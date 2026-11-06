@@ -281,6 +281,7 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
     expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('');
     const button = await screen.findByTestId('answer-send-to-claude');
     expect(button).toHaveTextContent('Send to Claude (free)');
+    expect(screen.getByText("Bar couldn't do it?")).toBeInTheDocument();
     if (mobile) expect(button.style.minHeight).toBe('44px');
     fireEvent.click(button);
     expect(await screen.findByText('Sent to Claude.')).toBeInTheDocument();

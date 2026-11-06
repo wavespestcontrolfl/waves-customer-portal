@@ -25,6 +25,8 @@ const mockBreaker = {
 // A fake database: gap rows land in mockGapRows; any other table is an insert sink.
 const mockGapRows = [];
 const mockGapMerges = [];
+// The status the saved gap row comes back with (the upsert's RETURNING); a test sets a closed one.
+let mockSavedStatus = 'new';
 
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockMessagesCreate(...args) },
@@ -39,7 +41,7 @@ jest.mock('../models/db', () => {
         onConflict: () => ({
           merge: (fields) => {
             mockGapMerges.push(fields);
-            return { returning: async () => [{ id: '7', occurrences: 1, status: 'new', domain: null, xmax: '1' }] };
+            return { returning: async () => [{ id: '7', occurrences: 1, status: mockSavedStatus, domain: null, xmax: '1' }] };
           },
         }),
       };
@@ -157,6 +159,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockGapRows.length = 0;
   mockGapMerges.length = 0;
+  mockSavedStatus = 'new';
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_SEND_TO_CLAUDE = 'true';
   process.env.GATE_IB_ANSWER_SEND_TO_CLAUDE = 'true';
@@ -174,6 +177,20 @@ describe('answerClaude on /query', () => {
     expect(payload.answerClaude).toEqual({ stuck: true, gapId: 7 });
     // Nothing the bar wrote rides on the key.
     expect(JSON.stringify(payload.answerClaude)).not.toContain('prepay');
+  });
+
+  test('a gap Claude is already building is named too', async () => {
+    mockSavedStatus = 'building';
+    script(DECLINE_REPLY);
+    expect((await ask()).answerClaude).toEqual({ stuck: true, gapId: 7 });
+  });
+
+  test.each(['by_design', 'dismissed'])('a saved gap closed as %s is not named: gapId null, so the button shows', async (status) => {
+    mockSavedStatus = status;
+    script(DECLINE_REPLY);
+    const payload = await ask();
+    expect(mockGapRows).toHaveLength(1);
+    expect(payload.answerClaude).toEqual({ stuck: true, gapId: null });
   });
 
   test('a search with no gap row written (an ordinary answer) is stuck with gapId null', async () => {

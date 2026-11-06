@@ -114,6 +114,9 @@ const REFUSAL_NOTES = {
 // the default list; a recurrence reopens `fixed` (and rings the bell again).
 const GAP_STATUSES = Object.freeze(['new', 'building', 'fixed', 'by_design', 'dismissed']);
 const CLOSED_STATUSES = Object.freeze(['fixed', 'by_design', 'dismissed']);
+// A row Claude still has to build. A sighting reopens a fixed row to new, but by_design and dismissed rows stay
+// closed, so the bar's stuck-answer line ("Claude has this as gap #N") must never name one of those.
+const OPEN_STATUSES = Object.freeze(GAP_STATUSES.filter((status) => !CLOSED_STATUSES.includes(status)));
 const MAX_TEXT = 300;
 const TOOL_NAME_RE = /^[a-z0-9_]{1,64}$/;
 const KNOWN_DOMAINS = new Set(Object.values(policy).map((entry) => entry?.domain).filter(Boolean));
@@ -766,6 +769,12 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
   return { discovery, toolResult, flush, searched };
 }
 
+// The id of the first saved row that is still open (new or building), or null. Takes flush()'s return value.
+function firstOpenGapId(rows) {
+  const open = (Array.isArray(rows) ? rows : []).find((row) => row && OPEN_STATUSES.includes(row.status));
+  return open ? open.id : null;
+}
+
 module.exports = {
   GAP_STATUSES,
   CLOSED_STATUSES,
@@ -776,5 +785,6 @@ module.exports = {
   listRecentGaps,
   setGapStatus,
   createGapCollector,
+  firstOpenGapId,
   _private: { prepareGapRow, recordableRefusalCode, RECORDED_REFUSAL_CODES, BY_DESIGN_REFUSAL_CODES, UNRECORDED_DECLINE_CODES, gapWindowCutoff, gapBellText, ringGapBell, SOURCE_LABELS, DECLINE_RE, BAR_DECLINE_RE },
 };

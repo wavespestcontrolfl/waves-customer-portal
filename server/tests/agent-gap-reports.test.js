@@ -1175,3 +1175,16 @@ describe('agent-gap-reports', () => {
     });
   });
 });
+
+describe('firstOpenGapId', () => {
+  const { firstOpenGapId } = require('../services/agent-gap-reports');
+
+  test('names the first saved row Claude still has to build, never a closed one', () => {
+    expect(firstOpenGapId([{ id: 3, status: 'dismissed' }, { id: 4, status: 'building' }])).toBe(4);
+    expect(firstOpenGapId([{ id: 5, status: 'new' }])).toBe(5);
+    expect(firstOpenGapId([{ id: 6, status: 'by_design' }, { id: 8, status: 'fixed' }])).toBeNull();
+    expect(firstOpenGapId([null, { id: 9 }])).toBeNull();
+    expect(firstOpenGapId([])).toBeNull();
+    expect(firstOpenGapId(undefined)).toBeNull();
+  });
+});

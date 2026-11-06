@@ -262,6 +262,9 @@ export function SendAnswerToClaude({ answer, claude, variant = 'desktop' }) {
   return (
     <div style={{ paddingTop: 10 }}>
       {showButton && (
+        <span style={{ fontSize: 14, color: look.muted, marginRight: 10 }}>Bar couldn't do it?</span>
+      )}
+      {showButton && (
         <button
           type="button"
           data-testid="answer-send-to-claude"

@@ -97,7 +97,7 @@ const ModelContext = require('../services/intelligence-bar/model-context');
 const MultiCard = require('../services/intelligence-bar/multi-card');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
-const { gapReportPromptLine, createGapCollector } = require('../services/agent-gap-reports');
+const { gapReportPromptLine, createGapCollector, firstOpenGapId } = require('../services/agent-gap-reports');
 const ToolSearch = require('../services/intelligence-bar/tool-search');
 const ToolAdditions = require('../services/intelligence-bar/tool-additions');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
@@ -4542,7 +4542,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // only; the palette shows "Claude has this as gap #N." or a Send to Claude button. Absent otherwise.
       ...(platformEnabled && ibAnswerSendToClaudeLive() && ibFullAccess(req) && gapCollector?.searched()
         && !pendingProposals.length && !directActionIds.length
-        ? { answerClaude: { stuck: true, gapId: savedGaps?.[0]?.id ?? null } } : {}),
+        ? { answerClaude: { stuck: true, gapId: firstOpenGapId(savedGaps) } } : {}),
       // Return the structured data from the last tool call for UI rendering
       structuredData: toolResults.length > 0 ? toolResults[toolResults.length - 1].result : null,
       // Pending write proposals for the client confirmation card. This is the
