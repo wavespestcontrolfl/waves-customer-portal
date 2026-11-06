@@ -35,6 +35,7 @@ function chain(overrides = {}) {
     whereIn: jest.fn().mockReturnThis(),
     whereExists: jest.fn().mockReturnThis(),
     whereNotExists: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
@@ -710,6 +711,9 @@ describe('appointment reminder reschedule windows', () => {
     const hold = finalReminderLookup.update.mock.calls[0][0].move_hold_until;
     expect(hold).toBeInstanceOf(Date);
     expect(hold.getTime() - Date.now()).toBe(15 * 60 * 1000);
+    // Never over a grouped-move hold (it carries a token and keeps its own deadline): the write
+    // itself excludes those rows, so a hold stamped meanwhile is not shortened either.
+    expect(finalReminderLookup.whereNull).toHaveBeenCalledWith('move_hold_token');
     expect(finalReminderLookup.update.mock.calls[0][0]).not.toHaveProperty('move_hold_token');
   });
 

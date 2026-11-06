@@ -2640,7 +2640,7 @@ async function renderConfirmationBody({ scheduledServiceId, customerId, firstNam
 // hold takes in handleReschedule. The 15-minute stranded-confirmation sweep then
 // sends ONE text with the latest time once the visit has been quiet that long. No
 // token is stamped: the grouped-move release only frees holds that carry one, so
-// this hold simply lapses. A windowless placeholder or a sibling-suppressed row keeps
+// this hold simply lapses. A row that already carries a grouped-move hold is left alone. A windowless placeholder or a sibling-suppressed row keeps
 // the normal path: the sweep skips the first and the slot owner carries the second.
 // True only when asked and the row was re-armed; any miss sends as before.
 async function coalesceRescheduleNotice(record, newApptTime, options) {
@@ -2649,6 +2649,9 @@ async function coalesceRescheduleNotice(record, newApptTime, options) {
   try {
     const rearmed = await db('appointment_reminders')
       .where({ id: record.id, appointment_time: newApptTime, suppressed_by_sibling: false, cancelled: false })
+      // A grouped-move hold (it carries a token) keeps its own deadline: the update misses and the
+      // move takes the normal path, where that hold defers the notice as it always has.
+      .whereNull('move_hold_token')
       .update({
         confirmation_sent: false,
         confirmation_sent_at: null,
