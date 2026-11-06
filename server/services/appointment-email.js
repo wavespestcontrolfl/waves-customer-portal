@@ -28,7 +28,7 @@ const { getPrimaryContact, getAppointmentContacts, getServiceContactSlots, SERVI
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { propertyDisplayLabel } = require('../utils/property-display');
-const { formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
+const { formatETDay, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
 const { MOVE_NOTICE_CATEGORY } = require('../constants/email-replay-exclusions');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -496,14 +496,49 @@ function apptStamp(apptTime) {
   return apptTime ? String(apptTime.getTime()) : 'na';
 }
 
-async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, rescheduleUrl, idempotencyKey, recipientFilter = null } = {}) {
+// GATE_DAY_ONLY_PROMISE: a day-only email quotes no hour, so its key carries the ET day in the slot segment instead of
+// the slot epoch ('day-2026-11-12'). The no-show detector then recovers no slot from the key (it reads only a numeric
+// segment 3), and a move to another day is still a new send, while a time change inside the same day is not.
+function dayStamp(apptTime) {
+  return apptTime ? `day-${etDateString(apptTime)}` : 'day';
+}
+
+function slotStamp(apptTime, dayOnly) {
+  return dayOnly ? dayStamp(apptTime) : apptStamp(apptTime);
+}
+
+// The day-only template of an event (`<event>_day`) when this send is day-only and the event has one, else the event's own.
+function dayTemplateKey(eventKey, hasDayTemplate, dayOnly) {
+  return hasDayTemplate && dayOnly ? `${eventKey}_day` : eventKey;
+}
+
+// The day-only metadata a day-only email records on its interaction row: window_unknown (no slot is recorded) and
+// promise_level 'day' (the marker the no-show detector reads). Lazy require: time-promise pulls the auto-dispatch readers.
+function dayOnlyMetadata(dayOnly) {
+  return dayOnly === true ? require('./time-promise').DAY_PROMISE_META : {};
+}
+
+// The appointment_time payload entry of a window email; a day-only email has none (no hour anywhere).
+function hourPayload(apptTime, dayOnly) {
+  return dayOnly ? {} : { appointment_time: apptTime ? formatETTime(apptTime) : '' };
+}
+
+// A day template that is missing, disabled or unusable answers with one of these codes. The caller then sends today's
+// window email instead: a customer always gets the notice, and the window copy is the safe side.
+const DAY_TEMPLATE_UNAVAILABLE_CODES = new Set(['EMAIL_TEMPLATE_UNAVAILABLE', 'EMAIL_TEMPLATE_DISABLED']);
+function dayTemplateUnavailable(result) {
+  return !result?.ok && DAY_TEMPLATE_UNAVAILABLE_CODES.has(result?.code);
+}
+
+async function sendConfirmationVariant({ customerId, scheduledServiceId, appointmentTime, serviceLabel, rescheduleUrl, idempotencyKey, recipientFilter = null, dayOnly = false } = {}) {
   const apptTime = toDate(appointmentTime);
   const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
   return sendTemplate({
     customerId,
     scheduledServiceId,
     recipientFilter,
-    templateKey: 'appointment.confirmation',
+    templateKey: dayTemplateKey('appointment.confirmation', true, dayOnly),
+    // The event type stays appointment.confirmation for the day-only email: the no-show detector reads that name.
     eventType: 'appointment.confirmation',
     payload: {
       // Stamped visit address overrides the customer-derived property label
@@ -512,18 +547,29 @@ async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId
       service_type: clean(serviceLabel) || 'service',
       appointment_day: apptTime ? formatETDay(apptTime) : '',
       appointment_date: apptTime ? formatETDate(apptTime) : '',
-      appointment_time: apptTime ? formatETTime(apptTime) : '',
+      // A day-only email carries no hour at all.
+      ...hourPayload(apptTime, dayOnly),
       // Empty string hides the template's "Reschedule appointment" CTA block
       // (renderBlocks skips a cta with no href) — never a broken button.
       reschedule_url: clean(rescheduleUrl),
     },
-    idempotencyKey: idempotencyKey || `appointment.confirmation:${scheduledServiceId || customerId}:${apptStamp(apptTime)}`,
+    idempotencyKey: idempotencyKey || `appointment.confirmation:${scheduledServiceId || customerId}:${slotStamp(apptTime, dayOnly)}`,
     categories: ['appointment_confirmation'],
     triggerEventId: `appointment.confirmation:${scheduledServiceId || customerId}`,
-    metadata: { scheduled_service_id: scheduledServiceId || null },
+    metadata: { scheduled_service_id: scheduledServiceId || null, ...dayOnlyMetadata(dayOnly) },
     moveHoldServiceId: scheduledServiceId || null,
     renderedSlotMs: apptTime ? apptTime.getTime() : null,
   });
+}
+
+// dayOnly (GATE_DAY_ONLY_PROMISE): the day-only email; a missing or disabled day template sends today's window email.
+async function sendAppointmentConfirmationEmail(args = {}) {
+  if (args.dayOnly === true) {
+    const result = await sendConfirmationVariant(args);
+    if (!dayTemplateUnavailable(result)) return result;
+    logger.warn('[appointment-email] appointment.confirmation_day is missing or disabled - sending the window email');
+  }
+  return sendConfirmationVariant({ ...args, dayOnly: false });
 }
 
 // Assigned tech's first name for the reminder details card — self-contained
@@ -542,13 +588,16 @@ async function technicianFirstName(scheduledServiceId) {
   }
 }
 
-// kind: '72h' | '24h'
-async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, kind, rescheduleUrl, idempotencyKey, cardHoldPolicyNote: cardHoldNoteOverride = null } = {}) {
+// kind: '72h' | '24h'. dayOnly (GATE_DAY_ONLY_PROMISE, 72h only): the day-only email, no hour anywhere.
+async function sendReminderVariant({ customerId, scheduledServiceId, appointmentTime, serviceLabel, kind, rescheduleUrl, idempotencyKey, cardHoldPolicyNote: cardHoldNoteOverride = null, dayOnly } = {}) {
   const apptTime = toDate(appointmentTime);
   const techName = await technicianFirstName(scheduledServiceId);
   const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
   const is72 = String(kind) === '72h';
-  const templateKey = is72 ? 'appointment.reminder_72h' : 'appointment.reminder_24h';
+  // The event type (and the idempotency key's name) stays appointment.reminder_72h for the day-only email: the no-show
+  // detector reads that name. Only the template differs.
+  const eventKey = is72 ? 'appointment.reminder_72h' : 'appointment.reminder_24h';
+  const templateKey = dayTemplateKey(eventKey, is72, dayOnly);
   // Card-hold fee-policy disclosure (spec Phase 1) — resolved HERE, not
   // threaded from callers, so every email path carries it: the email/both
   // channel sends AND the undelivered-SMS fallback (Codex #2677 round-1).
@@ -573,7 +622,7 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
       service_type: clean(serviceLabel) || 'service',
       appointment_day: apptTime ? formatETDay(apptTime) : '',
       appointment_date: apptTime ? formatETDate(apptTime) : '',
-      appointment_time: apptTime ? formatETTime(apptTime) : '',
+      ...hourPayload(apptTime, templateKey !== eventKey),
       technician_name: techName,
       reschedule_url: clean(rescheduleUrl),
       card_hold_policy_note: cardHoldPolicyNote,
@@ -601,15 +650,25 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
     customerId,
     scheduledServiceId,
     templateKey,
-    eventType: templateKey,
+    eventType: eventKey,
     payload,
-    idempotencyKey: idempotencyKey || `${templateKey}:${scheduledServiceId || customerId}:${apptStamp(apptTime)}`,
+    idempotencyKey: idempotencyKey || `${eventKey}:${scheduledServiceId || customerId}:${slotStamp(apptTime, templateKey !== eventKey)}`,
     categories: [is72 ? 'appointment_reminder_72h' : 'appointment_reminder_24h'],
-    triggerEventId: `${templateKey}:${scheduledServiceId || customerId}`,
-    metadata: { scheduled_service_id: scheduledServiceId || null },
+    triggerEventId: `${eventKey}:${scheduledServiceId || customerId}`,
+    metadata: { scheduled_service_id: scheduledServiceId || null, ...dayOnlyMetadata(templateKey !== eventKey) },
     moveHoldServiceId: scheduledServiceId || null,
     renderedSlotMs: apptTime ? apptTime.getTime() : null,
   });
+}
+
+// A missing or disabled day template sends today's window email.
+async function sendAppointmentReminderEmail(args = {}) {
+  if (args.dayOnly === true && String(args.kind) === '72h') {
+    const result = await sendReminderVariant(args);
+    if (!dayTemplateUnavailable(result)) return result;
+    logger.warn('[appointment-email] appointment.reminder_72h_day is missing or disabled - sending the window email');
+  }
+  return sendReminderVariant({ ...args, dayOnly: false });
 }
 
 async function sendTechEnRouteEmail({ customerId, scheduledServiceId, techName, etaMinutes, trackUrl, idempotencyKey } = {}) {

@@ -91,6 +91,17 @@ function smsLineFor(url) {
   return url ? `Reschedule here: ${url}\n\n` : '';
 }
 
+// The {reschedule_line} of the DAY-ONLY texts (GATE_DAY_ONLY_PROMISE, owner 2026-11-05 "D2 a"): the customer was told
+// only the day, so the line offers a different day or a set time. Used only by the day-only rows
+// that carry {reschedule_line} (appointment_confirmation_day_v1, reminder_72h_day_v1, reminder_72h_no_reply_day_v1).
+// With no link (or a visit this builder refuses to link) the customer is still
+// told how to reach someone. Today's lines above are unchanged.
+const DAY_ONLY_ASK = 'Need a different day or a set time?';
+
+function dayOnlyLineFor(url) {
+  return url ? `${DAY_ONLY_ASK} ${url}\n\n` : `${DAY_ONLY_ASK} Reply here or call.\n\n`;
+}
+
 // The clause for a visit this builder refuses to link (C3/C6): never the
 // bare empty line the OTHER refusals return, so a customer still hears how
 // to reach someone instead of a template line that just vanishes.
@@ -240,4 +251,4 @@ async function rescheduledTextLine(scheduledServiceId, { customerId = null } = {
   return url ? `Need a different time? Reschedule here: ${url}` : RESCHEDULED_REPLY_LINE;
 }
 
-module.exports = { buildRescheduleLink, smsLineFor, hasUnblockedVisitGroup, rescheduledTextLine, RESCHEDULED_REPLY_LINE };
+module.exports = { buildRescheduleLink, smsLineFor, dayOnlyLineFor, hasUnblockedVisitGroup, rescheduledTextLine, RESCHEDULED_REPLY_LINE };

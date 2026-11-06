@@ -8600,6 +8600,12 @@ const newApptStopOrderLive = () => {
 };
 
 router.post('/', requireAdmin, scheduleCreateHandler);
+// GATE_DAY_ONLY_PROMISE: the column the office's "customer asked for this time" box writes. True only when the request
+// said exactly true and the column exists; otherwise nothing (NULL = not recorded).
+function askedTimeStamp(cols, customerAskedTime) {
+  return cols.customer_asked_time && customerAskedTime === true ? { customer_asked_time: true } : {};
+}
+
 async function scheduleCreateHandler(req, res, next) {
   try {
     const {
@@ -8614,6 +8620,9 @@ async function scheduleCreateHandler(req, res, next) {
       primaryLinePrice, estimatedPrice, estimatedDuration, urgency, internalNotes, customerNotes, isCallback,
       parentServiceId, sendConfirmationSms, sendTechNotification, sourceEstimateId,
       sendCardOnFileLink,
+      // GATE_DAY_ONLY_PROMISE: the office marked "the customer asked for this time" (a set time). Stored on the created
+      // visits only when the body says exactly true; anything else leaves NULL (not recorded). Changes no response.
+      customerAskedTime,
       // The operator's explicit service address for a multi-property customer
       // (customer_properties.id). Absent → the sole-property anchor below.
       propertyId,
@@ -9824,6 +9833,7 @@ async function scheduleCreateHandler(req, res, next) {
       if (cols.urgency) insertData.urgency = urgency || 'routine';
       if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
       if (cols.is_callback) insertData.is_callback = resolvedIsCallback || false;
+      Object.assign(insertData, askedTimeStamp(cols, customerAskedTime));
       if (officeCustomerRequest && cols.customer_request && cols.customer_request_source) {
         insertData.customer_request = officeCustomerRequest.text;
         insertData.customer_request_source = officeCustomerRequest.source;
@@ -9997,6 +10007,7 @@ async function scheduleCreateHandler(req, res, next) {
         // operator turns a re-service into a repeating cadence, every future
         // visit must stay free and report as a callback (not bill monthly dues).
         if (cols.is_callback) childData.is_callback = resolvedIsCallback || false;
+        Object.assign(childData, askedTimeStamp(cols, customerAskedTime));
         if (cols.estimated_price) {
           if (zeroCallbackPrice) childData.estimated_price = 0;
           else if (memberSeriesCovered) {
@@ -10091,6 +10102,7 @@ async function scheduleCreateHandler(req, res, next) {
           const boosterRestack = restackLiveVisitFinancials(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
           if (cols.is_callback) boosterData.is_callback = resolvedIsCallback || false;
+          Object.assign(boosterData, askedTimeStamp(cols, customerAskedTime));
           // Booster rows are is_recurring:false — completion treats them as
           // one-off visits that BILL their own price, never as dues-covered
           // plan visits, so the member-series stripping must not touch them:

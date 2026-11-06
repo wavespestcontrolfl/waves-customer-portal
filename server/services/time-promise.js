@@ -12,6 +12,8 @@
  */
 
 const { loadPromiseLevels } = require('./auto-dispatch/told-visits');
+const { parseETDateTime } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 
 // The 24-hour reminder takes over inside this many hours. It is the same boundary the reminder sender uses:
 // appointment-reminders.js reminder72hStillReachable (`> 24.25` hours out) and the cron branches (72-hour `hoursUntil >
@@ -84,7 +86,176 @@ function showHourFor({
   return hours <= DAY_PROMISE_CUTOFF_HOURS;
 }
 
+// ── Who may be promised only the day (part B1: the booking confirmation and the 72-hour reminder; part B2 and the
+// screens reuse the same rule) ──
+
+// appointment_reminders.source values of a FIRST or one-time visit the OFFICE booked (the customer did not pick the
+// hour, so the office may promise only the day). Where each comes from:
+//   admin_manual      routes/admin-schedule.js create, the new-caller visit, the outbound review-confirm booking
+//   admin_ib          services/intelligence-bar/tools.js (the Intelligence Bar books for the office)
+//   estimate_followup services/estimate-converter.js (the office converts an accepted estimate into a visit)
+//   health_alert_comp services/health-alerts.js (the office-approved comp visit)
+//   ops_manual        ops scripts that book a visit by hand
+//   admin             legacy admin bookings
+const OFFICE_BOOKING_SOURCES = Object.freeze(['admin_manual', 'admin_ib', 'estimate_followup', 'health_alert_comp', 'ops_manual', 'admin']);
+
+// Every OTHER registerAppointment source. None of them can be promised only the day: the customer picked the hour
+// (online booking), the AI call agent committed one, the origin is unknown, or the visit is a recurring child
+// (a child is judged by its move history instead, never by its source). A future booking path must be put in one of
+// the two lists on purpose; server/tests/day-only-promise-b1-sources.test.js fails until it is.
+//   booking_new, booking_followup   routes/booking.js, services/availability.js, completion-followup-booking.js
+//   estimate_accept_slot            routes/estimate-public.js, services/one-tap-purchase.js (the customer picked a slot)
+//   call_recording                  services/call-recording-processor.js (the AI call agent's committed time)
+//   cron_selfheal                   appointment-reminders.js backfill of a missing reminder row (origin unknown)
+//   recurring_auto_extend, recurring_cancel_reseed, recurring_alert_action
+//                                   routes/admin-schedule.js spawned recurring children (judged by move history)
+const CUSTOMER_OR_UNKNOWN_SOURCES = Object.freeze([
+  'booking_new', 'booking_followup', 'estimate_accept_slot', 'call_recording', 'cron_selfheal',
+  'recurring_auto_extend', 'recurring_cancel_reseed', 'recurring_alert_action',
+]);
+
+// Statuses that end a visit: a member in one of them is no longer part of the stop the customer hears about.
+const ENDED_STATUSES = ['cancelled', 'completed', 'skipped'];
+
+const MEMBER_COLUMNS = ['id', 'visit_id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id',
+  'date_exception', 'date_exception_source', 'date_exception_at', 'customer_asked_time'];
+
+/** The live members of each requested row's stop: Map<requested id, member rows[]>. A row with no stop is its own
+ *  member; an ended (cancelled, completed, skipped) row has none. Throws on a failed read. */
+async function loadStopFacts(conn, ids) {
+  const own = await conn('scheduled_services').whereIn('id', ids.map(String)).select(MEMBER_COLUMNS);
+  const visitIds = [...new Set(own.map((r) => r.visit_id).filter((v) => v != null).map(String))];
+  const mates = visitIds.length
+    ? await conn('scheduled_services').whereIn('visit_id', visitIds).whereNotIn('status', ENDED_STATUSES).select(MEMBER_COLUMNS)
+    : [];
+  const membersOfVisit = new Map();
+  for (const m of mates) {
+    const key = String(m.visit_id);
+    if (!membersOfVisit.has(key)) membersOfVisit.set(key, []);
+    membersOfVisit.get(key).push(m);
+  }
+  return new Map(own.map((r) => {
+    if (ENDED_STATUSES.includes(String(r.status || ''))) return [String(r.id), []];
+    return [String(r.id), r.visit_id != null ? membersOfVisit.get(String(r.visit_id)) || [r] : [r]];
+  }));
+}
+
+/** Map<service id, appointment_reminders.source> of the newest live reminder row of each. Throws on a failed read. */
+async function loadBookingSources(conn, memberIds) {
+  if (!memberIds.length) return new Map();
+  const rows = await conn('appointment_reminders').whereIn('scheduled_service_id', memberIds).where('cancelled', false)
+    .orderBy('created_at', 'desc').select('scheduled_service_id', 'source');
+  const sources = new Map();
+  for (const r of rows) if (!sources.has(String(r.scheduled_service_id))) sources.set(String(r.scheduled_service_id), r.source);
+  return sources;
+}
+
+const isRecurringChild = (m) => m.is_recurring === true && m.recurring_parent_id != null;
+
+/** May this ONE member be promised only the day? `customer_asked_time` is the explicit intent for the current slot:
+ *  true = a set time (never), false = the day only was chosen (skip the source and customer-pick rules), NULL = infer.
+ *  Inferred: a recurring child unless the customer picked its slot; a first or one-time visit only from an office source. */
+async function memberEligible(conn, member, source) {
+  if (member.customer_asked_time === true) return false;
+  if (member.customer_asked_time === false) return true;
+  // Lazy: auto-dispatch/eligibility pulls the route optimizer, which reads the feature gates at load time.
+  if (isRecurringChild(member)) return !(await require('./auto-dispatch/eligibility').isCustomerPickedVisit(member, conn)).picked;
+  return OFFICE_BOOKING_SOURCES.includes(source);
+}
+
+/**
+ * Which visits may be promised only the DAY? Map<id, { eligible, level }>, one bulk read per fact, stop-wide: every live
+ * member of a visit's stop must be eligible, else none is. `level` comes from loadPromiseLevels; a level of 'hour' is
+ * never eligible (the customer already has an hour). Any read failure: not eligible, level 'hour' (fail closed: the
+ * customer keeps today's window copy). A recurring child is judged by who placed its slot (isCustomerPickedVisit,
+ * one read per child of the stop); a first or one-time visit by its booking source (OFFICE_BOOKING_SOURCES).
+ */
+async function dayOnlyEligibility(conn, ids, now = new Date()) {
+  const result = new Map();
+  if (!ids || ids.length === 0) return result;
+  try {
+    const levels = await loadPromiseLevels(conn, ids, now);
+    const facts = await loadStopFacts(conn, ids);
+    const memberIds = [...new Set([...facts.values()].flat().map((m) => String(m.id)))];
+    const sources = await loadBookingSources(conn, memberIds);
+    for (const id of ids) {
+      const level = levels.get(id) || 'hour';
+      const members = facts.get(String(id)) || [];
+      let eligible = level !== 'hour' && members.length > 0;
+      for (const member of eligible ? members : []) {
+        if (!(await memberEligible(conn, member, sources.get(String(member.id))))) { eligible = false; break; }
+      }
+      result.set(id, { eligible, level });
+    }
+  } catch {
+    for (const id of ids) result.set(id, { eligible: false, level: 'hour' });
+  }
+  return result;
+}
+
+/**
+ * The per-send decision for the booking confirmation and the 72-hour reminder (and part B2's move notices): should this
+ * send promise only the day? { dayOnly, level, eligible }. `id` is one visit, or `ids` every member of a stop (all must
+ * be eligible). The cheap checks (gate, cutoff, the customer's 24-hour reminder) run first, so a gate-off send, an
+ * inside-the-cutoff send and a 24-hour-reminder-off customer read nothing from the database.
+ */
+async function dayOnlySendDecision(conn, { id = null, ids = null, startAt, now = new Date(), reminder24hEnabled } = {}) {
+  const wanted = (ids && ids.length ? ids : [id]).filter((v) => v != null);
+  const no = { dayOnly: false, level: null, eligible: false };
+  if (!wanted.length) return no;
+  if (!shouldPromiseDayOnly({ startAt, now, reminder24hEnabled, customerPicked: false, level: 'none' })) return no;
+  const verdicts = await dayOnlyEligibility(conn, wanted, now);
+  // A stop is judged as a whole: every requested member must be eligible, and no member's latest promise may be an hour.
+  const all = wanted.map((w) => verdicts.get(w) || { eligible: false, level: 'hour' });
+  const eligible = all.every((a) => a.eligible);
+  const levels = all.map((a) => a.level);
+  const level = levels.includes('hour') ? 'hour' : levels.includes('day') ? 'day' : 'none';
+  const dayOnly = shouldPromiseDayOnly({ startAt, now, reminder24hEnabled, customerPicked: !eligible, level });
+  return { dayOnly, level, eligible };
+}
+
+/** The visit's start time from its ET date and window start, or null. */
+function composeStartAt(row) {
+  const date = dateOnlyString(row && row.scheduled_date);
+  const time = row && row.window_start ? String(row.window_start).slice(0, 8) : null;
+  if (!date || !time) return null;
+  const at = parseETDateTime(`${date}T${time}`);
+  return at instanceof Date && !Number.isNaN(at.getTime()) ? at : null;
+}
+
+/**
+ * Should a customer screen show the HOUR for each of these visits? Map<id, { showHour, level, eligible }>. Rows carry at
+ * least id, scheduled_date and window_start. Gate off: showHour true for every row and NO database read. Gate on:
+ * showHour = !eligible || the start is missing/invalid || it is within DAY_PROMISE_CUTOFF_HOURS. One bulk eligibility
+ * read for all rows. A failed read: showHour true for every row (the safe side for a screen: the customer keeps seeing
+ * the hour they may have been told).
+ */
+async function loadTimeDisplay(conn, rows, now = new Date()) {
+  const out = new Map();
+  const list = Array.isArray(rows) ? rows.filter((r) => r && r.id != null) : [];
+  if (!dayOnlyPromiseOn()) {
+    for (const r of list) out.set(r.id, { showHour: true, level: null, eligible: false });
+    return out;
+  }
+  const verdicts = await dayOnlyEligibility(conn, list.map((r) => r.id), now);
+  for (const r of list) {
+    const { eligible, level } = verdicts.get(r.id) || { eligible: false, level: 'hour' };
+    const hours = hoursUntil(composeStartAt(r), now);
+    out.set(r.id, {
+      showHour: !eligible || !Number.isFinite(hours) || hours <= DAY_PROMISE_CUTOFF_HOURS,
+      level,
+      eligible,
+    });
+  }
+  return out;
+}
+
 module.exports = {
+  OFFICE_BOOKING_SOURCES,
+  CUSTOMER_OR_UNKNOWN_SOURCES,
+  dayOnlyEligibility,
+  dayOnlySendDecision,
+  loadTimeDisplay,
   DAY_PROMISE_CUTOFF_HOURS,
   DAY_PROMISE_META,
   dayOnlyPromiseOn,
