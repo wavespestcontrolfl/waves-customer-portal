@@ -247,9 +247,11 @@ function clearedEmail(slot, { since, until } = {}) {
 function defaultState() {
   return {
     v: 1,
-    down: { open: false, since: null, failures: 0, via: null, alertId: null },
-    runner: { seen: null, polls: 0, open: null, via: null, alertId: null },
-    setup: { open: false, detail: null, via: null, alertId: null },
+    // via: how the slot's current alert went out. emailed: an alert of this open
+    // episode went out by email, so its clear owes a closing email.
+    down: { open: false, since: null, failures: 0, via: null, emailed: false, alertId: null },
+    runner: { seen: null, polls: 0, open: null, via: null, emailed: false, alertId: null },
+    setup: { open: false, detail: null, via: null, emailed: false, alertId: null },
     outbox: [],
   };
 }
@@ -259,7 +261,7 @@ const isMail = (m) => !!m && typeof m.subject === 'string' && typeof m.body === 
 function wellFormed(item) {
   if (!item || typeof item !== 'object' || typeof item.id !== 'string' || typeof item.key !== 'string' || typeof item.at !== 'string') return false;
   if (item.kind === 'alert') return !!item.row && typeof item.row === 'object' && isMail(item.email);
-  if (item.kind === 'clear') return item.via !== 'email' || isMail(item.email);
+  if (item.kind === 'clear') return item.email === undefined || isMail(item.email);
   return false;
 }
 
@@ -325,6 +327,8 @@ function enqueueAlert(state, { slot = null, key, parts, at, replace }) {
     // A newer alert for the slot supersedes one still owed.
     state.outbox = state.outbox.filter((i) => !(i.kind === 'alert' && i.slot === slot));
     state[slot].alertId = id;
+    // `emailed` stays: an earlier alert of this episode that went by email still
+    // owes its closing email when the replacement lands as a row.
     state[slot].via = null;
   }
   state.outbox.push({
@@ -336,16 +340,15 @@ function enqueueAlert(state, { slot = null, key, parts, at, replace }) {
 
 // Close a slot. An alert still owed is dropped, but its row is retired all the same:
 // a POST that timed out may have landed while its email failed, so an owed alert does
-// not prove that no row stands. Only an alert that went out by email (via 'email')
-// gets a closing email.
+// not prove that no row stands. A closing email goes when any alert of the episode
+// went out by email (`emailed`), even if a later replacement landed as a row.
 function enqueueClear(state, { slot, key, at, email }) {
   state.outbox = state.outbox.filter((i) => !(i.kind === 'alert' && i.slot === slot));
-  const { via } = state[slot];
-  state[slot].alertId = null;
-  state[slot].via = null;
+  const owesEmail = state[slot].emailed === true;
+  Object.assign(state[slot], { alertId: null, via: null, emailed: false });
   state.outbox.push({
-    id: `clear:${key}:${at}`, kind: 'clear', slot, key, at, via, tries: 0, resolved: false,
-    ...(via === 'email' ? { email, emailed: false } : {}),
+    id: `clear:${key}:${at}`, kind: 'clear', slot, key, at, tries: 0, resolved: false,
+    ...(owesEmail ? { email, emailed: false } : {}),
   });
 }
 
@@ -446,13 +449,13 @@ async function flushClear(item, io) {
     if (resolved.ok) item.resolved = true;
     else failed.push(`resolve ${resolved.reason}`);
   }
-  if (item.via === 'email' && !item.emailed) {
+  if (item.email && !item.emailed) {
     const mail = await io.sendEmail(item.email);
     if (mail.ok) item.emailed = true;
     else failed.push(`email ${mail.reason}`);
   }
   if (failed.length) return { ok: false, reason: failed.join('; ') };
-  return { ok: true, via: item.via === 'email' ? 'email' : 'row' };
+  return { ok: true, via: item.email ? 'email' : 'row' };
 }
 
 async function flush(state, io, now) {
@@ -472,7 +475,10 @@ async function flush(state, io, now) {
       result = { ok: false, reason: `threw ${err.name}` };
     }
     if (result.ok) {
-      if (item.kind === 'alert' && item.slot && state[item.slot].alertId === item.id) state[item.slot].via = result.via;
+      if (item.kind === 'alert' && item.slot && state[item.slot].alertId === item.id) {
+        state[item.slot].via = result.via;
+        if (result.via === 'email') state[item.slot].emailed = true;
+      }
       wrote.push(`${label}=${result.via}`);
     } else {
       item.tries = (Number(item.tries) || 0) + 1;

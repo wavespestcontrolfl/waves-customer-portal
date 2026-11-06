@@ -380,6 +380,23 @@ describe('delivery: job runner', () => {
     expect(calls.posts.map((p) => p.key)).toEqual([deliver.KEYS.runner]);
   });
 
+  test('an emailed alert keeps its closing email when a changed reason lands as a row', async () => {
+    const state = deliver.defaultState();
+    let ingestUp = false;
+    const { io, calls } = fakeIo({ post: () => (ingestUp ? { ok: true } : { ok: false, status: 409, reason: 'in_app_disabled' }) });
+    await step(state, silent(), io, 0);
+    await step(state, silent(), io, 10);
+    expect(state.runner).toMatchObject({ via: 'email', emailed: true });
+    ingestUp = true;
+    const off = report({ reasons: ['scheduler:disabled'], scheduler: { age_minutes: 90, ok: false } });
+    await step(state, off, io, 20);
+    await step(state, off, io, 30);
+    expect(state.runner).toMatchObject({ open: 'scheduler:disabled', via: 'row', emailed: true });
+    await step(state, report(), io, 40);
+    expect(calls.mails.map((m) => m.subject)).toEqual(['FIX: Waves portal crons stopped (outside watchdog)', 'Waves portal crons running again (outside watchdog)']);
+    expect(state.runner).toMatchObject({ open: null, via: null, emailed: false });
+  });
+
   test('a row the portal refuses goes by email, and the email gets its closing email', async () => {
     const state = deliver.defaultState();
     const { io, calls } = fakeIo({ post: () => ({ ok: false, status: 409, reason: 'in_app_disabled' }) });
@@ -410,6 +427,19 @@ describe('delivery: setup and the outbox', () => {
     expect(state.setup.open).toBe(false);
   });
 
+  test('a setup alert that went by email keeps its closing email after a changed refusal lands as a row', async () => {
+    const state = deliver.defaultState();
+    let ingestUp = false;
+    const { io, calls } = fakeIo({ post: () => (ingestUp ? { ok: true } : { ok: false, reason: 'unreachable:TimeoutError' }) });
+    await step(state, report({ result: 'config', detail: 'HTTP 404: the watchdog lane is off' }), io, 0);
+    expect(state.setup).toMatchObject({ via: 'email', emailed: true });
+    ingestUp = true;
+    await step(state, report({ result: 'config', detail: 'HTTP 401: the watchdog signature was rejected' }), io, 10);
+    expect(state.setup).toMatchObject({ via: 'row', emailed: true });
+    await step(state, report(), io, 20);
+    expect(calls.mails.map((m) => m.subject)).toEqual(['FIX: the Waves portal refuses the outside watchdog poll', 'Outside watchdog poll working again']);
+  });
+
   test('a write owed for over 48 h is dropped', async () => {
     const state = deliver.defaultState();
     const failing = fakeIo({ post: () => ({ ok: false, reason: 'x' }), mail: () => ({ ok: false, reason: 'y' }) });
@@ -426,7 +456,8 @@ describe('delivery: setup and the outbox', () => {
     await step(state, report({ result: 'config', detail: 'HTTP 403: refused' }), ok.io, 0);
     const failing = fakeIo({ resolve: () => ({ ok: false, reason: 'unreachable:TypeError' }) });
     await step(state, report(), failing.io, 10);
-    expect(state.outbox).toEqual([expect.objectContaining({ kind: 'clear', slot: 'setup', via: 'row', tries: 1 })]);
+    expect(state.outbox).toEqual([expect.objectContaining({ kind: 'clear', slot: 'setup', resolved: false, tries: 1 })]);
+    expect(state.outbox[0]).not.toHaveProperty('email');
     await deliver.flush(state, ok.io, new Date(at(20)));
     expect(state.outbox).toEqual([]);
   });
