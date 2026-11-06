@@ -48,6 +48,9 @@ describe('gate on', () => {
     // split across the two legs: each keeps the old 180 s single-call limit.
     const single = Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS) > 0 ? Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS) : 180000;
     expect(payload.timeoutMs).toBe(2 * single);
+    // Gemini 2.5 Pro's thinking shares the output cap with the answer; the
+    // shared call's 2048 default cut 10 of 33 legs Nov 1-5 (MAX_TOKENS).
+    expect(payload.maxTokens).toBe(8192);
     expect(options.timeoutMs).toBeUndefined();
     expect(options.reserveFallbackBudget).toBe(true);
     expect(options.validate({ json: { emails: [] } })).toBeNull();
