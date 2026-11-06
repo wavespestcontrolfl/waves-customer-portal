@@ -148,7 +148,7 @@ async function buildChargeFailureResponse(err, { customerId, chargeAmount, techn
 
 /**
  * POST /api/admin/customers/:id/charge-now
- * Body: { amount?: number, description?: string, billedMonth?: 'YYYY-MM' }
+ * Body: { amount?: number, description?: string, billedMonth?: 'YYYY-MM', expectedAmount?: number }
  * If amount omitted, charges customer.monthly_rate — ONLY for a customer the
  * lane resolver puts on the monthly lane. Any other lane 400s (fail closed).
  * billedMonth (amount omitted only): the month of dues this collects — this
@@ -156,12 +156,57 @@ async function buildChargeFailureResponse(err, { customerId, chargeAmount, techn
  * month whose bank payment was canceled (owner 2026-10-30). Every monthly
  * guard below reads that month, and the payment carries it as billed_month,
  * the stamp the cron, the retry sweep and plan-visit completion all trust.
+ * expectedAmount (amount omitted only): the dollar amount the Charge now
+ * confirm showed. The dues charge collects the rate stored NOW, so a rate
+ * edited after the page loaded would collect an amount nobody approved: a
+ * confirmed amount that no longer matches refuses (409 rate_changed, with the
+ * current amount) and charges nothing. Absent = no confirm to compare.
  */
 const PAST_DUES_MONTHS = 2;
+
+const toCents = (value) => Math.round(parseFloat(value || 0) * 100);
+
+function readConfirmedCents(expectedAmount, amount) {
+  if (expectedAmount == null) return { cents: null };
+  if (amount != null) {
+    return { error: 'A confirmed amount applies only to the monthly dues charge: leave the amount empty.' };
+  }
+  if (typeof expectedAmount !== 'number' || !Number.isFinite(expectedAmount) || expectedAmount <= 0) {
+    return { error: 'The confirmed amount must be a positive number of dollars.' };
+  }
+  return { cents: Math.round(expectedAmount * 100) };
+}
+
+// The refusal when the rate to charge is not the rate the operator confirmed
+// (or it moved while this request waited on the billing lock). Nothing charged.
+function rateChangedBody(currentAmount, confirmedCents) {
+  const confirmed = confirmedCents == null ? '' : ` after you confirmed $${(confirmedCents / 100).toFixed(2)}`;
+  return {
+    error: `The monthly rate changed to $${currentAmount.toFixed(2)}${confirmed}. Nothing was charged. Check the rate and confirm again.`,
+    rate_changed: true,
+    current_amount: currentAmount,
+  };
+}
+
+// Inside the billing lock, just before the dues charge: the rate read before
+// the lock must still be the stored rate (an edit can land while the request
+// waits on the lock and its guards), and it must be the amount the operator
+// confirmed when the page sent one. Otherwise throws the RATE_CHANGED refusal
+// the lock's catch returns as a 409; nothing has been charged at this point.
+async function assertRateUnchanged(customerId, chargeAmount, confirmedCents) {
+  const current = await db('customers').where({ id: customerId }).first('monthly_rate');
+  const currentCents = toCents(current?.monthly_rate);
+  if (currentCents === toCents(chargeAmount) && (confirmedCents == null || confirmedCents === currentCents)) return;
+  const err = new Error('The monthly rate changed before the charge.');
+  err.code = 'RATE_CHANGED';
+  err.body = rateChangedBody(currentCents / 100, confirmedCents);
+  throw err;
+}
+
 router.post('/customers/:id/charge-now', async (req, res, next) => {
   try {
     const customerId = req.params.id;
-    const { amount, description, billedMonth } = req.body || {};
+    const { amount, description, billedMonth, expectedAmount } = req.body || {};
 
     // The months the list may name: this ET month and the previous PAST_DUES_MONTHS (Customer
     // 360's month list shows the same window). One clock read for the request, so the month
@@ -182,6 +227,8 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
       // This month picked = the plain button, unchanged.
       obligationMonth = billedMonth === thisMonth ? null : billedMonth;
     }
+    const confirmed = readConfirmedCents(expectedAmount, amount);
+    if (confirmed.error) return res.status(400).json({ error: confirmed.error });
 
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -375,6 +422,10 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           }
         }
 
+        // As late as possible: the amount about to be charged is still the
+        // stored rate and the amount the operator confirmed.
+        await assertRateUnchanged(customerId, chargeAmount, confirmed.cents);
+
         // Attempt-scoped idempotency key (Codex round-1 P1): shared with
         // chargeMonthly()'s own key derivation (retry-collectibility.js)
         // so charge-now and the daily cron always agree on the SAME key
@@ -432,6 +483,8 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
         if (err.code === 'BILLING_CLAIM_HELD_ELSEWHERE') {
           return { response: { status: 409, body: { error: `${err.message} — try again in a moment`, in_progress: true } } };
         }
+        // assertRateUnchanged's refusal: thrown before the charge, so nothing was charged.
+        if (err.code === 'RATE_CHANGED') return { response: { status: 409, body: err.body } };
         throw err;
       });
 
