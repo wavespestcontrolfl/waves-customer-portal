@@ -70,7 +70,8 @@ function useEveryBox() {
 // Where the mic and its notice are drawn: inside the box's own dialog when it has one, so the
 // dialog's focus trap and its hidden-background markers (aria-hidden / inert) include the mic.
 function hostFor(el) {
-  const dialog = el?.isConnected ? el.closest('[role="dialog"], [aria-modal="true"]') : null;
+  // [data-modal-panel] is the panel useModalFocus actually traps (ui/Dialog.jsx); its role=dialog wrapper is outside the trap.
+  const dialog = el?.isConnected ? el.closest('[data-modal-panel], [role="dialog"], [aria-modal="true"]') : null;
   return dialog || document.body;
 }
 
@@ -152,8 +153,16 @@ function useBoxPlace(el) {
 }
 
 // The box's own form, dialog or page area: what a Send / Save / Create button in it would read.
+// Always contains the box: an editor portaled straight to body (no dialog role, no form) is
+// scoped to its own portal root, never to #admin-main, which would not hold its Save button.
 function actionScope(box) {
-  return box.closest('[role="dialog"], [aria-modal="true"], form') || document.getElementById("admin-main") || document.body;
+  const near = box.closest('[role="dialog"], [aria-modal="true"], form');
+  if (near) return near;
+  const main = document.getElementById("admin-main");
+  if (main?.contains(box)) return main;
+  let root = box;
+  while (root.parentElement && root.parentElement !== document.body) root = root.parentElement;
+  return root;
 }
 
 /**

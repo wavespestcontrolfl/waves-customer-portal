@@ -240,4 +240,42 @@ describe("FocusedBoxMic", () => {
     await focusBox();
     expect(screen.queryByRole("button", { name: MIC })).toBeNull();
   });
+
+  it("holds Save in an editor portaled straight to body (no dialog role, no form)", async () => {
+    stubServer({ available: true, everyBox: true });
+    const save = vi.fn();
+    // #admin-main exists but does not contain the editor, like the Dispatch visit editor.
+    document.body.insertAdjacentHTML("beforeend", '<main id="admin-main"></main>');
+    await mount(
+      <>
+        <textarea aria-label="notes" defaultValue="Hello" />
+        <button type="button" onClick={save}>Save</button>
+      </>,
+    );
+    await focusBox();
+    screen.getByLabelText("notes").setSelectionRange(5, 5);
+    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: MIC })); });
+    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: "Stop dictation" })); });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Transcribing" })).toBeInTheDocument());
+    await act(async () => { fireEvent.click(screen.getByText("Save")); });
+    expect(save).not.toHaveBeenCalled();
+    await act(async () => { resolveClip({ ok: true, json: async () => ({ text: "world" }) }); });
+    await waitFor(() => expect(screen.getByLabelText("notes")).toHaveValue("Hello world"));
+    await act(async () => { fireEvent.click(screen.getByText("Save")); });
+    expect(save).toHaveBeenCalledTimes(1);
+    document.getElementById("admin-main")?.remove();
+  });
+
+  it("draws the mic inside the panel a modal traps (ui/Dialog), not its outer wrapper", async () => {
+    stubServer({ available: true, everyBox: true });
+    await mount(
+      <div role="dialog" aria-modal="true">
+        <div className="backdrop" />
+        <div data-modal-panel="true" tabIndex={-1}><textarea aria-label="notes" /></div>
+      </div>,
+    );
+    await focusBox();
+    const mic = await screen.findByRole("button", { name: MIC });
+    expect(mic.parentElement).toBe(document.querySelector("[data-modal-panel]"));
+  });
 });

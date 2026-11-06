@@ -595,7 +595,10 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
       // A technician's Messages badge polls its own unread count at start: that call is answered, the route call is not.
       : String(url).includes("/communications/unread-count")
         ? response(200, { conversations: 0, messages: 0 })
-        : response(401, { error: "Session expired" }))));
+        // The staff-wide mic asks once at layout mount whether it is on (GATE_DICTATION_EVERY_BOX): answered, off.
+        : String(url).includes("/tech/dictation/availability")
+          ? response(200, { available: false, everyBox: false })
+          : response(401, { error: "Session expired" }))));
     renderAt();
     expect(await screen.findByText("Saved route content")).toBeInTheDocument();
     await act(async () => {
