@@ -46,7 +46,7 @@ jest.mock('../services/invoice-helpers', () => ({
 }));
 jest.mock('../routes/admin-sms-templates', () => ({}));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ gates: {} }));
+jest.mock('../config/feature-gates', () => ({ gates: {}, estimateDueFirstVisitLive: () => false }));
 jest.mock('../services/stripe', () => ({}));
 jest.mock('../services/microdeposit-verification-email', () => ({ sendMicrodepositVerificationEmail: jest.fn() }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(), invoiceShortCodePrefix: jest.fn() }));

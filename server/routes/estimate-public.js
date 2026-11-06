@@ -2391,6 +2391,18 @@ async function lockAcceptInvoiceDepositLedger(trx, { estimateId, customerId, sch
   }
 }
 
+// The later due date of an accept invoice, else null (the caller keeps today). GATE_ESTIMATE_DUE_FIRST_VISIT on
+// (owner 2026-11-06 "walk all"): the ET day of the first booked visit linked to the accept, read on the accept
+// transaction, when that day is after today. No linked visit, a visit today or earlier, a visit date that cannot be
+// read, or the gate off: null. The reminder ladder then starts on that due date (invoice-followups.js
+// newSequenceAnchor).
+async function acceptInvoiceVisitDueDate(trx, scheduledServiceId) {
+  if (!scheduledServiceId || !require('../config/feature-gates').estimateDueFirstVisitLive()) return null;
+  const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('scheduled_date');
+  const visitDay = require('../utils/date-only').dateOnlyString(visit?.scheduled_date);
+  return visitDay && visitDay > etDateString() ? visitDay : null;
+}
+
 function roundInvoiceAmount(value) {
   const amount = Number(value);
   return Number.isFinite(amount) ? Math.round(amount * 100) / 100 : null;
@@ -13612,7 +13624,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           title: invoiceDraft.title,
           lineItems: invoiceDraft.lineItems,
           notes: invoiceDraft.notes,
-          dueDate: etDateString(),
+          dueDate: (await acceptInvoiceVisitDueDate(trx, acceptLinkedSsId)) || etDateString(),
           ...(requestedInvoiceDepositCredit > 0
             ? { depositCredit: { amount: requestedInvoiceDepositCredit, estimateId: estimate.id } }
             : {}),
@@ -14050,8 +14062,13 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           const invoiceModeAnchorId = acceptLinkedSsId || standardConversionResult?.firstScheduledServiceId || null;
           if (invoiceModeAnchorId) {
             if (!acceptLinkedSsId) {
+              // The visit this accept just booked is now the invoice's first linked visit: its due date follows it.
+              const anchorDueDate = await acceptInvoiceVisitDueDate(trx, invoiceModeAnchorId);
               await trx('invoices').where({ id: invoiceIdResult }).whereNull('scheduled_service_id')
-                .update({ scheduled_service_id: invoiceModeAnchorId });
+                .update({
+                  scheduled_service_id: invoiceModeAnchorId,
+                  ...(anchorDueDate ? { due_date: anchorDueDate } : {}),
+                });
             }
             await EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage(trx, {
               invoiceId: invoiceIdResult,
@@ -14370,7 +14387,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
               title: invoiceTitle,
               lineItems,
               notes: invoiceNotes,
-              dueDate: etDateString(),
+              dueDate: (await acceptInvoiceVisitDueDate(trx, attachScheduledServiceId)) || etDateString(),
               ...(requestedStandardDepositCredit > 0
                 ? { depositCredit: { amount: requestedStandardDepositCredit, estimateId: estimate.id } }
                 : {}),
@@ -32622,6 +32639,8 @@ module.exports.commercialAgreementBlockedFor = commercialAgreementBlockedFor;
 module.exports.sendEstimatePage = sendEstimatePage;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;
+// GATE_ESTIMATE_DUE_FIRST_VISIT: the accept invoice's later due date, on its own line for the unit test.
+module.exports.acceptInvoiceVisitDueDate = acceptInvoiceVisitDueDate;
 module.exports.selectTierCeiling = selectTierCeiling;
 module.exports.applyMembershipRepriceToEstimate = applyMembershipRepriceToEstimate;
 module.exports.shapePreferenceAddOns = shapePreferenceAddOns;
