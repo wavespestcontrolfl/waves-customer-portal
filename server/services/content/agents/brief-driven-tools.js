@@ -208,6 +208,18 @@ function planSectionMismatch(plan, body, { partial }) {
   return (missing.length || extra.length) ? { missing, extra } : null;
 }
 
+// GATE_CONTENT_PII_ALL_LANES: a brief saved before the gate flipped still
+// holds the customer's own (regex-redacted) words in customer_signal. Every
+// read that hands a saved brief to an agent drops them too, not only newly
+// composed briefs (pre-push audit r3, P1). Topic and counts stay.
+function stripCustomerWords(brief) {
+  if (!brief || !require('../../../config/feature-gates').contentPiiAllLanesLive()) return brief;
+  const cs = brief.customer_signal;
+  if (!cs || typeof cs !== 'object') return brief;
+  const { example_phrasing_anonymized: _example, redaction_confidence: _confidence, ...rest } = cs;
+  return { ...brief, customer_signal: rest };
+}
+
 async function executeBriefTool(toolName, input, { sessionId } = {}) {
   switch (toolName) {
 
@@ -227,7 +239,7 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
           'voice_constraints', 'facts_pack',
         ]);
         brief.seo_requirements = buildSeoRequirements(brief);
-        return brief;
+        return stripCustomerWords(brief);
       } catch (err) {
         return { error: `content_briefs read failed: ${err.message}` };
       }
@@ -963,6 +975,7 @@ function urlToAstroPath(url) {
 
 module.exports = {
   executeBriefTool,
+  stripCustomerWords,
   getDraft,
   getCheckedRoutes,
   clearDraft,

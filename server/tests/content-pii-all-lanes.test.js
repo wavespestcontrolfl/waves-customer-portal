@@ -193,3 +193,42 @@ describe.each(LANES)('%s public-entity exemptions', (_lane, brief) => {
     expect(r.checks.redaction_passed).toBeDefined();
   });
 });
+
+// Pre-push audit r3 (P1): briefs saved BEFORE the gate flipped still hold the
+// customer's words; every read that hands a saved brief to an agent drops them.
+describe('saved briefs read back by agents', () => {
+  const SAVED = {
+    opportunity_id: 'opp-1',
+    version: 2,
+    customer_signal: JSON.stringify({
+      topic: 'ants', normalized_question: 'How do I stop ants?', total_count: 4,
+      example_phrasing_anonymized: 'my name is pat and the ants are back', redaction_confidence: 'high',
+    }),
+  };
+  function mockBriefRow(row) {
+    const q = { where: jest.fn(() => q), orderBy: jest.fn(() => q), first: jest.fn(async () => row) };
+    db.mockImplementation(() => q);
+  }
+
+  test('dark: get_content_brief returns the saved example as before', async () => {
+    delete process.env[GATE];
+    mockBriefRow({ ...SAVED });
+    const out = await executeBriefTool('get_content_brief', { opportunity_id: 'opp-1' });
+    expect(out.customer_signal.example_phrasing_anonymized).toBe('my name is pat and the ants are back');
+  });
+
+  test('live: get_content_brief drops the saved example and confidence, keeps the topic', async () => {
+    process.env[GATE] = 'true';
+    mockBriefRow({ ...SAVED });
+    const out = await executeBriefTool('get_content_brief', { opportunity_id: 'opp-1' });
+    expect(out.customer_signal).not.toHaveProperty('example_phrasing_anonymized');
+    expect(out.customer_signal).not.toHaveProperty('redaction_confidence');
+    expect(out.customer_signal).toMatchObject({ topic: 'ants', normalized_question: 'How do I stop ants?', total_count: 4 });
+  });
+
+  test('live: the reviewed-run loader uses the same strip', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/content/autonomous-runner'), 'utf8');
+    const loader = src.slice(src.indexOf('async _loadReviewedBrief(run) {'));
+    expect(loader.slice(0, loader.indexOf('\n  }\n'))).toContain("require('./agents/brief-driven-tools').stripCustomerWords(out)");
+  });
+});
