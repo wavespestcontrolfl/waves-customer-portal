@@ -198,10 +198,10 @@ async function settleStandingRows(standing, { ids, now, items = null }) {
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(bellMetadata(items, ids))]),
     });
   }
-  const currentKey = dedupeKeyFor(ids);
-  const keys = stale.filter((r) => r !== rewrite).map((r) => r.meta.dedupeKey).filter((k) => k && k !== currentKey);
-  const closed = keys.length
-    ? await episodes.closeAdminAlertKeys(db, keys, 'wdo_superseded', { now, resolution: SUPERSEDED_RESOLUTION })
+  // By id, never by dedupeKey: the key is cut at 200 characters, so a stale row and the current one can share it.
+  const closeIds = stale.filter((r) => r !== rewrite).map((r) => r.id);
+  const closed = closeIds.length
+    ? await episodes.closeAdminAlertIds(db, closeIds, 'wdo_superseded', { now, resolution: SUPERSEDED_RESOLUTION })
     : 0;
   return { refreshed: rewrite ? 1 : 0, closed };
 }

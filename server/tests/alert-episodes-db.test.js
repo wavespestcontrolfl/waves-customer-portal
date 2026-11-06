@@ -72,6 +72,22 @@ maybeDescribe('alert episodes (live Postgres)', () => {
     expect(await close(['close-unread', 'close-read'])).toBe(0);
   });
 
+  test('close by id: only the named row closes even when another row shares its dedupeKey; same stamps as a key close', async () => {
+    const stale = await bell('shared-key');
+    const current = await bell('shared-key');
+    expect(await helpers.closeAdminAlertIds(db, [], 'superseded')).toBe(0);
+    expect(await helpers.closeAdminAlertIds(db, [stale.id], 'superseded', { resolution: 'Replaced by a newer alert.' })).toBe(1);
+    const s = await get(stale.id);
+    expect([s.done_by, s.resolution]).toEqual(['episodes', 'Replaced by a newer alert.']);
+    expect(s.done_at).not.toBeNull();
+    expect(s.metadata).toMatchObject({ autoCleared: true, autoClearedReason: 'superseded', dedupeKey: key('shared-key') });
+    const c = await get(current.id);
+    expect([c.done_at, c.read_at]).toEqual([null, null]);
+    expect(c.metadata.autoCleared).toBeUndefined();
+    // Already cleared: a second close rewrites nothing.
+    expect(await helpers.closeAdminAlertIds(db, [stale.id], 'superseded')).toBe(0);
+  });
+
   test('done state: a close is also done (a person\'s resolution and done time stand; the close takes done_by) and a comeback puts the row back in the bell', async () => {
     const auto = await bell('done-auto');
     const person = await bell('done-person');
