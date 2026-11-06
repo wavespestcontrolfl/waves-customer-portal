@@ -1282,15 +1282,22 @@ describe('sectionTierEligibleFromKeys — per-section badge (single source of tr
 });
 
 describe('lawn $55 minimum after discounts renders the full discount on the price card (owner 2026-11-06)', () => {
+  const GATE = 'GATE_LAWN_MIN_AFTER_DISCOUNT';
+  let priorGate;
+  beforeEach(() => { priorGate = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env[GATE];
+    else process.env[GATE] = priorGate;
+  });
   // The customer price card (client PriceCard.jsx) strikes through
   // frequency.perVisit, else monthlyBase x 12 / visits, and labels the gap
   // "WaveGuard <tier> Discount" only when the gap equals the tier % of that
   // crossed-out price. So the raised list must reach the card, not just the
   // paid price. crossedOut mirrors that PriceCard anchor.
-  async function lawnCards(services) {
+  async function lawnCards(services, extra = {}) {
     const input = {
       homeSqFt: 1800, lotSqFt: 6000, measuredTurfSf: 1450, propertyType: 'single_family',
-      features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' }, services,
+      features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' }, services, ...extra,
     };
     const r = generateEstimate(input);
     const bundle = await buildPricingBundle({
@@ -1303,6 +1310,7 @@ describe('lawn $55 minimum after discounts renders the full discount on the pric
         f.key,
         Number(f.perVisit) > 0 ? f.perVisit : Math.round((f.monthlyBase * 12 / f.visitsPerYear) * 100) / 100,
         f.perServiceTreatments[0].displayPrice,
+        ...(f.manualDiscount ? [Math.round((Number(f.manualDiscount.recurringAmount ?? f.manualDiscount.amount) / f.visitsPerYear) * 100) / 100] : []),
       ]);
   }
   const lawn = { track: 'st_augustine', lawnFreq: 9 };
@@ -1311,6 +1319,13 @@ describe('lawn $55 minimum after discounts renders the full discount on the pric
     expect(await lawnCards({ pest: { frequency: 'quarterly' }, lawn })).toEqual([
       ['enhanced', 61.11, 55],
       ['premium', 61.11, 55],
+    ]);
+  });
+
+  test('lawn only, typed $50 off: each cadence crossed out by enough to show the $50 and still pay $55', async () => {
+    expect(await lawnCards({ lawn }, { manualDiscount: { type: 'FIXED', value: 50 } })).toEqual([
+      ['enhanced', 60.56, 55, 5.56],
+      ['premium', 59.17, 55, 4.17],
     ]);
   });
 

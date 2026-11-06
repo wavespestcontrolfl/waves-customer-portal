@@ -1,7 +1,7 @@
 // GATE_LAWN_COST_PLUS_LIST (owner 2026-10-09): residential recurring lawn care
 // is listed at cost / (1 - 0.45), never below the market table (its $55 list
-// minimum was retired 2026-11-06 for the $55-after-discount minimum on every
-// lawn quote; a basis stamped with it still replays it). Discounts apply in full; the 35% collected-margin floor is a review
+// minimum was retired 2026-11-06 for the $55-after-discount minimum,
+// GATE_LAWN_MIN_AFTER_DISCOUNT; a basis stamped with it still replays it). Discounts apply in full; the 35% collected-margin floor is a review
 // line (owner 2026-11-02, "remove this"). Ships OFF: off must
 // price exactly as before, and a saved estimate replays as it was priced.
 const {
@@ -90,9 +90,7 @@ describe('gate OFF: nothing moves', () => {
     const explicit = generateEstimate(estimateInput(fourServices({ costPlusList: false })));
     expect(explicit.lineItems).toEqual(followed.lineItems);
     expect(explicit.summary).toEqual(followed.summary);
-    // Market $576 (4,500 sq ft, 9x); Platinum 20% would collect $51.20/app, so
-    // the $55-after-discount minimum (owner 2026-11-06) lists it at $495 / 0.8.
-    expect(lawnLine(followed).annual).toBe(618.75);
+    expect(lawnLine(followed).annual).toBe(576);
     expect(followed.pricingMetadata.lawnCostPlusList).toBe(false);
     expect(followed.pricingMetadata.lawnCostFloorArmed).toBe(false);
   });
@@ -304,11 +302,7 @@ describe('discounts apply in full; the 35% margin floor is a review line (owner 
       { lawn: lawnService({ costPlusList: true }) },
       { manualDiscount: { type: 'PERCENT', value: 50 } },
     ));
-    // 50% off a $693 list would collect $38.50/app; the $55-after-discount
-    // minimum (owner 2026-11-06) raises the list to $990 so the customer still
-    // sees 50% off and pays $495 (9 x $55). That is still under a 35% margin.
-    expect(lawnLine(estimate).annual).toBe(990);
-    expect(estimate.summary.recurringAnnualAfterDiscount).toBeCloseTo(495, 2);
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBeCloseTo(346.5, 2);
     expect(estimate.summary.manualDiscount).toEqual(expect.objectContaining({ capped: false }));
     expect(estimate.marginWarnings.map((w) => w.type)).toContain('manual_discount_below_margin_floor');
   });

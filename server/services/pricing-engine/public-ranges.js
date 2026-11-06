@@ -502,8 +502,11 @@ function buildRows() {
           LAWN_TIER_KEYS.map((tier) => ({ sq, track, tier })))),
       ({ sq, track, tier }) => sp.priceLawnCare({ lawnSqFt: sq }, { track, tier }),
       // No lawn plan collects under the minimum after discounts (owner
-      // 2026-11-06), so no list price under it is advertised either.
-      (r) => Math.max(r.perApp, Number(constants.LAWN_PRICING_V2.minimumPerVisitAfterDiscount) || 0)),
+      // 2026-11-06, GATE_LAWN_MIN_AFTER_DISCOUNT), so no list price under it
+      // is advertised either.
+      (r) => Math.max(r.perApp, require('../../config/feature-gates').gateEnvValue('GATE_LAWN_MIN_AFTER_DISCOUNT')
+        ? Number(constants.LAWN_PRICING_V2.minimumPerVisitAfterDiscount) || 0
+        : 0)),
     notes: `${lawnCadenceText} applications per year by tier; priced by grass type and treatable turf area — larger or more complex lawns price higher. WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
   }));
 
@@ -755,7 +758,7 @@ function lastComputeUnstable() {
 }
 
 function gateSignature() {
-  return [getLastSyncAt(), ...Object.values(PURCHASE_GATED_ROWS).map((gate) => process.env[gate] || ''), String(require('../../config/feature-gates').lawnV13Live?.() === true), process.env.GATE_LAWN_COST_PLUS_LIST || ''].join('|');
+  return [getLastSyncAt(), ...Object.values(PURCHASE_GATED_ROWS).map((gate) => process.env[gate] || ''), String(require('../../config/feature-gates').lawnV13Live?.() === true), process.env.GATE_LAWN_COST_PLUS_LIST || '', process.env.GATE_LAWN_MIN_AFTER_DISCOUNT || ''].join('|');
 }
 
 function computePublicPricingRanges({ refresh = false } = {}) {

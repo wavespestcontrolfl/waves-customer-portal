@@ -126,21 +126,56 @@ function lawnLineProtectedAnnual(item, { marginFloorArmed = false, programMinimu
   };
 }
 
+// Report-only "looks low" signal for a lawn line (owner ruling 2026-07-17:
+// margins surfaced, never enforced): armed or not, a WaveGuard-discounted
+// lawn line that lands under the 35% collected-margin target emits the same
+// belowMarginFloor / finalMargin signals pest and tree/shrub carry, plus a
+// Pricing Review Note via marginWarnings. Cent-rounded floor prices sit
+// within ~1e-5 of target, so an at-floor armed cap must not read as a breach
+// (same 1e-4 tolerance as the floor pins and the manual-discount audit).
+// Re-stamping (after a later list raise) replaces the line's earlier entry.
+function stampLawnWaveGuardMargin(item, discount, warnings) {
+  const prior = warnings.findIndex((w) => w.service === 'lawn_care' && w.type === 'waveguard_discount_below_margin_floor');
+  if (prior >= 0) warnings.splice(prior, 1);
+  const lawnCostTotal = Number(item.costs?.total);
+  const finalLawnAnnual = Number(item.annualAfterDiscount);
+  if (!(Number.isFinite(lawnCostTotal) && lawnCostTotal >= 0 && finalLawnAnnual > 0)) return;
+  const lawnMargin = (finalLawnAnnual - lawnCostTotal) / finalLawnAnnual;
+  const lawnTarget = Number(lawnMarginTarget(item) ?? 0.35);
+  item.finalMargin = Math.round(lawnMargin * 1000) / 1000;
+  item.belowMarginFloor = lawnMargin < lawnTarget - 1e-4;
+  if (item.belowMarginFloor && (discount.effectiveDiscount || 0) > 0) {
+    warnings.push({
+      service: 'lawn_care',
+      type: 'waveguard_discount_below_margin_floor',
+      margin: item.finalMargin,
+      marginFloor: lawnTarget,
+      finalAnnual: finalLawnAnnual,
+      annualCost: Math.round(lawnCostTotal * 100) / 100,
+      message: `lawn_care WaveGuard discount drops collected margin to ${(lawnMargin * 100).toFixed(1)}% (below the ${(lawnTarget * 100).toFixed(0)}% review floor) — price stands as discounted`,
+    });
+  }
+}
+
 // Lawn minimum per visit AFTER discounts (owner 2026-11-06): a residential
 // recurring lawn customer never pays less than minPerVisit an application
-// once the WaveGuard tier % and a typed percent discount come off. The LIST
+// once the WaveGuard tier % and a typed discount come off (a dollar
+// discount: raiseLawnListForFixedDiscount below). The LIST
 // price (the crossed-out number) is raised instead of the discount shrinking,
 // so the customer still sees the full discount: list = minimum / (1 - discount).
 // Every sold cadence is raised with the same discount, so the public page,
 // which re-applies the discount to the stored list rows, shows the same $55.
 // keepFraction = the share of list the customer pays (0.9 for Silver).
-function raiseLawnListForMinimumAfterDiscount(item, keepFraction, minPerVisit) {
+// alsoCovers = dollars a year still to come off after keepFraction (the lawn's
+// share of a typed dollar discount, plus any flat credit), so the list covers
+// them too.
+function raiseLawnListForMinimumAfterDiscount(item, keepFraction, minPerVisit, alsoCovers = 0) {
   if (!(minPerVisit > 0) || !(keepFraction > 0) || keepFraction > 1) return;
   const raise = (row) => {
     const visits = Number(row.visits ?? row.freq);
     const annual = Number(row.annual);
     if (!(visits > 0) || !(annual > 0)) return false;
-    const target = roundMoney(minPerVisit * visits);
+    const target = roundMoney(minPerVisit * visits + alsoCovers);
     const paid = (list) => roundMoney(list * keepFraction);
     if (paid(annual) >= target) return false;
     let list = roundMoney(target / keepFraction);
@@ -172,6 +207,40 @@ function raiseLawnListForMinimumAfterDiscount(item, keepFraction, minPerVisit) {
   } else {
     raise(item);
   }
+}
+
+// Typed DOLLAR discount on a lawn quote (owner 2026-11-06): the same $55
+// minimum. generateEstimate spreads the dollar amount across the
+// discountable estimate in proportion to price, so the lawn's share grows as
+// its price does; find the after-WaveGuard lawn amount whose remainder after
+// its share is the minimum, then raise every cadence by that share (the
+// public page takes the same dollar slice off whichever cadence is picked).
+// otherDiscountable = the rest of the discountable estimate. Returns the
+// change in the lawn's after-WaveGuard annual (0 when nothing moved).
+function raiseLawnListForFixedDiscount(item, fixedAmount, otherDiscountable, minPerVisit) {
+  const paidNow = Number(item.annualAfterDiscount);
+  const visits = Number(item.selected?.visits ?? item.frequency);
+  const keep = 1 - (item.discount?.effectiveDiscount || 0);
+  if (!(minPerVisit > 0) || !(fixedAmount > 0) || !(paidNow > 0) || !(visits > 0) || !(keep > 0)) return 0;
+  // A dollar amount that covers the whole estimate is a free plan, not a price.
+  if (fixedAmount >= paidNow + otherDiscountable) return 0;
+  const target = roundMoney(minPerVisit * visits);
+  const shareAt = (a) => roundMoney(fixedAmount * (a / (a + otherDiscountable)));
+  let paid = paidNow;
+  for (let i = 0; i < 25 && roundMoney(paid - shareAt(paid)) < target; i += 1) {
+    paid = roundMoney(target + shareAt(paid) + (i > 10 ? 0.01 * (i - 10) : 0));
+  }
+  if (!(paid > paidNow)) return 0;
+  // A flat credit already taken off this line comes off the raised list too.
+  const credit = Math.max(0, roundMoney(roundMoney(Number(item.annual) * keep) - paidNow));
+  raiseLawnListForMinimumAfterDiscount(item, keep, minPerVisit, roundMoney(shareAt(paid) + credit));
+  if (!item.minimumAfterDiscountApplied) return 0;
+  item.annualBeforeDiscount = item.annual;
+  const newPaid = roundMoney(roundMoney(item.annual * keep) - credit);
+  const delta = roundMoney(newPaid - paidNow);
+  item.annualAfterDiscount = newPaid;
+  item.monthlyAfterDiscount = roundMoney(newPaid / 12);
+  return delta;
 }
 const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes } = require('./modifiers');
@@ -845,10 +914,13 @@ function generateEstimate(input) {
     : PEST.enforceFloorPostDiscount === true;
   // Lawn minimum per visit after discounts (owner 2026-11-06). Replays thread
   // the value the saved quote was priced with (0 for quotes priced before
-  // the rule), so only new quotes take it; otherwise the live DB-synced value.
+  // the rule or while the gate was off), so only new quotes take it;
+  // otherwise the live DB-synced value while GATE_LAWN_MIN_AFTER_DISCOUNT is
+  // on (read at call time; off = 0, prices exactly as before).
   const lawnMinimumPerVisitAfterDiscountResolved = (() => {
     const override = Number(input.lawnMinimumPerVisitAfterDiscount);
     if (input.lawnMinimumPerVisitAfterDiscount != null && Number.isFinite(override) && override >= 0) return override;
+    if (!gateEnvValue('GATE_LAWN_MIN_AFTER_DISCOUNT')) return 0;
     const n = Number(LAWN_PRICING_V2.minimumPerVisitAfterDiscount);
     return Number.isFinite(n) && n > 0 ? n : 0;
   })();
@@ -2667,33 +2739,7 @@ function generateEstimate(input) {
         } else {
           item.annualAfterDiscount = discountedAnnual;
         }
-        // Report-only "looks low" signal (owner ruling 2026-07-17: margins
-        // surfaced, never enforced): armed or not, a WaveGuard-discounted
-        // lawn line that lands under the 35% collected-margin target emits
-        // the same belowMarginFloor / finalMargin signals pest and
-        // tree/shrub carry, plus a Pricing Review Note via marginWarnings.
-        // Cent-rounded floor prices sit within ~1e-5 of target, so an
-        // at-floor armed cap must not read as a breach (same 1e-4 tolerance
-        // as the floor pins and the manual-discount audit).
-        const lawnCostTotal = Number(item.costs?.total);
-        const finalLawnAnnual = Number(item.annualAfterDiscount);
-        if (Number.isFinite(lawnCostTotal) && lawnCostTotal >= 0 && finalLawnAnnual > 0) {
-          const lawnMargin = (finalLawnAnnual - lawnCostTotal) / finalLawnAnnual;
-          const lawnTarget = Number(lawnMarginTarget(item) ?? 0.35);
-          item.finalMargin = Math.round(lawnMargin * 1000) / 1000;
-          item.belowMarginFloor = lawnMargin < lawnTarget - 1e-4;
-          if (item.belowMarginFloor && (discount.effectiveDiscount || 0) > 0) {
-            waveGuardMarginWarnings.push({
-              service: 'lawn_care',
-              type: 'waveguard_discount_below_margin_floor',
-              margin: item.finalMargin,
-              marginFloor: lawnTarget,
-              finalAnnual: finalLawnAnnual,
-              annualCost: Math.round(lawnCostTotal * 100) / 100,
-              message: `lawn_care WaveGuard discount drops collected margin to ${(lawnMargin * 100).toFixed(1)}% (below the ${(lawnTarget * 100).toFixed(0)}% review floor) — price stands as discounted`,
-            });
-          }
-        }
+        stampLawnWaveGuardMargin(item, discount, waveGuardMarginWarnings);
       } else {
         item.annualAfterDiscount = discountedAnnual;
         stampReportOnlyWaveGuardMargin(item, discount, waveGuardMarginWarnings);
@@ -2738,8 +2784,8 @@ function generateEstimate(input) {
   const oneTimeItems = lineItems.filter(i => i.price && !i.annual && !i.total);
   const specialtyItems = lineItems.filter(i => i.total && !i.annual);
 
-  const recurringAnnualBefore = recurringItems.reduce((sum, i) => sum + (i.annualBeforeDiscount || 0), 0);
-  const recurringAnnualAfterWG = recurringItems.reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);
+  let recurringAnnualBefore = recurringItems.reduce((sum, i) => sum + (i.annualBeforeDiscount || 0), 0);
+  let recurringAnnualAfterWG = recurringItems.reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);
 
   // Manual / custom estimate discount. Applies after WaveGuard to discountable
   // recurring annual services AND to one-time + specialty work (owner directive
@@ -2755,7 +2801,7 @@ function generateEstimate(input) {
   let manualDiscountInfo = null;
   const manualEligibleItems = recurringItems.filter(isManualRecurringDiscountEligible);
   const manualExcludedItems = recurringItems.filter(i => !isManualRecurringDiscountEligible(i));
-  const manualDiscountableRecurringAnnual = manualEligibleItems
+  let manualDiscountableRecurringAnnual = manualEligibleItems
     .reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);
   const manualOneTimeEligibleItems = oneTimeItems.filter(isManualOneTimeDiscountEligible);
   const manualSpecialtyEligibleItems = specialtyItems.filter(isManualOneTimeDiscountEligible);
@@ -2772,10 +2818,29 @@ function generateEstimate(input) {
     : 0;
   const manualDiscountableSpecialty = manualSpecialtyEligibleItems
     .reduce((sum, i) => sum + manualOneTimeLinePrice(i), 0);
-  const manualDiscountableTotal = roundMoney(
+  let manualDiscountableTotal = roundMoney(
     manualDiscountableRecurringAnnual + manualDiscountableOneTime + manualDiscountableSpecialty,
   );
   const md = input.manualDiscount;
+  // A typed DOLLAR discount keeps the lawn at its minimum after discounts too
+  // (owner 2026-11-06); the percent case was handled in the discount pass.
+  // The lawn's list is raised here, before the dollar amount is spread, so
+  // every base below already carries the raised lawn price.
+  if (md && md.type !== 'PERCENT' && Number(md.value) > 0) {
+    for (const lawnItem of manualEligibleItems.filter((i) => i.service === 'lawn_care')) {
+      const listBefore = Number(lawnItem.annualBeforeDiscount) || 0;
+      const lawnPaid = Number(lawnItem.annualAfterDiscount || lawnItem.annual || 0);
+      const delta = raiseLawnListForFixedDiscount(
+        lawnItem, roundMoney(Number(md.value)), roundMoney(manualDiscountableTotal - lawnPaid), lawnMinimumPerVisitAfterDiscountResolved,
+      );
+      if (!(delta > 0)) continue;
+      recurringAnnualBefore = roundMoney(recurringAnnualBefore + (lawnItem.annualBeforeDiscount - listBefore));
+      recurringAnnualAfterWG = roundMoney(recurringAnnualAfterWG + delta);
+      manualDiscountableRecurringAnnual = roundMoney(manualDiscountableRecurringAnnual + delta);
+      manualDiscountableTotal = roundMoney(manualDiscountableTotal + delta);
+      stampLawnWaveGuardMargin(lawnItem, lawnItem.discount || {}, waveGuardMarginWarnings);
+    }
+  }
   if (md && Number(md.value) > 0) {
     const v = Number(md.value);
     const manualWarnings = manualDiscountEligibilityWarnings(md, input);

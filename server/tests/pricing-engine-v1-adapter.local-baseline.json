@@ -61,21 +61,21 @@
     "recurring": {
       "tier": "Platinum",
       "discount": 0.2,
-      "annualBeforeDiscount": 2922,
-      "annualAfterDiscount": 2337.6,
-      "monthlyTotal": 194.8,
-      "savings": 584.4,
+      "annualBeforeDiscount": 2889,
+      "annualAfterDiscount": 2311.2,
+      "monthlyTotal": 192.6,
+      "savings": 577.8,
       "serviceCount": 4
     },
     "results": {
       "lawn": [
         {
-          "mo": 51.56,
+          "mo": 50,
           "recommended": false,
           "name": "9x applications/yr"
         },
         {
-          "mo": 68.75,
+          "mo": 66,
           "recommended": true,
           "name": "12x applications/yr"
         }
@@ -131,8 +131,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 2337.6,
-      "year2": 2337.6
+      "year1": 2311.2,
+      "year2": 2311.2
     }
   },
   "v1adapter_boracare_attic_2000sf": {

@@ -447,11 +447,8 @@ describe('pricing audit — FROZEN WaveGuard tier discounts (in-code constants, 
   const S = { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', tier: 'enhanced' }, mosquito: { tier: 'seasonal9' }, treeShrub: { tier: 'standard', treeCount: 6 } };
   const FROZEN_TIERS = [
     ['silver: pest + lawn', ['pest', 'lawn'], 'silver', 0.1, { pest_control: [403.2, 33.6], lawn_care: [518.4, 43.2] }],
-    // Gold and Platinum would collect $54.40 / $51.20 an application on the
-    // $576 lawn, so the $55-after-discount minimum (owner 2026-11-06) raises
-    // its list ($582.35 / $618.75) and the customer pays 9 x $55 = $495.
-    ['gold: pest + lawn + mosquito', ['pest', 'lawn', 'mosquito'], 'gold', 0.15, { pest_control: [380.8, 31.73], lawn_care: [495, 41.25], mosquito: [589.05, 49.09] }],
-    ['platinum: pest + lawn + mosquito + tree & shrub', ['pest', 'lawn', 'mosquito', 'treeShrub'], 'platinum', 0.2, { pest_control: [358.4, 29.87], lawn_care: [495, 41.25], mosquito: [554.4, 46.2], tree_shrub: [467.2, 38.93] }],
+    ['gold: pest + lawn + mosquito', ['pest', 'lawn', 'mosquito'], 'gold', 0.15, { pest_control: [380.8, 31.73], lawn_care: [489.6, 40.8], mosquito: [589.05, 49.09] }],
+    ['platinum: pest + lawn + mosquito + tree & shrub', ['pest', 'lawn', 'mosquito', 'treeShrub'], 'platinum', 0.2, { pest_control: [358.4, 29.87], lawn_care: [460.8, 38.4], mosquito: [554.4, 46.2], tree_shrub: [467.2, 38.93] }],
   ];
   test.each(FROZEN_TIERS)('%s prices exactly as frozen', (_name, keys, tier, pct, perLine) => {
     const res = generateEstimate({ ...BASE, bedArea: 2000, services: Object.fromEntries(keys.map((k) => [k, S[k]])) });

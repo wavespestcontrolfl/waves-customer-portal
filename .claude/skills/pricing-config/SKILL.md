@@ -63,10 +63,11 @@ environment that carries the row (prod does), **editing
   (`GATE_LAWN_COST_PLUS_LIST` is OFF in production, owner 2026-11-06), and
   the lawn 35% margin is a review line only: discounts apply in full (owner
   2026-11-02). **Lawn $55 minimum after discounts** (owner 2026-11-06,
-  `lawn_pricing_v2.minimumPerVisitAfterDiscount`): every 9x/12x lawn
+  `lawn_pricing_v2.minimumPerVisitAfterDiscount`, dark behind
+  `GATE_LAWN_MIN_AFTER_DISCOUNT` until the owner flips it): every 9x/12x lawn
   customer pays at least $55 an application after the WaveGuard tier % and a
-  typed percent discount; the LIST (crossed-out) price is raised to
-  $55 / (1 - discount) so the full discount still shows. New quotes only:
+  typed percent or dollar discount; the LIST (crossed-out) price is raised
+  so the full discount still shows. New quotes only:
   saved quotes replay with the stamped `pricingMetadata` value (0 when
   unstamped). The cost-plus list-side $55 minimum is retired (0). The owner
   ruled a 35% floor for T&S; it is not built (it waits on the T&S protocol).

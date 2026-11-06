@@ -791,7 +791,7 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.margin).toBeGreaterThan(0.39); // 0.395 on the $516 tapered market price (2026-08-04 re-grid)
   });
 
-  test('reviewed 2,870 sqft Silver estimate: the $55-after-discount minimum raises the list so the full 10% still shows', () => {
+  test('reviewed 2,870 sqft estimate stays at 9 applications and Silver-discounted market price', () => {
     const estimate = generateEstimate(baseInput({
       homeSqFt: 2720,
       lotSqFt: 7200,
@@ -809,40 +809,19 @@ describe('lawn pricing production follow-up', () => {
       qualifyingCount: 2,
     });
     expect(lawn.frequency).toBe(9);
-    // 2,870 sqft prices off the market table at $516/yr ($57.33/app); Silver
-    // 10% would collect $51.60/app. Owner 2026-11-06: no lawn plan collects
-    // under $55/app after discounts, and the LIST is raised (not the discount
-    // cut) so the customer still sees the full 10%: list $550 ($61.11/app),
-    // paid $495 ($55/app). Every sold cadence is raised the same way.
-    expect(lawn.perApp).toBe(61.11);
-    expect(lawn.annual).toBe(550);
-    expect(lawn.annualAfterDiscount).toBe(495);
-    expect(lawn.monthlyAfterDiscount).toBe(41.25);
-    expect(lawn.discount.effectiveDiscount).toBe(0.1);
-    expect(lawn.minimumAfterDiscountApplied).toBe(true);
-    expect(lawn.tiers.map((t) => [t.visits, t.annual, t.perApp])).toEqual([[9, 550], [12, 733.33]].map(([v, a]) => [v, a, Math.round(a / v * 100) / 100]));
-    expect(estimate.pricingMetadata.lawnMinimumPerVisitAfterDiscount).toBe(55);
+    // Owner 2026-07-17 ("forget all pricing floors") + 2026-08-04 re-grid:
+    // 2,870 sqft prices off the sub-3,000 taper at $516/yr ($57.33/app) and
+    // Silver 10% applies IN FULL: $516 × 0.90 = $464.40/yr = $38.70/mo. The
+    // post-discount program-minimum guard is inert (never set), no cap.
+    expect(lawn.perApp).toBe(57.33);
+    expect(lawn.annual).toBe(516);
+    expect(lawn.annualAfterDiscount).toBe(464.4);
+    expect(lawn.monthlyAfterDiscount).toBe(38.7);
     expect(lawn.programMinimumGuardApplied).toBeUndefined();
     expect(lawn.discountCapped).toBeUndefined();
     expect(lawn.pricingSource).toBe('MARKET_TABLE');
     expect(lawn.programMinimumApplied).toBe(false);
     expect(lawn.costFloorApplied).toBe(false);
-
-    // A quote saved before the rule replays with its stamp (0): unchanged.
-    const replay = generateEstimate(baseInput({
-      homeSqFt: 2720,
-      lotSqFt: 7200,
-      measuredTurfSf: 2870,
-      features: { complexity: 'simple' },
-      services: {
-        pest: { frequency: 'quarterly' },
-        lawn: { track: 'st_augustine', lawnFreq: 9 },
-      },
-      lawnMinimumPerVisitAfterDiscount: 0,
-    }));
-    const oldLawn = replay.lineItems.find(i => i.service === 'lawn_care');
-    expect([oldLawn.annual, oldLawn.annualAfterDiscount]).toEqual([516, 464.4]);
-    expect(oldLawn.minimumAfterDiscountApplied).toBeUndefined();
   });
 
   test('cost floor (re-armed) uses annual material budgets by grass type (not $8/K fallback)', () => {
@@ -1001,15 +980,14 @@ describe('lawn pricing production follow-up', () => {
     }));
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
 
-    // Silver 10% then the typed 10% would collect $51.84/app on the $576 lawn,
-    // so the $55-after-discount minimum (owner 2026-11-06) raises its list to
-    // $611.11: Silver → $550, typed 10% → $495 (9 x $55). The manual-discount
-    // base is pest 403.20 + lawn 550 = 953.20 (pest base 112, 2026-08-03),
-    // and the 10% (95.32) applies in full, uncapped.
-    expect(lawn.annual).toBe(611.11);
-    expect(lawn.annualAfterDiscount).toBe(550);
-    expect(estimate.summary.manualDiscount.discountableBase).toBeCloseTo(953.2, 2);
-    expect(estimate.summary.manualDiscount.amount).toBe(95.32);
+    // Owner 2026-07-17 ("forget all pricing floors"): lawn takes the full
+    // Silver 10% ($576 → $518.40), so the manual-discount base is pest
+    // 403.20 + lawn 518.40 = 921.60 (pest base 112, owner ruling 2026-08-03).
+    expect(lawn.annualAfterDiscount).toBe(518.4);
+    expect(estimate.summary.manualDiscount.discountableBase).toBeCloseTo(921.6, 2);
+    // With no floor to protect, the 10% manual discount (92.16) applies in
+    // full, uncapped — no lawn_program_minimum cap exists anymore.
+    expect(estimate.summary.manualDiscount.amount).toBe(92.16);
     expect(estimate.summary.manualDiscount.capped).toBe(false);
     expect(estimate.summary.manualDiscount.capReason).toBeNull();
     expect(estimate.summary.manualDiscount.eligibleServices).toContain('lawn_care_enhanced');
@@ -1054,9 +1032,6 @@ describe('lawn pricing production follow-up', () => {
         lawn: { track: 'st_augustine', lawnFreq: 9 },
       },
       useLawnCostFloor: true,
-      // Pins the re-armed cost-floor allocation alone, without the separate
-      // $55-after-discount minimum (owner 2026-11-06).
-      lawnMinimumPerVisitAfterDiscount: 0,
       manualDiscount: { type: 'PERCENT', value: 30, source: 'test', eligibilityConfirmed: true },
     }));
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
@@ -1244,13 +1219,9 @@ describe('lawn pricing production follow-up', () => {
     }));
     const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
 
-    // The $55-after-discount minimum (owner 2026-11-06) lists the lawn at
-    // $990 so the full 50% still shows and the customer pays $495 (9 x $55),
-    // still under a 35% margin, so the warning stays.
     expect(estimate.summary.manualDiscount.capped).toBe(false);
-    expect(lawn.annual).toBe(990);
-    expect(estimate.summary.recurringAnnualAfterDiscount).toBe(495);
-    expect(lawn.manualFinalAnnual).toBe(495);
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBe(288);
+    expect(lawn.manualFinalAnnual).toBe(288);
     expect(lawn.manualFinalMargin).toBeLessThan(0.35);
     expect(lawn.manualMarginWarning).toBe(true);
     const warning = estimate.marginWarnings.find((w) => (
@@ -1421,5 +1392,99 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.selected.costFloorApplied).toBe(false);
     expect(lawn.selected.pricingSource).toBe('MARKET_TABLE');
     expect(lawn.selected.annual).toBe(576);
+  });
+});
+
+describe('lawn $55 minimum per visit after discounts (owner 2026-11-06, GATE_LAWN_MIN_AFTER_DISCOUNT)', () => {
+  // The customer never pays under $55 an application after the WaveGuard
+  // tier % and a typed discount; the LIST (crossed-out) price is raised, not
+  // the discount cut, so the customer still sees the full discount.
+  const GATE = 'GATE_LAWN_MIN_AFTER_DISCOUNT';
+  let priorGate;
+  beforeEach(() => { priorGate = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env[GATE];
+    else process.env[GATE] = priorGate;
+  });
+  const lawnOf = (estimate) => estimate.lineItems.find(i => i.service === 'lawn_care');
+  // 2,870 sq ft lists at $516/yr ($57.33/app); Silver alone would collect $51.60.
+  const silverQuote = (extra = {}) => generateEstimate(baseInput({
+    homeSqFt: 2720,
+    lotSqFt: 7200,
+    measuredTurfSf: 2870,
+    features: { complexity: 'simple' },
+    services: { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', lawnFreq: 9 } },
+    ...extra,
+  }));
+
+  test('gate off: prices exactly as before and stamps 0', () => {
+    delete process.env[GATE];
+    const estimate = silverQuote();
+    expect([lawnOf(estimate).annual, lawnOf(estimate).annualAfterDiscount]).toEqual([516, 464.4]);
+    expect(estimate.pricingMetadata.lawnMinimumPerVisitAfterDiscount).toBe(0);
+  });
+
+  test('Silver: list raised to $550 ($61.11/app) so 10% off lands on $55/app, on every cadence', () => {
+    const estimate = silverQuote();
+    const lawn = lawnOf(estimate);
+    expect(lawn.discount.effectiveDiscount).toBe(0.1);
+    expect([lawn.annual, lawn.perApp, lawn.annualAfterDiscount, lawn.monthlyAfterDiscount]).toEqual([550, 61.11, 495, 41.25]);
+    expect(lawn.minimumAfterDiscountApplied).toBe(true);
+    expect(lawn.tiers.map((t) => [t.visits, t.annual])).toEqual([[9, 550], [12, 733.33]]);
+    expect(estimate.pricingMetadata.lawnMinimumPerVisitAfterDiscount).toBe(55);
+  });
+
+  test('a quote saved before the rule (stamped 0) replays at its old price', () => {
+    const lawn = lawnOf(silverQuote({ lawnMinimumPerVisitAfterDiscount: 0 }));
+    expect([lawn.annual, lawn.annualAfterDiscount]).toEqual([516, 464.4]);
+    expect(lawn.minimumAfterDiscountApplied).toBeUndefined();
+  });
+
+  test('a lawn already above the minimum after discount is untouched', () => {
+    const lawn = lawnOf(generateEstimate(baseInput({
+      measuredTurfSf: 8000,
+      services: { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', lawnFreq: 9 } },
+    })));
+    expect(lawn.minimumAfterDiscountApplied).toBeUndefined();
+    expect(lawn.annualAfterDiscount / 9).toBeGreaterThan(55);
+  });
+
+  test('typed percent on top of Silver: list covers both, lawn pays $55/app', () => {
+    const estimate = silverQuote({ manualDiscount: { type: 'PERCENT', value: 10 } });
+    const lawn = lawnOf(estimate);
+    expect(lawn.annual).toBe(611.11);
+    expect(lawn.annualAfterDiscount).toBe(550);
+    // The typed 10% of the lawn's $550 leaves $495 = 9 x $55.
+    const md = estimate.summary.manualDiscount;
+    expect(md.capped).toBe(false);
+    expect(Math.round((lawn.annualAfterDiscount * (1 - md.value / 100)) * 100) / 100).toBe(495);
+  });
+
+  test('typed dollar discount: list covers the lawn share, lawn pays $55/app', () => {
+    // Lawn only: the whole $50 comes off the lawn, on whichever cadence.
+    const solo = generateEstimate(baseInput({
+      measuredTurfSf: 1450,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+      manualDiscount: { type: 'FIXED', value: 50 },
+    }));
+    expect(lawnOf(solo).tiers.map((t) => [t.visits, t.annual])).toEqual([[9, 545], [12, 710]]);
+    expect(solo.summary.manualDiscount.amount).toBe(50);
+    expect(solo.summary.recurringAnnualAfterDiscount).toBe(495);
+
+    // Bundle: the $50 is spread by price, and the lawn's share still leaves $495.
+    const bundle = silverQuote({ measuredTurfSf: 1450, manualDiscount: { type: 'FIXED', value: 50 } });
+    const lawn = lawnOf(bundle);
+    const md = bundle.summary.manualDiscount;
+    const lawnPays = lawn.annualAfterDiscount - md.amount * (lawn.annualAfterDiscount / md.discountableBase);
+    expect(lawnPays).toBeGreaterThanOrEqual(495 - 0.01);
+    expect(lawnPays).toBeLessThan(495.05);
+  });
+
+  test('the public price range starts the lawn row at the minimum only while the gate is on', () => {
+    const { computePublicPricingRanges } = require('../services/pricing-engine/public-ranges');
+    const lawnRow = () => computePublicPricingRanges({ refresh: true }).services.find((r) => r.key === 'lawn_care_program');
+    expect(lawnRow().low).toBe(55);
+    delete process.env[GATE];
+    expect(lawnRow().low).toBeLessThan(55);
   });
 });

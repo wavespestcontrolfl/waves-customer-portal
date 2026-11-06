@@ -8,18 +8,6 @@ These baselines are the yardstick for Sessions 3-10. A failing regression test m
 
 ---
 
-## 2026-11-06 lawn $55 minimum per visit after discounts
-
-Owner ruling 2026-11-06: a residential recurring lawn plan (9x and 12x)
-never collects under $55 an application after the WaveGuard tier % and a
-typed percent discount; the list price is raised to $55 / (1 - discount)
-so the full discount still shows (migration
-`20261106150000_lawn_minimum_per_visit_after_discount` + changelog entry).
-Local baselines recaptured (`CAPTURE_BASELINE=1 LOCAL=1`): two lawn-bearing
-engine cases and one v1-adapter case moved, all lawn lines that were under
-$55 an application after discount. The DB baselines (`*.baseline.json`)
-are pending post-deploy recapture.
-
 ## 2026-08-04 lawn 500-sqft re-grid + basic/4x retirement
 
 Owner directives 2026-08-04 (accepted/expired funnel review): lawn brackets

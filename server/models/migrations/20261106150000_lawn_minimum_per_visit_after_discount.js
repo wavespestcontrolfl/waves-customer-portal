@@ -6,12 +6,14 @@
  * read-modify-write
  *   - adds minimumPerVisitAfterDiscount: 55 — a residential recurring lawn
  *     customer pays at least $55 an application after the WaveGuard tier %
- *     and a typed percent discount; the crossed-out list price is raised so
+ *     and a typed discount (percent or dollar); the crossed-out list price is raised so
  *     the full discount still shows (estimate-engine
  *     raiseLawnListForMinimumAfterDiscount);
  *   - retires the cost-plus list-side minimum (costPlusList.minimumPerVisit
  *     55 → 0). Cost-plus pricing is off; cost bases stamped on saved quotes
  *     keep their own value, so nothing already sent moves.
+ * The engine reads the minimum only while GATE_LAWN_MIN_AFTER_DISCOUNT is on,
+ * so this row edit changes no price by itself.
  * Only an untouched seeded value is changed; admin edits are left alone.
  * Saved quotes replay with the stamped pricingMetadata value (0 when the
  * quote predates this rule), so only new quotes price with it.
@@ -80,7 +82,7 @@ exports.up = async function (knex) {
         affected_services: JSON.stringify(['lawn_care']),
         before_value: JSON.stringify({ minimumPerVisitAfterDiscount: null, costPlusListMinimumPerVisit: RETIRED_COST_PLUS_MINIMUM }),
         after_value: JSON.stringify({ minimumPerVisitAfterDiscount: MINIMUM, costPlusListMinimumPerVisit: 0 }),
-        rationale: 'Owner 2026-11-06: residential recurring lawn (every 6 weeks and monthly) never collects under $55 an application after WaveGuard and typed percent discounts. The list price is raised to $55 / (1 - discount), so Silver shows $61.11 crossed out and $55.00 paid. New quotes only: saved quotes replay with their stamped value. The cost-plus list-side $55 minimum is retired.',
+        rationale: 'Owner 2026-11-06: residential recurring lawn (every 6 weeks and monthly) never collects under $55 an application after WaveGuard and typed (percent or dollar) discounts. The list price is raised to $55 / (1 - discount), so Silver shows $61.11 crossed out and $55.00 paid. New quotes only: saved quotes replay with their stamped value. The cost-plus list-side $55 minimum is retired.',
       });
     }
   }

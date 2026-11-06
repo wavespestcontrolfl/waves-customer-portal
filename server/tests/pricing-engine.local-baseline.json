@@ -71,9 +71,9 @@
   },
   "zone_d_quarterly_pest_bahia_basic": {
     "summary": {
-      "recurringAnnualAfterDiscount": 865.8,
-      "recurringMonthlyAfterDiscount": 72.15,
-      "year1Total": 865.8
+      "recurringAnnualAfterDiscount": 835.2,
+      "recurringMonthlyAfterDiscount": 69.6,
+      "year1Total": 835.2
     },
     "waveGuard": {
       "tier": "silver",
@@ -86,8 +86,8 @@
         "monthly": 34.33
       },
       "lawn_care": {
-        "annual": 550,
-        "monthly": 45.83
+        "annual": 516,
+        "monthly": 43
       }
     }
   },
@@ -177,9 +177,9 @@
   },
   "platinum_bundle_4_qualifying_services_zone_a": {
     "summary": {
-      "recurringAnnualAfterDiscount": 1930.2,
-      "recurringMonthlyAfterDiscount": 160.85,
-      "year1Total": 1930.2
+      "recurringAnnualAfterDiscount": 1905.6,
+      "recurringMonthlyAfterDiscount": 158.8,
+      "year1Total": 1905.6
     },
     "waveGuard": {
       "tier": "platinum",
@@ -192,8 +192,8 @@
         "monthly": 37.33
       },
       "lawn_care": {
-        "annual": 618.75,
-        "monthly": 51.56
+        "annual": 588,
+        "monthly": 49
       },
       "tree_shrub": {
         "annual": 482,

@@ -325,7 +325,7 @@ const LAWN_PRICING_V2 = {
   // lawn_pricing_v2 row (db-bridge resets it false when absent).
   useLawnCostFloor: false,
   // Least a residential recurring lawn customer pays per application AFTER
-  // the WaveGuard tier % and a typed percent discount (owner 2026-11-06).
+  // the WaveGuard tier % and a typed percent or dollar discount (owner 2026-11-06).
   // Every cadence's list price is raised to minimum / (1 - discount) so the
   // full discount still shows. 0 disables. DB-editable on the
   // lawn_pricing_v2 row; db-bridge rebases it to 55 on every sync.
