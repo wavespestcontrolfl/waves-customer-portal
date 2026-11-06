@@ -362,6 +362,30 @@
   transform: translateY(-1px);
 }
 
+/* ── Main approve CTA ─────────────────────────────────────────────────── */
+/* The plan's one primary action (GetServiceTodayCta) outranks every other
+   gold control on the page: card-wide, 56px tall, and a more solid gold.
+   The base accent rule in glass-theme.css stays as it is for all other
+   accent buttons. */
+[data-glass-theme] .gc-main-cta[data-glass-accent] {
+  width: 100%;
+  max-width: 420px;
+  min-height: 56px !important;
+  font-size: 18px !important;
+  background: linear-gradient(135deg, rgba(255, 222, 110, 0.95), rgba(244, 176, 20, 0.88)),
+    rgba(240, 165, 0, 0.6) !important;
+  box-shadow: 0 14px 32px rgba(180, 110, 0, 0.3), 0 0 22px rgba(240, 165, 0, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45), inset 0 -2px 8px rgba(180, 110, 0, 0.2) !important;
+}
+@media (max-width: 640px) {
+  /* Card-wide on phones; 16px keeps the label on one line at 390px. */
+  [data-glass-theme] .gc-main-cta[data-glass-accent] {
+    max-width: none;
+    padding: 0 16px !important;
+    font-size: 16px !important;
+  }
+}
+
 /* ── App section: paired hero phones + chips ─────────────────────────── */
 [data-glass-theme] .gc-app-visual {
   display: flex;

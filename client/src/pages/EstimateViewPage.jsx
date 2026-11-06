@@ -235,6 +235,7 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '16px 0 24px' }}>
       <button
         type="button"
+        className="gc-main-cta"
         onClick={slotMeta ? scrollToPaymentSection : onPickTime}
         style={{
           minHeight: 44,
