@@ -981,7 +981,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       ) : null}
 
       {metrics.length ? (
-        <div style={{
+        <div className="gc-ai-metrics" style={{
           display: 'grid',
           // 3 metrics = one row of 3 (owner 2026-07-10 — auto-fit orphaned
           // the third tile onto its own row); any other count keeps the
