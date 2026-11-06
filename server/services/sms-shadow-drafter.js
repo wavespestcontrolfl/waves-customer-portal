@@ -5909,7 +5909,10 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
       // and thinking spends from this same maxTokens ahead of the ~270-token
       // real draft — 10 of 71 live calls were hitting 600 with the overflow
       // being thinking, not draft text.
-      { laneId, system, text: userContent, jsonMode: false, maxTokens: 2000, anthropicClient: client },
+      // cacheTtl '1h' (2026-11-06 prompt-cache check): the ~10k-token system
+      // prompt is fixed and shared, and 46 of 69 weekly cache rewrites came
+      // after a 5 to 60 minute gap, which a 5-minute cache cannot cover.
+      { laneId, system, text: userContent, jsonMode: false, maxTokens: 2000, anthropicClient: client, cacheTtl: '1h' },
       { validate: (result) => (parseShadowResponse(result.text || '') ? null : 'unparseable') },
     );
     if (routed.ok) return {

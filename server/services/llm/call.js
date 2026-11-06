@@ -699,7 +699,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
 // A payload `temperature` is read by the Gemini leg only. Current Anthropic
 // models (Opus 4.7+, Sonnet 5, Fable) reject sampling controls with a 400, so
 // this leg never forwards it.
-function anthropicRequest({ model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens, effort }) {
+function anthropicRequest({ model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens, effort, cacheTtl }) {
   const content = [...withImageLabels(images, toAnthropicImage, (label) => ({ type: 'text', text: label })),
     ...documents.map((doc) => ({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: doc.data } }))];
   if (text) content.push({ type: 'text', text });
@@ -709,8 +709,11 @@ function anthropicRequest({ model, system, text, images, documents, tools, jsonM
   // Ephemeral cache breakpoint on the system prompt (tools render before
   // system, so this caches both). Repeat callers with the same prompt reuse
   // it at ~0.1x input price; prompts under the model's cacheable minimum
-  // are silently not cached — harmless.
-  if (system) req.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+  // are silently not cached — harmless. `cacheTtl: '1h'` keeps the entry an
+  // hour instead of 5 minutes (a 2x write instead of 1.25x): for lanes whose
+  // calls often come 5 to 60 minutes apart.
+  const cacheControl = cacheTtl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' };
+  if (system) req.system = [{ type: 'text', text: system, cache_control: cacheControl }];
   if (tools) req.tools = tools;
   const outputConfig = {};
   if (jsonMode && jsonSchema) outputConfig.format = { type: 'json_schema', schema: anthropicSchema(jsonSchema) };
@@ -775,7 +778,7 @@ function anthropicVerdict(resp, maxTokens) {
   return 'anthropic_incomplete';
 }
 
-async function callAnthropic({ model, system, text, images = [], documents = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, timeoutMs, signal, anthropicClient, laneId, promptVersion, policyLabel, effort } = {}) {
+async function callAnthropic({ model, system, text, images = [], documents = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, timeoutMs, signal, anthropicClient, laneId, promptVersion, policyLabel, effort, cacheTtl } = {}) {
   if (!anthropicClient && (!Anthropic || !process.env.ANTHROPIC_API_KEY)) return { ok: false, reason: 'no_key' };
   const base = { provider: 'anthropic', requestedModel: model, laneId, promptVersion, policyLabel };
   // Ledger latency. With no budget the SDK keeps its default retries, so one
@@ -790,7 +793,7 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
     // scored every event. Same 10-minute value the SDK would otherwise use.
     const client = anthropicClient || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: DEFAULT_TIMEOUT_MS });
     const req = anthropicRequest({
-      model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens, effort,
+      model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens, effort, cacheTtl,
     });
     // maxRetries:0 whenever a budget is supplied — the SDK's per-request
     // timeout applies to EACH attempt, so its default retry policy (2 retries)
@@ -827,7 +830,8 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
  * actually serving the request accepts that exact level; ignored on
  * OpenAI/Gemini routes.
  * payload: { system, text, images, documents, jsonMode, jsonSchema, maxTokens, tools, temperature,
- *            thinkingLevel (Gemini), reasoningEffort (OpenAI), anthropicClient, laneId,
+ *            thinkingLevel (Gemini), reasoningEffort (OpenAI), cacheTtl (Anthropic: '1h'
+ *            caches the system prompt for an hour, else 5 minutes), anthropicClient, laneId,
  *            promptVersion } (`anthropicClient` supports
  *            existing injected clients and deterministic tests without bypassing
  *            the router; laneId / promptVersion only label the call-ledger row).
