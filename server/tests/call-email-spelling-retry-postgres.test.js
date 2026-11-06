@@ -725,4 +725,51 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     expect((await recoveryRows(original.id))[0]).toMatchObject({ status: 'delivered', record_updated: false });
     expect((await trackedClaim(customerId))[0].status).toBe('resending');
   });
+
+  // ── A provider failure of the BOUND retry send (not a bounce) settles the claim failed / send_failed ───────────────────
+  test('automation: the bound retry send fails at the provider: the claim fails through the send id, the enrollment is left as any failed send, nobody is told', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    jest.clearAllMocks();
+    sendgrid.sendOne.mockRejectedValueOnce(new Error('provider down'));
+
+    const res = await runner.sendStep(ctx.enrollment.id);
+
+    expect(res).toMatchObject({ sent: false, error: 'provider down' });
+    const failedSend = await db('automation_step_sends').where({ enrollment_id: ctx.enrollment.id, email: OTHER }).first();
+    expect(failedSend).toMatchObject({ status: 'failed' });
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'failed', reason: 'send_failed', retry_send_id: failedSend.id });
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'failed' });
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(BOUNCED);
+    expect(bounceRecovery.alertBouncedContactAddress).not.toHaveBeenCalled();
+    expect(bounceRescue.rescueBouncedAddress).not.toHaveBeenCalled();
+    expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    // A late delivery event for that send settles nothing: the claim is no longer resending.
+    await db('automation_step_sends').where({ id: failedSend.id }).update({ sendgrid_message_id: 'failed-send-1' });
+    await delivered('failed-send-1');
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(BOUNCED);
+  });
+
+  test('automation: a provider failure of a send that is NOT the bound retry send leaves the claim alone', async () => {
+    ctx = await setup({ sent: 1 });
+    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+    await webhook.handleEvent(bounce(ctx.send));
+    sendgrid.sendOne.mockRejectedValueOnce(new Error('provider down'));
+    await runner.sendStep(sibling.enrollment.id); // the sibling's own first step, never bound
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'resending', retry_send_id: null });
+  });
+
+  test('tracked: the staged recovery message fails at the provider after the bind: the claim fails through the message id', async () => {
+    const customerId = await seedCustomer(BOUNCED);
+    await seedCall(customerId);
+    const original = await seedBouncedMessage(customerId);
+    sendgrid.sendOne.mockRejectedValueOnce(new Error('provider down'));
+    const res = await bounceRecovery.attemptRecovery(original, hardBounce);
+    expect(res).toMatchObject({ error: expect.any(String) });
+    const [rec] = await recoveryRows(original.id);
+    expect(rec.status).toBe('send_failed');
+    expect((await trackedClaim(customerId))[0]).toMatchObject({ status: 'failed', reason: 'send_failed', retry_send_id: rec.recovery_message_id });
+    expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+  });
 });

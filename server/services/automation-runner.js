@@ -925,6 +925,17 @@ async function dispatchUnderContactBoundary({ dispatch, enrollment, step, recipi
   }
 }
 
+// A provider failure of the BOUND call-spelling retry send (not a bounce: the request itself failed) settles its claim
+// `failed` / `send_failed` through the send id, so the once-only claim never sits `resending` on a send that cannot deliver. The
+// enrollment is left as the runner leaves any failed send (below). Provenance enrollments only; settleClaim never throws.
+async function failBoundRetrySend(enrollment, sendRow) {
+  if (!enrollmentMetadata(enrollment).spelling_retry_email) return;
+  await require('./call-email-spelling-retry').settleClaim(
+    { customerId: enrollment.customer_id, channel: 'automation', sendId: sendRow.id },
+    { status: 'failed', reason: 'send_failed' },
+  );
+}
+
 // The queued automation_step_sends row for one step. The rewound retry step is bound to its claim by this very row, in the
 // transaction that creates it (call-email-spelling-retry.js bindAutomationRetrySend): only provenance enrollments take that
 // path, every other send inserts as before.
@@ -1048,6 +1059,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
       updated_at: new Date(),
     });
     if (testRecipient) throw err;
+    await failBoundRetrySend(enrollment, sendRow);
 
     // Mark enrollment failed so it stops retrying. Operator can re-enroll
     // later. Fenced on the step this attempt was for.

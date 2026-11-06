@@ -75,15 +75,15 @@ async function claimRetry({ customerId, sourceCallId = null, bouncedEmail, retry
 /**
  * Move a claim out of `resending` (only from there, so it is idempotent and a settled row never flips). The claim is found by
  * SEND, never by address alone: `sendId` is the retry send bound to it (delivery, bounce, gate-off at the boundary), or
- * `originId` is the original message whose own flow took the claim and has not bound a send yet (a staging failure or refusal
- * before anything went out). One of the two is required. Failure to settle is logged, never thrown: the send already happened.
+ * `originId` (with `bouncedEmail`) is the original message whose own flow took the claim and has not bound a send yet (a staging
+ * failure or refusal before anything went out). One of the two is required; a bound send id needs nothing else to find its claim. Failure to settle is logged, never thrown: the send already happened.
  */
 async function settleClaim({ customerId, bouncedEmail, channel = EMAIL_CHANNEL, sendId = null, originId = null }, { status, reason = null }, client = db) {
   if (!sendId && !originId) return;
   try {
     await client(TABLE)
-      .where({ customer_id: customerId, bounced_email: norm(bouncedEmail), channel, status: 'resending' })
-      .modify((q) => (sendId ? q.where({ retry_send_id: sendId }) : q.where({ origin_send_id: originId }).whereNull('retry_send_id')))
+      .where({ customer_id: customerId, channel, status: 'resending' })
+      .modify((q) => (sendId ? q.where({ retry_send_id: sendId }) : q.where({ bounced_email: norm(bouncedEmail), origin_send_id: originId }).whereNull('retry_send_id')))
       .update({ status, reason, committed_at: status === 'committed' ? new Date() : null, updated_at: new Date() });
   } catch (err) {
     logger.warn(`[call-email-spelling-retry] could not settle the claim as ${status}: ${err.code || err.name}`);
