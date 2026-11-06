@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // MUTATES (dry-run default) — revoke ONE automatic vendor order
-// (server/services/procurement/order-dispatch.js): the vendor_orders ledger
+// (server/services/procurement/order-dispatch.js). The rules and the write
+// live in server/services/procurement/order-revoke.js, shared with the
+// Restock tab's "Record vendor cancellation" (owner-only): the vendor_orders ledger
 // row (status `placed` ONLY — a `placing` row is still the dispatcher's, and
 // reopening its request would race the in-flight vendor call into a double
 // purchase) goes to needs_review and its restock request is CANCELLED
@@ -30,8 +32,8 @@ if (!process.env.DATABASE_PUBLIC_URL) {
 process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
 const path = require('path');
 const db = require(path.join(__dirname, '..', '..', 'server', 'models', 'db'));
-const { auditVendorOrder } = require(path.join(__dirname, '..', '..', 'server', 'services', 'audit-log'));
 const { RECEIVED_SETTLES_SQL } = require(path.join(__dirname, '..', '..', 'server', 'services', 'procurement', 'order-dispatch'));
+const { revokeBlocker, revokeOrder } = require(path.join(__dirname, '..', '..', 'server', 'services', 'procurement', 'order-revoke'));
 
 function arg(name) {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -45,8 +47,6 @@ const CANCELLED_WITH_VENDOR = process.argv.includes('--cancelled-with-vendor');
 const LIST = process.argv.includes('--list');
 const orderId = arg('order');
 const dollars = (c) => `$${(Number(c || 0) / 100).toFixed(2)}`;
-
-const parseEvidence = (raw) => (typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return {}; } })() : raw) || {};
 
 // --list: every automatic order whose vendor call was dispatched or is in
 // flight and whose request is not yet received — placing (shown, not
@@ -76,87 +76,8 @@ async function listDispatched() {
   }
 }
 
-// Whether this ledger row is a dispatched order an operator may revoke now.
-// Returns null when it is, else the message to print (exit 0) or an Error
-// (exit 1) for a row the dispatcher still owns.
-function revokeBlocker(row) {
-  const evidence = parseEvidence(row.evidence);
-  if (evidence.revokedAt) return `Already revoked at ${evidence.revokedAt} — nothing to do.`;
-  // A needs_review row is revocable only when its vendor call was DISPATCHED
-  // (placed_at set). Recording the revoke is what lets the office cancel the
-  // request; a pre-submit park (nothing sent) needs no revoke and its request
-  // cancels freely.
-  if (row.status === 'needs_review' && !row.placed_at) return 'needs_review with nothing dispatched — no vendor order to revoke; cancel the request on the Restock tab.';
-  if (row.status === 'failed') return 'Row is failed (nothing was ordered) — revoke does not apply.';
-  // The vendor call may be in flight: reopening the request now would let
-  // staff order while the dispatcher still lands the original (double
-  // purchase). The dispatcher itself resolves a placing row — revoke only
-  // after it has.
-  if (row.status === 'placing') return new Error('Row is still placing — the dispatcher owns it until it resolves; re-run once it is placed or needs_review.');
-  return null;
-}
-
-// The locked ledger row must still be a dispatched order, not already
-// revoked, and unchanged since the operator READ it — a late placement (order
-// number, total, latePlacementAt, or any write at all) makes the decision
-// stale: re-read and decide again (Codex r4 P1). Throws the reason.
-function assertRevocableLocked(locked, row) {
-  if (!locked || !(locked.status === 'placed' || (locked.status === 'needs_review' && locked.placed_at))) throw new Error(`ledger row is ${locked?.status || 'missing'} — not a dispatched order; re-run`);
-  const lockedEvidence = parseEvidence(locked.evidence);
-  if (lockedEvidence.revokedAt) throw new Error(`ledger row was revoked at ${lockedEvidence.revokedAt} by a concurrent run — nothing to do`);
-  const same = (a, b) => String(a ?? '') === String(b ?? '');
-  const changed = !same(locked.external_order_number, row.external_order_number) || !same(locked.amount_cents, row.amount_cents)
-    || !same(lockedEvidence.latePlacementAt, parseEvidence(row.evidence).latePlacementAt) || !same(new Date(locked.updated_at).toISOString(), new Date(row.updated_at).toISOString());
-  if (changed) throw new Error(`ledger row changed since you read it (now ${locked.status}, #${locked.external_order_number || '—'} ${dollars(locked.amount_cents)}${lockedEvidence.latePlacementAt ? `, order confirmed late at ${lockedEvidence.latePlacementAt}` : ''}) — re-run to decide on the current facts`);
-}
-
-// The locked request must still be in flight — open or ordered — BEFORE the
-// ledger is marked: a request received in between means the stock landed,
-// so there is nothing to revoke and a revokedAt marker would falsely audit
-// a vendor cancellation (Codex r18 P2). Throws the reason.
-// Exception: a received request whose automatic order landed AFTER that
-// receipt (ledger evidence.landedAfterReceive) — the order is still out, so
-// it is revocable; the request stays received (Codex r27 P1).
-function assertRequestInFlight(req, lockedEvidence) {
-  if (req?.status === 'received' && lockedEvidence.landedAfterReceive) return;
-  if (!req || !new Set(['open', 'ordered']).has(req.status)) throw new Error(`restock request is ${req?.status || 'missing'} — ${req?.status === 'received' ? 'the stock was received; nothing to revoke' : 'not an order in flight'}`);
-}
-
-// The revoke itself: ledger → needs_review with the STRUCTURED
-// evidence.revokedAt marker the cancel guard and the dispatcher's prior-order
-// belt read (order-dispatch.js), request open/ordered → cancelled, critical
-// audit row. Eligibility AND idempotency are re-checked on the LOCKED rows
-// (two --execute runs that both passed the unlocked check must not
-// double-revoke, Codex r2 P2); LOCK ORDER ledger → request, the dispatcher's.
-async function revoke(row) {
-  await db.transaction(async (trx) => {
-    const locked = await trx('vendor_orders').where({ id: row.id }).forUpdate().first('status', 'placed_at', 'evidence', 'external_order_number', 'amount_cents', 'updated_at');
-    assertRevocableLocked(locked, row);
-    const req = await trx('product_restock_requests').where({ id: row.restock_request_id }).forUpdate().first('status', 'metadata');
-    assertRequestInFlight(req, parseEvidence(locked.evidence));
-    const revokedAt = new Date().toISOString();
-    // The row's reconciliation bell ("cancel with the vendor or record the
-    // revoke") is now obsolete: retire the notification and strip the
-    // persisted bell so reringPendingBells never re-sends it (Codex r22 P2).
-    await trx('vendor_orders').where({ id: row.id }).update({
-      status: 'needs_review',
-      error: `revoked: operator revoke ${revokedAt} (was ${locked.status})`.slice(0, 400),
-      evidence: trx.raw("(COALESCE(evidence, '{}'::jsonb) - 'bell' - 'bellAt' - 'landedAfterReceive') || ?::jsonb", [JSON.stringify({ revokedAt })]),
-      updated_at: new Date(),
-    });
-    await trx('notifications').whereRaw("(metadata->>'dedupeKey' = ? OR metadata->>'dedupeKey' LIKE ?)", [`auto-order:${row.id}`, `auto-order:${row.id}:%`]).whereNull('read_at').update({ read_at: new Date() });
-    // Cancelled, not reopened (pre-push P1): the next sweep raises a fresh
-    // request the dispatcher can claim; the office can also order by hand.
-    // A received request stays received — its stock was counted.
-    if (req.status !== 'received') await trx('product_restock_requests').where({ id: row.restock_request_id }).update({
-      status: 'cancelled',
-      closed_at: new Date(),
-      metadata: JSON.stringify({ ...parseEvidence(req.metadata), autoOrderCancelled: 'revoked_vendor_order', autoOrderCancelledAt: revokedAt, revokedVendorOrderId: row.id }),
-      updated_at: new Date(),
-    });
-    await auditVendorOrder({ vendor_order_id: row.id, restock_request_id: row.restock_request_id, vendor_id: row.vendor_id, adapter: row.adapter, outcome: 'revoked', amount_cents: row.amount_cents, external_order_number: row.external_order_number, reason: `operator revoke (was ${locked.status})`, actor_type: 'system', trx }); // no technicians.id to carry: the CLI is a system actor (Codex r22 P2)
-  });
-}
+// The eligibility checks, the locked re-checks and the revoke transaction are
+// server/services/procurement/order-revoke.js (revokeBlocker, revokeOrder).
 
 (async () => {
   try {
@@ -172,14 +93,14 @@ async function revoke(row) {
     if (!row) { console.error(`vendor_orders ${orderId} not found`); process.exit(1); }
     console.log(`Ledger ${row.id}: ${row.status}, ${row.vendor || '?'} #${row.external_order_number || '—'} ${dollars(row.amount_cents)} for ${row.product || '?'}; request ${row.restock_request_id} is ${row.request_status}`);
     const blocker = revokeBlocker(row);
-    if (blocker instanceof Error) { console.error(blocker.message); process.exit(1); }
-    if (blocker) { console.log(blocker); process.exit(0); }
+    if (blocker && blocker.inFlight) { console.error(blocker.message); process.exit(1); }
+    if (blocker) { console.log(blocker.message); process.exit(0); }
 
     console.log(`Would set ledger → needs_review, request ${row.request_status} → cancelled (revoked_vendor_order), stamp evidence.revokedAt, write audit row procurement.vendor_order.revoked.`);
     console.log(`FIRST cancel order #${row.external_order_number || '?'} with ${row.vendor || 'the vendor'} by hand. Recording the revoke clears the way for a replacement order (the next sweep raises a fresh request), so it must follow the vendor cancellation, never precede it.`);
     if (!EXECUTE) { console.log('Dry run. Once the vendor has cancelled it, re-run with --execute --cancelled-with-vendor to apply.'); process.exit(0); }
     if (!CANCELLED_WITH_VENDOR) { console.error('Refusing: --execute needs --cancelled-with-vendor, your confirmation that the vendor order is already cancelled.'); process.exit(2); }
-    await revoke(row);
+    await revokeOrder(row, { actorType: 'system' }); // no technicians.id to carry: the CLI is a system actor (Codex r22 P2)
     console.log('Revoked: ledger needs_review, request cancelled — the next low-stock sweep raises a fresh request (or order by hand from the Restock tab).');
     process.exit(0);
   } catch (err) {
