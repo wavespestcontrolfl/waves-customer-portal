@@ -174,6 +174,12 @@ describe('exemption predicate', () => {
     expect(budget.exemptReason({ category: 'alert', metadata: { ownerOnly: 'false' } })).toBeNull();
   });
 
+  test('an ops digest is exempt: a held digest would let supersedeOlderDigests close the newest finding as a quiet repeat', () => {
+    expect(budget.exemptReason({ category: 'ops_digest', metadata: { dedupeKey: 'ops-digest:unworked-comms', audience: 'owner' } })).toBe('ops_digest');
+    expect(budget.exemptReason({ category: 'ops_digest', metadata: {} })).toBe('ops_digest');
+    expect(budget.exemptReason({ category: 'alert', metadata: { dedupeKey: 'ops-digest:unworked-comms' } })).toBeNull();
+  });
+
   test('the count row\'s read of held rows leaves out owner-only rows (second lock)', async () => {
     const sqls = [];
     const conn = makeConn();

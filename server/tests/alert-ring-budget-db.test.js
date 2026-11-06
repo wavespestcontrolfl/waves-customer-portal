@@ -29,12 +29,14 @@ maybeDescribe('daily ring budget (live Postgres)', () => {
     return row;
   };
   const countRow = (day) => db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [`ring-budget:${day}`]).first();
-  // Rows this suite owns, and only those: its fixture marker, its title prefix, the ids it tracked, and the day's count row (the
-  // guard in beforeAll proves none existed before the suite started, so a count row for today is the suite's own).
+  // Rows this suite owns, and only those: its fixture marker, its title prefix, the ids it tracked, and the day's count row once
+  // the guard in beforeAll has proved none existed before the suite started (`owned`). If the guard refuses the database,
+  // afterAll still runs, and the foreign count row it found must survive it.
   const OWN_PREFIX = 'ring-budget-test-';
+  let owned = false;
   const ownRows = () => db('notifications').where({ recipient_type: 'admin' }).where((q) => {
     q.whereRaw("metadata->>'fixture' = ?", [RUN]).orWhereRaw('starts_with(title, ?)', [RUN]).orWhereIn('id', made);
-    q.orWhereRaw("metadata->>'dedupeKey' = ?", [`ring-budget:${etDateString()}`]);
+    if (owned) q.orWhereRaw("metadata->>'dedupeKey' = ?", [`ring-budget:${etDateString()}`]);
   });
   const clearOwn = () => ownRows().del();
   const waitFor = async (fn, ms = 3000) => {
@@ -72,6 +74,7 @@ maybeDescribe('daily ring budget (live Postgres)', () => {
     if (Number(foreign.n) > 0) {
       throw new Error(`This database already holds ${foreign.n} ring-budget rows for today that this suite does not own; use a fresh private QA database`);
     }
+    owned = true;
   });
   beforeEach(async () => {
     process.env.GATE_ALERT_RING_BUDGET = 'true';

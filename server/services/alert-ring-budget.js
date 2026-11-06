@@ -17,6 +17,9 @@
 //   - an owner-only row (metadata.ownerOnly, a Claude plan or copy): the count row is shared by every admin login, and
 //     holding such a row would copy its title into it. An owner-only row is never held, so its words never reach the count
 //     row or the Activity "Held alerts" list; it rings as it does without the budget;
+//   - an ops digest (category ops_digest: the Mac checks' ACT/FIX findings). Owner ruling 2026-09-11: ACT/FIX findings stay
+//     in the bell. Each digest also supersedes its older copies by key (ops-digest.js supersedeOlderDigests), which reads a
+//     quiet row as an unchanged repeat, so a held digest would close the newest finding and keep the stale one;
 //   - the count row itself.
 // A `bell: true` site tag is NOT an exemption: those rows are budgeted unless they are one of the above (a tag only says
 // "this belongs in the bell", not "this is a customer").
@@ -112,6 +115,7 @@ function exemptReason({ category, metadata, dedupeKey } = {}) {
   const meta = metaOf(metadata);
   if (meta[MARK_KEY] === COUNT_MARK) return 'count_row';
   if (isOwnerOnly(meta)) return 'owner_only';
+  if (category === 'ops_digest') return 'ops_digest';
   const triggerKey = meta.triggerKey || null;
   const trigger = registryTrigger(triggerKey);
   const rule = trigger?.rule;
