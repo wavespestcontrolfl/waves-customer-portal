@@ -1411,6 +1411,8 @@ export function SmsTab({
   const [smsLoadingMore, setSmsLoadingMore] = useState(false);
   const smsSearchRef = useRef("");
   const smsLoadSeqRef = useRef(0);
+  // Latest "To" box action: a search reply applies only if no keystroke or pick came after it.
+  const toSearchSeqRef = useRef(0);
   const smsRequestRef = useRef(null);
   const activeThreadRef = useRef(activeThread);
   activeThreadRef.current = activeThread;
@@ -1437,6 +1439,7 @@ export function SmsTab({
 
   const selectSmsRecipient = (contactPhone, ourNumber, customerId, replyTo) => {
     if (sending || uploading || hearing) return;
+    toSearchSeqRef.current += 1;
     const selectedDraft = setDraftForRecipient(contactPhone ? smsThreadKey(contactPhone) : "", (draft) => {
       const hasDraft = draft.msgBody.trim() || draft.attachments.length || draft.loadedMessageDraft;
       if (hasDraft && (draft.selectedCustomerId || null) !== (customerId || null)) {
@@ -3575,6 +3578,7 @@ export function SmsTab({
           value={toSearch || toNumber}
           onChange={async (e) => {
             const val = e.target.value;
+            const searchSeq = ++toSearchSeqRef.current;
             if (/^[\d\s()\-+]+$/.test(val)) {
               setToNumber(val);
               setToSearch("");
@@ -3592,10 +3596,8 @@ export function SmsTab({
                       },
                     },
                   );
-                  if (r.ok) {
-                    const d = await r.json();
-                    setToResults(d.customers || []);
-                  }
+                  const d = r.ok ? await r.json() : null;
+                  if (d && searchSeq === toSearchSeqRef.current) setToResults(d.customers || []);
                 } catch {
                   /* ignore */
                 }
