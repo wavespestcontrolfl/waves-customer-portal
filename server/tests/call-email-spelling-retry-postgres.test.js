@@ -251,10 +251,10 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
   test('delivered: a hand edit of the email in between wins, nothing is overwritten, the row is skipped', async () => {
     ctx = await setup({ sent: 1 });
     await webhook.handleEvent(bounce(ctx.send));
+    await runner.sendStep(ctx.enrollment.id);
     await db('customers').where({ id: ctx.customerId }).update({ email: 'jonny.doe@example.com' });
-    const [retrySend] = await db('automation_step_sends').insert({
-      enrollment_id: ctx.enrollment.id, step_id: ctx.last.id, step_order: 1, email: OTHER, status: 'sent', sendgrid_message_id: 'retry-delivered-2',
-    }).returning('*');
+    const retrySend = await db('automation_step_sends').where({ enrollment_id: ctx.enrollment.id, email: OTHER }).first();
+    await db('automation_step_sends').where({ id: retrySend.id }).update({ sendgrid_message_id: 'retry-delivered-2' });
     await webhook.handleEvent({ event: 'delivered', email: OTHER, sg_event_id: `ev-${randomUUID()}`, sg_message_id: 'retry-delivered-2.filter0' });
     expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe('jonny.doe@example.com');
     expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'email_changed', retry_send_id: retrySend.id });
@@ -511,7 +511,7 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled' });
     expect(await cancelReason(ctx.enrollment.id)).toBe('hard_bounce');
-    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'gate_off' });
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'gate_off', retry_send_id: null }); // gate off: never bound
     expect((await db('automation_step_sends').where({ enrollment_id: ctx.enrollment.id, email: OTHER }))[0]).toMatchObject({ status: 'blocked' });
   });
 
@@ -604,5 +604,125 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     await runner.sendStep(ctx.enrollment.id);
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
     expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ to: OTHER, subject: 'Step 1' }));
+  });
+
+  // ── Settlement is bound to the actual retry SEND (P1-D, pre-push audit) ───────────────────────────────────────────────
+  const delivered = (messageId) => webhook.handleEvent({ event: 'delivered', email: OTHER, sg_event_id: `ev-${randomUUID()}`, sg_message_id: `${messageId}.filter0` });
+  async function retrySendOf(enrollmentId, messageId) {
+    const send = await db('automation_step_sends').where({ enrollment_id: enrollmentId, email: OTHER }).orderBy('created_at', 'desc').first();
+    await db('automation_step_sends').where({ id: send.id }).update({ sendgrid_message_id: messageId });
+    return send;
+  }
+  const strayAutomationSend = async (enrollmentId, stepId, messageId, email = OTHER) => (await db('automation_step_sends').insert({
+    enrollment_id: enrollmentId, step_id: stepId, step_order: 1, email, status: 'sent', sendgrid_message_id: messageId,
+  }).returning('*'))[0];
+
+  test('the retry send is recorded on the claim by the same transaction that creates its send row', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    expect((await ledger(ctx.customerId))[0].retry_send_id).toBeNull(); // re-queued, not sent yet
+    await runner.sendStep(ctx.enrollment.id);
+    const sent = await db('automation_step_sends').where({ enrollment_id: ctx.enrollment.id, email: OTHER }).first();
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'resending', retry_send_id: sent.id });
+  });
+
+  test('an older delivery to the same address does not commit; only the bound retry send does', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await runner.sendStep(ctx.enrollment.id);
+    const bound = await retrySendOf(ctx.enrollment.id, 'bound-retry-1');
+    await strayAutomationSend(ctx.enrollment.id, ctx.last.id, 'older-send-1'); // an older, unrelated send to the same address
+
+    await delivered('older-send-1');
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(BOUNCED);
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'resending', retry_send_id: bound.id });
+
+    await delivered('bound-retry-1');
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(OTHER);
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'committed', retry_send_id: bound.id });
+  });
+
+  test('a bounce of a send that is not the bound retry send does not fail the claim', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await runner.sendStep(ctx.enrollment.id);
+    const bound = await retrySendOf(ctx.enrollment.id, 'bound-retry-2');
+    const stray = await strayAutomationSend(ctx.enrollment.id, ctx.last.id, 'older-send-2');
+    await webhook.handleEvent(bounce(stray, OTHER));
+    await flush();
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'resending', retry_send_id: bound.id });
+  });
+
+  test('another customer\'s pending claim on the same alternate address is untouched by this customer\'s delivery, and cannot hijack it', async () => {
+    ctx = await setup({ sent: 1 });
+    const stranger = await setup({ sent: 1, customerEmail: 'stranger.doe@example.com', email: 'stranger.doe@example.com', call: { email: 'stranger.doe@example.com', other: OTHER } });
+    const strangerSend = await strayAutomationSend(stranger.enrollment.id, stranger.last.id, 'stranger-send-1');
+    await db('call_email_spelling_retries').insert({
+      customer_id: stranger.customerId, bounced_email: 'stranger.doe@example.com', retry_email: OTHER, channel: 'automation', status: 'resending', retry_send_id: strangerSend.id,
+    });
+    await webhook.handleEvent(bounce(ctx.send));
+    await runner.sendStep(ctx.enrollment.id);
+    await retrySendOf(ctx.enrollment.id, 'bound-retry-3');
+
+    await delivered('bound-retry-3');
+
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(OTHER);
+    expect((await ledger(ctx.customerId))[0].status).toBe('committed');
+    expect((await ledger(stranger.customerId))[0]).toMatchObject({ status: 'resending', retry_send_id: strangerSend.id });
+    expect((await db('customers').where({ id: stranger.customerId }).first()).email).toBe('stranger.doe@example.com');
+  });
+
+  test('a sibling repointed without a re-send never binds or settles the claim', async () => {
+    ctx = await setup({ sent: 1 });
+    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await runner.sendStep(sibling.enrollment.id); // the sibling sends ITS first step to the retry address
+    expect((await ledger(ctx.customerId))[0].retry_send_id).toBeNull();
+    const siblingSend = await retrySendOf(sibling.enrollment.id, 'sibling-send-1');
+    await delivered('sibling-send-1');
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(BOUNCED);
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'resending', retry_send_id: null });
+    await webhook.handleEvent(bounce(siblingSend, OTHER));
+    await flush();
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'resending' });
+  });
+
+  // ── Tracked path: the same chokepoints (P1-C) ─────────────────────────────────────────────────────────────────────────
+  test('tracked path: gate off right before the provider handoff sends nothing, blocks the staged message, skips the claim, tells nobody', async () => {
+    const customerId = await seedCustomer(BOUNCED);
+    await seedCall(customerId);
+    const original = await seedBouncedMessage(customerId);
+    sendgrid.sendOne.mockImplementationOnce(async (args) => {
+      delete process.env.GATE_CALL_BOUNCE_OTHER_SPELLING; // flipped while the request was being prepared
+      await args.providerBoundaryCheck({ database: undefined });
+      return { messageId: 'must-not-send' };
+    });
+    jest.clearAllMocks();
+    const res = await bounceRecovery.attemptRecovery(original, hardBounce);
+    expect(res).toEqual({ skipped: 'gate_off' });
+    const [rec] = await recoveryRows(original.id);
+    expect(rec.status).toBe('other_spelling_not_sent');
+    const staged = await db('email_messages').where({ id: rec.recovery_message_id }).first();
+    expect(staged).toMatchObject({ status: 'blocked', error_message: 'gate_off' });
+    expect(staged.provider_message_id).toBeNull();
+    expect((await trackedClaim(customerId))[0]).toMatchObject({ status: 'skipped', reason: 'gate_off' });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+  });
+
+  test('tracked path: the claim is bound to the staged recovery message, and a delivery of a message it is not bound to commits nothing', async () => {
+    const customerId = await seedCustomer(BOUNCED);
+    await seedCall(customerId);
+    const original = await seedBouncedMessage(customerId);
+    await bounceRecovery.attemptRecovery(original, hardBounce);
+    const [rec] = await recoveryRows(original.id);
+    expect((await trackedClaim(customerId))[0]).toMatchObject({ status: 'resending', retry_send_id: rec.recovery_message_id });
+
+    await trackedClaim(customerId).update({ retry_send_id: randomUUID() }); // the claim belongs to some other send
+    const recoveryMessage = await db('email_messages').where({ id: rec.recovery_message_id }).first();
+    await bounceRecovery.commitRecoveryOnDelivery(recoveryMessage);
+    expect((await db('customers').where({ id: customerId }).first()).email).toBe(BOUNCED);
+    expect((await recoveryRows(original.id))[0]).toMatchObject({ status: 'delivered', record_updated: false });
+    expect((await trackedClaim(customerId))[0].status).toBe('resending');
   });
 });

@@ -925,6 +925,25 @@ async function dispatchUnderContactBoundary({ dispatch, enrollment, step, recipi
   }
 }
 
+// The queued automation_step_sends row for one step. The rewound retry step is bound to its claim by this very row, in the
+// transaction that creates it (call-email-spelling-retry.js bindAutomationRetrySend): only provenance enrollments take that
+// path, every other send inserts as before.
+async function insertStepSend({ enrollment, step, recipient, testRecipient }) {
+  const queued = (conn) => conn('automation_step_sends').insert({
+    enrollment_id: enrollment.id,
+    step_id: step.id,
+    step_order: step.step_order,
+    email: recipient,
+    status: 'queued',
+  }).returning('*').then((rows) => rows[0]);
+  if (testRecipient || !enrollmentMetadata(enrollment).spelling_retry_email) return queued(db);
+  return db.transaction(async (trx) => {
+    const row = await queued(trx);
+    await require('./call-email-spelling-retry').bindAutomationRetrySend({ enrollment, step, sendId: row.id, recipient }, trx);
+    return row;
+  });
+}
+
 async function sendStepLocked(enrollment, { testRecipient } = {}) {
   const enrollmentId = enrollment.id;
   const template = await db('automation_templates').where({ key: enrollment.template_key }).first();
@@ -984,13 +1003,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     }
   }
 
-  const sendRow = await db('automation_step_sends').insert({
-    enrollment_id: enrollment.id,
-    step_id: step.id,
-    step_order: step.step_order,
-    email: recipient,
-    status: 'queued',
-  }).returning('*').then((rows) => rows[0]);
+  const sendRow = await insertStepSend({ enrollment, step, recipient, testRecipient });
 
   const deliveryBlock = await automationDeliveryBlock({ enrollment, template, recipient,
     sendId: sendRow.id, testRecipient, billingSend });

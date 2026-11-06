@@ -19,6 +19,10 @@
  * The table is ALSO the once-only claim of the tracked email_messages path (channel `email_message`, claimRetry/settleClaim
  * below, used by email-bounce-recovery.js): one row per customer + bounced address, whichever path takes it first.
  *
+ * Every retry send is bound to its claim by SEND id (`retry_send_id`, bindAutomationRetrySend / bindTrackedRetrySend, written in
+ * the transaction that creates the send row) and every delivered / bounced event finds its claim only through claimForSend:
+ * channel + send id + the customer resolved first. Nothing is ever settled by address alone.
+ *
  * Same safety as the ledger path: a positive link (the enrollment's customer is the source call's customer and holds the
  * bounced address as primary email), not the same Gmail inbox, no active suppression on the other spelling, not owned by
  * another customer or lead, never tried before for this customer + address, fail closed (any error before the first
@@ -69,20 +73,68 @@ async function claimRetry({ customerId, sourceCallId = null, bouncedEmail, retry
 }
 
 /**
- * Move a claim out of `resending` (only from there, so it is idempotent and a settled row never flips). The tracked path
- * finds its claim by customer + bounced address; failure to settle is logged, never thrown: the send already happened.
+ * Move a claim out of `resending` (only from there, so it is idempotent and a settled row never flips). The claim is found by
+ * SEND, never by address alone: `sendId` is the retry send bound to it (delivery, bounce, gate-off at the boundary), or
+ * `originId` is the original message whose own flow took the claim and has not bound a send yet (a staging failure or refusal
+ * before anything went out). One of the two is required. Failure to settle is logged, never thrown: the send already happened.
  */
-async function settleClaim({ customerId, bouncedEmail, channel = EMAIL_CHANNEL }, { status, reason = null, retrySendId = null }, client = db) {
+async function settleClaim({ customerId, bouncedEmail, channel = EMAIL_CHANNEL, sendId = null, originId = null }, { status, reason = null }, client = db) {
+  if (!sendId && !originId) return;
   try {
     await client(TABLE)
       .where({ customer_id: customerId, bounced_email: norm(bouncedEmail), channel, status: 'resending' })
-      .update({
-        status, reason, ...(retrySendId ? { retry_send_id: retrySendId } : {}),
-        committed_at: status === 'committed' ? new Date() : null, updated_at: new Date(),
-      });
+      .modify((q) => (sendId ? q.where({ retry_send_id: sendId }) : q.where({ origin_send_id: originId }).whereNull('retry_send_id')))
+      .update({ status, reason, committed_at: status === 'committed' ? new Date() : null, updated_at: new Date() });
   } catch (err) {
     logger.warn(`[call-email-spelling-retry] could not settle the claim as ${status}: ${err.code || err.name}`);
   }
+}
+
+/**
+ * THE way a delivered or bounced event finds a claim: by channel + the retry SEND bound to it + the resolved customer. Never
+ * by address, so a delayed event for an older send, a sibling's send, or another customer's pending claim on the same
+ * alternate address settles nothing. Locks the claim row. Null = this send is not a bound, still-`resending` retry.
+ */
+async function claimForSend({ channel, sendId, customerId }, client = db) {
+  if (!sendId || !customerId) return null;
+  return (await client(TABLE).where({ channel, retry_send_id: sendId, customer_id: customerId, status: 'resending' }).forUpdate().first()) || null;
+}
+
+/**
+ * Bind the automation retry send to its claim, in the same transaction that creates the send row (sendStepLocked), only
+ * while the claim is still `resending` and unbound, the gate is on, and the send is the rewound step itself: the claim's
+ * origin send belongs to THIS enrollment and THIS step. A sibling repointed without a resend, a later step, or any other
+ * enrollment never binds. One UPDATE, so exactly one send can win the bind.
+ */
+async function bindAutomationRetrySend({ enrollment, step, sendId, recipient }, client = db) {
+  if (!gateLive()) return false;
+  const res = await client.raw(
+    `UPDATE ${TABLE} c SET retry_send_id = ?, updated_at = now()
+       FROM automation_step_sends o
+      WHERE c.customer_id = ? AND c.retry_email = ? AND c.channel = ? AND c.status = 'resending' AND c.retry_send_id IS NULL
+        AND o.id = c.origin_send_id AND o.enrollment_id = ? AND o.step_id = ?`,
+    [sendId, enrollment.customer_id, norm(recipient), CHANNEL, enrollment.id, step.id],
+  );
+  return res.rowCount === 1;
+}
+
+/**
+ * Bind the tracked recovery message to its claim, in the transaction that stages the message (insertRecoveryMessage): only
+ * for the claim this original message took, still `resending`, unbound (or already bound to this very message: a held
+ * recovery resumed), with the gate on. False = the message must not be staged or sent.
+ */
+async function bindTrackedRetrySend({ customerId, bouncedEmail, originId, sendId }, client = db) {
+  if (!gateLive()) return false;
+  const n = await client(TABLE)
+    .where({ customer_id: customerId, bounced_email: norm(bouncedEmail), channel: EMAIL_CHANNEL, origin_send_id: originId, status: 'resending' })
+    .whereRaw('(retry_send_id IS NULL OR retry_send_id = ?)', [sendId])
+    .update({ retry_send_id: sendId, updated_at: new Date() });
+  return Number(n) === 1;
+}
+
+/** GATE_CALL_BOUNCE_OTHER_SPELLING, read at call time: the one gate recheck every retry boundary goes through. */
+function gateLive() {
+  return callBounceOtherSpellingLive();
 }
 
 /** The settled other spelling for this send's customer + address, after every safety check, or null. */
@@ -208,16 +260,18 @@ async function retryStillPending({ customerId, retryEmail }, client = db) {
   return !!row;
 }
 
-/** A send to a retry address hard-bounced: the row fails. Returns { retryFailed, bouncedEmail } or null. */
-async function settleRetryBounce({ sendRow, address }, client) {
-  const row = await client(TABLE).where({ retry_email: address, channel: CHANNEL, status: 'resending' }).forUpdate().first();
+/** The retry send itself hard-bounced: its (bound) claim fails. Returns { retryFailed, bouncedEmail } or null. */
+async function settleRetryBounce({ sendRow, customerId }, client) {
+  const row = await claimForSend({ channel: CHANNEL, sendId: sendRow.id, customerId }, client);
   if (!row) return null;
-  const own = await client('automation_enrollments').where({ id: sendRow.enrollment_id, customer_id: row.customer_id }).first('id');
-  if (!own) return null;
-  await client(TABLE).where({ id: row.id }).update({
-    status: 'failed', reason: 'retry_address_bounced', retry_send_id: sendRow.id, updated_at: new Date(),
-  });
+  await client(TABLE).where({ id: row.id }).update({ status: 'failed', reason: 'retry_address_bounced', updated_at: new Date() });
   return { retryFailed: true, bouncedEmail: row.bounced_email };
+}
+
+/** The customer a send belongs to, resolved from its enrollment BEFORE any claim is looked up. */
+async function enrollmentCustomerId(sendRow, client) {
+  const enrollment = await client('automation_enrollments').where({ id: sendRow.enrollment_id }).first('customer_id');
+  return enrollment?.customer_id || null;
 }
 
 /**
@@ -233,7 +287,7 @@ async function onAutomationHardBounce({ ev, sendRow }, client = db) {
   try {
     // One savepoint: any error rolls the attempt back whole and the bounce is handled as before.
     return await client.transaction(async (sp) => (
-      await settleRetryBounce({ sendRow, address: bounced }, sp) || await startRetry({ sendRow, bounced }, sp)
+      await settleRetryBounce({ sendRow, customerId: await enrollmentCustomerId(sendRow, sp) }, sp) || await startRetry({ sendRow, bounced }, sp)
     ));
   } catch (err) {
     logger.warn(`[call-email-spelling-retry] failed closed: ${err.code || err.name}`);
@@ -251,13 +305,12 @@ async function onAutomationDelivered({ sendRow }, client = db) {
   if (!callBounceOtherSpellingLive()) return { committed: false }; // gate off = today's behavior (the kill switch stops the commit too)
   const address = norm(sendRow?.email);
   if (!address || !sendRow?.enrollment_id) return { committed: false };
-  const row = await client(TABLE).where({ retry_email: address, channel: CHANNEL, status: 'resending' }).forUpdate().first();
-  if (!row) return { committed: false };
-  const own = await client('automation_enrollments').where({ id: sendRow.enrollment_id, customer_id: row.customer_id }).first('id');
-  if (!own) return { committed: false };
+  // Customer first, then the claim bound to THIS send: a delivery of any other send to this address settles nothing.
+  const row = await claimForSend({ channel: CHANNEL, sendId: sendRow.id, customerId: await enrollmentCustomerId(sendRow, client) }, client);
+  if (!row || norm(row.retry_email) !== address) return { committed: false };
 
   const settle = (status, reason) => client(TABLE).where({ id: row.id })
-    .update({ status, reason, retry_send_id: sendRow.id, committed_at: status === 'committed' ? new Date() : null, updated_at: new Date() });
+    .update({ status, reason, committed_at: status === 'committed' ? new Date() : null, updated_at: new Date() });
   const before = await client('customers').where({ id: row.customer_id }).forUpdate().first();
   if (!before) { await settle('skipped', 'customer_gone'); return { committed: false }; }
   const { lockCustomerEmail } = require('../utils/customer-comms-lock');
@@ -295,5 +348,5 @@ async function onAutomationDelivered({ sendRow }, client = db) {
 }
 
 module.exports = {
-  onAutomationHardBounce, onAutomationDelivered, claimRetry, settleClaim, endGatedRetry, retryStillPending, lockPrepSend, CHANNEL, EMAIL_CHANNEL, TABLE, RETRY_PROVENANCE_KEY,
+  onAutomationHardBounce, onAutomationDelivered, claimRetry, settleClaim, claimForSend, bindAutomationRetrySend, bindTrackedRetrySend, gateLive, endGatedRetry, retryStillPending, lockPrepSend, CHANNEL, EMAIL_CHANNEL, TABLE, RETRY_PROVENANCE_KEY,
 };
