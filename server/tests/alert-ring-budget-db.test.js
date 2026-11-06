@@ -284,6 +284,21 @@ maybeDescribe('daily ring budget (live Postgres)', () => {
     for (const id of [count.id, ordinary.id, secret.id, forced.id]) expect(techIds).not.toContain(id);
   });
 
+  test('a tech-visible trigger row past the budget rings and stays in a technician\'s bell; a non-tech-visible row is held out of it', async () => {
+    for (let i = 0; i < 10; i += 1) await write(`fill ${i}`);
+    const { TRIGGER_REGISTRY } = require('../services/notification-triggers');
+    const techKey = Object.entries(TRIGGER_REGISTRY).find(([, t]) => t.techVisible && !t.rule?.contact && !t.rule?.promise && t.category === 'alert')?.[0] || 'twilio_failure';
+    const visible = await write('tech visible', { category: 'alert', metadata: { fixture: RUN, triggerKey: techKey } });
+    const stored = await get(visible.id);
+    expect(stored.metadata.feed).toBeUndefined();
+    expect(stored.metadata.ringBudgetHeld).toBeUndefined();
+    const held = await write('not tech visible');
+    expect((await get(held.id)).metadata.ringBudgetHeld).toBe(etDateString());
+    const techIds = (await NotificationService.getAdminNotifications(500, 0, { role: 'technician' })).map((r) => r.id);
+    expect(techIds).toContain(visible.id);
+    expect(techIds).not.toContain(held.id);
+  });
+
   test('the Activity feed lists held alerts and leaves out the count row, ops digests and Claude\'s queue', async () => {
     const day = etDateString();
     const rows = [];

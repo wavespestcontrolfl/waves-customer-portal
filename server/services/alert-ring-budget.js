@@ -9,6 +9,8 @@
 //   - customer contact: the scorecard's customer lists below, a registry rule or alert that declares `contact: true`, and
 //     the customer-comms triggers the bell policy always admits;
 //   - a promise we owe a customer: `promise: true` (declared or in the registry rule) and the promise triggers;
+//   - a tech-visible row: a registry trigger flagged techVisible (the flag NotificationService.scopeAdminFeedToRole reads)
+//     shows in a technician's bell, and a technician cannot open the Activity feed, so the owner's budget must not take it away;
 //   - an auto-dispatch notice (category schedule_conflict, or a dedupe key in DISPATCH_KEY_PREFIXES);
 //   - time-critical field work: the combined-booking check's urgent case (a visit today or tomorrow with no time or
 //     technician) stamps metadata.timeCritical true, and docs/admin-notifications.md section 3 says it always rings;
@@ -93,11 +95,12 @@ const metaOf = (value) => {
   return value && typeof value === 'object' ? value : {};
 };
 
-// The registry rule of a trigger (its `contact` / `promise` declaration), or null when the registry cannot be read.
-function registryRule(triggerKey) {
+// A trigger's registry entry (its rule's `contact` / `promise` declaration and its `techVisible` flag), or null when the
+// registry cannot be read.
+function registryTrigger(triggerKey) {
   if (!triggerKey) return null;
   try {
-    return require('./notification-triggers').TRIGGER_REGISTRY?.[triggerKey]?.rule || null;
+    return require('./notification-triggers').TRIGGER_REGISTRY?.[triggerKey] || null;
   } catch { return null; }
 }
 
@@ -109,9 +112,11 @@ function exemptReason({ category, metadata, dedupeKey } = {}) {
   if (meta[MARK_KEY] === COUNT_MARK) return 'count_row';
   if (isOwnerOnly(meta)) return 'owner_only';
   const triggerKey = meta.triggerKey || null;
-  const rule = registryRule(triggerKey);
+  const trigger = registryTrigger(triggerKey);
+  const rule = trigger?.rule;
   return customerReason(category, meta, triggerKey, rule)
     || promiseReason(meta, triggerKey, rule)
+    || (trigger?.techVisible ? 'tech_visible' : null)
     || (meta.timeCritical === true ? 'time_critical' : null)
     || dispatchReason(category, String(dedupeKey ?? meta.dedupeKey ?? ''));
 }

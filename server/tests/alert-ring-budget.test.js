@@ -185,6 +185,23 @@ describe('exemption predicate', () => {
     expect(sqls.some((q) => /COALESCE\(metadata->>'ownerOnly', ''\) <> 'true'/.test(q))).toBe(true);
   });
 
+  test('every tech-visible registry trigger is exempt, so a technician\'s bell never loses a row to the budget', () => {
+    const { TRIGGER_REGISTRY } = require('../services/notification-triggers');
+    const techVisible = Object.entries(TRIGGER_REGISTRY).filter(([, t]) => t.techVisible);
+    expect(techVisible.length).toBeGreaterThan(5);
+    for (const [triggerKey, trigger] of techVisible) {
+      expect(budget.exemptReason({ category: trigger.category, metadata: { triggerKey } })).not.toBeNull();
+    }
+    // The ones that are neither customer nor promise are exempt for being tech-visible.
+    expect(budget.exemptReason({ category: 'alert', metadata: { triggerKey: 'twilio_failure' } })).toBe('tech_visible');
+    expect(budget.exemptReason({ category: 'alert', metadata: { triggerKey: 'completion_sms_failed' } })).toBe('tech_visible');
+    // Contrast: a registry trigger that is not tech-visible stays budgeted.
+    const plain = Object.entries(TRIGGER_REGISTRY).find(([key, t]) => !t.techVisible && !t.rule?.contact && !t.rule?.promise
+      && !budget.CUSTOMER_TRIGGER_KEYS.includes(key) && !budget.PROMISE_TRIGGER_KEYS.includes(key) && !budget.CUSTOMER_CATEGORIES.includes(t.category));
+    expect(plain).toBeTruthy();
+    expect(budget.exemptReason({ category: plain[1].category, metadata: { triggerKey: plain[0] } })).toBeNull();
+  });
+
   test('the count row is exempt; an ordinary non-customer row and a bell:true row are budgeted', () => {
     expect(budget.exemptReason({ category: 'system', metadata: { ringBudget: 'count' } })).toBe('count_row');
     expect(budget.exemptReason({ category: 'inventory', metadata: {} })).toBeNull();
