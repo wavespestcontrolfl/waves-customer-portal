@@ -4,7 +4,8 @@
 // archive confirm says where an archived document goes, "Show archived" lists
 // those documents with a Restore action, and Restore posts to the restore route
 // and reads the list again. Rows keep the actions of the view they were read
-// for while the next read is still on its way.
+// for while the next read is still on its way, and the read after a write
+// uses the view on screen when the write lands, not the one at the click.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -131,5 +132,42 @@ describe("archived staff documents", () => {
     await act(async () => { finishArchived(json({ documents: [ARCHIVED] })); });
     await waitFor(() => expect(screen.getByRole("button", { name: "Restore" })).toBeInTheDocument());
     expect(screen.queryByText("Vehicle policy")).not.toBeInTheDocument();
+  });
+
+  it("a restore that lands after a switch to the active view reads the active view", async () => {
+    let finishRestore;
+    const restoreSent = new Promise((resolve) => { finishRestore = resolve; });
+    let restored = false;
+    const reads = [];
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const u = new URL(String(url), "http://localhost");
+      if (u.pathname.endsWith("/technicians")) return json({ technicians: [] });
+      if (u.pathname.endsWith("/restore")) {
+        await restoreSent;
+        restored = true;
+        return json({ ...ARCHIVED, is_archived: false });
+      }
+      reads.push(u.searchParams.get("archived"));
+      if (u.searchParams.get("archived") === "only") return json({ documents: restored ? [] : [ARCHIVED] });
+      return json({ documents: restored ? [ARCHIVED, ACTIVE] : [ACTIVE] });
+    }));
+    renderDocuments();
+
+    expect(await screen.findByText("Vehicle policy")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show archived" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+    // The POST is still on its way when the admin goes back to the active view.
+    fireEvent.click(screen.getByRole("button", { name: "Show active" }));
+    expect(await screen.findByText("Vehicle policy")).toBeInTheDocument();
+
+    const readsBefore = reads.length;
+    await act(async () => { finishRestore(); });
+    expect(await screen.findByText("Old uniform policy")).toBeInTheDocument();
+    expect(screen.getByText("Vehicle policy")).toBeInTheDocument();
+    expect(screen.queryByText("Archived documents")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show archived" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+    // The reload after the restore read the active view, never the archived one.
+    expect(reads.slice(readsBefore)).toEqual([null]);
   });
 });

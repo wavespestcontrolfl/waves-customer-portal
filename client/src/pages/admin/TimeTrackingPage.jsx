@@ -5533,8 +5533,8 @@ function DocumentsTab({ showToast }) {
   }, []);
 
   const load = useCallback(async () => {
-    // Only the latest read (filter change, upload, edit, archive, Retry) may
-    // set the list or the failure notice.
+    // Only the latest read (filter change, view change, upload, edit,
+    // archive, restore, Retry) may set the list or the failure notice.
     const request = ++loadRequestRef.current;
     try {
       const params = new URLSearchParams();
@@ -5560,9 +5560,16 @@ function DocumentsTab({ showToast }) {
     setLoading(false);
   }, [catFilter, techFilter, showArchived]);
 
+  // An upload, edit, archive or restore bumps reloadKey when its write lands.
+  // The effect then reads with the filters and view on screen at that moment,
+  // not the ones captured at the click: the admin may switch views while the
+  // write is in flight.
+  const [reloadKey, setReloadKey] = useState(0);
+  const reload = () => setReloadKey((key) => key + 1);
+
   useEffect(() => {
     load();
-  }, [load]);
+  }, [load, reloadKey]);
 
   const handleUpload = async () => {
     if (!file) {
@@ -5598,7 +5605,7 @@ function DocumentsTab({ showToast }) {
         expirationDate: "",
       });
       setFile(null);
-      load();
+      reload();
     } catch (e) {
       showToast("Upload failed: " + e.message);
     }
@@ -5623,7 +5630,7 @@ function DocumentsTab({ showToast }) {
         method: "DELETE",
       });
       showToast("Document archived");
-      load();
+      reload();
     } catch (e) {
       showToast("Failed: " + e.message);
     }
@@ -5637,7 +5644,7 @@ function DocumentsTab({ showToast }) {
         method: "POST",
       });
       showToast("Document restored");
-      load();
+      reload();
     } catch (e) {
       showToast("Restore failed: " + (e.data?.error || e.message));
     }
@@ -5651,7 +5658,7 @@ function DocumentsTab({ showToast }) {
       });
       showToast("Document updated");
       setEditingId(null);
-      load();
+      reload();
     } catch (e) {
       showToast("Failed: " + e.message);
     }
