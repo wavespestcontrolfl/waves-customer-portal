@@ -1,8 +1,8 @@
 # AGENTS.md
 
 Code-review rubric for the automated reviewers that audit diffs in the
-**waves-customer-portal** monorepo: the Codex pre-push hook, the `@codex`
-GitHub bot, the `claude-review` GitHub Action, and ultrareview. Every rule
+**waves-customer-portal** monorepo: the Codex pre-push hook and the `@codex`
+GitHub bot. Every rule
 names the failure it prevents and the file it protects. Codex invocations
 return JSON matching `.github/codex-review-schema.json`; every reviewer
 cites `file:line` for every finding.
@@ -147,8 +147,7 @@ execute the workflows they describe.
   logs.** Railway logs and `errors.log` are plain text. last4 is fine; the
   full PM object (BIN, fingerprint) is not.
 - **Hardcoded Anthropic model IDs.** Anthropic IDs live only in
-  `server/config/models.js` (tiers `DEEP` / `FLAGSHIP` / `WORKHORSE` /
-  `FAST` / `VOICE` / `VISION` / `EXTREME`) and `services/llm/deep.js`;
+  `server/config/models.js` (a tier it exports) and `services/llm/deep.js`;
   `check:domain-rules` enforces it. A new `'claude-…'` literal elsewhere
   pins a tier and defeats the env-var swap. Per-service OpenAI/Gemini
   defaults (transcription and extraction in
@@ -266,7 +265,7 @@ execute the workflows they describe.
 - **"Per application" price copy.** Customer-facing units read "per
   application", never "per visit", and no combined plan totals ("$X/mo",
   "$X/yr") appear on any customer-facing estimate surface. Owner exception
-  2026-10-20 (always on since 2026-10-22): the per-application price
+  2026-10-20: the per-application price
   stays the price; a smaller "$X a month" average (plus a plan average
   for 2+ services, = stored monthly total) may sit beneath it; "$X/mo" as
   the price stays banned. Exempt: prepay previews (12-month LIST
@@ -407,7 +406,8 @@ execute the workflows they describe.
   built-ins, e.g. `@waves/affiliate-registry`) must NOT be added — mark them
   SERVER-ONLY in their `package.json` description.
 - **Company name in copy** is "Waves Pest Control", never "Waves Lawn &
-  Pest". The mascot artwork carrying the old name is intentional.
+  Pest". Texts say "Waves" (owner 2026-11-04); legal lines keep the full
+  name. The mascot artwork carrying the old name is intentional.
 
 ## Implementation defaults
 
@@ -469,6 +469,6 @@ severity noted.
 - Procedures go in a skill; orientation goes in `CLAUDE.md`; route
   contracts go in `docs/public-route-contracts.md`. `/lesson` routes a
   correction to the right file.
-- After every model upgrade, run `claude doctor` and a manual stale-fact
+- After every model upgrade, run `/doctor prompt-audit` and a manual stale-fact
   pass: verify each cited file, constant, and gate still exists as
   described, and drop anything the current models do unprompted.

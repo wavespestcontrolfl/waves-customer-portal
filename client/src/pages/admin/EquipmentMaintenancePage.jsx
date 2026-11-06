@@ -561,16 +561,40 @@ function EquipmentCard({
   const recordForm = openForm === "record";
   const mileageForm = openForm === "mileage";
   const toggleForm = name => setOpenForm(current => current === name ? null : name);
+  const [detailError, setDetailError] = useState(null);
+  const [mileageError, setMileageError] = useState(null);
+  // Retry bumps a counter in the effect's deps; a reply that lands after the
+  // card collapsed or after a newer read started is ignored.
+  const [detailReload, setDetailReload] = useState(0);
+  const [mileageReload, setMileageReload] = useState(0);
   useEffect(() => {
-    if (isExpanded && !detail) {
-      // The mileage log (personal miles, fuel cost, IRS deduction) is the
-      // office's: a technician never asks for it.
-      Promise.all([af(`/admin/equipment-maintenance/${eq.id}`), eq.category === "vehicle" && !readOnly ? af(`/admin/equipment-maintenance/${eq.id}/mileage?limit=30`) : Promise.resolve(null)]).then(([d, m]) => {
-        setDetail(d);
-        setMileage(m);
-      }).catch(console.error);
-    }
-  }, [isExpanded, eq.id, eq.category, detail, readOnly]);
+    if (!isExpanded || detail) return undefined;
+    let stale = false;
+    setDetailError(null);
+    af(`/admin/equipment-maintenance/${eq.id}`).then(d => {
+      if (!stale) setDetail(d);
+    }).catch(err => {
+      if (!stale) setDetailError(err?.message || "Request failed");
+    });
+    return () => {
+      stale = true;
+    };
+  }, [isExpanded, eq.id, detail, detailReload]);
+  useEffect(() => {
+    // The mileage log (personal miles, fuel cost, IRS deduction) is the
+    // office's: a technician never asks for it.
+    if (!isExpanded || eq.category !== "vehicle" || readOnly || mileage) return undefined;
+    let stale = false;
+    setMileageError(null);
+    af(`/admin/equipment-maintenance/${eq.id}/mileage?limit=30`).then(m => {
+      if (!stale) setMileage(m);
+    }).catch(err => {
+      if (!stale) setMileageError(err?.message || "Request failed");
+    });
+    return () => {
+      stale = true;
+    };
+  }, [isExpanded, eq.id, eq.category, readOnly, mileage, mileageReload]);
   const nm = eq.next_maintenance;
   const overdue = nm && nm.is_overdue;
   return <Card style={{
@@ -668,7 +692,7 @@ function EquipmentCard({
         </div>{" "}
       </Button>
       {/* Expanded Detail */}
-      {isExpanded && detail && <div style={{
+      {isExpanded && (detail ? <div style={{
       marginTop: 16,
       borderTop: `1px solid ${"#E4E4E7"}`,
       paddingTop: 16
@@ -803,6 +827,7 @@ function EquipmentCard({
                 {mileageForm ? "Cancel" : "Log Mileage"}
               </Button>}
           </div>}
+          <ReadRetry what="mileage" error={mileageError} onRetry={() => setMileageReload(n => n + 1)} className="mb-4" />
           {/* Record Maintenance Form */}
           {recordForm && <MaintenanceForm equipmentId={eq.id} schedules={detail.schedules || []} onDone={() => {
         setOpenForm(null);
@@ -815,6 +840,7 @@ function EquipmentCard({
           {mileageForm && <MileageForm vehicleId={eq.id} currentMiles={eq.current_miles} onDone={() => {
         setOpenForm(null);
         setMileage(null);
+        setMileageReload(n => n + 1);
         setDetail(null);
         loadFleet();
         showToast("Mileage logged");
@@ -1233,8 +1259,34 @@ function EquipmentCard({
                 </Table>{" "}
               </div>{" "}
             </div>}
-        </div>}
+        </div> : <div style={{
+      marginTop: 16,
+      borderTop: `1px solid ${"#E4E4E7"}`,
+      paddingTop: 16
+    }} id={`equipment-detail-${eq.id}`}>
+          <ReadRetry what="equipment details" error={detailError} onRetry={() => setDetailReload(n => n + 1)} pending={<div style={{
+        fontSize: 14,
+        color: "#71717A"
+      }}>Loading equipment details…</div>} />
+        </div>)}
     </Card>;
+}
+// A failed read shows its error and Retry, never a blank panel; until a read
+// fails it shows `pending` (or nothing).
+function ReadRetry({
+  what,
+  error,
+  onRetry,
+  pending = null,
+  className
+}) {
+  if (!error) return pending;
+  return <ActionFeedback error className={className}>
+      Failed to load {what}: {error}{" "}
+      <Button type="button" onClick={onRetry} variant="primary" className="ml-[8px]">
+        Retry
+      </Button>
+    </ActionFeedback>;
 }
 function InfoRow({
   label,
