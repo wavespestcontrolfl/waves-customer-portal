@@ -26,8 +26,9 @@ const {
   DEFAULT_CALL_ROUTING_CONFIG,
   mergeCallRoutingConfig,
 } = require('../services/call-routing-config');
-const { isEnabled } = require('../config/feature-gates');
-const { listGates } = require('../services/gate-list');
+const { isEnabled, settingsGateFlipLive } = require('../config/feature-gates');
+const { listGates, gateSetting, mentionedGates, readsOnFor } = require('../services/gate-list');
+const { ibFullAccess, requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const { decideVoiceRoute } = require('../services/voice-route-decision');
 
 // Each pending OAuth attempt is its own row keyed by `${PREFIX}${stateNonce}`,
@@ -199,7 +200,143 @@ router.get('/linkedin/status', adminAuthenticate, requireAdmin, async (req, res)
 // Owner-only: the public /api/health reply stopped carrying gates (#2853).
 router.get('/gates', adminAuthenticate, requireAdmin, (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ gates: listGates() });
+  // flipAvailable: the switches show only for the owner login while
+  // GATE_SETTINGS_GATE_FLIP is on (owner 2026-11-06); everyone else, and
+  // everyone while it is off, sees the read-only list as before.
+  res.json({ gates: listGates(), flipAvailable: settingsGateFlipLive() && ibFullAccess(req) });
+});
+
+// ── Flip a gate from Settings → Features (owner 2026-11-06) ──────────────
+// Two steps over the Intelligence Bar's own set_railway_gate write (catalogue
+// check, Railway production service only, compare-and-swap on the prior
+// value), approved through the bar's pending-action card
+// (ib_pending_actions): /preview records exactly that change for this admin;
+// /commit claims it with PendingActions.claimForConfirm — one atomic UPDATE,
+// so a repeated or concurrent confirm of the same card finds nothing to claim
+// (codex #7732) — and writes it, refusing if the gate changed in between.
+// Owner login only; 404 while GATE_SETTINGS_GATE_FLIP is off. Turning a gate
+// on asks for its name to be typed; off is one click and writes 'false' (some
+// gates read a MISSING variable as on, so 'false' is the only value that
+// turns every on/off gate off).
+// A heuristic for the card's warning, not a block: the description mentions
+// customer messages, money, prices or a public link page.
+const CUSTOMER_FACING_RE = /\b(sms|texts?|texting|e-?mails?|calls?|charges?|invoices?|refunds?|prices?|pricing|payments?|customers?)\b|\/:token/i;
+const gateFlipActor = (req) => String(req.technicianId || req.technician?.id || 'admin');
+
+function gateFlipEnabled(req, res, next) {
+  if (!settingsGateFlipLive()) return res.status(404).json({ error: 'Not found' });
+  return next();
+}
+
+function flippableGateOr404(req, res) {
+  const gate = listGates().find((g) => g.name === req.params.name);
+  if (!gate) {
+    res.status(404).json({ error: 'That is not a gate this portal reads.' });
+    return null;
+  }
+  if (!gate.flippable) {
+    res.status(400).json({ error: gate.notFlippableReason, code: 'not_flippable' });
+    return null;
+  }
+  return gate;
+}
+
+router.post('/gates/:name/preview', adminAuthenticate, requireAdmin, gateFlipEnabled, requireFullAccess, async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    const gate = flippableGateOr404(req, res);
+    if (!gate) return;
+    const value = req.body?.value;
+    if (value !== 'true' && value !== 'false') {
+      return res.status(400).json({ error: "value must be 'true' or 'false'.", code: 'invalid_value' });
+    }
+    const { executeOpsTool } = require('../services/intelligence-bar/ops-tools');
+    const result = await executeOpsTool('set_railway_gate', { gate_name: gate.name, value });
+    if (result?.configured === false) return res.status(503).json({ error: result.message, code: 'railway_not_configured' });
+    if (result?.already_set) return res.json({ alreadySet: true, message: result.message });
+    if (!result?.preview) return res.status(400).json({ error: result?.error || 'The change could not be prepared.', code: result?.code || null });
+
+    const { outsideWritePins } = require('../services/intelligence-bar/outside-write-pins');
+    const pending = await require('../services/intelligence-bar/pending-actions').createPendingAction({
+      toolName: 'set_railway_gate',
+      params: { gate_name: gate.name, value, ...outsideWritePins('set_railway_gate', result) },
+      requestedBy: gateFlipActor(req),
+      summary: `Settings → Features: ${result.change}`,
+      context: 'settings_gate_flip',
+    });
+    // Prerequisites the description names, with their current setting, so the
+    // card can warn that one reads as off. A warning, never a block.
+    const prerequisites = mentionedGates(gate.name, gate.description).map((name) => {
+      const setting = gateSetting(name);
+      return { name, set: setting.set, value: setting.value, readsOn: readsOnFor(name, require('../config/feature-gates').knownGateCatalog().get(name)) };
+    });
+    return res.json({
+      gate: gate.name,
+      description: result.controls,
+      currentValue: result.current_value,
+      newValue: result.new_value,
+      inverted: result.inverted === true,
+      meaning: result.meaning,
+      redeployNotice: result.redeploy_notice,
+      customerFacing: CUSTOMER_FACING_RE.test(String(gate.description || '')),
+      prerequisites,
+      requireTypedName: value === 'true',
+      pendingActionId: pending.id,
+    });
+  } catch (err) { next(err); }
+});
+
+// HTTP status for each outcome recordGateFlipAudit records.
+const GATE_FLIP_STATUS = { written: 200, outcome_unknown: 202, target_changed: 409, refused: 400 };
+
+router.post('/gates/:name/commit', adminAuthenticate, requireAdmin, gateFlipEnabled, requireFullAccess, async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    if (!flippableGateOr404(req, res)) return;
+    const PendingActions = require('../services/intelligence-bar/pending-actions');
+    const id = String(req.body?.pendingActionId || '').trim();
+    const actor = gateFlipActor(req);
+    // Read before claiming, so a wrong typed name never uses the card up. The
+    // claim below returns this same card with its params hash re-checked, so
+    // the gate name checked here is the one written.
+    const row = id ? await PendingActions.getPendingRow(id, actor).catch(() => null) : null;
+    const pins = row?.tool_name === 'set_railway_gate' ? row.params : {};
+    if (pins._verified_railway_gate_name !== req.params.name) {
+      return res.status(409).json({ error: 'This change card is no longer valid. Open the switch again for a fresh one.', code: 'stale_card' });
+    }
+    if (pins._verified_railway_gate_value === 'true' && req.body?.confirmName !== req.params.name) {
+      return res.status(400).json({ error: 'Type the gate name exactly to turn it on.', code: 'confirm_name_mismatch' });
+    }
+    const claim = await PendingActions.claimForConfirm(id, actor);
+    if (claim.error) {
+      return res.status(409).json({ error: 'This change card was already used or has expired. Open the switch again for a fresh one.', code: claim.error });
+    }
+    const { executeOpsTool, recordGateFlipAudit } = require('../services/intelligence-bar/ops-tools');
+    const verified = Object.fromEntries(Object.entries(claim.action.params).filter(([k]) => k.startsWith('_verified_')));
+    const result = await executeOpsTool('set_railway_gate', { confirmed: true, ...verified });
+    await PendingActions.recordResult(id, result);
+    const outcome = await recordGateFlipAudit({
+      via: 'settings_page',
+      actorId: req.technicianId,
+      gate: verified._verified_railway_gate_name,
+      value: verified._verified_railway_gate_value,
+      priorKind: verified._verified_railway_gate_prior_kind,
+      priorValue: verified._verified_railway_gate_prior,
+      result,
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+    return res.status(GATE_FLIP_STATUS[outcome]).json({
+      outcome,
+      success: outcome === 'written',
+      gate: result.gate,
+      value: result.value,
+      redeployNotice: result.redeploy_notice,
+      warning: result.warning,
+      error: result.error,
+      code: result.code,
+    });
+  } catch (err) { next(err); }
 });
 
 // =========================================================================
