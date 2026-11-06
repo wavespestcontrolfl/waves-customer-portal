@@ -15,8 +15,14 @@ jest.mock('../models/db', () => {
   mockDb.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
   return mockDb;
 });
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
-jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: jest.fn(() => '+19415550000') }));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn(() => true),
+  voicemailTextCallerOnlyLive: jest.fn(() => false),
+}));
+jest.mock('../config/twilio-numbers', () => ({
+  getOutboundNumber: jest.fn(() => '+19415550000'),
+  isInternalNumber: jest.fn((n) => String(n).endsWith('5550000')),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: true, providerMessageId: 'SM0123456789abcdef0123456789abcdef' })),
 }));
@@ -47,7 +53,7 @@ jest.mock('../services/messaging/auto-text-holds', () => ({
 }));
 
 const db = require('../models/db');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, voicemailTextCallerOnlyLive } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const lineType = require('../services/messaging/validators/line-type');
@@ -104,6 +110,7 @@ beforeEach(() => {
   db.mockImplementation((table) => makeBuilder(table));
   db.raw.mockImplementation((sql, bindings) => ({ __raw: sql, bindings }));
   isEnabled.mockReturnValue(true);
+  voicemailTextCallerOnlyLive.mockReturnValue(false);
   // clearAllMocks does NOT reset mockResolvedValue implementations — restore
   // every default so a per-test override can't leak into the next test.
   lineType.readCachedLineType.mockResolvedValue({ state: 'miss' });
@@ -491,5 +498,142 @@ describe('voicemail lead text-back send outcomes', () => {
     expect(state.inserts.filter((i) => i.table === 'sms_log')).toHaveLength(0);
     expect(phoneClaimReleased()).toBe(false);
     expect(phoneClaimOutcomes()).toContain('SUPPRESSED');
+  });
+});
+
+describe('GATE_VOICEMAIL_TEXT_CALLER_ONLY — the text goes only to the number that called (audit run 3, C2)', () => {
+  const CALLER = '+19415550100';
+  const SPOKEN = '+18135550199';
+  const callerCall = (over = {}) => ({
+    id: 'call-dummy-1', twilio_call_sid: 'CA-dummy-1', direction: 'inbound', from_phone: CALLER,
+    created_at: new Date('2026-11-05T07:30:00Z'), ...over,
+  });
+  const callerArgs = (over = {}) => args({ phone: SPOKEN, call: callerCall(), ...over });
+  const vars = () => renderSmsTemplate.mock.calls[0][1];
+
+  beforeEach(() => {
+    voicemailTextCallerOnlyLive.mockReturnValue(true);
+  });
+
+  test('gate off: a spoken callback number is still texted with the extracted words (unchanged)', async () => {
+    voicemailTextCallerOnlyLive.mockReturnValue(false);
+    const result = await sendVoicemailQuoteLink(callerArgs({
+      extracted: { first_name: 'mike, visit example.test', requested_service: 'your refund at example.test' },
+    }));
+    expect(result).toEqual({ sent: true });
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: SPOKEN }));
+    expect(vars()).toEqual(expect.objectContaining({
+      first_name: 'Mike, visit example.test',
+      service_label: 'your refund at example.test',
+    }));
+  });
+
+  test('a spoken callback number that is not the caller ID is never texted; the caller ID is', async () => {
+    const result = await sendVoicemailQuoteLink(callerArgs());
+    expect(result).toEqual({ sent: true });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: CALLER, entryPoint: 'voicemail_lead_sms', identityTrustLevel: 'phone_provided_unverified',
+    }));
+    // Every per-number check runs on the number that is texted.
+    expect(autoTextHoldReason).toHaveBeenCalledWith(CALLER, expect.objectContaining({ originCallId: 'call-dummy-1' }));
+    expect(autoTextHoldReason).not.toHaveBeenCalledWith(SPOKEN, expect.anything());
+    expect(state.inserts.find((i) => i.table === 'voicemail_sms_claims').payload.phone).toBe(CALLER);
+    expect(lineType.readCachedLineType).toHaveBeenCalledWith(CALLER);
+  });
+
+  test('the spoken number stays for staff: a timeline note names both numbers masked, and the full numbers appear nowhere', async () => {
+    await sendVoicemailQuoteLink(callerArgs());
+    const note = state.inserts.find((i) => i.table === 'lead_activities' && i.payload.activity_type === 'note');
+    expect(note.payload.description).toContain('***0100');
+    expect(note.payload.description).toContain('***0199');
+    expect(note.payload.description).not.toContain(SPOKEN);
+    expect(JSON.parse(note.payload.metadata).reason).toBe('spoken_number_not_caller');
+  });
+
+  test('a spoken number equal to the caller ID (any format) adds no note and texts the caller', async () => {
+    const result = await sendVoicemailQuoteLink(callerArgs({ phone: '(941) 555-0100' }));
+    expect(result).toEqual({ sent: true });
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: CALLER }));
+    expect(state.inserts.some((i) => i.table === 'lead_activities' && i.payload.activity_type === 'note')).toBe(false);
+  });
+
+  test.each([
+    ['an outbound call row', { direction: 'outbound-api' }],
+    ['a withheld caller ID', { from_phone: 'anonymous' }],
+    ['no caller ID', { from_phone: null }],
+    ['an impossible area code', { from_phone: '+11735550100' }],
+    ['one of our own lines', { from_phone: '+19415550000' }],
+  ])('%s: no text goes to the spoken number, and nothing is claimed', async (_label, over) => {
+    const result = await sendVoicemailQuoteLink(callerArgs({ call: callerCall(over) }));
+    expect(result).toEqual({ sent: false, skipped: 'no_caller_number' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(state.inserts.some((i) => i.table === 'voicemail_sms_claims')).toBe(false);
+  });
+
+  test('a missing lead id still reads as missing input', async () => {
+    expect(await sendVoicemailQuoteLink(callerArgs({ leadId: null }))).toEqual({ sent: false, skipped: 'missing_input' });
+  });
+
+  test.each([
+    ['a name with a link', 'mike, visit example.test'],
+    ['a name with digits', 'mike2'],
+    ['a sentence over 30 characters', 'Alexandria Maximilian Wolfeschlegel'],
+    ['a name with markup', '<b>Dana</b>'],
+    ['a name that starts with a hyphen', '-dana'],
+  ])('%s gets the no-name greeting', async (_label, first_name) => {
+    await sendVoicemailQuoteLink(callerArgs({ extracted: { first_name, matched_service: 'termite' } }));
+    expect(vars().first_name).toBe('there');
+  });
+
+  test.each([
+    ['dana', 'Dana'],
+    ["o'brien", "O'brien"],
+    ['mary-ann', 'Mary-ann'],
+    ['  jo   ann ', 'Jo ann'],
+    ['zoë', 'Zoë'],
+  ])('a plain first name (%s) is kept', async (first_name, expected) => {
+    await sendVoicemailQuoteLink(callerArgs({ extracted: { first_name } }));
+    expect(vars().first_name).toBe(expected);
+  });
+
+  test.each([
+    [{ requested_service: 'your refund at example.test' }, 'pest control'],
+    [{ matched_service: 'Call 941-555-0123 now' }, 'pest control'],
+    [{}, 'pest control'],
+    [{ matched_service: 'termite' }, 'Termite Inspection'],
+    [{ matched_service: 'Mosquito Control' }, 'Mosquito Control'],
+    [{ requested_service: 'my lawn is dying, visit example.test' }, 'Lawn Care'],
+    [{ requested_service: 'rats in the attic' }, 'Rodent Control'],
+    [{ matched_service: 'palm trees' }, 'Tree & Shrub'],
+    [{ matched_service: 'General Pest Control' }, 'Pest Control'],
+    [{ matched_service: 'something odd', requested_service: 'ants' }, 'Pest Control'],
+  ])('the service words for %j come from the allow-list: %s', async (extracted, expected) => {
+    await sendVoicemailQuoteLink(callerArgs({ extracted }));
+    expect(vars().service_label).toBe(expected);
+  });
+
+  test('the spoken text never reaches the body, even when it holds a link', async () => {
+    await sendVoicemailQuoteLink(callerArgs({
+      extracted: { first_name: 'mike, visit example.test', requested_service: 'your refund at example.test' },
+    }));
+    expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('example.test');
+    expect(vars()).toEqual(expect.objectContaining({ first_name: 'there', service_label: 'pest control' }));
+  });
+
+  test('the existing checks still apply to the caller number: a hold skips the text', async () => {
+    autoTextHoldReason.mockResolvedValueOnce('quote_on_file');
+    expect(await sendVoicemailQuoteLink(callerArgs())).toEqual({ sent: false, skipped: 'quote_on_file' });
+    expect(autoTextHoldReason).toHaveBeenCalledWith(CALLER, expect.any(Object));
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the deferred row carries the caller number, not the spoken one', async () => {
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: true, nextAllowedAt: '2026-11-05T13:00:00Z', code: 'SEND_WINDOW' });
+    const result = await sendVoicemailQuoteLink(callerArgs());
+    expect(result.scheduled).toBe(true);
+    const queued = state.inserts.find((i) => i.table === 'sms_log');
+    expect(queued.payload.to_phone).toBe(CALLER);
+    expect(JSON.parse(queued.payload.metadata).voicemail_phone).toBe(CALLER);
   });
 });
