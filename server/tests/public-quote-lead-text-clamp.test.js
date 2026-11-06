@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { _internals } = require('../routes/public-quote');
 
-const { clampLeadText, LEAD_TEXT_LIMITS } = _internals;
+const { clampLeadText, cutChars, CONTACT_NAME_MAX, LEAD_TEXT_LIMITS } = _internals;
 
 describe('clampLeadText', () => {
   test('a 300-character first name is stored at 255 characters', () => {
@@ -58,5 +58,23 @@ describe('clampLeadText', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
     expect(src).toMatch(/db\('leads'\)\.insert\(clampLeadText\(\{\s*first_name: contactFirstName/);
     expect(src).toMatch(/const updateFields = clampLeadText\(\{\s*first_name: contactFirstName/);
+  });
+});
+
+describe('cutChars', () => {
+  test('cuts by whole characters, never inside an emoji', () => {
+    const cut = cutChars(`${'a'.repeat(49)}😀tail`, CONTACT_NAME_MAX);
+    expect(Array.from(cut)).toHaveLength(50);
+    expect(cut.endsWith('😀')).toBe(true);
+  });
+
+  test('leaves short and non-text values alone', () => {
+    expect(cutChars('Sam', 50)).toBe('Sam');
+    expect(cutChars(null, 50)).toBeNull();
+    expect(cutChars(undefined, 50)).toBeUndefined();
+  });
+
+  test('the contact names use the narrowest name column (50)', () => {
+    expect(CONTACT_NAME_MAX).toBe(50);
   });
 });

@@ -46,14 +46,22 @@ const LEAD_TEXT_LIMITS = {
   service_key: 80,
 };
 // Cut by whole characters (code points), as Postgres counts varchar length, so
-// an emoji at the cut never leaves half a surrogate pair behind.
+// an emoji at the cut never leaves half a surrogate pair behind. The one place
+// this slice lives: the lead clamp, the name cut and the estimate name use it.
+function cutChars(value, max) {
+  if (typeof value !== 'string' || value.length <= max) return value;
+  return Array.from(value).slice(0, max).join('');
+}
 function clampLeadText(fields) {
   const out = { ...fields };
-  for (const [key, max] of Object.entries(LEAD_TEXT_LIMITS)) {
-    if (typeof out[key] === 'string' && out[key].length > max) out[key] = Array.from(out[key]).slice(0, max).join('');
-  }
+  for (const [key, max] of Object.entries(LEAD_TEXT_LIMITS)) out[key] = cutChars(out[key], max);
   return out;
 }
+// The narrowest name columns on the /calculate path: customers.first_name and
+// last_name, and customer_accounts.first_name and last_name, are varchar(50).
+// estimates.customer_name ("first last") is varchar(100).
+const CONTACT_NAME_MAX = 50;
+const ESTIMATE_CUSTOMER_NAME_MAX = 100;
 
 // `excludeLeadId` is the caller's OWN row (the token path re-checks a row the
 // property-lookup stage already minted) — a row is never its own prior.
@@ -1271,8 +1279,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // row written earlier in this request and the customer row are both
     // canonical — otherwise every quote like "CHARLES SANTIAGO" reintroduces raw
     // lead data after the backfill.
-    const contactFirstName = normalizeContactName(contact.firstName);
-    const contactLastName = normalizeContactName(contact.lastName);
+    // Cut once to the narrowest name column (50) so every later write — lead,
+    // customer account, customer, newsletter, estimate, bell — sees one value.
+    const contactFirstName = cutChars(normalizeContactName(contact.firstName), CONTACT_NAME_MAX);
+    const contactLastName = cutChars(normalizeContactName(contact.lastName), CONTACT_NAME_MAX);
     const contactEmail = contact.email;
     const contactPhone = contact.phoneForStorage;
     const normalizedPhone = contact.phoneE164;
@@ -3379,7 +3389,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       };
       const estFields = {
         customer_id: customerId,
-        customer_name: `${contactFirstName} ${contactLastName}`,
+        customer_name: cutChars(`${contactFirstName} ${contactLastName}`, ESTIMATE_CUSTOMER_NAME_MAX),
         customer_phone: contactPhone,
         customer_email: contactEmail,
         address: quoteFullAddress,
@@ -4486,6 +4496,8 @@ module.exports._internals = {
   deriveAddressUnverified,
   findPriorOpenWizardLeadId,
   clampLeadText,
+  cutChars,
+  CONTACT_NAME_MAX,
   LEAD_TEXT_LIMITS,
   duplicateOfFromExtracted,
   WIZARD_LEAD_REUSE_DAYS,
