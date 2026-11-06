@@ -309,12 +309,12 @@ describe('the booking confirmation', () => {
     test('the service-contact replay asks with the same predicate, and unreadable preferences are false without asking', async () => {
       const apptTime = new Date(NOW.getTime() + 150 * HOUR);
       prefsRow = { sms_enabled: false, service_reminder_24h: true, service_reminder_24h_channel: 'sms' };
-      await AppointmentReminders._test.replayDayOnly({ customerId: 'cust-1', scheduledServiceId: 'svc-1', apptTime });
+      await AppointmentReminders._test.dayOnlyNow({ customerId: 'cust-1', scheduledServiceId: 'svc-1', apptTime });
       expect(asked()).toBe(false);
       jest.clearAllMocks();
       timePromise.dayOnlySendDecision.mockResolvedValue(DAY_YES);
       prefsRow = { sms_enabled: false, email_enabled: true, service_reminder_24h: true, service_reminder_24h_channel: 'email' };
-      expect(await AppointmentReminders._test.replayDayOnly({ customerId: 'cust-1', scheduledServiceId: 'svc-1', apptTime })).toBe(true);
+      expect(await AppointmentReminders._test.dayOnlyNow({ customerId: 'cust-1', scheduledServiceId: 'svc-1', apptTime })).toBe(true);
       expect(asked()).toBe(true);
     });
   });

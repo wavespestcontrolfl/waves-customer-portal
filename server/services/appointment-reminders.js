@@ -1304,37 +1304,31 @@ function bouncedOccurrenceDate(metadata) {
   return metadata.guard_slot_ms != null && Number.isFinite(guard) ? etDateString(new Date(guard)) : null;
 }
 
-/** What a bounced DAY-ONLY text's recovery email may say NOW (a bounce can arrive hours later): 'day' only while the
- *  visit is still outside the cutoff and its latest promise is not an hour; 'window' once inside the cutoff (the 24-hour
- *  text owns the window); 'stale' when the latest promise is already an hour (the 24-hour text went, or anything newer
- *  than the bounced text) or the promise cannot be read, so a recovery never becomes a newer day promise over a known
- *  window. */
-async function dayRecoveryVerdict({ scheduledServiceId, apptTime }) {
-  if (!scheduledServiceId) return 'window';
+/** Is a bounced day-only text's recovery stale? True when the visit's latest promise is already an hour (the 24-hour text
+ *  went, or anything newer than the bounced text), or the promise cannot be read: a recovery must never become a newer day
+ *  promise over a known window. This is the ONE rule in front of the shared send decision. */
+async function bounceIsStale(scheduledServiceId) {
+  if (!scheduledServiceId) return false;
   try {
-    const now = new Date();
-    const level = (await require('./time-promise').loadPromiseLevels(db, [scheduledServiceId], now)).get(scheduledServiceId);
-    if (level === 'hour') return 'stale';
-    const hours = (new Date(apptTime).getTime() - now.getTime()) / 3600000;
-    return hours > require('./time-promise').DAY_PROMISE_CUTOFF_HOURS ? 'day' : 'window';
+    const levels = await require('./time-promise').loadPromiseLevels(db, [scheduledServiceId], new Date());
+    return levels.get(scheduledServiceId) === 'hour';
   } catch (err) {
     logger.warn(`[appt-remind] day-only bounce recovery for ${scheduledServiceId}: promise unreadable (${err.message})`);
-    return 'stale';
+    return true;
   }
 }
 
-/** The email recovery of a bounced appointment text. A window text recovers as before. A day-only text is revalidated for
- *  NOW first (dayRecoveryVerdict): still valid -> a day-only email; no longer valid -> today's window copy, or nothing
- *  when it would be stale. */
+/** The email recovery of a bounced appointment text. A window text recovers as before. A day-only text: stale (a promise
+ *  newer than it stands) -> nothing; else the shared day-only decision for NOW (live gate, cutoff, the customer's current
+ *  24-hour preference, full eligibility) -> a day-only email when true, today's window copy when false. */
 async function recoverBouncedNotice({ audit, kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey }) {
   let dayOnly = false;
   if (isDayPromise(audit.metadata)) {
-    const verdict = await dayRecoveryVerdict({ scheduledServiceId, apptTime });
-    if (verdict === 'stale') {
+    if (await bounceIsStale(scheduledServiceId)) {
       logger.info(`[appt-remind] bounced day-only ${kind} text for ${scheduledServiceId}: a later promise already stands (or none can be read) - recovery email suppressed as stale`);
       return;
     }
-    dayOnly = verdict === 'day';
+    dayOnly = await dayOnlyNow({ customerId, scheduledServiceId, apptTime });
   }
   await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel: audit.metadata?.requestedChannel, ...dayOnlyArg(dayOnly) });
 }
@@ -7012,8 +7006,7 @@ AppointmentReminders._test = {
   withReminderSendFence,
   deliverConfirmation,
   reminder24hWillSend,
-  replayDayOnly,
-  dayRecoveryVerdict,
+  dayOnlyNow,
   deliverConfirmationByChannel,
   scheduledServiceApptTime,
   sendAppointmentNoticeEmail,
@@ -7160,8 +7153,11 @@ async function replayRecipient({ customerId, scheduledServiceId, contactKey, acc
   return { recipient };
 }
 
-// The service-contact replay's day-only decision. Gate off (or any error): false, and nothing is read.
-async function replayDayOnly({ customerId, scheduledServiceId, apptTime }) {
+// The day-only decision for a send made NOW outside the reminder scan (the service-contact replay, a bounce's email
+// recovery): the SAME shared decision a fresh send uses, on the live gate, the customer's CURRENT preferences
+// (reminder24hWillSend) and the full eligibility. Gate off (or any error, unreadable preferences): false, and the caller
+// sends window copy.
+async function dayOnlyNow({ customerId, scheduledServiceId, apptTime }) {
   try {
     if (!require('./time-promise').dayOnlyPromiseOn()) return false;
     const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
@@ -7184,7 +7180,7 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
     const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
     // GATE_DAY_ONLY_PROMISE: the replay tells the same story as the primary's confirmation (a visit whose latest promise
     // is an hour reads 'hour' and keeps the window copy).
-    const dayOnly = await replayDayOnly({ customerId, scheduledServiceId, apptTime });
+    const dayOnly = await dayOnlyNow({ customerId, scheduledServiceId, apptTime });
     const ladder = {};
     const body = await renderConfirmationBody({
       scheduledServiceId,

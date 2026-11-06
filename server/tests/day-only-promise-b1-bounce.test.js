@@ -24,6 +24,7 @@ jest.mock('../services/estimate-card-holds', () => ({
 jest.mock('../services/time-promise', () => ({
   ...jest.requireActual('../services/time-promise'),
   loadPromiseLevels: jest.fn(),
+  dayOnlySendDecision: jest.fn(),
 }));
 
 const db = require('../models/db');
@@ -60,13 +61,27 @@ function setDbQueues(queues) {
   db.transaction = jest.fn(async (fn) => fn(db));
 }
 
+let prefsRow;
+const OLD_GATE = process.env.GATE_DAY_ONLY_PROMISE;
+
 beforeEach(() => {
   jest.clearAllMocks();
+  prefsRow = { sms_enabled: true, service_reminder_24h: true };
+  process.env.GATE_DAY_ONLY_PROMISE = 'true';
+  // The shared decision's cheap rules (live gate is checked by the caller, the cutoff and the 24-hour preference here);
+  // the eligibility reads are pinned in day-only-promise-b1-eligibility.test.js.
+  timePromise.dayOnlySendDecision.mockImplementation(async (_conn, { startAt, reminder24hEnabled }) => ({
+    dayOnly: jest.requireActual('../services/time-promise').shouldPromiseDayOnly({ startAt, now: new Date(), reminder24hEnabled, customerPicked: false, level: 'none' }),
+    level: 'none', eligible: true,
+  }));
   // Three days before the visit: outside the 24.25 h cutoff, so a day-only recovery is still valid.
   jest.useFakeTimers().setSystemTime(new Date('2026-06-19T14:00:00.000Z'));
   timePromise.loadPromiseLevels.mockImplementation(async (_conn, ids) => new Map(ids.map((id) => [id, 'none'])));
 });
-afterEach(() => { jest.useRealTimers(); });
+afterEach(() => {
+  jest.useRealTimers();
+  if (OLD_GATE === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = OLD_GATE;
+});
 
 const SLOT = Date.parse('2026-06-22T13:00:00.000Z');
 const DAY_META = { promise_level: 'day', window_unknown: true, guard_slot_ms: SLOT, promised_date: '2026-06-22' };
@@ -91,7 +106,8 @@ function groupedWorld({ metadata, visitDate = '2026-06-22' }) {
   ]);
   setDbQueues({
     messaging_audit_log: [auditChain],
-    customers: [chain({ first: { id: 'c9', phone: '+19415551234', email: 'c9@example.com', line_type: null } })],
+    customers: Array.from({ length: 3 }, () => chain({ first: { id: 'c9', phone: '+19415551234', email: 'c9@example.com', line_type: null } })),
+    notification_prefs: Array.from({ length: 4 }, () => chain({ first: prefsRow })),
     appointment_reminders: [chain({ first: ownerRow }), chain({})],
     scheduled_services: [chain({ first: { visit_id: 'visit-9' } })],
     service_visits: [chain({ first: { id: 'visit-9', scheduled_date: visitDate } })],
@@ -208,11 +224,57 @@ describe('a delayed bounce of a day-only text is revalidated before it recovers 
     const auditChain = chain({ first: { channel: 'sms', purpose: 'appointment_confirmation', customer_id: 'c1', metadata: { original_message_type: 'confirmation', scheduled_service_id: 'ss1', ...DAY_META } } });
     setDbQueues({
       messaging_audit_log: [auditChain],
-      customers: [chain({ first: { id: 'c1', phone: '+19415551234', line_type: null } })],
+      customers: Array.from({ length: 3 }, () => chain({ first: { id: 'c1', phone: '+19415551234', line_type: null } })),
+      notification_prefs: Array.from({ length: 4 }, () => chain({ first: prefsRow })),
       appointment_reminders: [chain({ first: { appointment_time: '2026-06-22T13:00:00.000Z', service_type: 'Pest Control' } }), chain({})],
     });
     await bounce('SM_conf');
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+  });
+
+  test('the gate was turned OFF between the send and the bounce: window copy, and no promise of a later window', async () => {
+    delete process.env.GATE_DAY_ONLY_PROMISE;
+    groupedWorld({ metadata: DAY_META });
+    await bounce('SM_gate_off');
+    const call = AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0];
+    expect(call).not.toHaveProperty('dayOnly');
+    expect(call).toMatchObject({ kind: '72h', appointmentTime: new Date('2026-06-22T13:00:00.000Z') });
+    expect(timePromise.dayOnlySendDecision).not.toHaveBeenCalled();
+  });
+
+  test('the customer turned the 24-hour reminder OFF between the send and the bounce: window copy', async () => {
+    prefsRow = { sms_enabled: true, service_reminder_24h: false };
+    groupedWorld({ metadata: DAY_META });
+    await bounce('SM_24h_off');
+    expect(timePromise.dayOnlySendDecision.mock.calls[0][1].reminder24hEnabled).toBe(false);
+    expect(AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0]).not.toHaveProperty('dayOnly');
+  });
+
+  test('texts turned off with a text-only 24-hour channel between the send and the bounce: window copy', async () => {
+    prefsRow = { sms_enabled: false, service_reminder_24h: true, service_reminder_24h_channel: 'sms' };
+    groupedWorld({ metadata: DAY_META });
+    await bounce('SM_texts_off');
+    expect(AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0]).not.toHaveProperty('dayOnly');
+  });
+
+  test('preferences unreadable at bounce time: window copy (the shared decision is not guessed)', async () => {
+    groupedWorld({ metadata: DAY_META });
+    const queued = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      if (table === 'notification_prefs') throw new Error('prefs down');
+      return queued(table);
+    });
+    await bounce('SM_prefs_down');
+    expect(AppointmentEmail.sendAppointmentReminderEmail.mock.calls[0][0]).not.toHaveProperty('dayOnly');
+    expect(timePromise.dayOnlySendDecision).not.toHaveBeenCalled();
+  });
+
+  test('the stale rule stays in front: a known window suppresses the recovery even when the decision would say day', async () => {
+    timePromise.loadPromiseLevels.mockResolvedValue(new Map([['ss-owner', 'hour']]));
+    groupedWorld({ metadata: DAY_META });
+    await bounce('SM_stale_first');
+    expect(AppointmentEmail.sendAppointmentReminderEmail).not.toHaveBeenCalled();
+    expect(timePromise.dayOnlySendDecision).not.toHaveBeenCalled();
   });
 
   test('a window bounce is never revalidated (no promise read, same recovery)', async () => {
