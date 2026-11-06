@@ -127,8 +127,9 @@ all final-HEAD CI and Codex requirements.
   Leave reused worktrees in place unless the owner explicitly authorizes
   their removal.
 
-### 6. Dark-ship pattern (user-visible features)
-- New user-visible behavior ships behind an env-var gate (`GATE_*`) or query param, default OFF in prod. Name the kill switch in the PR body.
+### 6. When a change gets a gate (owner 2026-11-05, "rule")
+- A change ships behind an env-var gate (`GATE_*`), default OFF in prod, only when it can: text, email or call a customer; change a price; charge, invoice or refund; delete data; spend money (a paid API or service); add a new public link page (a `/:token` route); or carries a named risk that needs an instant off switch. Name the gate and that reason in the PR body.
+- Everything else ships live, with no gate: its undo is a revert plus a deploy (~20 min). This writes down the 2026-10-01 merge test ("ships dark behind a gate or can be reverted with no lasting effect"). Why: on 2026-11-05, 883 gates were on and still in the code; about 120 landed each week and about 13 were removed, and every gate adds tests, CI time and a removal PR.
 - Owner (Adam) flips gates — never flip a customer-facing gate without his authorization.
 - After a gate flip, verify in prod (the gated page/flow renders; the kill switch works).
 
