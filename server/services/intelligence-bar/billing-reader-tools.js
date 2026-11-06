@@ -21,8 +21,11 @@
  *
  * The read-only form of the second fence performs no writes and takes no locks (it never releases or promotes a
  * stale claim). Any other outcome, or a check that cannot run, is `collectible: false`, `balance_due: null`, with
- * the fence's reason and a pointer to the Invoices page. An invoice with a PaymentIntent attached is held the same way
- * (the pay paths retrieve it from Stripe; this reader never calls Stripe). Nothing here infers a Stripe state, links orphan rows to
+ * the fence's reason and a pointer to the Invoices page. An invoice with a PaymentIntent attached is held the same way,
+ * unless that session moved no money (attachedIntentInert: no live payments row, and Stripe reads it canceled or with
+ * nothing attached, through the pay page's own bounded read-only check); every collection path retires such a session
+ * itself. That check is the reader's only Stripe call, and a check that cannot run holds the balance. Nothing else here
+ * infers a Stripe state, links orphan rows to
  * sibling invoices, or classifies refunds and disputes: the payments-table rows are listed as informational
  * "recorded payments" with no received / not-received verdict.
  *
@@ -445,8 +448,8 @@ async function processingStatusOutcome(invoice, database, terminalError) {
  *
  * On top of that shared predicate: a processing invoice runs the charge fence before the terminal "bank payment
  * processing" explanation is accepted, a held attempt or attached PaymentIntent with durable ACH-in-flight evidence
- * reads as a bank payment processing (not a reconciliation defect), and any other attached PaymentIntent holds
- * the balance (the pay paths retrieve it from Stripe; this reader never calls Stripe).
+ * reads as a bank payment processing (not a reconciliation defect), an attached PaymentIntent that moved no money
+ * (attachedIntentInert) does not hold the balance, and any other attached PaymentIntent holds it.
  * Deliberately not folded in: the off-session-only guards (the customer-level dispute hold, a stopped-dunning
  * flag), which the list reports as dispute_hold, and visitRefusesSettlement, a lock-taking settlement-write guard.
  * Anything unexpected, or a check that cannot run, holds the balance.
@@ -475,6 +478,21 @@ async function linkedVisitVerdict(invoice, database) {
   if (invoice.scheduled_service_id) return null;
   const payer = await require('../payer').resolveForInvoice({ database, customerId: String(invoice.customer_id), scheduledServiceId: String(visitId), throwOnError: true });
   return payer && payer.payerId ? { payerBilled: true } : null;
+}
+
+// An attached PaymentIntent that moved no money: the pay page mints one on load, and a customer who leaves (or pays
+// another way) leaves it attached. The collection paths accept it and retire it themselves (chargeInvoiceWithSavedCard,
+// createInvoicePaymentIntent, recordManualPayment), so it does not hold the balance. Both of their checks must pass:
+// no live payments row records the intent (their own in-flight check), and Stripe reads it canceled or with nothing
+// attached, through the pay page's bounded inspection (prepaid-pi-guard inspectOnly: it cancels and unstamps nothing).
+// Anything else, or a read that fails, is not inert.
+const TERMINAL_PAYMENT_ROW_STATUSES = ['failed', 'canceled', 'cancelled', 'refunded'];
+async function attachedIntentInert(invoice, database) {
+  const piId = String(invoice.stripe_payment_intent_id);
+  const live = await database('payments').where({ stripe_payment_intent_id: piId }).whereNotIn('status', TERMINAL_PAYMENT_ROW_STATUSES).first('id');
+  if (live) return false;
+  const verdict = await require('../prepaid-pi-guard').neutralizeOpenPaymentIntent(piId, { inspectOnly: true });
+  return verdict.ok === true;
 }
 
 async function decideCollectibility(invoice, listed, database) {
@@ -506,7 +524,9 @@ async function decideCollectibility(invoice, listed, database) {
   const linked = await linkedVisitVerdict(fresh, database);
   if (linked && linked.neverRan) return { ...held('needs_reconciliation', VISIT_DID_NOT_HAPPEN_REASON), row: fresh };
   if (linked && linked.payerBilled) return { ...held('not_collectible', MEMBER_REASONS.payer_billed), payer_billed: true, row: fresh };
-  if (fresh.stripe_payment_intent_id) return { ...(await heldAttemptOutcome(fresh, database, ATTACHED_INTENT_REASON, { complete: true })), row: fresh };
+  if (fresh.stripe_payment_intent_id && !(await attachedIntentInert(fresh, database))) {
+    return { ...(await heldAttemptOutcome(fresh, database, ATTACHED_INTENT_REASON, { complete: true })), row: fresh };
+  }
   return { collectible: true, needs_reconciliation: false, state: 'collectible', reason: null, balance_due: invoiceAmountDue(fresh), row: fresh };
 }
 

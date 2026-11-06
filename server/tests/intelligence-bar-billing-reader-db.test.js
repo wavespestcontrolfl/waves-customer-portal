@@ -8,6 +8,13 @@
 const crypto = require('crypto');
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// The reader's one Stripe read (an attached PaymentIntent, through the pay page's inspect-only check) never leaves the
+// suite: by default it cannot verify, which holds the balance; the attached-intent test sets the other answers.
+const UNVERIFIABLE = { ok: false, reason: 'payment_session_unverifiable' };
+jest.mock('../services/prepaid-pi-guard', () => ({
+  ...jest.requireActual('../services/prepaid-pi-guard'),
+  neutralizeOpenPaymentIntent: jest.fn(async () => ({ ok: false, reason: 'payment_session_unverifiable' })),
+}));
 
 // ONE reference instant for the whole suite, captured at module load: every relative date is derived from it with the
 // repo's ET calendar-day helper (calendar days, never 24-hour multiples), and nothing below reads the clock again.
@@ -265,10 +272,14 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     // Credit reconciliation read as one snapshot.
     Z = await customer(`Credit${run}`, `Snapshot${run}`, { account_credits: 10 });
     await db('customer_credit_ledger').insert({ customer_id: Z, delta: 10, balance_after: 10, source: 'manual', note: 'Synthetic grant' });
-    // An attached PaymentIntent (a payment started, outcome not confirmed here), shared by two combined siblings.
+    // An attached PaymentIntent (a payment started), shared by two combined siblings; Stripe's answer decides it.
     await invoice('z_attached', Z, { total: 80, stripe_payment_intent_id: `pi_attached_${run}` });
     await invoice('z_sibling', Z, { total: 20, stripe_payment_intent_id: `pi_attached_${run}` });
     await invoice('z_plain', Z, { total: 15 });
+    // An attached PaymentIntent a live payments row records: in flight whatever Stripe would say.
+    const zLive = await invoice('z_live', Z, { total: 40, stripe_payment_intent_id: `pi_live_${run}` });
+    await db('payments').insert({ customer_id: Z, payment_date: day(0), amount: 40, status: 'processing', processor: 'stripe', payment_method_type: 'card',
+      stripe_payment_intent_id: `pi_live_${run}`, description: 'Card payment in flight', metadata: json({ invoice_id: zLive.id }) });
     // Recorded payments listed beside a collectible invoice: payer-funded, dispute alias, waves alias, more than the read bound.
     G = await customer(`Listed${run}`, `Payments${run}`);
     const gPayer = await invoice('g_payer', G, { total: 300, status: 'paid', paid_at: REFERENCE });
@@ -354,7 +365,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       expect(spy).toHaveBeenCalledWith(inv.amb.id, expect.anything(), { readOnly: true });
       // ... on the call's snapshot connection, not the pool.
       expect(spy.mock.calls.find(([id]) => id === inv.amb.id)[1]).not.toBe(db);
-      // An attached PaymentIntent still holds it: the reader cannot confirm that outcome.
+      // An attached PaymentIntent still holds it: Stripe does not confirm that it moved no money (the suite's guard mock).
       expect(by(list, 'open')).toMatchObject({ collectible: false, balance_due: null });
       // Terminal invoices never reach the second fence.
       expect(spy.mock.calls.some(([id]) => id === inv.paid.id)).toBe(false);
@@ -598,17 +609,44 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(bulk.unknowns.join(' ')).toMatch(/More payment rows are tied to this invoice than were read/);
   });
 
-  test('an invoice with an attached PaymentIntent holds its balance (a payment was started; the reader does not call Stripe); so does every combined sibling', async () => {
-    const list = await read('get_customer_invoices', { customer_id: Z, limit: 50 });
-    for (const key of ['z_attached', 'z_sibling']) {
-      expect(by(list, key)).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true, overdue: null });
-      expect(by(list, key).reason).toBe('a payment was started on this invoice and its outcome is not confirmed here — settling it is a manual office step');
+  test('an attached PaymentIntent holds the balance, and every combined sibling\'s, unless Stripe reads it as a session that moved no money', async () => {
+    const guard = require('../services/prepaid-pi-guard');
+    const ATTACHED = 'a payment was started on this invoice and its outcome is not confirmed here — settling it is a manual office step';
+    const expectHeld = (list, keys) => {
+      for (const key of keys) {
+        expect(by(list, key)).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true, overdue: null });
+        expect(by(list, key).reason).toBe(ATTACHED);
+      }
+    };
+    try {
+      // Stripe cannot be read (the suite default), or the session is in flight or advanced (3DS, a method attached): held.
+      for (const answer of [UNVERIFIABLE, { ok: false, reason: 'payment_in_flight', piStatus: 'requires_action' }]) {
+        guard.neutralizeOpenPaymentIntent.mockClear();
+        guard.neutralizeOpenPaymentIntent.mockResolvedValue(answer);
+        const list = await read('get_customer_invoices', { customer_id: Z, limit: 50 });
+        expectHeld(list, ['z_attached', 'z_sibling', 'z_live']);
+        expect(by(list, 'z_plain')).toMatchObject({ collectible: true, balance_due: 15 });
+        expect(list.account_summary).toMatchObject({ total_due: 15, needs_reconciliation_count: 3 });
+        // The pay page's read-only form of the check: it cancels and unstamps nothing.
+        expect(guard.neutralizeOpenPaymentIntent).toHaveBeenCalledWith(`pi_attached_${run}`, { inspectOnly: true });
+      }
+      // Canceled, or nothing attached yet (the pay page mints one on load): the balance is stated, siblings too.
+      guard.neutralizeOpenPaymentIntent.mockClear();
+      guard.neutralizeOpenPaymentIntent.mockResolvedValue({ ok: true, piId: `pi_attached_${run}`, piStatus: 'requires_payment_method' });
+      const list = await read('get_customer_invoices', { customer_id: Z, limit: 50 });
+      expect(by(list, 'z_attached')).toMatchObject({ collectible: true, balance_due: 80, needs_reconciliation: false });
+      expect(by(list, 'z_sibling')).toMatchObject({ collectible: true, balance_due: 20, needs_reconciliation: false });
+      // A live payments row on the intent holds it without asking Stripe (the collection paths' own in-flight check).
+      expectHeld(list, ['z_live']);
+      expect(guard.neutralizeOpenPaymentIntent.mock.calls.some(([piId]) => piId === `pi_live_${run}`)).toBe(false);
+      expect(list.account_summary).toMatchObject({ total_due: 115, needs_reconciliation_count: 1 });
+      const detail = await read('get_invoice_detail', { invoice_id: inv.z_sibling.id });
+      expect(detail.invoice).toMatchObject({ collectible: true, balance_due: 20, needs_reconciliation: false });
+      expect(json(detail)).not.toContain(`pi_attached_${run}`);
+    } finally {
+      guard.neutralizeOpenPaymentIntent.mockReset();
+      guard.neutralizeOpenPaymentIntent.mockResolvedValue(UNVERIFIABLE);
     }
-    expect(by(list, 'z_plain')).toMatchObject({ collectible: true, balance_due: 15 });
-    expect(list.account_summary).toMatchObject({ total_due: 15, needs_reconciliation_count: 2 });
-    const detail = await read('get_invoice_detail', { invoice_id: inv.z_sibling.id });
-    expect(detail.invoice).toMatchObject({ collectible: false, balance_due: null, needs_reconciliation: true });
-    expect(json(detail)).not.toContain(`pi_attached_${run}`);
   });
 
   test('egress: an email and a PAN-like number seeded in every free-text column the readers select never appear in any result', async () => {
