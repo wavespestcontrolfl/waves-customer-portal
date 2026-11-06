@@ -11,7 +11,10 @@ jest.mock('../services/invoice-helpers', () => ({
 }));
 jest.mock('../routes/admin-sms-templates', () => ({}));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ gates: {} }));
+jest.mock('../config/feature-gates', () => ({
+  gates: {},
+  estimateDueFirstVisitLive: () => process.env.GATE_ESTIMATE_DUE_FIRST_VISIT === 'true',
+}));
 jest.mock('../services/stripe', () => ({}));
 jest.mock('../services/microdeposit-verification-email', () => ({ sendMicrodepositVerificationEmail: jest.fn() }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(), invoiceShortCodePrefix: jest.fn() }));
@@ -21,7 +24,7 @@ jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn() }));
 jest.mock('../services/email-template-library', () => ({}));
 jest.mock('../services/customer-contact', () => ({ getInvoiceEmailRecipients: jest.fn() }));
 jest.mock('../services/email-template', () => ({ currency: jest.fn() }));
-jest.mock('../utils/date-only', () => ({ formatDateOnly: jest.fn() }));
+jest.mock('../utils/date-only', () => ({ formatDateOnly: jest.fn(), dateOnlyString: jest.requireActual('../utils/date-only').dateOnlyString }));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -51,12 +54,18 @@ const baseTables = () => ({
     { id: 'ss-sent', source_estimate_id: 'est-sent' },
     { id: 'ss-home', source_estimate_id: 'est-home' },
     { id: 'ss-none', source_estimate_id: null },
+    // GATE_ESTIMATE_DUE_FIRST_VISIT: first visits booked by an estimate accept (pg DATE values, both read shapes).
+    { id: 'ss-first', source_estimate_id: 'est-home', scheduled_date: '2026-11-09' },
+    { id: 'ss-first-date', source_estimate_id: 'est-home', scheduled_date: new Date('2026-11-09T00:00:00Z') },
+    { id: 'ss-first-open', source_estimate_id: 'est-open', scheduled_date: '2026-11-09' },
+    { id: 'ss-first-bare', source_estimate_id: null, scheduled_date: '2026-11-09' },
   ],
   estimates: [
     { id: 'est-net30', status: 'accepted', bill_by_invoice: true, estimate_data: { proposal: proposal('net30') } },
     { id: 'est-autopay', status: 'accepted', bill_by_invoice: false, estimate_data: { proposal: proposal('autopay') } },
     { id: 'est-sent', status: 'sent', bill_by_invoice: true, estimate_data: { proposal: proposal('net30') } },
     { id: 'est-home', status: 'accepted', bill_by_invoice: false, estimate_data: { services: [] } },
+    { id: 'est-open', status: 'sent', bill_by_invoice: false, estimate_data: { services: [] } },
   ],
 });
 
@@ -114,6 +123,7 @@ beforeEach(() => {
 afterEach(() => {
   jest.useRealTimers();
   delete process.env.GATE_DUNNING_LADDER_90;
+  delete process.env.GATE_ESTIMATE_DUE_FIRST_VISIT;
 });
 
 describe('scheduleForInvoice: where a new sequence starts', () => {
@@ -240,5 +250,90 @@ describe('planFollowupSequence: the send card says where the reminders start', (
     const plan = await planFollowupSequence(bill(), conn, { id: 'c-1' });
 
     expect(plan).toMatchObject({ arms: false, state: 'start_unreadable' });
+  });
+});
+
+// GATE_ESTIMATE_DUE_FIRST_VISIT (owner 2026-11-06 "walk all"): an estimate-accept invoice is due on its first visit's
+// day (estimate-public.js acceptInvoiceVisitDueDate), so its ladder starts there too: no reminder calls it late before
+// the visit. Accepted Tue Nov 3, first visit Mon Nov 9.
+describe('GATE_ESTIMATE_DUE_FIRST_VISIT: an accept bill due on its first visit starts on that day', () => {
+  const acceptBill = (overrides = {}) => bill({ due_date: '2026-11-09', scheduled_service_id: 'ss-first', ...overrides });
+
+  test.each([
+    ['a pg DATE string', 'ss-first'],
+    ['a pg DATE read back as a UTC-midnight Date', 'ss-first-date'],
+  ])('gate on, visit date as %s: anchor_at is the due date and Day 3 counts from it', async (_label, visitId) => {
+    process.env.GATE_ESTIMATE_DUE_FIRST_VISIT = 'true';
+    const tables = baseTables();
+    tables.invoices = [acceptBill({ scheduled_service_id: visitId })];
+    const { inserts } = setupDb(tables);
+
+    await scheduleForInvoice('inv-1');
+
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0]).toMatchObject({ status: 'active', step_index: 0, anchor_at: new Date('2026-11-09T12:00:00Z') });
+    expect(inserts[0].next_touch_at).toEqual(tenAmEST('2026-11-12'));
+  });
+
+  test('gate off: the same bill starts when it went out (today\'s behavior)', async () => {
+    const tables = baseTables();
+    tables.invoices = [acceptBill()];
+    const { inserts } = setupDb(tables);
+
+    await scheduleForInvoice('inv-1');
+
+    expect(inserts[0]).not.toHaveProperty('anchor_at');
+    expect(inserts[0].next_touch_at).toEqual(tenAmEST('2026-11-06'));
+  });
+
+  test.each([
+    ['due the day it went out (a same-day or no-visit accept)', { due_date: '2026-11-03' }],
+    ['due on a day that is not its visit day', { due_date: '2026-12-03' }],
+    ['a visit from an estimate that is not accepted', { scheduled_service_id: 'ss-first-open' }],
+    ['a visit with no source estimate', { scheduled_service_id: 'ss-first-bare' }],
+    ['no visit at all', { scheduled_service_id: null }],
+  ])('gate on, %s: starts when it went out, no anchor_at', async (_label, overrides) => {
+    process.env.GATE_ESTIMATE_DUE_FIRST_VISIT = 'true';
+    const tables = baseTables();
+    tables.invoices = [acceptBill(overrides)];
+    const { inserts } = setupDb(tables);
+
+    await scheduleForInvoice('inv-1');
+
+    expect(inserts[0]).not.toHaveProperty('anchor_at');
+    expect(inserts[0].next_touch_at).toEqual(tenAmEST('2026-11-06'));
+  });
+
+  test('gate on, a won Net 30 proposal bill keeps its due-date start (the proposal rule runs first)', async () => {
+    process.env.GATE_ESTIMATE_DUE_FIRST_VISIT = 'true';
+    const tables = baseTables();
+    tables.invoices = [bill()];
+    const { inserts } = setupDb(tables);
+
+    await scheduleForInvoice('inv-1');
+
+    expect(inserts[0]).toMatchObject({ anchor_at: new Date('2026-12-03T12:00:00Z') });
+    expect(inserts[0].next_touch_at).toEqual(tenAmEST('2026-12-06'));
+  });
+
+  test('gate on, an Auto Pay hold keeps the visit-day start for when the hold releases', async () => {
+    process.env.GATE_ESTIMATE_DUE_FIRST_VISIT = 'true';
+    customerOnAutopay.mockResolvedValue(true);
+    const tables = baseTables();
+    tables.invoices = [acceptBill()];
+    const { inserts } = setupDb(tables);
+
+    await scheduleForInvoice('inv-1');
+
+    expect(inserts[0]).toMatchObject({ status: 'autopay_hold', next_touch_at: null, anchor_at: new Date('2026-11-09T12:00:00Z') });
+  });
+
+  test('gate on, the send card reports the visit day as startsOn', async () => {
+    process.env.GATE_ESTIMATE_DUE_FIRST_VISIT = 'true';
+    const { conn } = setupDb(baseTables());
+
+    const plan = await planFollowupSequence(acceptBill(), conn, { id: 'c-1' });
+
+    expect(plan).toMatchObject({ arms: true, state: 'active', startsOn: '2026-11-09' });
   });
 });

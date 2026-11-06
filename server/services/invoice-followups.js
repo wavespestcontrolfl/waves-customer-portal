@@ -44,7 +44,7 @@ const { customerOnAutopay, isBankMethodType } = require('./autopay-eligibility')
 const { publicPortalUrl } = require('../utils/portal-url');
 const EmailTemplateLibrary = require('./email-template-library');
 const { currency } = require('./email-template');
-const { formatDateOnly } = require('../utils/date-only');
+const { formatDateOnly, dateOnlyString } = require('../utils/date-only');
 const { approvalDigest, phoneKey, emailKey } = require('../utils/approval-digest');
 const { etDateString, etCalendarDayOf, formatETDayDate } = require('../utils/datetime-et');
 const { explicitBillingChannels } = require('./billing-delivery-channels');
@@ -740,17 +740,35 @@ async function newSequencePlanFor(trx, invoice, { adoption, steps }) {
 // Where a NEW sequence's cadence starts. Normally when the invoice went out: sent_at, then sms_sent_at, then created_at
 // (manual-only, email-only and older rows still schedule). A bill from a won commercial proposal that is due after the
 // day it went out (Net terms, proposal-win.js proposalTermsDueDate) starts on its due date instead (owner 2026-11-01):
-// it is not past due before then, and every step after the first says how many days past due it is. That start is
-// returned as `anchorAt` for the row's anchor_at, so later steps, a void re-arm (voidStopRearmAnchor) and the customer
-// schedule (sequenceAnchor) keep it. Throws when the proposal read fails.
+// it is not past due before then, and every step after the first says how many days past due it is. With
+// GATE_ESTIMATE_DUE_FIRST_VISIT on, so does an estimate-accept bill due on its first visit's day (owner 2026-11-06,
+// estimateAcceptBillDueOnVisit). That start is returned as `anchorAt` for the row's anchor_at, so later steps, a void
+// re-arm (voidStopRearmAnchor) and the customer schedule (sequenceAnchor) keep it. Throws when a read fails.
 async function newSequenceAnchor(conn, invoice) {
   const sentAnchor = invoice.sent_at || invoice.sms_sent_at || invoice.created_at;
   const dueDay = invoice.due_date ? etCalendarDayOf(invoice.due_date) : null;
   if (!dueDay || !sentAnchor || dueDay <= etDateString(new Date(sentAnchor))) return { anchor: sentAnchor, anchorAt: null };
-  if (!await require('./bill-by-invoice').wonProposalInvoice(conn, invoice)) return { anchor: sentAnchor, anchorAt: null };
+  const startsOnDueDay = await require('./bill-by-invoice').wonProposalInvoice(conn, invoice)
+    || (require('../config/feature-gates').estimateDueFirstVisitLive() && await estimateAcceptBillDueOnVisit(conn, invoice, dueDay));
+  if (!startsOnDueDay) return { anchor: sentAnchor, anchorAt: null };
   // Noon UTC is morning in New York, so the steps count from the due date's own calendar day (anchorTo10amNY).
   const anchorAt = new Date(`${dueDay}T12:00:00Z`);
   return { anchor: anchorAt, anchorAt };
+}
+
+// True for a bill an estimate accept made due on its first visit's day (estimate-public.js acceptInvoiceVisitDueDate):
+// the invoice's own visit (invoices.scheduled_service_id, the column the accept sets) was booked from an accepted
+// estimate (scheduled_services.source_estimate_id) and falls on `dueDay`. An invoice object without the visit column
+// is read by id. Throws when a read fails.
+async function estimateAcceptBillDueOnVisit(conn, invoice, dueDay) {
+  const visitId = invoice.scheduled_service_id !== undefined
+    ? invoice.scheduled_service_id
+    : (await conn('invoices').where({ id: invoice.id }).first('scheduled_service_id'))?.scheduled_service_id;
+  if (!visitId) return false;
+  const visit = await conn('scheduled_services').where({ id: visitId }).first('scheduled_date', 'source_estimate_id');
+  if (!visit?.source_estimate_id || dateOnlyString(visit.scheduled_date) !== dueDay) return false;
+  const estimate = await conn('estimates').where({ id: visit.source_estimate_id }).first('status');
+  return estimate?.status === 'accepted';
 }
 
 async function insertSequence(trx, invoice, plan) {
