@@ -1686,6 +1686,17 @@ function capabilityRowsFor(serviceMix) {
   return serviceMix.services.map((key) => ({ service_type: key.replace(/_/g, ' ') }));
 }
 
+// filterCollidingSlots' rows with each visit the caller moves at its new time (booking-make-room.js: the stops that
+// give up an hour move later the same day). Every rule in the filter then reads the day as it would be.
+function shiftMovedRows(rows, shiftedServiceMinutes) {
+  if (!shiftedServiceMinutes?.size) return rows;
+  return rows.map((row) => {
+    const minutes = shiftedServiceMinutes.get(String(row.id));
+    if (!minutes) return row;
+    return { ...row, window_start: addMinutesToHHMM(row.window_start, minutes), window_end: row.window_end ? addMinutesToHHMM(row.window_end, minutes) : row.window_end };
+  });
+}
+
 async function filterCollidingSlots(slots, {
   dateFrom, dateTo, estimateZone = null, coords = null, serviceMix = null, ownEstimateId = null,
   // This estimate's own catalog expected-service minutes (owner ruling
@@ -1696,6 +1707,10 @@ async function filterCollidingSlots(slots, {
   // Visits that are being MOVED by the caller: their own rows are not
   // collisions for the slot they are moving to (day-agreement shadow).
   excludeServiceIds = [],
+  // Visits the caller moves LATER the same day (booking make-room): a Map of
+  // scheduled_services id -> minutes. Each row counts at its own window shifted
+  // by those minutes (shiftMovedRows).
+  shiftedServiceMinutes,
 } = {}) {
   if (!Array.isArray(slots) || slots.length === 0) return slots;
   let inactiveTechs = new Set();
@@ -1732,8 +1747,9 @@ async function filterCollidingSlots(slots, {
       });
     });
   }
-  const rows = await collisionQuery
+  const rows = shiftMovedRows(await collisionQuery
     .select(
+      'scheduled_services.id',
       'scheduled_services.technician_id',
       'scheduled_services.scheduled_date',
       'scheduled_services.window_start',
@@ -1749,7 +1765,7 @@ async function filterCollidingSlots(slots, {
       ...(travelGapEnabled()
         ? [...guardedCoordSelects(db), 'scheduled_services.service_type', 'scheduled_services.service_key_snapshot']
         : []),
-    );
+    ), shiftedServiceMinutes);
   const candidatePin = { lat: coords?.lat ?? null, lng: coords?.lng ?? null };
   if (travelGapEnabled()) await ensureCatalogLoaded(db);
 
@@ -2115,6 +2131,20 @@ function makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, fun
 
 // GATE_BOOKING_MAKE_ROOM: records which taken hours this customer could have, over the final pool. Not awaited:
 // the list never waits for it, and it never changes the list.
+// The page's own placement rules for one make-room hour (booking-make-room.js), on the day with the moved stops at
+// their new times: filterCollidingSlots with the classified pool's arguments (overlaps, live holds, zone limits,
+// capability, the day fit, and the travel gap with this estimate's expected minutes), then the service-line rule.
+// Resolves true, or the reason the page would not offer the hour.
+function makeRoomPlacement({ estimateZone, coords, serviceMix, candidateExpectedMinutes, estimateId, lineRanking }) {
+  return async (slot, shiftedServiceMinutes) => {
+    const kept = await filterCollidingSlots([slot], {
+      dateFrom: slot.date, dateTo: slot.date, estimateZone, coords, serviceMix, candidateExpectedMinutes, ownEstimateId: estimateId, shiftedServiceMinutes,
+    });
+    if (!kept.length) return 'page_collision';
+    return applyLineOfferRule(kept, lineRanking).length ? true : 'service_line';
+  };
+}
+
 function startMakeRoomCheck(mode, args) {
   if (mode === 'off') return;
   try {
@@ -2562,6 +2592,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // The zone the page passes find-time, for the self-serve drive cap's route-day lift.
     zoneSlug: routeDaySlug,
     admit: makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnel }),
+    placement: makeRoomPlacement({ estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, estimateId, lineRanking }),
   });
   // The scarcity count below reads `bookable` when no funnel is active: leave out what the check removed.
   let countedBookable = bookable;
@@ -2885,5 +2916,6 @@ module.exports = {
     clearCaches() { wrapperCache.clear(); geocodeCache.clear(); require('./scheduling/expected-service-minutes').clearExpectedServiceMinutesCache(); },
     stopDatesInRange,
     makeRoomAdmit,
+    makeRoomPlacement,
   },
 };

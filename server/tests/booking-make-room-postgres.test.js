@@ -51,11 +51,12 @@ const DAY = '2097-06-10';
 const HQ = { lat: 27.4330885, lng: -82.4056801 };
 // GATE_REMINDER_72H_EMAIL_FIRST is cleared too: these fixture visits are one-time, and under it their 72-hour reminder
 // goes by email, so they would never move.
-const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_STAFF_ROUTE_INSERTION', 'GATE_NIGHT_TOLD_LOCK', 'GATE_DAY_ONLY_PROMISE', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_TECH_START_POINTS', 'GATE_REMINDER_72H_EMAIL_FIRST'];
+const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_STAFF_ROUTE_INSERTION', 'GATE_NIGHT_TOLD_LOCK', 'GATE_DAY_ONLY_PROMISE', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_TECH_START_POINTS', 'GATE_REMINDER_72H_EMAIL_FIRST', 'GATE_SLOT_TRAVEL_GAP'];
 
 maybeDescribe('make-room check on real PostgreSQL', () => {
   let database;
   let recordMakeRoomCheck;
+  let makeRoomPlacement;
   let techId;
   let visits;
   const saved = {};
@@ -68,6 +69,7 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
     for (const key of GATES) saved[key] = process.env[key];
     ({ recordMakeRoomCheck } = require('../services/scheduling/booking-make-room'));
+    ({ makeRoomPlacement } = require('../services/estimate-slot-availability')._internals);
   });
 
   afterAll(async () => {
@@ -130,10 +132,15 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
   const visitOf = (name) => visits.find((v) => v.name === name);
   const FREE = () => [{ date: DAY, windowStart: '12:00', techId }, { date: DAY, windowStart: '15:00', techId }];
   const admit = (slot) => slot.date === DAY && slot.windowStart >= '09:00' && slot.windowStart <= '16:00';
-  const run = () => recordMakeRoomCheck({
-    mode: 'shadow', estimateId: randomUUID(), pool: FREE(), coords: { lat: HQ.lat + 0.005, lng: HQ.lng + 0.2 },
-    durationMinutes: 60, dateFrom: DAY, dateTo: DAY, admit, now: NOW,
-  });
+  const PIN = { lat: HQ.lat + 0.005, lng: HQ.lng + 0.2 };
+  const run = () => {
+    const estimateId = randomUUID();
+    return recordMakeRoomCheck({
+      mode: 'shadow', estimateId, pool: FREE(), coords: PIN, durationMinutes: 60, dateFrom: DAY, dateTo: DAY, admit, now: NOW,
+      // The page's own placement rules (filterCollidingSlots + the service-line rule), on the same rolled-back rows.
+      placement: makeRoomPlacement({ estimateZone: null, coords: PIN, serviceMix: null, candidateExpectedMinutes: null, estimateId, lineRanking: null }),
+    });
+  };
   const starts = async () => (await mockConn('scheduled_services').whereIn('id', visits.map((v) => v.id)).orderBy('id').select('id', 'window_start', 'window_end', 'updated_at'));
   const sentAnything = () => Object.entries(mockOutbound).filter(([, fn]) => fn.mock && fn.mock.calls.length > 0).map(([name]) => name);
 
@@ -158,6 +165,14 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
     expect(await starts()).toEqual(before);
     expect(await mockConn('reschedule_log').whereIn('scheduled_service_id', visits.map((v) => v.id))).toHaveLength(0);
     expect(sentAnything()).toEqual([]);
+  });
+
+  test('travel gap on (production): a new visit that fills its whole hour leaves no turnaround before the moved stop, so the page refuses 9 AM', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    const report = await run();
+    expect(report.error).toBeNull();
+    expect(report.passed.find((p) => p.start === '09:00')).toBeUndefined();
+    expect(report.byReason.page_collision).toBeGreaterThanOrEqual(1);
   });
 
   test('the technician marked out that day is never a candidate (the free-slot finder\'s own absence rule)', async () => {

@@ -101,10 +101,13 @@ function fakeConn() {
   return { conn, inserted };
 }
 
-async function check({ deps = makeDeps(), pool = FREE, admit = (slot) => slot.date === DAY, coords = NEW_PIN, durationMinutes = 60, ...extra } = {}) {
+// The page's placement rules (estimate-slot-availability makeRoomPlacement) are the page's own; here they pass.
+const PAGE_PLACES = async () => true;
+
+async function check({ deps = makeDeps(), pool = FREE, admit = (slot) => slot.date === DAY, placement = PAGE_PLACES, coords = NEW_PIN, durationMinutes = 60, ...extra } = {}) {
   const { conn, inserted } = fakeConn();
   const report = await recordMakeRoomCheck({
-    mode: 'shadow', estimateId: 'est-1', pool, coords, durationMinutes, dateFrom: DAY, dateTo: DAY, admit, now: NOW, conn, deps, ...extra,
+    mode: 'shadow', estimateId: 'est-1', pool, coords, durationMinutes, dateFrom: DAY, dateTo: DAY, admit, placement, now: NOW, conn, deps, ...extra,
   });
   return { report, inserted, deps };
 }
@@ -151,7 +154,7 @@ describe('the plan page example', () => {
     const { conn } = fakeConn();
     const report = await recordMakeRoomCheck({
       mode: 'shadow', estimateId: 'est-1', pool: FREE, coords: NEW_PIN, durationMinutes: 60, dateFrom: DAY, dateTo: DAY,
-      admit: () => true, now: new Date('2097-06-10T05:00:00Z'), conn, deps: makeDeps(),
+      admit: () => true, placement: PAGE_PLACES, now: new Date('2097-06-10T05:00:00Z'), conn, deps: makeDeps(),
     });
     expect(report.passed).toEqual([]);
     expect(report.byReason.fixed_within_24h).toBeGreaterThanOrEqual(1);
@@ -332,7 +335,7 @@ describe('the saving bar', () => {
     const { conn, inserted } = fakeConn();
     const report = await recordMakeRoomCheck({
       mode: 'shadow', estimateId: 'est-1', pool, coords: NEW_PIN, durationMinutes: 60, dateFrom: DAY, dateTo: '2097-06-11',
-      admit: () => true, now: NOW, conn, deps: makeDeps({ rows }),
+      admit: () => true, placement: PAGE_PLACES, now: NOW, conn, deps: makeDeps({ rows }),
     });
     expect(report.free.best).toMatchObject({ date: '2097-06-11', start: '10:00' });
     expect(report.passed).toEqual([]);
@@ -390,8 +393,8 @@ describe('never throws', () => {
   test('a failed log write is swallowed', async () => {
     const conn = jest.fn(() => ({ insert: jest.fn(async () => { throw new Error('no table'); }) }));
     await expect(recordMakeRoomCheck({
-      mode: 'shadow', pool: FREE, coords: NEW_PIN, durationMinutes: 60, dateFrom: DAY, dateTo: DAY, admit: () => true, now: NOW, conn, deps: makeDeps(),
-    })).resolves.toMatchObject({ mode: 'shadow' });
+      mode: 'shadow', pool: FREE, coords: NEW_PIN, durationMinutes: 60, dateFrom: DAY, dateTo: DAY, admit: () => true, placement: PAGE_PLACES, now: NOW, conn, deps: makeDeps(),
+    })).resolves.toMatchObject({ mode: 'shadow', skipped: null });
   });
 });
 
@@ -432,6 +435,35 @@ describe('the default reads', () => {
   });
 });
 
+describe('the page\'s placement rules on the moved day', () => {
+  test('the page judges the new visit\'s slot with each moved stop shifted by its move', async () => {
+    const placement = jest.fn(PAGE_PLACES);
+    const { report } = await check({ placement });
+    expect(starts(report)).toContain('09:00');
+    const [slot, shifted] = placement.mock.calls.find(([s]) => s.windowStart === '09:00');
+    expect(slot).toEqual({ date: DAY, windowStart: '09:00', windowEnd: '10:00', durationMinutes: 60, techId: TECH, routeMode: 'arrival_windows' });
+    expect([...shifted]).toEqual([['visit-b', 60], ['visit-c', 60], ['visit-d', 60]]);
+  });
+
+  test('an hour the page refuses on the moved day (for example the travel gap) is not found, and its reason is counted', async () => {
+    const { report } = await check({ placement: async (slot) => (slot.windowStart === '09:00' ? 'page_collision' : true) });
+    expect(starts(report)).not.toContain('09:00');
+    expect(report.byReason.page_collision).toBe(1);
+  });
+
+  test('an answer that is not true never passes an hour', async () => {
+    const { report } = await check({ placement: async () => false });
+    expect(report.passed).toEqual([]);
+    expect(report.byReason.page_rules).toBeGreaterThanOrEqual(1);
+  });
+
+  test('without the page\'s placement rules the check does not run; it still records its row', async () => {
+    const { report, inserted } = await check({ placement: null });
+    expect(report.skipped).toBe('no_request');
+    expect(inserted).toHaveLength(1);
+  });
+});
+
 describe('the request\'s dates', () => {
   test('calendar days across the fall-back change come from the shared ET helpers, with the free list\'s dates', () => {
     const { datesFor } = _internals;
@@ -456,7 +488,7 @@ describe('startBackgroundCheck (backpressure for the detached check)', () => {
   }
   const args = (estimateId, deps) => ({
     mode: 'shadow', estimateId, pool: FREE, coords: NEW_PIN, durationMinutes: 60, dateFrom: DAY, dateTo: DAY,
-    admit: (slot) => slot.date === DAY, now: NOW, conn: fakeConn().conn, deps, budgetMs: 60000,
+    admit: (slot) => slot.date === DAY, placement: PAGE_PLACES, now: NOW, conn: fakeConn().conn, deps, budgetMs: 60000,
   });
 
   test('at most MAX_IN_FLIGHT checks run at once; an extra request is dropped and records nothing', async () => {

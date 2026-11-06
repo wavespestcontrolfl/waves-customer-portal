@@ -11,6 +11,10 @@
  *      weekends, zone days, time of day, notice and season) and it starts where a stop starts, on a day the free-slot
  *      finder would use: an assignable technician, no absent or off tech-day, no blackout date (find-time's rules),
  *      and a technician whose capability for this estimate's services is not off (the page's filterCollidingSlots).
+ *      The page's own placement rules then judge the new visit on the day as it would be, with the moved stops at
+ *      their new times (the caller's `placement`: filterCollidingSlots with this estimate's arguments, so overlaps,
+ *      live holds, zone limits, the day fit and the travel gap with its expected minutes; then the service-line
+ *      rule). The module does not re-code them.
  *   2. Every stop in the chain may move under the 4:40 re-plan's own rules: day-replan fixedReason, read again with
  *      the day's full facts (status, hold, staff lock, office review, group, same customer twice, the 24-hour lock,
  *      the 24-hour text and, with GATE_NIGHT_TOLD_LOCK, confirmed, first or one-time, person-placed and told
@@ -19,8 +23,9 @@
  *      2026-11-03): the 24-hour text always carries the new time; a new time inside 72 hours gets no new 72-hour
  *      text, and with GATE_NIGHT_TOLD_LOCK a stop whose time was already told never moves at all. Its time
  *      preference (the re-plan's loadPref) allows the new hour, and it still ends by the night tools' day close.
- *   3. Nothing else holds the new minutes: no unassigned visit, no other technician's visit while the occupancy
- *      check is technician-blind (the re-plan's blockedHoursFor rule), no schedule block.
+ *   3. Nothing else holds the new minutes of the new visit or of a moved stop: no unassigned visit, no other
+ *      technician's visit while the occupancy check is technician-blind (the re-plan's blockedHoursFor rule), no
+ *      schedule block.
  *   4. The route keeps every arrival window with the new visit in it: arrival-route.js evaluateArrivalPlacement on
  *      the moved day, the check the estimate page runs today. In capacity mode its added drive also stays under the
  *      picker's self-serve cap (find-time findCapacitySlots: customerMaxDetourMinutes, with the zone route-day lift).
@@ -192,13 +197,15 @@ function chainRanges(candidate) {
 // One hour on one technician-day, with the checks that need no read. Returns { candidate } or { reason }.
 function tryHour({ day, startMin, env, request }) {
   const { durationMin } = request;
-  const slot = { date: day.dateStr, windowStart: hhmm(startMin), windowEnd: hhmm(startMin + durationMin), durationMinutes: durationMin, techId: day.techId };
+  // routeMode: every hour that passes is checked on the arrival-window route (routeKeepsWindows), like the page's own
+  // capacity-mode slots, which is what filterCollidingSlots asks of a slot in capacity mode.
+  const slot = { date: day.dateStr, windowStart: hhmm(startMin), windowEnd: hhmm(startMin + durationMin), durationMinutes: durationMin, techId: day.techId, routeMode: 'arrival_windows' };
   if (!request.admit(slot)) return { reason: 'not_offerable' };
   const chain = buildChain(day.own, { startMin, durationMin, closeMin: env.closeMin });
   if (chain.reason) return { reason: chain.reason };
   const fixed = chain.moves.map((m) => env.fixedReason(m.row, day.quick)).find(Boolean);
   if (fixed) return { reason: `fixed_${fixed}` };
-  const candidate = { dateStr: day.dateStr, techId: day.techId, startMin, durationMin, moves: chain.moves };
+  const candidate = { dateStr: day.dateStr, techId: day.techId, startMin, durationMin, moves: chain.moves, slot };
   if (hitsAny(chainRanges(candidate), day.taken)) return { reason: 'taken_by_other' };
   const { prev } = neighbours(day.own, startMin, day.home);
   candidate.detourMin = addedDrive(env.legMin, prev, request.point, pointOf(chain.moves[0].row));
@@ -331,11 +338,14 @@ async function moveBlockedReason(move, { conn, env, day, techId }) {
   return pref && !(move.toMin >= pref.startMin && move.toMin < pref.endMin) ? 'preference' : null;
 }
 
-// The checks that read the database, for one candidate: schedule blocks, the route, then each moved stop's facts.
+// The checks that read the database, for one candidate: schedule blocks, the page's placement rules on the moved
+// day, the route, then each moved stop's facts.
 async function fullCheck(candidate, ctx) {
   const { conn, env, request, caches } = ctx;
   const blocks = await cached(caches.blocks, `${candidate.dateStr}|${candidate.techId}`, () => env.loadBlocks(conn, candidate.dateStr, candidate.techId));
   if (hitsAny(chainRanges(candidate), blocks || [])) return 'schedule_block';
+  const placed = await request.placement(candidate.slot, new Map(candidate.moves.map((m) => [String(m.row.id), m.toMin - m.fromMin])));
+  if (placed !== true) return placed || 'page_rules';
   const route = await routeKeepsWindows(candidate, ctx);
   if (route !== true) return route;
   const day = await cached(caches.days, candidate.dateStr, () => env.loadDayContext(conn, candidate.dateStr, request.now));
@@ -385,6 +395,8 @@ async function loadDays(conn, env, { dates, holdIds, deadline, report }) {
 // no absent or off tech-day, no blackout date (strict: an unreadable list stops the check). With this estimate's
 // services (capabilityRows), also the page's capability rule (filterCollidingSlots): no technician whose capability
 // for a requested service is off. A stop left on such a day is never a place to book, so it is never a candidate.
+// The page's placement check reads capability again for the hours that reach it; reading it here first keeps an
+// incapable technician's hours from using up the MAX_FULL_CHECKS full checks.
 async function loadOpenTechDays(conn, env, { dates, capabilityRows }) {
   const dateFrom = dates[0];
   const dateTo = dates[dates.length - 1];
@@ -472,7 +484,7 @@ async function checkCandidates(candidates, { conn, env, request, deadline, repor
   }
 }
 
-async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId, capabilityRows, zoneSlug, dateFrom, dateTo, admit, now, deadline, deps }) {
+async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId, capabilityRows, zoneSlug, dateFrom, dateTo, admit, placement, now, deadline, deps }) {
   const base = deps || defaultDeps();
   // The setup reads run under the same budget as every later read.
   const homes = await raceBudget(base.loadTechStartPoints(conn), deadline);
@@ -494,7 +506,7 @@ async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId
     report.timedOut = true;
     return;
   }
-  const request = { point, durationMin, admit, now, bestFree, estimateId, detourCap };
+  const request = { point, durationMin, admit, placement, now, bestFree, estimateId, detourCap };
   const candidates = [];
   for (const [dateStr, rows] of dayRows) {
     for (const techId of techIdsOf(rows)) {
@@ -542,12 +554,14 @@ function checkRow(report) {
  * @param {string} args.dateFrom        the request's first and last ET dates
  * @param {string} args.dateTo
  * @param {Function} args.admit         slot -> true when the page could offer it
+ * @param {Function} args.placement     async (slot, Map<stop id, minutes later>) -> true, or why the page's own
+ *                                      placement rules refuse the new visit on the moved day
  * @param {Array}  [args.capabilityRows] this estimate's services as technician-capabilities rows ({ service_type })
  * @param {string} [args.zoneSlug]      the request's route-day zone (the page passes find-time the same one)
  * @returns {Promise<object>} the report
  */
 async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = null, pool, coords, durationMinutes, capabilityRows, zoneSlug,
-  dateFrom, dateTo, admit, now = new Date(), conn, deps, budgetMs = DEFAULT_BUDGET_MS } = {}) {
+  dateFrom, dateTo, admit, placement, now = new Date(), conn, deps, budgetMs = DEFAULT_BUDGET_MS } = {}) {
   const startedAt = Date.now();
   const report = { mode, surface, estimateId, durationMin: null, free: null, dates: 0, tried: 0, candidates: 0, checked: 0, passed: [], byReason: {}, timedOut: false, skipped: null, error: null, ms: 0 };
   const knex = conn || require('../../models/db');
@@ -555,12 +569,12 @@ async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = nu
     const point = pointOf(coords);
     report.durationMin = Number(durationMinutes) > 0 ? Math.round(Number(durationMinutes)) : 60;
     if (!point) report.skipped = 'no_pin';
-    else if (typeof admit !== 'function' || !dateFrom || !dateTo) report.skipped = 'no_request';
+    else if (typeof admit !== 'function' || typeof placement !== 'function' || !dateFrom || !dateTo) report.skipped = 'no_request';
     else {
       await findMakeRoom(report, {
         conn: knex, pool: Array.isArray(pool) ? pool : [], point, durationMin: report.durationMin, estimateId,
         capabilityRows, zoneSlug,
-        dateFrom, dateTo, admit, now, deadline: startedAt + budgetMs, deps,
+        dateFrom, dateTo, admit, placement, now, deadline: startedAt + budgetMs, deps,
       });
     }
   } catch (err) {

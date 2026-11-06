@@ -126,6 +126,7 @@ describe('getAvailableSlots — make-room check wiring (GATE_BOOKING_MAKE_ROOM)'
     });
     expect(arg.durationMinutes).toBeGreaterThan(0);
     expect(typeof arg.admit).toBe('function');
+    expect(typeof arg.placement).toBe('function');
     // The pool holds every time the page served.
     const pooled = arg.pool.map((s) => `${s.date} ${s.windowStart}`);
     for (const key of served) expect(pooled).toContain(key);
