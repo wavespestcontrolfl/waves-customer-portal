@@ -104,8 +104,10 @@ Rules for any new check:
 - No paid API call. If the check needs one, stop and ask the owner first.
 - Never a customer text, email or call.
 
-If no home fits, write `no check yet: <reason>` in the lesson. Name the check,
-or that line, in the PR's Encoded lesson section.
+If no home fits, write `no check yet: <reason>` in the lesson. In the PR's
+Encoded lesson section, put one line: `Live check: <the job or check that now
+finds it>` or `no check yet: <reason>`. The weekly agent-loop scoreboard
+counts these two lines.
 
 ## Ship it with the fix
 
