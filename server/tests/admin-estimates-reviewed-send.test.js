@@ -2990,4 +2990,38 @@ describe('a corrected estimate says it is updated (GATE_ESTIMATE_UPDATED_WORDING
     expect(preview.body.messages.email).toMatchObject({ provider: 'smtp', subject: 'Your Updated Waves Pest Control Estimate is Ready', updated: true });
     expect(preview.body.messages.email.text).toContain('Your updated service estimate is ready for review. It replaces the one we sent before.');
   });
+
+  describe('an app-made move estimate (GATE_MOVING_AUTO_SEND)', () => {
+    const MOVE = { move: { moveId: 'synthetic-move' }, automation: { moveAutoEstimate: { moveId: 'synthetic-move', planName: 'Synthetic Plan' } } };
+    const updatedTextOff = () => smsTemplates.getTemplate.mockImplementation(async (key, vars) => (key === 'estimate_updated' ? null : baseSms(key, vars)));
+    beforeEach(() => {
+      gates.movingAutoSendLive = jest.fn(() => true);
+      row.estimate_data = { ...MOVE, ...row.estimate_data };
+    });
+    afterEach(() => { delete gates.movingAutoSendLive; });
+
+    test('a corrected move estimate previews the updated text; with that text off, the move text, not estimate_sent', async () => {
+      const preview = await invoke('/:id/send-preview', 'get');
+      expect(preview.body.messages.sms).toMatch(/^Updated estimate: /);
+      expect(preview.body.messages.smsTemplate).toBe('estimate_updated');
+      updatedTextOff();
+      const fallback = await invoke('/:id/send-preview', 'get');
+      expect(fallback.body.messages).not.toHaveProperty('smsTemplate');
+      expect(smsTemplates.getTemplate.mock.calls.at(-1)[0]).toBe('estimate_sent_move');
+      expect(smsTemplates.getTemplate.mock.calls.at(-1)[1]).toMatchObject({ plan_name: 'Synthetic Plan' });
+    });
+
+    test.each([
+      ["the app's morning text of the quote it emailed", () => { liveScope = DELIVERED_SCOPE; }, { movingAutoSend: true }, 'estimate_sent_move'],
+      ['an office resend of a corrected quote', () => {}, {}, 'estimate_updated'],
+      ['an office resend of a corrected quote, updated text off', updatedTextOff, {}, 'estimate_sent_move'],
+    ])('%s goes with, and is labeled as, the template that rendered it', async (_name, arrange, options, key) => {
+      arrange();
+      row.status = 'sending';
+      expect((await router.sendEstimateNow(structuredClone(row), 'sms', { callerPreClaimed: true, ...options })).sent).toBe(true);
+      expect(smsTemplates.getTemplate.mock.calls.at(-1)[0]).toBe(key);
+      // The provider's per-template kill switch reads the label (services/twilio.js isTemplateActive).
+      expect(sendCustomerMessage.mock.calls[0][0].metadata.original_message_type).toBe(key);
+    });
+  });
 });
