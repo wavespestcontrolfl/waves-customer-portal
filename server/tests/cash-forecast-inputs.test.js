@@ -6,7 +6,7 @@ const inputs = require('../services/cash-forecast/inputs');
 
 const {
   validateItemInput, validateSettingsInput, listItems, createItem, updateItem,
-  deactivateItem, getSettings, saveSettings,
+  deactivateItem, getSettings, saveSettings, validateMarkInput, listMarks, saveMark, clearMark,
 } = inputs;
 
 const ID = '11111111-2222-4333-8444-555555555555';
@@ -24,7 +24,7 @@ function makeDb(respond) {
     const call = { table, ops: [] };
     calls.push(call);
     const b = {};
-    ['where', 'orderBy', 'insert', 'update', 'returning', 'first', 'onConflict', 'merge'].forEach((name) => {
+    ['where', 'orderBy', 'insert', 'update', 'returning', 'first', 'onConflict', 'merge', 'select', 'del'].forEach((name) => {
       b[name] = (...args) => { call.ops.push([name, args]); return b; };
     });
     b.then = (res, rej) => Promise.resolve().then(() => respond(call)).then(res, rej);
@@ -392,6 +392,51 @@ describe('saveSettings', () => {
     const db = makeDb(() => []);
     await expect(saveSettings(db, {}, ACTOR)).rejects.toMatchObject({ status: 400 });
     await expect(saveSettings(db, { floor_cents: -1 }, ACTOR)).rejects.toMatchObject({ status: 400 });
+    expect(db.calls).toHaveLength(0);
+  });
+});
+
+// Step 2c: the owner's business/household label for a repeating bill, keyed on the engine's merchant key.
+describe('repeating-bill marks', () => {
+  test('a mark is business or household for a merchant key the engine gives (one or two capital words)', () => {
+    expect(validateMarkInput('ACME LOAN', { mark: 'household' })).toEqual({ ok: true, value: { key: 'ACME LOAN', mark: 'household' } });
+    expect(validateMarkInput('AT&T', { mark: 'business' }).ok).toBe(true);
+    for (const key of ['acme loan', 'ACME LOAN CO', 'A', 'ACME  LOAN', 'ACME1', '', 'X'.repeat(81), null]) {
+      expect(validateMarkInput(key, { mark: 'business' })).toEqual({ ok: false, error: 'key must be a repeating bill key from the forecast' });
+    }
+    expect(validateMarkInput('ACME LOAN', { mark: 'personal' })).toEqual({ ok: false, error: 'mark must be one of: business, household' });
+    expect(validateMarkInput('ACME LOAN', {})).toEqual({ ok: false, error: 'mark is required' });
+  });
+
+  test('listMarks reads every mark as key -> mark', async () => {
+    const db = makeDb(() => [{ key: 'ACME LOAN', mark: 'household' }, { key: 'NETPHONE', mark: 'business' }]);
+    expect(await listMarks(db)).toEqual({ 'ACME LOAN': 'household', NETPHONE: 'business' });
+    expect(db.calls[0].table).toBe('cash_forecast_line_marks');
+  });
+
+  test('saveMark upserts on the key with who and when, and returns the row', async () => {
+    const db = makeDb(() => [{ key: 'ACME LOAN', mark: 'business', updated_at: 'T' }]);
+    const out = await saveMark(db, 'ACME LOAN', { mark: 'business', key: 'IGNORED' }, ACTOR);
+    const call = db.calls[0];
+    expect(call.table).toBe('cash_forecast_line_marks');
+    expect(op(call, 'insert')[0]).toEqual({ key: 'ACME LOAN', mark: 'business', updated_by: ACTOR, updated_at: 'NOW()' });
+    expect(op(call, 'onConflict')).toEqual(['key']);
+    expect(op(call, 'merge')[0]).toEqual({ mark: 'business', updated_by: ACTOR, updated_at: 'NOW()' });
+    expect(out).toEqual({ key: 'ACME LOAN', mark: 'business', updated_at: 'T' });
+  });
+
+  test('clearMark deletes the row; clearing a mark that is not there is no error', async () => {
+    const db = makeDb(() => 0);
+    expect(await clearMark(db, 'ACME LOAN')).toEqual({ key: 'ACME LOAN', mark: null, removed: false });
+    expect(op(db.calls[0], 'where')).toEqual([{ key: 'ACME LOAN' }]);
+    expect(op(db.calls[0], 'del')).toEqual([]);
+  });
+
+  test('a bad key or mark throws status 400 and writes nothing', async () => {
+    const db = makeDb(() => []);
+    await expect(saveMark(db, 'acme', { mark: 'business' }, ACTOR)).rejects.toMatchObject({ status: 400 });
+    await expect(saveMark(db, 'ACME', { mark: 'nope' }, ACTOR)).rejects.toMatchObject({ status: 400 });
+    await expect(clearMark(db, 'ACME LOAN CO')).rejects.toMatchObject({ status: 400 });
     expect(db.calls).toHaveLength(0);
   });
 });

@@ -29,8 +29,30 @@ const config = require('./config');
 const logger = require('./services/logger');
 const { errorHandler, notFound } = require('./middleware/errors');
 const { initScheduledJobs, initBankingSync } = require('./services/scheduler');
+const { checkBootSecrets } = require('./utils/boot-secret-check');
 const { applySensitiveSpaHeaders } = require('./utils/sensitive-spa-headers');
 const { REDACTED_COMBINED_LOG, registerRedactedTokens } = require('./utils/request-log-format');
+
+// A placeholder or short JWT_SECRET refuses to start in production. A
+// placeholder TERMINAL_HANDOFF_SECRET or BOUNCIE_WEBHOOK_SECRET only logs a loud
+// error. Names only: never a secret value.
+function assertSecretStrength() {
+  const { fatal, warnings } = checkBootSecrets({ jwtSecret: config.jwt.secret, env: process.env });
+  for (const warning of warnings) {
+    if (config.nodeEnv === 'production') logger.error(`[startup] ${warning} — set a real value. Continuing.`);
+    else logger.warn(`[startup] ${warning} — continuing (non-production).`);
+  }
+  if (!fatal.length) return;
+  const message = `Weak secret(s): ${fatal.join('; ')}`;
+  if (config.nodeEnv === 'production') {
+    // Same reason as the missing-variable exit: the uncaughtException handler
+    // never exits, so a throw here would leave a zombie process.
+    console.error(`[startup] ${message} — refusing to start.`);
+    logger.error(`[startup] ${message} — refusing to start.`);
+    process.exit(1);
+  }
+  logger.warn(`[startup] ${message} — continuing (non-production).`);
+}
 
 // Fail closed on missing critical secrets in production. A missing JWT_SECRET
 // would otherwise let the app boot and then break auth at runtime — jwt.sign
@@ -53,7 +75,10 @@ function assertRequiredSecrets() {
   const missing = Object.entries(required)
     .filter(([, value]) => !value || !String(value).trim())
     .map(([name]) => name);
-  if (!missing.length) return;
+  if (!missing.length) {
+    assertSecretStrength();
+    return;
+  }
   const message = `Missing required environment variable(s): ${missing.join(', ')}`;
   if (config.nodeEnv === 'production') {
     // The global uncaughtException handler above deliberately never exits, so

@@ -365,6 +365,7 @@
  *   GATE_BID_ALERT_BUTTONS=true (owner 2026-10-29 "bid buttons, as a trial", PR 3 of the bell buttons: No bid on a new bid invite's bell row, and Bid only once the bid's due date is confirmed; a tap runs the Bid desk's own save step, sends nothing to a buyer or customer and moves no money. Week-1 read-out: ops job bid-buttons-trial-week1, Nov 5. Read at call time via bidAlertButtonsLive(), strict 'true', dark by default, and only while GATE_BID_DESK is on; off = the rows serve no such button and a tap answers 409.)
  *   GATE_ADS_NEGATIVES=true (owner plan A 2026-11-02: the owner's negative word list goes to Google Ads as phrase negatives on every linked campaign, each ads-advisor word arrives as one bell row with Add and Decline (3 a day at most), and every block can be undone on the Ads page; sends nothing to a customer and moves no money, but changes where the ads can show. Read at call time via adsNegativesLive(), strict 'true', dark by default; off = the /negatives routes answer 404, the bell rows serve no buttons, the advisor writes no rows, the 6 AM sync skips the step and no Google write runs.)
  *   GATE_ADS_HEALTH_CARD=true (owner 2026-11-04, option A on the PPC gap page: a read-only Ad health card on Ads → Dashboard. GET /api/admin/ads/health returns each Google campaign's live serving status and Google's reasons, ad disapprovals, the portal's 30-day conversion upload counts with Google's own upload check, and a 30-day who-changed-what timeline (Google change history from people and Google tools, plus the portal's budget log and negative keyword decisions). Reads only: it sends nothing, moves no money and changes no ad. Read at call time via adsHealthCardLive(), strict 'true', dark by default; off = the route answers 404 and the card renders nothing.)
+ *   GATE_ADS_HEALTH_ALERTS=shadow|true (owner 2026-11-05, "ALERT", after the Ad health card: every 2 hours one standing Leads bell for a person while an enabled Google Ads campaign cannot serve (Google's primary status Not eligible or Misconfigured, for a reason nobody chose: a pause or a date never counts) or an enabled ad in an enabled ad group of an enabled campaign is disapproved; it rings when a campaign or ad joins the set and closes itself at zero; plus one engineering row in Claude's queue while a live Google or Meta conversion upload failed on a try in the last 48 hours or Google's upload check reads Needs attention, retired at the first clean check. `shadow` = the same reads and one audit_log row (ads_health_alert.shadow) when the problems change, no alert; `true` = raise and close. Anything else = off: no query. Reads Google only; changes no ad or budget; sends nothing to a customer. Read at call time via adsHealthAlertsMode(). See services/ads/ads-health-alerts.js.)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
  *   GATE_PAY_PAGE_FAQ=true      (public /pay page: short FAQ accordion under the Pay button — card fee, bank timing, Zelle, saved card; copy-only, no money moves; dark in dev AND prod)
@@ -466,6 +467,7 @@
  *   GATE_LANE_VOICE_FILL=true (Fast Complete step 2, owner "ok go" 2026-10-02 on the mockup v8: POST /admin/dispatch/:id/lane-facts reads a specialty visit's own record (bed bug, fire ant, tick, bee & wasp, mud dauber, mosquito) from the technician's note: the places from the lane's own list and at most one value per finding group, each with the note's own words, kept only when the lane's closeout offers it and the note holds the words, never a pair the completion refuses (services/visit-lane-facts.js, TEXT_POLICIES.fastStructured, lane visit_lane_facts). Writes nothing: the office form and the tech's sheet show each field with its words for a person to confirm. With GATE_FAST_COMPLETE_REPORT also on, the tech portal opens such a visit (one that completes without a project) in the Fast Complete sheet's report flow instead of the project editor: the sheet's record card fills from the note, and the report and the /complete body (areasServiced, structuredObservations) are written from it; the pest-recap context answers the visit's `lane`. Strict opt-in: exactly 'true', read at call time via laneVoiceFillLive(). Ships DARK; off = 404 { enabled: false }, and the tech portal routes lane visits to the project editor as before.)
  *   GATE_TYPED_VOICE_FILL=true (Fast Complete steps 3 to 5, owner "ok go" 2026-10-02 on the mockup v8: POST /admin/dispatch/:id/typed-facts reads a typed visit's own findings (cockroach, the German and palmetto knockdowns, flea, pest inspection, mosquito event, wildlife trapping, rodent exclusion, sanitation and inspection; step 4: rodent trap checks, rodent and termite bait stations; step 5: termite liquid, trenching, rodding, spot and foam treatments and termite inspections, never new-construction pre-treat) from the technician's note: each pick field's values from the typed form's own options (the form as served for the visit's service key), each count and the technician's own 0-5 rating where they set the score only when the quote states the number (digits or words), a termite treatment's solution strength only as the percent its quote states, each with the note's own words, kept only when the note holds the words and never a combination the completion's own validator (validateTypedFindings, requirements off) refuses, every side of a clash left for a person (services/visit-typed-facts.js, TEXT_POLICIES.fastStructured, lane visit_typed_facts). Free-text and product-filled (autoFilled) fields are never read, nor the state's notice questions (treatment notice posted, inspection notice affixed: always a tap); a rating already set (scoreSet) is never read over. The termite forms are read on the office form only: their visits keep the typed form on the tech portal (typedReportFlowEnabled stays off for them). Writes nothing: a person confirms every field. On, the schedule payload carries `typedVoiceFillEnabled` and Generate AI report on the office Complete Service form first posts the notes with the form's present values (judged only, never stored) and fills only the fields still empty, each shown with the words it came from; a field set is never filled over and a fill that clashes with one is left for a person. With GATE_FAST_COMPLETE_REPORT also on, the schedule payload carries `typedReportFlowEnabled` (never a combined visit) and the tech portal opens such a visit in the Fast Complete sheet's report flow in place of the typed form: Generate reads the record from the note the same way, its card shows each field with the words it came from (a Change for each pick, a box for a count or free text, the 0-5 score where the tech sets it), and the report and completion are written from the record (structuredFindings, the form's own treated areas, activityScore); a nothing-found record, a saved trace the report would show, or a product whose place only the full form records goes to the Full form. A typed inspection shows the office form's inspection-credit toggle (on unless the tech turns it off; sent as offerInspectionCredit), and, after sending, the sheet offers a one-tap "Book the follow-up" on the day a completion suggests (bed bug, flea, cockroach and the knockdowns; POST /admin/dispatch/:id/schedule-followup, a pending visit, as the office's Schedule follow-up books it; the sheet context's `followupBooking`). Strict opt-in: exactly 'true', read at call time via typedVoiceFillLive(). Ships DARK; off = 404 { enabled: false }, Generate is unchanged and typed visits open the typed form as before.)
  *   GATE_ESTIMATE_CALL_LIST=true (owner 2026-11-01, from the sales study: 72% of acceptances come within 24 h of sending, so the 2 h to 48 h window after a customer opens an estimate is the hot one. Admin only: the estimates page gets a "Call today" list (viewed offers 2 h to 48 h after the last open with no call or follow-up since; the list rows carry lastCalledAt from the newest outbound call to the estimate phone in the last 30 days that the customer answered, by the missed-call bell's answered-leg proof) and a "Pick reason" list (expired offers the sweep marked expired_viewed in the last 30 days), and PATCH /api/admin/estimates/:id accepts a staff loss reason on an expired row with no status change. Extending an expired offer clears a staff reason. Read at call time via estimateCallListLive(), strict 'true', dark by default; the admin client reads it as the `estimate_call_list` flag on GET /api/admin/feature-flags. Off = every route, flag and page exactly as before. Never texts, emails or calls a customer; spends nothing.)
+ *   GATE_ESTIMATE_UPDATED_WORDING=true (owner 2026-11-04, "updated": a corrected estimate says so. A send of an estimate the customer already received, whose priced lines, prices (each line's and the totals) or address changed since that delivery, goes out as the estimate_updated text and the estimate.updated_delivery email ("your updated Waves estimate is ready"), both seeded by migration 20261105040000 from the live copy; each channel falls back to its normal template when its updated one is off or missing; read at call time via estimateUpdatedWordingLive(), services/estimate-updated-wording.js)
  *   GATE_PET_NAME_TEXT=true (WaveGuard perk, owner 2026-10-31 perks round 4 and 2026-11-01 "continue working on": the completion text of a WaveGuard member's visit at home (not a non-member, not a visit stamped at another address or unit) adds one sentence that names the member's dogs and cats and says when they can go back out, e.g. "Biscuit can go back out once the spray has dried." The sentence is one row of a closed table in server/services/pet-name-line.js, picked by the re-entry decision the visit's service report already prints (service-report/reentry.js buildReentryContext): a frozen lawn condition (dry, or watered in and dry), or the stored until-dry advisory of a pest, mosquito, lawn, tree and shrub or palm visit with an outside and/or inside re-entry target. Bait or station work, a visit with no re-entry on its report and an advisory not in the table get no sentence. No time or minute figure and no "safe"; the finished sentence still goes through customerCopyViolations. Names come from property_preferences.pets_structured (the customer app's Pets editor): dogs, cats and pets with no type only, one to three names (none or four and more = no sentence), an indoor pet left out of an outside line. It rides as its own paragraph after the template body and before the bundled review line, in every completion-family text except Fast Complete's fixed re-service text (which already carries its own pets line), and only for a performed visit. A failed read costs only the sentence, never the text. Customer copy, so strict opt-in: exactly 'true', read at call time via petNameTextLive(). Ships DARK; off = no extra read and byte-identical texts)
  *   GATE_STATION_FAST_COMPLETE=true (owner 2026-10-08: a termite or rodent bait station visit opens the one-screen Fast Complete sheet in admin Dispatch even while the station map (station-map-v1) is on. The sheet loads the property's station registry and shows "N stations, all OK"; the technician's note names exceptions by station number ("station 4 had activity, I replaced the bait in 7"), read by POST /admin/dispatch/:id/typed-facts when the request carries the sheet's stations (services/visit-station-facts.js: the number must be an active station of the visit's program, the status one of activity / serviced / no access, and the quoted words in the note, else dropped), each shown as a chip the technician taps to correct. The completion posts termiteStations exactly as the full form does (an entry per station, touched on exceptions) and the typed station counts from the shared rule (client/src/lib/station-checks.js). Adding, moving or retiring a station, a rodent trap check, a combined visit, an inspection-only outcome, a station with no pin and a registry that failed to load all stay on the full form. Needs GATE_FAST_COMPLETE_REPORT and GATE_TYPED_VOICE_FILL. The schedule payload carries `stationFastCompleteEnabled`. Strict opt-in: exactly 'true' in every environment, read at call time via stationFastCompleteLive(). Ships DARK; off = the flag is false, the typed-facts route reads no stations and station visits route exactly as before.)
  *   SELF_SERVE_NOTICE_HOURS=24 (not a gate — the self-serve BOOK notice window, server/services/scheduling/self-serve-notice.js: no SELF-SERVE booking of a slot starting within this many hours of now, on the estimate picker + reserve, /book, public reschedule's DESTINATION slot, public re-service and the assistant's booking tools; staff/admin/voice agent unaffected; cancels keep the fee-window policy; read at call time, default 24)
@@ -521,7 +523,6 @@
  *   GATE_RING_NEW_CONTACTS=true (owner 2026-11-04, reply "ring new": two kinds of incoming contact never put a banner on the owner's phone. (1) A text from a number with no customer record to a customer-facing office line (a location line or a Google Business Profile tracking line; not the AI assistant line, not a tech line, not a staff phone, not a reaction or courtesy closer) wrote only a quiet Activity row. On, it rings the same one-row-per-sender new-lead bell the website and van tracking lines ring (sms-reply-alert-delivery.js ringTrackingLineTextBell): the latest text quoted, a running count, the name on file, a phone banner on every text; the quiet Activity row is then skipped, and kept if the ring fails. (2) A new-lead email (a lead created from an email, or a follow-up email that completed a quote request) wrote a bell row without a banner. On, it also sends ONE phone banner with the New lead sound at any hour, once per email id (the bell row is keyed on the email), with no second bell row (bell-banners.js kind new_lead_email). Known-customer texts, tracking lines, the AI line, tech lines, staff senders and the possible-lead review rows are unchanged. Sends nothing to a customer, no paid API. Read at call time via ringNewContactsLive(), strict 'true', dark by default; off = byte-identical, rollback = unset.)
  *   GATE_MILEAGE_TRIP_COORDS=true (owner 2026-11-04, "do all" on the audit item "link each GPS trip to its stop": every mileage_log row since May 2026 has NULL start and end coordinates, because Bouncie's trip-start and trip-end webhooks carry no location; GPS points arrive only in trip-data events in bouncie_webhook_log. On: the daily 1:00 AM Bouncie cron, before its summary, copies the first and last trip-data point of the same transactionId into the row's NULL start and end coordinates (last 3 days; only trips whose trip-end event is logged and 2+ hours old, with a trip-start event, and only when the trail reaches the start and end times within 3 minutes), so the home base and the trip link can see them. Fills NULL coordinates only; never touches is_business, purpose, deduction or classification. Read at call time via mileageTripCoordsLive(), strict 'true', dark by default; off = nothing is written, byte for byte today's; rollback = unset.)
  *   GATE_NIGHT_PASS_WAIT=true (owner 2026-11-04, "do all": the 4:20 AM route re-order pass and the 4:40 AM day re-plan pass each borrow the 4:10 auto-dispatch writer lock; today a busy lock skips the 4:20 tick (ledgered) and fails the 4:40 tick. On, each of the two WAITS for that lock, retrying every 15 seconds for up to 25 minutes (the 4:10 road check can run 20 minutes), so the three night tools run one after another. A wait that runs out ends exactly as a skip does today. Only those two cron calls pass the wait; every other lock caller is unchanged. Strict `=== 'true'`, read at call time via nightPassWaitLive() so a flip needs no redeploy; dark by default. No customer contact, no spend. Rollback: unset it.)
- *   GATE_ESTIMATE_UPDATED_WORDING=true (owner 2026-11-04, "updated": a corrected estimate says so. A send of an estimate the customer already received, whose priced lines, prices (each line's and the totals) or address changed since that delivery, goes out as the estimate_updated text and the estimate.updated_delivery email ("your updated Waves estimate is ready"), both seeded by migration 20261105040000 from the live copy; each channel falls back to its normal template when its updated one is off or missing; read at call time via estimateUpdatedWordingLive(), services/estimate-updated-wording.js)
  */
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -3022,6 +3023,8 @@ const gates = {
   adsNegatives: process.env.GATE_ADS_NEGATIVES === 'true',
   // GATE_ADS_HEALTH_CARD (read-only Ad health card on Ads → Dashboard, dark). Boot-log entry only; the call-time reader is adsHealthCardLive().
   adsHealthCard: process.env.GATE_ADS_HEALTH_CARD === 'true',
+  // GATE_ADS_HEALTH_ALERTS (ads health alerts: a Google Ads serving and disapproval bell, upload faults to Claude's queue; dark). Boot-log entry only; the call-time reader is adsHealthAlertsMode().
+  adsHealthAlerts: ['shadow', 'true'].includes(String(process.env.GATE_ADS_HEALTH_ALERTS || '').trim().toLowerCase()),
 
   // Autonomous Content Engine — runs the daily content pipeline.
   // Even when this gate is ON, individual action types stay in shadow
@@ -3331,6 +3334,9 @@ const gates = {
   // STRICT opt-in in EVERY environment (a local run must never ring the
   // office). Enable with GATE_ESTIMATE_HOT_VIEW_ALERT=true.
   estimateHotViewAlert: process.env.GATE_ESTIMATE_HOT_VIEW_ALERT === 'true',
+  // GATE_ESTIMATE_UPDATED_WORDING: read at CALL time via estimateUpdatedWordingLive(); this entry is for logGateStatus,
+  // so the boot log shows the flip.
+  estimateUpdatedWording: process.env.GATE_ESTIMATE_UPDATED_WORDING === 'true',
   // Customer soft exit on a sent estimate: the "Not what you expected?" sheet.
   // Three outcomes, none of which message the customer: a reason-tagged
   // decline (PUT /:token/decline gains optional reason/competitor/note
@@ -5690,9 +5696,6 @@ const gates = {
   // GATE_NIGHT_PASS_WAIT: read at CALL time via nightPassWaitLive(); this entry is for logGateStatus, so the boot log
   // shows the flip.
   nightPassWait: process.env.GATE_NIGHT_PASS_WAIT === 'true',
-  // GATE_ESTIMATE_UPDATED_WORDING: read at CALL time via estimateUpdatedWordingLive(); this entry is for logGateStatus,
-  // so the boot log shows the flip.
-  estimateUpdatedWording: process.env.GATE_ESTIMATE_UPDATED_WORDING === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -7249,6 +7252,15 @@ function adsNegativesLive() {
 // sends nothing and changes no ad. Kill: unset.
 function adsHealthCardLive() {
   return process.env.GATE_ADS_HEALTH_CARD === 'true';
+}
+
+// GATE_ADS_HEALTH_ALERTS read at CALL time: 'shadow', 'true' or 'off' (services/ads/ads-health-alerts.js, owner
+// 2026-11-05 "ALERT"). 'shadow' (trimmed, any case) reads Google and the upload log and writes one audit_log row when
+// the problems change, with no alert; 'true' raises and closes the Google Ads bell and the upload row in Claude's
+// queue. Anything else is off: no query. Unset is the kill.
+function adsHealthAlertsMode() {
+  const value = String(process.env.GATE_ADS_HEALTH_ALERTS || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
 // GATE_RESERVICE_PHOTOS read at CALL time — the one canonical reader
@@ -9644,6 +9656,8 @@ module.exports.bidAlertButtonsLive = bidAlertButtonsLive;
 module.exports.adsNegativesLive = adsNegativesLive;
 // GATE_ADS_HEALTH_CARD reader, on its own line so gate PRs never conflict.
 module.exports.adsHealthCardLive = adsHealthCardLive;
+// GATE_ADS_HEALTH_ALERTS reader, on its own line so gate PRs never conflict.
+module.exports.adsHealthAlertsMode = adsHealthAlertsMode;
 module.exports.reservicePhotosLive = reservicePhotosLive;
 module.exports.reviewLowRatingAlertLive = reviewLowRatingAlertLive;
 // GATE_DUPLICATES_SAME_ADDRESS reader, on its own line.
@@ -9909,6 +9923,17 @@ function estimateCallListLive() {
 }
 // GATE_ESTIMATE_CALL_LIST reader, on its own line so gate PRs never conflict.
 module.exports.estimateCallListLive = estimateCallListLive;
+
+// GATE_ESTIMATE_UPDATED_WORDING read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
+// Owner 2026-11-04 "updated": an estimate the customer already received, sent again after its services, prices or
+// address changed, goes out as the "updated estimate" text (sms_templates estimate_updated) and email
+// (estimate.updated_delivery). Off = the estimate_sent text and the estimate.delivery email, as today
+// (services/estimate-updated-wording.js).
+function estimateUpdatedWordingLive() {
+  return process.env.GATE_ESTIMATE_UPDATED_WORDING === 'true';
+}
+// GATE_ESTIMATE_UPDATED_WORDING reader, on its own line so gate PRs never conflict.
+module.exports.estimateUpdatedWordingLive = estimateUpdatedWordingLive;
 
 // GATE_ONE_TEXT_PER_CUSTOMER_DAY read at CALL time, strict `=== 'true'`, dark in every environment.
 function oneTextPerCustomerDayLive() {
@@ -10728,14 +10753,13 @@ function voicemailTextCallerOnlyLive() {
 }
 // GATE_VOICEMAIL_TEXT_CALLER_ONLY reader, on its own line so gate PRs never conflict.
 module.exports.voicemailTextCallerOnlyLive = voicemailTextCallerOnlyLive;
-
-// GATE_ESTIMATE_UPDATED_WORDING read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
-// Owner 2026-11-04 "updated": an estimate the customer already received, sent again after its services, prices or
-// address changed, goes out as the "updated estimate" text (sms_templates estimate_updated) and email
-// (estimate.updated_delivery). Off = the estimate_sent text and the estimate.delivery email, as today
-// (services/estimate-updated-wording.js).
-function estimateUpdatedWordingLive() {
-  return process.env.GATE_ESTIMATE_UPDATED_WORDING === 'true';
+// GATE_CLAUDE_INPUT_GUARD read at CALL time, strict `=== 'true'`, dark in every environment (security audit run 3, owner 2026-11-05
+// "ALL"). On, three paths stop handing an outside sender's words to the owner's Claude sessions: the admin MCP `needs_me` keeps an
+// alert's `why` only for categories whose body our code writes; `list_gap_reports` marks every gap row quoted_words (the Intelligence
+// Bar writes its rows from model text, not from words the owner typed); and Send to Claude no longer offers purchase-receipt
+// inventory bells (they quote a marketplace listing title and a model reason). Off = all three as before.
+function claudeInputGuardLive() {
+  return process.env.GATE_CLAUDE_INPUT_GUARD === 'true';
 }
-// GATE_ESTIMATE_UPDATED_WORDING reader, on its own line so gate PRs never conflict.
-module.exports.estimateUpdatedWordingLive = estimateUpdatedWordingLive;
+// GATE_CLAUDE_INPUT_GUARD reader, on its own line so gate PRs never conflict.
+module.exports.claudeInputGuardLive = claudeInputGuardLive;
