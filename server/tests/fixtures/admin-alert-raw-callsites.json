@@ -20,7 +20,6 @@
   "services/admin-cancellation.js": 2,
   "services/admin-claude-ideas.js": 1,
   "services/agent-gap-reports.js": 1,
-  "services/agent-watchdog-liveness.js": 1,
   "services/annual-prepay-addon-billing.js": 1,
   "services/annual-prepay-renewals.js": 10,
   "services/appointment-card-request.js": 10,
