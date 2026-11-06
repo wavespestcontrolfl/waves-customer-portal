@@ -13,6 +13,10 @@
   flex-wrap: wrap;
   margin-top: 18px;
 }
+/* Room for the RECOMMENDED badge, which rises 16px above its pill. */
+[data-glass-theme] .gc-freq:has(.gc-freq-rec) {
+  margin-top: 26px;
+}
 [data-glass-theme] .gc-freq-btn {
   position: relative;
   flex: 1;
@@ -50,7 +54,9 @@
 }
 [data-glass-theme] .gc-freq-rec {
   position: absolute;
-  top: -10px;
+  /* Sits on the pill's top edge with ~9px clear above the label (it touched
+     the label at -10px). */
+  top: -16px;
   left: 50%;
   transform: translateX(-50%);
   font-size: 14px;
@@ -251,6 +257,16 @@
   border: 1px solid #dadce0;
   box-shadow: 0 1px 3px rgba(60, 64, 67, 0.12);
 }
+/* Phones: a 374px card (340 + padding) overran the ~308px strip, so the
+   first review was always cut. The whole card now ends inside the strip,
+   short of its edge fade (the strip is the viewport less 82px of page
+   gutter and card padding). */
+@media (max-width: 640px) {
+  [data-glass-theme] .gc-rm-card {
+    box-sizing: border-box;
+    width: min(374px, calc(100vw - 96px));
+  }
+}
 [data-glass-theme] .gc-gr-head {
   display: flex;
   align-items: flex-start;
@@ -360,6 +376,131 @@
 }
 [data-glass-theme] .gc-section-cta:hover {
   transform: translateY(-1px);
+}
+
+/* ── Main approve CTA ─────────────────────────────────────────────────── */
+/* The plan's one primary action (GetServiceTodayCta) outranks every other
+   gold control on the page: card-wide, 56px tall, and a more solid gold.
+   The base accent rule in glass-theme.css stays as it is for all other
+   accent buttons. */
+[data-glass-theme] .gc-main-cta[data-glass-accent] {
+  width: 100%;
+  max-width: 420px;
+  min-height: 56px !important;
+  font-size: 18px !important;
+  background: linear-gradient(135deg, rgba(255, 222, 110, 0.95), rgba(244, 176, 20, 0.88)),
+    rgba(240, 165, 0, 0.6) !important;
+  box-shadow: 0 14px 32px rgba(180, 110, 0, 0.3), 0 0 22px rgba(240, 165, 0, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45), inset 0 -2px 8px rgba(180, 110, 0, 0.2) !important;
+}
+/* Section intro lines (schedule, Waves AI, reviews) read as body prose:
+   16px per owner D1 2026-09-05 ("body prose is 16 on customer surfaces").
+   Inline 14px stays the non-glass value. */
+[data-glass-theme] .gc-lead {
+  font-size: 16px !important;
+}
+
+/* Long section CTA labels wrap evenly instead of leaving the arrow alone. */
+[data-glass-theme] .gc-section-cta {
+  text-wrap: balance;
+}
+
+/* ── Slot search on phones ───────────────────────────────────────────── */
+/* The shared search row (WavesAIScheduleSearch) puts Search beside the
+   input, which cuts the placeholder at 390px. On the estimate, phones stack
+   Search under the input. The quick-pick strip stays one scrolling line
+   (#3886); its edges fade so the overflow reads as "more", not cut off. */
+@media (max-width: 640px) {
+  [data-glass-theme] .gc-slot-search form {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  [data-glass-theme] .gc-slot-search .waves-chip-strip {
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 20px, #000 calc(100% - 56px), transparent);
+    mask-image: linear-gradient(90deg, transparent, #000 20px, #000 calc(100% - 56px), transparent);
+  }
+}
+
+/* ── Estimate calendar (shared SchedulePicker inside .gc-sched) ──────── */
+/* Unavailable days stay muted but legible (was 35% opacity), and the
+   openings / tech-nearby dots are big enough to tell apart. On phones the
+   inner panels give back 6px a side and the grid gap 2px, so each of the
+   seven day cells grows from ~34px to ~38px wide. */
+[data-glass-theme] .gc-sched .wpk-day:disabled {
+  opacity: 0.5;
+}
+[data-glass-theme] .gc-sched .wpk-day-dots i {
+  width: 7px;
+  height: 7px;
+}
+[data-glass-theme] .gc-sched .wpk-legend i {
+  width: 10px;
+  height: 10px;
+}
+@media (max-width: 640px) {
+  [data-glass-theme] .gc-sched .wpk-section-inner {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+  [data-glass-theme] .gc-sched .wpk-dow,
+  [data-glass-theme] .gc-sched .wpk-grid {
+    gap: 4px;
+  }
+}
+
+/* ── Scheduler buttons stop competing with Approve ───────────────────── */
+/* Gold belongs to the plan's approve CTA (and the owner's gold pills,
+   07-11). Search wore gold even while disabled with an empty box, so it
+   read as the page's action; it now looks disabled until the customer
+   types, then the shared gold accent returns. The best-time "Pick" pill
+   was the brightest yellow on the page; it is a navy outline pill now. */
+[data-glass-theme] .gc-slot-search button[type='submit'][data-glass-accent]:disabled {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.1)),
+    rgba(255, 255, 255, 0.22) !important;
+  border: 1px solid rgba(4, 57, 94, 0.2) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.42) !important;
+  color: #475569 !important;
+  opacity: 1 !important;
+}
+[data-glass-theme] .gc-sched .wpk-best-go {
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(4, 57, 94, 0.32);
+  color: #04395e;
+}
+
+/* ── Waves AI fact tiles on phones ───────────────────────────────────── */
+/* Three tiles stay one row (owner 2026-07-10). At 390px each tile had 79px
+   for text, so "2,340 sq ft" (81px) and "YEAR BUILT" (89px with eyebrow
+   tracking) broke mid-phrase. A tighter gap and side padding plus untracked
+   labels give 83px, so each label and value holds one line. The selectors
+   need the glass walker's tags, so the ?website=1 embed is untouched. */
+@media (max-width: 640px) {
+  [data-glass-theme] .gc-ai-metrics:has(> [data-glass]) {
+    gap: 8px !important;
+  }
+  [data-glass-theme] .gc-ai-metrics > [data-glass] {
+    padding-left: 6px !important;
+    padding-right: 6px !important;
+  }
+  [data-glass-theme] .gc-ai-metrics [data-gt="eyebrow"] {
+    letter-spacing: 0 !important;
+  }
+}
+
+/* The plan's terms line under the main CTA (cancel anytime, callbacks,
+   guarantee) is a trust point, not fine print: body size in ink navy. */
+[data-glass-theme] .gc-cta-micro {
+  font-size: 16px !important;
+  font-weight: 500 !important;
+  color: var(--text, #04395e) !important;
+}
+
+@media (max-width: 640px) {
+  /* Card-wide on phones; 16px keeps the label on one line at 390px. */
+  [data-glass-theme] .gc-main-cta[data-glass-accent] {
+    max-width: none;
+    padding: 0 16px !important;
+    font-size: 16px !important;
+  }
 }
 
 /* ── App section: paired hero phones + chips ─────────────────────────── */

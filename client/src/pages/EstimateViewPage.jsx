@@ -235,6 +235,7 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '16px 0 24px' }}>
       <button
         type="button"
+        className="gc-main-cta"
         onClick={slotMeta ? scrollToPaymentSection : onPickTime}
         style={{
           minHeight: 44,
@@ -267,7 +268,7 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
           tone; the demotion logic in glassCtaMicroForKeys already keeps
           them truthful per category. */}
       {showGuaranteeMicro ? (
-        <div style={{ marginTop: 12, fontSize: 14, color: ESTIMATE_MUTED, textAlign: 'center', lineHeight: 1.5 }}>
+        <div className="gc-cta-micro" style={{ marginTop: 12, fontSize: 14, color: ESTIMATE_MUTED, textAlign: 'center', lineHeight: 1.5 }}>
           {microText || GLASS_COPY.ctaMicro}
         </div>
       ) : null}
@@ -999,7 +1000,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         </h2>
       </div>
 
-      <p style={{
+      <p className="gc-lead" style={{
         margin: satelliteUrl || showMisting || metrics.length ? '0 0 14px' : '0',
         color: '#3F4A65',
         fontSize: 14,
@@ -1034,7 +1035,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       ) : null}
 
       {metrics.length ? (
-        <div style={{
+        <div className="gc-ai-metrics" style={{
           display: 'grid',
           // 3 metrics = one row of 3 (owner 2026-07-10 — auto-fit orphaned
           // the third tile onto its own row); any other count keeps the
