@@ -9521,7 +9521,7 @@ function initScheduledJobs() {
     try {
       await runExclusive('moving-auto-send', async () => {
         const result = await require('./moving-auto-send').runMoveAutoSendJob();
-        if (result.sent || result.texted || result.office || result.failed) logger.info(`[moving-auto-send] ${JSON.stringify(result)}`);
+        if (result.sent || result.texted || result.office || result.restored || result.failed) logger.info(`[moving-auto-send] ${JSON.stringify(result)}`);
       });
     } catch (err) {
       logger.error(`[moving-auto-send] run failed: ${err.message}`);

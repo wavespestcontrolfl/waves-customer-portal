@@ -206,7 +206,7 @@ postgres('moving: the app-sent new-home estimate (live Postgres)', () => {
   test('a customer with a phone and no email waits for 8 AM, then gets the text', async () => {
     const { estimateId } = await draftFor({ customer: { email: null } });
     // At night it never takes a place in the batch.
-    expect(await Send.runMoveAutoSendJob({ now: at('22:00') })).toEqual({ sent: 0, texted: 0, office: 0, waiting: 0, skipped: 0, failed: 0 });
+    expect(await Send.runMoveAutoSendJob({ now: at('22:00') })).toEqual({ sent: 0, texted: 0, office: 0, restored: 0, waiting: 0, skipped: 0, failed: 0 });
     expect((await estimate(estimateId)).status).toBe('draft');
     expect(await Send.runMoveAutoSendJob({ now: at('08:08', 1) })).toMatchObject({ sent: 1 });
     expect(texts()).toHaveLength(1);
@@ -275,6 +275,44 @@ postgres('moving: the app-sent new-home estimate (live Postgres)', () => {
     expect(officeItems()[0][3].detail).toContain("so the app cannot tell what went out. Check the estimate's send history first.");
     expect(await Send.runMoveAutoSendJob({ now: at('10:15'), sendEstimateNow })).toMatchObject({ office: 0 });
     expect(sendEstimateNow).toHaveBeenCalledTimes(1);
+  });
+
+  test('a send that parks the estimate itself (send_failed at its last check) still rings the office', async () => {
+    const { estimateId } = await draftFor();
+    const sendEstimateNow = jest.fn(async (row) => {
+      await trx('estimates').where({ id: row.id, status: 'sending' }).update({ status: 'send_failed', last_send_error: 'reprice_pending' });
+      throw Object.assign(new Error('This estimate is being re-priced. Nothing was sent.'), { statusCode: 409 });
+    });
+    expect(await Send.runMoveAutoSendJob({ now: at('10:00'), sendEstimateNow })).toMatchObject({ office: 1, sent: 0 });
+    expect((await estimate(estimateId)).status).toBe('send_failed');
+    expect(await state(estimateId)).toMatchObject({ result: 'uncertain' });
+    expect(officeItems()).toHaveLength(1);
+    expect(officeItems()[0][3].detail).toContain('This estimate is being re-priced. Nothing was sent.');
+  });
+
+  test.each([
+    ['a plain restart gives the customer the emailed estimate back, with no item', {}, { status: 'sent', items: 0, restored: 1 }],
+    ['a hold the send set keeps the estimate parked and rings the office', { reprice_pending_at: new Date().toISOString() }, { status: 'send_failed', items: 1, restored: 0 }],
+  ])('a morning text that stopped part way: %s', async (_name, engine, expected) => {
+    const { estimateId } = await draftFor();
+    await Send.runMoveAutoSendJob({ now: at('22:00') });
+    expect(await state(estimateId)).toMatchObject({ textOwed: true });
+    // The text claim, then a restart: the estimate sweep parks the row as send_failed.
+    await trx('estimates').where({ id: estimateId }).update({
+      status: 'send_failed',
+      last_send_error: 'Immediate estimate send was interrupted',
+      estimate_data: trx.raw("jsonb_set(jsonb_set(estimate_data, '{automation,moveAutoSend,textClaimedAt}', to_jsonb(?::text)), '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || ?::jsonb)",
+        [at('08:08', 1).toISOString(), JSON.stringify(engine)]),
+    });
+    expect(await Send.runMoveAutoSendJob({ now: at('09:00', 1) })).toMatchObject({ restored: expected.restored, office: expected.items, texted: 0 });
+    const row = await estimate(estimateId);
+    expect(row.status).toBe(expected.status);
+    if (expected.restored) expect(row.last_send_error).toBeNull();
+    expect(await state(estimateId)).toMatchObject({ textResult: 'stale' });
+    expect(officeItems()).toHaveLength(expected.items);
+    if (expected.items) expect(officeItems()[0][3]).toMatchObject({ dedupeKey: `moving_auto_send_office:${estimateId}:text`, metadata: { reason: 'text_blocked' } });
+    expect(texts()).toHaveLength(0);
+    expect(await Send.runMoveAutoSendJob({ now: at('09:15', 1) })).toMatchObject({ restored: 0, office: 0, texted: 0 });
   });
 
   test('a send that stopped part way rings the office once and never goes again', async () => {

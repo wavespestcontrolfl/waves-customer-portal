@@ -27,7 +27,10 @@ const logger = require('./logger');
 const { movingAutoSendLive } = require('../config/feature-gates');
 const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
 const { isWithinSendWindowET } = require('./messaging/send-window');
-const { ADDRESS_UNVERIFIED_ABSENT_SQL, DELIVERY_CLAIM_NOT_LIVE_SQL, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+const {
+  ADDRESS_UNVERIFIED_ABSENT_SQL, DELIVERY_CLAIM_NOT_LIVE_SQL, REPRICE_PENDING_ABSENT_SQL,
+  LINKAGE_INVALIDATION_ABSENT_SQL, INVALIDATION_PENDING_ABSENT_SQL,
+} = require('../utils/estimate-claim-sql');
 
 const CANDIDATE_LIMIT = 10;
 // A claim older than this with no outcome is a send that stopped part way.
@@ -40,7 +43,7 @@ const NOTES = {
   not_sent: 'The send reached no one.',
   uncertain: 'The send did not confirm, so the app cannot tell what went out. Check the estimate\'s send history first.',
   stale: 'The send stopped part way, so the app cannot tell what went out. Check the estimate\'s send history first.',
-  stale_text: 'The morning text stopped part way, so the customer may not open the estimate until it is sent again.',
+  text_blocked: 'The morning text did not finish, and the customer cannot open the estimate until it is sent again.',
 };
 const parseJson = (value) => {
   if (!value || typeof value === 'object') return value || null;
@@ -225,7 +228,9 @@ async function recordSent(estimate, patch, description) {
 
 // Nothing went: the estimate goes back to draft for the office, with one
 // ringing item, together. A send that moved the row on meanwhile (it left
-// 'sending') keeps its state and only records the outcome.
+// 'sending') keeps its state and records the outcome; the office still gets
+// the item when the send parked the estimate itself (send_failed: a hold or
+// an invalidation its last check found).
 async function handBack(claimed, code, { now, result = null, error = null }) {
   const patch = {
     attemptedAt: now.toISOString(),
@@ -237,8 +242,8 @@ async function handBack(claimed, code, { now, result = null, error = null }) {
     const released = await trx('estimates').where({ id: claimed.id, status: 'sending' })
       .update({ status: 'draft', send_method: null, estimate_data: merged(trx, patch), updated_at: trx.fn.now() });
     if (!released) {
-      await trx('estimates').where({ id: claimed.id }).update({ estimate_data: merged(trx, patch) });
-      return 'skipped';
+      const [row] = await trx('estimates').where({ id: claimed.id }).update({ estimate_data: merged(trx, patch) }).returning('status');
+      if (!row || row.status !== 'send_failed') return 'skipped';
     }
     await officeItem(trx, claimed, code, { step: 'send', extra: error ? String(error.message || '').slice(0, 200) : channelErrors(result) });
     return 'office';
@@ -269,7 +274,28 @@ async function sendDraft(row, { now, sender }) {
   return 'sent';
 }
 
-/** The morning text of one estimate the app emailed at night: 'texted', 'waiting', 'failed' or 'skipped'. */
+// The email went before the morning text, so a text that did not finish
+// gives the customer their link back: the row returns from 'sending' (this
+// job's claim) or 'send_failed' (the estimate sweep's mark for a claim that
+// stopped) to sent, or viewed. A terminal state stays, and so does a hold the
+// send itself set (archived, a re-price, an invalidation): then the customer
+// cannot open the estimate, and the office gets one item.
+async function giveLinkBack(trx, estimate) {
+  const restored = await trx('estimates').where({ id: estimate.id })
+    .whereIn('status', ['sending', 'send_failed'])
+    .whereNull('archived_at')
+    .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+    .whereRaw(LINKAGE_INVALIDATION_ABSENT_SQL)
+    .whereRaw(INVALIDATION_PENDING_ABSENT_SQL)
+    .update({ status: trx.raw("CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END"), last_send_error: null, updated_at: trx.fn.now() });
+  if (restored) return 'restored';
+  const row = await trx('estimates').where({ id: estimate.id }).first('status');
+  if (!row || !['sending', 'send_failed'].includes(row.status)) return 'kept';
+  await officeItem(trx, estimate, 'text_blocked', { step: 'text' });
+  return 'office';
+}
+
+/** The morning text of one estimate the app emailed at night: 'texted', 'waiting', 'failed', 'office' or 'skipped'. */
 async function sendMorningText(row, { now, sender }) {
   const claimed = await claimText(row, row.move_id, now);
   if (!claimed) return 'skipped';
@@ -279,24 +305,25 @@ async function sendMorningText(row, { now, sender }) {
     logger.info(`[moving-auto-send] texted estimate ${claimed.id}`);
     return 'texted';
   }
-  // The email already went: the row goes back to what the customer has, and a
-  // text the window held at its edge waits for the next window. No item: the
-  // customer holds the estimate.
+  // A text the window held at its edge waits for the next window; any other
+  // miss is not retried. Either way the customer keeps the emailed estimate.
   const held = !error && smsHeld(result);
-  await db('estimates').where({ id: claimed.id, status: 'sending' }).update({
-    status: db.raw("CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END"),
-    estimate_data: merged(db, held ? { textClaimedAt: null } : { textAttemptedAt: now.toISOString(), textResult: error ? 'failed' : 'not_sent' }),
-    updated_at: db.fn.now(),
+  const back = await db.transaction(async (trx) => {
+    await trx('estimates').where({ id: claimed.id })
+      .update({ estimate_data: merged(trx, held ? { textClaimedAt: null } : { textAttemptedAt: now.toISOString(), textResult: error ? 'failed' : 'not_sent' }) });
+    return giveLinkBack(trx, claimed);
   });
+  if (back === 'office') return 'office';
   if (held) return 'waiting';
   logger.warn(`[moving-auto-send] morning text for estimate ${claimed.id} did not go (${error ? 'error' : 'not sent'})`);
   return 'failed';
 }
 
 // A claim with no outcome after 30 minutes is a send that stopped part way (a
-// restart): what went out is unknown, so the app never sends it again, and the
-// office gets one item. The estimate sweep (scheduler.js) parks such a row as
-// send_failed, which the customer cannot open.
+// restart): what went out is unknown, so the app never sends it again. The
+// estimate sweep (scheduler.js) parks such a row as send_failed, which the
+// customer cannot open. A first send rings the office; a morning text gives
+// the customer the emailed estimate back (giveLinkBack).
 async function settleStale(estimate, now) {
   const auto = parseJson(estimate.estimate_data)?.automation?.moveAutoSend || {};
   const text = !!auto.textClaimedAt && !auto.textAttemptedAt;
@@ -306,7 +333,8 @@ async function settleStale(estimate, now) {
       .whereRaw(`estimate_data->'automation'->'moveAutoSend'->>'${done}' IS NULL`)
       .update({ estimate_data: merged(trx, text ? { textAttemptedAt: now.toISOString(), textResult: 'stale' } : { attemptedAt: now.toISOString(), result: 'stale' }) });
     if (!marked) return 'skipped';
-    await officeItem(trx, estimate, text ? 'stale_text' : 'stale', { step: text ? 'text' : 'send' });
+    if (text) return giveLinkBack(trx, estimate);
+    await officeItem(trx, estimate, 'stale', { step: 'send' });
     return 'office';
   });
 }
@@ -315,7 +343,7 @@ async function settleStale(estimate, now) {
 async function runMoveAutoSendJob({ now = new Date(), sendEstimateNow = null } = {}) {
   if (!movingAutoSendLive()) return { skipped: true };
   const sender = sendEstimateNow || require('../routes/admin-estimates').sendEstimateNow;
-  const out = { sent: 0, texted: 0, office: 0, waiting: 0, skipped: 0, failed: 0 };
+  const out = { sent: 0, texted: 0, office: 0, restored: 0, waiting: 0, skipped: 0, failed: 0 };
   const attempt = async (step, row, run) => {
     try {
       const outcome = await run();
