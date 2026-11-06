@@ -740,9 +740,11 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
       attempted: 'The bar declined; no capability search ran' }] : [];
   }
 
+  // The rows flush() saved, as writeGapRows returns them ([] when nothing was written, the kill switch is off or the
+  // write failed). The caller shows the first row's id ("Claude has this as gap #N").
   async function flush({ reply, ask, stepLimitReached, noReply } = {}) {
     try {
-      if (!gapReportsEnabled()) return;
+      if (!gapReportsEnabled()) return [];
       const declined = DECLINE_RE.test(String(reply || ''));
       const blocked = blockedSignals({ stepLimitReached, noReply });
       // Out of steps is ONE record: when the exhaustion row is written, a prose
@@ -751,13 +753,17 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
       // record stays (pre-push P1s).
       const exhaustionRecorded = blocked.some((signal) => signal.code === LOOP_EXHAUSTED_CODE);
       const signals = [...blocked, ...(declined && !exhaustionRecorded ? declinedSignals({ reply, ask }) : [])];
-      if (signals.length) await writeGapRows(signals);
+      return signals.length ? await writeGapRows(signals) : [];
     } catch (err) {
       logger.warn(`[agent-gap-reports] collector flush failed (${err.code || err.name || 'error'})`);
+      return [];
     }
   }
 
-  return { discovery, toolResult, flush };
+  // True when this request ran any capability search (discover_capabilities or the API tool search).
+  const searched = () => searches.length > 0;
+
+  return { discovery, toolResult, flush, searched };
 }
 
 module.exports = {

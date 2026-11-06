@@ -27,7 +27,7 @@ import useModalFocus from "../../hooks/useModalFocus";
 import { useAutoGrowTextarea } from "../../hooks/useAutoGrowTextarea";
 import DictationButton from "../tech/DictationButton";
 import useDictationPending from "../../hooks/dictationPending";
-import { useSendToClaudeIdea, SendToClaudeButton, SendToClaudeNote, SendToClaudeRow } from "./SendToClaudeIdea";
+import { useSendToClaudeIdea, SendToClaudeButton, SendToClaudeNote, SendToClaudeRow, SendAnswerToClaude, useSendAnswerToClaude } from "./SendToClaudeIdea";
 import PendingActionsCard from "./PendingActionsCard";
 import IntelligenceTaskCard from "./IntelligenceTaskCard";
 import { createRequestIdentity, definitiveFailure, ibSessionId } from "../../utils/ibSession";
@@ -335,6 +335,17 @@ function renderMarkdown(text, onNavigate) {
   return elements;
 }
 
+// The stuck-answer mark for a reply (GATE_IB_ANSWER_SEND_TO_CLAUDE): the gap id the server saved, and the owner's own
+// question for this exchange (null when it came from a tap or carried photos). Null when the reply is not marked.
+function stuckAnswerFrom(data, { ask, held, taskId, exchange }) {
+  if (data.answerClaude?.stuck !== true) return null;
+  const source = ask || held;
+  return {
+    gapId: Number.isInteger(data.answerClaude.gapId) ? data.answerClaude.gapId : null,
+    question: source?.question ?? null, pasted: source?.pasted === true, forResponse: data.response, taskId, exchange,
+  };
+}
+
 // ─── MAIN COMPONENT ─────────────────────────────────────────────
 function GlobalCommandPalette({ user, onNavigate }, ref) {
   const canFindPages = Boolean(useAdminNavigation());
@@ -365,6 +376,13 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // the way, so Ask waits for them instead of sending what was typed so far.
   const dictationPending = useDictationPending();
   const dictationPendingRef = useRef(false);
+  // GATE_IB_ANSWER_SEND_TO_CLAUDE: set from a reply's `answerClaude` ({ gapId, question, pasted, forResponse, exchange }).
+  // `question` is the owner's own composer text for that exchange, captured when he pressed Ask; null for a choice,
+  // quick action or recent (text a model or the app wrote) and for an ask with photos. The answer's text never goes in.
+  const [answerClaude, setAnswerClaude] = useState(null);
+  const answerSeqRef = useRef(0);
+  const answerClaudeRef = useRef(null);
+  answerClaudeRef.current = answerClaude;
   const dictationUsedRef = useRef(false); // a dictated chunk is in the message being composed
   const pastedRef = useRef(false); // text pasted or dropped into the message being composed
   dictationPendingRef.current = dictationPending;
@@ -766,10 +784,13 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // saved task. A reply the server flagged threadRolledOver started a new
   // conversation (its idle rule), with or without a new thread id, so the old
   // conversation's state goes first.
-  const applyServerReply = useCallback((data, { fallbackTaskId = null } = {}) => {
+  const applyServerReply = useCallback((data, { fallbackTaskId = null, ask = null, reload = false } = {}) => {
     if (data.threadRolledOver) startNewConversation();
     const taskId = data.taskId || fallbackTaskId;
     setResponse(data.response);
+    // A reloaded task (Refresh status) keeps the question and the send note of the exchange it already shows.
+    const held = reload && taskId && answerClaudeRef.current?.taskId === taskId ? answerClaudeRef.current : null;
+    setAnswerClaude(stuckAnswerFrom(data, { ask, held, taskId, exchange: held ? held.exchange : ++answerSeqRef.current }));
     setPendingActions(previous => [...previous, ...(data.pendingActions || [])
       .filter(action => !previous.some(old => old.id === action.id))
       .map(action => ({ ...action, taskId, receivedAt: Date.now() }))]);
@@ -789,11 +810,15 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       // an idle thread starts a new conversation (threadRolledOver on the reply),
       // so a retry goes out byte for byte as first sent.
       const request = queryPayloadFor(q, selectedTarget);
+      // The owner's own words and paste mark for this exchange, read before the composer clears. Only the composer's text
+      // counts: a tapped choice, quick action or recent is not what he wrote for this answer, and photos can't go.
+      const ask = !text && !attachments.length ? { question: q, pasted: pastedRef.current === true } : null;
       threadEpochRef.current += 1; // invalidate any inflight thread resume
       const epoch = threadEpochRef.current;
       setShowThreads(false); // a query from the History view shows its answer
       setLoading(true);
       setResponse(null);
+      setAnswerClaude(null);
       setChoices(null);
       setToolActivity([]);
       knowledgeGaps.reset();
@@ -814,7 +839,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         // "New chat" (or a context reset) while the query was inflight —
         // drop the stale response instead of restoring the cleared thread.
         if (threadEpochRef.current === epoch) {
-          applyServerReply(data);
+          applyServerReply(data, { ask });
           setChoices(Array.isArray(data.choices) ? data.choices.filter(choice => typeof choice === "string" && choice.trim()) : null);
           // The server states thread availability on every query, so a
           // RUNTIME gate change is reflected: off → detach and return to
@@ -850,7 +875,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         }
       }
     },
-    [prompt, loading, queryPayloadFor, applyServerReply, showQueryError, holdThread, resetAttachments, userId],
+    [prompt, loading, attachments, queryPayloadFor, applyServerReply, showQueryError, holdThread, resetAttachments, userId],
   );
 
   const refreshTask = async (id = activeTask?.taskId, operation = null, candidate = null) => {
@@ -870,7 +895,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       if (threadEpochRef.current !== epoch) return;
       // A loaded task replaces what is on screen, so its cards replace too.
       setPendingActions([]);
-      applyServerReply(data, { fallbackTaskId: id });
+      applyServerReply(data, { fallbackTaskId: id, reload: true });
       holdThread(data.threadId || null, data.threadSeq, taskLoadReopens(data, held, operation));
       setShowThreads(false);
     } catch (err) {
@@ -908,7 +933,12 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // Never beside a confirmation card or a receipt, whichever request made it:
   // a legacy card retained across requests (pendingActions) or the open
   // task's cards and receipts. The server only knows this turn's cards.
-  const shownChoices = pendingActions.length || activeTask?.pendingActions?.length || activeTask?.receipts?.length ? null : choices;
+  // The stuck-answer line or button: only beside the answer it was made for, and only while the status allows it.
+  // Never beside a card or a receipt, for the same reason as the choices.
+  const cardsShown = Boolean(pendingActions.length || activeTask?.pendingActions?.length || activeTask?.receipts?.length);
+  const shownAnswerClaude = claudeIdea.answerButton && answerClaude && answerClaude.forResponse === response && !loading && !cardsShown ? answerClaude : null;
+  const shownChoices = cardsShown ? null : choices;
+  const answerSend = useSendAnswerToClaude({ pageData: ibPageData, route: location.pathname, exchange: answerClaude?.exchange });
   const taskCard = <IntelligenceTaskCard task={activeTask}
     onSelectTarget={candidate => refreshTask(activeTask?.taskId, 'select-target', candidate)}
     onRefresh={() => refreshTask()} onContinue={() => refreshTask(activeTask?.taskId, 'resume')} onResolved={onActionResolved}  variant="dark" />;
@@ -1078,6 +1108,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         addAttachments={addAttachments}
         removeAttachment={removeAttachment}
         claudeIdea={claudeIdea}
+        answerClaude={shownAnswerClaude}
+        answerSend={answerSend}
       />
     );
   }
@@ -1376,6 +1408,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
             <ChoiceButtons choices={shownChoices} onChoose={chooseAnswer} disabled={choicesDisabled} variant="dark" />
             {!activeTask && <PendingActionsCard actions={pendingActions} variant="dark" onResolved={onActionResolved} />}
             <KnowledgeGapPrompt gaps={knowledgeGaps.gaps} update={knowledgeGaps.update} save={saveKnowledgeGap} variant="dark" />
+            {shownAnswerClaude && (
+              <SendAnswerToClaude answer={shownAnswerClaude} claude={answerSend} variant="desktop" />
+            )}
           </div>
         )}
         {(response || pendingActions.length > 0) && !loading && !showThreads && (
@@ -1549,6 +1584,8 @@ function MobileSheet({
   addAttachments,
   removeAttachment,
   claudeIdea,
+  answerClaude,
+  answerSend,
 }) {
   const fileInputRef = useRef(null);
   useAutoGrowTextarea(inputRef, prompt, COMPOSER_MAX_HEIGHT.mobile);
@@ -1820,6 +1857,9 @@ function MobileSheet({
           )}
           {response && !loading && !showThreads && (
             <KnowledgeGapPrompt gaps={knowledgeGaps.gaps} update={knowledgeGaps.update} save={saveKnowledgeGap} variant="light" />
+          )}
+          {answerClaude && response && !loading && !showThreads && (
+            <SendAnswerToClaude answer={answerClaude} claude={answerSend} variant="mobile" />
           )}
           {pendingActions.length > 0 && !loading && !showThreads && !activeTask && (
             <PendingActionsCard actions={pendingActions} variant="light" onResolved={onActionResolved} />

@@ -25,7 +25,7 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibCancelWithEffectsLive, ibAcceptEstimateLive, ibMultiCardLive, ibModelFailureNoticeLive, nameMatchV2Live, dictationMoneyNormalizeLive, ibOpenaiBackupLive, ibTargetRulesV2Live } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibCancelWithEffectsLive, ibAcceptEstimateLive, ibMultiCardLive, ibModelFailureNoticeLive, ibAnswerSendToClaudeLive, nameMatchV2Live, dictationMoneyNormalizeLive, ibOpenaiBackupLive, ibTargetRulesV2Live } = require('../config/feature-gates');
 const ModelFailure = require('../services/intelligence-bar/model-failure');
 const { dictatedAmountsNote } = require('../utils/spoken-money');
 const IbOpenaiBackup = require('../services/intelligence-bar/ib-openai-backup');
@@ -4384,7 +4384,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // discover_capabilities loop there to gather signals from); the admin
     // platform collector already searches first, so passing it there too is
     // inert on every request that already gathered a signal.
-    await gapCollector?.flush({ reply: finalResponse, ask: context === 'tech' ? prompt : undefined, stepLimitReached, noReply });
+    const savedGaps = await gapCollector?.flush({ reply: finalResponse, ask: context === 'tech' ? prompt : undefined, stepLimitReached, noReply });
 
     // Phantom-card guard (2026-09-25 production case): the model can write
     // "awaiting your Confirm on the card below" in plain prose with no tool
@@ -4538,6 +4538,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // none, and dropped when this turn made a card or committed a direct
       // edit: a button must never sit beside a Confirm control or a receipt.
       ...(offeredChoices && !pendingProposals.length && !directActionIds.length ? { choices: offeredChoices } : {}),
+      // GATE_IB_ANSWER_SEND_TO_CLAUDE: the bar searched its tools and changed nothing. Owner login on the admin platform
+      // only; the palette shows "Claude has this as gap #N." or a Send to Claude button. Absent otherwise.
+      ...(platformEnabled && ibAnswerSendToClaudeLive() && ibFullAccess(req) && gapCollector?.searched()
+        && !pendingProposals.length && !directActionIds.length
+        ? { answerClaude: { stuck: true, gapId: savedGaps?.[0]?.id ?? null } } : {}),
       // Return the structured data from the last tool call for UI rendering
       structuredData: toolResults.length > 0 ? toolResults[toolResults.length - 1].result : null,
       // Pending write proposals for the client confirmation card. This is the

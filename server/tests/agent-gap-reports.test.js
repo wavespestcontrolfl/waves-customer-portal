@@ -653,7 +653,7 @@ describe('agent-gap-reports', () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
       collector.discovery({ query: 'add a second service address' }, MISS);
-      await expect(collector.flush({ reply: DECLINE })).resolves.toBeUndefined();
+      await expect(collector.flush({ reply: DECLINE })).resolves.toEqual([]);
     });
 
     test('the decline check recognizes refusals the bar has actually given', () => {
@@ -1091,6 +1091,61 @@ describe('agent-gap-reports', () => {
       again.toolResult('update_customer', REFUSED, true, { round: 0 });
       await again.flush({ reply: 'x' });
       expect(digestMock).toHaveBeenCalledTimes(1);
+    });
+
+    describe('flush() result and searched() (the stuck-answer "Send to Claude" line)', () => {
+      const MISS = { status: 'capability_unimplemented', capabilities: [] };
+      const found = (...ids) => ({ status: 'capabilities_found', capabilities: ids.map((id) => ({ id, domain: 'customers' })) });
+      const DECLINED = DECLINE;
+      const collectorFor = () => load().createGapCollector({ source: 'intelligence-bar' });
+
+      test('flush returns the rows it saved, with their ids', async () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'switch a customer to annual prepay' }, found('billing_switch'));
+        const saved = await collector.flush({ reply: DECLINED });
+        expect(saved).toHaveLength(1);
+        expect(saved[0]).toMatchObject({ id: 7, occurrences: 1 });
+      });
+
+      test('flush returns [] when nothing was written, the kill switch is off, or the write failed', async () => {
+        const quiet = collectorFor();
+        expect(await quiet.flush({ reply: 'Here are the three customers you asked about.' })).toEqual([]);
+        process.env.AGENT_GAP_REPORTS = 'off';
+        const off = collectorFor();
+        off.discovery({ query: 'switch a customer to annual prepay' }, MISS);
+        expect(await off.flush({ reply: DECLINED })).toEqual([]);
+        delete process.env.AGENT_GAP_REPORTS;
+        loggerMock.warn.mockClear();
+        const failing = collectorFor();
+        failing.discovery({ query: 'switch a customer to annual prepay' }, MISS);
+        dbMock.transaction = jest.fn(async () => { throw Object.assign(new Error('boom'), { code: 'X1' }); });
+        await expect(failing.flush({ reply: DECLINED })).resolves.toEqual([]);
+      });
+
+      test('searched() is false before any search and for a search-less request', async () => {
+        const collector = collectorFor();
+        expect(collector.searched()).toBe(false);
+        collector.toolResult('get_customer', { ok: true }, false, { round: 0 });
+        expect(collector.searched()).toBe(false);
+      });
+
+      test('searched() is true after a discover_capabilities search, found or missed, and after an API tool search', () => {
+        const hit = collectorFor();
+        hit.discovery({ query: 'switch a customer to annual prepay' }, found('billing_switch'));
+        expect(hit.searched()).toBe(true);
+        const miss = collectorFor();
+        miss.discovery({ query: 'export payroll hours' }, MISS);
+        expect(miss.searched()).toBe(true);
+        const api = collectorFor();
+        api.discovery({ query: 'export payroll hours' }, MISS, { fromToolSearch: true });
+        expect(api.searched()).toBe(true);
+      });
+
+      test('a discovery result with another status is not a search', () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'x' }, { status: 'error' });
+        expect(collector.searched()).toBe(false);
+      });
     });
 
     test('prepareGapRow rejects a blocked signal with no usable code', () => {
