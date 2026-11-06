@@ -32094,6 +32094,22 @@ async function recordExpiredOpen({ req, ip, estimate, extensionOffered, isPdfRen
   }
 }
 
+// The 404 body for an expired estimate that passes
+// isEstimateExtensionRequestEligible, and the record of the open. The card's button is offered only when POST
+// /:token/extension-request would act on a tap: the gate is on, no fixed bid
+// blocks it, and the pricing-authority verdict passes (that POST answers the
+// generic 404, no reopen and no office request, for any other row, so its
+// button would only fail). Every row the button is not offered for gets the
+// bare body, byte-identical to an unknown token's.
+async function expiredEstimate404Body({ req, ip, estimate, isPdfRenderPass, docRenderPin, verifiedStaffPreview }) {
+  const extension = require('../services/estimate-extension');
+  const extensionOffered = featureGates.isEnabled('estimateExtensionRequest')
+    && !(await extension.fixedBidBlocksExtension(db, estimate))
+    && await extension.extensionDeliverableUnderGate(db, estimate);
+  await recordExpiredOpen({ req, ip, estimate, extensionOffered, isPdfRenderPass, docRenderPin, verifiedStaffPreview });
+  return extensionOffered ? expiredEstimateBody(estimate) : { error: 'Estimate not found' };
+}
+
 router.get('/:token/data', dataLimiter, async (req, res, next) => {
   try {
     // This JSON carries the customer's address, phone/email, notes, pricing,
@@ -32204,15 +32220,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // unknown ones and break the generic-404 contract.
       //
       // Same eligible-only rule for the three details the expired card shows
-      // (expiresAt, sentAt, extensionSelfServe): the card says when the quote
-      // was sent and expired, and whether the first reopen is still self-serve
-      // (extension_auto_granted_at unset — see POST /:token/extension-request).
-      // sentAt is omitted when unset and extensionSelfServe is never `false`.
+      // (expiresAt, sentAt, extensionSelfServe; see expiredEstimate404Body).
       if (isEstimateExtensionRequestEligible(estimate)) {
-        const extensionOffered = featureGates.isEnabled('estimateExtensionRequest')
-          && !(await require('../services/estimate-extension').fixedBidBlocksExtension(db, estimate));
-        await recordExpiredOpen({ req, ip, estimate, extensionOffered, isPdfRenderPass, docRenderPin, verifiedStaffPreview });
-        if (extensionOffered) return res.status(404).json(expiredEstimateBody(estimate));
+        return res.status(404).json(await expiredEstimate404Body({ req, ip, estimate, isPdfRenderPass, docRenderPin, verifiedStaffPreview }));
       }
       return res.status(404).json({ error: 'Estimate not found' });
     }

@@ -32,6 +32,7 @@ jest.mock('../services/estimate-group-navigation', () => ({
 jest.mock('../services/estimate-extension', () => ({
   ...jest.requireActual('../services/estimate-extension'),
   fixedBidBlocksExtension: jest.fn().mockResolvedValue(false),
+  extensionDeliverableUnderGate: jest.fn().mockResolvedValue(true),
 }));
 jest.mock('../middleware/admin-auth', () => ({
   ...jest.requireActual('../middleware/admin-auth'),
@@ -189,6 +190,12 @@ describe('GET /:token/data — expired estimate that can be reopened', () => {
 
   test('answers the bare 404 when a fixed bid blocks the extension, but still records the open', async () => {
     require('../services/estimate-extension').fixedBidBlocksExtension.mockResolvedValueOnce(true);
+    const { body } = await get(expiredRow());
+    expect(body).toEqual(BARE);
+    expect(auditEstimateExpiredOpen).toHaveBeenCalledWith(expect.objectContaining({ extensionOffered: false }));
+  });
+  test('answers the bare 404 when the reopen route would refuse the tap (pricing authority), but still records the open', async () => {
+    require('../services/estimate-extension').extensionDeliverableUnderGate.mockResolvedValueOnce(false);
     const { body } = await get(expiredRow());
     expect(body).toEqual(BARE);
     expect(auditEstimateExpiredOpen).toHaveBeenCalledWith(expect.objectContaining({ extensionOffered: false }));
