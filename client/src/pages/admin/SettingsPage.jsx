@@ -480,8 +480,8 @@ function gateReadsOn(gate, written) {
   return gate?.readsOn === true;
 }
 
-// Two steps (owner 2026-11-06, GATE_SETTINGS_GATE_FLIP): the server prepares
-// the change and returns a ticket for exactly that change; Confirm writes it.
+// Two steps (owner 2026-11-06, GATE_SETTINGS_GATE_FLIP): the server records
+// exactly that change as a one-use card; Confirm claims and writes it.
 // Turning a gate on asks for its name to be typed; off is one click.
 function GateFlipDialog({ request, onClose, onDone }) {
   const [preview, setPreview] = useState(null);
@@ -510,7 +510,7 @@ function GateFlipDialog({ request, onClose, onDone }) {
     try {
       const d = await adminFetch(`/admin/settings/gates/${encodeURIComponent(request.name)}/commit`, {
         method: "POST",
-        body: JSON.stringify({ ticket: preview.ticket, confirmName: typedName }),
+        body: JSON.stringify({ pendingActionId: preview.pendingActionId, confirmName: typedName }),
       });
       setOutcome(d?.success
         ? { ok: true, text: `${request.name} is now ${d.value}. ${d.redeployNotice || ""}` }
@@ -567,7 +567,7 @@ function GateFlipDialog({ request, onClose, onDone }) {
       <DialogFooter>
         <Button variant="secondary" onClick={onClose} disabled={busy}>{outcome?.ok ? "Close" : "Cancel"}</Button>
         {preview && !preview.alreadySet && !outcome?.ok && (
-          <Button onClick={commit} disabled={busy || !nameOk || !preview.ticket}>
+          <Button onClick={commit} disabled={busy || !nameOk || !preview.pendingActionId}>
             {busy ? "Saving..." : request?.value === "true" ? "Turn on" : "Turn off"}
           </Button>
         )}

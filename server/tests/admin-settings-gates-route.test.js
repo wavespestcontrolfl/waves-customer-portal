@@ -13,6 +13,34 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/google-business', () => ({}));
 jest.mock('../services/linkedin', () => ({}));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn() }));
+// In-memory ib_pending_actions with the real claim's one-use semantics: a card
+// is claimed once, by the admin who opened it (claimForConfirm's UPDATE ...
+// WHERE status = 'pending').
+jest.mock('../services/intelligence-bar/pending-actions', () => {
+  const rows = new Map();
+  let seq = 0;
+  return {
+    _rows: rows,
+    createPendingAction: jest.fn(async ({ toolName, params, requestedBy }) => {
+      const row = { id: `pa-${++seq}`, tool_name: toolName, params, requested_by: String(requestedBy), status: 'pending' };
+      rows.set(row.id, row);
+      return row;
+    }),
+    getPendingRow: jest.fn(async (id, requestedBy) => {
+      const row = rows.get(id);
+      return row && row.requested_by === String(requestedBy) ? { ...row } : null;
+    }),
+    claimForConfirm: jest.fn(async (id, requestedBy) => {
+      const row = rows.get(id);
+      if (!row) return { error: 'not_found' };
+      if (row.requested_by !== String(requestedBy)) return { error: 'actor_mismatch' };
+      if (row.status !== 'pending') return { error: 'already_used' };
+      row.status = 'confirmed';
+      return { action: { ...row } };
+    }),
+    recordResult: jest.fn(async () => true),
+  };
+});
 jest.mock('../services/intelligence-bar/ops-tools', () => ({
   executeOpsTool: jest.fn(),
   recordGateFlipAudit: jest.fn(),
@@ -141,7 +169,7 @@ describe('flip a gate from Settings → Features (GATE_SETTINGS_GATE_FLIP)', () 
     const body = await (await fetch(`${base}/api/admin/settings/gates`, { headers: { Authorization: 'Bearer admin', 'x-email': OWNER } })).json();
     expect(body.flipAvailable).toBe(false);
     expect((await post(`/gates/${FLIPPABLE()}/preview`, { value: 'true' })).status).toBe(404);
-    expect((await post(`/gates/${FLIPPABLE()}/commit`, { ticket: 'x' })).status).toBe(404);
+    expect((await post(`/gates/${FLIPPABLE()}/commit`, { pendingActionId: 'pa-x' })).status).toBe(404);
     expect(ops.executeOpsTool).not.toHaveBeenCalled();
   });
 
@@ -168,11 +196,11 @@ describe('flip a gate from Settings → Features (GATE_SETTINGS_GATE_FLIP)', () 
     expect(ops.executeOpsTool).toHaveBeenLastCalledWith('set_railway_gate', { gate_name: name, value: 'true' });
     expect(preview).toMatchObject({ gate: name, newValue: 'true', requireTypedName: true });
 
-    const noName = await post(`/gates/${name}/commit`, { ticket: preview.ticket, confirmName: 'GATE_WRONG' });
+    const noName = await post(`/gates/${name}/commit`, { pendingActionId: preview.pendingActionId, confirmName: 'GATE_WRONG' });
     expect(noName.status).toBe(400);
 
     ops.executeOpsTool.mockResolvedValueOnce({ success: true, gate: name, value: 'true', redeploy_notice: 'r' });
-    const res = await post(`/gates/${name}/commit`, { ticket: preview.ticket, confirmName: name });
+    const res = await post(`/gates/${name}/commit`, { pendingActionId: preview.pendingActionId, confirmName: name });
     expect(res.status).toBe(200);
     expect(ops.executeOpsTool).toHaveBeenLastCalledWith('set_railway_gate', expect.objectContaining({
       confirmed: true,
@@ -191,32 +219,37 @@ describe('flip a gate from Settings → Features (GATE_SETTINGS_GATE_FLIP)', () 
     const preview = await (await post(`/gates/${name}/preview`, { value: 'false' })).json();
     expect(preview.requireTypedName).toBe(false);
     ops.executeOpsTool.mockResolvedValueOnce({ success: true, gate: name, value: 'false' });
-    expect((await post(`/gates/${name}/commit`, { ticket: preview.ticket })).status).toBe(200);
+    expect((await post(`/gates/${name}/commit`, { pendingActionId: preview.pendingActionId })).status).toBe(200);
   });
 
-  test('a forged, expired, other-admin or other-gate ticket writes nothing', async () => {
+  test('a card is used once: a repeated or concurrent confirm writes nothing more (codex #7732)', async () => {
     const name = FLIPPABLE();
     ops.executeOpsTool.mockResolvedValueOnce(previewResult(name, 'false'));
-    const { ticket } = await (await post(`/gates/${name}/preview`, { value: 'false' })).json();
+    const { pendingActionId } = await (await post(`/gates/${name}/preview`, { value: 'false' })).json();
+    ops.executeOpsTool.mockResolvedValue({ success: true, gate: name, value: 'false' });
+    const statuses = (await Promise.all([1, 2, 3].map(() => post(`/gates/${name}/commit`, { pendingActionId })))).map((r) => r.status).sort();
+    expect(statuses).toEqual([200, 409, 409]);
+    expect((await post(`/gates/${name}/commit`, { pendingActionId })).status).toBe(409);
+    expect(ops.executeOpsTool.mock.calls.filter(([, input]) => input.confirmed === true)).toHaveLength(1);
+  });
+
+  test("an unknown card, another admin's card or another gate's card writes nothing", async () => {
+    const name = FLIPPABLE();
+    ops.executeOpsTool.mockResolvedValueOnce(previewResult(name, 'false'));
+    const { pendingActionId } = await (await post(`/gates/${name}/preview`, { value: 'false' })).json();
     ops.executeOpsTool.mockClear();
-    const [body, sig] = ticket.split('.');
-    const forged = `${Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(body, 'base64url').toString()), pins: { _verified_railway_gate_name: name, _verified_railway_gate_value: 'true' } })).toString('base64url')}.${sig}`;
     const other = listGates().filter((g) => g.flippable)[1].name;
     for (const [path, payload, opts] of [
-      [`/gates/${name}/commit`, { ticket: forged }, {}],
-      [`/gates/${name}/commit`, { ticket }, { techId: 'tech-2' }],
-      [`/gates/${other}/commit`, { ticket }, {}],
+      [`/gates/${name}/commit`, { pendingActionId: 'pa-unknown' }, {}],
+      [`/gates/${name}/commit`, { pendingActionId }, { techId: 'tech-2' }],
+      [`/gates/${other}/commit`, { pendingActionId }, {}],
     ]) {
       expect((await post(path, payload, opts)).status).toBe(409);
     }
-    const realNow = Date.now;
-    Date.now = () => realNow() + 11 * 60 * 1000;
-    try {
-      expect((await post(`/gates/${name}/commit`, { ticket })).status).toBe(409);
-    } finally {
-      Date.now = realNow;
-    }
     expect(ops.executeOpsTool).not.toHaveBeenCalled();
+    // None of those used the card up: the right admin can still confirm it.
+    ops.executeOpsTool.mockResolvedValueOnce({ success: true, gate: name, value: 'false' });
+    expect((await post(`/gates/${name}/commit`, { pendingActionId })).status).toBe(200);
   });
 });
 

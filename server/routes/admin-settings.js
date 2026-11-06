@@ -1,4 +1,3 @@
-const crypto = require('crypto');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -210,36 +209,19 @@ router.get('/gates', adminAuthenticate, requireAdmin, (req, res) => {
 // ── Flip a gate from Settings → Features (owner 2026-11-06) ──────────────
 // Two steps over the Intelligence Bar's own set_railway_gate write (catalogue
 // check, Railway production service only, compare-and-swap on the prior
-// value): /preview returns the card and a signed ticket for exactly that
-// change; /commit writes it only with that ticket, and refuses if the gate
-// changed in between. Owner login only; 404 while GATE_SETTINGS_GATE_FLIP is
-// off. Turning a gate on asks for its name to be typed; off is one click and
-// writes 'false' (some gates read a MISSING variable as on, so 'false' is the
-// only value that turns every on/off gate off).
-const GATE_FLIP_TICKET_TTL_MS = 10 * 60 * 1000;
+// value), approved through the bar's pending-action card
+// (ib_pending_actions): /preview records exactly that change for this admin;
+// /commit claims it with PendingActions.claimForConfirm — one atomic UPDATE,
+// so a repeated or concurrent confirm of the same card finds nothing to claim
+// (codex #7732) — and writes it, refusing if the gate changed in between.
+// Owner login only; 404 while GATE_SETTINGS_GATE_FLIP is off. Turning a gate
+// on asks for its name to be typed; off is one click and writes 'false' (some
+// gates read a MISSING variable as on, so 'false' is the only value that
+// turns every on/off gate off).
 // A heuristic for the card's warning, not a block: the description mentions
 // customer messages, money, prices or a public link page.
 const CUSTOMER_FACING_RE = /\b(sms|texts?|texting|e-?mails?|calls?|charges?|invoices?|refunds?|prices?|pricing|payments?|customers?)\b|\/:token/i;
-
-function gateFlipTicket(payload) {
-  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const sig = crypto.createHmac('sha256', process.env.JWT_SECRET || '').update(`gate-flip.${body}`).digest('base64url');
-  return `${body}.${sig}`;
-}
-
-function readGateFlipTicket(ticket) {
-  const [body, sig] = String(ticket || '').split('.');
-  if (!body || !sig || !process.env.JWT_SECRET) return null;
-  const expected = crypto.createHmac('sha256', process.env.JWT_SECRET).update(`gate-flip.${body}`).digest('base64url');
-  const a = Buffer.from(sig);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-  try {
-    return JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
-  } catch {
-    return null;
-  }
-}
+const gateFlipActor = (req) => String(req.technicianId || req.technician?.id || 'admin');
 
 function gateFlipEnabled(req, res, next) {
   if (!settingsGateFlipLive()) return res.status(404).json({ error: 'Not found' });
@@ -275,11 +257,12 @@ router.post('/gates/:name/preview', adminAuthenticate, requireAdmin, gateFlipEna
     if (!result?.preview) return res.status(400).json({ error: result?.error || 'The change could not be prepared.', code: result?.code || null });
 
     const { outsideWritePins } = require('../services/intelligence-bar/outside-write-pins');
-    const pins = outsideWritePins('set_railway_gate', result);
-    const ticket = gateFlipTicket({
-      pins,
-      actorId: req.technicianId || req.technician?.id || null,
-      expiresAt: Date.now() + GATE_FLIP_TICKET_TTL_MS,
+    const pending = await require('../services/intelligence-bar/pending-actions').createPendingAction({
+      toolName: 'set_railway_gate',
+      params: { gate_name: gate.name, value, ...outsideWritePins('set_railway_gate', result) },
+      requestedBy: gateFlipActor(req),
+      summary: `Settings → Features: ${result.change}`,
+      context: 'settings_gate_flip',
     });
     // Prerequisites the description names, with their current setting, so the
     // card can warn that one reads as off. A warning, never a block.
@@ -298,7 +281,7 @@ router.post('/gates/:name/preview', adminAuthenticate, requireAdmin, gateFlipEna
       customerFacing: CUSTOMER_FACING_RE.test(String(gate.description || '')),
       prerequisites,
       requireTypedName: value === 'true',
-      ticket,
+      pendingActionId: pending.id,
     });
   } catch (err) { next(err); }
 });
@@ -306,21 +289,33 @@ router.post('/gates/:name/preview', adminAuthenticate, requireAdmin, gateFlipEna
 router.post('/gates/:name/commit', adminAuthenticate, requireAdmin, gateFlipEnabled, requireFullAccess, async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-store');
-    const ticket = readGateFlipTicket(req.body?.ticket);
-    const pins = ticket?.pins || {};
-    const actorId = req.technicianId || req.technician?.id || null;
-    if (!ticket || !(ticket.expiresAt > Date.now()) || ticket.actorId !== actorId || pins._verified_railway_gate_name !== req.params.name) {
-      return res.status(409).json({ error: 'This change card is no longer valid. Open the switch again for a fresh one.', code: 'stale_ticket' });
-    }
     if (!flippableGateOr404(req, res)) return;
-    if (pins._verified_railway_gate_value === 'true' && req.body?.confirmName !== req.params.name) {
+    const PendingActions = require('../services/intelligence-bar/pending-actions');
+    const id = String(req.body?.pendingActionId || '').trim();
+    const actor = gateFlipActor(req);
+    // Read before claiming, so a wrong typed name never uses the card up.
+    const row = id ? await PendingActions.getPendingRow(id, actor).catch(() => null) : null;
+    const stored = row ? (typeof row.params === 'string' ? JSON.parse(row.params) : row.params) || {} : {};
+    if (!row || row.tool_name !== 'set_railway_gate' || stored._verified_railway_gate_name !== req.params.name) {
+      return res.status(409).json({ error: 'This change card is no longer valid. Open the switch again for a fresh one.', code: 'stale_card' });
+    }
+    if (stored._verified_railway_gate_value === 'true' && req.body?.confirmName !== req.params.name) {
       return res.status(400).json({ error: 'Type the gate name exactly to turn it on.', code: 'confirm_name_mismatch' });
+    }
+    const claim = await PendingActions.claimForConfirm(id, actor);
+    if (claim.error) {
+      return res.status(409).json({ error: 'This change card was already used or has expired. Open the switch again for a fresh one.', code: claim.error });
+    }
+    const pins = Object.fromEntries(Object.entries(claim.action.params).filter(([k]) => k.startsWith('_verified_')));
+    if (pins._verified_railway_gate_name !== req.params.name) {
+      return res.status(409).json({ error: 'This change card is no longer valid. Open the switch again for a fresh one.', code: 'stale_card' });
     }
     const { executeOpsTool, recordGateFlipAudit } = require('../services/intelligence-bar/ops-tools');
     const result = await executeOpsTool('set_railway_gate', { confirmed: true, ...pins });
+    await PendingActions.recordResult(id, result);
     await recordGateFlipAudit({
       via: 'settings_page',
-      actorId,
+      actorId: req.technicianId || req.technician?.id || null,
       gate: pins._verified_railway_gate_name,
       value: pins._verified_railway_gate_value,
       priorKind: pins._verified_railway_gate_prior_kind,

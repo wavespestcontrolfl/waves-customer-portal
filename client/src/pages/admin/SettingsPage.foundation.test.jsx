@@ -697,7 +697,7 @@ describe("Settings audit fixes", () => {
 // Settings → Features flip switches (owner 2026-11-06, GATE_SETTINGS_GATE_FLIP):
 // a switch only on a flippable row and only when the server says the viewer
 // may flip; turning a gate on needs its name typed before Confirm unlocks, and
-// Confirm sends exactly the ticket the preview returned.
+// Confirm sends exactly the card the preview recorded.
 describe("Feature gates flip switch", () => {
   const gates = [
     { name: "GATE_SYNTH_FLIP", set: false, value: null, readByCode: true, description: "Synthetic gate.", inverted: false, readsOn: false, flippable: true, notFlippableReason: null },
@@ -711,7 +711,7 @@ describe("Feature gates flip switch", () => {
       if (path === "/admin/settings/gates") return response({ gates, flipAvailable });
       if (path === "/admin/settings/gates/GATE_SYNTH_FLIP/preview") return response({
         gate: "GATE_SYNTH_FLIP", description: "Synthetic gate.", currentValue: "unset", newValue: "true",
-        redeployNotice: "The portal restarts briefly.", customerFacing: false, prerequisites: [], requireTypedName: true, ticket: "ticket-1",
+        redeployNotice: "The portal restarts briefly.", customerFacing: false, prerequisites: [], requireTypedName: true, pendingActionId: "pa-1",
       });
       if (path === "/admin/settings/gates/GATE_SYNTH_FLIP/commit") return response({ success: true, gate: "GATE_SYNTH_FLIP", value: "true", redeployNotice: "Restarting." });
       return response(fixtureFor(url, options));
@@ -741,7 +741,7 @@ describe("Feature gates flip switch", () => {
     fireEvent.click(confirm);
     expect(await screen.findByText(/GATE_SYNTH_FLIP is now true/)).toBeInTheDocument();
     const commit = fetch.mock.calls.find(([url]) => String(url).endsWith("/GATE_SYNTH_FLIP/commit"));
-    expect(JSON.parse(commit[1].body)).toEqual({ ticket: "ticket-1", confirmName: "GATE_SYNTH_FLIP" });
+    expect(JSON.parse(commit[1].body)).toEqual({ pendingActionId: "pa-1", confirmName: "GATE_SYNTH_FLIP" });
     // The server still reports the old value until the redeploy is live: the
     // switch shows what was written, so the next click turns it back off
     // instead of re-requesting "on" (codex #7732).
