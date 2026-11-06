@@ -141,41 +141,51 @@ function LinkDialog({ open, onClose, type, id, onLinked, allowLead = true }) {
   // start on and restrict to the Customer tab for those.
   const [kind, setKind] = useState(allowLead ? "lead" : "customer"); // lead | customer
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState([]);
+  // The newest search that finished, with the record type it searched:
+  // { kind, rows }. Only the open tab's own rows show, so a tab switch hides
+  // the other tab's rows at once.
+  const [found, setFound] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (open) { setKind(allowLead ? "lead" : "customer"); setQuery(""); setResults([]); setError(""); setBusy(false); }
+    if (open) { setKind(allowLead ? "lead" : "customer"); setQuery(""); setFound(null); setError(""); setBusy(false); }
   }, [open, allowLead]);
 
   useEffect(() => {
-    if (!open || query.trim().length < 2) { setResults([]); return undefined; }
+    if (!open || query.trim().length < 2) { setFound(null); return undefined; }
+    // A reply that lands after the tab or the text changed belongs to an
+    // older search: drop it, so a late Lead reply never fills the Customer tab.
+    let current = true;
     const t = setTimeout(async () => {
       try {
         const path = kind === "lead"
           ? `/admin/leads?search=${encodeURIComponent(query.trim())}&limit=8`
           : `/admin/customers?search=${encodeURIComponent(query.trim())}&limit=8&suggest=1`;
         const r = await adminFetch(path);
-        if (!r.ok) return;
+        if (!current || !r.ok) return;
         const data = await r.json();
+        if (!current) return;
         const rows = kind === "lead" ? (data.leads || data.rows || []) : (data.customers || data.rows || []);
-        setResults(rows.slice(0, 8));
+        setFound({ kind, rows: rows.slice(0, 8) });
       } catch {
         /* type-ahead is best-effort */
       }
     }, 250);
-    return () => clearTimeout(t);
+    return () => { current = false; clearTimeout(t); };
   }, [open, kind, query]);
 
-  const link = async (rowId) => {
+  const results = found?.kind === kind ? found.rows : [];
+
+  // rowKind: the record type the row came from, never the tab open at click time.
+  const link = async (rowKind, rowId) => {
     if (busy) return;
     setBusy(true);
     setError("");
     try {
       const r = await adminFetch(`/admin/photo-assessments/${type}/${id}/link`, {
         method: "POST",
-        body: { [kind === "lead" ? "lead_id" : "customer_id"]: rowId },
+        body: { [rowKind === "lead" ? "lead_id" : "customer_id"]: rowId },
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.error || `Link failed (${r.status})`);
@@ -212,7 +222,7 @@ function LinkDialog({ open, onClose, type, id, onLinked, allowLead = true }) {
                 key={r.id}
                 type="button"
                 disabled={busy}
-                onClick={() => link(r.id)}
+                onClick={() => link(found.kind, r.id)}
                 className="w-full text-left px-3 py-2 text-[14px] text-zinc-900 hover:bg-zinc-50"
               >
                 {/* Leads return snake_case fields; /api/admin/customers returns camelCase. */}
@@ -221,7 +231,7 @@ function LinkDialog({ open, onClose, type, id, onLinked, allowLead = true }) {
               </button>
             ))}
           </div>
-        ) : query.trim().length >= 2 ? (
+        ) : found?.kind === kind ? (
           <div className="text-[14px] text-zinc-500">No matches.</div>
         ) : null}
         {error ? <div className="text-[14px] text-alert-fg">{error}</div> : null}
