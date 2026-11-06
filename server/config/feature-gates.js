@@ -2397,7 +2397,9 @@ const gates = {
   // derived diarization) — or when the owner explicitly accepts LLM-label
   // risk. Without this gate the agent-commitment demotion never fires, even
   // with GATE_CALL_AGENT_COMMIT_BOOKING on. Owner-flip only.
-  callAgentCommitTrustedLabels: gateEnvValue('GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS'),
+  // Stays exact 'true' (codex #7732 security review): Agent/Caller labels are
+  // LLM-inferred, so the trusted-speaker path fails closed on any other value.
+  callAgentCommitTrustedLabels: process.env.GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS === 'true',
   // Commercial dictated booking (owner ruling 2026-09-30, call-booker gates
   // review item 8): a commercial job that Waves staff dictate on the call AND
   // the caller accepts, with a price agreed and grounded, books without the
