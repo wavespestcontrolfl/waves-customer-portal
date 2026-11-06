@@ -84,17 +84,25 @@ async function recordKpiSnapshot(snapshotDate, conn) {
 
 /**
  * True when `snapshotDate` (ET YYYY-MM-DD, default today ET) does not have its full
- * set of rows yet. The 23:55 catch-up tick uses it: the 23:45 tick can be lost
- * (deploy restart, dropped tick), and a partly written day (a restart mid-loop)
- * counts as missing so the upsert fills it. A read failure answers false: the
- * catch-up skips rather than guess.
+ * set of rows yet. A partly written day (a restart mid-loop) counts as missing so the
+ * upsert fills it. THROWS when kpi_snapshots cannot be read: code under the job lock
+ * must use this form, because runExclusive records a resolved callback as a successful
+ * run and a read failure answered as "already recorded" would hide the gap.
  */
-async function snapshotMissing(snapshotDate, conn) {
+async function readSnapshotMissing(snapshotDate, conn) {
   snapshotDate = snapshotDate || etDateString();
   conn = conn || require('../models/db');
+  const row = await conn('kpi_snapshots').where({ snapshot_date: snapshotDate }).count({ n: '*' }).first();
+  return Number(row?.n || 0) < SNAPSHOT_METRICS.length;
+}
+
+/**
+ * Pre-lock form for the 23:55 catch-up tick: a read failure answers false (skip, take no
+ * lock, record nothing; the original tick or tomorrow's check decides).
+ */
+async function snapshotMissing(snapshotDate, conn) {
   try {
-    const row = await conn('kpi_snapshots').where({ snapshot_date: snapshotDate }).count({ n: '*' }).first();
-    return Number(row?.n || 0) < SNAPSHOT_METRICS.length;
+    return await readSnapshotMissing(snapshotDate, conn);
   } catch (err) {
     logger.warn(`[kpi-snapshot] catch-up check could not read kpi_snapshots: ${err.message}`);
     return false;
@@ -104,11 +112,12 @@ async function snapshotMissing(snapshotDate, conn) {
 /**
  * Catch-up entry point: records the day's snapshot only when it is missing.
  * Call it inside runExclusive('kpi-daily-snapshot'): it checks again under the lock,
- * so a 23:45 run that finished while this one waited is not written twice.
+ * so a 23:45 run that finished while this one waited is not written twice. That read
+ * throws on failure, so the run is recorded as failed instead of as a no-op success.
  */
 async function recordKpiSnapshotIfMissing(snapshotDate, conn) {
   snapshotDate = snapshotDate || etDateString();
-  if (!(await snapshotMissing(snapshotDate, conn))) return { skipped: 'already_recorded', snapshot_date: snapshotDate };
+  if (!(await readSnapshotMissing(snapshotDate, conn))) return { skipped: 'already_recorded', snapshot_date: snapshotDate };
   return recordKpiSnapshot(snapshotDate, conn);
 }
 

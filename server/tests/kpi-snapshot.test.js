@@ -158,6 +158,14 @@ describe('snapshotMissing / recordKpiSnapshotIfMissing', () => {
     expect(capture.rows.every((r) => r.snapshot_date === '2026-06-24')).toBe(true);
   });
 
+  test('an unreadable table under the lock REJECTS: never resolved as "already recorded", so job health records a failure', async () => {
+    const capture = {};
+    await expect(recordKpiSnapshotIfMissing('2026-06-24', makeCatchUpDb({ countError: 'connection reset', capture })))
+      .rejects.toThrow('connection reset');
+    expect(capture.rows).toHaveLength(0);
+    expect(computeCoreKpis).not.toHaveBeenCalled();
+  });
+
   test('catch-up after a finished 23:45 tick writes nothing and never reads the KPIs', async () => {
     const capture = {};
     const out = await recordKpiSnapshotIfMissing('2026-06-24', makeCatchUpDb({ existing: SNAPSHOT_METRICS.length, capture }));

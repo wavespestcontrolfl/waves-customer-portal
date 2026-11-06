@@ -4,7 +4,7 @@
 // morning's tick) digests every day since, up to 7, each on its own window. Green days
 // send nothing; a run that throws leaves the bookmark where it was.
 
-const mockState = { bookmark: null, bookmarkError: null, stamps: [], days: {}, queried: [] };
+const mockState = { bookmark: null, bookmarkError: null, stampError: null, stamps: [], days: {}, queried: [] };
 
 // One fake for every table the digest touches. llm_dispatch_log answers by the window
 // the code asks for: a one-day window is that ET day, a 7-day window is the prior week,
@@ -19,7 +19,7 @@ jest.mock('../models/db', () => {
         first() { return mockState.bookmarkError ? Promise.reject(new Error(mockState.bookmarkError)) : Promise.resolve(mockState.bookmark ? { last_sent_at: mockState.bookmark } : undefined); },
         insert(row) { chain.row = row; return chain; },
         onConflict() { return chain; },
-        merge() { mockState.stamps.push(chain.row); return Promise.resolve(); },
+        merge() { if (mockState.stampError) return Promise.reject(new Error(mockState.stampError)); mockState.stamps.push(chain.row); return Promise.resolve(); },
       };
       return chain;
     }
@@ -81,7 +81,7 @@ beforeEach(() => {
   jest.resetModules();
   jest.clearAllMocks();
   jest.useFakeTimers({ now: TICK_AT });
-  Object.assign(mockState, { bookmark: null, bookmarkError: null, stamps: [], days: {}, queried: [] });
+  Object.assign(mockState, { bookmark: null, bookmarkError: null, stampError: null, stamps: [], days: {}, queried: [] });
   process.env = { ...ORIGINAL_ENV, GATE_LLM_DISPATCH_METRICS: 'true' };
   mockEmailSend.mockResolvedValue({ ok: true });
   mockDeliver = jest.fn(async (args) => { await args.sendEmail(); return { ok: true }; });
@@ -226,13 +226,32 @@ describe('runLlmDispatchDigestWithCatchUp', () => {
     expect(mockState.stamps[0].last_sent_at).toEqual(ET_MIDNIGHT('2026-11-05'));
   });
 
-  it('an unreadable bookmark falls back to yesterday only', async () => {
+  it('an unreadable bookmark digests yesterday only and does NOT move the bookmark (older owed days stay owed)', async () => {
     mockState.bookmarkError = 'connection reset';
     mockState.days = { '2026-11-04': GREEN_DAY };
     const { runLlmDispatchDigestWithCatchUp } = load();
     const out = await runLlmDispatchDigestWithCatchUp();
     expect(out).toMatchObject({ exceptions: [] });
     expect(mockState.queried.filter((q) => q.startsWith('stats:'))).toEqual(['stats:2026-11-04']);
+    expect(mockState.stamps).toEqual([]);
+  });
+
+  it('a missing bookmark row (first run) is not a read failure: yesterday is digested and the bookmark starts', async () => {
+    mockState.days = { '2026-11-04': GREEN_DAY };
+    const { runLlmDispatchDigestWithCatchUp } = load();
+    await runLlmDispatchDigestWithCatchUp();
+    expect(mockState.stamps).toHaveLength(1);
+    expect(mockState.stamps[0].last_sent_at).toEqual(ET_MIDNIGHT('2026-11-05'));
+  });
+
+  it('a failed bookmark write never throws and never moves the bookmark, so the next tick repeats rather than skips', async () => {
+    mockState.bookmark = ET_MIDNIGHT('2026-11-03');
+    mockState.stampError = 'connection reset';
+    mockState.days = { '2026-11-03': GREEN_DAY, '2026-11-04': GREEN_DAY };
+    const { runLlmDispatchDigestWithCatchUp } = load();
+    await expect(runLlmDispatchDigestWithCatchUp()).resolves.toMatchObject({ exceptions: [] });
+    expect(mockState.stamps).toEqual([]);
+    expect(mockState.bookmark).toEqual(ET_MIDNIGHT('2026-11-03'));
   });
 });
 

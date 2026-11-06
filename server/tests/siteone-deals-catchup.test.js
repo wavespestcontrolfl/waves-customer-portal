@@ -134,4 +134,12 @@ describe('runSiteOneDealsCatchUp', () => {
     expect(notify).not.toHaveBeenCalled();
     expect(calls.tables).not.toContain('emails');
   });
+
+  test('an unreadable job_health row under the lock REJECTS: never resolved as "already ran", so job health records a failure', async () => {
+    const { db, calls } = fakeDb({ healthError: 'connection reset', emails: emails() });
+    const notify = jest.fn();
+    await expect(runSiteOneDealsCatchUp({ now: TUESDAY_CATCH_UP, db, notify })).rejects.toThrow('connection reset');
+    expect(notify).not.toHaveBeenCalled();
+    expect(calls.tables).not.toContain('emails');
+  });
 });

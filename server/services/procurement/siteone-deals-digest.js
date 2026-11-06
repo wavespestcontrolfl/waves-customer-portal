@@ -366,17 +366,27 @@ const TICK_TIME = '08:00';
 const scheduledTickFor = (now) => parseETDateTime(`${etWeekStart(now)}T${TICK_TIME}`);
 
 /**
- * True when this ET week's digest has NOT finished yet. A read failure answers
- * false: the catch-up skips and the next tick tries again, so a database blip
- * never makes a second run.
+ * True when this ET week's digest has NOT finished yet. THROWS when job_health cannot
+ * be read. Code that runs under the job lock must use this form: a resolved callback is
+ * recorded by runExclusive as a successful run, so a read failure answered as "already
+ * ran" would stamp last_success_at with nothing digested and hide the week from the
+ * next catch-up tick.
  */
-async function weekIsMissing({ now = new Date(), db } = {}) {
+async function readWeekMissing({ now = new Date(), db } = {}) {
   const conn = db || require('../../models/db');
+  const row = await conn('job_health').where({ job_name: JOB_NAME }).first('last_success_at');
+  const weekStartMs = parseETDateTime(`${etWeekStart(now)}T00:00`).getTime();
+  const ranMs = row?.last_success_at ? new Date(row.last_success_at).getTime() : NaN;
+  return !(Number.isFinite(ranMs) && ranMs >= weekStartMs);
+}
+
+/**
+ * Pre-lock form for the cron tick: a read failure answers false (skip, take no lock,
+ * record nothing; the next tick tries again), so a database blip never makes a second run.
+ */
+async function weekIsMissing(opts = {}) {
   try {
-    const row = await conn('job_health').where({ job_name: JOB_NAME }).first('last_success_at');
-    const weekStartMs = parseETDateTime(`${etWeekStart(now)}T00:00`).getTime();
-    const ranMs = row?.last_success_at ? new Date(row.last_success_at).getTime() : NaN;
-    return !(Number.isFinite(ranMs) && ranMs >= weekStartMs);
+    return await readWeekMissing(opts);
   } catch (err) {
     logger.warn(`[siteone-deals] catch-up check could not read job_health: ${err.message}`);
     return false;
@@ -388,10 +398,11 @@ async function weekIsMissing({ now = new Date(), db } = {}) {
  * pinned to Monday 8:00 ET, not to the moment the catch-up fires. Mail that
  * arrives after Monday 8:00 falls in next week's window, so nothing is lost.
  * Meant to run inside runExclusive(JOB_NAME); it checks again under that lock, so
- * a tick that finished while this one waited for the lock is not run twice.
+ * a tick that finished while this one waited for the lock is not run twice. That
+ * second read throws on failure (see readWeekMissing), so the run is recorded as failed.
  */
 async function runSiteOneDealsCatchUp({ now = new Date(), db, notify } = {}) {
-  if (!(await weekIsMissing({ now, db }))) return { skipped: 'already_ran' };
+  if (!(await readWeekMissing({ now, db }))) return { skipped: 'already_ran' };
   return runSiteOneDealsDigest({ now: scheduledTickFor(now), db, notify });
 }
 

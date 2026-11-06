@@ -1247,14 +1247,17 @@ async function runLlmDispatchDigest({ days = [1] } = {}) {
 const DIGEST_BOOKMARK_KEY = 'llm-dispatch-digest-thru';
 const MAX_BACKFILL_DAYS = 7;
 
+// { readable, at }: `at` is null for a missing row (never digested; fine) and also for
+// a failed read, where `readable` is false. The two must stay apart: after a failed
+// read the run may digest yesterday, but it must not move the bookmark, or the older
+// days still owed behind it would be skipped for good.
 async function readDigestBookmark(db) {
   try {
     const row = await db('ops_email_send_state').where({ email_key: DIGEST_BOOKMARK_KEY }).first('last_sent_at');
-    return row?.last_sent_at ? new Date(row.last_sent_at) : null;
+    return { readable: true, at: row?.last_sent_at ? new Date(row.last_sent_at) : null };
   } catch (err) {
-    // No bookmark = the old behavior (yesterday only). Never let it break the digest.
-    logger.warn(`[llm-dispatch-metrics] digest bookmark read failed (${err.code || err.name || 'error'}) — digesting yesterday only`);
-    return null;
+    logger.warn(`[llm-dispatch-metrics] digest bookmark read failed (${err.code || err.name || 'error'}) — digesting yesterday only and leaving the bookmark alone`);
+    return { readable: false, at: null };
   }
 }
 
@@ -1294,22 +1297,24 @@ async function stampDigestedThroughYesterday(db) {
  */
 async function digestCatchUpNeeded() {
   const bookmark = await readDigestBookmark(require('../models/db'));
-  return !!bookmark && missedDigestDays(bookmark).length > 0;
+  return !!bookmark.at && missedDigestDays(bookmark.at).length > 0;
 }
 
 /**
  * The scheduled entry point (both the 6:25 tick and the midday catch-up tick). It
  * digests every day since the bookmark, then moves the bookmark to the end of
  * yesterday. A run that throws leaves the bookmark where it was, so the next tick
- * retries the same days. With the gate off the bookmark still moves: days the
+ * retries the same days. An unreadable bookmark digests yesterday only and is not moved. With the gate off the bookmark still moves: days the
  * feature was off are not backfilled the day it is switched on.
  */
 async function runLlmDispatchDigestWithCatchUp() {
   const db = require('../models/db');
-  const days = missedDigestDays(await readDigestBookmark(db));
+  const bookmark = await readDigestBookmark(db);
+  const days = missedDigestDays(bookmark.at);
   if (!days.length) return { skipped: 'already_digested' };
   const out = await runLlmDispatchDigest({ days });
-  await stampDigestedThroughYesterday(db);
+  // An unreadable bookmark may hide older owed days: leave it, the next readable tick backfills.
+  if (bookmark.readable) await stampDigestedThroughYesterday(db);
   return out;
 }
 
