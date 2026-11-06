@@ -26,7 +26,7 @@
  */
 const logger = require('../logger');
 const { hasAlignedAuth } = require('../email/inbox-hygiene');
-const { etWeekStart, etParts, etDateString } = require('../../utils/datetime-et');
+const { etWeekStart, etParts, etDateString, parseETDateTime } = require('../../utils/datetime-et');
 
 const WINDOW_DAYS = 7;
 const BODY_CHARS = 6000;
@@ -353,7 +353,61 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify } = {}) {
   return { scanned, deals: count, notified: true };
 }
 
+// ---- missed-tick catch-up --------------------------------------------------
+// The Monday 8:00 tick (scheduler.js) can be lost: a deploy restart on that minute,
+// or node-cron dropping a tick while the event loop is busy. The cron-lock records
+// every finished run of the wrapped job in job_health.last_success_at, so "did this
+// week's digest run" is that stamp being on or after this ET week's Monday. No new
+// table. The bell's own dedupeKey (siteone-deals:<Monday>) still blocks a second bell.
+const JOB_NAME = 'siteone-deals-digest';
+const TICK_TIME = '08:00';
+
+/** The instant this ET week's Monday tick is scheduled for: the end of the 7-day window. */
+const scheduledTickFor = (now) => parseETDateTime(`${etWeekStart(now)}T${TICK_TIME}`);
+
+/**
+ * True when this ET week's digest has NOT finished yet. THROWS when job_health cannot
+ * be read. Code that runs under the job lock must use this form: a resolved callback is
+ * recorded by runExclusive as a successful run, so a read failure answered as "already
+ * ran" would stamp last_success_at with nothing digested and hide the week from the
+ * next catch-up tick.
+ */
+async function readWeekMissing({ now = new Date(), db } = {}) {
+  const conn = db || require('../../models/db');
+  const row = await conn('job_health').where({ job_name: JOB_NAME }).first('last_success_at');
+  const weekStartMs = parseETDateTime(`${etWeekStart(now)}T00:00`).getTime();
+  const ranMs = row?.last_success_at ? new Date(row.last_success_at).getTime() : NaN;
+  return !(Number.isFinite(ranMs) && ranMs >= weekStartMs);
+}
+
+/**
+ * Pre-lock form for the cron tick: a read failure answers false (skip, take no lock,
+ * record nothing; the next tick tries again), so a database blip never makes a second run.
+ */
+async function weekIsMissing(opts = {}) {
+  try {
+    return await readWeekMissing(opts);
+  } catch (err) {
+    logger.warn(`[siteone-deals] catch-up check could not read job_health: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Catch-up run. Reads the SAME 7-day window the Monday tick would have: it is
+ * pinned to Monday 8:00 ET, not to the moment the catch-up fires. Mail that
+ * arrives after Monday 8:00 falls in next week's window, so nothing is lost.
+ * Meant to run inside runExclusive(JOB_NAME); it checks again under that lock, so
+ * a tick that finished while this one waited for the lock is not run twice. That
+ * second read throws on failure (see readWeekMissing), so the run is recorded as failed.
+ */
+async function runSiteOneDealsCatchUp({ now = new Date(), db, notify } = {}) {
+  if (!(await readWeekMissing({ now, db }))) return { skipped: 'already_ran' };
+  return runSiteOneDealsDigest({ now: scheduledTickFor(now), db, notify });
+}
+
 module.exports = {
+  weekIsMissing, runSiteOneDealsCatchUp, scheduledTickFor,
   runSiteOneDealsDigest, isDealEmail, extractDeadline, matchProducts, isDealSenderDomain,
   candidateEmailQuery, MAX_CANDIDATE_ROWS, BODY_CHARS, HTML_CHARS,
 };

@@ -1748,10 +1748,16 @@ function initScheduledJobs() {
   // (stats + email no-op while off; the retention prune still runs so
   // accumulated rows age out after a gate-off). runExclusive so a deploy
   // overlap doesn't double-email the same day.
-  cron.schedule('25 6 * * *', async () => {
+  // Shared by the 6:25 tick and the 12:28 catch-up tick below. Both call the same entry
+  // point, which digests every ET day since its bookmark (up to 7), so a lost 6:25 tick
+  // is made up by 12:28 the same day (or by the next 6:25 at the latest) and a tick
+  // after a finished one finds nothing to do. The catch-up tick takes the lock only when
+  // the bookmark shows a day still owed.
+  const runLlmDispatchDigestTick = async ({ catchUp = false } = {}) => {
     try {
       const metrics = require('./llm-dispatch-metrics');
-      const res = await runExclusive('llm-dispatch-digest', () => metrics.runLlmDispatchDigest());
+      if (catchUp && !(await metrics.digestCatchUpNeeded())) return;
+      const res = await runExclusive('llm-dispatch-digest', () => metrics.runLlmDispatchDigestWithCatchUp());
       // runExclusive returns { skipped, reason } WITHOUT calling the job when
       // it cannot acquire a DB connection — so on a full database outage the
       // digest never runs and its own DB-failure alert never fires. Alert from
@@ -1778,7 +1784,10 @@ function initScheduledJobs() {
         }
       }
     }
-  }, { timezone: 'America/New_York' });
+  };
+  cron.schedule('25 6 * * *', () => runLlmDispatchDigestTick(), { timezone: 'America/New_York' });
+  // DAILY 12:28PM ET — catch-up for the 6:25 digest above.
+  cron.schedule('28 12 * * *', () => runLlmDispatchDigestTick({ catchUp: true }), { timezone: 'America/New_York' });
 
   // HOURLY at :50 — LLM dispatch recorder heartbeat. Writes one row through
   // the same insert path real recording uses, so the digest can tell a
@@ -1830,6 +1839,22 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`[kpi-snapshot] cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 11:55PM ET — catch-up for the 11:45 snapshot above. A lost 11:45 tick left a
+  // gap in the trend chart. This tick writes today's rows only when they are missing
+  // (the date is fixed when the tick starts, so a late lock wait never writes
+  // tomorrow's date); a day already recorded is left alone, before and under the lock.
+  cron.schedule('55 23 * * *', async () => {
+    try {
+      const { snapshotMissing, recordKpiSnapshotIfMissing } = require('./kpi-snapshot');
+      const today = etDateString();
+      if (!(await snapshotMissing(today))) return;
+      const res = await runExclusive('kpi-daily-snapshot', () => recordKpiSnapshotIfMissing(today));
+      if (res && res.metrics) logger.warn(`[kpi-snapshot] catch-up wrote ${today}: the 23:45 tick did not complete`);
+    } catch (err) {
+      logger.error(`[kpi-snapshot] catch-up failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -2128,6 +2153,26 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Catch-up for the Monday 8:00 deals digest above: Monday and Tuesday at 10:52, same
+  // gates. A lost Monday tick (deploy restart, dropped tick) rang no bell that week.
+  // job_health.last_success_at shows whether this ET week's run finished; the rerun reads
+  // the window the Monday tick would have read (pinned to Monday 8:00) and the bell's
+  // weekly dedupeKey still allows only one bell. Checked before the lock and again under it.
+  cron.schedule('52 10 * * 1,2', async () => {
+    if (!isEnabled('siteOneDealsDigest')) return;
+    try {
+      const digest = require('./procurement/siteone-deals-digest');
+      if (!(await digest.weekIsMissing())) return;
+      logger.warn('[siteone-deals] catch-up: this week\'s digest has not finished, running it now');
+      await runExclusive('siteone-deals-digest', async () => {
+        const result = await digest.runSiteOneDealsCatchUp();
+        logger.info(`[siteone-deals] catch-up run: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Weekly SiteOne deals digest catch-up failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Catch-up: hourly at :20, same gates as the weekly tick. Reruns the scan when the
   // job_health row shows a failed run in the last 24 h, or a run that started 3+ h ago
   // and never finished — at most three failed attempts in a row. The per-match draft
@@ -2268,7 +2313,8 @@ function initScheduledJobs() {
   // in every schedule here, step patterns included; :19/:49 belong to the
   // DB/LLM-heavy previsit sweep (codex #5358 r2 P1).
   // =========================================================================
-  cron.schedule('13 8 * * 1', async () => {
+  // The tick body is shared with the 10:44 catch-up registered below it.
+  const runCallBookingLinkWeeklyTick = async () => {
     const tickStartedAt = Date.now();
     try {
       const lockRes = await runExclusive('call-booking-link-weekly', async () => {
@@ -2286,6 +2332,21 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Weekly booking-link check failed: ${err.message}`);
+    }
+  };
+  cron.schedule('13 8 * * 1', () => runCallBookingLinkWeeklyTick(), { timezone: 'America/New_York' });
+
+  // Catch-up for the Monday 8:13 check: Monday and Tuesday at 10:44. A lost Monday tick
+  // skipped the owner's weekly report. This runs the same tick only when the lane is on
+  // and this week's send marker is missing; the report window is anchored to Monday
+  // 8:13, so it covers the same week, and the check re-reads the marker under the lock.
+  cron.schedule('44 10 * * 1,2', async () => {
+    try {
+      if (!(await require('./call-booking-link-weekly-check').weekIsMissing())) return;
+      logger.warn('[call-booking-link-weekly] catch-up: this week\'s check has not gone out, running it now');
+      await runCallBookingLinkWeeklyTick();
+    } catch (err) {
+      logger.error(`Weekly booking-link check catch-up failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
