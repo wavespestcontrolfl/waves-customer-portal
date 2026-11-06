@@ -4399,6 +4399,7 @@ module.exports = {
   windowEnd,
   refreshableVerdictSql,
   withoutProactiveDraft,
+  bookedVisit,
   PERSON_CONTACT_KIND,
   PERSON_CONTACT_BASIS,
   applyHumanUpdate,
