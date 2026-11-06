@@ -4553,7 +4553,7 @@ router.get('/:serviceId/reschedule-options', async (req, res, next) => {
     // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees why.
     const refusal = await techMoveRefusal(req);
     if (refusal) return res.status(refusal.status).json(refusal.payload);
-    // GATE_ROUTE_CHECK_STAFF_LISTS: only an admin's list may buy Google road
+    // Route-checked day list: only an admin's list may buy Google road
     // times; a technician's stays on the estimate.
     const options = await SmartRebooker.findRescheduleOptions(req.params.serviceId, undefined, {
       caller: { isAdmin: req.techRole === 'admin', technicianId: req.technicianId },
@@ -7458,7 +7458,7 @@ router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
       jobId: req.params.id,
       technicianId: req.body ? req.body.technicianId : undefined,
       actorId: req.technicianId,
-      place: true, // GATE_ROUTE_CHECK_ASSIGN_SAVES: the office board numbers the stop
+      place: true, // the office board numbers the stop
     });
     res.json({ job: result.job, ...(result.warnings ? { warnings: result.warnings } : {}) });
   } catch (err) {

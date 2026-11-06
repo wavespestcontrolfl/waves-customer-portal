@@ -1,11 +1,11 @@
 // Opt-in PostgreSQL regression. Every write stays inside a disposable schema.
 //
 // 20261021010000 publishes ONE new active version of the four open-estimate
-// follow-up templates (GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE context line). The pre-migration
+// follow-up templates (follow-up monthly average context line). The pre-migration
 // content of each is the real shipped content, read from the migrated `public`
 // schema (the version this migration superseded when it has already run
 // there), so the test proves the migration against what production holds - and
-// proves the gate-off promise: rendered with a payload that has no
+// proves the no-average promise: rendered with a payload that has no
 // estimate_average_note, every template's html and text are byte-identical before
 // and after.
 jest.mock('../models/db', () => jest.fn());
@@ -154,7 +154,7 @@ postgres('estimate follow-up average note migration (PostgreSQL)', () => {
     }
   });
 
-  test('gate off is byte-identical: without a note every template renders exactly as before', async () => {
+  test('no average is byte-identical: without a note every template renders exactly as before', async () => {
     for (const key of KEYS()) await cloneTemplate(key);
     await migration.up(db);
     for (const key of KEYS()) {
@@ -167,7 +167,7 @@ postgres('estimate follow-up average note migration (PostgreSQL)', () => {
     }
   });
 
-  test('gate on: the price row and the context sentence render in the html and the plain text', async () => {
+  test('with an average: the price row and the context sentence render in the html and the plain text', async () => {
     for (const key of KEYS()) await cloneTemplate(key);
     await migration.up(db);
     const payload = { ...BASE_PAYLOAD, price_summary: '$94.00 per application · $31.33 a month', estimate_average_note: NOTE };

@@ -1,12 +1,6 @@
-// GATE_ESTIMATE_MONTHLY_AVERAGE on the LEGACY server-rendered estimate page
+// Monthly average on the LEGACY server-rendered estimate page
 // (renderPage: use_v2_view=false rows and the GrowthBook control). Same shared
 // builder and eligibility rules as the email, the PDF and the React page.
-const mockGate = { on: true };
-jest.mock('../config/feature-gates', () => {
-  const actual = jest.requireActual('../config/feature-gates');
-  return { ...actual, isEnabled: jest.fn((gate) => (gate === 'estimateMonthlyAverage' ? mockGate.on : actual.isEnabled(gate))) };
-});
-
 const { renderPage } = require('../routes/estimate-public');
 
 const tree = { service: 'tree_shrub', tier: 'standard', frequency: 6, visitsPerYear: 6, monthly: 66.75, annual: 801, perApp: 133.5, palmCountSource: 'service_line', pricingKnobs: { perPalmAnnual: 0, minutesPerPalmVisit: 0 } };
@@ -23,8 +17,6 @@ const data = (...lineItems) => ({ result: { lineItems, oneTime: { items: [], mem
 const render = (est, estData) => renderPage('ssr-avg-token', est, estData);
 const cents = (text) => Math.round(parseFloat(text.replace(/[^0-9.]/g, '')) * 100);
 const averageLines = (html) => [...html.matchAll(/<div class="day-price" data-monthly-average data-avg-pref-off="\d+">(\$[\d.,]+ a month)<\/div>/g)].map((m) => m[1]);
-
-beforeEach(() => { mockGate.on = true; });
 
 describe('legacy SSR page: monthly average', () => {
   test('the page script still parses and wires the hide-on-change hooks', () => {
@@ -93,25 +85,6 @@ describe('legacy SSR page: monthly average', () => {
     expect(html).not.toContain('data-monthly-average-plan');
   });
 
-  // Each render signs a fresh ask token (a JWT whose iat is in whole seconds), so two renders that straddle a second
-  // differ on that line alone (main 10-31). The pair runs with the clock held still.
-  test('gate off: no marker, no script hook, and the page is the gate-on page minus the additions (byte-identical)', () => {
-    jest.useFakeTimers({ now: Date.now() });
-    try {
-      const on = render(estimate(66.75), data(tree));
-      mockGate.on = false;
-      const off = render(estimate(66.75), data(tree));
-      expect(off).not.toMatch(/data-monthly-average|syncMonthlyAverageVisibility|a month|Averaged over the year/);
-      const stripped = on
-        .replace(/\s*<div class="day-price" data-monthly-average[^>]*>[^<]*<\/div>/g, '')
-        .replace(/ {2}\/\/ GATE_ESTIMATE_MONTHLY_AVERAGE: the average is computed[\s\S]*?\n {2}\}\n\n(?= {2}function syncPaymentSetupCards)/, '')
-        .replace(/ syncMonthlyAverageVisibility\([^)]*\);/g, '');
-      expect(stripped).toBe(off);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
   test('multi service: the lines add up to the plan line, which equals the stored monthly total', () => {
     const html = render(estimate(102.25), data(tree, lawn));
     const lines = averageLines(html);
@@ -165,7 +138,7 @@ describe('legacy SSR page: monthly average', () => {
     expect(render(estimate(80), data(tree, lawn))).not.toContain('data-monthly-average');
   });
 
-  test('plans the gate leaves alone: quote-required, accepted, declined', () => {
+  test('plans with no average: quote-required, accepted, declined', () => {
     for (const overrides of [{ quoteRequired: true }, { status: 'accepted' }, { status: 'declined' }]) {
       expect(render(estimate(66.75, overrides), data(tree))).not.toContain('data-monthly-average');
     }

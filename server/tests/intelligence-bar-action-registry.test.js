@@ -388,6 +388,8 @@ const SCOPE_SNAPSHOT = {
     // convert_lead carries lead_id + customer_id (validateRecordTarget binds both to the task customer).
     'convert_lead',
     'void_invoice',
+    // switch_visit_to_annual_prepay carries appointment_id (validateRecordTarget binds the visit to the task customer).
+    'switch_visit_to_annual_prepay',
     // The invoice edit cards carry invoice_id (or invoice_number, bound like send_invoice's).
     'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice',
     // The invoice reminder and payment-plan cards carry invoice_id (or invoice_number, bound like send_invoice's).

@@ -45,7 +45,7 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
-// GATE_ROUTE_CHECK_AUTO_SAVES (Route Check Everywhere 2b): the real gate reader,
+// Route check on saves (Route Check Everywhere 2b): the real reader,
 // a spy on the placement so no route query runs.
 jest.mock('../services/scheduling/arrival-route', () => ({
   ...jest.requireActual('../services/scheduling/arrival-route'),
@@ -2314,10 +2314,10 @@ describe('annual prepay renewal helpers', () => {
     }));
   });
 
-  describe('GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, Route Check Everywhere 2b)', () => {
+  describe('route check on saves (owner 2026-10-29, Route Check Everywhere 2b)', () => {
     const { placeMovedVisit } = require('../services/scheduling/arrival-route');
     const seedCols = { scheduled_date: {}, service_type: {}, annual_prepay_term_id: {}, window_start: {}, window_end: {}, time_window: {}, window_display: {}, technician_id: {}, estimated_duration_minutes: {}, notes: {} };
-    const gateOn = () => { process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true'; process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; };
+    const gateOn = () => { process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; };
     const TERM = {
       id: 'term-g', customer_id: 'customer-g', term_start: '2026-07-30', term_end: '2027-07-30',
       coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 2, coverage_cadence: 'quarterly',
@@ -2330,14 +2330,14 @@ describe('annual prepay renewal helpers', () => {
       return _private.ensureCoverageRowsForTerm(TERM, undefined, { today: '2026-07-31' });
     };
     beforeEach(() => placeMovedVisit.mockClear());
-    afterEach(() => { delete process.env.GATE_ROUTE_CHECK_AUTO_SAVES; delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS; });
+    afterEach(() => { delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS; });
 
-    test('gate off (unset): the timed first visit seeds with no placement', async () => {
+    test('arrival-window routing off (unset): the timed first visit seeds with no placement', async () => {
       await expect(seedTimed()).resolves.toMatchObject({ createdCount: 2 });
       expect(placeMovedVisit).not.toHaveBeenCalled();
     });
 
-    test('gate on: only the timed first visit is placed, once, inside the seeding transaction, with its source', async () => {
+    test('only the timed first visit is placed, once, inside the seeding transaction, with its source', async () => {
       gateOn();
       await expect(seedTimed()).resolves.toMatchObject({ createdCount: 2 });
       expect(placeMovedVisit).toHaveBeenCalledTimes(1);
@@ -2348,14 +2348,14 @@ describe('annual prepay renewal helpers', () => {
       expect(args).toEqual({ serviceId: 'svc-g1', staffSave: true, source: 'annual_prepay_renewal' });
     });
 
-    test('gate on, a throwing placement: the seed still succeeds', async () => {
+    test('a throwing placement: the seed still succeeds', async () => {
       gateOn();
       placeMovedVisit.mockRejectedValueOnce(new Error('route boom'));
       await expect(seedTimed()).resolves.toMatchObject({ createdCount: 2 });
       expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('route boom'));
     });
 
-    test('gate on: an adopted visit retimed to the promised window is placed after the update', async () => {
+    test('an adopted visit retimed to the promised window is placed after the update', async () => {
       gateOn();
       const adopted = {
         id: 'svc-adopted', customer_id: 'customer-g', scheduled_date: '2026-08-01', service_type: 'Quarterly Pest Control',

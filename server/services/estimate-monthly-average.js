@@ -1,6 +1,6 @@
 'use strict';
 
-// GATE_ESTIMATE_MONTHLY_AVERAGE (owner ruling 2026-10-20, "option A"): a
+// Monthly average (owner ruling 2026-10-20, "option A"): a
 // monthly AVERAGE beside the per-application price on residential estimates.
 // The per-application price stays the price; this module only decides WHETHER
 // the average may be shown for an estimate and hands the numbers to the shared
@@ -12,9 +12,8 @@
 // pricing authority as the document) and the estimate's STORED monthly total.
 // Whenever those do not reconcile (a stale stored total, a flat-monthly line,
 // a quote-required plan) the answer is null and the surface renders exactly as
-// it did before the gate.
+// it did before the average existed.
 
-const featureGates = require('../config/feature-gates');
 const logger = require('./logger');
 const shared = require('../../shared/estimate-monthly-average.cjs');
 const { isCommercialAutoAcceptEstimate } = require('./estimate-commercial-identity');
@@ -23,10 +22,6 @@ const num = (value) => {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
 };
-
-function gateOn() {
-  return featureGates.isEnabled('estimateMonthlyAverage');
-}
 
 function parseData(value) {
   if (!value) return {};
@@ -155,7 +150,7 @@ function resolveCandidate(estimate, livePricing) {
  * }}
  */
 function monthlyAverageFor({ estimate, proposal, bundle = null, livePricing = null, terminalState } = {}) {
-  if (!gateOn() || !estimate || !proposal || isExcludedPlan(estimate, proposal, bundle, terminalState)) return null;
+  if (!estimate || !proposal || isExcludedPlan(estimate, proposal, bundle, terminalState)) return null;
 
   const lines = (proposal.buildings || []).flatMap((building) => building.lineItems || []);
   const recurring = lines.filter((line) => line.frequency !== 'one_time');
@@ -189,14 +184,14 @@ function monthlyAverageFor({ estimate, proposal, bundle = null, livePricing = nu
 
 /**
  * The delivery email's pieces for an estimate row (async: it asks the same
- * billing authority the PDF asks). Null whenever the gate is off or the
+ * billing authority the PDF asks). Null whenever the
  * average may not be shown; never throws, so an email falls back to its
  * existing wording.
  *
  * @returns {Promise<null | {priceLine: string, note: string}>}
  */
 async function emailAverageParts(estimate) {
-  if (!gateOn() || !estimate) return null;
+  if (!estimate) return null;
   try {
     const { normalizeProposal } = require('./estimate-proposal');
     const { resolveProposalBillingContext } = require('./estimate-proposal-billing');
@@ -226,7 +221,7 @@ function averageText(parts) {
 
 /**
  * True when a REVIEWED (or scheduled) delivery email's recorded average no
- * longer matches what the send would now carry: a gate flip or a price edit
+ * longer matches what the send would now carry: a price edit
  * since the review. Same class as the reviewed PDF decision
  * (estimate-email-pdf.js reviewedPdfDecisionStale), with one difference: a
  * review with no recorded average means "no average", so a send that would now
@@ -239,8 +234,6 @@ function averageText(parts) {
 async function reviewedAverageStale(reviewedMessages, loadRow) {
   const reviewedEmail = reviewedMessages?.email;
   if (!reviewedEmail || reviewedEmail.provider === 'smtp') return false;
-  // Gate off and nothing recorded: nothing to compute, nothing changed.
-  if ((reviewedEmail.monthlyAverage ?? null) === null && !gateOn()) return false;
   // Through module.exports so a test can pin the resolution without a billing fixture.
   return averageDiffersFromReview(reviewedMessages, await module.exports.emailAverageParts(await loadRow()));
 }
@@ -256,4 +249,4 @@ function averageDiffersFromReview(reviewedMessages, parts) {
   return (reviewedEmail.monthlyAverage ?? null) !== averageText(parts);
 }
 
-module.exports = { monthlyAverageFor, emailAverageParts, averageText, reviewedAverageStale, averageDiffersFromReview, gateOn };
+module.exports = { monthlyAverageFor, emailAverageParts, averageText, reviewedAverageStale, averageDiffersFromReview };

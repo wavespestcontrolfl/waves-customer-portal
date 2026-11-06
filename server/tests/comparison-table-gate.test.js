@@ -2817,7 +2817,9 @@ describe('owner competitor list', () => {
     expect(approved.namedCompetitors).toEqual(['Massey Services', 'Orkin']);
     expect(gate.namedCompetitorListVerdict(ext(approved))).toEqual({ ok: true, approved: ['Massey Services', 'Orkin'] });
 
-    // Hughes is curated but NOT on the owner list.
+    // Hughes and Keller's are curated but NOT on the owner list.
+    const kellers = gate.evaluate({ body: "Orkin and Keller's Pest Control both offer recurring residential plans.", title: 'x' }, OPTS);
+    expect(gate.namedCompetitorListVerdict(ext(kellers))).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ["Keller's Pest Control"] });
     const offList = gate.evaluate({ body: 'Orkin and Hughes Exterminators both offer recurring residential plans.', title: 'x' }, OPTS);
     expect(gate.namedCompetitorListVerdict(ext(offList))).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Hughes Exterminators'] });
 
@@ -2825,6 +2827,8 @@ describe('owner competitor list', () => {
     for (const [body, name] of [
       ['Aptive offers recurring residential plans.', 'Aptive Environmental'],
       ['Truly Nolen offers recurring residential plans.', 'Truly Nolen'],
+      // Owner ruling 2026-11-05: All U Need joined the list.
+      ['All U Need Pest Control offers recurring residential plans.', 'All U Need Pest Control'],
     ]) {
       const r = gate.evaluate({ body, title: 'x' }, OPTS);
       expect(r.namedCompetitors).toEqual([name]);

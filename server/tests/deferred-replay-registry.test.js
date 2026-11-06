@@ -296,6 +296,28 @@ describe('deferred-replay registry', () => {
       expect(await recheckDeferredReplay('voicemail_lead_sms_deferred', meta)).toMatchObject({ eligible: false, retryable: true });
     });
 
+    describe('GATE_VOICEMAIL_TEXT_CALLER_ONLY: only a row the caller-only sender queued may go out', () => {
+      afterEach(() => { delete process.env.GATE_VOICEMAIL_TEXT_CALLER_ONLY; });
+
+      test('gate on: a row queued while the gate was off (spoken number, extracted words) is refused before any read', async () => {
+        process.env.GATE_VOICEMAIL_TEXT_CALLER_ONLY = 'true';
+        db.mockClear();
+        expect(await recheckDeferredReplay('voicemail_lead_sms_deferred', meta)).toEqual({ eligible: false, reason: 'queued-before-caller-only' });
+        expect(db).not.toHaveBeenCalled();
+      });
+
+      test('gate on: a row the caller-only sender queued stays eligible', async () => {
+        process.env.GATE_VOICEMAIL_TEXT_CALLER_ONLY = 'true';
+        db.mockReturnValueOnce(firstChain({ id: 'lead-1', status: 'new' }));
+        expect(await recheckDeferredReplay('voicemail_lead_sms_deferred', { ...meta, caller_only: true })).toEqual({ eligible: true });
+      });
+
+      test('gate off: a legacy row replays as before', async () => {
+        db.mockReturnValueOnce(firstChain({ id: 'lead-1', status: 'new' }));
+        expect(await recheckDeferredReplay('voicemail_lead_sms_deferred', meta)).toEqual({ eligible: true });
+      });
+    });
+
     describe('rechecked again at the true provider boundary (twilio.js runs it immediately before its request)', () => {
       const { deferredProviderPreSendCheck, deferredSmsHandoff } = require('../services/messaging/deferred-replay-registry');
       const boundaryConn = () => jest.fn(() => firstChain({ id: 'lead-1', status: 'new' }));

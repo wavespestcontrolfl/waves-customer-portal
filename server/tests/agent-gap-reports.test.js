@@ -661,7 +661,10 @@ describe('agent-gap-reports', () => {
       for (const reply of ["I can't merge records directly", 'I cannot deactivate, edit, or delete it from the bar',
         'I could not find a way to do that from the bar.', "There's no tool in this bar that adds a property",
         "I don't have an inventory tool in this bar", 'That isn’t available from here', 'Recurring series edits are not supported yet',
-        'This is a system issue I can’t work around from here', 'There is no way to issue a refund']) {
+        'This is a system issue I can’t work around from here', 'There is no way to issue a refund',
+        // The 2026-11-05 prepay ask: each sentence of the reply that recorded no row.
+        "I couldn't make this change.", 'The bar can only switch billing to per application, per visit, one-time or monthly membership.',
+        'It has no manual prepay option.']) {
         expect(DECLINE_RE.test(reply)).toBe(true);
       }
     });
@@ -669,7 +672,9 @@ describe('agent-gap-reports', () => {
     test('a read that worked but found nothing, or a request missing information, is not a decline', () => {
       const { _private: { DECLINE_RE } } = load();
       for (const reply of ["I couldn't find any matching invoices", 'that time is not available', "I can't confirm the price without the invoice",
-        "I can't switch it without the rental's street address", 'Done — the visit moved to Thursday at 9 AM.']) {
+        "I can't switch it without the rental's street address", 'Done — the visit moved to Thursday at 9 AM.',
+        "I couldn't make this change without the customer's new address.", 'It has no scheduled visits this month.',
+        'The customer has no autopay card on file.']) {
         expect(DECLINE_RE.test(reply)).toBe(false);
       }
     });

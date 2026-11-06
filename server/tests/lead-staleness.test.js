@@ -63,6 +63,7 @@ const SINCE_90D = new Date(NOW.getTime() - 90 * DAY_MS);
 const OWED_REPLY_BINDINGS = [
   'portal_chat', 'pending', 'resolved', 'closed', 'cancelled',
   'admin', 'portal-unfinished-'.length, 'portal-unfinished-',
+  'portal', 'portal',
   'inbound', SINCE_90D,
   'outbound',
   'voice_relay_sandbox', 'tech_voice', 'outbound', 'completed',
@@ -144,7 +145,12 @@ const OWED_REPLY_CLAUSE_TAIL = [
   'and not exists (select 1 from "notifications" as "n" '
   + 'where "n"."recipient_type" = ? and "n"."done_at" is null '
   + "and left(COALESCE(n.metadata->>'dedupeKey', ''), ?) = ? and n.metadata->>'customerId' = leads.customer_id::text) ",
-  // 4. an inbound text, not a STOP, in the window...
+  // 4. an unanswered portal message (portal-inbox.js openMessageScope)
+  'and not exists (select 1 from "conversations" as "cv" '
+  + 'where "cv"."channel" = ? and "cv"."our_endpoint_id" = ? and "cv"."customer_id" is not null and "cv"."last_inbound_at" is not null '
+  + "and cv.last_inbound_at >= cv.last_message_at and cv.last_inbound_at > coalesce((cv.metadata->>'handledAt')::timestamptz, '-infinity'::timestamptz) "
+  + 'and cv.customer_id = leads.customer_id) ',
+  // 5. an inbound text, not a STOP, in the window...
   'and not exists (select 1 from "sms_log" as "inb" '
   + 'where inb.customer_id = leads.customer_id and "inb"."direction" = ? and "inb"."created_at" >= ? '
   + "and inb.message_type IS DISTINCT FROM 'opt_out' "
@@ -295,9 +301,9 @@ describe('lead staleness sweep', () => {
         const knex = require('knex')({ client: 'pg' });
         const text = squash(flips['new-lead flip'](knex).sql);
         const clause = text.slice(text.indexOf('from "ai_escalations"'));
-        // chat, request, inbound text, then the person's text and the two calls; the
-        // email arm correlates through the customers lookup checked below
-        expect(clause.match(/customer_id = leads\.customer_id/g)).toHaveLength(6);
+        // chat, request, portal message, inbound text, then the person's text and the two
+        // calls; the email arm correlates through the customers lookup checked below
+        expect(clause.match(/customer_id = leads\.customer_id/g)).toHaveLength(7);
         expect(clause).toContain('strpos(');
         expect(clause).toContain('WHERE cu.id = leads.customer_id');
         return knex.destroy();
