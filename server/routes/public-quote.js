@@ -45,10 +45,12 @@ const LEAD_TEXT_LIMITS = {
   service_interest: 255,
   service_key: 80,
 };
+// Cut by whole characters (code points), as Postgres counts varchar length, so
+// an emoji at the cut never leaves half a surrogate pair behind.
 function clampLeadText(fields) {
   const out = { ...fields };
   for (const [key, max] of Object.entries(LEAD_TEXT_LIMITS)) {
-    if (typeof out[key] === 'string' && out[key].length > max) out[key] = out[key].slice(0, max);
+    if (typeof out[key] === 'string' && out[key].length > max) out[key] = Array.from(out[key]).slice(0, max).join('');
   }
   return out;
 }

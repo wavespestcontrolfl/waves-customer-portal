@@ -34,6 +34,20 @@ describe('clampLeadText', () => {
     expect(out.updated_at).toBe(when);
   });
 
+  test('cuts by whole characters: an emoji at the cut is kept whole, never split', () => {
+    const out = clampLeadText({ first_name: '\u{1F41C}'.repeat(300) });
+    const chars = Array.from(out.first_name);
+    expect(chars).toHaveLength(255);
+    expect(chars.every((c) => c === '\u{1F41C}')).toBe(true);
+    // 255 emoji are 510 UTF-16 units; Postgres counts 255 characters.
+    expect(out.first_name).toHaveLength(510);
+  });
+
+  test('a name of 255 emoji is under the column limit and passes through', () => {
+    const name = '\u{1F41C}'.repeat(255);
+    expect(clampLeadText({ first_name: name }).first_name).toBe(name);
+  });
+
   test('does not change the object it was given', () => {
     const input = { first_name: 'A'.repeat(300) };
     clampLeadText(input);
