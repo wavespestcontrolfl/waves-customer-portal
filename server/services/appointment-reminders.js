@@ -2531,6 +2531,9 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
         appointment_contact_role: held.contact.role || null,
         original_block_code: 'QUIET_HOURS_HOLD',
         replay_purpose: purpose,
+        // A day-only body keeps its promise fields (promise_level, window_unknown, guard fields) so the 8 AM replay
+        // records a DAY promise, not an unknown window (which the readers count as an hour). {} for a window body.
+        ...require('./time-promise').promiseMetaOf(metaExtra),
         ...(requiredVisitStatuses ? { required_visit_statuses: requiredVisitStatuses } : {}),
         ...(slotStamp || {}),
         resolve_from_by_customer: true,

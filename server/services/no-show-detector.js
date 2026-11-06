@@ -719,7 +719,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       source: 'email', source_id: r.id }));
   return [
     ...noticeEvents,
-    ...calls.map((r) => ({ visit_id: r.resource_id, start_at: r.metadata?.start_at,
+    ...calls.map((r) => ({ visit_id: r.resource_id, start_at: r.metadata?.start_at, ...levelOf(r.metadata),
       grouped: r.metadata?.stop_wide === true,
       communicated_at: r.metadata?.communicated_at || r.created_at, source: 'call', source_id: r.id })),
 
@@ -946,7 +946,7 @@ function agentCommittedStart(call) {
 // when the primary ledger failed, and its whole purpose is to still be there
 // whenever the feature is switched on. Best-effort itself — a send must
 // never fail because its bookkeeping did.
-async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = new Date(), providerSid = null, seriesMoveId = null, stopWide = false, windowUnknown = false } = {}) {
+async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = new Date(), providerSid = null, seriesMoveId = null, stopWide = false, windowUnknown = false, promiseLevel = null } = {}) {
   // null BEFORE the Number conversion: Number(null) is 0, a finite instant
   // (the epoch), so a bare isFinite check would stamp a 1970 window as the
   // promise — the same null-before-conversion trap `instant` guards above.
@@ -974,6 +974,8 @@ async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = n
         // so the promise it recovers supersedes every member's own rather
         // than reading as one service's (codex P1 round 26).
         ...(stopWide ? { stop_wide: true } : {}),
+        // GATE_DAY_ONLY_PROMISE: a day-only send is recorded as a day promise (read back as level 'day').
+        ...(promiseLevel === 'day' ? { promise_level: 'day' } : {}),
         fallback_reason: 'messaging_audit_unavailable' }, critical: true });
     return true;
   } catch (err) {

@@ -30,6 +30,26 @@ const DAY_PROMISE_CUTOFF_HOURS = 24.25;
 //                           unknown window, which counts as an hour (fail closed).
 const DAY_PROMISE_META = Object.freeze({ window_unknown: true, promise_level: 'day' });
 
+// The day-only fields of a send's metadata: the marker the no-show reader turns into level 'day' (promise_level), the
+// no-slot flag (window_unknown) and the occurrence guard (guard_slot_ms, promised_date; NOT promises, see
+// appointment-reminders.js dayGuardMeta). Anything that stores a notice's body to send it LATER (the 8 AM replay of a
+// held contact, the no-show reader's fallback record) must carry exactly these with the body, or the later send records
+// an unknown-window promise, which the readers count as an hour.
+const PROMISE_META_KEYS = Object.freeze(['promise_level', 'window_unknown', 'guard_slot_ms', 'promised_date']);
+
+/** The day-only fields present on a send's metadata, or {} for a window send (and for anything that is not a day promise). */
+function promiseMetaOf(meta) {
+  if (!meta || meta.promise_level !== 'day') return {};
+  const out = {};
+  for (const key of PROMISE_META_KEYS) if (meta[key] !== undefined && meta[key] !== null) out[key] = meta[key];
+  return out;
+}
+
+/** `meta` with the day-only fields saved from an earlier send re-applied (nothing added for a window send). */
+function withPromiseMeta(meta, saved) {
+  return { ...meta, ...promiseMetaOf(saved) };
+}
+
 /** Safe, call-time read of GATE_DAY_ONLY_PROMISE (strict 'true'). An unreadable gate is off. */
 function dayOnlyPromiseOn() {
   try {
@@ -255,6 +275,9 @@ async function loadTimeDisplay(conn, rows, now = new Date()) {
 }
 
 module.exports = {
+  PROMISE_META_KEYS,
+  promiseMetaOf,
+  withPromiseMeta,
   OFFICE_BOOKING_SOURCES,
   CUSTOMER_OR_UNKNOWN_SOURCES,
   dayOnlyEligibility,

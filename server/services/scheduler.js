@@ -6500,6 +6500,9 @@ function initScheduledJobs() {
               // A deferred template send keeps the key of the row that rendered
               // its frozen body (complete-scheduled-service enqueue).
               ...(claimMeta.template_key ? { templateKey: String(claimMeta.template_key) } : {}),
+              // A deferred DAY-ONLY appointment body (appointment-reminders.js queueHeldNoticeContacts) keeps its promise
+              // fields, so the replay records a day promise rather than an unknown window.
+              ...require('./time-promise').promiseMetaOf(claimMeta),
               // Enqueue provenance survives the replay (codex #3607 r4): the
               // audit row is written under this worker's own entry point, so
               // the ORIGINAL one (e.g. autopay_completion_decline_deferred)
