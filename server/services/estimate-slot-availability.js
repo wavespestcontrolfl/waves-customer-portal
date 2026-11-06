@@ -2080,6 +2080,41 @@ async function routeCheckedPool(pool, { coords, estimateId, durationMinutes, mod
   }
 }
 
+// Make room at booking (GATE_BOOKING_MAKE_ROOM, scheduling/booking-make-room.js). OFFER LISTS ONLY, like the route
+// check above: every other caller gets 'off'. Off: the module is never loaded. Any error reads as off.
+function makeRoomModeFor(userOpts) {
+  if (userOpts.offer !== true) return 'off';
+  try {
+    return require('./scheduling/booking-make-room').bookingMakeRoomMode();
+  } catch {
+    return 'off';
+  }
+}
+
+// This page's own offer rules for one window the make-room check tries: the request's dates and weekends, the
+// customer grid and close, the zone days, the time of day, the notice and the season.
+function makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays }) {
+  return (slot) => {
+    if (!slot?.date || slot.date < dateFrom || slot.date > dateTo) return false;
+    if (!enumerateETDateStrings(slot.date, slot.date, { includeWeekends: opts.includeWeekends }).length) return false;
+    if (!slotWindowFitsDay(slot.windowStart, slot.windowEnd)) return false;
+    if (funnelDays && !funnelDays.has(slot.date)) return false;
+    const kept = filterPastSlotsForToday(filterTimeOfDay([slot], opts.timeOfDay), { minimumLeadMinutes: opts.minimumLeadMinutes });
+    return filterSeasonalSlots(kept, serviceProfile).length === 1;
+  };
+}
+
+// GATE_BOOKING_MAKE_ROOM: records which taken hours this customer could have, over the final pool. Not awaited:
+// the list never waits for it, and it never changes the list.
+function startMakeRoomCheck(mode, args) {
+  if (mode === 'off') return;
+  try {
+    require('./scheduling/booking-make-room').recordMakeRoomCheck({ ...args, mode, surface: 'estimate' }).catch(() => {});
+  } catch (err) {
+    logger.warn(`[booking-make-room] check not started: ${err.message}`);
+  }
+}
+
 // ---------- main ----------
 
 async function getAvailableSlots(estimateId, userOpts = {}) {
@@ -2510,6 +2545,11 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const routeChecked = await routeCheckedPool(funneledEligible, {
     coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode,
   });
+  // GATE_BOOKING_MAKE_ROOM: the taken hours this customer could have, measured against this same final pool.
+  startMakeRoomCheck(makeRoomModeFor(userOpts), {
+    estimateId, pool: routeChecked, coords, durationMinutes: serviceProfile.durationMinutes, dateFrom, dateTo,
+    admit: makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays }),
+  });
   // The scarcity count below reads `bookable` when no funnel is active: leave out what the check removed.
   let countedBookable = bookable;
   if (routeChecked !== funneledEligible) {
@@ -2831,5 +2871,6 @@ module.exports = {
     heldVisitLines,
     clearCaches() { wrapperCache.clear(); geocodeCache.clear(); require('./scheduling/expected-service-minutes').clearExpectedServiceMinutesCache(); },
     stopDatesInRange,
+    makeRoomAdmit,
   },
 };
