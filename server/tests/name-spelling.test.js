@@ -35,6 +35,17 @@ describe('respellRecordName', () => {
     expect(say('Hi Tom, and Tom will be there too.', { firstName: 'Tim', lastName: 'Sampleroe' })).toBe('Hi Tim, and Tom will be there too.');
   });
 
+  test('a period ends the greeting, except after a title; a contraction is never a name', () => {
+    const dan = { firstName: 'Dan', lastName: 'Sampleroe' };
+    expect(say("Thanks. Don't worry about it.", dan)).toBe("Thanks. Don't worry about it.");
+    expect(say("Thanks, Don't worry about it.", dan)).toBe("Thanks, Don't worry about it.");
+    expect(say('Thanks, Don\u2019t worry about it.', dan)).toBe('Thanks, Don\u2019t worry about it.');
+    expect(say('Good morning. Dina called.')).toBe('Good morning. Dina called.');
+    expect(say('Thanks. Mrs. Exampletin called.')).toBe('Thanks. Mrs. Exampletin called.');
+    expect(say('Hi, Mrs. Exampletin.')).toBe('Hi, Mrs. Exampleton.');
+    expect(greeted('Thanks. X', 8)).toBe(false);
+  });
+
   test('a greeted first name followed by a different surname greets someone else', () => {
     expect(say('Hi Dina Smith')).toBe('Hi Dina Smith');
     expect(say('Hi Dina Exampleton')).toBe('Hi Dena Exampleton');

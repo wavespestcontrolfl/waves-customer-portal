@@ -12,7 +12,9 @@
  *   - it greets someone: it follows "Hi", "Hey", "Hello", "Dear", "Thanks",
  *     "Thank you" or "Good morning/afternoon/evening" (a title such as "Mrs"
  *     may sit between), or it is the surname right after such a first name.
- *     A name said in passing ("Tom will come") may be someone else;
+ *     A name said in passing ("Tom will come") may be someone else, and a
+ *     period ends the greeting except after a title ("Thanks. Don't worry");
+ *   - it is not a contraction ("Don't"); a possessive ("Dina's") is a name;
  *   - it is Capitalized (ALL CAPS is an acronym), has 3+ letters, and starts
  *     with the record name's letter and shares its sound code (Soundex over
  *     the whole word, not cut to 4);
@@ -48,8 +50,10 @@ const LETTER_RE = /\p{L}/u;
 const CAPITALIZED_RE = /^\p{Lu}\p{Ll}/u;
 const MIN_LETTERS = 3;
 const LONG_NAME_LETTERS = 6;
-// What may sit between a greeting and the name: "Hi, Dina", "Hi Mrs. Exampleton".
-const BETWEEN_WORDS = new Set([' ', '\t', ',', '.']);
+// What may sit between a greeting and the name: "Hi Dina", "Hi, Dina". A period may follow a title only.
+const BETWEEN_WORDS = new Set([' ', '\t', ',']);
+// "Don't", "Can't": a contraction is not a name. A possessive is ("Dina's").
+const CONTRACTION_RE = /^['\u2019](?!s(?!\p{L}))\p{L}/u;
 
 /** Lowercase, accent-folded letters of each word in `text` (the form every comparison here uses). */
 function nameLetters(text) {
@@ -120,13 +124,17 @@ function closeSpelling(letters, name) {
   return soundCode(letters) === name.sound && spellingEdits(letters, name.letters, maxEdits);
 }
 
-// The word that ends before `index` (only spaces, tabs, commas or periods between): { lower, start, end }.
+// The word that ends before `index` (only spaces, tabs or commas between): { lower, start, end }. A
+// period ends the sentence, so the word before one counts only as a title ("Mrs. Exampleton").
 function wordBefore(text, index) {
   let end = index;
   while (end > 0 && BETWEEN_WORDS.has(text[end - 1])) end -= 1;
+  const dotted = text[end - 1] === '.';
+  if (dotted) end -= 1;
   let start = end;
   while (start > 0 && LETTER_RE.test(text[start - 1])) start -= 1;
-  return { lower: text.slice(start, end).toLowerCase(), start, end };
+  const lower = text.slice(start, end).toLowerCase();
+  return { lower: dotted && !TITLES.has(lower) ? '' : lower, start, end };
 }
 
 // A greeting ends right before `index`, with at most a title between ("Hi Mrs", "Thank you").
@@ -158,7 +166,7 @@ function followedByOtherSurname(text, end, surnames) {
 
 /** The record name word `word` (at `index`) should be spelled as, or null to leave it as heard. */
 function respellTarget(text, word, index, names, keep) {
-  if (!CAPITALIZED_RE.test(word)) return null;
+  if (!CAPITALIZED_RE.test(word) || CONTRACTION_RE.test(text.slice(index + word.length, index + word.length + 3))) return null;
   const letters = normalizeNameFolded(word);
   if (CALENDAR_WORDS.has(letters) || keep.has(letters) || names.some((name) => name.letters === letters)) return null;
   const name = names.find((candidate) => closeSpelling(letters, candidate));
