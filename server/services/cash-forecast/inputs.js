@@ -3,6 +3,8 @@
  *
  * Every function takes the knex instance first, so a test can pass a fake.
  * Money is whole cents. A removed item is set inactive, never deleted.
+ * A repeating-bill mark (step 2c) is the owner's business/household label for one bill the finder shows,
+ * keyed on the merchant key engine.js gives it. A label only: clearing it deletes the row.
  * Dates go out as 'YYYY-MM-DD' strings (pg DATE arrives as a UTC-midnight Date on Railway).
  */
 const { validCalendarDate, dateOnlyString } = require('../../utils/datetime-et');
@@ -16,8 +18,14 @@ const MAX_RECEIPT_MONTHS = 48;
 const MONTH_KEY = /^\d{4}-(0[1-9]|1[0-2])$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+const MARKS = ['business', 'household'];
+// engine.js merchantKey: one or two words of capital letters or &, each 2+ long
+const MARK_KEY = /^[A-Z&]{2,}( [A-Z&]{2,})?$/;
+const MAX_MARK_KEY = 80;
+
 const ITEMS = 'cash_forecast_items';
 const SETTINGS = 'cash_forecast_settings';
+const MARK_ROWS = 'cash_forecast_line_marks';
 
 function has(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj, key) && obj[key] !== undefined;
@@ -111,6 +119,15 @@ function validateSettingsInput(input) {
   const r = checkFields(input, SETTINGS_FIELDS, []);
   if (r.ok && !Object.keys(r.value).length) return fail('Give floor_cents or last_year_receipts');
   return r;
+}
+
+const BAD_MARK_KEY = 'key must be a repeating bill key from the forecast';
+const isMarkKey = (key) => typeof key === 'string' && key.length <= MAX_MARK_KEY && MARK_KEY.test(key);
+
+function validateMarkInput(key, input) {
+  if (!isMarkKey(key)) return fail(BAD_MARK_KEY);
+  const r = checkFields(input, { mark: oneOf(MARKS, 'mark') }, ['mark']);
+  return r.ok ? { ok: true, value: { key, mark: r.value.mark } } : r;
 }
 
 function badRequest(message) {
@@ -219,15 +236,45 @@ async function saveSettings(db, input, actorId) {
   return shapeSettings(row);
 }
 
+// key -> 'business' | 'household'
+async function listMarks(db) {
+  const rows = await db(MARK_ROWS).select('key', 'mark');
+  return Object.fromEntries(rows.map((r) => [r.key, r.mark]));
+}
+
+async function saveMark(db, key, input, actorId) {
+  const v = validateMarkInput(key, input);
+  if (!v.ok) throw badRequest(v.error);
+  const stamp = { updated_by: actorId || null, updated_at: db.fn.now() };
+  const [row] = await db(MARK_ROWS)
+    .insert({ ...v.value, ...stamp })
+    .onConflict('key')
+    .merge({ mark: v.value.mark, ...stamp })
+    .returning(['key', 'mark', 'updated_at']);
+  return row;
+}
+
+// Clearing a mark that is not there is no error: the bill simply has no label.
+async function clearMark(db, key) {
+  if (!isMarkKey(key)) throw badRequest(BAD_MARK_KEY);
+  const removed = await db(MARK_ROWS).where({ key }).del();
+  return { key, mark: null, removed: Number(removed) > 0 };
+}
+
 module.exports = {
   KINDS,
   CADENCES,
+  MARKS,
   validateItemInput,
   validateSettingsInput,
+  validateMarkInput,
   listItems,
   createItem,
   updateItem,
   deactivateItem,
   getSettings,
   saveSettings,
+  listMarks,
+  saveMark,
+  clearMark,
 };
