@@ -51,9 +51,13 @@ describe('the day-only move rows', () => {
     expect(countSegments(render(t.body, VARS)).segmentCount).toBeLessThanOrEqual(2);
   });
 
-  test('the rain-out day row is the v3 row with the day-before line (same variables, same footer)', () => {
-    const v3 = require('../models/migrations/20260730600000_rain_out_moved_v3_template')._test.BODY;
-    expect(byKey.rain_out_moved_day_v1.body).toBe(v3.replace('{new_option}.{link_clause}', "{new_option}. We'll text your arrival window the day before.{link_clause}"));
+  test('the rain-out day row is the LIVE v3 row with the day-before line (same variables, no footer)', () => {
+    // The live v3 body: 20260730600000 seeded it, 20260810000060 dropped the STOP footer from customer transactional
+    // texts, and 20260928210000 changed "so we moved" to "so Waves moved" (owner: texts say "Waves").
+    const liveV3 = 'Hi {first_name}, {weather_lead}, so Waves moved your {service_type} to {new_option}.{link_clause}';
+    const brand = require('fs').readFileSync(require.resolve('../models/migrations/20260928210000_sms_brand_just_waves'), 'utf8');
+    expect(brand).toContain(liveV3);
+    expect(byKey.rain_out_moved_day_v1.body).toBe(liveV3.replace('{new_option}.{link_clause}', "{new_option}. We'll text your arrival window the day before.{link_clause}"));
   });
 
   test('the template registry requires the day (or the first date), never a window', () => {

@@ -40,7 +40,7 @@ const SMS_TEMPLATES = [
     name: 'Rain Out - Appointment Moved (Day Only)',
     baseKeys: ['rain_out_moved_v3', 'rain_out_moved_v2'],
     category: 'service',
-    body: "Hi {first_name} - {weather_lead}, so we moved your {service_type} to {new_option}. We'll text your arrival window the day before.{link_clause}\n\nQuestions? Reply here. Reply STOP to opt out.",
+    body: "Hi {first_name}, {weather_lead}, so Waves moved your {service_type} to {new_option}. We'll text your arrival window the day before.{link_clause}",
     variables: ['first_name', 'weather_lead', 'service_type', 'new_option', 'link_clause'],
   },
   {
