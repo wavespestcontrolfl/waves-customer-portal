@@ -1372,6 +1372,8 @@ async function planMove(input) {
   const context = { dateStr, notifyCustomers, notifyPhoneByCustomer };
   return {
     ...context,
+    // GATE_DAY_ONLY_PROMISE part B2: the office's "customer asked for this time" (true = a set time); absent = day only.
+    customerAskedTime: input.customer_asked_time === true,
     reason: input.reason,
     movable,
     stops: movable.map((s) => previewStop(s, context)),
@@ -1666,7 +1668,7 @@ async function applyPostCommit(classified, dateStr, reason) {
 // The opt-in reschedule text for one moved stop: { sent: true } or { reason }.
 // Same shared path as update-details and the bulk reschedule (arrival-window
 // copy, recipient routing, terminal/slot recheck, guarded reminder close/re-arm).
-async function sendMoveNotice(s, { dateStr, notifyPhoneByCustomer }) {
+async function sendMoveNotice(s, { dateStr, notifyPhoneByCustomer, customerAskedTime }) {
   const start = s.window_start ? String(s.window_start).slice(0, 5) : null;
   if (!start) return { reason: 'No arrival time is set for this visit, so no reschedule text was sent' };
   const reminderRow = await db('appointment_reminders')
@@ -1703,6 +1705,8 @@ async function sendMoveNotice(s, { dateStr, notifyPhoneByCustomer }) {
   // refuse at the sender, never text a number the operator did not see.
   const notice = await require('../../routes/admin-schedule').sendRescheduleNoticeForVisit(s.id, dateStr, start, {
     expectedPhone: notifyPhoneByCustomer.get(String(s.customer_id)) ?? null,
+    previousDate: s.scheduled_date,
+    customerAskedTime,
   });
   return notice.sent ? { sent: true } : { reason: notice.error || 'reschedule text was not sent' };
 }
@@ -1714,6 +1718,16 @@ async function textMovedStop(s, plan) {
   } catch (err) {
     logger.error(`[intelligence-bar:schedule] move notice failed for ${s.id}: ${err.message}`);
     return { reason: err.message };
+  }
+}
+
+// GATE_DAY_ONLY_PROMISE part B2: the office's choice for the new slot, on the moved stop. Gate off: nothing is written.
+// Best-effort: the batch is committed, so a failed write is only logged.
+async function recordMovedStopIntent(s, plan) {
+  try {
+    await require('../time-promise').recordCustomerAskedTime(db, [s.id], plan.customerAskedTime === true);
+  } catch (err) {
+    logger.warn(`[intelligence-bar:schedule] customer_asked_time write failed for ${s.id}: ${err.message}`);
   }
 }
 
@@ -1729,6 +1743,7 @@ async function notifyMovedCustomers(plan, movedIds) {
     try {
       await require('../outbound-review-confirm').activateLegacyOutboundReviewRowIfNeeded(db, s.id, 'ib-bulk-move');
     } catch { /* helper is internally best-effort; never strand the batch */ }
+    await recordMovedStopIntent(s, plan);
     if (!plan.notifyCustomers) continue;
     const outcome = await textMovedStop(s, plan);
     if (outcome.sent) textedCount++;

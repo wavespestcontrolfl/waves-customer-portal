@@ -146,6 +146,13 @@ function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, e
 }
 
 const MAX_SYNC_ATTEMPTS = 3;
+
+// GATE_DAY_ONLY_PROMISE part B2: the customer accepted an offered hour, which is a set time, so the move's notice keeps its
+// window and the visit records customer_asked_time = true. `previousDate` is the date the visit moved from. Gate off:
+// nothing, so the call keeps today's exact arguments.
+function setTimeMoveOptions(previousDate) {
+  return require('./time-promise').dayOnlyPromiseOn() ? { timePromise: 'set_time', previousDate } : {};
+}
 const stampEffects = (dbh, key) => dbh.raw("COALESCE(execution, '{}'::jsonb) || jsonb_build_object(?::text, to_jsonb(now()))", [key]);
 const countAttempt = (dbh) => dbh.raw("COALESCE(execution, '{}'::jsonb) || jsonb_build_object('effects_attempts', COALESCE((execution->>'effects_attempts')::int, 0) + 1)");
 
@@ -161,7 +168,7 @@ const countAttempt = (dbh) => dbh.raw("COALESCE(execution, '{}'::jsonb) || jsonb
  * day-before reminder still tells the customer, and it can never send a
  * second confirmation, whatever happened to the first attempt.
  */
-async function syncReminders({ dbh, decisionId, visitId, date, start, notify, deps = {} }) {
+async function syncReminders({ dbh, decisionId, visitId, date, start, notify, previousDate = null, deps = {} }) {
   let synced = null;
   try {
     synced = await (deps.reminders || require('./appointment-reminders')).handleReschedule(
@@ -169,7 +176,7 @@ async function syncReminders({ dbh, decisionId, visitId, date, start, notify, de
         expectSchedule: { date, windowStart: start },
         // Silent, and a confirmation still waiting to go (the first attempt's
         // after-hours hold, due at 8 AM) stays waiting.
-        ...(notify ? {} : { sendNotification: false, keepPendingConfirmation: true }),
+        ...(notify ? setTimeMoveOptions(previousDate) : { sendNotification: false, keepPendingConfirmation: true }),
       },
     );
   } catch (err) {
@@ -268,7 +275,7 @@ async function afterMove({ dbh, decisionId, svc, date, window, result, deps }) {
     }
     return;
   }
-  await syncReminders({ dbh, decisionId, visitId: svc.id, date, start: window.start, notify: true, deps });
+  await syncReminders({ dbh, decisionId, visitId: svc.id, date, start: window.start, notify: true, previousDate: dateOnlyString(svc.scheduled_date), deps });
   try {
     await (deps.emitDispatchJobUpdate || require('./dispatch-assignment').emitDispatchJobUpdate)({ jobId: svc.id, actorId: null });
   } catch (err) {

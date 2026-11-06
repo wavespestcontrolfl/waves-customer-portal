@@ -251,4 +251,12 @@ async function rescheduledTextLine(scheduledServiceId, { customerId = null } = {
   return url ? `Need a different time? Reschedule here: ${url}` : RESCHEDULED_REPLY_LINE;
 }
 
-module.exports = { buildRescheduleLink, smsLineFor, dayOnlyLineFor, hasUnblockedVisitGroup, rescheduledTextLine, RESCHEDULED_REPLY_LINE };
+// The day-only reschedule text's closing line, its {different_time_line} (GATE_DAY_ONLY_PROMISE part B2): the day-only
+// ask with the self-serve link when the builder makes one, else "Reply here or call." (no trailing blank lines: the row
+// ends with it).
+async function rescheduledDayTextLine(scheduledServiceId, { customerId = null } = {}) {
+  const { url } = await buildRescheduleLink(scheduledServiceId, { customerId });
+  return dayOnlyLineFor(url).trim();
+}
+
+module.exports = { buildRescheduleLink, smsLineFor, dayOnlyLineFor, hasUnblockedVisitGroup, rescheduledTextLine, rescheduledDayTextLine, RESCHEDULED_REPLY_LINE };

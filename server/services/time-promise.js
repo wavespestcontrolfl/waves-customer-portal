@@ -7,13 +7,14 @@
  * booking and the AI call agent keep the customer's own hour pick (a set time, locked), so they are never day-only.
  *
  * This module is the stable API the later parts call (senders, customer screens, AI context, the office booking box).
- * Nothing in the app calls it yet except tests. It sends nothing and spends nothing. With the gate off every function
+ * Parts B1 (booking confirmation, 72-hour reminder) and B2 (move notices) call it. It sends nothing and spends nothing. With the gate off every function
  * here answers "today's behavior".
  */
 
-const { loadPromiseLevels } = require('./auto-dispatch/told-visits');
+const { loadPromiseLevels, resolvePromises } = require('./auto-dispatch/told-visits');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
+const { etDateString } = require('../utils/datetime-et');
 
 // The 24-hour reminder takes over inside this many hours. It is the same boundary the reminder sender uses:
 // appointment-reminders.js reminder72hStillReachable (`> 24.25` hours out) and the cron branches (72-hour `hoursUntil >
@@ -251,11 +252,12 @@ async function memberEligible(conn, member, source) {
  * is rejected without a read) AND the same customer-pick check, since a customer's self-service reschedule leaves the office
  * source in place.
  */
-async function dayOnlyEligibility(conn, ids, now = new Date()) {
+async function dayOnlyEligibility(conn, ids, now = new Date(), { ignoreLevel = false } = {}) {
   const result = new Map();
   if (!ids || ids.length === 0) return result;
   try {
-    const levels = await loadPromiseLevels(conn, ids, now);
+    // A MOVE replaces the old promise (part B2), so its decision ignores the level: every visit reads as 'none'.
+    const levels = ignoreLevel ? new Map(ids.map((id) => [id, 'none'])) : await loadPromiseLevels(conn, ids, now);
     const facts = await loadStopFacts(conn, ids);
     const memberIds = [...new Set([...facts.values()].flat().map((m) => String(m.id)))];
     const sources = await loadBookingSources(conn, memberIds);
@@ -293,6 +295,88 @@ async function dayOnlySendDecision(conn, { id = null, ids = null, startAt, now =
   const level = levels.includes('hour') ? 'hour' : levels.includes('day') ? 'day' : 'none';
   const dayOnly = shouldPromiseDayOnly({ startAt, now, reminder24hEnabled, customerPicked: !eligible, level });
   return { dayOnly, level, eligible };
+}
+
+// ── Move notices (part B2): an office move, a customer move, a rain move and a series move ──
+
+/** The ET calendar day of a date-like value ('YYYY-MM-DD', a Date, an ISO string), or null. */
+function dayOf(value) {
+  try {
+    return value == null || value === '' ? null : dateOnlyString(value) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** What an office request says about the new time: "the customer asked for this time" (true) is a set time; anything
+ *  else (the box absent or unchecked) chooses the day only. */
+function officeMoveIntent(customerAskedTime) {
+  return customerAskedTime === true ? 'set_time' : 'day';
+}
+
+/**
+ * Should this MOVE notice promise only the new DAY? True only when ALL hold:
+ *  - the gate is on;
+ *  - the DATE changes (`oldDate !== newDate`): a same-day re-time always names the new window, and a day-only "now Tuesday"
+ *    for a visit that was already Tuesday reads wrong;
+ *  - the new start is more than DAY_PROMISE_CUTOFF_HOURS away (the 24-hour text will still go out and give the window);
+ *  - the customer's 24-hour reminder will really be sent (`reminder24hEnabled`, see reminder24hWillSend);
+ *  - the intent is day-only: 'set_time' -> never; 'day' -> yes; anything else (a rain move, a series move, a caller that
+ *    does not say) -> the visit's recorded intent (`customer_asked_time` true = set time, false = day only, NULL = inferred
+ *    as dayOnlyEligibility does: a first visit by its booking source, a recurring child unless the customer picked its slot).
+ * The OLD promise level is not read: the move replaces the old promise. Any read failure is false (the window text is the
+ * safe side). `ids` (or `id`) are the visits whose recorded intent decides; every one must be day-only.
+ */
+async function dayOnlyMoveDecision(conn, {
+  id = null, ids = null, newStartAt, oldDate, newDate, now = new Date(), reminder24hEnabled, intent,
+} = {}) {
+  try {
+    if (!dayOnlyPromiseOn()) return false;
+    const from = dayOf(oldDate);
+    const to = dayOf(newDate);
+    if (!from || !to || from === to) return false;
+    if (!shouldPromiseDayOnly({ startAt: newStartAt, now, reminder24hEnabled, customerPicked: false, level: 'none', gateOn: true })) return false;
+    if (intent === 'set_time') return false;
+    if (intent === 'day') return true;
+    const wanted = (ids && ids.length ? ids : [id]).filter((v) => v != null);
+    if (!wanted.length) return false;
+    const verdicts = await dayOnlyEligibility(conn, wanted, now, { ignoreLevel: true });
+    return wanted.every((w) => verdicts.get(w)?.eligible === true);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A held or merged MOVE notice re-sent later as a confirmation (a quiet-hours hold, a coalesced repeat move; part B2): may it
+ * still promise only the day? The recorded intent decides, not the caller: `customer_asked_time` must be explicitly FALSE
+ * (day only was chosen for the visit's current slot; true = a set time stays a window, NULL = today's rules decide).
+ * The move replaced the old promise, so an older hour promise does not block it, but a window promised for THIS date (a
+ * newer known window) always does: a day promise is never sent over a newer known window. An unknown-window promise or an
+ * unreadable promise: false. Gate, the 24.25 h cutoff and the 24-hour reminder as in shouldPromiseDayOnly. Never throws.
+ */
+async function dayOnlyReplayDecision(conn, { id, startAt, now = new Date(), reminder24hEnabled } = {}) {
+  try {
+    if (id == null || !shouldPromiseDayOnly({ startAt, now, reminder24hEnabled, customerPicked: false, level: 'none' })) return false;
+    const row = await conn('scheduled_services').where({ id: String(id) }).first('customer_asked_time');
+    if (!row || row.customer_asked_time !== false) return false;
+    const promise = (await resolvePromises(conn, [id], now)).get(id);
+    if (!promise) return true;
+    if (promise.start_at == null) return promise.level === 'day';
+    return etDateString(new Date(promise.start_at)) !== etDateString(startAt instanceof Date ? startAt : new Date(startAt));
+  } catch {
+    return false;
+  }
+}
+
+/** Records the office's "customer asked for this time" (true) or "day only" (false) on the moved visit(s). Gate off: nothing
+ *  is written (the UPDATE payloads stay exactly today's). Throws on a failed write, so a caller inside a transaction fails
+ *  the move with it and a best-effort caller can catch. */
+async function recordCustomerAskedTime(conn, ids, asked) {
+  if (!dayOnlyPromiseOn()) return 0;
+  const list = [...new Set((ids || []).filter((v) => v != null).map(String))];
+  if (!list.length) return 0;
+  return conn('scheduled_services').whereIn('id', list).update({ customer_asked_time: asked === true });
 }
 
 /** The visit's start time from its ET date and window start, or null. */
@@ -344,6 +428,10 @@ module.exports = {
   dayOnlyEligibility,
   dayOnlySendDecision,
   loadTimeDisplay,
+  dayOnlyMoveDecision,
+  dayOnlyReplayDecision,
+  officeMoveIntent,
+  recordCustomerAskedTime,
   DAY_PROMISE_CUTOFF_HOURS,
   DAY_PROMISE_META,
   dayOnlyPromiseOn,

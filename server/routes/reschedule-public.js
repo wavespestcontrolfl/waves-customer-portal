@@ -321,6 +321,23 @@ async function rescheduleNoticeOptions(svc) {
     : [];
 }
 
+// GATE_DAY_ONLY_PROMISE part B2: what the customer chose for the new slot, as handleReschedule options. The picker's slots are
+// hour picks, so they pass 'set_time' (a later part adds an "any time that day" choice that passes 'day'); previousDate is the
+// date the visit moved from. Gate off: nothing, so the call keeps today's exact arguments.
+function dayPromiseMoveOptions(svc, timePromise) {
+  return require('../services/time-promise').dayOnlyPromiseOn()
+    ? { timePromise, previousDate: apptDateStr(svc.scheduled_date) }
+    : {};
+}
+
+// handleReschedule's options for a customer move: the repeat-move deferral and the day-promise choice, as a spread (none
+// when both are absent).
+async function moveNoticeArgs(svc, timePromise) {
+  const deferral = await rescheduleNoticeOptions(svc);
+  const dayOptions = dayPromiseMoveOptions(svc, timePromise);
+  return Object.keys(dayOptions).length ? [{ ...dayOptions, ...(deferral[0] || {}) }] : deferral;
+}
+
 // True when committing `targetDateStr` for this visit re-anchors the series.
 function shouldReanchor(svc, targetDateStr) {
   if (!isSeriesVisit(svc) || awaitingCustomerPick(svc)) return false;
@@ -1557,7 +1574,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         await AppointmentReminders.handleReschedule(
           svc.id,
           `${date}T${slot.start_time}`,
-          ...await rescheduleNoticeOptions(svc),
+          ...await moveNoticeArgs(svc, 'set_time'),
         );
       } catch (err) {
         logger.error(`[reschedule-public] reminder sync failed for ${svc.id}: ${err.message}`);

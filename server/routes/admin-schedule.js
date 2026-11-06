@@ -1528,6 +1528,13 @@ function noticeOptions(options = {}, dateStr, startHHMM) {
   return { expectedPhone: options.expectedPhone, stopWide: stopWideMeta(options.stopWideFor, dateStr, startHHMM) };
 }
 
+// GATE_DAY_ONLY_PROMISE part B2: records the office's choice for a visit's NEW slot on the moved row(s): true = "the customer
+// asked for this time" (a set time, never promised as day only), anything else = day only. Gate off: nothing is written, so
+// every UPDATE stays exactly today's. Throws on a failed write (inside a transaction the move fails with it).
+async function recordOfficeMoveIntent(conn, ids, body) {
+  return require('../services/time-promise').recordCustomerAskedTime(conn, ids, body?.customerAskedTime === true);
+}
+
 // The operator's line for a reschedule text that reached nobody. The email
 // version goes first (GATE_MOVE_NOTICE_EMAIL): an email that went out is said
 // plainly, so staff do not chase a customer who was told.
@@ -1614,11 +1621,21 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
         .first('service_type')
         .catch(() => null);
       const serviceLabel = AppointmentReminders.smsServiceLabelStored(reminderRow?.service_type || svc.service_type) || 'service';
+      // GATE_DAY_ONLY_PROMISE part B2: a move to another date more than 24.25 h out promises only the new day, unless the
+      // office marked "customer asked for this time" (options.customerAskedTime). Gate off: false, nothing read.
+      const dayMove = require('../services/day-only-move-notice');
+      const dayState = { dayOnly: await dayMove.moveNoticeDayOnly({
+        serviceId, customerId: customer.id, newStartAt: apptTime, oldDate: options.previousDate, newDate: dateStr,
+        intent: require('../services/time-promise').officeMoveIntent(options.customerAskedTime),
+      }) };
+      const noticeSlotMs = dayMove.slotMsOf(apptTime);
       // Built once for every recipient, after the move landed, so the link
       // checks see the new slot.
       const differentTimeLine = await require('../services/reschedule-link').rescheduledTextLine(serviceId, { customerId: customer.id });
       sent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
         const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
+        const dayBody = await dayMove.renderDayRescheduled({ state: dayState, serviceId, customerId: customer.id, firstName, serviceLabel, apptTime });
+        if (dayBody) return dayBody;
         return renderRequiredSmsTemplate('appointment_rescheduled', {
           first_name: firstName,
           service_type: serviceLabel,
@@ -1633,7 +1650,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
           entity_type: 'scheduled_service',
           entity_id: serviceId,
         });
-      }, 'appointment_rescheduled', 'appointment_confirmation', {
+      }, 'appointment_rescheduled', 'appointment_confirmation', dayMove.withDayMeta({
         scheduled_service_id: serviceId,
         ...stopWide,
         // ABA guard input (codex #3609 r48): the slot this notice quotes —
@@ -1644,7 +1661,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
           return at && !Number.isNaN(at.getTime()) ? at.getTime() : undefined;
         })(),
         move_notice_at: noticeAt.toISOString(),
-      }, {
+      }, dayState, noticeSlotMs), {
         // Final recheck at the provider handoff: a concurrent move or a
         // terminal transition (cancel/complete/skip/no-show) means this
         // message is stale — abort; the winning writer owns the messaging.
@@ -1674,6 +1691,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
         error = await rescheduleTextNotSentError(noticeOutcome, {
           kind: 'rescheduled', customerId: customer.id, scheduledServiceId: serviceId, apptTime, serviceLabel,
           arrivalWindow: spokenArrivalWindow(start), notificationEventKey: stopWide.notificationEventKey, noticeAt, sendOutcome: noticeOutcome,
+          ...dayMove.dayOnlyArg(dayState),
         });
       }
     }
@@ -11251,6 +11269,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // The visit's real arrival start (no 08:00 fallback) — null for
             // date-only rows, which never get an immediate text.
             let bulkNoticeStart = null;
+            let bulkPreviousDate = null;
             let callFollowUpShiftFrom = null;
             // Collected inside the trx, applied only after a successful commit.
             let liveMoveRow = null;
@@ -11664,6 +11683,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               if (nextDate && (nextDate !== prevDate || normalizeHHMM(nextStart) !== normalizeHHMM(svc.window_start))) {
                 reminderSyncTime = `${nextDate}T${normalizeHHMM(nextStart) || '08:00'}`;
                 bulkNoticeStart = normalizeHHMM(nextStart) || null;
+                bulkPreviousDate = prevDate;
+                // GATE_DAY_ONLY_PROMISE part B2: the office's choice for the new slot, in the moving transaction.
+                await recordOfficeMoveIntent(trx, [id], payload);
               }
             });
             // Tech-facing move notice (tech-visit-notifications.js): this
@@ -11739,7 +11761,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                     .update({ confirmation_sent: false, confirmation_sent_at: null });
                 }
                 if (notifyThisRow) {
-                  const notice = await sendRescheduleNoticeForVisit(id, bulkTargetDate, bulkNoticeStart);
+                  const notice = await sendRescheduleNoticeForVisit(id, bulkTargetDate, bulkNoticeStart, {
+                    previousDate: bulkPreviousDate, customerAskedTime: payload?.customerAskedTime,
+                  });
                   if (!notice.sent) {
                     notificationFailures.push({ id, reason: notice.error || 'reschedule text was not sent' });
                   }
@@ -16539,7 +16563,10 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
               nextDate,
               updates.window_start !== undefined ? updates.window_start : reminderBefore.window_start,
             );
-            scheduleMoveForNotice = { date: nextDate, start: nextStart || null };
+            scheduleMoveForNotice = { date: nextDate, start: nextStart || null, previousDate: prevDate };
+            // GATE_DAY_ONLY_PROMISE part B2: the office's "customer asked for this time" (or day only) for the new slot,
+            // written in the same transaction that moved the visit. Gate off: nothing is written.
+            await recordOfficeMoveIntent(trx, [req.params.id], req.body);
           }
           // The tech's card covers any slot change — date, start, OR end
           // (the customer reminder above keys on date/start only).
@@ -18155,7 +18182,9 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         } catch (e) {
           logger.warn(`[schedule/update-details] reminder cover before reschedule notice failed for ${req.params.id}: ${e.message}`);
         }
-        const notice = await sendRescheduleNoticeForVisit(req.params.id, scheduleMoveForNotice.date, scheduleMoveForNotice.start);
+        const notice = await sendRescheduleNoticeForVisit(req.params.id, scheduleMoveForNotice.date, scheduleMoveForNotice.start, {
+          previousDate: scheduleMoveForNotice.previousDate, customerAskedTime: req.body.customerAskedTime,
+        });
         notificationSent = notice.sent;
         notificationError = notice.error;
       }
@@ -29991,6 +30020,7 @@ module.exports.reseedRecurringSeriesAfterCancelBatch = reseedRecurringSeriesAfte
 // lazily by the IB move_stops_to_day tool so its opt-in customer texts go
 // through the exact same path as update-details and the bulk reschedule.
 module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
+module.exports.recordOfficeMoveIntent = recordOfficeMoveIntent;
 // Shared "is money already taken for this visit" guard — the plan-length
 // trim's refusal contract, consumed lazily by the admin-dispatch series
 // cancel so a 'following' / 'series' cancel refuses prepaid visits the same

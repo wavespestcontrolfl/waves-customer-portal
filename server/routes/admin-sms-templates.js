@@ -132,6 +132,12 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   appointment_confirmation_day_v1: Object.freeze(['date', 'day']),
   reminder_72h_day_v1: Object.freeze(['date', 'day']),
   reminder_72h_no_reply_day_v1: Object.freeze(['date', 'day']),
+  // Part B2 (move notices): the new day and date ARE the promise of the reschedule text; the rain-out day row names the new
+  // day (new_option); each series row names the first date. None requires a window.
+  appointment_rescheduled_day_v1: Object.freeze(['date', 'day']),
+  rain_out_moved_day_v1: Object.freeze(['new_option']),
+  appointment_series_rescheduled_day_v1: Object.freeze(['start_date']),
+  appointment_recurring_placement_confirmed_day_v1: Object.freeze(['start_date']),
   // Outbound voicemail text-back: the callback number and the STOP footer
   // for unlinked prospects are promises the lane makes (codex #4195 r1 P2).
   outbound_voicemail_missed_you: Object.freeze(['first_name', 'callback_clause', 'optout_clause']),
