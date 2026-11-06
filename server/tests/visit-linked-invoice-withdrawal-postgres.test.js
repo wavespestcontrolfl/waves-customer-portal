@@ -39,7 +39,6 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
   });
   beforeEach(async () => {
     jest.restoreAllMocks();
-    delete process.env.GATE_BILL_TO_NO_VISIT_INVOICES;
     sendCustomerMessage.mockReset();
     mockPg = await database.transaction();
   });
@@ -702,7 +701,6 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
   // Owner ruling 2026-10-22 ("move"): an invoice with no visit is the customer default payer's (the live owner answer),
   // so it changes hands with the default like a visit-linked one, and only with the default.
   test('an invoice with no visit moves with the customer default (checkout cancelled, stamped) and comes back when it is cleared', async () => {
-    process.env.GATE_BILL_TO_NO_VISIT_INVOICES = 'true';
     const PayCombined = require('../services/pay-combined');
     const Linked = require('../services/visit-linked-invoice-withdrawal');
     const payerId = await payer();
@@ -725,17 +723,7 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(await invoiceRow(f.invoiceId)).toMatchObject({ scheduled_send_error: null });
   });
 
-  test('gate off: an invoice with no visit is not moved by the customer default, as before', async () => {
-    delete process.env.GATE_BILL_TO_NO_VISIT_INVOICES;
-    const payerId = await payer();
-    const f = await fixture({ link: 'none' });
-    await mockPg('customers').where({ id: f.customerId }).update({ payer_id: payerId });
-    expect(await Packets.withdrawPacketInvoicesForOwner(mockPg, { customerId: f.customerId })).toEqual([]);
-    expect(await invoiceRow(f.invoiceId)).toMatchObject({ scheduled_send_error: null });
-  });
-
   test('a visit-scoped Bill-To change never reaches an invoice with no visit', async () => {
-    process.env.GATE_BILL_TO_NO_VISIT_INVOICES = 'true';
     const payerId = await payer();
     const f = await fixture({ link: 'none' });
     await assignJobPayer(f.visitId, payerId);

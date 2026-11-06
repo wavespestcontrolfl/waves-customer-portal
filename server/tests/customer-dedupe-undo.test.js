@@ -26,7 +26,7 @@ function makeChain(table, route) {
   const q = { _table: table, _calls: [] };
   const methods = [
     'where', 'whereIn', 'orWhereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'select', 'groupBy',
-    'orderBy', 'forUpdate', 'update', 'insert', 'del', 'count', 'sum', 'max', 'onConflict',
+    'orderBy', 'forUpdate', 'forShare', 'update', 'insert', 'del', 'count', 'sum', 'max', 'onConflict',
     'ignore', 'returning', 'first', 'increment', 'decrement', 'limit', 'leftJoin',
   ];
   for (const m of methods) {
