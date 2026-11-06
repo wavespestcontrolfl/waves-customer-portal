@@ -976,6 +976,15 @@ async function technicianHasHistory(conn, technicianId) {
   return false;
 }
 
+// Owner-only lifecycle (owner ruling 2026-09-28): a non-owner admin must not
+// change, delete or re-credential the full-access (owner) row. assertMayChangeFullAccessEmail
+// covers the email field only; this covers the rest of the row's lifecycle.
+function ownerRowRefusal(req, target) {
+  return isFullAccessEmail(target.email) && !ibFullAccess(req)
+    ? { error: 'Only the owner account can change this staff account.' }
+    : null;
+}
+
 async function deactivationBlocker(trx, target, actorId) {
   if (!target.active) return null;
   if (target.id === actorId) return 'You cannot deactivate your own staff account';
@@ -1169,6 +1178,10 @@ async function updateTechnician(req, res, next) {
         .forUpdate()
         .first();
       if (!target) return { notFound: true };
+      const currentStatus = target.employment_status || (target.active ? 'active' : 'inactive');
+      const activeChanged = requestedStatus !== undefined && requestedStatus !== currentStatus;
+      const ownerRowGuard = activeChanged ? ownerRowRefusal(req, target) : null;
+      if (ownerRowGuard) return { ownerRowGuard };
       if (await techLineHeldByAnother(trx, techLine.patch.twilio_number, target.id)) return { lineTaken: true };
 
       const storedEmail = canonicalStaffEmail(target.email);
@@ -1213,8 +1226,6 @@ async function updateTechnician(req, res, next) {
       // Any transition that leaves `active` (→ inactive OR → prospective)
       // revokes sessions; entering active from prospective also rotates so a
       // token minted under the old state cannot carry over.
-      const currentStatus = target.employment_status || (target.active ? 'active' : 'inactive');
-      const activeChanged = requestedStatus !== undefined && requestedStatus !== currentStatus;
       const emailChanged = email !== undefined && normalizedEmail.value !== storedEmail;
       // Owner-only access model (owner ruling 2026-09-28): gated on an
       // ACTUAL change (emailChanged), never on the edit form simply
@@ -1266,6 +1277,7 @@ async function updateTechnician(req, res, next) {
 
     if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
     if (outcome.fullAccessEmailGuard) return res.status(403).json(outcome.fullAccessEmailGuard);
+    if (outcome.ownerRowGuard) return res.status(403).json(outcome.ownerRowGuard);
     if (outcome.missingEmail) {
       return res.status(400).json({ error: 'An active technician requires a valid staff email' });
     }
@@ -1475,6 +1487,8 @@ async function hireTechnician(req, res, next) {
         .first();
       if (!target) return { notFound: true };
       if (target.employment_status !== 'prospective') return { notProspective: true };
+      const ownerRowGuard = ownerRowRefusal(req, target);
+      if (ownerRowGuard) return { ownerRowGuard };
 
       const storedEmail = canonicalStaffEmail(target.email);
       if (parsed.email !== storedEmail) {
@@ -1525,6 +1539,7 @@ async function hireTechnician(req, res, next) {
 
     if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
     if (outcome.notProspective) return res.status(409).json({ error: 'Only a prospective row can be hired.' });
+    if (outcome.ownerRowGuard) return res.status(403).json(outcome.ownerRowGuard);
     if (outcome.fullAccessEmailGuard) return res.status(403).json(outcome.fullAccessEmailGuard);
     if (outcome.conflict) return res.status(409).json(EMAIL_IN_USE);
     if (outcome.renameLocked) return res.status(409).json(HIRE_RENAME_LOCKED);
@@ -1677,8 +1692,10 @@ const VOICE_PIN_TECH_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[
 async function putTechnicianVoicePin(req, res, next) {
   try {
     if (!VOICE_PIN_TECH_ID_RE.test(String(req.params.id || ''))) return res.status(404).json({ error: 'Technician not found' });
-    const target = await db('technicians').where({ id: req.params.id }).first('id');
+    const target = await db('technicians').where({ id: req.params.id }).first('id', 'email');
     if (!target) return res.status(404).json({ error: 'Technician not found' });
+    const ownerRowGuard = ownerRowRefusal(req, target);
+    if (ownerRowGuard) return res.status(403).json(ownerRowGuard);
     const { setTechVoicePin } = require('../services/tech-voice-pin');
     const out = await setTechVoicePin(db, { technicianId: target.id, pin: req.body?.pin });
     if (!out.ok) return res.status(400).json({ error: 'The PIN must be 4 to 6 digits', code: 'PIN_FORMAT' });
@@ -2096,6 +2113,8 @@ async function deactivateTechnician(req, res, next) {
         .forUpdate()
         .first();
       if (!target) return { notFound: true };
+      const ownerRowGuard = ownerRowRefusal(req, target);
+      if (ownerRowGuard) return { ownerRowGuard };
 
       const blocker = await deactivationBlocker(trx, target, req.technicianId);
       if (blocker) return { blocker };
@@ -2129,6 +2148,7 @@ async function deactivateTechnician(req, res, next) {
     });
 
     if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
+    if (outcome.ownerRowGuard) return res.status(403).json(outcome.ownerRowGuard);
     if (outcome.blocker) return res.status(409).json({ error: outcome.blocker });
     if (outcome.activeTimer) {
       return res.status(409).json({

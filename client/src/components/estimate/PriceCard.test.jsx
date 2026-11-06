@@ -975,9 +975,9 @@ describe('PriceCard — ROWLESS split T&S card renders frequency.palmCount (Code
   });
 });
 
-// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): a second, smaller line under
-// the per-application price. The price stays the price; the line is absent with
-// the gate off (the page passes null).
+// Monthly average (owner 2026-10-20): a second, smaller line under
+// the per-application price. The price stays the price; the line is absent when
+// the plan has no average (the page passes null).
 describe('PriceCard — monthly average line', () => {
   const frequency = {
     key: 'quarterly', monthly: 31.33, annual: 376, perVisit: 94, perTreatment: 94, visitsPerYear: 4,

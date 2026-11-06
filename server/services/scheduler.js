@@ -9513,6 +9513,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — The app-sent new-home estimate (owner 2026-11-04 option A):
+  // the estimate the app made goes out once through the office's send: email
+  // and the moving text from 8 AM to 8 PM ET; at night the email, with the text
+  // from 8 AM. A draft it must not send rings the office. Gate read per tick
+  // (GATE_MOVING_AUTO_SEND), five minutes after the estimate job.
+  // =========================================================================
+  cron.schedule('8,23,38,53 * * * *', async () => {
+    if (!require('../config/feature-gates').movingAutoSendLive()) return;
+    try {
+      await runExclusive('moving-auto-send', async () => {
+        const result = await require('./moving-auto-send').runMoveAutoSendJob();
+        if (result.sent || result.texted || result.office || result.restored || result.failed) logger.info(`[moving-auto-send] ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`[moving-auto-send] run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 11AM — Owner heads-up for an imminent visit with a balance 30+ days
   // overdue. The customer-facing reminders (pre-visit tiers, account late
   // check) are retired: the 10:05 pre-visit balance reminder and the invoice

@@ -35,6 +35,17 @@ describe('Twilio messaging provider adapter', () => {
       .toMatchObject({ sent: false, blocked: true, code: 'DELIVERY_SUPPRESSED' });
   });
 
+  test("forwards the sender's keep-the-customer's-channel mark next to the operator flag (GATE_APP_FIRST_ANY_DEVICE)", async () => {
+    await sendViaTwilio(baseInput({
+      audience: 'customer', purpose: 'tech_en_route', customerId: 'c-1', operatorInitiated: true,
+      metadata: { original_message_type: 'tech_en_route', useCustomerChannel: true },
+    }));
+    expect(TwilioService.sendSMS.mock.calls[0][2]).toMatchObject({ operatorInitiated: true, useCustomerChannel: true });
+    TwilioService.sendSMS.mockClear();
+    await sendViaTwilio(baseInput({ audience: 'customer', purpose: 'tech_en_route', customerId: 'c-1', operatorInitiated: true }));
+    expect(TwilioService.sendSMS.mock.calls[0][2]).toMatchObject({ operatorInitiated: true, useCustomerChannel: false });
+  });
+
   test('does not forward media URLs for automated sends without explicit authorization', async () => {
     await sendViaTwilio(baseInput({
       metadata: {

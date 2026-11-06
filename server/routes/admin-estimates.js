@@ -283,7 +283,7 @@ function moneySummary(estimate = {}, { allowTotals = false, average = null } = {
         ? `$${monthlyTotal.toFixed(2)}/mo · $${annualTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr`
         : `$${monthlyTotal.toFixed(2)}/mo`;
     }
-    // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): `average` is the
+    // Monthly average (owner 2026-10-20): `average` is the
     // resolved {priceLine, note} for a plan whose per-application lines
     // reconcile to the stored monthly total; absent = the line as before.
     if (average?.priceLine) return average.priceLine;
@@ -324,7 +324,7 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
       : (priceLine || moneySummary(estimate, { allowTotals: proposalMode })),
     service_summary: serviceSummary || '',
     property_address: estimate.address || '',
-    // GATE_ESTIMATE_MONTHLY_AVERAGE: the "Averaged over the year ..." line rides
+    // Monthly average: the "Averaged over the year ..." line rides
     // in front of the next-step paragraph (the template has no block for it, and
     // a template publish is not needed). Absent average = the sentence as before.
     next_step_summary: proposalMode
@@ -1007,18 +1007,33 @@ function estimateSmsPhoneProblem(estimate) {
   return problem ? `${problem} Fix the phone on the contact or the estimate, then send again. Nothing was sent.` : null;
 }
 
+// The text an estimate goes out with: the moving one, which names the plan that
+// comes along, for a new-home estimate the app made for a move
+// (services/moving-auto-estimate.js) while GATE_MOVING_AUTO_SEND is on; the
+// standard one for every other estimate. The preview and the send both read it.
+function estimateSmsTemplate(estimate) {
+  const data = parseEstimateData(estimate.estimate_data) || {};
+  const stamp = data.move && data.automation && data.automation.moveAutoEstimate;
+  const planName = stamp ? String(stamp.planName || '').trim() : '';
+  if (planName && require('../config/feature-gates').movingAutoSendLive?.() === true) {
+    return { key: 'estimate_sent_move', vars: { plan_name: planName } };
+  }
+  return { key: 'estimate_sent', vars: {} };
+}
+
 async function buildEstimateSendPreview(estimate) {
   const firstName = await estimateGreetingFirstName(db, estimate);
   const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
   const proposalMode = normalizeProposal(estimate).enabled;
   const priceLine = await currentEstimateEmailPriceLine(estimate);
-  // GATE_ESTIMATE_MONTHLY_AVERAGE: null with the gate off, so the email is unchanged.
+  // Null when no average applies, so the email is unchanged.
   const average = proposalMode ? null : await require('../services/estimate-monthly-average').emailAverageParts(estimate);
   // The reviewed average copy is recorded with the review (and with a schedule built from it) so the send can
   // refuse a changed one; absent = none (like pdfCopy, present only when there is one).
   const averageText = require('../services/estimate-monthly-average').averageText(average);
-  const sms = await smsTemplatesRouter.getTemplate('estimate_sent', {
-    first_name: firstName, estimate_url: viewUrl,
+  const smsTemplate = estimateSmsTemplate(estimate);
+  const sms = await smsTemplatesRouter.getTemplate(smsTemplate.key, {
+    first_name: firstName, estimate_url: viewUrl, ...smsTemplate.vars,
   }, {}, { noVariants: true, audit: false });
   let email = null;
   const library = sendgrid.isConfigured() ? await EmailTemplateLibrary.loadTemplateByKey(proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery') : null;
@@ -2881,8 +2896,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // (deliveryClaimFresh in admin-estimate-persistence.js), so no marker
     // can slip in between this lock releasing and the provider handoff —
     // the lock itself is never held across provider calls.
-    // GATE_ESTIMATE_MONTHLY_AVERAGE: the reviewed average copy must still be what this send would carry
-    // (a gate flip or a price edit since the review or schedule). Resolved BEFORE the claim transaction because
+    // Monthly average: the reviewed average copy must still be what this send would carry
+    // (a price edit since the review or schedule). Resolved BEFORE the claim transaction because
     // it reads billing state on other connections; a mismatch refuses the whole send below, before any channel.
     const reviewedAverageStale = sendMethod !== 'sms'
       && await require('../services/estimate-monthly-average').reviewedAverageStale(
@@ -3116,12 +3131,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         channels.sms = { ok: false, error: nanpPhoneProblem(estimate.customer_phone) || `Invalid phone format: ${estimate.customer_phone}` };
       } else {
         try {
-          const currentSmsBody = await smsTemplatesRouter.getTemplate('estimate_sent', { first_name: firstName, estimate_url: smsViewUrl }, {
+          const smsTemplate = estimateSmsTemplate(estimate);
+          const currentSmsBody = await smsTemplatesRouter.getTemplate(smsTemplate.key, { first_name: firstName, estimate_url: smsViewUrl, ...smsTemplate.vars }, {
             workflow: 'admin_estimate_send',
             entity_type: 'estimate',
             entity_id: estimate.id,
           }, { noVariants: !!options.reviewedMessages });
-          if (!currentSmsBody) throw new Error('SMS template estimate_sent is missing or inactive');
+          if (!currentSmsBody) throw new Error(`SMS template ${smsTemplate.key} is missing or inactive`);
           const smsBody = options.reviewedMessages
             ? options.reviewedMessages.sms?.split(stripSmsUrlScheme(longUrl)).join(stripSmsUrlScheme(smsViewUrl))
             : currentSmsBody;
@@ -3150,12 +3166,17 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
               capturedAt: estimate.created_at || new Date().toISOString(),
             },
             entryPoint: 'admin_estimate_send',
+            // The app's own send of a new-home estimate (services/moving-auto-send.js)
+            // is automation, not an office click: its entry point keeps the text
+            // inside 8 AM to 8 PM ET (validators/send-window.js).
+            ...(options.movingAutoSend === true ? { entryPoint: 'moving_auto_send' } : {}),
             metadata: {
               original_message_type: 'estimate_sent',
             },
           });
           if (!result.sent) {
-            channels.sms = { ok: false, uncertain: result.code === 'PROVIDER_FAILURE' && result.terminal !== true, error: result.reason || result.code || 'SMS send blocked/failed' };
+            // The code tells the auto-send a text held for the morning from one refused.
+            channels.sms = { ok: false, uncertain: result.code === 'PROVIDER_FAILURE' && result.terminal !== true, ...(result.code ? { code: result.code } : {}), error: result.reason || result.code || 'SMS send blocked/failed' };
             logger.error(`Estimate SMS failed: ${result.reason || result.code || 'unknown'}`);
           } else {
             // Suppression is not a provider handoff and never publishes an
@@ -3252,11 +3273,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             }
           }
           if (options.reviewedMessages && !options.reviewedMessages.email) throw new Error('The reviewed email template was unavailable. Review a new message before sending.');
-          // GATE_ESTIMATE_MONTHLY_AVERAGE: resolved from the row read just
+          // Monthly average: resolved from the row read just
           // before this send (freshEstimate), not the row the request started
           // with, so a price edit that landed during the send never ships a
           // stale average. The review preview resolves from the row it read.
-          // Null with the gate off or for a commercial proposal.
+          // Null for a commercial proposal.
           const averageService = require('../services/estimate-monthly-average');
           const average = proposalMode ? null : await averageService.emailAverageParts(freshEstimate);
           // The early check (before the claim) stops the text too; this one covers an edit that landed between

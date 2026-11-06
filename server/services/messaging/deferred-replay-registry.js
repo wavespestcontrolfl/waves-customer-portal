@@ -1242,6 +1242,13 @@ const REGISTRY = {
       // deleted, converted, or already contacted overnight makes the 8 AM
       // bearer link stale (and possibly wrong-audience).
       try {
+        // GATE_VOICEMAIL_TEXT_CALLER_ONLY: a row queued while the gate was off
+        // may hold a spoken callback number and the model's own words in its
+        // body. Only a row the gated sender queued (recipient = the caller ID,
+        // words from our own list) may go out once the gate is on.
+        if (require('../../config/feature-gates').voicemailTextCallerOnlyLive() && meta.caller_only !== true) {
+          return { eligible: false, reason: 'queued-before-caller-only' };
+        }
         if (meta.lead_id) {
           const lead = await conn('leads').where({ id: meta.lead_id }).whereNull('deleted_at').first('id', 'status');
           if (!lead) return { eligible: false, reason: 'lead-deleted' };
