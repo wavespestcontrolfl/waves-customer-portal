@@ -8,6 +8,9 @@
  * bookmark the 8:00 run and the catch-up keep, and the honest-failure rule: a failed read
  * before the lock skips, a failed read under the lock rejects with nothing billed.
  *
+ * Unresolved customers (a failure before any charge, nothing armed) hold the bookmark through
+ * the day after the billing date; a later run releases it with one alert naming the count.
+ *
  * BillingCron.processMonthlyBilling is faked here; who a date's run charges, skips or leaves
  * alone is billing-cron-monthly-catchup.test.js.
  */
@@ -35,11 +38,15 @@ jest.mock('../models/db', () => jest.fn((table) => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ billingMonthlyCatchupLive: jest.fn(() => false) }));
 jest.mock('../services/billing-cron', () => ({ processMonthlyBilling: jest.fn() }));
+// The real composer runs (under NODE_ENV=test a copy-rule break throws, so a bad alert never
+// reaches this fake); only the bell row is faked.
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n-1' })) }));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { billingMonthlyCatchupLive } = require('../config/feature-gates');
 const BillingCron = require('../services/billing-cron');
+const { notifyAdmin } = require('../services/notification-service');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const catchUp = require('../services/billing-monthly-catchup');
 
@@ -215,5 +222,136 @@ describe('8:00 tick (runMonthlyBillingTick)', () => {
     BillingCron.processMonthlyBilling.mockRejectedValueOnce(new Error('cohort read failed'));
     await expect(catchUp.runMonthlyBillingTick()).rejects.toThrow('cohort read failed');
     expect(mockWrites).toEqual([]);
+  });
+});
+
+// processMonthlyBilling's result for a date, with the given unresolved customers (failed before
+// any charge, nothing armed) and recorded declines (armed: they do not hold the bookmark).
+const runResult = (billingDate, { unresolved = [], declined = 0 } = {}) => ({
+  charged: 1, processing: 0, failed: unresolved.length + declined, skipped: 0, total: 3, billingDate, unresolvedCustomerIds: unresolved,
+});
+const resultsByDate = (byDate) => BillingCron.processMonthlyBilling.mockImplementation(async ({ billingDate } = {}) => {
+  const date = billingDate || etDateString();
+  return runResult(date, byDate[date] || {});
+});
+const alerts = () => notifyAdmin.mock.calls.map(([category, headline, why, opts]) => ({ category, headline, why, opts }));
+
+describe('unresolved customers hold the bookmark (catch-up)', () => {
+  test('a failure before the charge with nothing armed keeps the bookmark, so the next tick re-runs the date', async () => {
+    mockBookmarkRow = bookmarkAt('2026-11-11');
+    resultsByDate({ '2026-11-12': { unresolved: ['cust-b'] } });
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(billedDates()).toEqual(['2026-11-12']);
+    expect(mockWrites).toEqual([]);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+    expect(await catchUp.catchUpNeeded()).toBe(true);
+  });
+
+  test('a recorded decline (retry armed) still lets the bookmark move', async () => {
+    mockBookmarkRow = bookmarkAt('2026-11-11');
+    resultsByDate({ '2026-11-12': { declined: 1 } });
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(writtenDates()).toEqual(['2026-11-12']);
+  });
+
+  test('a held date stops the bookmark; later dates are still billed and the bookmark stays before the held one', async () => {
+    mockBookmarkRow = bookmarkAt('2026-11-10');
+    resultsByDate({ '2026-11-11': { unresolved: ['cust-x'] } });
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(billedDates()).toEqual(['2026-11-11', '2026-11-12']);
+    expect(mockWrites).toEqual([]);
+  });
+});
+
+describe('the hold is bounded', () => {
+  test('a date still unresolved two days later is released with one alert naming the count; newer held dates still hold', async () => {
+    mockBookmarkRow = bookmarkAt('2026-11-09');
+    resultsByDate({
+      '2026-11-10': { unresolved: ['cust-x', 'cust-y'] },
+      '2026-11-12': { unresolved: ['cust-z'] },
+    });
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(billedDates()).toEqual(['2026-11-10', '2026-11-11', '2026-11-12']);
+    expect(writtenDates()).toEqual(['2026-11-10', '2026-11-11']);
+    expect(alerts()).toEqual([{
+      category: 'billing',
+      headline: 'Billing — charge 2 Auto Pay customers by hand',
+      why: 'The Tue, Nov 10 monthly run failed before charging them, and two days of retries did not fix it.',
+      opts: expect.objectContaining({
+        dedupeKey: 'billing-monthly-unbilled:2026-11-10',
+        link: '/admin/invoices',
+        detail: expect.stringContaining('Customer ids: cust-x, cust-y.'),
+        metadata: expect.objectContaining({ area: 'Billing', severity: 'needs-you', who: 'person', doneWhen: 'dues_collected' }),
+      }),
+    }]);
+  });
+
+  test('yesterday\'s unresolved date is still inside the hold: no alert, no move', async () => {
+    mockBookmarkRow = bookmarkAt('2026-11-10');
+    resultsByDate({ '2026-11-11': { unresolved: ['cust-x'] } });
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(notifyAdmin).not.toHaveBeenCalled();
+    expect(mockWrites).toEqual([]);
+  });
+
+  test('month end: an earlier month\'s unfinished dates raise one alert for that month, and are not billed', async () => {
+    setNow('2026-11-02T15:29:00Z');
+    mockBookmarkRow = bookmarkAt('2026-10-29');
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(billedDates()).toEqual(['2026-11-01', '2026-11-02']);
+    expect(alerts()).toEqual([expect.objectContaining({
+      headline: "Billing — check last month's Auto Pay run",
+      why: '2 billing days of last month did not finish, so some monthly dues may be unpaid.',
+      opts: expect.objectContaining({ dedupeKey: 'billing-monthly-unfinished:2026-10' }),
+    })]);
+  });
+
+  test('month end: a bookmark on the last day of last month raises nothing', async () => {
+    setNow('2026-11-01T15:29:00Z');
+    mockBookmarkRow = bookmarkAt('2026-10-31');
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a failed alert only logs: the bookmark still moves past the released date', async () => {
+    notifyAdmin.mockRejectedValueOnce(new Error('bell write failed'));
+    mockBookmarkRow = bookmarkAt('2026-11-09');
+    resultsByDate({ '2026-11-10': { unresolved: ['cust-x'] } });
+    await catchUp.runMonthlyBillingCatchUp();
+    expect(writtenDates()).toEqual(['2026-11-10', '2026-11-11', '2026-11-12']);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('alert billing-monthly-unbilled:2026-11-10 failed: bell write failed'));
+  });
+});
+
+describe('8:00 tick: the same completion check', () => {
+  test('gate on: unresolved customers today keep the bookmark for the catch-up', async () => {
+    mockBookmarkRow = bookmarkAt('2026-11-11');
+    resultsByDate({ '2026-11-12': { unresolved: ['cust-b'] } });
+    await catchUp.runMonthlyBillingTick();
+    expect(mockWrites).toEqual([]);
+  });
+
+  test('gate on: a recorded decline still moves the bookmark', async () => {
+    mockBookmarkRow = bookmarkAt('2026-11-11');
+    resultsByDate({ '2026-11-12': { declined: 2 } });
+    await catchUp.runMonthlyBillingTick();
+    expect(writtenDates()).toEqual(['2026-11-12']);
+  });
+
+  test('gate off: unresolved customers keep the bookmark too (no read, no alert)', async () => {
+    billingMonthlyCatchupLive.mockReturnValue(false);
+    mockReadError = new Error('a read must not happen');
+    resultsByDate({ '2026-11-12': { unresolved: ['cust-b'] } });
+    await catchUp.runMonthlyBillingTick();
+    expect(mockWrites).toEqual([]);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('gate on, first run of a month: an unfinished earlier month raises its alert from the 8:00 tick', async () => {
+    setNow('2026-11-01T13:00:00Z');
+    mockBookmarkRow = bookmarkAt('2026-10-30');
+    await catchUp.runMonthlyBillingTick();
+    expect(alerts().map((a) => a.opts.dedupeKey)).toEqual(['billing-monthly-unfinished:2026-10']);
+    expect(writtenDates()).toEqual(['2026-11-01']);
   });
 });

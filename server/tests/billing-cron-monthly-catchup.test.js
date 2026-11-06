@@ -246,3 +246,54 @@ describe('the 8:00 run (no billingDate) is unchanged', () => {
     for (const call of findCollectedMonthlyPayment.mock.calls) expect(call[2]).toBeUndefined();
   });
 });
+
+// Codex pre-push P1 on d118ee1388: a customer the run could not reach before the charge, with
+// nothing armed, must not be lost when the catch-up marks the date finished. The run names
+// those customers (unresolvedCustomerIds) so the catch-up keeps the date; a re-run of the
+// same date bills only them.
+describe('unresolved customers: a failure before the charge with nothing armed', () => {
+  const collected = findCollectedMonthlyPayment.getMockImplementation();
+  const failLookupOnceFor = (customerId) => {
+    let failed = false;
+    findCollectedMonthlyPayment.mockImplementation(async (id, ...rest) => {
+      if (id === customerId && !failed) { failed = true; throw new Error('connection terminated'); }
+      return collected(id, ...rest);
+    });
+  };
+  afterEach(() => findCollectedMonthlyPayment.mockImplementation(collected));
+
+  test('run the date twice: the first run fails one customer before the charge; the second bills only that customer', async () => {
+    failLookupOnceFor('cust-b');
+    const first = await catchUpRun();
+    expect(chargedIds()).toEqual(['cust-a', 'cust-c']);
+    expect(first).toMatchObject({ charged: 1, failed: 2, unresolvedCustomerIds: ['cust-b'] });
+    const textsAfterFirst = sendCustomerMessage.mock.calls.length;
+    const emailsAfterFirst = BillingRetryEmail.reconcilePendingNotices.mock.calls.length;
+
+    StripeService.chargeMonthly.mockClear();
+    const second = await catchUpRun();
+    expect(chargedIds()).toEqual(['cust-b']);
+    expect(second).toMatchObject({ charged: 1, failed: 0, skipped: 2, unresolvedCustomerIds: [] });
+    // cust-b's receipt is the only new message; cust-c's decline is not repeated.
+    expect(sendCustomerMessage.mock.calls.length).toBe(textsAfterFirst + 1);
+    expect(BillingRetryEmail.reconcilePendingNotices.mock.calls.length).toBe(emailsAfterFirst);
+    expect(mockLedger.filter((r) => r.status === 'paid').map((r) => r.customer_id).sort()).toEqual(['cust-a', 'cust-b']);
+  });
+
+  test('a recorded decline is not unresolved: its armed retry row is the recovery', async () => {
+    const out = await catchUpRun();
+    expect(out.failed).toBe(1);
+    expect(out.unresolvedCustomerIds).toEqual([]);
+    expect(mockLedger.find((r) => r.customer_id === 'cust-c').next_retry_at).toEqual(expect.any(String));
+  });
+
+  test('an error outside the charge (nothing recorded, nothing armed) is unresolved, on the 8:00 run too', async () => {
+    StripeService.chargeMonthly.mockImplementation(async (customerId) => {
+      if (customerId === 'cust-a') throw new Error('customer read failed');
+      return ledgerRow(customerId, 'paid', TODAY);
+    });
+    const out = await BillingCron.processMonthlyBilling();
+    expect(out.unresolvedCustomerIds).toEqual(['cust-a']);
+    expect(sendCustomerMessage.mock.calls.every(([msg]) => msg.customerId !== 'cust-a')).toBe(true);
+  });
+});

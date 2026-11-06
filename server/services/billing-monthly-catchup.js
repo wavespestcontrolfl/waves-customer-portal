@@ -27,6 +27,19 @@
  *   and a customer with a failed or refunded attempt for this month dated on
  *   or after the billing date it makes up, so a card a killed run declined is
  *   not tried again and no second decline text or email goes out.
+ * - Unresolved customers hold the bookmark: processMonthlyBilling returns
+ *   unresolvedCustomerIds, the customers it could not charge AND left nothing
+ *   armed for (a read or lock error before the charge, an unpersisted
+ *   deferral). A recorded decline is not one: its armed retry row is the
+ *   recovery. A date with any is not marked finished, so the next catch-up
+ *   re-runs it; the guards above skip everyone that run charged or tried.
+ *   Bound: the hold lasts through the day after the billing date
+ *   (HOLD_DAYS). A run of that date on a later day releases it (the bookmark
+ *   moves past it) and raises one admin alert naming the count, so one
+ *   customer who always fails re-runs the date at most about four times. The
+ *   catch-up bills only this month, so the hold also ends with the month: the
+ *   first bookmark read in a new month that finds an earlier month's dates
+ *   unfinished raises one alert for that month.
  * - Honest failure (#7700 rule): the pre-lock read answers "skip" on a failed
  *   read and records nothing. The read under the lock throws, so runExclusive
  *   records a failure, never a false success.
@@ -35,10 +48,14 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const {
+  etDateString, addETDays, parseETDateTime, etCalendarDaysUntil, formatETDayDate,
+} = require('../utils/datetime-et');
 const { billingMonthlyCatchupLive } = require('../config/feature-gates');
 
 const BOOKMARK_KEY = 'billing-monthly-billed-thru';
+// A date with unresolved customers holds the bookmark through this many days after it.
+const HOLD_DAYS = 1;
 
 const nextDate = (ymd) => etDateString(addETDays(parseETDateTime(`${ymd}T12:00`), 1));
 
@@ -76,31 +93,84 @@ function missedBillingDates(bookmark, today) {
   return dates;
 }
 
+// One needs-you Billing alert, deduped on its subject for good (a date or a month rings once,
+// even after a person marks it done). Never throws: a lost alert must not fail the billing run.
+async function raiseBillingAlert(spec, detail) {
+  try {
+    await require('./admin-alert-compose').raiseAdminAlert('billing', {
+      area: 'Billing', severity: 'needs-you', link: '/admin/invoices', who: 'person', ...spec,
+    }, { detail, dedupeKey: spec.subject.id });
+  } catch (err) {
+    logger.error(`[billing-monthly-catchup] alert ${spec.subject.id} failed: ${err.message}`);
+  }
+}
+
+/**
+ * Whether a run's billing date counts as finished for the bookmark. A run with no
+ * unresolved customers finishes it. One with unresolved customers holds the date through
+ * HOLD_DAYS after it (the next catch-up re-runs it); a run on a later day releases the date
+ * and raises one alert naming the count.
+ */
+async function finishesDate(result) {
+  const ids = result.unresolvedCustomerIds || [];
+  if (!ids.length) return true;
+  if (-etCalendarDaysUntil(result.billingDate) <= HOLD_DAYS) {
+    logger.warn(`[billing-monthly-catchup] ${ids.length} customer(s) of ${result.billingDate} failed before any charge and nothing is armed — bookmark held so the next catch-up re-runs the date`);
+    return false;
+  }
+  const count = ids.length;
+  await raiseBillingAlert({
+    action: `charge ${count} Auto Pay customer${count === 1 ? '' : 's'} by hand`,
+    why: `The ${formatETDayDate(parseETDateTime(`${result.billingDate}T12:00`))} monthly run failed before charging them, and two days of retries did not fix it.`,
+    subject: { type: 'check', id: `billing-monthly-unbilled:${result.billingDate}` },
+    doneWhen: 'dues_collected',
+  }, `Monthly dues for billing date ${result.billingDate} were not charged and no retry is armed. Customer ids: ${ids.join(', ')}. Collect each with Charge now on the customer page.`);
+  return true;
+}
+
+// The catch-up bills only this month, so dates of an earlier month the bookmark never
+// reached are not billed again. Raise one alert for that month (deduped per month).
+async function alertUnfinishedEarlierMonth(bookmark, today) {
+  const monthStart = `${today.slice(0, 7)}-01`;
+  if (!bookmark || nextDate(bookmark) >= monthStart) return;
+  const unfinished = etCalendarDaysUntil(monthStart, parseETDateTime(`${bookmark}T12:00`)) - 1;
+  const lastMonth = etDateString(addETDays(parseETDateTime(`${monthStart}T12:00`), -1)).slice(0, 7);
+  await raiseBillingAlert({
+    action: "check last month's Auto Pay run",
+    why: `${unfinished} billing day${unfinished === 1 ? '' : 's'} of last month did not finish, so some monthly dues may be unpaid.`,
+    subject: { type: 'check', id: `billing-monthly-unfinished:${lastMonth}` },
+    doneWhen: 'month_reviewed',
+  }, `The last finished monthly billing date is ${bookmark}. The ${unfinished} date(s) after it, before ${monthStart}, did not finish (a lost run, or customers the run could not charge). The catch-up does not bill an earlier month.`);
+}
+
 /**
  * The 8:00 AM ET tick body (inside runExclusive('billing-monthly')). It runs today's billing
  * exactly as before, then moves the bookmark to today, unless the gate is on and an earlier
  * date of this month is still owed: then the bookmark stays, so the catch-up bills that date
- * (and passes over today's customers, all already charged or tried). With the gate on, a
- * failed bookmark read leaves the bookmark where it is; today's billing has already run.
+ * (and passes over today's customers, all already charged or tried). A run with unresolved
+ * customers does not move it (finishesDate). With the gate on, a failed bookmark read leaves
+ * the bookmark where it is; today's billing has already run.
  */
 async function runMonthlyBillingTick() {
   const result = await require('./billing-cron').processMonthlyBilling();
   if (!billingMonthlyCatchupLive()) {
-    await writeBookmark(result.billingDate);
+    if (!result.unresolvedCustomerIds?.length) await writeBookmark(result.billingDate);
     return result;
   }
-  let owedBefore;
+  let bookmark;
   try {
-    owedBefore = missedBillingDates(await readBookmark(), result.billingDate).filter((d) => d < result.billingDate);
+    bookmark = await readBookmark();
   } catch (err) {
     logger.warn(`[billing-monthly-catchup] bookmark read after the 8:00 run failed (${err.code || err.name || 'error'}) — bookmark left as it is`);
     return result;
   }
+  await alertUnfinishedEarlierMonth(bookmark, result.billingDate);
+  const owedBefore = missedBillingDates(bookmark, result.billingDate).filter((d) => d < result.billingDate);
   if (owedBefore.length) {
     logger.warn(`[billing-monthly-catchup] ${owedBefore.length} earlier billing date(s) still owed (${owedBefore.join(', ')}) — bookmark left for the catch-up`);
     return { ...result, owedBefore };
   }
-  await writeBookmark(result.billingDate);
+  if (await finishesDate(result)) await writeBookmark(result.billingDate);
   return result;
 }
 
@@ -121,20 +191,26 @@ async function catchUpNeeded() {
 /**
  * The catch-up tick body (inside runExclusive('billing-monthly'), the 8:00 run's own lock).
  * Re-reads the bookmark under the lock (a failed read throws), then bills each missed date in
- * order and moves the bookmark after each one, so a date that throws is retried by the next
- * tick and the dates before it are not.
+ * order. The bookmark moves after each finished date and stops at the first held one
+ * (finishesDate), so a date that throws or holds is re-run by the next tick and the dates
+ * before it are not. Later dates are still billed on time; their re-run skips everyone.
  */
 async function runMonthlyBillingCatchUp() {
   if (!billingMonthlyCatchupLive()) return { skipped: 'gate_off' };
-  const dates = missedBillingDates(await readBookmark(), etDateString());
+  const bookmark = await readBookmark();
+  const today = etDateString();
+  await alertUnfinishedEarlierMonth(bookmark, today);
+  const dates = missedBillingDates(bookmark, today);
   if (!dates.length) return { skipped: 'nothing_owed' };
   const BillingCron = require('./billing-cron');
   const runs = [];
+  let held = false;
   for (const billingDate of dates) {
     const result = await BillingCron.processMonthlyBilling({ billingDate });
-    await writeBookmark(billingDate);
     runs.push(result);
     logger.warn(`[billing-monthly-catchup] billed missed date ${billingDate}: ${result.charged} charged, ${result.processing} processing, ${result.failed} failed, ${result.skipped} skipped`);
+    held = !(await finishesDate(result)) || held;
+    if (!held) await writeBookmark(billingDate);
   }
   return { runs };
 }
@@ -143,5 +219,5 @@ module.exports = {
   runMonthlyBillingTick,
   catchUpNeeded,
   runMonthlyBillingCatchUp,
-  _private: { missedBillingDates, readBookmark, writeBookmark, BOOKMARK_KEY },
+  _private: { missedBillingDates, readBookmark, writeBookmark, BOOKMARK_KEY, HOLD_DAYS },
 };

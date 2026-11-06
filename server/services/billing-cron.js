@@ -568,6 +568,11 @@ const BillingCron = {
     let processing = 0;
     let skipped = 0;
     let failed = 0;
+    // Customers this run could not charge AND left no recovery path for: the failure came
+    // before any charge attempt was recorded (a read or lock error, an unpersisted deferral),
+    // so no retry row is armed. A recorded decline is not here: its armed row is the recovery.
+    // The catch-up keeps its bookmark before a date with any (billing-monthly-catchup.js).
+    const unresolvedCustomerIds = [];
 
     for (const customer of customers) {
       try {
@@ -696,7 +701,7 @@ const BillingCron = {
 
         if (lockOutcome.holdSkipped) {
           const deferred = await deferMonthlyForCollectionHold(customer, monthKey, now, lockOutcome.holdSkipped);
-          if (deferred) skipped++; else failed++;
+          if (deferred) skipped++; else { failed++; unresolvedCustomerIds.push(customer.id); }
           continue;
         }
 
@@ -719,7 +724,7 @@ const BillingCron = {
             // Not collected and possibly not durably deferred: an unpersisted deferral keeps
             // the catch-up marker (set inside deferMonthlyCollection) and counts as failed.
             const deferred = await deferMonthlyCollection(customer, monthKey, now);
-            if (!deferred) { failed++; continue; }
+            if (!deferred) { failed++; unresolvedCustomerIds.push(customer.id); continue; }
           }
           skipped++;
           continue;
@@ -935,6 +940,9 @@ const BillingCron = {
           logger.warn(`[billing-cron] Monthly charge for customer id=${customer.id} failed outside the charge itself (${err.message}) — no failed attempt to arm for retry`);
         }
 
+        // No failed row to arm: nothing will retry this customer this month.
+        if (!failedPayment) unresolvedCustomerIds.push(customer.id);
+
         const emailChoice = failedPayment ? await paymentIssueEmailChoice(customer.id) : false;
         const emailDescriptor = failedPayment && emailChoice !== false && emailChoice !== null
           ? BillingRetryEmail.pendingDescriptor({
@@ -1037,7 +1045,10 @@ const BillingCron = {
     logger.info(`[billing-cron] Monthly billing complete: ${charged} charged, ${processing} processing, ${skipped} skipped, ${failed} failed out of ${customers.length} customers`);
 
     // billingDate: the day whose cohort this run billed (the bookmark the catch-up keeps).
-    return { charged, processing, skipped, failed, total: customers.length, billingDate: billingDate || etDateString(now) };
+    return {
+      charged, processing, skipped, failed, total: customers.length,
+      billingDate: billingDate || etDateString(now), unresolvedCustomerIds,
+    };
   },
 
   // =========================================================================
