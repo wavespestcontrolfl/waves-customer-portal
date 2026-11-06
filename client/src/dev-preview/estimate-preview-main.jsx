@@ -264,7 +264,7 @@ function bundleScenario() {
   };
 }
 
-// GATE_ESTIMATE_MONTHLY_AVERAGE fixtures (owner 2026-10-20, option A). Real
+// Monthly average fixtures (owner 2026-10-20, option A). Real
 // payload shape: every per-application row carries perTreatment /
 // displayPrice AND visitsPerYear, so the card leads with the per-application
 // price and the monthly average hangs beneath it. pest_average is the single
@@ -1173,8 +1173,6 @@ window.fetch = async (input, init) => {
       ...payload,
       ...(pdfPass && proposal ? { proposal } : {}),
       glassDefault: true,
-      // The harness runs with GATE_ESTIMATE_MONTHLY_AVERAGE on (as dev does).
-      monthlyAverageEnabled: true,
       ...returnVisit,
       lawnCalendar: { programs: { standard: { visitsPerYear: 9 } } },
       ...referral,

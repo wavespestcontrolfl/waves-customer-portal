@@ -17,6 +17,7 @@ const logger = require('./logger');
 const { estimateConsultationOfferLive, leadInspectionLinkLive } = require('../config/feature-gates');
 const { leadLinkRefusal, consultationUrlForLead } = require('./lead-consultation-link');
 const { leadWantsRecurringPlan } = require('./lead-recurring-intent');
+const { hadCompletedAssessmentLook } = require('./assessment-booking');
 const { streetKey, normalizeZip, unitKey, streetEmbeddedUnitKey } = require('./customer-properties');
 const { parseRawAddress } = require('../utils/address-normalizer');
 
@@ -187,6 +188,25 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive, 
 // own last estimate and opt-out reads.
 const FINAL_CHECK_SNAPSHOT = { isolationLevel: 'repeatable read', readOnly: true };
 
+// The last step of finalEligibility: the lead's contact and intent, read in the same snapshot, then the look rule.
+async function freshRecurringLead(trx, leadId, freshEstimate) {
+  // The lead's contact and intent — from the same snapshot, so it is the
+  // same lead state the booking-state and refusal checks above judged
+  // (Codex #4918 r18/r20: call-origin proof, status, address and contact
+  // can no longer move between those checks and this read).
+  const freshLead = await trx('leads').where({ id: leadId }).whereNull('deleted_at')
+    .first('id', 'phone', 'email', 'service_interest', 'status', 'converted_at', 'customer_id');
+  if (!freshLead) return null;
+  const { leadMatchesEstimateContact } = require('./lead-estimate-link');
+  if (!leadMatchesEstimateContact(freshLead, freshEstimate)) return null;
+  if (!leadWantsRecurringPlan(freshLead)) return null;
+  // The look already happened (a Waves Assessment completed while this estimate was prepared): the lead link would
+  // book a second free one. The lead is the estimate's contact (leadMatchesEstimateContact, customer_id included), so
+  // the estimate's customer is the lead's. Last, so nothing else waits on this read.
+  if (await hadCompletedAssessmentLook(trx, freshEstimate)) return null;
+  return freshLead;
+}
+
 // The final, post-probe eligibility re-check — a fresh read of the
 // estimate and lead rows, re-judged against the same rules
 // estimateConsultationLead applies above. Kept single-sourced so a rule
@@ -228,17 +248,7 @@ async function finalEligibility(estimateId, leadId, probedAddress, probedAddress
   if (!booking?.bookable || !probedAddressInputs || booking.addressInputs !== probedAddressInputs) return null;
   if (await leadLinkRefusal(booking.lead, trx)) return null;
 
-  // The lead's contact and intent — from the same snapshot, so it is the
-  // same lead state the booking-state and refusal checks above judged
-  // (Codex #4918 r18/r20: call-origin proof, status, address and contact
-  // can no longer move between those checks and this read).
-  const freshLead = await trx('leads').where({ id: leadId }).whereNull('deleted_at')
-    .first('id', 'phone', 'email', 'service_interest', 'status', 'converted_at', 'customer_id');
-  if (!freshLead) return null;
-  const { leadMatchesEstimateContact } = require('./lead-estimate-link');
-  if (!leadMatchesEstimateContact(freshLead, freshEstimate)) return null;
-  if (!leadWantsRecurringPlan(freshLead)) return null;
-  return freshLead;
+  return freshRecurringLead(trx, leadId, freshEstimate);
 }
 
 // The estimate page's offer: its own gate, then the shared eligibility. The

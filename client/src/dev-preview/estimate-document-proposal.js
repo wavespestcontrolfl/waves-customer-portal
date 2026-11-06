@@ -128,7 +128,7 @@ function computeTotals(buildings) {
   };
 }
 
-// GATE_ESTIMATE_MONTHLY_AVERAGE: what the server ships as proposal.monthlyAverage
+// Monthly average: what the server ships as proposal.monthlyAverage
 // (monthlyAverageFor in server/services/estimate-monthly-average.js) - the
 // plan's monthly (here the sum of the cadences the fixture defaults to), the
 // bundle discount and the one-time lines. The document re-validates it against

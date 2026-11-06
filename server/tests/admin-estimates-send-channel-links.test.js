@@ -790,3 +790,58 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
     expect(state.row.status).toBe('accepted');
   });
 });
+
+describe('sendEstimateNow — the app-sent new-home estimate (GATE_MOVING_AUTO_SEND)', () => {
+  const GATES = ['GATE_MOVING_FLOW', 'GATE_MOVING_ESTIMATE', 'GATE_MOVING_AUTO_ESTIMATE', 'GATE_MOVING_AUTO_SEND'];
+  const saved = {};
+  beforeEach(() => {
+    for (const gate of GATES) { saved[gate] = process.env[gate]; process.env[gate] = 'true'; }
+  });
+  afterEach(() => {
+    for (const gate of GATES) { if (saved[gate] === undefined) delete process.env[gate]; else process.env[gate] = saved[gate]; }
+  });
+  // A draft the app made for a move: the move stamp and the plan the text names.
+  const moveRow = (stamp = { planName: 'Quarterly Pest Control Service' }) => estimateRow({
+    estimate_data: JSON.stringify({ move: { moveId: 'move-1' }, automation: { moveAutoEstimate: { moveId: 'move-1', ...stamp } } }),
+  });
+  const lastTemplate = () => smsTemplates.getTemplate.mock.calls.at(-1);
+  const smsLeg = () => sendCustomerMessage.mock.calls.at(-1)[0];
+
+  test("the app's send uses the moving text and the entry point the 8 AM to 8 PM window fences", async () => {
+    const row = moveRow();
+    db.mockImplementation(() => makeBuilder(row));
+    const result = await router.sendEstimateNow(row, 'both', { movingAutoSend: true, autoSend: true, callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    expect(lastTemplate()[0]).toBe('estimate_sent_move');
+    expect(lastTemplate()[1]).toMatchObject({ plan_name: 'Quarterly Pest Control Service', estimate_url: 'https://short.test/sms' });
+    // The window fences this entry point (messaging-send-window.test.js).
+    expect(smsLeg()).toMatchObject({ entryPoint: 'moving_auto_send', metadata: { original_message_type: 'estimate_sent' } });
+  });
+
+  test("the office's send of that estimate shows the moving text but stays an office send; gate off or no plan name = the standard text", async () => {
+    const row = moveRow();
+    db.mockImplementation(() => makeBuilder(row));
+    await router.sendEstimateNow(row, 'sms');
+    expect(lastTemplate()[0]).toBe('estimate_sent_move');
+    expect(smsLeg().entryPoint).toBe('admin_estimate_send');
+    delete process.env.GATE_MOVING_AUTO_SEND;
+    await router.sendEstimateNow(row, 'sms');
+    expect(lastTemplate()[0]).toBe('estimate_sent');
+    expect(lastTemplate()[1].plan_name).toBeUndefined();
+    process.env.GATE_MOVING_AUTO_SEND = 'true';
+    const unnamed = moveRow({});
+    db.mockImplementation(() => makeBuilder(unnamed));
+    await router.sendEstimateNow(unnamed, 'sms');
+    expect(lastTemplate()[0]).toBe('estimate_sent');
+  });
+
+  test('a text the window holds reports its code on the channel while the email goes', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, code: 'QUIET_HOURS_HOLD', reason: 'Automated SMS is limited to 8:00 AM-8:00 PM ET', retryable: true, deferred: true });
+    const row = moveRow();
+    db.mockImplementation(() => makeBuilder(row));
+    const result = await router.sendEstimateNow(row, 'both', { movingAutoSend: true });
+    expect(result.sent).toBe(true);
+    expect(result.sentChannels).toEqual(['email']);
+    expect(result.channels.sms).toMatchObject({ ok: false, code: 'QUIET_HOURS_HOLD' });
+  });
+});

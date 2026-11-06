@@ -80,7 +80,6 @@ const PAYLOADS = {
     const base = PAYLOADS.certificate();
     return {
       ...base,
-      pretreatStickerReport: true,
       findings: {
         ...base.findings,
         final_exterior_date: '2026-09-14',
@@ -90,7 +89,6 @@ const PAYLOADS = {
       },
     };
   },
-  'certificate-sticker-slab-day': () => ({ ...PAYLOADS.certificate(), pretreatStickerReport: true }),
   wdo: () => ({
     ...BASE,
     ...CARTER,

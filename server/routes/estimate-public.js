@@ -6593,16 +6593,15 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // evidence resolver as that chokepoint \u2014 this render has no fresh engine
   // result of its own, so it reads stored evidence only (no second arg).
   const treeShrubPalmCount = treeShrubPalmCountForEstData(estData);
-  // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): the legacy page (use_v2_view
+  // Monthly average (owner 2026-10-20): the legacy page (use_v2_view
   // = false rows, the GrowthBook control) prints the same "$X a month"
   // line under each per-application card, the plan summary for two or more
   // services (or a credited one) and the context sentence, from the SAME shared
-  // builder as the email, the PDF and the React page. Withheld (null) with the
-  // gate off, for quote-required / one-time-only / accepted / declined /
-  // commercial / monthly-billed plans, and whenever the cards do not reconcile
+  // builder as the email, the PDF and the React page. Withheld (null) for
+  // quote-required / one-time-only / accepted / declined / commercial /
+  // monthly-billed plans, and whenever the cards do not reconcile
   // to the stored monthly total, so the HTML is then byte-identical to before.
   const ssrMonthlyAverage = (() => {
-    if (!featureGates.isEnabled('estimateMonthlyAverage')) return null;
     if (quoteRequired || isOneTimeOnly || locked || est.status === 'declined' || commercialProposal
       || recurringBilledMonthly || commercialManualAccept) return null;
     if (!billingServiceRows.length || !billingServiceRows.every((row) => row.price != null && row.visits > 0)) return null;
@@ -8170,7 +8169,7 @@ ${shellQuestionsBar()}
     return context;
   }
 
-${ssrMonthlyAverage ? `  // GATE_ESTIMATE_MONTHLY_AVERAGE: the average is computed for the server-rendered
+${ssrMonthlyAverage ? `  // Monthly average: the average is computed for the server-rendered
   // preferences and a pay-per-application plan. A preference change re-prices
   // the cards client-side, and the annual prepay choice is not "pay after each
   // application", so either one hides the average rather than restate it. The
@@ -31322,9 +31321,9 @@ async function composeEstimateDataPayload(estimate, {
           livePricing: proposalBilling?.livePricing || null,
         });
         const proposalNoGuaranteeClaims = proposalMakesNoGuaranteeClaim(proposalForView, estimate.id);
-        // GATE_ESTIMATE_MONTHLY_AVERAGE: the inputs the document needs to print
+        // Monthly average: the inputs the document needs to print
         // "$X a month" under each per-application line. Null (key absent)
-        // with the gate off, for any plan that is not purely per application, and
+        // for any plan that is not purely per application, and
         // whenever the lines do not reconcile to the stored monthly total, so the
         // document is byte-identical to today in all of those cases.
         const monthlyAverage = proposalBilling?.billsPerApplication === true
@@ -31712,11 +31711,6 @@ async function composeEstimateDataPayload(estimate, {
       ...(acceptanceTermsServed ? { acceptanceTerms: acceptanceTerms.acceptanceTermsPayload(acceptanceTermsScope) } : {}),
       ...(acceptanceRecord ? { acceptance: acceptanceRecord } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
-      // GATE_ESTIMATE_MONTHLY_AVERAGE: the page may print "$X a month"
-      // under its per-application prices (it derives the figures from the
-      // selected cadence itself, so only the switch rides here). Absent, not
-      // false, with the gate off ⇒ response byte-identical to today.
-      ...(featureGates.isEnabled('estimateMonthlyAverage') ? { monthlyAverageEnabled: true } : {}),
       // "Does the lawn size look off?" challenge sheet — the link renders
       // only when this is true, so gate-off responses stay byte-identical
       // (absent, not false). Draft previews never offer it (a request row

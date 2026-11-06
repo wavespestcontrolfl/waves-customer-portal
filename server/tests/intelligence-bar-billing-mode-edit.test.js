@@ -270,6 +270,19 @@ describe('proposal refusals mirror the customer page (billing-mode-rules.js)', (
 describe('cases refused because the bar would have to reproduce another flow', () => {
   test('annual prepay as the new type, from annual prepay, or with a live term', async () => {
     expect((await propose({ billing_mode: 'annual_prepay' })).code).toBe('annual_prepay_lane');
+    // With the bar's own switch on (GATE_IB_PREPAY_SWITCH), the refusal names it instead of a dead end.
+    const savedSwitch = process.env.GATE_IB_PREPAY_SWITCH;
+    const savedPlatform = process.env.GATE_IB_PLATFORM;
+    process.env.GATE_IB_PREPAY_SWITCH = 'true';
+    process.env.GATE_IB_PLATFORM = 'true';
+    try {
+      const pointed = await propose({ billing_mode: 'annual_prepay' });
+      expect(pointed.code).toBe('annual_prepay_lane');
+      expect(pointed.error).toMatch(/switch_visit_to_annual_prepay/);
+    } finally {
+      if (savedSwitch === undefined) delete process.env.GATE_IB_PREPAY_SWITCH; else process.env.GATE_IB_PREPAY_SWITCH = savedSwitch;
+      if (savedPlatform === undefined) delete process.env.GATE_IB_PLATFORM; else process.env.GATE_IB_PLATFORM = savedPlatform;
+    }
     mockState.customer = { ...BASE, billing_mode: 'annual_prepay' };
     expect((await propose({ billing_mode: 'per_visit' })).code).toBe('annual_prepay_lane');
     mockState.customer = { ...BASE, billing_mode: 'per_application', per_application_fee: '91.00' };

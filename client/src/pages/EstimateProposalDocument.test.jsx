@@ -972,10 +972,10 @@ describe('Next steps text size', () => {
   });
 });
 
-// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): "$X a month" under each
+// Monthly average (owner 2026-10-20): "$X a month" under each
 // per-application line, one plan line for two or more services. The server ships
-// proposal.monthlyAverage only with the gate on and a reconciling plan, so an
-// absent key is the gate-off document.
+// proposal.monthlyAverage only for a reconciling plan, so an
+// absent key is the document without an average.
 describe('EstimateProposalDocument — monthly average beside per-application prices', () => {
   const perAppLine = (description, unitPrice, visitsPerYear) => ({
     description, quantity: 1, unitPrice, amount: unitPrice, frequency: 'per_application',
@@ -1074,7 +1074,7 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
     expect(container.querySelector('[data-monthly-average-plan]').textContent).toContain('$21.33 a month');
   });
 
-  it('gate off (no monthlyAverage from the server): the document is exactly as before', () => {
+  it('no monthlyAverage from the server: the document is exactly as before', () => {
     for (const fixture of [{ ...single, monthlyAverage: null }, { ...bundle, monthlyAverage: null }]) {
       const text = render1(docData(fixture));
       expect(text).not.toMatch(/a month|Averaged over the year|Your plan averages/);
@@ -1120,7 +1120,7 @@ describe('EstimateProposalDocument — monthly average beside per-application pr
       }
     });
 
-    it('the monthly average gate off (no inputs from the server) shows nothing', () => {
+    it('no monthly average inputs from the server shows nothing', () => {
       const text = render1(docData({ ...pestMosquito, monthlyAverage: null }));
       expect(text).not.toMatch(/What you pay|a month|Averaged over the year/);
     });

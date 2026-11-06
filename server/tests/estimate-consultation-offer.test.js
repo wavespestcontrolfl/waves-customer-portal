@@ -530,3 +530,57 @@ describe('buildEstimateConsultationOffer — lead-wide state and the final snaps
     expect(engineSnapshot).toHaveBeenCalledWith('leads');
   });
 });
+
+// A Waves Assessment completed while the estimate was prepared was the look: the lead link would book a second free
+// one, so the page offer AND the gone-quiet email's offer (both run finalEligibility) are withheld. The rule is
+// assessment-booking's hadCompletedAssessmentLook (its SQL shape is covered in estimate-assessment-public.test.js);
+// the scheduled_services read here is a stub.
+describe('the lead-link offer after a completed Waves Assessment (the look already happened)', () => {
+  const { estimateConsultationLead, reconfirmConsultationLead } = require('../services/estimate-consultation-offer');
+  const logger = require('../services/logger');
+  const CREATED = '2026-10-20T14:00:00Z';
+
+  // A scheduled_services builder: `row` is what the completed-assessment read finds.
+  function visitBuilder(row, { throwOn = false } = {}) {
+    const b = {};
+    for (const m of ['leftJoin', 'where', 'whereRaw']) b[m] = jest.fn(() => b);
+    b.first = jest.fn(async () => { if (throwOn) throw new Error('db exploded'); return row; });
+    return b;
+  }
+  function arrange({ estimateCustomer = 'cust-a', visits } = {}) {
+    mockBuilders.estimates = chainBuilder({ firstRow: freshOpenEstimate({ customer_id: estimateCustomer, created_at: CREATED }) });
+    mockBuilders.leads = chainBuilder({ firstRow: OPEN_RECURRING_LEAD });
+    mockBuilders.scheduled_services = visits;
+  }
+
+  test('a completed look for the estimate\'s customer: no offer on the page, none for the email, no reconfirm', async () => {
+    arrange({ visits: visitBuilder({ id: 'visit-1' }) });
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
+    const context = {};
+    expect(await estimateConsultationLead({ ...baseArgs(), context })).toBeNull();
+    expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith('scheduled_services.customer_id', 'cust-a');
+    expect(mockBuilders.scheduled_services.where).toHaveBeenCalledWith('scheduled_services.status', 'completed');
+  });
+
+  test('a look that completes after the offer was built: the email\'s reconfirm returns null', async () => {
+    arrange({ visits: visitBuilder(undefined) });
+    const context = {};
+    expect(await estimateConsultationLead({ ...baseArgs(), context })).toBeTruthy();
+    mockBuilders.scheduled_services = visitBuilder({ id: 'visit-1' });
+    expect(await reconfirmConsultationLead(context)).toBeNull();
+  });
+
+  test('no completed look (or no customer to match): the offer is unchanged', async () => {
+    arrange({ visits: visitBuilder(undefined) });
+    expect(await buildEstimateConsultationOffer(baseArgs())).toEqual({ url: expect.stringContaining('/inspection/') });
+    arrange({ estimateCustomer: null, visits: visitBuilder({ id: 'never-read' }) });
+    expect(await buildEstimateConsultationOffer(baseArgs())).toEqual({ url: expect.stringContaining('/inspection/') });
+    expect(mockBuilders.scheduled_services.first).not.toHaveBeenCalled();
+  });
+
+  test('a failed completed-assessment read: the offer is unchanged and a warning is logged', async () => {
+    arrange({ visits: visitBuilder(undefined, { throwOn: true }) });
+    expect(await buildEstimateConsultationOffer(baseArgs())).toEqual({ url: expect.stringContaining('/inspection/') });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('completed-assessment check skipped'));
+  });
+});

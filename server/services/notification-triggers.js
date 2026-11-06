@@ -533,7 +533,8 @@ const TRIGGER_REGISTRY = {
     priority: 'high',
     group: 'Communication',
     rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
-    techVisible: true, // the calls tab is staff-wide; whoever pressed 1 must see it
+    // Not tech-visible: technicians get no calls (owner 2026-10-02), so the Calls tab this links to is admin
+    // only, and the row names no customer (technician visibility audit C19, owner 2026-11-04 "ok go for all").
     build: (p) => ({
       title: `${agentName()} transfer without context`,
       body: `A caller${p.from ? ` from ${maskPhone(p.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,

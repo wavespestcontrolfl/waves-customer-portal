@@ -96,6 +96,7 @@ jest.mock('../routes/inspection-public', () => ({
   _internals: {
     computeConsultationSlotsForLead: (...args) => mockComputeConsultationSlotsForLead(...args),
     currentBookingState: (...args) => mockCurrentBookingState(...args),
+    findOpenVisit: async () => null,
   },
 }));
 
@@ -266,6 +267,41 @@ describe('GET /:token/data — assessmentFirst replaces the consultation offer',
       expect(Object.prototype.hasOwnProperty.call(body, 'assessmentFirst')).toBe(false);
     });
     expect(offer).not.toHaveBeenCalled();
+  });
+});
+
+// A Waves Assessment the customer already had completed while the estimate was prepared was the look: neither free
+// assessment offer is built, and the lead-link consultation offer does not stand in for the suppressed one.
+describe('GET /:token/data — a completed Waves Assessment (the look already happened)', () => {
+  const CUSTOMER = { id: 'cust-look', address_line1: '123 Consult Ln', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34203' };
+  const lookRow = () => estimateRow({ customer_id: 'cust-look', created_at: new Date(Date.now() - 7 * 86400000).toISOString() });
+  const fetchData = (row) => withServer(async (baseUrl) => (await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`)).json());
+  const has = (body, key) => Object.prototype.hasOwnProperty.call(body, key);
+  afterEach(() => { delete process.env.GATE_ESTIMATE_ASSESSMENT_FIRST; });
+
+  test('both consultation gates and assessment-first on, eligible lead, completed look: neither offer', async () => {
+    process.env.GATE_ESTIMATE_ASSESSMENT_FIRST = 'true';
+    const row = lookRow();
+    dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD, customers: CUSTOMER, scheduled_services: { id: 'visit-1' } };
+    const body = await fetchData(row);
+    expect(has(body, 'assessmentFirst')).toBe(false);
+    expect(has(body, 'consultationOffer')).toBe(false);
+  });
+
+  test('assessment-first gate off, completed look: the lead-link consultation offer is withheld', async () => {
+    const row = lookRow();
+    dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD, customers: CUSTOMER, scheduled_services: { id: 'visit-1' } };
+    expect(has(await fetchData(row), 'consultationOffer')).toBe(false);
+  });
+
+  test('no completed look: assessment-first is offered with its gate on, the consultation offer is unchanged with it off', async () => {
+    const row = lookRow();
+    dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD, customers: CUSTOMER };
+    expect((await fetchData(row)).consultationOffer).toEqual({ url: expect.stringContaining('/inspection/') });
+    process.env.GATE_ESTIMATE_ASSESSMENT_FIRST = 'true';
+    const body = await fetchData(row);
+    expect(body.assessmentFirst).toEqual({ url: `/estimate/${row.token}/assessment` });
+    expect(has(body, 'consultationOffer')).toBe(false);
   });
 });
 

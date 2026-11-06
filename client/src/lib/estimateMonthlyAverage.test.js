@@ -113,7 +113,6 @@ describe('pageMonthlyAverage', () => {
 describe('page decision helpers', () => {
   const monthlyAmountOf = (d) => Math.round((Number(d.recurringAmount ?? d.amount) / 12) * 100) / 100;
   const base = () => ({
-    data: { monthlyAverageEnabled: true },
     serviceMode: 'recurring',
     estimate: {},
     billsMonthly: false,
@@ -134,10 +133,10 @@ describe('page decision helpers', () => {
     expect(result.byKey).toEqual({ pest_control: 30, lawn_care: 42.3 });
   });
 
-  it('eligibility: gate switch, mode, billing, terminal state, quote, prepay', () => {
+  it('eligibility: mode, billing, terminal state, quote, prepay', () => {
     expect(pageAverageEligible(base())).toBe(true);
     for (const change of [
-      { data: {} }, { serviceMode: 'one_time' }, { estimate: { isOneTimeOnly: true } }, { billsMonthly: true },
+      { serviceMode: 'one_time' }, { estimate: { isOneTimeOnly: true } }, { billsMonthly: true },
       { isCommercialEstimate: true }, { cta: { terminalState: 'accepted' } }, { cta: { quoteRequired: true } },
       { paymentPreference: 'prepay_annual' },
     ]) {
