@@ -4176,7 +4176,11 @@ describe('named-competitor autopublish gate', () => {
       ['Aptive', 'Aptive offers recurring residential plans across its markets.', 'Aptive Environmental'],
       ['Truly Nolen', 'Truly Nolen offers recurring residential plans.', 'Truly Nolen'],
       ['All U Need Pest Control', 'All U Need Pest Control offers recurring residential plans across its markets.', 'All U Need Pest Control'],
-    ])('%s alone clears the owner list (owner added Aptive and Truly Nolen 2026-09-28, All U Need 2026-11-05) and publishes', async (who, body, canonical) => {
+      ['Prodigy Pest Solutions', 'Prodigy Pest Solutions offers recurring residential plans.', 'Prodigy Pest Solutions'],
+      ["Keller's Pest Control", "Keller's Pest Control offers recurring residential plans.", "Keller's Pest Control"],
+      ['Hughes Exterminators', 'Hughes Exterminators offers recurring residential plans.', 'Hughes Exterminators'],
+      ["Westfall's Lawn and Pest Control", "Westfall's Lawn and Pest Control offers recurring residential plans.", "Westfall's Lawn and Pest Control"],
+    ])('%s alone clears the owner list (owner added Aptive and Truly Nolen 2026-09-28, All U Need 2026-11-05, eight more 2026-11-05) and publishes', async (who, body, canonical) => {
       process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
       const publisher = chokepointPublisher(921, () => [who]);
       const { runner, queue } = namedCompetitorScenario({ publisher, comparisonGate: realGate, operatorBrief: brief(who), body });
@@ -4188,19 +4192,19 @@ describe('named-competitor autopublish gate', () => {
       expect(queue.skip).not.toHaveBeenCalled();
     });
 
-    test("Keller's Pest Control (curated, never owner-approved) still skips as named_competitor_off_list", async () => {
+    test('EcoShield Pest Solutions (curated, never owner-approved) still skips as named_competitor_off_list', async () => {
       process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
       const publisher = prPublisher(913);
       const { runner, queue } = namedCompetitorScenario({
         publisher, comparisonGate: realGate,
-        operatorBrief: brief("Orkin and Keller's Pest Control"),
-        body: "Orkin offers recurring residential plans. Keller's Pest Control offers recurring residential plans too.",
+        operatorBrief: brief('Orkin and EcoShield Pest Solutions'),
+        body: 'Orkin offers recurring residential plans. EcoShield Pest Solutions offers recurring residential plans too.',
       });
 
       const result = await runner.runNext();
 
       expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_off_list' });
-      expect(result.reviewer_notes).toMatch(/Keller/);
+      expect(result.reviewer_notes).toMatch(/EcoShield/);
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
       expect(queue.pendingReview).not.toHaveBeenCalled();
     });
@@ -4210,14 +4214,14 @@ describe('named-competitor autopublish gate', () => {
       const publisher = prPublisher(912);
       const { runner, queue, claimedAt } = namedCompetitorScenario({
         publisher, comparisonGate: realGate,
-        operatorBrief: brief('Orkin and Hughes Exterminators'),
-        body: 'Orkin offers recurring residential plans. Hughes Exterminators offers recurring residential plans too.',
+        operatorBrief: brief('Orkin and Rodent Solutions Inc'),
+        body: 'Orkin offers recurring residential plans. Rodent Solutions Inc offers recurring residential plans too.',
       });
 
       const result = await runner.runNext();
 
       expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_off_list' });
-      expect(result.reviewer_notes).toMatch(/Hughes Exterminators/);
+      expect(result.reviewer_notes).toMatch(/Rodent Solutions Inc/);
       expect(result.comparison_table_result.competitors_approved_by_list).toBeUndefined();
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
       expect(queue.pendingReview).not.toHaveBeenCalled();
