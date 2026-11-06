@@ -99,8 +99,11 @@ async function answered({ item, bundle, eventAt, meta, database }) {
   // the other kinds are answered by an email, a booking or a quote (the Messages reader's own text-or-call rule).
   if (after(bundle.textAt) || after(bundle.backAt) || after(bundle.inAt)) return true;
   if (bundle.shared !== null || item.kind === 'sms') return false;
-  if (after(bundle.replyAt) || after(bundle.visitAt) || bundle.quote) return true;
-  const customerId = item.refs.customerId;
+  if (after(bundle.replyAt) || after(bundle.visitAt)) return true;
+  // A quote answers it only when it was handed to the customer after `floor`. The bundle's own `quote` flag is read from
+  // the original call or email, not from the alert's latest event, so it is never trusted here: the shared quote
+  // witness is asked again at the floor, for the customer the bundle resolved.
+  const customerId = item.refs.customerId || bundle.customerId;
   if (!customerId) return false;
   const { quoteAnswered } = require('./admin-alert-relevance');
   return quoteAnswered(database, { meta, customerId, bellAt: new Date(floor) });

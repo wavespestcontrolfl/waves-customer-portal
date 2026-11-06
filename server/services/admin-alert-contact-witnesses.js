@@ -438,7 +438,7 @@ async function attachCustomerEmailSends(conn, idents, bundles) {
  *   phone only for a visitor with no customer id).
  * @param {{conn, bookedVisits: (customerIds: string[]) => Promise<Map>, visitRan?: boolean, staffActions?: boolean}} deps
  * @returns {Promise<Map<string, object>>} notification id -> bundle
- *   { anchor, shared (sms), pending (sms), textAt, backAt, inAt, visitAt, quote, replyAt, visitRanAt,
+ *   { anchor, customerId, shared (sms), pending (sms), textAt, backAt, inAt, visitAt, quote, replyAt, visitRanAt,
  *     staffActionAt, staffActionKind (sms, with `staffActions`) };
  *   an item whose subject cannot be identified is absent (never judged).
  */
@@ -491,6 +491,8 @@ async function loadContactBundles(items, { conn, bookedVisits, visitRan = false,
     const own = shared.has(ident);
     const bundle = {
       anchor: ident.anchor,
+      // The customer the item resolved to (from its refs, or from the text, call or email it names), or null.
+      customerId,
       shared: item.kind === 'sms' ? own : null,
       pending: item.kind === 'sms' ? [...ident.peers].some((peer) => pendingPeers.has(peer)) : null,
       textAt: own ? latestFor(replyRows, ident, ownMatch) : latestFor(textRows, ident),

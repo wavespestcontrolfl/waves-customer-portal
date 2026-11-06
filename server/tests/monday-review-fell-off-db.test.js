@@ -20,7 +20,7 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
   const HOUR = 60 * 60 * 1000;
   const NOW = new Date();
   const ago = (days) => new Date(NOW.getTime() - days * DAY);
-  const created = { notifications: [], customers: [], sms: [], calls: [], visits: [] };
+  const created = { notifications: [], customers: [], sms: [], calls: [], visits: [], estimates: [] };
   let testCustomerId = null;
 
   beforeAll(() => {
@@ -41,6 +41,7 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
     if (created.notifications.length) await db('notifications').whereIn('id', created.notifications).del();
     if (created.sms.length) await db('sms_log').whereIn('id', created.sms).del();
     if (created.calls.length) await db('call_log').whereIn('id', created.calls).del();
+    if (created.estimates.length) await db('estimates').whereIn('id', created.estimates).del();
     if (created.visits.length) await db('scheduled_services').whereIn('id', created.visits).del();
     if (created.customers.length) await db('customers').whereIn('id', created.customers).del();
   }, 60000);
@@ -251,6 +252,32 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
       await db('notifications').where({ id: row.id }).del();
       created.notifications = created.notifications.filter((id) => id !== row.id);
     }
+  });
+
+  test('a quote handed over between the original call and the alert\'s latest event does not answer it; one handed over after does', async () => {
+    const relevance = require('../services/admin-alert-relevance');
+    const { loadContactBundles } = require('../services/admin-alert-contact-witnesses');
+    const eventAt = ago(4); // the bell was rung again 4 days ago; the voicemail itself came in 6 days ago
+    const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
+    const run = async (customer, quoteAt) => {
+      const [call] = await db('call_log').insert({
+        direction: 'inbound', status: 'completed', customer_id: customer.id, from_phone: customer.phone, to_phone: '+15550000002', created_at: ago(6),
+      }).returning('id');
+      created.calls.push(call.id);
+      const [estimate] = await db('estimates').insert({ status: 'sent', customer_id: customer.id, sent_at: quoteAt, estimate_data: delivered(quoteAt), created_at: ago(7) }).returning('id');
+      created.estimates.push(estimate.id);
+      const item = { id: `voice-${customer.id}`, kind: 'voice', bellAt: eventAt, refs: { callLogId: call.id, customerId: null, phone: customer.phone } };
+      const bundles = await loadContactBundles([item], { conn: db, bookedVisits: (ids) => relevance.bookedVisitsByCustomer(db, ids) });
+      const bundle = bundles.get(item.id);
+      return { bundle, answered: await fellOff._private.answered({ item, bundle, eventAt, meta: {}, database: db }) };
+    };
+    const between = await run(await addCustomer('Sierra'), ago(5));
+    // The bundle's own flag is read from the original call, so it says "quoted" here; the alert's latest event is later.
+    expect(between.bundle.quote).toBe(true);
+    expect(between.bundle.customerId).toBeTruthy();
+    expect(between.answered).toBe(false);
+    const after = await run(await addCustomer('Tango'), ago(3));
+    expect(after.answered).toBe(true);
   });
 
   test('the Monday text names the listed alerts and nothing else changes', async () => {

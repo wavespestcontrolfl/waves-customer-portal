@@ -218,7 +218,7 @@ describe('the reply judgement', () => {
   const EVENT = new Date('2026-10-30T15:00:00Z');
   const at = (hours) => new Date(EVENT.getTime() + hours * 3600 * 1000);
   const bundle = (over = {}) => ({
-    anchor: EVENT, shared: null, textAt: null, backAt: null, inAt: null, visitAt: null, quote: false, replyAt: null, lastInboundAt: null, ...over,
+    anchor: EVENT, customerId: null, shared: null, textAt: null, backAt: null, inAt: null, visitAt: null, quote: false, replyAt: null, lastInboundAt: null, ...over,
   });
   const customerItem = { id: 'n1', kind: 'customer', refs: { customerId: 'c1' } };
   const smsItem = { id: 'n2', kind: 'sms', refs: { sid: 'SM1', customerId: 'c1' } };
@@ -240,19 +240,28 @@ describe('the reply judgement', () => {
     expect(await judge(customerItem, bundle({ textAt: at(2) }), at(5))).toBe(false);
   });
 
-  test('a booking or a handed-off quote answers a call, email or portal alert, never a text', async () => {
+  test('a booking answers a call, email or portal alert, never a text', async () => {
     expect(await judge(customerItem, bundle({ visitAt: at(3) }))).toBe(true);
-    expect(await judge({ id: 'n3', kind: 'voice', refs: { customerId: null } }, bundle({ quote: true }))).toBe(true);
-    expect(await judge(smsItem, bundle({ shared: false, visitAt: at(3), quote: true }))).toBe(false);
-    // A text alert read by its customer after the text was not found is a text alert still.
+    expect(await judge(smsItem, bundle({ shared: false, visitAt: at(3) }))).toBe(false);
+    // A text alert read by its customer after the text could not be found is a text alert still.
     expect(await judge(smsItem, bundle({ shared: null, visitAt: at(3) }))).toBe(false);
     expect(await judge(smsItem, bundle({ shared: false, textAt: at(1) }))).toBe(true);
   });
 
-  test('an unknown sender is answered only by a reply after their LATEST text', async () => {
-    const item = { id: 'n4', kind: 'sms', refs: { sid: 'SM9', customerId: null, unknownSender: true } };
-    expect(await judge(item, bundle({ shared: false, textAt: at(2), lastInboundAt: at(4) }))).toBe(false);
-    expect(await judge(item, bundle({ shared: false, textAt: at(6), lastInboundAt: at(4) }))).toBe(true);
+  test('the bundle quote flag is never trusted: a quote is asked again at the floor, for the customer the bundle resolved', async () => {
+    const voiceItem = { id: 'n3', kind: 'voice', refs: { customerId: null } };
+    // The flag is read from the original call, so it can name a quote older than the alert's latest event.
+    expect(await judge(voiceItem, bundle({ customerId: 'c9', quote: true }), at(4))).toBe(false);
+    expect(quoteAnswered.mock.calls[0][1]).toMatchObject({ customerId: 'c9', bellAt: at(4) });
+    quoteAnswered.mockResolvedValue(true);
+    expect(await judge(voiceItem, bundle({ customerId: 'c9', quote: false }), at(4))).toBe(true);
+    // No customer anywhere: nothing to ask, not answered.
+    quoteAnswered.mockClear();
+    expect(await judge(voiceItem, bundle({ quote: true }), at(4))).toBe(false);
+    expect(quoteAnswered).not.toHaveBeenCalled();
+    // A text alert never reads the quote witness.
+    expect(await judge(smsItem, bundle({ shared: false, customerId: 'c9', quote: true }), at(4))).toBe(false);
+    expect(quoteAnswered).not.toHaveBeenCalled();
   });
 
   test('a quote handed to the customer after the event answers a non-text alert, read at the later of anchor and event', async () => {
