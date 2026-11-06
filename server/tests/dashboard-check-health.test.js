@@ -150,16 +150,16 @@ describe('composeDigest', () => {
 });
 
 describe('scheduler wiring', () => {
-  test('runs nightly at 11:20 PM ET under runExclusive, with a lazy require and a job_health rethrow', () => {
+  test('runs nightly at 11:21 PM ET under runExclusive, with a lazy require and a job_health rethrow', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
-    const i = src.indexOf("cron.schedule('20 23 * * *'");
+    const i = src.indexOf("cron.schedule('21 23 * * *'");
     expect(i).toBeGreaterThan(-1);
     const block = src.slice(i, src.indexOf('timezone', i) + 40);
     expect(block).toContain("runExclusive('dashboard-check-health'");
     expect(block).toContain("require('./dashboard-check-health')");
     expect(block).toContain('result.delivery.ok === false');
     expect(block).toContain("timezone: 'America/New_York'");
-    // #3208 rule: the minute must not be shared with another daily job.
-    expect(src.match(/cron\.schedule\('20 23 \* \* \*'/g)).toHaveLength(1);
+    // #3208 rule. failing-jobs-check.test.js also checks that no fixed or hourly job shares the minute.
+    expect(src.match(/cron\.schedule\('21 23 \* \* \*'/g)).toHaveLength(1);
   });
 });

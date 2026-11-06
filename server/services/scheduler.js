@@ -7555,14 +7555,14 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 11:20PM — Dashboard check health (read-only). Posts one engineering
+  // DAILY 11:21PM — Dashboard check health (read-only). Posts one engineering
   // FIX row to the ops digest when a dashboard alert check fails two reads a
   // minute apart, and retires it on the first clean night. Late evening: the
   // closeout check reads statuses only for visits completed that day, so an
-  // early-morning run would skip that path. Minute unused elsewhere in this
-  // file (#3208 rule). See server/services/dashboard-check-health.js.
+  // early-morning run would skip that path. No other fixed or hourly job runs
+  // at this minute (#3208 rule). See server/services/dashboard-check-health.js.
   // =========================================================================
-  cron.schedule('20 23 * * *', async () => {
+  cron.schedule('21 23 * * *', async () => {
     try {
       await runExclusive('dashboard-check-health', async () => {
         const { runDashboardCheckHealth } = require('./dashboard-check-health');
@@ -7576,6 +7576,31 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Dashboard check health failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 11:31PM — Failing jobs check (read-only). Posts one engineering FIX
+  // row to the ops digest that lists each scheduled job whose last run failed
+  // or has not ended and that has had no good run for 2 hours, and retires it
+  // on the first clean night. Late evening, after most daily jobs have run.
+  // No other fixed or hourly job runs at this minute (#3208 rule). See
+  // server/services/failing-jobs-check.js.
+  // =========================================================================
+  cron.schedule('31 23 * * *', async () => {
+    try {
+      await runExclusive('failing-jobs-check', async () => {
+        const { runFailingJobsCheck } = require('./failing-jobs-check');
+        const result = await runFailingJobsCheck();
+        logger.info(`[failing-jobs-check] cron run: ${JSON.stringify({ failing: result.failing })}`);
+        // A finding that could not be delivered must read as a FAILED run in
+        // job_health: rethrow so runExclusive records it.
+        if (result.delivery && result.delivery.ok === false) {
+          throw new Error(`failing-jobs-check: the finding was not delivered (${result.delivery.error || 'send failed'})`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Failing jobs check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
