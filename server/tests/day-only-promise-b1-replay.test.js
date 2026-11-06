@@ -178,7 +178,8 @@ describe('the morning replay of a queued day-only body', () => {
 
 describe('a stored day-only EMAIL goes through the same chokepoint (dayOnlyStoredCopyStale)', () => {
   const stale = (over = {}) => timePromise.dayOnlyStoredCopyStale({
-    template_key: 'appointment.reminder_72h_day', trigger_event_id: 'appointment.reminder_72h:ss-1', recipient_type: 'customer', recipient_id: 'c1', ...over,
+    template_key: 'appointment.reminder_72h_day', trigger_event_id: 'appointment.reminder_72h:ss-1', recipient_type: 'customer', recipient_id: 'c1',
+    idempotency_key: 'appointment.reminder_72h:ss-1:day-2026-06-22:0123456789abcdef', ...over,
   });
 
   test('still valid: not stale, the stored copy may go', async () => {
@@ -205,6 +206,70 @@ describe('a stored day-only EMAIL goes through the same chokepoint (dayOnlyStore
   test('a message with no usable customer or visit is stale (fail closed)', async () => {
     expect(await stale({ recipient_id: null })).toBe(true);
     expect(await stale({ trigger_event_id: null })).toBe(true);
+  });
+
+  describe('the date the stored copy names must still be the visit\'s date', () => {
+    const visitOn = (date) => db.mockImplementation((table) => (table === 'scheduled_services'
+      ? chain({ id: 'ss-1', status: 'confirmed', scheduled_date: date, window_start: '09:00:00', reservation_service_mix: null })
+      : table === 'notification_prefs' ? chain(prefsRow) : chain({ id: 'c1', phone: '+19415550001' })));
+
+    test('same date: asks the chokepoint as before', async () => {
+      visitOn('2026-06-22');
+      expect(await stale()).toBe(false);
+      expect(timePromise.loadPromiseLevels).toHaveBeenCalled();
+    });
+
+    test('the visit was silently moved to another eligible date: stale, and no promise is read', async () => {
+      visitOn('2026-06-25');
+      expect(await stale()).toBe(true);
+      expect(timePromise.loadPromiseLevels).not.toHaveBeenCalled();
+      expect(timePromise.dayOnlySendDecision).not.toHaveBeenCalled();
+    });
+
+    test('a pg DATE value is compared as a calendar date, never as a timestamp', async () => {
+      visitOn(new Date('2026-06-22T00:00:00.000Z'));
+      expect(await stale()).toBe(false);
+      visitOn(new Date('2026-06-25T00:00:00.000Z'));
+      expect(await stale()).toBe(true);
+    });
+
+    test('a grouped key carries the occurrence date, compared too', async () => {
+      const grouped = 'appointment.reminder_72h:visit:v1:reminder_72h:2026-06-22:day:0123456789abcdef';
+      visitOn('2026-06-22');
+      expect(await stale({ idempotency_key: grouped })).toBe(false);
+      visitOn('2026-06-25');
+      expect(await stale({ idempotency_key: grouped })).toBe(true);
+    });
+
+    test('a coalesced day key (the day segment in the slot position) is compared too', async () => {
+      visitOn('2026-06-25');
+      expect(await stale({ idempotency_key: 'appointment.confirmation:ss-1:day-2026-06-22:coalesced:1794000000000:0123456789abcdef' })).toBe(true);
+    });
+
+    test.each([
+      ['no key', null],
+      ['a numeric slot key (not a day key)', 'appointment.reminder_72h:ss-1:1794751200000:0123456789abcdef'],
+      ['a garbled day segment', 'appointment.reminder_72h:ss-1:day-soon:0123456789abcdef'],
+      ['a grouped key without its :day marker', 'appointment.reminder_72h:visit:v1:reminder_72h:2026-06-22:0123456789abcdef'],
+      ['a grouped key with a bad date', 'appointment.reminder_72h:visit:v1:reminder_72h:June22:day:0123456789abcdef'],
+    ])('%s: stale (unparseable), no promise read', async (_label, key) => {
+      visitOn('2026-06-22');
+      expect(await stale({ idempotency_key: key })).toBe(true);
+      expect(timePromise.loadPromiseLevels).not.toHaveBeenCalled();
+    });
+
+    test('the visit cannot be read: stale', async () => {
+      db.mockImplementation(() => { throw new Error('db down'); });
+      expect(await stale()).toBe(true);
+    });
+
+    test('the key parser, directly', () => {
+      const { promisedDateFromEmailKey: parse } = timePromise;
+      expect(parse('appointment.confirmation:ss-1:day-2026-11-15:abc')).toBe('2026-11-15');
+      expect(parse('appointment.reminder_72h:visit:v1:eff:2026-11-15:day:abc')).toBe('2026-11-15');
+      expect(parse('appointment.confirmation:ss-1:1794751200000:abc')).toBeNull();
+      expect(parse(undefined)).toBeNull();
+    });
   });
 
   test('a window email is never stale for being a window email: no read at all', async () => {

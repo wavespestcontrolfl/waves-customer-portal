@@ -59,6 +59,29 @@ function isDayOnlyEmail(message) {
   return DAY_EMAIL_TEMPLATE_KEYS.includes(String(message?.template_key || ''));
 }
 
+const DAY_KEY_DATE = /^day-(\d{4}-\d{2}-\d{2})$/;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * The ET date a stored day-only email promised, read from its idempotency key (appointment-email.js emailKey): `day-<date>`
+ * in the slot position of a per-service or coalesced key (`<event>:<visit>:day-<date>:...`), or the occurrence date segment
+ * of a grouped key (`<event>:visit:<stop>:<effect>:<date>:day:...`). Null when the key carries no parseable date.
+ */
+function promisedDateFromEmailKey(key) {
+  const parts = String(key || '').split(':');
+  if (parts[1] === 'visit') return ISO_DATE.test(parts[4] || '') && parts[5] === 'day' ? parts[4] : null;
+  const match = DAY_KEY_DATE.exec(parts[2] || '');
+  return match ? match[1] : null;
+}
+
+/** Is the visit still on the date a stored day-only email promised? A mismatch, an unparseable key or an unreadable visit: no. */
+async function storedDateStillHolds(message, scheduledServiceId) {
+  const promised = promisedDateFromEmailKey(message.idempotency_key);
+  if (!promised) return false;
+  const visit = await require('../models/db')('scheduled_services').where({ id: scheduledServiceId }).first('scheduled_date');
+  return dateOnlyString(visit?.scheduled_date) === promised;
+}
+
 /**
  * Must a stored day-only email NOT be re-sent from its stored copy? The email twin of the text replay: both email replay
  * boundaries (transactional-email-provider-retry.js retryOne, email-bounce-recovery.js runRecoveryFlow) ask this before
@@ -74,6 +97,9 @@ async function dayOnlyStoredCopyStale(message) {
     const scheduledServiceId = String(message.trigger_event_id || '').split(':')[1] || null;
     const customerId = message.recipient_type === 'customer' ? message.recipient_id || null : null;
     if (!customerId || !scheduledServiceId) return true; // nothing to prove the promise against
+    // The stored HTML names a DAY: it is still true only while the visit is on that same ET calendar date. A silent move to
+    // another eligible date must not let it go, and no promise is read for a mismatch.
+    if (!(await storedDateStillHolds(message, scheduledServiceId))) return true;
     const verdict = await require('./appointment-reminders').revalidateDelayedDaySend({ customerId, scheduledServiceId });
     return verdict !== 'day';
   } catch {
@@ -308,6 +334,7 @@ async function loadTimeDisplay(conn, rows, now = new Date()) {
 module.exports = {
   DAY_EMAIL_TEMPLATE_KEYS,
   isDayOnlyEmail,
+  promisedDateFromEmailKey,
   dayOnlyStoredCopyStale,
   PROMISE_META_KEYS,
   promiseMetaOf,

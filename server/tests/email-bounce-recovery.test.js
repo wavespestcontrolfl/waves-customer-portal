@@ -397,17 +397,25 @@ describe('attemptRecovery codex-fix behaviors', () => {
   describe('a bounced day-only appointment email is revalidated before any corrected-address replay', () => {
     const bouncedDay = (template = 'appointment.confirmation_day') => ({
       id: 'orig1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com', template_key: template,
-      trigger_event_id: 'appointment.confirmation:svc-9', suppression_group_key_snapshot: 'transactional_required', categories: ['appointment', 'appointment_confirmation'],
+      trigger_event_id: 'appointment.confirmation:svc-9', idempotency_key: 'appointment.confirmation:svc-9:day-2026-11-15:0123456789abcdef', suppression_group_key_snapshot: 'transactional_required', categories: ['appointment', 'appointment_confirmation'],
     });
+    let visitDate = '2026-11-15';
     const run = async (message) => {
       db.mockImplementation(orderedDb({
-        first: (table) => (table === 'customers' ? { id: 'c1', email: 'jane@gmial.com' } : null),
+        first: (table) => (table === 'customers' ? { id: 'c1', email: 'jane@gmial.com' } : table === 'scheduled_services' ? { scheduled_date: visitDate } : null),
         returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec1' }] : []),
       }));
       return recovery.attemptRecovery(message, { event: 'bounce', type: 'bounce' });
     };
     const { revalidateDelayedDaySend } = require('../services/appointment-reminders');
-    beforeEach(() => revalidateDelayedDaySend.mockReset().mockResolvedValue('day'));
+    beforeEach(() => { visitDate = '2026-11-15'; revalidateDelayedDaySend.mockReset().mockResolvedValue('day'); });
+
+    test('the visit moved to another date since the email was written: not re-sent, chokepoint not asked', async () => {
+      visitDate = '2026-11-20';
+      expect(await run(bouncedDay())).toEqual({ skipped: 'stored_copy_not_replayed' });
+      expect(revalidateDelayedDaySend).not.toHaveBeenCalled();
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    });
 
     test.each([['suppress'], ['window']])('the chokepoint says %s: the stored copy is not re-sent; staff get the suggested address', async (verdict) => {
       revalidateDelayedDaySend.mockResolvedValue(verdict);

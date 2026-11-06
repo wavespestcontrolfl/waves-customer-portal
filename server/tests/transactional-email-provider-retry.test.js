@@ -178,16 +178,20 @@ describe('transactional email provider retry classification', () => {
     const { revalidateDelayedDaySend } = require('../services/appointment-reminders');
     const dayMessage = (over = {}) => message({
       template_key: 'appointment.reminder_72h_day', recipient_id: 'cust-1', trigger_event_id: 'appointment.reminder_72h:svc-9',
-      categories: ['appointment', 'appointment_reminder_72h'], send_attempt_token: 'attempt-2', ...over,
+      categories: ['appointment', 'appointment_reminder_72h'], send_attempt_token: 'attempt-2',
+      idempotency_key: 'appointment.reminder_72h:svc-9:day-2026-11-15:0123456789abcdef', ...over,
     });
     const settlingChain = () => {
       const chain = {};
       chain.where = jest.fn(() => chain);
       chain.update = jest.fn(() => chain);
       chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed' }]);
+      chain.first = jest.fn(async () => ({ scheduled_date: visitDate }));
       db.mockReturnValue(chain);
       return chain;
     };
+    let visitDate = '2026-11-15';
+    beforeEach(() => { visitDate = '2026-11-15'; });
     beforeEach(() => revalidateDelayedDaySend.mockReset().mockResolvedValue('day'));
 
     test.each(['suppress', 'window'])('the chokepoint says %s: settled as not sent, no provider call, and sent_at is never written', async (verdict) => {
@@ -204,6 +208,15 @@ describe('transactional email provider retry classification', () => {
       expect(patch.status).not.toBe('delivered');
       expect(sendgrid.sendOne).not.toHaveBeenCalled();
       expect(emailTemplates.activeSuppressionFor).not.toHaveBeenCalled();
+    });
+
+    test('the visit moved to another date since the email was written: stopped without asking the chokepoint', async () => {
+      visitDate = '2026-11-20';
+      const chain = settlingChain();
+      expect(await retry.retryOne(dayMessage())).toMatchObject({ sent: false, stopped: true });
+      expect(revalidateDelayedDaySend).not.toHaveBeenCalled();
+      expect(chain.update.mock.calls[0][0]).not.toHaveProperty('sent_at');
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
     });
 
     test('an unreadable promise stops the retry too (fail closed)', async () => {
