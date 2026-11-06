@@ -9,6 +9,7 @@ jest.mock('../services/stripe-banking', () => ({ getBalance: jest.fn() }));
 jest.mock('../services/cash-forecast/inputs', () => ({
   getSettings: jest.fn(async () => ({ floor_cents: null, last_year_receipts: {}, updated_at: null })),
   listItems: jest.fn(async () => []),
+  listMarks: jest.fn(async () => ({ 'ACME LOAN': 'household' })),
 }));
 jest.mock('../services/open-balance', () => ({
   applyOpenSelfPayPredicates: jest.fn((q) => q),
@@ -213,7 +214,9 @@ describe('loadForecastInput', () => {
     expect(visits.bindings[0]).toBe('2026-11-05'); // the autopay check's ET day
     expect(visits.bindings.slice(3, 5)).toEqual(['2026-06-08', '2027-01-31']); // 150 days back .. Sunday of week 12
     const bank = database.calls.find((c) => /FROM bank_transactions bt/.test(c.sql));
-    expect(bank.bindings).toEqual([['chk-a', 'chk-b', 'card-f', 'card-g'], '2026-08-28', '2026-11-11']); // trailing Sep 7 - Nov 1 +- 10 days; USD only
+    // from 120 days back (the repeating-bill finder; earlier than trailing Sep 7 less 10 days) to Nov 1 + 10 days; USD only
+    expect(bank.bindings).toEqual([['chk-a', 'chk-b', 'card-f', 'card-g'], '2026-07-08', '2026-11-11']);
+    expect(input.marks).toEqual({ 'ACME LOAN': 'household' }); // the owner's labels ride along to the engine
     for (const c of database.calls) expect(c.sql).not.toMatch(/current_date|now\(\)/i);
     // open invoices are the shared open-self-pay set; a pay run's net goes out on the pay date and the 941 return is never a payment
     expect(applyOpenSelfPayPredicates).toHaveBeenCalled();
