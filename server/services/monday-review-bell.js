@@ -208,6 +208,13 @@ async function loadOpenPastVisits({ now = new Date(), database = db, findStaleVi
 // Assembly (pure)
 // ---------------------------------------------------------------------------
 
+// The detail line that says how many listed alerts could not be checked for a reply (none = no line).
+function uncheckedNote(alerts) {
+  const n = Math.min(alerts.count, alerts.uncheckedCount ?? (alerts.unchecked ? alerts.count : 0));
+  if (!(n > 0)) return [];
+  return [`   The reply check could not run for ${n} of these, so ${n === 1 ? 'that one may have been' : 'those may have been'} answered.`];
+}
+
 // List 1 with GATE_MONDAY_FELL_OFF_LINE on: the customer alerts the quiet rule closed that no person answered, by name.
 // The first ENTRY_SHOWN, newest first, then "+N more". Page: the bell's Recently done list, which offers Reopen for
 // exactly these rows for 7 days.
@@ -221,7 +228,7 @@ function fellOffList(alerts) {
     phrase: `${alerts.count}${alerts.capped ? '+' : ''} customer ${plural(alerts.count, 'alert', 'alerts')} fell off with no reply`,
     detail: [
       `Customer alerts that fell off the bell after 3 quiet days with no reply: ${alerts.count}${alerts.capped ? '+' : ''}. Page: the bell, Recently done (Reopen puts one back).`,
-      ...(alerts.unchecked ? ['   The reply check did not run this week, so some of these may have been answered.'] : []),
+      ...uncheckedNote(alerts),
       ...shown.map((entry) => entryLine(entry, shortDate)),
       ...(more > 0 ? [`   +${more} more`] : []),
     ].join('\n'),

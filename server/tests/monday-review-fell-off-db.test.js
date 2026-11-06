@@ -121,7 +121,9 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
 
     const { out, names } = await listed();
     expect(names).toEqual(['Alpha', 'Charlie']);
-    expect(out).toMatchObject({ kind: 'fell-off', capped: false, unchecked: false });
+    expect(out).toMatchObject({ kind: 'fell-off', capped: false });
+    // Every fixture here resolves a witness bundle, so none of this run's entries carries the unchecked mark.
+    expect(out.entries.filter((e) => e.title.includes(`Fell${RUN}`)).every((e) => e.unchecked === false)).toBe(true);
     const alpha = out.entries.find((e) => e.title.includes('Alpha'));
     expect(alpha.name).toBe(`Alpha Fell${RUN}`);
     expect(alpha.at.getTime()).toBeGreaterThan(ago(5.1).getTime());
@@ -225,7 +227,30 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
     } finally {
       spy.mockRestore();
     }
-    expect((await listed()).out.unchecked).toBe(false);
+    const after = await listed();
+    expect(after.out.entries.filter((e) => e.title.includes(`Fell${RUN}`)).every((e) => e.unchecked === false)).toBe(true);
+  });
+
+  test('a customer contact alert that names no customer, text, call or email is listed with the unchecked mark', async () => {
+    const [row] = await db('notifications').insert({
+      recipient_type: 'admin', category: 'missed_call', title: `Missed call from Romeo Fell${RUN}`, body: 'fixture', link: '/admin/communications',
+      created_at: ago(5), done_at: ago(2), done_by: 'quiet-72h', resolution: 'No new activity for 3 days',
+      metadata: JSON.stringify({ severity: 'needs-you', who: 'person', triggerKey: 'customer_missed_call' }),
+    }).returning('id');
+    created.notifications.push(row.id);
+    try {
+      const { out, names } = await listed();
+      expect(names).toContain('Missed call from Romeo');
+      const entry = out.entries.find((e) => e.title.includes(`Romeo Fell${RUN}`));
+      expect(entry.unchecked).toBe(true);
+      expect(out.unchecked).toBe(true);
+      expect(out.uncheckedCount).toBeGreaterThanOrEqual(1);
+      // Entries whose reply was checked carry no mark.
+      expect(out.entries.filter((e) => e.title.includes('Fell') && !e.title.includes('Romeo')).every((e) => e.unchecked === false)).toBe(true);
+    } finally {
+      await db('notifications').where({ id: row.id }).del();
+      created.notifications = created.notifications.filter((id) => id !== row.id);
+    }
   });
 
   test('the Monday text names the listed alerts and nothing else changes', async () => {

@@ -97,8 +97,25 @@ describe('buildLists with the fell-off list', () => {
     const [capped] = buildLists({ alerts: fellOffOf(4, { capped: true }) });
     expect(capped.phrase).toBe('4+ customer alerts fell off with no reply');
     expect(capped.detail.split('\n')[0]).toContain('no reply: 4+.');
-    const [unchecked] = buildLists({ alerts: fellOffOf(2, { unchecked: true }) });
-    expect(unchecked.detail).toContain('The reply check did not run this week');
+    const [one] = buildLists({ alerts: fellOffOf(3, { unchecked: true, uncheckedCount: 1 }) });
+    expect(one.detail).toContain('   The reply check could not run for 1 of these, so that one may have been answered.');
+    const [many] = buildLists({ alerts: fellOffOf(3, { unchecked: true, uncheckedCount: 2 }) });
+    expect(many.detail).toContain('   The reply check could not run for 2 of these, so those may have been answered.');
+    // Only the flag, no count (the whole check could not run): every listed alert is unchecked.
+    const [all] = buildLists({ alerts: fellOffOf(2, { unchecked: true }) });
+    expect(all.detail).toContain('could not run for 2 of these, so those may have been answered.');
+    const [none] = buildLists({ alerts: fellOffOf(2) });
+    expect(none.detail).not.toContain('reply check');
+  });
+
+  test('an alert whose reply was not checked says so on its own line', () => {
+    const [list] = buildLists({ alerts: fellOffOf(2, { unchecked: true, uncheckedCount: 1, entries: [
+      { name: 'Jane Doe', title: 'Comms — answer a text', at: new Date('2026-11-03T15:00:00Z'), unchecked: true },
+      { name: 'John Roe', title: 'Comms — answer a text', at: new Date('2026-11-02T15:00:00Z'), unchecked: false },
+    ] }) });
+    const lines = list.detail.split('\n');
+    expect(lines.find((l) => l.includes('Jane Doe'))).toBe('   - Jane Doe: Comms — answer a text (Nov 3, reply not checked)');
+    expect(lines.find((l) => l.includes('John Roe'))).toBe('   - John Roe: Comms — answer a text (Nov 2)');
   });
 
   test('the other lists are unchanged and keep their order after list 1', () => {
@@ -252,22 +269,44 @@ describe('the reply judgement', () => {
     expect(await judge(null, undefined)).toBe(false);
   });
 
-  test('a reply check that throws lists that alert, marks the week unchecked and warns once; the rest are judged', async () => {
+  test('an alert with no witness bundle, or whose check throws, is listed unchecked; a thrown check warns once; the rest are judged', async () => {
     const { settleEntries } = fellOff._private;
     const logger = require('../services/logger');
     logger.warn.mockClear();
     quoteAnswered.mockRejectedValueOnce(new Error('canceling statement due to statement timeout')).mockRejectedValueOnce(new Error('again'));
-    const mk = (id, bundleOver) => ({
-      row: { id, title: `Alert ${id}` }, meta: {}, eventAt: EVENT, who: { name: `Name ${id}` },
-      item: { id, kind: 'customer', refs: { customerId: `c${id}` } }, bundle: bundle(bundleOver),
+    const mk = (id, bundleOver, item = { id, kind: 'customer', refs: { customerId: `c${id}` } }) => ({
+      row: { id, title: `Alert ${id}` }, meta: {}, eventAt: EVENT, who: { name: `Name ${id}` }, item, bundle: bundle(bundleOver),
     });
-    const judged = [mk('a'), mk('b'), mk('c', { textAt: at(2) })];
-    const bundles = new Map(judged.map((e) => [e.row.id, e.bundle]));
+    const judged = [mk('a'), mk('b'), mk('c', { textAt: at(2) }), mk('d'), mk('e', {}, null)];
+    // d has an item but no bundle was found for it; e names nothing the witnesses can find.
+    const bundles = new Map(judged.filter((e) => ['a', 'b', 'c'].includes(e.row.id)).map((e) => [e.row.id, e.bundle]));
     const out = await settleEntries(judged, bundles, jest.fn());
-    expect(out.failed).toBe(true);
-    expect(out.entries.map((e) => e.title)).toEqual(['Alert a', 'Alert b']); // c was answered by a text
+    expect(out.entries.map((e) => [e.title, e.unchecked])).toEqual([
+      ['Alert a', true], ['Alert b', true], ['Alert d', true], ['Alert e', true],
+    ]); // c was answered by a text
+    expect(out.unverified).toBe(4);
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn.mock.calls[0][0]).not.toContain('Name');
+  });
+
+  test('a checked, unanswered alert is listed without the unchecked mark', async () => {
+    const { settleEntries } = fellOff._private;
+    const judged = [{ row: { id: 'a', title: 'Alert a' }, meta: {}, eventAt: EVENT, who: null, item: customerItem }];
+    const out = await settleEntries(judged, new Map([['a', bundle()]]), jest.fn());
+    expect(out.entries).toEqual([{ name: '', title: 'Alert a', at: EVENT, unchecked: false }]);
+    expect(out.unverified).toBe(0);
+  });
+
+  test('an email answers a customer alert but never a text alert, including a text read by its customer', async () => {
+    expect(await judge(customerItem, bundle({ replyAt: at(2) }))).toBe(true);
+    expect(await judge(smsItem, bundle({ shared: false, replyAt: at(2) }))).toBe(false);
+    // The text could not be found and the alert was read by its customer: a later email still answers no text.
+    expect(await judge(smsItem, bundle({ shared: null, replyAt: at(2) }))).toBe(false);
+    quoteAnswered.mockClear();
+    expect(quoteAnswered).not.toHaveBeenCalled();
+    // A person's text or call still answers it.
+    expect(await judge(smsItem, bundle({ shared: null, textAt: at(2) }))).toBe(true);
+    expect(await judge(smsItem, bundle({ shared: null, backAt: at(2) }))).toBe(true);
   });
 
   test('what each alert is read by: a text by its text, a customer by id, then the call or email it names, else nothing', () => {

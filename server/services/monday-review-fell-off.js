@@ -89,16 +89,17 @@ function witnessItem(row, meta, named, eventAt) {
   return null;
 }
 
-// Did a person reach the customer after the alert's latest event? `bundle` is the witness bundle (absent = unchecked).
+// Did a person reach the customer after the alert's latest event? `bundle` is the witness bundle (absent = unchecked, listed).
 async function answered({ item, bundle, eventAt, meta, database }) {
   if (!bundle) return false;
   const floor = Math.max(bundle.anchor.getTime(), eventAt.getTime(), bundle.lastInboundAt ? new Date(bundle.lastInboundAt).getTime() : 0);
   const after = (at) => !!at && new Date(at).getTime() > floor;
-  if (after(bundle.textAt) || after(bundle.backAt) || after(bundle.inAt) || after(bundle.replyAt)) return true;
-  // A text's bundle carries `shared` (true or false); every other kind carries null. A text alert read by its customer
-  // after the text could not be found is a text alert still.
+  // A person's text or call answers any alert. A text's bundle carries `shared` (true or false); every other kind
+  // carries null, and a text alert read by its customer after the text could not be found is a text alert still. Only
+  // the other kinds are answered by an email, a booking or a quote (the Messages reader's own text-or-call rule).
+  if (after(bundle.textAt) || after(bundle.backAt) || after(bundle.inAt)) return true;
   if (bundle.shared !== null || item.kind === 'sms') return false;
-  if (after(bundle.visitAt) || bundle.quote) return true;
+  if (after(bundle.replyAt) || after(bundle.visitAt) || bundle.quote) return true;
   const customerId = item.refs.customerId;
   if (!customerId) return false;
   const { quoteAnswered } = require('./admin-alert-relevance');
@@ -124,7 +125,8 @@ async function loadBundles(items, database) {
 }
 
 /**
- * -> { kind: 'fell-off', count, capped, unchecked, entries: [{ name, title, at }] } (newest first).
+ * -> { kind: 'fell-off', count, capped, unchecked, uncheckedCount, entries: [{ name, title, at, unchecked }] } (newest first).
+ * `unchecked` is true when any listed alert's reply could not be checked; `uncheckedCount` says how many.
  * `entries` holds every alert found; the Monday text shows the first ENTRY_SHOWN.
  */
 async function loadFellOffAlerts({ now = new Date(), database = db, limit = CANDIDATE_LIMIT } = {}) {
@@ -148,34 +150,39 @@ async function loadFellOffAlerts({ now = new Date(), database = db, limit = CAND
     return { row, meta, eventAt, who: named.get(String(row.id)) || null };
   }).map((entry) => ({ ...entry, item: witnessItem(entry.row, entry.meta, entry.who, entry.eventAt) }));
   const bundles = await loadBundles(judged.map((e) => e.item).filter(Boolean), database);
-  const { entries, failed } = await settleEntries(judged, bundles, database);
+  const { entries, unverified } = await settleEntries(judged, bundles, database);
   entries.sort((a, b) => b.at.getTime() - a.at.getTime());
-  return { kind: 'fell-off', count: entries.length, capped, unchecked: bundles === null || failed, entries };
+  return { kind: 'fell-off', count: entries.length, capped, unchecked: unverified > 0, uncheckedCount: unverified, entries };
 }
 
-// The alerts no person answered. A reply check that throws (the quote witness reads the database on its own) lists that
-// alert and marks the week unchecked, with one warning for the run; it never aborts the Monday review.
+// The alerts no person answered. An alert whose reply could not be checked is listed with `unchecked: true`: it has no
+// witness bundle (nothing identifies its customer, text, call or email, or the witness read failed), or its check threw
+// (the quote witness reads the database on its own; one warning for the run, and the review goes on).
 async function settleEntries(judged, bundles, database) {
   const entries = [];
-  let failed = false;
+  let unverified = 0;
+  let warned = false;
   for (const entry of judged) {
     const bundle = entry.item && bundles ? bundles.get(String(entry.row.id)) : null;
+    let unchecked = !bundle;
     try {
       if (await answered({ item: entry.item, bundle, eventAt: entry.eventAt, meta: entry.meta, database })) continue;
     } catch (err) {
-      if (!failed) logger.warn(`[monday-review] a reply check failed; the alert is listed unchecked: ${require('./notification-service').safeErrorSummary(err)}`);
-      failed = true;
+      unchecked = true;
+      if (!warned) logger.warn(`[monday-review] a reply check failed; the alert is listed unchecked: ${require('./notification-service').safeErrorSummary(err)}`);
+      warned = true;
     }
-    entries.push({ name: entry.who?.name || '', title: String(entry.row.title || '').trim(), at: entry.eventAt });
+    if (unchecked) unverified += 1;
+    entries.push({ name: entry.who?.name || '', title: String(entry.row.title || '').trim(), at: entry.eventAt, unchecked });
   }
-  return { entries, failed };
+  return { entries, unverified };
 }
 
 // "Jane Doe: SMS from Jane Doe" would say the name twice, so a title that already holds the name stands alone.
 function entryLine(entry, shortDate) {
   const title = cutAtWord(entry.title || 'Customer alert', TITLE_CHARS);
   const named = entry.name && !title.toLowerCase().includes(entry.name.toLowerCase());
-  return `   - ${named ? `${entry.name}: ` : ''}${title} (${shortDate(entry.at)})`;
+  return `   - ${named ? `${entry.name}: ` : ''}${title} (${shortDate(entry.at)}${entry.unchecked ? ', reply not checked' : ''})`;
 }
 
 module.exports = {
