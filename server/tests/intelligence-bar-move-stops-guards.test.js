@@ -604,11 +604,11 @@ test('scoped (techScopedConfirmActive): a stop a concurrent reassignment committ
   }
 });
 
-// GATE_ROUTE_CHECK_STAFF_SAVES (owner 2026-10-29, Route Check Everywhere 2a): once
+// Route check on saves (owner 2026-10-29, Route Check Everywhere 2a): once
 // the batch is written, each moved stop gets the arrival-window route check as
 // a SECOND advisory probe. A route result is a warning, never a refusal; the
 // real-overlap probes are unchanged.
-describe('GATE_ROUTE_CHECK_STAFF_SAVES — move_stops_to_day route check', () => {
+describe('move_stops_to_day route check', () => {
   const actualOccupancy = jest.requireActual('../services/scheduling/occupancy');
   const ROUTE_WARNING = 'Could not verify the route\'s arrival windows on 2099-01-15. Review the route before driving it.';
   const arrivalCalls = () => findConflictingVisits.mock.calls.map(([a]) => a).filter((a) => a.arrivalWindow);
@@ -640,12 +640,11 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — move_stops_to_day route check', () =>
       : actualOccupancy.findConflictingVisits(args)));
   });
   afterEach(() => {
-    delete process.env.GATE_ROUTE_CHECK_STAFF_SAVES;
     delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
     findConflictingVisits.mockImplementation((...args) => actualOccupancy.findConflictingVisits(...args));
   });
 
-  test('gate off: no arrival check is passed and the result has no warning', async () => {
+  test('arrival-window routing off: no arrival check is passed and the result has no warning', async () => {
     wire();
     const result = await moveAll();
     expect(result).toMatchObject({ success: true, moved_count: 3 });
@@ -653,8 +652,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — move_stops_to_day route check', () =>
     expect(arrivalCalls()).toHaveLength(0);
   });
 
-  test('gate on: each timed stop is checked on cached road times after the writes; the moves commit with ONE deduplicated warning', async () => {
-    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+  test('each timed stop is checked on cached road times after the writes; the moves commit with ONE deduplicated warning', async () => {
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     wire();
     const result = await moveAll();
@@ -668,8 +666,7 @@ describe('GATE_ROUTE_CHECK_STAFF_SAVES — move_stops_to_day route check', () =>
     expect(arrivalCalls()[0]).toMatchObject({ date: '2099-01-15', windowStart: '09:00', windowEnd: '10:00', excludeServiceIds: ['svc-a'] });
   });
 
-  test('gate on: a route result never refuses; the real-overlap probe keeps its own arguments', async () => {
-    process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
+  test('a route result never refuses; the real-overlap probe keeps its own arguments', async () => {
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     wire();
     await moveAll();

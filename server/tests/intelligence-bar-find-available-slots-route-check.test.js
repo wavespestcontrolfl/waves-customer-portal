@@ -1,8 +1,8 @@
 /**
- * find_available_slots under GATE_ROUTE_CHECK_STAFF_LISTS (owner 2026-10-29,
+ * find_available_slots route check (owner 2026-10-29,
  * "Route Check Everywhere" build 1): a new stop is checked by the dispatcher's
  * arrival-window route check (the prospective target New Appointment uses).
- * Off, or without coordinates: the gap search, as before. Only an admin
+ * Arrival-window routing off, or without coordinates: the gap search, as before. Only an admin
  * caller's search may buy Google road times.
  */
 jest.mock('../models/db', () => jest.fn());
@@ -16,7 +16,7 @@ const db = require('../models/db');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 
-const ENV_KEYS = ['GATE_ROUTE_CHECK_STAFF_LISTS', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_PICKER_ROAD_CHECK', 'GATE_SCHEDULING_CAPACITY'];
+const ENV_KEYS = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_PICKER_ROAD_CHECK', 'GATE_SCHEDULING_CAPACITY'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -37,10 +37,9 @@ afterEach(() => {
 
 const input = { lat: 27.4, lng: -82.5, duration_minutes: 45 };
 const search = (ctx) => executeScheduleTool('find_available_slots', input, ctx);
-const on = () => { process.env.GATE_ROUTE_CHECK_STAFF_LISTS = 'true'; process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; process.env.GATE_PICKER_ROAD_CHECK = 'true'; };
+const on = () => { process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; process.env.GATE_PICKER_ROAD_CHECK = 'true'; };
 
-test('gate off: the old search, no arrival window, no road options', async () => {
-  process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+test('arrival-window routing off: the old search, no arrival window, no road options', async () => {
   await search({ isAdmin: true, technicianId: 'staff-9' });
   const call = findAvailableSlots.mock.calls[0][0];
   expect(call).not.toHaveProperty('arrivalWindow');
@@ -48,13 +47,7 @@ test('gate off: the old search, no arrival window, no road options', async () =>
   expect(call).not.toHaveProperty('providerTravel');
 });
 
-test('gate on without arrival-window routing: the old search', async () => {
-  process.env.GATE_ROUTE_CHECK_STAFF_LISTS = 'true';
-  await search({ isAdmin: true, technicianId: 'staff-9' });
-  expect(findAvailableSlots.mock.calls[0][0]).not.toHaveProperty('arrivalWindow');
-});
-
-test('gate on, admin: prospective target and staff Google (spender = the acting user)', async () => {
+test('admin: prospective target and staff Google (spender = the acting user)', async () => {
   on();
   await search({ isAdmin: true, technicianId: 'staff-9' });
   const call = findAvailableSlots.mock.calls[0][0];
@@ -66,7 +59,7 @@ test('gate on, admin: prospective target and staff Google (spender = the acting 
 test.each([
   ['a technician', { isAdmin: false, technicianId: 'tech-1' }],
   ['no context', undefined],
-])('gate on, %s: route check on the estimate only', async (_name, ctx) => {
+])('%s: route check on the estimate only', async (_name, ctx) => {
   on();
   await search(ctx);
   const call = findAvailableSlots.mock.calls[0][0];
@@ -77,7 +70,7 @@ test.each([
   expect(call).not.toHaveProperty('pickerBudget');
 });
 
-test('gate on: the output keeps the describeSlotSearch shape and lists every searched day', async () => {
+test('the output keeps the describeSlotSearch shape and lists every searched day', async () => {
   on();
   findAvailableSlots.mockResolvedValueOnce({
     slots: [{ date: '2099-01-05', start_time: '10:00', end_time: '10:45', detour_minutes: 4, score: 4 }],
@@ -91,7 +84,7 @@ test('gate on: the output keeps the describeSlotSearch shape and lists every sea
   expect(out.days[1].no_slot_reason).toContain('route_unverified x2');
 });
 
-test('gate on without coordinates the search could use: the old path (no geocode key, error as before)', async () => {
+test('without coordinates the search could use: the old path (no geocode key, error as before)', async () => {
   on();
   const out = await executeScheduleTool('find_available_slots', { duration_minutes: 45 }, { isAdmin: true, technicianId: 'staff-9' });
   expect(out.error).toMatch(/Need a customer_id, address, or lat\/lng/);

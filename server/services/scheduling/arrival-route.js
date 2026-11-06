@@ -1400,16 +1400,6 @@ function pickerRoadCheckLive() {
   return gateEnvValue('GATE_PICKER_ROAD_CHECK') && !capacityEnabled();
 }
 
-// GATE_ROUTE_CHECK_STAFF_LISTS (owner 2026-10-29, "Route Check Everywhere"
-// build 1): the staff day lists (the Reschedule window's suggested days, the
-// Quick Move day buttons, the Intelligence Bar's find_available_slots) rank
-// and filter by the dispatcher's arrival-window route check
-// (scheduling/route-ranked-days.js). Read at call time; callers also need
-// arrivalWindowRoutingEnabled(). Unset = today's lists, byte for byte.
-function routeCheckStaffListsLive() {
-  return gateEnvValue('GATE_ROUTE_CHECK_STAFF_LISTS');
-}
-
 // GATE_SAVE_ROAD_TIMES (owner 2026-10-28, "yes do this"): a staff save's
 // check and its route number read the road times the pickers bought for that
 // day (`roads: 'cache'`), so a save agrees with the hour its picker offered.
@@ -1417,48 +1407,6 @@ function routeCheckStaffListsLive() {
 // drive no picker looked up keeps the model. Needs the pickers' road check.
 function saveRoadTimesLive() {
   return gateEnvValue('GATE_SAVE_ROAD_TIMES') && pickerRoadCheckLive();
-}
-
-// GATE_ROUTE_CHECK_STAFF_SAVES (owner 2026-10-29, "start the builds", Route
-// Check Everywhere build 2a): the staff saves that checked only for an overlap
-// (New Appointment, lead booking, the Intelligence Bar's create, reschedule
-// and move-stops tools, bulk reschedule) also run the dispatcher's
-// arrival-window route check on the saved visit and show its warning. Warn
-// only: a route result never blocks a save. Cache road times only
-// (`roads: 'cache'`, no Google call). Needs the arrival-window route check
-// itself (arrivalWindowRoutingEnabled), the check that Edit's save runs.
-function routeCheckStaffSavesLive() {
-  return gateEnvValue('GATE_ROUTE_CHECK_STAFF_SAVES') && arrivalWindowRoutingEnabled();
-}
-
-// GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, "start the builds", Route
-// Check Everywhere build 2b): the automatic writers that create or move a
-// visit (completion and package follow-ups, annual prepay renewals, call
-// bookings) number the visit's technician day in the dispatcher's order
-// (placeMovedVisit, cache road times only). No warning, no notification, no
-// message, no Google call. Needs the arrival-window route check itself.
-function routeCheckAutoSavesLive() {
-  return gateEnvValue('GATE_ROUTE_CHECK_AUTO_SAVES') && arrivalWindowRoutingEnabled();
-}
-
-// GATE_ROUTE_CHECK_ACCEPT_SAVES (owner 2026-10-29, "ok go", Route Check
-// Everywhere follow-up item 1): an accepted estimate's visit gets its stop
-// number in the accept's own save. A held slot that graduates
-// (slot-reservation.js commitReservation, also a one-tap booking) and the
-// converter's same-trip standalone parent are numbered (placeMovedVisit,
-// source 'estimate_accept'). Stop numbers only: no message, no notification,
-// no Google call. Needs the arrival-window route check itself.
-function routeCheckAcceptSavesLive() {
-  return gateEnvValue('GATE_ROUTE_CHECK_ACCEPT_SAVES') && arrivalWindowRoutingEnabled();
-}
-
-// GATE_ROUTE_CHECK_ASSIGN_SAVES (same follow-up, item 1): an office board
-// assign (PUT /api/admin/dispatch/jobs/:id/assign) numbers the visit on its
-// new technician's day (placeMovedVisit, source 'dispatch_assign') instead of
-// leaving it unnumbered after the assign cleared the old number. Stop numbers
-// only; the assign itself is unchanged. Needs the arrival-window route check.
-function routeCheckAssignSavesLive() {
-  return gateEnvValue('GATE_ROUTE_CHECK_ASSIGN_SAVES') && arrivalWindowRoutingEnabled();
 }
 
 // GATE_ROUTE_CHECK_BOOKING_SAVES (owner 2026-10-30, "ok go", Route Check
@@ -1591,14 +1539,9 @@ async function checkArrivalPlacement({
 module.exports = {
   arrivalWindowRoutingEnabled, pickerRoadCheckLive, saveRoadBuyLive, buySaveRoads, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
   enumerateArrivalPlacements,
-  routeCheckStaffListsLive,
   groupRouteStops, workDuration,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
   placeMovedVisit, INSERTION_MARGIN_MINUTES,
   _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight, staffSaveTravel },
 };
-module.exports.routeCheckStaffSavesLive = routeCheckStaffSavesLive;
-module.exports.routeCheckAutoSavesLive = routeCheckAutoSavesLive;
-module.exports.routeCheckAcceptSavesLive = routeCheckAcceptSavesLive;
-module.exports.routeCheckAssignSavesLive = routeCheckAssignSavesLive;
 module.exports.routeCheckBookingSavesLive = routeCheckBookingSavesLive;

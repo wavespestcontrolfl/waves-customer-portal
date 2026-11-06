@@ -976,6 +976,10 @@ const PINNED_DISPLAY_BUILDERS = {
   void_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'void_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount: preview.amount, status: preview.status, sends_to_customer: 'nothing' }
     : null),
+  // switch_visit_to_annual_prepay: the card names the customer, the visit, the year's price and the invoice total; the lines ride the contract.
+  switch_visit_to_annual_prepay: (params, preview) => (preview?.preview === true && preview.tool === 'switch_visit_to_annual_prepay'
+    ? { customer: preview.customer_name || preview.customer_id, visit: `${preview.visit_date || ''} ${preview.service} (${preview.visit_status})`.trim(), billing: `${preview.billing_before} -> annual prepay once paid`, prepay: `${preview.prepay_amount} for ${preview.visits_covered} visits (${preview.cadence}), from ${preview.term_start}`, invoice_total: `${preview.invoice_total} (unpaid)`, voids: (preview.voids || []).map((v) => `${v.invoice_number || 'invoice'} ${v.amount}`).join(', ') || 'nothing', sends_to_customer: 'nothing' }
+    : null),
   // The invoice edit cards (GATE_IB_INVOICE_EDITS): the invoice, the customer and the headline; the lines ride the contract.
   edit_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'edit_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name, total: `${preview.amount} (unchanged)`, changes: (preview.changes || []).map((c) => `${c.field}: ${c.before} -> ${c.after}`), sends_to_customer: 'nothing' }
@@ -1076,6 +1080,8 @@ const VERIFIED_VERSION_PARAMS = {
   convert_lead: '_verified_lead_convert_version',
   // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
   void_invoice: '_verified_invoice_void_version',
+  // switch_visit_to_annual_prepay binds the visit, the billing type and every figure the card showed (prepay-switch-tools.js _version).
+  switch_visit_to_annual_prepay: '_verified_prepay_switch_version',
   // schedule_sms binds the customer, the number, the From number, the text digest and the send time the card showed.
   schedule_sms: '_verified_schedule_sms_version',
   // The invoice edit cards bind the invoice version (and, per card, the body, credit balance or visit) they showed.

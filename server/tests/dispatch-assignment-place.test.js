@@ -1,8 +1,8 @@
 /**
- * GATE_ROUTE_CHECK_ASSIGN_SAVES (owner 2026-10-29, "ok go", Route Check
+ * Route check on board assigns (owner 2026-10-29, "ok go", Route Check
  * Everywhere follow-up item 1): the office board's assign numbers the visit on
- * its new technician's day, in the assign's own transaction. Pins: gate off
- * touches nothing; gate on = one placement on the assign transaction with
+ * its new technician's day, in the assign's own transaction. Pins: arrival-window
+ * routing off touches nothing; on = one placement on the assign transaction with
  * source 'dispatch_assign', after the tech-day fences; only a caller that
  * passes place:true places (the Edit modal, visit-group moves and every other
  * service never do); an unassign is not placed; a throwing placement never
@@ -52,7 +52,6 @@ function buildTrx() {
 }
 
 const gateOn = () => {
-  process.env.GATE_ROUTE_CHECK_ASSIGN_SAVES = 'true';
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
 };
 
@@ -67,7 +66,6 @@ beforeEach(() => {
   placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockImplementation(async () => { calls.push('place'); return [1]; });
 });
 afterEach(() => {
-  delete process.env.GATE_ROUTE_CHECK_ASSIGN_SAVES;
   delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
   placeSpy.mockRestore();
 });
@@ -76,30 +74,14 @@ const assign = (extra = {}) => assignDispatchJob({
   jobId: 'job-1', technicianId: 't-new', actorId: 'admin', emit: false, skipVisitSeam: true, ...extra,
 });
 
-describe('the gate readers (call time)', () => {
-  test('unset reads off; on needs the arrival-window route check; the sibling gates do not turn it on', () => {
-    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
-    expect(arrivalRoute.routeCheckAssignSavesLive()).toBe(false);
-    process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true';
-    process.env.GATE_ROUTE_CHECK_ACCEPT_SAVES = 'true';
-    expect(arrivalRoute.routeCheckAssignSavesLive()).toBe(false);
-    process.env.GATE_ROUTE_CHECK_ASSIGN_SAVES = 'true';
-    expect(arrivalRoute.routeCheckAssignSavesLive()).toBe(true);
-    delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
-    expect(arrivalRoute.routeCheckAssignSavesLive()).toBe(false);
-    delete process.env.GATE_ROUTE_CHECK_AUTO_SAVES;
-    delete process.env.GATE_ROUTE_CHECK_ACCEPT_SAVES;
-  });
-});
-
 describe('assignDispatchJob place option', () => {
-  test('gate off: place:true touches nothing, and the result is the same', async () => {
+  test('arrival routing off: place:true touches nothing, and the result is the same', async () => {
     const out = await assign({ place: true });
     expect(placeSpy).not.toHaveBeenCalled();
     expect(out).toMatchObject({ changed: true, technicianName: 'Tech Two', job: UPDATED });
   });
 
-  test('gate on: one placement on the assign transaction, source dispatch_assign, after the tech-day fence', async () => {
+  test('one placement on the assign transaction, source dispatch_assign, after the tech-day fence', async () => {
     gateOn();
     const out = await assign({ place: true });
     expect(placeSpy).toHaveBeenCalledTimes(1);
@@ -108,7 +90,7 @@ describe('assignDispatchJob place option', () => {
     expect(out).toMatchObject({ changed: true, technicianName: 'Tech Two', job: UPDATED });
   });
 
-  test('gate on, a caller transaction: the placement rides that transaction', async () => {
+  test('a caller transaction: the placement rides that transaction', async () => {
     gateOn();
     await assign({ place: true, trx });
     expect(db.transaction).not.toHaveBeenCalled();
@@ -119,27 +101,27 @@ describe('assignDispatchJob place option', () => {
     ['no place option (the Edit modal, visit-group moves, every other caller)', {}],
     ['place:false', { place: false }],
     ['a truthy non-true value', { place: 'yes' }],
-  ])('gate on, %s: never places', async (_label, extra) => {
+  ])('%s: never places', async (_label, extra) => {
     gateOn();
     const out = await assign(extra);
     expect(placeSpy).not.toHaveBeenCalled();
     expect(out.changed).toBe(true);
   });
 
-  test('gate on: an unassign (no technician) is not placed', async () => {
+  test('an unassign (no technician) is not placed', async () => {
     gateOn();
     await assign({ technicianId: null, place: true });
     expect(placeSpy).not.toHaveBeenCalled();
   });
 
-  test('gate on: an assign that changes nothing is not placed', async () => {
+  test('an assign that changes nothing is not placed', async () => {
     gateOn();
     const out = await assign({ technicianId: 't-old', place: true });
     expect(out.changed).toBe(false);
     expect(placeSpy).not.toHaveBeenCalled();
   });
 
-  test('gate on: a throwing placement is one warning line and the assign still commits', async () => {
+  test('a throwing placement is one warning line and the assign still commits', async () => {
     gateOn();
     placeSpy.mockRejectedValueOnce(new Error('route boom'));
     const out = await assign({ place: true });

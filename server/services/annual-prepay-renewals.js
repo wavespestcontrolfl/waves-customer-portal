@@ -2087,9 +2087,9 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     if (await termOwnerMovedUnderFence(trx)) return null;
     await prepareSeedSlot(trx, scheduledDate, { timed: true });
     const [row] = await trx('scheduled_services').insert(buildInsert(scheduledDate, windowStart)).returning('*');
-    // GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29): number the timed first visit
+    // Route check on saves (owner 2026-10-29): number the timed first visit
     // in its technician's day, inside this transaction (silent, never fails the
-    // seed, a no-op while the gate is off or the seed has no technician).
+    // seed, a no-op while arrival-window routing is off or the seed has no technician).
     await placeAutoSavedVisit(trx, { visit: row, source: 'annual_prepay_renewal' });
     // Filed only once the visit actually exists: fileCoverageException writes
     // through the global connection and dedupes for 7 days, so a notice
@@ -2183,7 +2183,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
     if (cols.time_window) updates.time_window = null;
     if (cols.window_display) updates.window_display = null;
     await trx('scheduled_services').where({ id: row.id }).update({ ...updates, ...recurringDispatchDuePatch(row, updates) });
-    // GATE_ROUTE_CHECK_AUTO_SAVES: the retimed visit moved within its day.
+    // Route check on saves: the retimed visit moved within its day.
     await placeAutoSavedVisit(trx, { visit: row, source: 'annual_prepay_renewal' });
     // Filed only once the retime is written (same rule as the seed path):
     // the notice claims the visit WAS retimed, so it must never outlive a
