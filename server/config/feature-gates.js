@@ -304,6 +304,7 @@
  *   GATE_RESERVICE_OFFICE_REQUEST=true (New Appointment modal "Customer's words" box on a pest/lawn re-service: suggests the customer's latest inbound text or call note from the last 72 hours with a "Use this" button, saved to scheduled_services.customer_request/_source; the server decides the source — unchanged text/call = quotable text/call, edited or typed = office. Off unless exactly 'true' (isEnabled('reserviceOfficeRequest')); off = the modal shows nothing new, GET /api/admin/schedule/reservice-request-suggestion answers {enabled:false, suggestion:null}, and POST ignores customerRequest. Sends nothing to a customer.)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_ZONE_ROUTE_DAYS=true (customer-facing booking + estimate picker lift the self-serve detour cap on a far zone's route day — default Friday for Venice / North Port — so an EMPTY route day can be offered and seeded; config in system_settings key schedule_zone_route_days; phone/office/IB/auto-dispatch untouched; read at call time via zoneRouteDaysLive(); unset = today's cap everywhere)
+ *   GATE_BOOKING_MAKE_ROOM=shadow|true (owner 2026-11-06, "build this first": a new customer on the estimate page may take the best hour on a route even when a regular stop holds it. That stop, and each later stop it would then overlap, moves later by the new visit's length in whole hours (1 hour for a visit up to 60 minutes, the owner's 2026-11-03 rule) until a free hour takes the last one. A stop may move only under the 4:40 day re-plan's own rules (services/day-replan fixedReason with the day's full facts, including the GATE_NIGHT_TOLD_LOCK told, confirmed, first or one-time and person-placed locks), when its customer gets the 72-hour and 24-hour reminder texts, and when its time preference allows the new hour. The route must keep every arrival window (arrival-route.js evaluateArrivalPlacement), and the hour must add at least 10 fewer drive minutes than the best free time (the re-plan's free straight-line drive model: no Google, no AI, no paid call). shadow = PR 1: after an estimate page offer list (offer: true callers only, on a cache miss) is built, services/scheduling/booking-make-room.js runs the check without the list waiting for it and writes one booking_make_room_checks row (ids, dates, hours and minutes only). The list, holds and visits never change, and nothing is sent. true = reserved for PR 2 (offer the hour, hold it, move the stops at accept); until then it records exactly like shadow. Unset or anything else = off: the module is never loaded. Read at call time via bookingMakeRoomMode(), so a flip needs no redeploy; dark by default.)
  *   GATE_JOB_CARD=true (Service Protocol drawer "Job card" tab: customer paragraph (deterministic template of portal fields, built on each read), per-product spray check from NWS hourly at the property, tank mix search; read at call time; unset = tab hidden, endpoint answers {enabled:false})
  *   GATE_JOB_CARD_CUSTOMER_CONTEXT=true (job card "Why they booked" box, owner "ok go" 2026-10-03: the visit's own scheduled_services.customer_request / _source / _pests — typed on the re-service page or texted (quoted), a call's AI summary or the office's wording (not quoted), and the pests picked; the customer's own inbound texts from the 14 ET days up to and including the visit's day, never past now (owner 2026-10-03: a fixed window, not "since the last visit"), newest three, tapbacks, recruiting rows and unresolved review-ask reservations dropped, null = unreadable; and, only with GATE_VISIT_PREP_PHOTOS live too, the photos the customer sent before the visit (visit-prep.js customerFlaggedFacts: topic, place, note, photo ids; thumbnails from GET /admin/schedule/:id/visit-prep-photos) — words code-scrubbed, shown under the paragraph. Display only: never in the paragraph, its grounding hash or a model call. Read at call time by services/job-card.js, exact 'true'; off = card payload byte-identical. Sends nothing to a customer. Kill switch: unset.)
  *   GATE_REPORT_PHOTO_CONTENT=true (tech-reviewed completion-photo captions/summary ground the AI report writer; read at call time via reportPhotoContentLive(), off unless exactly 'true')
@@ -5729,6 +5730,9 @@ const gates = {
   // GATE_NIGHT_PASS_WAIT: read at CALL time via nightPassWaitLive(); this entry is for logGateStatus, so the boot log
   // shows the flip.
   nightPassWait: process.env.GATE_NIGHT_PASS_WAIT === 'true',
+  // GATE_BOOKING_MAKE_ROOM: read at CALL time via bookingMakeRoomMode(); this entry is for logGateStatus, so the boot
+  // log shows the flip (shadow and true both read as enabled).
+  bookingMakeRoom: ['shadow', 'true'].includes(String(process.env.GATE_BOOKING_MAKE_ROOM || '').trim().toLowerCase()),
   // GATE_NIGHT_TOLD_LOCK: read at CALL time via nightToldLockLive(); this entry is for logGateStatus, so the boot log
   // shows the flip.
   nightToldLock: process.env.GATE_NIGHT_TOLD_LOCK === 'true',
@@ -10691,6 +10695,18 @@ function dayReplanMode() {
 }
 // GATE_DAY_REPLAN reader, on its own line so gate PRs never conflict.
 module.exports.dayReplanMode = dayReplanMode;
+
+// GATE_BOOKING_MAKE_ROOM read at CALL time (so a flip needs no redeploy): exactly 'shadow' or 'true', anything else
+// (unset is the kill) is 'off'. Owner 2026-11-06, "build this first" (services/scheduling/booking-make-room.js):
+// shadow = the estimate page records which taken hours a new customer could have; the list does not change.
+// PR 1: 'true' records exactly like 'shadow'.
+function bookingMakeRoomMode() {
+  const value = String(process.env.GATE_BOOKING_MAKE_ROOM || '').trim().toLowerCase();
+  if (value === 'shadow') return 'shadow';
+  return value === 'true' ? 'on' : 'off';
+}
+// GATE_BOOKING_MAKE_ROOM reader, on its own line so gate PRs never conflict.
+module.exports.bookingMakeRoomMode = bookingMakeRoomMode;
 
 // GATE_APP_FIRST_ANY_DEVICE read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
 // Owner 2026-11-04: more automated notices go in the app instead of a text, and a customer counts as reachable

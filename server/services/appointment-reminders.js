@@ -6847,6 +6847,16 @@ AppointmentReminders.composeScheduledApptTime = composeScheduledApptTime;
 // deferred-replay recheck (app property scope, PR 3).
 AppointmentReminders.visitPrefsRow = visitPrefsRow;
 
+// The reminder settings for the make-room check (scheduling/booking-make-room.js).
+// Not exported as `getReminderPrefs` on purpose: messaging/deferred-replay-
+// registry.js destructures that name today, gets undefined and fails its
+// channel recheck closed, so exporting that name would change which deferred
+// texts replay. That is its own change.
+AppointmentReminders.readReminderPrefs = getReminderPrefs;
+// The 72-hour reminder's effective channel (email-first for one-time visits
+// under GATE_REMINDER_72H_EMAIL_FIRST), for the same check.
+AppointmentReminders.resolve72hChannel = resolve72hChannel;
+
 // classifyDeliveryCertainty verdict -> replay result.
 const REPLAY_DELIVERY_RESULT = Object.freeze({
   sent: { sent: true },
