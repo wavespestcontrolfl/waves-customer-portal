@@ -20,14 +20,21 @@
  * names, "First Last". Products shrink to make room (the 1800-character cap does not move).
  * A technician login gets the first group for its OWN stops only; the texts, calls and
  * recent-customer groups are office reads and stay admin-only. The list is cached 5 minutes
- * per (login scope, ET day); the on-screen customer is added per request. The same names'
- * surnames come back as `keywords` for the transcriber's keywords[] hint.
+ * per (login scope, ET day); the on-screen customer is added per request. The on-screen
+ * customer's first name, then the same names' surnames, come back as `keywords` for the
+ * transcriber's keywords[] hint.
+ *
+ * It also returns `recordName` (the on-screen customer's first and last name) and `keep` (the
+ * words of the staff, product, service and place names) for respellRecordName
+ * (utils/name-spelling.js), which puts the record's spelling back on a close spelling of that
+ * customer's name in the transcript.
  *
  * Nothing here is logged. Names never leave the transcription call.
  */
 const db = require('../models/db');
 const logger = require('./logger');
 const { STT_HINTS } = require('../config/transcription-vocabulary');
+const { nameLetters } = require('../utils/name-spelling');
 
 // Same ceiling as the voice-fill transcriber's prompt (benchmarked 2026-10-03).
 const PROMPT_MAX_CHARS = 1800;
@@ -293,20 +300,42 @@ async function buildDictationHints(context = {}, knex = db) {
     : [];
   const onScreen = personFrom(row);
   const ordered = uniquePeople([onScreen, ...people]);
+  const terms = termList();
   const { prompt, kept } = composeSections([
     { key: 'customer', label: 'Customer on this screen: ', names: customer },
     { key: 'customers', label: 'Customers who may be named: ', names: ordered.map((person) => person.full) },
     { key: 'technicians', label: 'Staff who may be named: ', names: technicians },
     { key: 'products', label: 'Products that may be said: ', names: products },
     { key: 'services', label: 'Services that may be said: ', names: services },
-    { key: 'terms', label: 'Other words that may be said: ', names: termList() },
+    { key: 'terms', label: 'Other words that may be said: ', names: terms },
   ], NAMES_SECTION_CAPS);
-  // Surnames of the names that made it into the prompt, in the same order (on-screen first).
+  // Surnames of the names that made it into the prompt, in the same order (on-screen first). The
+  // on-screen customer's first name leads the list (owner 2026-11-06: a first name came back in
+  // its common spelling while only the surname was a keyword); other first names stay out of it.
   const keptFull = new Set((kept.customers || []).map((name) => name.toLowerCase()));
-  const keywords = uniqueNames(ordered
+  const surnames = ordered
     .filter((person) => keptFull.has(person.full.toLowerCase()) && person.last.length > 1)
-    .map((person) => person.last)).slice(0, KEYWORD_MAX);
-  return { prompt, keywords };
+    .map((person) => person.last);
+  const onScreenFirst = cleanName(row?.first_name);
+  const keywords = uniqueNames([...(onScreenFirst.length > 1 ? [onScreenFirst] : []), ...surnames]).slice(0, KEYWORD_MAX);
+  // recordName + keep feed respellRecordName (utils/name-spelling.js) once the clip is heard.
+  const recordName = row ? { firstName: row.first_name || '', lastName: row.last_name || '' } : null;
+  return { prompt, keywords, recordName, keep: keepWords([technicians, products, services, terms]) };
+}
+
+/** Lowercase words said for something other than a customer (staff, products, services, places, pests). */
+function keepWords(lists) {
+  return new Set(lists.flat().flatMap((name) => nameLetters(name)));
+}
+
+/** The same keep words for a caller with no clip (the nightly text check). A failed source drops out. */
+async function loadKeepWords(knex = db) {
+  const [technicians, products, services] = await Promise.all([
+    safely('technicians', () => technicianNames(knex)),
+    safely('products', () => productNames(knex)),
+    safely('services', () => serviceNames(knex)),
+  ]);
+  return keepWords([technicians, products, services, termList()]);
 }
 
 module.exports = {
@@ -315,6 +344,7 @@ module.exports = {
   NAMES_SECTION_CAPS,
   KEYWORD_MAX,
   buildDictationHints,
+  loadKeepWords,
   resetNameCache,
   composePrompt,
   cleanName,

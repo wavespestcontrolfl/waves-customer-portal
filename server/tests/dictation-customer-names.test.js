@@ -3,7 +3,8 @@
  * puts the on-screen customer first, then today's/tomorrow's route, then (admin only) people
  * who texted or called and recently updated active customers; stays under 1800 characters;
  * a technician login sees only its own stops; the list is cached 5 minutes per scope and day;
- * surnames come back as transcriber keywords. Synthetic names only.
+ * the on-screen customer's first name, then the surnames, come back as transcriber keywords, and
+ * the on-screen record name and the keep words come back for the name respell. Synthetic names only.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -17,7 +18,7 @@ jest.mock('../services/pest-recap', () => ({
 }));
 
 const {
-  buildDictationHints, resetNameCache, PROMPT_MAX_CHARS, NAMES_SECTION_CAPS, KEYWORD_MAX,
+  buildDictationHints, loadKeepWords, resetNameCache, PROMPT_MAX_CHARS, NAMES_SECTION_CAPS, KEYWORD_MAX,
 } = require('../services/dictation-word-list');
 const { mergeTranscriptionKeywords, transcriptionKeywords } = require('../services/call-recording-processor')._test;
 
@@ -91,10 +92,12 @@ describe('buildDictationHints', () => {
   });
 
   test('a name with no on-screen customer still lists the route', async () => {
-    const { prompt, keywords } = await buildDictationHints({ scope: {} }, makeKnex({ onScreen: undefined }));
+    const { prompt, keywords, recordName } = await buildDictationHints({ scope: {} }, makeKnex({ onScreen: undefined }));
     expect(prompt).toMatch(/Customers who may be named: Route Todayman, Second Stopper/);
     expect(prompt).not.toMatch(/Customer on this screen/);
     expect(keywords[0]).toBe('Todayman');
+    // no customer on screen: nothing to respell toward
+    expect(recordName).toBeNull();
   });
 
   test('products shrink to 400 characters and the prompt stays under the cap with a huge world', async () => {
@@ -113,16 +116,27 @@ describe('buildDictationHints', () => {
     expect(prompt).toContain('Alex Samplestaff');
     expect(prompt).toContain('Quarterly Pest Control');
     for (const name of list('Customers who may be named').split(', ')) expect(name).toMatch(/^(Testa Examplesmith|[VCR]First\d+ [VCR]Last\d+)$/);
-    // the keywords are surnames of names that fit, on-screen first, capped
-    expect(keywords[0]).toBe('Examplesmith');
+    // the keywords are the on-screen first name, then surnames of names that fit, capped
+    expect(keywords.slice(0, 2)).toEqual(['Testa', 'Examplesmith']);
     expect(keywords.length).toBeLessThanOrEqual(KEYWORD_MAX);
     expect(keywords.every((word) => prompt.includes(word))).toBe(true);
   });
 
-  test('keywords: surnames in prompt order, on-screen first, de-duplicated', async () => {
+  test('keywords: the on-screen first name, then surnames in prompt order, de-duplicated', async () => {
     const dup = [P('Route', 'Todayman'), P('Another', 'Todayman')];
     const { keywords } = await buildDictationHints({ customerId: CUSTOMER_ID, scope: {} }, makeKnex({ visits: dup }));
-    expect(keywords).toEqual(['Examplesmith', 'Todayman', 'Callerson', 'Updatedson']);
+    // other customers' first names stay out: only the on-screen one is spelled exactly
+    expect(keywords).toEqual(['Testa', 'Examplesmith', 'Todayman', 'Callerson', 'Updatedson']);
+  });
+
+  test('the on-screen record name and the keep words come back for the respell', async () => {
+    const { recordName, keep } = await buildDictationHints({ customerId: CUSTOMER_ID, scope: {} }, makeKnex());
+    expect(recordName).toEqual({ firstName: 'Testa', lastName: 'Examplesmith' });
+    // staff, services, products and the term list; never a customer name
+    for (const word of ['alex', 'samplestaff', 'quarterly', 'pest', 'examplex']) expect(keep.has(word)).toBe(true);
+    for (const word of ['testa', 'examplesmith', 'todayman', 'callerson']) expect(keep.has(word)).toBe(false);
+    // the nightly text check reads the same words without a clip
+    expect([...(await loadKeepWords(makeKnex()))].sort()).toEqual([...keep].sort());
   });
 
   test('technician fence: only its own stops, no texting or recent-customer reads', async () => {
@@ -137,7 +151,7 @@ describe('buildDictationHints', () => {
     expect(prompt).toMatch(/Customers who may be named: Testa Examplesmith, Route Todayman, Second Stopper\./);
     expect(prompt).not.toContain('Callerson');
     expect(prompt).not.toContain('Updatedson');
-    expect(keywords).toEqual(['Examplesmith', 'Todayman', 'Stopper']);
+    expect(keywords).toEqual(['Testa', 'Examplesmith', 'Todayman', 'Stopper']);
   });
 
   test('cached 5 minutes per login scope: a second clip does not re-query, another scope does', async () => {

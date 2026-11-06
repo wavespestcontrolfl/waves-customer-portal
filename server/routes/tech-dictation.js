@@ -24,12 +24,16 @@
  * for a visit that was just reassigned, and the answer never says whether a
  * customer or visit exists. Admins are unrestricted.
  *
- * The word list carries customer names and their surnames go to the transcriber's keyword
- * hints (services/dictation-word-list.js buildDictationHints).
+ * The word list carries customer names; the on-screen customer's first name and the surnames go to
+ * the transcriber's keyword hints (services/dictation-word-list.js buildDictationHints).
+ *
+ * One rewrite: a close spelling of the on-screen customer's name gets the record's spelling
+ * ("Hey Dina." becomes "Hey Dena." for a customer the record calls Dena), under the rules in
+ * utils/name-spelling.js. Nothing else in the transcript changes.
  *
  * GATE_DICTATION_MONEY_NORMALIZE reads dictated dollar amounts (utils/spoken-money.js) and adds
- * `money: { changes, ambiguous }` beside `text`. The text itself is returned exactly as heard: a parser can
- * misread a phrase, so it only suggests (changes) and flags (ambiguous), it never rewrites. Off = `{ text }`.
+ * `money: { changes, ambiguous }` beside `text`. Amounts are never rewritten: a parser can misread a
+ * phrase, so it only suggests (changes) and flags (ambiguous). Off = `{ text }`.
  *
  * Nothing is stored: no row, no S3 object. The audit line carries sizes and
  * counts only, never the audio or the words (audio has no ledger: lane-policies
@@ -45,6 +49,7 @@ const { dictationAudioUpload, dictationClipType, dictationLimiter } = require('.
 const featureGates = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { normalizeSpokenMoney } = require('../utils/spoken-money');
+const { respellRecordName } = require('../utils/name-spelling');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -98,7 +103,7 @@ router.post('/', (req, res, next) => (gateOn() ? next() : res.status(404).json(N
       // The customer-name section and surname keyword hints. A technician login's names come
       // from its OWN stops only (the word list reads req's scope from the login, never from
       // the client).
-      const { prompt, keywords } = await buildDictationHints({
+      const { prompt, keywords, recordName, keep } = await buildDictationHints({
         customerId,
         serviceId,
         scope: isTechnicianRequest(req) ? { technicianId: req.technicianId } : {},
@@ -115,18 +120,22 @@ router.post('/', (req, res, next) => (gateOn() ? next() : res.status(404).json(N
         // silence is an answer ({ text: '' }), not a provider failure
         emptyOk: true,
       });
-      const text = String(result?.text || '').trim();
+      const heard = String(result?.text || '').trim();
       const context = serviceId ? 'service' : customerId ? 'customer' : 'none';
-      logger.info(`[server-dictation] tech=${req.technicianId} bytes=${req.file.buffer.length} type=${baseType} context=${context} promptChars=${prompt.length} ok=${Boolean(result)} chars=${text.length}`);
+      logger.info(`[server-dictation] tech=${req.technicianId} bytes=${req.file.buffer.length} type=${baseType} context=${context} promptChars=${prompt.length} ok=${Boolean(result)} chars=${heard.length}`);
       if (!result) return res.status(502).json({ error: 'Transcription unavailable. Type instead.' });
       // Same hallucination guard as call recordings and field dictation: far
       // more characters than the clip's seconds can hold is a fabricated
       // transcript. The client reports the recorded seconds; unknown fails open.
       const durationSeconds = Number(req.body?.duration_seconds) || 0;
-      if (isImplausibleTranscript(text, durationSeconds)) {
-        logger.warn(`[server-dictation] implausible transcript rejected chars=${text.length} seconds=${durationSeconds}`);
+      if (isImplausibleTranscript(heard, durationSeconds)) {
+        logger.warn(`[server-dictation] implausible transcript rejected chars=${heard.length} seconds=${durationSeconds}`);
         return res.status(502).json({ error: 'Transcription looked unreliable. Try again or type.' });
       }
+      // The on-screen customer's name in the record's spelling: "Hey Dina." becomes "Hey Dena." for a
+      // customer the record calls Dena (owner 2026-11-06). The log carries the count, never the words.
+      const { text, fixes } = respellRecordName(heard, { ...recordName, keep });
+      if (fixes.length) logger.info(`[server-dictation] record name respelled count=${fixes.length}`);
       return res.json(dictationAnswer(text));
     } catch (err) { return next(err); }
   });
