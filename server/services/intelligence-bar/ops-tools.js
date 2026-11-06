@@ -767,6 +767,8 @@ async function commitRailwayGate(input) {
 // the bar (owner 2026-11-06). Records what was attempted and how it ended;
 // a non-boolean prior value is never recorded, only its kind. An audit
 // failure is logged, never thrown: the Railway write already happened.
+// Returns the outcome it recorded (written / outcome_unknown / target_changed
+// / refused).
 async function recordGateFlipAudit({ via, actorId = null, gate, value, priorKind = null, priorValue = null, result, ip = null, userAgent = null }) {
   const outcome = result?.success === true ? 'written'
     : result?.outcome_unknown ? 'outcome_unknown'
@@ -786,7 +788,7 @@ async function recordGateFlipAudit({ via, actorId = null, gate, value, priorKind
     });
   } catch (err) {
     logger.error(`[intelligence-bar:ops] gate.flip audit row failed for ${gate}: ${err.message}`);
-  }
+  }  return outcome;
 }
 
 async function executeOpsTool(toolName, input = {}) {

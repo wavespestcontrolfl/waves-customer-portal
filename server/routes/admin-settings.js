@@ -286,6 +286,9 @@ router.post('/gates/:name/preview', adminAuthenticate, requireAdmin, gateFlipEna
   } catch (err) { next(err); }
 });
 
+// HTTP status for each outcome recordGateFlipAudit records.
+const GATE_FLIP_STATUS = { written: 200, outcome_unknown: 202, target_changed: 409, refused: 400 };
+
 router.post('/gates/:name/commit', adminAuthenticate, requireAdmin, gateFlipEnabled, requireFullAccess, async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-store');
@@ -293,41 +296,46 @@ router.post('/gates/:name/commit', adminAuthenticate, requireAdmin, gateFlipEnab
     const PendingActions = require('../services/intelligence-bar/pending-actions');
     const id = String(req.body?.pendingActionId || '').trim();
     const actor = gateFlipActor(req);
-    // Read before claiming, so a wrong typed name never uses the card up.
+    // Read before claiming, so a wrong typed name never uses the card up. The
+    // claim below returns this same card with its params hash re-checked, so
+    // the gate name checked here is the one written.
     const row = id ? await PendingActions.getPendingRow(id, actor).catch(() => null) : null;
-    const stored = row ? (typeof row.params === 'string' ? JSON.parse(row.params) : row.params) || {} : {};
-    if (!row || row.tool_name !== 'set_railway_gate' || stored._verified_railway_gate_name !== req.params.name) {
+    const pins = row?.tool_name === 'set_railway_gate' ? row.params : {};
+    if (pins._verified_railway_gate_name !== req.params.name) {
       return res.status(409).json({ error: 'This change card is no longer valid. Open the switch again for a fresh one.', code: 'stale_card' });
     }
-    if (stored._verified_railway_gate_value === 'true' && req.body?.confirmName !== req.params.name) {
+    if (pins._verified_railway_gate_value === 'true' && req.body?.confirmName !== req.params.name) {
       return res.status(400).json({ error: 'Type the gate name exactly to turn it on.', code: 'confirm_name_mismatch' });
     }
     const claim = await PendingActions.claimForConfirm(id, actor);
     if (claim.error) {
       return res.status(409).json({ error: 'This change card was already used or has expired. Open the switch again for a fresh one.', code: claim.error });
     }
-    const pins = Object.fromEntries(Object.entries(claim.action.params).filter(([k]) => k.startsWith('_verified_')));
-    if (pins._verified_railway_gate_name !== req.params.name) {
-      return res.status(409).json({ error: 'This change card is no longer valid. Open the switch again for a fresh one.', code: 'stale_card' });
-    }
     const { executeOpsTool, recordGateFlipAudit } = require('../services/intelligence-bar/ops-tools');
-    const result = await executeOpsTool('set_railway_gate', { confirmed: true, ...pins });
+    const verified = Object.fromEntries(Object.entries(claim.action.params).filter(([k]) => k.startsWith('_verified_')));
+    const result = await executeOpsTool('set_railway_gate', { confirmed: true, ...verified });
     await PendingActions.recordResult(id, result);
-    await recordGateFlipAudit({
+    const outcome = await recordGateFlipAudit({
       via: 'settings_page',
-      actorId: req.technicianId || req.technician?.id || null,
-      gate: pins._verified_railway_gate_name,
-      value: pins._verified_railway_gate_value,
-      priorKind: pins._verified_railway_gate_prior_kind,
-      priorValue: pins._verified_railway_gate_prior ?? null,
+      actorId: req.technicianId,
+      gate: verified._verified_railway_gate_name,
+      value: verified._verified_railway_gate_value,
+      priorKind: verified._verified_railway_gate_prior_kind,
+      priorValue: verified._verified_railway_gate_prior,
       result,
       ip: req.ip,
-      userAgent: req.get('user-agent') || null,
+      userAgent: req.get('user-agent'),
     });
-    if (result?.success) return res.json({ success: true, gate: result.gate, value: result.value, redeployNotice: result.redeploy_notice });
-    if (result?.outcome_unknown) return res.status(202).json({ outcomeUnknown: true, warning: result.warning });
-    if (result?.preview_changed) return res.status(409).json({ error: result.error, code: result.code });
-    return res.status(400).json({ error: result?.error || 'The change was not made.', code: result?.code || null });
+    return res.status(GATE_FLIP_STATUS[outcome]).json({
+      outcome,
+      success: outcome === 'written',
+      gate: result.gate,
+      value: result.value,
+      redeployNotice: result.redeploy_notice,
+      warning: result.warning,
+      error: result.error,
+      code: result.code,
+    });
   } catch (err) { next(err); }
 });
 

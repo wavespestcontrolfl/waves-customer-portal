@@ -43,7 +43,8 @@ jest.mock('../services/intelligence-bar/pending-actions', () => {
 });
 jest.mock('../services/intelligence-bar/ops-tools', () => ({
   executeOpsTool: jest.fn(),
-  recordGateFlipAudit: jest.fn(),
+  // Returns the outcome it records, like the real helper.
+  recordGateFlipAudit: jest.fn(async ({ result }) => (result?.success ? 'written' : result?.preview_changed ? 'target_changed' : 'refused')),
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
@@ -162,7 +163,7 @@ describe('flip a gate from Settings → Features (GATE_SETTINGS_GATE_FLIP)', () 
     process.env.JWT_SECRET = 'test-secret';
     delete process.env.IB_FULL_ACCESS_EMAILS;
     ops.executeOpsTool.mockReset();
-    ops.recordGateFlipAudit.mockReset();
+    ops.recordGateFlipAudit.mockClear();
   });
   afterEach(() => {
     for (const [k, env] of [['gate', 'GATE_SETTINGS_GATE_FLIP'], ['secret', 'JWT_SECRET'], ['emails', 'IB_FULL_ACCESS_EMAILS']]) {

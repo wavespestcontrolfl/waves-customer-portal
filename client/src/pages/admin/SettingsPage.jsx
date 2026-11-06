@@ -484,27 +484,21 @@ function gateReadsOn(gate, written) {
 // exactly that change as a one-use card; Confirm claims and writes it.
 // Turning a gate on asks for its name to be typed; off is one click.
 function GateFlipDialog({ request, onClose, onDone }) {
-  const [preview, setPreview] = useState(null);
-  const [loadError, setLoadError] = useState(null);
+  // One state for the card: loading → ready (or info / error) → done. The
+  // parent mounts a fresh dialog (keyed by gate and value) for every flip.
+  const [state, setState] = useState({ step: "loading", message: "Preparing the change..." });
   const [typedName, setTypedName] = useState("");
   const [busy, setBusy] = useState(false);
-  const [outcome, setOutcome] = useState(null);
+  const turnOn = request.value === "true";
   useEffect(() => {
-    if (!request) return undefined;
     let cancelled = false;
-    setPreview(null);
-    setLoadError(null);
-    setTypedName("");
-    setOutcome(null);
-    adminFetch(`/admin/settings/gates/${encodeURIComponent(request.name)}/preview`, {
-      method: "POST",
-      body: JSON.stringify({ value: request.value }),
-    })
-      .then((d) => { if (!cancelled) setPreview(d); })
-      .catch((e) => { if (!cancelled) setLoadError(e.message || "Could not prepare the change"); });
+    adminFetch(`/admin/settings/gates/${encodeURIComponent(request.name)}/preview`, { method: "POST", body: JSON.stringify({ value: request.value }) })
+      .then((d) => { if (!cancelled) setState(d.alreadySet ? { step: "info", message: d.message } : { step: "ready", preview: d }); })
+      .catch((e) => { if (!cancelled) setState({ step: "error", isError: true, message: e.message || "Could not prepare the change" }); });
     return () => { cancelled = true; };
-  }, [request]);
+  }, [request.name, request.value]);
 
+  const { preview } = state;
   const commit = async () => {
     setBusy(true);
     try {
@@ -512,34 +506,31 @@ function GateFlipDialog({ request, onClose, onDone }) {
         method: "POST",
         body: JSON.stringify({ pendingActionId: preview.pendingActionId, confirmName: typedName }),
       });
-      setOutcome(d?.success
-        ? { ok: true, text: `${request.name} is now ${d.value}. ${d.redeployNotice || ""}` }
-        : { ok: false, text: d?.warning || "Railway did not confirm the change. Check the variable in Railway before trying again." });
-      if (d?.success) onDone(request.name, d.value);
+      if (d.success) onDone(request.name, d.value);
+      setState(d.success
+        ? { step: "done", preview, message: `${request.name} is now ${d.value}. ${d.redeployNotice || ""}` }
+        : { step: "done", preview, isError: true, message: d.warning || "Railway did not confirm the change. Check the variable in Railway before trying again." });
     } catch (e) {
-      setOutcome({ ok: false, text: e.message || "The change was not made." });
+      setState({ step: "ready", preview, isError: true, message: e.message || "The change was not made." });
     } finally {
       setBusy(false);
     }
   };
 
-  const nameOk = !preview?.requireTypedName || typedName === request?.name;
-  const offPrereqs = (preview?.prerequisites || []).filter((p) => !p.readsOn);
+  const ready = state.step === "ready";
+  const offPrereqs = turnOn ? (preview?.prerequisites || []).filter((p) => !p.readsOn) : [];
   return (
-    <Dialog open={Boolean(request)} onClose={busy ? undefined : onClose} size="md">
+    <Dialog open onClose={busy ? undefined : onClose} size="md">
       <DialogHeader>
-        <DialogTitle>{request?.value === "true" ? "Turn on" : "Turn off"} {request?.name}</DialogTitle>
+        <DialogTitle>{turnOn ? "Turn on" : "Turn off"} {request.name}</DialogTitle>
       </DialogHeader>
       <DialogBody className="space-y-3">
-        {!preview && !loadError && <ActionFeedback>Preparing the change...</ActionFeedback>}
-        {loadError && <ActionFeedback error>{loadError}</ActionFeedback>}
-        {preview?.alreadySet && <ActionFeedback>{preview.message}</ActionFeedback>}
-        {preview && !preview.alreadySet && (
+        {preview && (
           <>
             <p className="text-ui-body text-zinc-900 u-nums">
               {preview.gate}: <span className="font-medium">{preview.currentValue}</span> → <span className="font-medium">{preview.newValue}</span>
             </p>
-            {preview.description && <p className="text-ui-body text-ink-secondary">{preview.description}</p>}
+            <p className="text-ui-body text-ink-secondary">{preview.description}</p>
             {preview.customerFacing && (
               <ActionFeedback error>
                 This gate looks customer-facing (messages, money, prices or a customer page). Check what it does before you change it.
@@ -548,27 +539,27 @@ function GateFlipDialog({ request, onClose, onDone }) {
             {preview.inverted && (
               <p className="text-ui-body text-ink-secondary">The name suggests "true" turns something OFF.</p>
             )}
-            {request?.value === "true" && offPrereqs.length > 0 && (
+            {offPrereqs.length > 0 && (
               <p className="text-ui-body text-ink-secondary">
                 Its description names other gates that read as off now: {offPrereqs.map((p) => p.name).join(", ")}.
                 It may do nothing until they are on.
               </p>
             )}
             <p className="text-ui-body text-ink-secondary">{preview.redeployNotice}</p>
-            {preview.requireTypedName && !outcome?.ok && (
+            {ready && preview.requireTypedName && (
               <Field label="Type the gate name to turn it on">
                 <Input value={typedName} onChange={(e) => setTypedName(e.target.value)} autoComplete="off" spellCheck={false} />
               </Field>
             )}
           </>
         )}
-        {outcome && <ActionFeedback error={!outcome.ok}>{outcome.text}</ActionFeedback>}
+        {state.message && <ActionFeedback error={state.isError === true}>{state.message}</ActionFeedback>}
       </DialogBody>
       <DialogFooter>
-        <Button variant="secondary" onClick={onClose} disabled={busy}>{outcome?.ok ? "Close" : "Cancel"}</Button>
-        {preview && !preview.alreadySet && !outcome?.ok && (
-          <Button onClick={commit} disabled={busy || !nameOk || !preview.pendingActionId}>
-            {busy ? "Saving..." : request?.value === "true" ? "Turn on" : "Turn off"}
+        <Button variant="secondary" onClick={onClose} disabled={busy}>{state.step === "done" ? "Close" : "Cancel"}</Button>
+        {ready && (
+          <Button onClick={commit} disabled={busy || (preview.requireTypedName && typedName !== request.name)}>
+            {busy ? "Saving..." : turnOn ? "Turn on" : "Turn off"}
           </Button>
         )}
       </DialogFooter>
@@ -643,7 +634,9 @@ function FeatureGatesTab() {
             ? " Flip an on/off gate with its switch; anything else: Railway Dashboard → Variables. Every change restarts the server."
             : " To change one: Railway Dashboard → Variables. A change restarts the server."}
         </p>
+        {flipRequest && (
         <GateFlipDialog
+          key={`${flipRequest.name}:${flipRequest.value}`}
           request={flipRequest}
           onClose={() => setFlipRequest(null)}
           onDone={(name, value) => {
@@ -652,6 +645,7 @@ function FeatureGatesTab() {
             setTimeout(retry, 90 * 1000);
           }}
         />
+        )}
       </CardBody>
     </Card>
   );
