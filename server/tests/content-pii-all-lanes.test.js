@@ -190,6 +190,18 @@ describe.each(LANES)('%s public-entity exemptions', (_lane, brief) => {
     expect(evalLane(brief, body).checks.redaction_passed.ok).toBe(false);
   });
 
+  test('live: a customer address in a sentence naming an approved competitor still holds the draft', () => {
+    process.env[GATE] = 'true';
+    const r = evalLane(brief, 'Truly Nolen treated the home at 4867 Maple Street in Bradenton last spring.');
+    expect(r.checks.redaction_passed.ok).toBe(false);
+  });
+
+  test('live: "The <surname> family" still holds the draft when the surname starts a competitor name', () => {
+    process.env[GATE] = 'true';
+    const r = evalLane(brief, 'The Massey family in Parrish had ants in the kitchen again.');
+    expect(r.checks.redaction_passed.ok).toBe(false);
+  });
+
   test('live: a customer surname that matches a one-word competitor alias still holds the draft', () => {
     process.env[GATE] = 'true';
     const r = evalLane(brief, 'John Massey reported ants in Parrish last spring.');
@@ -239,5 +251,17 @@ describe('saved briefs read back by agents', () => {
     const src = require('fs').readFileSync(require.resolve('../services/content/autonomous-runner'), 'utf8');
     const loader = src.slice(src.indexOf('async _loadReviewedBrief(run) {'));
     expect(loader.slice(0, loader.indexOf('\n  }\n'))).toContain("require('./agents/brief-driven-tools').stripCustomerWords(out)");
+  });
+});
+
+describe('pii-redactor allowPairs option', () => {
+  const { redact } = require('../services/content/pii-redactor');
+  test('without the option a two-word business name reads as a name, as before', () => {
+    expect(redact('Truly Nolen came by last week.').findings.map((f) => f.type)).toContain('name');
+  });
+  test('with the option the listed pair is not a name, and other names still are', () => {
+    const allowPairs = new Set(['truly nolen']);
+    expect(redact('Truly Nolen came by last week.', { allowPairs }).findings.map((f) => f.type)).not.toContain('name');
+    expect(redact('Truly Nolen and John Smith came by.', { allowPairs }).findings.map((f) => f.type)).toContain('name');
   });
 });

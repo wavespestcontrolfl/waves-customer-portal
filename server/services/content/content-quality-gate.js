@@ -1009,7 +1009,7 @@ const STRUCTURAL_HEADING_WORDS = new Set([
 // structural vocabulary + allowlists absorb ordinary heading prose, and an
 // unlisted pair parks the draft for review (fail-closed by design).
 // Returns the offending pair or null.
-function headingCustomerNamePair(headingText) {
+function headingCustomerNamePair(headingText, allowPairs) {
   let looksLikeFalsePositiveName;
   try {
     ({ looksLikeFalsePositiveName } = require('./pii-redactor')._internals);
@@ -1027,7 +1027,7 @@ function headingCustomerNamePair(headingText) {
     // evaluates "John Smith" ("## about john smith…" sailed through).
     pairRe.lastIndex = m.index + first.length;
     if (STRUCTURAL_HEADING_WORDS.has(first) || STRUCTURAL_HEADING_WORDS.has(last)) continue;
-    if (looksLikeFalsePositiveName(first, last)) continue;
+    if (looksLikeFalsePositiveName(first, last, allowPairs)) continue;
     return `${first} ${last}`;
   }
   return null;
@@ -1078,7 +1078,7 @@ function decodeLinkText(text) {
 // Control" as a person); sentence-cased prose (metas) gets the raw name
 // scan plus the low-confidence backstop. Throws if the redactor is missing
 // — callers fail closed.
-function scanPublicFieldForPii(where, raw, { titleCased }) {
+function scanPublicFieldForPii(where, raw, { titleCased, allowPairs }) {
   if (!String(raw || '').trim()) return null;
   const { redact } = require('./pii-redactor');
   const phoneHit = scanPhones(raw, where);
@@ -1088,11 +1088,11 @@ function scanPublicFieldForPii(where, raw, { titleCased }) {
     return { ok: false, reason: `email_in_${where}` };
   }
   const stripped = stripWavesOfficeAddresses(raw);
-  const fieldScan = redact(stripped);
+  const fieldScan = redact(stripped, { allowPairs });
   const fieldHit = (fieldScan.findings || [])
     .find((f) => BLOCKING_PII_TYPES.has(f.type) && (titleCased ? f.type !== 'name' : true));
   if (fieldHit) return { ok: false, reason: `unredacted_${fieldHit.type}_in_${where}` };
-  if (titleCased && headingCustomerNamePair(stripped)) {
+  if (titleCased && headingCustomerNamePair(stripped, allowPairs)) {
     return { ok: false, reason: `unredacted_name_in_${where}` };
   }
   // A lowercase self-intro meta ("this is john smith ants are back")
@@ -1139,17 +1139,19 @@ function checkRedactionPassedAllLanes(draft) {
   if (!require('../../config/feature-gates').contentPiiAllLanesLive()) {
     return { ok: true, reason: 'content_pii_all_lanes_gate_dark' };
   }
-  return checkRedactionPassed(blankApprovedPublicEntitiesInDraft(draft));
+  return checkRedactionPassed(draft, { allowPairs: approvedEntityPairs() });
 }
 
 // Editorial lanes name public entities the customer-text name heuristic reads
 // as people: owner-approved competitors ("Truly Nolen") and cited public
-// bodies ("National Pest Management Association") — Codex #7646 r1. Replace
-// exactly those names with an allowlisted stand-in before the scan. Exact
-// names only, never a Title Case pattern: a pattern swallowed the customer
-// name in "Homeowners Association and John Smith" (pre-push audit r2). The
-// competitor gate still owns every other business name; a public body not on
-// this list holds the draft for review, which is the safe failure.
+// bodies ("National Pest Management Association") — Codex #7646 r1. Exact
+// names only, never a Title Case pattern (a pattern swallowed the customer
+// name in "Homeowners Association and John Smith", pre-push audit r2), and
+// never by rewriting the text (a stand-in could hide a neighbouring name or
+// break an address, r4-r5): their word pairs go to the redactor's own
+// allowlist instead. The competitor gate still owns every other business
+// name; a public body not on this list holds the draft for review, the safe
+// failure.
 const PUBLIC_BODIES = [
   'National Pest Management Association', 'Florida Pest Management Association', 'NPMA',
   'University of Florida IFAS Extension', 'UF/IFAS Extension', 'UF IFAS Extension', 'University of Florida', 'UF/IFAS', 'IFAS',
@@ -1161,50 +1163,40 @@ const PUBLIC_BODIES = [
   'Florida Fish and Wildlife Conservation Commission', 'Florida Medical Entomology Laboratory', 'National Weather Service',
 ];
 
-// A one-word alias is exempt only when it is a brand, never a common surname:
-// the approved list's bare 'massey' would otherwise clear "John Massey".
-const SINGLE_WORD_BRANDS = new Set(['orkin', 'terminix', 'trugreen', 'aptive', 'taexx']);
-
 function approvedCompetitorNames() {
   const { COMPETITORS, OWNER_APPROVED_AUTOPUBLISH_IDS } = require('./competitor-facts');
   return COMPETITORS
     .filter((c) => OWNER_APPROVED_AUTOPUBLISH_IDS.includes(c.id))
     .flatMap((c) => [c.name, ...(c.aliases || [])])
-    .filter((n) => n && (/\s/.test(n.trim()) || SINGLE_WORD_BRANDS.has(n.trim().toLowerCase())))
-    .sort((a, b) => b.length - a.length);
+    .filter(Boolean);
 }
 
-function blankApprovedPublicEntities(text) {
-  if (!text) return text;
-  // Each capitalized word becomes 'Waves' (on the redactor's NAME_ALLOWLIST)
-  // and connector words stay, so the text keeps its capitalization: the
-  // redactor's pii_confidence_low test reads the case ratio, and blanking
-  // the only capitalized words of a sentence tripped it. The stand-in is
-  // fenced by ' ; ' on both sides so it can never join a neighbouring
-  // capitalized word into one allowlisted run: "Orkin John Smith" must
-  // still read John Smith as a name (pre-push audit r4).
-  const standIn = (span) => `; ${span.split(/( +)/).map((w) => (/^[A-Z]/.test(w) ? 'Waves' : w)).join('')} ;`;
-  const names = [...approvedCompetitorNames(), ...PUBLIC_BODIES].sort((a, b) => b.length - a.length);
-  let out = String(text);
-  for (const name of names) {
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, ' +');
-    out = out.replace(new RegExp(`(^|[^\\w])(${escaped})(?![\\w])`, 'gi'), (m, pre, hit) => pre + standIn(hit));
+// Adjacent-word pairs of every approved name, lowercased: the redactor's name
+// heuristic judges capitalized PAIRS, so these are what it must not read as a
+// person (same mechanism as its service-area CITY_PAIR_ALLOWLIST). One-word
+// names add no pair, so a bare alias like 'massey' cannot clear "John Massey",
+// and a customer pair touching an approved name ("Orkin John Smith") is still
+// read. The draft text is never rewritten, so addresses, phones and emails
+// are scanned exactly as written.
+function approvedEntityPairs() {
+  const pairs = new Set();
+  const words = (name) => String(name).toLowerCase().split(/\s+/).filter(Boolean);
+  for (const name of [...approvedCompetitorNames(), ...PUBLIC_BODIES]) {
+    const w = words(name);
+    for (let i = 0; i + 1 < w.length; i += 1) pairs.add(`${w[i]} ${w[i + 1]}`);
   }
-  return out;
+  // "The University of Florida ..." opens a sentence, and the redactor reads
+  // the capitalized "The University" as a pair. Public bodies only: some
+  // competitor names start with a surname ("Massey", "Turner"), and "The
+  // Massey family" must still hold the draft.
+  for (const name of PUBLIC_BODIES) {
+    const w = words(name);
+    if (w.length > 1) pairs.add(`the ${w[0]}`);
+  }
+  return pairs;
 }
 
-function blankApprovedPublicEntitiesInDraft(draft) {
-  const fm = draft?.frontmatter || {};
-  const seo = (o) => ({
-    ...o,
-    ...['title', 'meta_description', 'metaTitle', 'metaDescription']
-      .filter((k) => typeof o[k] === 'string')
-      .reduce((acc, k) => ({ ...acc, [k]: blankApprovedPublicEntities(o[k]) }), {}),
-  });
-  return { ...seo(draft || {}), body: blankApprovedPublicEntities(draft?.body), frontmatter: seo(fm) };
-}
-
-function checkRedactionPassed(draft) {
+function checkRedactionPassed(draft, { allowPairs } = {}) {
   // Exact licensed-photo attribution lines (a photographer's name, a long
   // numeric Commons URL) are catalog text, not customer PII — Codex r7.
   const body = require('./licensed-photo-library').blankLibraryPhotoAttributions(String(draft.body || ''));
@@ -1254,18 +1246,18 @@ function checkRedactionPassed(draft) {
     const headingText = (body.match(/^#{1,6}\s.*$/gm) || []).join('\n');
     if (headingText) {
       const strippedHeadings = stripWavesOfficeAddresses(headingText);
-      const headingScan = redact(strippedHeadings);
+      const headingScan = redact(strippedHeadings, { allowPairs });
       const headingHit = (headingScan.findings || [])
         .find((f) => BLOCKING_PII_TYPES.has(f.type) && f.type !== 'name');
       if (headingHit) {
         return { ok: false, reason: `unredacted_${headingHit.type}_in_heading` };
       }
-      if (headingCustomerNamePair(strippedHeadings)) {
+      if (headingCustomerNamePair(strippedHeadings, allowPairs)) {
         return { ok: false, reason: 'unredacted_name_in_heading' };
       }
     }
     const scanBody = body.replace(/^#{1,6}\s.*$/gm, '');
-    const scanned = redact(stripWavesOfficeAddresses(scanBody));
+    const scanned = redact(stripWavesOfficeAddresses(scanBody), { allowPairs });
     const hit = (scanned.findings || []).find((f) => BLOCKING_PII_TYPES.has(f.type));
     if (hit) return { ok: false, reason: `unredacted_${hit.type}_in_body` };
     // 'low' confidence means the redactor itself says its heuristics were
@@ -1300,7 +1292,7 @@ function checkRedactionPassed(draft) {
       ['meta_description', joinFields(draft.meta_description, fm.meta_description, draft.metaDescription, fm.metaDescription)],
     ];
     for (const [where, raw] of seoFields) {
-      const hit = scanPublicFieldForPii(where, raw, { titleCased: where === 'title' });
+      const hit = scanPublicFieldForPii(where, raw, { titleCased: where === 'title', allowPairs });
       if (hit) return hit;
     }
   } catch (err) {
