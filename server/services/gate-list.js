@@ -63,6 +63,25 @@ function readGateIndex() {
   return names;
 }
 
+// Whether Settings → Features may flip a gate, and if not, the one-line
+// reason the row shows. The same check the Intelligence Bar's
+// set_railway_gate applies (a plain on/off gate with a description line), plus
+// the page's own exclusions: the flip switch itself stays Railway-only.
+const FLIP_SWITCH = 'GATE_SETTINGS_GATE_FLIP';
+function flipStatus(name, entry) {
+  if (name === FLIP_SWITCH) return { flippable: false, notFlippableReason: 'This switch turns gate flipping on and off, so it is set in Railway only.' };
+  if (!entry) return { flippable: false, notFlippableReason: 'Not in the gate catalogue (no description line in feature-gates.js yet). Set it in Railway.' };
+  if (entry.kind === 'mode') return { flippable: false, notFlippableReason: 'Takes a mode, timestamp or list, not just on/off. Set it in Railway.' };
+  if (!entry.boolean) return { flippable: false, notFlippableReason: 'The code does not show it is a plain on/off switch. Set it in Railway.' };
+  if (!entry.description) return { flippable: false, notFlippableReason: 'No description line in feature-gates.js yet, so it cannot be flipped here. Set it in Railway.' };
+  return { flippable: true, notFlippableReason: null };
+}
+
+// GATE_* names a gate's description says it depends on ("needs GATE_Y").
+function mentionedGates(name, description) {
+  return [...new Set(String(description || '').match(/GATE_[A-Z0-9_]*[A-Z0-9]/g) || [])].filter((n) => n !== name);
+}
+
 function listGates() {
   let catalog = new Map();
   try {
@@ -81,8 +100,10 @@ function listGates() {
       ...gateSetting(name),
       readByCode: read.has(name),
       description: catalog.get(name)?.description || read.get(name) || null,
+      inverted: catalog.get(name)?.inverted === true,
+      ...flipStatus(name, catalog.get(name)),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-module.exports = { listGates, gateSetting };
+module.exports = { listGates, gateSetting, flipStatus, mentionedGates, FLIP_SWITCH };

@@ -693,3 +693,51 @@ describe("Settings audit fixes", () => {
     expect(screen.queryByText("Second link")).not.toBeInTheDocument();
   });
 });
+
+// Settings → Features flip switches (owner 2026-11-06, GATE_SETTINGS_GATE_FLIP):
+// a switch only on a flippable row and only when the server says the viewer
+// may flip; turning a gate on needs its name typed before Confirm unlocks, and
+// Confirm sends exactly the ticket the preview returned.
+describe("Feature gates flip switch", () => {
+  const gates = [
+    { name: "GATE_SYNTH_FLIP", set: false, value: null, readByCode: true, description: "Synthetic gate.", inverted: false, flippable: true, notFlippableReason: null },
+    { name: "GATE_SYNTH_MODE", set: true, value: "shadow", readByCode: true, description: "Synthetic mode gate.", inverted: false, flippable: false, notFlippableReason: "Takes a mode, timestamp or list, not just on/off. Set it in Railway." },
+  ];
+  function stubGates(flipAvailable) {
+    fetch.mockImplementation(async (url, options = {}) => {
+      const path = String(url).replace(/^\/api/, "");
+      if (path === "/admin/settings/gates") return response({ gates, flipAvailable });
+      if (path === "/admin/settings/gates/GATE_SYNTH_FLIP/preview") return response({
+        gate: "GATE_SYNTH_FLIP", description: "Synthetic gate.", currentValue: "unset", newValue: "true",
+        redeployNotice: "The portal restarts briefly.", customerFacing: false, prerequisites: [], requireTypedName: true, ticket: "ticket-1",
+      });
+      if (path === "/admin/settings/gates/GATE_SYNTH_FLIP/commit") return response({ success: true, gate: "GATE_SYNTH_FLIP", value: "true", redeployNotice: "Restarting." });
+      return response(fixtureFor(url, options));
+    });
+  }
+
+  it("shows no switches unless the server allows flipping", async () => {
+    stubGates(false);
+    mount("gates");
+    expect(await screen.findByText("GATE_SYNTH_FLIP")).toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Takes a mode/)).not.toBeInTheDocument();
+  });
+
+  it("turns a gate on only after its name is typed, with the previewed ticket", async () => {
+    stubGates(true);
+    mount("gates");
+    expect(await screen.findByText(/Takes a mode, timestamp or list/)).toBeInTheDocument();
+    expect(screen.getAllByRole("switch")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("switch", { name: "Turn on GATE_SYNTH_FLIP" }));
+    expect(await screen.findByText("The portal restarts briefly.")).toBeInTheDocument();
+    const confirm = screen.getByRole("button", { name: "Turn on" });
+    expect(confirm).toBeDisabled();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "GATE_SYNTH_FLIP" } });
+    expect(confirm).not.toBeDisabled();
+    fireEvent.click(confirm);
+    expect(await screen.findByText(/GATE_SYNTH_FLIP is now true/)).toBeInTheDocument();
+    const commit = fetch.mock.calls.find(([url]) => String(url).endsWith("/GATE_SYNTH_FLIP/commit"));
+    expect(JSON.parse(commit[1].body)).toEqual({ ticket: "ticket-1", confirmName: "GATE_SYNTH_FLIP" });
+  });
+});

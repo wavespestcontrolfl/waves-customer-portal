@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -26,8 +27,9 @@ const {
   DEFAULT_CALL_ROUTING_CONFIG,
   mergeCallRoutingConfig,
 } = require('../services/call-routing-config');
-const { isEnabled } = require('../config/feature-gates');
-const { listGates } = require('../services/gate-list');
+const { isEnabled, settingsGateFlipLive } = require('../config/feature-gates');
+const { listGates, gateSetting, mentionedGates } = require('../services/gate-list');
+const { ibFullAccess, requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const { decideVoiceRoute } = require('../services/voice-route-decision');
 
 // Each pending OAuth attempt is its own row keyed by `${PREFIX}${stateNonce}`,
@@ -199,7 +201,139 @@ router.get('/linkedin/status', adminAuthenticate, requireAdmin, async (req, res)
 // Owner-only: the public /api/health reply stopped carrying gates (#2853).
 router.get('/gates', adminAuthenticate, requireAdmin, (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ gates: listGates() });
+  // flipAvailable: the switches show only for the owner login while
+  // GATE_SETTINGS_GATE_FLIP is on (owner 2026-11-06); everyone else, and
+  // everyone while it is off, sees the read-only list as before.
+  res.json({ gates: listGates(), flipAvailable: settingsGateFlipLive() && ibFullAccess(req) });
+});
+
+// ── Flip a gate from Settings → Features (owner 2026-11-06) ──────────────
+// Two steps over the Intelligence Bar's own set_railway_gate write (catalogue
+// check, Railway production service only, compare-and-swap on the prior
+// value): /preview returns the card and a signed ticket for exactly that
+// change; /commit writes it only with that ticket, and refuses if the gate
+// changed in between. Owner login only; 404 while GATE_SETTINGS_GATE_FLIP is
+// off. Turning a gate on asks for its name to be typed; off is one click and
+// writes 'false' (some gates read a MISSING variable as on, so 'false' is the
+// only value that turns every on/off gate off).
+const GATE_FLIP_TICKET_TTL_MS = 10 * 60 * 1000;
+// A heuristic for the card's warning, not a block: the description mentions
+// customer messages, money, prices or a public link page.
+const CUSTOMER_FACING_RE = /\b(sms|texts?|texting|e-?mails?|calls?|charges?|invoices?|refunds?|prices?|pricing|payments?|customers?)\b|\/:token/i;
+
+function gateFlipTicket(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', process.env.JWT_SECRET || '').update(`gate-flip.${body}`).digest('base64url');
+  return `${body}.${sig}`;
+}
+
+function readGateFlipTicket(ticket) {
+  const [body, sig] = String(ticket || '').split('.');
+  if (!body || !sig || !process.env.JWT_SECRET) return null;
+  const expected = crypto.createHmac('sha256', process.env.JWT_SECRET).update(`gate-flip.${body}`).digest('base64url');
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  try {
+    return JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function gateFlipEnabled(req, res, next) {
+  if (!settingsGateFlipLive()) return res.status(404).json({ error: 'Not found' });
+  return next();
+}
+
+function flippableGateOr404(req, res) {
+  const gate = listGates().find((g) => g.name === req.params.name);
+  if (!gate) {
+    res.status(404).json({ error: 'That is not a gate this portal reads.' });
+    return null;
+  }
+  if (!gate.flippable) {
+    res.status(400).json({ error: gate.notFlippableReason, code: 'not_flippable' });
+    return null;
+  }
+  return gate;
+}
+
+router.post('/gates/:name/preview', adminAuthenticate, requireAdmin, gateFlipEnabled, requireFullAccess, async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    const gate = flippableGateOr404(req, res);
+    if (!gate) return;
+    const value = req.body?.value;
+    if (value !== 'true' && value !== 'false') {
+      return res.status(400).json({ error: "value must be 'true' or 'false'.", code: 'invalid_value' });
+    }
+    const { executeOpsTool } = require('../services/intelligence-bar/ops-tools');
+    const result = await executeOpsTool('set_railway_gate', { gate_name: gate.name, value });
+    if (result?.configured === false) return res.status(503).json({ error: result.message, code: 'railway_not_configured' });
+    if (result?.already_set) return res.json({ alreadySet: true, message: result.message });
+    if (!result?.preview) return res.status(400).json({ error: result?.error || 'The change could not be prepared.', code: result?.code || null });
+
+    const { outsideWritePins } = require('../services/intelligence-bar/outside-write-pins');
+    const pins = outsideWritePins('set_railway_gate', result);
+    const ticket = gateFlipTicket({
+      pins,
+      actorId: req.technicianId || req.technician?.id || null,
+      expiresAt: Date.now() + GATE_FLIP_TICKET_TTL_MS,
+    });
+    // Prerequisites the description names, with their current setting, so the
+    // card can warn that one reads as off. A warning, never a block.
+    const prerequisites = mentionedGates(gate.name, gate.description).map((name) => {
+      const setting = gateSetting(name);
+      return { name, set: setting.set, value: setting.value, readsOn: setting.set && /^(true|1|on)$/i.test(String(setting.value || '').trim()) };
+    });
+    return res.json({
+      gate: gate.name,
+      description: result.controls,
+      currentValue: result.current_value,
+      newValue: result.new_value,
+      inverted: result.inverted === true,
+      meaning: result.meaning,
+      redeployNotice: result.redeploy_notice,
+      customerFacing: CUSTOMER_FACING_RE.test(String(gate.description || '')),
+      prerequisites,
+      requireTypedName: value === 'true',
+      ticket,
+    });
+  } catch (err) { next(err); }
+});
+
+router.post('/gates/:name/commit', adminAuthenticate, requireAdmin, gateFlipEnabled, requireFullAccess, async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    const ticket = readGateFlipTicket(req.body?.ticket);
+    const pins = ticket?.pins || {};
+    const actorId = req.technicianId || req.technician?.id || null;
+    if (!ticket || !(ticket.expiresAt > Date.now()) || ticket.actorId !== actorId || pins._verified_railway_gate_name !== req.params.name) {
+      return res.status(409).json({ error: 'This change card is no longer valid. Open the switch again for a fresh one.', code: 'stale_ticket' });
+    }
+    if (!flippableGateOr404(req, res)) return;
+    if (pins._verified_railway_gate_value === 'true' && req.body?.confirmName !== req.params.name) {
+      return res.status(400).json({ error: 'Type the gate name exactly to turn it on.', code: 'confirm_name_mismatch' });
+    }
+    const { executeOpsTool, recordGateFlipAudit } = require('../services/intelligence-bar/ops-tools');
+    const result = await executeOpsTool('set_railway_gate', { confirmed: true, ...pins });
+    await recordGateFlipAudit({
+      via: 'settings_page',
+      actorId,
+      gate: pins._verified_railway_gate_name,
+      value: pins._verified_railway_gate_value,
+      priorKind: pins._verified_railway_gate_prior_kind,
+      priorValue: pins._verified_railway_gate_prior ?? null,
+      result,
+      ip: req.ip,
+      userAgent: req.get('user-agent') || null,
+    });
+    if (result?.success) return res.json({ success: true, gate: result.gate, value: result.value, redeployNotice: result.redeploy_notice });
+    if (result?.outcome_unknown) return res.status(202).json({ outcomeUnknown: true, warning: result.warning });
+    if (result?.preview_changed) return res.status(409).json({ error: result.error, code: result.code });
+    return res.status(400).json({ error: result?.error || 'The change was not made.', code: result?.code || null });
+  } catch (err) { next(err); }
 });
 
 // =========================================================================

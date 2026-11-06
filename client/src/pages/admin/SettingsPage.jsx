@@ -37,6 +37,11 @@ import {
   CardBody,
   CardHeader,
   CardTitle,
+  Dialog,
+  DialogBody,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
   Field,
   Input,
   Select,
@@ -425,17 +430,22 @@ export default function SettingsPage() {
 // public /api/health reply stopped carrying gates in #2853.
 function useGateList() {
   const [gates, setGates] = useState(null);
+  const [flipAvailable, setFlipAvailable] = useState(false);
   const [error, setError] = useState(null);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let cancelled = false;
     setError(null);
     adminFetch("/admin/settings/gates")
-      .then((d) => { if (!cancelled) setGates(Array.isArray(d?.gates) ? d.gates : []); })
+      .then((d) => {
+        if (cancelled) return;
+        setGates(Array.isArray(d?.gates) ? d.gates : []);
+        setFlipAvailable(d?.flipAvailable === true);
+      })
       .catch((e) => { if (!cancelled) setError(e.message || "Could not load gates"); });
     return () => { cancelled = true; };
   }, [attempt]);
-  return { gates, error, retry: () => setAttempt((n) => n + 1) };
+  return { gates, flipAvailable, error, retry: () => setAttempt((n) => n + 1) };
 }
 
 function GateListError({ error, onRetry }) {
@@ -461,8 +471,110 @@ function GateSettingBadge({ gate }) {
   return <Badge tone={off ? "neutral" : "strong"} dot>{gate.value}</Badge>;
 }
 
+// The switch shows the variable as the code reads it: on for true / 1 / on.
+function gateReadsOn(gate) {
+  return Boolean(gate?.set && gate.value !== null && /^(true|1|on)$/i.test(gate.value.trim()));
+}
+
+// Two steps (owner 2026-11-06, GATE_SETTINGS_GATE_FLIP): the server prepares
+// the change and returns a ticket for exactly that change; Confirm writes it.
+// Turning a gate on asks for its name to be typed; off is one click.
+function GateFlipDialog({ request, onClose, onDone }) {
+  const [preview, setPreview] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+  const [typedName, setTypedName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [outcome, setOutcome] = useState(null);
+  useEffect(() => {
+    if (!request) return undefined;
+    let cancelled = false;
+    setPreview(null);
+    setLoadError(null);
+    setTypedName("");
+    setOutcome(null);
+    adminFetch(`/admin/settings/gates/${encodeURIComponent(request.name)}/preview`, {
+      method: "POST",
+      body: JSON.stringify({ value: request.value }),
+    })
+      .then((d) => { if (!cancelled) setPreview(d); })
+      .catch((e) => { if (!cancelled) setLoadError(e.message || "Could not prepare the change"); });
+    return () => { cancelled = true; };
+  }, [request]);
+
+  const commit = async () => {
+    setBusy(true);
+    try {
+      const d = await adminFetch(`/admin/settings/gates/${encodeURIComponent(request.name)}/commit`, {
+        method: "POST",
+        body: JSON.stringify({ ticket: preview.ticket, confirmName: typedName }),
+      });
+      setOutcome(d?.success
+        ? { ok: true, text: `${request.name} is now ${d.value}. ${d.redeployNotice || ""}` }
+        : { ok: false, text: d?.warning || "Railway did not confirm the change. Check the variable in Railway before trying again." });
+      if (d?.success) onDone();
+    } catch (e) {
+      setOutcome({ ok: false, text: e.message || "The change was not made." });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const nameOk = !preview?.requireTypedName || typedName === request?.name;
+  const offPrereqs = (preview?.prerequisites || []).filter((p) => !p.readsOn);
+  return (
+    <Dialog open={Boolean(request)} onClose={busy ? undefined : onClose} size="md">
+      <DialogHeader>
+        <DialogTitle>{request?.value === "true" ? "Turn on" : "Turn off"} {request?.name}</DialogTitle>
+      </DialogHeader>
+      <DialogBody className="space-y-3">
+        {!preview && !loadError && <ActionFeedback>Preparing the change...</ActionFeedback>}
+        {loadError && <ActionFeedback error>{loadError}</ActionFeedback>}
+        {preview?.alreadySet && <ActionFeedback>{preview.message}</ActionFeedback>}
+        {preview && !preview.alreadySet && (
+          <>
+            <p className="text-ui-body text-zinc-900 u-nums">
+              {preview.gate}: <span className="font-medium">{preview.currentValue}</span> → <span className="font-medium">{preview.newValue}</span>
+            </p>
+            {preview.description && <p className="text-ui-body text-ink-secondary">{preview.description}</p>}
+            {preview.customerFacing && (
+              <ActionFeedback error>
+                This gate looks customer-facing (messages, money, prices or a customer page). Check what it does before you change it.
+              </ActionFeedback>
+            )}
+            {preview.inverted && (
+              <p className="text-ui-body text-ink-secondary">The name suggests "true" turns something OFF.</p>
+            )}
+            {request?.value === "true" && offPrereqs.length > 0 && (
+              <p className="text-ui-body text-ink-secondary">
+                Its description names other gates that read as off now: {offPrereqs.map((p) => p.name).join(", ")}.
+                It may do nothing until they are on.
+              </p>
+            )}
+            <p className="text-ui-body text-ink-secondary">{preview.redeployNotice}</p>
+            {preview.requireTypedName && !outcome?.ok && (
+              <Field label="Type the gate name to turn it on">
+                <Input value={typedName} onChange={(e) => setTypedName(e.target.value)} autoComplete="off" spellCheck={false} />
+              </Field>
+            )}
+          </>
+        )}
+        {outcome && <ActionFeedback error={!outcome.ok}>{outcome.text}</ActionFeedback>}
+      </DialogBody>
+      <DialogFooter>
+        <Button variant="secondary" onClick={onClose} disabled={busy}>{outcome?.ok ? "Close" : "Cancel"}</Button>
+        {preview && !preview.alreadySet && !outcome?.ok && (
+          <Button onClick={commit} disabled={busy || !nameOk || !preview.ticket}>
+            {busy ? "Saving..." : request?.value === "true" ? "Turn on" : "Turn off"}
+          </Button>
+        )}
+      </DialogFooter>
+    </Dialog>
+  );
+}
+
 function FeatureGatesTab() {
-  const { gates, error, retry } = useGateList();
+  const { gates, flipAvailable, error, retry } = useGateList();
+  const [flipRequest, setFlipRequest] = useState(null);
   const setCount = (gates || []).filter((g) => g.set).length;
   return (
     <Card>
@@ -487,8 +599,20 @@ function FeatureGatesTab() {
                   {g.value !== null && g.value !== g.value.trim() && (
                     <div className="mt-1 text-ui-caption text-ink-secondary">The value has extra spaces. Some readers ignore them and some do not; remove them.</div>
                   )}
+                  {flipAvailable && !g.flippable && g.notFlippableReason && (
+                    <div className="mt-1 text-ui-caption text-ink-secondary">{g.notFlippableReason}</div>
+                  )}
                 </div>
-                <GateSettingBadge gate={g} />
+                <div className="flex items-center gap-3">
+                  <GateSettingBadge gate={g} />
+                  {flipAvailable && g.flippable && (
+                    <Switch
+                      checked={gateReadsOn(g)}
+                      onChange={(next) => setFlipRequest({ name: g.name, value: next ? "true" : "false" })}
+                      aria-label={`${gateReadsOn(g) ? "Turn off" : "Turn on"} ${g.name}`}
+                    />
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -496,8 +620,11 @@ function FeatureGatesTab() {
         <p className="mt-4 rounded-md bg-zinc-50 p-3 text-ui-body text-ink-secondary">
           This shows each setting, not whether its feature runs: many features also need
           other gates or checks. Look a gate up in docs/gates-and-env.md before you change it.
-          To change one: Railway Dashboard → Variables. A change restarts the server.
+          {flipAvailable
+            ? " Flip an on/off gate with its switch; anything else: Railway Dashboard → Variables. Every change restarts the server."
+            : " To change one: Railway Dashboard → Variables. A change restarts the server."}
         </p>
+        <GateFlipDialog request={flipRequest} onClose={() => setFlipRequest(null)} onDone={retry} />
       </CardBody>
     </Card>
   );

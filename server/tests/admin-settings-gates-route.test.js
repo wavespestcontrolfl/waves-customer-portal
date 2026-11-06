@@ -13,11 +13,17 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/google-business', () => ({}));
 jest.mock('../services/linkedin', () => ({}));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn() }));
+jest.mock('../services/intelligence-bar/ops-tools', () => ({
+  executeOpsTool: jest.fn(),
+  recordGateFlipAudit: jest.fn(),
+}));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const role = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     if (!role) return res.status(401).json({ error: 'Admin authentication required' });
     req.techRole = role;
+    req.technicianId = req.headers['x-tech-id'] || 'tech-1';
+    req.technician = { id: req.technicianId, email: req.headers['x-email'] || '' };
     return next();
   },
   requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
@@ -30,6 +36,7 @@ let server;
 let base;
 beforeAll(async () => {
   const a = express();
+  a.use(express.json());
   a.use('/api/admin/settings', require('../routes/admin-settings'));
   server = a.listen(0);
   await new Promise((resolve) => server.once('listening', resolve));
@@ -57,6 +64,18 @@ function withEnv(values, fn) {
 
 const row = (name) => listGates().find((g) => g.name === name);
 
+describe('flipStatus', () => {
+  test('flippable = a described on/off gate; everything else says why it is Railway-only', () => {
+    const { flipStatus } = require('../services/gate-list');
+    const catalog = featureGates.knownGateCatalog();
+    expect(flipStatus('GATE_LAWN_MIN_AFTER_DISCOUNT', catalog.get('GATE_LAWN_MIN_AFTER_DISCOUNT')).flippable).toBe(true);
+    expect(flipStatus('GATE_SETTINGS_GATE_FLIP', catalog.get('GATE_SETTINGS_GATE_FLIP'))).toMatchObject({ flippable: false });
+    expect(flipStatus('GATE_REVIEW_AUTO_REPLY', catalog.get('GATE_REVIEW_AUTO_REPLY')).notFlippableReason).toMatch(/mode/);
+    expect(flipStatus('GATE_NOT_IN_CATALOGUE', undefined).notFlippableReason).toMatch(/catalogue/);
+    expect(flipStatus('GATE_X', { kind: 'boolean', boolean: true, description: null }).notFlippableReason).toMatch(/No description/);
+  });
+});
+
 describe('GET /api/admin/settings/gates', () => {
   test('refuses a signed-out caller and a non-admin role', async () => {
     expect((await get(null)).status).toBe(401);
@@ -69,7 +88,121 @@ describe('GET /api/admin/settings/gates', () => {
     expect(res.headers.get('cache-control')).toBe('no-store');
     const body = await res.json();
     expect(body.gates.length).toBe(listGates().length);
-    expect(Object.keys(body.gates[0]).sort()).toEqual(['description', 'name', 'readByCode', 'set', 'value']);
+    expect(Object.keys(body.gates[0]).sort()).toEqual(['description', 'flippable', 'inverted', 'name', 'notFlippableReason', 'readByCode', 'set', 'value']);
+    expect(body.flipAvailable).toBe(false);
+  });
+});
+
+describe('flip a gate from Settings → Features (GATE_SETTINGS_GATE_FLIP)', () => {
+  const ops = require('../services/intelligence-bar/ops-tools');
+  const OWNER = 'contact@wavespestcontrol.com';
+  const FLIPPABLE = () => listGates().find((g) => g.flippable).name;
+  const post = (path, body, { role = 'admin', email = OWNER, techId = 'tech-1' } = {}) => fetch(`${base}/api/admin/settings${path}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${role}`, 'x-email': email, 'x-tech-id': techId, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const previewResult = (name, value) => ({
+    preview: true, gate: name, controls: 'what it does', current_value: 'unset', new_value: value,
+    inverted: false, meaning: 'm', redeploy_notice: 'restarts',
+    target: { service_id: 'svc', environment_id: 'env' }, prior_kind: 'unset', prior_value: null, prior_value_digest: null,
+  });
+  let saved;
+  beforeEach(() => {
+    saved = { gate: process.env.GATE_SETTINGS_GATE_FLIP, secret: process.env.JWT_SECRET, emails: process.env.IB_FULL_ACCESS_EMAILS };
+    process.env.GATE_SETTINGS_GATE_FLIP = 'true';
+    process.env.JWT_SECRET = 'test-secret';
+    delete process.env.IB_FULL_ACCESS_EMAILS;
+    ops.executeOpsTool.mockReset();
+    ops.recordGateFlipAudit.mockReset();
+  });
+  afterEach(() => {
+    for (const [k, env] of [['gate', 'GATE_SETTINGS_GATE_FLIP'], ['secret', 'JWT_SECRET'], ['emails', 'IB_FULL_ACCESS_EMAILS']]) {
+      if (saved[k] === undefined) delete process.env[env]; else process.env[env] = saved[k];
+    }
+  });
+
+  test('gate off: the page stays read-only and both routes answer 404', async () => {
+    delete process.env.GATE_SETTINGS_GATE_FLIP;
+    const body = await (await fetch(`${base}/api/admin/settings/gates`, { headers: { Authorization: 'Bearer admin', 'x-email': OWNER } })).json();
+    expect(body.flipAvailable).toBe(false);
+    expect((await post(`/gates/${FLIPPABLE()}/preview`, { value: 'true' })).status).toBe(404);
+    expect((await post(`/gates/${FLIPPABLE()}/commit`, { ticket: 'x' })).status).toBe(404);
+    expect(ops.executeOpsTool).not.toHaveBeenCalled();
+  });
+
+  test('switches show for the owner login only; another admin gets 403', async () => {
+    const owner = await (await fetch(`${base}/api/admin/settings/gates`, { headers: { Authorization: 'Bearer admin', 'x-email': OWNER } })).json();
+    const office = await (await fetch(`${base}/api/admin/settings/gates`, { headers: { Authorization: 'Bearer admin', 'x-email': 'office@example.com' } })).json();
+    expect([owner.flipAvailable, office.flipAvailable]).toEqual([true, false]);
+    expect((await post(`/gates/${FLIPPABLE()}/preview`, { value: 'true' }, { email: 'office@example.com' })).status).toBe(403);
+  });
+
+  test('refuses a gate that cannot be flipped here, with the reason the row shows', async () => {
+    for (const name of ['GATE_SETTINGS_GATE_FLIP', 'GATE_REVIEW_AUTO_REPLY']) {
+      const res = await post(`/gates/${name}/preview`, { value: 'true' });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe(row(name).notFlippableReason);
+    }
+    expect(ops.executeOpsTool).not.toHaveBeenCalled();
+  });
+
+  test('preview → commit writes exactly the previewed change, asks for the typed name to turn on, and audits it', async () => {
+    const name = FLIPPABLE();
+    ops.executeOpsTool.mockResolvedValueOnce(previewResult(name, 'true'));
+    const preview = await (await post(`/gates/${name}/preview`, { value: 'true' })).json();
+    expect(ops.executeOpsTool).toHaveBeenLastCalledWith('set_railway_gate', { gate_name: name, value: 'true' });
+    expect(preview).toMatchObject({ gate: name, newValue: 'true', requireTypedName: true });
+
+    const noName = await post(`/gates/${name}/commit`, { ticket: preview.ticket, confirmName: 'GATE_WRONG' });
+    expect(noName.status).toBe(400);
+
+    ops.executeOpsTool.mockResolvedValueOnce({ success: true, gate: name, value: 'true', redeploy_notice: 'r' });
+    const res = await post(`/gates/${name}/commit`, { ticket: preview.ticket, confirmName: name });
+    expect(res.status).toBe(200);
+    expect(ops.executeOpsTool).toHaveBeenLastCalledWith('set_railway_gate', expect.objectContaining({
+      confirmed: true,
+      _verified_railway_gate_name: name,
+      _verified_railway_gate_value: 'true',
+      _verified_railway_service_id: 'svc',
+      _verified_railway_environment_id: 'env',
+      _verified_railway_gate_prior_kind: 'unset',
+    }));
+    expect(ops.recordGateFlipAudit).toHaveBeenCalledWith(expect.objectContaining({ via: 'settings_page', gate: name, value: 'true', actorId: 'tech-1' }));
+  });
+
+  test('turning off is one click (no typed name)', async () => {
+    const name = FLIPPABLE();
+    ops.executeOpsTool.mockResolvedValueOnce(previewResult(name, 'false'));
+    const preview = await (await post(`/gates/${name}/preview`, { value: 'false' })).json();
+    expect(preview.requireTypedName).toBe(false);
+    ops.executeOpsTool.mockResolvedValueOnce({ success: true, gate: name, value: 'false' });
+    expect((await post(`/gates/${name}/commit`, { ticket: preview.ticket })).status).toBe(200);
+  });
+
+  test('a forged, expired, other-admin or other-gate ticket writes nothing', async () => {
+    const name = FLIPPABLE();
+    ops.executeOpsTool.mockResolvedValueOnce(previewResult(name, 'false'));
+    const { ticket } = await (await post(`/gates/${name}/preview`, { value: 'false' })).json();
+    ops.executeOpsTool.mockClear();
+    const [body, sig] = ticket.split('.');
+    const forged = `${Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(body, 'base64url').toString()), pins: { _verified_railway_gate_name: name, _verified_railway_gate_value: 'true' } })).toString('base64url')}.${sig}`;
+    const other = listGates().filter((g) => g.flippable)[1].name;
+    for (const [path, payload, opts] of [
+      [`/gates/${name}/commit`, { ticket: forged }, {}],
+      [`/gates/${name}/commit`, { ticket }, { techId: 'tech-2' }],
+      [`/gates/${other}/commit`, { ticket }, {}],
+    ]) {
+      expect((await post(path, payload, opts)).status).toBe(409);
+    }
+    const realNow = Date.now;
+    Date.now = () => realNow() + 11 * 60 * 1000;
+    try {
+      expect((await post(`/gates/${name}/commit`, { ticket })).status).toBe(409);
+    } finally {
+      Date.now = realNow;
+    }
+    expect(ops.executeOpsTool).not.toHaveBeenCalled();
   });
 });
 

@@ -29,6 +29,7 @@ jest.mock('../services/intelligence-bar/circuit-breaker', () => ({
   })),
 }));
 jest.mock('../services/intelligence-bar/tool-events', () => ({ recordToolEvent: jest.fn() }));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => 1) }));
 jest.mock('../config/models', () => ({ FLAGSHIP: 'test-model' }));
 jest.mock('../services/intelligence-bar/pending-actions', () => ({
   TTL_MINUTES: 10,
@@ -428,4 +429,12 @@ test('set_railway_gate: a stored forged gate pin is stripped; the write uses the
   expect(status).toBe(200);
   expect(writes).toHaveLength(1);
   expect(JSON.parse(writes[0][1].body).variables.input).toMatchObject({ name: 'GATE_STAMPED_ZERO_FREE', value: 'true' });
+  // Every confirmed gate write adds one audit_log row naming the gate that was
+  // actually written, the same as a flip from Settings → Features.
+  const { recordAuditEvent } = require('../services/audit-log');
+  expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+    action: 'gate.flip',
+    resource_id: 'GATE_STAMPED_ZERO_FREE',
+    metadata: expect.objectContaining({ via: 'intelligence_bar', value: 'true', outcome: 'written' }),
+  }));
 });
