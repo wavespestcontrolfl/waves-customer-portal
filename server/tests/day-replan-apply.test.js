@@ -263,6 +263,38 @@ describe('a moved visit must still be movable under the fence', () => {
     expect(w.rowWrites()).toEqual([]);
   });
 
+  // GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a"): the move transaction re-reads the told-lock facts.
+  const recurring = { a: { route_order: 1, is_recurring: true, recurring_parent_id: 'p-a' }, b: { route_order: 2, is_recurring: true, recurring_parent_id: 'p-b' },
+    c: { route_order: 3, is_recurring: true, recurring_parent_id: 'p-c' }, d: { route_order: 4, is_recurring: true, recurring_parent_id: 'p-d' } };
+  const toldLockOver = (on) => ({ toldLockOn: () => on, isPersonPlacedVisit: jest.fn(async () => ({ placed: false })) });
+
+  test('told-lock on: its 72-hour reminder went out meanwhile', async () => {
+    const w = plan4({ rowExtra: recurring, over: toldLockOver(true) });
+    w.lockDayRows.mockImplementationOnce(async () => { w.db.reminders.push({ scheduled_service_id: 'b', reminder_72h_sent: true }); });
+    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:reminder_72h_sent', moved: 0 });
+    expect(w.rowWrites()).toEqual([]);
+  });
+
+  test('told-lock on: a person placed it meanwhile (an unreadable history counts as placed)', async () => {
+    const over = toldLockOver(true);
+    over.isPersonPlacedVisit = jest.fn(async () => ({ placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN' }));
+    const w = plan4({ rowExtra: recurring, over });
+    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:person_placed', moved: 0 });
+    expect(w.rowWrites()).toEqual([]);
+  });
+
+  test('told-lock on: a pre-closed 72-hour placeholder does not stop the write', async () => {
+    const w = plan4({ rowExtra: recurring, over: toldLockOver(true) });
+    w.lockDayRows.mockImplementationOnce(async () => { w.db.reminders.push({ scheduled_service_id: 'b', reminder_72h_sent: true, windows_preclosed: true }); });
+    expect(await w.run()).toEqual({ status: 'applied', reason: 'applied', moved: 2 });
+  });
+
+  test('told-lock off: a 72-hour reminder sent meanwhile changes nothing (today)', async () => {
+    const w = plan4({ rowExtra: recurring, over: toldLockOver(false) });
+    w.lockDayRows.mockImplementationOnce(async () => { w.db.reminders.push({ scheduled_service_id: 'b', reminder_72h_sent: true }); });
+    expect(await w.run()).toEqual({ status: 'applied', reason: 'applied', moved: 2 });
+  });
+
   test('its visit now has another live member', async () => {
     const w = plan4({ rowExtra: { ...numbered, a: { route_order: 1, visit_id: 'v-1' } } });
     // The hash cannot see a new mate, but the movability test reads the visit under the lock.

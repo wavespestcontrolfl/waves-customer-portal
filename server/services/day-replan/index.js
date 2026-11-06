@@ -96,7 +96,7 @@ function nightToldLockOn() {
   try {
     const gates = require('../../config/feature-gates');
     return typeof gates.nightToldLockLive === 'function' && gates.nightToldLockLive() === true;
-  } catch (_) {
+  } catch {
     return false;
   }
 }
@@ -633,6 +633,9 @@ function applyDeps() {
   const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
   return {
     fixedReason,
+    // GATE_NIGHT_TOLD_LOCK: the move transaction re-reads the told-lock facts (apply.js recheckVisit).
+    toldLockOn: nightToldLockOn,
+    isPersonPlacedVisit: (row, conn) => require('../auto-dispatch/eligibility').isPersonPlacedVisit(row, conn),
     rowHours,
     excludedStatuses: EXCLUDED_STATUSES,
     // The rebooker's own occupancy statuses for a move: a completed morning visit never blocks an afternoon one.
