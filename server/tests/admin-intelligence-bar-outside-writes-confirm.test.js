@@ -434,7 +434,8 @@ test('set_railway_gate: a stored forged gate pin is stripped; the write uses the
   const { recordAuditEvent } = require('../services/audit-log');
   expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
     action: 'gate.flip',
-    resource_id: 'GATE_STAMPED_ZERO_FREE',
-    metadata: expect.objectContaining({ via: 'intelligence_bar', value: 'true', outcome: 'written' }),
+    metadata: expect.objectContaining({ gate: 'GATE_STAMPED_ZERO_FREE', via: 'intelligence_bar', value: 'true', outcome: 'written' }),
   }));
+  // audit_log.resource_id is a uuid column: a gate name there fails the insert.
+  expect(recordAuditEvent.mock.calls.at(-1)[0].resource_id).toBeUndefined();
 });

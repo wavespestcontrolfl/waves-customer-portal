@@ -777,8 +777,9 @@ async function recordGateFlipAudit({ via, actorId = null, gate, value, priorKind
       actor_id: actorId,
       action: 'gate.flip',
       resource_type: 'railway_variable',
-      resource_id: gate || null,
-      metadata: { via, value, prior_kind: priorKind, prior_value: priorValue, outcome, code: result?.code || null },
+      // resource_id is a uuid column; the gate is a name, so it rides in
+      // metadata (codex #7732).
+      metadata: { gate: gate || null, via, value, prior_kind: priorKind, prior_value: priorValue, outcome, code: result?.code || null },
       ip_address: ip,
       user_agent: userAgent,
       critical: true,
