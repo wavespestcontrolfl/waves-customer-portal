@@ -23,6 +23,7 @@ jest.mock('../services/email-bounce-recovery', () => ({
   ...jest.requireActual('../services/email-bounce-recovery'),
   alertBouncedContactAddress: jest.fn(async () => ({ alerted: true })),
 }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
 jest.mock('../services/email-bounce-rescue', () => ({ rescueBouncedAddress: jest.fn(async () => ({})) }));
 jest.mock('../services/email-bounce-reverify', () => ({
   ...jest.requireActual('../services/email-bounce-reverify'),
@@ -47,6 +48,7 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
   let bounceRecovery;
   let bounceRescue;
   let reverify;
+  let NotificationService;
   let ctx;
   const priorGate = process.env.GATE_CALL_BOUNCE_OTHER_SPELLING;
   const created = { customers: [], templates: [] };
@@ -59,11 +61,13 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     bounceRecovery = require('../services/email-bounce-recovery');
     bounceRescue = require('../services/email-bounce-rescue');
     reverify = require('../services/email-bounce-reverify');
+    NotificationService = require('../services/notification-service');
   });
 
   async function cleanup() {
     for (const id of created.customers) {
       await db('call_email_spelling_retries').where({ customer_id: id }).del();
+      await db('email_messages').where({ recipient_id: id }).del(); // cascades the bounce-recovery ledger
       await db('audit_log').where({ resource_id: id }).del();
       await db('call_log').where({ customer_id: id }).del();
       await db('estimates').where({ customer_id: id }).del();
@@ -354,5 +358,141 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     await flush();
     expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled', email: BOUNCED });
     expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'sequence_cursor_moved' });
+  });
+
+  // ── The tracked email_messages path shares ONE claim with the automation path (P1, pre-push audit) ──────────────────────
+  async function seedBouncedMessage(customerId, over = {}) {
+    const [row] = await db('email_messages').insert({
+      id: randomUUID(), provider: 'sendgrid', recipient_type: 'customer', recipient_id: customerId, recipient_email_snapshot: BOUNCED,
+      subject_snapshot: 'Your estimate', html_snapshot: '<p>Hello</p>', text_snapshot: 'Hello', categories: JSON.stringify(['email_template']),
+      suppression_group_key_snapshot: 'service_operational', status: 'bounced', idempotency_key: `orig-${randomUUID()}`, ...over,
+    }).returning('*');
+    return row;
+  }
+  const hardBounce = { event: 'bounce', type: 'bounce', sg_event_id: 'ev-tracked' };
+  const trackedClaim = (customerId) => db('call_email_spelling_retries').where({ customer_id: customerId, channel: 'email_message' });
+  const recoveryRows = (messageId) => db('email_bounce_recoveries').where({ original_message_id: messageId });
+
+  test('tracked path: a settled other spelling is resent once under an email_message claim; the commit on delivery replaces the customer email and settles the claim', async () => {
+    const customerId = await seedCustomer(BOUNCED);
+    const callId = await seedCall(customerId);
+    const original = await seedBouncedMessage(customerId);
+    const res = await bounceRecovery.attemptRecovery(original, hardBounce);
+    expect(res).toMatchObject({ resent: true, corrected: OTHER, rule: 'call_other_spelling' });
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ to: OTHER }));
+    const [claim] = await trackedClaim(customerId);
+    expect(claim).toMatchObject({ status: 'resending', bounced_email: BOUNCED, retry_email: OTHER, origin_send_id: original.id, source_call_id: callId });
+
+    const [rec] = await recoveryRows(original.id);
+    const recoveryMessage = await db('email_messages').where({ id: rec.recovery_message_id }).first();
+    await bounceRecovery.commitRecoveryOnDelivery(recoveryMessage);
+    expect((await db('customers').where({ id: customerId }).first()).email).toBe(OTHER);
+    expect((await trackedClaim(customerId))[0]).toMatchObject({ status: 'committed', retry_send_id: recoveryMessage.id });
+  });
+
+  test('tracked path, kill switch: the gate switched off between the resend and its delivery overwrites nothing and runs no fanout', async () => {
+    const customerId = await seedCustomer(BOUNCED);
+    await seedCall(customerId);
+    await db('estimates').insert({ customer_id: customerId, customer_email: BOUNCED });
+    const original = await seedBouncedMessage(customerId);
+    await bounceRecovery.attemptRecovery(original, hardBounce);
+    const [rec] = await recoveryRows(original.id);
+    const recoveryMessage = await db('email_messages').where({ id: rec.recovery_message_id }).first();
+
+    delete process.env.GATE_CALL_BOUNCE_OTHER_SPELLING;
+    await bounceRecovery.commitRecoveryOnDelivery(recoveryMessage);
+
+    expect((await db('customers').where({ id: customerId }).first()).email).toBe(BOUNCED);
+    expect((await db('estimates').where({ customer_id: customerId }).first()).customer_email).toBe(BOUNCED);
+    expect((await recoveryRows(original.id))[0]).toMatchObject({ status: 'delivered', record_updated: false });
+    expect((await trackedClaim(customerId))[0]).toMatchObject({ status: 'skipped', reason: 'gate_off' });
+  });
+
+  test('tracked path: when the resend bounces too, the claim fails, the existing alert fires and no call-audio card is raised', async () => {
+    const customerId = await seedCustomer(BOUNCED);
+    await seedCall(customerId);
+    const original = await seedBouncedMessage(customerId);
+    await bounceRecovery.attemptRecovery(original, hardBounce);
+    const [rec] = await recoveryRows(original.id);
+    const recoveryMessage = await db('email_messages').where({ id: rec.recovery_message_id }).first();
+    jest.clearAllMocks();
+    await bounceRecovery.handleRecoveryBounce(recoveryMessage, { event: 'bounce', type: 'bounce' });
+    expect((await trackedClaim(customerId))[0]).toMatchObject({ status: 'failed', reason: 'retry_address_bounced' });
+    expect((await recoveryRows(original.id))[0]).toMatchObject({ status: 'redelivered_bounced' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+  });
+
+  test('an automation claim blocks the tracked path: nothing is sent, no alert, no card, a quiet ledger status', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    expect(await ledger(ctx.customerId)).toHaveLength(1);
+    jest.clearAllMocks();
+
+    const original = await seedBouncedMessage(ctx.customerId);
+    const res = await bounceRecovery.attemptRecovery(original, hardBounce);
+
+    expect(res).toEqual({ skipped: 'other_spelling_already_tried' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(await db('email_messages').where({ recipient_email_snapshot: OTHER, recipient_id: ctx.customerId })).toEqual([]);
+    expect((await recoveryRows(original.id))[0]).toMatchObject({ status: 'other_spelling_already_tried', correction_rule: 'call_other_spelling' });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
+    expect(await ledger(ctx.customerId)).toHaveLength(1);
+  });
+
+  test('a tracked claim blocks the automation path: the bounce cancels, alerts and rescues as today, no second resend', async () => {
+    ctx = await setup({ sent: 1 });
+    const original = await seedBouncedMessage(ctx.customerId);
+    await bounceRecovery.attemptRecovery(original, hardBounce);
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(await trackedClaim(ctx.customerId)).toHaveLength(1);
+    jest.clearAllMocks();
+
+    await webhook.handleEvent(bounce(ctx.send));
+    await flush();
+
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled', email: BOUNCED });
+    expect(await ledger(ctx.customerId)).toHaveLength(1);
+    expect((await ledger(ctx.customerId))[0].channel).toBe('email_message');
+    expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledTimes(1);
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('a claim in ANY status blocks a later try: a failed automation retry stops the tracked path too', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await db('call_email_spelling_retries').where({ customer_id: ctx.customerId }).update({ status: 'failed', reason: 'retry_address_bounced' });
+    const original = await seedBouncedMessage(ctx.customerId);
+    expect(await bounceRecovery.attemptRecovery(original, hardBounce)).toEqual({ skipped: 'other_spelling_already_tried' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('two different bounced messages for the same customer + address race: exactly one resend, one claim row', async () => {
+    const customerId = await seedCustomer(BOUNCED);
+    await seedCall(customerId);
+    const first = await seedBouncedMessage(customerId);
+    const second = await seedBouncedMessage(customerId);
+    const results = await Promise.all([
+      bounceRecovery.attemptRecovery(first, { ...hardBounce, sg_event_id: 'ev-r1' }),
+      bounceRecovery.attemptRecovery(second, { ...hardBounce, sg_event_id: 'ev-r2' }),
+    ]);
+    expect(results.filter((r) => r.resent)).toHaveLength(1);
+    expect(results.filter((r) => r.skipped === 'other_spelling_already_tried')).toHaveLength(1);
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(await trackedClaim(customerId)).toHaveLength(1);
+  });
+
+  test('a recovery resumed from a dispute-hold park keeps its own claim (same original message), a different message does not', async () => {
+    const customerId = await seedCustomer(BOUNCED);
+    await seedCall(customerId);
+    const claims = require('../services/call-email-spelling-retry');
+    const mine = randomUUID();
+    const args = { customerId, bouncedEmail: BOUNCED, retryEmail: OTHER, channel: 'email_message', originId: mine };
+    expect((await claims.claimRetry({ ...args, resumeOriginId: mine }, db)).claimed).toBe(true);
+    expect((await claims.claimRetry({ ...args, resumeOriginId: mine }, db)).claimed).toBe(true);
+    expect((await claims.claimRetry({ ...args, originId: randomUUID(), resumeOriginId: randomUUID() }, db)).claimed).toBe(false);
+    expect(await trackedClaim(customerId)).toHaveLength(1);
   });
 });

@@ -16,6 +16,9 @@
  *                           is replaced with it (the same fanout the rescue's auto-apply uses), the row is
  *                           `committed`, and one audit row is written.
  *
+ * The table is ALSO the once-only claim of the tracked email_messages path (channel `email_message`, claimRetry/settleClaim
+ * below, used by email-bounce-recovery.js): one row per customer + bounced address, whichever path takes it first.
+ *
  * Same safety as the ledger path: a positive link (the enrollment's customer is the source call's customer and holds the
  * bounced address as primary email), not the same Gmail inbox, no active suppression on the other spelling, not owned by
  * another customer or lead, never tried before for this customer + address, fail closed (any error before the first
@@ -27,6 +30,7 @@ const { callBounceOtherSpellingLive } = require('../config/feature-gates');
 
 const TABLE = 'call_email_spelling_retries';
 const CHANNEL = 'automation';
+const EMAIL_CHANNEL = 'email_message';
 const NO_RETRY = Object.freeze({ retried: false });
 
 const norm = (value) => String(value || '').trim().toLowerCase();
@@ -35,6 +39,48 @@ function enrollmentRole(enrollment) {
   const meta = enrollment?.metadata;
   if (meta && typeof meta === 'object') return meta.recipient_role || null;
   try { return JSON.parse(meta || '{}').recipient_role || null; } catch { return null; }
+}
+
+/**
+ * THE once-only claim for BOTH delivery paths (automation_step_sends and the tracked email_messages recovery): one row per
+ * customer + bounced address, taken with a single INSERT ... ON CONFLICT DO NOTHING on UNIQUE(customer_id, bounced_email),
+ * so exactly one concurrent caller wins and the loser sends nothing. A row of any status, from either path, is a lost
+ * claim ("tried before"). `resumeOriginId` (tracked path only) lets the SAME original message take its own still-`resending`
+ * claim back when a dispute-hold park resumes it; it can never have sent anything yet. Returns { claimed, id }.
+ */
+async function claimRetry({ customerId, sourceCallId = null, bouncedEmail, retryEmail, channel, originId = null, resumeOriginId = null }, client = db) {
+  const bounced = norm(bouncedEmail);
+  const [row] = await client(TABLE).insert({
+    customer_id: customerId,
+    source_call_id: sourceCallId,
+    bounced_email: bounced,
+    retry_email: norm(retryEmail),
+    channel,
+    origin_send_id: originId,
+    status: 'resending',
+  }).onConflict(['customer_id', 'bounced_email']).ignore().returning(['id']);
+  if (row) return { claimed: true, id: row.id };
+  if (!resumeOriginId) return { claimed: false };
+  const own = await client(TABLE)
+    .where({ customer_id: customerId, bounced_email: bounced, channel, origin_send_id: resumeOriginId, status: 'resending' }).first('id');
+  return own ? { claimed: true, id: own.id } : { claimed: false };
+}
+
+/**
+ * Move a claim out of `resending` (only from there, so it is idempotent and a settled row never flips). The tracked path
+ * finds its claim by customer + bounced address; failure to settle is logged, never thrown: the send already happened.
+ */
+async function settleClaim({ customerId, bouncedEmail, channel = EMAIL_CHANNEL }, { status, reason = null, retrySendId = null }, client = db) {
+  try {
+    await client(TABLE)
+      .where({ customer_id: customerId, bounced_email: norm(bouncedEmail), channel, status: 'resending' })
+      .update({
+        status, reason, ...(retrySendId ? { retry_send_id: retrySendId } : {}),
+        committed_at: status === 'committed' ? new Date() : null, updated_at: new Date(),
+      });
+  } catch (err) {
+    logger.warn(`[call-email-spelling-retry] could not settle the claim as ${status}: ${err.code || err.name}`);
+  }
 }
 
 /** The settled other spelling for this send's customer + address, after every safety check, or null. */
@@ -70,16 +116,10 @@ async function startRetry({ sendRow, bounced }, client) {
   const found = await eligibleOtherSpelling({ enrollment, bounced }, client);
   if (!found) return NO_RETRY;
 
-  const [row] = await client(TABLE).insert({
-    customer_id: found.customerId,
-    source_call_id: found.sourceCallId,
-    bounced_email: bounced,
-    retry_email: found.other,
-    channel: CHANNEL,
-    origin_send_id: sendRow.id,
-    status: 'resending',
-  }).onConflict(['customer_id', 'bounced_email']).ignore().returning(['id']);
-  if (!row) return NO_RETRY; // tried before for this customer + address: never twice
+  const row = await claimRetry({
+    customerId: found.customerId, sourceCallId: found.sourceCallId, bouncedEmail: bounced, retryEmail: found.other, channel: CHANNEL, originId: sendRow.id,
+  }, client);
+  if (!row.claimed) return NO_RETRY; // tried before for this customer + address, by either path: never twice
 
   const { rewindEnrollmentToStep } = require('./automation-runner');
   const rewound = await rewindEnrollmentToStep({ enrollment, stepId: sendRow.step_id, email: found.other }, client);
@@ -185,4 +225,4 @@ async function onAutomationDelivered({ sendRow }, client = db) {
   return { committed: true };
 }
 
-module.exports = { onAutomationHardBounce, onAutomationDelivered, CHANNEL, TABLE };
+module.exports = { onAutomationHardBounce, onAutomationDelivered, claimRetry, settleClaim, CHANNEL, EMAIL_CHANNEL, TABLE };
