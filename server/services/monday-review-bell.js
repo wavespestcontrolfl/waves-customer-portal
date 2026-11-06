@@ -11,6 +11,10 @@
 //      the last look before they expire. Judged the way needs-me judges them
 //      (needs-me.js mapAlertRow): known needs-you severity only, never an
 //      "unsorted" row, never an Activity-only row, never Claude's queue.
+//      With GATE_MONDAY_FELL_OFF_LINE on, list 1 is instead the customer alerts that
+//      fell off the bell after 3 quiet days with no reply, by name (the quiet
+//      fall-off closes a row after 72 hours, so the unread list above can no longer
+//      fire; monday-review-fell-off.js).
 //   2. Overdue promises Waves made to callers: the watchdog's own selection
 //      (call-commitments selectOverdue, then the internal-test filter and the
 //      still-open fence). Past 5 of them the watchdog's daily row is
@@ -34,6 +38,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { mondayReviewBellLive } = require('../config/feature-gates');
+// GATE_MONDAY_FELL_OFF_LINE, read at call time and guarded: a test that mocks feature-gates without the reader reads off.
+const fellOffLineLive = () => require('../config/feature-gates').mondayFellOffLineLive?.() === true;
 const { etDateString } = require('../utils/datetime-et');
 const { MAX_HEADLINE_CHARS, MAX_WHY_CHARS, cutAtWord, raiseAdminAlert } = require('./admin-alert-compose');
 
@@ -202,11 +208,41 @@ async function loadOpenPastVisits({ now = new Date(), database = db, findStaleVi
 // Assembly (pure)
 // ---------------------------------------------------------------------------
 
+// The detail line that says how many listed alerts could not be checked for a reply (none = no line).
+function uncheckedNote(alerts) {
+  const n = Math.min(alerts.count, alerts.uncheckedCount ?? (alerts.unchecked ? alerts.count : 0));
+  if (!(n > 0)) return [];
+  return [`   The reply check could not run for ${n} of these, so ${n === 1 ? 'that one may have been' : 'those may have been'} answered.`];
+}
+
+// List 1 with GATE_MONDAY_FELL_OFF_LINE on: the customer alerts the quiet rule closed that no person answered, by name.
+// The first ENTRY_SHOWN, newest first, then "+N more". Page: the bell's Recently done list, which offers Reopen for
+// exactly these rows for 7 days.
+function fellOffList(alerts) {
+  const { entryLine, ENTRY_SHOWN } = require('./monday-review-fell-off');
+  const shown = (alerts.entries || []).slice(0, ENTRY_SHOWN);
+  const more = alerts.count - shown.length;
+  return {
+    key: 'fellOff',
+    count: alerts.count,
+    phrase: `${alerts.count}${alerts.capped ? '+' : ''} customer ${plural(alerts.count, 'alert', 'alerts')} fell off with no reply`,
+    detail: [
+      `Customer alerts that fell off the bell after 3 quiet days with no reply: ${alerts.count}${alerts.capped ? '+' : ''}. Page: the bell, Recently done (Reopen puts one back).`,
+      ...uncheckedNote(alerts),
+      ...shown.map((entry) => entryLine(entry, shortDate)),
+      ...(more > 0 ? [`   +${more} more`] : []),
+    ].join('\n'),
+    link: '/admin/dashboard',
+  };
+}
+
 // The lists with a count above zero, in the owner's order, each with the short
 // phrase for the "why" and the detail text.
 function buildLists({ alerts, promises, drafts, visits }) {
   const lists = [];
-  if (alerts?.count > 0) {
+  if (alerts?.kind === 'fell-off') {
+    if (alerts.count > 0) lists.push(fellOffList(alerts));
+  } else if (alerts?.count > 0) {
     const lines = (alerts.headlines || []).map((h) => `   - ${cutAtWord(h.headline, HEADLINE_CHARS)} (idle since ${shortDate(h.at)})`);
     lists.push({
       key: 'alerts',
@@ -287,8 +323,21 @@ async function closeReviewRows({ database = db, now = new Date(), keepKey = null
   return Number(await episodes.closeAdminAlertKeys(database, keys, reason, { now, resolution })) || 0;
 }
 
+// List 1: the 14-day unread list, or (GATE_MONDAY_FELL_OFF_LINE) the customer alerts that fell off with no reply.
+// The fell-off list fails open: if it cannot be read at all, the week goes out with the other three lists and a warning
+// (the 14-day list keeps the module's stance that a read failure throws).
+async function loadFirstList(ctx) {
+  if (!fellOffLineLive()) return loadUnreadAlerts(ctx);
+  try {
+    return await require('./monday-review-fell-off').loadFellOffAlerts(ctx);
+  } catch (err) {
+    logger.warn(`[monday-review] fell-off list not read; this week goes out without it: ${require('./notification-service').safeErrorSummary(err)}`);
+    return { kind: 'fell-off', count: 0, capped: false, unchecked: true, entries: [] };
+  }
+}
+
 const defaultLoaders = {
-  alerts: loadUnreadAlerts,
+  alerts: loadFirstList,
   promises: loadOverduePromises,
   drafts: loadDraftOnlyVisits,
   visits: loadOpenPastVisits,

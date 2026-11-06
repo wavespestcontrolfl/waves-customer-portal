@@ -259,5 +259,5 @@ async function unsendAdminAlertFromClaude(id, { at, by, role, technicianId = nul
 module.exports = {
   sendAdminAlertToClaude, unsendAdminAlertFromClaude, withSendToClaudeFields, cleanNote, plainText, byStamp, uuidOrNull, UUID_RE,
   sendRefusal, sendToClaudeLive, sentPatch,
-  CONTACT_CATEGORIES, CONTACT_TRIGGERS, SYSTEM_CATEGORIES, CHECK_CLASSES,
+  CONTACT_CATEGORIES, CONTACT_TRIGGERS, SYSTEM_CATEGORIES, CHECK_CLASSES, declaredContact,
 };
