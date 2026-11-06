@@ -243,10 +243,10 @@ async function memberEligible(conn, member, source) {
 }
 
 /**
- * Which visits may be promised only the DAY? Map<id, { eligible, level }>, one bulk read per fact, stop-wide: every live
+ * Which visits may be promised only the DAY? Map<id, { eligible, level, failed? }>, one bulk read per fact, stop-wide: every live
  * member of a visit's stop must be eligible, else none is. `level` comes from loadPromiseLevels; a level of 'hour' is
- * never eligible (the customer already has an hour). Any read failure: not eligible, level 'hour' (fail closed: the
- * customer keeps today's window copy). A recurring child is judged by who placed its slot (isCustomerPickedVisit, one read
+ * never eligible (the customer already has an hour). Any read failure: not eligible, level 'hour', failed true (fail
+ * closed: the customer keeps today's window copy; `failed` is the only way to tell it from a real 'hour' verdict). A recurring child is judged by who placed its slot (isCustomerPickedVisit, one read
  * per child of the stop). A first or one-time visit needs an office booking source (OFFICE_BOOKING_SOURCES; any other source
  * is rejected without a read) AND the same customer-pick check, since a customer's self-service reschedule leaves the office
  * source in place.
@@ -269,7 +269,9 @@ async function dayOnlyEligibility(conn, ids, now = new Date()) {
       result.set(id, { eligible, level });
     }
   } catch {
-    for (const id of ids) result.set(id, { eligible: false, level: 'hour' });
+    // failed: true marks a READ FAILURE (as opposed to a real "customer was told an hour" verdict, which has the same
+    // eligible/level). A screen ignores it and keeps showing the hour; an AI context (day-only-ai-context.js) says only the day.
+    for (const id of ids) result.set(id, { eligible: false, level: 'hour', failed: true });
   }
   return result;
 }
@@ -305,11 +307,11 @@ function composeStartAt(row) {
 }
 
 /**
- * Should a customer screen show the HOUR for each of these visits? Map<id, { showHour, level, eligible }>. Rows carry at
+ * Should a customer screen show the HOUR for each of these visits? Map<id, { showHour, level, eligible, failed? }>. Rows carry at
  * least id, scheduled_date and window_start. Gate off: showHour true for every row and NO database read. Gate on:
  * showHour = !eligible || the start is missing/invalid || it is within DAY_PROMISE_CUTOFF_HOURS. One bulk eligibility
  * read for all rows. A failed read: showHour true for every row (the safe side for a screen: the customer keeps seeing
- * the hour they may have been told).
+ * the hour they may have been told) and `failed: true` on each, so an AI context can choose the other safe side.
  */
 async function loadTimeDisplay(conn, rows, now = new Date()) {
   const out = new Map();
@@ -320,12 +322,14 @@ async function loadTimeDisplay(conn, rows, now = new Date()) {
   }
   const verdicts = await dayOnlyEligibility(conn, list.map((r) => r.id), now);
   for (const r of list) {
-    const { eligible, level } = verdicts.get(r.id) || { eligible: false, level: 'hour' };
+    const { eligible, level, failed } = verdicts.get(r.id) || { eligible: false, level: 'hour' };
     const hours = hoursUntil(composeStartAt(r), now);
     out.set(r.id, {
       showHour: !eligible || !Number.isFinite(hours) || hours <= DAY_PROMISE_CUTOFF_HOURS,
       level,
       eligible,
+      // Only on a failed eligibility read; every other row keeps its shape. Callers that ignore it behave as before.
+      ...(failed === true ? { failed: true } : {}),
     });
   }
   return out;
