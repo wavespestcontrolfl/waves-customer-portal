@@ -111,12 +111,13 @@ test('only an enabled campaign Google says cannot serve counts; a pause or an en
   expect(problems.campaigns.map((c) => c.id)).toEqual(['1', '2']);
 });
 
-test('Google is asked for exactly the disapproved ads that would serve: ad, ad group and campaign enabled', async () => {
+test('Google is asked for exactly the disapproved ads that would serve: ad, ad group and campaign enabled, campaign not ended', async () => {
   google({ ads: [ad()] });
   const { disapproved } = await readGoogle();
   const gaql = mockCustomer.query.mock.calls[0][0].replace(/\s+/g, ' ');
+  // An ended campaign keeps status ENABLED, so its disapproved ads are left out by primary status, before the limit.
   for (const filter of ["ad_group_ad.policy_summary.approval_status = 'DISAPPROVED'", "ad_group_ad.status = 'ENABLED'",
-    "ad_group.status = 'ENABLED'", "campaign.status = 'ENABLED'", 'LIMIT 201']) {
+    "ad_group.status = 'ENABLED'", "campaign.status = 'ENABLED'", "campaign.primary_status != 'ENDED' LIMIT 201"]) {
     expect(gaql).toContain(filter);
   }
   expect(disapproved).toEqual({ capped: false, ads: [{ campaign: 'Test Search Campaign', adGroup: 'Pests', adId: '901', topics: ['DESTINATION_NOT_WORKING'] }] });

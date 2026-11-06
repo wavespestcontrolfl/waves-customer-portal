@@ -55,10 +55,11 @@ const when = (at) => `${formatETDayDate(new Date(at))} at ${formatETTime(new Dat
 // Google Ads: campaigns that cannot serve and disapproved ads
 // ---------------------------------------------------------------------------
 
-// Every enabled ad Google disapproved in an enabled ad group of an enabled campaign, filtered by Google. The card's
-// disapprovals read lists the first 50 ads not fully approved, which can hide a disapproved one past them, and a set
-// that may be incomplete must never read as clean. A paused campaign's ads never count: the pause is someone's own
-// choice, and a disapproval there rings at the first check after the campaign is turned back on.
+// Every enabled ad Google disapproved in an enabled ad group of an enabled campaign that has not ended, filtered by
+// Google before the limit. The card's disapprovals read lists the first 50 ads not fully approved, which can hide a
+// disapproved one past them, and a set that may be incomplete must never read as clean. A paused or ended campaign's
+// ads never count: a pause and an end date are someone's own choice, and a disapproval there rings at the first check
+// after the campaign is turned back on. (An ended campaign keeps status ENABLED; its primary status says ENDED.)
 async function readDisapprovedAds(customer) {
   const rows = await customer.query(`
     SELECT campaign.name, ad_group.name, ad_group_ad.ad.id, ad_group_ad.policy_summary.policy_topic_entries
@@ -67,6 +68,7 @@ async function readDisapprovedAds(customer) {
       AND ad_group_ad.status = 'ENABLED'
       AND ad_group.status = 'ENABLED'
       AND campaign.status = 'ENABLED'
+      AND campaign.primary_status != 'ENDED'
     LIMIT ${MAX_ADS + 1}`);
   const ads = rows.slice(0, MAX_ADS).map((row) => ({
     campaign: row.campaign?.name || null,
