@@ -675,11 +675,10 @@ async function searchKnowledgeBase(query, { forTech = false, technician = false 
 }
 
 
-// The tech's own truck (resolved from the login, never from input), behind
-// GATE_TRUCK_KIT; an admin borrowing the tech reads has no truck.
+// The tech's own truck (resolved from the login, never from input); an admin
+// borrowing the tech reads has no truck.
 async function getMyTruckKit(techContext) {
   const truckKit = require('../truck-kit');
-  if (!truckKit.truckKitEnabled()) return { enabled: false, error: 'Truck kit is off (GATE_TRUCK_KIT)' };
   const techId = techContext?.techId || null;
   if (!techId) return { error: 'This read needs a technician login' };
   try {

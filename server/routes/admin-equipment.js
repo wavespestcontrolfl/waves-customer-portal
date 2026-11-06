@@ -50,11 +50,8 @@ function conditionValue(raw) {
 }
 
 // kit_key (PR 2): what the tool is, lowercase snake_case; blank clears it.
-// Only while GATE_TRUCK_KIT is on: the kill switch covers the writer too, so
-// nothing can preconfigure holds in the dark.
 function kitKeyValue(raw) {
   if (raw === undefined) return { skip: true };
-  if (!require('../services/truck-kit').truckKitEnabled()) return { error: 'kit_key needs GATE_TRUCK_KIT' };
   const key = normalizeKitKey(raw);
   if (key && !isValidKitKey(key)) return { error: 'kit_key must be letters, digits and underscores, 2 to 60 characters' };
   return { value: key };
@@ -106,13 +103,10 @@ async function custodyFields(body, { selfId = null } = {}) {
 const DEAD_ITEM_STATUSES = ['lost', 'retired', 'sold'];
 
 // receipt_line_id (scope PR 3): the purchase line the inventory agent classed
-// as equipment that this save files under the row. Needs GATE_TRUCK_KIT (the
-// bell that carries the id exists only with the gate); off, the field is
-// refused rather than dropped, so a stale tab never saves without its link.
+// as equipment that this save files under the row.
 function receiptLineField(body) {
   const value = body.receipt_line_id;
   if (value === undefined || value === null || value === '') return { value: null };
-  if (!require('../services/truck-kit').truckKitEnabled()) return { error: 'receipt_line_id needs GATE_TRUCK_KIT' };
   if (!require('../services/purchase-receipts/receipt-equipment-link').UUID_RE.test(String(value))) return { error: 'receipt_line_id must be a purchase receipt line id' };
   return { value: String(value) };
 }
@@ -189,12 +183,9 @@ router.get('/equipment', async (req, res, next) => {
 
 // GET /kit-keys — every kit key in use (checklist items and equipment rows),
 // for the Assets dialog's suggestions (docs/tool-inventory-tracker-scope.md PR 2).
-// The gate's answer is the dialog's capability: off = 404 { enabled: false }
-// and the Kit key field stays away (fail closed, like the tech route).
 router.get('/kit-keys', async (req, res, next) => {
   try {
     const truckKit = require('../services/truck-kit');
-    if (!truckKit.truckKitEnabled()) return res.status(404).json({ enabled: false });
     res.json({ enabled: true, keys: await truckKit.kitKeyVocabulary() });
   } catch (err) {
     next(err);
