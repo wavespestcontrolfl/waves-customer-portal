@@ -453,7 +453,7 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
       },
     });
     renderPicker();
-    expect(await screen.findByText('The next 2 weeks are full. Here are the first open times:')).toBeInTheDocument();
+    expect(await screen.findByText('The next 2 weeks are full. Here are open times after that:')).toBeInTheDocument();
     const chips = pickChips();
     expect(chips).toHaveLength(3);
     expect(chips[0]).toMatch(/Saturday, November 21 · 9:00 AM/);
@@ -478,7 +478,7 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
     renderPicker();
     expect(await screen.findByText('Looking further ahead…')).toBeInTheDocument();
     await act(async () => { pending.resolve(jsonResponse({ primary: [SLOT_NOV21], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21' } } })); });
-    await screen.findByText('The next 2 weeks are full. Here are the first open times:');
+    await screen.findByText('The next 2 weeks are full. Here are open times after that:');
     expect(screen.queryByText('Looking further ahead…')).not.toBeInTheDocument();
   });
 
@@ -492,7 +492,7 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
       byDate: { '2099-11-21': { primary: [SLOT_NOV21], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21' } } } },
     });
     renderPicker();
-    await screen.findByText('The next 2 weeks are full. Here are the first open times:');
+    await screen.findByText('The next 2 weeks are full. Here are open times after that:');
     const chips = pickChips();
     expect(chips[0]).toMatch(/Saturday, November 21 · 9:00 AM/);
     expect(chips[1]).toMatch(/November 22/);
@@ -509,7 +509,7 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
     const onSelect = vi.fn();
     const onSelectMeta = vi.fn();
     renderPicker({ onSelect, onSelectMeta });
-    await screen.findByText('The next 2 weeks are full. Here are the first open times:');
+    await screen.findByText('The next 2 weeks are full. Here are open times after that:');
     fireEvent.click(screen.getAllByRole('button', { name: /Pick/ })[1]);
     expect(onSelect).toHaveBeenLastCalledWith('s-nov22');
     expect(onSelectMeta).toHaveBeenLastCalledWith(expect.objectContaining({ slotId: 's-nov22', date: '2099-11-22' }));
@@ -526,7 +526,7 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
       });
       const onSelect = vi.fn();
       renderPicker({ selectedSlotId: 's-far', onSelect });
-      await screen.findByText('The next 2 weeks are full. Here are the first open times:');
+      await screen.findByText('The next 2 weeks are full. Here are open times after that:');
       expect(onSelect).not.toHaveBeenCalledWith(null);
     } finally {
       setGlassDefault(false);
@@ -560,15 +560,14 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
     expect(screen.queryByText(/The next 2 weeks are full/)).not.toBeInTheDocument();
   });
 
-  it('an empty date search shows the first later opening with one 90-day read and no second find-slots call', async () => {
+  it('an empty date search before the first open day names that opening, with no second 90-day read or find-slots call', async () => {
     const fetchMock = stubFetch({
-      list: NORMAL,
       wide: { primary: [SLOT_NOV22, SLOT_NOV21], expander: [SLOT_DEC06], metadata: { firstDayAvailability: { date: '2099-11-21' } } },
       find: { summary: 'Nothing that week.', primary: [], expander: [], nearby: false, window: { date_from: '2099-11-17', date_to: '2099-11-19' } },
     });
     const onSelect = vi.fn();
     renderPicker({ onSelect });
-    await screen.findByText('Monday, June 1');
+    await screen.findByText('The next 2 weeks are full. Here are open times after that:');
     fireEvent.click(screen.getByRole('button', { name: 'run-date-search' }));
     expect(await screen.findByText('Nothing is open then. The first open time after that is Sat, Nov 21 at 9:00 AM.')).toBeInTheDocument();
     expect(postCalls(fetchMock)).toHaveLength(1);
@@ -582,40 +581,52 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
     expect(wideCalls(fetchMock)).toHaveLength(1);
   });
 
-  it('a date search that ends after every look-ahead slot offers the first one overall, without "after that"', async () => {
-    stubFetch({
-      list: NORMAL,
-      wide: { primary: [SLOT_NOV21], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21' } } },
-      find: { summary: 'x', primary: [], expander: [], window: { date_from: '2099-12-20', date_to: '2099-12-31' } },
+  it('names no opening for an empty date search that ends on or after the first open day (the capped list can skip openings)', async () => {
+    const fetchMock = stubFetch({
+      wide: { primary: [SLOT_NOV21, SLOT_DEC20], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21' } } },
+      find: { summary: 'Nothing those days.', primary: [], expander: [], window: { date_from: '2099-11-25', date_to: '2099-11-30' } },
     });
     renderPicker();
-    await screen.findByText('Monday, June 1');
+    await screen.findByText('The next 2 weeks are full. Here are open times after that:');
     fireEvent.click(screen.getByRole('button', { name: 'run-date-search' }));
-    expect(await screen.findByText('Nothing is open then. The first open time is Sat, Nov 21 at 9:00 AM.')).toBeInTheDocument();
+    expect(await screen.findByText(/No open times then/)).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing is open then/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/December 20/)).not.toBeInTheDocument();
+    expect(postCalls(fetchMock)).toHaveLength(1);
   });
 
-  it('an empty specific date shows the next opening after it as a slot button', async () => {
+  it('an empty specific date before the first open day names that opening as a slot button', async () => {
     const fetchMock = stubFetch({
-      list: NORMAL,
-      wide: { primary: [OPEN('s-earlier', '2099-11-10'), SLOT_NOV21], expander: [SLOT_DEC06], metadata: { firstDayAvailability: { date: '2099-11-10' } } },
+      wide: { primary: [SLOT_NOV22, SLOT_NOV21], expander: [SLOT_DEC06], metadata: { firstDayAvailability: { date: '2099-11-21' } } },
     });
     const onSelect = vi.fn();
     renderPicker({ onSelect });
-    fireEvent.change(await screen.findByLabelText(/pick one that works for you/i), { target: { value: '2099-11-17' } });
+    await screen.findByText('The next 2 weeks are full. Here are open times after that:');
+    fireEvent.change(screen.getByLabelText(/pick one that works for you/i), { target: { value: '2099-11-17' } });
     expect(await screen.findByText('Nothing is open on Tue, Nov 17. The next open time is Sat, Nov 21 at 9:00 AM.')).toBeInTheDocument();
     expect(wideCalls(fetchMock)).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: /Choose 9:00 AM on Saturday, November 21/ }));
     expect(onSelect).toHaveBeenLastCalledWith('s-nov21');
   });
 
-  it('keeps the old text for an empty specific date when nothing opens after it', async () => {
+  it('keeps the old text for an empty specific date on or after the first open day (the capped list can skip openings)', async () => {
     stubFetch({
-      list: NORMAL,
-      wide: { primary: [OPEN('s-earlier', '2099-11-10')], expander: [], metadata: { firstDayAvailability: { date: '2099-11-10' } } },
+      wide: { primary: [OPEN('s-earlier', '2099-11-10'), SLOT_NOV21], expander: [], metadata: { firstDayAvailability: { date: '2099-11-10' } } },
     });
     renderPicker();
-    fireEvent.change(await screen.findByLabelText(/pick one that works for you/i), { target: { value: '2099-11-17' } });
+    await screen.findByText('The next 2 weeks are full. Here are open times after that:');
+    fireEvent.change(screen.getByLabelText(/pick one that works for you/i), { target: { value: '2099-11-17' } });
     expect(await screen.findByText(/No open times then/)).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing is open on/)).not.toBeInTheDocument();
+  });
+
+  it('reads nothing past 14 days when the 14-day list has times, even for an empty picked date', async () => {
+    const fetchMock = stubFetch({ list: NORMAL, wide: { primary: [SLOT_NOV21], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21' } } } });
+    renderPicker();
+    await screen.findByText('Monday, June 1');
+    fireEvent.change(screen.getByLabelText(/pick one that works for you/i), { target: { value: '2099-06-20' } });
+    expect(await screen.findByText(/No open times then/)).toBeInTheDocument();
+    expect(wideCalls(fetchMock)).toHaveLength(0);
   });
 
   it('reads again for new params and ignores the answer for the old ones', async () => {

@@ -146,8 +146,8 @@ export default function SlotPicker({
     onFirstSlotDate(firstOpen?.date || null);
   }, [data, onFirstSlotDate, glass, freshnessTick]);
 
-  // Past-14-days look-ahead: reads the 90-day horizon once when the answer on
-  // screen (list, date search or picked date) is a bookable one with no slots.
+  // Past-14-days look-ahead: reads the 90-day horizon once when the 14-day list
+  // is a bookable answer with no slots (the dead end). See slotLookahead.js.
   const view = useSlotLookahead({
     apiBase: API_BASE,
     token,
