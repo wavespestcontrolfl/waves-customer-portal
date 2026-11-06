@@ -2662,6 +2662,23 @@ async function coalesceRescheduleNotice(record, newApptTime, options) {
   }
 }
 
+// The extra columns a delivered confirmation writes when it IS the deferred notice
+// of a coalesced reschedule (coalesceRescheduleNotice: a lapsed move_hold_until that
+// carries no token; every grouped-move hold stamps both). It stands in for the
+// reschedule notice the repeat moves did not send, so it covers the reminder windows
+// that notice would cover (reminderFlagsCoveredByNotice, the rule markRescheduleNoticeSent
+// applies), and it clears the spent hold so a later confirmation reads as ordinary.
+// Nothing for any other confirmation.
+function coalescedNoticeCover(record, apptTime, sent) {
+  if (!record.move_hold_until || record.move_hold_token) return {};
+  const covered = sent ? reminderFlagsCoveredByNotice(apptTime) : {};
+  return {
+    move_hold_until: null,
+    ...(covered.alreadyInside72hWindow ? { reminder_72h_sent: true, reminder_72h_sent_at: new Date() } : {}),
+    ...(covered.alreadyInside24hWindow ? { reminder_24h_sent: true, reminder_24h_sent_at: new Date() } : {}),
+  };
+}
+
 async function deliverConfirmation(record, { scheduledServiceId, customerId, apptTime, serviceLabel, recheckBeforeSend = false, customerInitiated }) {
   if (apptTime.getTime() <= Date.now()) {
     // Deferred path (codex #3609 r22 P2): the time this sender read can have
@@ -2839,7 +2856,8 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       const marked = await db('appointment_reminders')
         .where({ id: record.id, appointment_time: apptTime })
         .update({ confirmation_sent: true, confirmation_sent_at: new Date(), confirmation_estimate_id: null,
-          ...(coversDayBefore ? { reminder_24h_sent: true, reminder_24h_sent_at: new Date() } : {}) });
+          ...(coversDayBefore ? { reminder_24h_sent: true, reminder_24h_sent_at: new Date() } : {}),
+          ...coalescedNoticeCover(record, apptTime, sent) });
       if (Number(marked) === 0) {
         logger.warn(`[appt-remind] Confirmation for ${scheduledServiceId} went out for a time that changed under the send — row left pending so the sweep resends the new time`);
       }
