@@ -75,10 +75,14 @@ describe('respellRecordName', () => {
     expect(soundCode('exampleton')).not.toBe(soundCode('example'));
   });
 
-  test('lowercase words, ALL CAPS, months, weekdays and keep words are never changed', () => {
+  test('lowercase words, ALL CAPS, months, the greeting\'s own words, group words and keep words are never changed', () => {
     expect(say('hi dina')).toBe('hi dina');
     expect(say('Hi DINA')).toBe('Hi DINA');
     expect(say('Hi June', { firstName: 'Jane', lastName: 'Sampleroe' })).toBe('Hi June');
+    const moss = { firstName: 'Dena', lastName: 'Moss' };
+    expect(say('Hi Miss Moss, see you Tuesday.', moss)).toBe('Hi Miss Moss, see you Tuesday.');
+    expect(say('Hi Miss Mass, see you Tuesday.', moss)).toBe('Hi Miss Moss, see you Tuesday.');
+    expect(say('Hi All, the gate is locked.', { firstName: 'Ali', lastName: 'Sampleroe' })).toBe('Hi All, the gate is locked.');
     const joy = { firstName: 'Joy', lastName: 'Sampleroe' };
     expect(say('Hi Joe', joy)).toBe('Hi Joy');
     expect(say('Hi Joe', { ...joy, keep: new Set(nameLetters('Joe Staffington')) })).toBe('Hi Joe');

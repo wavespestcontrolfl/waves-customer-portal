@@ -24,7 +24,8 @@
  *     letter (Sara / Sarah, Philip / Phillip); any other added letter makes
  *     another name (Eric / Erica, Paul / Paula), so that word stays;
  *   - it is not a word said for something else: `keep` (staff names,
- *     products, services, our cities and pest words), a month or a weekday;
+ *     products, services, our cities and pest words), a month or a weekday,
+ *     a word of the greeting itself ("Miss", "Good") or a group ("All");
  *   - a greeted first name is not followed by a different surname
  *     ("Hi Dina Smith" greets someone else);
  *   - it is not already one of the record's own name words.
@@ -46,6 +47,12 @@ const GREETINGS = new Set(['hi', 'hey', 'hello', 'dear', 'thanks']);
 // A greeting only after "Good": "This morning Dina called" names someone in passing.
 const TIMES_OF_DAY = new Set(['morning', 'afternoon', 'evening']);
 const TITLES = new Set(['mr', 'mrs', 'ms', 'miss', 'dr']);
+// Never a name, however close: the greeting's own words ("Hi Miss Moss"), group words ("Hi All") and
+// the calendar.
+const NOT_NAMES = new Set([
+  ...GREETINGS, ...TIMES_OF_DAY, ...TITLES, 'good', 'thank', 'you',
+  'all', 'again', 'there', 'everyone', 'team', 'guys', 'folks', ...CALENDAR_WORDS,
+]);
 // A word: letters, with inner hyphens ("Smith-Jones"). An apostrophe ends it, so "Dina's" is "Dina".
 const WORD_RE = /\p{L}+(?:-\p{L}+)*/gu;
 const NEXT_WORD_RE = /^[ \t]+(\p{L}+(?:-\p{L}+)*)/u;
@@ -184,7 +191,7 @@ function followedByOtherSurname(text, end, surnames) {
 function respellTarget(text, word, index, names, keep) {
   if (!CAPITALIZED_RE.test(word) || CONTRACTION_RE.test(text.slice(index + word.length, index + word.length + 3))) return null;
   const letters = normalizeNameFolded(word);
-  if (CALENDAR_WORDS.has(letters) || keep.has(letters) || names.some((name) => name.letters === letters)) return null;
+  if (NOT_NAMES.has(letters) || keep.has(letters) || names.some((name) => name.letters === letters)) return null;
   const name = names.find((candidate) => closeSpelling(letters, candidate));
   if (!name || !addressed(text, index, name, names)) return null;
   if (name.first && followedByOtherSurname(text, index + word.length, names.filter((n) => !n.first))) return null;
