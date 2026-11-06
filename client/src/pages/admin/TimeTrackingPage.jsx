@@ -5497,6 +5497,11 @@ function DocumentsTab({ showToast }) {
   const loadRequestRef = useRef(0);
   const [catFilter, setCatFilter] = useState("all");
   const [techFilter, setTechFilter] = useState("all"); // 'all' | 'company' | <techId>
+  // Archived view: the documents an admin archived, each with Restore.
+  // docsArchived is the view the rows on screen were read for, so a row never
+  // shows the other view's action while the next read is on its way.
+  const [showArchived, setShowArchived] = useState(false);
+  const [docsArchived, setDocsArchived] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
   const [uploadForm, setUploadForm] = useState({
     title: "",
@@ -5536,21 +5541,24 @@ function DocumentsTab({ showToast }) {
       params.set("category", catFilter);
       if (techFilter && techFilter !== "all")
         params.set("technicianId", techFilter);
+      if (showArchived) params.set("archived", "only");
       const res = await adminFetch(
         `/admin/timetracking/documents?${params.toString()}`,
       );
       if (request !== loadRequestRef.current) return;
       setDocs(res.documents || []);
+      setDocsArchived(showArchived);
       setLoadFailed(false);
     } catch {
       if (request !== loadRequestRef.current) return;
       // The list on screen may belong to another filter, so it is cleared;
       // the notice below says the read failed.
       setDocs([]);
+      setDocsArchived(showArchived);
       setLoadFailed(true);
     }
     setLoading(false);
-  }, [catFilter, techFilter]);
+  }, [catFilter, techFilter, showArchived]);
 
   useEffect(() => {
     load();
@@ -5609,7 +5617,7 @@ function DocumentsTab({ showToast }) {
   };
 
   const handleDelete = async (doc) => {
-    if (!confirm(`Archive "${doc.title}"? It can be restored later.`)) return;
+    if (!confirm(`Archive "${doc.title}"? You can restore it from Show archived.`)) return;
     try {
       await adminFetch(`/admin/timetracking/documents/${doc.id}`, {
         method: "DELETE",
@@ -5618,6 +5626,20 @@ function DocumentsTab({ showToast }) {
       load();
     } catch (e) {
       showToast("Failed: " + e.message);
+    }
+  };
+
+  // The stored file and metadata come back as they were; only the archive
+  // flag is cleared.
+  const handleRestore = async (doc) => {
+    try {
+      await adminFetch(`/admin/timetracking/documents/${doc.id}/restore`, {
+        method: "POST",
+      });
+      showToast("Document restored");
+      load();
+    } catch (e) {
+      showToast("Restore failed: " + (e.data?.error || e.message));
     }
   };
 
@@ -5687,14 +5709,25 @@ function DocumentsTab({ showToast }) {
       >
         {" "}
         <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>
-          Documents
+          {docsArchived ? "Archived documents" : "Documents"}
         </div>{" "}
-        <button
-          onClick={() => setShowUpload(true)}
-          style={sBtn(D.teal, D.white)}
-        >
-          + Upload Document
-        </button>{" "}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            onClick={() => setShowArchived((value) => !value)}
+            aria-pressed={showArchived}
+            style={sBtn(D.card, D.text)}
+          >
+            {showArchived ? "Show active" : "Show archived"}
+          </button>
+          {!showArchived && (
+            <button
+              onClick={() => setShowUpload(true)}
+              style={sBtn(D.teal, D.white)}
+            >
+              + Upload Document
+            </button>
+          )}
+        </div>{" "}
       </div>
       {/* Tech filter pills — All / Company / one-per-tech. Hidden when
           there are no techs to assign to. */}
@@ -6257,45 +6290,64 @@ function DocumentsTab({ showToast }) {
                 >
                   Download
                 </button>{" "}
-                <button
-                  onClick={() => {
-                    setEditingId(doc.id);
-                    setEditForm({
-                      title: doc.title,
-                      category: doc.category,
-                      description: doc.description || "",
-                      technicianId: doc.technician_id || "",
-                      expirationDate: doc.expiration_date
-                        ? String(doc.expiration_date).split("T")[0]
-                        : "",
-                    });
-                  }}
-                  style={{
-                    padding: "5px 12px",
-                    background: "transparent",
-                    border: `1px solid ${D.border}`,
-                    borderRadius: 6,
-                    color: D.muted,
-                    fontSize: 14,
-                    cursor: "pointer",
-                  }}
-                >
-                  Edit
-                </button>{" "}
-                <button
-                  onClick={() => handleDelete(doc)}
-                  style={{
-                    padding: "5px 12px",
-                    background: "transparent",
-                    border: `1px solid ${D.border}`,
-                    borderRadius: 6,
-                    color: D.red,
-                    fontSize: 14,
-                    cursor: "pointer",
-                  }}
-                >
-                  Archive
-                </button>{" "}
+                {docsArchived ? (
+                  <button
+                    onClick={() => handleRestore(doc)}
+                    style={{
+                      padding: "5px 12px",
+                      background: "transparent",
+                      border: `1px solid ${D.border}`,
+                      borderRadius: 6,
+                      color: D.text,
+                      fontSize: 14,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Restore
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => {
+                        setEditingId(doc.id);
+                        setEditForm({
+                          title: doc.title,
+                          category: doc.category,
+                          description: doc.description || "",
+                          technicianId: doc.technician_id || "",
+                          expirationDate: doc.expiration_date
+                            ? String(doc.expiration_date).split("T")[0]
+                            : "",
+                        });
+                      }}
+                      style={{
+                        padding: "5px 12px",
+                        background: "transparent",
+                        border: `1px solid ${D.border}`,
+                        borderRadius: 6,
+                        color: D.muted,
+                        fontSize: 14,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Edit
+                    </button>{" "}
+                    <button
+                      onClick={() => handleDelete(doc)}
+                      style={{
+                        padding: "5px 12px",
+                        background: "transparent",
+                        border: `1px solid ${D.border}`,
+                        borderRadius: 6,
+                        color: D.red,
+                        fontSize: 14,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Archive
+                    </button>
+                  </>
+                )}{" "}
               </div>{" "}
             </div>
           );
@@ -6304,7 +6356,11 @@ function DocumentsTab({ showToast }) {
       {loadFailed && (
         <LoadFailedNotice onRetry={load}>Could not load documents.</LoadFailedNotice>
       )}
-      {docs.length === 0 && !loadFailed && !showUpload && (
+      {docs.length === 0 && !loadFailed && (docsArchived ? (
+        <div style={{ ...sCard, textAlign: "center", padding: 24, color: D.muted, fontSize: 14 }}>
+          No archived documents.
+        </div>
+      ) : !showUpload && (
         <div style={{ ...sCard, textAlign: "center", padding: 40 }}>
           {" "}
           <div style={{ fontSize: 32, marginBottom: 12 }}>
@@ -6331,7 +6387,7 @@ function DocumentsTab({ showToast }) {
             + Upload First Document
           </button>{" "}
         </div>
-      )}
+      ))}
     </div>
   );
 }
