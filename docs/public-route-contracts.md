@@ -6459,7 +6459,7 @@ on the primary profile, then the oldest). A second gate narrows who counts (`GAT
 dark; strict `=== 'true'`, read at call time — `contactLoginHolderOnlyLive()`): when live, `contactSlotMayLogIn` also
 requires the phone to be listed in `service_preferences.login_attested_phone_keys`,
 which only the signed-in holder's portal contacts save writes (a holder who
-attested contacts before the gate re-saves them once to restore their sign-in).
+attested contacts before the gate re-saves them once to restore their sign-in). Any other writer of the slot phones (admin edit, call pipeline, dedupe) cannot add to that list, and a database trigger (migration 20261105060000) cuts it to the phones still stored in a slot, so a removed number that is later re-added does not regain sign-in.
 A consent stamp written by the call pipeline, the grandfather backfill or a
 recipient YES no longer admits a number by itself: send-code sends no code,
 verify-code answers the same 401, and a live contact session ends at its next
