@@ -115,6 +115,52 @@ describe('the morning replay of a queued day-only body', () => {
     expect((await recheckDeferredReplay(ENTRY, queuedMeta)).eligible).toBe(false);
   });
 
+  describe('the old-hour pin (a day-only body names no hour)', () => {
+    const visitAt = (over) => db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return chain({ id: 'ss-1', status: 'confirmed', scheduled_date: '2026-06-22', window_start: '09:00:00', reservation_service_mix: null, ...over });
+      if (table === 'notification_prefs') return chain(prefsRow);
+      if (table === 'customers') return chain({ id: 'c1', phone: '+19415550001' });
+      return chain(null);
+    });
+
+    test('day row, same date, the hour changed overnight: still sent (the chokepoint says day)', async () => {
+      visitAt({ window_start: '14:00:00' });
+      expect(await recheckDeferredReplay(ENTRY, queuedMeta)).toEqual({ eligible: true });
+      expect(timePromise.dayOnlySendDecision).toHaveBeenCalledTimes(1);
+    });
+
+    test('day row, same date, the hour changed, but the chokepoint says no: still suppressed', async () => {
+      visitAt({ window_start: '14:00:00' });
+      timePromise.loadPromiseLevels.mockResolvedValue(new Map([['ss-1', 'hour']]));
+      expect(await recheckDeferredReplay(ENTRY, queuedMeta)).toEqual({ eligible: false, reason: 'day-promise-superseded' });
+    });
+
+    test('day row, the DATE changed: rejected as slot-moved before any promise read', async () => {
+      visitAt({ scheduled_date: '2026-06-24' });
+      expect(await recheckDeferredReplay(ENTRY, queuedMeta)).toEqual({ eligible: false, reason: 'slot-moved' });
+      expect(timePromise.loadPromiseLevels).not.toHaveBeenCalled();
+    });
+
+    test('day row, the visit is cancelled or already started: the status checks stay', async () => {
+      visitAt({ status: 'cancelled' });
+      expect((await recheckDeferredReplay(ENTRY, queuedMeta)).reason).toBe('visit-cancelled');
+      jest.setSystemTime(new Date('2026-06-22T14:00:00.000Z'));
+      visitAt({ window_start: '09:00:00' });
+      expect((await recheckDeferredReplay(ENTRY, queuedMeta)).reason).toBe('visit-started');
+    });
+
+    test('window row, the hour changed: rejected as slot-moved, exactly as today', async () => {
+      visitAt({ window_start: '14:00:00' });
+      const { promise_level: _p, window_unknown: _w, guard_slot_ms: _g, promised_date: _d, ...windowMeta } = queuedMeta;
+      expect(await recheckDeferredReplay(ENTRY, windowMeta)).toEqual({ eligible: false, reason: 'slot-moved' });
+    });
+
+    test('window row, same hour: eligible', async () => {
+      const { promise_level: _p, window_unknown: _w, guard_slot_ms: _g, promised_date: _d, ...windowMeta } = queuedMeta;
+      expect(await recheckDeferredReplay(ENTRY, windowMeta)).toEqual({ eligible: true });
+    });
+  });
+
   test('a queued WINDOW body is not revalidated: today\'s checks only, no promise read', async () => {
     const { promise_level: _p, window_unknown: _w, guard_slot_ms: _g, promised_date: _d, ...windowMeta } = queuedMeta;
     expect(await recheckDeferredReplay(ENTRY, windowMeta)).toEqual({ eligible: true });
