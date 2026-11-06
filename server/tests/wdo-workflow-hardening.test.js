@@ -547,7 +547,7 @@ describe('signature ink check fails closed', () => {
   });
 });
 
-describe('pre-treat final exterior fields: customer copy screen (GATE_PRETREAT_STICKER_REPORT)', () => {
+describe('pre-treat final exterior fields: customer copy screen', () => {
   const certificate = () => wdoProject({
     project_type: 'pre_treatment_termite_certificate',
     wdo_signature: null,
