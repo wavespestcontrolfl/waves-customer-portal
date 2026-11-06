@@ -859,6 +859,7 @@ export function SmsTemplatesTabV2() {
 // ── CSR Coach Tab ───────────────────────────────────────────────────
 
 const COACH_SECTIONS = ["overview", "tasks", "weeklyRec", "leaderboard", "leadQuality"];
+const OPEN_TASK_STATUSES = ["pending", "in_progress"];
 
 export function CSRCoachTabV2() {
   const [overview, setOverview] = useState(null);
@@ -903,19 +904,20 @@ export function CSRCoachTabV2() {
   const retryFailedSections = () =>
     setReload((r) => ({ n: r.n + 1, keys: COACH_SECTIONS.filter((k) => sectionErrors[k]) }));
 
-  const handleMarkDone = async (taskId) => {
+  const handleTaskUpdate = async (taskId, status) => {
     setBusyTasks((prev) => ({ ...prev, [taskId]: true }));
     setTaskError("");
     try {
-      await adminFetch(`/admin/csr/follow-up-tasks/${taskId}`, {
+      const { task } = await adminFetch(`/admin/csr/follow-up-tasks/${taskId}`, {
         method: "PUT",
-        body: JSON.stringify({ status: "completed" }),
+        body: JSON.stringify({ status }),
       });
-      // A done task leaves the open list right away; the server list below
-      // replaces it.
+      // Show the saved task right away; the server list below replaces it.
       setTasks((prev) => ({
         ...prev,
-        tasks: (prev.tasks || []).filter((t) => t.id !== taskId),
+        tasks: (prev.tasks || [])
+          .map((t) => (t.id === taskId ? { ...t, ...task } : t))
+          .filter((t) => OPEN_TASK_STATUSES.includes(t.status)),
       }));
       try {
         setTasks(await adminFetch("/admin/csr/follow-up-tasks"));
@@ -1227,7 +1229,7 @@ export function CSRCoachTabV2() {
                       variant="primary"
                       size="sm"
                       disabled={busyTasks[t.id]}
-                      onClick={() => handleMarkDone(t.id)}
+                      onClick={() => handleTaskUpdate(t.id, "completed")}
                     >
                       Mark Done
                     </Button>{" "}

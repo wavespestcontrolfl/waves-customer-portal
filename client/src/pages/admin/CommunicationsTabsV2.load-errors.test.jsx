@@ -309,8 +309,8 @@ describe("CSR Coach task actions", () => {
           return refreshUp ? json({ tasks: [open[1]], pending: 0, overdue: 1 }) : json({ error: "x" }, 503);
         };
       })(),
-      // The client does not need the PUT's answer: a done task just leaves the list.
-      put: () => json({ task: { id: 1, status: "completed", assigned_to: "Synthetic CSR" } }),
+      // The PUT answers the bare row, without the joined customer names.
+      put: (path) => json({ task: { id: 1, status: "completed", assigned_to: "Synthetic CSR" } }),
     });
 
     render(<CSRCoachTabV2 />);
