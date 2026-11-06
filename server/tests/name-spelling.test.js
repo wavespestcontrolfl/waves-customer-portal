@@ -32,6 +32,8 @@ describe('respellRecordName', () => {
     expect(say('Tell Dina Exampletin hi.')).toBe('Tell Dina Exampletin hi.');
     expect(say('Dina, we can come Tuesday.')).toBe('Dina, we can come Tuesday.');
     expect(say('Good morning Dena, Dina called.')).toBe('Good morning Dena, Dina called.');
+    expect(say('This morning Dina called about the appointment.')).toBe('This morning Dina called about the appointment.');
+    expect(say('Yes, I said hi Dina would like that.')).toBe('Yes, I said hi Dina would like that.');
     expect(say('Hi Tom, and Tom will be there too.', { firstName: 'Tim', lastName: 'Sampleroe' })).toBe('Hi Tim, and Tom will be there too.');
   });
 
@@ -43,7 +45,6 @@ describe('respellRecordName', () => {
     expect(say('Good morning. Dina called.')).toBe('Good morning. Dina called.');
     expect(say('Thanks. Mrs. Exampletin called.')).toBe('Thanks. Mrs. Exampletin called.');
     expect(say('Hi, Mrs. Exampletin.')).toBe('Hi, Mrs. Exampleton.');
-    expect(greeted('Thanks. X', 8)).toBe(false);
   });
 
   test('a greeted first name followed by a different surname greets someone else', () => {
@@ -89,11 +90,19 @@ describe('respellRecordName', () => {
     expect(say('Hi Mr Mcdonnald', { firstName: 'Ann', lastName: 'McDonald' })).toBe('Hi Mr McDonald');
   });
 
-  test('greetings: a title may sit between; "thank you" counts; a line break does not', () => {
-    expect(greeted('Hi Mrs. X', 8)).toBe(true);
-    expect(greeted('Thank you X', 10)).toBe(true);
-    expect(greeted('Hi\nX', 3)).toBe(false);
-    expect(greeted('X', 0)).toBe(false);
+  test('greetings open a sentence; a title may sit between; "thank you" and "good morning" count', () => {
+    const greetsX = (text) => greeted(text, text.lastIndexOf('X'));
+    expect(greetsX('Hi Mrs. X')).toBe(true);
+    expect(greetsX('Thank you X')).toBe(true);
+    expect(greetsX('Done. Good evening X')).toBe(true);
+    expect(greetsX('All set!\nHey X')).toBe(true);
+    // mid-sentence, a time of day without "Good", a sentence end or a line break in between: left alone
+    expect(greetsX('Sounds good, thanks X')).toBe(false);
+    expect(greetsX('Yesterday evening X')).toBe(false);
+    expect(greetsX('No thank you X')).toBe(false);
+    expect(greetsX('Thanks. X')).toBe(false);
+    expect(greetsX('Hi\nX')).toBe(false);
+    expect(greetsX('X')).toBe(false);
   });
 
   test('no record name or no text: unchanged', () => {

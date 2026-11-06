@@ -11,8 +11,9 @@
  * re-spelled only when every rule holds:
  *   - it greets someone: it follows "Hi", "Hey", "Hello", "Dear", "Thanks",
  *     "Thank you" or "Good morning/afternoon/evening" (a title such as "Mrs"
- *     may sit between), or it is the surname right after such a first name.
- *     A name said in passing ("Tom will come") may be someone else, and a
+ *     may sit between), and that greeting opens the text or a sentence; or it
+ *     is the surname right after such a first name. A name said in passing
+ *     ("Tom will come", "This morning Tom called") may be someone else, and a
  *     period ends the greeting except after a title ("Thanks. Don't worry");
  *   - it is not a contraction ("Don't"); a possessive ("Dina's") is a name;
  *   - it is Capitalized (ALL CAPS is an acronym), has 3+ letters, and starts
@@ -41,7 +42,9 @@ const CALENDAR_WORDS = new Set([
   'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october',
   'november', 'december', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
 ]);
-const GREETINGS = new Set(['hi', 'hey', 'hello', 'dear', 'thanks', 'morning', 'afternoon', 'evening']);
+const GREETINGS = new Set(['hi', 'hey', 'hello', 'dear', 'thanks']);
+// A greeting only after "Good": "This morning Dina called" names someone in passing.
+const TIMES_OF_DAY = new Set(['morning', 'afternoon', 'evening']);
 const TITLES = new Set(['mr', 'mrs', 'ms', 'miss', 'dr']);
 // A word: letters, with inner hyphens ("Smith-Jones"). An apostrophe ends it, so "Dina's" is "Dina".
 const WORD_RE = /\p{L}+(?:-\p{L}+)*/gu;
@@ -137,12 +140,25 @@ function wordBefore(text, index) {
   return { lower: dotted && !TITLES.has(lower) ? '' : lower, start, end };
 }
 
-// A greeting ends right before `index`, with at most a title between ("Hi Mrs", "Thank you").
+// Only spaces or tabs lie between `index` and the start of the text or the end of a sentence.
+function opensSentence(text, index) {
+  const before = text.slice(0, index).replace(/[ \t]+$/, '');
+  return before === '' || /[.!?\n]$/.test(before);
+}
+
+// A greeting that opens a sentence ends right before `index`, with at most a title between ("Hi
+// Mrs", "Good morning", "Thank you"). Mid-sentence ("Sounds good, thanks Dina") is left alone.
 function greeted(text, index) {
   let prev = wordBefore(text, index);
   if (TITLES.has(prev.lower)) prev = wordBefore(text, prev.start);
-  if (GREETINGS.has(prev.lower)) return true;
-  return prev.lower === 'you' && wordBefore(text, prev.start).lower === 'thank';
+  let opener = prev;
+  if (TIMES_OF_DAY.has(prev.lower) || prev.lower === 'you') {
+    opener = wordBefore(text, prev.start);
+    if (opener.lower !== (prev.lower === 'you' ? 'thank' : 'good')) return false;
+  } else if (!GREETINGS.has(prev.lower)) {
+    return false;
+  }
+  return opensSentence(text, opener.start);
 }
 
 // The word at `index` greets the customer: a name right after a greeting ("Hi Dina", "Hi Mrs
