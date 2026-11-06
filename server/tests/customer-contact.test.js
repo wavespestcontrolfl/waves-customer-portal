@@ -395,3 +395,41 @@ describe('customer contact recipient routing', () => {
     }
   });
 });
+
+describe('contactSlotMayLogIn — GATE_CONTACT_LOGIN_HOLDER_ONLY', () => {
+  const { contactSlotMayLogIn } = require('../services/customer-contact');
+  const KEY = '5552220000';
+  const stamped = (source) => ({ ...customer, service_contacts_consent_source: source });
+
+  afterEach(() => { delete process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY; });
+
+  test('gate off: the stamp alone authorizes login whatever wrote it (unchanged)', () => {
+    for (const source of ['call_pipeline_request', 'portal_account_holder', null]) {
+      expect(contactSlotMayLogIn(stamped(source), KEY)).toBe(true);
+    }
+  });
+
+  test('gate on: only the holder\'s portal attestation authorizes login', () => {
+    process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
+    expect(contactSlotMayLogIn(stamped('portal_account_holder'), KEY)).toBe(true);
+    for (const source of ['call_pipeline_request', 'legacy_grandfathered_backfill', 'recipient_optin_confirmed', null, undefined]) {
+      expect(contactSlotMayLogIn(stamped(source), KEY)).toBe(false);
+    }
+  });
+
+  test('gate on: an unstamped account or an unconsented slot phone is still refused', () => {
+    process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
+    expect(contactSlotMayLogIn({ ...stamped('portal_account_holder'), service_contacts_consent_at: null }, KEY)).toBe(false);
+    expect(contactSlotMayLogIn({
+      ...stamped('portal_account_holder'),
+      service_preferences: JSON.stringify({ unconsented_slot_phone_keys: [KEY] }),
+    }, KEY)).toBe(false);
+  });
+
+  test('a call-stamped contact still receives texts with the gate on (only login changes)', () => {
+    process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
+    expect(getAppointmentContacts(stamped('call_pipeline_request'), { appointment_notify_primary: false })).toEqual([
+      expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
+    ]);
+  });
+});

@@ -188,7 +188,7 @@ beforeEach(() => {
   TwilioService.sendVerificationCode.mockClear();
   process.env.GATE_CONTACT_LOGIN = 'true';
 });
-afterEach(() => { delete process.env.GATE_CONTACT_LOGIN; });
+afterEach(() => { delete process.env.GATE_CONTACT_LOGIN; delete process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY; });
 
 async function call(method, path, headers = {}, body) {
   const res = await fetch(`${baseUrl}${path}`, {
@@ -331,6 +331,64 @@ describe('contact login — who a number signs in as', () => {
     expect((await call('GET', '/api/auth/me', bearerOf(body.token))).status).toBe(200);
     tables.customers[0].service_preferences = JSON.stringify({ unconsented_slot_phone_keys: ['9415550202'] });
     expect((await call('GET', '/api/auth/me', bearerOf(body.token))).status).toBe(401);
+  });
+
+  // Security audit run 3 (GATE_CONTACT_LOGIN_HOLDER_ONLY): the call pipeline stamps a
+  // number named by an unauthenticated caller with source 'call_pipeline_request'.
+  // That stamp must not open a contact sign-in; only the holder's own portal
+  // attestation does.
+  describe('GATE_CONTACT_LOGIN_HOLDER_ONLY', () => {
+    const callStamp = () => Object.assign(tables.customers[0], {
+      service_contact2_name: null, service_contact2_phone: null,
+      service_contacts_consent_at: new Date().toISOString(),
+      service_contacts_consent_source: 'call_pipeline_request',
+      service_contacts_consent_text_version: 'call-2026-07-23',
+      service_preferences: null,
+    });
+
+    test('gate off: a call-pipeline stamp still opens the login, exactly as before', async () => {
+      callStamp();
+      await call('POST', '/api/auth/send-code', {}, { phone: CONTACT_PHONE });
+      expect(TwilioService.sendVerificationCode).toHaveBeenCalledWith(CONTACT_PHONE);
+      const res = await login(CONTACT_PHONE);
+      expect(res.status).toBe(200);
+      expect(res.body.actor.kind).toBe('contact');
+    });
+
+    test('gate on: a call-pipeline stamp sends no code and mints no session', async () => {
+      process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
+      callStamp();
+      await call('POST', '/api/auth/send-code', {}, { phone: CONTACT_PHONE });
+      expect(TwilioService.sendVerificationCode).not.toHaveBeenCalled();
+      expect((await login(CONTACT_PHONE)).status).toBe(401);
+      // The account holder still signs in.
+      expect((await login(HOLDER_PHONE)).status).toBe(200);
+    });
+
+    test('gate on: any other machine source (grandfather backfill, recipient YES, no source) is refused too', async () => {
+      process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
+      for (const source of ['legacy_grandfathered_backfill', 'recipient_optin_confirmed', null, undefined]) {
+        tables.customers[0].service_contacts_consent_source = source;
+        expect((await login(CONTACT_PHONE)).status).toBe(401);
+      }
+    });
+
+    test('gate on: the holder\'s own portal attestation still signs the contact in', async () => {
+      process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
+      tables.customers[0].service_contacts_consent_source = 'portal_account_holder';
+      const res = await login(CONTACT_PHONE);
+      expect(res.status).toBe(200);
+      expect(res.body.actor.kind).toBe('contact');
+    });
+
+    test('gate on: a live contact session on a call-stamped slot ends at its next request (401)', async () => {
+      tables.customers[0].service_contacts_consent_source = 'portal_account_holder';
+      const { body } = await login(CONTACT_PHONE);
+      process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
+      expect((await call('GET', '/api/auth/me', bearerOf(body.token))).status).toBe(200);
+      tables.customers[0].service_contacts_consent_source = 'call_pipeline_request';
+      expect((await call('GET', '/api/auth/me', bearerOf(body.token))).status).toBe(401);
+    });
   });
 
   // The App Store reviewer bypass (REVIEW_LOGIN_PHONE + the fixed code) maps

@@ -484,10 +484,19 @@ function findServiceContactSlotByPhoneKey(customer, phoneKey) {
 // #6363 r4 security P2). The ACTUAL stamp, never serviceContactsConsented:
 // that helper honors DISABLE_CONTACT_CONSENT_GATE=1, the SMS fan-out rollback
 // switch, which must not open the login to unstamped numbers (codex r6 P1).
+//
+// GATE_CONTACT_LOGIN_HOLDER_ONLY (security audit run 3, dark): the stamp only
+// opens the login when the account holder wrote it themselves in the signed-in
+// portal. The call pipeline stamps a number from an unauthenticated caller's
+// words ('call_pipeline_request'); that, the grandfather backfill and any
+// other machine source keep their texts but no longer open a sign-in.
+const HOLDER_ATTESTED_CONSENT_SOURCE = 'portal_account_holder';
 function contactSlotMayLogIn(customer, phoneKey) {
   const key = phoneKeyOf(phoneKey);
   if (!customer || !key) return false;
-  return !!customer.service_contacts_consent_at && !unconsentedSlotPhoneKeys(customer).has(key);
+  if (!customer.service_contacts_consent_at || unconsentedSlotPhoneKeys(customer).has(key)) return false;
+  if (!require('../config/feature-gates').contactLoginHolderOnlyLive()) return true;
+  return customer.service_contacts_consent_source === HOLDER_ATTESTED_CONSENT_SOURCE;
 }
 
 // True if this customer has a distinct service contact configured (any slot).
