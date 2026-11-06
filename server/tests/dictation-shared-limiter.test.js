@@ -28,6 +28,11 @@ describe('live words spend from the same bucket', () => {
     // concurrent starts cannot all pass against an empty bucket
     const burst = await Promise.all(Array.from({ length: 100 }, () => takeLiveSessionBudget('tech:burst-test:v1')));
     expect(burst.filter(Boolean)).toHaveLength(20);
+    // a full bucket whose window has passed admits again, before the store's own sweep
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    jest.setSystemTime(Date.now() + 16 * 60 * 1000);
+    expect(await takeLiveSessionBudget(key)).toBe(true);
+    jest.useRealTimers();
     // the clip route still has its other half: the limiter's own store holds the same count
     expect(await takeLiveSessionBudget('tech:other:v1')).toBe(true);
   });

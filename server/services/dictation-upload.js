@@ -76,7 +76,9 @@ const LIVE_SESSION_SHARE = DICTATION_MAX_CLIPS / 2;
 let liveAdmissions = Promise.resolve();
 async function admitLiveSession(key) {
   const used = await dictationStore.get(key);
-  if ((used?.totalHits || 0) >= LIVE_SESSION_SHARE) return false;
+  // The store drops an expired window only on its sweep, so a count past its reset time is not a count.
+  const live = used && (!used.resetTime || used.resetTime.getTime() > Date.now()) ? used.totalHits : 0;
+  if (live >= LIVE_SESSION_SHARE) return false;
   await dictationStore.increment(key);
   return true;
 }
