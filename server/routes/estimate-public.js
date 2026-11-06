@@ -32034,6 +32034,63 @@ async function composeEstimateDataPayload(estimate, {
     };
 }
 
+// Whether a tap on the expired card reopens the estimate by itself right now.
+// POST /:token/extension-request auto-grants only while the lifetime grant is
+// unused AND no request landed in the last 24 hours (its DEDUPE_OPEN); any
+// other tap only tells the office, so the card must not promise a reopen. The
+// claim's re-price hold and county-roll address checks need no copy here: they
+// already make the row ineligible (isEstimateExtensionRequestEligible →
+// estimateOffCustomerSurface).
+const EXTENSION_REQUEST_DEDUPE_MS = 24 * 60 * 60 * 1000;
+function extensionSelfServeNow(estimate, nowMs = Date.now()) {
+  if (estimate.extension_auto_granted_at) return false;
+  if (!estimate.extension_requested_at) return true;
+  const requestedMs = new Date(estimate.extension_requested_at).getTime();
+  return Number.isFinite(requestedMs) && nowMs - requestedMs >= EXTENSION_REQUEST_DEDUPE_MS;
+}
+
+// Body of the eligible-expired 404 on GET /:token/data. Only ever built for a
+// real, published estimate that died of expiry; every other 404 stays the bare
+// `{ error }` so unknown tokens remain indistinguishable (generic-404 contract).
+function expiredEstimateBody(estimate) {
+  const body = {
+    error: 'Estimate not found',
+    extensionRequestEligible: true,
+    expiresAt: estimate.expires_at || null,
+  };
+  if (estimate.sent_at) body.sentAt = estimate.sent_at;
+  if (extensionSelfServeNow(estimate)) body.extensionSelfServe = true;
+  return body;
+}
+
+// A customer opened the link of an estimate that expired. Recorded in
+// audit_log only: estimate_checkout_events and estimate_views are read
+// without a kind filter by the payment-step follow-up email and the
+// engagement rules, so a row there would trigger customer messages.
+// Applies the shouldCountView filters (it returns false for expired rows, so
+// it is not called here) and skips signed PDF render passes.
+async function recordExpiredOpen({ req, ip, estimate, extensionOffered, isPdfRenderPass, docRenderPin }) {
+  if (isPdfRenderPass || docRenderPin) return;
+  const userAgent = requestUserAgent(req);
+  if (!estimateHasBeenSent(estimate)
+    || isBotUserAgent(userAgent)
+    || hasAdminMarker(req)
+    || isAdminIp(ip)) return;
+  // A signal only: a failed write (or a test's whole-module mock without the
+  // helper) must never turn the customer's 404 card into a 500.
+  try {
+    await require('../services/audit-log').auditEstimateExpiredOpen({
+      estimateId: estimate.id,
+      expiresAt: estimate.expires_at || null,
+      extensionOffered,
+      ipAddress: ip || null,
+      userAgent: userAgent ? String(userAgent).slice(0, 500) : null,
+    });
+  } catch (err) {
+    logger.warn(`[estimate-expired-open] audit write failed for estimate ${estimate.id}: ${err.message}`);
+  }
+}
+
 router.get('/:token/data', dataLimiter, async (req, res, next) => {
   try {
     // This JSON carries the customer's address, phone/email, notes, pricing,
@@ -32142,10 +32199,17 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // ever INCLUDED when true — an explicit `false` here would distinguish
       // real-but-ineligible tokens (drafts, archived, send_failed) from
       // unknown ones and break the generic-404 contract.
-      if (featureGates.isEnabled('estimateExtensionRequest')
-        && isEstimateExtensionRequestEligible(estimate)
-        && !(await require('../services/estimate-extension').fixedBidBlocksExtension(db, estimate))) {
-        return res.status(404).json({ error: 'Estimate not found', extensionRequestEligible: true });
+      //
+      // Same eligible-only rule for the three details the expired card shows
+      // (expiresAt, sentAt, extensionSelfServe): the card says when the quote
+      // was sent and expired, and whether the first reopen is still self-serve
+      // (extension_auto_granted_at unset — see POST /:token/extension-request).
+      // sentAt is omitted when unset and extensionSelfServe is never `false`.
+      if (isEstimateExtensionRequestEligible(estimate)) {
+        const extensionOffered = featureGates.isEnabled('estimateExtensionRequest')
+          && !(await require('../services/estimate-extension').fixedBidBlocksExtension(db, estimate));
+        await recordExpiredOpen({ req, ip, estimate, extensionOffered, isPdfRenderPass, docRenderPin });
+        if (extensionOffered) return res.status(404).json(expiredEstimateBody(estimate));
       }
       return res.status(404).json({ error: 'Estimate not found' });
     }
