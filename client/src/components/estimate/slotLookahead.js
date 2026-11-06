@@ -120,9 +120,10 @@ const firstAfter = (slots, ymd) => (ymd ? slots.find((slot) => slot.date > ymd) 
 //   slots    the slots to show in place of the empty answer (null = none)
 //   ordered  true when `slots` must keep date order (not the engine's rank)
 //   notice   the line above them
+//   stripProps  SchedulePicker props for the best-times strip ({} = its defaults)
 // `slots` here are the usable look-ahead slots (stale ones already dropped).
 function lookaheadView({ data, searchData, pickedData, pickedDate, status, slots, formatTime }) {
-  const none = { loading: false, slots: null, ordered: false, notice: null };
+  const none = { loading: false, slots: null, ordered: false, notice: null, stripProps: {} };
   const body = searchData || pickedData || data;
   if (!isEmptyBrowsable(body)) return none;
   // 'idle' is the render before the read starts: the page is already past its own load.
@@ -135,13 +136,17 @@ function lookaheadView({ data, searchData, pickedData, pickedDate, status, slots
       slots: slots.slice(0, LIST_SLOT_COUNT),
       ordered: true,
       notice: 'The next 2 weeks are full. Here are the first open times:',
+      // The soonest times, not route picks: drop the strip's route-fit copy.
+      stripProps: { bestTitle: null, bestIntro: null },
     };
   }
   if (searchData) {
-    const slot = firstAfter(slots, searchData.window?.date_to) || slots[0];
-    return slot
-      ? { ...none, slots: [slot], notice: `Nothing is open then. The first open time after that is ${at(slot)}.` }
-      : none;
+    const after = firstAfter(slots, searchData.window?.date_to);
+    const slot = after || slots[0];
+    if (!slot) return none;
+    // "after that" only when the slot really is after the searched window.
+    const lead = after ? 'The first open time after that is' : 'The first open time is';
+    return { ...none, slots: [slot], notice: `Nothing is open then. ${lead} ${at(slot)}.` };
   }
   const slot = firstAfter(slots, pickedDate);
   return slot

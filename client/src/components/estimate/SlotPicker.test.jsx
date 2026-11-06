@@ -460,6 +460,9 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
     expect(chips[1]).toMatch(/Sunday, November 22 · 11:00 AM/);
     expect(chips[2]).toMatch(/Sunday, December 6 · 9:00 AM/);
     expect(screen.queryByText(/No open slots in the next 14 days/)).not.toBeInTheDocument();
+    // The soonest times, not route picks: the strip drops its route-fit copy.
+    expect(screen.queryByText('Our best times for you')).not.toBeInTheDocument();
+    expect(screen.queryByText(/fit our route near you best/)).not.toBeInTheDocument();
     const wide = wideCalls(fetchMock);
     expect(wide).toHaveLength(1);
     expect(wide[0][0]).toContain('serviceMode=recurring');
@@ -579,7 +582,7 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
     expect(wideCalls(fetchMock)).toHaveLength(1);
   });
 
-  it('a date search that ends after every look-ahead slot falls back to the first one overall', async () => {
+  it('a date search that ends after every look-ahead slot offers the first one overall, without "after that"', async () => {
     stubFetch({
       list: NORMAL,
       wide: { primary: [SLOT_NOV21], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21' } } },
@@ -588,7 +591,7 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
     renderPicker();
     await screen.findByText('Monday, June 1');
     fireEvent.click(screen.getByRole('button', { name: 'run-date-search' }));
-    expect(await screen.findByText('Nothing is open then. The first open time after that is Sat, Nov 21 at 9:00 AM.')).toBeInTheDocument();
+    expect(await screen.findByText('Nothing is open then. The first open time is Sat, Nov 21 at 9:00 AM.')).toBeInTheDocument();
   });
 
   it('an empty specific date shows the next opening after it as a slot button', async () => {

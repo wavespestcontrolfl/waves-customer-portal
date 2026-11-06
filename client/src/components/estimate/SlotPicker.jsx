@@ -411,6 +411,7 @@ export default function SlotPicker({
         selectedSlot={pickerSelected}
         onSelectSlot={(slot) => selectSlot(slot)}
         intro="Tap a time — each shows the two-hour arrival window from its start."
+        {...view.stripProps}
         slotDetail={(slot) => `Arrival window: ${formatSlotDate(slot.date, slot.windowStart).window}`}
         empty={(
           <div style={{ fontSize: 14, color: W.textBody, marginBottom: 12 }}>
