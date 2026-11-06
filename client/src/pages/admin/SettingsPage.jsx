@@ -471,9 +471,13 @@ function GateSettingBadge({ gate }) {
   return <Badge tone={off ? "neutral" : "strong"} dot>{gate.value}</Badge>;
 }
 
-// The switch shows the variable as the code reads it: on for true / 1 / on.
-function gateReadsOn(gate) {
-  return Boolean(gate?.set && gate.value !== null && /^(true|1|on)$/i.test(gate.value.trim()));
+// The switch shows the variable as the code reads it (the server applies the
+// gate's own parser: exactly 'true' for a strict gate). After a flip the
+// server keeps the old value until Railway's redeploy is live, so the value
+// just written wins until a reload shows it.
+function gateReadsOn(gate, written) {
+  if (written && Object.prototype.hasOwnProperty.call(written, gate.name)) return written[gate.name] === "true";
+  return gate?.readsOn === true;
 }
 
 // Two steps (owner 2026-11-06, GATE_SETTINGS_GATE_FLIP): the server prepares
@@ -511,7 +515,7 @@ function GateFlipDialog({ request, onClose, onDone }) {
       setOutcome(d?.success
         ? { ok: true, text: `${request.name} is now ${d.value}. ${d.redeployNotice || ""}` }
         : { ok: false, text: d?.warning || "Railway did not confirm the change. Check the variable in Railway before trying again." });
-      if (d?.success) onDone();
+      if (d?.success) onDone(request.name, d.value);
     } catch (e) {
       setOutcome({ ok: false, text: e.message || "The change was not made." });
     } finally {
@@ -575,6 +579,18 @@ function GateFlipDialog({ request, onClose, onDone }) {
 function FeatureGatesTab() {
   const { gates, flipAvailable, error, retry } = useGateList();
   const [flipRequest, setFlipRequest] = useState(null);
+  // Values written this visit, shown until a reload reports them as live.
+  const [written, setWritten] = useState({});
+  useEffect(() => {
+    if (!gates) return;
+    setWritten((prev) => {
+      const next = { ...prev };
+      for (const g of gates) {
+        if (g.name in next && g.readsOn === (next[g.name] === "true")) delete next[g.name];
+      }
+      return next;
+    });
+  }, [gates]);
   const setCount = (gates || []).filter((g) => g.set).length;
   return (
     <Card>
@@ -599,6 +615,9 @@ function FeatureGatesTab() {
                   {g.value !== null && g.value !== g.value.trim() && (
                     <div className="mt-1 text-ui-caption text-ink-secondary">The value has extra spaces. Some readers ignore them and some do not; remove them.</div>
                   )}
+                  {g.name in written && (
+                    <div className="mt-1 text-ui-caption text-ink-secondary">Set to {written[g.name]}. It takes effect when Railway finishes restarting the portal.</div>
+                  )}
                   {flipAvailable && !g.flippable && g.notFlippableReason && (
                     <div className="mt-1 text-ui-caption text-ink-secondary">{g.notFlippableReason}</div>
                   )}
@@ -607,9 +626,9 @@ function FeatureGatesTab() {
                   <GateSettingBadge gate={g} />
                   {flipAvailable && g.flippable && (
                     <Switch
-                      checked={gateReadsOn(g)}
+                      checked={gateReadsOn(g, written)}
                       onChange={(next) => setFlipRequest({ name: g.name, value: next ? "true" : "false" })}
-                      aria-label={`${gateReadsOn(g) ? "Turn off" : "Turn on"} ${g.name}`}
+                      aria-label={`${gateReadsOn(g, written) ? "Turn off" : "Turn on"} ${g.name}`}
                     />
                   )}
                 </div>
@@ -624,7 +643,15 @@ function FeatureGatesTab() {
             ? " Flip an on/off gate with its switch; anything else: Railway Dashboard → Variables. Every change restarts the server."
             : " To change one: Railway Dashboard → Variables. A change restarts the server."}
         </p>
-        <GateFlipDialog request={flipRequest} onClose={() => setFlipRequest(null)} onDone={retry} />
+        <GateFlipDialog
+          request={flipRequest}
+          onClose={() => setFlipRequest(null)}
+          onDone={(name, value) => {
+            setWritten((prev) => ({ ...prev, [name]: value }));
+            // Reload once the redeploy is likely live; the written value shows meanwhile.
+            setTimeout(retry, 90 * 1000);
+          }}
+        />
       </CardBody>
     </Card>
   );

@@ -77,6 +77,16 @@ function flipStatus(name, entry) {
   return { flippable: true, notFlippableReason: null };
 }
 
+// Whether the code reads the variable as on, by the gate's own parser: a
+// strict reader takes exactly 'true'; a gateEnvValue reader takes 1 / true /
+// on in any case. Computed from the raw value, which the list may withhold.
+function readsOnFor(name, entry) {
+  const raw = process.env[name];
+  if (raw === undefined) return false;
+  if (entry?.reader === 'loose') return ['1', 'true', 'on'].includes(String(raw).toLowerCase());
+  return raw === 'true';
+}
+
 // GATE_* names a gate's description says it depends on ("needs GATE_Y").
 function mentionedGates(name, description) {
   return [...new Set(String(description || '').match(/GATE_[A-Z0-9_]*[A-Z0-9]/g) || [])].filter((n) => n !== name);
@@ -101,9 +111,10 @@ function listGates() {
       readByCode: read.has(name),
       description: catalog.get(name)?.description || read.get(name) || null,
       inverted: catalog.get(name)?.inverted === true,
+      readsOn: readsOnFor(name, catalog.get(name)),
       ...flipStatus(name, catalog.get(name)),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-module.exports = { listGates, gateSetting, flipStatus, mentionedGates, FLIP_SWITCH };
+module.exports = { listGates, gateSetting, flipStatus, mentionedGates, readsOnFor, FLIP_SWITCH };

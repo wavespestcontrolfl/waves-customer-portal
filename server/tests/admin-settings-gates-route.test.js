@@ -64,6 +64,20 @@ function withEnv(values, fn) {
 
 const row = (name) => listGates().find((g) => g.name === name);
 
+describe('readsOn follows each gate\'s own parser (codex #7732)', () => {
+  test('a strict gate is on only for exactly "true"; a gateEnvValue gate also takes 1 / on', () => {
+    const catalog = featureGates.knownGateCatalog();
+    expect(catalog.get('GATE_HIRED_PACKET').reader).toBe('strict');
+    for (const [value, on] of [['true', true], ['on', false], ['1', false], ['TRUE', false], [' true ', false], [undefined, false]]) {
+      withEnv({ GATE_HIRED_PACKET: value }, () => expect(row('GATE_HIRED_PACKET').readsOn).toBe(on));
+    }
+    expect(catalog.get('GATE_ADMIN_OPS_QUEUE').reader).toBe('loose');
+    for (const [value, on] of [['true', true], ['on', true], ['1', true], ['TRUE', true], ['false', false]]) {
+      withEnv({ GATE_ADMIN_OPS_QUEUE: value }, () => expect(row('GATE_ADMIN_OPS_QUEUE').readsOn).toBe(on));
+    }
+  });
+});
+
 describe('flipStatus', () => {
   test('flippable = a described on/off gate; everything else says why it is Railway-only', () => {
     const { flipStatus } = require('../services/gate-list');
@@ -88,7 +102,7 @@ describe('GET /api/admin/settings/gates', () => {
     expect(res.headers.get('cache-control')).toBe('no-store');
     const body = await res.json();
     expect(body.gates.length).toBe(listGates().length);
-    expect(Object.keys(body.gates[0]).sort()).toEqual(['description', 'flippable', 'inverted', 'name', 'notFlippableReason', 'readByCode', 'set', 'value']);
+    expect(Object.keys(body.gates[0]).sort()).toEqual(['description', 'flippable', 'inverted', 'name', 'notFlippableReason', 'readByCode', 'readsOn', 'set', 'value']);
     expect(body.flipAvailable).toBe(false);
   });
 });

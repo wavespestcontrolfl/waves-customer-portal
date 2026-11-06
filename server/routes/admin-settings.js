@@ -28,7 +28,7 @@ const {
   mergeCallRoutingConfig,
 } = require('../services/call-routing-config');
 const { isEnabled, settingsGateFlipLive } = require('../config/feature-gates');
-const { listGates, gateSetting, mentionedGates } = require('../services/gate-list');
+const { listGates, gateSetting, mentionedGates, readsOnFor } = require('../services/gate-list');
 const { ibFullAccess, requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const { decideVoiceRoute } = require('../services/voice-route-decision');
 
@@ -285,7 +285,7 @@ router.post('/gates/:name/preview', adminAuthenticate, requireAdmin, gateFlipEna
     // card can warn that one reads as off. A warning, never a block.
     const prerequisites = mentionedGates(gate.name, gate.description).map((name) => {
       const setting = gateSetting(name);
-      return { name, set: setting.set, value: setting.value, readsOn: setting.set && /^(true|1|on)$/i.test(String(setting.value || '').trim()) };
+      return { name, set: setting.set, value: setting.value, readsOn: readsOnFor(name, require('../config/feature-gates').knownGateCatalog().get(name)) };
     });
     return res.json({
       gate: gate.name,
