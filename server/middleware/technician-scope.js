@@ -129,7 +129,7 @@ const TECHNICIAN_ALLOW_LIST = [
   // (owner 2026-11-04): their routes are requireAdmin, so a technician login
   // never reached them.
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|unread-count|link-library|agent-draft)$/ },
-  { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|send-prep|rewrite-sms|ai-draft)$/ },
+  { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|send-prep|rewrite-sms|ai-draft|name-check)$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/blocked-numbers$/ },
   // Facebook Messenger threads (GATE_MESSENGER_INBOX, dark): the router scopes a
   // technician to threads linked to a customer on their own route, like the SMS inbox.

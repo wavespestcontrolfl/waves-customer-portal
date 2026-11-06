@@ -40,6 +40,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/communications/link-library` | admin-communications |
 | GET | `/api/admin/communications/log` | admin-communications |
 | POST | `/api/admin/communications/messages/read` | admin-communications |
+| POST | `/api/admin/communications/name-check` | admin-communications |
 | POST | `/api/admin/communications/rewrite-sms` | admin-communications |
 | POST | `/api/admin/communications/send-prep` | admin-communications |
 | GET | `/api/admin/communications/sender` | admin-communications |

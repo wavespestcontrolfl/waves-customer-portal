@@ -52,6 +52,7 @@
 //   missing signature verification or path that creates customers
 //   from arbitrary inbound numbers without rate-limiting.
 import { renderWithDidYouMean } from "../../components/admin/DidYouMean";
+import GreetingNameNote, { useGreetingNameCheck } from "../../components/admin/GreetingNameCheck";
 import { isAcceptedSms, unansweredSmsReply } from "../../utils/sms-delivery";
 import React, {
   useState,
@@ -1301,6 +1302,7 @@ export function SmsTab({
   useEffect(() => {
     if (smsIsTechnicianRole && sendTiming !== "now") setSendTiming("now");
   }, [smsIsTechnicianRole, sendTiming, setSendTiming]);
+  const nameCheck = useGreetingNameCheck({ customerId: selectedCustomerId, text: msgBody, setText: setMsgBody });
   const [sending, setSending] = useState(false);
   // Mirrors `sending` for async code that must not act mid-send: canceling
   // a review row while its /sms is in flight can land before the server's
@@ -3801,6 +3803,7 @@ export function SmsTab({
             className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-ui-body text-zinc-900 resize-y focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
           />
           </Field>
+          <GreetingNameNote check={nameCheck} disabled={rewritingSms || sending} />
           <div className="mt-2 flex items-center gap-2">
             <Button
               variant="secondary"
