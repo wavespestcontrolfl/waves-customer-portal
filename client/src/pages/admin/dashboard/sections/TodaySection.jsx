@@ -16,6 +16,7 @@ import { completionVerdict } from "../scorecard-metrics";
 export default function TodaySection({
   alerts,
   alertsStale,
+  alertFailures,
   alertsLoading,
   errors = {},
   pending = {},
@@ -36,7 +37,7 @@ export default function TodaySection({
       about="Live operations for the current day: the Action Inbox ranks what to fix first (stale leads, expiring estimates, at-risk recurring revenue), Today's Completion tracks the schedule as it happens, and the tiles show service execution for the selected period. Start here each morning — clear the inbox, then check the other tabs."
     >
       {alertsLoading ? <ActionFeedback className="mb-4">Loading action inbox…</ActionFeedback>
-        : <ActionInbox alerts={alerts} stale={alertsStale} />}
+        : <ActionInbox alerts={alerts} stale={alertsStale} failures={alertFailures} />}
       {errors.alerts && <ActionFeedback error onRetry={pending.alerts ? undefined : onRetry} className="mb-4">
         {pending.alerts ? "Retrying action inbox…" : "Action inbox is out of date."}
       </ActionFeedback>}
