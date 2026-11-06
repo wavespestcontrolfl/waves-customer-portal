@@ -212,4 +212,27 @@ describe("FocusedBoxMic", () => {
     await act(async () => { fireEvent.click(screen.getByText("Send follow-up")); });
     expect(send).toHaveBeenCalledTimes(1);
   });
+
+  it("draws the mic inside the box's own dialog, so a focus trap and aria-hidden background include it", async () => {
+    stubServer({ available: true, everyBox: true });
+    await mount(<div role="dialog" aria-label="Edit"><textarea aria-label="notes" /></div>);
+    await focusBox();
+    const mic = await screen.findByRole("button", { name: MIC });
+    expect(screen.getByRole("dialog")).toContainElement(mic);
+  });
+
+  it("turning the gate off reaches an open session when the page comes back to the front", async () => {
+    stubServer({ available: true, everyBox: true });
+    await mount(<textarea aria-label="notes" />);
+    await focusBox();
+    expect(await screen.findByRole("button", { name: MIC })).toBeInTheDocument();
+    await act(async () => { screen.getByLabelText("notes").blur(); });
+
+    stubServer({ available: true, everyBox: false });
+    const now = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(now + 6 * 60 * 1000);
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    await focusBox();
+    expect(screen.queryByRole("button", { name: MIC })).toBeNull();
+  });
 });

@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Mic, MicOff } from "lucide-react";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
-import { checkEveryBoxDictation } from "../../hooks/serverDictation";
+import { checkEveryBoxDictation, refreshEveryBoxDictation } from "../../hooks/serverDictation";
 import { readToken } from "../../hooks/useServerDictationMode";
 import { setDictationPending } from "../../hooks/dictationPending";
 import { useIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
@@ -29,21 +29,47 @@ const NOTICES = {
 // Buttons that stay live while words are on the way: they leave the box, they do not read it.
 const SAFE_BUTTON = /\b(cancel|close|back|dismiss|discard|stop|no thanks)\b/i;
 
-/** Asks the server once per login whether the every-box mic is on. Nothing renders until it says yes. */
+const RECHECK_MS = 5 * 60 * 1000;
+
+/**
+ * Asks the server whether the every-box mic is on: once at mount, then again when
+ * the page comes back to the front (at most every five minutes), so turning the
+ * gate off reaches an open session without a reload. A failed check changes nothing.
+ * Nothing renders until the server says yes.
+ */
 function useEveryBox() {
   const [on, setOn] = useState(false);
   useEffect(() => {
     const token = readToken();
     if (!token) return undefined;
     let disposed = false;
+    let checkedAt = Date.now();
     checkEveryBoxDictation(token).then((yes) => {
       if (!disposed) setOn(yes === true);
     });
+    const recheck = () => {
+      if (document.visibilityState === "hidden" || Date.now() - checkedAt < RECHECK_MS) return;
+      checkedAt = Date.now();
+      refreshEveryBoxDictation(token).then((answer) => {
+        if (!disposed && answer !== null) setOn(answer);
+      });
+    };
+    document.addEventListener("visibilitychange", recheck);
+    window.addEventListener("focus", recheck);
     return () => {
       disposed = true;
+      document.removeEventListener("visibilitychange", recheck);
+      window.removeEventListener("focus", recheck);
     };
   }, []);
   return on;
+}
+
+// Where the mic and its notice are drawn: inside the box's own dialog when it has one, so the
+// dialog's focus trap and its hidden-background markers (aria-hidden / inert) include the mic.
+function hostFor(el) {
+  const dialog = el?.isConnected ? el.closest('[role="dialog"], [aria-modal="true"]') : null;
+  return dialog || document.body;
 }
 
 /** The mic's fixed position for a box, or null when the box is off screen or too small. */
@@ -172,7 +198,7 @@ function useHoldActions(box, active, onHeld) {
   }, [box, active, onHeld]);
 }
 
-function Notice({ message }) {
+function Notice({ message, host }) {
   if (!message) return null;
   return createPortal(
     <div
@@ -182,16 +208,31 @@ function Notice({ message }) {
     >
       {message}
     </div>,
-    document.body,
+    host,
   );
 }
 
-function MicButton({ micRef, place, listening, uploading, onTap }) {
+function MicButton({ micRef, host, place, listening, uploading, onTap }) {
   const label = uploading ? "Transcribing" : listening ? "Stop dictation" : "Dictate into this box";
   const size = place?.size || 40;
   // Pinned to a box that left the screen: the mic stays reachable so a recording can be stopped.
+  // A dialog with a transform makes `fixed` relative to itself: measure once per place and shift back.
+  const [nudge, setNudge] = useState({ host, x: 0, y: 0 });
+  const measuredFor = useRef("");
+  useLayoutEffect(() => {
+    if (host === document.body || !place || !micRef.current) return;
+    const key = `${place.left},${place.top}`;
+    if (measuredFor.current === key) return;
+    measuredFor.current = key;
+    const rect = micRef.current.getBoundingClientRect();
+    const dx = place.left - rect.left;
+    const dy = place.top - rect.top;
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+    setNudge((n) => ({ host, x: (n.host === host ? n.x : 0) + dx, y: (n.host === host ? n.y : 0) + dy }));
+  }, [host, place, micRef]);
+  const shift = nudge.host === host ? nudge : { x: 0, y: 0 };
   const style = place
-    ? { top: place.top, left: place.left, width: size, height: size }
+    ? { top: place.top + shift.y, left: place.left + shift.x, width: size, height: size }
     : { bottom: 16, right: 16, width: 40, height: 40 };
   return createPortal(
     <button
@@ -216,7 +257,7 @@ function MicButton({ micRef, place, listening, uploading, onTap }) {
     >
       {listening ? <MicOff size={16} strokeWidth={2.2} aria-hidden="true" /> : <Mic size={16} strokeWidth={2.2} aria-hidden="true" />}
     </button>,
-    document.body,
+    host,
   );
 }
 
@@ -269,6 +310,7 @@ function FocusedBoxMicInner() {
 
   const target = busy ? pinned : focused;
   const place = useBoxPlace(target);
+  const host = hostFor(target);
 
   const onTap = useCallback(() => {
     if (!sessionRef.current && focused) {
@@ -278,12 +320,12 @@ function FocusedBoxMicInner() {
     toggle();
   }, [focused, toggle]);
 
-  if (!supported || mode !== "upload") return <Notice message={notice} />;
+  if (!supported || mode !== "upload") return <Notice message={notice} host={host} />;
   const show = busy || (focused && place);
   return (
     <>
-      {show ? <MicButton micRef={micRef} place={place} listening={listening} uploading={uploading} onTap={onTap} /> : null}
-      <Notice message={notice} />
+      {show ? <MicButton micRef={micRef} host={host} place={place} listening={listening} uploading={uploading} onTap={onTap} /> : null}
+      <Notice message={notice} host={host} />
     </>
   );
 }

@@ -47,6 +47,13 @@ export async function checkEveryBoxDictation(token) {
   return Boolean(token && answered && answered.token === token && answered.everyBox === true);
 }
 
+/** Asks the server again (the gate may have changed). The every-box answer, or null when the server could not be reached. */
+export async function refreshEveryBoxDictation(token) {
+  forgetServerDictation();
+  await checkServerDictation(token);
+  return answered && answered.token === token ? answered.everyBox === true : null;
+}
+
 /** Drop the remembered answer (the server said 404: the gate went off mid-session). */
 export function forgetServerDictation() {
   answered = null;
