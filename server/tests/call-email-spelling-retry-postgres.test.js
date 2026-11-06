@@ -1309,6 +1309,152 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     expect(await post([deliveredEvent(stray.sendgrid_message_id, 'ev-precheck-1')])).toBe(200);
   });
 
+  // ── A delivery that beats the runner's save of the message id (round 13 P1) ─────────────────────────────────────────────
+  const SEND_ID_ARG = 'automation_step_send_id';
+  const argEvent = (sendId, eventId, extra = {}) => ({
+    event: 'delivered', email: OTHER, sg_event_id: eventId, sg_message_id: 'early-1.f', [SEND_ID_ARG]: sendId, ...extra,
+  });
+  // Re-queue the bounced step to the other spelling; the NEXT sendStep dispatches the bound retry send.
+  async function queuedRetry() {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+  }
+  // sendOne that runs `during(args)` (the webhook arriving) before it returns the message id.
+  const sendOneDuring = (during, messageId = 'early-1') => sendgrid.sendOne.mockImplementationOnce(async (args) => {
+    await args.providerBoundaryCheck?.({});
+    await during(args);
+    return { messageId };
+  });
+  const retryRow = () => db('automation_step_sends').where({ enrollment_id: ctx.enrollment.id, email: OTHER }).orderBy('created_at', 'desc').first();
+
+  test('only the BOUND retry send carries its own row id as a custom arg; any other automation send is dispatched as before', async () => {
+    await queuedRetry();
+    await runner.sendStep(ctx.enrollment.id);
+    const [args] = sendgrid.sendOne.mock.calls[0];
+    expect(args.customArgs).toEqual({ [SEND_ID_ARG]: (await retryRow()).id });
+    // A plain enrollment (no claim, no provenance): no custom args at all.
+    jest.clearAllMocks();
+    ctx = await setup({ sent: 1, call: false, customerEmail: 'jondoe-plain@example.com', email: 'jondoe-plain@example.com' });
+    await db('automation_enrollments').where({ id: ctx.enrollment.id }).update({ next_send_at: new Date(Date.now() - 1000) });
+    const plainResult = await runner.sendStep(ctx.enrollment.id);
+    expect(plainResult).toMatchObject({ sent: true });
+    expect(sendgrid.sendOne.mock.calls[0][0].customArgs).toBeUndefined();
+  });
+
+  test('a delivery processed BEFORE sendOne returns (message id not saved yet) commits the retry once, and the later save changes nothing', async () => {
+    await queuedRetry();
+    let status;
+    sendOneDuring(async (args) => {
+      status = await post([argEvent(args.customArgs[SEND_ID_ARG], 'ev-early-1')]);
+    });
+    await runner.sendStep(ctx.enrollment.id);
+    expect(status).toBe(200);
+    await expectCommittedOnce('ev-early-1');
+    // The runner's save landed after the delivery: it saved the id and kept 'delivered' (never rewound to 'sent').
+    expect(await retryRow()).toMatchObject({ sendgrid_message_id: 'early-1', status: 'delivered' });
+    expect((await retryRow()).delivered_at).not.toBeNull();
+    // Redelivery of the same event, and a second delivered event now found by the saved message id: no second commit.
+    expect(await post([argEvent((await retryRow()).id, 'ev-early-1')])).toBe(200);
+    expect(await post([deliveredEvent('early-1', 'ev-early-1b')])).toBe(200);
+    expect(await db('audit_log').where({ resource_id: ctx.customerId, action: 'customer.email_replaced_after_bounce_retry' })).toHaveLength(1);
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(OTHER);
+  });
+
+  test('that early delivery is retry-critical: a failing event transaction answers 500, writes nothing, and the redelivery commits once', async () => {
+    await queuedRetry();
+    const statuses = [];
+    sendOneDuring(async (args) => {
+      const id = args.customArgs[SEND_ID_ARG];
+      const undo = await failStatementWhen('sendgrid_webhook_events', 'INSERT', "NEW.event_id = 'ev-early-2'");
+      try {
+        statuses.push(await post([argEvent(id, 'ev-early-2')]));
+      } finally {
+        await undo();
+      }
+      expect(await eventLedger('ev-early-2')).toEqual([]);
+      expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(BOUNCED);
+      statuses.push(await post([argEvent(id, 'ev-early-2')])); // SendGrid's redelivery
+    });
+    await runner.sendStep(ctx.enrollment.id);
+    expect(statuses).toEqual([500, 200]);
+    await expectCommittedOnce('ev-early-2');
+  });
+
+  test('an early BOUNCE of the retry send (message id not saved yet) fails the claim, and the later save does not rewrite the bounce', async () => {
+    await queuedRetry();
+    sendOneDuring(async (args) => {
+      expect(await post([{
+        event: 'bounce', type: 'bounce', email: OTHER, reason: '550 5.1.1', sg_event_id: 'ev-early-3', sg_message_id: 'early-1.f',
+        [SEND_ID_ARG]: args.customArgs[SEND_ID_ARG],
+      }])).toBe(200);
+    });
+    await runner.sendStep(ctx.enrollment.id);
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'failed', reason: 'retry_address_bounced' });
+    expect(await retryRow()).toMatchObject({ sendgrid_message_id: 'early-1', status: 'bounced' });
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(BOUNCED);
+  });
+
+  describe('a custom arg is never trusted past its recipient and claim binding', () => {
+    // Each case sends the early event, then asserts the claim is untouched (the runner's own save and the event are both harmless).
+    const early = (mutate) => async () => {
+      await queuedRetry();
+      let status;
+      let sendId;
+      sendOneDuring(async (args) => {
+        sendId = args.customArgs[SEND_ID_ARG];
+        status = await post([mutate({ sendId, stray: await strayAutomationSend(ctx.enrollment.id, ctx.last.id, null, OTHER) })]);
+      });
+      await runner.sendStep(ctx.enrollment.id);
+      expect(status).toBe(200);
+      expect((await ledger(ctx.customerId))[0].status).toBe('resending');
+      expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(BOUNCED);
+      expect(await db('audit_log').where({ resource_id: ctx.customerId, action: 'customer.email_replaced_after_bounce_retry' })).toEqual([]);
+    };
+    test('the event\'s recipient is not the send\'s recipient', early(({ sendId }) => argEvent(sendId, 'ev-forge-1', { email: BOUNCED })));
+    test('a recipient that only differs from the claim\'s retry address', early(({ sendId }) => argEvent(sendId, 'ev-forge-2', { email: 'someoneelse@example.com' })));
+    test('an event with no recipient', early(({ sendId }) => argEvent(sendId, 'ev-forge-3', { email: undefined })));
+    test('a custom arg that is not a uuid', early(() => argEvent('not-a-uuid', 'ev-forge-4')));
+    test('a custom arg naming a send no claim is bound to', early(({ stray }) => argEvent(stray.id, 'ev-forge-5')));
+    test('a custom arg naming a row that does not exist', early(() => argEvent(randomUUID(), 'ev-forge-6')));
+  });
+
+  test('a custom arg naming a send already bound to a DIFFERENT message id is not trusted', async () => {
+    await boundRetryDelivery('bound-other-1');
+    const send = await retryRow();
+    expect(await post([argEvent(send.id, 'ev-forge-7', { sg_message_id: 'someone-elses.f' })])).toBe(200);
+    expect((await ledger(ctx.customerId))[0].status).toBe('resending');
+    expect(await retryRow()).toMatchObject({ sendgrid_message_id: 'bound-other-1' });
+  });
+
+  test('the pre-check does not mark a forged / mismatched custom arg retry-critical (today\'s 200 survives a failing event write)', async () => {
+    await queuedRetry();
+    let status;
+    sendOneDuring(async (args) => {
+      const undo = await failStatementWhen('sendgrid_webhook_events', 'INSERT', "NEW.event_id = 'ev-forge-8'");
+      try {
+        status = await post([argEvent(args.customArgs[SEND_ID_ARG], 'ev-forge-8', { email: BOUNCED })]);
+      } finally {
+        await undo();
+      }
+    });
+    await runner.sendStep(ctx.enrollment.id);
+    expect(status).toBe(200);
+    expect((await ledger(ctx.customerId))[0].status).toBe('resending');
+  });
+
+  test('gate off: a custom arg settles nothing', async () => {
+    await queuedRetry();
+    let status;
+    sendOneDuring(async (args) => {
+      delete process.env.GATE_CALL_BOUNCE_OTHER_SPELLING;
+      status = await post([argEvent(args.customArgs[SEND_ID_ARG], 'ev-gateoff-arg')]);
+    });
+    await runner.sendStep(ctx.enrollment.id);
+    expect(status).toBe(200);
+    expect((await ledger(ctx.customerId))[0].status).toBe('resending');
+    expect(await eventLedger('ev-gateoff-arg')).toEqual([]);
+  });
+
   test('gate off: the same ledger-insert failure on a delivery of the bound retry send keeps today\'s 200', async () => {
     await boundRetryDelivery('gateoff-1');
     delete process.env.GATE_CALL_BOUNCE_OTHER_SPELLING;

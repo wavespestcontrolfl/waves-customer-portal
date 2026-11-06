@@ -980,9 +980,18 @@ async function insertStepSend({ enrollment, step, recipient, testRecipient }) {
     const row = await queued(trx);
     const bind = await require('./call-email-spelling-retry').bindAutomationRetrySend({ enrollment, step, sendId: row.id, recipient }, trx);
     // The originating retry step whose bind failed must NOT be dispatched (automationDeliveryBlock stops it): fail closed.
-    return bind === 'refused' ? Object.assign(row, { retryNotBound: true }) : row;
+    if (bind === 'refused') return Object.assign(row, { retryNotBound: true });
+    // The bound retry send also carries its own id to SendGrid (custom arg), so its delivery event is found even when it beats
+    // the post-send save of the message id. Only this send: every other automation send is dispatched exactly as before.
+    return bind === 'bound' ? Object.assign(row, { retryBound: true }) : row;
   });
 }
+
+// The bound retry send's own id as a SendGrid custom arg (see insertStepSend); every other send adds nothing.
+const retrySendCustomArgs = (sendRow) => (sendRow.retryBound
+  ? { customArgs: { [require('./call-email-spelling-retry').SEND_ID_ARG]: sendRow.id } } : {});
+// A bound retry send's delivery / bounce event can land before the post-send save: its status is then kept, never rewound to 'sent'.
+const sentStatusFor = (sendRow) => (sendRow.retryBound ? db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END") : 'sent');
 
 async function sendStepLocked(enrollment, { testRecipient } = {}) {
   const enrollmentId = enrollment.id;
@@ -1059,6 +1068,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     text: text || undefined,
     categories: ['automation', `template_${template.key}`, `step_${step.step_order}`],
     asmGroupId,
+    ...retrySendCustomArgs(sendRow),
     ...(providerBoundaryCheck ? { providerBoundaryCheck } : {}),
   });
   try {
@@ -1068,7 +1078,8 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     if (res?.sent === false) return res;
 
     await db('automation_step_sends').where({ id: sendRow.id }).update({
-      status: 'sent',
+      // A bound retry send's delivery / bounce event can land before this save: its status is then kept, never rewound to 'sent'.
+      status: sentStatusFor(sendRow),
       sendgrid_message_id: res.messageId,
       sent_at: new Date(),
       updated_at: new Date(),

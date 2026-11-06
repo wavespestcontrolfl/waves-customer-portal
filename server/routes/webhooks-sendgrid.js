@@ -241,7 +241,11 @@ async function isRetryCriticalEvent(ev) {
       .join('automation_step_sends as s', 's.id', 'c.retry_send_id')
       .where({ 's.sendgrid_message_id': messageId, 'c.status': 'resending' })
       .first('c.id');
-    return !!bound;
+    if (bound) return true;
+    // The delivery can beat the runner's save of the message id: the send is then named by its custom arg alone.
+    const byArg = await require('../services/call-email-spelling-retry')
+      .findRetrySendByCustomArg({ ev, messageId, email: ev.email, resendingOnly: true });
+    return !!byArg;
   } catch (err) {
     logger.warn(`[sendgrid-webhook] retry pre-check failed (treated as retry-critical): ${err.code || err.name}`);
     return true;
@@ -265,6 +269,24 @@ async function processAutomationEvent(ev, messageId, email, automationSend) {
     if (spelling?.touched && err && typeof err === 'object') err.retryWebhook = true;
     throw err;
   }
+}
+
+/**
+ * Fallback (GATE_CALL_BOUNCE_OTHER_SPELLING): a BOUND retry send carries its own row id as custom arg `automation_step_send_id`, so
+ * an event that beats the runner's post-send message-id write still finds it. Trusted only for that send, to its own recipient,
+ * while unbound or bound to this message id; the id is then saved so the runner's later write changes nothing. Null = not found.
+ */
+async function retrySendByCustomArg(ev, messageId, email) {
+  if (!ev.automation_step_send_id) return null;
+  const retrySvc = require('../services/call-email-spelling-retry');
+  const named = await retrySvc.findRetrySendByCustomArg({ ev, messageId, email });
+  return named ? retrySvc.adoptRetrySendMessageId(named, messageId) : null;
+}
+
+// The automation step send an event belongs to: by message id, else (a bound retry send only) by its custom arg.
+async function findAutomationSend(ev, messageId, email) {
+  const byMessageId = await db('automation_step_sends').where({ sendgrid_message_id: messageId }).first();
+  return byMessageId || retrySendByCustomArg(ev, messageId, email);
 }
 
 async function handleEvent(ev) {
@@ -317,9 +339,7 @@ async function handleEvent(ev) {
   // Automation step sends are always single-recipient (one customer per
   // step), so message id alone is unique there. Belt-and-suspenders email
   // filter anyway.
-  const automationSend = !newsletterDelivery ? await db('automation_step_sends')
-    .where({ sendgrid_message_id: messageId })
-    .first() : null;
+  const automationSend = newsletterDelivery ? null : await findAutomationSend(ev, messageId, email);
   let emailMessage = !newsletterDelivery && !automationSend
     ? await db('email_messages')
       .where({ provider_message_id: messageId })

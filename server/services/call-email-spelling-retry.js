@@ -46,6 +46,11 @@ const RETRY_OWNED = Object.freeze({ retried: false, retryOwned: true });
 const EMAIL_SHAPE_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // automation_enrollments.metadata key: the retry address this enrollment now mails (retry provenance).
 const RETRY_PROVENANCE_KEY = 'spelling_retry_email';
+// SendGrid custom arg that carries a BOUND retry send's own queued row id (automation_step_sends.id). SendGrid echoes it on every
+// event, so a delivered / bounced event that races the runner's post-send sendgrid_message_id write still finds its send. Same
+// mechanism as the tracked path's `email_message_id`, narrowed to the one send that owns a claim.
+const SEND_ID_ARG = 'automation_step_send_id';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const norm = (value) => String(value || '').trim().toLowerCase();
 
@@ -209,6 +214,40 @@ async function bindAutomationRetrySend({ enrollment, step, sendId, recipient }, 
   // The originating step but the bind failed (the claim is already bound to an earlier queued row that was never dispatched, e.g.
   // the process stopped after the bind committed). Fail closed: the caller must not dispatch it.
   return gateLive() ? 'refused' : 'gate_off';
+}
+
+/**
+ * The BOUND retry send an event names by its custom arg, for an event whose X-Message-Id the runner has not saved yet. Trusted only
+ * when ALL hold: the gate is live; the arg is a uuid; the send row exists and a claim is bound to it by `retry_send_id`; the event's
+ * recipient is the send row's recipient AND the claim's retry address (case-insensitive, an event with no recipient never
+ * matches); and the row is unbound or already bound to THIS event's message id (a different saved id means another send).
+ * `resendingOnly` also requires that claim to be `resending` (the retry-critical pre-check). A query, no write; null = not trusted.
+ */
+async function findRetrySendByCustomArg({ ev, messageId, email, resendingOnly = false }, client = db) {
+  const id = ev && ev[SEND_ID_ARG] ? String(ev[SEND_ID_ARG]) : '';
+  if (!gateLive() || !UUID_RE.test(id) || !messageId || !norm(email)) return null;
+  const q = client(`automation_step_sends as s`)
+    .join(`${TABLE} as c`, 'c.retry_send_id', 's.id')
+    .where('s.id', id)
+    .whereRaw('LOWER(s.email) = ?', [norm(email)])
+    .whereRaw('LOWER(c.retry_email) = ?', [norm(email)])
+    .where((w) => w.whereNull('s.sendgrid_message_id').orWhere('s.sendgrid_message_id', String(messageId)));
+  if (resendingOnly) q.where('c.status', 'resending');
+  return (await q.first('s.*')) || null;
+}
+
+/**
+ * Save the message id on a send found by its custom arg, so later events take the fast path. One guarded UPDATE (still unbound), and
+ * the runner's own later save of the same id is a no-op for the result. Returns the row as it stands, bound to this message id, or
+ * null if the row now carries a different id.
+ */
+async function adoptRetrySendMessageId(sendRow, messageId, client = db) {
+  if (String(sendRow.sendgrid_message_id || '') === String(messageId)) return sendRow;
+  const n = await client('automation_step_sends').where({ id: sendRow.id }).whereNull('sendgrid_message_id')
+    .update({ sendgrid_message_id: String(messageId), updated_at: new Date() });
+  if (n > 0) return { ...sendRow, sendgrid_message_id: String(messageId) };
+  const reread = await client('automation_step_sends').where({ id: sendRow.id }).first();
+  return reread && String(reread.sendgrid_message_id || '') === String(messageId) ? reread : null;
 }
 
 /** GATE_CALL_BOUNCE_OTHER_SPELLING, read at call time: the one gate recheck every retry boundary goes through. */
@@ -547,5 +586,5 @@ async function commitDeliveredRetry({ sendRow }, client) {
 
 module.exports = {
   onAutomationHardBounce, onAutomationDelivered, claimRetry, settleClaim, claimForSend, bindAutomationRetrySend, gateLive,
-  retrySendVerdict, stopRetry, abandonRetry, releaseRetryEnrollments, onAutomationDeadDomain, settledOtherSpelling, lockPrepSend, CLAIM_STALE_MS, CHANNEL, TABLE, RETRY_PROVENANCE_KEY,
+  findRetrySendByCustomArg, adoptRetrySendMessageId, SEND_ID_ARG, retrySendVerdict, stopRetry, abandonRetry, releaseRetryEnrollments, onAutomationDeadDomain, settledOtherSpelling, lockPrepSend, CLAIM_STALE_MS, CHANNEL, TABLE, RETRY_PROVENANCE_KEY,
 };
