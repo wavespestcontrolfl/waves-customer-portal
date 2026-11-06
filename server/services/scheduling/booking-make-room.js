@@ -100,7 +100,9 @@ function ownStops(rows, techId) {
 /**
  * The stops a new visit at [startMin, startMin + durationMin) pushes later, in order. `own` is the technician's timed
  * stops in start order. Each moved stop keeps its length and moves the same whole hours; the chain ends at the first
- * stop the moved ones no longer overlap. Returns { moves: [{ row, fromMin, toMin, widthMin }] } or { reason }. Pure.
+ * stop the moved ones no longer overlap. Stops that already overlap each other would still overlap after the move,
+ * and the writer refuses that (day-replan apply.js assertNoClash), so such a chain is refused here too.
+ * Returns { moves: [{ row, fromMin, toMin, widthMin }] } or { reason }. Pure.
  */
 function buildChain(own, { startMin, durationMin, closeMin }) {
   const shift = shiftMinutesFor(durationMin);
@@ -116,6 +118,7 @@ function buildChain(own, { startMin, durationMin, closeMin }) {
     const widthMin = range.endMin - range.startMin;
     const toMin = range.startMin + shift;
     if (toMin + widthMin > closeMin) return { reason: 'past_day_close' };
+    if (moves.length && toMin < Math.max(...moves.map((m) => m.toMin + m.widthMin))) return { reason: 'moved_stops_overlap' };
     moves.push({ row, fromMin: range.startMin, toMin, widthMin });
     busyUntil = Math.max(busyUntil, toMin + widthMin);
   }

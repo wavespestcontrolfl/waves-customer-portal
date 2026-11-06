@@ -281,6 +281,12 @@ describe('the chain', () => {
     const overlapping = [stop('a', 8, 10, { window_end: '09:30:00' }), stop('b', 9, 20)];
     expect(buildChain(overlapping, { startMin: 9 * 60, durationMin: 60, closeMin: 17 * 60 })).toEqual({ reason: 'earlier_stop_overlaps' });
   });
+
+  test('stops that already overlap would still overlap after the move: refused, as the writer refuses it', () => {
+    // B 9:00-10:30 and C 10:00-11:00 would become 10:00-11:30 and 11:00-12:00 (day-replan apply.js assertNoClash).
+    const tight = [stop('b', 9, 20, { window_end: '10:30:00' }), stop('c', 10, 30), stop('d', 12, 40)];
+    expect(buildChain(tight, { startMin: 9 * 60, durationMin: 60, closeMin: 17 * 60 })).toEqual({ reason: 'moved_stops_overlap' });
+  });
 });
 
 describe('never throws', () => {

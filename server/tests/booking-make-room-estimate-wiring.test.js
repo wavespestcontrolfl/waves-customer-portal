@@ -171,6 +171,7 @@ describe('makeRoomAdmit — the page\'s own offer rules for a tried hour', () =>
     dateFrom: '2027-05-14',
     dateTo: '2027-05-28',
     funnelDays: overrides.funnelDays || null,
+    funnel: overrides.funnel || null,
   });
   const slot = (date, start, end) => ({ date, windowStart: start, windowEnd: end, durationMinutes: 60, techId: 'tech-1' });
 
@@ -191,5 +192,14 @@ describe('makeRoomAdmit — the page\'s own offer rules for a tried hour', () =>
     expect(admit({ opts: { timeOfDay: 'morning' } })(slot('2027-05-20', '14:00', '15:00'))).toBe(false);
     expect(admit({ funnelDays: new Set(['2027-05-21']) })(slot('2027-05-20', '09:00', '10:00'))).toBe(false);
     expect(admit({ funnelDays: new Set(['2027-05-20']) })(slot('2027-05-20', '09:00', '10:00'))).toBe(true);
+  });
+
+  test('a zone the funnel seeded (no cluster day left): the seed day counts, other days do not', () => {
+    const seeded = { funnelDays: new Set(), funnel: { mode: 'seeded', seedDate: '2027-05-21' } };
+    expect(admit(seeded)(slot('2027-05-21', '09:00', '10:00'))).toBe(true);
+    expect(admit(seeded)(slot('2027-05-20', '09:00', '10:00'))).toBe(false);
+    // A cluster day still counts while the page seeded another day: had its hour been free, the page would offer it.
+    const seededWithCluster = { funnelDays: new Set(['2027-05-20']), funnel: { mode: 'seeded', seedDate: '2027-05-21' } };
+    expect(admit(seededWithCluster)(slot('2027-05-20', '09:00', '10:00'))).toBe(true);
   });
 });

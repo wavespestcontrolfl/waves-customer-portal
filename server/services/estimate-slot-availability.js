@@ -2091,14 +2091,20 @@ function makeRoomModeFor(userOpts) {
   }
 }
 
+// The zone-day funnel as the page resolved it (applyZoneDayFunnel): its cluster days, plus the one seed day when it
+// seeded one. funnelDays null = no funnel.
+function funnelAllows(funnelDays, funnel, date) {
+  return !funnelDays || funnelDays.has(date) || (funnel?.mode === 'seeded' && funnel.seedDate === date);
+}
+
 // This page's own offer rules for one window the make-room check tries: the request's dates and weekends, the
 // customer grid and close, the zone days, the time of day, the notice and the season.
-function makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays }) {
+function makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnel = null }) {
   return (slot) => {
     if (!slot?.date || slot.date < dateFrom || slot.date > dateTo) return false;
     if (!enumerateETDateStrings(slot.date, slot.date, { includeWeekends: opts.includeWeekends }).length) return false;
     if (!slotWindowFitsDay(slot.windowStart, slot.windowEnd)) return false;
-    if (funnelDays && !funnelDays.has(slot.date)) return false;
+    if (!funnelAllows(funnelDays, funnel, slot.date)) return false;
     const kept = filterPastSlotsForToday(filterTimeOfDay([slot], opts.timeOfDay), { minimumLeadMinutes: opts.minimumLeadMinutes });
     return filterSeasonalSlots(kept, serviceProfile).length === 1;
   };
@@ -2548,7 +2554,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // GATE_BOOKING_MAKE_ROOM: the taken hours this customer could have, measured against this same final pool.
   startMakeRoomCheck(makeRoomModeFor(userOpts), {
     estimateId, pool: routeChecked, coords, durationMinutes: serviceProfile.durationMinutes, dateFrom, dateTo,
-    admit: makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays }),
+    admit: makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnel }),
   });
   // The scarcity count below reads `bookable` when no funnel is active: leave out what the check removed.
   let countedBookable = bookable;
