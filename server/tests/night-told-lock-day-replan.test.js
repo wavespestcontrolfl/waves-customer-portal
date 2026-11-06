@@ -20,8 +20,6 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
   isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
 }));
 
-const logger = require('../services/logger');
-const { planDay } = require('../services/day-replan/planner');
 const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
 const { getCustomerSchedulingPreferences } = require('../services/auto-dispatch/preferences');
 const { isPersonPlacedVisit } = require('../services/auto-dispatch/eligibility');

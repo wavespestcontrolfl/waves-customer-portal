@@ -124,8 +124,6 @@ afterEach(() => { delete process.env.GATE_NIGHT_LOCK_24H; });
 afterAll(() => { delete process.env.AUTO_DISPATCH_ALLOW_APPLY; });
 
 const skipCodes = () => audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.action !== 'changed').map((d) => d.reason_code);
-const changed = () => audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.action === 'changed');
-const run = (over = {}) => runAutoDispatch({ mode: 'apply', flexTierEnabled: true, ...over });
 
 
 afterEach(() => { delete process.env.GATE_NIGHT_TOLD_LOCK; });
