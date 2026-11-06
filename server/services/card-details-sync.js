@@ -86,9 +86,10 @@ function cardPatch(pm, row) {
 }
 
 // The account updater can replace the card NUMBER. Payment history shows each payment's own brand and last-four
-// snapshot first (StripeService.getPaymentHistory, Customer 360), so before a saved card's brand or last four changes,
-// a linked payment that never got a snapshot is given the details it was made with. Fill-only, like the payment_methods
-// delete trigger (migration 20260924000032, payments_snapshot_removed_method): a value a payment carries stays.
+// snapshot first (StripeService.getPaymentHistory, Customer 360), so when a saved card's brand or last four changes,
+// a linked payment that never got a snapshot is given the details it was made with: the ones the row held. Called in
+// the row write's transaction, after the write landed. Fill-only, like the payment_methods delete trigger (migration
+// 20260924000032, payments_snapshot_removed_method): a value a payment carries stays.
 async function preservePaymentSnapshots(knex, row) {
   const fill = {};
   if (row.last_four) fill.card_last_four = knex.raw('COALESCE(card_last_four, ?)', [row.last_four]);
@@ -133,10 +134,15 @@ async function applyStripeCardDetails(pm, { source = 'webhook', database, rows }
     // updated_at stays as it is: the Auto Pay fallback walk (stripe.js, autopay-eligibility.js) orders duplicate
     // default cards by it, and the unanswered-reply check reads it as an account change. A detail refresh must not
     // move either; the audit row records when it ran.
-    if (patch.last_four || patch.card_brand) await preservePaymentSnapshots(knex, row);
-    const count = await knex('payment_methods')
-      .where({ id: row.id, stripe_payment_method_id: pm.id, ...unchangedSince(row) })
-      .update(patch);
+    // One transaction: the row write (compare-and-set) first; the payment snapshot fill only when that write landed,
+    // so a refused write fills nothing, and a payment made meanwhile cannot see the new card before the fill commits.
+    const count = await knex.transaction(async (trx) => {
+      const changed = await trx('payment_methods')
+        .where({ id: row.id, stripe_payment_method_id: pm.id, ...unchangedSince(row) })
+        .update(patch);
+      if (changed && (patch.last_four || patch.card_brand)) await preservePaymentSnapshots(trx, row);
+      return changed;
+    });
     if (!count) { conflict = true; continue; }
     updated += 1;
     logger.info(`[card-details-sync] row ${row.id} refreshed from Stripe (${source}): ${fields.join(', ')}`);

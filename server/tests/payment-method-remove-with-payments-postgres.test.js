@@ -144,7 +144,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
   test('a card the account updater replaced keeps its old number on earlier payments (card details sync, #7672 r2 P2)', async () => {
     // Stripe replaced the saved card's number. The refresh fills the snapshot of a payment that never took one, then
     // changes the saved card; history reads each payment's snapshot first, so both earlier payments keep the old card.
-    const { refreshCardFromStripe } = require('../services/card-details-sync');
+    const { applyStripeCardDetails, refreshCardFromStripe } = require('../services/card-details-sync');
     const [customer] = await db('customers')
       .insert({ first_name: 'FkProbe', last_name: 'Renewed', phone: '+15550001238' })
       .returning('id');
@@ -183,6 +183,25 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
         ['60.00', 'VISA', '4242'],
         ['50.00', 'VISA', '4242'],
       ]);
+
+      // A refresh that read the card BEFORE that one landed (#7672 r3) is refused, and a payment made since with
+      // the new card keeps no stamp of the old number: the fill runs only after a write that landed.
+      const [later] = await db('payments')
+        .insert({ customer_id: customerId, payment_method_id: methodId, payment_date: '2026-11-03', amount: '70.00', status: 'paid' })
+        .returning('id');
+      const late = await applyStripeCardDetails({
+        id: pmId, type: 'card', customer: 'cus_card_sync_probe',
+        card: { brand: 'visa', last4: '7777', exp_month: 12, exp_year: 2030, funding: 'credit' },
+      }, {
+        source: 'test',
+        database: db,
+        rows: [{ id: methodId, method_type: 'card', exp_month: '11', exp_year: '2026', last_four: '4242', card_brand: 'VISA', card_funding: null }],
+      });
+      expect(late).toEqual({ updated: 0, conflict: true });
+      expect(await db('payment_methods').where({ id: methodId }).first())
+        .toMatchObject({ card_brand: 'MASTERCARD', last_four: '5555', exp_year: '2029' });
+      expect(await db('payments').where({ id: later.id ?? later }).first())
+        .toMatchObject({ card_brand: null, card_last_four: null });
     } finally {
       jest.restoreAllMocks();
       if (methodId) {
