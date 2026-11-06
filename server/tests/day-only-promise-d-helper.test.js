@@ -55,6 +55,17 @@ describe('loadDayOnlyCheck', () => {
     expect([{ id: 'v1' }, { id: 'v9' }, { id: null }].map(isDayOnly)).toEqual([false, true, true]);
   });
 
+  test('gate on: a row whose display entry has failed: true is day-only even with showHour true', async () => {
+    // loadTimeDisplay marks a row whose eligibility read failed with failed: true (B1); an AI context then says only the day.
+    timePromise.loadTimeDisplay.mockResolvedValue(new Map([
+      ['v1', { showHour: true, failed: true }],
+      ['v2', { showHour: true }],
+    ]));
+    const isDayOnly = await loadDayOnlyCheck(CONN, [{ id: 'v1' }, { id: 'v2' }]);
+    expect(isDayOnly({ id: 'v1' })).toBe(true);
+    expect(isDayOnly({ id: 'v2' })).toBe(false);
+  });
+
   test('no rows: nothing to read', async () => {
     const isDayOnly = await loadDayOnlyCheck(CONN, []);
     expect(isDayOnly({ id: 'v1' })).toBe(false);

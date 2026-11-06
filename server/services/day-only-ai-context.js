@@ -41,7 +41,8 @@ async function loadDayOnlyCheck(conn, rows, now = new Date()) {
   }
   return (row) => {
     const verdict = row && row.id != null && display ? display.get(row.id) : null;
-    return !verdict || verdict.showHour === false;
+    // `failed: true` = that row's eligibility read failed (loadTimeDisplay marks it); an AI context then says only the day.
+    return !verdict || verdict.failed === true || verdict.showHour === false;
   };
 }
 
