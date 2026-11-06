@@ -183,6 +183,9 @@ function useHoldActions(box, active, onHeld) {
     const onKey = (event) => {
       if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
       if (!(event.target instanceof Element) || !scope.contains(event.target)) return;
+      // Enter on a focused button or link activates it as a click, which the click guard above judges
+      // (the mic, Cancel and Close stay usable from the keyboard).
+      if (event.target.closest('button, [role="button"], a[href], input[type="submit"]')) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       onHeld();

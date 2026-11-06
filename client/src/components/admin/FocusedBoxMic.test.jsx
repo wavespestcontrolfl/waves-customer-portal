@@ -204,6 +204,9 @@ describe("FocusedBoxMic", () => {
     await act(async () => { fireEvent.keyDown(screen.getByLabelText("notes"), { key: "Enter", metaKey: true }); });
     expect(send).not.toHaveBeenCalled();
     expect(await screen.findByRole("status")).toHaveTextContent(/wait for the words/);
+    // Enter on a focused Cancel or on the mic is a click for the browser; the key guard leaves it alone.
+    expect(fireEvent.keyDown(screen.getByText("Cancel"), { key: "Enter" })).toBe(true);
+    expect(fireEvent.keyDown(screen.getByRole("button", { name: "Transcribing" }), { key: "Enter" })).toBe(true);
     await act(async () => { fireEvent.click(screen.getByText("Cancel")); });
     expect(cancel).toHaveBeenCalledTimes(1);
 
