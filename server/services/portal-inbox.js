@@ -9,6 +9,9 @@
  * With GATE_PORTAL_BOOKING_ITEMS on, a third kind joins them (3): the open admin bells for a visitor who
  * started to book and left (portal-unfinished-bookings.js: dedupeKey `portal-unfinished-...`). They are bells,
  * not requests: a person marks one handled with the bell's own Done, and `closeOlder` marks them Done too.
+ * With GATE_PORTAL_MESSAGES on, a fourth kind (4): a customer's own message in their portal thread
+ * (portal-messages.js) that nobody answered: the thread's newest message is the customer's and is newer than
+ * its handledAt stamp. An answer in the portal (a newer outbound row) or Mark handled closes it.
  * The Communications Portal tab lists the last 14 days (`items`). Open items at
  * or before the cutoff are listed one by one too (`olderItems`) and counted
  * (`older`); `closeOlder` still closes them and sends NOTHING to a customer.
@@ -27,7 +30,8 @@ const WINDOW_DAYS = 14;
 const LIST_CAP = 200;
 const TEXT_CAP = 300;
 const TERMINAL_REQUEST_STATUSES = ['resolved', 'closed', 'cancelled'];
-const ALERT_KEYS = ['escalationId', 'requestId'];
+// portalConversationId: a customer's portal message thread (portal-messages.js, GATE_PORTAL_MESSAGES).
+const ALERT_KEYS = ['escalationId', 'requestId', 'portalConversationId'];
 const CHAT_CLOSE_NOTE = 'Closed as older than 14 days from Communications → Portal. No customer message.';
 const REQUEST_CLOSE_NOTE = 'Closed as older than 14 days (Portal tab). No email sent.';
 const ALERT_CLOSE_RESOLUTION = 'Closed as older than 14 days (Portal tab)';
@@ -37,6 +41,8 @@ const BOOKING_KEY_PREFIX = 'portal-unfinished-';
 
 // GATE_PORTAL_BOOKING_ITEMS, read at call time. A test that mocks feature-gates without the reader reads off.
 const bookingsLive = () => Boolean(featureGates.portalBookingItemsLive?.());
+// GATE_PORTAL_MESSAGES, read at call time the same way.
+const messagesLive = () => Boolean(featureGates.portalMessagesLive?.());
 
 // An escalation's admin bell alert marked Done = somebody already dealt with
 // it. Hide the chat then. No alert at all (before Oct 2) = keep it listed.
@@ -99,18 +105,48 @@ function openBookings(conn = db) {
   return openBookingScope(conn('notifications as n'));
 }
 
+// A customer's portal thread waiting on the office, as a scope over a builder on `conversations as cv`: the
+// newest message is the customer's (appendMessage keeps last_inbound_at = last_message_at for it), and it is
+// newer than the thread's Mark handled stamp. openMessages below and the lead staleness sweep go through it.
+function openMessageScope(builder) {
+  return builder
+    .where('cv.channel', 'portal')
+    .where('cv.our_endpoint_id', 'portal')
+    .whereNotNull('cv.customer_id')
+    .whereNotNull('cv.last_inbound_at')
+    .whereRaw('cv.last_inbound_at >= cv.last_message_at')
+    .whereRaw("cv.last_inbound_at > coalesce((cv.metadata->>'handledAt')::timestamptz, '-infinity'::timestamptz)");
+}
+
+function openMessages(conn = db) {
+  return openMessageScope(conn('conversations as cv'));
+}
+
+// Runs fn(trx, open) on the portal thread's locked conversations row, with whether the thread waits on the
+// office right now. Every change to a thread's admin bells goes through here (Mark handled, an answer's close,
+// a customer message's ring), and saving a message writes the same row, so a bell change and a newer message
+// cannot cross: a bell closes only when nothing is left open, and rings only while the thread is open.
+async function onLockedThread(threadId, fn) {
+  return db.transaction(async (trx) => {
+    await trx('conversations').where({ id: threadId }).forUpdate().first('id');
+    const open = Boolean(await openMessages(trx).where('cv.id', threadId).first('cv.id'));
+    return fn(trx, open);
+  });
+}
+
 async function countOf(query) {
   const row = await query.clone().count({ n: '*' }).first();
   return Number(row?.n || 0);
 }
 
 async function summary(cutoff = windowCutoff()) {
-  const [chats, requests, bookings] = await Promise.all([
+  const [chats, requests, bookings, messages] = await Promise.all([
     countOf(openChats().where('e.created_at', '>', cutoff)),
     countOf(openRequests().where('r.created_at', '>', cutoff)),
     bookingsLive() ? countOf(openBookings().where('n.created_at', '>', cutoff)) : 0,
+    messagesLive() ? countOf(openMessages().where('cv.last_inbound_at', '>', cutoff)) : 0,
   ]);
-  return { count: chats + requests + bookings };
+  return { count: chats + requests + bookings + messages };
 }
 
 // The assistant's reply right after the customer's hand-off message: the first
@@ -193,6 +229,50 @@ function bookingItem(row) {
   };
 }
 
+// A customer's unanswered portal message: the words since the office's last answer (and since Mark handled),
+// and that last answer for context.
+const UNANSWERED_SQL = `(
+  SELECT string_agg(m.body, E'\\n' ORDER BY m.created_at) FROM messages m
+  WHERE m.conversation_id = cv.id AND m.direction = 'inbound'
+    AND m.created_at > coalesce((SELECT max(o.created_at) FROM messages o
+      WHERE o.conversation_id = cv.id AND o.direction = 'outbound'), '-infinity'::timestamptz)
+    AND m.created_at > coalesce((cv.metadata->>'handledAt')::timestamptz, '-infinity'::timestamptz)
+)`;
+const LAST_ANSWER_SQL = `(
+  SELECT o.body FROM messages o WHERE o.conversation_id = cv.id AND o.direction = 'outbound'
+  ORDER BY o.created_at DESC LIMIT 1
+)`;
+
+// The newest customer message of the thread: what Mark handled covers when the office presses it.
+const THROUGH_SQL = `(
+  SELECT m.id FROM messages m WHERE m.conversation_id = cv.id AND m.direction = 'inbound'
+  ORDER BY m.created_at DESC, m.id DESC LIMIT 1
+)`;
+
+function messageItem(row) {
+  return {
+    kind: 'message',
+    id: row.id,
+    throughId: row.through_id,
+    createdAt: row.created_at,
+    customer: customerOf(row),
+    customerMessage: cut(row.unanswered),
+    lastAnswer: cut(row.last_answer),
+  };
+}
+
+async function listMessages(cutoff, op) {
+  const rows = await openMessages()
+    .leftJoin('customers as c', 'c.id', 'cv.customer_id')
+    .where('cv.last_inbound_at', op, cutoff)
+    .orderBy('cv.last_inbound_at', 'desc')
+    .limit(LIST_CAP)
+    .select('cv.id', 'cv.last_inbound_at as created_at', 'cv.customer_id', 'c.first_name', 'c.last_name', 'c.phone',
+      db.raw(HAS_TEXTS_SQL), db.raw(`${UNANSWERED_SQL} AS unanswered`), db.raw(`${LAST_ANSWER_SQL} AS last_answer`),
+      db.raw(`${THROUGH_SQL} AS through_id`));
+  return rows.map(messageItem);
+}
+
 // The bell's content version (notification-service NOTIFICATION_VERSION_SQL), read on the `n` alias: the
 // customers join also has a metadata column. Same values, same md5, so the Done route accepts it.
 function bookingVersionSql() {
@@ -229,7 +309,8 @@ async function listOpen(cutoff, recent) {
     .select('r.id', 'r.created_at', 'r.customer_id', 'r.category', 'r.subject', 'r.description',
       'r.requested_service', 'r.source', 'r.urgency', 'r.status', 'r.metadata', 'c.first_name', 'c.last_name', 'c.phone', db.raw(HAS_TEXTS_SQL));
   const bookingItems = bookingsLive() ? await listBookings(cutoff, op) : [];
-  return [...chatRows.map(chatItem), ...requestRows.map(requestItem), ...bookingItems]
+  const messageItems = messagesLive() ? await listMessages(cutoff, op) : [];
+  return [...chatRows.map(chatItem), ...requestRows.map(requestItem), ...bookingItems, ...messageItems]
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 }
 
@@ -240,22 +321,24 @@ async function listOpen(cutoff, recent) {
 async function list(now = new Date()) {
   const cutoff = windowCutoff(now);
   const withBookings = bookingsLive();
-  const [items, olderItems, recent, chats, requests, bookings] = await Promise.all([
+  const withMessages = messagesLive();
+  const [items, olderItems, recent, chats, requests, bookings, messages] = await Promise.all([
     listOpen(cutoff, true),
     listOpen(cutoff, false),
     summary(cutoff),
     countOf(openChats().where('e.created_at', '<=', cutoff)),
     countOf(openRequests().where('r.created_at', '<=', cutoff)),
     withBookings ? countOf(openBookings().where('n.created_at', '<=', cutoff)) : 0,
+    withMessages ? countOf(openMessages().where('cv.last_inbound_at', '<=', cutoff)) : 0,
   ]);
   return {
     cutoff: cutoff.toISOString(), items, olderItems, total: recent.count,
-    older: { chats, requests, ...(withBookings ? { bookings } : {}) },
+    older: { chats, requests, ...(withBookings ? { bookings } : {}), ...(withMessages ? { messages } : {}) },
   };
 }
 
 // Close the open admin bell alerts raised for these ids. `key` is the metadata
-// field the alert carries: 'escalationId' (chat hand-off) or 'requestId'.
+// field the alert carries: 'escalationId' (chat hand-off), 'requestId' or 'portalConversationId'.
 async function closeAlerts(key, ids, { by, role, technicianId = null, resolution }, conn = db) {
   if (!ALERT_KEYS.includes(key)) throw new Error(`unknown alert key ${key}`);
   const list = [...new Set([].concat(ids ?? []).filter(Boolean).map(String))];
@@ -370,6 +453,45 @@ async function closeBookingsOlder(trx, cutoff, alertActor) {
   return require('./notification-service').markAdminDone(ids, alertActor, trx);
 }
 
+// The open portal-message threads at or before the cutoff, stamped handled through their own newest customer
+// message (the row's last_inbound_at), so a message saved after it opens the thread again. Returns their ids.
+async function closeMessagesOlder(trx, cutoff, now) {
+  const rows = await openMessages(trx).where('cv.last_inbound_at', '<=', cutoff)
+    .update({ metadata: trx.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object('handledAt', last_inbound_at)"), updated_at: now })
+    .returning('id');
+  return rows.map((r) => r.id || r);
+}
+
+// Mark handled on a portal message item (GATE_PORTAL_MESSAGES), through the newest customer message the office
+// saw (`throughId`, the item's throughId): a message saved after it keeps the item open. On the locked thread
+// row the stamp only moves forward, and the thread's bells close only when nothing is left open, in the same
+// transaction. Sends nothing. Returns { handled, open }, or null when throughId is not a customer message of
+// this thread.
+async function markMessageHandled(threadId, throughId, actor) {
+  return onLockedThread(threadId, async (trx, wasOpen) => {
+    const seen = await trx('messages').where({ id: throughId, conversation_id: threadId, channel: 'portal', direction: 'inbound' }).first('created_at');
+    if (!seen) return null;
+    if (!wasOpen) return { handled: false, open: false };
+    const rows = await openMessages(trx).where('cv.id', threadId)
+      .whereRaw("coalesce((cv.metadata->>'handledAt')::timestamptz, '-infinity'::timestamptz) < ?", [seen.created_at])
+      .update({
+        metadata: trx.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object('handledAt', ?::text)", [new Date(seen.created_at).toISOString()]),
+        updated_at: new Date(),
+      })
+      .returning('id');
+    const open = Boolean(await openMessages(trx).where('cv.id', threadId).first('cv.id'));
+    if (!open) {
+      await closeAlerts('portalConversationId', [threadId], {
+        by: String(actor.technicianId || 'admin'),
+        role: actor.role,
+        technicianId: actor.technicianId || null,
+        resolution: 'Handled in Communications → Portal',
+      }, trx);
+    }
+    return { handled: rows.length > 0, open };
+  });
+}
+
 // Close every open item at or before `cutoff` in ONE transaction. Sends no
 // email or text: it writes rows and marks the matching admin alerts Done.
 async function closeOlder(cutoff, actor, now = new Date()) {
@@ -381,16 +503,19 @@ async function closeOlder(cutoff, actor, now = new Date()) {
     await closeAlerts('requestId', requestIds, alertActor, trx);
     const withBookings = bookingsLive();
     const bookingsClosed = withBookings ? await closeBookingsOlder(trx, cutoff, alertActor) : 0;
+    const withMessages = messagesLive();
+    const messageIds = withMessages ? await closeMessagesOlder(trx, cutoff, now) : [];
+    await closeAlerts('portalConversationId', messageIds, alertActor, trx);
     await require('./audit-log').recordAuditEvent({
       actor_type: 'technician',
       actor_id: actor.technicianId || null,
       action: 'portal_inbox.close_older',
       resource_type: 'portal_inbox',
-      metadata: { cutoff: cutoff.toISOString(), chats: chatIds.length, requests: requestIds.length, ...(withBookings ? { bookings: bookingsClosed } : {}) },
+      metadata: { cutoff: cutoff.toISOString(), chats: chatIds.length, requests: requestIds.length, ...(withBookings ? { bookings: bookingsClosed } : {}), ...(withMessages ? { messages: messageIds.length } : {}) },
       critical: true,
       trx,
     });
-    return { chats: chatIds.length, requests: requestIds.length, ...(withBookings ? { bookings: bookingsClosed } : {}) };
+    return { chats: chatIds.length, requests: requestIds.length, ...(withBookings ? { bookings: bookingsClosed } : {}), ...(withMessages ? { messages: messageIds.length } : {}) };
   });
 }
 
@@ -399,6 +524,9 @@ module.exports = {
   openChatScope,
   openRequestScope,
   openBookingScope,
+  openMessageScope,
+  onLockedThread,
+  markMessageHandled,
   windowCutoff,
   summary,
   list,
