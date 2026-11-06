@@ -13,14 +13,13 @@
 const { foldNameLetters } = require('../../utils/name-match');
 const { doubleMetaphone } = require('../../utils/double-metaphone');
 
-const MAX_RESULTS = 5;
 const MIN_SCORE = 0.75; // mean token score a customer needs to be returned
 const MIN_TOKEN_SCORE = 0.5; // every search word needs at least this much
 const PHONETIC_EQUAL = 0.9; // same sound, different spelling
 const PHONETIC_PARTIAL = 0.85; // scaled by how close the sound keys are
 
-// Name matcher v2 (GATE_NAME_MATCH_V2). The caller passes `v2: true`; this
-// module never reads the gate, so off is the scoring above, untouched.
+// Name matcher v2: Double Metaphone and sound-alike tolerances, run-together
+// words, possessives and context bonuses, layered on the scoring above.
 const MAX_RESULTS_V2 = 8;
 const METAPHONE_PRIMARY = 0.9; // primary key equals primary key
 const METAPHONE_ALTERNATE = 0.85; // primary equals the other word's secondary key
@@ -141,29 +140,6 @@ function customerNameWords(candidate, options) {
   return tokenize([candidate.first_name, candidate.last_name, candidate.company_name].filter(Boolean).join(' '), options);
 }
 
-// One-to-one: a customer word can satisfy at most one search word, so a
-// short first name cannot also stand in for a longer last name that begins the
-// same way. Pairs are taken best first; any search word left unmatched fails
-// the customer.
-function scoreCandidate(searchTokens, nameParts, keyOf) {
-  const pairs = [];
-  searchTokens.forEach((word, i) => nameParts.forEach((token, j) => {
-    const score = wordSimilarity(word, token, keyOf);
-    if (score >= MIN_TOKEN_SCORE) pairs.push({ score, i, j });
-  }));
-  pairs.sort((a, b) => b.score - a.score);
-  const usedWords = new Set();
-  const usedTokens = new Set();
-  let total = 0;
-  for (const { score, i, j } of pairs) {
-    if (usedWords.has(i) || usedTokens.has(j)) continue;
-    usedWords.add(i);
-    usedTokens.add(j);
-    total += score;
-  }
-  return usedWords.size === searchTokens.length ? total / searchTokens.length : 0;
-}
-
 // ─── Name matcher v2 ─────────────────────────────────────────────
 
 // A short form or full form shares its end with the other word. Mirrors
@@ -251,7 +227,10 @@ function mergedSimilarity(a, b, keyOf, soundsOf) {
   return best >= MERGED_MIN ? best : 0;
 }
 
-// Same one-to-one pairing as scoreCandidate. Also says whether the first
+// One-to-one pairing: a customer word can satisfy at most one search word, so a
+// short first name cannot also stand in for a longer last name that begins the
+// same way. Pairs are taken best first; any search word left unmatched fails
+// the customer. Also says whether the first
 // search word matched a customer word exactly.
 function scoreCandidateV2(searchTokens, nameParts, simFn, minToken = MIN_TOKEN_SCORE) {
   const pairs = [];
@@ -516,34 +495,18 @@ function rankNameMatchesV2(search, candidates, { limit, minScore, context, prefi
 
 // Rank candidates ({ id, first_name, last_name, company_name }) against a
 // dictated search string. Returns [{ id, score }] best first, at most
-// `limit`, each at or above `minScore`.
+// `limit` (default 8), each at or above `minScore`.
 //
-// `v2: true` (GATE_NAME_MATCH_V2, passed by the caller) turns on the v2 word
-// scoring, run-together words, possessives, the wider default `limit` of 8,
-// and `context` ({ onScreenCustomerId, visitTodayIds: Set, recentContactIds:
+// Scoring is the v2 word scoring: run-together words, possessives, and
+// `context` ({ onScreenCustomerId, visitTodayIds: Set, recentContactIds:
 // Set }): a bonus of +0.15 / +0.10 / +0.05 and a 0.65 floor for a customer
-// with any bonus. A v2 entry with a bonus also carries `reasons`. Without
-// `v2` the scoring is the original, whatever `context` holds.
-function rankNameMatches(search, candidates, { limit, minScore = MIN_SCORE, v2 = false, context = null, prefiltered = false } = {}) {
-  if (v2) return rankNameMatchesV2(search, candidates, { limit: limit || MAX_RESULTS_V2, minScore, context, prefiltered });
-  const cap = limit === undefined ? MAX_RESULTS : limit;
-  const searchTokens = tokenize(search);
-  if (!searchTokens.length) return [];
-  const keys = new Map();
-  const keyOf = (word) => {
-    if (!keys.has(word)) keys.set(word, phoneticKey(word));
-    return keys.get(word);
-  };
-  const scored = [];
-  for (const candidate of candidates) {
-    const score = scoreCandidate(searchTokens, customerNameWords(candidate), keyOf);
-    if (score >= minScore) scored.push({ id: candidate.id, score: Math.round(score * 1000) / 1000 });
-  }
-  return scored.sort((a, b) => b.score - a.score || String(a.id).localeCompare(String(b.id))).slice(0, cap);
+// with any bonus. An entry with a bonus also carries `reasons`.
+function rankNameMatches(search, candidates, { limit, minScore = MIN_SCORE, context = null, prefiltered = false } = {}) {
+  return rankNameMatchesV2(search, candidates, { limit: limit || MAX_RESULTS_V2, minScore, context, prefiltered });
 }
 
 module.exports = {
-  MAX_RESULTS, MAX_RESULTS_V2, MIN_SCORE, tokenize, isNameLikeSearch, phoneticKey, levenshtein, wordSimilarity, rankNameMatches,
+  MAX_RESULTS_V2, MIN_SCORE, tokenize, isNameLikeSearch, phoneticKey, levenshtein, wordSimilarity, rankNameMatches,
   wordSimilarityV2, suffixSimilarity, tolerantKey,
   MAX_SURVIVORS, buildNameIndex, prefilterNameIndex, cachedNameIndex, resetNameIndexCache,
 };

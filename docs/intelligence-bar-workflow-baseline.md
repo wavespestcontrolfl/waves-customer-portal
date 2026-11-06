@@ -23,15 +23,17 @@ Timings from the scripted run (median 7 ms to the first tool result, 29 ms to a 
 |---|---:|---:|---:|
 | W1 What needs my attention | 10 | 0 | 0 |
 | W2 Customer situation before a call | 9 | 1 | 0 |
-| W3 Lead name and contact details | 9 | 1 | 0 |
-| W4 Second property labeled rental | 9 | 1 | 0 |
+| W3 Lead name and contact details | 5 | 5 | 0 |
+| W4 Second property labeled rental | 8 | 2 | 0 |
 | W5 Book one service | 10 | 0 | 0 |
-| W6 Move an appointment, then notify | 4 | 1 | 5 |
+| W6 Move an appointment, then notify | 2 | 3 | 5 |
 | W7 Draft, revise, send an SMS | 8 | 1 | 1 |
 | W8 Lawn estimate, change cadence | 8 | 1 | 1 |
 | W9 What they owe | 3 | 1 | 6 |
 | W10 Record stock that arrived | 10 | 0 | 0 |
-| **Total** | **80** | **7** | **13** |
+| **Total** | **73** | **14** | **13** |
+
+Re-measured 2026-11-05 when the eight Intelligence Bar gates that had held since Oct 21-23 were removed (the baseline had been taken with them off, and production runs with them on). Eleven cases now show a card where the contract expects a direct commit (`proposal` `carded_where_contract_expects_direct`): W3-dev-01, 02, 03, 07 (the case reads the leads first, and a read of lead text taints the request, so every write in it keeps its card), W4-dev-04 (the request names an address, which removes the page customer's direct authority), and W6-dev-01, 03, 04, 05, 09, 10 (the request names only a surname, or says "this visit", so no customer is established for a card-free edit). This is the production behavior, not a harness fault: the scripted model and the manifests did not change.
 
 **Not runnable** means the manifest says the case's target behavior needs a capability that does not exist on this branch: its `requires` array names a gap key from `CAPABILITY_GAPS` (`server/tests/fixtures/ib-workflows/execution-matrix.js`). It is never counted as a pass or a fail, and the case is still probed with the nearest existing tools so the report shows what the path does today. The reason recorded for each case is the gap key itself: `invoice_payment_reader` 6 (W9, PR 3a, `#5586`), `reschedule_notice_send` 5 (W6, PR 3c), `series_reschedule_writer` 1 (W6-dev-06, also needs the notice), `secondary_number_customer_link` 1 (W7-dev-03), `estimate_measurement_selector` 1 (W8-dev-05). When a gap lands, add its key to `BUILT_GAPS` in `server/tests/helpers/ib-workflow-capability.js`; its cases are scored from then on and the snapshot diff shows what changed.
 

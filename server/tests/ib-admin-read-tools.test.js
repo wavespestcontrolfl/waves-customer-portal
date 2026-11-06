@@ -14,7 +14,7 @@ const rules = require('../utils/admin-read-rules');
 const { ADMIN_READ_HEADER, adminReadMarkerValue } = require('../utils/redact-request-url');
 const catalog = require('../services/intelligence-bar/admin-read-catalog.json');
 const registry = require('../services/intelligence-bar/action-registry');
-const { executeAdminReadTool, MAX_RESULT_CHARS } = require('../services/intelligence-bar/admin-read-tools');
+const { executeAdminReadTool, shapeResponse, MAX_RESULT_CHARS } = require('../services/intelligence-bar/admin-read-tools');
 
 const TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJ0ZXN0IjoidG9rZW4ifQ.c2lnbmF0dXJl';
 const AUTH = `Bearer ${TOKEN}`;
@@ -983,8 +983,10 @@ describe('the general read needs the platform gate', () => {
   });
 });
 
-// Codex round 8: operator notes are withheld, not scrubbed.
+// Codex round 8: operator notes are withheld, not scrubbed. The owner login now returns them scrubbed
+// (ib-admin-read-returned-notes.test.js); the office login still gets the withholding, tested here on any row.
 describe('operator notes are withheld', () => {
+  const readOffice = async ({ endpoint }) => shapeResponse(await global.fetch(), catalog.entries.find(entry => entry.endpoint === endpoint), AUTH, { office: true });
   const NOTE_ENTRY = catalog.entries.find(entry => entry.params.length === 0 && entry.query.length === 0 && Object.values(entry.freeText || {}).includes('note'));
   const CONTENT_ENTRY = catalog.entries.find(entry => entry.params.length === 0 && entry.query.length === 0 && Object.values(entry.freeText || {}).includes('content'));
   const noteKey = NOTE_ENTRY && Object.keys(NOTE_ENTRY.freeText).find(key => NOTE_ENTRY.freeText[key] === 'note');
@@ -995,7 +997,7 @@ describe('operator notes are withheld', () => {
   test('a note with a session link and one with a password sentence show only their length', async () => {
     const first = `Pay here ${sessionLink}`;
     global.fetch.mockResolvedValueOnce(jsonResponse(200, [{ id: 1, [noteKey]: first }, { id: 2, [noteKey]: wordSecret }]));
-    const result = await read({ endpoint: NOTE_ENTRY.endpoint });
+    const result = await readOffice({ endpoint: NOTE_ENTRY.endpoint });
     const text = JSON.stringify(result);
     expect(result.data[0][noteKey]).toBe(`[note withheld: ${first.length} characters]`);
     expect(result.data[1][noteKey]).toBe(`[note withheld: ${wordSecret.length} characters]`);
@@ -1006,7 +1008,7 @@ describe('operator notes are withheld', () => {
 
   test('a note key nested at any depth is withheld, and empty notes are not counted', async () => {
     global.fetch.mockResolvedValueOnce(jsonResponse(200, { payer: { id: 1, history: [{ deep: { [noteKey]: wordSecret } }], [noteKey]: '' }, other: { [noteKey]: null } }));
-    const result = await read({ endpoint: NOTE_ENTRY.endpoint });
+    const result = await readOffice({ endpoint: NOTE_ENTRY.endpoint });
     expect(result.data.payer.history[0].deep[noteKey]).toBe(`[note withheld: ${wordSecret.length} characters]`);
     expect(result.data.payer[noteKey]).toBe('');
     expect(result.data.other[noteKey]).toBeNull();
@@ -1017,13 +1019,13 @@ describe('operator notes are withheld', () => {
   test('a note kept as JSON is withheld whole, with the length of its JSON', async () => {
     const value = { reason: wordSecret, tries: 2 };
     global.fetch.mockResolvedValueOnce(jsonResponse(200, { [noteKey]: value }));
-    const result = await read({ endpoint: NOTE_ENTRY.endpoint });
+    const result = await readOffice({ endpoint: NOTE_ENTRY.endpoint });
     expect(result.data[noteKey]).toBe(`[note withheld: ${JSON.stringify(value).length} characters]`);
   });
 
   test('an answer with no notes has no notes_withheld and no note line', async () => {
     global.fetch.mockResolvedValueOnce(jsonResponse(200, [{ id: 1 }]));
-    const result = await read({ endpoint: NOTE_ENTRY.endpoint });
+    const result = await readOffice({ endpoint: NOTE_ENTRY.endpoint });
     expect(result).not.toHaveProperty('notes_withheld');
     expect(result.note).not.toMatch(/Free-text notes/);
   });
@@ -1031,7 +1033,7 @@ describe('operator notes are withheld', () => {
   test('a content field is returned, with links and secrets still removed', async () => {
     const text = `Say hello. See ${sessionLink} and the ${wordSecret}. Dose: 2 oz per gallon.`;
     global.fetch.mockResolvedValueOnce(jsonResponse(200, [{ id: 1, [contentKey]: text }]));
-    const result = await read({ endpoint: CONTENT_ENTRY.endpoint });
+    const result = await readOffice({ endpoint: CONTENT_ENTRY.endpoint });
     const out = result.data[0][contentKey];
     expect(out).toContain('Say hello.');
     expect(out).toContain('Dose: 2 oz per gallon.');

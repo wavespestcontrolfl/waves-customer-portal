@@ -27,7 +27,7 @@
  * OFFICE login (owner ruling 2026-10-28 "A1", GATE_IB_GENERAL_READ_OFFICE, which needs GATE_IB_GENERAL_READ): a non-owner ADMIN login
  * gets the same two tools limited to the catalog rows a person marked `office: true` (admin-read-reviewed.json). find_admin_reads lists
  * only those rows; read_admin_data refuses any other row ("not available on this login"). Free-text notes are always withheld on that
- * login, whatever GATE_IB_READ_NOTES says, and a keep-mode row never adds its keepNotes there. The loopback GET still carries her own
+ * login, and a keep-mode row never adds its keepNotes there. The loopback GET still carries her own
  * bearer token, so each endpoint's own auth applies. Technicians never reach this module's tools (the registry refuses them first, and
  * isAdmin is checked again here).
  */
@@ -99,13 +99,6 @@ const BLOCKED_ROUTES = Object.freeze([...catalog.blockedRoutes]);
 
 function adminReadLive() {
   return require('../../config/feature-gates').ibGeneralReadLive() === true;
-}
-
-// GATE_IB_READ_NOTES (needs the general read): free-text notes come back scrubbed
-// instead of withheld. Read at call time. The caller has already checked the
-// owner login, so a non-owner login never reaches it.
-function readNotesLive() {
-  return require('../../config/feature-gates').ibReadNotesLive() === true;
 }
 
 // GATE_IB_GENERAL_READ_OFFICE: the non-owner admin login's limited read. Read at call time.
@@ -350,8 +343,8 @@ const NOTES_RETURNED_NOTE = `Free-text notes are returned as written, with secre
 const KEEP_NOTE_WITH_NOTES = 'This read returns a reviewed list of fields (ids, names, contact details, dates, numbers and statuses) plus the row\'s reviewed note fields, scrubbed of secrets. Titles, tags and any other field not on the list exist on the record but are not shown; say so if the operator asks for one.';
 const KEEP_NOTE = 'This read returns only a reviewed list of fields (ids, names, contact details, dates, numbers and statuses). Free text, notes, titles, tags and any field not on the list exist on the record but are not shown; say so if the operator asks for one.';
 
-// With GATE_IB_READ_NOTES on, a keep-mode row also keeps the note paths its review lists (keepNotes); the
-// returned-notes branch then scrubs them. Gate off: the projection is exactly `keep` (Codex #6375 r14).
+// For the owner login a keep-mode row also keeps the note paths its review lists (keepNotes); the
+// returned-notes branch then scrubs them. The office login's projection is exactly `keep` (Codex #6375 r14).
 const keepNoteFor = (entry, returning) => {
   if (!entry.keep) return null;
   return returning && entry.keepNotes ? KEEP_NOTE_WITH_NOTES : KEEP_NOTE;
@@ -365,12 +358,12 @@ function projectRow(parsed, entry, withNotes = false) {
 
 function answerFrom(parsed, status, entry, { office = false } = {}) {
   const state = newState();
-  // Operator notes first: a key declared "note", or any key whose name looks like free text and is not declared "content", is never read,
-  // unless GATE_IB_READ_NOTES is on: then it is returned through the fixed-format scrubber only.
+  // Operator notes first: a key declared "note", or any key whose name looks like free text and is not declared "content", is returned
+  // through the fixed-format scrubber only (and withheld on the office login).
   // The row's projection next: keys it omits never reach the model, and a row in keep mode (an allow-list) passes ONLY the
   // keys it lists, so a column added later is dropped until a person reviews it. Then every string is scrubbed.
-  // The office login never receives notes, whatever GATE_IB_READ_NOTES says (that gate is the owner login's ruling).
-  const returning = readNotesLive() && !office;
+  // The office login never receives notes (the returned-notes ruling is the owner login's).
+  const returning = !office;
   const projected = projectRow(parsed, entry, returning);
   const clean = returning
     ? redactSecrets(projected, state, 0, { freeText: entry.freeText || {} })
@@ -466,4 +459,6 @@ async function executeAdminReadTool(name, input, actionContext = {}) {
 module.exports = {
   ADMIN_READ_TOOLS, executeAdminReadTool, adminReadLive, officeReadLive, scopeBinding, wordsOf, stem, STOPWORDS,
   ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL, MAX_RESULT_CHARS, READ_TIMEOUT_MS,
+  // Exported for the withholding fixtures: the answer as the office login (notes withheld) gets it, for any catalog row.
+  shapeResponse,
 };

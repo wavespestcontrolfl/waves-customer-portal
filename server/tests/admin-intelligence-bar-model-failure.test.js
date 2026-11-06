@@ -1,10 +1,10 @@
 /**
  * POST /admin/intelligence-bar/query when the MODEL call fails
- * (GATE_IB_MODEL_FAILURE_NOTICE). 2026-10-19: the Anthropic monthly limit
+ * 2026-10-19: the Anthropic monthly limit
  * (anthropic_400) ended every ask with a thrown error, "Error: <message>" in
- * the palette, no gap row and no alert. With the gate on the route answers 200
+ * the palette, no gap row and no alert. The route now answers 200
  * with a plain reply, records one quiet `ib-model` gap row and rings one admin
- * bell an hour; with it off the error path is unchanged. A saved change is
+ * bell an hour. A saved change is
  * read from the task's receipts and never reported as "nothing was changed".
  *
  * Harness (mocks + helpers) mirrors admin-intelligence-bar-empty-reply-ledger.test.js.
@@ -155,7 +155,6 @@ const savedRow = (overrides = {}) => ({
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.GATE_IB_PLATFORM;
-  process.env.GATE_IB_MODEL_FAILURE_NOTICE = 'true';
   mockWriteGapRows.mockResolvedValue([{ id: 7, occurrences: 1 }]);
   mockNotifyAdmin.mockResolvedValue({ id: 1 });
   mockForTask.mockResolvedValue([]);
@@ -164,11 +163,10 @@ beforeEach(() => {
 });
 
 afterAll(() => {
-  delete process.env.GATE_IB_MODEL_FAILURE_NOTICE;
   delete process.env.GATE_IB_PLATFORM;
 });
 
-describe('gate on, platform off', () => {
+describe('platform off', () => {
   test('a monthly-limit failure answers 200 in plain words, records one quiet gap and rings one bell', async () => {
     mockMessagesCreate.mockRejectedValueOnce(limitError());
     await withServer(async (baseUrl) => {
@@ -251,34 +249,7 @@ describe('gate on, platform off', () => {
   });
 });
 
-describe('gate off', () => {
-  test.each([[undefined], ['false'], ['1']])('GATE_IB_MODEL_FAILURE_NOTICE=%s keeps today\'s error, with no gap and no bell', async (value) => {
-    if (value === undefined) delete process.env.GATE_IB_MODEL_FAILURE_NOTICE; else process.env.GATE_IB_MODEL_FAILURE_NOTICE = value;
-    mockMessagesCreate.mockRejectedValueOnce(limitError());
-    await withServer(async (baseUrl) => {
-      const { status, body } = await postQuery(baseUrl, { prompt: 'anything', context: 'customers' });
-      expect(status).toBe(400); // the provider's own status reaches the error handler, as before
-      expect(body.error).toMatch(/usage limits/);
-      expect(body.response).toBeUndefined();
-    });
-    expect(mockWriteGapRows).not.toHaveBeenCalled();
-    expect(mockNotifyAdmin).not.toHaveBeenCalled();
-  });
-
-  test('gate off with a saved task still marks it outcome_unknown', async () => {
-    delete process.env.GATE_IB_MODEL_FAILURE_NOTICE;
-    process.env.GATE_IB_PLATFORM = 'true';
-    mockMessagesCreate.mockRejectedValueOnce(limitError());
-    await withServer(async (baseUrl) => {
-      const { status } = await postQuery(baseUrl, PLATFORM_BODY);
-      expect(status).toBe(400);
-    });
-    expect(mockTaskCheckpoint).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'outcome_unknown' }));
-    expect(mockForTask).not.toHaveBeenCalled();
-  });
-});
-
-describe('gate on, saved task (GATE_IB_PLATFORM)', () => {
+describe('saved task (GATE_IB_PLATFORM)', () => {
   beforeEach(() => { process.env.GATE_IB_PLATFORM = 'true'; });
 
   test('nothing ran: the task ends failed (resumable) and the reply says nothing was changed', async () => {
@@ -529,7 +500,7 @@ describe('round 4 fixes (#6368)', () => {
 
   test('the too-many-steps fallback does not count as a model answer', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-intelligence-bar.js'), 'utf8');
-    expect(src).toMatch(/ibModelFailureNoticeLive\(\) && !noReply\)/);
+    expect(src).toMatch(/if \(!noReply\) \{\n\s+\/\/ Deliberate fire-and-forget/);
   });
 
   test('a failed request with photos says to attach them again', async () => {

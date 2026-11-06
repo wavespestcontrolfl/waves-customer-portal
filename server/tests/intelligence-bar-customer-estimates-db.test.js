@@ -31,7 +31,8 @@ suite('existing-customer estimates from another workspace', () => {
   async function propose(fixture, extras = {}, requestedEstimate = extras.estimate_id, prompt = null) {
     const input = { customer_id: fixture.customer.id, property_id: fixture.property.id, ...extras };
     mockModel.mockReset();
-    mockModel.mockResolvedValueOnce(tool('discover_capabilities', { query: 'customer estimate' }, 'discover'))
+    // A specific query: discovery returns 12 tools at most, and a broad one ('customer estimate') now ranks create_invoice above save_customer_estimate.
+    mockModel.mockResolvedValueOnce(tool('discover_capabilities', { query: 'save customer estimate' }, 'discover'))
       .mockResolvedValueOnce(tool('get_customer_estimate_context', { customer_id: input.customer_id, property_id: input.property_id }, 'lookup'))
       .mockResolvedValueOnce(tool('save_customer_estimate', input, 'save'))
       .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Review the estimate price before saving.' }], usage: {} });
