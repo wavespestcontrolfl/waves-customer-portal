@@ -188,7 +188,7 @@ beforeEach(() => {
   TwilioService.sendVerificationCode.mockClear();
   process.env.GATE_CONTACT_LOGIN = 'true';
 });
-afterEach(() => { delete process.env.GATE_CONTACT_LOGIN; });
+afterEach(() => { delete process.env.GATE_CONTACT_LOGIN; delete process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY; });
 
 async function call(method, path, headers = {}, body) {
   const res = await fetch(`${baseUrl}${path}`, {
@@ -331,6 +331,91 @@ describe('contact login — who a number signs in as', () => {
     expect((await call('GET', '/api/auth/me', bearerOf(body.token))).status).toBe(200);
     tables.customers[0].service_preferences = JSON.stringify({ unconsented_slot_phone_keys: ['9415550202'] });
     expect((await call('GET', '/api/auth/me', bearerOf(body.token))).status).toBe(401);
+  });
+
+  // Security audit run 3 (GATE_CONTACT_LOGIN_HOLDER_ONLY): the call pipeline stamps a
+  // number named by an unauthenticated caller (source 'call_pipeline_request'), and a
+  // recipient's own YES can lift the unconsented hold while an older holder stamp
+  // stays. Neither may open a contact sign-in; only a phone the holder's own portal
+  // save listed (service_preferences.login_attested_phone_keys) does.
+  describe('GATE_CONTACT_LOGIN_HOLDER_ONLY', () => {
+    const ATTESTED = JSON.stringify({ login_attested_phone_keys: ['9415550202', '9415550303'] });
+    const callStamp = () => Object.assign(tables.customers[0], {
+      service_contact2_name: null, service_contact2_phone: null,
+      service_contacts_consent_at: new Date().toISOString(),
+      service_contacts_consent_source: 'call_pipeline_request',
+      service_contacts_consent_text_version: 'call-2026-07-23',
+      service_preferences: null,
+    });
+
+    test('gate off: a call-pipeline stamp still opens the login, exactly as before', async () => {
+      callStamp();
+      await call('POST', '/api/auth/send-code', {}, { phone: CONTACT_PHONE });
+      expect(TwilioService.sendVerificationCode).toHaveBeenCalledWith(CONTACT_PHONE);
+      const res = await login(CONTACT_PHONE);
+      expect(res.status).toBe(200);
+      expect(res.body.actor.kind).toBe('contact');
+    });
+
+    test('gate on: a call-pipeline stamp sends no code and mints no session', async () => {
+      process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
+      callStamp();
+      await call('POST', '/api/auth/send-code', {}, { phone: CONTACT_PHONE });
+      expect(TwilioService.sendVerificationCode).not.toHaveBeenCalled();
+      expect((await login(CONTACT_PHONE)).status).toBe(401);
+      // The account holder still signs in.
+      expect((await login(HOLDER_PHONE)).status).toBe(200);
+    });
+
+    test('gate on: a holder stamp kept while the call pipeline adds an inferred phone, then that person\'s YES lifts the hold: still no login', async () => {
+      process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
+      Object.assign(tables.customers[0], {
+        service_contact3_name: 'Stranger', service_contact3_phone: '+19415550404',
+        service_contacts_consent_source: 'portal_account_holder',
+        // The hold is already gone (their YES); the attestation never listed them.
+        service_preferences: JSON.stringify({ login_attested_phone_keys: ['9415550202', '9415550303'] }),
+      });
+      expect((await login('+19415550404')).status).toBe(401);
+      expect((await login(CONTACT_PHONE)).status).toBe(200);
+    });
+
+    test('gate on: without a saved attestation list (or with a recipient YES / backfill stamp) nobody signs in', async () => {
+      process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
+      for (const source of ['legacy_grandfathered_backfill', 'recipient_optin_confirmed', 'portal_account_holder', null]) {
+        tables.customers[0].service_contacts_consent_source = source;
+        tables.customers[0].service_preferences = null;
+        expect((await login(CONTACT_PHONE)).status).toBe(401);
+      }
+    });
+
+    test('gate on: a phone the holder\'s portal save listed still signs in, whatever source a later call stamp left', async () => {
+      process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
+      tables.customers[0].service_preferences = ATTESTED;
+      for (const source of ['portal_account_holder', 'call_pipeline_request']) {
+        tables.customers[0].service_contacts_consent_source = source;
+        const res = await login(CONTACT_PHONE);
+        expect(res.status).toBe(200);
+        expect(res.body.actor.kind).toBe('contact');
+      }
+    });
+
+    test('gate on: a listed phone on an unstamped account, or on the unconsented hold, is still refused', async () => {
+      process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
+      tables.customers[0].service_preferences = JSON.stringify({ login_attested_phone_keys: ['9415550202'], unconsented_slot_phone_keys: ['9415550202'] });
+      expect((await login(CONTACT_PHONE)).status).toBe(401);
+      tables.customers[0].service_preferences = ATTESTED;
+      tables.customers[0].service_contacts_consent_at = null;
+      expect((await login(CONTACT_PHONE)).status).toBe(401);
+    });
+
+    test('gate on: a live contact session ends at its next request once the phone leaves the holder\'s list (401)', async () => {
+      tables.customers[0].service_preferences = ATTESTED;
+      const { body } = await login(CONTACT_PHONE);
+      process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY = 'true';
+      expect((await call('GET', '/api/auth/me', bearerOf(body.token))).status).toBe(200);
+      tables.customers[0].service_preferences = JSON.stringify({ login_attested_phone_keys: ['9415550303'] });
+      expect((await call('GET', '/api/auth/me', bearerOf(body.token))).status).toBe(401);
+    });
   });
 
   // The App Store reviewer bypass (REVIEW_LOGIN_PHONE + the fixed code) maps

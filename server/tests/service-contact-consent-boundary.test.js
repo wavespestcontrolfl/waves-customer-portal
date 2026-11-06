@@ -47,10 +47,11 @@ describe('unconsented_slot_phone_keys holds a phone out of text resolution', () 
 
 describe('server-owned service_preferences keys survive customer-facing rebuilds', () => {
   test('withServerOwnedPrefs carries every server key from the stored blob', () => {
-    const raw = { interior_spray: true, demote_primary_on_optin: { a: 1 }, demote_primary_applied: { b: 1 }, consent_covered_phone_keys: ['1'], unconsented_slot_phone_keys: ['2'] };
+    const raw = { interior_spray: true, demote_primary_on_optin: { a: 1 }, demote_primary_applied: { b: 1 }, consent_covered_phone_keys: ['1'], unconsented_slot_phone_keys: ['2'], login_attested_phone_keys: ['3'] };
     const out = withServerOwnedPrefs(raw, { interior_spray: false });
     expect(out.interior_spray).toBe(false);
     for (const k of SERVER_OWNED_PREF_KEYS) expect(out[k]).toEqual(raw[k]);
+    expect(out.login_attested_phone_keys).toEqual(['3']);
   });
 
   test('both writers route through it', () => {
