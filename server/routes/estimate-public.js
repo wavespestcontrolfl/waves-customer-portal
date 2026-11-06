@@ -32067,10 +32067,13 @@ function expiredEstimateBody(estimate) {
 // audit_log only: estimate_checkout_events and estimate_views are read
 // without a kind filter by the payment-step follow-up email and the
 // engagement rules, so a row there would trigger customer messages.
-// Applies the shouldCountView filters (it returns false for expired rows, so
-// it is not called here) and skips signed PDF render passes.
-async function recordExpiredOpen({ req, ip, estimate, extensionOffered, isPdfRenderPass, docRenderPin }) {
-  if (isPdfRenderPass || docRenderPin) return;
+// Skips what the customer view count skips: a verified staff preview, the
+// page's own internal refresh, signed PDF render passes, and the
+// shouldCountView filters (it returns false for expired rows, so it is not
+// called here).
+async function recordExpiredOpen({ req, ip, estimate, extensionOffered, isPdfRenderPass, docRenderPin, verifiedStaffPreview }) {
+  if (verifiedStaffPreview || isPdfRenderPass || docRenderPin) return;
+  if (req.query?.refresh === '1' && estimate.viewed_at) return;
   const userAgent = requestUserAgent(req);
   if (!estimateHasBeenSent(estimate)
     || isBotUserAgent(userAgent)
@@ -32208,7 +32211,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       if (isEstimateExtensionRequestEligible(estimate)) {
         const extensionOffered = featureGates.isEnabled('estimateExtensionRequest')
           && !(await require('../services/estimate-extension').fixedBidBlocksExtension(db, estimate));
-        await recordExpiredOpen({ req, ip, estimate, extensionOffered, isPdfRenderPass, docRenderPin });
+        await recordExpiredOpen({ req, ip, estimate, extensionOffered, isPdfRenderPass, docRenderPin, verifiedStaffPreview });
         if (extensionOffered) return res.status(404).json(expiredEstimateBody(estimate));
       }
       return res.status(404).json({ error: 'Estimate not found' });

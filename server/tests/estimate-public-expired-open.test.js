@@ -33,6 +33,10 @@ jest.mock('../services/estimate-extension', () => ({
   ...jest.requireActual('../services/estimate-extension'),
   fixedBidBlocksExtension: jest.fn().mockResolvedValue(false),
 }));
+jest.mock('../middleware/admin-auth', () => ({
+  ...jest.requireActual('../middleware/admin-auth'),
+  verifyStaffBearer: jest.fn().mockResolvedValue(null),
+}));
 jest.mock('../services/audit-log', () => ({
   ...jest.requireActual('../services/audit-log'),
   auditEstimateExpiredOpen: jest.fn().mockResolvedValue(undefined),
@@ -213,6 +217,23 @@ describe('GET /:token/data — recording that a customer opened an expired estim
     const marker = jwt.sign({ kind: 'admin_marker' }, config.jwt.secret);
     const { body } = await get(expiredRow(), { headers: { cookie: `waves_admin=${marker}` } });
     expect(body.extensionRequestEligible).toBe(true);
+    expect(auditEstimateExpiredOpen).not.toHaveBeenCalled();
+  });
+
+  test('does not record a verified staff preview (no marker cookie, not an admin IP)', async () => {
+    require('../middleware/admin-auth').verifyStaffBearer.mockResolvedValueOnce({ id: 'staff-1', role: 'admin' });
+    const { body } = await get(expiredRow(), { query: '?adminPreview=1', headers: { 'x-forwarded-for': '198.51.100.20' } });
+    expect(body.extensionRequestEligible).toBe(true);
+    expect(auditEstimateExpiredOpen).not.toHaveBeenCalled();
+  });
+
+  test('records ?adminPreview=1 without a valid staff sign-in as a customer open', async () => {
+    await get(expiredRow(), { query: '?adminPreview=1', headers: { 'x-forwarded-for': '198.51.100.20' } });
+    expect(auditEstimateExpiredOpen).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not record the page's own refresh of an estimate it already showed", async () => {
+    await get(expiredRow({ viewed_at: SENT }), { query: '?refresh=1' });
     expect(auditEstimateExpiredOpen).not.toHaveBeenCalled();
   });
 
