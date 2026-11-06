@@ -1213,9 +1213,28 @@ async function checkPaymentStepAbandoned(now = new Date()) {
   return sent;
 }
 
+// A schema that predates a stage's columns or tables (a fresh environment)
+// stays quiet; any other whole-stage error is recorded for the tick's end.
+const MISSING_SCHEMA_CODES = new Set(["42703", "42P01"]);
+function throwIfStagesFailed(stageFailures, sent) {
+  if (stageFailures.length > 0) {
+    throw new Error(
+      `estimate-follow-up: ${stageFailures.length} stage(s) failed (${stageFailures.join(", ")}); ${sent} follow-up(s) sent`,
+    );
+  }
+}
+
+function noteStageFailure(stageFailures, stage, err) {
+  if (MISSING_SCHEMA_CODES.has(err?.code)) return;
+  // Code only: a driver message can carry SQL bindings or a customer's contact data.
+  logger.error(`[est-followup] ${stage} stage failed (${err?.code || err?.name || "error"})`);
+  stageFailures.push(stage);
+}
+
 const EstimateFollowUp = {
   async checkAll() {
     let sent = 0;
+    const stageFailures = [];
 
     // Heal lost counter bumps BEFORE any stage judges spacing/caps
     // (codex 2736 r15) — non-fatal: a failed heal just means this tick
@@ -1324,8 +1343,8 @@ const EstimateFollowUp = {
           }
         }
       }
-    } catch {
-      /* columns may not exist */
+    } catch (e) {
+      noteStageFailure(stageFailures, "unviewed", e);
     }
 
     // 2. Viewed but NOT accepted after 48 hours
@@ -1410,8 +1429,8 @@ const EstimateFollowUp = {
           }
         }
       }
-    } catch {
-      /* columns may not exist */
+    } catch (e) {
+      noteStageFailure(stageFailures, "viewed", e);
     }
 
     // 3. Viewed but NOT accepted after 5 days (final nudge)
@@ -1492,8 +1511,8 @@ const EstimateFollowUp = {
           }
         }
       }
-    } catch {
-      /* columns may not exist */
+    } catch (e) {
+      noteStageFailure(stageFailures, "final", e);
     }
 
     // 4. Expiring in 1-3 days
@@ -1614,19 +1633,23 @@ const EstimateFollowUp = {
           }
         }
       }
-    } catch {
-      /* columns may not exist */
+    } catch (e) {
+      noteStageFailure(stageFailures, "expiring", e);
     }
 
     // 6. Reached the save-a-card step but never accepted
     try {
       sent += await checkPaymentStepAbandoned();
-    } catch {
-      /* tables may not exist */
+    } catch (e) {
+      noteStageFailure(stageFailures, "payment_step", e);
     }
 
     if (sent > 0)
       logger.info(`[est-followup] Sent ${sent} follow-ups (SMS+email)`);
+    // Every stage has run. A whole-stage failure (a broken stage query, not
+    // one customer's send) must reach job_health: runExclusive records a
+    // failure only when the body throws.
+    throwIfStagesFailed(stageFailures, sent);
     return { sent };
   },
 };

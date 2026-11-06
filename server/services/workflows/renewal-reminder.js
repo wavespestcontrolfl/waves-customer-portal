@@ -27,7 +27,31 @@ function termiteRenewalSummary(counts) {
     .join(', ');
 }
 
-async function runTermiteRenewalChargeLeg() {
+// A step that logs its own failure and lets the next step run reports it here.
+// checkAndSend throws once after the last step, so job_health records the failure
+// (runExclusive records one only when the body throws).
+function noteFailedPasses(failedSteps, step, result) {
+  if (result?.failedPasses?.length) failedSteps.push(step);
+}
+
+// The restamp sweep logs a failed candidate query and returns its summary.
+// Both runners (the hourly tick in scheduler.js and the leg below) call this
+// inside the shared 'annual-prepay-restamp-sweep' lock, so that job's
+// job_health row records the failed pass.
+function throwIfRestampFailed(summary) {
+  if (summary?.failedPasses?.length) {
+    throw new Error(`annual-prepay restamp: ${summary.failedPasses.length} pass(es) failed (${summary.failedPasses.join(', ')})`);
+  }
+  return summary;
+}
+
+function throwIfStepsFailed(failedSteps, totalSent) {
+  if (failedSteps.length > 0) {
+    throw new Error(`renewal-reminders: ${failedSteps.length} step(s) failed (${failedSteps.join(', ')}); ${totalSent} sent`);
+  }
+}
+
+async function runTermiteRenewalChargeLeg(failedSteps = []) {
   try {
     const { runTermiteAnnualRenewalSweep } = require('../termite-annual-renewal-charge');
     const renewalCharge = await runTermiteAnnualRenewalSweep();
@@ -35,6 +59,7 @@ async function runTermiteRenewalChargeLeg() {
     logger.info(`Termite annual renewal charge: ${termiteRenewalSummary(renewalCharge)}`);
   } catch (err) {
     logger.error(`Termite annual renewal charge sweep failed: ${err.message}`);
+    failedSteps.push('termite renewal charge');
   }
 }
 
@@ -42,32 +67,36 @@ async function runTermiteRenewalChargeLeg() {
 // were left unstamped because a stamp pass failed (webhook activation only
 // logs). Runs BEFORE the covered-term sweep so the sweep's pending-window
 // reconcile sees freshly stamped rows. Outside checkAndSend for the same
-// complexity reason as the termite leg; never throws.
-async function runPrepayRestampLeg(prepay) {
+// complexity reason as the termite leg; never throws (a failure is added to
+// failedSteps, which checkAndSend turns into one throw after the last leg).
+async function runPrepayRestampLeg(prepay, failedSteps = []) {
   try {
     const service = prepay || require('../annual-prepay-renewals');
     if (service.restampUnstampedActiveTerms) {
       // Same lease as the hourly tick (scheduler.js): the two runners never
       // overlap, and a held lease just skips this leg until the next tick.
       const { runExclusive } = require('../../utils/cron-lock');
-      await runExclusive('annual-prepay-restamp-sweep', () => service.restampUnstampedActiveTerms());
+      // Thrown inside the lock, so the restamp lease's own job_health row records it.
+      await runExclusive('annual-prepay-restamp-sweep', async () => throwIfRestampFailed(await service.restampUnstampedActiveTerms()));
     }
   } catch (err) {
     logger.error(`Annual prepay restamp sweep failed: ${err.message}`);
+    failedSteps.push('prepay restamp');
   }
 }
 
 // Office bell before a prepaid year ends (GATE_PREPAY_YEAR_END_BELL, dark by default;
 // the runner returns before any query while the gate is off). Office only: it texts,
 // emails and charges nobody. Outside checkAndSend for the same complexity reason as the
-// legs above; never throws.
-async function runPrepayYearEndBellLeg() {
+// legs above; never throws (a failure is added to failedSteps).
+async function runPrepayYearEndBellLeg(failedSteps = []) {
   try {
     const { runPrepayYearEndBell } = require('../prepay-year-end-bell');
     const { raised, closed } = await runPrepayYearEndBell();
     if (raised || closed) logger.info(`Prepay year end bell: raised=${raised}, closed=${closed}`);
   } catch (err) {
     logger.error(`Prepay year end bell failed: ${err.message}`);
+    failedSteps.push('prepay year end bell');
   }
 }
 
@@ -79,20 +108,25 @@ class RenewalReminder {
   async checkAndSend() {
     let annualPrepaySent = 0;
     let annualPrepay = null;
+    // Every step below logs its own failure and the next step still runs;
+    // a failed step is named here and thrown once, after the last step.
+    const failedSteps = [];
     try {
       annualPrepay = require('../annual-prepay-renewals');
       if (annualPrepay.checkAndSend) {
         const result = await annualPrepay.checkAndSend();
         annualPrepaySent = Number(result?.sent || 0);
+        noteFailedPasses(failedSteps, 'prepay reminder passes', result);
       }
     } catch (err) {
       logger.error(`Annual prepay renewal reminder failed: ${err.message}`);
+      failedSteps.push('prepay reminders');
     }
 
     // Restamp leg first (see runPrepayRestampLeg): a stamp pass that failed
     // at activation must not leave a covered visit billing on top of the
     // prepay any longer than one daily run.
-    await runPrepayRestampLeg(annualPrepay);
+    await runPrepayRestampLeg(annualPrepay, failedSteps);
 
     // Daily catch-all reconcile for live covered terms: recovers
     // pending-window settle/credit/reversal work whose one-shot
@@ -102,10 +136,12 @@ class RenewalReminder {
     try {
       const prepay = annualPrepay || require('../annual-prepay-renewals');
       if (prepay.reconcileCoveredTermsSweep) {
-        await prepay.reconcileCoveredTermsSweep();
+        const summary = await prepay.reconcileCoveredTermsSweep();
+        noteFailedPasses(failedSteps, 'prepay covered-term sweep', summary);
       }
     } catch (err) {
       logger.error(`Annual prepay covered-term sweep failed: ${err.message}`);
+      failedSteps.push('prepay covered-term sweep');
     }
 
     // Termite annual plan: the automatic renewal charge (slice 6b, dark
@@ -115,11 +151,11 @@ class RenewalReminder {
     // voids/retires any successor whose grace period lapsed unpaid.
     // Independent try/catch (inside the helper), same as every other leg
     // in this workflow.
-    await runTermiteRenewalChargeLeg();
+    await runTermiteRenewalChargeLeg(failedSteps);
 
     // Office bell before a prepaid year ends (dark behind GATE_PREPAY_YEAR_END_BELL).
     // Own try/catch inside the helper: a failure here must not silence the legs below.
-    await runPrepayYearEndBellLeg();
+    await runPrepayYearEndBellLeg(failedSteps);
 
     // OWNER RULING (2026-07-13): "renewal" language is reserved for termite
     // bonds — the one service with a real fixed term. WaveGuard and mosquito
@@ -221,9 +257,12 @@ class RenewalReminder {
     }
 
     logger.info(`Renewal reminders: ${totalSent} sent`);
+    throwIfStepsFailed(failedSteps, totalSent);
     return { sent: totalSent };
   }
 }
 
 module.exports = new RenewalReminder();
+// The hourly restamp tick (scheduler.js) shares this check, inside the same lock.
+module.exports.throwIfRestampFailed = throwIfRestampFailed;
 module.exports._private = { TERMITE_RENEWAL_ACTIVITY_KEYS, runTermiteRenewalChargeLeg };

@@ -6388,6 +6388,14 @@ async function reconcileOneCoveredTermInSweep(term, conn, todayKey, summary) {
   await reverseCancelledPendingCompletionGrantsInSweep(term, conn, summary);
 }
 
+// A whole-pass failure the sweep logged and kept going past. The renewal-reminders
+// workflow reads `failedPasses` and throws once every step has run, so job_health
+// records the failure. The key exists only after a failure.
+function notePassFailed(summary, pass) {
+  if (!summary.failedPasses) summary.failedPasses = [];
+  summary.failedPasses.push(pass);
+}
+
 async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } = {}) {
   const summary = { terms: 0, settled: 0, credited: 0, reversed: 0, disputeRecovered: 0 };
   if (!(await annualPrepayTableExists())) return summary;
@@ -6397,6 +6405,7 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     terms = await coveredTermsAsOf(conn, todayKey).select('t.*');
   } catch (err) {
     logger.warn(`[annual-prepay] covered-term sweep query failed: ${err.message}`);
+    notePassFailed(summary, 'covered-term query');
     return summary;
   }
   for (const term of terms) {
@@ -6426,6 +6435,7 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     }
   } catch (err) {
     logger.warn(`[annual-prepay] sweep expired-window marker pass failed: ${err.message}`);
+    notePassFailed(summary, 'expired-window marker pass');
   }
   // WaveGuard extension-credit recovery pass: a refund-cancelled term is no
   // longer covered, so it never enters the dated loop above — an extension
@@ -6558,6 +6568,7 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     }
   } catch (err) {
     logger.warn(`[annual-prepay] sweep WaveGuard extension-credit recovery failed: ${err.message}`);
+    notePassFailed(summary, 'extension-credit recovery');
   }
   // WaveGuard extension-credit RESTORE recovery pass (codex #3344 r5 P1):
   // the dated loop above restores only covered-TODAY terms, so a refunded
@@ -6643,6 +6654,7 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     }
   } catch (err) {
     logger.warn(`[annual-prepay] sweep WaveGuard extension-credit restore recovery failed: ${err.message}`);
+    notePassFailed(summary, 'extension-credit restore recovery');
   }
   // Paid-late declined terms whose historical reconcile has not completed —
   // expired ones too (they are outside the dated loop above).
@@ -6874,6 +6886,7 @@ async function restampUnstampedActiveTerms({
       .select('t.*');
   } catch (err) {
     logger.warn(`[annual-prepay] restamp sweep query failed: ${err.message}`);
+    notePassFailed(summary, 'restamp query');
     return summary;
   }
 
@@ -10015,25 +10028,28 @@ async function escalateMissedNotice(term) {
 // One termite sub-pass: its candidate query AND per-row work isolated, so a
 // failure (even the candidate query itself) never skips the independent
 // safety-net passes that follow it the same day.
-async function runTermiteSubPass(label, loadCandidates, fn) {
+async function runTermiteSubPass(label, loadCandidates, fn, failedPasses = []) {
   try {
     return await forEachTermIsolated(await loadCandidates(), `${label} failed`, fn);
   } catch (err) {
     logger.error(`[annual-prepay] ${label} aborted: ${err.message}`);
+    failedPasses.push(label);
     return 0;
   }
 }
 
-async function runTermiteNoticePass(today, termCols) {
+async function runTermiteNoticePass(today, termCols, failedPasses = []) {
   const sent = await runTermiteSubPass(
     'termite notice-obligation pass',
     () => termiteNoticeObligationCandidates({ today }),
     async (term) => (await processTermiteNoticeObligations(term, today)).sent,
+    failedPasses,
   );
   await runTermiteSubPass(
     'termite late-notice escalation retry',
     () => termiteLateNoticeEscalationCandidates(),
     retryLateNoticeEscalations,
+    failedPasses,
   );
   // Gated on its own two columns (20260926000108) so a DB that has not
   // run that migration yet still gets every other part of this pass.
@@ -10042,6 +10058,7 @@ async function runTermiteNoticePass(today, termCols) {
       'termite undelivered-notice escalation',
       () => termiteUndeliveredNoticeEscalationCandidates({ today }),
       (term) => escalateUndeliveredRungs(term, today),
+      failedPasses,
     );
   }
   // Durable staff escalation, atomically deduped via notifyAdmin's own
@@ -10050,6 +10067,7 @@ async function runTermiteNoticePass(today, termCols) {
     'termite missed-notice escalation',
     () => termiteMissedNoticeEscalationCandidates({ today }),
     escalateMissedNotice,
+    failedPasses,
   );
   // A witness conflict whose staff bell never got a confirmed insert
   // (Codex #4921 r10 P2) — gated on its own columns (20260926000109).
@@ -10058,6 +10076,7 @@ async function runTermiteNoticePass(today, termCols) {
       'termite witness-conflict bell retry',
       () => termiteWitnessConflictCandidates(),
       refileWitnessConflictBell,
+      failedPasses,
     );
   }
   return sent;
@@ -10133,9 +10152,12 @@ async function checkAndSend({ today = etDateString() } = {}) {
   await activatePaidPendingTerms();
   const termCols = await annualPrepayColumns();
   const termiteReady = termiteNoticeColumnsReady(termCols);
-  const termiteSent = termiteReady ? await runTermiteNoticePass(today, termCols) : 0;
+  const failedPasses = [];
+  const termiteSent = termiteReady ? await runTermiteNoticePass(today, termCols, failedPasses) : 0;
   const genericSent = await runGenericNoticeLadder(today, termiteReady);
-  return { sent: termiteSent + genericSent };
+  // The renewal-reminders workflow throws on `failedPasses` after its other
+  // steps ran. The key exists only after a termite pass aborted.
+  return failedPasses.length ? { sent: termiteSent + genericSent, failedPasses } : { sent: termiteSent + genericSent };
 }
 
 async function hasAnnualPrepayRenewal(customerId, termEnd) {

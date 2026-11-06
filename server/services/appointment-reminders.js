@@ -5058,6 +5058,9 @@ const AppointmentReminders = {
     } catch (err) {
       logger.error(`[appt-remind] checkAndSendReminders failed: ${err.message}`);
       results.errors++;
+      // The cron body throws on this flag after its later steps have run, so
+      // job_health records the failed scan.
+      results.scanFailed = true;
     }
 
     if (results.sent72h > 0 || results.sent24h > 0) {
