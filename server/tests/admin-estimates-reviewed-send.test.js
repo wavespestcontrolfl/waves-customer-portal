@@ -2314,11 +2314,11 @@ describe('impossible US phone is refused before any provider call', () => {
 });
 
 
-describe('estimate PDF copy on the delivery email (GATE_ESTIMATE_EMAIL_PDF)', () => {
+describe('estimate PDF copy on the delivery email', () => {
   const featureGates = require('../config/feature-gates');
   const docPdf = require('../services/pdf/estimate-doc-pdf');
   const PDF = { filename: 'Waves-Estimate-EST-2026-0001.pdf', content: 'c3ludGhldGlj', type: 'application/pdf', disposition: 'attachment' };
-  const setGates = (on) => featureGates.isEnabled.mockImplementation((name) => on && (name === 'estimateEmailPdf' || name === 'estimateDocPdf'));
+  const setGates = (on) => featureGates.isEnabled.mockImplementation((name) => on && name === 'estimateDocPdf');
   let originalRender;
   beforeEach(() => {
     originalRender = email.renderTemplate.getMockImplementation();
@@ -2336,7 +2336,7 @@ describe('estimate PDF copy on the delivery email (GATE_ESTIMATE_EMAIL_PDF)', ()
     email.renderTemplate.mockImplementation(originalRender);
   });
 
-  test('gate on: the email carries the PDF and the note, and the channel says so', async () => {
+  test('document gate on: the email carries the PDF and the note, and the channel says so', async () => {
     setGates(true);
     const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
     expect(result.channels.email).toMatchObject({ ok: true, pdfAttached: true });
@@ -2349,7 +2349,7 @@ describe('estimate PDF copy on the delivery email (GATE_ESTIMATE_EMAIL_PDF)', ()
     expect(docPdf.buildEstimateEmailPdfAttachment).toHaveBeenCalledWith(expect.objectContaining({ id: row.id }), { validThrough: expect.any(Date) });
   });
 
-  test('gate off: nothing is built, no note, no attachment, and the channel result is unchanged', async () => {
+  test('document gate off: nothing is built, no note, no attachment, and the channel result is unchanged', async () => {
     setGates(false);
     const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
     expect(docPdf.buildEstimateEmailPdfAttachment).not.toHaveBeenCalled();
@@ -2358,13 +2358,6 @@ describe('estimate PDF copy on the delivery email (GATE_ESTIMATE_EMAIL_PDF)', ()
     expect(sent.payload).not.toHaveProperty('estimate_pdf_note');
     expect(result.channels.email).not.toHaveProperty('pdfAttached');
     expect(result.channels.email.warning).toBeUndefined();
-  });
-
-  test('the PDF gate alone is not enough: the browser document gate must be on too', async () => {
-    featureGates.isEnabled.mockImplementation((name) => name === 'estimateEmailPdf');
-    await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
-    expect(docPdf.buildEstimateEmailPdfAttachment).not.toHaveBeenCalled();
-    expect(email.sendTemplate.mock.calls[0][0].payload).not.toHaveProperty('estimate_pdf_note');
   });
 
   test.each([

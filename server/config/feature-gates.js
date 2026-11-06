@@ -3489,17 +3489,6 @@ const gates = {
   // Kill switch: unset GATE_ESTIMATE_DOC_PDF.
   estimateDocPdf: isProd ? process.env.GATE_ESTIMATE_DOC_PDF === 'true' : true,
 
-  // Estimate PDF on the email (owner ask 2026-10-19: "attach a pdf version of
-  // the estimates to all outgoing emails for customers who can't open the
-  // estimate"). An open-estimate email (delivery, follow-ups, engagement,
-  // extension notices) carries the browser-rendered work-order document as
-  // a PDF attachment plus a one-line note under the button. Needs
-  // GATE_ESTIMATE_DOC_PDF too: the attachment is the browser document only,
-  // never the pdfkit proposal. A render failure sends the email as before.
-  // Off or unset in prod: every estimate email is byte-identical to today.
-  // Kill switch: unset GATE_ESTIMATE_EMAIL_PDF (read at boot; the Railway restart applies it).
-  estimateEmailPdf: isProd ? process.env.GATE_ESTIMATE_EMAIL_PDF === 'true' : true,
-
   // Monthly AVERAGE beside per-application prices on residential estimates
   // (owner ruling 2026-10-20, "option A"). The per-application price stays the
   // price; a second, smaller line reads "$X a month", with the context

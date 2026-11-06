@@ -330,7 +330,7 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
     next_step_summary: proposalMode
       ? PROPOSAL_NEXT_STEP_SUMMARY
       : `${average?.note ? `${average.note} ` : ''}When you are ready, open the estimate and accept it online. We will collect the final setup details after that.`,
-    // Only present when the PDF copy rides along (GATE_ESTIMATE_EMAIL_PDF):
+    // Only present when the PDF copy rides along:
     // an absent key renders no block, so a send without it is unchanged.
     ...(pdfNote ? { estimate_pdf_note: pdfNote } : {}),
   };
@@ -1027,7 +1027,7 @@ async function buildEstimateSendPreview(estimate) {
   // review or schedule without it means "no PDF" at send time.
   const pdfCopy = !proposalMode && await emailPdfCopy().deliveryPdfCopyDecision(estimate);
   if (library?.activeVersion) {
-    // GATE_ESTIMATE_EMAIL_PDF: the reviewer sees the PDF line the customer
+    // The reviewer sees the PDF line the customer
     // gets when the copy is attached. The note is a payload variable, not
     // template text, so the reviewed contentHash (a template-version hash)
     // is unaffected; the messageVersion covers the previewed text, and the
@@ -3222,7 +3222,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             logger.error(`[admin-estimates] proposal PDF attachment failed for estimate ${estimate.id}: ${e.message}`);
           }
         }
-        // GATE_ESTIMATE_EMAIL_PDF: an ordinary estimate email carries the
+        // An ordinary estimate email carries the
         // browser work-order document too, for customers who cannot open the
         // link. The whole decision, address check, fence and render live in
         // prepareDeliveryPdfCopy; it never throws, and no attachment sends the
