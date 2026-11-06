@@ -23,6 +23,13 @@ class FakeRecorder {
   }
 }
 
+// The live-words preview comes from the hook (GATE_DICTATION_LIVE_WORDS); a test sets it here.
+const live = vi.hoisted(() => ({ text: "" }));
+vi.mock("../../hooks/useSpeechDictation", async (importOriginal) => {
+  const real = (await importOriginal()).default;
+  return { default: (...args) => { const r = real(...args); return live.text ? { ...r, liveText: live.text } : r; } };
+});
+
 const CUSTOMER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const VISIT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const MIC = /Dictate into this box/;
@@ -66,6 +73,7 @@ async function mount(children) {
 const focusBox = (label = "notes") => act(() => { screen.getByLabelText(label).focus(); });
 
 beforeEach(() => {
+  live.text = "";
   forgetServerDictation();
   clipRequests = [];
   localStorage.setItem("waves_admin_token", "staff-jwt");
@@ -277,5 +285,46 @@ describe("FocusedBoxMic", () => {
     await focusBox();
     const mic = await screen.findByRole("button", { name: MIC });
     expect(mic.parentElement).toBe(document.querySelector("[data-modal-panel]"));
+  });
+
+  it("box removed while RECORDING: the clip is abandoned (nothing uploaded), the hold is released and the notice shows", async () => {
+    stubServer({ available: true, everyBox: true });
+    const send = vi.fn();
+    let closeBox;
+    function Host() {
+      const [open, setOpen] = useState(true);
+      closeBox = () => setOpen(false);
+      return (
+        <div role="dialog" aria-label="Edit">
+          {open && <textarea aria-label="notes" defaultValue="Hello" />}
+          <button type="button" onClick={send}>Send message</button>
+        </div>
+      );
+    }
+    await mount(<Host />);
+    await focusBox();
+    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: MIC })); });
+    await screen.findByRole("button", { name: "Stop dictation" });
+    await act(async () => { closeBox(); });
+    expect(await screen.findByRole("status")).toHaveTextContent(/closed before the words came back/);
+    expect(screen.queryByRole("button", { name: /Stop dictation|Transcribing/ })).toBeNull();
+    expect(clipRequests).toHaveLength(0);
+    // The hold is gone: Send in the same dialog works at once.
+    await act(async () => { fireEvent.click(screen.getByText("Send message")); });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the live-words bubble beside the mic while recording, and none without liveText", async () => {
+    stubServer({ available: true, everyBox: true });
+    await mount(<textarea aria-label="notes" />);
+    await focusBox();
+    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: MIC })); });
+    await screen.findByRole("button", { name: "Stop dictation" });
+    expect(screen.queryByTestId("dictation-live-words")).toBeNull();
+    live.text = "gate is on the left";
+    await act(async () => { screen.getByLabelText("notes").dispatchEvent(new Event("input", { bubbles: true })); });
+    // Re-render with the preview: any state change in the component does it.
+    await act(async () => { screen.getByLabelText("notes").blur(); });
+    expect(await screen.findByTestId("dictation-live-words")).toHaveTextContent("gate is on the left");
   });
 });

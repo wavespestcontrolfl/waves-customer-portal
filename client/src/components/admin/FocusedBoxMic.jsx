@@ -5,6 +5,7 @@ import useSpeechDictation from "../../hooks/useSpeechDictation";
 import { checkEveryBoxDictation, refreshEveryBoxDictation } from "../../hooks/serverDictation";
 import { readToken } from "../../hooks/useServerDictationMode";
 import { setDictationPending } from "../../hooks/dictationPending";
+import { LiveWordsBubble } from "../tech/DictationButton";
 import { useIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { boxFits, insertDictatedText, isEligibleBox, readSelection } from "../../lib/dictationInsert";
 
@@ -85,7 +86,7 @@ function placeFor(el) {
   const bottom = Math.min(rect.bottom, viewBottom);
   const top = bottom - size - 6;
   if (top < rect.top || top < 0 || rect.right < 0 || rect.left > window.innerWidth) return null;
-  return { top, left: rect.right - size - HANDLE_CLEARANCE, size };
+  return { top, left: rect.right - size - HANDLE_CLEARANCE, size, room: rect.width - size - HANDLE_CLEARANCE - 16 };
 }
 
 // The focused box, tracked by focusin / focusout. Focus landing on the mic
@@ -113,8 +114,10 @@ function useFocusedBox(micRef) {
 
 // Keeps `place` current for `el` through scroll, resize, the box's own size
 // changes and layout shifts nothing else announces (a slow check).
-function useBoxPlace(el) {
+function useBoxPlace(el, onGone) {
   const [place, setPlace] = useState(null);
+  const onGoneRef = useRef(onGone);
+  onGoneRef.current = onGone;
   useEffect(() => {
     if (!el) {
       setPlace(null);
@@ -123,8 +126,9 @@ function useBoxPlace(el) {
     let frame = 0;
     const update = () => {
       frame = 0;
+      if (!el.isConnected) onGoneRef.current?.(el);
       const next = el.isConnected && isEligibleBox(el) ? placeFor(el) : null;
-      setPlace((prev) => (prev && next && prev.top === next.top && prev.left === next.left && prev.size === next.size ? prev : next));
+      setPlace((prev) => (prev && next && prev.top === next.top && prev.left === next.left && prev.size === next.size && prev.room === next.room ? prev : next));
     };
     const schedule = () => {
       if (!frame) frame = requestAnimationFrame(update);
@@ -226,7 +230,7 @@ function Notice({ message, host }) {
   );
 }
 
-function MicButton({ micRef, host, place, listening, uploading, onTap }) {
+function MicButton({ micRef, host, place, listening, uploading, liveText, onTap }) {
   const label = uploading ? "Transcribing" : listening ? "Stop dictation" : "Dictate into this box";
   const size = place?.size || 40;
   // Pinned to a box that left the screen: the mic stays reachable so a recording can be stopped.
@@ -248,7 +252,17 @@ function MicButton({ micRef, host, place, listening, uploading, onTap }) {
   const style = place
     ? { top: place.top + shift.y, left: place.left + shift.x, width: size, height: size }
     : { bottom: 16, right: 16, width: 40, height: 40 };
+  // The live preview sits to the left of the mic, in the box's corner area, so it never covers the mic.
+  const bubbleStyle = place
+    ? { top: place.top + shift.y, left: place.left + shift.x - 8, maxWidth: Math.max(96, Math.min(224, place.room)), transform: "translateX(-100%)" }
+    : { bottom: 16, right: 64, maxWidth: 224 };
   return createPortal(
+    <>
+    {liveText && listening ? (
+      <div className="fixed pointer-events-none" style={{ ...bubbleStyle, zIndex: Z_INDEX }}>
+        <LiveWordsBubble text={liveText} migrated />
+      </div>
+    ) : null}
     <button
       ref={micRef}
       type="button"
@@ -270,7 +284,8 @@ function MicButton({ micRef, host, place, listening, uploading, onTap }) {
       style={{ ...style, zIndex: Z_INDEX }}
     >
       {listening ? <MicOff size={16} strokeWidth={2.2} aria-hidden="true" /> : <Mic size={16} strokeWidth={2.2} aria-hidden="true" />}
-    </button>,
+    </button>
+    </>,
     host,
   );
 }
@@ -295,7 +310,7 @@ function FocusedBoxMicInner() {
     const result = insertDictatedText(session.el, text, session.selection);
     if (!result.ok) setNotice(NOTICES[result.reason]);
   }, []);
-  const { listening, starting, uploading, toggle, mode, supported } = useSpeechDictation(onTranscript, { dictationContext });
+  const { listening, starting, uploading, toggle, abandon, mode, supported, liveText } = useSpeechDictation(onTranscript, { dictationContext });
   const busy = mode === "upload" && (starting || listening || uploading);
 
   // Send / Ask buttons wait for words still in flight (dictationPending.js).
@@ -322,8 +337,18 @@ function FocusedBoxMicInner() {
   const holdNotice = useCallback(() => setNotice(NOTICES.wait), []);
   useHoldActions(pinned, busy, holdNotice);
 
+  // The box left the page. Still recording: abandon the clip (nothing is sent or transcribed) and say so.
+  // Already transcribing: the upload finishes and insertDictatedText drops the words with the same notice.
+  const phaseRef = useRef({});
+  phaseRef.current = { recording: starting || listening, uploading };
+  const onGone = useCallback(() => {
+    if (!phaseRef.current.recording || phaseRef.current.uploading) return;
+    abandon();
+    setNotice(NOTICES.gone);
+  }, [abandon]);
+
   const target = busy ? pinned : focused;
-  const place = useBoxPlace(target);
+  const place = useBoxPlace(target, busy ? onGone : undefined);
   const host = hostFor(target);
 
   const onTap = useCallback(() => {
@@ -338,7 +363,7 @@ function FocusedBoxMicInner() {
   const show = busy || (focused && place);
   return (
     <>
-      {show ? <MicButton micRef={micRef} host={host} place={place} listening={listening} uploading={uploading} onTap={onTap} /> : null}
+      {show ? <MicButton micRef={micRef} host={host} place={place} listening={listening} uploading={uploading} liveText={liveText} onTap={onTap} /> : null}
       <Notice message={notice} host={host} />
     </>
   );
