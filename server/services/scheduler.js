@@ -7555,11 +7555,14 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // Property-lookup parser canary — nightly, one golden parcel per county
-  // through the real by-parcel pipeline; alerts when a county PAO layout
-  // change silently breaks the scrape-based parsers.
-  // See server/services/property-lookup-canary.js. Re-run when a deploy
-  // kills it mid-run, so a busy merge night still gets its health check.
+  // Property-lookup parser canary — daily at 10:17 AM ET, one golden parcel
+  // per county through the real by-parcel pipeline; alerts when a county PAO
+  // layout change silently breaks the scrape-based parsers. Day, not night:
+  // the Sarasota host stopped answering at 4:17 AM (Nov 4-6, 2026) while
+  // estimate lookups in the day still resolved, so a night run paged for an
+  // outage no estimate sees. See server/services/property-lookup-canary.js.
+  // Re-run when a deploy kills it mid-run, so a busy merge day still gets
+  // its health check.
   // =========================================================================
   const runPropertyLookupCanaryTick = async () => {
     try {
@@ -7572,10 +7575,10 @@ function initScheduledJobs() {
       logger.error(`Property-lookup canary cron failed: ${err.message}`);
     }
   };
-  cron.schedule('17 4 * * *', runPropertyLookupCanaryTick, { timezone: 'America/New_York' });
+  cron.schedule('17 10 * * *', runPropertyLookupCanaryTick, { timezone: 'America/New_York' });
   // No retry once the killed run wrote its check state: the alert and the
-  // streak counters for the night are already recorded, and a second run
-  // would ring a second bell and count one night twice.
+  // streak counters for the day are already recorded, and a second run
+  // would ring a second bell and count one day twice.
   registerDeployKillRetry('property-lookup-canary', runPropertyLookupCanaryTick, {
     shouldRetry: async (row) => !(await require('./property-lookup-canary').canaryStateWrittenSince(row.last_started_at)),
   });
