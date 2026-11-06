@@ -148,12 +148,21 @@ async function blockStoppedRetry({ enrollment, sendId, recipient, verdict: asked
   return blockSendAndCancelEnrollment({ enrollment, sendId, reason: `Retry to the call-settled other spelling stopped: ${verdict}`, cancelReason: 'hard_bounce' });
 }
 
+// THE terminal cancel of a send in the runner: every pre-send check that ends an enrollment (a suppressed address, no termite
+// bond, an accepted estimate, a contact with email off and no holder address, a refused payment-failed step, a stopped call-spelling
+// retry) funnels here. An enrollment carrying call-spelling retry provenance is the retry's: its still-`resending` claim is settled
+// `skipped` with the cancel reason first (applySettlement releases the sibling enrollments and the provenance), so a blocked send
+// never leaves the claim in flight. Genuinely deferred sends (holds, quiet hours, lock skips, not due) never reach this function.
 async function blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancelReason }) {
   await db('automation_step_sends').where({ id: sendId }).update({
     status: 'blocked',
     failure_reason: reason.slice(0, 500),
     updated_at: new Date(),
   });
+  const marked = enrollmentMetadata(enrollment).spelling_retry_email;
+  if (marked) {
+    await require('./call-email-spelling-retry').abandonRetry({ customerId: enrollment.customer_id, retryEmail: marked, reason: cancelReason });
+  }
   await db('automation_enrollments').where({ id: enrollment.id }).update({
     status: 'cancelled',
     next_send_at: null,

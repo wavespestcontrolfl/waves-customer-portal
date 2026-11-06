@@ -34,6 +34,12 @@ const { gmailCanonicalMailbox, sameGmailInbox } = require('../utils/email-equiva
 
 const TABLE = 'call_email_spelling_retries';
 const CHANNEL = 'automation';
+// A claim still `resending` after this long is stranded by some path nobody foresaw (a hold, a crash, a cancel that did not settle).
+// 72 h is SendGrid's own limit: it keeps retrying a deferred message for up to 72 hours before it drops it, so a retry send that
+// is going to deliver or bounce has done so by then; the retry step itself is due the moment the bounce is processed (the drip's
+// longest step delay never applies to it). Past the window the claim is stale: it no longer owns bounces and no longer lets a
+// send through.
+const CLAIM_STALE_MS = 72 * 3600 * 1000;
 const NO_RETRY = Object.freeze({ retried: false });
 // A hard bounce for an address whose claim is still in flight: the retry owns it, nothing is retried and nothing is raised.
 const RETRY_OWNED = Object.freeze({ retried: false, retryOwned: true });
@@ -267,6 +273,7 @@ async function verdictFor({ claim, customerId, retryEmail }, client) {
   if (claim && claim.status === 'committed' && customer && norm(customer.email) === address) return null;
   if (!gateLive()) return 'gate_off';
   if (!claim || claim.status !== 'resending') return 'claim_settled';
+  if (isStale(claim)) return 'stale';
   if (!customer || norm(customer.email) !== norm(claim.bounced_email)) return 'email_changed';
   return retryAddressProblem(address, customerId, client);
 }
@@ -387,10 +394,33 @@ async function settleRetryBounce({ sendRow, customerId, reason = 'retry_address_
   return { retryFailed: true, bouncedEmail: row.bounced_email };
 }
 
-/** Is the claim for this customer + bounced address still `resending`? */
+const isStale = (claim) => Date.now() - new Date(claim.created_at).getTime() > CLAIM_STALE_MS;
+
+/**
+ * Is the claim for this customer + bounced address in flight? 'fresh' = still `resending` and inside the window (it owns the
+ * bounce); a STALE one is settled `failed` / `stale` here (claim locked, enrollments released by applySettlement) and counts as
+ * not in flight, so the bounce takes today's path; null = no live claim.
+ */
 async function claimInFlight({ customerId, bounced }, client) {
-  const row = await client(TABLE).where({ customer_id: customerId, bounced_email: bounced, channel: CHANNEL, status: 'resending' }).first('id');
-  return !!row;
+  const claim = await client(TABLE).where({ customer_id: customerId, bounced_email: bounced, channel: CHANNEL, status: 'resending' }).forUpdate().first();
+  if (!claim) return null;
+  if (!isStale(claim)) return 'fresh';
+  await applySettlement(client(TABLE).where({ id: claim.id, status: 'resending' }), { status: 'failed', reason: 'stale' }, client);
+  return null;
+}
+
+/**
+ * A terminal cancel of a send (automation-runner.js blockSendAndCancelEnrollment) for an enrollment carrying this retry address:
+ * the still-`resending` claim is skipped with the cancel reason, claim row locked first, which releases the sibling enrollments
+ * and the provenance. A claim already settled is left alone.
+ */
+async function abandonRetry({ customerId, retryEmail, reason }, client = db) {
+  return client.transaction(async (trx) => {
+    const claim = await latestClaim(trx, customerId, retryEmail).forUpdate().first();
+    if (!claim || claim.status !== 'resending') return false;
+    await applySettlement(trx(TABLE).where({ id: claim.id, status: 'resending' }), { status: 'skipped', reason: String(reason || 'cancelled').slice(0, 100) }, trx);
+    return true;
+  });
 }
 
 /** The customer a send belongs to, resolved from its enrollment BEFORE any claim is looked up. */
@@ -418,7 +448,7 @@ async function onAutomationHardBounce({ ev, sendRow }, client = db) {
       // The claim for this customer + address is still in flight: that retry owns this bounce (a duplicate event, a sibling's
       // send to the same address). Nothing is retried again and no alert, rescue or read-back card is raised; a settled claim
       // (failed, committed, skipped) is today's path.
-      if (customerId && await claimInFlight({ customerId, bounced }, sp)) return RETRY_OWNED;
+      if (customerId && await claimInFlight({ customerId, bounced }, sp) === 'fresh') return RETRY_OWNED;
       return startRetry({ sendRow, bounced }, sp);
     });
   } catch (err) {
@@ -499,5 +529,5 @@ async function onAutomationDelivered({ sendRow }, client = db) {
 
 module.exports = {
   onAutomationHardBounce, onAutomationDelivered, claimRetry, settleClaim, claimForSend, bindAutomationRetrySend, gateLive,
-  retrySendVerdict, stopRetry, releaseRetryEnrollments, onAutomationDeadDomain, settledOtherSpelling, lockPrepSend, CHANNEL, TABLE, RETRY_PROVENANCE_KEY,
+  retrySendVerdict, stopRetry, abandonRetry, releaseRetryEnrollments, onAutomationDeadDomain, settledOtherSpelling, lockPrepSend, CLAIM_STALE_MS, CHANNEL, TABLE, RETRY_PROVENANCE_KEY,
 };

@@ -108,12 +108,14 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
   }
 
   // Two enabled steps with no delay. `sent` = how many the enrollment already passed (the runner sends, then the bounce lands).
-  async function seedEnrollment({ asm = 'service', sent = 1, status = 'active', email = BOUNCED, role = null, customerId } = {}) {
-    const key = `retry_${randomUUID().slice(0, 8)}`;
-    await db('automation_templates').insert({ key, name: 'Synthetic lead welcome', asm_group: asm, enabled: true, trigger_type: 'manual' });
-    created.templates.push(key);
+  async function seedEnrollment({ asm = 'service', sent = 1, status = 'active', email = BOUNCED, role = null, customerId, templateKey = null } = {}) {
+    // templateKey: reuse a seeded template (its single enabled step) so its own pre-send checks (estimate accepted, termite bond) apply.
+    const key = templateKey || `retry_${randomUUID().slice(0, 8)}`;
     const steps = [];
-    for (const order of [1, 2]) {
+    if (templateKey) steps.push(...await db('automation_steps').where({ template_key: key, enabled: true }).orderBy('step_order'));
+    else await db('automation_templates').insert({ key, name: 'Synthetic lead welcome', asm_group: asm, enabled: true, trigger_type: 'manual' });
+    if (!templateKey) created.templates.push(key);
+    for (const order of templateKey ? [] : [1, 2]) {
       const [step] = await db('automation_steps').insert({
         template_key: key, step_order: order, delay_hours: 0, subject: `Step ${order}`, html_body: `<p>Hello {{first_name}} ${order}</p>`, text_body: `Hello ${order}`,
       }).returning('*');
@@ -961,5 +963,101 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     await flush();
     expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledTimes(1);
     expect(bounceRescue.rescueBouncedAddress).toHaveBeenCalledTimes(1);
+  });
+
+  // ── A terminal cancel of a provenance send settles its claim; a defer keeps it; a stale claim stops owning anything (P1-M) ──────
+  test.each([
+    ['estimate_accepted', 'estimate_sent', async (id) => { await db('estimates').insert({ customer_id: id, customer_email: BOUNCED, accepted_at: new Date(Date.now() + 5000) }); }],
+    ['not_termite_bond', 'service_renewal', async () => {}],
+  ])('a pre-send check cancels the retry (%s): the bound claim is skipped with that reason and the sibling is released', async (reason, templateKey, makeCause) => {
+    ctx = await setup({ sent: 1, templateKey });
+    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await makeCause(ctx.customerId);
+
+    await runner.sendStep(ctx.enrollment.id);
+
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    const blocked = await db('automation_step_sends').where({ enrollment_id: ctx.enrollment.id, email: OTHER }).first();
+    expect(blocked).toMatchObject({ status: 'blocked' });
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason, retry_send_id: blocked.id });
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled' });
+    expect(await cancelReason(ctx.enrollment.id)).toBe(reason);
+    expect(await enrollmentRow(sibling.enrollment.id)).toMatchObject({ status: 'cancelled' });
+    await noProvenance(sibling.enrollment.id);
+    await noProvenance(ctx.enrollment.id);
+    // The claim no longer owns the address: a later bounce of the original address is today's path.
+    const stray = await strayAutomationSend(sibling.enrollment.id, sibling.steps[0].id, 'after-cancel-1', BOUNCED);
+    jest.clearAllMocks();
+    await webhook.handleEvent(bounce(stray, BOUNCED));
+    await flush();
+    expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledTimes(1);
+  });
+
+  test('a genuinely deferred retry send (held at the provider boundary) keeps its claim resending and the enrollments live, then sends on the next tick', async () => {
+    ctx = await setup({ sent: 1 });
+    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+    await webhook.handleEvent(bounce(ctx.send));
+    const prefs = require('../services/contact-notification-prefs');
+    const spy = jest.spyOn(prefs, 'rerouteForContactEmailOptOut')
+      .mockImplementationOnce(async (_c, email) => ({ email, rerouted: false })) // the early check
+      .mockImplementationOnce(async () => ({ email: null, rerouted: true })); // the check at the provider boundary: held
+    sendgrid.sendOne.mockImplementationOnce(async (args) => { await args.providerBoundaryCheck({ database: undefined }); return { messageId: 'must-not-send' }; });
+    try {
+      const held = await runner.sendStep(ctx.enrollment.id);
+      expect(held).toMatchObject({ sent: false, deferred: true });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1); // sendOne was entered and refused at its boundary check
+    expect((await ledger(ctx.customerId))[0].status).toBe('resending');
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'active', email: OTHER });
+    expect(await enrollmentRow(sibling.enrollment.id)).toMatchObject({ status: 'active', email: OTHER });
+    sendgrid.sendOne.mockClear();
+    sendgrid.sendOne.mockImplementation(async () => ({ messageId: `retry-${randomUUID()}` }));
+    await runner.sendStep(ctx.enrollment.id);
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    const sent = await db('automation_step_sends').where({ enrollment_id: ctx.enrollment.id, email: OTHER, status: 'sent' }).first();
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'resending', retry_send_id: sent.id });
+  });
+
+  const ageClaim = (customerId, hours) => ledger(customerId).update({ created_at: new Date(Date.now() - hours * 3600 * 1000) });
+
+  test('a stale claim (older than 72 h, still resending) no longer owns a bounce: today\'s path, and the claim fails as stale', async () => {
+    ctx = await setup({ sent: 1 });
+    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await ageClaim(ctx.customerId, 80);
+    const stray = await strayAutomationSend(sibling.enrollment.id, sibling.steps[0].id, 'stale-1', BOUNCED);
+    jest.clearAllMocks();
+    await webhook.handleEvent(bounce(stray, BOUNCED));
+    await flush();
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'failed', reason: 'stale' });
+    expect(await enrollmentRow(sibling.enrollment.id)).toMatchObject({ status: 'cancelled' });
+    await noProvenance(ctx.enrollment.id);
+    expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledTimes(1);
+    expect(bounceRescue.rescueBouncedAddress).toHaveBeenCalledTimes(1);
+  });
+
+  test('a fresh claim just inside the window still owns the bounce', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await ageClaim(ctx.customerId, 70);
+    const stray = await strayAutomationSend(ctx.enrollment.id, ctx.last.id, 'fresh-1', BOUNCED);
+    jest.clearAllMocks();
+    await webhook.handleEvent(bounce(stray, BOUNCED));
+    await flush();
+    expect((await ledger(ctx.customerId))[0].status).toBe('resending');
+    expect(bounceRecovery.alertBouncedContactAddress).not.toHaveBeenCalled();
+  });
+
+  test('a stale claim never lets a send through at the runner boundary', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await ageClaim(ctx.customerId, 80);
+    await runner.sendStep(ctx.enrollment.id);
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'stale' });
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled' });
   });
 });
