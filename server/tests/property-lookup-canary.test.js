@@ -170,11 +170,11 @@ describe('decideCanaryAlert', () => {
   it('suppresses a first-night transient and escalates once it crosses the threshold', () => {
     const n1 = decideCanaryAlert([transientCheck], {});
     expect(n1.alertFailures).toEqual([]);
-    expect(n1.suppressed).toEqual(['Sarasota golden parcel: by-parcel lookup threw (timeout) (night 1/3)']);
+    expect(n1.suppressed).toEqual(['Sarasota golden parcel: by-parcel lookup threw (timeout) (day 1/3)']);
     expect(n1.nextCounts).toEqual({ 'golden:Sarasota': 1 });
 
     const n3 = decideCanaryAlert([transientCheck], { 'golden:Sarasota': 2 });
-    expect(n3.alertFailures).toEqual(['Sarasota golden parcel: by-parcel lookup threw (timeout) — 3 nights running']);
+    expect(n3.alertFailures).toEqual(['Sarasota golden parcel: by-parcel lookup threw (timeout) — 3 days running']);
     expect(n3.suppressed).toEqual([]);
     expect(n3.nextCounts).toEqual({ 'golden:Sarasota': 3 });
   });
@@ -242,7 +242,7 @@ describe('runPropertyLookupCanary', () => {
     expect(mockTriggerNotification).not.toHaveBeenCalled();
     const n3 = await runPropertyLookupCanary();
     expect(n3.ok).toBe(false);
-    expect(n3.failures.some((f) => /address search threw \(timeout\).*3 nights running/.test(f))).toBe(true);
+    expect(n3.failures.some((f) => /address search threw \(timeout\).*3 days running/.test(f))).toBe(true);
   });
 
   it('an address search finding nothing is transient (streaks), not an instant page', async () => {
@@ -275,7 +275,7 @@ describe('runPropertyLookupCanary', () => {
     const n3 = await runPropertyLookupCanary();
     expect(n3.ok).toBe(false);
     // A timeout now carries the browser-UA probe verdict in the detail.
-    const streakRe = /^Sarasota golden parcel: by-parcel lookup threw \(timeout\) — browser-UA probe: .+ — 3 nights running$/;
+    const streakRe = /^Sarasota golden parcel: by-parcel lookup threw \(timeout\) — browser-UA probe: .+ — 3 days running$/;
     expect(n3.failures.some((f) => streakRe.test(f))).toBe(true);
     expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
     // Keyed per ET day: the deploy-kill retry of a run that already alerted
@@ -376,7 +376,7 @@ describe('runPropertyLookupCanary', () => {
     });
     const after = await runPropertyLookupCanary(); // back to night 1, not 3
     expect(after.failures).toEqual([]);
-    expect(after.suppressed.some((s) => s.includes('night 1/3'))).toBe(true);
+    expect(after.suppressed.some((s) => s.includes('day 1/3'))).toBe(true);
     expect(mockTriggerNotification).not.toHaveBeenCalled();
   });
 
