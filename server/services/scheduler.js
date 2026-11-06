@@ -7240,14 +7240,16 @@ function initScheduledJobs() {
             return sum + (parseFloat(data.invoice_amount) || 0);
           }, 0);
 
-        const parts = [`${parseInt(unread?.c || 0)} unread`];
+        const unreadCount = parseInt(unread?.c || 0);
+        const parts = [`${unreadCount} unread`];
         if (leads > 0) parts.push(`${leads} leads created`);
         // Only claim a dollar figure when extraction actually produced one —
         // "4 invoices ($0.00 logged)" was a fabricated total, not a real zero.
         if (invoices > 0) {
+          const invoiceLabel = `${invoices} invoice${invoices > 1 ? 's' : ''}`;
           parts.push(invoiceAmounts > 0
-            ? `${invoices} invoice${invoices > 1 ? 's' : ''} ($${invoiceAmounts.toFixed(2)} logged)`
-            : `${invoices} invoice${invoices > 1 ? 's' : ''} (amounts not extracted)`);
+            ? `${invoiceLabel} ($${invoiceAmounts.toFixed(2)} logged)`
+            : `${invoiceLabel} (amounts not extracted)`);
         }
         if (spam > 0) parts.push(`${spam} spam quarantined`);
         // Exception surface: quarantine attempts that FAILED left classified
@@ -7290,7 +7292,7 @@ function initScheduledJobs() {
             link: '/admin/email',
             // One digest per ET morning, even if the tick runs twice.
             dedupeKey: `email-digest:${etDateString()}`,
-            metadata: { severity: (parseInt(unread?.c || 0) > 10 || nudgeLines || quarantineIssues > 0) ? 'high' : 'low' },
+            metadata: { severity: (unreadCount > 10 || nudgeLines || quarantineIssues > 0) ? 'high' : 'low' },
           },
         );
 
