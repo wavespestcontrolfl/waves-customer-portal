@@ -1304,10 +1304,10 @@ function bouncedOccurrenceDate(metadata) {
   return metadata.guard_slot_ms != null && Number.isFinite(guard) ? etDateString(new Date(guard)) : null;
 }
 
-/** Is a bounced day-only text's recovery stale? True when the visit's latest promise is already an hour (the 24-hour text
- *  went, or anything newer than the bounced text), or the promise cannot be read: a recovery must never become a newer day
+/** Is a delayed day-only send stale? True when the visit's latest promise is already an hour (the 24-hour text went, or
+ *  anything newer than the original send), or the promise cannot be read: a delayed send must never become a newer day
  *  promise over a known window. This is the ONE rule in front of the shared send decision. */
-async function bounceIsStale(scheduledServiceId) {
+async function delayedSendIsStale(scheduledServiceId) {
   if (!scheduledServiceId) return false;
   try {
     const levels = await require('./time-promise').loadPromiseLevels(db, [scheduledServiceId], new Date());
@@ -1318,17 +1318,36 @@ async function bounceIsStale(scheduledServiceId) {
   }
 }
 
-/** The email recovery of a bounced appointment text. A window text recovers as before. A day-only text: stale (a promise
- *  newer than it stands) -> nothing; else the shared day-only decision for NOW (live gate, cutoff, the customer's current
- *  24-hour preference, full eligibility) -> a day-only email when true, today's window copy when false. */
+/**
+ * THE chokepoint for every DELAYED day-only send: a bounced text's email recovery, and the morning replay of a queued
+ * contact's stored body (messaging/deferred-replay-registry.js appointment_notice_contact_deferred). Anything that sends a
+ * stored day-only body later must ask this first (day-only-promise-b1-persisted-paths.test.js scans for it).
+ *   'suppress'  a promise newer than the original send stands (the latest promise is already an hour, e.g. the 24-hour text
+ *               delivered the window) or the promise cannot be read: send nothing.
+ *   'day'       the SAME shared decision a fresh send uses (dayOnlyNow: live gate, the cutoff, reminder24hWillSend on the
+ *               customer's CURRENT preferences, full eligibility) still says day: the day-only body may go.
+ *   'window'    it no longer does (gate rolled back, the 24-hour reminder switched off, inside the cutoff): the day-only
+ *               body must not go. The caller sends window copy if it can render it, else suppresses.
+ * `apptTime` is the visit's start the caller already knows; absent, it is read from the visit.
+ */
+async function revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime }) {
+  if (await delayedSendIsStale(scheduledServiceId)) return 'suppress';
+  const startAt = apptTime || (scheduledServiceId ? await scheduledServiceApptTime(scheduledServiceId) : null);
+  return (await dayOnlyNow({ customerId, scheduledServiceId, apptTime: startAt })) ? 'day' : 'window';
+}
+
+/** The email recovery of a bounced appointment text. A window text recovers as before. A day-only text goes through the
+ *  delayed-send chokepoint: suppress -> nothing; day -> a day-only email; window -> today's window copy (the email path
+ *  renders it fresh). */
 async function recoverBouncedNotice({ audit, kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey }) {
   let dayOnly = false;
   if (isDayPromise(audit.metadata)) {
-    if (await bounceIsStale(scheduledServiceId)) {
+    const verdict = await revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime });
+    if (verdict === 'suppress') {
       logger.info(`[appt-remind] bounced day-only ${kind} text for ${scheduledServiceId}: a later promise already stands (or none can be read) - recovery email suppressed as stale`);
       return;
     }
-    dayOnly = await dayOnlyNow({ customerId, scheduledServiceId, apptTime });
+    dayOnly = verdict === 'day';
   }
   await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel: audit.metadata?.requestedChannel, ...dayOnlyArg(dayOnly) });
 }
@@ -7241,6 +7260,7 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
   }
 }
 AppointmentReminders.sendConfirmationToServiceContact = sendConfirmationToServiceContact;
+AppointmentReminders.revalidateDelayedDaySend = revalidateDelayedDaySend;
 
 // Shared with twilio.js's en-route/arrival senders (owner ruling
 // 2026-09-25) — see the function's own comment.

@@ -239,6 +239,35 @@ describe('persist and replay paths are accounted for', () => {
     expect(unknown).toEqual([]);
   });
 
+  // Every path that sends a stored day-only body LATER must ask the chokepoint (appointment-reminders.js
+  // revalidateDelayedDaySend) first. The only ways to carry or recognise a stored day-only body are promiseMetaOf(...) and
+  // isDayPromise(...): a file that uses either must be listed with how it reaches the chokepoint, so a new delayed path
+  // cannot skip it.
+  test('every delayed day-only sender calls the chokepoint', () => {
+    const reminders = read('services/appointment-reminders.js');
+    // the bounce recovery
+    expect(reminders).toMatch(/async function recoverBouncedNotice[\s\S]*?revalidateDelayedDaySend\(/);
+    // the morning replay of queued contacts, via the registry's recheck
+    const registry = read('services/messaging/deferred-replay-registry.js');
+    expect(registry).toMatch(/appointment_notice_contact_deferred: \{[\s\S]*?dayPromiseStillValid\(meta\)/);
+    expect(registry).toMatch(/async function dayPromiseStillValid[\s\S]*?revalidateDelayedDaySend\(/);
+    // the chokepoint is the only caller of the shared decision for a delayed send: no inline dayOnlyNow in either path
+    expect(reminders.match(/async function recoverBouncedNotice[\s\S]*?\n}\n/)[0]).not.toMatch(/dayOnlyNow\(/);
+    expect(registry).not.toMatch(/dayOnlyNow|dayOnlySendDecision/);
+  });
+
+  test('no other file carries or recognises a stored day-only body without being decided here', () => {
+    const DECIDED = new Set([
+      'services/time-promise.js', // defines promiseMetaOf
+      'services/appointment-reminders.js', // writer (queueHeldNoticeContacts), bounce recovery (isDayPromise)
+      'services/scheduler.js', // replay: applies promiseMetaOf(claimMeta); its recheck is the registry's (above)
+    ]);
+    const users = files(SERVER)
+      .filter((f) => /\bpromiseMetaOf\(|\bisDayPromise\(/.test(fs.readFileSync(f, 'utf8')))
+      .map((f) => path.relative(SERVER, f));
+    expect(users.filter((f) => !DECIDED.has(f))).toEqual([]);
+  });
+
   test('the paths decided as NO CHANGE do not hold appointment-reminders send metadata (they never call safeSendAppointment)', () => {
     for (const [file, why] of Object.entries(KNOWN)) {
       if (!why.startsWith('NO CHANGE')) continue;

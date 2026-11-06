@@ -1643,7 +1643,9 @@ const REGISTRY = {
         ? await visitStillInStatus(meta.scheduled_service_id, meta.required_visit_statuses, 'notice-contact')
         : await visitStillUpcoming(meta.scheduled_service_id, 'notice-contact', meta);
       if (visit.eligible === false) return visit;
-      return contactSlotStillAuthorized(meta, 'notice-contact');
+      const contact = await contactSlotStillAuthorized(meta, 'notice-contact');
+      if (contact.eligible === false || meta.promise_level !== 'day') return contact;
+      return dayPromiseStillValid(meta);
     },
   },
 
@@ -1846,6 +1848,26 @@ async function visitStillUpcoming(scheduledServiceId, label, slotSnapshot = null
     return { eligible: true };
   } catch (err) {
     return failClosed(label, scheduledServiceId, err);
+  }
+}
+
+// A queued DAY-ONLY body (GATE_DAY_ONLY_PROMISE, queueHeldNoticeContacts stores promise_level 'day' with it) is
+// revalidated at replay time through the same chokepoint a bounce recovery uses (appointment-reminders.js
+// revalidateDelayedDaySend): a promise newer than the original send (the 24-hour text delivered the window) supersedes it,
+// and a gate rolled back, a 24-hour reminder switched off or a visit inside the cutoff means the day-only body is no longer
+// true to say. This replay holds only the FROZEN body of one contact, with no template variables to re-render window copy
+// from, so both cases SUPPRESS it (logged by the scheduler as stale_replay). That is safe: the 24-hour reminder still gives
+// the window to every customer who will get it, and a customer who switched it off chose that. A read failure holds the row
+// for a bounded retry (failClosed).
+async function dayPromiseStillValid(meta) {
+  try {
+    const verdict = await require('../appointment-reminders').revalidateDelayedDaySend({
+      customerId: meta.customer_id, scheduledServiceId: meta.scheduled_service_id,
+    });
+    if (verdict === 'day') return { eligible: true };
+    return { eligible: false, reason: verdict === 'suppress' ? 'day-promise-superseded' : 'day-promise-no-longer-valid' };
+  } catch (err) {
+    return failClosed('notice-contact-day-promise', meta.scheduled_service_id, err);
   }
 }
 
