@@ -36,7 +36,7 @@ const RECOVERY_CATEGORY = 'bounce_recovery';
 // Thrown by insertRecoveryMessage when the other-spelling claim cannot be bound to the message (claim settled elsewhere or gate off): nothing is staged.
 const RETRY_NOT_BOUND = 'CALL_SPELLING_RETRY_NOT_BOUND';
 // Thrown inside the provider-boundary check when the gate is off right before the handoff of an other-spelling recovery.
-const RETRY_GATE_OFF = 'CALL_SPELLING_RETRY_GATE_OFF';
+const RETRY_STOPPED = 'CALL_SPELLING_RETRY_STOPPED';
 // Ledger correction_rule for a resend to the other spelling a call's settled-spelling record names.
 const OTHER_SPELLING_RULE = 'call_other_spelling';
 const EMAIL_SHAPE_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -609,19 +609,25 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
     // Set when a collections dispute hold refuses the recovery re-send (up front, or at
     // sendOne's FINAL boundary check): a WAIT, never a settled block - see attemptRecovery.
     let heldRecovery = null;
-    // Set when the other-spelling gate is off at the provider boundary (see stampDispatchAtProviderBoundary).
-    let retryGateOff = false;
+    // Set to the verdict reason when an other-spelling resend must not go at the provider boundary (see stampDispatchAtProviderBoundary).
+    let retryStopped = null;
     // The pre-provider phase marker is stamped at the ACTUAL provider boundary (Codex #5459 r3 P2): sendOne
     // runs its annual-offer guard, then this check, then builds the payload and calls fetch. A crash while
     // the guards run happened before any provider request and must stay retryable, so no marker is written
     // until the caller's own authority has passed. The write is durable before this resolves (sendOne's
     // fetch follows synchronously); a failed write throws, so the request never goes out unmarked.
     const stampDispatchAtProviderBoundary = (callerCheck) => async (args) => {
-      // Kill switch at the chokepoint every branch's request passes (owner 2026-11-05): an other-spelling resend whose gate is
-      // off by now sends nothing. Thrown, because sendOne awaits this check and lets a throw escape before any request.
-      if (otherSpelling && !require('./call-email-spelling-retry').gateLive()) {
-        retryGateOff = true;
-        throw Object.assign(new Error('the other-spelling resend was switched off before the provider handoff'), { code: RETRY_GATE_OFF, providerBoundaryBlocked: true });
+      // The chokepoint every branch's request passes (owner 2026-11-05): an other-spelling resend is sent only while the SAME
+      // verdict the automation path uses allows it (gate on, claim still resending, the customer's primary email still the bounced
+      // address, the retry address not suppressed or owned by another record). Thrown, because sendOne awaits this check and lets
+      // a throw escape before any request.
+      if (otherSpelling) {
+        retryStopped = await require('./call-email-spelling-retry').retrySendVerdict({
+          customerId: ownCustomerId, retryEmail: correctedEmail, channel: 'email_message',
+        }, db);
+        if (retryStopped) {
+          throw Object.assign(new Error('the other-spelling resend was stopped before the provider handoff'), { code: RETRY_STOPPED, providerBoundaryBlocked: true });
+        }
       }
       const verdict = callerCheck ? await callerCheck(args) : undefined;
       if (verdict && verdict.ok === false) return verdict; // refused: no provider request follows, no marker
@@ -687,7 +693,7 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
           annualWithheld = true;
           return;
         }
-        if (err && err.providerBoundaryBlocked && (heldRecovery || retryGateOff)) return;
+        if (err && err.providerBoundaryBlocked && (heldRecovery || retryStopped)) return;
         // SendGrid's response body can echo a recipient. Keep only its status
         // before the recovery result reaches persistence or the failure log.
         if (Number.isInteger(err?.status)) throw new Error(`SendGrid bounce recovery failed (${err.status})`);
@@ -781,7 +787,7 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       return { ok: false, held: true, reason: 'collection_hold', holdReason: heldRecovery.reason };
     }
     if (!result) {
-      const reason = retryGateOff ? 'gate_off' : (annualWithheld ? 'annual_offer_withheld' : (authorityRefusal || 'provider_dispatch_unavailable'));
+      const reason = retryStopped || (annualWithheld ? 'annual_offer_withheld' : (authorityRefusal || 'provider_dispatch_unavailable'));
       await db('email_messages').where({ id: message.id, status: 'queued' })
         .update({ status: 'blocked', error_message: reason, updated_at: new Date() }).catch(() => {});
       if (visitSummary) {
@@ -789,7 +795,7 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
         await require('./visit-completion-summary').reconcileSummaryEmailRecovery({ ...message, status: 'blocked' })
           .catch((err) => logger.warn(`[bounce-recovery] visit summary suppression not reconciled for ${message.id}: ${err.message}`));
       }
-      return { ok: false, suppressed: true, reason };
+      return { ok: false, suppressed: true, reason, retryStopped: !!retryStopped };
     }
     // Always record the provider id + send time. These are safe regardless of
     // any concurrent webhook.
@@ -873,6 +879,9 @@ async function otherSpellingCandidate(bouncedMessage, bouncedEmail, match) {
     const recipientId = String(bouncedMessage?.recipient_type || '').toLowerCase() === 'customer'
       ? bouncedMessage.recipient_id : null;
     if (!recipientId || !match?.customerId || String(match.customerId) !== String(recipientId)) return null;
+    // The bounced address must be the customer's PRIMARY email: a service-contact or billing field, or a message matched only by an
+    // old estimate snapshot, keeps the manual recovery path.
+    if (match.field !== 'email') return null;
     const { findSourceCall } = require('./email-bounce-reverify');
     const call = await findSourceCall({
       bouncedEmail, customerId: recipientId, onlyCustomerId: recipientId, requireRecording: false, requireSettled: true,
@@ -918,15 +927,17 @@ async function claimOtherSpellingSend(decision, candidate, match, bouncedMessage
 // delivered message is not the send its claim is bound to (still resending).
 async function otherSpellingCommitSkip(rec, recoveryMessage) {
   if (!callBounceOtherSpellingLive()) return 'gate_off';
+  // Only the customer's PRIMARY email is ever overwritten by this rule (a contact or billing field keeps the manual path).
+  if (rec.customer_email_field !== 'email') return 'not_primary_email';
   const claim = await require('./call-email-spelling-retry').claimForSend({
     channel: 'email_message', sendId: recoveryMessage.id, customerId: rec.customer_id,
   }, db);
   return claim ? null : 'claim_not_bound';
 }
 
-// Ledger status for a recovery the dispatch refused (the gate-off refusal of an other-spelling resend is a quiet "not sent").
-function refusalStatus(reason) {
-  if (reason === 'gate_off') return OTHER_SPELLING_NOT_SENT_STATUS;
+// Ledger status for a recovery the dispatch refused (an other-spelling resend stopped at the boundary is a quiet "not sent").
+function refusalStatus({ reason, retryStopped }) {
+  if (retryStopped) return OTHER_SPELLING_NOT_SENT_STATUS;
   return reason === 'corrected_owned_by_other' ? 'corrected_owned_by_other' : 'recipient_unauthorized';
 }
 
@@ -1094,12 +1105,12 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
   }
   if (sendResult.suppressed) {
     await db('email_bounce_recoveries').where({ id: recoveryId }).update({
-      status: refusalStatus(sendResult.reason),
+      status: refusalStatus(sendResult),
       updated_at: new Date(),
       metadata: jsonbMerge({ suppression_reason: sendResult.reason }),
     });
     await settleOtherSpellingClaim(claimRec, { status: 'skipped', reason: sendResult.reason });
-    if (sendResult.reason !== 'gate_off' && billingReplay.isBillingEmailTemplateRetry(bouncedMessage)) {
+    if (!sendResult.retryStopped && billingReplay.isBillingEmailTemplateRetry(bouncedMessage)) {
       await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId,
         status: sendResult.reason === 'corrected_owned_by_other'
           ? 'corrected_owned_by_other' : 'billing_replay_reauthorization_required', candidate });

@@ -71,6 +71,7 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
       await db('audit_log').where({ resource_id: id }).del();
       await db('call_log').where({ customer_id: id }).del();
       await db('estimates').where({ customer_id: id }).del();
+      await db('notification_prefs').where({ customer_id: id }).del();
       await db('automation_enrollments').where({ customer_id: id }).del();
       await db('customers').where({ id }).del();
     }
@@ -879,5 +880,97 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'failed', reason: 'retry_address_bounced' });
     expect(await enrollmentRow(sibling.enrollment.id)).toMatchObject({ status: 'cancelled' });
     await noProvenance(sibling.enrollment.id);
+  });
+
+  // ── A failed bind never dispatches (P1-F) ─────────────────────────────────────────────────────────────────────────────
+  test('the process stopped after the bind committed and before the dispatch: the next tick sends nothing unbound, the claim and enrollments end cleanly', async () => {
+    ctx = await setup({ sent: 1 });
+    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+    await webhook.handleEvent(bounce(ctx.send));
+    // Simulate the dead process: the first retry send row exists, bound to the claim, queued, never dispatched.
+    const [orphan] = await db('automation_step_sends').insert({
+      enrollment_id: ctx.enrollment.id, step_id: ctx.last.id, step_order: 1, email: OTHER, status: 'queued',
+    }).returning('*');
+    await ledger(ctx.customerId).update({ retry_send_id: orphan.id });
+
+    await runner.sendStep(ctx.enrollment.id);
+
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'not_bound' });
+    for (const id of [ctx.enrollment.id, sibling.enrollment.id]) {
+      expect(await enrollmentRow(id)).toMatchObject({ status: 'cancelled' });
+      expect(await cancelReason(id)).toBe('hard_bounce');
+      await noProvenance(id);
+    }
+    expect(await db('automation_step_sends').where({ id: orphan.id }).first()).toMatchObject({ status: 'blocked' });
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(BOUNCED);
+  });
+
+  test('a step deferred before dispatch (its queued row deleted) re-binds on the next tick and still settles', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    const [gone] = await db('automation_step_sends').insert({
+      enrollment_id: ctx.enrollment.id, step_id: ctx.last.id, step_order: 1, email: OTHER, status: 'queued',
+    }).returning('*');
+    await ledger(ctx.customerId).update({ retry_send_id: gone.id });
+    await db('automation_step_sends').where({ id: gone.id }).del(); // what a held step does: nothing was sent
+
+    await runner.sendStep(ctx.enrollment.id);
+
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    const sent = await retrySendOf(ctx.enrollment.id, 'rebound-1');
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'resending', retry_send_id: sent.id });
+    await delivered('rebound-1');
+    expect((await ledger(ctx.customerId))[0].status).toBe('committed');
+  });
+
+  // ── Tracked path: primary email only, and the same eligibility verdict before the handoff (P1-G) ──────────────────────
+  test.each([
+    ['a service-contact field', async (id) => { await db('customers').where({ id }).update({ email: 'someone.else@example.com', service_contact_email: BOUNCED }); }],
+    ['the billing email', async (id) => {
+      await db('customers').where({ id }).update({ email: 'someone.else@example.com' });
+      await db('notification_prefs').insert({ customer_id: id, billing_email: BOUNCED });
+    }],
+    ['an old estimate snapshot only', async (id) => {
+      await db('customers').where({ id }).update({ email: 'someone.else@example.com' });
+      await db('estimates').insert({ customer_id: id, customer_email: BOUNCED });
+    }],
+  ])('tracked: the bounced address is %s, not the primary email: nothing is resent, no claim, the manual path (alert + card) as today', async (_label, shape) => {
+    const customerId = await seedCustomer(BOUNCED);
+    await seedCall(customerId);
+    await shape(customerId);
+    const original = await seedBouncedMessage(customerId);
+    jest.clearAllMocks();
+    const res = await bounceRecovery.attemptRecovery(original, hardBounce);
+    expect(res).toEqual({ skipped: 'no_candidate' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(await trackedClaim(customerId)).toEqual([]);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledTimes(1);
+    await db('notification_prefs').where({ customer_id: customerId }).del();
+  });
+
+  test.each([
+    ['email_changed', async (id) => { await db('customers').where({ id }).update({ email: 'jonny.doe@example.com' }); }],
+    ['owned_by_other', async () => { await seedCustomer(OTHER); }],
+    ['suppressed', async () => { await db('email_suppressions').insert({ email: OTHER, status: 'active', suppression_type: 'bounce', source: 'test', suppressed_at: new Date() }); }],
+  ])('tracked: %s found between the claim and the provider handoff: nothing is sent, the claim is skipped, nobody is told', async (reason, makeProblem) => {
+    const customerId = await seedCustomer(BOUNCED);
+    await seedCall(customerId);
+    const original = await seedBouncedMessage(customerId);
+    sendgrid.sendOne.mockImplementationOnce(async (args) => {
+      await makeProblem(customerId); // happens after the claim was taken and the message staged
+      await args.providerBoundaryCheck({ database: undefined });
+      return { messageId: 'must-not-send' };
+    });
+    jest.clearAllMocks();
+    const res = await bounceRecovery.attemptRecovery(original, hardBounce);
+    expect(res).toEqual({ skipped: reason });
+    const [rec] = await recoveryRows(original.id);
+    expect(rec.status).toBe('other_spelling_not_sent');
+    expect(await db('email_messages').where({ id: rec.recovery_message_id }).first()).toMatchObject({ status: 'blocked', error_message: reason });
+    expect((await trackedClaim(customerId))[0]).toMatchObject({ status: 'skipped', reason });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
   });
 });

@@ -163,18 +163,33 @@ async function claimForSend({ channel, sendId, customerId }, client = db) {
  * Bind the automation retry send to its claim, in the same transaction that creates the send row (sendStepLocked), only
  * while the claim is still `resending` and unbound, the gate is on, and the send is the rewound step itself: the claim's
  * origin send belongs to THIS enrollment and THIS step. A sibling repointed without a resend, a later step, or any other
- * enrollment never binds. One UPDATE, so exactly one send can win the bind.
+ * enrollment never binds ('not_origin'). One UPDATE, so exactly one send can win the bind. Returns 'bound', 'not_origin', or, for the
+ * originating step whose bind failed, 'refused' / 'gate_off': that send must not be dispatched.
  */
 async function bindAutomationRetrySend({ enrollment, step, sendId, recipient }, client = db) {
-  if (!gateLive()) return false;
-  const res = await client.raw(
-    `UPDATE ${TABLE} c SET retry_send_id = ?, updated_at = now()
-       FROM automation_step_sends o
-      WHERE c.customer_id = ? AND c.retry_email = ? AND c.channel = ? AND c.status = 'resending' AND c.retry_send_id IS NULL
-        AND o.id = c.origin_send_id AND o.enrollment_id = ? AND o.step_id = ?`,
-    [sendId, enrollment.customer_id, norm(recipient), CHANNEL, enrollment.id, step.id],
+  const where = [enrollment.customer_id, norm(recipient), CHANNEL, enrollment.id, step.id];
+  if (gateLive()) {
+    // Unbound, or bound to a row that no longer exists (a deferred step deletes its queued row: nothing was sent).
+    const res = await client.raw(
+      `UPDATE ${TABLE} c SET retry_send_id = ?, updated_at = now()
+         FROM automation_step_sends o
+        WHERE c.customer_id = ? AND c.retry_email = ? AND c.channel = ? AND c.status = 'resending'
+          AND (c.retry_send_id IS NULL OR NOT EXISTS (SELECT 1 FROM automation_step_sends b WHERE b.id = c.retry_send_id))
+          AND o.id = c.origin_send_id AND o.enrollment_id = ? AND o.step_id = ?`,
+      [sendId, ...where],
+    );
+    if (res.rowCount === 1) return 'bound';
+  }
+  // Not bound. Is this the claim's originating retry step at all? A sibling or a later step legitimately never binds.
+  const origin = await client.raw(
+    `SELECT 1 FROM ${TABLE} c JOIN automation_step_sends o ON o.id = c.origin_send_id
+      WHERE c.customer_id = ? AND c.retry_email = ? AND c.channel = ? AND c.status = 'resending' AND o.enrollment_id = ? AND o.step_id = ?`,
+    where,
   );
-  return res.rowCount === 1;
+  if (origin.rows.length === 0) return 'not_origin';
+  // The originating step but the bind failed (the claim is already bound to an earlier queued row that was never dispatched, e.g.
+  // the process stopped after the bind committed). Fail closed: the caller must not dispatch it.
+  return gateLive() ? 'refused' : 'gate_off';
 }
 
 /**
@@ -229,15 +244,16 @@ async function retryAddressProblem(address, customerId, client) {
 }
 
 /**
- * The send-boundary verdict for a provenance-marked automation send, asked right before the queued retry step is created and
+ * The send-boundary verdict for a retry send of EITHER channel (automation: the runner; email_message: the tracked recovery's provider
+ * boundary), asked right before the queued retry step is created and
  * again right before the provider request (automation-runner.js). null = send. Otherwise the reason it must not go: the gate is
  * off; the claim is no longer `resending` (a settled claim is never a pass); the customer's primary email is no longer the
  * bounced address (staff changed it); or the retry address is now suppressed or belongs to someone else.
  */
-async function retrySendVerdict({ customerId, retryEmail }, client = db) {
+async function retrySendVerdict({ customerId, retryEmail, channel = CHANNEL }, client = db) {
   if (!gateLive()) return 'gate_off';
   const address = norm(retryEmail);
-  const claim = await client(TABLE).where({ customer_id: customerId, retry_email: address, channel: CHANNEL }).orderBy('created_at', 'desc').first();
+  const claim = await client(TABLE).where({ customer_id: customerId, retry_email: address, channel }).orderBy('created_at', 'desc').first();
   if (!claim || claim.status !== 'resending') return 'claim_settled';
   const customer = await client('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
   if (!customer || norm(customer.email) !== norm(claim.bounced_email)) return 'email_changed';
@@ -251,6 +267,11 @@ async function retrySendVerdict({ customerId, retryEmail }, client = db) {
 async function stopRetry({ customerId, retryEmail, reason }, client = db) {
   const claim = await client(TABLE).where({ customer_id: customerId, retry_email: norm(retryEmail), channel: CHANNEL }).orderBy('created_at', 'desc').first();
   if (claim && claim.status === 'resending') {
+    // A queued row the claim was bound to but never dispatched (reason not_bound) is closed with it.
+    if (reason === 'not_bound' && claim.retry_send_id) {
+      await client('automation_step_sends').where({ id: claim.retry_send_id, status: 'queued' })
+        .update({ status: 'blocked', failure_reason: 'The retry send was never dispatched', updated_at: new Date() });
+    }
     await applySettlement(client(TABLE).where({ id: claim.id, status: 'resending' }), { status: 'skipped', reason }, client);
     return;
   }

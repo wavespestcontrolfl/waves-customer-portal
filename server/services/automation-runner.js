@@ -202,8 +202,9 @@ async function estimateAcceptedForFollowUp(enrollment) {
   return !!accepted;
 }
 
-async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend }) {
+async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend, retryNotBound = false }) {
   if (testRecipient) return null;
+  if (retryNotBound) return blockStoppedRetry({ enrollment, sendId, recipient, verdict: 'not_bound' });
   const retryVerdict = await retryStopVerdict(enrollment, recipient);
   if (retryVerdict) return blockStoppedRetry({ enrollment, sendId, recipient, verdict: retryVerdict });
   // A billing send checks suppression for the CURRENT billing recipient,
@@ -953,8 +954,9 @@ async function insertStepSend({ enrollment, step, recipient, testRecipient }) {
   if (testRecipient || !enrollmentMetadata(enrollment).spelling_retry_email) return queued(db);
   return db.transaction(async (trx) => {
     const row = await queued(trx);
-    await require('./call-email-spelling-retry').bindAutomationRetrySend({ enrollment, step, sendId: row.id, recipient }, trx);
-    return row;
+    const bind = await require('./call-email-spelling-retry').bindAutomationRetrySend({ enrollment, step, sendId: row.id, recipient }, trx);
+    // The originating retry step whose bind failed must NOT be dispatched (automationDeliveryBlock stops it): fail closed.
+    return bind === 'refused' ? Object.assign(row, { retryNotBound: true }) : row;
   });
 }
 
@@ -1020,7 +1022,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   const sendRow = await insertStepSend({ enrollment, step, recipient, testRecipient });
 
   const deliveryBlock = await automationDeliveryBlock({ enrollment, template, recipient,
-    sendId: sendRow.id, testRecipient, billingSend });
+    sendId: sendRow.id, testRecipient, billingSend, retryNotBound: sendRow.retryNotBound });
   if (deliveryBlock) return deliveryBlock;
 
   const dispatch = (providerBoundaryCheck) => sendgrid.sendOne({

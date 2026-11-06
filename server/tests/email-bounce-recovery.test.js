@@ -266,7 +266,7 @@ function orderedDb(resolvers = {}) {
   const calls = [];
   const fn = jest.fn((table) => {
     const chain = {};
-    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'select', 'forUpdate', 'whereNull']) {
+    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'select', 'forUpdate', 'whereNull', 'orderBy']) {
       chain[m] = jest.fn(() => chain);
     }
     chain.insert = jest.fn((data) => { calls.push({ table, op: 'insert', data }); return chain; });
@@ -1388,7 +1388,12 @@ describe('resend to the other spelling the call settled against (GATE_CALL_BOUNC
     template_key: 'estimate.delivery', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'], ...over,
   });
   const newDb = (over = {}) => orderedDb({
-    first: (table) => (table === 'customers' ? { id: 'c1', email: 'jondoe@example.com' } : (over.first ? over.first(table) : null)),
+    first: (table) => {
+      if (table === 'customers') return { id: 'c1', email: 'jondoe@example.com' };
+      // the claim the provider-boundary verdict reads: resending, for the bounced address
+      if (table === 'call_email_spelling_retries') return over.claimRow === undefined ? { id: 'claim1', status: 'resending', bounced_email: 'jondoe@example.com' } : over.claimRow;
+      return over.first ? over.first(table) : null;
+    },
     returning: (table) => {
       if (table === 'email_bounce_recoveries') return [{ id: 'rec1' }];
       if (table === 'call_email_spelling_retries') return over.claim === false ? [] : [{ id: 'claim1' }];
@@ -1456,7 +1461,7 @@ describe('resend to the other spelling the call settled against (GATE_CALL_BOUNC
 
   test('the claim is lost (an earlier try for this customer + address, from either path, any status): no resend, no alert, no card, a quiet ledger status', async () => {
     process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
-    const mockDb = newDb({ claim: false });
+    const mockDb = newDb({ claim: false, claimRow: null }); // the insert loses and there is no resumable claim of this message
     db.mockImplementation(mockDb);
     const res = await recovery.attemptRecovery(bounced({ id: 'orig2' }), { event: 'bounce', type: 'bounce' });
     expect(res).toEqual({ skipped: 'other_spelling_already_tried' });
@@ -1494,6 +1499,39 @@ describe('resend to the other spelling the call settled against (GATE_CALL_BOUNC
     expect(res).toMatchObject({ error: expect.any(String) });
     const settle = claimWrites(mockDb).find((c) => c.data && c.data.status === 'failed');
     expect(settle.data).toMatchObject({ status: 'failed', reason: 'send_failed' });
+  });
+
+  test.each([
+    ['a service-contact field', { customer: { id: 'c1', email: 'someone.else@example.com', service_contact_email: 'jondoe@example.com' } }],
+    ['the billing email', { customer: { id: 'c1', email: 'someone.else@example.com' }, pref: { billing_email: 'jondoe@example.com' } }],
+    ['an old estimate snapshot only (no field holds it)', { customer: { id: 'c1', email: 'someone.else@example.com' } }],
+  ])('the bounced address is %s, not the primary email: no other-spelling candidate, the manual path (alert + read-back card) as today', async (_label, shape) => {
+    process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
+    const mockDb = orderedDb({
+      first: (table) => (table === 'customers' ? shape.customer : (table === 'notification_prefs' ? (shape.pref || null) : null)),
+      returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec1' }] : []),
+    });
+    db.mockImplementation(mockDb);
+    const res = await recovery.attemptRecovery(bounced({ id: 'orig8' }), { event: 'bounce', type: 'bounce' });
+    expect(res).toEqual({ skipped: 'no_candidate' });
+    expect(reverify.findSourceCall).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(claimWrites(mockDb)).toEqual([]);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['skipped', 'failed'])('the claim is %s by the time of the provider handoff: nothing is sent, quiet status', async (status) => {
+    process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
+    const mockDb = newDb({ claimRow: { id: 'claim1', status, bounced_email: 'jondoe@example.com' } });
+    db.mockImplementation(mockDb);
+    // The claim insert wins; the boundary verdict then finds it settled (settled behind this flow's back).
+    sendgrid.sendOne.mockImplementation(async (args) => { await args.providerBoundaryCheck({ database: undefined }); return { messageId: 'must-not-send' }; });
+    const res = await recovery.attemptRecovery(bounced({ id: 'orig9' }), { event: 'bounce', type: 'bounce' });
+    expect(res).toEqual({ skipped: 'claim_settled' });
+    expect(ledger(mockDb).pop().data).toMatchObject({ status: 'other_spelling_not_sent' });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
   });
 
   test('gate switched off right before the provider handoff: nothing is sent, the message is blocked, the claim is skipped, no alert and no card', async () => {
@@ -1723,6 +1761,20 @@ describe('resend to the other spelling the call settled against (GATE_CALL_BOUNC
       await recovery.commitRecoveryOnDelivery(message);
       expect(db.transaction).toHaveBeenCalledTimes(1);
       expect(mockDb._calls.find((c) => c.table === 'call_email_spelling_retries').data).toMatchObject({ status: 'committed' });
+      delete db.transaction;
+    });
+
+    test('a recovery whose matched field is not the primary email never commits (no contact or billing field is overwritten)', async () => {
+      process.env.GATE_CALL_BOUNCE_OTHER_SPELLING = 'true';
+      const contactRec = { ...rec, customer_email_field: 'service_contact_email' };
+      const mockDb = orderedDb({ first: (table) => (table === 'email_bounce_recoveries' ? contactRec : (table === 'call_email_spelling_retries' ? { id: 'claim1' } : null)) });
+      db.mockImplementation(mockDb);
+      db.transaction = jest.fn(async () => ({ fields: ['service_contact_email'] }));
+      fanout.propagateCustomerEmailChange.mockClear();
+      await recovery.commitRecoveryOnDelivery(message);
+      expect(db.transaction).not.toHaveBeenCalled();
+      expect(fanout.propagateCustomerEmailChange).not.toHaveBeenCalled();
+      expect(mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries').pop().data).toMatchObject({ status: 'delivered' });
       delete db.transaction;
     });
 
