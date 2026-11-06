@@ -120,6 +120,23 @@ async function activeAutomationSuppressionFor(template, email, database = db) {
   return rows.find((row) => automationSuppressionMatches(template, row)) || null;
 }
 
+// Retry provenance (call-email-spelling-retry.js, GATE_CALL_BOUNCE_OTHER_SPELLING, owner 2026-11-05): an enrollment the
+// webhook pointed at the other spelling of a bounced call-captured address carries metadata.spelling_retry_email. The gate is a
+// kill switch for retries still in flight, so a send to that address with the gate off sends nothing, and ends the retry the way
+// today's hard bounce would have (call-email-spelling-retry.js endGatedRetry); a claim already committed or failed is not
+// pending, and its send goes on as any other. Read lazily and only for enrollments with provenance: no cost for any other send.
+function spellingRetryGateOff(enrollment, recipient) {
+  const marked = String(enrollmentMetadata(enrollment).spelling_retry_email || '').trim().toLowerCase();
+  if (!marked || String(recipient || '').trim().toLowerCase() !== marked) return false;
+  return !require('../config/feature-gates').callBounceOtherSpellingLive();
+}
+
+async function blockGatedRetry({ enrollment, sendId, recipient }) {
+  const ended = await require('./call-email-spelling-retry').endGatedRetry({ customerId: enrollment.customer_id, retryEmail: recipient });
+  if (!ended) return null;
+  return blockSendAndCancelEnrollment({ enrollment, sendId, reason: 'Retry to the call-settled other spelling stopped: its gate is off', cancelReason: 'hard_bounce' });
+}
+
 async function blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancelReason }) {
   await db('automation_step_sends').where({ id: sendId }).update({
     status: 'blocked',
@@ -180,6 +197,10 @@ async function estimateAcceptedForFollowUp(enrollment) {
 
 async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend }) {
   if (testRecipient) return null;
+  if (spellingRetryGateOff(enrollment, recipient)) {
+    const stopped = await blockGatedRetry({ enrollment, sendId, recipient });
+    if (stopped) return stopped;
+  }
   // A billing send checks suppression for the CURRENT billing recipient,
   // inside the shared billing email authority under its recipient lock; the
   // address snapshotted at enrollment may no longer be the one it goes to.
@@ -691,9 +712,10 @@ function nextSequenceStep(enrollment, steps) {
  * advanceEnrollment moves past it as for any send. The passed set loses `stepId`; the anchor falls back to the
  * previous passed step (null = none, which the legacy reading of current_step resolves to the same place). A completed
  * enrollment becomes active again. Fenced on the cursor the caller saw (current_step, last passed step id), so a tick
- * that advanced it first makes this a no-op. Returns true when the enrollment was rewound.
+ * that advanced it first makes this a no-op. `metadata` is merged into the same write (retry provenance). The caller holds the
+ * customer's prep-send lock, so no tick can be mid-send on this enrollment. Returns true when the enrollment was rewound.
  */
-async function rewindEnrollmentToStep({ enrollment, stepId, email }, client = db) {
+async function rewindEnrollmentToStep({ enrollment, stepId, email, metadata = {} }, client = db) {
   const steps = await client('automation_steps')
     .where({ template_key: enrollment.template_key, enabled: true })
     .orderBy('step_order', 'asc')
@@ -705,6 +727,7 @@ async function rewindEnrollmentToStep({ enrollment, stepId, email }, client = db
   const remaining = passedIds.filter((id) => id !== String(step.id));
   const prior = steps.filter((s) => remaining.includes(String(s.id)) && keyAfter(stepKey(step), stepKey(s))).pop() || null;
   const cursor = {
+    ...metadata,
     passed_step_order: prior ? Number(prior.step_order) : null,
     passed_step_id: prior ? String(prior.id) : null,
     passed_step_ids: remaining,
@@ -861,9 +884,17 @@ async function stepRecipientAfterContactOptOut(enrollment, step, testRecipient) 
 // an enrollment with no customer (nothing to re-resolve). The payment-failed
 // step rides the billing authority's own boundary check instead.
 const CONTACT_RECIPIENT_CHANGED = 'CONTACT_RECIPIENT_CHANGED';
+const RETRY_GATE_OFF = 'CALL_SPELLING_RETRY_GATE_OFF';
 function contactRecipientBoundaryCheck(enrollment, recipient, testRecipient) {
   if (testRecipient || !enrollment.customer_id) return null;
   return async () => {
+    // The kill switch again at the true provider boundary (a gate unset after the early check, while the request was prepared).
+    if (spellingRetryGateOff(enrollment, recipient)
+      && await require('./call-email-spelling-retry').retryStillPending({ customerId: enrollment.customer_id, retryEmail: recipient })) {
+      throw Object.assign(new Error('the retry to the call-settled other spelling was switched off before the provider handoff'), {
+        code: RETRY_GATE_OFF, providerBoundaryBlocked: true,
+      });
+    }
     const again = await require('./contact-notification-prefs')
       .rerouteForContactEmailOptOut(enrollment.customer_id, recipient, { recipientRole: enrollment.metadata?.recipient_role || null });
     if (again.rerouted) {
@@ -883,6 +914,10 @@ async function dispatchUnderContactBoundary({ dispatch, enrollment, step, recipi
   try {
     return await dispatch(contactRecipientBoundaryCheck(enrollment, recipient, testRecipient));
   } catch (err) {
+    if (err.code === RETRY_GATE_OFF) {
+      const stopped = await blockGatedRetry({ enrollment, sendId, recipient });
+      return stopped || { sent: false, deferred: true, reason: err.message };
+    }
     if (err.code !== CONTACT_RECIPIENT_CHANGED) throw err;
     logger.info(`[automation-runner] enrollment ${enrollment.id} step ${step.step_order} held at the provider boundary: ${err.message}`);
     await db('automation_step_sends').where({ id: sendId }).del();

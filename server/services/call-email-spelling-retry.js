@@ -32,6 +32,8 @@ const TABLE = 'call_email_spelling_retries';
 const CHANNEL = 'automation';
 const EMAIL_CHANNEL = 'email_message';
 const NO_RETRY = Object.freeze({ retried: false });
+// automation_enrollments.metadata key: the retry address this enrollment now mails (retry provenance).
+const RETRY_PROVENANCE_KEY = 'spelling_retry_email';
 
 const norm = (value) => String(value || '').trim().toLowerCase();
 
@@ -110,9 +112,39 @@ async function eligibleOtherSpelling({ enrollment, bounced }, client) {
   return { other, sourceCallId: call.id, customerId: customer.id };
 }
 
+const PREP_LOCK_WAIT_MS = 5000;
+const PREP_LOCK_POLL_MS = 100;
+
+/**
+ * Take, for the rest of this transaction, the SAME Postgres advisory lock the runner holds for a customer-linked step from
+ * its read through its send and cursor advance (`runExclusive('prep-send:<customer>')` -> pg_try_advisory_lock(
+ * hashtext('cron:prep-send:<customer>')), cron-lock.js; cross-process, so it serializes this webhook with a runner in
+ * another process). The transaction-scoped twin of the key conflicts with the runner's session lock. The wait is bounded
+ * (the runner holds it across the provider request); false = not obtained, and the caller does not rewind.
+ */
+async function lockPrepSend(client, customerId, { waitMs = PREP_LOCK_WAIT_MS } = {}) {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const res = await client.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS locked', [`cron:prep-send:${customerId}`]);
+    if (res.rows[0]?.locked === true) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, PREP_LOCK_POLL_MS));
+  }
+}
+
 async function startRetry({ sendRow, bounced }, client) {
+  const peek = await client('automation_enrollments').where({ id: sendRow.enrollment_id }).first('customer_id');
+  if (!peek?.customer_id || !sendRow.step_id) return NO_RETRY;
+  // LOCK ORDER (webhook): event ledger row and send/suppression writes (already held by the event transaction) -> prep-send
+  // advisory lock -> enrollment row FOR UPDATE -> claim row. The runner takes the prep-send lock first and writes enrollments
+  // without row locks, so the two cannot wait on each other in a cycle. The cursor is read only AFTER the lock: a step the
+  // runner sent first has moved it, and the rewind then refuses.
+  if (!(await lockPrepSend(client, peek.customer_id))) {
+    logger.warn('[call-email-spelling-retry] prep-send lock busy: no retry, the bounce is handled as before');
+    return NO_RETRY;
+  }
   const enrollment = await client('automation_enrollments').where({ id: sendRow.enrollment_id }).forUpdate().first();
-  if (!enrollment || !sendRow.step_id) return NO_RETRY;
+  if (!enrollment) return NO_RETRY;
   const found = await eligibleOtherSpelling({ enrollment, bounced }, client);
   if (!found) return NO_RETRY;
 
@@ -122,7 +154,10 @@ async function startRetry({ sendRow, bounced }, client) {
   if (!row.claimed) return NO_RETRY; // tried before for this customer + address, by either path: never twice
 
   const { rewindEnrollmentToStep } = require('./automation-runner');
-  const rewound = await rewindEnrollmentToStep({ enrollment, stepId: sendRow.step_id, email: found.other }, client);
+  // spelling_retry_email is the retry provenance the runner's send boundary reads (kill switch): see endGatedRetry.
+  const rewound = await rewindEnrollmentToStep({
+    enrollment, stepId: sendRow.step_id, email: found.other, metadata: { [RETRY_PROVENANCE_KEY]: found.other },
+  }, client);
   if (!rewound) {
     // A later step already went out or the cursor moved: nothing is re-sent, the webhook cancels as it does today.
     await client(TABLE).where({ id: row.id }).update({ status: 'skipped', reason: 'sequence_cursor_moved', updated_at: new Date() });
@@ -134,9 +169,43 @@ async function startRetry({ sendRow, bounced }, client) {
     .whereNot({ id: enrollment.id })
     .whereRaw('LOWER(email) = ?', [bounced])
     .whereRaw("COALESCE(metadata->>'recipient_role', '') = ''")
-    .update({ email: found.other, updated_at: new Date() });
+    .update({
+      email: found.other,
+      metadata: client.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [RETRY_PROVENANCE_KEY]: found.other })]),
+      updated_at: new Date(),
+    });
   logger.info(`[call-email-spelling-retry] automation step re-queued for customer ${found.customerId} to the other spelling`);
   return { retried: true, retryEmail: found.other };
+}
+
+/**
+ * Kill switch at the runner's send boundary (automation-runner.js, before the row is queued and again at the provider
+ * boundary). The caller has already found that the gate is off and that the enrollment carries retry provenance for this
+ * recipient. Only a claim that is STILL `resending` is ended (a committed or failed one means the address is settled and
+ * the send proceeds): it becomes `skipped` / `gate_off` and every active enrollment of the customer addressed to the retry
+ * address is cancelled the way today's hard bounce cancels (cancel_reason hard_bounce). True = the send must not happen.
+ */
+async function endGatedRetry({ customerId, retryEmail }, client = db) {
+  const address = norm(retryEmail);
+  const ended = await client(TABLE)
+    .where({ customer_id: customerId, retry_email: address, channel: CHANNEL, status: 'resending' })
+    .update({ status: 'skipped', reason: 'gate_off', updated_at: new Date() });
+  if (Number(ended) === 0) return false;
+  await client('automation_enrollments')
+    .where({ customer_id: customerId, status: 'active' })
+    .whereRaw('LOWER(email) = ?', [address])
+    .update({
+      status: 'cancelled', next_send_at: null, completed_at: new Date(),
+      metadata: client.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify('hard_bounce')]),
+      updated_at: new Date(),
+    });
+  return true;
+}
+
+/** True while a claim for this customer + retry address is still `resending` (read-only, for the provider boundary). */
+async function retryStillPending({ customerId, retryEmail }, client = db) {
+  const row = await client(TABLE).where({ customer_id: customerId, retry_email: norm(retryEmail), channel: CHANNEL, status: 'resending' }).first('id');
+  return !!row;
 }
 
 /** A send to a retry address hard-bounced: the row fails. Returns { retryFailed, bouncedEmail } or null. */
@@ -225,4 +294,6 @@ async function onAutomationDelivered({ sendRow }, client = db) {
   return { committed: true };
 }
 
-module.exports = { onAutomationHardBounce, onAutomationDelivered, claimRetry, settleClaim, CHANNEL, EMAIL_CHANNEL, TABLE };
+module.exports = {
+  onAutomationHardBounce, onAutomationDelivered, claimRetry, settleClaim, endGatedRetry, retryStillPending, lockPrepSend, CHANNEL, EMAIL_CHANNEL, TABLE, RETRY_PROVENANCE_KEY,
+};

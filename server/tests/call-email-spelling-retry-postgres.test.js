@@ -495,4 +495,114 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     expect((await claims.claimRetry({ ...args, originId: randomUUID(), resumeOriginId: randomUUID() }, db)).claimed).toBe(false);
     expect(await trackedClaim(customerId)).toHaveLength(1);
   });
+
+  // ── Kill switch at the runner's send boundary (P1-A, pre-push audit) ─────────────────────────────────────────────────
+  const dueNow = (enrollmentId) => db('automation_enrollments').where({ id: enrollmentId }).update({ next_send_at: new Date(Date.now() - 1000) });
+  const cancelReason = async (id) => (await enrollmentRow(id)).metadata.cancel_reason;
+
+  test('gate switched off after the rewind and before the next tick: the rewound enrollment sends nothing, is cancelled like a hard bounce, the claim is skipped', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'active', email: OTHER });
+    delete process.env.GATE_CALL_BOUNCE_OTHER_SPELLING;
+
+    await runner.sendStep(ctx.enrollment.id);
+
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled' });
+    expect(await cancelReason(ctx.enrollment.id)).toBe('hard_bounce');
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'gate_off' });
+    expect((await db('automation_step_sends').where({ enrollment_id: ctx.enrollment.id, email: OTHER }))[0]).toMatchObject({ status: 'blocked' });
+  });
+
+  test('gate switched off: a repointed sibling enrollment is stopped too (whichever is reached first ends both)', async () => {
+    ctx = await setup({ sent: 1 });
+    const sibling = await seedEnrollment({ customerId: ctx.customerId, sent: 0 });
+    await webhook.handleEvent(bounce(ctx.send));
+    expect(await enrollmentRow(sibling.enrollment.id)).toMatchObject({ status: 'active', email: OTHER });
+    delete process.env.GATE_CALL_BOUNCE_OTHER_SPELLING;
+
+    await runner.sendStep(sibling.enrollment.id);
+
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    for (const id of [sibling.enrollment.id, ctx.enrollment.id]) {
+      expect(await enrollmentRow(id)).toMatchObject({ status: 'cancelled' });
+      expect(await cancelReason(id)).toBe('hard_bounce');
+    }
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'gate_off' });
+  });
+
+  test('gate off but the retry is already settled (committed): the send goes on as any other', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await ledger(ctx.customerId).update({ status: 'committed' });
+    delete process.env.GATE_CALL_BOUNCE_OTHER_SPELLING;
+    await runner.sendStep(ctx.enrollment.id);
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect((await ledger(ctx.customerId))[0].status).toBe('committed');
+  });
+
+  test('gate switched off at the provider boundary itself (after the early check): nothing is sent, the retry ends', async () => {
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    sendgrid.sendOne.mockImplementationOnce(async (args) => {
+      delete process.env.GATE_CALL_BOUNCE_OTHER_SPELLING; // flipped while the request was being prepared
+      await args.providerBoundaryCheck(); // the real sendOne awaits this immediately before the request and lets a throw escape
+      return { messageId: 'must-not-send' };
+    });
+    await runner.sendStep(ctx.enrollment.id);
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'cancelled' });
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'gate_off' });
+    expect((await db('automation_step_sends').where({ enrollment_id: ctx.enrollment.id, email: OTHER }))[0]).toMatchObject({ status: 'blocked' });
+  });
+
+  // ── Serialized with the runner's prep-send lock (P1-B, pre-push audit) ───────────────────────────────────────────────
+  const until = async (check, ms = 4000) => {
+    const end = Date.now() + ms;
+    while (!(await check())) {
+      if (Date.now() > end) throw new Error('condition not reached');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  };
+
+  test('the runner is already sending step 2 when step 1\'s bounce arrives: the webhook waits for the lock, then finds the cursor moved, rewinds nothing and re-sends nothing', async () => {
+    ctx = await setup({ sent: 1 });
+    await dueNow(ctx.enrollment.id);
+    let release;
+    sendgrid.sendOne.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve({ messageId: 'step-2-message' }); }));
+    const runnerRun = runner.sendStep(ctx.enrollment.id); // holds the customer's prep-send lock across the provider request
+    await until(() => sendgrid.sendOne.mock.calls.length === 1);
+
+    let hookDone = false;
+    const hook = webhook.handleEvent(bounce(ctx.send)).then(() => { hookDone = true; });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(hookDone).toBe(false); // waiting on the lock, not racing the cursor
+    expect(await ledger(ctx.customerId)).toEqual([]);
+
+    release();
+    await Promise.all([runnerRun, hook]);
+    await flush();
+
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1); // step 2 once; step 1 is not sent again
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ subject: 'Step 2' }));
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'completed', email: BOUNCED });
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'sequence_cursor_moved' });
+  });
+
+  test('the webhook has rewound but not committed when the runner ticks: the tick skips on the lock, and after the commit step 1 goes out once to the other spelling', async () => {
+    ctx = await setup({ sent: 1 });
+    await dueNow(ctx.enrollment.id);
+    const sendRow = await db('automation_step_sends').where({ id: ctx.send.id }).first();
+    let tickDuring;
+    await db.transaction(async (trx) => {
+      await webhook.handleAutomationEvent(bounce(ctx.send), sendRow, trx);
+      tickDuring = await runner.sendStep(ctx.enrollment.id); // another connection: the prep-send lock is held by this transaction
+    });
+    expect(tickDuring).toMatchObject({ sent: false, skipped: true });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+
+    await runner.sendStep(ctx.enrollment.id);
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ to: OTHER, subject: 'Step 1' }));
+  });
 });
