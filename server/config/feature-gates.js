@@ -10724,3 +10724,13 @@ function voicemailTextCallerOnlyLive() {
 }
 // GATE_VOICEMAIL_TEXT_CALLER_ONLY reader, on its own line so gate PRs never conflict.
 module.exports.voicemailTextCallerOnlyLive = voicemailTextCallerOnlyLive;
+// GATE_CLAUDE_INPUT_GUARD read at CALL time, strict `=== 'true'`, dark in every environment (security audit run 3, owner 2026-11-05
+// "ALL"). On, three paths stop handing an outside sender's words to the owner's Claude sessions: the admin MCP `needs_me` keeps an
+// alert's `why` only for categories whose body our code writes; `list_gap_reports` marks every gap row quoted_words (the Intelligence
+// Bar writes its rows from model text, not from words the owner typed); and Send to Claude no longer offers purchase-receipt
+// inventory bells (they quote a marketplace listing title and a model reason). Off = all three as before.
+function claudeInputGuardLive() {
+  return process.env.GATE_CLAUDE_INPUT_GUARD === 'true';
+}
+// GATE_CLAUDE_INPUT_GUARD reader, on its own line so gate PRs never conflict.
+module.exports.claudeInputGuardLive = claudeInputGuardLive;
