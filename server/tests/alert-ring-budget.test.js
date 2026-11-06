@@ -160,6 +160,13 @@ describe('exemption predicate', () => {
     }
   });
 
+  test('time-critical field work (the combined-booking check\'s urgent case) is exempt; the same check without the marker is budgeted', () => {
+    const base = { category: 'alert', metadata: { dedupeKey: 'combined-booking-check:e1', opsKey: 'combined-booking-check' } };
+    expect(budget.exemptReason({ ...base, metadata: { ...base.metadata, timeCritical: true } })).toBe('time_critical');
+    expect(budget.exemptReason(base)).toBeNull();
+    expect(budget.exemptReason({ ...base, metadata: { ...base.metadata, timeCritical: 'true' } })).toBeNull();
+  });
+
   test('the count row is exempt; an ordinary non-customer row and a bell:true row are budgeted', () => {
     expect(budget.exemptReason({ category: 'system', metadata: { ringBudget: 'count' } })).toBe('count_row');
     expect(budget.exemptReason({ category: 'inventory', metadata: {} })).toBeNull();
@@ -362,6 +369,16 @@ describe('count row', () => {
     ]);
   });
 
+  test('the detail names each held alert by its own headline and its Eastern time, so the owner can act from the count row', () => {
+    const detail = budget.detailFor([
+      { title: "Schedule — fix J. Sample's combined booking", created_at: new Date('2026-11-05T18:40:00Z') },
+      { title: 'Inventory — gloves are low', created_at: new Date('2026-11-05T21:05:00Z') },
+    ]);
+    expect(detail).toBe("1:40 PM — Schedule — fix J. Sample's combined booking\n4:05 PM — Inventory — gloves are low");
+    // The link opens the Agents Activity tab, which loads GET /admin/agents/activity (the "Held alerts" source).
+    expect(budget.countSpec(DAY, 2).link).toBe('/admin/agents?tab=activity');
+  });
+
   test('the refresh re-reads the held rows inside the key\'s lock: new count and list, quiet', async () => {
     const conn = makeConn(held(['One']));
     await budget.writeCountRow(DAY, conn);
@@ -404,6 +421,13 @@ describe('refresh of a held row', () => {
     expect(budget.heldToday(JSON.stringify({ ringBudgetHeld: todayDay }))).toBe(true);
     process.env.GATE_ALERT_RING_BUDGET = '';
     expect(budget.heldToday({ ringBudgetHeld: todayDay })).toBe(false);
+  });
+
+  test('a held row that is refreshed by an exempt emission (it became time-critical) is not kept quiet', () => {
+    const held = { ringBudgetHeld: todayDay };
+    expect(budget.heldToday(held, { category: 'alert', metadata: { note: 'x' } })).toBe(true);
+    expect(budget.heldToday(held, { category: 'alert', metadata: { timeCritical: true } })).toBe(false);
+    expect(budget.heldToday(held, { category: 'inbound_sms', metadata: {} })).toBe(false);
   });
 
   test('a ringing refresh brings a held row back into the bell and drops the held stamp', () => {

@@ -10,6 +10,8 @@
 //     the customer-comms triggers the bell policy always admits;
 //   - a promise we owe a customer: `promise: true` (declared or in the registry rule) and the promise triggers;
 //   - an auto-dispatch notice (category schedule_conflict, or a dedupe key in DISPATCH_KEY_PREFIXES);
+//   - time-critical field work: the combined-booking check's urgent case (a visit today or tomorrow with no time or
+//     technician) stamps metadata.timeCritical true, and docs/admin-notifications.md section 3 says it always rings;
 //   - the count row itself.
 // A `bell: true` site tag is NOT an exemption: those rows are budgeted unless they are one of the above (a tag only says
 // "this belongs in the bell", not "this is a customer").
@@ -106,6 +108,7 @@ function exemptReason({ category, metadata, dedupeKey } = {}) {
   if (CUSTOMER_CATEGORIES.includes(category) || (triggerKey && CUSTOMER_TRIGGER_KEYS.includes(triggerKey))) return 'customer_contact';
   if (meta.promise === true || rule?.promise === true) return 'promise';
   if (triggerKey && PROMISE_TRIGGER_KEYS.includes(triggerKey)) return 'promise';
+  if (meta.timeCritical === true) return 'time_critical';
   const key = String(dedupeKey ?? meta.dedupeKey ?? '');
   if (DISPATCH_CATEGORIES.includes(category) || DISPATCH_KEY_PREFIXES.some((p) => key.startsWith(p))) return 'dispatch';
   return null;
@@ -161,10 +164,12 @@ function isHeld(result) {
 }
 
 // A standing row held earlier TODAY: a refresh of it stays quiet (and held) instead of ringing past the budget. A row held on
-// an earlier day is a new ring today; it takes the ordinary refresh.
-function heldToday(existingMeta, now = new Date()) {
+// an earlier day is a new ring today; it takes the ordinary refresh. `incoming` ({ category, metadata }, optional) is the
+// emission doing the refresh: one that is exempt (it became time-critical, say) rings as the exempt row it is.
+function heldToday(existingMeta, incoming = null, now = new Date()) {
   const held = metaOf(existingMeta)[HELD_KEY];
-  return Boolean(held) && enabled() && held === etDateString(now);
+  if (!held || !enabled() || held !== etDateString(now)) return false;
+  return !(incoming && exemptReason({ category: incoming.category, metadata: incoming.metadata }));
 }
 
 // ---- the count row ----

@@ -806,7 +806,7 @@ const NotificationService = {
             // unless the emission itself asked for a quiet refresh.
             const leftClaudeQueue = Boolean(existingMeta.claudeQueue) && !useMeta.claudeQueue;
             // A row the daily ring budget held today (alert-ring-budget.js) refreshes its words in Activity; it does not ring past the budget.
-            const shouldRing = adjusted?.quiet || ringBudget.heldToday(existingMeta) ? false : (enteredOwner || leftClaudeQueue || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta));
+            const shouldRing = adjusted?.quiet || ringBudget.heldToday(existingMeta, { category, metadata: useMeta }) ? false : (enteredOwner || leftClaudeQueue || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta));
             const mergedMetadata = mergeRefreshMetadata(existingMeta, useMeta, shouldRing);
             const bump = shouldRing && bumpOnRefresh;
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,

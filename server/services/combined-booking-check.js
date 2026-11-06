@@ -585,7 +585,7 @@ async function retireStanding(conn, estimateIds, resolution) {
   });
 }
 
-async function postAlert(estimate, verdict, ctx, { raise } = {}) {
+async function postAlert(estimate, verdict, ctx, { raise, timeCritical = false } = {}) {
   const raiseAdminAlert = raise || require('./admin-alert-compose').raiseAdminAlert;
   const { detail, ...spec } = composeAlert(verdict, {
     customerName: ctx.customerName, customerId: estimate.customer_id, estimateId: estimate.id,
@@ -612,6 +612,9 @@ async function postAlert(estimate, verdict, ctx, { raise } = {}) {
       // refresh, so a changed problem set is treated as a real change.
       count: keys.length,
       itemKeys: keys,
+      // Time-critical field work (a visit today or tomorrow with no time or technician): always rings, so the daily ring
+      // budget (alert-ring-budget.js) never holds it. Set only in that case.
+      ...(timeCritical ? { timeCritical: true } : {}),
     },
   });
 }
@@ -855,7 +858,7 @@ async function postInUrgencyOrder(toPost, result, { raise, ringBudget, urgentOnl
       result.held += 1;
       continue;
     }
-    const row = await postAlert(estimate, verdict, ctx, { raise });
+    const row = await postAlert(estimate, verdict, ctx, { raise, timeCritical });
     if (!row) { result.failed += 1; logger.warn(`[combined-booking-check] alert write failed for estimate ${estimate.id}`); continue; }
     if (rang(row)) rings += 1;
     result.problems += 1;

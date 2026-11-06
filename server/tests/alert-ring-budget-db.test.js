@@ -156,6 +156,28 @@ maybeDescribe('daily ring budget (live Postgres)', () => {
     }
   });
 
+  test('time-critical field work after ten rings still rings, also when a quiet held row of the same key becomes urgent', async () => {
+    for (let i = 0; i < 10; i += 1) await write(`fill ${i}`);
+    const urgent = await write('urgent', { category: 'alert', metadata: { fixture: RUN, opsKey: 'combined-booking-check', timeCritical: true } });
+    const stored = await get(urgent.id);
+    expect(stored.metadata.feed).toBeUndefined();
+    expect(stored.metadata.ringBudgetHeld).toBeUndefined();
+    expect(stored.metadata.ringBudgetDay).toBeUndefined();
+
+    // A non-urgent row of one key is held; the next emission is urgent: it rings into the bell and loses the held stamp.
+    const key = `${RUN}:cbc`;
+    const opts = (metadata) => ({ link: '/admin/inventory', dedupeKey: key, refreshOnDedupe: true, metadata: { fixture: RUN, ...metadata }, bell: true });
+    const held = await NotificationService.notifyAdmin('alert', `${RUN} cbc`, 'Later.', opts({}));
+    made.push(held.id);
+    expect((await get(held.id)).metadata.ringBudgetHeld).toBe(etDateString());
+    const again = await NotificationService.notifyAdmin('alert', `${RUN} cbc`, 'Now due today.', opts({ timeCritical: true }));
+    expect(again).toMatchObject({ refreshed: true, rung: true });
+    const after = await get(held.id);
+    expect(after.metadata.ringBudgetHeld).toBeUndefined();
+    expect(after.metadata.feed).toBeNull();
+    expect(await bellRows([held.id]).select('id')).toHaveLength(1);
+  });
+
   test('a held keyed row refreshes quietly the same day: its words change in Activity, it never rings into the bell', async () => {
     for (let i = 0; i < 10; i += 1) await write(`fill ${i}`);
     const key = `${RUN}:keyed`;

@@ -279,6 +279,26 @@ postgres('combined-booking check through the real conversion', () => {
     }
   });
 
+  test('only the urgent case (a visit due today) carries the time-critical marker the ring budget exempts', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    mockPg = trx;
+    try {
+      const soon = await acceptedEstimate(trx, lines);
+      const later = await acceptedEstimate(trx, lines);
+      await repair(trx, soon);
+      const today = require('../utils/datetime-et').etDateString(new Date());
+      const lawnChild = (await rowsOf(trx, soon.estimateId)).find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
+      await trx('scheduled_services').where({ id: lawnChild.id }).update({ technician_id: null, scheduled_date: today });
+      expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10 })).toMatchObject({ problems: 2 });
+      expect((await alertsOf(trx, soon.estimateId))[0].metadata.timeCritical).toBe(true);
+      expect((await alertsOf(trx, later.estimateId))[0].metadata).not.toHaveProperty('timeCritical');
+    } finally {
+      mockPg = pool;
+      await trx.rollback();
+    }
+  });
+
   test('the hourly urgent pass rings a visit due tomorrow and leaves far-off problems to the daily run', async () => {
     const pool = mockPg;
     const trx = await pool.transaction();

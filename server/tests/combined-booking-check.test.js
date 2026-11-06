@@ -410,6 +410,18 @@ describe('postAlert', () => {
     expect(opts.metadata).toMatchObject({ estimateId: 'estimate-1', itemKeys: ['lawn_care'] });
   });
 
+  test('the time-critical marker is set only for the urgent case (a visit today or tomorrow), which the ring budget never holds', async () => {
+    const raise = jest.fn(async () => ({ id: 'n1', deduped: false }));
+    await postAlert({ id: 'estimate-1', customer_id: 'customer-1' }, verdict, { customerName: 'J. Sample' }, { raise, timeCritical: true });
+    expect(raise.mock.calls[0][2].metadata.timeCritical).toBe(true);
+    await postAlert({ id: 'estimate-1', customer_id: 'customer-1' }, verdict, { customerName: 'J. Sample' }, { raise, timeCritical: false });
+    await postAlert({ id: 'estimate-1', customer_id: 'customer-1' }, verdict, { customerName: 'J. Sample' }, { raise });
+    expect(raise.mock.calls[1][2].metadata).not.toHaveProperty('timeCritical');
+    expect(raise.mock.calls[2][2].metadata).not.toHaveProperty('timeCritical');
+    expect(require('../services/alert-ring-budget').exemptReason({ category: 'alert', metadata: raise.mock.calls[0][2].metadata })).toBe('time_critical');
+    expect(require('../services/alert-ring-budget').exemptReason({ category: 'alert', metadata: raise.mock.calls[1][2].metadata })).toBeNull();
+  });
+
   test('a standing bell re-rings only for a service family it did not carry', () => {
     const lawn = { code: 'missing_time_tech', families: ['lawn_care'] };
     const pest = { code: 'missing_time_tech', families: ['pest_control'] };
