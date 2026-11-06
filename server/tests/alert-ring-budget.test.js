@@ -440,6 +440,29 @@ describe('count row', () => {
     expect(line.endsWith('…')).toBe(true);
   });
 
+  test('the refresh read runs on the transaction notifyAdmin passes, never on the pool', async () => {
+    const pool = makeConn(held(['One']));
+    await budget.writeCountRow(DAY, pool);
+    const opts = compose.raiseAdminAlert.mock.calls[0][2];
+    const poolReads = [];
+    const poolSpy = (...a) => { poolReads.push(a); return pool(...a); };
+    poolSpy.raw = pool.raw;
+    const trxReads = [];
+    const trx = makeConn(held(['One', 'Two']));
+    const trxSpy = (...a) => { trxReads.push(a); return trx(...a); };
+    trxSpy.raw = trx.raw;
+    // Re-compose against the spied pool, as a caller holding it would.
+    compose.raiseAdminAlert.mockClear();
+    await budget.writeCountRow(DAY, poolSpy);
+    const refresh = compose.raiseAdminAlert.mock.calls[0][2].standingRefresh;
+    poolReads.length = 0;
+    const adjusted = await refresh({}, {}, trxSpy);
+    expect(poolReads).toHaveLength(0);
+    expect(trxReads.length).toBeGreaterThan(0);
+    expect(adjusted.title).toBe('System — 2 more alerts held today');
+    expect(opts.standingRefresh).toEqual(expect.any(Function));
+  });
+
   test('nothing held: no count row', async () => {
     await expect(budget.writeCountRow(DAY, makeConn())).resolves.toBeNull();
     expect(compose.raiseAdminAlert).not.toHaveBeenCalled();
@@ -503,6 +526,39 @@ describe('gate reader', () => {
       expect(require('../services/alert-ring-budget').enabled()).toBe(false);
     });
     jest.dontMock('../config/feature-gates');
+  });
+});
+
+describe('push-only recipients (every admin has bell entries off)', () => {
+  const metadata = { triggerKey: 'dashboard_alert', priority: 'normal', payload: {} };
+  const recorder = () => { const rows = []; return { rows, write: jest.fn(async (m) => { rows.push(m); return { id: 'r1', metadata: m }; }) }; };
+
+  test('within the budget the push goes and an Activity-only record counts it for the day', async () => {
+    const { rows, write } = recorder();
+    const out = await budget.budgetPushOnly({ connection: makeConn(stamped(9, today())), category: 'alert', metadata, write });
+    expect(out).toEqual({ held: false });
+    expect(rows[0]).toMatchObject({ feed: 'activity', quiet: true, severity: 'fyi', ringBudgetPushOnly: true, ringBudgetDay: today(), triggerKey: 'dashboard_alert' });
+  });
+
+  test('past the budget the push is held: a held row is written and the count row follows', async () => {
+    const { rows, write } = recorder();
+    const conn = makeConn(stamped(10, today()));
+    mockState.conn = conn;
+    const out = await budget.budgetPushOnly({ connection: conn, category: 'alert', metadata, write });
+    expect(out).toEqual({ held: true });
+    expect(rows[0]).toMatchObject({ feed: 'activity', quiet: true, ringBudgetHeld: today() });
+    expect(rows[0]).not.toHaveProperty('ringBudgetDay');
+    expect(compose.raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
+  test('an exempt alert is untouched, and a failed record write reads as not held (the push goes)', async () => {
+    const { write } = recorder();
+    expect(await budget.budgetPushOnly({ connection: makeConn(stamped(30, today())), category: 'inbound_sms', metadata: {}, write })).toEqual({ held: false });
+    expect(write).not.toHaveBeenCalled();
+    const failing = jest.fn(async () => null);
+    expect(await budget.budgetPushOnly({ connection: makeConn(stamped(30, today())), category: 'alert', metadata, write: failing })).toEqual({ held: false });
+    const throwing = jest.fn(async () => { throw new Error('x'); });
+    expect(await budget.budgetPushOnly({ connection: makeConn(stamped(30, today())), category: 'alert', metadata, write: throwing })).toEqual({ held: false });
   });
 });
 

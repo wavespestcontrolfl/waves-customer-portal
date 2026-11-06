@@ -5,6 +5,8 @@
  * lists and the decision rules are in alert-ring-budget.test.js (no database).
  */
 const SKIP = !process.env.DATABASE_URL;
+// A small pool, so a writer that waits for a connection while holding the count row's lock shows up as a hang.
+process.env.DB_POOL_MAX = '3';
 const maybeDescribe = SKIP ? describe.skip : describe;
 
 maybeDescribe('daily ring budget (live Postgres)', () => {
@@ -328,6 +330,77 @@ maybeDescribe('daily ring budget (live Postgres)', () => {
     expect(techIds).toContain(visible.id);
     expect(techIds).not.toContain(held.id);
   });
+
+  test('concurrent count writers all finish: the refresh read runs on the lock holder\'s own transaction, not the pool', async () => {
+    const day = etDateString();
+    for (let i = 0; i < 3; i += 1) {
+      const [row] = await db('notifications').insert({
+        recipient_type: 'admin', category: 'inventory', title: `${RUN} held ${i}`, body: 'x',
+        metadata: JSON.stringify({ fixture: RUN, feed: 'activity', quiet: true, ringBudgetHeld: day }),
+      }).returning('id');
+      made.push(row.id);
+    }
+    const results = await Promise.all(Array.from({ length: 12 }, () => budget.writeCountRow(day)));
+    expect(results.every(Boolean)).toBe(true);
+    const rows = await db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [`ring-budget:${day}`]);
+    expect(rows).toHaveLength(1);
+    made.push(rows[0].id);
+    expect(rows[0].title).toBe('System — 3 more alerts held today');
+    expect(rows[0].detail.split('\n')).toHaveLength(3);
+  }, 30000);
+
+  test('push-only recipients: within the budget the push goes and counts; past it the push is held and listed as held', async () => {
+    const day = etDateString();
+    const PushService = require('../services/push-notifications');
+    const { triggerNotification } = require('../services/notification-triggers');
+    const push = jest.spyOn(PushService, 'sendToAdminUsers').mockResolvedValue({ subscriptions: 1, sent: 1, expired: 0, failed: 0, skipped: 0, results: [] });
+    jest.spyOn(require('../services/admin-unread'), 'getUnreadCountForAdmin').mockResolvedValue({ count: 0, at: Date.now() });
+    const admins = await db('technicians').where({ active: true, role: 'admin' }).select('id');
+    const prior = await db('notification_preferences').where({ trigger_key: 'dashboard_alert' }).whereIn('admin_user_id', admins.map((a) => a.id));
+    await db('notification_preferences').where({ trigger_key: 'dashboard_alert' }).whereIn('admin_user_id', admins.map((a) => a.id)).del();
+    // Every admin: bell entries off, phone push on.
+    if (admins.length === 0) {
+      const [admin] = await db('technicians').insert({ name: 'Synthetic Admin', email: `${RUN}@example.invalid`, password_hash: 'synthetic', role: 'admin', active: true }).returning('id');
+      admins.push(admin);
+    }
+    await db('notification_preferences').insert(admins.map((a) => ({ admin_user_id: a.id, trigger_key: 'dashboard_alert', bell_enabled: false, push_enabled: true, sound_enabled: true })));
+    try {
+      const fire = (n) => triggerNotification('dashboard_alert', { title: `${RUN} push only ${n}`, message: 'Synthetic' });
+      for (let i = 0; i < 10; i += 1) {
+        const stats = await fire(i);
+        expect(stats).toMatchObject({ bellWritten: false });
+        expect(stats.ringBudgetHeld).toBeUndefined();
+      }
+      expect(push).toHaveBeenCalledTimes(10);
+      const counted = await db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'ringBudgetDay' = ?", [day]);
+      expect(counted).toHaveLength(10);
+      for (const row of counted) {
+        made.push(row.id);
+        expect(row.metadata).toMatchObject({ feed: 'activity', quiet: true, ringBudgetPushOnly: true });
+      }
+      expect(await bellRows(counted.map((r) => r.id)).select('id')).toHaveLength(0);
+
+      const eleventh = await fire(10);
+      expect(eleventh).toMatchObject({ ringBudgetHeld: true, push: { sent: 0, skipped: 'ring_budget' } });
+      expect(push).toHaveBeenCalledTimes(10);
+      const heldRows = await db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'ringBudgetHeld' = ?", [day]);
+      expect(heldRows).toHaveLength(1);
+      made.push(heldRows[0].id);
+      expect(heldRows[0].title).toContain('push only 10');
+      expect(await bellRows([heldRows[0].id]).select('id')).toHaveLength(0);
+      const listed = await activity._private.loadHeldRows(db, new Date(Date.now() - 3600 * 1000), null, true);
+      expect(listed.map((r) => r.id)).toContain(heldRows[0].id);
+      const count = await waitFor(() => countRow(day));
+      expect(count).toBeTruthy();
+      made.push(count.id);
+      expect(count.title).toBe('System — 1 more alert held today');
+    } finally {
+      await db('notification_preferences').where({ trigger_key: 'dashboard_alert' }).whereIn('admin_user_id', admins.map((a) => a.id)).del();
+      if (prior.length) await db('notification_preferences').insert(prior);
+      await db('technicians').where({ email: `${RUN}@example.invalid` }).del();
+      jest.restoreAllMocks();
+    }
+  }, 60000);
 
   test('the Activity feed lists held alerts and leaves out the count row, ops digests and Claude\'s queue', async () => {
     const day = etDateString();

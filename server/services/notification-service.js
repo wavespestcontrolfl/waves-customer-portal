@@ -752,13 +752,14 @@ const NotificationService = {
           const existingMeta = typeof existing.metadata === 'string'
             ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
             : (existing.metadata || {});
-          // standingRefresh runs HERE, inside the key's lock, against the row as it
+          // standingRefresh(existing, existingMeta, trx) runs HERE, inside the key's lock and on this transaction `trx` (a callback that
+          // reads more rows must use it, not the pool), against the row as it
           // stands now: a caller that must compare this emission with what the row
           // already holds (a count, which of two concurrent messages is newer) cannot
           // do it before the lock. Returns null (no change) or the content this
           // refresh should write; `quiet` writes it without ringing or bumping.
           const adjusted = refreshOnDedupe && typeof standingRefresh === 'function'
-            ? await standingRefresh(existing, existingMeta) : null;
+            ? await standingRefresh(existing, existingMeta, trx) : null;
           // A row the owner sent to Claude (GATE_ALERT_SEND_TO_CLAUDE) stays in Claude's queue while it is open: this
           // emission still updates its text, never its routing (admin-alert-routing.js keepSentToClaude).
           const useMeta = keepSentToClaude(existing, existingMeta, adjusted?.metadata ? { ...metadata, ...adjusted.metadata } : metadata);

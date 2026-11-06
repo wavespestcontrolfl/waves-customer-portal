@@ -40,6 +40,7 @@ const DAY_KEY = 'ringBudgetDay';
 const HELD_KEY = 'ringBudgetHeld';
 const MARK_KEY = 'ringBudget';
 const COUNT_MARK = 'count';
+const PUSH_ONLY_KEY = 'ringBudgetPushOnly';
 const COUNT_KEY_PREFIX = 'ring-budget:';
 const COUNT_CATEGORY = 'system';
 const ACTIVITY_LINK = '/admin/agents?tab=activity';
@@ -266,8 +267,10 @@ async function writeCountRow(day, connection = dbHandle()) {
     detail: detailFor(rows),
     refreshOnDedupe: true,
     ringOnRefresh: () => false,
-    standingRefresh: async () => {
-      const current = await readHeld(connection, day);
+    // notifyAdmin passes the transaction that holds the key's lock: the read runs on it, never on the pool (writers waiting for
+    // the lock would otherwise starve the holder of a connection).
+    standingRefresh: async (_existing, _existingMeta, trx) => {
+      const current = await readHeld(trx || connection, day);
       if (!current.length) return null;
       const composed = composeAdminAlert(countSpec(day, current.length));
       return { title: composed.headline, body: composed.why, link: composed.link, detail: detailFor(current), metadata: { heldCount: current.length }, quiet: true };
@@ -277,6 +280,30 @@ async function writeCountRow(day, connection = dbHandle()) {
 }
 
 const dbHandle = () => require('../models/db');
+
+// An alert with no bell row because every admin turned bell entries off (their phone pushes stay on): the push is the ring,
+// so it takes the same budget. `write(metadata)` writes the row that records the decision; it is Activity-only either way, so
+// no bell entry is enabled against a preference.
+//   ring - within the budget: the push goes as before, and an Activity-only record stamped with the day (severity fyi, so
+//          retention retires it) counts it toward the day's ten;
+//   hold - past the budget: the held row is written (Held alerts in Activity, one count row), and the caller sends no push.
+// Exempt rows (customer contact and the rest) are untouched. A write that fails reads as "not held": the push goes.
+// Returns { held }. Never throws.
+async function budgetPushOnly({ connection, category, metadata, write }) {
+  try {
+    const verdict = await applyBudget({ connection, category, metadata });
+    if (verdict.outcome !== 'ring' && verdict.outcome !== 'hold') return { held: false };
+    const held = verdict.outcome === 'hold';
+    const row = held ? verdict.metadata : { ...verdict.metadata, feed: 'activity', quiet: true, severity: 'fyi', [PUSH_ONLY_KEY]: true };
+    const created = await write(row);
+    if (!created || created.suppressed) return { held: false };
+    if (held) await afterHeldInsert(connection, verdict.day);
+    return { held };
+  } catch (err) {
+    logger.warn(`[ring-budget] push-only verdict failed, pushing as before: ${err?.code || err?.name || 'error'}`);
+    return { held: false };
+  }
+}
 
 // The outermost transaction of a knex transaction handle (a savepoint resolves before the outer commit).
 function outermost(trx) {
@@ -344,6 +371,7 @@ module.exports = {
   promotesHeld,
   noteHeld,
   afterHeldInsert,
+  budgetPushOnly,
   writeCountRow,
   countSpec,
   detailFor,

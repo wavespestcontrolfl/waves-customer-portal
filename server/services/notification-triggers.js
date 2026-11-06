@@ -1462,6 +1462,14 @@ async function writeRescuedFault({ trigger, triggerKey, payload, bellMetadata, w
   return { bellWritten, push: { sent: 0, skipped: 'claude_queue' }, policySilenced: true, claudeQueue: true };
 }
 
+// No bell row because every admin turned bell entries off, but a phone push is going: that push takes the daily ring budget too
+// (alert-ring-budget.js budgetPushOnly). True when the budget held it, so the caller sends no push.
+async function pushOnlyBudgetHeld({ bellWritten, anyBellEnabled, pushOnly, relayFailureCall, pushEnabledIds, trigger, bellMetadata, writeBell }) {
+  if (bellWritten || anyBellEnabled || pushOnly || relayFailureCall || pushEnabledIds.length === 0 || !ringBudget.enabled()) return false;
+  const { held } = await ringBudget.budgetPushOnly({ connection: db, category: trigger.category, metadata: bellMetadata, write: writeBell });
+  return held;
+}
+
 async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false, onlyUserIds = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
@@ -1677,6 +1685,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       }
     }
 
+    ringHeld = ringHeld || await pushOnlyBudgetHeld({ bellWritten, anyBellEnabled, pushOnly, relayFailureCall, pushEnabledIds, trigger, bellMetadata, writeBell });
     const stats = { bellWritten, push: null,
       ...(dedupeKey ? { retryable: anyBellEnabled && !bellWritten && !bellSuppressed } : {}),
     };
