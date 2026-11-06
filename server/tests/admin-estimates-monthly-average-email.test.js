@@ -49,11 +49,6 @@ jest.mock('../routes/estimate-public', () => ({
   bookingServiceFor: jest.fn(),
 }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
-const mockGate = { on: true };
-jest.mock('../config/feature-gates', () => {
-  const actual = jest.requireActual('../config/feature-gates');
-  return { ...actual, isEnabled: jest.fn((gate) => (gate === 'estimateMonthlyAverage' ? mockGate.on : actual.isEnabled(gate))) };
-});
 const mockBilling = { ctx: { billsPerApplication: true, livePricing: null } };
 jest.mock('../services/estimate-proposal-billing', () => ({
   resolveProposalBillingContext: jest.fn(async () => mockBilling.ctx),
@@ -97,9 +92,8 @@ const bundleEstimate = {
   } } },
 };
 
-describe('delivery email: monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () => {
+describe('delivery email: monthly average', () => {
   beforeEach(() => {
-    mockGate.on = true;
     mockBilling.ctx = { billsPerApplication: true, livePricing: null };
   });
 
@@ -139,9 +133,7 @@ describe('delivery email: monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =
     expect(JSON.stringify(row)).toBe(before);
   });
 
-  test('gate off: no average, and the payload is byte-identical to before', async () => {
-    mockGate.on = false;
-    expect(await emailAverageParts(pestEstimate)).toBeNull();
+  test('no average: the payload carries the plain per-application wording', async () => {
     const priceLine = moneySummary(pestEstimate);
     expect(priceLine).toBe('Priced per application — full breakdown inside');
     expect(estimateEmailPayload({ estimate: pestEstimate, firstName: 'Pat', viewUrl: 'u', priceLine, average: null })).toEqual({
@@ -154,7 +146,7 @@ describe('delivery email: monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =
     });
   });
 
-  test('plans the gate leaves alone', async () => {
+  test('plans with no average', async () => {
     // Annual prepay / monthly member / unknown lane: the billing authority says not per application.
     mockBilling.ctx = { billsPerApplication: false, livePricing: null };
     expect(await emailAverageParts(pestEstimate)).toBeNull();

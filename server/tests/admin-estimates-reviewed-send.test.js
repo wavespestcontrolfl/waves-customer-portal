@@ -2682,7 +2682,7 @@ describe('estimate PDF copy on the delivery email', () => {
   });
 });
 
-describe('delivery email monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () => {
+describe('delivery email monthly average', () => {
   const averageService = require('../services/estimate-monthly-average');
   afterEach(() => { jest.restoreAllMocks(); });
 
@@ -2706,19 +2706,17 @@ describe('delivery email monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =>
     const PARTS = { priceLine: '$94.00 per application · $31.33 a month', note: 'Averaged over the year. You pay after each application.' };
     const TEXT = `${PARTS.priceLine}\n${PARTS.note}`;
     let current;
-    let gateOn;
     beforeEach(() => {
-      gateOn = true;
       current = PARTS;
-      featureGates.isEnabled.mockImplementation((name) => gateOn && name === 'estimateMonthlyAverage');
-      jest.spyOn(averageService, 'emailAverageParts').mockImplementation(async () => (gateOn ? current : null));
+      featureGates.isEnabled.mockImplementation(() => false);
+      jest.spyOn(averageService, 'emailAverageParts').mockImplementation(async () => current);
     });
     afterEach(() => { featureGates.isEnabled.mockImplementation(() => false); });
 
-    test('the review records the exact copy, a schedule keeps it, and gate off leaves no key', async () => {
+    test('the review records the exact copy, a schedule keeps it, and no average leaves no key', async () => {
       const preview = await invoke('/:id/send-preview', 'get');
       expect(preview.body.messages.email.monthlyAverage).toBe(TEXT);
-      gateOn = false;
+      current = null;
       expect((await invoke('/:id/send-preview', 'get')).body.messages.email).not.toHaveProperty('monthlyAverage');
     });
 
@@ -2766,8 +2764,8 @@ describe('delivery email monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =>
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
-    test('a recorded average with the gate now off is stale (never silently dropped)', async () => {
-      gateOn = false;
+    test('a recorded average that no longer applies is stale (never silently dropped)', async () => {
+      current = null;
       await expect(router.sendEstimateNow(structuredClone(row), 'email', {
         callerPreClaimed: false, reviewedMessages: { sms: null, email: { provider: 'sendgrid', monthlyAverage: TEXT } },
       })).rejects.toMatchObject({ code: 'ESTIMATE_REVIEW_STALE' });
@@ -2775,13 +2773,13 @@ describe('delivery email monthly average (GATE_ESTIMATE_MONTHLY_AVERAGE)', () =>
     });
 
     test('an old review with no record and no average now sends as before; an unreviewed send uses the current value', async () => {
-      gateOn = false;
+      current = null;
       const old = await router.sendEstimateNow(structuredClone(row), 'email', {
         reviewedMessages: { sms: null, email: { provider: 'sendgrid' } },
       });
       expect(old.channels.email.ok).toBe(true);
       expect(email.sendTemplate.mock.calls.at(-1)[0].payload.next_step_summary).not.toContain('Averaged over the year');
-      gateOn = true;
+      current = PARTS;
       await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
       expect(email.sendTemplate.mock.calls.at(-1)[0].payload.price_summary).toBe(PARTS.priceLine);
     });

@@ -1,7 +1,7 @@
 'use strict';
 
 // Monthly AVERAGE beside per-application prices on residential estimates
-// (owner ruling 2026-10-20, GATE_ESTIMATE_MONTHLY_AVERAGE).
+// (owner ruling 2026-10-20).
 //
 // The per-application price STAYS the price. This module only derives the
 // smaller "$X a month" line that sits under it. It never prices anything:

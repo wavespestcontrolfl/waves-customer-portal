@@ -1,7 +1,7 @@
 'use strict';
 
 // Category stamped on an estimate follow-up email that carries the monthly average
-// (GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE). The stored copy of such an email goes stale
+// (estimate-follow-up.js applyMonthlyAverage). The stored copy of such an email goes stale
 // when the estimate's price changes, so neither stored-copy rail may re-send it:
 // transactional-email-provider-retry.js (scheduling, claim and retry) and
 // email-bounce-recovery.js (corrected-address replay) skip rows that carry it. The
