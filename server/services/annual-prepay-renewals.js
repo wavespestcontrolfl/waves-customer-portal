@@ -124,6 +124,13 @@ function termiteRenewalGraceDeadlineFor(term) {
   return etDateString(addETDays(parseETDateTime(`${later}T12:00`), TERMITE_RENEWAL_GRACE_DAYS));
 }
 const CUSTOMER_NOTICE_DAYS = [30, 15, 7];
+// GATE_MONEY_NOTICE_CATCHUP (owner 2026-11-06): a 30/15/7 notice whose day
+// passed at most this many days ago, and that is still unsent, goes out on
+// the next run. Smaller than the 8-day gap between the 15 and 7 rungs, so a
+// late window never reaches the next rung's day; the bound also keeps the
+// first run after the flip from sending notices for long-past days. The
+// termite bond texts in workflows/renewal-reminder.js use the same bound.
+const NOTICE_CATCHUP_DAYS = 3;
 // Termite annual-plan terms (annual_plan_version set) get an EXTRA 45-day
 // rung ahead of the shared ladder above (owner ruling §A2: 45 and 30 days
 // before the cancellation deadline). Every other term (lawn/mosquito/rodent/
@@ -10100,8 +10107,14 @@ async function runTermiteNoticePass(today, termCols, failedPasses = []) {
 // missing, the termite pass is skipped, and excluding termite terms here
 // too would leave them with NO 30-day notice at all — so they fall back to
 // this exact-day send (sendCustomerTermNotice still picks the termite copy).
-function genericNoticeCandidates(daysOut, target, excludeTermite30) {
+//
+// `anchorWindow` is { from, to }: the anchor dates this run may notice. Gate off,
+// from === to === today + daysOut (the exact-day match). Catch-up gate on,
+// `from` reaches NOTICE_CATCHUP_DAYS back, and a rung whose later rung was
+// already sent is never sent (the later notice supersedes it).
+function genericNoticeCandidates(daysOut, anchorWindow, excludeTermite30) {
   const noticeCol = noticeColumnForDaysOut(daysOut);
+  const range = [anchorWindow.from, anchorWindow.to];
   return db('annual_prepay_terms')
     .whereIn('status', ACTIVE_STATUSES)
     .whereNull('renewal_decision')
@@ -10111,9 +10124,13 @@ function genericNoticeCandidates(daysOut, target, excludeTermite30) {
       this.whereNull(claimCol).orWhere(claimCol, '<', new Date(Date.now() - NOTICE_CLAIM_TTL_MS));
     })
     .where(function renewalAnchorMatches() {
-      this.where('term_end', target).orWhere('last_scheduled_service_date', target);
+      this.whereBetween('term_end', range).orWhereBetween('last_scheduled_service_date', range);
     })
     .modify((qb) => { if (daysOut === 30 && excludeTermite30) qb.whereNull('annual_plan_version'); })
+    .modify((qb) => {
+      if (anchorWindow.from === anchorWindow.to) return;
+      for (const later of CUSTOMER_NOTICE_DAYS.filter((days) => days < daysOut)) qb.whereNull(noticeColumnForDaysOut(later));
+    })
     .select('*');
 }
 
@@ -10124,20 +10141,22 @@ function genericNoticeCandidates(daysOut, target, excludeTermite30) {
 // on term_end — its contractual notice is N days before THAT date, never a
 // last-visit anchor (a visit up to 120 days early would stamp the rung and
 // suppress the real notice).
-function genericNoticeAnchored(term, target) {
-  if (dateOnly(term.term_end) === target) return true;
+function genericNoticeAnchored(term, anchorWindow) {
+  const termEnd = dateOnly(term.term_end);
+  if (termEnd >= anchorWindow.from && termEnd <= anchorWindow.to) return true;
   return !isTermiteAnnualPlanTerm(term) && isLastServiceNearTermEnd(term);
 }
 
 async function runGenericNoticeLadder(today, termiteReady) {
+  const lateDays = require('../config/feature-gates').moneyNoticeCatchupLive() ? NOTICE_CATCHUP_DAYS : 0;
   let sent = 0;
   for (const daysOut of CUSTOMER_NOTICE_DAYS) {
-    const target = addDaysYmd(today, daysOut);
+    const anchorWindow = { from: addDaysYmd(today, daysOut - lateDays), to: addDaysYmd(today, daysOut) };
     // Termite pass ran → it owns the termite 30; not ready → the termite 30
     // falls back here, with baseline columns only for every claim/stamp/
     // release (Codex #4921 r8 — a pre-000106 schema has no late columns).
-    const terms = (await genericNoticeCandidates(daysOut, target, termiteReady))
-      .filter((term) => genericNoticeAnchored(term, target));
+    const terms = (await genericNoticeCandidates(daysOut, anchorWindow, termiteReady))
+      .filter((term) => genericNoticeAnchored(term, anchorWindow));
     sent += await forEachTermIsolated(
       terms,
       'reminder failed',
@@ -11765,6 +11784,8 @@ module.exports = {
   // suspendActiveTermsForDisputedInvoice stamps (ADMIN-BUG-R17-FINDING-1).
   annualPrepayColumns,
   _private: {
+    runGenericNoticeLadder,
+    NOTICE_CATCHUP_DAYS,
     stampTermCoverageOnly,
     PARENT_DECISION_LOCK_SESSIONS,
     supersedeRenewWithCustomerCancel,

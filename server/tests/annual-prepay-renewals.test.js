@@ -117,6 +117,7 @@ function query({ first, returning, columnInfo, rows = [], updateCount = 1 } = {}
     'whereNull',
     'whereNot',
     'whereBetween',
+    'orWhereBetween',
     'whereNotIn',
     'orderBy',
     'select',

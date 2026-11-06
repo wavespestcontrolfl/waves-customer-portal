@@ -5138,6 +5138,28 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 1:16PM (Tue–Fri) — same-day catch-up for the 10:16 follow-ups above
+  // (GATE_MONEY_NOTICE_CATCHUP, owner 2026-11-06). A deploy restart at 10:16 lost
+  // every touch due that day: the next tick finds them past the 20-hour grace and
+  // skips them for good (owner ruling 2026-08-04: first eligible day or not at
+  // all). This second run is still that day, 3h16m after the 10:00 anchor, so
+  // the same grace lets it send what is still due. A touch the 10:16 run sent has
+  // moved to its next step's day, a held touch to the next day, so it is not due
+  // again; a row left claimed by an interrupted send is not taken
+  // (runPending's catchUp option). Same lock as 10:16, so the runs never overlap.
+  // The Auto Pay hold sweep stays on the 10:16 run only.
+  cron.schedule('16 13 * * 2-5', async () => {
+    try {
+      if (!require('../config/feature-gates').moneyNoticeCatchupLive()) return;
+      await runExclusive('invoice-followups', async () => {
+        const result = await require('./invoice-followups').runPending({ catchUp: true });
+        logger.info(`Invoice follow-ups catch-up done: ${result.sent} sent, ${result.skipped} skipped`);
+      });
+    } catch (err) {
+      logger.error(`Invoice follow-ups catch-up failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 10:42AM (Mon–Fri) — Collections SHADOW sweep (observation only).
   // Evaluates the voice contact policy for every open-balance customer,

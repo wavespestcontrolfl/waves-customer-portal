@@ -1052,7 +1052,8 @@ async function adoptOrphanInvoices({ dryRun = false } = {}) {
 /**
  * Cron entry point — fires all due touches.
  */
-async function runPending() {
+// options.catchUp: the 1:16 PM same-day run (scheduler.js, GATE_MONEY_NOTICE_CATCHUP).
+async function runPending(options) {
   const now = new Date();
 
   // Only run during configured window (double-guard; cron also enforces this)
@@ -1125,6 +1126,15 @@ async function runPending() {
     // row keeps sending the verification nudge (the loop below decides, per
     // row, outside any lock). With no schedule rows this excludes nothing (pinned).
     .where(gates.divertMicrodepositDunning ? notOwnedOrMicrodepositCandidate : notOwnedByCustomerSchedule)
+    // The 1:16 PM catch-up never takes a row that still carries a touch claim.
+    // The claim clears when a send finishes, so a claim left on the row means
+    // the 10:16 run stopped mid-send (a deploy restart): that touch may have
+    // gone out, and the claim TTL has expired by 1:16. It is left to the next
+    // morning run, which passes it over as stale, exactly as without the
+    // catch-up — never a second text for one touch.
+    .where(function unclaimedOnCatchUp() {
+      if (options && options.catchUp) this.whereNull('s.touch_claimed_at');
+    })
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied', 'i.amount_paid', 'i.status as invoice_status',
