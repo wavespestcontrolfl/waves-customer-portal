@@ -629,7 +629,7 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
     ...(estimateId ? { estimate_id: estimateId } : {}),
   };
   reactivatePayload.metadata = dbh.raw(
-    "(COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id' - 'recipient_role' - 'estimate_id' - 'passed_step_order' - 'passed_step_id' - 'passed_step_ids' - 'spelling_retry_email') || ?::jsonb",
+    "(COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id' - 'recipient_role' - 'estimate_id' - 'passed_step_order' - 'passed_step_id' - 'passed_step_ids' - 'spelling_retry_email' - 'spelling_retry_step') || ?::jsonb",
     [JSON.stringify(stamps)],
   );
   if (existing) {
@@ -976,10 +976,12 @@ async function insertStepSend({ enrollment, step, recipient, testRecipient }) {
     email: recipient,
     status: 'queued',
   }).returning('*').then((rows) => rows[0]);
-  if (testRecipient || !enrollmentMetadata(enrollment).spelling_retry_email) return queued(db);
-  // The step's retry send was already handed to the provider and its outcome never recorded: it is NOT dispatched again.
+  if (testRecipient) return queued(db);
+  // The rewound step's retry send was already handed to the provider and the cursor never moved past it (the durable episode marker
+  // names the step, settlement or not): it is NOT dispatched again, the cursor only moves.
   const handedOff = await require('./call-email-spelling-retry').handedOffRetrySend({ enrollment, step });
   if (handedOff) return Object.assign(handedOff, { retryHandedOff: true });
+  if (!enrollmentMetadata(enrollment).spelling_retry_email) return queued(db);
   return db.transaction(async (trx) => {
     const row = await queued(trx);
     const bind = await require('./call-email-spelling-retry').bindAutomationRetrySend({ enrollment, step, sendId: row.id, recipient }, trx);
@@ -1192,6 +1194,18 @@ async function settleFailedSend({ enrollment, step, sendRow, err, testRecipient,
 // and the last passed step id), so two settlers of one step (the tick and a
 // manual / composer prep delivery) cannot advance it twice. Steps are loaded
 // when the caller has none.
+// The cursor write for a passed step. It also ends the call-spelling retry EPISODE when that step is the one the episode re-queued
+// (metadata.spelling_retry_step, call-email-spelling-retry.js): the marker lives until the cursor moves past its step, never longer.
+function cursorMetadataSql(cursor, passed) {
+  const marker = require('./call-email-spelling-retry').RETRY_STEP_KEY;
+  return db.raw(
+    `CASE WHEN COALESCE(metadata->'${marker}'->>'step_id', '') = ?
+          THEN (COALESCE(metadata, '{}'::jsonb) || ?::jsonb) - '${marker}'
+          ELSE COALESCE(metadata, '{}'::jsonb) || ?::jsonb END`,
+    [String(passed.id), JSON.stringify(cursor), JSON.stringify(cursor)],
+  );
+}
+
 async function advanceEnrollment(enrollment, steps = null, passedStep = null) {
   if (!steps) steps = await enabledSequenceSteps(enrollment.template_key);
   const { passedIds } = sequenceCursor(enrollment, steps);
@@ -1208,7 +1222,7 @@ async function advanceEnrollment(enrollment, steps = null, passedStep = null) {
     .whereRaw("COALESCE(metadata->>'passed_step_id', '') = ?", [priorPassedId])
     .update({
       ...patch,
-      ...(cursor ? { metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(cursor)]) } : {}),
+      ...(cursor ? { metadata: cursorMetadataSql(cursor, passed) } : {}),
       last_sent_at: new Date(),
       updated_at: new Date(),
     });

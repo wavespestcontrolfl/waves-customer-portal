@@ -1580,6 +1580,133 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
     await expectCommittedOnce('ev-acc-2');
   });
 
+  // ── The episode marker outlives settlement: a crash between the send and the cursor advance (round 15 P1) ───────────────
+  const STEP_MARKER = 'spelling_retry_step';
+  const marker = async () => (await enrollmentRow(ctx.enrollment.id)).metadata[STEP_MARKER];
+  // A runner "crash" after the provider took the request: the row and the cursor writes all fail, so the row stays `dispatching`.
+  async function crashAfterAcceptance(messageId) {
+    sendgrid.sendOne.mockImplementationOnce(async (args) => {
+      await args.providerBoundaryCheck?.({});
+      return { messageId };
+    });
+    const undoRow = await failStatementWhen('automation_step_sends', 'UPDATE', "NEW.status = 'sent'");
+    await db.raw("CREATE OR REPLACE FUNCTION test_fail_enroll() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected enrollment failure'; END $$");
+    await db.raw(`CREATE TRIGGER test_fail_enroll BEFORE UPDATE ON automation_enrollments FOR EACH ROW WHEN (OLD.id = '${ctx.enrollment.id}' AND NEW.current_step <> OLD.current_step) EXECUTE FUNCTION test_fail_enroll()`);
+    try {
+      await runner.sendStep(ctx.enrollment.id);
+    } finally {
+      await undoRow();
+      await db.raw('DROP TRIGGER IF EXISTS test_fail_enroll ON automation_enrollments');
+    }
+    const row = await retryRow();
+    expect(row.status).toBe('dispatching');
+    return row;
+  }
+
+  test('the rewind writes the episode marker { step_id, origin_send_id } beside the provenance', async () => {
+    await queuedRetry();
+    expect(await marker()).toEqual({ step_id: String(ctx.last.id), origin_send_id: String(ctx.send.id) });
+    expect((await enrollmentRow(ctx.enrollment.id)).metadata.spelling_retry_email).toBe(OTHER);
+  });
+
+  test('normal flow: the marker survives the send and settlement, and is cleared only when the cursor advances past its step', async () => {
+    await queuedRetry();
+    await runner.sendStep(ctx.enrollment.id); // dispatched, saved, cursor advanced in one go
+    expect(await marker()).toBeUndefined();
+    expect((await enrollmentRow(ctx.enrollment.id)).metadata.spelling_retry_email).toBe(OTHER); // provenance lives until the claim settles
+    const row = await retryRow();
+    expect(await post([argEvent(row.id, 'ev-ep-1', { sg_message_id: `${row.sendgrid_message_id}.f` })])).toBe(200);
+    expect((await ledger(ctx.customerId))[0].status).toBe('committed');
+  });
+
+  test('a delivery commit alone never clears the marker', async () => {
+    await queuedRetry();
+    await crashAfterAcceptance('ep-2');
+    const row = await retryRow();
+    expect(await post([argEvent(row.id, 'ev-ep-2', { sg_message_id: 'ep-2.f' })])).toBe(200);
+    expect((await ledger(ctx.customerId))[0].status).toBe('committed');
+    expect((await enrollmentRow(ctx.enrollment.id)).metadata.spelling_retry_email).toBeUndefined(); // provenance cleared
+    expect(await marker()).toEqual({ step_id: String(ctx.last.id), origin_send_id: String(ctx.send.id) }); // the episode marker is not
+  });
+
+  test('crash after acceptance, then the delivery commits the claim and clears the provenance: the next tick advances only, sendOne ran once', async () => {
+    await queuedRetry();
+    const row = await crashAfterAcceptance('ep-3');
+    const before = (await enrollmentRow(ctx.enrollment.id)).current_step;
+    expect(await post([argEvent(row.id, 'ev-ep-3', { sg_message_id: 'ep-3.f' })])).toBe(200);
+    expect((await db('customers').where({ id: ctx.customerId }).first()).email).toBe(OTHER);
+    expect(await db('automation_step_sends').where({ id: row.id }).first()).toMatchObject({ status: 'delivered' });
+    await dueNow(ctx.enrollment.id);
+    await runner.sendStep(ctx.enrollment.id); // the next tick
+    expect(retrySteps()).toHaveLength(1);
+    expect((await enrollmentRow(ctx.enrollment.id)).current_step).toBeGreaterThan(before);
+    expect(await marker()).toBeUndefined(); // cleared by the advance
+    expect(await db('automation_step_sends').where({ enrollment_id: ctx.enrollment.id, step_id: ctx.last.id, email: OTHER })).toHaveLength(1);
+  });
+
+  test('crash after acceptance, then the retry address BOUNCES (claim failed): nothing is sent again', async () => {
+    await queuedRetry();
+    const row = await crashAfterAcceptance('ep-4');
+    expect(await post([{
+      event: 'bounce', type: 'bounce', email: OTHER, reason: '550 5.1.1', sg_event_id: 'ev-ep-4', sg_message_id: 'ep-4.f', [SEND_ID_ARG]: row.id,
+    }])).toBe(200);
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'failed', reason: 'retry_address_bounced' });
+    expect((await enrollmentRow(ctx.enrollment.id)).status).toBe('cancelled');
+    await dueNow(ctx.enrollment.id);
+    await runner.sendStep(ctx.enrollment.id).catch(() => null); // a cancelled enrollment is refused
+    expect(retrySteps()).toHaveLength(1);
+  });
+
+  test('crash after acceptance, then a hand edit of the email and the delivery (claim skipped, enrollment retargeted and still active): the next tick advances only', async () => {
+    await queuedRetry();
+    const row = await crashAfterAcceptance('ep-5');
+    await db('customers').where({ id: ctx.customerId }).update({ email: 'jonny.doe@example.com' });
+    expect(await post([argEvent(row.id, 'ev-ep-5', { sg_message_id: 'ep-5.f' })])).toBe(200);
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'skipped', reason: 'email_changed' });
+    expect(await enrollmentRow(ctx.enrollment.id)).toMatchObject({ status: 'active', email: 'jonny.doe@example.com' });
+    const before = (await enrollmentRow(ctx.enrollment.id)).current_step;
+    await dueNow(ctx.enrollment.id);
+    await runner.sendStep(ctx.enrollment.id);
+    expect(retrySteps()).toHaveLength(1);
+    expect(sendgrid.sendOne.mock.calls.filter(([a]) => a.to === 'jonny.doe@example.com' && a.subject === 'Step 1')).toHaveLength(0);
+    expect((await enrollmentRow(ctx.enrollment.id)).current_step).toBeGreaterThan(before);
+    expect(await marker()).toBeUndefined();
+  });
+
+  test('the marker alone sends nothing without a handed-off send of the episode: a never-dispatched step still goes out', async () => {
+    await queuedRetry();
+    expect(await marker()).toBeDefined();
+    await runner.sendStep(ctx.enrollment.id);
+    expect(retrySteps()).toHaveLength(1);
+  });
+
+  test('a definitely rejected send of the episode is NOT handed off: the marker does not hide a step that never went out', async () => {
+    await queuedRetry();
+    afterRequestLeft(httpError(400));
+    await runner.sendStep(ctx.enrollment.id);
+    const svc = require('../services/call-email-spelling-retry');
+    expect(await svc.handedOffRetrySend({ enrollment: await enrollmentRow(ctx.enrollment.id), step: ctx.last })).toBeNull();
+  });
+
+  test('the originating send of an earlier episode never counts as the episode\'s hand-off', async () => {
+    await queuedRetry();
+    const svc = require('../services/call-email-spelling-retry');
+    // ctx.send is the original (delivered-looking) first email of this very step, created before the rewind.
+    await db('automation_step_sends').where({ id: ctx.send.id }).update({ status: 'delivered' });
+    expect(await svc.handedOffRetrySend({ enrollment: await enrollmentRow(ctx.enrollment.id), step: ctx.last })).toBeNull();
+  });
+
+  test('re-enrolling a terminal enrollment drops the episode marker with the provenance', async () => {
+    await queuedRetry();
+    await db('automation_enrollments').where({ id: ctx.enrollment.id }).update({ status: 'cancelled' });
+    const customer = await db('customers').where({ id: ctx.customerId }).first();
+    await runner.enrollCustomer({ templateKey: ctx.key, customer: { ...customer, email: OTHER } });
+    const row = await enrollmentRow(ctx.enrollment.id);
+    expect(row).toMatchObject({ status: 'active' });
+    expect(row.metadata[STEP_MARKER]).toBeUndefined();
+    expect(row.metadata.spelling_retry_email).toBeUndefined();
+  });
+
   test('a send sendOne RETURNED (accepted) is never a failure, whatever failed after it', async () => {
     await queuedRetry();
     sendgrid.sendOne.mockImplementationOnce(async () => ({ messageId: 'acc-3' })); // returned without passing through the boundary hook

@@ -46,6 +46,12 @@ const RETRY_OWNED = Object.freeze({ retried: false, retryOwned: true });
 const EMAIL_SHAPE_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // automation_enrollments.metadata key: the retry address this enrollment now mails (retry provenance).
 const RETRY_PROVENANCE_KEY = 'spelling_retry_email';
+// automation_enrollments.metadata key: the DURABLE episode marker of the rewound step, { step_id, origin_send_id } (the bounced send the
+// rewind started from). It is a different thing from the provenance above: provenance is the gate / eligibility state and is cleared
+// by every settlement; this marker only tells the runner "the next step is the one this retry re-queued", so a send row of this
+// episode that was already handed to the provider is never dispatched twice. It is written with the rewind and cleared ONLY when the
+// cursor advances past that step (automation-runner advanceEnrollment) or the enrollment is re-enrolled. No settlement touches it.
+const RETRY_STEP_KEY = 'spelling_retry_step';
 // SendGrid custom arg that carries a BOUND retry send's own queued row id (automation_step_sends.id). SendGrid echoes it on every
 // event, so a delivered / bounced event that races the runner's post-send sendgrid_message_id write still finds its send. Same
 // mechanism as the tracked path's `email_message_id`, narrowed to the one send that owns a claim.
@@ -251,19 +257,37 @@ async function adoptRetrySendMessageId(sendRow, messageId, client = db) {
 }
 
 /**
- * The retry send of this enrollment step that was already HANDED OFF to the provider but whose outcome the runner never recorded
- * (a lost response, a failed save after SendGrid accepted it, a crash): its row is `dispatching` or `sent` and its claim is still
- * `resending`. The runner must not dispatch that step again; it only moves the cursor past it and the delivery webhook settles the
- * claim. Null when there is none. A query on the bound row, no write.
+ * The send of this enrollment's REWOUND step that was already HANDED OFF to the provider in this retry episode but whose step the
+ * cursor never moved past (a lost response, a failed save after SendGrid accepted it, a crash between the send and the advance).
+ * The runner must not dispatch that step again: it only moves the cursor past it. The episode is the durable marker
+ * (RETRY_STEP_KEY) written with the rewind: it names the step and the bounced send the rewind started from, and an episode send is
+ * one created after that send. Handed off = any status but the not-sent ones (`queued`, `blocked`, and `failed` without a provider
+ * message id, i.e. a definite rejection): `dispatching`, `sent`, `delivered`, `bounced`, a provider-block `failed`, ... So it
+ * counts a delivered row and a committed, failed or skipped claim alike: settlement never changes the answer, and neither does the
+ * gate. Null when the enrollment has no marker for this step (no query at all) or no such send exists. A read, no write.
  */
 async function handedOffRetrySend({ enrollment, step }, client = db) {
-  if (!gateLive() || !enrollment?.customer_id) return null;
+  const marker = retryStepMarker(enrollment);
+  if (!marker || !step || String(marker.step_id) !== String(step.id) || !marker.origin_send_id) return null;
   const row = await client('automation_step_sends as s')
-    .join(`${TABLE} as c`, 'c.retry_send_id', 's.id')
-    .where({ 'c.customer_id': enrollment.customer_id, 'c.channel': CHANNEL, 'c.status': 'resending', 's.enrollment_id': enrollment.id, 's.step_id': step.id })
-    .whereIn('s.status', ['dispatching', 'sent'])
+    .where({ 's.enrollment_id': enrollment.id, 's.step_id': step.id })
+    .whereNot('s.id', marker.origin_send_id)
+    .whereRaw('s.created_at > (SELECT o.created_at FROM automation_step_sends o WHERE o.id = ?)', [marker.origin_send_id])
+    .whereNotIn('s.status', ['queued', 'blocked'])
+    .where((w) => w.whereNot('s.status', 'failed').orWhereNotNull('s.sendgrid_message_id'))
+    .orderBy('s.created_at', 'desc')
     .first('s.*');
   return row || null;
+}
+
+/** The episode marker of an enrollment row (metadata may arrive as an object or as JSON text), or null. */
+function retryStepMarker(enrollment) {
+  let meta = enrollment?.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { return null; }
+  }
+  const marker = meta && typeof meta === 'object' ? meta[RETRY_STEP_KEY] : null;
+  return marker && typeof marker === 'object' ? marker : null;
 }
 
 /** GATE_CALL_BOUNCE_OTHER_SPELLING, read at call time: the one gate recheck every retry boundary goes through. */
@@ -429,7 +453,8 @@ async function startRetry({ sendRow, bounced }, client) {
   const { rewindEnrollmentToStep } = require('./automation-runner');
   // spelling_retry_email is the retry provenance the runner's send boundary reads (kill switch): see retrySendVerdict.
   const rewound = await rewindEnrollmentToStep({
-    enrollment, stepId: sendRow.step_id, email: found.other, metadata: { [RETRY_PROVENANCE_KEY]: found.other },
+    enrollment, stepId: sendRow.step_id, email: found.other,
+    metadata: { [RETRY_PROVENANCE_KEY]: found.other, [RETRY_STEP_KEY]: { step_id: String(sendRow.step_id), origin_send_id: String(sendRow.id) } },
   }, client);
   if (!rewound) {
     // A later step already went out or the cursor moved: nothing is re-sent, the webhook cancels as it does today.
@@ -602,5 +627,5 @@ async function commitDeliveredRetry({ sendRow }, client) {
 
 module.exports = {
   onAutomationHardBounce, onAutomationDelivered, claimRetry, settleClaim, claimForSend, bindAutomationRetrySend, gateLive,
-  findRetrySendByCustomArg, adoptRetrySendMessageId, handedOffRetrySend, SEND_ID_ARG, retrySendVerdict, stopRetry, abandonRetry, releaseRetryEnrollments, onAutomationDeadDomain, settledOtherSpelling, lockPrepSend, CLAIM_STALE_MS, CHANNEL, TABLE, RETRY_PROVENANCE_KEY,
+  findRetrySendByCustomArg, adoptRetrySendMessageId, handedOffRetrySend, SEND_ID_ARG, retrySendVerdict, stopRetry, abandonRetry, releaseRetryEnrollments, onAutomationDeadDomain, settledOtherSpelling, lockPrepSend, CLAIM_STALE_MS, CHANNEL, TABLE, RETRY_PROVENANCE_KEY, RETRY_STEP_KEY,
 };
