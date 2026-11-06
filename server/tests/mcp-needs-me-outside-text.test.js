@@ -107,3 +107,17 @@ test('guard on: a row whose body our code writes keeps its why; a standing count
   const standing = allItems(answer).find((item) => item.kind === 'standing');
   expect(standing.why ?? null).toBeNull();
 });
+
+test('guard on: a system-category row built by a registry trigger from a customer name or an error message is withheld', async () => {
+  process.env.GATE_CLAUDE_INPUT_GUARD = 'true';
+  const b = built('service_report_delivery_failed', {
+    customerName: `Pat Example ${INJECTION}`, errorMessage: INJECTION, serviceReportId: 'r-1', customerId: '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10',
+  });
+  const answer = await answerFor([{
+    id: '00000000-0000-4000-8000-000000000004', category: 'system', title: b.title, body: b.body, detail: null, link: b.link,
+    metadata: { triggerKey: 'service_report_delivery_failed' }, created_at: '2026-11-04T12:03:00Z', read_at: null,
+  }]);
+  expect(allItems(answer)).toHaveLength(1);
+  expect(allItems(answer)[0].why).toMatch(/^text withheld/);
+  expect(JSON.stringify(answer)).not.toContain(INJECTION);
+});

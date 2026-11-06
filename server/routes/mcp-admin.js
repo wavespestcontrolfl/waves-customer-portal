@@ -234,7 +234,8 @@ function claudeInputGuardOn() {
   try { return require('../config/feature-gates').claudeInputGuardLive?.() === true; } catch { return false; }
 }
 
-// Alert categories whose body our own code writes (system faults, cost and token alerts, agent reports). Every other row's
+// Alert categories whose body our own code writes (system faults, cost and token alerts, agent reports), when no registry
+// trigger built it (a trigger's body is composed from its payload: a customer's name, a provider's error text). Every other row's
 // `why` can quote an outside sender (a customer text, an email subject, a Messenger message, a voicemail, a lead form) or a
 // vendor or model, so it stays server side. New categories join only after reading their emitters.
 const CODE_WRITTEN_ALERT_CATEGORIES = new Set(['system', 'llm_cost', 'agents', 'token_alert']);
@@ -242,7 +243,7 @@ const WHY_WITHHELD = 'text withheld: may quote an outside sender; look the item 
 
 // An item with no category is a standing count, whose label our code writes and whose `why` is null.
 const guardNeedsMeItem = (item) => (
-  item && item.why && item.category && !CODE_WRITTEN_ALERT_CATEGORIES.has(item.category) ? { ...item, why: WHY_WITHHELD } : item
+  item && item.why && item.category && (!CODE_WRITTEN_ALERT_CATEGORIES.has(item.category) || item.trigger) ? { ...item, why: WHY_WITHHELD } : item
 );
 
 // A gap row from someone other than the owner (quoted_words: a technician,
