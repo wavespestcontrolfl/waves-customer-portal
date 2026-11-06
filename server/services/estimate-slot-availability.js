@@ -2118,7 +2118,7 @@ function makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, fun
 function startMakeRoomCheck(mode, args) {
   if (mode === 'off') return;
   try {
-    require('./scheduling/booking-make-room').recordMakeRoomCheck({ ...args, mode, surface: 'estimate' }).catch(() => {});
+    Promise.resolve(require('./scheduling/booking-make-room').startBackgroundCheck({ ...args, mode, surface: 'estimate' })).catch(() => {});
   } catch (err) {
     logger.warn(`[booking-make-room] check not started: ${err.message}`);
   }
@@ -2559,6 +2559,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     estimateId, pool: routeChecked, coords, durationMinutes: serviceProfile.durationMinutes, dateFrom, dateTo,
     // The page's capability rule (filterCollidingSlots) for the technician whose stop would move.
     capabilityRows: serviceProfile.reservationServiceMix ? capabilityRowsFor(serviceProfile.reservationServiceMix) : null,
+    // The zone the page passes find-time, for the self-serve drive cap's route-day lift.
+    zoneSlug: routeDaySlug,
     admit: makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnel }),
   });
   // The scarcity count below reads `bookable` when no funnel is active: leave out what the check removed.

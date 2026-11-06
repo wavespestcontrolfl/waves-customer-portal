@@ -14,13 +14,16 @@
  *   2. Every stop in the chain may move under the 4:40 re-plan's own rules: day-replan fixedReason, read again with
  *      the day's full facts (status, hold, staff lock, office review, group, same customer twice, the 24-hour lock,
  *      the 24-hour text and, with GATE_NIGHT_TOLD_LOCK, confirmed, first or one-time, person-placed and told
- *      visits). Its customer also gets the 72-hour and 24-hour reminders BY TEXT (the plan: "the customer gets
- *      reminder texts"), read with the sender's own channel and app routing rules, so the new time reaches them. Its time
+ *      visits). Its customer also has both reminder tiers on and sent BY TEXT (the plan: "the customer gets reminder
+ *      texts"), read with the sender's own channel and app routing rules. The lock is the re-plan's 24 hours (owner
+ *      2026-11-03): the 24-hour text always carries the new time; a new time inside 72 hours gets no new 72-hour
+ *      text, and with GATE_NIGHT_TOLD_LOCK a stop whose time was already told never moves at all. Its time
  *      preference (the re-plan's loadPref) allows the new hour, and it still ends by the night tools' day close.
  *   3. Nothing else holds the new minutes: no unassigned visit, no other technician's visit while the occupancy
  *      check is technician-blind (the re-plan's blockedHoursFor rule), no schedule block.
  *   4. The route keeps every arrival window with the new visit in it: arrival-route.js evaluateArrivalPlacement on
- *      the moved day, the check the estimate page runs today.
+ *      the moved day, the check the estimate page runs today. In capacity mode its added drive also stays under the
+ *      picker's self-serve cap (find-time findCapacitySlots: customerMaxDetourMinutes, with the zone route-day lift).
  *   5. The new visit adds at least MIN_SAVING_MIN fewer drive minutes than the best free time in the list.
  * Drive minutes on both sides use the re-plan's straight-line leg (legMin) from the technician's start point: the
  * drive the new visit adds between the stop before it and the stop after it. The moved stops keep their order, so
@@ -32,9 +35,11 @@
  *   on      GATE_BOOKING_MAKE_ROOM=true. Reserved for the offer, hold and move (a later change); today it records
  *           exactly like shadow.
  *
- * Never throws, spends nothing, sends nothing, and writes only its own log row.
+ * Never throws, spends nothing, sends nothing, and writes only its own log row. The estimate page starts it through
+ * startBackgroundCheck: at most MAX_IN_FLIGHT checks at once and one per estimate per DEDUPE_MS, extra requests dropped.
  */
 const logger = require('../logger');
+const { addETDays, etDateString } = require('../../utils/datetime-et');
 
 const MIN_SAVING_MIN = 10;
 const DEFAULT_BUDGET_MS = 4000;
@@ -42,6 +47,10 @@ const MAX_DATES = 21;
 const MAX_FULL_CHECKS = 6;
 const TABLE = 'booking_make_room_checks';
 const TIMED_OUT = Symbol('timed_out');
+// Backpressure (startBackgroundCheck): the page never waits for a check, and a lost race never cancels a read
+// already sent, so the number of checks is bounded here instead.
+const MAX_IN_FLIGHT = 2;
+const DEDUPE_MS = 10 * 60 * 1000;
 
 function bookingMakeRoomMode() {
   try {
@@ -255,7 +264,18 @@ async function routeKeepsWindows(candidate, { conn, env, request, caches }) {
   const result = env.evaluateArrivalPlacement({ ...context, rows: context.rows.map((row) => shiftRow(row, moved.get(String(row.id)))) }, {
     windowStart: hhmm(candidate.startMin), windowEnd: hhmm(candidate.startMin + candidate.durationMin), durationMinutes: candidate.durationMin,
   });
-  return result?.feasible === true ? true : `route_${result?.reason || 'unknown'}`;
+  if (result?.feasible !== true) return `route_${result?.reason || 'unknown'}`;
+  // find-time's own test: `fit.detourMinutes > capFor(date, tech.id)`.
+  if (request.detourCap && result.detourMinutes > request.detourCap(candidate.dateStr, candidate.techId)) return 'detour_cap';
+  return true;
+}
+
+// The picker's self-serve drive cap (find-time findCapacitySlots, capacity mode only), with the zone route-day lift
+// for the request's zone. Null while capacity mode is off: the page's free times have no cap then either.
+async function loadDetourCap(conn, env, zoneSlug) {
+  if (!env.capacityOn()) return null;
+  const zoneRouteDays = zoneSlug && env.zoneRouteDaysLive() ? await env.readZoneRouteDays(conn) : null;
+  return (date, technicianId) => env.customerMaxDetourMinutes(zoneRouteDays ? { date, technicianId, zoneSlug, zoneRouteDays } : undefined);
 }
 
 // The moved customer hears the new time only from the 72-hour and 24-hour texts, so both must be on and readable.
@@ -334,16 +354,15 @@ function raceBudget(promise, deadline) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-function addDays(dateStr, days) {
-  const at = new Date(`${dateStr}T12:00:00Z`);
-  at.setUTCDate(at.getUTCDate() + days);
-  return at.toISOString().slice(0, 10);
-}
-
 // The request's dates (at most MAX_DATES) and every date the free list uses, in order.
 function datesFor({ dateFrom, dateTo, pool }) {
   const dates = new Set(pool.map((slot) => slot?.date).filter(Boolean));
-  for (let i = 0; i < MAX_DATES && addDays(dateFrom, i) <= dateTo; i++) dates.add(addDays(dateFrom, i));
+  const first = new Date(`${dateFrom}T12:00:00Z`);
+  for (let i = 0; i < MAX_DATES; i++) {
+    const date = etDateString(addETDays(first, i));
+    if (date > dateTo) break;
+    dates.add(date);
+  }
   return [...dates].sort();
 }
 
@@ -393,6 +412,7 @@ function defaultDeps() {
   const eligibility = require('../technician-eligibility');
   const reminders = require('../appointment-reminders');
   const pushRouting = require('../messaging/push-channel-routing');
+  const policy = require('./policy');
   return {
     loadDayStops: (conn, dateStr) => replan.loadDayStops(conn, dateStr, false),
     loadDayContext: replan.loadDayContext,
@@ -411,6 +431,10 @@ function defaultDeps() {
     assignableTechIds: async (conn) => (await eligibility.applyAssignable(conn('technicians')).select('technicians.id')).map((row) => row.id),
     absentTechDays: eligibility.absentTechDays,
     getBlackoutDates: require('./blackout-dates').getBlackoutDates,
+    capacityOn: policy.capacityEnabled,
+    customerMaxDetourMinutes: policy.customerMaxDetourMinutes,
+    zoneRouteDaysLive: require('../../config/feature-gates').zoneRouteDaysLive,
+    readZoneRouteDays: require('./zone-route-days').readZoneRouteDays,
     inactiveCapabilities: require('../technician-capabilities').inactiveCapabilitiesForServices,
     pushRouteFor: (customerId, messageType) => pushRouting.decidePushRoute({ gateOn: pushRouting.gatePushRoutingOn(), customerId, messageType }),
     appDeviceStatus: (customerId, conn) => require('../push-notifications').customerStatus(customerId, conn, { withReachable: true }),
@@ -448,7 +472,7 @@ async function checkCandidates(candidates, { conn, env, request, deadline, repor
   }
 }
 
-async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId, capabilityRows, dateFrom, dateTo, admit, now, deadline, deps }) {
+async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId, capabilityRows, zoneSlug, dateFrom, dateTo, admit, now, deadline, deps }) {
   const base = deps || defaultDeps();
   // The setup reads run under the same budget as every later read.
   const homes = await raceBudget(base.loadTechStartPoints(conn), deadline);
@@ -464,12 +488,13 @@ async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId
   if (!dayRows) return;
   const bestFree = bestFreeTime(pool, { dayRows, homeOf: env.homeOf, point, legMin: env.legMin });
   report.free = { count: pool.length, best: bestFree };
-  const request = { point, durationMin, admit, now, bestFree, estimateId };
   const open = await raceBudget(loadOpenTechDays(conn, env, { dates, capabilityRows }), deadline);
-  if (open === TIMED_OUT) {
+  const detourCap = open === TIMED_OUT ? TIMED_OUT : await raceBudget(loadDetourCap(conn, env, zoneSlug), deadline);
+  if (detourCap === TIMED_OUT) {
     report.timedOut = true;
     return;
   }
+  const request = { point, durationMin, admit, now, bestFree, estimateId, detourCap };
   const candidates = [];
   for (const [dateStr, rows] of dayRows) {
     for (const techId of techIdsOf(rows)) {
@@ -518,9 +543,10 @@ function checkRow(report) {
  * @param {string} args.dateTo
  * @param {Function} args.admit         slot -> true when the page could offer it
  * @param {Array}  [args.capabilityRows] this estimate's services as technician-capabilities rows ({ service_type })
+ * @param {string} [args.zoneSlug]      the request's route-day zone (the page passes find-time the same one)
  * @returns {Promise<object>} the report
  */
-async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = null, pool, coords, durationMinutes, capabilityRows,
+async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = null, pool, coords, durationMinutes, capabilityRows, zoneSlug,
   dateFrom, dateTo, admit, now = new Date(), conn, deps, budgetMs = DEFAULT_BUDGET_MS } = {}) {
   const startedAt = Date.now();
   const report = { mode, surface, estimateId, durationMin: null, free: null, dates: 0, tried: 0, candidates: 0, checked: 0, passed: [], byReason: {}, timedOut: false, skipped: null, error: null, ms: 0 };
@@ -533,7 +559,7 @@ async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = nu
     else {
       await findMakeRoom(report, {
         conn: knex, pool: Array.isArray(pool) ? pool : [], point, durationMin: report.durationMin, estimateId,
-        capabilityRows,
+        capabilityRows, zoneSlug,
         dateFrom, dateTo, admit, now, deadline: startedAt + budgetMs, deps,
       });
     }
@@ -550,8 +576,32 @@ async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = nu
   return report;
 }
 
+const inFlight = new Set();
+const lastStarted = new Map();
+
+/**
+ * Starts one check in the background, or drops the request: at most MAX_IN_FLIGHT checks at once, and one estimate
+ * at most once per DEDUPE_MS (Codex security review: a link holder can ask for many lists in a row). A dropped
+ * request records nothing. Always returns a promise that never rejects.
+ */
+function startBackgroundCheck(args, { nowMs = Date.now() } = {}) {
+  const key = args?.estimateId ? String(args.estimateId) : null;
+  if (inFlight.size >= MAX_IN_FLIGHT || (key && nowMs - (lastStarted.get(key) ?? -Infinity) < DEDUPE_MS)) return Promise.resolve(null);
+  for (const [id, at] of lastStarted) if (nowMs - at >= DEDUPE_MS) lastStarted.delete(id);
+  const token = Symbol('check');
+  inFlight.add(token);
+  if (key) lastStarted.set(key, nowMs);
+  return recordMakeRoomCheck(args).catch(() => null).finally(() => inFlight.delete(token));
+}
+
+function resetBackgroundChecks() {
+  inFlight.clear();
+  lastStarted.clear();
+}
+
 module.exports = {
   bookingMakeRoomMode,
+  startBackgroundCheck,
   recordMakeRoomCheck,
-  _internals: { buildChain, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, remindersByText, moveBlockedReason, datesFor, bySaving, defaultDeps, MIN_SAVING_MIN, MAX_FULL_CHECKS },
+  _internals: { buildChain, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, remindersByText, moveBlockedReason, datesFor, bySaving, defaultDeps, resetBackgroundChecks, MIN_SAVING_MIN, MAX_FULL_CHECKS, MAX_IN_FLIGHT, DEDUPE_MS },
 };

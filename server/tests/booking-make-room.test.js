@@ -42,6 +42,9 @@ function countBy(rows, key) {
   return counts;
 }
 
+// The added drive minutes the route check reports for every passing placement.
+const ROUTE_DETOUR_MIN = 20;
+
 const TEXTS = { smsEnabled: true, serviceReminder72h: true, serviceReminder24h: true, reminder72hChannel: 'sms', reminder24hChannel: 'sms' };
 
 function makeDeps({
@@ -67,7 +70,7 @@ function makeDeps({
     loadArrivalRouteContext: jest.fn(async ({ date }) => ({ date, rows: rows.filter((r) => r.scheduled_date === date) })),
     evaluateArrivalPlacement: jest.fn((context, placement) => {
       evaluated.push({ context, placement });
-      return feasible ? { feasible: true } : { feasible: false, reason: 'arrival_window' };
+      return feasible ? { feasible: true, detourMinutes: ROUTE_DETOUR_MIN } : { feasible: false, reason: 'arrival_window' };
     }),
     arrivalWindowsOn: () => true,
     getReminderPrefs: jest.fn(async (customerId) => prefs[customerId] || TEXTS),
@@ -77,6 +80,12 @@ function makeDeps({
     absentTechDays: jest.fn(async () => new Set(absent)),
     getBlackoutDates: jest.fn(async () => new Set(blackout)),
     inactiveCapabilities: jest.fn(async () => inactive),
+    // The picker's self-serve drive cap (capacity mode only) and the zone route-day config it reads. A test turns
+    // capacity mode on by setting these on the returned deps.
+    capacityOn: () => false,
+    customerMaxDetourMinutes: jest.fn(() => 30),
+    zoneRouteDaysLive: () => false,
+    readZoneRouteDays: jest.fn(async () => ({ synthetic: true })),
     // The sender's app routing for a reminder type, and the customer's app device as its sender reads it.
     pushRouteFor: jest.fn(() => pushRoute),
     appDeviceStatus: jest.fn(async () => device || { enabled: true, registered: false, fresh: false, reachable: false }),
@@ -240,6 +249,34 @@ describe('the day and the route', () => {
     expect(inserted).toHaveLength(1);
   });
 
+  test('in capacity mode, a moved route that adds more drive than the picker\'s cap is refused', async () => {
+    const deps = makeDeps();
+    deps.capacityOn = () => true;
+    deps.customerMaxDetourMinutes = jest.fn(() => ROUTE_DETOUR_MIN - 1);
+    const { report } = await check({ deps });
+    expect(report.passed).toEqual([]);
+    expect(report.byReason.detour_cap).toBeGreaterThanOrEqual(1);
+    expect(deps.customerMaxDetourMinutes).toHaveBeenCalledWith(undefined);
+  });
+
+  test('in capacity mode, a route under the cap passes; the zone route-day lift is read for the request\'s zone', async () => {
+    const deps = makeDeps();
+    deps.capacityOn = () => true;
+    deps.zoneRouteDaysLive = () => true;
+    const { report } = await check({ deps, zoneSlug: 'venice' });
+    expect(starts(report)).toContain('09:00');
+    expect(deps.readZoneRouteDays).toHaveBeenCalledTimes(1);
+    expect(deps.customerMaxDetourMinutes).toHaveBeenCalledWith({ date: DAY, technicianId: TECH, zoneSlug: 'venice', zoneRouteDays: { synthetic: true } });
+  });
+
+  test('capacity mode off: no cap, as on the page', async () => {
+    const deps = makeDeps();
+    deps.customerMaxDetourMinutes = jest.fn(() => ROUTE_DETOUR_MIN - 1);
+    const { report } = await check({ deps });
+    expect(starts(report)).toContain('09:00');
+    expect(deps.customerMaxDetourMinutes).not.toHaveBeenCalled();
+  });
+
   test('the blackout list is read strictly: an unreadable one stops the check', async () => {
     const deps = makeDeps();
     deps.getBlackoutDates.mockRejectedValue(new Error('settings down'));
@@ -384,8 +421,61 @@ describe('the default reads', () => {
     expect(deps.getReminderPrefs).toBe(reminders._test.getReminderPrefs);
     expect(deps.resolve72hChannel).toBe(reminders._test.resolve72hChannel);
     expect(deps.inactiveCapabilities).toBe(require('../services/technician-capabilities').inactiveCapabilitiesForServices);
+    const policy = require('../services/scheduling/policy');
+    expect(deps.capacityOn).toBe(policy.capacityEnabled);
+    expect(deps.customerMaxDetourMinutes).toBe(policy.customerMaxDetourMinutes);
+    expect(deps.zoneRouteDaysLive).toBe(require('../config/feature-gates').zoneRouteDaysLive);
+    expect(deps.readZoneRouteDays).toBe(require('../services/scheduling/zone-route-days').readZoneRouteDays);
     expect(typeof require('../services/push-notifications').customerStatus).toBe('function');
     expect(typeof deps.pushRouteFor('cust-1', 'reminder_72h')).toBe('string');
     expect(typeof deps.techBlind()).toBe('boolean');
+  });
+});
+
+describe('the request\'s dates', () => {
+  test('calendar days across the fall-back change come from the shared ET helpers, with the free list\'s dates', () => {
+    const { datesFor } = _internals;
+    expect(datesFor({ dateFrom: '2026-10-31', dateTo: '2026-11-03', pool: [{ date: '2026-11-10' }] }))
+      .toEqual(['2026-10-31', '2026-11-01', '2026-11-02', '2026-11-03', '2026-11-10']);
+  });
+});
+
+describe('startBackgroundCheck (backpressure for the detached check)', () => {
+  const { startBackgroundCheck } = require('../services/scheduling/booking-make-room');
+  const { resetBackgroundChecks, MAX_IN_FLIGHT, DEDUPE_MS } = _internals;
+  beforeEach(() => resetBackgroundChecks());
+
+  // A check whose first read waits until the test lets it go.
+  function heldDeps() {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const deps = makeDeps();
+    const base = deps.loadTechStartPoints;
+    deps.loadTechStartPoints = jest.fn(async (...args) => { await gate; return base(...args); });
+    return { deps, release };
+  }
+  const args = (estimateId, deps) => ({
+    mode: 'shadow', estimateId, pool: FREE, coords: NEW_PIN, durationMinutes: 60, dateFrom: DAY, dateTo: DAY,
+    admit: (slot) => slot.date === DAY, now: NOW, conn: fakeConn().conn, deps, budgetMs: 60000,
+  });
+
+  test('at most MAX_IN_FLIGHT checks run at once; an extra request is dropped and records nothing', async () => {
+    const held = Array.from({ length: MAX_IN_FLIGHT }, () => heldDeps());
+    const runs = held.map((h, i) => startBackgroundCheck(args(`est-${i}`, h.deps)));
+    const extra = makeDeps();
+    await expect(startBackgroundCheck(args('est-extra', extra))).resolves.toBeNull();
+    expect(extra.loadTechStartPoints).not.toHaveBeenCalled();
+    held.forEach((h) => h.release());
+    const reports = await Promise.all(runs);
+    expect(reports.every((r) => r && r.mode === 'shadow')).toBe(true);
+    // A slot is free again once a check ends.
+    await expect(startBackgroundCheck(args('est-extra', extra))).resolves.toMatchObject({ mode: 'shadow' });
+  });
+
+  test('one estimate gets at most one check per DEDUPE_MS', async () => {
+    const t0 = Date.now();
+    await expect(startBackgroundCheck(args('est-1', makeDeps()), { nowMs: t0 })).resolves.toMatchObject({ mode: 'shadow' });
+    await expect(startBackgroundCheck(args('est-1', makeDeps()), { nowMs: t0 + 1000 })).resolves.toBeNull();
+    await expect(startBackgroundCheck(args('est-1', makeDeps()), { nowMs: t0 + DEDUPE_MS })).resolves.toMatchObject({ mode: 'shadow' });
   });
 });

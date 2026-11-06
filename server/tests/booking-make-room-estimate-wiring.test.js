@@ -26,7 +26,7 @@ jest.mock('../services/scheduling/customer-route-check', () => ({
 }));
 jest.mock('../services/scheduling/booking-make-room', () => ({
   bookingMakeRoomMode: jest.fn(() => 'off'),
-  recordMakeRoomCheck: jest.fn(async () => ({})),
+  startBackgroundCheck: jest.fn(async () => ({})),
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
@@ -102,13 +102,13 @@ describe('getAvailableSlots — make-room check wiring (GATE_BOOKING_MAKE_ROOM)'
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-14T15:00:00Z'));
     makeRoom.bookingMakeRoomMode.mockReturnValue('off');
-    makeRoom.recordMakeRoomCheck.mockImplementation(async () => ({}));
+    makeRoom.startBackgroundCheck.mockImplementation(async () => ({}));
   });
   afterEach(() => { jest.useRealTimers(); });
 
   test('gate off: the check never starts', async () => {
     await getAvailableSlots('est-room-1', OFFER);
-    expect(makeRoom.recordMakeRoomCheck).not.toHaveBeenCalled();
+    expect(makeRoom.startBackgroundCheck).not.toHaveBeenCalled();
   });
 
   test('shadow: one check per built list, over the final pool, with the estimate pin, length and dates; the list is unchanged', async () => {
@@ -118,8 +118,8 @@ describe('getAvailableSlots — make-room check wiring (GATE_BOOKING_MAKE_ROOM)'
     makeRoom.bookingMakeRoomMode.mockReturnValue('shadow');
     const served = keys(await getAvailableSlots('est-room-1', OFFER));
     expect(served).toEqual(baseline);
-    expect(makeRoom.recordMakeRoomCheck).toHaveBeenCalledTimes(1);
-    const [arg] = makeRoom.recordMakeRoomCheck.mock.calls[0];
+    expect(makeRoom.startBackgroundCheck).toHaveBeenCalledTimes(1);
+    const [arg] = makeRoom.startBackgroundCheck.mock.calls[0];
     expect(arg).toMatchObject({
       mode: 'shadow', surface: 'estimate', estimateId: 'est-room-1', coords: { lat: 27.3364, lng: -82.5307 },
       dateFrom: '2027-05-20', dateTo: '2027-05-20',
@@ -134,7 +134,7 @@ describe('getAvailableSlots — make-room check wiring (GATE_BOOKING_MAKE_ROOM)'
   test('a caller that did not ask for an offer list never starts it', async () => {
     makeRoom.bookingMakeRoomMode.mockReturnValue('shadow');
     await getAvailableSlots('est-room-1', OPTS);
-    expect(makeRoom.recordMakeRoomCheck).not.toHaveBeenCalled();
+    expect(makeRoom.startBackgroundCheck).not.toHaveBeenCalled();
   });
 
   test('a cache hit does not start it again', async () => {
@@ -142,17 +142,17 @@ describe('getAvailableSlots — make-room check wiring (GATE_BOOKING_MAKE_ROOM)'
     await getAvailableSlots('est-room-1', OFFER);
     const second = await getAvailableSlots('est-room-1', OFFER);
     expect(second.metadata.cacheHit).toBe(true);
-    expect(makeRoom.recordMakeRoomCheck).toHaveBeenCalledTimes(1);
+    expect(makeRoom.startBackgroundCheck).toHaveBeenCalledTimes(1);
   });
 
   test('a failing or never-ending check never touches the list', async () => {
     const baseline = keys(await getAvailableSlots('est-room-1', OFFER));
     estimateSlotAvailability._internals.clearCaches();
     makeRoom.bookingMakeRoomMode.mockReturnValue('shadow');
-    makeRoom.recordMakeRoomCheck.mockRejectedValue(new Error('boom'));
+    makeRoom.startBackgroundCheck.mockRejectedValue(new Error('boom'));
     expect(keys(await getAvailableSlots('est-room-1', OFFER))).toEqual(baseline);
     estimateSlotAvailability._internals.clearCaches();
-    makeRoom.recordMakeRoomCheck.mockImplementation(() => new Promise(() => {}));
+    makeRoom.startBackgroundCheck.mockImplementation(() => new Promise(() => {}));
     expect(keys(await getAvailableSlots('est-room-1', OFFER))).toEqual(baseline);
   });
 });
