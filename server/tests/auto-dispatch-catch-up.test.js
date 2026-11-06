@@ -1,5 +1,5 @@
 /**
- * 5:00 AM auto-dispatch catch-up (GATE_AUTO_DISPATCH_CATCH_UP, owner 2026-10-26).
+ * 5:00 AM auto-dispatch catch-up (owner 2026-10-26).
  * The 04:10 run is cut off by a deploy restart (2026-09-03, 2026-10-26); the
  * catch-up settles the dead cron row and runs the night tool once more.
  */

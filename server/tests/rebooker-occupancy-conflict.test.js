@@ -822,7 +822,6 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     jest.restoreAllMocks();
     if (originalPlacementGate === undefined) delete process.env.GATE_CUSTOMER_RECURRING_DISPATCH;
     else process.env.GATE_CUSTOMER_RECURRING_DISPATCH = originalPlacementGate;
-    delete process.env.GATE_SERIES_MOVE_SKIP_CLOSED_DAYS;
   });
   beforeEach(() => {
     jest.clearAllMocks();
@@ -952,11 +951,10 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
         .mockResolvedValue({ has: date => date !== TARGET });
     }
     // Owner 2026-10-24 ("FIX"): a customer web move put an untimed hand-off on
-    // Christmas. With GATE_SERIES_MOVE_SKIP_CLOSED_DAYS on, the next visit's
-    // closed cadence date moves to the next open day, due date included.
+    // Christmas. The next visit's closed cadence date moves to the next open
+    // day, due date included.
     let closedCadenceDate = null;
     if (actor === 'customer_closed_day') {
-      process.env.GATE_SERIES_MOVE_SKIP_CLOSED_DAYS = 'true';
       closedCadenceDate = SmartRebooker.nextRecurringDate(TARGET, 'quarterly', 1, SmartRebooker.recurrenceOrdinalOptions(TARGET));
       const blackout = require('../services/scheduling/blackout-dates');
       jest.spyOn(blackout, 'getBlackoutLayers')

@@ -899,8 +899,8 @@ function initScheduledJobs() {
           // proofreader's own gate is off.
           const moveCheckClosed = await require('./auto-dispatch/proofreader/nightly').closeNotices(new Date(), { enabled: getAutoDispatchConfig().proofreaderEnabled === true });
           if (!moveCheckClosed) failures.push(new Error('move-check notice close failed'));
-          // The move-check-down notice by the same rule: it closes when its
-          // gate or the check is off; with no run, nothing else changes it.
+          // The move-check-down notice by the same rule: it closes when the
+          // check is off; with no run, nothing else changes it.
           const checkDown = await require('./auto-dispatch/check-down-notice').noteRun(null, { enabled: getAutoDispatchConfig().proofreaderEnabled === true, nowDate: new Date() });
           if (checkDown.action === 'error') failures.push(new Error('move-check-down notice upkeep failed'));
           if (failures.length) throw failures[0];
@@ -975,16 +975,15 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY MIN — Bundled tech pushes (GATE_TECH_PUSH_BUNDLE). A burst of
+  // EVERY MIN — Bundled tech pushes. A burst of
   // visit changes (an office script, many single moves in a row) sends each
   // tech ONE push once their changes go quiet, not one per visit. Registered
-  // before the GATE_CRON_JOBS return below, like the reconcile above: with
-  // the bundle gate on, deliver() holds pushes whether or not cron jobs run,
+  // before the GATE_CRON_JOBS return below, like the reconcile above:
+  // deliver() holds pushes whether or not cron jobs run,
   // and only this sweep sends them (Codex #6459 r2). No runExclusive on
   // purpose: each tech's cards are claimed in one UPDATE under the sweep's own
   // token, so overlapping deploy instances never push the same cards, and no
-  // lock is held across a push (owner ruling 2026-09-30, #5421). It runs with
-  // the gate off too, so cards held before a flip still go out.
+  // lock is held across a push (owner ruling 2026-09-30, #5421).
   // =========================================================================
   cron.schedule('* * * * *', async () => {
     try {
@@ -1986,17 +1985,13 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 5:00AM — Auto-Dispatch CATCH-UP (GATE_AUTO_DISPATCH_CATCH_UP, dark;
-  // owner 2026-10-26). A deploy that restarts the server during the 4:10 run
+  // DAILY 5:00AM — Auto-Dispatch CATCH-UP (owner 2026-10-26). A deploy that restarts the server during the 4:10 run
   // cuts it off: it moves nothing and nothing re-runs it (2026-09-03,
   // 2026-10-26). If today has no finished night run, this job settles the
   // dead cron run row and runs the night tool once more (triggered_by
   // 'catch_up', at most one a day). It holds the same writer lock as 4:10.
-  // Gate off: returns before any database read.
   // =========================================================================
   cron.schedule('0 5 * * *', async () => {
-    // Call-time read so a Railway var flip takes effect on the next tick.
-    if (!require('../config/feature-gates').autoDispatchCatchUpLive()) return;
     if (!isEnabled('cronJobs') || !isEnabled('autoDispatch')) return;
     try {
       await runExclusive('auto-dispatch-catch-up', async () => {

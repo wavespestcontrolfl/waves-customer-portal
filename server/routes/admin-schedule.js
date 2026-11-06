@@ -1193,10 +1193,10 @@ function planSeriesExtendDates({ baseDateStr, pattern, rOpts, skip, dir, seen, n
 // 2026-10-22). Staff writes never block on conflicts (owner 2026-08-25,
 // guardRecurrenceDestination), and a plan visit whose hour another stop holds
 // goes in WITHOUT a time for auto-dispatch to place (owner 2026-10-22, audit
-// D4; GATE_PLAN_TAKEN_HOUR_HANDOFF, scheduling/plan-taken-hour.js). Returns
+// D4; scheduling/plan-taken-hour.js). Returns
 // the hand-off fields to merge into the insert, or none, logging what it
-// books through: the customer's own stop in the hour (one trip) or, gate off
-// or too near, another visit. Windowless templates carry no occupancy and
+// books through: the customer's own stop in the hour (one trip) or, too
+// near, another visit. Windowless templates carry no occupancy and
 // probe nothing (module convention). `tag` names the writer in the log
 // ([recurring], [recurring-topup], [recurring-alerts]).
 // DELIBERATELY probe-only, never a commit gate: these writers run under the

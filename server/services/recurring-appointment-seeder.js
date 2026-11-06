@@ -1586,10 +1586,10 @@ async function seedFollowUpsForParent(conn, inputParent, inputOpts = {}) {
       }
     }
   }
-  // Taken hour (GATE_PLAN_TAKEN_HOUR_HANDOFF; owner 2026-10-22, audit D4): a
+  // Taken hour (owner 2026-10-22, audit D4): a
   // follow-up whose hour another stop already holds is seeded WINDOWLESS
   // with its date as recurring_dispatch_due_date, and auto-dispatch places
-  // it (scheduling/plan-taken-hour.js). Gate off: no read, rows unchanged.
+  // it (scheduling/plan-taken-hour.js).
   // The insert lines below stay untouched.
   rows = await require('./scheduling/plan-taken-hour').handOffTakenHours(conn, rows, { cols: columns });
 
