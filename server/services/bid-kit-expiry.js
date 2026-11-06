@@ -1,10 +1,9 @@
 'use strict';
 
-// Bid kit daily expiry check (GATE_BID_KIT, dark). Once a day, in the 6 a.m. ET compliance slot, one admin bell per kit
+// Bid kit daily expiry check. Once a day, in the 6 a.m. ET compliance slot, one admin bell per kit
 // item that expired or expires within 30 days, once a week per item. The bell closes when the item is renewed (its date
 // moves out of the window) or archived, at once on the save and again on the daily run. The audience is the admin bell
-// only; nothing is sent to a customer, an agency or anyone else. Gate off = the job returns before any query.
-const { bidKitLive } = require('../config/feature-gates');
+// only; nothing is sent to a customer, an agency or anyone else.
 const crypto = require('node:crypto');
 const db = require('../models/db');
 const store = require('./bid-kit-store');
@@ -96,7 +95,7 @@ async function closeBells(conn, keys, reason) {
 // lock). Closes the item's open bell when the fresh row no longer qualifies. A failure never fails the save: the daily job
 // closes it on its next run.
 async function syncExpiryBell(item, { now = new Date() } = {}) {
-  if (!bidKitLive() || !item || !item.id) return { skipped: 'gate_off' };
+  if (!item || !item.id) return { skipped: 'no_item' };
   const today = catalog.etToday(now);
   let result;
   try {
@@ -222,9 +221,8 @@ async function syncOverflowRow(candidateIds, today, { onlyIfListed = null } = {}
 
 // The daily job. Per run it raises at most MAX_NEW_BELLS per-item bells (expired first, then soonest expiry); items with no
 // open bell that did not fit become the standing count. Every open bell whose item no longer qualifies is closed.
-// Returns { skipped } with the gate off; otherwise { scanned, rang, closed, overflow }.
+// Returns { scanned, rang, closed, overflow }.
 async function runBidKitExpiryCheck({ now = new Date() } = {}) {
-  if (!bidKitLive()) return { skipped: 'gate_off' };
   const today = catalog.etToday(now);
   let rows;
   try {

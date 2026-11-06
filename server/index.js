@@ -1180,7 +1180,7 @@ app.use('/api/admin/sms-templates', require('./routes/admin-sms-templates'));
 app.use('/api/admin/email', require('./routes/admin-email'));
 // Bid Desk (GATE_BID_DESK, dark): the router answers 404 for every path while the gate is off.
 app.use('/api/admin/bid-desk', require('./routes/admin-bid-desk'));
-// Bid kit (GATE_BID_KIT, dark): the router answers 404 for every path while the gate is off.
+// Bid kit (admin only).
 app.use('/api/admin/bid-kit', require('./routes/admin-bid-kit'));
 // Trip link summary (GATE_TRIP_LINK, dark): the router answers 404 for every path while the gate is off.
 app.use('/api/admin/trip-link', require('./routes/admin-trip-link'));

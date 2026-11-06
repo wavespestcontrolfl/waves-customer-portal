@@ -2618,12 +2618,12 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // DAILY 7:25 AM ET — Bid Desk SAM.gov reader (GATE_BID_DESK_SAM, dark; needs GATE_BID_DESK and SAM_GOV_API_KEY):
+  // DAILY 7:25 AM ET — Bid Desk SAM.gov reader (needs GATE_BID_DESK and SAM_GOV_API_KEY):
   // files federal pest control and grounds notices from the official SAM.gov Opportunities API as bid opportunities
   // and rings one admin notification per new bid. Two API calls a day. No AI call; it sends nothing to an agency,
-  // contractor or customer. The gate is read per run, so a flip or an unset needs no restart.
+  // contractor or customer. GATE_BID_DESK is read per run, so a flip or an unset needs no restart.
   cron.schedule('0 25 7 * * *', async () => {
-    if (!require('../config/feature-gates').bidDeskSamLive()) return;
+    if (!require('../config/feature-gates').bidDeskLive()) return;
     try {
       const lockRes = await runExclusive('bid-desk-sam', async () => {
         const result = await require('./bid-desk/sam-gov').runSamGovPoll();
@@ -8676,7 +8676,7 @@ function initScheduledJobs() {
   // DAILY 6AM ET — Credential expiry check (credentials v1 §7)
   // Scans business_credentials for anything expiring within 60 days; fires a
   // `credential_expiring_soon` notification per credential (deduped 7d). The Bid kit
-  // expiry check (GATE_BID_KIT, dark) rides the same slot.
+  // expiry check rides the same slot.
   // =========================================================================
   cron.schedule('5 6 * * *', async () => {
     logger.info('Running: Credential expiry check');
@@ -8686,8 +8686,8 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Credential expiry check failed: ${err.message}`);
     }
-    // Bid kit (GATE_BID_KIT, dark): one admin bell per kit paper that expired or expires within 30 days, once a week each.
-    // Gate off = returns before any query. Admin bell only. runExclusive: the sweep reads open bells, then rings at most
+    // Bid kit: one admin bell per kit paper that expired or expires within 30 days, once a week each.
+    // Admin bell only. runExclusive: the sweep reads open bells, then rings at most
     // three; a deploy overlap must not run two sweeps that each ring three.
     try {
       await runExclusive('bid-kit-expiry', async () => {

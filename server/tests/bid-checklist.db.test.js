@@ -1,4 +1,4 @@
-// Bid Desk checklist (GATE_BID_CHECKLIST) through PostgreSQL: the migration (down, up, up again), the new bid fields, the
+// Bid Desk checklist through PostgreSQL: the migration (down, up, up again), the new bid fields, the
 // estimate link, the documents, the checklist routes, and the 14-day, questions and job-walk reminders with their
 // invariants. Every write runs in a transaction that is rolled back. Synthetic senders, projects and files only.
 // Skips without DATABASE_URL (CI runs it against the migrated database).
@@ -67,7 +67,6 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
   });
   beforeEach(async () => {
     mockPg = await database.transaction();
-    process.env.GATE_BID_CHECKLIST = 'true';
     delete global.__actorId;
     raiseAdminAlertWithReopen.mockReset();
     raiseAdminAlertWithReopen.mockImplementation(async (_category, headline, why) => { expect(headline.length).toBeGreaterThan(0); expect(why.length).toBeGreaterThan(0); return { id: randomUUID(), deduped: false, rang: true }; });
@@ -75,7 +74,6 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
   afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => {
     delete process.env.GATE_BID_DESK;
-    delete process.env.GATE_BID_CHECKLIST;
     if (server) await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     if (database) await database.destroy();
   });
@@ -139,40 +137,12 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
     });
   });
 
-  describe('gate off', () => {
-    beforeEach(() => { delete process.env.GATE_BID_CHECKLIST; });
-
-    test('the new fields are refused, the checklist routes answer 404, and the replies carry no new keys', async () => {
-      const bidId = await newBid();
-      const before = await bidRow(bidId);
-      expect((await call('PATCH', `/${bidId}`, { solicitationType: 'rfp' })).status).toBe(400);
-      expect((await call('PATCH', `/${bidId}`, { jobWalkMandatory: true })).status).toBe(400);
-      expect((await call('POST', `/${bidId}/checklist/start`, {})).status).toBe(404);
-      expect((await call('GET', '/estimates?q=Fixture')).status).toBe(404);
-      expect(await items(bidId)).toHaveLength(0);
-      const detail = await call('GET', `/${bidId}`);
-      expect(Object.keys(detail.body).sort()).toEqual(['bid', 'emails']);
-      for (const key of ['solicitation_type', 'scored', 'estimate_id', 'submitted_at', 'checklist_progress']) expect(detail.body.bid).not.toHaveProperty(key);
-      const list = await call('GET', '/');
-      expect(list.body).not.toHaveProperty('checklist_live');
-      expect(list.body.bids[0]).not.toHaveProperty('checklist_progress');
-      expect(await bidRow(bidId)).toEqual(before);
-    });
-
-    test('the original fields still save, and a changed walk or questions date still clears its stamp', async () => {
+  describe('snake_case date fields', () => {
+    test('the snake_case date fields save, and a changed walk or questions date clears its stamp', async () => {
       const bidId = await newBid({ job_walk_reminder_sent_at: NOW, questions_reminder_sent_at: NOW });
       const res = await call('PATCH', `/${bidId}`, { job_walk_at: '2026-10-10T09:00', questions_due_at: '2026-10-08T17:00', decision_note: 'x' });
       expect(res.status).toBe(200);
       expect(await bidRow(bidId)).toMatchObject({ job_walk_reminder_sent_at: null, questions_reminder_sent_at: null });
-    });
-
-    test('only the 7-day and 2-day reminders fire, and the date reminders do not', async () => {
-      await newBid({ due_at: new Date(NOW.getTime() + 10 * DAY), due_confirmed: true, questions_due_at: new Date(NOW.getTime() + 1 * DAY), job_walk_at: new Date(NOW.getTime() + 1 * DAY) });
-      expect(await service.sendDueReminders({ now: NOW })).toBe(0);
-      expect(raiseAdminAlertWithReopen).not.toHaveBeenCalled();
-      const soon = await newBid({ due_at: new Date(NOW.getTime() + 6 * DAY), due_confirmed: true });
-      expect(await service.sendDueReminders({ now: NOW })).toBe(1);
-      expect(rungKeys()).toEqual([`bid-desk:remind:${soon}:7d:${(await bidRow(soon)).due_at.toISOString()}`]);
     });
   });
 
@@ -191,7 +161,6 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       expect(row.job_walk_at.toISOString()).toBe('2026-10-09T13:30:00.000Z');
       expect(row.submitted_at.toISOString()).toBe('2026-10-19T19:45:00.000Z');
       const detail = (await call('GET', `/${bidId}`)).body;
-      expect(detail.checklist_live).toBe(true);
       expect(detail.bid).toMatchObject({ solicitation_type: 'itb', scored: false, estimate_id: est.id });
       expect(detail.estimate).toEqual({ id: est.id, slug: 'EST-1001', name: 'Fixture Build Co', status: 'draft', proposal_path: `/admin/estimates/${est.id}/proposal` });
       // null clears.
@@ -230,7 +199,6 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       const [first] = await items(bidId);
       await call('PATCH', `/${bidId}/checklist/${first.id}`, { checked: true });
       const list = (await call('GET', '/')).body;
-      expect(list.checklist_live).toBe(true);
       expect(list.bids.find((b) => b.id === bidId).checklist_progress).toEqual({ checked: 1, required: 18 });
     });
   });
@@ -595,13 +563,6 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
         expect((await bidRow(id)).job_walk_confirmed).toBe(false);
       });
 
-      test('the gate off refuses jobWalkConfirmed and leaves the flag alone', async () => {
-        const id = await newBid({ job_walk_at: at(2), job_walk_confirmed: false });
-        delete process.env.GATE_BID_CHECKLIST;
-        expect((await call('PATCH', `/${id}`, { jobWalkConfirmed: true })).status).toBe(400);
-        expect((await bidRow(id)).job_walk_confirmed).toBe(false);
-        expect((await call('GET', `/${id}`)).body.bid).not.toHaveProperty('job_walk_confirmed');
-      });
     });
 
     test('clearing a date retires its reminder, and a decision closes them all', async () => {
@@ -620,7 +581,7 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       expect([await cleared(keys.walk), await cleared(keys.due)]).toEqual([true, true]);
     });
 
-    test('with the gate off, an open questions bell and job-walk bell still close on a date change and when the bid is decided; nothing new rings', async () => {
+    test('an open questions bell and job-walk bell close on a date change and when the bid is decided; nothing new rings', async () => {
       const id = await newBid({ due_at: at(10), due_confirmed: true, questions_due_at: at(1), job_walk_at: at(1), job_walk_confirmed: true });
       const row = await bidRow(id);
       const keys = {
@@ -631,11 +592,7 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       const ring = async () => { for (const key of Object.values(keys)) await mockPg('notifications').insert({ recipient_type: 'admin', category: 'lead', title: 't', body: 'b', metadata: JSON.stringify({ dedupeKey: key }) }); };
       const wall = (date) => new Date(date.getTime() - 4 * 60 * 60 * 1000).toISOString().slice(0, 16); // ET wall time in October
 
-      // The bells rang while the gate was on; the gate is turned off afterwards.
       await ring();
-      delete process.env.GATE_BID_CHECKLIST;
-      expect(await service.sendDueReminders({ now: NOW })).toBe(0); // no new reminder while off
-      expect(raiseAdminAlertWithReopen).not.toHaveBeenCalled();
 
       // A changed questions date (the original key) closes only the questions bell; the site-visit date likewise.
       expect((await call('PATCH', `/${id}`, { questions_due_at: wall(at(1.5)) })).status).toBe(200);
@@ -679,12 +636,9 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
       expect((await call('PATCH', `/${id}`, { confirm_due: true, expected_updated_at: after })).status).toBe(409);
     });
 
-    test('a tick of the job with the gate on runs the new reminders; with it off it does not', async () => {
+    test('a tick of the job runs the date reminders', async () => {
       await newBid({ questions_due_at: at(1) });
       await mockPg('system_settings').where({ key: service.WATERMARK_KEY }).del();
-      delete process.env.GATE_BID_CHECKLIST;
-      expect((await service.runBidDeskTick({ now: NOW })).reminders).toBe(0);
-      process.env.GATE_BID_CHECKLIST = 'true';
       expect((await service.runBidDeskTick({ now: NOW })).reminders).toBe(1);
     });
 

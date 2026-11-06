@@ -26,9 +26,7 @@ async function closeDoneAlerts(conn, bidId, before, after) {
     prefixes.push(`bid-desk:remind:${bidId}:`);
     reason.push('due_date_changed');
   }
-  // GATE_BID_CHECKLIST reminders: a changed or cleared date retires the reminder sent for the old one. This cleanup
-  // is NOT behind the gate: the gate stops NEW reminders only, and a bell rung while it was on must still close when
-  // the date changes or the bid is decided after it is turned off (turning it back on cannot repair a bell left open).
+  // Questions and job-walk reminders: a changed or cleared date retires the reminder sent for the old one.
   const at = (row, key) => (row[key] ? new Date(row[key]).getTime() : null);
   if (at(before, 'questions_due_at') !== at(after, 'questions_due_at')) {
     prefixes.push(`bid-desk:remind-questions:${bidId}:`);

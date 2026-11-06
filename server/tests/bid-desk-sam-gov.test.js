@@ -1,4 +1,4 @@
-// Bid Desk SAM.gov reader (GATE_BID_DESK_SAM, dark). The mapping is pure; the poll is checked for its gate, its key
+// Bid Desk SAM.gov reader. The mapping is pure; the poll is checked for its gate, its key
 // check and its error text with a mocked database and a fake fetch. No network, no real database.
 const mockDb = jest.fn(() => { throw new Error('the database must not be touched'); });
 jest.mock('../models/db', () => {
@@ -123,18 +123,8 @@ describe('deadlines', () => {
 });
 
 describe('runSamGovPoll', () => {
-  test('gate off: no request, no database', async () => {
-    process.env.GATE_BID_DESK = 'true';
-    delete process.env.GATE_BID_DESK_SAM;
-    const fetchImpl = jest.fn();
-    expect(await sam.runSamGovPoll({ now: NOW, fetchImpl, apiKey: 'k' })).toEqual({ skipped: 'gate_off' });
-    expect(fetchImpl).not.toHaveBeenCalled();
-    expect(mockDb).not.toHaveBeenCalled();
-  });
-
-  test('the SAM gate alone is not enough: the Bid Desk gate must be on too', async () => {
+  test('Bid Desk gate off: no request, no database', async () => {
     delete process.env.GATE_BID_DESK;
-    process.env.GATE_BID_DESK_SAM = 'true';
     const fetchImpl = jest.fn();
     expect(await sam.runSamGovPoll({ now: NOW, fetchImpl, apiKey: 'k' })).toEqual({ skipped: 'gate_off' });
     expect(fetchImpl).not.toHaveBeenCalled();
@@ -142,7 +132,6 @@ describe('runSamGovPoll', () => {
 
   test('no API key: no request, no database', async () => {
     process.env.GATE_BID_DESK = 'true';
-    process.env.GATE_BID_DESK_SAM = 'true';
     const fetchImpl = jest.fn();
     expect(await sam.runSamGovPoll({ now: NOW, fetchImpl, apiKey: '  ' })).toEqual({ skipped: 'no_api_key' });
     expect(fetchImpl).not.toHaveBeenCalled();
@@ -203,15 +192,15 @@ describe('fetchAll', () => {
   });
 });
 
-test('the scheduler checks the SAM gate before the cron lock and logs only the safe error', () => {
+test('the scheduler checks the Bid Desk gate before the cron lock and logs only the safe error', () => {
   const source = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
   const at = source.indexOf("'0 25 7 * * *'");
   expect(at).toBeGreaterThan(-1);
   const block = source.slice(at, at + 1700);
-  expect(block.indexOf('bidDeskSamLive()')).toBeGreaterThan(-1);
-  expect(block.indexOf('bidDeskSamLive()')).toBeLessThan(block.indexOf("runExclusive('bid-desk-sam'"));
+  expect(block.indexOf('bidDeskLive()')).toBeGreaterThan(-1);
+  expect(block.indexOf('bidDeskLive()')).toBeLessThan(block.indexOf("runExclusive('bid-desk-sam'"));
   expect(block).toContain('runSamGovPoll');
   expect(block).toContain('safeError(err)');
-  // Both gates on with no key is a failed run in job health, not a quiet success.
+  // Gate on with no key is a failed run in job health, not a quiet success.
   expect(block.indexOf("result.skipped === 'no_api_key'")).toBeGreaterThan(block.indexOf('runSamGovPoll'));
 });

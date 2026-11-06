@@ -1,6 +1,6 @@
 # Bid kit
 
-Admin-only page at `/admin/bid-kit`, behind `GATE_BID_KIT` (dark; see `docs/gates-and-env.md`). One place for the papers and company facts every government bid asks for, so a bid is not rejected for a missing paper. Evidence: Sarasota County Schools bid 24-0118 (May 2024) rejected 3 of 5 bids, the lowest included, for a missing business license copy, state employee ID cards, the certified operator's certificate and renewal, a notarized statement that the certified operator works full-time for the bidder, and the product list.
+Admin-only page at `/admin/bid-kit`, a tab of `Bids` (see `docs/gates-and-env.md`). One place for the papers and company facts every government bid asks for, so a bid is not rejected for a missing paper. Evidence: Sarasota County Schools bid 24-0118 (May 2024) rejected 3 of 5 bids, the lowest included, for a missing business license copy, state employee ID cards, the certified operator's certificate and renewal, a notarized statement that the certified operator works full-time for the bidder, and the product list.
 
 ## What it holds
 
@@ -10,7 +10,7 @@ Each row keeps: its private file, limits (insurance, whole dollars), source docu
 
 ## Never public
 
-- Nothing here is on the website or in `/api/public/credentials`. Every route needs an admin login and answers 404 while the gate is off.
+- Nothing here is on the website or in `/api/public/credentials`. Every route needs an admin login.
 - A file is stored privately in S3 and opens only through a signed link that lasts 5 minutes. No route returns a stored key. The stored object and the signed response both say `private, no-store`, so no browser or proxy cache keeps the file after the link expires.
 - Nothing is sent to an agency, a customer or anyone else. The only notice is one admin bell per paper that expired or expires within 30 days, at most once a week per paper. A daily run raises at most 3 new bells (expired first, then soonest expiry); any more are one quiet standing count on the Activity feed with the list under Show full text, rewritten quietly when the count changes (also right after a listed paper is saved, renewed or archived) and closed when it reaches zero; a later count is a new quiet row, never the closed one rung again (docs/admin-notifications.md rule 3). Past the 3, a paper that already has a bell still has its words refreshed, without ringing.
 - The activity log (who changed what) never holds a custom item's label, value, notes or details: a catalog item is named by its catalog label, a custom item as "custom item", and an edit lists only the names of the fields whose stored values changed (the editor sends every field; a save that changes nothing names none).

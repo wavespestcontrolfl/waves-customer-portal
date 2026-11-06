@@ -22,7 +22,7 @@ const bid = (over = {}) => ({
 });
 const line = (over = {}) => ({ id: "i1", label: "Example required document", position: 1, section: "base", required: true, checked_at: null, notes: "", ...over });
 const detail = (lines = [line()]) => ({
-  bid: bid(), emails: [], checklist_live: true, checklist: lines, checklist_progress: { checked: 0, required: lines.length, total: lines.length }, estimate: null, documents: [],
+  bid: bid(), emails: [], checklist: lines, checklist_progress: { checked: 0, required: lines.length, total: lines.length }, estimate: null, documents: [],
 });
 const renderPage = (url = "/?bid=b1") => render(<MemoryRouter initialEntries={[url]}><BidDeskPage /></MemoryRouter>);
 const NOTE = "Note: Example required document";
@@ -39,7 +39,7 @@ afterEach(() => cleanup());
 
 it("scrolls to the bid and focuses its heading after Open, and gives focus back to the row on Close", async () => {
   adminFetch.mockImplementation((path) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1") return reply(detail());
     throw new Error(`Unexpected ${path}`);
   });
@@ -57,7 +57,7 @@ it("scrolls to the bid and focuses its heading after Open, and gives focus back 
 
 it("does the same for a direct ?bid= link, and not again when the bid reloads", async () => {
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1" && options.method === "PATCH") return reply({ ok: true, bid: bid({ status: "bid" }) });
     if (path === "/admin/bid-desk/b1") return reply(detail());
     throw new Error(`Unexpected ${path}`);
@@ -76,7 +76,7 @@ it("keeps a newer note draft when the earlier save's reload lands, and saves it 
   const releases = [];
   const saved = [];
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1") return reply(detail([line({ notes: stored })]));
     if (path === "/admin/bid-desk/b1/checklist/i1") {
       saved.push(options.body.notes);
@@ -106,7 +106,7 @@ it("shows the unconfirmed message and reloads when a checklist reply is lost, so
   let lines = [];
   let addCalls = 0;
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1") return reply(detail(lines));
     if (path === "/admin/bid-desk/b1/checklist" && options.method === "POST") {
       addCalls += 1;
@@ -126,7 +126,7 @@ it("shows the unconfirmed message and reloads when a checklist reply is lost, so
 
 it("keeps 'Not saved: ...' for a refusal the server sent", async () => {
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1") return reply(detail());
     if (path === "/admin/bid-desk/b1/checklist" && options.method === "POST") return reply({ error: "Invalid checklist update" }, 400);
     throw new Error(`Unexpected ${path}`);
@@ -141,7 +141,7 @@ it("keeps 'Not saved: ...' for a refusal the server sent", async () => {
 it("shows the unconfirmed message and reloads the bid when a bid save loses its reply", async () => {
   let reads = 0;
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1" && options.method === "PATCH") return Promise.reject(new TypeError("Failed to fetch"));
     if (path === "/admin/bid-desk/b1") { reads += 1; return reply(detail()); }
     throw new Error(`Unexpected ${path}`);
@@ -155,7 +155,7 @@ it("shows the unconfirmed message and reloads the bid when a bid save loses its 
 it("sends only the details the operator changed, and nothing when nothing changed", async () => {
   const patches = [];
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1" && options.method === "PATCH") { patches.push(options.body); return reply({ ok: true, bid: bid() }); }
     if (path === "/admin/bid-desk/b1") return reply(detail());
     throw new Error(`Unexpected ${path}`);
@@ -176,7 +176,7 @@ it("sends only the details the operator changed, and nothing when nothing change
 it("sends a changed type, judging and mandatory flag together", async () => {
   const patches = [];
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1" && options.method === "PATCH") { patches.push(options.body); return reply({ ok: true, bid: bid() }); }
     if (path === "/admin/bid-desk/b1") return reply(detail());
     throw new Error(`Unexpected ${path}`);
@@ -196,7 +196,7 @@ it.each([
   [500, { error: "Database busy" }, "Could not mark it: Database busy. Try again."],
 ])("Mark as bid with a %s answer says: %s", async (status, body, text) => {
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [] });
     if (path === "/admin/bid-desk/from-email" && options.method === "POST") return reply(body, status);
     throw new Error(`Unexpected ${path}`);
   });
@@ -210,7 +210,7 @@ it.each([
 
 it("Mark as bid with a dropped connection says it could not mark it, not that the id is wrong", async () => {
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [] });
     if (path === "/admin/bid-desk/from-email" && options.method === "POST") return Promise.reject(new TypeError("Failed to fetch"));
     throw new Error(`Unexpected ${path}`);
   });
@@ -227,7 +227,7 @@ it("keeps the row's controls usable while a note save is in flight, and sends on
   const releases = [];
   const ticks = [];
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1") return reply(detail());
     if (path === "/admin/bid-desk/b1/checklist/i1" && "notes" in options.body) {
       notePatches.push(options.body.notes);
@@ -262,7 +262,7 @@ it("sends a queued note draft even when a tick's reload brings back the older sa
   const notePatches = [];
   const releases = [];
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1") return reply(detail([line({ notes: stored })]));
     if (path === "/admin/bid-desk/b1/checklist/i1" && "notes" in options.body) {
       notePatches.push(options.body.notes);
@@ -294,7 +294,7 @@ it("sends a queued note draft even when a tick's reload brings back the older sa
 it("keeps a typed, unsaved due date when a decision save loses its reply and the bid reloads", async () => {
   let reads = 0;
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1" && options.method === "PATCH") return Promise.reject(new TypeError("Failed to fetch"));
     if (path === "/admin/bid-desk/b1") { reads += 1; return reply(detail()); }
     throw new Error(`Unexpected ${path}`);
@@ -311,7 +311,7 @@ it("keeps a typed, unsaved due date when a decision save loses its reply and the
 it("still sends a newer note draft queued behind a save that lost its reply", async () => {
   const notePatches = [];
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1") return reply(detail());
     if (path === "/admin/bid-desk/b1/checklist/i1" && "notes" in options.body) {
       notePatches.push(options.body.notes);
@@ -336,7 +336,7 @@ it("keeps the saves locked until the recovery reload after a lost reply has land
   let reads = 0;
   let releaseReload;
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1" && options.method === "PATCH") return Promise.reject(new TypeError("Failed to fetch"));
     if (path === "/admin/bid-desk/b1") {
       reads += 1;
@@ -356,7 +356,7 @@ it("keeps the saves locked until the recovery reload after a lost reply has land
 it("keeps an unsaved Decision note when a due-date save loses its reply, and re-reads only that date", async () => {
   let reads = 0;
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1" && options.method === "PATCH") return Promise.reject(new TypeError("Failed to fetch"));
     if (path === "/admin/bid-desk/b1") { reads += 1; return reply(detail()); }
     throw new Error(`Unexpected ${path}`);
@@ -379,7 +379,7 @@ it("shows a note changed on the server when its field has focus but no typing, a
   let releaseReload;
   const notePatches = [];
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1") {
       reads += 1;
       if (reads === 1) return reply(detail([line({ notes: stored })]));
@@ -408,7 +408,7 @@ it("shows a note changed on the server when its field has focus but no typing, a
 it("keeps the bid and every unsaved field on screen when the read after a lost reply fails too", async () => {
   let reads = 0;
   adminFetch.mockImplementation((path, options = {}) => {
-    if (path === "/admin/bid-desk/") return reply({ bids: [bid()], checklist_live: true });
+    if (path === "/admin/bid-desk/") return reply({ bids: [bid()] });
     if (path === "/admin/bid-desk/b1" && options.method === "PATCH") return Promise.reject(new TypeError("Failed to fetch"));
     if (path === "/admin/bid-desk/b1") {
       reads += 1;

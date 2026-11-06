@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Bid kit status beside the Bid Desk checklist lines: shown only while the bid_kit flag is on and the kit loads; the
+// Bid kit status beside the Bid Desk checklist lines: shown when the kit loads; the
 // checklist is unchanged otherwise; the panel never writes. Synthetic data only.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
@@ -7,9 +7,8 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-const { adminFetch, flag } = vi.hoisted(() => ({ adminFetch: vi.fn(), flag: { on: true } }));
+const { adminFetch } = vi.hoisted(() => ({ adminFetch: vi.fn() }));
 vi.mock("../../lib/adminFetch", () => ({ adminFetch }));
-vi.mock("../../hooks/useFeatureFlag", () => ({ useFeatureFlag: (key) => (key === "bid_kit" ? flag.on : false) }));
 
 import BidChecklistPanel from "./BidChecklistPanel";
 
@@ -31,7 +30,7 @@ const kitReply = () => ({
 const renderPanel = () => render(<MemoryRouter><BidChecklistPanel bidId="b1" bid={bid} extras={extras} save={vi.fn()} busy={false} invite={false} /></MemoryRouter>);
 const writes = () => adminFetch.mock.calls.filter(([, options]) => options && options.method && options.method !== "GET");
 
-beforeEach(() => { adminFetch.mockReset(); flag.on = true; });
+beforeEach(() => { adminFetch.mockReset(); });
 afterEach(() => cleanup());
 
 it("shows a pill on each line that needs a kit paper, linked to the kit item, and nothing on the others", async () => {
@@ -49,15 +48,6 @@ it("shows a pill on each line that needs a kit paper, linked to the kit item, an
   for (const label of ["Line 1", "Line 2", "Line 3", "Typed line", "Line 5"]) expect(screen.getByLabelText(label)).not.toBeChecked();
   expect(adminFetch.mock.calls.map(([path]) => path)).toEqual(["/admin/bid-kit"]);
   expect(writes()).toEqual([]);
-});
-
-it("does not read the kit and shows no pills while the bid_kit flag is off", async () => {
-  flag.on = false;
-  adminFetch.mockImplementation(() => reply({}, { ok: false, status: 500 }));
-  renderPanel();
-  await screen.findByLabelText("Line 1");
-  expect(screen.queryAllByTestId("kit-pill")).toHaveLength(0);
-  expect(adminFetch).not.toHaveBeenCalled();
 });
 
 it("shows the checklist as before, with no pills and no banner, when the kit request fails", async () => {

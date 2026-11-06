@@ -1,5 +1,5 @@
-// Bid kit daily expiry check (GATE_BID_KIT): one admin bell per item that expired or expires within 30 days, deduped per
-// item for 7 days, admin bell only, nothing at all with the gate off. The store and the bell are stand-ins here
+// Bid kit daily expiry check: one admin bell per item that expired or expires within 30 days, deduped per
+// item for 7 days, admin bell only. The store and the bell are stand-ins here
 // (the SQL runs in bid-kit.db.test.js); every spec is composed by the real notification rules.
 const mockRows = [];
 // What a re-read under the lock returns: a row a test changed after the snapshot, else the snapshot's own row.
@@ -44,19 +44,10 @@ beforeEach(() => {
   mockRows.length = 0;
   mockFresh.clear();
   jest.clearAllMocks();
-  process.env.GATE_BID_KIT = 'true';
   raiseAdminAlert.mockImplementation(async () => ({ id: 'n1', deduped: false, rang: true }));
   episodes.openAdminAlertKeys.mockResolvedValue([]);
   episodes.openAdminAlertMetadata.mockResolvedValue([]);
   episodes.closeAdminAlertKeys.mockResolvedValue(0);
-});
-afterEach(() => { delete process.env.GATE_BID_KIT; });
-
-test('gate off: nothing is read and nothing rings', async () => {
-  delete process.env.GATE_BID_KIT;
-  expect(await runBidKitExpiryCheck({ now: NOW })).toEqual({ skipped: 'gate_off' });
-  expect(store.listItems).not.toHaveBeenCalled();
-  expect(raiseAdminAlert).not.toHaveBeenCalled();
 });
 
 test('it rings for an expired item and an item expiring within 30 days, and for nothing else', async () => {
@@ -182,9 +173,8 @@ describe('bells close when the paper no longer needs renewing', () => {
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 
-  test('with the gate off the save path closes nothing and touches nothing', async () => {
-    delete process.env.GATE_BID_KIT;
-    expect(await syncExpiryBell(present(item(ID(1), { expires_on: '2027-10-01' })), { now: NOW })).toEqual({ skipped: 'gate_off' });
+  test('with no item the save path closes nothing and touches nothing', async () => {
+    expect(await syncExpiryBell(null, { now: NOW })).toEqual({ skipped: 'no_item' });
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 

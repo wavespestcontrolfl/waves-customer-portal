@@ -1,4 +1,4 @@
-// Bid Desk SAM.gov reader (GATE_BID_DESK_SAM) through PostgreSQL: the migration (down, up), filing a notice once, the
+// Bid Desk SAM.gov reader through PostgreSQL: the migration (down, up), filing a notice once, the
 // cursor, the one notification per new bid and its retry. A fake fetch stands in for SAM.gov. Every write runs in a
 // transaction that is rolled back. Synthetic notices only. Skips without DATABASE_URL (CI runs it).
 const SKIP = !process.env.DATABASE_URL;
@@ -66,7 +66,6 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } });
     mockPg = database;
     process.env.GATE_BID_DESK = 'true';
-    process.env.GATE_BID_DESK_SAM = 'true';
   });
   beforeEach(async () => {
     mockPg = await database.transaction();
@@ -78,7 +77,6 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
   afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => {
     delete process.env.GATE_BID_DESK;
-    delete process.env.GATE_BID_DESK_SAM;
     if (database) await database.destroy();
   });
 
