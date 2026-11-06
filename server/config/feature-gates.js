@@ -136,6 +136,7 @@
  *     call time via callCancelGuardLive(), strict 'true', dark by default.)
  *   GATE_AI_CHANGE_CHECK=true (owner 2026-10-30, "all": before-and-after AI check for every content change. The daily impact tracker compares how often AI answers cited a changed page in the 14 days before its deploy with the 14 days after, adjusted for site-wide Waves citations, and stores gained / lost / flat / no_data on the content_optimization_impact row. A "lost" verdict adds one FIX leg to the impact digest (also needs GATE_IMPACT_DIGEST), at most one email a day. Reads seo_llm_mentions that the daily prober already stored; fires no probes, costs $0, sends nothing to a customer. Read at call time via aiChangeCheckLive(), strict 'true', dark by default; off = no check runs and the digest has no such leg.)
  *   GATE_SAME_QUESTION_CHECK=true (content engine, owner 2026-10-30 "all": before a NEW supporting blog is drafted, topic-targeting-gate looks for a live post whose title, slug or primary keyword already holds every topic word of the brief's keyword (geo and framing words dropped, singular/plural folded; a one-word topic blocks only when at most 3 live posts hold it and it is not a broad pest or service word like termite or lawn). Off = the rule runs in shadow: it records run.topic_targeting_result.same_question and logs, and never blocks. On = the row is skipped by design (topic_targeting:TOPIC_SAME_QUESTION_LIVE) and one same_question_refresh row is queued against the owner page, which adds the candidate question as an answer block (ANSWER-GAP MODE) through the normal refresh chain: protected pages, in-flight page edit and the 28-day page cooldown still apply. Strict opt-in: exactly 'true', read at call time via sameQuestionCheckLive(). Ships DARK. Off also stops same_question_refresh rows already queued from being claimed (opportunity-queue lane fence); they wait and expire unclaimed after 60 days.)
+ *   GATE_CONTENT_PII_ALL_LANES=true (security audit run 3, 2026-11-05, fix E: the autonomous content engine's deterministic body privacy check (phones, emails, names, street addresses; `redaction_passed` in services/content/content-quality-gate.js) ran only on city-service and customer-question drafts. On, it also runs on supporting-blog and refresh drafts; a draft that fails holds for review through the existing hard-failure path and never publishes. On also stops the brief (`customer_signal`) and the get_customer_questions tool from passing `example_phrasing_anonymized` and `redaction_confidence` (a customer's own words with regex redaction only) to the writer and refresher agents; the topic (`normalized_question`) still goes. Sends nothing to a customer. Strict 'true', read at call time via contentPiiAllLanesLive(); dark by default; off = byte-identical to before. Kill switch: unset.)
  *   GATE_PORTAL_INBOX=true (owner 2026-10-31, option A: a Portal tab in Admin > Communications lists what customers asked for inside the customer portal and nobody answered: portal chat hand-offs (ai_escalations from a portal_chat session still pending) and customer service requests not yet resolved, closed or cancelled and not made by staff. Shows the last 14 days; older open items sit under one Older line with a Close all older button that closes them and sends nothing to customers. Mark handled on a row closes the item and the admin bell alerts raised for it. Admin only. Read at call time via portalInboxLive(), strict 'true', dark by default; off = the tab is hidden, the new routes answer enabled:false/404, and the escalation and request update routes close no alerts. Sends nothing to a customer.)
  *   GATE_PORTAL_ITEM_CLOSE=true (owner 2026-11-01, "do the fixes" after the inbound-requests audit: portal items close the way chat items do, and "Mark handled" in the Portal tab stops emailing the customer. (1) The Portal tab sends `quiet: true` on its request PATCH and the route then skips the customer's "Your Waves request was updated" email; Customer 360 sends no `quiet`, so its email is unchanged. (2) The admin bell raised for a portal request (doneWhen `request_answered`) closes once a person texted, called back, answered the call of, or emailed that customer after the bell. (3) The bell for an add-service request (trigger `bundle_quote_requested`) now carries its request id at the top of its metadata, so Mark handled closes it, and it closes once an estimate was handed to that customer after the bell. When the sweep closes a bell it also resolves that request row quietly (status resolved, an admin note such as "Answered by text"); it never sends the customer anything. Rides on GATE_ALERT_CONTACT_CLOSE for the contact close. Read at call time via portalItemCloseLive(), strict 'true', dark by default; off = today's behavior, byte for byte.)
  *   GATE_PORTAL_LATE_RERING=true (owner 2026-11-01, same audit: the portal tells the customer to expect a reply within one business hour (8 AM to 8 PM ET) and nothing rang when that hour passed. An open portal item bell (chat hand-off, portal request, add-service request) whose ask is past that hour with no person's contact since is rung ONE more time, on the same row: the body leads with "Still waiting: no reply after 1 business hour", it moves to the top, and it is stamped metadata.lateReRungAt so it never re-rings twice. Only asks from the last 24 hours. Sends nothing to a customer. Reuses the follow-up SLA clock (followUpDueAt) and runs inside the existing alert-relevance sweep. Read at call time via portalLateReringLive(), strict 'true', dark by default; off = the sweep does nothing extra.)
@@ -366,6 +367,7 @@
  *   GATE_BID_ALERT_BUTTONS=true (owner 2026-10-29 "bid buttons, as a trial", PR 3 of the bell buttons: No bid on a new bid invite's bell row, and Bid only once the bid's due date is confirmed; a tap runs the Bid desk's own save step, sends nothing to a buyer or customer and moves no money. Week-1 read-out: ops job bid-buttons-trial-week1, Nov 5. Read at call time via bidAlertButtonsLive(), strict 'true', dark by default, and only while GATE_BID_DESK is on; off = the rows serve no such button and a tap answers 409.)
  *   GATE_ADS_NEGATIVES=true (owner plan A 2026-11-02: the owner's negative word list goes to Google Ads as phrase negatives on every linked campaign, each ads-advisor word arrives as one bell row with Add and Decline (3 a day at most), and every block can be undone on the Ads page; sends nothing to a customer and moves no money, but changes where the ads can show. Read at call time via adsNegativesLive(), strict 'true', dark by default; off = the /negatives routes answer 404, the bell rows serve no buttons, the advisor writes no rows, the 6 AM sync skips the step and no Google write runs.)
  *   GATE_ADS_HEALTH_CARD=true (owner 2026-11-04, option A on the PPC gap page: a read-only Ad health card on Ads → Dashboard. GET /api/admin/ads/health returns each Google campaign's live serving status and Google's reasons, ad disapprovals, the portal's 30-day conversion upload counts with Google's own upload check, and a 30-day who-changed-what timeline (Google change history from people and Google tools, plus the portal's budget log and negative keyword decisions). Reads only: it sends nothing, moves no money and changes no ad. Read at call time via adsHealthCardLive(), strict 'true', dark by default; off = the route answers 404 and the card renders nothing.)
+ *   GATE_ADS_HEALTH_ALERTS=shadow|true (owner 2026-11-05, "ALERT", after the Ad health card: every 2 hours one standing Leads bell for a person while an enabled Google Ads campaign cannot serve (Google's primary status Not eligible or Misconfigured, for a reason nobody chose: a pause or a date never counts) or an enabled ad in an enabled ad group of an enabled campaign is disapproved; it rings when a campaign or ad joins the set and closes itself at zero; plus one engineering row in Claude's queue while a live Google or Meta conversion upload failed on a try in the last 48 hours or Google's upload check reads Needs attention, retired at the first clean check. `shadow` = the same reads and one audit_log row (ads_health_alert.shadow) when the problems change, no alert; `true` = raise and close. Anything else = off: no query. Reads Google only; changes no ad or budget; sends nothing to a customer. Read at call time via adsHealthAlertsMode(). See services/ads/ads-health-alerts.js.)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
  *   GATE_PAY_PAGE_FAQ=true      (public /pay page: short FAQ accordion under the Pay button — card fee, bank timing, Zelle, saved card; copy-only, no money moves; dark in dev AND prod)
@@ -3026,6 +3028,8 @@ const gates = {
   adsNegatives: process.env.GATE_ADS_NEGATIVES === 'true',
   // GATE_ADS_HEALTH_CARD (read-only Ad health card on Ads → Dashboard, dark). Boot-log entry only; the call-time reader is adsHealthCardLive().
   adsHealthCard: process.env.GATE_ADS_HEALTH_CARD === 'true',
+  // GATE_ADS_HEALTH_ALERTS (ads health alerts: a Google Ads serving and disapproval bell, upload faults to Claude's queue; dark). Boot-log entry only; the call-time reader is adsHealthAlertsMode().
+  adsHealthAlerts: ['shadow', 'true'].includes(String(process.env.GATE_ADS_HEALTH_ALERTS || '').trim().toLowerCase()),
 
   // Autonomous Content Engine — runs the daily content pipeline.
   // Even when this gate is ON, individual action types stay in shadow
@@ -7252,6 +7256,15 @@ function adsHealthCardLive() {
   return process.env.GATE_ADS_HEALTH_CARD === 'true';
 }
 
+// GATE_ADS_HEALTH_ALERTS read at CALL time: 'shadow', 'true' or 'off' (services/ads/ads-health-alerts.js, owner
+// 2026-11-05 "ALERT"). 'shadow' (trimmed, any case) reads Google and the upload log and writes one audit_log row when
+// the problems change, with no alert; 'true' raises and closes the Google Ads bell and the upload row in Claude's
+// queue. Anything else is off: no query. Unset is the kill.
+function adsHealthAlertsMode() {
+  const value = String(process.env.GATE_ADS_HEALTH_ALERTS || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
 // GATE_RESERVICE_PHOTOS read at CALL time — the one canonical reader
 // (server/routes/reservice-public.js). Strict 'true', and only alongside
 // GATE_VISIT_PREP_PHOTOS (the storage and tech surfaces it rides).
@@ -8209,6 +8222,13 @@ function leadDraftPropertyLookupLive() {
 // and not booked, plus one catch-up bell for the older ones. Off = the cron returns before any read.
 function followupDueAlertLive() {
   return process.env.GATE_FOLLOWUP_DUE_ALERT === 'true';
+}
+
+// GATE_CONTENT_PII_ALL_LANES read at CALL time (so a flip needs no redeploy); strict 'true', dark (security audit run 3, fix E).
+// On, supporting-blog and refresh drafts get the same body privacy hard check as city-service and customer-question, and the writer
+// and refresher agents stop receiving a customer's own (regex-redacted) words. Off = unchanged.
+function contentPiiAllLanesLive() {
+  return process.env.GATE_CONTENT_PII_ALL_LANES === 'true';
 }
 
 // GATE_CALLER_CALLBACK_BELL read at CALL time (so a flip needs no redeploy); strict 'true', dark (owner 2026-11-04, option A).
@@ -9645,6 +9665,8 @@ module.exports.bidAlertButtonsLive = bidAlertButtonsLive;
 module.exports.adsNegativesLive = adsNegativesLive;
 // GATE_ADS_HEALTH_CARD reader, on its own line so gate PRs never conflict.
 module.exports.adsHealthCardLive = adsHealthCardLive;
+// GATE_ADS_HEALTH_ALERTS reader, on its own line so gate PRs never conflict.
+module.exports.adsHealthAlertsMode = adsHealthAlertsMode;
 module.exports.reservicePhotosLive = reservicePhotosLive;
 module.exports.reviewLowRatingAlertLive = reviewLowRatingAlertLive;
 // GATE_DUPLICATES_SAME_ADDRESS reader, on its own line.
@@ -10613,6 +10635,8 @@ module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
 module.exports.techSetTextsLive = techSetTextsLive;
 // GATE_EMAIL_DRAFT_FACTS reader, on its own line so gate PRs never conflict.
 module.exports.emailDraftFactsLive = emailDraftFactsLive;
+// GATE_CONTENT_PII_ALL_LANES reader, on its own line so gate PRs never conflict.
+module.exports.contentPiiAllLanesLive = contentPiiAllLanesLive;
 // GATE_FOLLOWUP_DUE_ALERT reader, on its own line so gate PRs never conflict.
 module.exports.followupDueAlertLive = followupDueAlertLive;
 // GATE_MONDAY_REVIEW_BELL reader, on its own line so gate PRs never conflict.
