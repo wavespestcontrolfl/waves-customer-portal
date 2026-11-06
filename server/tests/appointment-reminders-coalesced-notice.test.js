@@ -10,6 +10,9 @@
  * confirmation send and the real reminder scan; only the table reads and the message
  * send are faked.
  */
+// Read when feature-gates loads: the SMS send window (8 AM - 8 PM ET) holds the SMS leg overnight.
+process.env.GATE_SMS_SEND_WINDOW = 'true';
+
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/street-level-hold', () => ({ ...jest.requireActual('../services/street-level-hold'), isStreetLevelHoldVisit: jest.fn(async () => false) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -212,6 +215,24 @@ describe('a deferred confirmation of a coalesced reschedule', () => {
       const [ordinary, deferred] = emailKeys();
       expect(ordinary).toBeUndefined(); // the default visit + slot key, as before the gate
       expect(deferred).toMatch(/^appointment\.confirmation:svc-1:\d+:coalesced:\d+$/);
+    });
+
+    test("channel 'both' with the hold lapsing overnight: the email sent at the window hold and the one at 8 AM share the coalesced key, so the customer gets it once", async () => {
+      prefsRow = { appointment_confirmation_channel: 'both', appointment_confirmation_channel_explicit: true };
+      const hold = new Date('2026-11-11T03:00:00.000Z'); // 22:00 ET the night before
+      jest.setSystemTime(new Date('2026-11-11T03:30:00.000Z')); // 22:30 ET: outside the SMS window
+      row = reminderRow(96, { move_hold_until: hold });
+      await AppointmentReminders.checkAndSendReminders();
+      expect(sendCustomerMessage).not.toHaveBeenCalled(); // the SMS leg waits for 8 AM
+      expect(row.confirmation_sent).toBe(false);
+
+      jest.setSystemTime(new Date('2026-11-11T13:30:00.000Z')); // 08:30 ET
+      await AppointmentReminders.checkAndSendReminders();
+
+      const keys = emailKeys();
+      expect(keys.length).toBeGreaterThanOrEqual(2);
+      expect(keys.every((key) => /:coalesced:\d+$/.test(key))).toBe(true);
+      expect(new Set(keys).size).toBe(1);
     });
 
     test('a retry of the same deferred notice keeps its key, a later burst gets another', async () => {

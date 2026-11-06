@@ -2804,7 +2804,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         // night, and at 08:00 the past-appointment guard above closes the
         // row before the window ever admits the SMS.
         if (apptChannel(confirmationChannel) === 'both') {
-          const heldEmailRes = await sendAppointmentNoticeEmail({ kind: 'confirmation', customerId, scheduledServiceId, apptTime, serviceLabel });
+          const heldEmailRes = await sendAppointmentNoticeEmail({ kind: 'confirmation', customerId, scheduledServiceId, apptTime, serviceLabel, emailIdempotencyKey: coalescedNoticeEmailKey(record, scheduledServiceId, apptTime) });
           logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} held — email leg ${heldEmailRes?.ok ? 'sent now' : `not sent (${heldEmailRes?.reason || heldEmailRes?.error || 'unknown'})`}, SMS deferred`);
         }
         logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} deferred — outside 8AM-8PM ET send window`);
