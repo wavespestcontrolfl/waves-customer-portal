@@ -4,7 +4,6 @@ const db = require('../models/db');
 // process startup, NOT at query-build time — a marker stamped after this
 // instant belongs to a newer gate-on pod and must never be deleted.
 const PROCESS_BOOT_AT = new Date();
-const TwilioService = require('./twilio');
 const logger = require('./logger');
 
 // Reviewer-facing note for a scheduled reply retired by the fire-time amount /
@@ -119,7 +118,6 @@ function amountsStaleNote(reason) {
 }
 const { scrubSentryText } = require('../utils/sentry-scrub');
 const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
-const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms } = require('./scheduled-sms-delivery');
 const { isEnabled, gateEnvValue, aioGapSweepMonthlyLive } = require('../config/feature-gates');
@@ -7721,7 +7719,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 8:23AM — Tax Deadline Alerting (SMS reminders for upcoming filings)
+  // DAILY 8:23AM — Tax Deadline Alerting (admin bell reminders for upcoming filings)
   // 8:23 not 8:00: it shared the 8:00:00 minute with the monthly-billing
   // sweep and pool exhaustion failed it 4 runs straight (job_health:
   // "Timeout acquiring a connection"). One minute per job — #3208 rule.
@@ -7731,65 +7729,14 @@ function initScheduledJobs() {
     try {
       await runExclusive('tax-deadline-alerts', async () => {
       const now = new Date();
-      const today = etDateString(now);
-      const futureDate = etDateString(addETDays(now, 14));
 
       // Payroll tax rows (GATE_PAYROLL_TAX_CALENDAR; returns at once when off)
       // so quarters with no pay run and new hires are on the calendar and
       // get this run's reminder. Never throws.
       await require('./payroll-tax-calendar').syncPayrollFilingsSafe();
 
-      // GATE_TAX_DEADLINE_BELLS (owner 2026-10-30): the reminders ring the admin bell, one per row and
-      // stage, in place of the text below (the bell policy had silenced that text since 2026-09-01).
-      // The typeof guard keeps a suite that mocks feature-gates without the reader on today's text.
-      const gates = require('../config/feature-gates');
-      if (typeof gates.taxDeadlineBellsLive === 'function' && gates.taxDeadlineBellsLive()) {
-        await require('./tax-deadline-reminders').runTaxDeadlineReminders({ now });
-        return;
-      }
-
-      // Find filings due in the next 14 days that haven't been reminded yet
-      const upcomingFilings = await db('tax_filing_calendar')
-        .where('due_date', '>=', today)
-        .where('due_date', '<=', futureDate)
-        .whereNot('status', 'filed')
-        .whereNot('status', 'paid')
-        .where(function () {
-          this.whereNull('reminder_sent_at')
-            .orWhere('reminder_sent', false);
-        })
-        .orderBy('due_date');
-
-      if (upcomingFilings.length === 0) {
-        return;
-      }
-
-      // Build reminder message. due_date is a DATE column — pg hands it
-      // back as midnight, so `new Date(f.due_date)` rendered in ET shows
-      // the previous day. Anchor the calendar date at ET noon instead
-      // (dateOnly + T12:00 pattern, same as admin-schedule.js) so both the
-      // displayed date and the day-count math stay on the right ET day.
-      const todayNoon = parseETDateTime(`${today}T12:00`);
-      const lines = upcomingFilings.map(f => {
-        const dueDate = parseETDateTime(`${dateOnlyString(f.due_date)}T12:00`);
-        const daysUntil = Math.round((dueDate.getTime() - todayNoon.getTime()) / (24 * 60 * 60 * 1000));
-        const amountStr = f.amount_due ? ` ($${parseFloat(f.amount_due).toLocaleString()})` : '';
-        return `- ${f.title}${amountStr} — due ${dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })} (${daysUntil} day${daysUntil !== 1 ? 's' : ''})`;
-      });
-
-      const message = `Tax Deadline Alert:\n\n${lines.join('\n')}\n\nReview in the admin portal.`;
-
-      // Send SMS to admin
-      if (process.env.ADAM_PHONE) {
-        await TwilioService.sendSMS(process.env.ADAM_PHONE, message, { messageType: 'internal_alert' });
-        logger.info(`[tax-alerts] Sent ${upcomingFilings.length} deadline reminder(s) via SMS`);
-      }
-
-      // Mark reminders as sent
-      const ids = upcomingFilings.map(f => f.id);
-      await db('tax_filing_calendar')
-        .whereIn('id', ids)
-        .update({ reminder_sent: true, reminder_sent_at: new Date() });
+      // Owner 2026-10-30: the reminders ring the admin bell, one per row and stage.
+      await require('./tax-deadline-reminders').runTaxDeadlineReminders({ now });
       });
     } catch (err) {
       logger.error(`Tax deadline alert failed: ${err.message}`);
