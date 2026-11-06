@@ -2677,6 +2677,32 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
   );
 }
 
+// Threshold-only aria-live announcement (3:00 and 1:00) — not every tick.
+// Reset above 3:00 so an extension that pushes the clock back up can
+// announce the same thresholds again on the way back down.
+// No clock yet (null): say nothing. Above 3:00 the message is cleared too,
+// so a stale threshold line never stays in the live region.
+function useHoldAnnouncement(secondsRemaining) {
+  const announcedRef = useRef({ warm: false, urgent: false });
+  const [announcement, setAnnouncement] = useState('');
+  useEffect(() => {
+    if (!Number.isFinite(secondsRemaining)) return;
+    if (secondsRemaining > 180) {
+      announcedRef.current = { warm: false, urgent: false };
+      setAnnouncement('');
+      return;
+    }
+    if (secondsRemaining <= 60 && !announcedRef.current.urgent) {
+      announcedRef.current.urgent = true;
+      setAnnouncement('Less than one minute left to keep your held time.');
+    } else if (secondsRemaining <= 180 && !announcedRef.current.warm) {
+      announcedRef.current.warm = true;
+      setAnnouncement('Three minutes left to keep your held time.');
+    }
+  }, [secondsRemaining]);
+  return announcement;
+}
+
 // Prominent, escalating hold bar — replaces the old 14px muted CountdownLine
 // (the prod incident: a countdown nobody could see and no way to extend it).
 // Sits at the top of the review card, sticky so it stays visible while the
@@ -2687,7 +2713,12 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
 // it and swaps the copy for the hard-ceiling message; `checking` covers the
 // brief window where a 0:00 countdown is trying one silent extend before
 // falling back to the expired flow.
-function HoldCountdownBar({ secondsRemaining, checking = false, holdLimitReached = false, extending = false, onExtend = null, onPickNewTime = null, busy = false, sticky = true }) {
+// Before the first tick there is no time to show: render nothing rather than 0:00.
+function HoldCountdownBar(props) {
+  return Number.isFinite(props.secondsRemaining) ? <HoldCountdownBarBody {...props} /> : null;
+}
+
+function HoldCountdownBarBody({ secondsRemaining, checking = false, holdLimitReached = false, extending = false, onExtend = null, onPickNewTime = null, busy = false, sticky = true }) {
   const m = Math.max(0, Math.floor(secondsRemaining / 60));
   const s = Math.max(0, secondsRemaining % 60);
   const timeLabel = `${m}:${String(s).padStart(2, '0')}`;
@@ -2708,32 +2739,7 @@ function HoldCountdownBar({ secondsRemaining, checking = false, holdLimitReached
   // race a DELETE against the acceptance it is trying to complete.
   const showPickNewTime = holdLimitReached && !checking && !busy && typeof onPickNewTime === 'function';
 
-  // Threshold-only aria-live announcement (3:00 and 1:00) — not every tick.
-  // Reset above 3:00 so an extension that pushes the clock back up can
-  // announce the same thresholds again on the way back down.
-  // No clock yet (null): say nothing. Above 3:00 the message is cleared too,
-  // so a stale threshold line never stays in the live region.
-  const announcedRef = useRef({ warm: false, urgent: false });
-  const [announcement, setAnnouncement] = useState('');
-  const clockKnown = Number.isFinite(secondsRemaining);
-  useEffect(() => {
-    if (!clockKnown) return;
-    if (secondsRemaining > 180) {
-      announcedRef.current = { warm: false, urgent: false };
-      setAnnouncement('');
-      return;
-    }
-    if (secondsRemaining <= 60 && !announcedRef.current.urgent) {
-      announcedRef.current.urgent = true;
-      setAnnouncement('Less than one minute left to keep your held time.');
-    } else if (secondsRemaining <= 180 && !announcedRef.current.warm) {
-      announcedRef.current.warm = true;
-      setAnnouncement('Three minutes left to keep your held time.');
-    }
-  }, [secondsRemaining, clockKnown]);
-
-  // Before the first tick there is no time to show: render nothing rather than 0:00.
-  if (!clockKnown) return null;
+  const announcement = useHoldAnnouncement(secondsRemaining);
 
   return (
     <div
@@ -4369,6 +4375,13 @@ export function ReviewPhase({ website = false, slotId, slotMeta = null, existing
   );
 }
 
+// The website's estimate dialog loads this page with embed=1 in a frame that
+// never grows past the estimate: a link that leaves the estimate must open in
+// the full window.
+function embeddedLinkTarget() {
+  return new URLSearchParams(window.location.search).get('embed') === '1' ? '_top' : undefined;
+}
+
 export function SuccessCard({ acceptResult, appointmentLabel = null, recurring = false }) {
   const nextStep = acceptResult?.nextStep || (acceptResult?.invoiceMode ? 'pay_invoice' : 'confirmed');
   const bookingUrl = acceptResult?.bookingUrl || null;
@@ -4413,7 +4426,7 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
             href={invoicePayUrl}
             // Inside the website's estimate dialog (embed=1) the frame never
             // grows past the estimate, so the pay page opens in the full window.
-            target={new URLSearchParams(window.location.search).get('embed') === '1' ? '_top' : undefined}
+            target={embeddedLinkTarget()}
             style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, textDecoration: 'none', fontSize: 16 }}
           >{payNowLabel}</a>
         ) : null}
