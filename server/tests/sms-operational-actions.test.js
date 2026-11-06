@@ -478,7 +478,7 @@ describe('SMS operational evidence and ownership', () => {
   );
 
   test('prompts scrub current, historical, and split payment readbacks before serialization', () => {
-    const prompt = buildPrompt({ message: source('CVV is 123. Please send the estimate'),
+    const { text: prompt } = buildPrompt({ message: source('CVV is 123. Please send the estimate'),
       history: [source('My card is 4242 4242'), source('4242 4242')] });
     expect(prompt).not.toContain('4242 4242');
     expect(prompt).not.toContain('CVV is 123');
@@ -608,9 +608,10 @@ describe('SMS operational evidence and ownership', () => {
   });
 
   test('the prompt carries text, direction, time and opaque property ids only', () => {
-    const prompt = buildPrompt({ message: source('The controller is beside the garage.'), history: [source('Hi there', 'outbound')],
+    const parts = buildPrompt({ message: source('The controller is beside the garage.'), history: [source('Hi there', 'outbound')],
       properties: [{ id: PROPERTY_ID, address_line1: '100 Example Lane', city: 'Sarasota', zip: '34236' }] });
-    expect(prompt).toContain(PROPERTY_ID);
+    const prompt = `${parts.system}\n${parts.text}`;
+    expect(parts.text).toContain(PROPERTY_ID);
     expect(prompt).toContain('"direction":"outbound"');
     for (const leak of [CUSTOMER_ID, '+12025550101', numbers.locations.parrish.number, '100 Example Lane', 'Sarasota', '34236', '"id":"00000000-0000-4000-8000-000000000103"']) {
       expect(prompt).not.toContain(leak);
@@ -844,11 +845,11 @@ describe('Owner-approved staff-promise plan (2026-09-28): a promise staff texted
 
   test("the extraction is told the text's ET day and the staff-promise rules", () => {
     const prompt = buildPrompt({ message: staff("I'll stop by tomorrow") });
-    expect(prompt).toContain('The CURRENT message was sent on Saturday, 2040-03-10 (America/New_York).');
+    expect(prompt.text).toContain('The CURRENT message was sent on Saturday, 2040-03-10 (America/New_York).');
     for (const phrase of ['promise_firm is true only for a promise (basis promise) its sender committed to outright',
       'Never extract a status update or arrival estimate', 'due_date, for a promise only, is the calendar day',
       '"This weekend" is that weekend\'s Sunday; "next week" is next week\'s Friday']) {
-      expect(prompt).toContain(phrase);
+      expect(prompt.system).toContain(phrase);
     }
   });
 });
@@ -1594,7 +1595,7 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     const obligationSchema = SCHEMA.properties.obligations.items;
     expect(obligationSchema.required).toContain('answered_by_payment');
     expect(obligationSchema.properties.answered_by_payment).toEqual({ type: 'boolean' });
-    const prompt = buildPrompt({ message: source('Did my payment go through?') });
+    const { system: prompt } = buildPrompt({ message: source('Did my payment go through?') });
     expect(prompt).toContain('answered_by_payment is true only when the customer\'s own payment arriving');
     for (const phrase of ['a refund, reversal, void, reimbursement, chargeback', 'a change of how the customer pays', 'a receipt or other document']) {
       expect(prompt).toContain(phrase);
@@ -1604,8 +1605,37 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
   test('rule 2: the completion check repeats the rule — a payment never answers money going back, however worded', async () => {
     dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     await verifySmsFulfillment({ kind: 'other', description: 'Did my payment go through?', sms_context: ctx }, { records: [invoicePaid], failures: [] });
-    expect(dispatchWithFallback.mock.calls.at(-1)[1].text)
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].system)
       .toContain('it never answers money going back to the customer (a refund, reversal, reimbursement or chargeback, however worded)');
+  });
+
+  test('the completion check sends its fixed rules as a 1-hour cached system prompt; the evidence and any extra rule go in the user message', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    await verifySmsFulfillment({ kind: 'other', description: 'Did my payment go through?', sms_context: ctx }, { records: [invoicePaid], failures: [] });
+    await verifySmsFulfillment({ kind: 'other', description: 'Is the invoice paid yet?', sms_context: ctx }, { records: [invoicePaid], failures: [] });
+    const [first, second] = dispatchWithFallback.mock.calls.map(([, request]) => request);
+    // One rules string for every obligation, so the cache entry is shared.
+    expect(second.system).toBe(first.system);
+    expect(first.cacheTtl).toBe('1h');
+    expect(first.system).not.toContain('Did my payment go through?');
+    expect(first.text).toContain('Did my payment go through?');
+    expect(second.text).toContain('Is the invoice paid yet?');
+    // No extra rule for this obligation, so the user message is the evidence JSON alone.
+    expect(JSON.parse(first.text).obligation.description).toBe('Did my payment go through?');
+  });
+
+  test('an obligation\'s extra rule (GATE_PROMISE_RECORD_EVIDENCE) leads the user message; the cached rules do not change', async () => {
+    const { withExtendedEvidence } = require('../services/sms-commitment-fulfillment');
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const promise = { kind: 'other', description: 'We will send the annual plan invoice', sms_context: { ...ctx, basis: 'promise' } };
+    await verifySmsFulfillment(promise, { records: [invoicePaid], failures: [] });
+    await verifySmsFulfillment(withExtendedEvidence(promise), { records: [invoicePaid], failures: [] });
+    const [plain, extended] = dispatchWithFallback.mock.calls.map(([, request]) => request);
+    expect(extended.system).toBe(plain.system);
+    expect(plain.text.startsWith('{')).toBe(true);
+    expect(extended.text).toMatch(/^For this promise Waves made, an invoice record \(type invoice, listed in witness_refs\)/);
+    const [, evidenceJson] = extended.text.split('\n');
+    expect(JSON.parse(evidenceJson).obligation.description).toBe('We will send the annual plan invoice');
   });
 
   test('owner ruling 2026-09-28: the extraction no longer judges whether a reply could answer an ask', () => {
@@ -1613,7 +1643,8 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     const obligationSchema = SCHEMA.properties.obligations.items;
     expect(obligationSchema.required).not.toContain('answered_by_reply');
     expect(obligationSchema.properties).not.toHaveProperty('answered_by_reply');
-    expect(buildPrompt({ message: source("What's the Zelle number?") })).not.toContain('answered_by_reply');
+    const zelle = buildPrompt({ message: source("What's the Zelle number?") });
+    expect(`${zelle.system}\n${zelle.text}`).not.toContain('answered_by_reply');
   });
 
   test('owner ruling 2026-09-28: a person\'s reply or call back closes a general ask without the model, whatever it says', async () => {
