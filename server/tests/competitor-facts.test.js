@@ -134,12 +134,21 @@ describe('competitor-facts', () => {
     expect(orkin.attributes.reach.as_of).toBeTruthy();
   });
 
-  test('owner autopublish list: the nine approved companies under every approved spelling, nobody else (rulings 2026-09-27 D2 + 2026-09-28, Aptive + Truly Nolen added 2026-09-28, All U Need added 2026-11-05)', () => {
+  test('owner autopublish list: the seventeen approved companies under every approved spelling, nobody else (rulings 2026-09-27 D2 + 2026-09-28, Aptive + Truly Nolen added 2026-09-28, All U Need and eight more added 2026-11-05)', () => {
     for (const name of ['Orkin', 'Terminix', 'HomeTeam', 'HomeTeam Pest Defense', 'TAEXX', 'Turner', 'Turner Pest Control', 'Massey', 'Massey Services', 'TruGreen', 'Aptive', 'Aptive Environmental', 'Aptive Pest Control', 'goaptive', 'Truly Nolen',
-      'All U Need Pest Control', 'All "U" Need Pest Control', 'All “U” Need Pest Control', 'All U Need Pest', 'All U Need', 'All U Need Pest Control, LLC']) {
+      'All U Need Pest Control', 'All "U" Need Pest Control', 'All “U” Need Pest Control', 'All U Need Pest', 'All U Need', 'All U Need Pest Control, LLC',
+      // Owner 2026-11-05: eight more companies.
+      'Prodigy Pest Solutions', 'Prodigy Pest', 'Greenhouse Termite & Pest Control', 'Greenhouse Termite and Pest Control',
+      'Good News Pest Solutions', 'Good News Pest', "Keller's Pest Control", 'Kellers Pest Control', "Keller's Pest",
+      'Arrow Environmental', 'Arrow Environmental Services', 'Hughes Exterminators', 'Hughes Pest Control',
+      'Farrow Pest Services', 'Farrow Pest', 'Farrow Pest Control',
+      "Westfall's Lawn and Pest Control", "Westfall's Lawn & Pest Control", "Westfall's Pest Control", 'Westfalls Pest Control',
+      'Westfalls Lawn and Pest Control, LLC']) {
       expect(cf.isOwnerApprovedForAutopublish(name)).toBe(true);
     }
-    for (const name of ['Keller\'s Pest Control', 'Hughes Exterminators', 'Hulett', 'Hawx']) {
+    // Curated records that stay off the list (EcoShield, Rodent Solutions) and
+    // detection-only brands (Hulett, Hawx) are never approved.
+    for (const name of ['EcoShield Pest Solutions', 'EcoShield', 'Rodent Solutions Inc', 'Rodent Solutions', 'Hulett', 'Hawx', 'Westfall', 'Arrow Exterminators']) {
       expect(cf.isOwnerApprovedForAutopublish(name)).toBe(false);
     }
     expect(cf.findBusinessMentions('HomeTeam installs TAEXX tubes.').map((m) => m.name)).toEqual(['HomeTeam Pest Defense']);
@@ -149,8 +158,65 @@ describe('competitor-facts', () => {
     // All U Need (owner 2026-11-05): bare brand is case-sensitive prose only.
     expect(cf.findBusinessMentions('All U Need offers recurring plans.').map((m) => m.name)).toEqual(['All U Need Pest Control']);
     expect(cf.findBusinessMentions('Everything all u need to know about ants.')).toEqual([]);
-    expect(cf.OWNER_APPROVED_AUTOPUBLISH_IDS).toHaveLength(9);
-    expect(cf.OWNER_APPROVED_AUTOPUBLISH_IDS).toContain('all-u-need-pest');
+    expect(cf.OWNER_APPROVED_AUTOPUBLISH_IDS).toHaveLength(17);
+    expect(cf.OWNER_APPROVED_AUTOPUBLISH_IDS).toEqual(expect.arrayContaining([
+      'all-u-need-pest', 'prodigy-pest', 'greenhouse-pest', 'good-news-pest', 'kellers-pest',
+      'arrow-environmental', 'hughes-exterminators', 'farrow-pest', 'westfalls-lawn-pest',
+    ]));
+    expect(cf.OWNER_APPROVED_AUTOPUBLISH_IDS).not.toContain('ecoshield-pest');
+    expect(cf.OWNER_APPROVED_AUTOPUBLISH_IDS).not.toContain('rodent-solutions');
+    // Every approved id is a real record (a typo would silently approve nobody).
+    for (const id of cf.OWNER_APPROVED_AUTOPUBLISH_IDS) expect(cf.COMPETITORS.some((c) => c.id === id)).toBe(true);
+  });
+
+  test("Westfall's Lawn and Pest Control: curated record sourced from its own site, full-name spellings only (owner 2026-11-05)", () => {
+    const rec = cf.findCompetitor("Westfall's Lawn and Pest Control");
+    expect(rec).toMatchObject({ id: 'westfalls-lawn-pest', name: "Westfall's Lawn and Pest Control" });
+    for (const a of Object.values(rec.attributes)) {
+      expect(a.source).toMatch(/^https:\/\/www\.westfallspestcontrol\.com\//);
+      expect(a.asOf).toBe('2026-11-05');
+    }
+    for (const text of [
+      "Westfall's Lawn and Pest offers monthly plans.",
+      "Westfall's Lawn & Pest Control offers monthly plans.",
+      "Westfall's Pest Control offers monthly plans.",
+      'Westfalls Pest Control offers monthly plans.',
+      'Westfall’s Pest Control offers monthly plans.', // curly apostrophe
+      'WESTFALL\'S PEST CONTROL offers monthly plans.',
+    ]) {
+      expect(cf.findBusinessMentions(text)).toEqual([{ name: "Westfall's Lawn and Pest Control", inAllowlist: true }]);
+    }
+    // A surname, a road, or another business with the same surname is not the company.
+    for (const text of [
+      'The Westfall family called today about ants.',
+      'Turn left on Westfall Road.',
+      "Mr. Westfall's yard has chinch bugs.",
+      "Westfall's Plumbing fixed the leak.",
+      'westfall pest.',
+    ]) {
+      expect(cf.findBusinessMentions(text)).toEqual([]);
+    }
+    expect(cf.isOwnerApprovedForAutopublish('Westfall')).toBe(false);
+    expect(cf.isOwnerApprovedForAutopublish("Westfall's")).toBe(false);
+  });
+
+  test('the newly approved companies are detected by name and approved (owner 2026-11-05)', () => {
+    const pairs = [
+      ['Prodigy Pest Solutions', 'Prodigy Pest Solutions'],
+      ['Greenhouse Termite & Pest Control', 'Greenhouse Termite & Pest Control'],
+      ['Good News Pest Solutions', 'Good News Pest Solutions'],
+      ["Keller's Pest Control", "Keller's Pest Control"],
+      ['Arrow Environmental', 'Arrow Environmental'],
+      ['Hughes Exterminators', 'Hughes Exterminators'],
+      ['Farrow Pest Services', 'Farrow Pest Services'],
+    ];
+    for (const [text, canonical] of pairs) {
+      expect(cf.findBusinessMentions(`${text} offers recurring plans.`)).toEqual([{ name: canonical, inAllowlist: true }]);
+      expect(cf.isOwnerApprovedForAutopublish(canonical)).toBe(true);
+    }
+    // Approval did not widen detection: bare surnames and generic phrases stay prose.
+    expect(cf.findBusinessMentions('The Hughes family called today.')).toEqual([]);
+    expect(cf.findBusinessMentions('Compare greenhouse pest control options.')).toEqual([]);
   });
 
   test('Aptive has a curated record sourced from its own site (aptivepestcontrol.com — aptive.com is an unrelated company)', () => {

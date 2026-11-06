@@ -28,7 +28,7 @@ const { confirmPhotoSubject } = require('./photo-subject-confirmer');
 // (single grammar — a mined listicle opportunity must actually receive the
 // overlay). Never fork a private copy of the regexes here.
 const { isListicleQuery } = require('./listicle-query');
-const { isEnabled } = require('../../config/feature-gates');
+const { isEnabled, contentPiiAllLanesLive } = require('../../config/feature-gates');
 
 const queue = require('./opportunity-queue');
 const router = require('./decision-router');
@@ -1087,7 +1087,12 @@ class ContentBriefBuilder {
             source_counts: signals.customer_signal.source_counts,
             funnel_stage: signals.customer_signal.funnel_stage,
             urgency: signals.customer_signal.urgency,
-            example_phrasing_anonymized: signals.customer_signal.example_phrasing_anonymized,
+            // GATE_CONTENT_PII_ALL_LANES: pass the topic (normalized_question),
+            // never the customer's own words. The example is regex-redacted,
+            // not paraphrased, and its name/gate-code misses are known.
+            ...(contentPiiAllLanesLive()
+              ? {}
+              : { example_phrasing_anonymized: signals.customer_signal.example_phrasing_anonymized }),
           }
         : null,
       conversion_signal: signals.conversion_feedback

@@ -20,6 +20,8 @@ describe('competitor host matcher', () => {
     for (const h of ['mosquitojoe.com', 'lawndoctor.com', 'pestie.com']) expect(hosts.has(h)).toBe(true);
     // competitor-gap-miner tracked locals + the classifier's extra competitors
     for (const h of ['turnerpest.com', 'westfallspestcontrol.com', 'flapest.com', 'hometeampestdefense.com']) expect(hosts.has(h)).toBe(true);
+    // every newly approved company's own site stays a blocked competitor host (owner 2026-11-05: never link a competitor)
+    for (const h of ['westfallspestcontrol.com', 'prodigypest.com', 'kellerspestcontrol.com', 'hughes-exterminators.com', 'farrowpestservices.com', 'goodnewspestsolutions.com', 'arrowservices.com', 'mygreenhousepro.com']) expect(hosts.has(h)).toBe(true);
     // never our own hub or spokes, never a reference/listing site
     for (const h of ['wavespestcontrol.com', 'ufl.edu', 'edis.ifas.ufl.edu', 'bbb.org', 'epa.gov', 'consumeraffairs.com', 'web.archive.org']) {
       expect(isCompetitorHost(h, hosts)).toBe(false);

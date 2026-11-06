@@ -10,7 +10,7 @@ jest.mock('../services/notification-service', () => ({
   getAdminNotificationForExplainer: jest.fn(),
   markAdminIdeaCancelled: jest.fn(),
 }));
-jest.mock('../config/feature-gates', () => ({ ibSendToClaudeLive: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ ibSendToClaudeLive: jest.fn(() => true), ibAnswerSendToClaudeLive: jest.fn(() => false) }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const users = {
@@ -29,7 +29,7 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 
 const NotificationService = require('../services/notification-service');
-const { ibSendToClaudeLive } = require('../config/feature-gates');
+const { ibSendToClaudeLive, ibAnswerSendToClaudeLive } = require('../config/feature-gates');
 const { cleanIdea, ideaDedupeKey } = require('../services/admin-claude-ideas');
 const router = require('../routes/admin-claude-ideas');
 
@@ -56,6 +56,7 @@ const call = (base, path, { who = 'admin', method = 'POST', body } = {}) => fetc
 beforeEach(() => {
   jest.clearAllMocks();
   ibSendToClaudeLive.mockReturnValue(true);
+  ibAnswerSendToClaudeLive.mockReturnValue(false);
   NotificationService.notifyAdmin.mockResolvedValue({ id: ID, deduped: false });
 });
 
@@ -98,6 +99,30 @@ describe('gate off', () => {
     ibSendToClaudeLive.mockReturnValue(undefined);
     await withServer(async (base) => {
       expect((await call(base, '/status', { method: 'GET' })).body).toEqual({ enabled: false });
+    });
+  });
+});
+
+describe('answerButton on the status (GATE_IB_ANSWER_SEND_TO_CLAUDE)', () => {
+  test('present only while the answer gate is on and the login is the owner with the box button on', async () => {
+    ibAnswerSendToClaudeLive.mockReturnValue(true);
+    await withServer(async (base) => {
+      expect((await call(base, '/status', { method: 'GET' })).body).toEqual({ enabled: true, answerButton: true });
+      // Another admin login: not enabled, so no answerButton either.
+      expect((await call(base, '/status', { method: 'GET', who: 'office' })).body).toEqual({ enabled: false });
+    });
+    ibSendToClaudeLive.mockReturnValue(false);
+    await withServer(async (base) => {
+      expect((await call(base, '/status', { method: 'GET' })).body).toEqual({ enabled: false });
+    });
+  });
+  test('absent while the answer gate is off, and for a missing reader', async () => {
+    await withServer(async (base) => {
+      expect((await call(base, '/status', { method: 'GET' })).body).toEqual({ enabled: true });
+    });
+    ibAnswerSendToClaudeLive.mockReturnValue(undefined);
+    await withServer(async (base) => {
+      expect((await call(base, '/status', { method: 'GET' })).body).toEqual({ enabled: true });
     });
   });
 });
