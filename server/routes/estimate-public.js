@@ -17864,7 +17864,34 @@ function resolveOptOutBeforeResult(parsedData) {
 // disclosures the confirm panel renders, plus the one case the owner ruled must
 // never be self-serve. `mode` flips the wording for a restore — the same tier
 // move reads "Dropping X" one way and "Adding X back" the other.
-function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label, mode = 'remove' }) {
+// What follows "$X per application" for a line that joins the plan (owner 2026-11-06):
+// the year's application count and the "$Y a month" average, worded as the estimate's
+// service cards word them (same shared formatter and context line). The average
+// is the shared builder's, reconciled against the plan's monthly total, so it
+// matches what the card shows once the line is added; when the numbers do not
+// reconcile (or the count is unknown) the sentence ends after the price as before.
+function joinedLineTermsText({ rows, row, perApplicationOf, afterMonthlyTotal, prefMonthlyOff }) {
+  const visits = Math.round(Number(row?.visitsPerYear) || 0);
+  if (!(visits > 0)) return '.';
+  const key = String(row.service || row.name || '');
+  const planMonthly = afterMonthlyTotal == null ? null : afterMonthlyTotal - prefMonthlyOff;
+  const model = planMonthly == null ? null : monthlyAverageShared.buildMonthlyAverage({
+    services: rows.map((r) => ({
+      key: String(r.service || r.name || ''),
+      label: r.name || r.service,
+      perApplication: perApplicationOf(r),
+      visits: Number(r.visitsPerYear),
+    })),
+    planMonthly,
+  });
+  const monthly = model?.services.find((s) => s.key === key)?.monthly;
+  const count = `, ${visits} application${visits === 1 ? '' : 's'} per year.`;
+  return monthly > 0
+    ? `${count} ${monthlyAverageShared.monthlyText(monthly)}. ${monthlyAverageShared.CONTEXT_LINE}`
+    : count;
+}
+
+function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label, mode = 'remove', afterMonthlyTotal }) {
   const disclosures = [];
   // 'restore' and 'add' read the same way to the customer — a line joining the
   // plan — except that an add was never on it, so nothing comes "back".
@@ -17957,17 +17984,18 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
   // customer confirms amounts higher than they will pay (codex #3684 r3 P1).
   // Same derivation as the /preferences write, per side, converted back to
   // per-application (monthlyOff × 12 ÷ visits).
-  const pestPrefPerAppOff = (result, data) => {
+  const pestPrefOff = (result, data) => {
     try {
       const pest = detectPestRecurring(recurringServicesWithSupplements(result || {}));
       const visits = Number(pest?.visitsPerYear || 0);
-      if (!pest || !(visits > 0)) return 0;
+      if (!pest || !(visits > 0)) return { perApplication: 0, monthly: 0 };
       const { monthlyOff } = computePrefDiscount(data?.preferences, pest, false, 0);
-      return Math.round(((monthlyOff * 12) / visits) * 100) / 100;
-    } catch (_) { return 0; }
+      return { perApplication: Math.round(((monthlyOff * 12) / visits) * 100) / 100, monthly: monthlyOff };
+    } catch (_) { return { perApplication: 0, monthly: 0 }; }
   };
-  const beforePestOff = pestPrefPerAppOff(beforeResult, beforeData);
-  const afterPestOff = pestPrefPerAppOff(afterResult, afterData);
+  const beforePestOff = pestPrefOff(beforeResult, beforeData).perApplication;
+  const afterPrefOff = pestPrefOff(afterResult, afterData);
+  const afterPestOff = afterPrefOff.perApplication;
   const effectivePerApplication = (row, prefOff = 0) => {
     // manualFinalAnnual is the FINAL customer amount when an operator manual
     // discount hit the row; annualAfterDiscount is only post-WaveGuard, and
@@ -18005,11 +18033,18 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
       if (beforeKeys.has(String(after.service || after.name || ''))) continue;
       const pa = effectivePerApplication(after, afterPestOff);
       if (!pa) continue;
+      const terms = joinedLineTermsText({
+        rows: svcRows(afterResult),
+        row: after,
+        perApplicationOf: (r) => effectivePerApplication(r, afterPestOff),
+        afterMonthlyTotal,
+        prefMonthlyOff: afterPrefOff.monthly,
+      });
       disclosures.push({
         code: mode === 'add' ? 'added_per_application' : 'restored_per_application',
         message: mode === 'add'
-          ? `${after.name || after.service} is $${pa.toFixed(2)} per application.`
-          : `${after.name || after.service} comes back at $${pa.toFixed(2)} per application.`,
+          ? `${after.name || after.service} is $${pa.toFixed(2)} per application${terms}`
+          : `${after.name || after.service} comes back at $${pa.toFixed(2)} per application${terms}`,
       });
     }
   }
@@ -18499,6 +18534,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     const impact = optOutImpact({
       beforeResult, afterResult, beforeData, afterData: parsedData, label,
       mode: mode === 'restore' && staffOffered ? 'add' : mode,
+      afterMonthlyTotal: reprice.serverTotals.monthlyTotal,
     });
     if (included === false && impact.wouldChargeBundled.length) {
       return { status: 400, body: ({

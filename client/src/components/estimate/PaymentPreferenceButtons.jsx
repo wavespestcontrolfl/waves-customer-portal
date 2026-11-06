@@ -129,6 +129,16 @@ export function standardInvoiceShape({ setupFee = null, extraInvoiceRows = [], s
   return { hasSetupInvoice, hasFirstVisitInvoice, setupOnly: hasSetupInvoice && !hasFirstVisitInvoice };
 }
 
+// The first application's bill the confirm step repeats under the visit line, so
+// "at the price shown" has a price on the same screen. It is the figure the invoice
+// box above the CTA already shows (firstVisitAmount of the selected plan), never
+// a new computation. No amount for a one-time visit, the annual prepay (the confirm
+// step quotes its own charge) or a plan the account manager prices on site.
+export function confirmStepFirstVisitAmount({ serviceMode, paymentPreference, siteConfirmationHold, selectedFrequency }) {
+  if (serviceMode === 'one_time' || paymentPreference === 'prepay_annual' || siteConfirmationHold) return null;
+  return firstVisitAmount(selectedFrequency || {});
+}
+
 export default function PaymentPreferenceButtons({
   onSelect,
   disabled,

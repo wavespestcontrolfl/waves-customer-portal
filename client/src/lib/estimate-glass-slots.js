@@ -74,6 +74,60 @@ export function glassSlotMeta(slot) {
   };
 }
 
+// A visit more than this many days out gets its date in the Approve label.
+const APPROVE_LABEL_DATE_AFTER_DAYS = 6;
+
+/**
+ * The picked slot's day and time on the Approve buttons (owner 2026-11-06): "Mon 9:00 AM"
+ * inside the coming week, "Mon, Nov 23, 9:00 AM" past 6 days, where the bare weekday could
+ * mean two different Mondays. Days are counted on ET calendar dates. A slot with no date
+ * keeps the short form.
+ */
+export function approveSlotWhen(slotMeta, now = new Date()) {
+  const dayMs = 86400000;
+  const daysOut = Math.round((new Date(`${slotMeta.date}T12:00:00Z`) - new Date(`${etDateString(now)}T12:00:00Z`)) / dayMs);
+  if (!(daysOut > APPROVE_LABEL_DATE_AFTER_DAYS)) return `${slotMeta.dow} ${slotMeta.time}`;
+  const monthDay = new Date(`${slotMeta.date}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  return `${slotMeta.dow}, ${monthDay}, ${slotMeta.time}`;
+}
+
+// The glass Approve button: "Approve — Mon 9:00 AM" / "Approve — Mon, Nov 23, 9:00 AM".
+export function approveSlotLabel(slotMeta, now = new Date()) {
+  return `Approve — ${approveSlotWhen(slotMeta, now)}`;
+}
+
+// The customer's arrival window is the slot start plus 2 hours (owner rule; the
+// same range the server prints in texts and on the appointment). '09:00' ->
+// '9:00-11:00 AM'; the AM/PM shows once when both ends share it.
+const ARRIVAL_WINDOW_MINUTES = 120;
+
+function clockParts(totalMinutes) {
+  const mins = ((totalMinutes % 1440) + 1440) % 1440;
+  const h24 = Math.floor(mins / 60);
+  return { clock: `${h24 % 12 === 0 ? 12 : h24 % 12}:${String(mins % 60).padStart(2, '0')}`, meridiem: h24 < 12 ? 'AM' : 'PM' };
+}
+
+export function arrivalWindowLabel(windowStart) {
+  const start = windowStartMinutes(windowStart);
+  if (start == null) return null;
+  const from = clockParts(start);
+  const to = clockParts(start + ARRIVAL_WINDOW_MINUTES);
+  return from.meridiem === to.meridiem
+    ? `${from.clock}-${to.clock} ${to.meridiem}`
+    : `${from.clock} ${from.meridiem}-${to.clock} ${to.meridiem}`;
+}
+
+// "Mon, Nov 9, 9:00-11:00 AM" for the booked-card first-visit line. The date is
+// the slot's ET calendar date and the window is ET wall-clock text, so no zone
+// conversion happens in the browser. Null when either piece is unusable.
+export function firstVisitDayAndWindow(dateYmd, windowStart) {
+  const day = new Date(`${dateYmd}T12:00:00Z`);
+  const window = arrivalWindowLabel(windowStart);
+  if (Number.isNaN(day.getTime()) || !window) return null;
+  const dayText = day.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+  return `${dayText}, ${window}`;
+}
+
 /**
  * Real-data scarcity: only when the FIRST day with availability truly has
  * ≤2 open slots — "Only 1 opening tomorrow — 9:00 AM". The count comes

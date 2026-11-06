@@ -541,8 +541,15 @@ router.get('/:token/available-slots', async (req, res) => {
       const browseHorizonDays = seasonalBrowse && typeof slotAvailability.seasonalMaxHorizonDays === 'function'
         ? slotAvailability.seasonalMaxHorizonDays()
         : MAX_SLOT_HORIZON_DAYS;
-      if (date > etDateString(addETDays(new Date(), browseHorizonDays))) {
-        return res.status(400).json({ error: 'date is beyond the booking horizon' });
+      const lastBookableDate = etDateString(addETDays(new Date(), browseHorizonDays));
+      if (date > lastBookableDate) {
+        // The page words this for the customer from the two fields below, so
+        // the limit has one source: the horizon this route just compared against.
+        return res.status(400).json({
+          error: 'date is beyond the booking horizon',
+          lastBookableDate,
+          horizonDays: browseHorizonDays,
+        });
       }
       opts.dateFrom = date;
       opts.dateTo = date;

@@ -221,7 +221,12 @@ describe('specific-date browse horizon (parity with reserveSlot)', () => {
     const farFuture = etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS + 1));
     const res = await fetch(`${base}/${TOKEN}/available-slots?date=${farFuture}`);
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: 'date is beyond the booking horizon' });
+    // The page words its "pick a date on or before ..." line from these two fields.
+    expect(await res.json()).toEqual({
+      error: 'date is beyond the booking horizon',
+      lastBookableDate: etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS)),
+      horizonDays: MAX_SLOT_HORIZON_DAYS,
+    });
     expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 
