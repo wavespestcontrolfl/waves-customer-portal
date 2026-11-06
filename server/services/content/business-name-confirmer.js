@@ -232,18 +232,21 @@ function exemptNameMatcher(draft) {
   };
 }
 
-// The extraction with every exempt name moved from `companies` to
-// `exempted_names` — the same object when none is exempt, so a stored
-// result read again is unchanged.
+// The extraction with its names (`companies` plus any earlier
+// `exempted_names`) split again under the CURRENT rules, so a stored result
+// reused after the kill switch goes off or a product leaves the registry
+// gets its product names back in `companies`. Same object when there is
+// nothing to split.
 function withoutExemptNames(extraction, draft) {
+  const earlier = Array.isArray(extraction.exempted_names) ? extraction.exempted_names : [];
   const isExempt = exemptNameMatcher(draft);
-  const exempted = extraction.companies.filter(isExempt);
-  if (!exempted.length) return extraction;
-  return {
-    ...extraction,
-    companies: extraction.companies.filter((name) => !isExempt(name)),
-    exempted_names: [...new Set([...(extraction.exempted_names || []), ...exempted])].sort(),
-  };
+  const names = [...new Set([...extraction.companies, ...earlier])].sort();
+  const exempted = names.filter(isExempt);
+  if (!exempted.length && !earlier.length) return extraction;
+  const result = { ...extraction, companies: names.filter((name) => !isExempt(name)) };
+  if (exempted.length) result.exempted_names = exempted;
+  else delete result.exempted_names;
+  return result;
 }
 
 /**

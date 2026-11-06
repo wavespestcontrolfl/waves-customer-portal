@@ -169,6 +169,27 @@ describe('extractCompanyNames', () => {
       expect(await extractCompanyNames(AFFILIATE_DRAFT, { prior })).toEqual({ ...prior, companies: ['Bug Out'], exempted_names: ['KS Hardware'] });
       expect(dispatchWithFallback).not.toHaveBeenCalled();
     });
+
+    test('a stored exemption is judged again on reuse: kill switch off or product unlinked, the names go back to companies', async () => {
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Augusta National', 'Bug Out', 'KS Hardware'] } });
+      const stored = await extractCompanyNames(AFFILIATE_DRAFT);
+      expect(stored).toMatchObject({ companies: ['Bug Out'], exempted_names: ['Augusta National', 'KS Hardware'] });
+
+      delete process.env.GATE_AFFILIATE_LINKS;
+      const off = await extractCompanyNames(AFFILIATE_DRAFT, { prior: stored });
+      expect(off).toMatchObject({ companies: ['Bug Out', 'KS Hardware'], exempted_names: ['Augusta National'] });
+      process.env.GATE_AFFILIATE_LINKS = 'true';
+      const again = await extractCompanyNames(AFFILIATE_DRAFT, { prior: off });
+      expect(again).toMatchObject({ companies: ['Bug Out'], exempted_names: ['Augusta National', 'KS Hardware'] });
+      expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+
+      // Nothing exempt any more: the field goes, it never lingers empty.
+      const noBackground = { ok: true, key: stored.key, companies: ['Bug Out'], exempted_names: ['KS Hardware'] };
+      delete process.env.GATE_AFFILIATE_LINKS;
+      const plain = await extractCompanyNames(AFFILIATE_DRAFT, { prior: noBackground });
+      expect(plain.companies).toEqual(['Bug Out', 'KS Hardware']);
+      expect(plain).not.toHaveProperty('exempted_names');
+    });
   });
 
   test('a provider failure, a throw, or malformed output is a RETRYABLE failure', async () => {
