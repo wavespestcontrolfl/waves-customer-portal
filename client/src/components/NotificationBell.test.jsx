@@ -872,6 +872,19 @@ describe('NotificationBell admin "What to do" and the customer line (GATE_ALERT_
     expect(customerNameFor(plan, 'customer')).toBeNull();
   });
 
+  it('a customer with no `explainable` mark (GATE_ALERT_CUSTOMER_LINE alone) shows the line and keeps "Show full text", with no "What to do"', async () => {
+    await withWidth(1280, async () => {
+      const { explainable: _a, ...plan } = rows()[0];
+      setup({ list: [plan] });
+      render(<NotificationBell type="admin" />);
+      open();
+      expect(await screen.findByRole('link', { name: 'Jane Doe' })).toHaveAttribute('href', `/admin/customers?customerId=${CUSTOMER_ID}`);
+      expect(screen.getByRole('button', { name: 'Show full text' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'What to do' })).toBeNull();
+      expect(explainCalls()).toHaveLength(0);
+    });
+  });
+
   it.each([['desktop', 1280], ['phone', 390]])('shows the customer, then the summary from the server, without navigating or marking read (%s)', async (_label, width) => {
     await withWidth(width, async (hrefSpy) => {
       setup();

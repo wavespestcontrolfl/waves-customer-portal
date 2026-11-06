@@ -203,6 +203,7 @@
  *   GATE_PROMISE_RECORD_EVIDENCE=shadow|true (owner 2026-10-29, fix F4 "Stuck Alert Fixes": three false overdue bells on promises and asks the records had already answered. On, (1) an invoice Waves sent the customer after a staff promise ("I'll adjust the payment terms") is evidence the model may cite, (2) an estimate the customer accepted after a send-estimate ask counts even if it was sent before the ask, and (3) a waves row (promise or customer request) of kind other, callback or technician_follow_up whose customer has a live, non-series visit booked after the promise text and with its window end still ahead does not ring as overdue until that window end. `shadow` = change nothing; write audit_log rows for what it would have changed (sms_commitment.fulfillment.shadow, sms_commitment.on_track.shadow). Anything else = off, byte-identical. Read at call time via promiseRecordEvidenceMode(). See docs/gates-and-env.md.)
  *   GATE_ALERT_RETENTION=shadow|true (owner 2026-10-26, "ok go": admin alerts expire instead of piling up. A nightly 1:32 AM ET sweep marks done, never deletes, an admin bell row idle for more than 30 days (read or not) and an FYI row idle for more than 7 days; read state is untouched; `shadow` = judge and record one audit_log summary row (counts by rule and category, the re-ring list), change nothing; `true` = expire. Anything else = off. Read at call time via alertRetentionMode(). See docs/gates-and-env.md.)
  *   GATE_ALERT_BELL_ORDER=true (owner 2026-11-05, admin-bell plan decision D1 "go": the admin bell lists the alerts that need the owner first (`metadata.severity` 'needs-you'), then rows with no severity label, then the rest (fyi, broken), each group newest first, and each row shows ONE Area chip (`areaChip`, from `metadata.area` when it is one of the nine Areas). Paging uses a three-part cursor "<rank>~<timestamp>~<uuid>"; a cursor of the other order (the gate flipped under an open panel) restarts at page 1 with restart: true. Technicians' lists use the same order. Unread count, the Done list and a technician's row copy are unchanged. Sends nothing to anyone. Strict 'true', read at call time via alertBellOrderLive(); dark by default; off = byte-identical list, cursor and client. Kill switch: unset.)
+ *   GATE_ALERT_CUSTOMER_LINE=true (owner 2026-11-05, step S2 of the admin-bell plan, "go": the admin bell shows the "Customer: Name" line under an alert about a customer while GATE_ALERT_EXPLAINER stays off. The name is a database read (services/admin-alert-customer.js, no AI call); only `customer` is added to the row, never the "What to do" button or its summary. Admin role only. With GATE_ALERT_EXPLAINER on the bell is unchanged by this gate. Strict opt-in, read at call time via alertCustomerLineLive(); off = rows are served as before. Kill switch: unset.)
  *   GATE_ALERT_QUIET_FALL_OFF=shadow|true (owner 2026-11-04, "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF": every 10 minutes an open admin bell row with no new activity for 72 hours is marked done (done_by `quiet-72h`, resolution "No new activity for 3 days"), never deleted; last activity is the latest of created_at, metadata.rungAt, observedAt, lastFailureAt and a Reopen's quietHoldFrom, so a quiet refresh is not news; money alerts (billing, payment, dispute, refund, tax, payout, payroll, llm_cost), Activity-only rows and Claude-queue rows stay; a Reopen in Recently done puts one back and holds it 72 more hours, and a changed re-emission rings it back; `shadow` = count and log what would close, write nothing; `true` = close. Anything else = off. Read at call time via alertQuietFallOffMode(). See docs/admin-notifications.md.)
  *   GATE_VOICEMAIL_VISIT_UNDERWAY=shadow|true (owner 2026-10-29, "Stuck Alert Fixes" F3: a voicemail callback bell closes once the voicemail's customer has a visit completed after the call on the same Eastern day; rides on GATE_ALERT_CONTACT_CLOSE, read at call time via voicemailVisitUnderwayMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_ALERT_CATALOG=watch (owner 2026-10-29, "ok go" on admin bell rebuild step D1: every notification-registry type declares how it closes, and an admin alert the 08-28 bell policy silences is counted. `watch` = when NotificationService.create silences an admin row it writes ONE audit_log row (notification.bell_policy.muted) per Eastern day per distinct alert, category + trigger key + digit-free title stem only; the bell, pushes and create()'s return are unchanged. Anything else = off, byte-identical: no read, no write. Read at call time via alertCatalogMode(). See docs/gates-and-env.md.)
@@ -517,6 +518,7 @@
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
  *   GATE_MONDAY_REVIEW_BELL=true (owner 2026-11-02, "build all", B2: one needs-you bell every Monday 9:20 AM ET for the work that sits, built from the 2026-09-30 rule item 6. Lines, each only when its count is above zero: needs-you alerts unread 14+ days (before the 30-day retention sweep expires them), overdue promises to callers, completed visits whose only invoice is an unsent draft, past-dated visits still open. One row per Monday (dedupeKey monday-review:<ET date>) with a detail line and page for each list; last week's row closes first, and an all-zero week raises nothing. Admin only: sends nothing to a customer, no paid API, writes only admin notifications. Read at call time via mondayReviewBellLive(), strict 'true', dark by default; off = the Monday cron returns before any read. Rollback = unset.)
+ *   GATE_MONDAY_FELL_OFF_LINE=true (owner 2026-11-05, "go" on the admin-bell plan, decision D3: on the Monday review bell, list 1 stops being "needs-you alerts unread 14+ days" (the quiet fall-off, GATE_ALERT_QUIET_FALL_OFF, closes a bell row after 72 hours, so that list can no longer fire) and becomes "customer alerts that fell off with no reply": the customer-contact bell rows the quiet rule closed (done_by `quiet-72h`, still done) in the 7 days before the run, that the relevance sweep's own verdict (admin-alert-relevance.js classify / loadSubjects / subjectFor / judge) does not call handled, whatever the mode of GATE_ALERT_CONTACT_CLOSE; a row no class judges is listed and marked "reply not checked". Named by customer, with the alert's short title and Eastern date, at most 15 and then "+N more"; internal test customers left out. Admin only: sends nothing to a customer, no paid API, no write beyond the Monday row. Read at call time via mondayFellOffLineLive(), strict 'true', dark by default; off = list 1 is the 14-day unread list, byte-identical. Rollback = unset.)
  *   GATE_MORNING_BANNER=true (owner 2026-11-03, "ok add", choice C: at 8:00 AM ET each day ONE phone banner tells the owner how many items wait for him and opens his alert list. It counts the open bell alerts that need a person (needs-you or broken, not done, not Activity-only, not sent to Claude) and replaces a banner for each of his other action items. Zero items = no banner. Push only, no bell row, admin phones only, with the per-admin Push Settings switch for the waiting_summary type; sends nothing to a customer, no paid API. At most one banner per ET day (sms_send_claims row morning_banner:<ET date>). Read at call time via morningBannerLive(), strict 'true', dark by default; off = the 8 AM job returns before any read and the waiting_summary type stays silent in the bell policy.)
  *   GATE_OWNER_NUDGE_BANNER=true (owner 2026-11-04, "banner": the owner's 7 PM open-visit nudge (services/tech-open-visit-nudge.js) reaches him as a Waves Admin phone banner instead of a text. Push only, no bell row, owner only, same words as the text, a tap opens /tech, reminder sound. The banner counts only when a phone accepted it; otherwise the same text goes out as today, so the nudge is never lost. Never both. Still needs GATE_TECH_OPEN_VISIT_NUDGE. Sends nothing to a customer, no paid API (it saves the text's Twilio cost). Read at call time via ownerNudgeBannerLive(), strict 'true', dark by default; off = the owner still gets the text, byte-identical, and the open_visits_nudge type stays silent in the bell policy. Rollback = unset.)
  *   GATE_RING_NEW_CONTACTS=true (owner 2026-11-04, reply "ring new": two kinds of incoming contact never put a banner on the owner's phone. (1) A text from a number with no customer record to a customer-facing office line (a location line or a Google Business Profile tracking line; not the AI assistant line, not a tech line, not a staff phone, not a reaction or courtesy closer) wrote only a quiet Activity row. On, it rings the same one-row-per-sender new-lead bell the website and van tracking lines ring (sms-reply-alert-delivery.js ringTrackingLineTextBell): the latest text quoted, a running count, the name on file, a phone banner on every text; the quiet Activity row is then skipped, and kept if the ring fails. (2) A new-lead email (a lead created from an email, or a follow-up email that completed a quote request) wrote a bell row without a banner. On, it also sends ONE phone banner with the New lead sound at any hour, once per email id (the bell row is keyed on the email), with no second bell row (bell-banners.js kind new_lead_email). Known-customer texts, tracking lines, the AI line, tech lines, staff senders and the possible-lead review rows are unchanged. Sends nothing to a customer, no paid API. Read at call time via ringNewContactsLive(), strict 'true', dark by default; off = byte-identical, rollback = unset.)
@@ -533,6 +535,8 @@ const gates = {
   alertBellOrder: process.env.GATE_ALERT_BELL_ORDER === 'true',
   // GATE_AI_CREDIT_KEYS (credit-only API key pool for Anthropic and OpenAI calls, dark). Boot-log entry only; the wrapper is installed at boot by credit-key-pool.js.
   aiCreditKeys: process.env.GATE_AI_CREDIT_KEYS === 'true',
+  // GATE_ALERT_CUSTOMER_LINE ("Customer: Name" line in the admin bell without the paid AI summary, dark). Boot-log entry only; the call-time reader is alertCustomerLineLive().
+  alertCustomerLine: process.env.GATE_ALERT_CUSTOMER_LINE === 'true',
   // GATE_WDO_ATTENTION_RINGS (the WDO report attention sweep rings its bell again and closes it when clean, dark). Boot-log entry only; the call-time reader is wdoAttentionRingsLive().
   wdoAttentionRings: process.env.GATE_WDO_ATTENTION_RINGS === 'true',
   // GATE_BID_KIT (Bid kit, admin only, dark). Boot-log entry only; the call-time reader is bidKitLive().
@@ -5117,6 +5121,10 @@ const gates = {
   // Registered for logGateStatus only; consumers read secondTechLowsLive() at
   // CALL time. Kill switch: unset - dashboard utilization and the IB name picks stay as before.
   secondTechLows: process.env.GATE_SECOND_TECH_LOWS === 'true',
+
+  // Monday review bell, list 1 as "customer alerts that fell off with no reply" (owner 2026-11-05). Registered for
+  // logGateStatus only; services/monday-review-bell.js reads mondayFellOffLineLive() at CALL time. Kill switch: unset.
+  mondayFellOffLine: process.env.GATE_MONDAY_FELL_OFF_LINE === 'true',
 
   // Admin alert retention (owner 2026-10-26). Registered for logGateStatus only; the sweep reads
   // alertRetentionMode() at CALL time. 'shadow' records, 'true' expires. Kill switch: unset.
@@ -10058,6 +10066,17 @@ function alertExplainerLive() {
 // GATE_ALERT_EXPLAINER reader, on its own line so gate PRs never conflict.
 module.exports.alertExplainerLive = alertExplainerLive;
 
+// GATE_ALERT_CUSTOMER_LINE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-05, step S2 of
+// the admin-bell plan: "the customer needs to be named" without the paid AI summary). On, with GATE_ALERT_EXPLAINER off,
+// the admin bell list adds the customer an alert is about (`customer`) to each row, read from the database by
+// services/admin-alert-customer.js: no AI call, no "What to do" button. With GATE_ALERT_EXPLAINER on the gate adds
+// nothing. Off = the bell list is as before. Kill = unset.
+function alertCustomerLineLive() {
+  return process.env.GATE_ALERT_CUSTOMER_LINE === 'true';
+}
+// GATE_ALERT_CUSTOMER_LINE reader, on its own line so gate PRs never conflict.
+module.exports.alertCustomerLineLive = alertCustomerLineLive;
+
 // GATE_ALERT_SEND_TO_CLAUDE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-02: "for the
 // stuff that needs to be fixed ... we need to be able to send that back to terminal, open a terminal session, to have
 // Claude fix that"; scope "All but customer contact"). On, the bell's "What to do" panel (GATE_ALERT_EXPLAINER) carries
@@ -10764,3 +10783,13 @@ function claudeInputGuardLive() {
 }
 // GATE_CLAUDE_INPUT_GUARD reader, on its own line so gate PRs never conflict.
 module.exports.claudeInputGuardLive = claudeInputGuardLive;
+
+// GATE_MONDAY_FELL_OFF_LINE read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
+// Owner 2026-11-05, "go" on the admin-bell plan, decision D3: the Monday review bell's first list becomes the customer
+// alerts that fell off the bell after 3 quiet days with no reply, named (services/monday-review-bell.js). Off = the list
+// is the 14-day unread list, as today. Rollback = unset.
+function mondayFellOffLineLive() {
+  return process.env.GATE_MONDAY_FELL_OFF_LINE === 'true';
+}
+// GATE_MONDAY_FELL_OFF_LINE reader, on its own line so gate PRs never conflict.
+module.exports.mondayFellOffLineLive = mondayFellOffLineLive;

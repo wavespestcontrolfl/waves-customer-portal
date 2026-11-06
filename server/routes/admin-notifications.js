@@ -161,7 +161,8 @@ router.get('/', async (req, res, next) => {
     res.json({
       // A row's own buttons ride as `actions`, for the admin role only (docs/admin-notifications.md section 2, part 9).
       // The customer it names and its "What to do" summary ride as `customer`, `explainable` and `explainer`, for the
-      // admin role while GATE_ALERT_EXPLAINER is on. `sendToClaude` marks a row the "Send to Claude" button may move,
+      // admin role while GATE_ALERT_EXPLAINER is on. With that gate off, GATE_ALERT_CUSTOMER_LINE alone adds `customer`
+      // (a database read, no AI call). The done list (/done) carries neither. `sendToClaude` marks a row the "Send to Claude" button may move,
       // for the admin role while GATE_ALERT_SEND_TO_CLAUDE is on (no explainer needed).
       notifications: [...(page === 1 && !before ? liveCtx.live : []), ...rows],
       page, limit, hasMore: persisted.length > limit,
