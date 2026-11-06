@@ -6458,8 +6458,8 @@ resolved ONLY when no active account-holder row carries the number
 on the primary profile, then the oldest). A second gate narrows who counts (`GATE_CONTACT_LOGIN_HOLDER_ONLY`,
 dark; strict `=== 'true'`, read at call time — `contactLoginHolderOnlyLive()`): when live, `contactSlotMayLogIn` also
 requires the phone to be listed in `service_preferences.login_attested_phone_keys`,
-which only the signed-in holder's portal contacts save writes (and migration
-20261105050000 seeds once for rows already stamped `portal_account_holder`).
+which only the signed-in holder's portal contacts save writes (a holder who
+attested contacts before the gate re-saves them once to restore their sign-in).
 A consent stamp written by the call pipeline, the grandfather backfill or a
 recipient YES no longer admits a number by itself: send-code sends no code,
 verify-code answers the same 401, and a live contact session ends at its next
