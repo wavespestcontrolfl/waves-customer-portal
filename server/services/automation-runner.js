@@ -120,12 +120,49 @@ async function activeAutomationSuppressionFor(template, email, database = db) {
   return rows.find((row) => automationSuppressionMatches(template, row)) || null;
 }
 
+// Retry provenance (call-email-spelling-retry.js, GATE_CALL_BOUNCE_OTHER_SPELLING, owner 2026-11-05): an enrollment the
+// webhook pointed at the other spelling of a bounced call-captured address carries metadata.spelling_retry_email. A send to that
+// address is allowed only while retrySendVerdict says so (gate on, claim still resending, the customer's primary email still
+// the bounced address, the retry address not suppressed or owned by someone else). Any other answer sends nothing and ends
+// the retry through stopRetry, which releases the customer's provenance enrollments (cancel as a hard bounce would, or retarget
+// them to a hand-set primary email). Read only for enrollments with provenance: no cost for any other send.
+async function retryStopVerdict(enrollment, recipient) {
+  const marked = String(enrollmentMetadata(enrollment).spelling_retry_email || '').trim().toLowerCase();
+  if (!marked || String(recipient || '').trim().toLowerCase() !== marked) return null;
+  return require('./call-email-spelling-retry').retrySendVerdict({ customerId: enrollment.customer_id, retryEmail: recipient, enrollment });
+}
+
+// null = the live state (claim, customer, enrollments, re-read in the transaction of the stop) says the send is fine after all, e.g.
+// a delivery committed the claim since this runner read the enrollment: the caller then sends normally and nothing is cancelled.
+async function blockStoppedRetry({ enrollment, sendId, recipient, verdict: asked }) {
+  const stop = await require('./call-email-spelling-retry').stopRetry({ customerId: enrollment.customer_id, retryEmail: recipient, reason: asked, enrollment });
+  if (!stop.stopped) return null;
+  const verdict = stop.reason;
+  if (verdict === 'email_changed') {
+    // Staff set a different primary email: the enrollments were retargeted to it, so this step stays due for that address.
+    await db('automation_step_sends').where({ id: sendId }).update({
+      status: 'blocked', failure_reason: 'The retry address was replaced by a hand-set email', updated_at: new Date(),
+    });
+    return { sent: false, deferred: true, reason: 'email_changed' };
+  }
+  return blockSendAndCancelEnrollment({ enrollment, sendId, reason: `Retry to the call-settled other spelling stopped: ${verdict}`, cancelReason: 'hard_bounce' });
+}
+
+// THE terminal cancel of a send in the runner: every pre-send check that ends an enrollment (a suppressed address, no termite
+// bond, an accepted estimate, a contact with email off and no holder address, a refused payment-failed step, a stopped call-spelling
+// retry) funnels here. An enrollment carrying call-spelling retry provenance is the retry's: its still-`resending` claim is settled
+// `skipped` with the cancel reason first (applySettlement releases every provenance enrollment and the provenance), so a blocked send
+// never leaves the claim in flight. Genuinely deferred sends (holds, quiet hours, lock skips, not due) never reach this function.
 async function blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancelReason }) {
   await db('automation_step_sends').where({ id: sendId }).update({
     status: 'blocked',
     failure_reason: reason.slice(0, 500),
     updated_at: new Date(),
   });
+  const marked = enrollmentMetadata(enrollment).spelling_retry_email;
+  if (marked) {
+    await require('./call-email-spelling-retry').abandonRetry({ customerId: enrollment.customer_id, retryEmail: marked, reason: cancelReason });
+  }
   await db('automation_enrollments').where({ id: enrollment.id }).update({
     status: 'cancelled',
     next_send_at: null,
@@ -178,8 +215,15 @@ async function estimateAcceptedForFollowUp(enrollment) {
   return !!accepted;
 }
 
-async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend }) {
+async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend, retryNotBound = false, handedOffStep = null }) {
   if (testRecipient) return null;
+  if (handedOffStep) return completeHandedOffRetry(enrollment, handedOffStep);
+  if (retryNotBound) return blockStoppedRetry({ enrollment, sendId, recipient, verdict: 'not_bound' });
+  const retryVerdict = await retryStopVerdict(enrollment, recipient);
+  if (retryVerdict) {
+    const stopped = await blockStoppedRetry({ enrollment, sendId, recipient, verdict: retryVerdict });
+    if (stopped) return stopped;
+  }
   // A billing send checks suppression for the CURRENT billing recipient,
   // inside the shared billing email authority under its recipient lock; the
   // address snapshotted at enrollment may no longer be the one it goes to.
@@ -309,6 +353,8 @@ async function repointPaymentFailedEnrollment({ enrollment, sendId, current, ema
   });
   await db('automation_enrollments').where({ id: enrollment.id, current_step: enrollment.current_step }).update({
     email,
+    // The address moved on its own: any call-spelling retry provenance for the old one is stale.
+    metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'spelling_retry_email'"),
     ...(parts.length ? { first_name: parts[0], last_name: parts.slice(1).join(' ') || null } : {}),
     updated_at: new Date(),
   });
@@ -583,7 +629,7 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
     ...(estimateId ? { estimate_id: estimateId } : {}),
   };
   reactivatePayload.metadata = dbh.raw(
-    "(COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id' - 'recipient_role' - 'estimate_id' - 'passed_step_order' - 'passed_step_id' - 'passed_step_ids') || ?::jsonb",
+    "(COALESCE(automation_enrollments.metadata,'{}'::jsonb) - 'lead_id' - 'recipient_role' - 'estimate_id' - 'passed_step_order' - 'passed_step_id' - 'passed_step_ids' - 'spelling_retry_email' - 'spelling_retry_step') || ?::jsonb",
     [JSON.stringify(stamps)],
   );
   if (existing) {
@@ -681,6 +727,51 @@ function firstStepAfter(steps, anchor, passedIds) {
 function nextSequenceStep(enrollment, steps) {
   const { anchor, passedIds } = sequenceCursor(enrollment, steps);
   return firstStepAfter(steps, anchor, passedIds);
+}
+
+/**
+ * Put an enrollment back one step so that step is sent again, to `email`, on the next tick (owner 2026-11-05: a
+ * hard-bounced call-captured address is retried once at the other spelling the call settled; the webhook does this in
+ * its own transaction). Allowed ONLY when `stepId` is the last step the enrollment passed (its cursor anchor), so
+ * nothing later was sent and the step goes out exactly once more: the tick's next step is then `stepId` again, and
+ * advanceEnrollment moves past it as for any send. The passed set loses `stepId`; the anchor falls back to the
+ * previous passed step (null = none, which the legacy reading of current_step resolves to the same place). A completed
+ * enrollment becomes active again. Fenced on the cursor the caller saw (current_step, last passed step id), so a tick
+ * that advanced it first makes this a no-op. `metadata` is merged into the same write (retry provenance). The caller holds the
+ * customer's prep-send lock, so no tick can be mid-send on this enrollment. Returns true when the enrollment was rewound.
+ */
+async function rewindEnrollmentToStep({ enrollment, stepId, email, metadata = {} }, client = db) {
+  const steps = await client('automation_steps')
+    .where({ template_key: enrollment.template_key, enabled: true })
+    .orderBy('step_order', 'asc')
+    .orderBy('id', 'asc');
+  const step = steps.find((s) => String(s.id) === String(stepId));
+  if (!step) return false;
+  const { anchor, passedIds } = sequenceCursor(enrollment, steps);
+  if (!anchor || Number(anchor[0]) !== Number(step.step_order) || String(anchor[1]) !== String(step.id)) return false;
+  const remaining = passedIds.filter((id) => id !== String(step.id));
+  const prior = steps.filter((s) => remaining.includes(String(s.id)) && keyAfter(stepKey(step), stepKey(s))).pop() || null;
+  const cursor = {
+    ...metadata,
+    passed_step_order: prior ? Number(prior.step_order) : null,
+    passed_step_id: prior ? String(prior.id) : null,
+    passed_step_ids: remaining,
+  };
+  const priorPassedId = String(enrollmentMetadata(enrollment).passed_step_id ?? '');
+  const updated = await client('automation_enrollments')
+    .where({ id: enrollment.id, current_step: enrollment.current_step })
+    .whereIn('status', ['active', 'completed'])
+    .whereRaw("COALESCE(metadata->>'passed_step_id', '') = ?", [priorPassedId])
+    .update({
+      status: 'active',
+      email,
+      current_step: steps.indexOf(step),
+      next_send_at: new Date(),
+      completed_at: null,
+      metadata: client.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(cursor)]),
+      updated_at: new Date(),
+    });
+  return Number(updated) === 1;
 }
 
 /**
@@ -818,9 +909,18 @@ async function stepRecipientAfterContactOptOut(enrollment, step, testRecipient) 
 // an enrollment with no customer (nothing to re-resolve). The payment-failed
 // step rides the billing authority's own boundary check instead.
 const CONTACT_RECIPIENT_CHANGED = 'CONTACT_RECIPIENT_CHANGED';
+const RETRY_STOPPED = 'CALL_SPELLING_RETRY_STOPPED';
 function contactRecipientBoundaryCheck(enrollment, recipient, testRecipient) {
   if (testRecipient || !enrollment.customer_id) return null;
   return async () => {
+    // The retry verdict again at the true provider boundary (a gate unset, a claim settled, an email changed by hand, or an
+    // address claimed while the request was prepared).
+    const retryVerdict = await retryStopVerdict(enrollment, recipient);
+    if (retryVerdict) {
+      throw Object.assign(new Error('the retry to the call-settled other spelling was stopped before the provider handoff'), {
+        code: RETRY_STOPPED, retryVerdict, providerBoundaryBlocked: true,
+      });
+    }
     const again = await require('./contact-notification-prefs')
       .rerouteForContactEmailOptOut(enrollment.customer_id, recipient, { recipientRole: enrollment.metadata?.recipient_role || null });
     if (again.rerouted) {
@@ -840,10 +940,118 @@ async function dispatchUnderContactBoundary({ dispatch, enrollment, step, recipi
   try {
     return await dispatch(contactRecipientBoundaryCheck(enrollment, recipient, testRecipient));
   } catch (err) {
+    if (err.code === RETRY_STOPPED) {
+      const stopped = await blockStoppedRetry({ enrollment, sendId, recipient, verdict: err.retryVerdict });
+      if (stopped) return stopped;
+      // The live state says go after all (a delivery committed the claim meanwhile): nothing was sent, the step stays due.
+      await db('automation_step_sends').where({ id: sendId }).del();
+      return { sent: false, deferred: true, reason: err.message };
+    }
     if (err.code !== CONTACT_RECIPIENT_CHANGED) throw err;
     logger.info(`[automation-runner] enrollment ${enrollment.id} step ${step.step_order} held at the provider boundary: ${err.message}`);
     await db('automation_step_sends').where({ id: sendId }).del();
     return { sent: false, deferred: true, reason: err.message };
+  }
+}
+
+// A provider failure of the BOUND call-spelling retry send (not a bounce: the request itself failed) settles its claim
+// `failed` / `send_failed` through the send id, so the once-only claim never sits `resending` on a send that cannot deliver. The
+// enrollment is left as the runner leaves any failed send (below). Provenance enrollments only; settleClaim never throws.
+async function failBoundRetrySend(enrollment, sendRow) {
+  if (!enrollmentMetadata(enrollment).spelling_retry_email) return;
+  await require('./call-email-spelling-retry').settleClaim(
+    { customerId: enrollment.customer_id, channel: 'automation', sendId: sendRow.id },
+    { status: 'failed', reason: 'send_failed' },
+  );
+}
+
+// The queued automation_step_sends row for one step. The rewound retry step is bound to its claim by this very row, in the
+// transaction that creates it (call-email-spelling-retry.js bindAutomationRetrySend): only provenance enrollments take that
+// path, every other send inserts as before.
+async function insertStepSend({ enrollment, step, recipient, testRecipient }) {
+  const queued = (conn) => conn('automation_step_sends').insert({
+    enrollment_id: enrollment.id,
+    step_id: step.id,
+    step_order: step.step_order,
+    email: recipient,
+    status: 'queued',
+  }).returning('*').then((rows) => rows[0]);
+  if (testRecipient) return queued(db);
+  // The rewound step's retry send was already handed to the provider and the cursor never moved past it (the durable episode marker
+  // names the step, settlement or not): it is NOT dispatched again, the cursor only moves.
+  const handedOff = await require('./call-email-spelling-retry').handedOffRetrySend({ enrollment, step });
+  if (handedOff) return Object.assign(handedOff, { retryHandedOff: true });
+  if (!enrollmentMetadata(enrollment).spelling_retry_email) return queued(db);
+  return db.transaction(async (trx) => {
+    const row = await queued(trx);
+    const bind = await require('./call-email-spelling-retry').bindAutomationRetrySend({ enrollment, step, sendId: row.id, recipient }, trx);
+    // The originating retry step whose bind failed must NOT be dispatched (automationDeliveryBlock stops it): fail closed.
+    if (bind === 'refused') return Object.assign(row, { retryNotBound: true });
+    // The bound retry send also carries its own id to SendGrid (custom arg), so its delivery event is found even when it beats
+    // the post-send save of the message id. Only this send: every other automation send is dispatched exactly as before.
+    return bind === 'bound' ? Object.assign(row, { retryBound: true }) : row;
+  });
+}
+
+// The bound retry send's own id as a SendGrid custom arg (see insertStepSend); every other send adds nothing.
+const retrySendCustomArgs = (sendRow) => (sendRow.retryBound
+  ? { customArgs: { [require('./call-email-spelling-retry').SEND_ID_ARG]: sendRow.id } } : {});
+// A bound retry send's delivery / bounce event can land before the post-send save: its status is then kept, never rewound to 'sent'.
+const sentStatusFor = (sendRow) => (sendRow.retryBound
+  ? db.raw("CASE WHEN status IN ('queued', 'dispatching') THEN 'sent' ELSE status END") : 'sent');
+
+// ── The bound retry send's outcome can be ambiguous (round 14 P1) ───────────────────────────────────────────────────────────
+// The classifier is the codebase's own (transactional-email-provider-retry.js): a send is DEFINITELY not delivered only when the
+// request never left (no handoff started: the pre-send checks failed or the provider boundary stopped it, SendGrid not configured)
+// or SendGrid answered with a definite rejection (sendgrid.isDefiniteRejection: 400 401 403 404 405 413 415 422 429). Everything
+// else is ambiguous, because SendGrid may hold the message despite the lost response: a timeout or network error once the request
+// left, any other status (5xx, 408), and any failure AFTER sendOne returned (the provider accepted it; our save failed).
+const markHandoffStarted = (handoff, check) => async (...args) => {
+  const result = await check(...args);
+  handoff.started = true; // the provider boundary passed: the request goes out next
+  return result;
+};
+function retryOutcomeAmbiguous(handoff, err) {
+  if (handoff.accepted) return true;
+  if (!handoff.started) return false;
+  const neverSent = err?.annualOfferWithheld || err?.annualOfferGuardFailed || err?.providerBoundaryBlocked
+    || err?.code === 'SENDGRID_NOT_CONFIGURED';
+  return !neverSent && !sendgrid.isDefiniteRejection(err);
+}
+// Written before the bound retry send's request, so a crash or a failed save after the provider took it still leaves the mark
+// that it was handed off (handedOffRetrySend). Only the bound send; the deferral paths delete the row and nothing was sent.
+async function markRetryDispatching(sendRow) {
+  if (!sendRow.retryBound) return;
+  await db('automation_step_sends').where({ id: sendRow.id, status: 'queued' }).update({ status: 'dispatching', updated_at: new Date() });
+}
+// The step counts as sent: move the cursor past it exactly as a recorded send does.
+async function completeHandedOffRetry(enrollment, step) {
+  const steps = await enabledSequenceSteps(enrollment.template_key);
+  await stampPrepSentForSequence(enrollment, step, steps);
+  return advanceEnrollment(enrollment, steps, step);
+}
+// An ambiguous outcome is NOT a failed send. The claim stays `resending` and nothing is cancelled or sent again: the row is marked
+// sent (with the message id when the provider returned it), the enrollment moves past the step, and the signed delivery event
+// settles the claim through the row's custom arg (delivered: commit; bounced: failed). When no event ever comes, the claim's 72 h
+// window (CLAIM_STALE_MS) ends it. Each write is best effort: a failure here leaves the row `dispatching`, and the next tick finds
+// it (handedOffRetrySend) and only moves the cursor.
+async function settleAmbiguousRetrySend({ enrollment, step, sendRow, err, handoff }) {
+  logger.warn(`[automation-runner] retry send ${sendRow.id} outcome unknown (${handoff.accepted ? 'accepted, save failed' : (err.status || err.name || 'no status')}); left for the delivery webhook`);
+  const messageId = handoff.accepted?.messageId || null;
+  const writes = [...(messageId ? [{ sendgrid_message_id: messageId }, { sendgrid_message_id: messageId }] : []), {}];
+  for (const extra of writes) {
+    try {
+      await db('automation_step_sends').where({ id: sendRow.id }).update({ status: sentStatusFor(sendRow), sent_at: new Date(), updated_at: new Date(), ...extra });
+      break;
+    } catch (writeErr) {
+      logger.warn(`[automation-runner] retry send ${sendRow.id} could not be marked sent: ${writeErr.message}`);
+    }
+  }
+  try {
+    return await completeHandedOffRetry(enrollment, step);
+  } catch (advanceErr) {
+    logger.warn(`[automation-runner] retry send ${sendRow.id} handed off but the enrollment was not advanced: ${advanceErr.message}`);
+    return { sent: true, ambiguous: true };
   }
 }
 
@@ -906,18 +1114,14 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     }
   }
 
-  const sendRow = await db('automation_step_sends').insert({
-    enrollment_id: enrollment.id,
-    step_id: step.id,
-    step_order: step.step_order,
-    email: recipient,
-    status: 'queued',
-  }).returning('*').then((rows) => rows[0]);
+  const sendRow = await insertStepSend({ enrollment, step, recipient, testRecipient });
 
   const deliveryBlock = await automationDeliveryBlock({ enrollment, template, recipient,
-    sendId: sendRow.id, testRecipient, billingSend });
+    sendId: sendRow.id, testRecipient, billingSend, retryNotBound: sendRow.retryNotBound,
+    handedOffStep: sendRow.retryHandedOff ? step : null });
   if (deliveryBlock) return deliveryBlock;
 
+  const handoff = { started: false, accepted: null };
   const dispatch = (providerBoundaryCheck) => sendgrid.sendOne({
     to: recipient,
     fromEmail,
@@ -928,16 +1132,20 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     text: text || undefined,
     categories: ['automation', `template_${template.key}`, `step_${step.step_order}`],
     asmGroupId,
-    ...(providerBoundaryCheck ? { providerBoundaryCheck } : {}),
+    ...retrySendCustomArgs(sendRow),
+    ...(providerBoundaryCheck ? { providerBoundaryCheck: sendRow.retryBound ? markHandoffStarted(handoff, providerBoundaryCheck) : providerBoundaryCheck } : {}),
   });
   try {
+    await markRetryDispatching(sendRow);
     const res = billingSend
       ? await sendPaymentFailedThroughBillingAuthority({ enrollment, template, recipient, sendId: sendRow.id, dispatch })
       : await dispatchUnderContactBoundary({ dispatch, enrollment, step, recipient, testRecipient, sendId: sendRow.id });
     if (res?.sent === false) return res;
+    handoff.accepted = res;
 
     await db('automation_step_sends').where({ id: sendRow.id }).update({
-      status: 'sent',
+      // A bound retry send's delivery / bounce event can land before this save: its status is then kept, never rewound to 'sent'.
+      status: sentStatusFor(sendRow),
       sendgrid_message_id: res.messageId,
       sent_at: new Date(),
       updated_at: new Date(),
@@ -950,21 +1158,32 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
 
     return advanceEnrollment(enrollment, steps, step);
   } catch (err) {
-    logger.error(`[automation-runner] send failed enrollment=${enrollment.id} step=${step.step_order}: ${err.message}`);
-    await db('automation_step_sends').where({ id: sendRow.id }).update({
-      status: 'failed',
-      failure_reason: err.message.slice(0, 500),
-      updated_at: new Date(),
-    });
-    if (testRecipient) throw err;
-
-    // Mark enrollment failed so it stops retrying. Operator can re-enroll
-    // later. Fenced on the step this attempt was for.
-    await db('automation_enrollments').where({ id: enrollment.id, current_step: enrollment.current_step }).update({
-      status: 'failed', next_send_at: null, updated_at: new Date(),
-    });
-    return { sent: false, error: err.message };
+    return settleFailedSend({ enrollment, step, sendRow, err, testRecipient, handoff });
   }
+}
+
+// What a thrown sendStepLocked dispatch leaves behind. Every send but the BOUND call-spelling retry: the row fails and the
+// enrollment stops, as ever. The bound retry send is classified first (retryOutcomeAmbiguous): a definite non-delivery fails as
+// before; an AMBIGUOUS outcome is not a failure (settleAmbiguousRetrySend).
+async function settleFailedSend({ enrollment, step, sendRow, err, testRecipient, handoff }) {
+  logger.error(`[automation-runner] send failed enrollment=${enrollment.id} step=${step.step_order}: ${err.message}`);
+  if (!testRecipient && sendRow.retryBound && retryOutcomeAmbiguous(handoff, err)) {
+    return settleAmbiguousRetrySend({ enrollment, step, sendRow, err, handoff });
+  }
+  await db('automation_step_sends').where({ id: sendRow.id }).update({
+    status: 'failed',
+    failure_reason: err.message.slice(0, 500),
+    updated_at: new Date(),
+  });
+  if (testRecipient) throw err;
+  await failBoundRetrySend(enrollment, sendRow);
+
+  // Mark enrollment failed so it stops retrying. Operator can re-enroll
+  // later. Fenced on the step this attempt was for.
+  await db('automation_enrollments').where({ id: enrollment.id, current_step: enrollment.current_step }).update({
+    status: 'failed', next_send_at: null, updated_at: new Date(),
+  });
+  return { sent: false, error: err.message };
 }
 
 // Moves an enrolment past a step: the one it just delivered or skipped (the
@@ -975,6 +1194,18 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
 // and the last passed step id), so two settlers of one step (the tick and a
 // manual / composer prep delivery) cannot advance it twice. Steps are loaded
 // when the caller has none.
+// The cursor write for a passed step. It also ends the call-spelling retry EPISODE when that step is the one the episode re-queued
+// (metadata.spelling_retry_step, call-email-spelling-retry.js): the marker lives until the cursor moves past its step, never longer.
+function cursorMetadataSql(cursor, passed) {
+  const marker = require('./call-email-spelling-retry').RETRY_STEP_KEY;
+  return db.raw(
+    `CASE WHEN COALESCE(metadata->'${marker}'->>'step_id', '') = ?
+          THEN (COALESCE(metadata, '{}'::jsonb) || ?::jsonb) - '${marker}'
+          ELSE COALESCE(metadata, '{}'::jsonb) || ?::jsonb END`,
+    [String(passed.id), JSON.stringify(cursor), JSON.stringify(cursor)],
+  );
+}
+
 async function advanceEnrollment(enrollment, steps = null, passedStep = null) {
   if (!steps) steps = await enabledSequenceSteps(enrollment.template_key);
   const { passedIds } = sequenceCursor(enrollment, steps);
@@ -991,7 +1222,7 @@ async function advanceEnrollment(enrollment, steps = null, passedStep = null) {
     .whereRaw("COALESCE(metadata->>'passed_step_id', '') = ?", [priorPassedId])
     .update({
       ...patch,
-      ...(cursor ? { metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(cursor)]) } : {}),
+      ...(cursor ? { metadata: cursorMetadataSql(cursor, passed) } : {}),
       last_sent_at: new Date(),
       updated_at: new Date(),
     });
@@ -1098,6 +1329,7 @@ module.exports = {
   enrollCustomer,
   sendStep,
   advanceEnrollment,
+  rewindEnrollmentToStep,
   nextSequenceStep,
   processDueSteps,
   testSequence,
