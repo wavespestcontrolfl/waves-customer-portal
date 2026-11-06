@@ -26,6 +26,7 @@ import { notifyUnreadChanged } from "../../../hooks/useUnreadConversations";
 import { getAdminUser } from "../../../lib/adminAuth";
 import { combineAppendedDraft, consultationLineOf } from "../../../lib/composerLinks";
 import AuthenticatedCallAudio from "../AuthenticatedCallAudio";
+import GreetingNameNote, { useGreetingNameCheck } from "../GreetingNameCheck";
 import { deliveryLabel, formatDuration } from "./activity";
 import { etDateString, formatETDate, formatETTime } from "../../../lib/timezone";
 
@@ -205,6 +206,7 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
   const [sentNote, setSentNote] = useState("");
   const [pendingNew, setPendingNew] = useState(0);
   const [liveNote, setLiveNote] = useState("");
+  const nameCheck = useGreetingNameCheck({ customerId, text: draft, setText: (value) => onDraftChange(value) });
 
   const seqRef = useRef(0);
   const customerRef = useRef(identity);
@@ -476,6 +478,7 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
               className="text-16"
               disabled={sending}
             />
+            <GreetingNameNote check={nameCheck} />
             <div className="flex items-center justify-between gap-3 mt-2">
               <div className="min-w-0 text-14" aria-live="polite">
                 {sendError ? <span className="text-alert-fg">{sendError}</span> : null}

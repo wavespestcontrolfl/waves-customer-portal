@@ -379,6 +379,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/communications/compliance-export` | admin-communications |
 | POST | `/api/admin/communications/contact-compliance-checks` | admin-communications |
 | POST | `/api/admin/communications/messages/:id/like` | admin-communications |
+| POST | `/api/admin/communications/name-check` | admin-communications |
 | POST | `/api/admin/communications/schedule-sms` | admin-communications |
 | GET | `/api/admin/communications/scheduled` | admin-communications |
 | DELETE | `/api/admin/communications/scheduled/:id` | admin-communications |

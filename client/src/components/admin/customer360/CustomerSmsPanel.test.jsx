@@ -411,4 +411,35 @@ describe("CustomerSmsPanel", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("notes a greeting name that differs from the record, fixes it on tap, and never blocks Send", async () => {
+    const nameChecks = [];
+    adminFetch.mockImplementation(async (path, opts) => {
+      if (path.includes("/comms")) return { comms: [] };
+      if (path === "/admin/communications/name-check") {
+        const { customer_id: id, text } = JSON.parse(opts.body);
+        nameChecks.push({ id, text });
+        return text.includes("Avry") ? { fixes: [{ heard: "Avry", spelled: "Avery" }], text: text.replace("Avry", "Avery") } : { fixes: [], text };
+      }
+      return {};
+    });
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={vi.fn()} />);
+    const box = await screen.findByLabelText(/Message to Avery Sample/);
+    fireEvent.change(box, { target: { value: "Hi Avry, see you Friday." } });
+    expect(await screen.findByText("Record says Avery")).toBeInTheDocument();
+    expect(nameChecks).toEqual([{ id: "cust-a", text: "Hi Avry, see you Friday." }]);
+    expect(screen.getByRole("button", { name: "Send text" })).toBeEnabled();
+    expect(box).toHaveValue("Hi Avry, see you Friday.");
+    fireEvent.click(screen.getByRole("button", { name: "Change to Avery" }));
+    expect(box).toHaveValue("Hi Avery, see you Friday.");
+    expect(sessionStorage.getItem("c360:sms-draft:staff-a:cust-a")).toBe("Hi Avery, see you Friday.");
+    await waitFor(() => expect(screen.queryByText("Record says Avery")).not.toBeInTheDocument());
+  });
+
+  it("skips the name check when the thread has no customer id", async () => {
+    adminFetch.mockImplementation(async (path) => (path.includes("/comms") ? { comms: [] } : {}));
+    render(<CustomerSmsPanel customer={{ firstName: "Lee", lastName: "Sample", phone: "+19415550109" }} open onClose={vi.fn()} />);
+    fireEvent.change(await screen.findByLabelText(/Message to Lee Sample/), { target: { value: "Hi Lea," } });
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(adminFetch.mock.calls.some(([p]) => p === "/admin/communications/name-check")).toBe(false);
+  });
 });

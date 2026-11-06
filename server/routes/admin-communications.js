@@ -11,6 +11,7 @@ const { isTechnicianRequest, technicianServicesCustomer, technicianCustomerIdsSu
 const { hideRecruitingThreadsFromNonAdmin, isRecruitingPhone, isRecruitingMessageType } = require('../utils/recruiting-thread-scope');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
+const { respellRecordName } = require('../utils/name-spelling');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
@@ -1845,6 +1846,34 @@ async function sendSmsHandler(req, res, next) {
   }
 }
 router.post('/sms', sendSmsHandler);
+
+// POST /api/admin/communications/name-check — the composer's note when a greeting uses another
+// listed spelling of the customer's first name ("Hi Gina," to a record that says Gena). Read-only:
+// it answers the fixes and the fixed text, and the composer changes nothing unless the user taps
+// the fix. Only a count is logged, never the words.
+const NAME_CHECK_MAX_TEXT = 2000;
+router.post('/name-check', async (req, res, next) => {
+  try {
+    const { customer_id: customerId, text } = req.body || {};
+    if (typeof customerId !== 'string' || !UUID_RE.test(customerId)) {
+      return res.status(400).json({ error: 'customer_id must be a UUID' });
+    }
+    if (typeof text !== 'string' || text.length > NAME_CHECK_MAX_TEXT) {
+      return res.status(400).json({ error: `text must be a string of at most ${NAME_CHECK_MAX_TEXT} characters` });
+    }
+    // A technician sees only customers on their own route; out of scope reads as unknown.
+    if (isTechnicianRequest(req) && !(await technicianServicesCustomer(req, customerId))) {
+      return res.json({ fixes: [], text });
+    }
+    const customer = await db('customers').where({ id: customerId }).first('first_name', 'last_name');
+    if (!customer) return res.json({ fixes: [], text });
+    const checked = respellRecordName(text, { firstName: customer.first_name, lastName: customer.last_name });
+    logger.info(`[name-check] ${checked.fixes.length} greeting name fix(es) offered`);
+    return res.json({ fixes: checked.fixes, text: checked.text });
+  } catch (err) {
+    return next(err);
+  }
+});
 
 // POST /api/admin/communications/send-prep — manual prep-guide send for a
 // customer picked by name ("Send prep guide" button). Smart channel: emails
