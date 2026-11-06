@@ -420,6 +420,33 @@
   }
 }
 
+/* ── Estimate calendar (shared SchedulePicker inside .gc-sched) ──────── */
+/* Unavailable days stay muted but legible (was 35% opacity), and the
+   openings / tech-nearby dots are big enough to tell apart. On phones the
+   inner panels give back 6px a side and the grid gap 2px, so each of the
+   seven day cells grows from ~34px to ~38px wide. */
+[data-glass-theme] .gc-sched .wpk-day:disabled {
+  opacity: 0.5;
+}
+[data-glass-theme] .gc-sched .wpk-day-dots i {
+  width: 7px;
+  height: 7px;
+}
+[data-glass-theme] .gc-sched .wpk-legend i {
+  width: 10px;
+  height: 10px;
+}
+@media (max-width: 640px) {
+  [data-glass-theme] .gc-sched .wpk-section-inner {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+  [data-glass-theme] .gc-sched .wpk-dow,
+  [data-glass-theme] .gc-sched .wpk-grid {
+    gap: 4px;
+  }
+}
+
 /* ── Waves AI fact tiles on phones ───────────────────────────────────── */
 /* Three tiles stay one row (owner 2026-07-10). At 390px each tile had 79px
    for text, so "2,340 sq ft" (81px) and "YEAR BUILT" (89px with eyebrow

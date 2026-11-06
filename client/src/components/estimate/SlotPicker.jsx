@@ -562,7 +562,7 @@ export default function SlotPicker({
   );
 
   return (
-    <div data-website-card="" style={estimateCard()}>
+    <div data-website-card="" className={website ? undefined : 'gc-sched'} style={estimateCard()}>
       {website ? null : heading}
       {glass && selectedSlot && !glassSlotIsStale(selectedSlot) ? (
         <GlassTechChip slotMeta={glassSlotMeta(selectedSlot)} licenseNumber={licenseNumber} />
