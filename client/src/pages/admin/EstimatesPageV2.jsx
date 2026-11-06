@@ -3769,115 +3769,115 @@ export function MobileEstimateRow({
               </span>{" "}
             </div>
           ) : (
-            <div className="text-ui-body text-ink-tertiary truncate">
-              {" "}
-              <MobilePriceText
-                text={amountInline}
-                className="inline-block align-bottom"
-              />{" "}
+            // The status keeps its full width. The price shortens first (the
+            // full text is in its title), and the details get the width left.
+            <div className="flex min-w-0 items-center overflow-hidden whitespace-nowrap text-ui-body text-ink-tertiary">
+              <MobilePriceText text={amountInline} />
               <span
                 className={cn(
-                  "ml-2 font-medium",
+                  "ml-2 shrink-0 font-medium",
                   mobileStatusClass(estimate.status),
                 )}
               >
                 {cfg.label}
               </span>
-              {estimate.viewCount > 1 && (
-                <span
-                  className="ml-2 u-nums"
-                  title={
-                    estimate.lastViewedAt
-                      ? `Last viewed ${timeAgo(estimate.lastViewedAt)}`
-                      : undefined
-                  }
-                >
-                  {estimate.viewCount}×
+              <span className="min-w-0 flex-1 truncate">
+                {estimate.viewCount > 1 && (
+                  <span
+                    className="ml-2 u-nums"
+                    title={
+                      estimate.lastViewedAt
+                        ? `Last viewed ${timeAgo(estimate.lastViewedAt)}`
+                        : undefined
+                    }
+                  >
+                    {estimate.viewCount}×
+                  </span>
+                )}
+                {estimate.pricingRisk?.hasRisk && (
+                  <span className="ml-2 text-alert-fg">
+                    {estimate.pricingRisk.missingCogsCount
+                      ? "Missing COGS"
+                      : estimate.pricingRisk.lowMarginCount
+                        ? "Low Margin"
+                        : "Pricing Risk"}
+                  </span>
+                )}
+                {automationBadgeLabel(estimate.automation) && (
+                  <span
+                    className={cn(
+                      "ml-2",
+                      [
+                        "manual_review_required",
+                        "generation_failed",
+                        "blocked",
+                      ].includes(estimate.automation?.status)
+                        ? "text-alert-fg"
+                        : "text-ink-tertiary",
+                    )}
+                    title={(estimate.automation?.review || []).join(" · ")}
+                  >
+                    {automationBadgeLabel(estimate.automation)}
+                  </span>
+                )}
+                {estimate.estimatorEngine?.lane && (
+                  <span
+                    className={cn(
+                      "ml-2",
+                      estimate.estimatorEngine.lane !== "green"
+                        ? "text-alert-fg"
+                        : "text-ink-tertiary",
+                    )}
+                    title={(estimate.estimatorEngine.laneReasons || []).join(
+                      " · ",
+                    )}
+                  >
+                    {estimate.estimatorEngine.lane !== "green"
+                      ? "AI Review"
+                      : "AI Draft"}
+                  </span>
+                )}
+                {estimate.lawnServiceOutline && (
+                  <span
+                    className={cn(
+                      "ml-2",
+                      estimate.lawnServiceOutline.validationStatus === "blocked"
+                        ? "text-alert-fg"
+                        : "text-ink-tertiary",
+                    )}
+                    title={`Outline ${estimate.lawnServiceOutline.status || "draft"} · ${estimate.lawnServiceOutline.validationStatus || "unchecked"}`}
+                  >
+                    Outline{" "}
+                    {estimate.lawnServiceOutline.stale
+                      ? "stale"
+                      : estimate.lawnServiceOutline.ctaClickCount > 0
+                        ? "clicked"
+                        : estimate.lawnServiceOutline.status || "draft"}
+                  </span>
+                )}
+                {estimate.confirmedAppointment && (
+                  <span
+                    className="ml-2"
+                    title={
+                      estimate.confirmedAppointment.linked
+                        ? `This call also booked ${formatApptShort(estimate.confirmedAppointment)} — review the schedule before sending a fresh quote.`
+                        : `Customer has a confirmed appointment ${formatApptShort(estimate.confirmedAppointment)}.`
+                    }
+                  >
+                    {" "}
+                    <CalendarCheck
+                      size={11}
+                      strokeWidth={1.75}
+                      className="inline-block align-text-top"
+                      aria-hidden
+                    />
+                    {formatApptShort(estimate.confirmedAppointment)}
+                  </span>
+                )}
+                <span className="ml-2 u-nums">
+                  #{shortEstimateRef(estimate.id)}
                 </span>
-              )}
-              {estimate.pricingRisk?.hasRisk && (
-                <span className="ml-2 text-alert-fg">
-                  {estimate.pricingRisk.missingCogsCount
-                    ? "Missing COGS"
-                    : estimate.pricingRisk.lowMarginCount
-                      ? "Low Margin"
-                      : "Pricing Risk"}
-                </span>
-              )}
-              {automationBadgeLabel(estimate.automation) && (
-                <span
-                  className={cn(
-                    "ml-2",
-                    [
-                      "manual_review_required",
-                      "generation_failed",
-                      "blocked",
-                    ].includes(estimate.automation?.status)
-                      ? "text-alert-fg"
-                      : "text-ink-tertiary",
-                  )}
-                  title={(estimate.automation?.review || []).join(" · ")}
-                >
-                  {automationBadgeLabel(estimate.automation)}
-                </span>
-              )}
-              {estimate.estimatorEngine?.lane && (
-                <span
-                  className={cn(
-                    "ml-2",
-                    estimate.estimatorEngine.lane !== "green"
-                      ? "text-alert-fg"
-                      : "text-ink-tertiary",
-                  )}
-                  title={(estimate.estimatorEngine.laneReasons || []).join(
-                    " · ",
-                  )}
-                >
-                  {estimate.estimatorEngine.lane !== "green"
-                    ? "AI Review"
-                    : "AI Draft"}
-                </span>
-              )}
-              {estimate.lawnServiceOutline && (
-                <span
-                  className={cn(
-                    "ml-2",
-                    estimate.lawnServiceOutline.validationStatus === "blocked"
-                      ? "text-alert-fg"
-                      : "text-ink-tertiary",
-                  )}
-                  title={`Outline ${estimate.lawnServiceOutline.status || "draft"} · ${estimate.lawnServiceOutline.validationStatus || "unchecked"}`}
-                >
-                  Outline{" "}
-                  {estimate.lawnServiceOutline.stale
-                    ? "stale"
-                    : estimate.lawnServiceOutline.ctaClickCount > 0
-                      ? "clicked"
-                      : estimate.lawnServiceOutline.status || "draft"}
-                </span>
-              )}
-              {estimate.confirmedAppointment && (
-                <span
-                  className="ml-2"
-                  title={
-                    estimate.confirmedAppointment.linked
-                      ? `This call also booked ${formatApptShort(estimate.confirmedAppointment)} — review the schedule before sending a fresh quote.`
-                      : `Customer has a confirmed appointment ${formatApptShort(estimate.confirmedAppointment)}.`
-                  }
-                >
-                  {" "}
-                  <CalendarCheck
-                    size={11}
-                    strokeWidth={1.75}
-                    className="inline-block align-text-top"
-                    aria-hidden
-                  />
-                  {formatApptShort(estimate.confirmedAppointment)}
-                </span>
-              )}
-              <span className="ml-2 u-nums">
-                #{shortEstimateRef(estimate.id)}
-              </span>{" "}
+              </span>
             </div>
           )}
           <EstimateSoldByRow estimate={estimate} onChanged={onSoldByChanged} />

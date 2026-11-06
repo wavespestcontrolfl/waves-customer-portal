@@ -19,6 +19,10 @@ const ID_KEYS = ['customer_id', 'property_id', 'estimate_id', 'appointment_id', 
 export const pickIds = (pageData) => Object.fromEntries(ID_KEYS.filter((key) => pageData?.[key]).map((key) => [key, pageData[key]]));
 
 // The send button's state for one palette. `onSent` clears the composer (prompt, attachments, paste mark) after a send.
+// Owner 2026-11-05 "lock pastes": an idea with pasted text may hold a customer's words, so the Mac launcher opens it only in a
+// locked Claude tab that writes a plan for the owner's bell and builds nothing. The note says so as soon as it is sent.
+export const SENT_PASTED_NOTE = 'Sent to Claude. It has pasted text, so you get a plan only, in your bell.';
+
 export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoading, dictationPending, pastedRef, dictationUsedRef, pageData, route, onSent, onRestore }) {
   // Whether the box offers the button: asked once per session (kept once answered); a failed ask reads as hidden and is
   // asked again the next time the box opens.
@@ -48,7 +52,7 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
 
   useEffect(() => () => clearTimeout(timerRef.current), []);
 
-  // An error or duplicate line goes when the box changes; "Sent to Claude." keeps its Undo until it runs out, and "Cancelled." stays.
+  // An error or duplicate line goes when the box changes; the sent line keeps its Undo until it runs out, and "Cancelled." stays.
   useEffect(() => {
     setNote((now) => (now && (now.kind === 'error' || now.kind === 'duplicate') ? null : now));
   }, [prompt, attachments.length]);
@@ -79,7 +83,7 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
         // including a photo still being converted.
         if (promptRef.current === raw && !attachmentsRef.current.length && !attachmentsLoadingRef.current) onSent();
         // `raw` and `pasted` are the box as the owner sent it, for an Undo to put back.
-        setNote({ kind: 'sent', text: 'Sent to Claude.', id: out.id, at: out.at, undoable: true, raw, pasted, dictated });
+        setNote({ kind: 'sent', text: pasted ? SENT_PASTED_NOTE : 'Sent to Claude.', id: out.id, at: out.at, undoable: true, raw, pasted, dictated });
         clearTimeout(timerRef.current);
         timerRef.current = setTimeout(() => setNote((now) => (now?.kind === 'sent' ? { ...now, undoable: false } : now)), UNDO_MS);
       } else {

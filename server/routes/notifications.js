@@ -1367,6 +1367,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       const consentUpdates = serviceContactConsentUpdates(contacts, updates.serviceContactsConsent);
       let lockedBefore = beforeRow;
       let lockedAt = null;
+      let loginPrefs;
       await db.transaction(async (trx) => {
         // Row lock + re-read: the audit diff below must describe the actual
         // DB transition — a concurrent save may have moved the row since the
@@ -1383,9 +1384,14 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           optinClaims = await claimRecipientOptins({ ...optinArgs, trx });
         }
+        // Contact login (GATE_CONTACT_LOGIN_HOLDER_ONLY): this signed-in holder
+        // save is the only writer of the per-phone login attestation.
+        loginPrefs = require('../services/customer-contact')
+          .loginAttestedPrefs(lockedBefore, contacts.map((c) => c.phone), !!consentUpdates.service_contacts_consent_at);
         await trx('customers').where({ id: req.params.customerId }).update({
           ...slotUpdates,
           ...consentUpdates,
+          ...(loginPrefs ? { service_preferences: JSON.stringify(loginPrefs) } : {}),
           updated_at: new Date(),
         });
         // A removed contact's own notification choices and portal sessions
@@ -1469,9 +1475,23 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           legacyClaims = await claimRecipientOptins({ ...legacyOptinArgs, trx });
         }
+        // Per-phone login attestation (GATE_CONTACT_LOGIN_HOLDER_ONLY). This save
+        // submitted slot 1 only, so only slot 1 is newly attested; slots 2 and 3 keep
+        // an attestation they already hold and gain none (a phone the call pipeline
+        // filed meanwhile needs the holder's explicit full-list save).
+        const { loginAttestedPrefs, loginAttestedPhoneKeys, phoneKeyOf } = require('../services/customer-contact');
+        const alreadyAttested = loginAttestedPhoneKeys(legacyLockedBefore);
+        const legacyLoginPrefs = loginAttestedPrefs(
+          legacyLockedBefore,
+          [contact.phone, ...[2, 3]
+            .map((n) => legacyLockedBefore[`service_contact${n}_phone`])
+            .filter((phone) => alreadyAttested.has(phoneKeyOf(phone)))],
+          !!legacyConsentUpdates.service_contacts_consent_at,
+        );
         await trx('customers').where({ id: req.params.customerId }).update({
           ...legacySlot1Updates,
           ...legacyConsentUpdates,
+          ...(legacyLoginPrefs ? { service_preferences: JSON.stringify(legacyLoginPrefs) } : {}),
           updated_at: new Date(),
         });
         // Same prune as the list save: a replaced slot-1 person's own choices

@@ -28,11 +28,9 @@ const NotificationService = require('./notification-service');
 // one. A person's earlier done keeps its own stamps (doneColumns COALESCEs).
 const GENERIC_RESOLUTION = 'Cleared: the condition this alert was about no longer holds';
 
-async function closeAdminAlertKeys(conn, dedupeKeys, reason, { now = new Date(), resolution = null } = {}) {
-  const keys = [...new Set((dedupeKeys || []).filter(Boolean).map(String))];
-  if (!keys.length) return 0;
-  return conn('notifications').where({ recipient_type: 'admin' })
-    .whereRaw("metadata->>'dedupeKey' = ANY(?::text[])", [keys])
+// The one writer behind both closers: `rows` is the caller's selection (by key or by id). Same stamps either way.
+function closeSelected(conn, rows, reason, { now, resolution }) {
+  return rows
     .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'")
     .update({
       ...NotificationService._private.doneColumns({ by: 'episodes', resolution: resolution || GENERIC_RESOLUTION, at: now, keepExisting: true, conn }),
@@ -40,6 +38,23 @@ async function closeAdminAlertKeys(conn, dedupeKeys, reason, { now = new Date(),
         autoCleared: true, autoClearedReason: reason, autoClearedAt: now.toISOString(),
       })]),
     });
+}
+
+async function closeAdminAlertKeys(conn, dedupeKeys, reason, { now = new Date(), resolution = null } = {}) {
+  const keys = [...new Set((dedupeKeys || []).filter(Boolean).map(String))];
+  if (!keys.length) return 0;
+  return closeSelected(conn, conn('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ANY(?::text[])", [keys]), reason, { now, resolution });
+}
+
+// The same close, addressed by notification id. For a source whose dedupe key can be shared by two rows (a key cut
+// to a fixed length for two different sets), where a key close would also close the row that must stay open. Same
+// stamps as closeAdminAlertKeys (done by 'episodes', the resolution, autoCleared); admin rows only.
+async function closeAdminAlertIds(conn, ids, reason, { now = new Date(), resolution = null } = {}) {
+  const list = [...new Set((ids || []).filter(Boolean).map(String))];
+  if (!list.length) return 0;
+  return closeSelected(conn, conn('notifications').where({ recipient_type: 'admin' }).whereIn('id', list),
+    reason, { now, resolution });
 }
 
 // The dedupe keys of every admin row under a key prefix that is not yet
@@ -124,4 +139,4 @@ async function openAdminAlertMetadata(conn, prefix) {
   return rows.map((r) => (typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata) || {});
 }
 
-module.exports = { closeAdminAlertKeys, openAdminAlertKeys, openAdminAlertMetadata, raiseAdminAlertWithReopen };
+module.exports = { closeAdminAlertKeys, closeAdminAlertIds, openAdminAlertKeys, openAdminAlertMetadata, raiseAdminAlertWithReopen };
