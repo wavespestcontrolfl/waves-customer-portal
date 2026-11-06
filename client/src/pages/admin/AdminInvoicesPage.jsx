@@ -9399,6 +9399,7 @@ function CreateInvoice({
             >
               <Field className="min-w-0" label="Notes (optional)">
                 <Textarea
+                  data-own-mic="true"
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                   rows={2}
@@ -9463,6 +9464,7 @@ function CreateInvoice({
               >
                 <Field className="min-w-0" label="Email message (optional)">
                   <Textarea
+                    data-own-mic="true"
                     value={emailMessage}
                     onChange={(e) =>
                       setEmailMessage(e.target.value.slice(0, 800))
