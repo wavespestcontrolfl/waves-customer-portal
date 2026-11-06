@@ -144,7 +144,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
   test('a card the account updater replaced keeps its old number on earlier payments (card details sync, #7672 r2 P2)', async () => {
     // Stripe replaced the saved card's number. The refresh fills the snapshot of a payment that never took one, then
     // changes the saved card; history reads each payment's snapshot first, so both earlier payments keep the old card.
-    const { applyStripeCardDetails } = require('../services/card-details-sync');
+    const { refreshCardFromStripe } = require('../services/card-details-sync');
     const [customer] = await db('customers')
       .insert({ first_name: 'FkProbe', last_name: 'Renewed', phone: '+15550001238' })
       .returning('id');
@@ -168,11 +168,13 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
         { customer_id: customerId, payment_method_id: methodId, payment_date: '2026-10-03', amount: '60.00', status: 'paid' },
       ]);
 
-      const out = await applyStripeCardDetails({
+      // Stripe now holds the replaced card (no network call: the read is stubbed on the real module).
+      jest.spyOn(StripeService, 'retrievePaymentMethod').mockResolvedValue({
         id: pmId, type: 'card', customer: 'cus_card_sync_probe',
         card: { brand: 'mastercard', last4: '5555', exp_month: 11, exp_year: 2029, funding: 'credit' },
-      }, { source: 'test', database: db });
-      expect(out).toEqual({ updated: 1 });
+      });
+      const out = await refreshCardFromStripe(pmId, { source: 'test', database: db });
+      expect(out).toEqual({ updated: 1, conflict: false });
 
       const saved = await db('payment_methods').where({ id: methodId }).first();
       expect(saved).toMatchObject({ card_brand: 'MASTERCARD', last_four: '5555', exp_month: '11', exp_year: '2029' });
@@ -182,6 +184,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
         ['50.00', 'VISA', '4242'],
       ]);
     } finally {
+      jest.restoreAllMocks();
       if (methodId) {
         await db('audit_log').where({ resource_type: 'payment_method', resource_id: String(methodId) }).del().catch(() => {});
       }

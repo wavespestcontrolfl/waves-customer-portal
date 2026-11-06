@@ -7,11 +7,19 @@
  * time (stripe.js savePaymentMethod), so a renewed card kept its old expiry
  * and Auto Pay refused it as expired.
  *
- *   applyStripeCardDetails(pm, { source })  one Stripe PaymentMethod -> every
- *                                           card row that holds it
- *   syncNearExpiryCards()                   daily safety net for the cards
- *                                           the portal reads as expired or
- *                                           expiring soon
+ *   refreshCardFromStripe(pmId, { source })  re-read one Stripe PaymentMethod
+ *                                            and write it to every card row
+ *                                            that holds it (the webhook)
+ *   syncNearExpiryCards()                    daily safety net for the cards
+ *                                            the portal reads as expired or
+ *                                            expiring soon
+ *
+ * Both entry points refresh through refreshCardFromStripe. It reads the rows
+ * BEFORE it asks Stripe, and writes a row only while the row still holds what
+ * was read (compare-and-set on every field a refresh may change). An older
+ * Stripe answer therefore never overwrites a newer one that a concurrent
+ * refresh already wrote: the late refresh finds the row changed, writes
+ * nothing, and reads the row and Stripe again (Codex #7672 r3).
  *
  * Sends nothing to a customer. Never log a PaymentMethod object: log row ids
  * and the names of the fields that changed.
@@ -92,13 +100,32 @@ async function preservePaymentSnapshots(knex, row) {
     .update(fill);
 }
 
-async function applyStripeCardDetails(pm, { source = 'webhook', database } = {}) {
-  if (!pm || pm.type !== 'card' || !pm.card || !pm.id) return { updated: 0 };
-  const knex = database || defaultDb;
-  const rows = await knex('payment_methods')
-    .where({ stripe_payment_method_id: pm.id })
+// The rows a refresh compares against, read BEFORE Stripe is asked.
+function savedCardRows(knex, pmId) {
+  return knex('payment_methods')
+    .where({ stripe_payment_method_id: pmId })
     .select('id', 'method_type', 'exp_month', 'exp_year', 'last_four', 'card_brand', 'card_funding');
+}
+
+// The compare-and-set condition: the row still holds every field a refresh may change, as it was read.
+function unchangedSince(row) {
+  return {
+    exp_month: row.exp_month ?? null,
+    exp_year: row.exp_year ?? null,
+    last_four: row.last_four ?? null,
+    card_brand: row.card_brand ?? null,
+    card_funding: row.card_funding ?? null,
+  };
+}
+
+// `rows` = the card's rows as read BEFORE `pm` was retrieved (savedCardRows). A row that changed since then is not
+// written: { conflict: true } tells refreshCardFromStripe to read the row and Stripe again.
+async function applyStripeCardDetails(pm, { source = 'webhook', database, rows } = {}) {
+  if (!pm || pm.type !== 'card' || !pm.card || !pm.id) return { updated: 0, conflict: false };
+  if (!Array.isArray(rows)) throw new Error('applyStripeCardDetails needs the rows read before Stripe was asked');
+  const knex = database || defaultDb;
   let updated = 0;
+  let conflict = false;
   for (const row of rows) {
     if (isBankMethodType(row.method_type)) continue;
     const { patch, fields, stored, next } = cardPatch(pm, row);
@@ -108,9 +135,9 @@ async function applyStripeCardDetails(pm, { source = 'webhook', database } = {})
     // move either; the audit row records when it ran.
     if (patch.last_four || patch.card_brand) await preservePaymentSnapshots(knex, row);
     const count = await knex('payment_methods')
-      .where({ id: row.id, stripe_payment_method_id: pm.id })
+      .where({ id: row.id, stripe_payment_method_id: pm.id, ...unchangedSince(row) })
       .update(patch);
-    if (!count) continue;
+    if (!count) { conflict = true; continue; }
     updated += 1;
     logger.info(`[card-details-sync] row ${row.id} refreshed from Stripe (${source}): ${fields.join(', ')}`);
     try {
@@ -125,7 +152,29 @@ async function applyStripeCardDetails(pm, { source = 'webhook', database } = {})
       logger.warn(`[card-details-sync] audit write failed for row ${row.id}: ${err.message}`);
     }
   }
-  return { updated };
+  return { updated, conflict };
+}
+
+const REFRESH_TRIES = 3;
+
+// One saved card, for both entry points: read its rows, ask Stripe, write what changed while the rows still hold
+// what was read; a concurrent refresh that landed first sends it round again (up to REFRESH_TRIES).
+// Returns { updated, conflict } or { stripeMissing } (Stripe returned nothing) or { detached } (no Stripe customer).
+async function refreshCardFromStripe(pmId, { source = 'webhook', database } = {}) {
+  const knex = database || defaultDb;
+  let updated = 0;
+  for (let attempt = 1; attempt <= REFRESH_TRIES; attempt++) {
+    const rows = await savedCardRows(knex, pmId);
+    const pm = await require('./stripe').retrievePaymentMethod(pmId);
+    if (!pm) return { stripeMissing: true, updated };
+    if (!pm.customer) return { detached: true, updated };
+    const result = await applyStripeCardDetails(pm, { source, database: knex, rows });
+    updated += result.updated;
+    if (!result.conflict) return { updated, conflict: false };
+    logger.info(`[card-details-sync] ${pmId}: a concurrent refresh changed a row first (try ${attempt}); reading again`);
+  }
+  logger.warn(`[card-details-sync] ${pmId}: still changing after ${REFRESH_TRIES} tries; left for the next refresh`);
+  return { updated, conflict: true };
 }
 
 function inRefreshWindow(row, now) {
@@ -137,11 +186,10 @@ function inRefreshWindow(row, now) {
 
 // One Stripe card. Returns { updated, detached, error } counters.
 async function syncOneCard(pmId, knex) {
-  const pm = await require('./stripe').retrievePaymentMethod(pmId);
-  if (!pm) return { error: 1 };
-  if (!pm.customer) return { detached: 1 };
-  const { updated } = await applyStripeCardDetails(pm, { source: 'daily_sync', database: knex });
-  return { updated };
+  const result = await refreshCardFromStripe(pmId, { source: 'daily_sync', database: knex });
+  if (result.stripeMissing) return { error: 1 };
+  if (result.detached) return { detached: 1 };
+  return { updated: result.updated, error: result.conflict ? 1 : 0 };
 }
 
 async function syncNearExpiryCards({ now = new Date(), database } = {}) {
@@ -173,4 +221,4 @@ async function syncNearExpiryCards({ now = new Date(), database } = {}) {
   return totals;
 }
 
-module.exports = { applyStripeCardDetails, syncNearExpiryCards };
+module.exports = { applyStripeCardDetails, refreshCardFromStripe, syncNearExpiryCards };

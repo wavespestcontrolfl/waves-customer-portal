@@ -11,7 +11,7 @@ const logger = require('../services/logger');
 const { auditCardDetailsSynced } = require('../services/audit-log');
 const stripe = require('../services/stripe');
 const gatesModule = require('../config/feature-gates');
-const { applyStripeCardDetails, syncNearExpiryCards } = require('../services/card-details-sync');
+const { applyStripeCardDetails, refreshCardFromStripe, syncNearExpiryCards } = require('../services/card-details-sync');
 
 // Minimal in-memory knex: payment_methods reads and updates, plus the fill-only payments snapshot write.
 // `writes` records the order of the two tables' updates.
@@ -45,7 +45,7 @@ function fakeKnex(rows) {
       whereNotNull(col) { needNotNull = col; return q; },
       select() {
         return Promise.resolve(rows.filter((r) => Object.entries(filter).every(([k, v]) => r[k] === v)
-          && (!needNotNull || r[needNotNull] != null)));
+          && (!needNotNull || r[needNotNull] != null)).map((r) => ({ ...r })));
       },
       update(patch) {
         const hit = rows.filter((r) => Object.entries(filter).every(([k, v]) => r[k] === v));
@@ -58,6 +58,7 @@ function fakeKnex(rows) {
     return q;
   };
   knex.raw = (sql, bindings) => ({ sql, bindings });
+  knex.table = rows;
   knex.updates = updates;
   knex.paymentFills = paymentFills;
   knex.writes = writes;
@@ -75,6 +76,12 @@ const stripeCard = (over = {}, cardOver = {}) => ({
   ...over,
 });
 
+// applyStripeCardDetails compares against the rows read BEFORE Stripe was asked: here, copies of the table now.
+const apply = (pm, knex, opts = {}) => applyStripeCardDetails(pm, {
+  database: knex, ...opts, rows: knex.table.filter((r) => r.stripe_payment_method_id === pm.id).map((r) => ({ ...r })),
+});
+const CAS = (r) => ({ exp_month: r.exp_month, exp_year: r.exp_year, last_four: r.last_four, card_brand: r.card_brand, card_funding: r.card_funding });
+
 beforeEach(() => {
   jest.clearAllMocks();
   gatesModule.gates.cardDetailsSync = true;
@@ -84,10 +91,11 @@ describe('applyStripeCardDetails', () => {
   test('writes a stale expiry with savePaymentMethod formatting and audits it', async () => {
     const rows = [card()];
     const knex = fakeKnex(rows);
-    const out = await applyStripeCardDetails(stripeCard({}, { exp_month: 3, last4: '1111' }), { source: 'webhook', database: knex });
-    expect(out).toEqual({ updated: 1 });
+    const out = await apply(stripeCard({}, { exp_month: 3, last4: '1111' }), knex, { source: 'webhook' });
+    expect(out).toEqual({ updated: 1, conflict: false });
     expect(rows[0]).toMatchObject({ exp_month: '03', exp_year: '2029', last_four: '1111' });
-    expect(knex.updates[0].filter).toEqual({ id: 'row-1', stripe_payment_method_id: 'pm_a' });
+    // Written only while the row still holds what was read before Stripe answered (compare-and-set).
+    expect(knex.updates[0].filter).toEqual({ id: 'row-1', stripe_payment_method_id: 'pm_a', ...CAS(card()) });
     // The Auto Pay fallback orders duplicate default cards by updated_at: a detail refresh never moves it.
     expect(knex.updates[0].patch).not.toHaveProperty('updated_at');
     const audit = auditCardDetailsSynced.mock.calls[0][0];
@@ -112,7 +120,7 @@ describe('applyStripeCardDetails', () => {
   test('an expiry-only renewal writes no payment snapshot', async () => {
     const rows = [card()];
     const knex = fakeKnex(rows);
-    expect(await applyStripeCardDetails(stripeCard(), { database: knex })).toEqual({ updated: 1 });
+    expect(await apply(stripeCard(), knex)).toEqual({ updated: 1, conflict: false });
     expect(rows[0]).toMatchObject({ exp_year: '2029', last_four: '4242', card_brand: 'VISA' });
     expect(knex.writes).toEqual(['payment_methods']);
     expect(knex.paymentFills).toEqual([]);
@@ -121,7 +129,7 @@ describe('applyStripeCardDetails', () => {
   test('a saved card with no stored brand or last four has nothing to preserve', async () => {
     const rows = [card({ last_four: null, card_brand: null })];
     const knex = fakeKnex(rows);
-    expect(await applyStripeCardDetails(stripeCard(), { database: knex })).toEqual({ updated: 1 });
+    expect(await apply(stripeCard(), knex)).toEqual({ updated: 1, conflict: false });
     expect(rows[0]).toMatchObject({ last_four: '4242', card_brand: 'VISA' });
     expect(knex.paymentFills).toEqual([]);
   });
@@ -129,8 +137,8 @@ describe('applyStripeCardDetails', () => {
   test('values equal after normalization are a no-op', async () => {
     const rows = [card({ exp_month: '03', exp_year: '29' })];
     const knex = fakeKnex(rows);
-    const out = await applyStripeCardDetails(stripeCard({}, { exp_month: 3, exp_year: 2029 }), { database: knex });
-    expect(out).toEqual({ updated: 0 });
+    const out = await apply(stripeCard({}, { exp_month: 3, exp_year: 2029 }), knex);
+    expect(out).toEqual({ updated: 0, conflict: false });
     expect(knex.updates).toHaveLength(0);
     expect(auditCardDetailsSynced).not.toHaveBeenCalled();
   });
@@ -142,8 +150,8 @@ describe('applyStripeCardDetails', () => {
       card({ id: 'legacy', method_type: null }),
     ];
     const knex = fakeKnex(rows);
-    const out = await applyStripeCardDetails(stripeCard(), { database: knex });
-    expect(out).toEqual({ updated: 1 });
+    const out = await apply(stripeCard(), knex);
+    expect(out).toEqual({ updated: 1, conflict: false });
     expect(rows[0].exp_year).toBe('2026');
     expect(rows[1].exp_year).toBe('2026');
     expect(rows[2].exp_year).toBe('2029');
@@ -151,14 +159,14 @@ describe('applyStripeCardDetails', () => {
 
   test('a non-card PaymentMethod does nothing', async () => {
     const knex = jest.fn();
-    expect(await applyStripeCardDetails({ id: 'pm_a', type: 'us_bank_account' }, { database: knex })).toEqual({ updated: 0 });
+    expect(await applyStripeCardDetails({ id: 'pm_a', type: 'us_bank_account' }, { database: knex })).toEqual({ updated: 0, conflict: false });
     expect(knex).not.toHaveBeenCalled();
   });
 
   test('funding is never nulled when Stripe has none', async () => {
     const rows = [card({ card_funding: 'credit' })];
     const knex = fakeKnex(rows);
-    await applyStripeCardDetails(stripeCard({}, { funding: null }), { database: knex });
+    await apply(stripeCard({}, { funding: null }), knex);
     expect(rows[0].card_funding).toBe('credit');
     expect(knex.updates[0].patch).not.toHaveProperty('card_funding');
     expect(knex.updates[0].patch).not.toHaveProperty('card_funding_checked_at');
@@ -167,8 +175,8 @@ describe('applyStripeCardDetails', () => {
   test('a changed funding is written with its checked-at stamp', async () => {
     const rows = [card({ card_funding: 'credit', exp_year: '2029' })];
     const knex = fakeKnex(rows);
-    const out = await applyStripeCardDetails(stripeCard({}, { funding: 'debit' }), { database: knex });
-    expect(out).toEqual({ updated: 1 });
+    const out = await apply(stripeCard({}, { funding: 'debit' }), knex);
+    expect(out).toEqual({ updated: 1, conflict: false });
     expect(rows[0].card_funding).toBe('debit');
     expect(rows[0].card_funding_checked_at).toBeInstanceOf(Date);
     expect(auditCardDetailsSynced.mock.calls[0][0].changed_fields).toEqual(['funding']);
@@ -177,10 +185,73 @@ describe('applyStripeCardDetails', () => {
   test('a failed audit write does not undo or block the update', async () => {
     auditCardDetailsSynced.mockRejectedValueOnce(new Error('audit down'));
     const rows = [card()];
-    const out = await applyStripeCardDetails(stripeCard(), { database: fakeKnex(rows) });
-    expect(out).toEqual({ updated: 1 });
+    const out = await apply(stripeCard(), fakeKnex(rows));
+    expect(out).toEqual({ updated: 1, conflict: false });
     expect(rows[0].exp_year).toBe('2029');
     expect(logger.warn).toHaveBeenCalled();
+  });
+});
+
+describe('refreshCardFromStripe', () => {
+  test('re-reads the card from Stripe and writes what changed', async () => {
+    const rows = [card()];
+    stripe.retrievePaymentMethod.mockResolvedValue(stripeCard());
+    expect(await refreshCardFromStripe('pm_a', { source: 'webhook', database: fakeKnex(rows) })).toEqual({ updated: 1, conflict: false });
+    expect(stripe.retrievePaymentMethod).toHaveBeenCalledWith('pm_a');
+    expect(rows[0].exp_year).toBe('2029');
+  });
+
+  // Codex #7672 r3: the daily refresh reads Stripe just before the account updater renews the card, the webhook's
+  // refresh writes the renewal, then the daily one resumes with its older answer. It compares with the row as read
+  // BEFORE its Stripe read, so it has nothing to write, and the renewal stays.
+  test('an older Stripe answer than a concurrent refresh already wrote is never applied', async () => {
+    const rows = [card()]; // portal 11/2026
+    stripe.retrievePaymentMethod.mockImplementationOnce(async () => {
+      Object.assign(rows[0], { exp_month: '11', exp_year: '2029' }); // the webhook's refresh lands meanwhile
+      return stripeCard({}, { exp_month: 11, exp_year: 2026 }); // the daily answer, from before the renewal
+    });
+    const knex = fakeKnex(rows);
+    expect(await refreshCardFromStripe('pm_a', { source: 'daily_sync', database: knex })).toEqual({ updated: 0, conflict: false });
+    expect(rows[0]).toMatchObject({ exp_month: '11', exp_year: '2029' });
+    expect(knex.updates).toEqual([]);
+  });
+
+  test('a row that changed while Stripe answered is not written; the refresh reads both again', async () => {
+    const rows = [card()]; // portal 11/2026
+    stripe.retrievePaymentMethod
+      .mockImplementationOnce(async () => {
+        Object.assign(rows[0], { exp_month: '11', exp_year: '2029' }); // a concurrent refresh lands first
+        return stripeCard({}, { exp_month: 12, exp_year: 2028 });
+      })
+      .mockResolvedValueOnce(stripeCard({}, { exp_month: 12, exp_year: 2030 }));
+    const knex = fakeKnex(rows);
+    expect(await refreshCardFromStripe('pm_a', { database: knex })).toEqual({ updated: 1, conflict: false });
+    expect(stripe.retrievePaymentMethod).toHaveBeenCalledTimes(2);
+    // The first write was refused (the row no longer held what was read); the second applied the fresh answer.
+    expect(knex.updates).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ exp_month: '12', exp_year: '2030' });
+  });
+
+  test('a card that keeps changing stops after three tries and reports the conflict', async () => {
+    const rows = [card()];
+    let year = 2027;
+    stripe.retrievePaymentMethod.mockImplementation(async () => {
+      year += 1;
+      Object.assign(rows[0], { exp_year: String(year) }); // another refresh lands every time
+      return stripeCard({}, { exp_month: 1, exp_year: year + 10 });
+    });
+    expect(await refreshCardFromStripe('pm_a', { database: fakeKnex(rows) })).toEqual({ updated: 0, conflict: true });
+    expect(stripe.retrievePaymentMethod).toHaveBeenCalledTimes(3);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('still changing'));
+  });
+
+  test('Stripe returning nothing, and a card with no Stripe customer, write nothing', async () => {
+    const rows = [card()];
+    stripe.retrievePaymentMethod.mockResolvedValueOnce(null);
+    expect(await refreshCardFromStripe('pm_a', { database: fakeKnex(rows) })).toEqual({ stripeMissing: true, updated: 0 });
+    stripe.retrievePaymentMethod.mockResolvedValueOnce(stripeCard({ customer: null }));
+    expect(await refreshCardFromStripe('pm_a', { database: fakeKnex(rows) })).toEqual({ detached: true, updated: 0 });
+    expect(rows[0].exp_year).toBe('2026');
   });
 });
 
