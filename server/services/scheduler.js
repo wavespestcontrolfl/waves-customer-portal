@@ -7555,6 +7555,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 11:20PM — Dashboard check health (read-only). Posts one engineering
+  // FIX row to the ops digest when a dashboard alert check fails two reads a
+  // minute apart, and retires it on the first clean night. Late evening: the
+  // closeout check reads statuses only for visits completed that day, so an
+  // early-morning run would skip that path. Minute unused elsewhere in this
+  // file (#3208 rule). See server/services/dashboard-check-health.js.
+  // =========================================================================
+  cron.schedule('20 23 * * *', async () => {
+    try {
+      await runExclusive('dashboard-check-health', async () => {
+        const { runDashboardCheckHealth } = require('./dashboard-check-health');
+        const result = await runDashboardCheckHealth();
+        logger.info(`[dashboard-check-health] cron run: ${JSON.stringify({ failed: result.failed, cleared: result.cleared || [] })}`);
+        // A finding that could not be delivered must read as a FAILED run in
+        // job_health: rethrow so runExclusive records it.
+        if (result.delivery && result.delivery.ok === false) {
+          throw new Error(`dashboard-check-health: the finding was not delivered (${result.delivery.error || 'send failed'})`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Dashboard check health failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // Property-lookup parser canary — daily at 10:17 AM ET, one golden parcel
   // per county through the real by-parcel pipeline; alerts when a county PAO
   // layout change silently breaks the scrape-based parsers. Day, not night:
