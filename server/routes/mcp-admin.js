@@ -234,11 +234,11 @@ function claudeInputGuardOn() {
   try { return require('../config/feature-gates').claudeInputGuardLive?.() === true; } catch { return false; }
 }
 
-// Alert categories whose body our own code writes (system faults, cost and token alerts, agent reports), when no registry
+// Alert categories whose body our own code writes (system faults, cost alerts, agent reports; token_alert is left out: it carries a provider's error text), when no registry
 // trigger built it (a trigger's body is composed from its payload: a customer's name, a provider's error text). Every other row's
 // `why` can quote an outside sender (a customer text, an email subject, a Messenger message, a voicemail, a lead form) or a
 // vendor or model, so it stays server side. New categories join only after reading their emitters.
-const CODE_WRITTEN_ALERT_CATEGORIES = new Set(['system', 'llm_cost', 'agents', 'token_alert']);
+const CODE_WRITTEN_ALERT_CATEGORIES = new Set(['system', 'llm_cost', 'agents']);
 const WHY_WITHHELD = 'text withheld: may quote an outside sender; look the item up by id';
 
 // An item with no category is a standing count, whose label our code writes and whose `why` is null.

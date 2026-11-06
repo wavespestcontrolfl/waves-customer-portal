@@ -121,3 +121,13 @@ test('guard on: a system-category row built by a registry trigger from a custome
   expect(allItems(answer)[0].why).toMatch(/^text withheld/);
   expect(JSON.stringify(answer)).not.toContain(INJECTION);
 });
+
+test('guard on: a token_alert row (its body is a provider\'s error text) is withheld', async () => {
+  process.env.GATE_CLAUDE_INPUT_GUARD = 'true';
+  const answer = await answerFor([{
+    id: '00000000-0000-4000-8000-000000000005', category: 'token_alert', title: 'Token needs reconnecting', body: INJECTION, detail: null,
+    link: '/admin/settings', metadata: {}, created_at: '2026-11-04T12:04:00Z', read_at: null,
+  }]);
+  expect(allItems(answer)[0].why).toMatch(/^text withheld/);
+  expect(JSON.stringify(answer)).not.toContain(INJECTION);
+});
