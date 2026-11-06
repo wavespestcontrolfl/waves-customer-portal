@@ -632,6 +632,29 @@ async function auditVendorOrder({ vendor_order_id, restock_request_id, vendor_id
 }
 
 /**
+ * A customer opened the link of an estimate that had expired. Called from GET
+ * /api/estimates/:token/data on the eligible-expired 404 branch. Fire-and-
+ * forget (never throws): it is a "customer came back" signal only. It lives in
+ * audit_log on purpose — estimate_checkout_events and estimate_views are read
+ * without a kind filter by customer-facing follow-up jobs, so a row there
+ * would start a message.
+ *
+ * metadata: { expires_at, extension_offered } — extension_offered is whether
+ * the page showed the reopen / ask-for-more-time button.
+ */
+async function auditEstimateExpiredOpen({ estimateId, expiresAt = null, extensionOffered = false, ipAddress = null, userAgent = null }) {
+  return recordAuditEvent({
+    actor_type: 'customer',
+    action: 'estimate_expired_open',
+    resource_type: 'estimate',
+    resource_id: estimateId,
+    metadata: { expires_at: expiresAt, extension_offered: extensionOffered === true },
+    ip_address: ipAddress,
+    user_agent: userAgent,
+  });
+}
+
+/**
  * A saved card's expiry, brand, last four or funding was refreshed from
  * Stripe (services/card-details-sync.js; Stripe's card account updater
  * renews cards without telling us). Fire-and-forget: the payment_methods row
@@ -651,6 +674,7 @@ async function auditCardDetailsSynced({ payment_method_row_id, source, changed_f
 
 module.exports = {
   recordAuditEvent,
+  auditEstimateExpiredOpen,
   auditCardDetailsSynced,
   auditLawnSqftFromEstimate,
   auditVendorOrder,
