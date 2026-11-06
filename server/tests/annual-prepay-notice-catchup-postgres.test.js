@@ -28,6 +28,7 @@ jest.mock('../services/account-membership-email', () => ({
 const { randomUUID } = require('node:crypto');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
+const { sendMembershipRenewalReminder } = require('../services/account-membership-email');
 const { _private } = require('../services/annual-prepay-renewals');
 
 const TODAY = '2026-11-10';
@@ -93,6 +94,8 @@ postgres('annual-prepay notice catch-up (PostgreSQL)', () => {
     expect(await ladder()).toBe(1);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({ annual_prepay_term_id: id, days_out: 30 });
+    // The email states the 28 days actually left; the rung keys the send (Codex #7715).
+    expect(sendMembershipRenewalReminder).toHaveBeenCalledWith(expect.objectContaining({ daysOut: 30, noticeDaysLeft: 28 }));
     expect((await row(id)).notice_30_sent_at).toBeInstanceOf(Date);
 
     expect(await ladder(plus(1))).toBe(0); // 27 days out: still inside the 30 window, already sent

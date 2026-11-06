@@ -8510,7 +8510,7 @@ async function termNoticeAddress(termiteRung, term, customer) {
 // prior term_end). So the successor 12-month window starts the day AFTER
 // term_end and ends on the next anniversary — no overlap, no drift.
 async function sendTermNoticeEmail({
-  termiteRung, customer, term, daysOut, cancelLink, planAddress, coversRungs = null,
+  termiteRung, customer, term, daysOut, cancelLink, planAddress, coversRungs = null, noticeDaysLeft = null,
 }) {
   try {
     // newEnd is derived from newStart, not from term_end directly — exactly
@@ -8551,6 +8551,8 @@ async function sendTermNoticeEmail({
         // 15/7-day rungs of a termite plan share this generic sender; flag
         // them so the prepaid-year wording applies to prepay terms only.
         ...(isTermiteAnnualPlanTerm(term) ? { termitePlan: true } : {}),
+        // A catch-up send states the days actually left (runGenericNoticeLadder).
+        ...(noticeDaysLeft != null ? { noticeDaysLeft } : {}),
       });
     const confirmed = result?.sent === true || result?.ok === true;
     if (!confirmed) logger.warn(`[annual-prepay] renewal email not sent for term ${term.id}: ${result?.reason || 'not_sent'}`);
@@ -9389,6 +9391,7 @@ function sendTermNoticeEmailFor(ctx) {
     cancelLink: ctx.cancelLink,
     planAddress: ctx.planAddress,
     coversRungs: ctx.coversRungs,
+    noticeDaysLeft: ctx.opts?.noticeDaysLeft ?? null,
   });
 }
 
@@ -10147,6 +10150,17 @@ function genericNoticeAnchored(term, anchorWindow) {
   return !isTermiteAnnualPlanTerm(term) && isLastServiceNearTermEnd(term);
 }
 
+// The days from today to the anchor a notice matched: term_end when it falls
+// inside the window, else the last-visit anchor. On time that is the rung
+// itself. A catch-up send (GATE_MONEY_NOTICE_CATCHUP) has fewer days left, and
+// its email states them (Codex #7715); the rung still keys the claim, the stamp
+// and the idempotency key. Null when the anchor date is unreadable.
+function daysLeftToNoticeAnchor(term, anchorWindow, today) {
+  const termEnd = dateOnly(term.term_end);
+  const inWindow = termEnd && termEnd >= anchorWindow.from && termEnd <= anchorWindow.to;
+  return daysUntil(today, inWindow ? termEnd : dateOnly(term.last_scheduled_service_date));
+}
+
 async function runGenericNoticeLadder(today, termiteReady) {
   const lateDays = require('../config/feature-gates').moneyNoticeCatchupLive() ? NOTICE_CATCHUP_DAYS : 0;
   let sent = 0;
@@ -10160,7 +10174,10 @@ async function runGenericNoticeLadder(today, termiteReady) {
     sent += await forEachTermIsolated(
       terms,
       'reminder failed',
-      async (term) => (await sendCustomerTermNotice(term, daysOut, { baseline: !termiteReady })).sent,
+      async (term) => (await sendCustomerTermNotice(term, daysOut, {
+        baseline: !termiteReady,
+        ...(lateDays ? { noticeDaysLeft: daysLeftToNoticeAnchor(term, anchorWindow, today) } : {}),
+      })).sent,
     );
   }
   return sent;
@@ -11786,6 +11803,7 @@ module.exports = {
   _private: {
     runGenericNoticeLadder,
     NOTICE_CATCHUP_DAYS,
+    daysLeftToNoticeAnchor,
     stampTermCoverageOnly,
     PARENT_DECISION_LOCK_SESSIONS,
     supersedeRenewWithCustomerCancel,

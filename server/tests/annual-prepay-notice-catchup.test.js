@@ -92,3 +92,15 @@ test('gate on: the rung\'s own sent column and claim still gate it, and a later 
   expect(q7).toMatch(/"notice_7_sent_at" is null/);
   expect(q7).not.toMatch(/"notice_15_sent_at" is null/);
 });
+
+// Codex #7715: a late notice's email states the days actually left to the anchor it
+// matched; the rung (30/15/7) still keys the claim, the stamp and the idempotency key.
+test('days left to the matched anchor: the rung on time, fewer when late, the last visit when term_end is outside', () => {
+  const window30 = { from: plus(27), to: plus(30) };
+  expect(_private.daysLeftToNoticeAnchor({ term_end: plus(30) }, window30, TODAY)).toBe(30);
+  expect(_private.daysLeftToNoticeAnchor({ term_end: plus(27) }, window30, TODAY)).toBe(27);
+  expect(_private.daysLeftToNoticeAnchor(
+    { term_end: plus(40), last_scheduled_service_date: plus(28) }, window30, TODAY,
+  )).toBe(28);
+  expect(_private.daysLeftToNoticeAnchor({ term_end: null, last_scheduled_service_date: null }, window30, TODAY)).toBeNull();
+});
