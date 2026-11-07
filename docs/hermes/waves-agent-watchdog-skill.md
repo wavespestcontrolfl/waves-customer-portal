@@ -1,5 +1,11 @@
 # Hermes Skill — Waves Agent Watchdog
 
+> **Retired.** The Hermes box last polled on 2026-09-05. Since 2026-11-06 the
+> office MacBook Air runs the same poll script (`watchdog_poll.py --json`)
+> every 10 minutes and delivers what it finds as Claude fault rows or, while
+> the portal is down, an email: see `ops/outside-watchdog/README.md`. This
+> page stays as the poll script's contract (what it watches, the paging rules).
+
 **Paste this into the Hostinger Hermes dashboard → Skills tab → category WAVES.**
 Give it its own profile (`hermes-watchdog`): its own signing key, read-only
 scope, manual approvals. It is the *first* lane from the "Hermes at Waves"
