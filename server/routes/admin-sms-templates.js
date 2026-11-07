@@ -125,6 +125,13 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   // appointment-reminders.js renders with this same list and falls back to
   // the base reminder_72h row when this one fails.
   reminder_72h_no_reply_v1: Object.freeze(['date', 'window']),
+  // GATE_DAY_ONLY_PROMISE day rows (owner 2026-11-05 "D2 a"): the booked day and date ARE the promise, and the window is
+  // deliberately NOT required (a day row that quoted an hour would break it). appointment-reminders.js renders with
+  // these same lists and falls back to the window rows when a day row fails.
+  appointment_confirmation_day_v2: Object.freeze(['date', 'day']),
+  appointment_confirmation_day_v1: Object.freeze(['date', 'day']),
+  reminder_72h_day_v1: Object.freeze(['date', 'day']),
+  reminder_72h_no_reply_day_v1: Object.freeze(['date', 'day']),
   // Outbound voicemail text-back: the callback number and the STOP footer
   // for unlinked prospects are promises the lane makes (codex #4195 r1 P2).
   outbound_voicemail_missed_you: Object.freeze(['first_name', 'callback_clause', 'optout_clause']),
