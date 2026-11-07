@@ -1,7 +1,7 @@
 /**
  * Staff voice-to-text through our own transcriber (GATE_SERVER_DICTATION).
  *
- *   GET  /api/tech/dictation/availability  -> { available, liveWords }
+ *   GET  /api/tech/dictation/availability  -> { available, everyBox, liveWords }
  *   POST /api/tech/dictation                -> { text }
  *        multipart: audio (the clip), duration_seconds; query: customer_id?, service_id?
  *
@@ -78,7 +78,12 @@ const NOT_AVAILABLE = { error: 'Server dictation is not available' };
 
 router.get('/availability', (req, res) => {
   const available = gateOn() && Boolean(process.env.OPENAI_API_KEY);
-  res.json({ available, liveWords: available && featureGates.dictationLiveWordsLive() === true });
+  // everyBox: GATE_DICTATION_EVERY_BOX adds the staff-wide mic on text boxes that have none.
+  res.json({
+    available,
+    everyBox: available && featureGates.dictationEveryBoxLive() === true,
+    liveWords: available && featureGates.dictationLiveWordsLive() === true,
+  });
 });
 
 // Gate first, so a gate-off request never costs 15 MB of memory in multer.

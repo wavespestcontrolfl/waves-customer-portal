@@ -755,6 +755,7 @@ export function VisitNote({ note, onChange, onDictated, onDictationPending, serv
     <Textarea
       ref={noteRef}
       id={noteId}
+      data-own-mic="true"
       className="tech-visit-control"
       rows={3}
       value={note}

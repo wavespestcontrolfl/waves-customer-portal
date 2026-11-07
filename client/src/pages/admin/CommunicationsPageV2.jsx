@@ -3795,6 +3795,7 @@ export function SmsTab({
           <Textarea
             aria-label="Text message"
             name="smsMessage"
+            data-own-mic="true"
             placeholder={listening ? "Listening…" : "Type your message…"}
             value={msgBody}
             onChange={(e) => setMsgBody(e.target.value)}

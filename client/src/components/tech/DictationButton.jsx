@@ -54,7 +54,7 @@ function bubbleText(text) {
 }
 
 // column-reverse pins the text to the bottom of the box, so when it runs past two lines the oldest words scroll off the top.
-function LiveWordsBubble({ text, migrated, palette }) {
+export function LiveWordsBubble({ text, migrated, palette }) {
   const { muted = "#94a3b8" } = palette || {};
   const box = {
     display: "inline-flex",

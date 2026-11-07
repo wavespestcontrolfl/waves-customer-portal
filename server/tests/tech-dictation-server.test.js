@@ -132,7 +132,7 @@ describe('server dictation endpoint', () => {
     delete process.env.GATE_SERVER_DICTATION;
     await withServer(async (baseUrl) => {
       const avail = await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } });
-      expect(await avail.json()).toEqual({ available: false, liveWords: false });
+      expect(await avail.json()).toEqual({ available: false, everyBox: false, liveWords: false });
       const res = await clip(baseUrl);
       expect(res.status).toBe(404);
       expect(mockHints).not.toHaveBeenCalled();
@@ -150,14 +150,42 @@ describe('server dictation endpoint', () => {
   test('gate on: availability needs the transcriber key', async () => {
     await withServer(async (baseUrl) => {
       const on = await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } });
-      expect(await on.json()).toEqual({ available: true, liveWords: false });
+      expect(await on.json()).toEqual({ available: true, everyBox: false, liveWords: false });
       process.env.GATE_DICTATION_LIVE_WORDS = 'true';
       const live = await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } });
-      expect(await live.json()).toEqual({ available: true, liveWords: true });
+      expect(await live.json()).toEqual({ available: true, everyBox: false, liveWords: true });
       delete process.env.OPENAI_API_KEY;
       const noKey = await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } });
-      expect(await noKey.json()).toEqual({ available: false, liveWords: false });
+      expect(await noKey.json()).toEqual({ available: false, everyBox: false, liveWords: false });
     });
+  });
+
+  test('GATE_DICTATION_EVERY_BOX: everyBox needs the gate exactly "true" AND server dictation available', async () => {
+    const ask = async (baseUrl) => {
+      const { available, everyBox } = await (await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } })).json();
+      return { available, everyBox };
+    };
+    const originalEveryBox = process.env.GATE_DICTATION_EVERY_BOX;
+    try {
+      await withServer(async (baseUrl) => {
+        process.env.GATE_DICTATION_EVERY_BOX = 'true';
+        expect(await ask(baseUrl)).toEqual({ available: true, everyBox: true });
+        process.env.GATE_DICTATION_EVERY_BOX = '1';
+        expect(await ask(baseUrl)).toEqual({ available: true, everyBox: false });
+        delete process.env.GATE_DICTATION_EVERY_BOX;
+        expect(await ask(baseUrl)).toEqual({ available: true, everyBox: false });
+        // On, but the server mic itself is off or has no key: no every-box mic either.
+        process.env.GATE_DICTATION_EVERY_BOX = 'true';
+        delete process.env.OPENAI_API_KEY;
+        expect(await ask(baseUrl)).toEqual({ available: false, everyBox: false });
+        process.env.OPENAI_API_KEY = 'test-key';
+        delete process.env.GATE_SERVER_DICTATION;
+        expect(await ask(baseUrl)).toEqual({ available: false, everyBox: false });
+      });
+    } finally {
+      if (originalEveryBox === undefined) delete process.env.GATE_DICTATION_EVERY_BOX;
+      else process.env.GATE_DICTATION_EVERY_BOX = originalEveryBox;
+    }
   });
 
   test('hears the clip with the voice-fill model and the SERVER-built prompt; client prompt text is ignored', async () => {

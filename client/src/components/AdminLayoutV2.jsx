@@ -38,6 +38,7 @@ import {
 import NotificationBell from "./NotificationBell";
 import useUnreadConversations from "../hooks/useUnreadConversations";
 import GlobalCommandPalette from "./admin/GlobalCommandPalette";
+import FocusedBoxMic from "./admin/FocusedBoxMic";
 import { clearEmailDrafts } from "../lib/emailDrafts";
 import { AdminNavigationProvider } from "../hooks/useAdminNavigation";
 import AdminWorkspaceNavigation from "./admin/AdminWorkspaceNavigation";
@@ -452,6 +453,8 @@ export default function AdminLayoutV2() {
 
       {/* Global ⌘K palette */}
       <GlobalCommandPalette ref={paletteRef} user={user} />
+      {/* One Waves mic on every staff text box with none of its own (GATE_DICTATION_EVERY_BOX). */}
+      {sessionReady ? <FocusedBoxMic /> : null}
     </div>
     </AdminNavigationProvider>
     </IntelligenceBarPageDataProvider>
