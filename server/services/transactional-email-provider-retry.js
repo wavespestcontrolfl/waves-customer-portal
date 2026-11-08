@@ -799,6 +799,17 @@ async function holdGateLifecycleRetry(message) {
   return { sent: false, held: true };
 }
 
+// Why this row's stored copy must not be re-sent, or null. A category on the shared no-replay list, or (GATE_DAY_ONLY_PROMISE)
+// a day-only appointment email that the delayed-send chokepoint no longer clears. Decided BEFORE any update or dispatch, so a
+// stopped day-only retry leaves the row failed with no sent_at: it can never read as a newer day promise.
+async function storedCopyStopReason(message) {
+  const listed = staleStoredCopyReason(asArray(message.categories));
+  if (listed) return listed;
+  return (await require('./time-promise').dayOnlyStoredCopyStale(message))
+    ? 'Not re-sent from stored copy (the day-only promise is superseded or no longer valid).'
+    : null;
+}
+
 async function retryOne(message) {
   // A row scheduled before the ruling took effect settles the same way.
   if (isSenderRenderedEmail(message)) {
@@ -814,7 +825,7 @@ async function retryOne(message) {
     return stopRetry(message, { status: 'failed', reason: EMAIL_REPLACED_REASON, requote, reissue: replay && !requote });
   }
   // A row scheduled by an older build, or marked after scheduling, settles the same way.
-  const staleCopy = staleStoredCopyReason(asArray(message.categories));
+  const staleCopy = await storedCopyStopReason(message);
   if (staleCopy) return stopRetry(message, { status: 'failed', reason: staleCopy });
   let suppression;
   try {

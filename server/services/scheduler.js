@@ -1212,11 +1212,10 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // EVERY 5 MIN — text-thread lead reader (GATE_SMS_LEAD_EXTRACTION, read in
-  // the sweep): a quiet thread from an unknown number becomes a lead. The
-  // durable per-thread claim fences overlapping ticks and instances.
+  // EVERY 5 MIN — text-thread lead reader: a quiet thread from an unknown
+  // number becomes a lead. The durable per-thread claim fences overlapping
+  // ticks and instances.
   cron.schedule('*/5 * * * *', async () => {
-    if (!isEnabled('smsLeadExtraction')) return;
     try {
       await runExclusive('sms-lead-extraction', async () => {
         await require('./sms-lead-extraction').sweepSmsLeadCandidates();
@@ -1226,11 +1225,9 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // EVERY 30 MIN — reply outcome signals (GATE_SMS_REPLY_OUTCOMES, read in the
-  // sweep too): records what each customer did after a Waves text reply.
-  // Measurement only; the unique reply key makes a repeated tick harmless.
+  // EVERY 30 MIN — reply outcome signals: records what each customer did
+  // after a Waves text reply. Measurement only; the unique reply key makes a repeated tick harmless.
   cron.schedule('13,43 * * * *', async () => {
-    if (!isEnabled('smsReplyOutcomes')) return;
     try {
       await runExclusive('sms-reply-outcomes', async () => {
         await require('./sms-reply-outcomes').sweepReplyOutcomes();
@@ -2796,11 +2793,9 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // Neighborhood gate-code directory (PR 2): file every saved neighborhood
-  // gate code under its property's neighborhood; dark behind
-  // GATE_NEIGHBORHOOD_ACCESS, read at each tick. Logs counts and error codes
+  // gate code under its property's neighborhood. Logs counts and error codes
   // only — never a code.
   cron.schedule('0 7,22,37,52 * * * *', async () => {
-    if (!require('../config/feature-gates').neighborhoodAccessLive()) return;
     const tickStartedAt = Date.now();
     try {
       // A pass in which any customer's filing or a conflict step (the count,
@@ -2825,12 +2820,9 @@ function initScheduledJobs() {
 
   // Access codes section (PR 2a): read inbound texts for gate, door, lockbox,
   // garage, call-box and pass codes and file each as a `found` row for the
-  // office; dark behind GATE_ACCESS_CODES_SECTION (+ _SINCE), read at each
-  // tick. runAccessCodeNet takes its own cron lock. Logs counts and error
+  // office; needs GATE_ACCESS_CODES_SECTION_SINCE. runAccessCodeNet takes its own cron lock. Logs counts and error
   // codes only: never a code, a quote or a message body.
   cron.schedule('0 3,8,13,18,23,28,33,38,43,48,53,58 * * * *', async () => {
-    // No gate check here: with the section off the sweep still runs its
-    // ownership cleanup (merge undo), and reads nothing else.
     const capture = require('./access-code-capture');
     const tickStartedAt = Date.now();
     try {
@@ -2850,13 +2842,11 @@ function initScheduledJobs() {
   // The found-codes bell (owner ruling 2026-10-24): one standing admin row for
   // the codes waiting on Customers → Gate codes, 90 seconds after each sweep
   // tick so a code the sweep just filed is listed. It rings when a code joins,
-  // refreshes quietly when one leaves and closes itself when none wait. Dark
-  // behind GATE_ACCESS_CODES_FOUND_BELL, read at each tick. No cron lease: the
+  // refreshes quietly when one leaves and closes itself when none wait. No cron lease: the
   // sync holds the row's own advisory lock in one transaction (one pooled
   // connection). Logs the outcome and count only, never a code.
   cron.schedule('30 4,9,14,19,24,29,34,39,44,49,54,59 * * * *', async () => {
     try {
-      if (!require('../config/feature-gates').accessCodesFoundBellLive()) return;
       const result = await require('./access-code-found-bell').syncFoundCodesBell();
       if (!['unchanged', 'clear'].includes(result?.outcome)) logger.info(`[access-codes] found bell: ${result?.outcome} (${result?.count ?? 0})`);
     } catch (err) {
@@ -6539,6 +6529,9 @@ function initScheduledJobs() {
               // A deferred template send keeps the key of the row that rendered
               // its frozen body (complete-scheduled-service enqueue).
               ...(claimMeta.template_key ? { templateKey: String(claimMeta.template_key) } : {}),
+              // A deferred DAY-ONLY appointment body (appointment-reminders.js queueHeldNoticeContacts) keeps its promise
+              // fields, so the replay records a day promise rather than an unknown window.
+              ...require('./time-promise').promiseMetaOf(claimMeta),
               // Enqueue provenance survives the replay (codex #3607 r4): the
               // audit row is written under this worker's own entry point, so
               // the ORIGINAL one (e.g. autopay_completion_decline_deferred)
@@ -7665,6 +7658,32 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Text name spelling check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 11:30PM — Late-sent bill check (read-only). Posts one engineering
+  // FIX row to the ops digest when an open self-pay bill first sent in the
+  // last 7 days had a due date before the day it went out (a delivery path
+  // that skipped invoice-helpers.js firstDeliveryDueDate), and retires it on
+  // the first clean night. Late evening, after the day's sends. No other fixed
+  // or hourly job runs at this minute (#3208 rule). See
+  // server/services/late-sent-bill-check.js.
+  // =========================================================================
+  cron.schedule('30 23 * * *', async () => {
+    try {
+      await runExclusive('late-sent-bill-check', async () => {
+        const { runLateSentBillCheck } = require('./late-sent-bill-check');
+        const result = await runLateSentBillCheck();
+        logger.info(`[late-sent-bill] cron run: ${JSON.stringify({ found: result.found })}`);
+        // A finding that could not be delivered must read as a FAILED run in
+        // job_health: rethrow so runExclusive records it.
+        if (result.delivery && result.delivery.ok === false) {
+          throw new Error(`late-sent-bill-check: the finding was not delivered (${result.delivery.error || 'send failed'})`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Late-sent bill check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

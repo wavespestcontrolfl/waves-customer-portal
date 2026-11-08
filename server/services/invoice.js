@@ -4664,7 +4664,11 @@ async function claimDueScheduledInvoiceForSend(database, invoiceId) {
     .whereNotNull("scheduled_send_at")
     .where("scheduled_send_at", "<=", new Date())
     .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5))
-    .update({ status: "sending", updated_at: new Date(), send_claim_token: claimToken })
+    .update({
+      status: "sending", updated_at: new Date(), send_claim_token: claimToken,
+      // A scheduled first send that went out after its due day takes the send day (invoice-helpers.js).
+      due_date: require("./invoice-helpers").firstDeliveryDueDate(database, etDateString()),
+    })
     .returning("*");
   return claimed || null;
 }
@@ -4998,7 +5002,8 @@ function approvedDigestRefusal({ invoice, expectedVersion }) {
 async function approvedEffectsRefusal({ invoice, current, expectedVersion, database }) {
   if (!expectedVersion.verifyEffects) return null;
   let same = false;
-  try { same = await expectedVersion.verifyEffects({ ...invoice, status: current.status }, database); } catch { same = false; }
+  // The prior due date too: the claim may move a stale one to the send day, and the card was planned on the row before it.
+  try { same = await expectedVersion.verifyEffects({ ...invoice, status: current.status, due_date: current.due_date }, database); } catch { same = false; }
   return same ? null : approvedVersionChangedError(invoice);
 }
 
@@ -5174,7 +5179,11 @@ async function claimInvoiceForSend(invoiceId, {
 
   const token = crypto.randomUUID();
   const [invoice] = await buildClaimFlip(database, invoiceId, current, options)
-    .update({ status: "sending", send_claim_token: token, updated_at: new Date() })
+    .update({
+      status: "sending", send_claim_token: token, updated_at: new Date(),
+      // A first delivery after the bill's due day takes the send day, before the text, email and PDF are built (invoice-helpers.js).
+      due_date: require("./invoice-helpers").firstDeliveryDueDate(database, etDateString()),
+    })
     .returning("*");
   if (!invoice) await refuseFailedClaim(invoiceId, current, database, options);
   invoice.send_claim_token = token;
@@ -10646,6 +10655,8 @@ const InvoiceService = {
   async markSummaryTextAccepted(invoiceId) {
     const updated = await db("invoices").where({ id: invoiceId }).update({
       sms_sent_at: db.raw("COALESCE(sms_sent_at, NOW())"),
+      // The summary text is this bill's first delivery when nothing went before it (invoice-helpers.js).
+      due_date: require("./invoice-helpers").firstDeliveryDueDate(db, etDateString()),
       scheduled_send_error: db.raw("CASE WHEN scheduled_send_error LIKE ? THEN ? ELSE scheduled_send_error END",
         [`${SUMMARY_TEXT_PLANNED_ERROR}%`, SUMMARY_TEXT_CARRIED_ERROR]),
       updated_at: new Date(),

@@ -2794,7 +2794,8 @@ function formatAppointmentLabel(appointment = {}) {
       timeZone: 'America/New_York',
     })
     : '';
-  const time = appointment.windowDisplay || appointment.windowStart || '';
+  // GATE_DAY_ONLY_PROMISE: a day-only visit has no hour; the note stands in its place.
+  const time = appointment.windowDisplay || appointment.windowStart || (appointment.day_only ? appointment.arrival_note : '') || '';
   return [date, time].filter(Boolean).join(' · ') || 'Your scheduled appointment';
 }
 

@@ -1528,6 +1528,50 @@ function noticeOptions(options = {}, dateStr, startHHMM) {
   return { expectedPhone: options.expectedPhone, stopWide: stopWideMeta(options.stopWideFor, dateStr, startHHMM) };
 }
 
+// GATE_DAY_ONLY_PROMISE part B2: records the office's choice for a visit's NEW slot on the moved row(s): true = "the customer
+// asked for this time" (a set time, never promised as day only), anything else = day only. Gate off: nothing is written, so
+// every UPDATE stays exactly today's. Throws on a failed write (inside a transaction the move fails with it).
+async function recordOfficeMoveIntent(conn, ids, body) {
+  return require('../services/time-promise').recordCustomerAskedTime(conn, ids, body?.customerAskedTime === true);
+}
+
+// GATE_DAY_ONLY_PROMISE part E: stamps each office row with what the customer was told (`told: { level, dayOnly }`, visits of
+// the next 14 days) and the stored "customer asked for this time" choice (`customerAskedTime`), for the visit card and the
+// edit window, plus whether the customer's 24-hour reminder will go out (`reminder24hOn`, for the phone-script hint). ONE bulk read
+// per fact for the whole payload (time-promise.loadOfficeToldFields), never per row. Gate off: no read and
+// no field. A technician's feed is the field view and gets neither. Never throws: a failed read leaves the payload as is.
+async function attachOfficeToldFields(req, rows) {
+  try {
+    if (isTechnicianRequest(req) || !Array.isArray(rows) || !rows.length) return;
+    const fields = await require('../services/time-promise').loadOfficeToldFields(db, rows);
+    for (const row of rows) {
+      const found = fields.get(row.id);
+      if (!found) continue;
+      if (found.customerAskedTime !== undefined) row.customerAskedTime = found.customerAskedTime;
+      if (found.told) row.told = found.told;
+      if (found.reminder24hOn !== undefined) row.reminder24hOn = found.reminder24hOn;
+    }
+  } catch (err) {
+    logger.warn(`[admin-schedule] told fields failed (${err.code || err.name || 'error'})`);
+  }
+}
+
+// GATE_DAY_ONLY_PROMISE part E: { office } for ONE visit (the same fields attachOfficeToldFields stamps on a feed row), or {} with
+// the gate off, for a technician, or when the visit is gone. Never throws: a failed read leaves the reply as it was.
+async function officeFieldsForVisit(id) {
+  try {
+    const timePromise = require('../services/time-promise');
+    if (!timePromise.dayOnlyPromiseOn()) return {};
+    const row = await db('scheduled_services').where({ id }).first('id', 'scheduled_date', 'status');
+    if (!row) return {};
+    const found = (await timePromise.loadOfficeToldFields(db, [row])).get(row.id);
+    return found ? { office: found } : {};
+  } catch (err) {
+    logger.warn(`[admin-schedule] office fields failed (${err.code || err.name || 'error'})`);
+    return {};
+  }
+}
+
 // The operator's line for a reschedule text that reached nobody. The email
 // version goes first (GATE_MOVE_NOTICE_EMAIL): an email that went out is said
 // plainly, so staff do not chase a customer who was told.
@@ -1614,11 +1658,21 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
         .first('service_type')
         .catch(() => null);
       const serviceLabel = AppointmentReminders.smsServiceLabelStored(reminderRow?.service_type || svc.service_type) || 'service';
+      // GATE_DAY_ONLY_PROMISE part B2: a move to another date more than 24.25 h out promises only the new day, unless the
+      // office marked "customer asked for this time" (options.customerAskedTime). Gate off: false, nothing read.
+      const dayMove = require('../services/day-only-move-notice');
+      const dayState = { dayOnly: await dayMove.moveNoticeDayOnly({
+        serviceId, customerId: customer.id, newStartAt: apptTime, oldDate: options.previousDate, newDate: dateStr,
+        intent: require('../services/time-promise').officeMoveIntent(options.customerAskedTime),
+      }) };
+      const noticeSlotMs = dayMove.slotMsOf(apptTime);
       // Built once for every recipient, after the move landed, so the link
       // checks see the new slot.
       const differentTimeLine = await require('../services/reschedule-link').rescheduledTextLine(serviceId, { customerId: customer.id });
       sent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
         const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
+        const dayBody = await dayMove.renderDayRescheduled({ state: dayState, serviceId, customerId: customer.id, firstName, serviceLabel, apptTime });
+        if (dayBody) return dayBody;
         return renderRequiredSmsTemplate('appointment_rescheduled', {
           first_name: firstName,
           service_type: serviceLabel,
@@ -1633,7 +1687,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
           entity_type: 'scheduled_service',
           entity_id: serviceId,
         });
-      }, 'appointment_rescheduled', 'appointment_confirmation', {
+      }, 'appointment_rescheduled', 'appointment_confirmation', dayMove.withDayMeta({
         scheduled_service_id: serviceId,
         ...stopWide,
         // ABA guard input (codex #3609 r48): the slot this notice quotes —
@@ -1644,7 +1698,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
           return at && !Number.isNaN(at.getTime()) ? at.getTime() : undefined;
         })(),
         move_notice_at: noticeAt.toISOString(),
-      }, {
+      }, dayState, noticeSlotMs), {
         // Final recheck at the provider handoff: a concurrent move or a
         // terminal transition (cancel/complete/skip/no-show) means this
         // message is stale — abort; the winning writer owns the messaging.
@@ -1674,6 +1728,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
         error = await rescheduleTextNotSentError(noticeOutcome, {
           kind: 'rescheduled', customerId: customer.id, scheduledServiceId: serviceId, apptTime, serviceLabel,
           arrivalWindow: spokenArrivalWindow(start), notificationEventKey: stopWide.notificationEventKey, noticeAt, sendOutcome: noticeOutcome,
+          ...dayMove.dayOnlyArg(dayState),
         });
       }
     }
@@ -6708,7 +6763,7 @@ router.get('/', async (req, res, next) => {
 
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
     const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
-    // Neighborhood gate-code directory (dark behind GATE_NEIGHBORHOOD_ACCESS):
+    // Neighborhood gate-code directory:
     // the shared entry for a visit whose customer has no gate code. A failed
     // read just shows no fallback.
     let neighborhoodGateByVisit = new Map();
@@ -6717,20 +6772,14 @@ router.get('/', async (req, res, next) => {
     // a pin have a key, so every other row is byte-identical to before.
     let gateWaypointByVisit = new Map();
     // Visits whose stop is in an active neighborhood, when a visit's assigned
-    // technician may add a gate code or mark one wrong
-    // (GATE_NEIGHBORHOOD_TECH_ACTIONS); empty = the field screen offers neither.
+    // technician may add a gate code or mark one wrong;
+    // an empty set = the field screen offers neither.
     let gateActionVisits = new Set();
-    const neighborhoodTechActions = require('../config/feature-gates').neighborhoodTechActionsLive();
-    // GATE_SCHEDULE_ACCESS_CODES: the office schedule draws each row's gate
-    // lines (propertyAlerts) only while this is on; read once per request.
-    const scheduleAccessCodes = require('../config/feature-gates').scheduleAccessCodesLive();
     try {
-      if (require('../config/feature-gates').neighborhoodAccessLive()) {
-        const neighborhoodAccess = require('../services/neighborhood-access');
-        neighborhoodGateByVisit = await neighborhoodAccess.neighborhoodGateEntriesForVisits(db, services);
-        gateWaypointByVisit = await neighborhoodAccess.neighborhoodGateWaypointsForVisits(db, services);
-        if (neighborhoodTechActions) gateActionVisits = await neighborhoodAccess.gateActionVisitIds(db, services);
-      }
+      const neighborhoodAccess = require('../services/neighborhood-access');
+      neighborhoodGateByVisit = await neighborhoodAccess.neighborhoodGateEntriesForVisits(db, services);
+      gateWaypointByVisit = await neighborhoodAccess.neighborhoodGateWaypointsForVisits(db, services);
+      gateActionVisits = await neighborhoodAccess.gateActionVisitIds(db, services);
     } catch (err) {
       logger.warn(`[admin-schedule] neighborhood gate lookup failed (${err.code || err.name || 'error'})`);
     }
@@ -7206,7 +7255,6 @@ router.get('/', async (req, res, next) => {
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
         ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
-        ...(scheduleAccessCodes ? { scheduleAccessEnabled: true } : {}),
         ...(gateWaypointByVisit.has(s.id) ? { gateWaypoint: gateWaypointByVisit.get(s.id) } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
@@ -7358,15 +7406,12 @@ router.get('/', async (req, res, next) => {
       attachStopRain(enriched, date, hourlyByZone);
     } catch { /* rain outlook is optional */ }
 
+    await attachOfficeToldFields(req, enriched);
     stripTechOwnerOnlyMoney(req, enriched);
 
     res.json({
       date, services: enriched,
       visitCloseout: legacyCloseoutEnabled,
-      // GATE_NEW_APPT_ADDRESS_TIMES: New Appointment's time box answers on a new caller's address alone.
-      addressFirstTimes: isEnabled('newApptAddressTimes'),
-      // GATE_NEW_APPT_PHONE_MATCH: New Appointment matches a new caller's phone as it is typed, and one Save adds and books them.
-      newCustomerPhoneMatch: isEnabled('newApptPhoneMatch'),
       // GATE_NEW_CALLER_BOOKING: New Appointment's Book saves a new caller's visit by address, no customer yet.
       newCallerBooking: isEnabled('newCallerBooking'),
       // GATE_BOARD_OPEN_TIMES: a drag on the Dispatch day or week grid lights the hours that fit the visit.
@@ -7904,18 +7949,16 @@ router.get('/week', async (req, res, next) => {
     // (owner 2026-10-24, #6653): the mobile dispatch list and appointment
     // sheet route Directions through it before the house. One lookup for the
     // week; only a visit with a pin gets the key, so every other row is
-    // byte-identical. Dark behind GATE_NEIGHBORHOOD_ACCESS; a failed read
-    // routes plainly.
+    // byte-identical. A failed read routes plainly.
     try {
-      if (require('../config/feature-gates').neighborhoodAccessLive()) {
-        const pins = await require('../services/neighborhood-access').neighborhoodGateWaypointsForVisits(db, weekGateVisits);
-        days.flatMap((day) => day.services).filter((row) => pins.has(row.id))
-          .forEach((row) => { row.gateWaypoint = pins.get(row.id); });
-      }
+      const pins = await require('../services/neighborhood-access').neighborhoodGateWaypointsForVisits(db, weekGateVisits);
+      days.flatMap((day) => day.services).filter((row) => pins.has(row.id))
+        .forEach((row) => { row.gateWaypoint = pins.get(row.id); });
     } catch (err) {
       logger.warn(`[admin-schedule] week gate waypoint lookup failed (${err.code || err.name || 'error'})`);
     }
 
+    await attachOfficeToldFields(req, days.flatMap((day) => day.services));
     stripTechOwnerOnlyMoney(req, days.flatMap((day) => day.services));
     if (isTechnicianRequest(req)) {
       // Coworker absences are the office's view; the caller's own stays.
@@ -8600,6 +8643,12 @@ const newApptStopOrderLive = () => {
 };
 
 router.post('/', requireAdmin, scheduleCreateHandler);
+// GATE_DAY_ONLY_PROMISE: the column the office's "customer asked for this time" box writes. True only when the request
+// said exactly true and the column exists; otherwise nothing (NULL = not recorded).
+function askedTimeStamp(cols, customerAskedTime) {
+  return cols.customer_asked_time && customerAskedTime === true ? { customer_asked_time: true } : {};
+}
+
 async function scheduleCreateHandler(req, res, next) {
   try {
     const {
@@ -8614,6 +8663,9 @@ async function scheduleCreateHandler(req, res, next) {
       primaryLinePrice, estimatedPrice, estimatedDuration, urgency, internalNotes, customerNotes, isCallback,
       parentServiceId, sendConfirmationSms, sendTechNotification, sourceEstimateId,
       sendCardOnFileLink,
+      // GATE_DAY_ONLY_PROMISE: the office marked "the customer asked for this time" (a set time). Stored on the created
+      // visits only when the body says exactly true; anything else leaves NULL (not recorded). Changes no response.
+      customerAskedTime,
       // The operator's explicit service address for a multi-property customer
       // (customer_properties.id). Absent → the sole-property anchor below.
       propertyId,
@@ -9824,6 +9876,7 @@ async function scheduleCreateHandler(req, res, next) {
       if (cols.urgency) insertData.urgency = urgency || 'routine';
       if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
       if (cols.is_callback) insertData.is_callback = resolvedIsCallback || false;
+      Object.assign(insertData, askedTimeStamp(cols, customerAskedTime));
       if (officeCustomerRequest && cols.customer_request && cols.customer_request_source) {
         insertData.customer_request = officeCustomerRequest.text;
         insertData.customer_request_source = officeCustomerRequest.source;
@@ -9997,6 +10050,7 @@ async function scheduleCreateHandler(req, res, next) {
         // operator turns a re-service into a repeating cadence, every future
         // visit must stay free and report as a callback (not bill monthly dues).
         if (cols.is_callback) childData.is_callback = resolvedIsCallback || false;
+        Object.assign(childData, askedTimeStamp(cols, customerAskedTime));
         if (cols.estimated_price) {
           if (zeroCallbackPrice) childData.estimated_price = 0;
           else if (memberSeriesCovered) {
@@ -10091,6 +10145,7 @@ async function scheduleCreateHandler(req, res, next) {
           const boosterRestack = restackLiveVisitFinancials(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
           if (cols.is_callback) boosterData.is_callback = resolvedIsCallback || false;
+          Object.assign(boosterData, askedTimeStamp(cols, customerAskedTime));
           // Booster rows are is_recurring:false — completion treats them as
           // one-off visits that BILL their own price, never as dues-covered
           // plan visits, so the member-series stripping must not touch them:
@@ -11130,6 +11185,8 @@ router.get('/list', async (req, res, next) => {
       ...(s._approximate ? { approximate: true, matchReasons: s._matchReasons } : {}),
     }));
 
+    // GATE_DAY_ONLY_PROMISE part E: the list, and the client search that reads it, open the same edit window as the day feed.
+    await attachOfficeToldFields(req, mapped);
     res.json({
       services: mapped,
       ...(customerSearchFuzzy && search ? { approximateCount: approximateServices.length } : {}),
@@ -11239,6 +11296,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // The visit's real arrival start (no 08:00 fallback) — null for
             // date-only rows, which never get an immediate text.
             let bulkNoticeStart = null;
+            let bulkPreviousDate = null;
             let callFollowUpShiftFrom = null;
             // Collected inside the trx, applied only after a successful commit.
             let liveMoveRow = null;
@@ -11652,6 +11710,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               if (nextDate && (nextDate !== prevDate || normalizeHHMM(nextStart) !== normalizeHHMM(svc.window_start))) {
                 reminderSyncTime = `${nextDate}T${normalizeHHMM(nextStart) || '08:00'}`;
                 bulkNoticeStart = normalizeHHMM(nextStart) || null;
+                bulkPreviousDate = prevDate;
+                // GATE_DAY_ONLY_PROMISE part B2: the office's choice for the new slot, in the moving transaction.
+                await recordOfficeMoveIntent(trx, [id], payload);
               }
             });
             // Tech-facing move notice (tech-visit-notifications.js): this
@@ -11727,7 +11788,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                     .update({ confirmation_sent: false, confirmation_sent_at: null });
                 }
                 if (notifyThisRow) {
-                  const notice = await sendRescheduleNoticeForVisit(id, bulkTargetDate, bulkNoticeStart);
+                  const notice = await sendRescheduleNoticeForVisit(id, bulkTargetDate, bulkNoticeStart, {
+                    previousDate: bulkPreviousDate, customerAskedTime: payload?.customerAskedTime,
+                  });
                   if (!notice.sent) {
                     notificationFailures.push({ id, reason: notice.error || 'reschedule text was not sent' });
                   }
@@ -12319,6 +12382,9 @@ async function comboTargetElapsed(row, changes, newDate, newWindow) {
 }
 
 // 'together': every refusal comes before any write.
+// { customerAskedTime } for a planner body that moves a shared stop, or {} with the gate off (the body stays exactly today's).
+const comboAskedTimeBody = (body) => (require('../services/time-promise').dayOnlyPromiseOn() ? { customerAskedTime: body.customerAskedTime === true } : {});
+
 async function planComboTogetherMove(req, row, changes, shown) {
   const body = req.body;
   const refuse = (status, message, code) => {
@@ -12360,6 +12426,10 @@ async function planComboTogetherMove(req, row, changes, shown) {
     notifyCustomer,
     body: {
       ...(changes.technician ? { technicianId: body.technicianId || null } : {}),
+      // GATE_DAY_ONLY_PROMISE part E: the office's "customer asked for this time" for the stop's new slot. The mover writes it in
+      // each member's own UPDATE (B3), the only write for this move: the per-row edit below never moves (its date and time keys
+      // are removed), so recordOfficeMoveIntent does not fire a second time. Gate off: the planner body is exactly today's.
+      ...comboAskedTimeBody(body),
       expectVisit: { id: shown.id, memberIds: shown.memberIds.map(String), liveCount: shown.liveCount, liveMemberIds: shown.liveMemberIds.map(String) },
     },
     actor,
@@ -16527,7 +16597,10 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
               nextDate,
               updates.window_start !== undefined ? updates.window_start : reminderBefore.window_start,
             );
-            scheduleMoveForNotice = { date: nextDate, start: nextStart || null };
+            scheduleMoveForNotice = { date: nextDate, start: nextStart || null, previousDate: prevDate };
+            // GATE_DAY_ONLY_PROMISE part B2: the office's "customer asked for this time" (or day only) for the new slot,
+            // written in the same transaction that moved the visit. Gate off: nothing is written.
+            await recordOfficeMoveIntent(trx, [req.params.id], req.body);
           }
           // The tech's card covers any slot change — date, start, OR end
           // (the customer reminder above keys on date/start only).
@@ -18143,7 +18216,9 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         } catch (e) {
           logger.warn(`[schedule/update-details] reminder cover before reschedule notice failed for ${req.params.id}: ${e.message}`);
         }
-        const notice = await sendRescheduleNoticeForVisit(req.params.id, scheduleMoveForNotice.date, scheduleMoveForNotice.start);
+        const notice = await sendRescheduleNoticeForVisit(req.params.id, scheduleMoveForNotice.date, scheduleMoveForNotice.start, {
+          previousDate: scheduleMoveForNotice.previousDate, customerAskedTime: req.body.customerAskedTime,
+        });
         notificationSent = notice.sent;
         notificationError = notice.error;
       }
@@ -24372,7 +24447,10 @@ router.get('/:id/series-summary', async (req, res, next) => {
 // membership, whatever its own feed carries.
 router.get('/:id/visit-summary', requireAdmin, async (req, res, next) => {
   try {
-    res.json({ visit: await require('../services/visit-groups').visitSummaryForService(db, req.params.id) });
+    const visit = await require('../services/visit-groups').visitSummaryForService(db, req.params.id);
+    // GATE_DAY_ONLY_PROMISE part E: the office fields (customerAskedTime, told, reminder24hOn) for a visit opened from a row that
+    // does not carry them (month, customer pages, any feed). Gate off: the reply is exactly today's, and nothing more is read.
+    res.json({ visit, ...(await officeFieldsForVisit(req.params.id)) });
   } catch (err) { next(err); }
 });
 
@@ -29979,6 +30057,8 @@ module.exports.reseedRecurringSeriesAfterCancelBatch = reseedRecurringSeriesAfte
 // lazily by the IB move_stops_to_day tool so its opt-in customer texts go
 // through the exact same path as update-details and the bulk reschedule.
 module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
+module.exports.recordOfficeMoveIntent = recordOfficeMoveIntent;
+module.exports.attachOfficeToldFields = attachOfficeToldFields;
 // Shared "is money already taken for this visit" guard — the plan-length
 // trim's refusal contract, consumed lazily by the admin-dispatch series
 // cancel so a 'following' / 'series' cancel refuses prepaid visits the same

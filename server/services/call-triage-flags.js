@@ -1247,12 +1247,11 @@ function isWholeStructureService({ serviceKey = null } = {}) {
 }
 
 /**
- * GATE_CALL_WHOLE_STRUCTURE_NO_UNIT: rewrite an Address Validation verdict whose
+ * Whole-structure unit waiver: rewrite an Address Validation verdict whose
  * ONLY problem is the missing unit into the accepted verdict it would have been
  * for a building-level job. Returns the SAME object untouched unless every
- * condition holds, so gate-off (and every non-qualifying call) is
- * byte-identical:
- *   - the gate is on and the call's resolved service is on the allowlist;
+ * condition holds, so every non-qualifying call is byte-identical:
+ *   - the call's resolved service is on the allowlist;
  *   - the verdict is exactly "PREMISE resolved, only subpremise missing"
  *     (isMissingUnitNumber) — no other missing component;
  *   - every other address check that deriveStatus would have applied still
@@ -1266,7 +1265,6 @@ function isWholeStructureService({ serviceKey = null } = {}) {
  * re-raises the unit ask. Persisted ai_address_validation keeps the ORIGINAL.
  */
 function applyWholeStructureUnitWaiver(av, opts = {}) {
-  if (!opts.enabled) return av;
   if (!isWholeStructureService(opts)) return av;
   if (!isMissingUnitNumber(av)) return av;
   if (av.inServiceArea !== true || av.hasUnconfirmed || av.hasReplaced) return av;
@@ -2511,7 +2509,7 @@ function onFileAddressSatisfaction(flags, extraction, opts = {}) {
   return { flags: list.filter((f) => !FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f)), satisfied };
 }
 
-// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT x GATE_CALL_WHOLE_STRUCTURE_NO_UNIT: true
+// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT x the whole-structure unit waiver: true
 // when the extraction carries the service-unclear signal the Assessment gate
 // demotes (the model's ambiguous_pest_or_service flag). With the Assessment gate
 // on, such a call books the Waves Assessment row — a service OFF the whole-

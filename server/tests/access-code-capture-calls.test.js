@@ -295,21 +295,3 @@ describe('call prompt and read', () => {
     await expect(readCallAccessCodes({ message: call(transcript) })).rejects.toThrow('access_net_sensitive_output');
   });
 });
-
-describe('callsEnabled', () => {
-  const OLD = { section: process.env.GATE_ACCESS_CODES_SECTION, calls: process.env.GATE_ACCESS_CODES_CALLS };
-  afterEach(() => {
-    for (const [key, value] of [['GATE_ACCESS_CODES_SECTION', OLD.section], ['GATE_ACCESS_CODES_CALLS', OLD.calls]]) {
-      if (value === undefined) delete process.env[key]; else process.env[key] = value;
-    }
-  });
-  test('needs the calls gate and the section gate, read at call time', () => {
-    process.env.GATE_ACCESS_CODES_SECTION = 'true';
-    delete process.env.GATE_ACCESS_CODES_CALLS;
-    expect(access.callsEnabled()).toBe(false);
-    process.env.GATE_ACCESS_CODES_CALLS = 'true';
-    expect(access.callsEnabled()).toBe(true);
-    process.env.GATE_ACCESS_CODES_SECTION = 'false';
-    expect(access.callsEnabled()).toBe(false);
-  });
-});

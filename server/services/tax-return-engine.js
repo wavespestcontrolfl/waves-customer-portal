@@ -1,6 +1,6 @@
 /**
  * Federal return engine for a single-member LLC (Schedule C, Schedule SE and
- * Form 1040), GATE_TAX_RETURN_ENGINE, nested under GATE_BANK_IMPORT.
+ * Form 1040), nested under GATE_BANK_IMPORT.
  *
  *   computeReturn(inputs)  pure: numbers in, the return out. No database.
  *   gatherInputs(year)     reads the books, the P&L, the equipment register,

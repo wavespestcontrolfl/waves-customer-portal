@@ -462,6 +462,12 @@ export default function AppointmentPage() {
                 2-hour arrival window · {appt.arrivalWindow}
               </small>
             ) : null}
+            {/* GATE_DAY_ONLY_PROMISE: the customer was told only the day, so the server sends no hour. */}
+            {!appt.arrivalWindow && appt.day_only ? (
+              <small data-testid="appointment-day-only-note" style={{ display: 'block', fontSize: 14, fontWeight: 500, color: S.body }}>
+                Arrival window: texted the day before
+              </small>
+            ) : null}
           </span>
           <WeatherChip weather={data.weather} />
         </div>

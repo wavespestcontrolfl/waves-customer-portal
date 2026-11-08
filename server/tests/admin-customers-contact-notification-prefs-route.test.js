@@ -97,7 +97,7 @@ beforeEach(() => {
   mockState.locked = [];
   mockState.onLock = null;
 });
-afterEach(() => { delete process.env.GATE_CONTACT_LOGIN; delete process.env.GATE_CONTACT_REPORT_TEXT; });
+afterEach(() => { delete process.env.GATE_CONTACT_LOGIN; });
 
 describe('GET /:id/contact-notification-prefs', () => {
   test('lists every filled slot with effective choices, the holder\'s account-wide off, withheld reports and the opt-in state', async () => {
@@ -173,16 +173,8 @@ describe('PUT /:id/contact-notification-prefs/:slot', () => {
 
   // Choices are keyed by phone (codex r1 P2): an address counts when ANY slot
   // carrying the number has one, for the read-out and for the PUT alike.
-  test('text-only report delivery is refused while the contact report text is off (the contact\'s own PUT\'s rule), before any row is read or locked; allowed with it on (codex r2 P2)', async () => {
-    const db = require('../models/db');
+  test('text-only report delivery is saved for a contact with consent on file', async () => {
     mockState.contactRows = [{ customer_id: 'cust-1', phone_key: '9415550202', consent_attested_at: '2026-10-20T00:00:00Z' }];
-    const refused = await put(1, { serviceCompleteChannel: 'sms' });
-    expect(refused.status).toBe(400);
-    expect(refused.body.code).toBe('REPORT_TEXT_UNAVAILABLE');
-    expect(mockState.locked).toEqual([]);
-    expect(db.transaction).not.toHaveBeenCalled();
-    expect(mockState.contactRows[0].service_complete_channel).toBeUndefined();
-    process.env.GATE_CONTACT_REPORT_TEXT = 'true';
     expect((await put(1, { serviceCompleteChannel: 'sms' })).status).toBe(200);
     expect(mockState.contactRows[0].service_complete_channel).toBe('sms');
   });

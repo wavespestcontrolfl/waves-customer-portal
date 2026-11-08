@@ -983,6 +983,11 @@ horizon, `seasonalMaxHorizonDays()`, when seasonal browse applies, else
 an ET `YYYY-MM-DD`. The estimate page words "We book up to N days ahead. Pick a
 date on or before <day>." from these two fields; a 400 without them keeps the old
 retry message.
+`?timeOfDay=` on the same route accepts `morning`, `afternoon` or `evening` (trimmed,
+any case). Any other value, `any` or none applies no time-of-day filter. Before
+2026-11-07 any string passed through: an unknown value filtered like `afternoon`
+and, because the slot cache key carries it, forced a fresh list build on every new
+value. The estimate page sends no `timeOfDay`.
 `/book`'s self-booking offers (`/api/booking/availability`, `/find-slots`,
 the `/capture-intent` revalidation, public re-service, and inspection
 booking) evaluate the new visit at every position in the technician's route,
@@ -3337,12 +3342,6 @@ Two changes exist, both only while the gate is live, only for a frozen instructi
 
 The PDF cache key gains `:wir=c` (rain covered it) or `:wir=a` (the amount line) for such a visit only while the gate is live; the stamp reads the location through the frozen identity map center, like the render.
 
-`GATE_LAWN_REPORT_STORY` (dark, strict `true`, read at call time; needs `GATE_LAWN_REPORT_LAYOUT`;
-gate off leaves the payload, the PDF and every cached PDF key byte-identical) adds one optional
-member inside the `lawnLayout` key that `GATE_LAWN_REPORT_LAYOUT` (next paragraph) adds:
-`lawnLayout.story: true` (lawn only, only while that key is present; no new route, token, privacy
-or rate-limit surface). The live web page then prints the story order (`STORY_LAYOUT_ORDER`); the
-PDF document, static and SMS renders ignore it.
 `GATE_LAWN_REPORT_LAYOUT` (dark, strict `true`, read at call time; gate off leaves the
 payload, the PDF and every cached PDF key byte-identical) adds one optional key to the lawn
 `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit
@@ -3350,19 +3349,8 @@ surface; tree & shrub and pest payloads never change): top-level `lawnLayout:
 { mowingRange: { minInches, maxInches, grassLabel } | null }`. `mowingRange` is the row of the
 Mowing Height table (`HEIGHT_BAND_BY_GRASS`, `turf-height.js`) for the lawn's grass (the visit's
 own reading, else the turf profile); null for a grass the table does not list. The live web page
-orders and trims the lawn report from the key (a lead is also needed); the PDF document, static
+orders and trims the lawn report from the key (a lead is also needed) in the story order (`LAYOUT_ORDER`); the PDF document, static
 and SMS renders ignore it, so the lawn PDF signature carries no part for this gate.
-`GATE_REPORT_SHARED_TEMPLATE` (dark, strict `true`, read at call time; gate off leaves every
-payload below byte-identical) adds one optional top-level key, `reportTemplate: true`, to the
-LIVE web payloads of the regular customer reports (`server/services/service-report/report-template.js`):
-`/api/reports/:token/data` in `live` mode only (a `service_report_v1` record and an older record;
-the `pdf`, `static` and `sms_preview` modes, the PDF and every cached PDF key never carry it),
-`/api/reports/project/:token/data` (the page has only the live view), the lawn-diagnostic and
-pest-identifier report GETs (beside `report`, see below), and the staff-only
-`/api/admin/report-preview/:scheduledServiceId/data`. No new route, token, privacy or
-rate-limit surface; nothing about the customer is added or removed. The page prints the pest
-report's customer header and one stacked layout from the key; WDO inspection and pre-treatment
-certificate pages ignore it (the page decides from the report type).
 `GATE_LAWN_EXPECTATIONS` (dark; gate off leaves the lawn payload unchanged, key
 for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
 (lawn only, never tree & shrub; no new route, token, privacy or rate-limit
@@ -4299,7 +4287,7 @@ under `GATE_LEAD_TURNSTILE`. Owner alert (owner 2026-10-14): a verified lead nev
 call to the owner at any hour. It takes the `new_lead` bell; the legacy
 lead SMS to the owner goes only if that bell fails. The alert never
 changes the response, the lead's one automated text, or the estimate
-draft. A diff that places a call from this route is a P0. Repeat form from a lead (`GATE_LEAD_REPEAT_FORM`, dark; owner
+draft. A diff that places a call from this route is a P0. Repeat form from a lead (owner
 2026-10-24): a submission whose phone matches a live customers row still
 takes the existing-customer branch (its note; no leads row, no automated
 text, no draft, no new-lead bell) and the response is unchanged. When that
@@ -4307,8 +4295,8 @@ row is still a lead (`pipeline_stage` new_lead, contacted, estimate_sent,
 estimate_viewed, follow_up or lost), an open `lead_intake_status`
 (`awaiting_service`, `awaiting_address`) is kept instead of cleared, and
 one Leads admin alert rings (`ringRepeatFormAlert`; none inside the
-5-minute duplicate window). Any other row is unchanged by that gate, nothing is
-sent to the submitter, and gate off = as before. Current or past customer
+5-minute duplicate window). Any other row is unchanged by that rule, and nothing is
+sent to the submitter. Current or past customer
 (`GATE_CURRENT_CUSTOMER_QUOTE_TEXT`, dark; owner 2026-11-02 "text and bell"): a
 row in `active_customer`, `won`, `at_risk`, `churned`, `past_customer` or
 `dormant` (`server/services/customer-stages.js`) still takes the
@@ -4445,7 +4433,7 @@ excludes pricing, vendor, SKU, dilution, MOA, inventory fields),
 CTA telemetry limit, privacy headers `no-store`/`noindex`/`no-referrer`,
 generic 404 for missing, draft, revoked, or malformed tokens; the payload's
 `content` is the packet's stored `content_json`, frozen when the packet was
-built. A packet built while `GATE_LAWN_OUTLINE_V13` was live (stamped
+built. A packet built on the v13 lawn outline (stamped
 `content_library_version` `lawn-v13-copy-2`; packets built before the
 2026-11-01 program wording carry `lawn-v13-copy-1`) may carry a `visual` object on a
 section, beside the unchanged `title`/`body`/`bullets`, which stay the text
@@ -4781,9 +4769,6 @@ success/autoExtended/expiresAt/smsSent/emailSent — no PII),
 diagnostics, strictly whitelisted customer-safe payload — no internal
 scores, raw AI, product names, label constraints, reconciliation/QA
 internals, or tech notes — generic 404 for missing/draft/expired/malformed.
-`GATE_REPORT_SHARED_TEMPLATE` (dark; off leaves the payload unchanged) adds
-top-level `reportTemplate: true` beside `report` and `glassDefault`; `report`
-itself never changes.
 `GATE_LAWN_JEV_TIMING_CHECK` (dark, `off` | `shadow` | `enforce`; needs `GATE_TYPED_DECISIONS`; off leaves the payload and the stored row unchanged) acts when the diagnosis is STORED, not when this page is read: in `enforce` the writers (this page's source rows from the public lawn assessment, the tech lawn diagnostic and the admin Analyze photos button) drop Jev-flagged timing sentences from `customer_summary` before the insert, waiting at most 3000 ms and failing open; `shadow` only records the verdict after the insert. Only the summary's sentences go to TypeSafe. The payload keys and shape never change, and `safeCustomerSummary` still drops word-list timing sentences at read.
 `GATE_LAWN_DIAGNOSTIC_EVIDENCE` (dark; off leaves the payload unchanged, key
 for key, and makes no extra read) adds two things. `basis`: one fixed sentence,
@@ -4910,9 +4895,7 @@ payload via buildPublicPestReport, generic 404, plus a set-once
 `report_first_viewed_at` funnel stamp. Deliberately NOT behind
 GATE_PEST_IDENTIFIER: sent reports are owner-initiated communications
 (admin manual send works pre-launch), and an invalid token 404s exactly
-like the dark surface — only analyze/claim are gated. `GATE_REPORT_SHARED_TEMPLATE`
-(dark; off leaves the payload unchanged) adds top-level `reportTemplate: true`
-beside `report`; `report` itself never changes.)
+like the dark surface — only analyze/claim are gated.)
 `/api/public/bug-id-extension/identify` (POST that writes nothing but the daily counter; anonymous photo identification for the Waves Bug Identifier Chrome extension, owner 2026-10-31 — no auth, no token, no Turnstile (the widget cannot render on a chrome-extension:// page). Paid vision per accepted request, so: the whole `/api/public/bug-id-extension` surface answers the generic 404, any method, while GATE_BUG_ID_EXTENSION is dark — first in server/index.js ahead of the global cors() (so an OPTIONS preflight reads 404 too), the global /api/ limiter and the 50 MB photo parser, again in the router ahead of its limiters; 6 req/hour and 15 req/day per IP (IPv6 /64-collapsed via unauthenticatedAuthLimitKey, in-memory, skipped outside production and for bodies that fail the shape check); then ONE worldwide daily cap, its own `bug-id-extension` bucket in public_llm_daily_usage (BUG_ID_EXTENSION_CAP: 100/day by default, env PUBLIC_LLM_DAILY_CAP_BUG_ID_EXTENSION, America/New_York day), consumed once per request after validation and right before the paid call, counted whatever GATE_PUBLIC_LLM_SHARED_CAP says and FAIL-CLOSED (429) on a database error; it never touches the website funnels' `photo-assessment` bucket. Body: `photos`, 1–3 `{ data, mimeType }` with plain base64 `data` (≤6,000,000 chars each) and mimeType image/jpeg, image/png or image/webp — anything else 400 (413 for an oversized photo) before any limiter count or model call. Runs identifyPestV2 on the Gemini-only ladder (same as the customer app) and answers 200 `{ success: true, result }` where `result` is ONLY the engine's customer-facing v2 object (every string catalog copy or a fixed template; unapproved catalog entries stay unnamed) — never the engine's `internal` block (which models answered) or its `v1` mapping; 503 when vision is unavailable; 429 over a limiter or the cap. Persists nothing else: no identification row, no photo, no lead, no pricing; logs only tier, wording, species slug and photo count. Privacy headers (no-store, noindex, no-referrer) on every handler response. No CORS headers: the extension's host permission lets it read the answer, ordinary web pages cannot.)
 `/api/public/pest-forecast` (+ `/pest-forecast/locations`, `/pest-forecast/nearest`) (read-only,
 no auth, no DB writes, no PII — returns a deterministic Florida
@@ -7699,8 +7682,7 @@ stays inside its 3 reserved minutes either way). No `<Dial>`,
 PIN (`services/tech-voice-pin.js`: salted hash, 3 tries a call, a 15-minute
 lockout after 5 wrong in a row with one admin alert) and then answers fixed
 commands with no model, always in the technician's own scope: next stop,
-access notes, last treatment, the stop's codes (only while
-`GATE_ACCESS_CODES_SECTION` is on; `listForVisit`, one `audit_log` row
+access notes, last treatment, the stop's codes (`listForVisit`, one `audit_log` row
 without the codes), the set-text reply (only while `GATE_TECH_SET_TEXTS`
 is on), and a set text
 only after a read-back of the name, street and wording and a spoken "yes"
@@ -8789,3 +8771,5 @@ Expired-estimate card details (2026-11-05, estimate page audit): GET `/api/estim
 `/api/webhooks/sendgrid/events` (POST; SendGrid signed-event webhook, ECDSA signature + timestamp headers, fail-closed without `SENDGRID_WEBHOOK_PUBLIC_KEY`; contract otherwise unchanged): the response is 200 once the batch is processed, with one documented rule on retries. A non-2xx (500) is returned when any event in the batch failed AND that event is a `bounce`, `dropped` or `blocked` event, carries `err.retryWebhook` (rate review letters, and the retry delivery below), or is retry-critical; SendGrid then redelivers the batch and the event-ledger row (`sendgrid_webhook_events`, unique `event_id`) makes every redelivery idempotent. Other-spelling retry (`GATE_CALL_BOUNCE_OTHER_SPELLING`, dark, strict `'true'`, read per event): when the gate is on, a `delivered` event whose send (named by its `sg_message_id`, or, when it beats the runner's save of that id, by the bound retry send's own SendGrid custom arg `automation_step_send_id`, trusted only while the event's recipient is the send's recipient and the claim's retry address and the row is unbound or bound to the event's message id) is bound by `retry_send_id` to a `call_email_spelling_retries` claim still `resending` (the delivery that commits the customer's email to the address that worked), or for which that pre-check cannot be answered, is retry-critical, decided BEFORE the event's lookups and transaction: ANY failure while processing it (message lookups, event-ledger insert, delivery update, the retry commit with its fanout and audit row, the COMMIT itself) answers 500, nothing is half-written (the ledger row rolls back with the transaction), and the redelivery commits once (a later delivery of the same event is a no-op through the ledger; a different delivery finds no `resending` claim). Gate off, any other event, and any send not bound to a pending claim keep the previous contract (200 even when processing failed, except the bounce / dropped / blocked and rate-review cases above). A hard bounce, a blocked dead-domain event or a delivery of a bound retry send never changes the response code on success, which stays 200. No new route, auth, rate limit or header change.
 
 Stuck-booking records and office alert (2026-11-05, estimate page audit fix 3): GET `/api/public/estimates/:token/available-slots`, POST `/:token/find-slots`, POST `/:token/reserve`, DELETE `/:token/reserve/:scheduledServiceId`, PUT `/api/estimates/:token/accept` and the eligible-expired 404 of GET `/api/estimates/:token/data` answer exactly as before; every change here is a side effect after the answer is decided, never awaited by it, and never a customer message. For a customer request (not a bot user agent, no admin marker cookie, not an admin IP; `customer-page-views.js` `shouldRecord`), a date browse (`?date=`) or a find-slots search writes one `audit_log` row `estimate_slot_search` (`metadata` `{ via: 'date' | 'ai', date, empty }`), a reserve that took a hold writes `estimate_hold_started` (`{ scheduled_service_id, date, window_start, expires_at }`), and a release that deleted one writes `estimate_hold_ended` (`{ scheduled_service_id, how: 'released' }`); the 15-minute expiry sweep writes `estimate_hold_ended` with `how: 'expired'` for each estimate hold it deletes. All rows are `actor_type` `customer`, `resource_type` `estimate`, never `estimate_views` or `estimate_checkout_events`. The office's stuck alert (`estimate-stuck-alert.js`, one bell per estimate per Eastern day, sent, not accepted, declined or archived estimates only) is raised when the 90-day read (`windowDays=90`, no date) answers no slots and names no `metadata.firstDayAvailability` day, five searches in a row answer none, a hold the customer started expires unbooked with no newer live hold, available-slots answers an error other than the retryable capacity 409, the accept answers a 4xx the page does not recover from by itself (not 402, 404 or 429, not a refresh-and-confirm-again or busy-retry code, not a taken time or lapsed hold, not a no-booking reload such as the Bermuda or area add-on codes, not the office-review park), or the expired 404 above records a return.
+
+Day-only customer screens (`GATE_DAY_ONLY_PROMISE`, part C1, additive; gate off is byte-for-byte today): a visit the customer was told only the DAY for (`time-promise.js loadTimeDisplay` says `showHour` false: an office or recurring visit more than 24.25 h out whose hour the customer did not pick) is sent with its hour fields blank and two added keys, `day_only: true` and `arrival_note: "Arrival window texted the day before"` (`time-display.js`; no key is added for a visit that shows its hour). One bulk `loadTimeDisplay` call per payload; a failed lookup shows the hour. Surfaces: `GET /api/schedule`, `/next`, `/account-next`, `/properties-next` (`windowStart`, `windowEnd` null; `calendarExpiresAt` is the end of the ET day), `GET /api/public/appointment/:token` (`appointment.windowStart`, `appointment.arrivalWindow`, `service.visit.windowStart` null; the keys ride on `appointment`), `GET /api/public/prep/:token` (`upcomingVisits[].windowLabel` null), `GET /api/reports/project/:token/data` (`upcomingAppointment.windowStart`), the service report's `nextAppointment`, `nextSameServiceAppointment`, `upcomingVisitsCard.visits[]` and the termite and cockroach next visit (`windowStart` null, so the narrative prints the date alone), the estimate page's linked appointment (`windowStart`, `windowEnd`, `windowDisplay` null) and `GET /api/public/secure-card/:token` (`windowDisplay` null). `GET /api/public/appointment/:token/calendar.ics` for a day-only visit is an all-day event (`DTSTART;VALUE=DATE`, `DTEND;VALUE=DATE` the next day, description "We'll text your arrival window the day before.") with the same `UID` the timed event uses, so a later download updates the same calendar entry. Confirm: `POST /api/public/appointment/:token/confirm` and `POST /api/schedule/:id/confirm` accept a blank `windowStart` for a visit the server still shows as day-only (the visit's current start stands in; the date must still match); a blank `windowStart` for a visit that now shows its hour answers the usual 409 CHANGED. Unconditional fix (not gated): `GET /api/public/secure-card/:token` `windowDisplay` is now built from the visit's current `window_start` (the 2-hour arrival window), not the stored `window_display`, which no move updates.

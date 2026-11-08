@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isValidFeatureFlagKey } = require('../services/feature-flags');
-const { bidDeskLive, estimateCallListLive } = require('../config/feature-gates');
+const { bidDeskLive, estimateCallListLive, dayOnlyPromiseLive } = require('../config/feature-gates');
 const { soldByLive: commissionSoldByLive } = require('../services/estimate-sold-by');
 const {
   VISUAL_SERVICE_NOTES_FLAG,
@@ -36,6 +36,9 @@ router.get('/', async (req, res, next) => {
     // Call today / Pick reason on the estimates page (GATE_ESTIMATE_CALL_LIST), the same way.
     if (estimateCallListLive?.()) flags.estimate_call_list = true;
     else delete flags.estimate_call_list;
+    // "Customer asked for this time" box and the Told badge (GATE_DAY_ONLY_PROMISE), the same way.
+    if (dayOnlyPromiseLive?.()) flags.day_only_promise = true;
+    else delete flags.day_only_promise;
     res.json({ flags });
   } catch (err) {
     next(err);

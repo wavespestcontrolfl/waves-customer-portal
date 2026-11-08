@@ -1,23 +1,21 @@
-// Gate and access codes on the office schedule (GATE_SCHEDULE_ACCESS_CODES,
-// owner ruling 2026-10-26; lines from lib/schedule-access.js).
+// Gate and access codes on the office schedule (owner ruling 2026-10-26; lines from lib/schedule-access.js).
 //   ScheduleAccessLine     — one line on the Schedule list row
 //   ScheduleAccessSection  — "Access" in the Details sheet (variant "sheet",
 //                            with Wrong code / Add gate code) and in the
 //                            desktop side panel (variant "panel", read only)
 // The section also lists the codes the office accepted for this stop (door,
 // call box, visitor pass…) from GET /admin/access-codes/visits/:id, the read
-// the tech app's stop brief uses; that answers 404 while the access codes
-// section is off, and the block then shows the day feed's lines alone.
+// the tech app's stop brief uses; if that read fails, the block shows the
+// day feed's lines alone.
 // Wrong code and Add gate code post to the routes the tech app uses
-// (POST /admin/neighborhood-access/visits/:id/entries[/:entryId/wrong],
-// GATE_NEIGHBORHOOD_TECH_ACTIONS); the row says when they apply
-// (`neighborhoodGateActions`, and `neighborhoodEntryId` on a code line).
+// (POST /admin/neighborhood-access/visits/:id/entries[/:entryId/wrong]); the
+// row says when they apply (`neighborhoodGateActions`, and `neighborhoodEntryId` on a code line).
 
 import { useEffect, useState } from 'react';
 import { KeyRound } from 'lucide-react';
 import { adminFetch } from '../../utils/admin-fetch';
 import { withPassLinks } from '../../pages/tech/passLinks';
-import { ACCESS_KIND_LABELS, acceptedRowsFor, accessLinesOf, scheduleAccessOn } from '../../lib/schedule-access';
+import { ACCESS_KIND_LABELS, acceptedRowsFor, accessLinesOf } from '../../lib/schedule-access';
 
 const WARN = { background: '#FEF3C7', border: '#FCD34D', text: '#854D0E' };
 
@@ -65,13 +63,12 @@ const sheetButton = 'rounded-sm bg-white text-zinc-900 border border-hairline bo
 const darkButton = 'rounded-sm border-0 bg-zinc-900 text-white font-medium u-focus-ring disabled:opacity-50';
 
 function useAcceptedCodes(service) {
-  const on = scheduleAccessOn(service);
   const visitId = service?.id ? String(service.id) : '';
   const [loaded, setLoaded] = useState({ key: '', rows: [] });
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    if (!on || !visitId) return undefined;
+    if (!visitId) return undefined;
     let cancelled = false;
     setFailed(false);
     adminFetch(`/admin/access-codes/visits/${encodeURIComponent(visitId)}`)
@@ -80,12 +77,12 @@ function useAcceptedCodes(service) {
       })
       .catch((err) => {
         if (cancelled) return;
-        // Off (404) or not this login's visit (403): the day feed's lines alone.
+        // Not found (404) or not this login's visit (403): the day feed's lines alone.
         if (err && (err.status === 404 || err.status === 403)) setLoaded({ key: visitId, rows: [] });
         else setFailed(true);
       });
     return () => { cancelled = true; };
-  }, [on, visitId, attempt]);
+  }, [visitId, attempt]);
   // Rows read for another stop never show on this one.
   return { rows: loaded.key === visitId ? loaded.rows : [], failed, retry: () => setAttempt((n) => n + 1) };
 }
@@ -273,7 +270,6 @@ export function ScheduleAccessSection({ service, variant = 'sheet', actions = fa
   const act = actions && !panel ? gate : null;
   const canAdd = !!act && current?.neighborhoodGateActions === true;
 
-  if (!scheduleAccessOn(current)) return null;
   if (!lines.length && !rows.length && !canAdd && !accepted.failed && !gate.note) return null;
 
   const items = (

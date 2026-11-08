@@ -139,7 +139,7 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // who can still silence the category here.
 // access_codes: the one standing row for the access codes waiting on
 // Customers → Gate codes (services/access-code-found-bell.js, owner ruling
-// 2026-10-24). The dark GATE_ACCESS_CODES_FOUND_BELL is the switch; same treatment.
+// 2026-10-24). Same treatment.
 // estimate_stuck: a customer stuck booking from an estimate, or back on an expired one (services/estimate-stuck-alert.js,
 // owner 2026-11-05 "1, 2 and 3"). No gate: it must reach the office, who can still silence the category here.
 const DEFAULT_ON_CATEGORIES = new Set(['estimate_change_request', 'customer_landline_from_call', 'visit_prep_photos', 'typed_decisions', 'llm_cost', 'review_low_rating', 'truck_kit', 'access_codes', 'payroll', 'estimate_stuck']);

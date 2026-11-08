@@ -1,5 +1,5 @@
 /**
- * Staff onboarding documents (GATE_STAFF_ONBOARDING_DOCS, owner 2026-10-08).
+ * Staff onboarding documents (owner 2026-10-08).
  *
  * A staff document an admin marked "Required at onboarding"
  * (document_templates.onboarding_required) is OUTSTANDING for an active staff member
@@ -12,8 +12,8 @@
  * The card deep-links document + version; the record screen starts the member's own
  * record when none is picked.
  *
- * Gate off = the read functions return empty before any query. The vehicle-agreement
- * check (hasCompletedIssuedRecord) is NOT gated.
+ * Staff documents off (GATE_CONTROLLED_STAFF_DOCUMENTS) = the read functions return empty
+ * before any query. The vehicle-agreement check (hasCompletedIssuedRecord) is NOT gated.
  */
 const db = require('../models/db');
 const featureGates = require('../config/feature-gates');
@@ -28,7 +28,7 @@ const DUE_DAYS = 7;
 const empty = () => ({ enabled: false, documents: [], counts: { outstanding: 0, total: 0 } });
 
 function live() {
-  return featureGates.staffOnboardingDocsLive() && featureGates.gateEnvValue('GATE_CONTROLLED_STAFF_DOCUMENTS');
+  return featureGates.gateEnvValue('GATE_CONTROLLED_STAFF_DOCUMENTS');
 }
 
 /**

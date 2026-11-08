@@ -201,6 +201,12 @@ describe('processScheduledSends send-window handling', () => {
 
     expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true, claimToken: 'claim-1' }));
     expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
+    // Owner 2026-11-06 "fix": the worker's own claim moves a due date before the send day to the
+    // send day (invoice-helpers.js firstDeliveryDueDate; real-Postgres rows in late-sent-bill-postgres).
+    const claimPatch = claim.update.mock.calls[0][0];
+    expect(claimPatch).toMatchObject({ status: 'sending', due_date: expect.stringContaining('due_date < ?::date THEN ?::date ELSE due_date END') });
+    const today = require('../utils/datetime-et').etDateString();
+    expect(db.raw).toHaveBeenCalledWith(claimPatch.due_date, [today, today]);
   });
 
   test.each([new Date('2026-09-25T02:45:00.000Z'), null])(

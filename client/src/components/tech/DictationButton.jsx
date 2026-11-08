@@ -15,7 +15,10 @@ import { setDictationPending } from "../../hooks/dictationPending";
  * (words arrive after the tap that stops it, with "Transcribing" showing); off,
  * it is the browser's speech recognition. While a clip is recorded or
  * transcribed the button reports it to `useDictationPending()` so Send / Ask
- * buttons can wait for the words.
+ * buttons can wait for the words. With GATE_DICTATION_LIVE_WORDS on, the words
+ * so far show in a small bubble beside the mic while the person talks (a
+ * preview: at most two lines, newest words kept); it goes away when the final
+ * words land.
  *
  * Props:
  *   onAppend(text)  required — called with each final transcript chunk
@@ -39,6 +42,44 @@ import { setDictationPending } from "../../hooks/dictationPending";
 function micLabel({ uploading, listening, title }) {
   if (uploading) return "Transcribing";
   return listening ? "Stop dictation" : title;
+}
+
+// The bubble holds two lines of 14px text; a long dictation keeps its newest words.
+const BUBBLE_MAX_CHARS = 160;
+const BUBBLE_LINE_PX = 20;
+
+function bubbleText(text) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  return clean.length > BUBBLE_MAX_CHARS ? `…${clean.slice(clean.length - BUBBLE_MAX_CHARS).replace(/^\S*\s/, "")}` : clean;
+}
+
+// column-reverse pins the text to the bottom of the box, so when it runs past two lines the oldest words scroll off the top.
+export function LiveWordsBubble({ text, migrated, palette }) {
+  const { muted = "#94a3b8" } = palette || {};
+  const box = {
+    display: "inline-flex",
+    flexDirection: "column-reverse",
+    overflow: "hidden",
+    height: BUBBLE_LINE_PX * 2 + 8,
+    maxWidth: "14rem",
+    padding: "4px 8px",
+    borderRadius: 4,
+    fontSize: 14,
+    lineHeight: `${BUBBLE_LINE_PX}px`,
+    verticalAlign: "middle",
+    wordBreak: "break-word",
+    ...(migrated ? {} : { color: muted, border: `1px solid ${muted}55` }),
+  };
+  return (
+    <span
+      data-testid="dictation-live-words"
+      aria-live="off"
+      className={migrated ? "border border-hairline bg-zinc-100 text-zinc-600" : undefined}
+      style={box}
+    >
+      <span>{bubbleText(text)}</span>
+    </span>
+  );
 }
 
 function legacyMicStyle({ size, listening, palette }) {
@@ -80,7 +121,7 @@ export default function DictationButton({
 }) {
   const migrated = presentation === "admin";
   const Control = migrated ? Button : "button";
-  const { listening, supported, toggle, cancel, mode, starting, uploading } = useSpeechDictation(onAppend, { uploadServiceId, clipHandler, dictationContext });
+  const { listening, supported, toggle, cancel, mode, starting, uploading, liveText } = useSpeechDictation(onAppend, { uploadServiceId, clipHandler, dictationContext });
 
   // A recorded clip has no transcript until it is stopped and transcribed;
   // a save in that window would go out without it. The window opens at the
@@ -115,6 +156,7 @@ export default function DictationButton({
   const label = micLabel({ uploading, listening, title });
 
   return (
+    <>
     <Control
       type="button"
       onClick={toggle}
@@ -143,5 +185,7 @@ export default function DictationButton({
         <line x1="12" y1="19" x2="12" y2="22" />
       </svg>
     </Control>
+    {liveText ? <LiveWordsBubble text={liveText} migrated={migrated} palette={palette} /> : null}
+    </>
   );
 }

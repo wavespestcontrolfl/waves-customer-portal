@@ -25,7 +25,6 @@ const {
 const { etParts } = require('../utils/datetime-et');
 const { publicFindingEvidence, publicBasis } = require('../services/lawn-diagnostic-evidence');
 const featureGates = require('../config/feature-gates');
-const { reportTemplatePayload } = require('../services/service-report/report-template');
 
 function evidenceGateLive() {
   return typeof featureGates.lawnDiagnosticEvidenceLive === 'function' && featureGates.lawnDiagnosticEvidenceLive();
@@ -293,8 +292,6 @@ router.get('/:token', readLimiter, async (req, res, next) => {
       success: true,
       report: buildPublicLawnReport(row, { photoCount }),
       glassDefault: true,
-      // GATE_REPORT_SHARED_TEMPLATE: the shared customer header and the stacked layout. Absent = byte-identical payload.
-      ...reportTemplatePayload(),
     });
   } catch (err) {
     return next(err);

@@ -49,9 +49,9 @@ afterEach(() => {
   document.documentElement.removeAttribute('data-glass-theme');
 });
 
-describe('ProjectReportViewPage theme gate', () => {
-  it('WDO inspection reports render as the paper document (no glass scene), even with the shared template on', async () => {
-    const { container, findAllByText, queryByRole } = renderProjectReport(payload('wdo_inspection', { reportTemplate: true }));
+describe('ProjectReportViewPage theme', () => {
+  it('WDO inspection reports render as the paper document (no glass scene, no shared template)', async () => {
+    const { container, findAllByText, queryByRole } = renderProjectReport(payload('wdo_inspection'));
     await findAllByText(/wdo inspection/i);
     expect(container.querySelector('.project-report-page')).not.toBeNull();
     expect(document.documentElement).not.toHaveAttribute('data-glass-theme');
@@ -60,8 +60,8 @@ describe('ProjectReportViewPage theme gate', () => {
     expect(queryByRole('region', { name: 'Share feedback' })).not.toBeInTheDocument();
   });
 
-  it('the pre-construction certificate stays the paper document, even with the shared template on', async () => {
-    const { container, findAllByText, queryByRole } = renderProjectReport(payload('pre_treatment_termite_certificate', { reportTemplate: true }));
+  it('the pre-construction certificate stays the paper document (no shared template)', async () => {
+    const { container, findAllByText, queryByRole } = renderProjectReport(payload('pre_treatment_termite_certificate'));
     await findAllByText(/Certificate of Compliance/i);
     expect(container.querySelector('.project-report-page')).not.toBeNull();
     expect(document.documentElement).not.toHaveAttribute('data-glass-theme');
@@ -70,7 +70,7 @@ describe('ProjectReportViewPage theme gate', () => {
     expect(queryByRole('region', { name: 'Share feedback' })).not.toBeInTheDocument();
   });
 
-  it('a regular termite treatment report keeps the glass theme (shared template off: its own header)', async () => {
+  it('a regular termite treatment report keeps the glass theme and takes the shared template', async () => {
     const { container, findByRole } = renderProjectReport(payload('termite_treatment'));
     await waitFor(() => {
       expect(document.documentElement).toHaveAttribute('data-glass-theme');
@@ -78,15 +78,14 @@ describe('ProjectReportViewPage theme gate', () => {
     // The glass attribute is set before the fetch resolves: wait for the loaded report before reading its classes.
     expect(await findByRole('heading', { level: 3, name: "How did today's visit go?" })).toBeInTheDocument();
     expect(container.querySelector('.project-report-page')).not.toBeNull();
-    expect(container.querySelector('.project-report-page')).not.toHaveClass('customer-report-template');
-    expect(container.querySelector('.report-header')).toBeNull();
+    expect(container.querySelector('.project-report-page')).toHaveClass('customer-report-template');
+    expect(container.querySelector('.report-header')).not.toBeNull();
     expect(await findByRole('region', { name: 'Share feedback' }))
       .toHaveAttribute('data-section', 'review-request-project');
   });
 
-  it('shared template on: a regular report takes the template class and the shared header with the project title and recorded address', async () => {
+  it('a regular report takes the template class and the shared header with the project title and recorded address', async () => {
     const { container, findByRole } = renderProjectReport(payload('termite_treatment', {
-      reportTemplate: true,
       title: 'Perimeter treatment',
       customerEmail: 'TEST@EXAMPLE.COM',
       customerPhone: '9415551212',
@@ -350,5 +349,29 @@ describe('ProjectReportViewPage pre-treat sticker', () => {
     }));
     expect(await findByText('09/14/2026 9:30 AM · Termidor SC / Fipronil · applied by Sam Example')).toBeInTheDocument();
     expect(getByText(/This signature covers the initial treatment only\./)).toBeInTheDocument();
+  });
+});
+
+describe('ProjectReportViewPage follow-up appointment (GATE_DAY_ONLY_PROMISE)', () => {
+  it('day-only: the date and the arrival note, no hour', async () => {
+    const { findAllByText, queryByText } = renderProjectReport(payload('termite_treatment', {
+      upcomingAppointment: {
+        serviceType: 'Termite Follow-up', scheduledDate: '2999-01-05', windowStart: null, technicianName: 'Alex', status: 'confirmed',
+        day_only: true, arrival_note: 'Arrival window texted the day before',
+      },
+    }));
+    const rows = await findAllByText(/Arrival window texted the day before/);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows[0].textContent).toMatch(/January 5/);
+    expect(queryByText(/\d{1,2}:\d{2} (AM|PM)/)).toBeNull();
+  });
+
+  it('an hour the server sent still shows, with no note', async () => {
+    const { findAllByText, queryByText } = renderProjectReport(payload('termite_treatment', {
+      upcomingAppointment: { serviceType: 'Termite Follow-up', scheduledDate: '2999-01-05', windowStart: '08:00:00', technicianName: 'Alex', status: 'confirmed' },
+    }));
+    const rows = await findAllByText(/8:00 AM-10:00 AM/);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(queryByText(/texted the day before/)).toBeNull();
   });
 });

@@ -169,7 +169,7 @@ describe('applyReviewedCallReschedule', () => {
     expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith(
       VISIT_ID,
       '2026-09-15T14:00',
-      { sendNotification: false, expectSchedule: { date: '2026-09-15', windowStart: '14:00' } },
+      { sendNotification: false, expectSchedule: { date: '2026-09-15', windowStart: '14:00' }, timePromise: 'set_time' },
     );
     expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: VISIT_ID, actorId: ACTOR_ID });
   });
@@ -415,7 +415,7 @@ describe('reviewed call reschedule', () => {
       skipCallFollowUpShift: true, notifyRequested: false, pendingConfirmation: true, operationKey: 'proposal:card:hash',
     });
     expect(reminders.handleReschedule).toHaveBeenCalledWith('visit-reviewed', '2026-09-15T14:00',
-      { sendNotification: false, expectSchedule: { date: '2026-09-15', windowStart: '14:00' } });
+      { sendNotification: false, expectSchedule: { date: '2026-09-15', windowStart: '14:00' }, timePromise: 'set_time' });
   });
 
   test('refuses an open portal request after locking the selected visit and before proposal mutation', async () => {

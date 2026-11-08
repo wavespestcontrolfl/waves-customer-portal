@@ -396,7 +396,7 @@ function buildScheduleNote({ scheduleSource, derived, scheduleFmt, rainSensor = 
   const sensorClause = rainSensor
     ? ' Since you have a rain sensor, some of those runs may have been skipped after rain — this figure assumes the full schedule ran, so read it as the most your system would have applied.'
     : '';
-  // The owner table is not UF's: with GATE_IRRIGATION_OWNER_RATES on the sentence drops the attribution.
+  // The owner table is not UF's: the sentence drops the attribution for the owner table.
   const rateSource = rateTable === 'owner' ? '' : ' from University of Florida turf guidance';
   return `We worked that ${scheduleFmt}" out from what you entered under Irrigation in your portal — ${describeRuntimeBasis(derived)} — using the typical ${HEAD_LABELS[derived.headType] || derived.headType} rate${rateSource} (about ${formatInches(derived.rateInPerHr)}" per hour).${sensorClause} If you know your actual weekly inches, enter them there and we'll use your number instead.`;
 }
@@ -595,8 +595,8 @@ function decideWeeklyEmail({
   // Jurisdiction for the restriction policy (resolveRestrictionCounty).
   county = null,
   weekPlanEnabled = false,
-  // Head rate table ('owner' | 'package') for this decision. Omitted = a NEW decision, so the live
-  // GATE_IRRIGATION_OWNER_RATES picks it; a replay of a stored plan passes the stored table (storedRateTable).
+  // Head rate table ('owner' | 'package') for this decision. Omitted = a NEW decision, so the owner's
+  // table; a replay of a stored plan passes the stored table (storedRateTable).
   rateTable = undefined,
   // Lawn area on file for the plan's "water you saved" gallons (null = no sentence).
   lawnSqft = null,

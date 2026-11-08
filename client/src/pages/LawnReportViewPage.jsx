@@ -176,8 +176,6 @@ function tierPerApplication(tier = {}) {
 export default function LawnReportViewPage() {
   const { token } = useParams();
   const [report, setReport] = useState(null);
-  // GATE_REPORT_SHARED_TEMPLATE: the server sends reportTemplate:true beside the report while the gate is on.
-  const [sharedTemplate, setSharedTemplate] = useState(false);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [loadError, setLoadError] = useState(false);
@@ -197,7 +195,6 @@ export default function LawnReportViewPage() {
       if (!res.ok) throw new Error(`lawn report fetch failed: ${res.status}`);
       const body = await res.json();
       setReport(body.report || null);
-      setSharedTemplate(body.reportTemplate === true);
     } catch {
       setLoadError(true);
     } finally {
@@ -239,30 +236,13 @@ export default function LawnReportViewPage() {
   const expectationItems = Object.entries(report.expectations || {}).filter(([, v]) => v);
   const watchItems = (report.watch_items || []).filter(Boolean);
 
-  // GATE_REPORT_SHARED_TEMPLATE: the heading prints once, as the shared customer header above the
-  // first card or as the page's own eyebrow and title inside it.
   const title = `Here's what we saw at ${placeLabel}`;
-  const heading = sharedTemplate
-    ? { above: <CustomerReportHeader eyebrow="Your lawn report" title={title} customerName={report.first_name} address={report.city} />, inCard: null }
-    : {
-      above: null,
-      inCard: (
-        <>
-          {/* Eyebrow → h1 → intro (owner 2026-09-04: no status chips on customer pages). */}
-          <div data-gt="eyebrow" style={DOC_EYEBROW}>Your lawn report</div>
-          <h1 style={{ fontFamily: FONTS.serif, fontSize: 26, fontWeight: 500, lineHeight: 1.18, color: TEXT, margin: '0 0 10px' }}>
-            {title}
-          </h1>
-        </>
-      ),
-    };
 
   return (
-    <Page template={sharedTemplate}>
-      {heading.above}
+    <Page template>
+      <CustomerReportHeader eyebrow="Your lawn report" title={title} customerName={report.first_name} address={report.city} />
       {/* Hero */}
       <SectionCard>
-        {heading.inCard}
         {/* The server's overall assessment stays, as text (no chip). */}
         <p style={{ margin: '0 0 8px', color: TEXT, fontSize: 15, fontWeight: 600, lineHeight: 1.5 }}>
           Overall: {report.overall_status || 'Reviewed'}

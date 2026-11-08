@@ -89,6 +89,25 @@ describe('PrepGuidePage block rendering', () => {
     expect(telLink).toHaveAttribute('href', 'tel:+19415550100');
   });
 
+  it('day-only (GATE_DAY_ONLY_PROMISE): an upcoming visit shows the date and the arrival note, never an hour', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      ...BASE_PAYLOAD,
+      blocks: [{ type: 'paragraph', content: 'Plain paragraph.' }],
+      upcomingVisits: [
+        { dateLabel: 'Tue, Jan 12', windowLabel: null, serviceLabel: 'Flea Control', day_only: true, arrival_note: 'Arrival window texted the day before' },
+        { dateLabel: 'Tue, Feb 9', windowLabel: '1:00–3:00 PM', serviceLabel: 'Flea Control' },
+      ],
+    })));
+
+    render(<PrepGuidePage />);
+
+    await waitFor(() => expect(screen.getByText('Tue, Jan 12')).toBeInTheDocument());
+    expect(screen.getByTestId('prep-day-only-note')).toHaveTextContent('Arrival window texted the day before');
+    // The visit whose hour the customer was told keeps it, and gets no note.
+    expect(screen.getByText('Arrival 1:00–3:00 PM')).toBeInTheDocument();
+    expect(screen.getAllByTestId('prep-day-only-note')).toHaveLength(1);
+  });
+
   it('refuses to linkify an unsafe href scheme, rendering the markdown as plain text', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
       ...BASE_PAYLOAD,

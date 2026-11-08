@@ -37,12 +37,22 @@ import { getAdminUser } from '../../lib/adminAuth';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-// A drop that changes nothing, or a technician's drop in another lane (or the
-// rail). That is a reassignment, and PUT /admin/schedule/:id/assign is
+// A lane takes new work (a visit from another lane or the rail, a
+// drag-create, an Open hour) only when its technician is on the assignable
+// roster and not marked out for the day. The server refuses any other
+// assignment (assertAssignableTechnician, 422 TECH_NOT_ASSIGNABLE).
+function takesNewWork(lane) {
+  return lane.rostered === true && !lane.outToday;
+}
+
+// A drop that changes nothing, a drop into a lane that takes no new work,
+// or a technician's drop in another lane (or the rail). A drop in another
+// lane is a reassignment, and PUT /admin/schedule/:id/assign is
 // office-only: a technician can move a visit in time inside its own lane,
 // never across lanes.
-function dropRefused(fromTech, toTech, fromMin, toMin) {
+function dropRefused(fromTech, toTech, fromMin, toMin, toLane) {
   if (fromTech === toTech) return fromMin === toMin;
+  if (toLane && !takesNewWork(toLane)) return true;
   return getAdminUser()?.role !== 'admin';
 }
 
@@ -613,13 +623,17 @@ export function isBookableSlotIdx(slotIdx, durationMin = 60) {
   return startMin + dur <= DAY_END_HOUR * 60;
 }
 
-function SlotDroppable({ techId, slotIdx, onCreateStart }) {
+function SlotDroppable({ techId, slotIdx, onCreateStart, takesNew = true }) {
   const slotMin = snapSlotIdxToHourMin(slotIdx);
   // The visit being dragged (same payload onDragEnd reads) sizes the fit
   // check; with nothing in flight the row is judged as a 60-min create.
   const { active } = useDndContext();
   const activeSvc = active?.data?.current?.service;
-  const bookable = isBookableSlotIdx(slotIdx, activeSvc ? effectiveDuration(activeSvc) : 60);
+  // A lane that takes no new work still lets its own visit move to another
+  // hour: a same-day move on the same technician is not an assignment, and
+  // the server accepts it.
+  const laneOpen = takesNew || (activeSvc != null && activeSvc.technicianId === techId);
+  const bookable = laneOpen && isBookableSlotIdx(slotIdx, activeSvc ? effectiveDuration(activeSvc) : 60);
   const { setNodeRef, isOver } = useDroppable({
     id: `slot-${techId}-${slotIdx}`,
     data: { techId, slotMin },
@@ -718,9 +732,12 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
         className="sticky top-0 z-10 bg-zinc-50 px-3 py-2 text-14 font-medium text-zinc-900 flex items-center justify-between"
         style={{ borderBottom: '1px solid #E4E4E7', borderTop: accent ? `2px solid ${accent}` : undefined }}
       >
-        <span className="truncate">{tech.name}</span>
-        <span className="u-nums text-14 text-ink-secondary">
-          {services.length}
+        <span className="truncate min-w-0">{tech.name}</span>
+        <span className="flex items-center gap-2 shrink-0">
+          {tech.outToday && <span className="text-warn-fg">Out today</span>}
+          <span className="u-nums text-14 text-ink-secondary">
+            {services.length}
+          </span>
         </span>
       </div>
       <div ref={gridRef} className="relative" style={{ height: GRID_HEIGHT }}>
@@ -730,6 +747,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
             techId={tech.id}
             slotIdx={idx}
             onCreateStart={onCreateSlot ? handleCreateStart : undefined}
+            takesNew={takesNewWork(tech)}
           />
         ))}
         {/* GATE_BOARD_OPEN_TIMES: while a visit is dragged, the hours that fit it on this route. */}
@@ -1308,7 +1326,7 @@ export default function TimeGridDay({
     // Past-day-end landings are disabled droppables; belt-and-braces for a
     // stale drop payload — the server would 422 it anyway.
     if (drop.slotMin != null && toMin + effectiveDuration(svc) > DAY_END_HOUR * 60) return;
-    if (dropRefused(fromTech, toTech, fromMin, toMin)) return;
+    if (dropRefused(fromTech, toTech, fromMin, toMin, techList.find((lane) => lane.id === toTech))) return;
 
     const dur = effectiveDuration(svc);
     const newWindow = `${minutesToHHMM(toMin)}-${minutesToHHMM(toMin + dur)}`;
@@ -1346,7 +1364,7 @@ export default function TimeGridDay({
         ? { fromName: fromTechName, toName: toTechName }
         : null,
     });
-  }, [allServices, technicians]);
+  }, [allServices, technicians, techList]);
 
   const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds, target }) => {
     if (!pending) return;
@@ -1699,12 +1717,11 @@ export default function TimeGridDay({
                     showNowLine={date === todayIso}
                     // An unassigned booking holds its hour in every column:
                     // any tech may end up taking it.
-                    // A tech marked out for the day gets none (the booking
-                    // would be refused).
-                    // Only rostered (assignable) techs: a column kept for a
-                    // deactivated tech's leftover visits takes no booking.
+                    // A lane that takes no new work gets none (takesNewWork:
+                    // a tech marked out for the day, or a column kept for a
+                    // deactivated tech's leftover visits).
                     // While lit hours show, they replace the Open blocks.
-                    openHours={onCreateSlot && showOpenHours && !tech.outToday && tech.rostered && !dragFits
+                    openHours={onCreateSlot && showOpenHours && takesNewWork(tech) && !dragFits
                       ? openHoursForDay(date, [...(byTech[tech.id] || []), ...unassignedInRail], { now: hourClock, bookingHours })
                       : []}
                     routeStale={Boolean(optimistic)}

@@ -321,6 +321,29 @@ async function rescheduleNoticeOptions(svc) {
     : [];
 }
 
+// GATE_DAY_ONLY_PROMISE part B2: what the customer chose for the new slot, as handleReschedule options. The picker's slots are
+// hour picks, so they pass 'set_time' (a later part adds an "any time that day" choice that passes 'day'); previousDate is the
+// date the visit moved from. Gate off: nothing, so the call keeps today's exact arguments.
+function dayPromiseMoveOptions(svc, timePromise) {
+  return require('../services/time-promise').dayOnlyPromiseOn()
+    ? { timePromise, previousDate: apptDateStr(svc.scheduled_date) }
+    : {};
+}
+
+// GATE_DAY_ONLY_PROMISE part B3: the rebooker option that records the customer's own hour for a single move. A later "any time
+// that day" choice (timePromise 'day') passes customerAskedTime: false here instead. Gate off: nothing.
+function dayPromiseMoveIntent() {
+  return require('../services/time-promise').dayOnlyPromiseOn() ? { customerAskedTime: true } : {};
+}
+
+// handleReschedule's options for a customer move: the repeat-move deferral and the day-promise choice, as a spread (none
+// when both are absent).
+async function moveNoticeArgs(svc, timePromise) {
+  const deferral = await rescheduleNoticeOptions(svc);
+  const dayOptions = dayPromiseMoveOptions(svc, timePromise);
+  return Object.keys(dayOptions).length ? [{ ...dayOptions, ...(deferral[0] || {}) }] : deferral;
+}
+
 // True when committing `targetDateStr` for this visit re-anchors the series.
 function shouldReanchor(svc, targetDateStr) {
   if (!isSeriesVisit(svc) || awaitingCustomerPick(svc)) return false;
@@ -1463,6 +1486,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             beforeMove: noticeRecheck,
             moveGuard: officeApprovalRecheck,
             placeInRoute: bookingPlacesInRoute(), // GATE_ROUTE_CHECK_BOOKING_SAVES
+            // GATE_DAY_ONLY_PROMISE part B3: the picker's slots are hours the customer chose, recorded by this move's own UPDATE
+            // (rebooker.js moveIntentColumns). Gate off: no key, so the call keeps today's exact arguments.
+            ...dayPromiseMoveIntent(),
             // No arrivalGraceMinutes (owner ruling 2026-09-28, scope cut
             // Codex r1 P1 #5314): this page's own commit runs a STRICT
             // pre-verify travel probe that a grace-kept slot would fail
@@ -1557,7 +1583,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         await AppointmentReminders.handleReschedule(
           svc.id,
           `${date}T${slot.start_time}`,
-          ...await rescheduleNoticeOptions(svc),
+          ...await moveNoticeArgs(svc, 'set_time'),
         );
       } catch (err) {
         logger.error(`[reschedule-public] reminder sync failed for ${svc.id}: ${err.message}`);

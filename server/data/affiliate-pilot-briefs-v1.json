@@ -2,7 +2,7 @@
   "version": 1,
   "set": "affiliate-pilot-v1",
   "owner": "adam",
-  "notes": "Affiliate pilot — six hub-only informational posts (owner monetization pilot 2026-08-31; playbook docs/affiliate-links-pilot.md): 2 nonchemical prevention, 2 lawn/irrigation measurement, 2 field-tool/equipment. GLOBAL RULES, all briefs: (1) informational lane only — no near-me or transactional phrasing anywhere; (2) every pest/agronomic claim must be verified against the cited UF/IFAS guidance or model-matched product documentation at draft time — if a claim cannot be verified, OMIT it; (3) never state prices or dollar amounts, for Waves services OR for products — say 'view current price' near a product link; (4) never describe any pesticide or product as 'safe' — this set recommends NO pesticides at all (tools, gauges, exclusion materials only); (5) the ONLY way to link a product is the <AffiliateLink> component with the exact ids in affiliate_products — never a retailer URL; (6) frontmatter disclosure.type must be 'affiliate'; (7) the Waves service CTA comes before the first product link and every post keeps Waves service as the primary answer — the product is the homeowner's measuring/prevention step, not a substitute for treatment. Revised 2026-09-24: removed unsupported prevalence, speed and product-performance promises. No approved product IDs, placements, disclosures or registry-approval requirements changed; autonomous supporting posts retain their existing no-per-post-approval policy. Re-seeding is a separate operator action; edits here do not update queued payloads.",
+  "notes": "Affiliate pilot — five hub-only informational posts (owner monetization pilot 2026-08-31; playbook docs/affiliate-links-pilot.md): 2 nonchemical prevention, 2 lawn/irrigation measurement, 1 field-tool/equipment. GLOBAL RULES, all briefs: (1) informational lane only — no near-me or transactional phrasing anywhere; (2) every pest/agronomic claim must be verified against the cited UF/IFAS guidance or model-matched product documentation at draft time — if a claim cannot be verified, OMIT it; (3) never state prices or dollar amounts, for Waves services OR for products — say 'view current price' near a product link; (4) never describe any pesticide or product as 'safe' — this set recommends NO pesticides at all (tools, gauges, exclusion materials only); (5) the ONLY way to link a product is the <AffiliateLink> component with the exact ids in affiliate_products — never a retailer URL; (6) frontmatter disclosure.type must be 'affiliate'; (7) the Waves service CTA comes before the first product link and every post keeps Waves service as the primary answer — the product is the homeowner's measuring/prevention step, not a substitute for treatment. Revised 2026-09-24: removed unsupported prevalence, speed and product-performance promises. No approved product IDs, placements, disclosures or registry-approval requirements changed; autonomous supporting posts retain their existing no-per-post-approval policy. Re-seeding is a separate operator action; edits here do not update queued payloads. Revised 2026-11-06: AP05 (catch cups, Parrish) dropped because a live post already owns its topic; AP03 and AP04 name their city lawn page in internal_links.",
   "cta_codes": {
     "QUOTE": "quote form /pest-control-quote/ (relative on-site link)",
     "CONTACT": "contact page /contact/ (relative on-site link) — lawn and tree-shrub have no calculator flow"
@@ -158,7 +158,9 @@
         "Do not invent Waves inspection findings, local prevalence, product testing, task durations, or diagnostic certainty. Stay within the general observation scope in sources; no device-specific tutorial or product-performance claims without retrievable exact-model documentation.",
         "Visual plan: one context image plus two distinct instructional views when accurate assets are available, and an article-specific ComparisonTable or PestEvidenceGrid with explicit supported props. No generic pest seasonality graphic, fabricated readings, source logos, or generated images presented as field evidence."
       ],
-      "internal_links": []
+      "internal_links": [
+        "/lawn-care-venice-fl/"
+      ]
     },
     {
       "id": "AP04",
@@ -208,59 +210,9 @@
         "Do not invent Waves inspection findings, local prevalence, product testing, task durations, or diagnostic certainty. Stay within the general observation scope in sources; no device-specific tutorial or product-performance claims without retrievable exact-model documentation.",
         "Visual plan: one context image plus two distinct instructional views when accurate assets are available, and an article-specific ComparisonTable or PestEvidenceGrid with explicit supported props. No generic pest seasonality graphic, fabricated readings, source logos, or generated images presented as field evidence."
       ],
-      "internal_links": []
-    },
-    {
-      "id": "AP05",
-      "action": "new_supporting_blog",
-      "slug": "/lawn-care/sprinkler-catch-cup-audit-dry-spots-parrish-fl/",
-      "city": "Parrish",
-      "working_title": "Dry Spots in a Parrish Lawn: What a Catch-Cup Sprinkler Check Can Show",
-      "primary_kw": "sprinkler catch cup audit parrish",
-      "secondary_kws": [
-        "irrigation audit dry spots lawn",
-        "sprinkler coverage test"
-      ],
-      "intent": "informational",
-      "window": "immediate",
-      "byline": "adam-augusta",
-      "cta": [
-        "CONTACT"
-      ],
-      "schema_types": [
-        "Article"
-      ],
-      "thesis": "A catch-cup check can reveal uneven water distribution. It is a screening step, not proof of a particular faulty head or a substitute for pest and disease assessment.",
-      "outline": [
-        "Record the dry patch, irrigation zone, and visible conditions without claiming irrigation is the most common cause",
-        "Explain application rate and distribution using current UF/IFAS or EPA guidance",
-        "Place cups and record run duration and collected water using a cited protocol; place the approved product link here",
-        "Show a clearly labelled worked example with units and arithmetic, never invented customer measurements",
-        "Treat uneven readings as a reason to investigate pressure, coverage, obstructions, and hardware rather than as a diagnosis",
-        "Verify current Manatee County restrictions; distinguish homeowner measurement from licensed repair or professional assessment"
-      ],
-      "affiliate_products": [
-        {
-          "product_id": "orbit-sprinkler-catch-cups",
-          "placement": "primary-rec",
-          "anchor": "a set of sprinkler catch cups",
-          "section": "the cited catch-cup setup and measurement step"
-        }
-      ],
-      "sources": [
-        "https://gardeningsolutions.ifas.ufl.edu/care/tools-and-equipment/irrigation-system-maintenance/",
-        "https://www.orbitonline.com/collections/b-hyve/products/b-hyve-sprinkler-catch-cup-12-pack",
-        "https://support.orbitonline.com/en/battery-powered-sprinkler-controller/Catch-Cups-Instructions-9396",
-        "Use UF/IFAS for the catch-container calibration method. Verify current Manatee County watering restrictions on the exact county page before citing any schedule; label worked measurements illustrative.",
-        "The official Orbit product page identifies SKU26251. Attribute the chosen protocol clearly; do not mix Orbit timing/placement with UF/IFAS calibration steps into a fabricated method."
-      ],
-      "verify_notes": [
-        "Verify the audit method and any uniformity figure against UF/IFAS; verify watering rules against the county's live page and date them; omit anything unsourced.",
-        "Never state prices; lawn has no calculator flow — direct cost questions to /contact/.",
-        "Do not invent Waves inspection findings, local prevalence, product testing, task durations, or diagnostic certainty. Verify product suitability against the model-matched documentation identified in sources before drafting; observe its provenance and claim limits.",
-        "Visual plan: one context image plus two distinct instructional views when accurate assets are available, and an article-specific ComparisonTable or PestEvidenceGrid with explicit supported props. No generic pest seasonality graphic, fabricated readings, source logos, or generated images presented as field evidence."
-      ],
-      "internal_links": []
+      "internal_links": [
+        "/lawn-care-lakewood-ranch-fl/"
+      ]
     },
     {
       "id": "AP06",

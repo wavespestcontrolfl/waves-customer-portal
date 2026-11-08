@@ -1,5 +1,5 @@
 /**
- * Text-thread lead reader (GATE_SMS_LEAD_EXTRACTION, default OFF; owner 2026-10-23).
+ * Text-thread lead reader (owner 2026-10-23).
  *
  * The call path turns a phone call into a lead (lead-from-extraction.js). A
  * person who TEXTS a Waves line instead got nothing: their name, address and
@@ -397,8 +397,6 @@ async function processCandidate(candidate) {
 }
 
 async function sweepSmsLeadCandidates({ limit = DEFAULT_LIMIT, now = new Date() } = {}) {
-  const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('smsLeadExtraction')) return { skipped: 'gate_off' };
   // Bells a crash or a failed raise left owed go first.
   await ringOwedBells(limit);
   const candidates = await findCandidates({ limit, now });

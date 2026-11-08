@@ -84,20 +84,10 @@ describe('phone matching', () => {
   });
 });
 
-describe('measurement only, dark by default', () => {
+describe('measurement only', () => {
   const read = (file) => fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
   test('the settle time covers the longest window', () => {
     expect(outcomes.SETTLE_HOURS).toBe(72);
-  });
-  test('the gate is registered and off unless exactly true', () => {
-    expect(read('config/feature-gates.js')).toContain("smsReplyOutcomes: process.env.GATE_SMS_REPLY_OUTCOMES === 'true'");
-  });
-  test('the cron returns before taking its lock when the gate is off', () => {
-    const src = read('services/scheduler.js');
-    const at = src.indexOf("runExclusive('sms-reply-outcomes'");
-    expect(at).toBeGreaterThan(0);
-    const block = src.slice(src.lastIndexOf('cron.schedule(', at), at);
-    expect(block).toContain("if (!isEnabled('smsReplyOutcomes')) return;");
   });
   test('the service never sends and writes only its own table', () => {
     const src = read('services/sms-reply-outcomes.js');

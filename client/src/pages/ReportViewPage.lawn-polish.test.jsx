@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ReportViewPage from './ReportViewPage';
@@ -96,24 +96,25 @@ describe('the Water card, three states, on the real page', () => {
 });
 
 describe('one label line per product card', () => {
-  const openProducts = (container) => {
-    const summary = [...container.querySelectorAll('summary')].find((el) => el.textContent.includes('Products Applied'));
-    fireEvent.click(summary);
+  // The record cards (with their Safety lines) print on the standard page; the lawn layout explains each product
+  // inside "what we did" instead, so these payloads drop the layout key.
+  const standardPage = (payload) => {
+    const copy = clone(payload);
+    delete copy.lawnLayout;
+    return copy;
   };
 
   it('gate off: the spray card prints the catalog precaution and the re-entry line, the granule its third sentence too', async () => {
-    const { container } = renderReport(clone(mixedBase));
+    const { container } = renderReport(standardPage(mixedBase));
     await waitForReport();
-    openProducts(container);
     expect(safetyOf(container, 'Gravex 20 EW').textContent).toContain('Per the product label: keep people and pets off treated areas until sprays have dried.');
     expect(safetyOf(container, 'Gravex 20 EW').textContent).toContain('Stay off treated areas until the application has dried.');
     expect(safetyOf(container, 'Dimension').textContent).toContain('People and pets can use the lawn once it has been watered in');
   });
 
   it('gate on: the spray card prints the re-entry line alone; the granule its handling sentences and the re-entry line', async () => {
-    const { container } = renderReport(clone(mixedPolish));
+    const { container } = renderReport(standardPage(mixedPolish));
     await waitForReport();
-    openProducts(container);
     const spray = safetyOf(container, 'Gravex 20 EW');
     expect(spray.querySelectorAll('p')).toHaveLength(1);
     expect(spray).toHaveTextContent('Stay off treated areas until the application has dried.');
@@ -125,9 +126,8 @@ describe('one label line per product card', () => {
   });
 
   it('gate on: a surfactant keeps both lines (a mix note is not a keep-off line), so no card is left without its keep-off line', async () => {
-    const { container } = renderReport(clone(mixedPolish));
+    const { container } = renderReport(standardPage(mixedPolish));
     await waitForReport();
-    openProducts(container);
     const surfactant = safetyOf(container, 'Surfactant');
     expect(surfactant).toHaveTextContent('Used only as part of a spray mix');
     expect(surfactant).toHaveTextContent('Stay off treated areas until the application has dried.');

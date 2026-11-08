@@ -18,6 +18,13 @@ jest.mock('@aws-sdk/client-s3', () => ({
 jest.mock('@aws-sdk/s3-request-presigner', () => ({
   getSignedUrl: jest.fn(),
 }));
+// GATE_DAY_ONLY_PROMISE part C1: the follow-up appointment asks loadTimeDisplay whether to show its hour. The real one
+// runs (gate off here: the hour shows) unless a test installs an answer.
+const mockLoadTimeDisplayOverride = jest.fn();
+jest.mock('../services/time-promise', () => {
+  const actual = jest.requireActual('../services/time-promise');
+  return { ...actual, loadTimeDisplay: (...args) => (mockLoadTimeDisplayOverride.getMockImplementation() ? mockLoadTimeDisplayOverride(...args) : actual.loadTimeDisplay(...args)) };
+});
 jest.mock('../services/report-followup-appointment', () => ({
   findReportFollowupAppointment: jest.fn(),
 }));
@@ -449,6 +456,42 @@ describe('public project reports', () => {
       expect(body.upcomingAppointment.windowEnd).toBeUndefined();
       expect(JSON.stringify(body)).not.toContain('12:00:00');
     });
+  });
+
+  test('GATE_DAY_ONLY_PROMISE: a day-only follow-up appointment shows the date, no hour, and the note', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-dayonly', customer_id: 'customer-1', scheduled_service_id: 'ss-source',
+        report_token: '0123456789abcdef0123456789abcdef', report_viewed_at: '2026-05-02T14:00:00.000Z', status: 'sent', project_type: 'wdo_inspection',
+        first_name: 'Test', last_name: 'Customer', findings: JSON.stringify({ wdo_finding: 'No visible signs of WDO observed', inspection_fee: '$250' }), recommendations: 'Keep mulch pulled back from the foundation.',
+      }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'projects as p') return projectRead;
+      if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
+      if (table === 'service_records') return chain();
+      if (table === 'scheduled_services') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    findReportFollowupAppointment.mockResolvedValue({
+      id: 'ss-next', service_type: 'WDO Re-Inspection', scheduled_date: '2999-01-05', window_start: '08:00:00', window_end: '12:00:00',
+      technician_name: 'Alex', status: 'confirmed',
+    });
+    mockLoadTimeDisplayOverride.mockImplementation(async (_conn, rows) => new Map(rows.map((r) => [r.id, { showHour: false, level: 'none', eligible: true }])));
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+        const body = await res.json();
+        expect({ status: res.status, error: body.error }).toEqual({ status: 200, error: undefined });
+        expect(mockLoadTimeDisplayOverride).toHaveBeenCalledTimes(1);
+        expect(body.upcomingAppointment).toMatchObject({
+          scheduledDate: '2999-01-05', windowStart: null, day_only: true, arrival_note: 'Arrival window texted the day before',
+        });
+        expect(JSON.stringify(body.upcomingAppointment)).not.toMatch(/08:00|12:00/);
+      });
+    } finally {
+      mockLoadTimeDisplayOverride.mockReset();
+    }
   });
 
   // FDACS applicator identification card number (F.S. 482.2265(1)(b), owner

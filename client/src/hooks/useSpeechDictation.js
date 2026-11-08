@@ -3,6 +3,7 @@ import {
   dictationTarget, guardRecording, openRecorderSlot, pickMode, pickRecorderMime, stopQuietly, transcribeClip,
 } from "./serverDictation";
 import useServerDictationMode, { readToken } from "./useServerDictationMode";
+import { startLiveWords } from "./liveDictation";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -70,6 +71,12 @@ export const CLIP_MAX_MS = 3 * 60 * 1000;
  * clip mode does. Gate off, key missing, or a browser that cannot record: the
  * paths above run exactly as before.
  *
+ * Live words (GATE_DICTATION_LIVE_WORDS, server dictation only): when the availability answer says
+ * `liveWords`, the same microphone stream is also streamed over the staff socket (liveDictation.js) and the
+ * words so far come back as `liveText`, a preview while the person talks. The final words are still the clip's;
+ * `liveText` is cleared when they land (or the clip fails, or the mic is cancelled, unmounted or moved to
+ * another customer or visit). A live session that fails only drops the preview.
+ *
  * Clip mode: pass `{ clipHandler }` (async (blob, durationSeconds) => void) and
  * the mic ALWAYS records, on every browser that can record, and hands the
  * finished clip to the handler instead of transcribing it here: no speech
@@ -86,6 +93,10 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   const [listening, setListening] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadAvailable, setUploadAvailable] = useState(false);
+  // The words so far while a server-mode recording runs (live words); "" otherwise.
+  const [liveText, setLiveText] = useState("");
+  const liveRef = useRef(null);
+  const liveKeyRef = useRef(null);
   const recognitionRef = useRef(null);
   const recorderRef = useRef(null);
   // Ends the live recording's own bookkeeping (hidden-page guard, the app-wide
@@ -107,7 +118,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     typeof window !== "undefined" &&
     typeof window.MediaRecorder === "function" &&
     !!navigator.mediaDevices?.getUserMedia;
-  const { serverMode, dropServerMode } = useServerDictationMode({ clipMode, recorderSupported });
+  const { serverMode, liveWords, dropServerMode } = useServerDictationMode({ clipMode, recorderSupported });
 
   // What this mic's words are for: the customer and visit ids of its field. A
   // recording snapshots it at the tap (`toggleUpload`), and a transcript that
@@ -170,6 +181,51 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   const mode = pickMode({ clipMode, recorderSupported, serverMode, speechSupported, uploadAvailable });
   const supported = mode !== null;
 
+  // Ends the live preview and drops its words (the final words landed, or the recording is over).
+  const clearLive = useCallback(() => {
+    const session = liveRef.current;
+    liveRef.current = null;
+    liveKeyRef.current = null;
+    session?.abort();
+    if (mountedRef.current) setLiveText("");
+  }, []);
+
+  // `clip` is the recording's target; the session shows words only while the field still belongs to it.
+  const beginLive = useCallback((stream, clip) => {
+    const token = readToken();
+    if (!token) return;
+    liveRef.current?.abort();
+    const session = startLiveWords({
+      stream,
+      context: clip,
+      token,
+      onText: (text) => {
+        if (liveRef.current === session && mountedRef.current && targetRef.current.key === clip.key) setLiveText(text);
+      },
+      onEnd: (failed) => {
+        if (liveRef.current !== session || !failed) return;
+        liveRef.current = null;
+        liveKeyRef.current = null;
+        if (mountedRef.current) setLiveText("");
+      },
+    });
+    liveRef.current = session;
+    liveKeyRef.current = clip.key;
+  }, []);
+
+  // Live words never gate the recording: only a server-mode mic whose server said yes starts a preview.
+  const maybeBeginLive = useCallback((stream, clip) => {
+    if (serverMode && liveWords) beginLive(stream, clip);
+  }, [serverMode, liveWords, beginLive]);
+
+  // The recording stopped: the preview takes no more audio but keeps the last words coming until the final words land.
+  const stopLive = useCallback(() => liveRef.current?.stop(), []);
+
+  // The mic moved to another customer or visit mid-recording: the preview is for the old field.
+  useEffect(() => {
+    if (liveRef.current && liveKeyRef.current !== target.key) clearLive();
+  }, [target.key, clearLive]);
+
   const settleUpload = useCallback(() => {
     if (mountedRef.current) setUploading(false);
   }, []);
@@ -207,20 +263,24 @@ export default function useSpeechDictation(onTranscript, options = {}) {
         if (clip.server && e?.status === 404 && mountedRef.current) dropServerMode();
         if (mountedRef.current) alert(`Dictation error: ${e.message}`);
       } finally {
+        clearLive();
         settleUpload();
       }
     },
-    [dropServerMode, settleUpload],
+    [clearLive, dropServerMode, settleUpload],
   );
 
   const uploadClip = useCallback(
     (blob, durationSeconds, clip) => {
-      if (!blob || !blob.size) return undefined;
+      if (!blob || !blob.size) {
+        clearLive();
+        return undefined;
+      }
       return clipHandlerRef.current
         ? runClipHandler(blob, durationSeconds)
         : runTranscription(blob, durationSeconds, clip);
     },
-    [runClipHandler, runTranscription],
+    [clearLive, runClipHandler, runTranscription],
   );
 
   const toggleUpload = useCallback(async () => {
@@ -318,7 +378,11 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       stream.getTracks().forEach((t) => t.stop());
       recorderRef.current = null;
       setListening(false);
-      if (recordingFailed) return;
+      stopLive();
+      if (recordingFailed) {
+        clearLive();
+        return;
+      }
       const blob = new Blob(chunks, { type: rec.mimeType || mimeType || "audio/webm" });
       uploadClip(blob, (Date.now() - startedAt) / 1000, clip);
     };
@@ -328,6 +392,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       stream.getTracks().forEach((t) => t.stop());
       recorderRef.current = null;
       setListening(false);
+      clearLive();
       alert("Dictation error: recording failed");
     };
     try {
@@ -342,11 +407,12 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       return;
     }
     recorderRef.current = rec;
+    maybeBeginLive(stream, clip);
     // Both updates land in one render, so a caller watching
     // `starting || listening` never sees a gap between them.
     doneStarting();
     setListening(true);
-  }, [uploadClip, uploading, clipMode, serverMode, clipMaxMs]);
+  }, [uploadClip, uploading, clipMode, serverMode, maybeBeginLive, stopLive, clearLive, clipMaxMs]);
 
   const toggle = useCallback((event) => {
     const SR =
@@ -538,6 +604,23 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // modal closes mid-dictation) so the mic isn't left recording and stale
   // callbacks can't fire against an unmounted notes setter.
   const mountedRef = useRef(true);
+  // Abandon, don't upload: the field is gone. Lets go of a running recorder, its
+  // page guard and the app-wide slot; its clip is never sent. No-op when nothing records.
+  const dropRecorder = useCallback(() => {
+    const recorder = recorderRef.current;
+    if (!recorder) return;
+    unguardRef.current?.();
+    recorder.ondataavailable = null;
+    recorder.onstop = null;
+    recorder.onerror = null;
+    try {
+      recorder.stream?.getTracks?.().forEach((t) => t.stop());
+      recorder.stop();
+    } catch {
+      /* no-op */
+    }
+    recorderRef.current = null;
+  }, []);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -555,23 +638,11 @@ export default function useSpeechDictation(onTranscript, options = {}) {
         }
         recognitionRef.current = null;
       }
-      const recorder = recorderRef.current;
-      if (recorder) {
-        // Abandon, don't upload: the field is gone.
-        unguardRef.current?.();
-        recorder.ondataavailable = null;
-        recorder.onstop = null;
-        recorder.onerror = null;
-        try {
-          recorder.stream?.getTracks?.().forEach((t) => t.stop());
-          recorder.stop();
-        } catch {
-          /* no-op */
-        }
-        recorderRef.current = null;
-      }
+      liveRef.current?.abort();
+      liveRef.current = null;
+      dropRecorder();
     };
-  }, []);
+  }, [dropRecorder]);
 
   // Ends a live SPEECH session for a consumer that has gone busy (e.g. a
   // disabled mic while its field is being rewritten) and drops any result
@@ -580,6 +651,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // a recording already running stops on its own tap as before.
   const cancel = useCallback(() => {
     if (startingRef.current) openingSlotRef.current?.cancel();
+    clearLive();
     const rec = recognitionRef.current;
     if (!rec) return;
     stopRequestedRef.current = true;
@@ -589,7 +661,17 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     } catch {
       /* already ending */
     }
-  }, []);
+  }, [clearLive]);
 
-  return { listening, supported, toggle, cancel, mode, starting, uploading };
+  // The field this mic serves is gone while it records (or still opening): stop, send nothing, no
+  // transcription. Unlike cancel(), this also ends a running clip recording (the unmount path, kept mounted).
+  const abandon = useCallback(() => {
+    if (startingRef.current) openingSlotRef.current?.cancel();
+    clearLive();
+    if (!recorderRef.current) return;
+    dropRecorder();
+    if (mountedRef.current) setListening(false);
+  }, [clearLive, dropRecorder]);
+
+  return { listening, supported, toggle, cancel, abandon, mode, starting, uploading, liveText };
 }

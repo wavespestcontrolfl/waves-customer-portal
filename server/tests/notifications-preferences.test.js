@@ -147,7 +147,7 @@ describe('notification preference updates', () => {
 
     expect(updates).toEqual({
       appointment_confirmation_channel: 'email',
-      // Same contract for the confirmation channel (GATE_NEW_CLIENT_CONFIRM_EMAIL):
+      // Same contract for the confirmation channel:
       // any customer write is a deliberate choice, so the new-client text +
       // email promotion never overrides it.
       appointment_confirmation_channel_explicit: true,
@@ -284,7 +284,7 @@ describe('account-level channel routing', () => {
     expect(CHANNEL_DB_COLUMNS).toEqual([
       'appointment_confirmation_channel',
       // The confirmation channel's explicit-choice stamp travels with it to
-      // the primary-profile row (GATE_NEW_CLIENT_CONFIRM_EMAIL).
+      // the primary-profile row.
       'appointment_confirmation_channel_explicit',
       'service_reminder_72h_channel',
       // The explicit-choice stamp routes to the primary-profile row WITH the

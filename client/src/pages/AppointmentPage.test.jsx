@@ -112,6 +112,37 @@ describe('AppointmentPage upcoming visit', () => {
     expect(screen.queryByText(/no waiting on a whole morning/)).not.toBeInTheDocument();
   });
 
+  it('day-only (GATE_DAY_ONLY_PROMISE): shows the date and "Arrival window: texted the day before", no hour, and the confirm still posts', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(upcomingPayload({
+        appointment: {
+          date: '2026-08-05', windowStart: null, arrivalWindow: null, day_only: true, arrival_note: 'Arrival window texted the day before',
+        },
+      })),
+      post: jsonResponse({ success: true, confirmed: true }),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/Wednesday, August 5/)).toBeInTheDocument();
+    expect(screen.getByText('Arrival window: texted the day before')).toBeInTheDocument();
+    expect(screen.queryByText(/2-hour arrival window/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/no waiting on a whole morning/)).not.toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm this appointment' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Confirm this appointment' })).not.toBeInTheDocument());
+    const posted = fetchMock.mock.calls.find(([, o]) => o?.method === 'POST');
+    // The page holds no hour, so it echoes none; the server fills the visit's current slot in.
+    expect(JSON.parse(posted[1].body)).toEqual({ date: '2026-08-05', windowStart: null, membershipKey: null });
+  });
+
+  it('an older payload (no day_only) with no window shows no day-only note', async () => {
+    stubFetch({ get: jsonResponse(upcomingPayload({ appointment: { date: '2026-08-05', windowStart: null, arrivalWindow: null } })) });
+    renderPage();
+    expect(await screen.findByText(/Wednesday, August 5/)).toBeInTheDocument();
+    expect(screen.queryByText(/texted the day before/)).not.toBeInTheDocument();
+  });
+
   it('names the service in the heading and shows the tech with the tracking promise', async () => {
     stubFetch();
 
