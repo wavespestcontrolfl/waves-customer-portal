@@ -1,5 +1,5 @@
 /**
- * Tax-year records for the return engine (GATE_TAX_RETURN_ENGINE, nested under
+ * Tax-year records for the return engine (nested under
  * GATE_BANK_IMPORT). One row per tax year in `tax_years`: the owner's inputs
  * (filing status, income outside the business, estimates paid), the
  * carryovers that come IN from the prior year, and, once the year is marked

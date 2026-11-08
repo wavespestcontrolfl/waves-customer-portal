@@ -29,7 +29,7 @@ const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
 // Sources whose gratitude-only texts take the gratitude path. Only 'live_webhook' drafts are send-eligible.
 const GRATITUDE_CLASSIFY_SOURCES = new Set(['live_webhook', 'mac_late']);
-const { gateEnvValue, multiTechTextTimesLive, smsVoiceProfilePinVersion, smsEditLearningLive, smsPromptB1Live } = require('../config/feature-gates');
+const { gateEnvValue, multiTechTextTimesLive, smsVoiceProfilePinVersion, smsPromptB1Live } = require('../config/feature-gates');
 const { phoneIdentityKey } = require('../utils/phone');
 const { renderCompanyFactsSection } = require('./sms-company-facts');
 const labelFactsLib = require('./sms-label-facts');
@@ -267,10 +267,10 @@ function realAnswersBaseVersion() {
   if (smsPromptB1Live()) return nextOfSeries ? B1_NEXT_OF_SERIES_PROMPT_VERSION : B1_PROMPT_VERSION;
   return nextOfSeries ? NEXT_OF_SERIES_PROMPT_VERSION : REAL_ANSWERS_PROMPT_VERSION;
 }
-// VOICE INPUT TAGS (owner 2026-10-24, GATE_SMS_VOICE_PROFILE_PIN + GATE_SMS_EDIT_LEARNING). Neither gate edits the
+// VOICE INPUT TAGS (owner 2026-10-24, GATE_SMS_VOICE_PROFILE_PIN + edit learning). Neither edits the
 // prompt text or the facts block; each changes WHICH voice text the draft receives, so each is a cohort of its own:
 //   'v' = a voice profile pin is set (the drafter reads that profile version, not the newest approved one),
-//   'e' = edit learning is on (the few-shot exemplars rank edited-suggestion and human_better replies first).
+//   'e' = edit learning (the few-shot exemplars rank edited-suggestion and human_better replies first).
 // They join the single-character '+' tag set the four hand-off categories already use (b c l m), sorted with them, so
 // the flip order never changes the identity: real-answers base (32 chars) + '+' + up to six tags = 39, under
 // PROMPT_VERSION_COLUMN_MAX (40), pinned by a test. The tag follows the INPUT, not just the env var: 'v' needs the
@@ -282,7 +282,7 @@ function realAnswersBaseVersion() {
 function voiceInputTags() {
   const tags = [];
   if (smsVoiceProfilePinVersion() !== null && VOICE_PROFILE_ENABLED) tags.push('v');
-  if (smsEditLearningLive() && FEWSHOT_ENABLED && VERIFY_ENABLED) tags.push('e');
+  if (FEWSHOT_ENABLED && VERIFY_ENABLED) tags.push('e');
   return tags;
 }
 function withVoiceInputTags(base, categoryTags = []) {
@@ -5649,9 +5649,9 @@ ${lines}`;
  * Fail-safe: any error (or the kill switch, or no intent) → [] so drafting is
  * never blocked on the corpus.
  */
-// GATE_SMS_EDIT_LEARNING exemplar ranking (owner 2026-10-24). All three facts are read at FETCH time from the live
+// Edit-learning exemplar ranking (owner 2026-10-24). All three facts are read at FETCH time from the live
 // tables, never stamped on the corpus row at mine time: the corpus is insert-ignore (a row never changes after it is
-// mined), a judgment lands days after the reply, and rows mined before the gate went on would otherwise never rank.
+// mined), a judgment lands days after the reply, and rows mined before the ranking went on would otherwise never rank.
 //   the reply's send resolved a suggestion decision: sms_log.metadata.agent_decision_id -> agent_decisions.id (the link
 //     both send paths stamp; the nightly judge and the corrections view join the same way). The uuid cast sits behind a
 //     shape check so one malformed metadata value cannot fail the query.
@@ -5670,7 +5670,7 @@ const JUDGED_HUMAN_BETTER_SQL = `EXISTS (SELECT 1 FROM shadow_draft_judgments j
    WHERE j.human_reply_sms_id = voice_corpus_examples.source_id AND j.verdict = 'human_better')`;
 const OUTCOME_RANK_SQL = `CASE WHEN ${EDITED_SUGGESTION_SQL} OR ${JUDGED_HUMAN_BETTER_SQL} THEN 0 ELSE 1 END`;
 
-async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, excludeCustomerIds = [], throwOnError = false, outcomeRanked = false } = {}) {
+async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, excludeCustomerIds = [], throwOnError = false } = {}) {
   if (!FEWSHOT_ENABLED || !intent || limit <= 0) return [];
   try {
     const query = dbi('voice_corpus_examples')
@@ -5687,15 +5687,11 @@ async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, ex
       // "sealed" means never trained on, not merely not trained on today.
       // (source_id for sms_human_reply rows IS the reply's sms_log id.)
       .whereNotIn('source_id', dbi('sms_sealed_eval_items').select('human_reply_sms_id').whereNotNull('human_reply_sms_id'));
-    if (outcomeRanked) {
-      // Edit learning: never teach the drafter its own text (a suggestion sent unchanged), then edited-suggestion and
-      // human_better replies first, newest within each tier. Off, the query below is the original newest-first one.
-      query
-        .whereRaw(`NOT ${LINKED_DECISION_VERDICT_SQL('accepted')}`)
-        .orderByRaw(`${OUTCOME_RANK_SQL} ASC, occurred_at DESC`);
-    } else {
-      query.orderBy('occurred_at', 'desc');
-    }
+    // Edit learning: never teach the drafter its own text (a suggestion sent unchanged), then edited-suggestion and
+    // human_better replies first, newest within each tier.
+    query
+      .whereRaw(`NOT ${LINKED_DECISION_VERDICT_SQL('accepted')}`)
+      .orderByRaw(`${OUTCOME_RANK_SQL} ASC, occurred_at DESC`);
     query.limit(limit).select('inbound_text', 'reply_text');
     if (excludeCustomerIds.length) query.whereNotIn('customer_id', excludeCustomerIds);
     return await query;
@@ -6243,7 +6239,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // Gratitude has fixed server-approved copy. Mutable corpus examples add no
   // value here and would change the examined prompt without a version change.
   const exemplars = VERIFY_ENABLED && intent?.intent !== GRATITUDE_INTENT
-    ? await fetchVoiceExemplars({ intent: intent?.intent, outcomeRanked: smsEditLearningLive() }) : [];
+    ? await fetchVoiceExemplars({ intent: intent?.intent }) : [];
   const exemplarBlock = formatExemplarBlock(exemplars);
   const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock, draftPromptHints({ context, reserviceLaneDecides, reserviceState, inboundMessage }));
 

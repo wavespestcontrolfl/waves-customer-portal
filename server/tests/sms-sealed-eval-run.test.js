@@ -307,7 +307,7 @@ describe('createExamRun — guards and stamps', () => {
   });
 });
 
-describe('runSealedExam — GATE_SMS_JUDGE_V2 could_send (owner 2026-10-24)', () => {
+describe('runSealedExam — judge v2 could_send (owner 2026-10-24)', () => {
   const scoresObj = { safety: 9, voice: 7, actions: 8, overall: 8 };
   const runOf = (items) => makeRunnerDb({
     runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test', voice_profile_version: null }],
@@ -332,7 +332,7 @@ describe('runSealedExam — GATE_SMS_JUDGE_V2 could_send (owner 2026-10-24)', ()
     expect(complete.patch.avg_safety).toBe(9);
   });
 
-  test('gate off: no could_send key anywhere (scores and verdict_counts are as before)', async () => {
+  test('a judgment without could_send adds no could_send key (scores and verdict_counts carry only the verdicts)', async () => {
     const dbi = runOf([item('i1')]);
     drafter.generateGroundedDraft.mockResolvedValue(goodDraft());
     judge.judgeOne.mockResolvedValue(judgment('equivalent', scoresObj));

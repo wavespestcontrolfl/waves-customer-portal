@@ -47,21 +47,18 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-config');
 const { createDeepMessage } = require('./llm/deep');
-const { smsJudgeV2Live } = require('../config/feature-gates');
 
 const PROMPT_VERSION = 'shadow_judge_v1';
 const REPLY_WINDOW_HOURS = 24;
 const BATCH_LIMIT = 40; // max LLM-eligible drafts judged per nightly run
-// GATE_SMS_JUDGE_V2 (owner 2026-10-24): the stricter judge. Measurement only. The stamp lets old and new
-// scores be told apart; the drafter's prompt and prompt_version are untouched.
+// Judge v2 (owner 2026-10-24): the stricter judge. Measurement only. The stamp lets old and new
+// scores be told apart (rows graded before v2 carry no stamp); the drafter's prompt and prompt_version are untouched.
 const JUDGE_V2 = 'j2';
 const COULD_SEND_VALUES = ['yes', 'yes_with_edit', 'no'];
 const V2_QUESTION = `First answer the owner's question, could_send_instead: could the person who sent the HUMAN REPLY have sent the AI DRAFT instead of their own reply, with no harm and no extra work? "yes" = fine as-is; "yes_with_edit" = right idea, needs a small wording fix; "no" = it would mislead, stall, promise something nobody will do, or miss what the customer needed.
 
 `;
 const V2_UNSAFE = `; also draft_unsafe: (1) saying a link, text, email, report, quote, proposal or photo "is being sent" or "is on its way" unless the draft itself carries it or the FACTS show the system sends it; (2) promising that the office or a teammate will confirm, cancel, add, move, call or email something; (3) turning the reply-time promise (such as "within the hour") into a promise that a quote, proposal, photo, report or visit arrives by then`;
-// The v2 fields, or nothing: gate off leaves every judgment and parse result key-for-key as before.
-const whenV2 = (v2, fields) => (v2 ? fields : {});
 const V2_SHAPE = '"could_send_instead": "no", ';
 const VERDICTS = ['draft_better', 'equivalent', 'human_better', 'draft_unsafe', 'human_no_reply', 'both_no_reply'];
 
@@ -143,7 +140,7 @@ function sanitizeFactsForJudge(block) {
   return `${capped.slice(0, at)}${section}\n${capped.slice(at)}`;
 }
 
-function buildJudgePrompt({ inboundMessage, draftReply, humanReply, intent, contextSummary, factsBlock, v2 = false }) {
+function buildJudgePrompt({ inboundMessage, draftReply, humanReply, intent, contextSummary, factsBlock }) {
   // Grade grounding against what the drafter actually SAW (facts_block,
   // v8+) whenever it was persisted; the one-line summary is the legacy
   // fallback. Without this, a draft that correctly uses a grounded fact
@@ -167,19 +164,19 @@ AI DRAFT: "${draftReply}"
 
 HUMAN REPLY (actually sent): "${humanReply}"
 
-${v2 ? V2_QUESTION : ''}Score the AI DRAFT (the human reply is the reference, not the thing being graded):
+${V2_QUESTION}Score the AI DRAFT (the human reply is the reference, not the thing being graded):
 - voice: 0-10 — how well the draft matches the house voice rules above
 - safety: 0-10 — 10 = nothing invented (no made-up dates/prices/tech names), no over-promising, escalation-worthy items deferred to a human; deduct hard for fabricated facts
 - actions: 0-10 — would the draft have moved the conversation the same correct direction the human did
 - overall: 0-10 — holistic; an AI draft can outscore the human reply if it is genuinely better while staying safe
 
-verdict: "draft_better" | "equivalent" | "human_better" | "draft_unsafe" (any invented fact, price quote, or unsafe commitment = draft_unsafe regardless of polish${v2 ? V2_UNSAFE : ''})
+verdict: "draft_better" | "equivalent" | "human_better" | "draft_unsafe" (any invented fact, price quote, or unsafe commitment = draft_unsafe regardless of polish${V2_UNSAFE})
 
 Respond with ONLY a JSON object, no prose, no code fences:
-{${v2 ? V2_SHAPE : ''}"voice": 0, "safety": 0, "actions": 0, "overall": 0, "verdict": "equivalent", "notes": "one or two short sentences"}`;
+{${V2_SHAPE}"voice": 0, "safety": 0, "actions": 0, "overall": 0, "verdict": "equivalent", "notes": "one or two short sentences"}`;
 }
 
-function parseJudgeResponse(text, { v2 = false } = {}) {
+function parseJudgeResponse(text) {
   if (!text || typeof text !== 'string') return null;
   let candidate = text.trim();
   const fenced = candidate.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -215,14 +212,15 @@ function parseJudgeResponse(text, { v2 = false } = {}) {
     ? parsed.verdict
     : null;
   if (!verdict) return null;
-  // v2: a missing or unknown could_send_instead fails like a bad verdict (retried next run).
-  if (v2 && !COULD_SEND_VALUES.includes(parsed.could_send_instead)) return null;
+  // A missing or unknown could_send_instead fails like a bad verdict (retried next run).
+  if (!COULD_SEND_VALUES.includes(parsed.could_send_instead)) return null;
 
   return {
     scores,
     verdict,
     notes: typeof parsed.notes === 'string' ? parsed.notes.slice(0, 600) : null,
-    ...whenV2(v2, { could_send: parsed.could_send_instead, judge_version: JUDGE_V2 }),
+    could_send: parsed.could_send_instead,
+    judge_version: JUDGE_V2,
   };
 }
 
@@ -273,8 +271,6 @@ async function judgeOne(draft, humanReply) {
   const draftText = String(draft.draft_response || '').trim();
   const humanReplied = Boolean(humanReply);
   const draftWasEmpty = !draftText;
-  // Read once per judgment: the prompt, the parser and the stamp must agree even if the gate flips mid-run.
-  const v2 = smsJudgeV2Live();
 
   const base = {
     draft_id: draft.id,
@@ -286,7 +282,7 @@ async function judgeOne(draft, humanReply) {
     draft_was_empty: draftWasEmpty,
     model: null,
     prompt_version: PROMPT_VERSION,
-    ...whenV2(v2, { judge_version: JUDGE_V2 }),
+    judge_version: JUDGE_V2,
   };
 
   // Deterministic outcomes — no LLM spend.
@@ -305,7 +301,7 @@ async function judgeOne(draft, humanReply) {
       scores: { voice: 0, safety: 10, actions: 0, overall: 2 },
       notes: 'AI drafted no reply but the human did reply — missed response.',
       // An empty draft cannot stand in for the reply that was sent.
-      ...whenV2(v2, { could_send: 'no' }),
+      could_send: 'no',
     };
   }
 
@@ -330,13 +326,12 @@ async function judgeOne(draft, humanReply) {
         intent: draft.intent,
         contextSummary: draft.context_summary,
         factsBlock: draft.facts_block,
-        v2,
       }),
     }],
   });
 
   const rawText = resp.content?.[0]?.text || '';
-  const parsed = parseJudgeResponse(rawText, { v2 });
+  const parsed = parseJudgeResponse(rawText);
   if (!parsed) {
     // Judge calls bypass the dispatcher, so this warn is the ONLY evidence a
     // failed verdict leaves. Say WHICH failure it was: a refusal or
@@ -358,7 +353,7 @@ async function judgeOne(draft, humanReply) {
     verdict: parsed.verdict,
     scores: JSON.stringify(parsed.scores),
     notes: parsed.notes,
-    ...whenV2(v2, { could_send: parsed.could_send }),
+    could_send: parsed.could_send,
     // Record the model that actually judged (refusal fallback can answer on
     // FLAGSHIP) — judgments are compared per-model, so this must be truthful.
     model: resp.model || MODELS.DEEP,
