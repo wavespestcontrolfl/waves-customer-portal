@@ -983,6 +983,11 @@ horizon, `seasonalMaxHorizonDays()`, when seasonal browse applies, else
 an ET `YYYY-MM-DD`. The estimate page words "We book up to N days ahead. Pick a
 date on or before <day>." from these two fields; a 400 without them keeps the old
 retry message.
+`?timeOfDay=` on the same route accepts `morning`, `afternoon` or `evening` (trimmed,
+any case). Any other value, `any` or none applies no time-of-day filter. Before
+2026-11-07 any string passed through: an unknown value filtered like `afternoon`
+and, because the slot cache key carries it, forced a fresh list build on every new
+value. The estimate page sends no `timeOfDay`.
 `/book`'s self-booking offers (`/api/booking/availability`, `/find-slots`,
 the `/capture-intent` revalidation, public re-service, and inspection
 booking) evaluate the new visit at every position in the technician's route,
