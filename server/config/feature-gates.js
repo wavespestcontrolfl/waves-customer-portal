@@ -7027,20 +7027,6 @@ function reviewTapPauseLive() {
   return String(process.env.GATE_REVIEW_TAP_PAUSE || '').trim().toLowerCase() === 'true';
 }
 
-// GATE_ASSISTANT_ROUTE_TIMES read at CALL time (owner 2026-10-29, "start the
-// builds", Route Check Everywhere build 3c). The portal assistant's
-// check_availability and the text drafter's city-based OPEN TIMES fallback
-// (services/scheduling/assistant-route-times.js) read the customer pages' time
-// list instead of the by-city zone finder. 'off' (unset or any other value) is
-// today's finder byte for byte; 'shadow' computes both, logs the difference
-// and serves the finder's; 'on' (GATE_ASSISTANT_ROUTE_TIMES=true) serves the
-// customer pages' list in the finder's response shape.
-function assistantRouteTimesMode() {
-  const value = String(process.env.GATE_ASSISTANT_ROUTE_TIMES || '').trim().toLowerCase();
-  if (value === 'shadow') return 'shadow';
-  return value === 'true' ? 'on' : 'off';
-}
-
 // GATE_MULTI_TECH_CONFIRM read at CALL time — the one canonical reader for the
 // tech-aware confirm-side conflict scope (scheduling/occupancy.js
 // techScopedConfirmActive; owner 2026-10-30: it no longer also requires
@@ -8978,7 +8964,6 @@ module.exports.rainoutKeepRainOkLive = rainoutKeepRainOkLive;
 module.exports.reviewAskAtVisitLive = reviewAskAtVisitLive;
 // GATE_REVIEW_TAP_PAUSE reader, on its own line so gate PRs never conflict.
 module.exports.reviewTapPauseLive = reviewTapPauseLive;
-module.exports.assistantRouteTimesMode = assistantRouteTimesMode;
 module.exports.lawnScoreScaleV2Live = lawnScoreScaleV2Live;
 module.exports.packageFollowupAutobookLive = packageFollowupAutobookLive;
 // GATE_LAWN_NO_SEASON_BOOST reader (kept off the end-of-file append point, where gate PRs keep colliding).
