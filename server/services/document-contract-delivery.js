@@ -6,6 +6,12 @@ const { wrapEmail, plainText } = require('./email-template');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { toE164 } = require('../utils/phone');
 const {
+  DOCUMENT_REQUEST_EMAIL,
+  documentEmailSuppression,
+  alertBlockedDocumentEmail,
+  suppressionReason,
+} = require('./document-email-suppression');
+const {
   BUSINESS_PHONE,
   documentContractExpiresAt,
   documentRequiresSignature,
@@ -394,6 +400,23 @@ async function deliveryOptionsForContract(contract = {}, {
   };
 }
 
+// Sweep #7765 B2: the local suppression list (a do_not_email row, a manual unsubscribe) blocks the document email
+// the way it blocks a template send. A failed read sends nothing: the operator retries, and the reminder tick
+// releases its claim and tries again on its next run.
+async function assertEmailNotSuppressed(contract, recipient) {
+  let suppression;
+  try {
+    suppression = await documentEmailSuppression(DOCUMENT_REQUEST_EMAIL, recipient);
+  } catch (err) {
+    // Never err.message: a knex error carries the query with its bindings, the recipient address among them.
+    logger.warn(`[document-delivery] suppression check failed for contract ${contract.id} (${err.code || err.name || 'error'})`);
+    throw deliveryError('Could not check the email suppression list. Nothing was sent; try again.', 503, 'EMAIL_PREFLIGHT_UNAVAILABLE');
+  }
+  if (!suppression) return;
+  await alertBlockedDocumentEmail(DOCUMENT_REQUEST_EMAIL, recipient, suppression);
+  throw deliveryError(`Recipient email is suppressed (${suppressionReason(suppression)}).`, 422, 'EMAIL_SUPPRESSED');
+}
+
 async function validatePreparedChannel(prepared, channel) {
   const recipient = recipientFor(prepared.contract, prepared.customer, channel);
   if (!recipient) {
@@ -404,6 +427,7 @@ async function validatePreparedChannel(prepared, channel) {
     if (prefs?.email_enabled === false) {
       throw deliveryError('Recipient has email notifications disabled.', 422, 'EMAIL_OPTED_OUT');
     }
+    await assertEmailNotSuppressed(prepared.contract, recipient);
   }
   if (channel === 'sms') {
     const recipientPhone = trustedPhone(recipient);
