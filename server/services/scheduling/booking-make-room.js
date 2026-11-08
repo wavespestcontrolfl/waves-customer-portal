@@ -45,6 +45,8 @@
  *
  * Never throws, spends nothing, sends nothing, and writes only its own log row. The estimate page starts it through
  * startBackgroundCheck: at most MAX_IN_FLIGHT checks at once and one per estimate per DEDUPE_MS, extra requests dropped.
+ * A check has DEFAULT_BUDGET_MS. Once that runs out it sends no further read, and it keeps its slot until the reads it
+ * already sent answer, for at most LINGER_MS (makeBudget).
  */
 const logger = require('../logger');
 const { addETDays, etDateString } = require('../../utils/datetime-et');
@@ -55,10 +57,14 @@ const MAX_DATES = 21;
 const MAX_FULL_CHECKS = 6;
 const TABLE = 'booking_make_room_checks';
 const TIMED_OUT = Symbol('timed_out');
+// A budget that never runs out, for a direct call of one step (tests).
+const NO_LIMIT = { spent: () => false };
 // Backpressure (startBackgroundCheck): the page never waits for a check, and a lost race never cancels a read
-// already sent, so the number of checks is bounded here instead.
+// already sent, so the number of checks is bounded here instead. A check that ran out of time keeps its slot until
+// the reads it already sent answer, for at most LINGER_MS (makeBudget).
 const MAX_IN_FLIGHT = 2;
 const DEDUPE_MS = 10 * 60 * 1000;
+const LINGER_MS = 30 * 1000;
 
 function bookingMakeRoomMode() {
   try {
@@ -332,7 +338,9 @@ async function remindersMayGoInApp(customerId, env, conn) {
 
 // ...and both go out by text: the channels the reminder sender itself uses (resolve72hChannel for the 72-hour leg,
 // which can promote a one-time visit to email; the stored 24-hour channel), and, for a text-only leg, not the app.
-async function remindersByText(prefs, row, env, conn) {
+// TIMED_OUT when the budget ran out before one of its reads.
+async function remindersByText(prefs, row, env, conn, budget = NO_LIMIT) {
+  if (budget.spent()) return TIMED_OUT;
   const channel72 = await env.resolve72hChannel(prefs.reminder72hChannel, row.id, {
     prefsUnavailable: prefs.unavailable,
     explicitChoice: prefs.reminder72hChannelExplicit,
@@ -341,11 +349,13 @@ async function remindersByText(prefs, row, env, conn) {
   if (!TEXT_CHANNELS.has(channel72) || !TEXT_CHANNELS.has(prefs.reminder24hChannel)) return false;
   // 'both' adds an email leg the app never replaces; only a text-only leg can turn into an app message.
   if (channel72 !== 'sms' && prefs.reminder24hChannel !== 'sms') return true;
+  if (budget.spent()) return TIMED_OUT;
   return !(await remindersMayGoInApp(row.customer_id, env, conn));
 }
 
-// Why one moved stop may not move after all, from the day's full facts, or null.
-async function moveBlockedReason(move, { conn, env, day, techId }) {
+// Why one moved stop may not move after all, from the day's full facts, or null. TIMED_OUT when the budget ran out
+// before one of its reads.
+async function moveBlockedReason(move, { conn, env, day, techId, budget = NO_LIMIT }) {
   const row = (day?.allRows || []).find((r) => String(r.id) === String(move.row.id));
   if (!row || !sameTech(row, techId) || bookedRange(row)?.startMin !== move.fromMin) return 'changed';
   const why = env.fixedReason(row, day);
@@ -353,9 +363,13 @@ async function moveBlockedReason(move, { conn, env, day, techId }) {
   let prefs;
   let pref;
   try {
+    if (budget.spent()) return TIMED_OUT;
     prefs = await env.getReminderPrefs(row.customer_id, { scheduledServiceId: row.id });
     if (!remindersOn(prefs)) return 'reminders_off';
-    if (!(await remindersByText(prefs, row, env, conn))) return 'reminders_not_text';
+    // true, false, or TIMED_OUT (passed on as it is).
+    const byText = await remindersByText(prefs, row, env, conn, budget);
+    if (byText !== true) return byText || 'reminders_not_text';
+    if (budget.spent()) return TIMED_OUT;
     pref = await env.loadPref(conn, row);
   } catch {
     return 'prefs_unreadable';
@@ -364,18 +378,22 @@ async function moveBlockedReason(move, { conn, env, day, techId }) {
 }
 
 // The checks that read the database, for one candidate: schedule blocks, the page's placement rules on the moved
-// day, the route, then each moved stop's facts.
+// day, the route, then each moved stop's facts. Once the budget is spent it sends no further read and returns
+// TIMED_OUT: the race in checkOne has already ended the check, and a lost race never cancels the read in progress.
 async function fullCheck(candidate, ctx) {
-  const { conn, env, request, caches } = ctx;
+  const { conn, env, request, caches, budget } = ctx;
   const blocks = await cached(caches.blocks, `${candidate.dateStr}|${candidate.techId}`, () => env.loadBlocks(conn, candidate.dateStr, candidate.techId));
   if (hitsAny(chainRanges(candidate), blocks || [])) return 'schedule_block';
+  if (budget.spent()) return TIMED_OUT;
   const placed = await request.placement(candidate.slot, new Map(candidate.moves.map((m) => [String(m.row.id), m.toMin - m.fromMin])));
   if (placed !== true) return placed || 'page_rules';
+  if (budget.spent()) return TIMED_OUT;
   const route = await routeKeepsWindows(candidate, ctx);
   if (route !== true) return route;
+  if (budget.spent()) return TIMED_OUT;
   const day = await cached(caches.days, candidate.dateStr, () => env.loadDayContext(conn, candidate.dateStr, request.now));
   for (const move of candidate.moves) {
-    const why = await moveBlockedReason(move, { conn, env, day, techId: candidate.techId });
+    const why = await moveBlockedReason(move, { conn, env, day, techId: candidate.techId, budget });
     if (why) return why;
   }
   return null;
@@ -387,6 +405,33 @@ function raceBudget(promise, deadline) {
   let timer;
   const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(TIMED_OUT), remaining); });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// The check's time budget (Codex round 5 on #7736). A read already sent is never cancelled, so:
+//   race(start)        starts a step only while time is left, and races it against the deadline;
+//   spent()            each step asks it before its next read, and stops there with TIMED_OUT;
+//   settledWithin(ms)  waits, at most ms, until every started step has settled. recordMakeRoomCheck returns only
+//                      then, so startBackgroundCheck frees the slot only after the reads a timed-out check left
+//                      behind answer. A read that never answers frees the slot after ms.
+// One read a step already sent (a page placement pass, a settings read) still finishes.
+function makeBudget(deadline) {
+  const pending = new Set();
+  const spent = () => Date.now() >= deadline;
+  return {
+    spent,
+    race(start) {
+      if (spent()) return Promise.resolve(TIMED_OUT);
+      const step = new Promise((resolve) => resolve(start()));
+      const settled = step.then(() => true, () => true);
+      pending.add(settled);
+      settled.then(() => pending.delete(settled));
+      return raceBudget(step, deadline);
+    },
+    async settledWithin(ms) {
+      if (!pending.size) return true;
+      return (await raceBudget(Promise.all([...pending]), Date.now() + ms)) !== TIMED_OUT;
+    },
+  };
 }
 
 // The request's dates (at most MAX_DATES) and every date the free list uses, in order.
@@ -403,10 +448,10 @@ function datesFor({ dateFrom, dateTo, pool }) {
 
 // The days, without this estimate's own hold. Null when a day cannot be read in time: a best free time judged on
 // part of the list could read a saving that is not there.
-async function loadDays(conn, env, { dates, holdIds, deadline, report }) {
+async function loadDays(conn, env, { dates, holdIds, budget, report }) {
   const days = new Map();
   for (const dateStr of dates) {
-    const rows = await raceBudget(env.loadDayStops(conn, dateStr), deadline);
+    const rows = await budget.race(() => env.loadDayStops(conn, dateStr));
     if (rows === TIMED_OUT) {
       report.timedOut = true;
       return null;
@@ -421,13 +466,17 @@ async function loadDays(conn, env, { dates, holdIds, deadline, report }) {
 // services (capabilityRows), also the page's capability rule (filterCollidingSlots): no technician whose capability
 // for a requested service is off. A stop left on such a day is never a place to book, so it is never a candidate.
 // The page's placement check reads capability again for the hours that reach it; reading it here first keeps an
-// incapable technician's hours from using up the MAX_FULL_CHECKS full checks.
-async function loadOpenTechDays(conn, env, { dates, capabilityRows }) {
+// incapable technician's hours from using up the MAX_FULL_CHECKS full checks. TIMED_OUT when the budget ran out
+// before one of its reads.
+async function loadOpenTechDays(conn, env, { dates, capabilityRows, budget }) {
   const dateFrom = dates[0];
   const dateTo = dates[dates.length - 1];
   const techIds = (await env.assignableTechIds(conn)).map(String);
+  if (budget.spent()) return TIMED_OUT;
   const blackout = await env.getBlackoutDates(dateFrom, dateTo, conn, { strict: true });
+  if (budget.spent()) return TIMED_OUT;
   const absent = techIds.length ? await env.absentTechDays(conn, { dateFrom, dateTo, technicianIds: techIds }) : new Set();
+  if (budget.spent()) return TIMED_OUT;
   const inactive = capabilityRows?.length && techIds.length ? await env.inactiveCapabilities(conn, techIds, capabilityRows) : [];
   const off = new Set(inactive.map((row) => String(row.technician_id)));
   const open = new Set(techIds.filter((id) => !off.has(id)));
@@ -494,9 +543,9 @@ function summaryOf(candidate) {
 const SAME_FOR_ANY_SHIFT = /^(changed$|fixed_|reminders_|prefs_unreadable$|error$)/;
 
 // One full check within the budget: null when every rule holds, else why, or TIMED_OUT.
-async function checkOne(candidate, ctx, deadline) {
+async function checkOne(candidate, ctx) {
   try {
-    return await raceBudget(fullCheck(candidate, ctx), deadline);
+    return await ctx.budget.race(() => fullCheck(candidate, ctx));
   } catch {
     return 'error';
   }
@@ -504,15 +553,15 @@ async function checkOne(candidate, ctx, deadline) {
 
 // The candidates that need reads, best saving first, within the budget. An hour whose 1-hour move fails is checked
 // again with its 2-hour move (owner 2026-11-07 "B"); the hour counts once, with the last reason or the passing move.
-async function checkCandidates(candidates, { conn, env, request, deadline, report }) {
-  const ctx = { conn, env, request, caches: { blocks: new Map(), routes: new Map(), days: new Map() } };
+async function checkCandidates(candidates, { conn, env, request, budget, report }) {
+  const ctx = { conn, env, request, budget, caches: { blocks: new Map(), routes: new Map(), days: new Map() } };
   for (const candidate of candidates.sort(bySaving).slice(0, MAX_FULL_CHECKS)) {
     let checkedMove = candidate;
-    let why = await checkOne(candidate, ctx, deadline);
+    let why = await checkOne(candidate, ctx);
     if (why && why !== TIMED_OUT && candidate.later && !SAME_FOR_ANY_SHIFT.test(why)) {
       report.twoHourTried += 1;
       checkedMove = candidate.later;
-      why = await checkOne(checkedMove, ctx, deadline);
+      why = await checkOne(checkedMove, ctx);
     }
     if (why === TIMED_OUT) {
       report.timedOut = true;
@@ -524,11 +573,11 @@ async function checkCandidates(candidates, { conn, env, request, deadline, repor
   }
 }
 
-async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId, capabilityRows, zoneSlug, dateFrom, dateTo, admit, placement, now, deadline, deps }) {
+async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId, capabilityRows, zoneSlug, dateFrom, dateTo, admit, placement, now, budget, deps }) {
   const base = deps || defaultDeps();
   // The setup reads run under the same budget as every later read.
-  const homes = await raceBudget(base.loadTechStartPoints(conn), deadline);
-  const holdIds = homes === TIMED_OUT ? TIMED_OUT : await raceBudget(base.ownHoldIds(conn, estimateId), deadline);
+  const homes = await budget.race(() => base.loadTechStartPoints(conn));
+  const holdIds = homes === TIMED_OUT ? TIMED_OUT : await budget.race(() => base.ownHoldIds(conn, estimateId));
   if (holdIds === TIMED_OUT) {
     report.timedOut = true;
     return;
@@ -536,12 +585,12 @@ async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId
   const env = { ...base, homeOf: (techId) => base.homeFromMap(homes, techId), techBlind: base.techBlind() };
   const dates = datesFor({ dateFrom, dateTo, pool });
   report.dates = dates.length;
-  const dayRows = await loadDays(conn, env, { dates, holdIds, deadline, report });
+  const dayRows = await loadDays(conn, env, { dates, holdIds, budget, report });
   if (!dayRows) return;
   const bestFree = bestFreeTime(pool, { dayRows, homeOf: env.homeOf, point, legMin: env.legMin });
   report.free = { count: pool.length, best: bestFree };
-  const open = await raceBudget(loadOpenTechDays(conn, env, { dates, capabilityRows }), deadline);
-  const detourCap = open === TIMED_OUT ? TIMED_OUT : await raceBudget(loadDetourCap(conn, env, zoneSlug), deadline);
+  const open = await budget.race(() => loadOpenTechDays(conn, env, { dates, capabilityRows, budget }));
+  const detourCap = open === TIMED_OUT ? TIMED_OUT : await budget.race(() => loadDetourCap(conn, env, zoneSlug));
   if (detourCap === TIMED_OUT) {
     report.timedOut = true;
     return;
@@ -555,7 +604,7 @@ async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId
     }
   }
   report.candidates = candidates.length;
-  await checkCandidates(candidates, { conn, env, request, deadline, report });
+  await checkCandidates(candidates, { conn, env, request, budget, report });
 }
 
 function logReport(report) {
@@ -598,11 +647,14 @@ function checkRow(report) {
  *                                      placement rules refuse the new visit on the moved day
  * @param {Array}  [args.capabilityRows] this estimate's services as technician-capabilities rows ({ service_type })
  * @param {string} [args.zoneSlug]      the request's route-day zone (the page passes find-time the same one)
- * @returns {Promise<object>} the report
+ * @param {number} [args.budgetMs]      the check's time budget
+ * @param {number} [args.lingerMs]      how long a check that ran out of time waits for the reads it already sent
+ * @returns {Promise<object>} the report, once the check's own reads have answered (at most lingerMs after it ended)
  */
 async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = null, pool, coords, durationMinutes, capabilityRows, zoneSlug,
-  dateFrom, dateTo, admit, placement, now = new Date(), conn, deps, budgetMs = DEFAULT_BUDGET_MS } = {}) {
+  dateFrom, dateTo, admit, placement, now = new Date(), conn, deps, budgetMs = DEFAULT_BUDGET_MS, lingerMs = LINGER_MS } = {}) {
   const startedAt = Date.now();
+  const budget = makeBudget(startedAt + budgetMs);
   const report = { mode, surface, estimateId, durationMin: null, free: null, dates: 0, tried: 0, candidates: 0, checked: 0, twoHourTried: 0, passed: [], byReason: {}, timedOut: false, skipped: null, error: null, ms: 0 };
   const knex = conn || require('../../models/db');
   try {
@@ -614,20 +666,29 @@ async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = nu
       await findMakeRoom(report, {
         conn: knex, pool: Array.isArray(pool) ? pool : [], point, durationMin: report.durationMin, estimateId,
         capabilityRows, zoneSlug,
-        dateFrom, dateTo, admit, placement, now, deadline: startedAt + budgetMs, deps,
+        dateFrom, dateTo, admit, placement, now, budget, deps,
       });
     }
   } catch (err) {
     report.error = err?.message || String(err);
   }
   report.ms = Date.now() - startedAt;
+  await finishCheck(knex, report, { budget, lingerMs });
+  return report;
+}
+
+// Logs and records the report, then waits for the reads a timed-out check already sent: the caller, and so the
+// in-flight slot, waits with it.
+async function finishCheck(knex, report, { budget, lingerMs }) {
   try { logReport(report); } catch { /* logging never breaks a check */ }
   try {
     await knex(TABLE).insert(checkRow(report));
   } catch (err) {
     logger.warn(`[booking-make-room] could not record the check: ${err.message}`);
   }
-  return report;
+  if (!(await budget.settledWithin(lingerMs))) {
+    logger.warn(`[booking-make-room] a read was still running ${lingerMs} ms after the check ended; its slot is free again`);
+  }
 }
 
 const inFlight = new Set();
@@ -636,7 +697,8 @@ const lastStarted = new Map();
 /**
  * Starts one check in the background, or drops the request: at most MAX_IN_FLIGHT checks at once, and one estimate
  * at most once per DEDUPE_MS (Codex security review: a link holder can ask for many lists in a row). A dropped
- * request records nothing. Always returns a promise that never rejects.
+ * request records nothing. A check holds its slot until recordMakeRoomCheck returns: after its row, and after the
+ * reads a timed-out check already sent (at most LINGER_MS). Always returns a promise that never rejects.
  */
 function startBackgroundCheck(args, { nowMs = Date.now() } = {}) {
   const key = args?.estimateId ? String(args.estimateId) : null;
@@ -657,5 +719,5 @@ module.exports = {
   bookingMakeRoomMode,
   startBackgroundCheck,
   recordMakeRoomCheck,
-  _internals: { buildChain, shiftsFor, MAX_SHIFT_MIN, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, remindersByText, moveBlockedReason, datesFor, bySaving, defaultDeps, resetBackgroundChecks, MIN_SAVING_MIN, MAX_FULL_CHECKS, MAX_IN_FLIGHT, DEDUPE_MS },
+  _internals: { buildChain, shiftsFor, MAX_SHIFT_MIN, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, remindersByText, moveBlockedReason, datesFor, bySaving, defaultDeps, resetBackgroundChecks, makeBudget, TIMED_OUT, MIN_SAVING_MIN, MAX_FULL_CHECKS, MAX_IN_FLIGHT, DEDUPE_MS, LINGER_MS },
 };

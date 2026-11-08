@@ -115,6 +115,24 @@ async function check({ deps = makeDeps(), pool = FREE, admit = (slot) => slot.da
 const moves = (summary) => summary.moves.map((m) => `${m.id} ${m.from}->${m.to}`);
 const starts = (report) => report.passed.map((p) => p.start);
 
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+async function until(condition) {
+  const end = Date.now() + 3000;
+  while (!condition()) {
+    if (Date.now() > end) throw new Error('the condition never held');
+    await sleep(5);
+  }
+}
+
+// One read of `deps` answers only when the test lets it go.
+function holdRead(deps, name) {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const base = deps[name];
+  deps[name] = jest.fn(async (...args) => { await gate; return base(...args); });
+  return () => release();
+}
+
 describe('the plan page example', () => {
   test('9 AM: stops B, C and D move 1 hour later, the chain ends in the free 12 PM hour, E and F keep theirs', async () => {
     const { report, inserted, deps } = await check();
@@ -241,15 +259,18 @@ describe('the day and the route', () => {
     expect(starts(report)).toContain('09:00');
   });
 
-  test.each(['loadTechStartPoints', 'ownHoldIds'])('a setup read (%s) that never answers ends the check at its budget', async (name) => {
+  test.each(['loadTechStartPoints', 'ownHoldIds'])('a setup read (%s) that never answers ends the check at its budget, and frees its slot after lingerMs', async (name) => {
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
     const deps = makeDeps();
     deps[name] = jest.fn(() => new Promise(() => {}));
     const started = Date.now();
-    const { report, inserted } = await check({ deps, budgetMs: 40 });
+    const { report, inserted } = await check({ deps, budgetMs: 40, lingerMs: 50 });
     expect(Date.now() - started).toBeLessThan(2000);
     expect(report.timedOut).toBe(true);
     expect(report.passed).toEqual([]);
     expect(inserted).toHaveLength(1);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('a read was still running 50 ms after the check ended'));
   });
 
   test('in capacity mode, a moved route that adds more drive than the picker\'s cap is refused', async () => {
@@ -471,6 +492,41 @@ describe('the 2-hour move (owner 2026-11-07 "B": a moved visit may shift up to 2
   });
 });
 
+describe('the time budget (Codex round 5: a lost race never cancels a read already sent)', () => {
+  test.each([
+    ['an open-day read (assignableTechIds)', 'assignableTechIds', ['getBlackoutDates', 'absentTechDays', 'loadBlocks']],
+    ['a full-check read (loadBlocks)', 'loadBlocks', ['placement', 'loadArrivalRouteContext', 'loadDayContext', 'getReminderPrefs', 'loadPref']],
+    ['a moved stop\'s reminder settings (getReminderPrefs)', 'getReminderPrefs', ['resolve72hChannel', 'appDeviceStatus', 'loadPref']],
+  ])('%s outlasts the budget: the check sends no later read, and returns only once that read answers', async (_label, slow, later) => {
+    const deps = makeDeps();
+    const release = holdRead(deps, slow);
+    const placement = jest.fn(PAGE_PLACES);
+    const reads = { ...deps, placement };
+    const { conn, inserted } = fakeConn();
+    let returned = false;
+    const run = check({ deps, placement, conn, budgetMs: 150, lingerMs: 5000 }).then((result) => { returned = true; return result; });
+    await until(() => inserted.length === 1);
+    expect(deps[slow]).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(inserted[0].report).timedOut).toBe(true);
+    // The check is over and its row is written; it still waits for the read it sent.
+    await sleep(30);
+    expect(returned).toBe(false);
+    release();
+    const { report } = await run;
+    expect(report.timedOut).toBe(true);
+    expect(deps[slow]).toHaveBeenCalledTimes(1);
+    for (const name of later) expect(reads[name]).not.toHaveBeenCalled();
+  });
+
+  test('a spent budget starts no step and has nothing to wait for', async () => {
+    const budget = _internals.makeBudget(Date.now() - 1);
+    const start = jest.fn(async () => 'read');
+    await expect(budget.race(start)).resolves.toBe(_internals.TIMED_OUT);
+    expect(start).not.toHaveBeenCalled();
+    await expect(budget.settledWithin(10)).resolves.toBe(true);
+  });
+});
+
 describe('never throws', () => {
   test('a failed day read records the error and finds nothing', async () => {
     const deps = makeDeps();
@@ -597,6 +653,26 @@ describe('startBackgroundCheck (backpressure for the detached check)', () => {
     const reports = await Promise.all(runs);
     expect(reports.every((r) => r && r.mode === 'shadow')).toBe(true);
     // A slot is free again once a check ends.
+    await expect(startBackgroundCheck(args('est-extra', extra))).resolves.toMatchObject({ mode: 'shadow' });
+  });
+
+  test('a check that ran out of time keeps its slot until the read it already sent answers', async () => {
+    const slow = makeDeps();
+    const release = holdRead(slow, 'loadBlocks');
+    const { conn, inserted } = fakeConn();
+    const run = startBackgroundCheck({ ...args('est-slow', slow), conn, budgetMs: 100, lingerMs: 60000 });
+    await until(() => inserted.length === 1);
+    // Its row is written, but its read is still out: its slot stays taken, so the other slots fill and the next
+    // request is dropped.
+    const held = Array.from({ length: MAX_IN_FLIGHT - 1 }, () => heldDeps());
+    const runs = held.map((h, i) => startBackgroundCheck(args(`est-${i}`, h.deps)));
+    const extra = makeDeps();
+    await expect(startBackgroundCheck(args('est-extra', extra))).resolves.toBeNull();
+    expect(extra.loadTechStartPoints).not.toHaveBeenCalled();
+    release();
+    await expect(run).resolves.toMatchObject({ timedOut: true });
+    held.forEach((h) => h.release());
+    await Promise.all(runs);
     await expect(startBackgroundCheck(args('est-extra', extra))).resolves.toMatchObject({ mode: 'shadow' });
   });
 
