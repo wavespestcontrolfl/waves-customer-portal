@@ -132,7 +132,7 @@ describe('applyWaitlistTags', () => {
     // Only the fresh tags are bound — the stale in-memory snapshot is never written.
     expect(JSON.parse(patch.tags)).toEqual(['out_of_area_waitlist', 'zip:33573', 'city:ruskin']);
     expect(sql).toMatch(/jsonb_array_elements\(/);
-    expect(sql).toMatch(/WHERE id = \? AND status = 'pending'/);
+    expect(sql).toMatch(/WHERE id = \?\s+AND \(status = 'pending'\s+OR \(status IN \('unsubscribed', 'inactive'\) AND confirmation_token = \?::uuid\)\)/);
     expect(sql).toMatch(/\^\(zip\|city\):/);
   });
 

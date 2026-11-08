@@ -437,9 +437,11 @@ function sanitizeWaitlistTags(rawTags, fields = {}) {
 }
 
 // Writes the sanitized waitlist tags onto the signup's own mid-DOI row,
-// replacing any zip:/city: tag from an earlier attempt. Only a 'pending' row is
-// touched (this signup just created or re-armed it), so an anonymous post can't
-// rewrite tags on an already-confirmed subscriber. Returns the update count.
+// replacing any zip:/city: tag from an earlier attempt. Only a 'pending' row,
+// or an opted-out row still holding THIS signup's freshly minted re-signup
+// token (sweep #7765 B5: such a row stays unsubscribed/inactive until the
+// confirm click), is touched, so an anonymous post can't rewrite tags on an
+// already-confirmed subscriber. Returns the update count.
 async function applyWaitlistTags(subscriber, rawTags, fields = {}, dbh = null) {
   if (!subscriber || !subscriber.id) return 0;
   const conn = dbh || db;
@@ -460,8 +462,10 @@ async function applyWaitlistTags(subscriber, rawTags, fields = {}, dbh = null) {
               OR NOT ((e #>> '{}') ~* '^(zip|city):' OR (e #>> '{}') = ?)
         ) || ?::jsonb,
             updated_at = NOW()
-      WHERE id = ? AND status = 'pending'`,
-    [WAITLIST_SOURCE, JSON.stringify(fresh), subscriber.id],
+      WHERE id = ?
+        AND (status = 'pending'
+             OR (status IN ('unsubscribed', 'inactive') AND confirmation_token = ?::uuid))`,
+    [WAITLIST_SOURCE, JSON.stringify(fresh), subscriber.id, subscriber.confirmation_token || null],
   );
   return result?.rowCount ?? 0;
 }

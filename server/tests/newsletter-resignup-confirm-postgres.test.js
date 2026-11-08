@@ -104,6 +104,21 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     expect(done.tags).toEqual(['keep_me']);
   });
 
+  test('waitlist tags follow a re-signup on an opted-out row (token-fenced) and never touch an active row', async () => {
+    const email = addr();
+    const row = await unsubscribedRow(email, { tags: JSON.stringify(['keep_me']) });
+    const result = await signup(email);
+    const wrote = await svc.applyWaitlistTags(result.subscriber, ['zip:33570', 'city:ruskin'], {});
+    expect(wrote).toBe(1);
+    const tagged = await reload(row.id);
+    expect(tagged.status).toBe('unsubscribed');
+    expect(tagged.tags).toEqual(expect.arrayContaining(['keep_me', 'out_of_area_waitlist', 'zip:33570', 'city:ruskin']));
+    // A stale/other token does not match; an active row is never matched.
+    expect(await svc.applyWaitlistTags({ id: row.id, confirmation_token: '00000000-0000-4000-8000-000000000000' }, [], {})).toBe(0);
+    await svc.confirmByToken(tagged.confirmation_token);
+    expect(await svc.applyWaitlistTags({ id: row.id, confirmation_token: tagged.confirmation_token }, ['zip:34205'], {})).toBe(0);
+  });
+
   test('a second submit inside 10 minutes is throttled; after 10 minutes it sends with a new token', async () => {
     const email = addr();
     const row = await unsubscribedRow(email);
