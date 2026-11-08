@@ -11,10 +11,11 @@
  * here answers "today's behavior".
  */
 
-const { loadPromiseLevels, resolvePromises } = require('./auto-dispatch/told-visits');
+const { loadPromiseLevels, resolvePromises, promiseLevelOf } = require('./auto-dispatch/told-visits');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
+const { formatSmsTimeRange, arrivalWindowRange } = require('../utils/sms-time-format');
 
 // The 24-hour reminder takes over inside this many hours. It is the same boundary the reminder sender uses:
 // appointment-reminders.js reminder72hStillReachable (`> 24.25` hours out) and the cron branches (72-hour `hoursUntil >
@@ -511,6 +512,98 @@ async function loadTimeDisplay(conn, rows, now = new Date()) {
   return out;
 }
 
+// ── The office's view (part E): what was this customer told? ──
+
+// The admin schedule shows "Told: ..." for visits this many days out (the ones a day-only promise can still hold).
+const TOLD_HORIZON_DAYS = 14;
+
+/**
+ * What the customer was told, from the resolved promise itself (never the visit's current window): { level, dayOnly, date,
+ * window }. level is told-visits.promiseLevelOf, the same rule loadPromiseLevels uses. A known slot (start_at, an ISO
+ * instant) gives `date` (its ET date) and `window` (the arrival range the customer heard: the ET start plus 2 hours, as
+ * arrivalWindowRange quotes it; the visit's own window is the job's length, never quoted). An unknown slot gives null for
+ * both. A day-only promise event carries no date (start_at null, level 'day'), so its date and window are null too.
+ */
+function toldOf(promise) {
+  const level = promiseLevelOf(promise);
+  const told = { level, dayOnly: level === 'day', date: null, window: null };
+  const start = promise && promise.start_at != null ? new Date(promise.start_at) : null;
+  if (!start || Number.isNaN(start.getTime())) return told;
+  const { hour, minute } = etParts(start);
+  const pad = (n) => String(n).padStart(2, '0');
+  told.date = etDateString(start);
+  told.window = formatSmsTimeRange(arrivalWindowRange(`${pad(hour)}:${pad(minute)}`));
+  return told;
+}
+
+const entryOf = (out, id) => {
+  if (!out.has(id)) out.set(id, {});
+  return out.get(id);
+};
+
+/**
+ * What the office's visit cards and edit window need: Map<id, { customerAskedTime, told }>. Rows carry at least id,
+ * scheduled date (`scheduled_date` or `scheduledDate`) and status. Gate off: an EMPTY map and NO database read, so a
+ * payload stays byte-for-byte today's. Gate on: ONE bulk read of the CURRENT intent (`customer_asked_time` judged by currentIntent) for every row,
+ * and ONE bulk resolvePromises read for the open visits of the next TOLD_HORIZON_DAYS days (never per row).
+ * `told` = { level: 'none' | 'day' | 'hour', dayOnly, date, window } (toldOf). A failed read leaves that field out: the office
+ * sees no badge rather than a promise nobody can prove (the fail-closed answer would read as "hour").
+ */
+async function loadOfficeToldFields(conn, rows, now = new Date()) {
+  const out = new Map();
+  if (!dayOnlyPromiseOn()) return out;
+  const list = Array.isArray(rows) ? rows.filter((r) => r && r.id != null) : [];
+  if (!list.length) return out;
+  const entry = (id) => entryOf(out, id);
+  let visitsForReminders = [];
+  try {
+    // The CURRENT intent (currentIntent, the one read rule), not the raw column: an intent a later slot-changing move left
+    // behind reads as not recorded (null), so the box never pre-checks a choice the customer made for an older slot. Both
+    // facts come from this ONE query (the same filter and comparison as eligibility.loadNewestSlotRows withIntent).
+    const slotRows = (extra) => `EXISTS (SELECT 1 FROM reschedule_log WHERE reschedule_log.scheduled_service_id = scheduled_services.id
+      AND new_date IS NOT NULL AND ${require('./auto-dispatch/eligibility').SLOT_CHANGED_SQL}${extra})`;
+    const stored = await conn('scheduled_services').whereIn('id', list.map((r) => r.id)).select(
+      'id', 'customer_id', 'property_id', 'customer_asked_time', 'customer_asked_time_at',
+      conn.raw(`${slotRows('')} AS has_slot_change`),
+      conn.raw(`${slotRows(' AND reschedule_log.created_at > scheduled_services.customer_asked_time_at')} AS slot_after_intent`),
+    );
+    for (const r of stored) {
+      const newest = r.has_slot_change ? { after_intent: r.slot_after_intent === true } : null;
+      const intent = currentIntent(r, newest);
+      entry(r.id).customerAskedTime = intent === true ? true : intent === false ? false : null;
+    }
+    visitsForReminders = stored.map((r) => ({ id: r.id, customer_id: r.customer_id, property_id: r.property_id }));
+  } catch { /* no pre-fill: the box starts unchecked */ }
+  try {
+    const first = etDateString(now);
+    const last = etDateString(addETDays(now, TOLD_HORIZON_DAYS));
+    const open = list.filter((r) => {
+      const day = dayOf(r.scheduled_date !== undefined ? r.scheduled_date : r.scheduledDate);
+      return day && day >= first && day <= last && ![...ENDED_STATUSES, 'rescheduled'].includes(String(r.status || ''));
+    });
+    if (open.length) {
+      const promises = await resolvePromises(conn, open.map((r) => r.id), now);
+      for (const r of open) entry(r.id).told = toldOf(promises.get(r.id));
+    }
+  } catch { /* no badge */ }
+  await addReminder24hFields(conn, out, visitsForReminders);
+  return out;
+}
+
+/**
+ * `reminder24hOn` per row: will the customer's 24-hour reminder go out for THIS visit (appointment-reminders.
+ * loadVisitReminder24hAnswers, the senders' own rule including a saved property's toggles under enforcement, read-only, bulk
+ * per payload)? The office's phone-script hint needs it, because a day-only promise is made only when that text will go out
+ * (shouldPromiseDayOnly). A failed read leaves the field OUT: the client reads that as "will not go out", the senders' own
+ * answer for unreadable preferences (reminder24hWillSend), so the hint then tells staff to name the time.
+ */
+async function addReminder24hFields(conn, out, visits) {
+  try {
+    const answers = await require('./appointment-reminders').loadVisitReminder24hAnswers(conn, visits);
+    for (const [id, on] of answers) entryOf(out, id).reminder24hOn = on;
+  } catch { /* no field */ }
+}
+
 module.exports = {
   DAY_EMAIL_TEMPLATE_KEYS,
   isDayOnlyEmail,
@@ -524,6 +617,8 @@ module.exports = {
   dayOnlyEligibility,
   dayOnlySendDecision,
   loadTimeDisplay,
+  loadOfficeToldFields,
+  TOLD_HORIZON_DAYS,
   dayOnlyMoveDecision,
   dayOnlyReplayDecision,
   officeMoveIntent,

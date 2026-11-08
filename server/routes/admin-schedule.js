@@ -1535,6 +1535,43 @@ async function recordOfficeMoveIntent(conn, ids, body) {
   return require('../services/time-promise').recordCustomerAskedTime(conn, ids, body?.customerAskedTime === true);
 }
 
+// GATE_DAY_ONLY_PROMISE part E: stamps each office row with what the customer was told (`told: { level, dayOnly }`, visits of
+// the next 14 days) and the stored "customer asked for this time" choice (`customerAskedTime`), for the visit card and the
+// edit window, plus whether the customer's 24-hour reminder will go out (`reminder24hOn`, for the phone-script hint). ONE bulk read
+// per fact for the whole payload (time-promise.loadOfficeToldFields), never per row. Gate off: no read and
+// no field. A technician's feed is the field view and gets neither. Never throws: a failed read leaves the payload as is.
+async function attachOfficeToldFields(req, rows) {
+  try {
+    if (isTechnicianRequest(req) || !Array.isArray(rows) || !rows.length) return;
+    const fields = await require('../services/time-promise').loadOfficeToldFields(db, rows);
+    for (const row of rows) {
+      const found = fields.get(row.id);
+      if (!found) continue;
+      if (found.customerAskedTime !== undefined) row.customerAskedTime = found.customerAskedTime;
+      if (found.told) row.told = found.told;
+      if (found.reminder24hOn !== undefined) row.reminder24hOn = found.reminder24hOn;
+    }
+  } catch (err) {
+    logger.warn(`[admin-schedule] told fields failed (${err.code || err.name || 'error'})`);
+  }
+}
+
+// GATE_DAY_ONLY_PROMISE part E: { office } for ONE visit (the same fields attachOfficeToldFields stamps on a feed row), or {} with
+// the gate off, for a technician, or when the visit is gone. Never throws: a failed read leaves the reply as it was.
+async function officeFieldsForVisit(id) {
+  try {
+    const timePromise = require('../services/time-promise');
+    if (!timePromise.dayOnlyPromiseOn()) return {};
+    const row = await db('scheduled_services').where({ id }).first('id', 'scheduled_date', 'status');
+    if (!row) return {};
+    const found = (await timePromise.loadOfficeToldFields(db, [row])).get(row.id);
+    return found ? { office: found } : {};
+  } catch (err) {
+    logger.warn(`[admin-schedule] office fields failed (${err.code || err.name || 'error'})`);
+    return {};
+  }
+}
+
 // The operator's line for a reschedule text that reached nobody. The email
 // version goes first (GATE_MOVE_NOTICE_EMAIL): an email that went out is said
 // plainly, so staff do not chase a customer who was told.
@@ -7369,6 +7406,7 @@ router.get('/', async (req, res, next) => {
       attachStopRain(enriched, date, hourlyByZone);
     } catch { /* rain outlook is optional */ }
 
+    await attachOfficeToldFields(req, enriched);
     stripTechOwnerOnlyMoney(req, enriched);
 
     res.json({
@@ -7920,6 +7958,7 @@ router.get('/week', async (req, res, next) => {
       logger.warn(`[admin-schedule] week gate waypoint lookup failed (${err.code || err.name || 'error'})`);
     }
 
+    await attachOfficeToldFields(req, days.flatMap((day) => day.services));
     stripTechOwnerOnlyMoney(req, days.flatMap((day) => day.services));
     if (isTechnicianRequest(req)) {
       // Coworker absences are the office's view; the caller's own stays.
@@ -11146,6 +11185,8 @@ router.get('/list', async (req, res, next) => {
       ...(s._approximate ? { approximate: true, matchReasons: s._matchReasons } : {}),
     }));
 
+    // GATE_DAY_ONLY_PROMISE part E: the list, and the client search that reads it, open the same edit window as the day feed.
+    await attachOfficeToldFields(req, mapped);
     res.json({
       services: mapped,
       ...(customerSearchFuzzy && search ? { approximateCount: approximateServices.length } : {}),
@@ -12341,6 +12382,9 @@ async function comboTargetElapsed(row, changes, newDate, newWindow) {
 }
 
 // 'together': every refusal comes before any write.
+// { customerAskedTime } for a planner body that moves a shared stop, or {} with the gate off (the body stays exactly today's).
+const comboAskedTimeBody = (body) => (require('../services/time-promise').dayOnlyPromiseOn() ? { customerAskedTime: body.customerAskedTime === true } : {});
+
 async function planComboTogetherMove(req, row, changes, shown) {
   const body = req.body;
   const refuse = (status, message, code) => {
@@ -12382,6 +12426,10 @@ async function planComboTogetherMove(req, row, changes, shown) {
     notifyCustomer,
     body: {
       ...(changes.technician ? { technicianId: body.technicianId || null } : {}),
+      // GATE_DAY_ONLY_PROMISE part E: the office's "customer asked for this time" for the stop's new slot. The mover writes it in
+      // each member's own UPDATE (B3), the only write for this move: the per-row edit below never moves (its date and time keys
+      // are removed), so recordOfficeMoveIntent does not fire a second time. Gate off: the planner body is exactly today's.
+      ...comboAskedTimeBody(body),
       expectVisit: { id: shown.id, memberIds: shown.memberIds.map(String), liveCount: shown.liveCount, liveMemberIds: shown.liveMemberIds.map(String) },
     },
     actor,
@@ -24399,7 +24447,10 @@ router.get('/:id/series-summary', async (req, res, next) => {
 // membership, whatever its own feed carries.
 router.get('/:id/visit-summary', requireAdmin, async (req, res, next) => {
   try {
-    res.json({ visit: await require('../services/visit-groups').visitSummaryForService(db, req.params.id) });
+    const visit = await require('../services/visit-groups').visitSummaryForService(db, req.params.id);
+    // GATE_DAY_ONLY_PROMISE part E: the office fields (customerAskedTime, told, reminder24hOn) for a visit opened from a row that
+    // does not carry them (month, customer pages, any feed). Gate off: the reply is exactly today's, and nothing more is read.
+    res.json({ visit, ...(await officeFieldsForVisit(req.params.id)) });
   } catch (err) { next(err); }
 });
 
@@ -30007,6 +30058,7 @@ module.exports.reseedRecurringSeriesAfterCancelBatch = reseedRecurringSeriesAfte
 // through the exact same path as update-details and the bulk reschedule.
 module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
 module.exports.recordOfficeMoveIntent = recordOfficeMoveIntent;
+module.exports.attachOfficeToldFields = attachOfficeToldFields;
 // Shared "is money already taken for this visit" guard — the plan-length
 // trim's refusal contract, consumed lazily by the admin-dispatch series
 // cancel so a 'following' / 'series' cancel refuses prepaid visits the same

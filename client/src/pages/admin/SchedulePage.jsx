@@ -159,7 +159,10 @@ import termiteTreatmentMethods from "../../../../shared/termite-treatment-method
 import AREA_SCOPES from "../../../../shared/treatment-area-scopes.json";
 import legacyCompletionAreas from "../../../../shared/legacy-completion-areas.json";
 import completionMarkerGrammar from "../../../../shared/completion-marker-grammar.json";
-import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
+import { useFeatureFlag, useFeatureFlagReady } from "../../hooks/useFeatureFlag";
+import { AskedTimeBoxLegacy, ToldBadgeLegacy } from "../../components/schedule/DayOnlyPromiseLegacy";
+import { usePropertyReminderAnswer } from "../../components/schedule/useHydratedOfficeService";
+import { askedTimeMoveFields } from "../../components/schedule/dayOnlyPromise";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import useDictationPending from "../../hooks/dictationPending";
 import { Mic, MicOff } from "lucide-react";
@@ -1938,6 +1941,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // arrival time — admin chooses per save; default matches the drag-and-drop
   // reschedule modal (no text).
   const [notificationType, setNotificationType] = useState("none");
+  // GATE_DAY_ONLY_PROMISE (flag `day_only_promise`): "Customer asked for this time" for a save that moves the visit,
+  // pre-filled from the stored choice (true = checked). Gate off: no box and no field in the request.
+  const dayOnlyPromiseOn = useFeatureFlag("day_only_promise");
+  const [customerAskedTime, setCustomerAskedTime] = useState(service.customerAskedTime === true);
   // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE, owner ruling
   // 2026-08-28): a DATE change on a recurring visit moves its later sister
   // visits. The server's preview renders as one line under the date, and
@@ -2065,6 +2072,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [addressOptions, setAddressOptions] = useState([]);
   const [addressState, setAddressState] = useState("loading");
   const [selectedPropertyId, setSelectedPropertyId] = useState("");
+  // GATE_DAY_ONLY_PROMISE part E: the 24-hour-reminder answer for the property the save will use (the phone-script hint).
+  const reminder24hOn = usePropertyReminderAnswer(service, selectedPropertyId, dayOnlyPromiseOn);
   // Advisory drive-detour suggestions for the same fixed day — picking a
   // chip only fills the window fields (never saves). A terminal visit's
   // date/window edit is a record correction: there is no route to price,
@@ -3510,6 +3519,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             : undefined,
           ...(selectedPropertyId ? { propertyId: selectedPropertyId } : {}),
           notifyCustomer: notifyOnMove || undefined,
+          // GATE_DAY_ONLY_PROMISE: the office's choice for the new slot; only a moving save with the gate on.
+          ...askedTimeMoveFields(dayOnlyPromiseOn && moveNotifyOffered, customerAskedTime),
           // Collective-move ack — bound to the previewed occurrence set the
           // modal showed (empty when this save is not a collective move).
           ...(comboTogether ? {} : seriesAckPayload(seriesPreview.preview)),
@@ -4892,6 +4903,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               >
                 {customerName}
               </span>{" "}
+              {dayOnlyPromiseOn && (
+                <ToldBadgeLegacy told={service.told} currentDate={service.scheduledDate} colors={D} />
+              )}{" "}
             </div>{" "}
           </div>{" "}
           <div
@@ -6103,6 +6117,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     messages are sent.
                   </div>{" "}
                 </div>
+              )}{" "}
+              {dayOnlyPromiseOn && moveNotifyOffered && (
+                <AskedTimeBoxLegacy id="edit-appt-asked-time" checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={saving} colors={D} style={{ marginBottom: 14 }} slot={{ date: form.scheduledDate, start: form.windowStart, reminder24hOn, originalDate: service.scheduledDate }} />
               )}{" "}
               {moveNotifyOffered && (
                 <div style={{ marginBottom: 14 }}>
@@ -9262,6 +9279,11 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   // Immediate reschedule text — admin chooses per move ('none' | 'sms'),
   // matching the drag-and-drop RescheduleConfirmModal's default of no text.
   const [notificationType, setNotificationType] = useState("none");
+  // GATE_DAY_ONLY_PROMISE (flag `day_only_promise`): "Customer asked for this time" for the new slot, pre-filled from the
+  // stored choice. Gate off: no box and no field in the request.
+  const dayOnlyPromiseOn = useFeatureFlag("day_only_promise");
+  const [customerAskedTime, setCustomerAskedTime] = useState(service.customerAskedTime === true);
+  const askedTimeFields = askedTimeMoveFields(dayOnlyPromiseOn, customerAskedTime);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [showManual, setShowManual] = useState(false);
@@ -9435,6 +9457,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       reasonCode: reason,
       reasonText: notes,
       notifyCustomer,
+      ...askedTimeFields,
       ...seriesAckPayload(seriesConfirm.preview),
     });
   };
@@ -9474,6 +9497,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       reasonCode: reason,
       reasonText: notes,
       notifyCustomer,
+      ...askedTimeFields,
     });
   };
 
@@ -9502,6 +9526,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       reasonCode: reason,
       reasonText: notes,
       notifyCustomer,
+      ...askedTimeFields,
     });
   };
 
@@ -9529,6 +9554,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       setNotes={setNotes}
       notificationType={notificationType}
       setNotificationType={setNotificationType}
+      dayOnlyPromiseOn={dayOnlyPromiseOn}
+      customerAskedTime={customerAskedTime}
+      setCustomerAskedTime={setCustomerAskedTime}
       sending={sending}
       seriesConfirm={seriesConfirm}
       seriesConfirmDate={seriesConfirmDate}
