@@ -77,7 +77,6 @@
  *   GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT=true (an estimate sent to a customer after their Waves Assessment closes that assessment visit quietly — no report, text, review ask or invoice; a sweep every ten minutes, owner ruling 2026-10-04; off = nothing runs)
  *   GATE_ESTIMATE_DUE_FIRST_VISIT=true (owner 2026-11-06 "walk all": an estimate-accept invoice is due on the day of the first booked visit linked to the accept, when that day is after today, and its reminder cadence starts on that due date; off = due on the accept day, reminders count from the send)
  *   GATE_CALL_PROMISE_AI_CLOSE=true (owner 2026-10-24: an open Waves call promise closes on its own when the same AI check the text-follow-up lane uses finds, across every line (texts both ways, calls, emails, visits booked, moved or completed, estimates, payments), a later record that kept it, quoted exactly; a customer text confirming it was done also closes it. Read at call time via callPromiseAiCloseLive(), strict 'true', dark by default; off = exactly today's behavior. Needs GATE_CALL_COMMITMENTS and PROMISE_EVIDENCE_CLOSE. Staff can Reopen from the Owed tab. Sends nothing to a customer.)
- *   GATE_CALL_PROMISE_LATER_TEXT_CHECK=true (owner 2026-10-25 "build it": a record proof the call-promise AI check accepted is no longer held for good by any later human text. The AI reads the texts that came after the proof and answers one question: does any of them say this promise was not kept, was undone, went wrong or is still needed? Only a clear no lets the proof close the promise; yes, unclear, a failed read, any later message with no words (a photo) or too long to read whole, more later texts than it reads, and card-number fragments it cannot attribute keep it held as before. Needs GATE_CALL_PROMISE_AI_CLOSE. Read at call time via callPromiseLaterTextCheckLive(), strict 'true', dark by default; off = exactly today's behavior. Staff can Reopen from the Owed tab. Sends nothing to a customer.)
  *   GATE_CALL_PROMISE_AI_NO_CUSTOMER=true (owner 2026-11-05, "A, AI": the call-promise AI check also judges an open Waves promise on a call with NO customer record (a job candidate, a vendor, a prospect not yet on file), by the caller's phone identity: texts and calls both ways, same checker, same guards (admissible witness, evidence-hash cache, later-human-text hold, model budgets). A number that is one of ours, a carrier sentinel, or on more than one customer record is skipped. At most 10 model calls per Eastern day for these promises across the watchdog pass and the Owed-queue pass (about $0.05 a day expected), newest call first. Read at call time via callPromiseAiNoCustomerLive(), strict 'true', dark by default, honoured only while GATE_CALL_PROMISE_AI_CLOSE is live; off = exactly today's behavior. Staff can Reopen from the Owed tab. Sends nothing to anyone.)
  *   GATE_PROMISE_PHONE_MATCH_CLOSE=shadow|true (owner 2026-11-04, "FOR ALL COMUNNICATION LINES": two free, fixed rules matched by phone, no model. A text bell from a number with no customer record closes once a person's delivered reply (or a call a person placed or answered and spoke on) reached that number after the sender's latest text; an automated reply never closes it. A Waves promise on a call dispositioned vendor_logged or spam_discarded, or whose caller is a job applicant, raises no promise-chaser, follow-up SLA or overdue alert; it stays on the Owed tab. Rides on GATE_ALERT_CONTACT_CLOSE for the text rule. Read at call time via promisePhoneMatchCloseMode(); shadow records or logs what would change and changes nothing; true acts; unset = off.)
  *   GATE_TECH_LOGIN_PRIVACY=true (owner 2026-10-25, second technician: a login with the technician role sees only its own customers' alerts and promises. Customer-text bells and pushes (sms_reply, reschedule intent, voicemail callback, service report and completion text failures, Twilio failures, job complete, follow-up bells) reach a technician only when the customer is on that technician's route (the same rule the Communications routes use); an alert with no customer keeps today's routing. The Promises tab feeds (proposals, open commitments, auto-closed) list only own-customer rows and closing, dismissing or reopening another customer's promise answers 404. The customer-deleted-account push goes to admin-role staff only. A technician socket joins a room of its own (tech:<id>) instead of the office-wide dispatch:admins room and hears only ids-and-status pings about its own visits; GET /dispatch/weather/tomorrow answers a technician 403; POST /dispatch/slot-check refuses a visit or technician that is not the caller's. Admin and office logins see everything as before. Read at call time via techLoginPrivacyLive(), strict 'true', dark by default; off = byte-identical to before; sends nothing to a customer.)
@@ -4133,17 +4132,6 @@ const gates = {
   // unset — every route starts and ends at the office, as before.
   techStartPoints: gateEnvValue('GATE_TECH_START_POINTS'),
 
-  // Technician "can move visits" switch (owner 2026-10-25, the way ServiceTitan
-  // gates technician rescheduling): on, a non-admin technician whose Team tab
-  // switch (technicians.can_move_visits) is off cannot move a visit: Quick Move
-  // in the tech app and Quick Move / Reschedule from the dispatch routes answer
-  // "Ask the office to move this visit." Every technician on file when the
-  // column landed keeps moves on; a technician added later starts off. Admins
-  // are never refused. OFF in every environment; read through gateEnvValue()
-  // at call time (scheduling/tech-move-permission.js). Kill switch: unset —
-  // every technician can move their own visits, as before.
-  techMoveSwitch: gateEnvValue('GATE_TECH_MOVE_SWITCH'),
-
   // Technician login privacy (owner 2026-10-25): a technician login sees only its
   // own customers' alert bells, push banners and promises; the customer-deleted
   // account push goes to admins only. Exactly `true`. Read at call time in
@@ -5913,13 +5901,6 @@ function setupFeeOpenInvoiceNoticeLive() {
 // text-follow-up AI check over a call promise the fixed rules left open.
 function callPromiseAiCloseLive() {
   return process.env.GATE_CALL_PROMISE_AI_CLOSE === 'true';
-}
-
-// GATE_CALL_PROMISE_LATER_TEXT_CHECK read at CALL time — strict `=== 'true'`; unset = kill.
-// call-promise-later-text-check.js: whether a later human text still holds a record proof the AI close
-// accepted. Honoured only while the AI close itself is live.
-function callPromiseLaterTextCheckLive() {
-  return callPromiseAiCloseLive() && process.env.GATE_CALL_PROMISE_LATER_TEXT_CHECK === 'true';
 }
 
 // GATE_CALL_PROMISE_AI_NO_CUSTOMER read at CALL time — strict `=== 'true'`; unset = off.
@@ -10148,8 +10129,6 @@ module.exports.smsFollowupWitnessFixLive = smsFollowupWitnessFixLive;
 module.exports.setupFeeSettledAnywhereLive = setupFeeSettledAnywhereLive;
 // GATE_CALL_PROMISE_AI_CLOSE reader, on its own line so gate PRs never conflict.
 module.exports.callPromiseAiCloseLive = callPromiseAiCloseLive;
-// GATE_CALL_PROMISE_LATER_TEXT_CHECK reader, on its own line so gate PRs never conflict.
-module.exports.callPromiseLaterTextCheckLive = callPromiseLaterTextCheckLive;
 // GATE_CALL_PROMISE_AI_NO_CUSTOMER reader, on its own line so gate PRs never conflict.
 module.exports.callPromiseAiNoCustomerLive = callPromiseAiNoCustomerLive;
 // GATE_PROMISE_PHONE_MATCH_CLOSE reader, on its own line so gate PRs never conflict.

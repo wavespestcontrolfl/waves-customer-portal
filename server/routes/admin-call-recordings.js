@@ -330,7 +330,7 @@ router.post('/proposals/:id/preview', async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id) || (req.body?.visit_id && !UUID_RE.test(req.body.visit_id))) return res.status(400).json({ error: 'Invalid proposal or visit id' });
     if (!(await ownsProposal(req, req.params.id))) return res.status(404).json({ error: 'Proposal not found' });
-    // GATE_TECH_MOVE_SWITCH: applying a proposal moves the visit, so a
+    // Applying a proposal moves the visit, so a
     // technician whose Team tab switch is off sees why before applying.
     const refusal = await techMoveRefusal(req);
     if (refusal) return res.status(refusal.status).json(refusal.payload);
@@ -353,7 +353,7 @@ router.post('/proposals/:id/apply', async (req, res, next) => {
     if (!UUID_RE.test(req.params.id) || !UUID_RE.test(String(req.body?.visit_id || ''))
       || !/^[a-f0-9]{64}$/.test(String(req.body?.preview_hash || ''))) return res.status(400).json({ error: 'Preview the selected visit before applying' });
     if (!(await ownsProposal(req, req.params.id))) return res.status(404).json({ error: 'Proposal not found' });
-    // GATE_TECH_MOVE_SWITCH: the apply is the enforcer.
+    // The apply is the enforcer.
     const refusal = await techMoveRefusal(req);
     if (refusal) return res.status(refusal.status).json(refusal.payload);
     const result = await require('../services/call-reschedule-proposals').applyProposal(db, req.params.id, {

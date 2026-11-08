@@ -47,7 +47,7 @@
 
 const crypto = require('crypto');
 const logger = require('./logger');
-const { isEnabled, promiseEvidenceCloseLive, callPromiseAiCloseLive, callPromiseLaterTextCheckLive } = require('../config/feature-gates');
+const { isEnabled, promiseEvidenceCloseLive, callPromiseAiCloseLive } = require('../config/feature-gates');
 // GATE_CALL_PROMISE_AI_NO_CUSTOMER, read at call time and guarded like the other late-added readers: a test that mocks
 // feature-gates without it reads off.
 const callPromiseAiNoCustomerLive = () => require('../config/feature-gates').callPromiseAiNoCustomerLive?.() === true;
@@ -225,7 +225,7 @@ function cachedAiClose(row) {
   return prior?.version === VERSION ? prior : null;
 }
 
-// GATE_CALL_PROMISE_LATER_TEXT_CHECK helpers. A held proof (HELD_BY_LATER_TEXT) stands without a new model call
+// Later-text check helpers. A held proof (HELD_BY_LATER_TEXT) stands without a new model call
 // only while the later-text check has already answered for this proof, this newest human message and these later
 // texts; otherwise its cached verdict is dropped so the record check runs again (a hold cached before the check
 // existed carries no proof to test, so it is judged again once).
@@ -258,10 +258,9 @@ async function judgeCandidate(conn, row, { now, budget, cap, verify = verifySmsF
   if (from.getTime() >= now.getTime()) return { outcome: 'skipped', reason: 'not_yet' };
   const cache = cachedAiClose(row) || {};
   const { current, message } = await subjectOf(conn, row, from, cache);
-  // GATE_CALL_PROMISE_LATER_TEXT_CHECK: a held proof is judged again unless the later-text check already
-  // answered for exactly these later texts (a hold cached before the check existed carries no proof to test).
-  const laterLive = callPromiseLaterTextCheckLive();
-  if (laterLive) await dropUnansweredHold(conn, current, message, cache, now);
+  // A held proof is judged again unless the later-text check already answered for exactly these later texts
+  // (a hold cached before the check existed carries no proof to test).
+  await dropUnansweredHold(conn, current, message, cache, now);
   const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
   let model = 0;
   // One model call from the run's budget; false when it is spent. A no-customer promise also reserves the call against
@@ -292,13 +291,12 @@ async function judgeCandidate(conn, row, { now, budget, cap, verify = verifySmsF
     // quote, same evidence hash) so it is not re-judged, and let the later conversation decide below.
     result.readThrough = await latestHumanMessage(conn, message);
     if (!laterThan(result.readThrough, verdict.matched_at)) return result;
-    // GATE_CALL_PROMISE_LATER_TEXT_CHECK: only a clear "no later text says this promise was not kept" lets the
-    // record close it.
-    if (laterLive && await laterTextsAllowClose(conn, result, { verdict, cache, now, mayCall: take })) {
+    // Only a clear "no later text says this promise was not kept" lets the record close it.
+    if (await laterTextsAllowClose(conn, result, { verdict, cache, now, mayCall: take })) {
       return { ...result, model, laterTextChecked: true };
     }
     // With the record the hold rests on (never its quote), so the later-text check can tell whether it already
-    // answered. Bookkeeping only: nothing reads these fields while that check is off.
+    // answered.
     result.cache.fulfillment_check = { verdict: 'uncertain', reason: HELD_BY_LATER_TEXT, evidence_hash: checked.evidence_hash, retry_after: null,
       record_type: verdict.record_type, record_id: verdict.record_id, matched_at: verdict.matched_at };
     result.verdict = { verdict: 'uncertain', reason: HELD_BY_LATER_TEXT };
@@ -478,7 +476,7 @@ async function storeCache(conn, row, cache, now) {
   // fulfilled verdict is not cached at all (it closes the promise in the same run; a lost race asks again).
   const bare = (v) => (v && v.verdict !== 'fulfilled' ? Object.fromEntries(Object.entries(v).filter(([k]) => k !== 'quote')) : null);
   const next = { version: VERSION, fulfillment_check: bare(cache.fulfillment_check), thread_check: bare(cache.thread_check),
-    // Only when there is a later-text verdict (GATE_CALL_PROMISE_LATER_TEXT_CHECK): with the check off, no key.
+    // Only when there is a later-text verdict.
     ...(cache.later_text_check != null ? { later_text_check: bare(cache.later_text_check) } : {}), checked_at: now.toISOString() };
   const prior = cachedAiClose(row);
   // record_id: a held proof that gains the record it rests on is written once, so the later-text check can test it.
