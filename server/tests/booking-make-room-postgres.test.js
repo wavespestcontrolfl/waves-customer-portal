@@ -133,13 +133,20 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
   const FREE = () => [{ date: DAY, windowStart: '12:00', techId }, { date: DAY, windowStart: '15:00', techId }];
   const admit = (slot) => slot.date === DAY && slot.windowStart >= '09:00' && slot.windowStart <= '16:00';
   const PIN = { lat: HQ.lat + 0.005, lng: HQ.lng + 0.2 };
-  const run = () => {
+  // Each test reads the WHOLE check, so it gets a test-sized budget and must finish. Production's 4-second budget
+  // is about a slow page, and it has its own tests (booking-make-room.test.js). CI's database is shared by two suite
+  // halves at once: on 2026-11-08 (#7766's run) a busy check ran out of the 4 seconds before the hour under test,
+  // and the test read the time-out as a missing reason. An error or a time-out now fails here, by name.
+  const run = async () => {
     const estimateId = randomUUID();
-    return recordMakeRoomCheck({
+    const report = await recordMakeRoomCheck({
       mode: 'shadow', estimateId, pool: FREE(), coords: PIN, durationMinutes: 60, dateFrom: DAY, dateTo: DAY, admit, now: NOW,
       // The page's own placement rules (filterCollidingSlots + the service-line rule), on the same rolled-back rows.
       placement: makeRoomPlacement({ estimateZone: null, coords: PIN, serviceMix: null, candidateExpectedMinutes: null, estimateId, lineRanking: null }),
+      budgetMs: 60000,
     });
+    expect(report).toMatchObject({ error: null, timedOut: false });
+    return report;
   };
   const starts = async () => (await mockConn('scheduled_services').whereIn('id', visits.map((v) => v.id)).orderBy('id').select('id', 'window_start', 'window_end', 'updated_at'));
   const sentAnything = () => Object.entries(mockOutbound).filter(([, fn]) => fn.mock && fn.mock.calls.length > 0).map(([name]) => name);
@@ -189,7 +196,8 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
     await mockConn('notification_prefs').insert({ customer_id: visitOf('c').customerId, sms_enabled: false });
     const report = await run();
     expect(report.passed.find((p) => p.start === '09:00')).toBeUndefined();
-    expect(report.byReason.reminders_off).toBeGreaterThanOrEqual(1);
+    // The whole tally on a failure, so the reason that won is named.
+    expect(report.byReason).toEqual(expect.objectContaining({ reminders_off: expect.any(Number) }));
     expect(sentAnything()).toEqual([]);
   });
 });
