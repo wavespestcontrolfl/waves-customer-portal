@@ -7363,10 +7363,6 @@ router.get('/', async (req, res, next) => {
     res.json({
       date, services: enriched,
       visitCloseout: legacyCloseoutEnabled,
-      // GATE_NEW_APPT_ADDRESS_TIMES: New Appointment's time box answers on a new caller's address alone.
-      addressFirstTimes: isEnabled('newApptAddressTimes'),
-      // GATE_NEW_APPT_PHONE_MATCH: New Appointment matches a new caller's phone as it is typed, and one Save adds and books them.
-      newCustomerPhoneMatch: isEnabled('newApptPhoneMatch'),
       // GATE_NEW_CALLER_BOOKING: New Appointment's Book saves a new caller's visit by address, no customer yet.
       newCallerBooking: isEnabled('newCallerBooking'),
       // GATE_BOARD_OPEN_TIMES: a drag on the Dispatch day or week grid lights the hours that fit the visit.

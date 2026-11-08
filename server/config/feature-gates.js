@@ -4198,32 +4198,6 @@ const gates = {
   // unset. This entry is for logGateStatus only.
   callBookingStopOrder: gateEnvValue('GATE_CALL_BOOKING_STOP_ORDER'),
 
-  // New Appointment address-first best times (owner 2026-10-24, replacing the
-  // 2026-10-21 Dispatch "Find a time" drawer): office staff on a call with a
-  // NEW caller open New Appointment, pick the address in its New customer
-  // block, and the time box (now above Services) shows the best hours for
-  // that address alone, no customer record needed, on a 30-minute search
-  // until a service sets the length. A chip fills the day and hour only: no
-  // service is known yet, so the chip's technician is not pinned (Codex #6411
-  // r1 on the retired drawer). Nothing is written until staff save. It needs GATE_BEST_TIME_HINTS
-  // on to get an answer. OFF in every environment; the admin schedule day
-  // view carries it to Dispatch as addressFirstTimes. Kill switch: unset —
-  // the time box waits for a customer, as before.
-  newApptAddressTimes: gateEnvValue('GATE_NEW_APPT_ADDRESS_TIMES'),
-
-  // New Appointment phone match and one Save (owner 2026-10-24): in the New
-  // customer block, a typed phone is looked up once it has ten digits and
-  // each customer already on that number is offered with one tap ("Use this
-  // customer"), never picked automatically (a household often shares one
-  // phone). Save then adds a new caller and books the visit in one press (the
-  // Add customer button goes away); a known phone or address still stops at
-  // the Attach / Separate account choice, and a total that changes once the
-  // customer exists waits for a second Save. A picked address suggestion
-  // scrolls the best times into view. OFF in every environment; the admin
-  // schedule day view carries it to Dispatch as newCustomerPhoneMatch. Kill
-  // switch: unset — the Add customer button and the two-step flow return.
-  newApptPhoneMatch: gateEnvValue('GATE_NEW_APPT_PHONE_MATCH'),
-
   // New-caller booking by address (owner 2026-10-25): with no customer
   // selected, the New customer block open, an address picked from the
   // suggestions and no name or phone typed, New Appointment's Book saves ONE
