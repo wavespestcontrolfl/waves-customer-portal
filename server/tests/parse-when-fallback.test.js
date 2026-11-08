@@ -23,8 +23,22 @@ describe('fallbackParse', () => {
     expect(fallbackParse('tuesday', NOW)).toMatchObject({ dateFrom: '2026-06-02', dateTo: '2026-06-02' });
   });
 
-  it('resolves "next <weekday>" to the following week', () => {
-    expect(fallbackParse('next tuesday', NOW)).toMatchObject({ dateFrom: '2026-06-09', dateTo: '2026-06-09' });
+  it('resolves "next <weekday>" to the coming one, the first such day after today', () => {
+    // From Sunday May 31 the coming Tuesday is June 2 (it used to skip to June 9).
+    expect(fallbackParse('next tuesday', NOW)).toMatchObject({ dateFrom: '2026-06-02', dateTo: '2026-06-02' });
+    // From Friday Nov 6 2026 (the walk's case) it is Tue Nov 10, and the search keeps its time of day.
+    const friday = new Date('2026-11-06T17:00:00Z');
+    expect(fallbackParse('next tuesday afternoon', friday)).toMatchObject({ dateFrom: '2026-11-10', dateTo: '2026-11-10', timeOfDay: 'afternoon' });
+    // Asked on that weekday, "next" never means today: it is a week out. A bare weekday still means today.
+    const tuesday = new Date('2026-11-10T17:00:00Z');
+    expect(fallbackParse('next tuesday', tuesday)).toMatchObject({ dateFrom: '2026-11-17' });
+    expect(fallbackParse('tuesday', tuesday)).toMatchObject({ dateFrom: '2026-11-10' });
+  });
+
+  it('leaves "next weekend" and "next week" on their own rule', () => {
+    const friday = new Date('2026-11-06T17:00:00Z');
+    expect(fallbackParse('next weekend', friday)).toMatchObject({ dateFrom: '2026-11-14', dateTo: '2026-11-15' });
+    expect(fallbackParse('next week', friday)).toMatchObject({ dateFrom: '2026-11-16' });
   });
 
   it('treats "this weekend" on a Sunday as just today', () => {

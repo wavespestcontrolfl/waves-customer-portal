@@ -4,6 +4,7 @@ import { BookOpen, Calendar, ClipboardList, Mail, Plus } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { Badge, Button, Dialog, DialogBody, DialogFooter, Select } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
+import { registerLeaveGuard } from "../../lib/navigation-guard";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
 import { IssueWarrantyAction } from "../../components/admin/IssueWarrantyDialog";
 import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
@@ -157,6 +158,8 @@ const TYPE_LABELS = {
 const WDO_TYPE = "wdo_inspection";
 const CERTIFICATE_TYPE = "pre_treatment_termite_certificate";
 const OFFICIAL_TERMITE_DOCUMENT_TYPES = new Set([WDO_TYPE, CERTIFICATE_TYPE]);
+const UNSAVED_CAPTION_MESSAGE =
+  "Save or cancel the photo caption you are editing first. The report and its PDF use saved captions only.";
 const ROBOTO_FONT = "'Roboto', Arial, sans-serif";
 const GENERAL_TYPE_LABELS = Object.fromEntries(
   Object.entries(TYPE_LABELS).filter(([key]) => key !== WDO_TYPE),
@@ -1296,6 +1299,10 @@ function CustomerProjectReportPreview({
   );
 }
 
+// The same prompt Dispatch and the tech home show before they close this editor.
+const confirmDiscardReport = () =>
+  window.confirm("Discard unsaved report edits?");
+
 export default function ProjectsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const initialProjectId = searchParams.get("projectId");
@@ -1304,6 +1311,9 @@ export default function ProjectsPage() {
   const [filterStatus, setFilterStatus] = useState("");
   const [filterType, setFilterType] = useState("");
   const [selectedId, setSelectedId] = useState(null);
+  // ProjectDetail's onDirtyChange: the open report holds unsaved field or
+  // photo caption edits.
+  const [editorDirty, setEditorDirty] = useState(false);
   const [typesRegistry, setTypesRegistry] = useState(null);
   const [createMode, setCreateMode] = useState(null);
   const [error, setError] = useState("");
@@ -1362,20 +1372,86 @@ export default function ProjectsPage() {
   const selectProject = useCallback(
     (projectId) => {
       if (!projectId) return;
+      if (
+        editorDirty &&
+        String(projectId) !== String(selectedId) &&
+        !confirmDiscardReport()
+      )
+        return;
       const next = new URLSearchParams(searchParams);
       next.set("projectId", String(projectId));
       setSearchParams(next);
       setSelectedId(projectId);
     },
-    [searchParams, setSearchParams],
+    [editorDirty, searchParams, selectedId, setSearchParams],
   );
 
   const closeProject = useCallback(() => {
+    if (editorDirty && !confirmDiscardReport()) return;
     const next = new URLSearchParams(searchParams);
     next.delete("projectId");
     setSearchParams(next, { replace: true });
     setSelectedId(null);
-  }, [searchParams, setSearchParams]);
+  }, [editorDirty, searchParams, setSearchParams]);
+
+  // While the open report holds unsaved edits, every way off it asks first,
+  // like the × close and the list: a same-tab link (sidebar, tab bar, page
+  // finder), browser Back/Forward, sign-out and alert taps (the shared
+  // registry in lib/navigation-guard.js), and a reload or tab close. Same
+  // capture-phase link and history pattern as AdminInvoicesPage. A link or
+  // history entry that keeps this report open loses nothing, so it never asks.
+  useEffect(() => {
+    if (!editorDirty || !selectedId) return undefined;
+    const pagePath = window.location.pathname;
+    const openId = String(selectedId);
+    const keepsReport = (url) =>
+      url.pathname === pagePath && url.searchParams.get("projectId") === openId;
+    const beforeUnload = (event) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const guardLink = (event) => {
+      const link = event.target.closest?.("a[href]");
+      if (!link || link.target === "_blank" || link.hasAttribute("download")) return;
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      if (link.origin !== window.location.origin || keepsReport(new URL(link.href))) return;
+      if (confirmDiscardReport()) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    // BrowserRouter stamps an index on each history entry, so a declined
+    // Back/Forward steps back to this entry before the router's own popstate
+    // listener can switch or close the report.
+    let entryIndex = window.history.state?.idx;
+    let restoring = false;
+    const guardHistory = (event) => {
+      if (restoring) {
+        restoring = false;
+        event.stopImmediatePropagation();
+        return;
+      }
+      const nextIndex = event.state?.idx;
+      if (!Number.isInteger(entryIndex) || !Number.isInteger(nextIndex) || entryIndex === nextIndex) return;
+      // The browser has already moved to the popped-to URL here.
+      if (keepsReport(new URL(window.location.href)) || confirmDiscardReport()) {
+        entryIndex = nextIndex;
+        return;
+      }
+      event.stopImmediatePropagation();
+      restoring = true;
+      window.history.go(entryIndex - nextIndex);
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    window.addEventListener("popstate", guardHistory, true);
+    document.addEventListener("click", guardLink, true);
+    const unregister = registerLeaveGuard(confirmDiscardReport);
+    return () => {
+      window.removeEventListener("beforeunload", beforeUnload);
+      window.removeEventListener("popstate", guardHistory, true);
+      document.removeEventListener("click", guardLink, true);
+      unregister();
+    };
+  }, [editorDirty, selectedId]);
 
   useEffect(() => {
     adminFetch("/admin/projects/types")
@@ -1485,6 +1561,7 @@ export default function ProjectsPage() {
             key={String(selectedId)}
             projectId={selectedId}
             typesRegistry={typesRegistry}
+            onDirtyChange={setEditorDirty}
             onClose={closeProject}
             onChanged={loadProjects}
             canAdminActions={isAdmin}
@@ -1786,6 +1863,9 @@ export function ProjectDetail({
   useEffect(() => {
     onDirtyChange?.(dirty || dirtyPhotoIds.size > 0);
   }, [dirty, dirtyPhotoIds, onDirtyChange]);
+  // A closed editor holds nothing: a host that stays mounted (the Reports
+  // page) must not keep asking about edits that are already gone.
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const handlePhotoCaptionDirtyChange = useCallback((photoId, isDirty) => {
     setDirtyPhotoIds((current) => {
       if (current.has(photoId) === isDirty) return current;
@@ -1896,6 +1976,7 @@ export function ProjectDetail({
       setError("Admin access required to send project reports.");
       return;
     }
+    if (blockedByUnsavedCaption()) return;
     const readiness = evaluateProjectReadiness({
       project: { ...project, title: editTitle },
       typeCfg,
@@ -1999,12 +2080,22 @@ export function ProjectDetail({
     }
   }
 
+  // Send and PDF render from SAVED captions, so an open caption draft would be
+  // left out. Block instead of auto-saving (a caption save re-flags a signed WDO).
+  function blockedByUnsavedCaption() {
+    if (dirtyPhotoIds.size === 0) return false;
+    setNotice("");
+    setError(UNSAVED_CAPTION_MESSAGE);
+    return true;
+  }
+
   // Open the filled FDACS-13645 exactly as it will be filed, so the operator can
   // verify the official form is populated before sending. The endpoint is
   // admin-only (bearer auth), so fetch it with adminFetch and open the PDF as an
   // object URL — a plain link navigation drops the auth header and 401s.
   async function viewFilledFdacsPdf() {
     if (!projectId) return;
+    if (blockedByUnsavedCaption()) return;
     setError("");
     // Open the tab synchronously inside the click gesture; Safari/iOS and strict
     // popup blockers reject window.open that happens only after an await. We set
@@ -2035,6 +2126,7 @@ export function ProjectDetail({
       setError("Admin access required to send project reports.");
       return;
     }
+    if (blockedByUnsavedCaption()) return;
     const readiness = evaluateProjectReadiness({
       project: { ...project, title: editTitle },
       typeCfg,

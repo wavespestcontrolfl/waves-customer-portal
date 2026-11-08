@@ -279,6 +279,37 @@ async function isPersonPlacedVisit(input, db, opts = {}) {
   }
 }
 
+/**
+ * Did the CUSTOMER pick this visit's current slot? (GATE_DAY_ONLY_PROMISE, services/time-promise.js dayOnlyEligibility.)
+ * The same evidence as isPersonPlacedVisit, but only customer sources count: the newest slot-changing reschedule_log row
+ * was made by a CUSTOMER_INITIATORS source, or the visit carries a customer date exception newer than that row. A
+ * system or office placement is not a customer pick, so the customer keeps the day-only promise for it.
+ * A read error answers picked (fail closed): the customer keeps today's window copy.
+ */
+async function isCustomerPickedVisit(input, db) {
+  if (!input || !input.id) return { picked: false };
+  try {
+    const newestRows = await db('reschedule_log')
+      .where('scheduled_service_id', input.id)
+      .whereNotNull('new_date')
+      .whereRaw(SLOT_CHANGED_SQL)
+      .whereRaw(`created_at = (SELECT max(r2.created_at) FROM reschedule_log r2
+        WHERE r2.scheduled_service_id = reschedule_log.scheduled_service_id
+          AND r2.new_date IS NOT NULL
+          AND (r2.original_date IS DISTINCT FROM r2.new_date OR r2.original_window IS DISTINCT FROM r2.new_window))`)
+      .select('created_at', 'new_date', 'initiated_by');
+    const newestAt = newestRows.length ? new Date(newestRows[0].created_at) : null;
+    const exceptionAt = input.date_exception === true && input.date_exception_at
+      && CUSTOMER_INITIATORS.has(String(input.date_exception_source || '')) ? new Date(input.date_exception_at) : null;
+    if (exceptionAt && !Number.isNaN(exceptionAt.getTime()) && (!newestAt || exceptionAt > newestAt)) return { picked: true };
+    const dateStr = toDateStr(input.scheduled_date);
+    const placement = newestRows.find((r) => (!dateStr || toDateStr(r.new_date) === dateStr) && CUSTOMER_INITIATORS.has(r.initiated_by));
+    return { picked: Boolean(placement) };
+  } catch (err) {
+    return { picked: true, degraded: true, reason_description: `Could not read the move history: ${err.message}` };
+  }
+}
+
 module.exports = {
-  isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit, VALID_STATUSES, SLOT_CHANGED_SQL,
+  isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit, isCustomerPickedVisit, CUSTOMER_INITIATORS, VALID_STATUSES, SLOT_CHANGED_SQL,
 };

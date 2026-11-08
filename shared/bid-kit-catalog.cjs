@@ -1,6 +1,6 @@
 'use strict';
 
-// Bid kit catalog (GATE_BID_KIT, dark, admin only). The list of papers and facts a government bid asks for, in the order
+// Bid kit catalog (admin only). The list of papers and facts a government bid asks for, in the order
 // the owner works through them, plus the pure status rule. Used by the server (server/routes/admin-bid-kit.js,
 // server/services/bid-kit-*.js) and by the admin page (client alias @bid-kit-catalog). No I/O, no clock reads except
 // the default `now` of etToday().

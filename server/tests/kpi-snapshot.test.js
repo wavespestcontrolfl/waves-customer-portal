@@ -3,7 +3,9 @@
 jest.mock('../routes/admin-dashboard', () => ({ computeCoreKpis: jest.fn() }));
 
 const { computeCoreKpis } = require('../routes/admin-dashboard');
-const { recordKpiSnapshot, SNAPSHOT_METRICS } = require('../services/kpi-snapshot');
+const {
+  recordKpiSnapshot, recordKpiSnapshotIfMissing, snapshotMissing, SNAPSHOT_METRICS,
+} = require('../services/kpi-snapshot');
 
 // Fake Knex: kpi_snapshots upserts (insert → onConflict → merge) are captured
 // into an array, one entry per metric row written.
@@ -98,5 +100,77 @@ describe('recordKpiSnapshot', () => {
     const arRow = capture.rows.find(({ row }) => row.metric === 'ar_days');
     expect(arRow).toBeDefined();
     expect(arRow.row.value).toBeNull();
+  });
+});
+
+// Missed-tick catch-up (the 23:55 tick in scheduler.js): write today's rows only when
+// the 23:45 tick did not leave the full set.
+describe('snapshotMissing / recordKpiSnapshotIfMissing', () => {
+  // Fake Knex for the existence check plus the upsert path: `existing` is how many rows
+  // kpi_snapshots already holds for the asked date; an error makes the count read throw.
+  function makeCatchUpDb({ existing = 0, countError = null, capture }) {
+    capture.counts = [];
+    capture.rows = [];
+    return () => {
+      const builder = {
+        where(cond) { capture.counts.push(cond); return builder; },
+        count() { return builder; },
+        first() { return countError ? Promise.reject(new Error(countError)) : Promise.resolve({ n: String(existing) }); },
+        insert(row) { builder._row = row; return builder; },
+        onConflict() { return builder; },
+        merge() { capture.rows.push(builder._row); return Promise.resolve(); },
+      };
+      return builder;
+    };
+  }
+
+  beforeEach(() => {
+    computeCoreKpis.mockReset();
+    computeCoreKpis.mockResolvedValue(fixedKpis());
+  });
+
+  test('no rows for the day: missing', async () => {
+    const capture = {};
+    await expect(snapshotMissing('2026-06-24', makeCatchUpDb({ existing: 0, capture }))).resolves.toBe(true);
+    expect(capture.counts).toEqual([{ snapshot_date: '2026-06-24' }]);
+  });
+
+  test('a half-written day (a restart mid-loop) is still missing', async () => {
+    const capture = {};
+    await expect(snapshotMissing('2026-06-24', makeCatchUpDb({ existing: SNAPSHOT_METRICS.length - 1, capture }))).resolves.toBe(true);
+  });
+
+  test('the full set is there: not missing', async () => {
+    const capture = {};
+    await expect(snapshotMissing('2026-06-24', makeCatchUpDb({ existing: SNAPSHOT_METRICS.length, capture }))).resolves.toBe(false);
+  });
+
+  test('an unreadable table answers "not missing": the catch-up skips instead of guessing', async () => {
+    const capture = {};
+    await expect(snapshotMissing('2026-06-24', makeCatchUpDb({ countError: 'connection reset', capture }))).resolves.toBe(false);
+  });
+
+  test("catch-up writes the day's full set when it is missing", async () => {
+    const capture = {};
+    const out = await recordKpiSnapshotIfMissing('2026-06-24', makeCatchUpDb({ existing: 0, capture }));
+    expect(out).toEqual({ snapshot_date: '2026-06-24', metrics: SNAPSHOT_METRICS.length });
+    expect(capture.rows).toHaveLength(SNAPSHOT_METRICS.length);
+    expect(capture.rows.every((r) => r.snapshot_date === '2026-06-24')).toBe(true);
+  });
+
+  test('an unreadable table under the lock REJECTS: never resolved as "already recorded", so job health records a failure', async () => {
+    const capture = {};
+    await expect(recordKpiSnapshotIfMissing('2026-06-24', makeCatchUpDb({ countError: 'connection reset', capture })))
+      .rejects.toThrow('connection reset');
+    expect(capture.rows).toHaveLength(0);
+    expect(computeCoreKpis).not.toHaveBeenCalled();
+  });
+
+  test('catch-up after a finished 23:45 tick writes nothing and never reads the KPIs', async () => {
+    const capture = {};
+    const out = await recordKpiSnapshotIfMissing('2026-06-24', makeCatchUpDb({ existing: SNAPSHOT_METRICS.length, capture }));
+    expect(out).toEqual({ skipped: 'already_recorded', snapshot_date: '2026-06-24' });
+    expect(capture.rows).toHaveLength(0);
+    expect(computeCoreKpis).not.toHaveBeenCalled();
   });
 });

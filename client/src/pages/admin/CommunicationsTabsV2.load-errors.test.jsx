@@ -268,6 +268,32 @@ describe("CSR Coach load failures", () => {
   });
 });
 
+describe("CSR Coach task list", () => {
+  // The header counts every open task; the list used to stop at 10 with no way to see the rest.
+  it.each([
+    [12, true],
+    [10, false],
+  ])("lists %i follow-up tasks with a Show all button only when more than 10", async (count, hasMore) => {
+    coachFetch({
+      tasks: { tasks: Array.from({ length: count }, (_, i) => taskRow(i + 1)), pending: count, overdue: 0 },
+    });
+
+    render(<CSRCoachTabV2 />);
+    await screen.findByText(/Action 1\b/);
+    expect(screen.getAllByRole("button", { name: "Mark Done" })).toHaveLength(Math.min(count, 10));
+    if (!hasMore) {
+      expect(screen.queryByRole("button", { name: "Show all" })).not.toBeInTheDocument();
+      expect(screen.queryByText(/Showing 10 of/)).not.toBeInTheDocument();
+      return;
+    }
+    expect(screen.getByText("Showing 10 of 12")).toBeInTheDocument();
+    expect(screen.getByText(/Pending:/)).toHaveTextContent("Pending: 12");
+    fireEvent.click(screen.getByRole("button", { name: "Show all" }));
+    expect(screen.getAllByRole("button", { name: "Mark Done" })).toHaveLength(12);
+    expect(screen.queryByRole("button", { name: "Show all" })).not.toBeInTheDocument();
+  });
+});
+
 describe("CSR Coach task actions", () => {
   it("disables the task buttons during the PUT and keeps the task with the error when it fails", async () => {
     let release;
@@ -280,11 +306,12 @@ describe("CSR Coach task actions", () => {
     render(<CSRCoachTabV2 />);
     await screen.findByText(/Action 1/);
     const [done1, done2] = screen.getAllByRole("button", { name: "Mark Done" });
-    const [reassign1] = screen.getAllByRole("button", { name: "Reassign" });
+    // Mark Done is the only task action: the old Reassign button only set
+    // in_progress and never changed who the task belongs to.
+    expect(screen.queryByRole("button", { name: "Reassign" })).toBeNull();
 
     fireEvent.click(done1);
     await waitFor(() => expect(done1).toBeDisabled());
-    expect(reassign1).toBeDisabled();
     expect(done2).toBeEnabled();
 
     await act(async () => { release(); });
@@ -319,6 +346,12 @@ describe("CSR Coach task actions", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Mark Done" })[0]);
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("The task list could not refresh");
+    expect(calls.filter((c) => c.method === "PUT")).toEqual([
+      expect.objectContaining({
+        path: "/api/admin/csr/follow-up-tasks/1",
+        body: JSON.stringify({ status: "completed" }),
+      }),
+    ]);
     expect(screen.queryByText(/Action 1/)).not.toBeInTheDocument();
     expect(screen.getByText(/Action 2/)).toBeInTheDocument();
     // The counts are not worked out in the browser: they stay the server's
@@ -332,35 +365,5 @@ describe("CSR Coach task actions", () => {
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
     expect(screen.getByText(/Pending:/)).toHaveTextContent("Pending: 0");
     expect(countCalls(calls, "/api/admin/csr/follow-up-tasks")).toBe(3);
-  });
-
-  it("merges the returned task over the old row so the customer name stays, before the refresh lands", async () => {
-    let releaseRefresh;
-    const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
-    let first = true;
-    coachFetch({
-      onTasksGet: () => {
-        if (first) {
-          first = false;
-          return json({ tasks: [taskRow(1)], pending: 1, overdue: 0 });
-        }
-        return refreshGate.then(() => json({ tasks: [taskRow(1, { status: "in_progress" })], pending: 0, overdue: 0 }));
-      },
-      put: () => json({ task: { id: 1, status: "in_progress", assigned_to: "Synthetic Tech" } }),
-    });
-
-    render(<CSRCoachTabV2 />);
-    await screen.findByText(/Action 1/);
-    fireEvent.click(screen.getByRole("button", { name: "Reassign" }));
-
-    // PUT is done, refresh still pending: the row already shows the saved
-    // assignee and keeps the customer name that the PUT response lacks.
-    const row = await screen.findByText(/Synthetic Tech/);
-    expect(row).toHaveTextContent("First1 Last1");
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-
-    await act(async () => { releaseRefresh(); });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Reassign" })).toBeEnabled());
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

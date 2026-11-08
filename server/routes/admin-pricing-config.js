@@ -309,6 +309,14 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     const problem = costPlusListKnobError(data.costPlusList);
     if (problem) return fail(`lawn_pricing_v2.${problem}`);
   }
+  // Same placement for the lawn minimum per visit after discounts (owner
+  // 2026-11-06): dollars and cents from 0 (off) to 500.
+  if (configKey === 'lawn_pricing_v2' && data?.minimumPerVisitAfterDiscount !== undefined) {
+    const v = num(data.minimumPerVisitAfterDiscount);
+    if (!(Number.isFinite(v) && v >= 0 && v <= 500 && Math.abs(v * 100 - Math.round(v * 100)) < 1e-6)) {
+      return fail('lawn_pricing_v2.minimumPerVisitAfterDiscount must be a dollar amount from 0 to 500');
+    }
+  }
 
   // The global_* singles must be STRICTLY positive: syncConstantsFromDB
   // applies them through truthy `?.value` checks, so a stored 0 would return

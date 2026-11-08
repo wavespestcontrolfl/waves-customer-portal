@@ -284,6 +284,23 @@ async function stampSendMarker() {
   }
 }
 
+// Missed-tick catch-up (scheduler.js runs a second pair of ticks Monday and Tuesday
+// at 10:44). True only when the lane is on and THIS week's report has not been
+// stamped yet; the stamp is the same one the Monday tick writes, and the report
+// window is anchored to Monday 8:13, so a late run covers the same week. A read
+// failure answers false (skip, try again next tick): unlike the Monday tick, a
+// catch-up never sends "without the guard".
+async function weekIsMissing(now = new Date(), opts = {}) {
+  if (!(opts.gateEnabled ?? isEnabled(GATE))) return false;
+  try {
+    const row = await db('ops_email_send_state').where({ email_key: OPS_KEY }).first('last_sent_at');
+    return !(row?.last_sent_at && new Date(row.last_sent_at).getTime() >= reportWindow(now).end.getTime());
+  } catch (err) {
+    logger.warn(`[call-booking-link-weekly] catch-up check could not read the send marker (${err.code || err.name || 'error'}) — skipped`);
+    return false;
+  }
+}
+
 async function runCallBookingLinkWeeklyCheck(opts = {}) {
   const now = opts.now || new Date();
   if (!(opts.gateEnabled ?? isEnabled(GATE))) return { skipped: 'disabled' };
@@ -356,5 +373,6 @@ async function runCallBookingLinkWeeklyCheck(opts = {}) {
 
 module.exports = {
   runCallBookingLinkWeeklyCheck,
+  weekIsMissing,
   _private: { composeWeeklyCheck, reportWindow, sentRecently, dedupeKeyFor, reasonLabel, clampSummary, loadWeek, OPS_KEY, SUMMARY_MAX },
 };

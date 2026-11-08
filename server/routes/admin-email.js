@@ -10,7 +10,7 @@ const { unblockSender, manualBlockSender } = require('../services/email/spam-blo
 const { sendEmailMessage } = require('../services/email/send-message');
 const logger = require('../services/logger');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { emailSendLaterLive, emailReclassifyPickLive } = require('../config/feature-gates');
+const { emailReclassifyPickLive } = require('../config/feature-gates');
 const { parseETDateTime, etParts, etDateString, etWallClockOccurrences } = require('../utils/datetime-et');
 const { countProcessedInvoices } = require('../services/email/invoice-outcome');
 const {
@@ -387,7 +387,7 @@ router.post('/send', async (req, res) => {
 });
 
 // ============================================
-// Schedule send (GATE_EMAIL_SEND_LATER; table scheduled_emails)
+// Schedule send (table scheduled_emails)
 // ============================================
 
 const SCHEDULE_ET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
@@ -440,7 +440,6 @@ async function consumeFailedRetry(known) {
 // composer's encoded HTML (as on /send) and `draftText` its plain text, which
 // "Back to draft" restores. A repeated `clientKey` returns the first row.
 router.post('/schedule', async (req, res) => {
-  if (!emailSendLaterLive()) return res.status(404).json({ enabled: false, error: 'Schedule send is off.' });
   try {
     const { to, subject, body, draftText, threadId, replyEmailId, sendAt, clientKey } = req.body || {};
     if (!to || !body || !draftText) return res.status(400).json({ error: 'to, body and draftText required' });
@@ -522,7 +521,7 @@ router.get('/scheduled', async (req, res) => {
         .orderBy('cancelled_at', 'desc').limit(CANCELLED_LIST_CAP),
     ]);
     const rows = [...open, ...cancelled].sort((a, b) => new Date(a.send_at) - new Date(b.send_at));
-    res.json({ enabled: emailSendLaterLive(), emails: rows.map(scheduledView) });
+    res.json({ emails: rows.map(scheduledView) });
   } catch (err) {
     logger.error(`[email] scheduled list failed (${err.code || 'error'})`);
     res.status(500).json({ error: 'Scheduled emails are unavailable.' });

@@ -22,15 +22,22 @@
  *                  parcel id. Unambiguous code/layout break → alert on the
  *                  first run.
  *   'transient'  — we couldn't reach the data at all (fetch threw/timed out,
- *                  or the lookup returned no record). A slow county site at
- *                  4am looks identical to a real outage for one run, so this
+ *                  or the lookup returned no record). A slow county site
+ *                  looks identical to a real outage for one run, so this
  *                  is SUPPRESSED until a check has failed
- *                  TRANSIENT_FAILURE_ALERT_THRESHOLD nights in a row (state in
+ *                  TRANSIENT_FAILURE_ALERT_THRESHOLD days in a row (state in
  *                  property_lookup_canary_state), then alerts once + re-pings
  *                  weekly. Mirrors event-source-health.js. The estimator
  *                  degrades gracefully to vision guesses meanwhile, so a few
- *                  silent nights on a genuine outage is the right trade for
- *                  killing single-night-blip noise.
+ *                  silent days on a genuine outage is the right trade for
+ *                  killing single-day-blip noise.
+ *
+ * WHEN IT RUNS: once a day at 10:17 AM ET (scheduler.js), inside the hours
+ * estimates actually run. It ran at 4:17 AM until 2026-11-06; on Nov 4-6 the
+ * Sarasota host (sarasotapropertyappraiser.gov) timed out every 4:17 AM
+ * request (on Nov 6 a browser-UA probe in the same run timed out too), while
+ * a real estimate lookup from the same server resolved at 10:09 AM on Nov 4. A county site that is down
+ * overnight does not affect estimates, so the canary checks in the day.
  *
  * Kill switch: PROPERTY_LOOKUP_CANARY_DISABLED=1.
  */
@@ -45,11 +52,11 @@ const { lookupParcelByPoint } = require('./property-lookup/parcel-gis');
 
 const CANARY_TIMEOUT_MS = 20000;
 
-// Consecutive nights a "can't reach the data" (transient) failure must persist
-// before it pages — 3 nights ≈ a real multi-day county outage, not a blip.
+// Consecutive daily runs a "can't reach the data" (transient) failure must
+// persist before it pages — 3 days ≈ a real multi-day county outage, not a blip.
 const TRANSIENT_FAILURE_ALERT_THRESHOLD = 3;
-// Re-ping cadence (in nightly runs) while a check stays past its threshold —
-// one alert per breakage plus a weekly reminder, never nightly spam.
+// Re-ping cadence (in daily runs) while a check stays past its threshold —
+// one alert per breakage plus a weekly reminder, never daily spam.
 const REPING_EVERY_RUNS = 7;
 
 // One known pool home per county, live-verified 2026-06-12 (Hillsborough
@@ -210,10 +217,10 @@ function decideCanaryAlert(checks, priorCounts = {}, opts = {}) {
         // indefinitely. Only happens when the state store itself is broken.
         alertFailures.push(...check.details.map((d) => `${d} (canary state unavailable — escalated)`));
       } else if (atAlertPoint(count, threshold)) {
-        alertFailures.push(...check.details.map((d) => `${d} — ${count} nights running`));
+        alertFailures.push(...check.details.map((d) => `${d} — ${count} days running`));
         pendingAlerts.push({ key: check.key, count });
       } else {
-        suppressed.push(...check.details.map((d) => `${d} (night ${count}/${threshold})`));
+        suppressed.push(...check.details.map((d) => `${d} (day ${count}/${threshold})`));
       }
     } else {
       // 'ok' or 'regression' both mean the data was reachable, so the

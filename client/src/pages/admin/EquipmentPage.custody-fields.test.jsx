@@ -165,10 +165,10 @@ describe('kit key', () => {
     expect(puts[0]).toEqual(expect.objectContaining({ kit_key: 'moisture_meter' }));
   });
 
-  it('with GATE_TRUCK_KIT off the dialog has no Kit key field and sends no kit_key', async () => {
+  it('when the kit-key read fails the dialog has no Kit key field and sends no kit_key', async () => {
     const stub = fetch.getMockImplementation();
     fetch.mockImplementation(async (url, options = {}) => {
-      if (String(url).includes('/admin/equipment/kit-keys')) return { ok: false, status: 404, json: async () => ({ enabled: false }) };
+      if (String(url).includes('/admin/equipment/kit-keys')) return { ok: false, status: 500, json: async () => ({ error: 'Could not read kit keys' }) };
       return stub(url, options);
     });
     mountAssets();

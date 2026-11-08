@@ -3,7 +3,6 @@ const Joi = require('joi');
 const multer = require('multer');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { bidKitLive } = require('../config/feature-gates');
 const store = require('../services/bid-kit-store');
 const files = require('../services/bid-kit-files');
 const expiry = require('../services/bid-kit-expiry');
@@ -11,16 +10,14 @@ const { scrubError, errorTag } = require('../services/bid-kit-log');
 const catalog = require('../../shared/bid-kit-catalog.cjs');
 const { validCalendarDate } = require('../utils/datetime-et');
 
-// Bid kit (GATE_BID_KIT, dark). Staff-only. The papers and facts every government bid asks for, each with its private
+// Bid kit. Staff-only. The papers and facts every government bid asks for, each with its private
 // file, limits, source, dates and the owner's sign-off. Nothing here is public and nothing is sent to anyone.
 // A file is never returned as a key or a stored address: only GET /:id/file, a signed link good for 5 minutes.
 const router = express.Router();
 router.use(adminAuthenticate, requireAdmin);
-// Private records: nothing is cached by the browser or a proxy, the dark-gate 404 as well as the data. It runs after the
+// Private records: nothing is cached by the browser or a proxy. It runs after the
 // auth guard (like every admin router): a middleware ahead of the guard would make the surface read as public.
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
-// Gate off = the whole surface answers 404, exactly as if it were not mounted.
-router.use((req, res, next) => (bidKitLive() ? next() : res.status(404).json({ error: 'Not found' })));
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Any /:id that is not a UUID is a 404 before a handler (or an upload) runs.

@@ -29,6 +29,13 @@ jest.mock('../services/slot-reservation', () => ({
   extendReservation: jest.fn(),
   releaseReservation: jest.fn(),
 }));
+// The office's stuck-booking alert: the routes hand it each answer (its own suite covers what it does with them).
+jest.mock('../services/estimate-stuck-alert', () => ({
+  noteSlotAnswer: jest.fn(),
+  noteSlotListFailed: jest.fn(),
+  noteHoldStarted: jest.fn(),
+  noteHoldReleased: jest.fn(),
+}));
 jest.mock('../services/estimate-membership-context', () => ({
   buildEstimateMembershipContext: jest.fn(),
 }));
@@ -214,7 +221,12 @@ describe('specific-date browse horizon (parity with reserveSlot)', () => {
     const farFuture = etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS + 1));
     const res = await fetch(`${base}/${TOKEN}/available-slots?date=${farFuture}`);
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: 'date is beyond the booking horizon' });
+    // The page words its "pick a date on or before ..." line from these two fields.
+    expect(await res.json()).toEqual({
+      error: 'date is beyond the booking horizon',
+      lastBookableDate: etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS)),
+      horizonDays: MAX_SLOT_HORIZON_DAYS,
+    });
     expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 
@@ -1573,5 +1585,64 @@ describe('offerableEstimateSlots — the page\'s acceptance contract', () => {
     resolveEstimateAcceptance.mockRejectedValue(new Error('appointments down'));
     await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
     expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+});
+
+describe('the office stuck-booking alert hears every slot answer (estimate page audit fix 3, owner 2026-11-05)', () => {
+  const stuckAlert = require('../services/estimate-stuck-alert');
+  const ROW = { id: 'est-1', token: TOKEN, status: 'sent', expires_at: null, archived_at: null, customer_id: 'cust-1', estimate_data: {} };
+  const EMPTY = { primary: [], expander: [], metadata: {} };
+  const HOLD = '11111111-1111-4111-8111-111111111111';
+  const post = (leg, body = {}) => fetch(`${base}/${TOKEN}/${leg}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const asked = () => stuckAlert.noteSlotAnswer.mock.calls.map(([req, estimate, ask, result]) => [Boolean(req?.headers), estimate.id, ask, result]);
+
+  beforeEach(() => {
+    currentEstimate = ROW;
+    Object.values(stuckAlert).forEach((fn) => fn.mockClear());
+  });
+
+  test('the 90-day look-ahead and a date browse hand over their window, day and answer, and the answer is unchanged', async () => {
+    getAvailableSlots.mockResolvedValue(EMPTY);
+    const ahead = await fetch(`${base}/${TOKEN}/available-slots?windowDays=90`);
+    expect(await ahead.json()).toEqual(EMPTY);
+    const day = etDateString(addETDays(new Date(), 7));
+    await fetch(`${base}/${TOKEN}/available-slots?date=${day}`);
+    expect(asked()).toEqual([
+      [true, 'est-1', { windowDays: 90 }, EMPTY],
+      [true, 'est-1', { date: day }, EMPTY],
+    ]);
+  });
+
+  test('a Waves AI search hands over its answer as an AI search', async () => {
+    const found = { primary: [], expander: [], availableSlots: [], summary: null };
+    findEstimateSlots.mockResolvedValue(found);
+    const res = await post('find-slots', { query: 'next week please' });
+    expect(res.status).toBe(200);
+    expect(asked()).toEqual([[true, 'est-1', { search: 'ai' }, found]]);
+  });
+
+  test('a time list that fails hands over the error; the customer still gets the retry answer', async () => {
+    const boom = new Error('boom');
+    getAvailableSlots.mockRejectedValueOnce(boom);
+    const res = await fetch(`${base}/${TOKEN}/available-slots`);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'unable to load availability', retry: true });
+    expect(stuckAlert.noteSlotListFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'est-1' }), boom);
+    expect(stuckAlert.noteSlotAnswer).not.toHaveBeenCalled();
+  });
+
+  test('a hold taken and a hold let go hand over the hold', async () => {
+    slotReservation.reserveSlot.mockResolvedValueOnce({ scheduledServiceId: 'ss-1', expiresAt: '2030-01-01T14:15:00.000Z' });
+    const reserved = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+    expect(reserved.status).toBe(201);
+    expect(stuckAlert.noteHoldStarted).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'est-1' }), {
+      scheduledServiceId: 'ss-1', expiresAt: '2030-01-01T14:15:00.000Z',
+    });
+    slotReservation.releaseReservation.mockResolvedValueOnce({ released: true });
+    const released = await fetch(`${base}/${TOKEN}/reserve/${HOLD}`, { method: 'DELETE' });
+    expect(await released.json()).toEqual({ ok: true, released: true });
+    expect(stuckAlert.noteHoldReleased).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'est-1' }), {
+      scheduledServiceId: HOLD, released: true,
+    });
   });
 });

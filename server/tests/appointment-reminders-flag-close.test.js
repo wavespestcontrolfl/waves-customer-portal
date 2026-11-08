@@ -149,6 +149,37 @@ describe('scan marker exclusion', () => {
   });
 });
 
+describe('scan failure flag (the cron body throws on it after its later steps)', () => {
+  test('a failed main scan sets scanFailed; a failed single reminder row does not', async () => {
+    wireDb({
+      appointment_reminders: [
+        chain(), // stranded-confirmation sweep → []
+        chain({ select: jest.fn().mockRejectedValue(new Error('connection lost')) }),
+      ],
+    });
+    const failed = await AppointmentReminders.checkAndSendReminders();
+    expect(failed).toMatchObject({ errors: 1, scanFailed: true });
+
+    // One customer's read fails inside that row's own send try: counted, the scan goes on.
+    wireDb({
+      appointment_reminders: [
+        chain(), // stranded sweep
+        chain({ select: jest.fn().mockResolvedValue([row72()]) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'rem-1' }) }), // current reminder under comms lock
+      ],
+      scheduled_services: [
+        chain({ first: jest.fn().mockResolvedValue({ status: 'confirmed' }) }),
+        chain({ first: jest.fn().mockResolvedValue({ tech_name: null }) }),
+      ],
+      notification_prefs: [chain({ first: jest.fn().mockResolvedValue(null) })],
+      customers: [chain(), chain({ first: jest.fn().mockRejectedValue(new Error('customer read failed')) })],
+    });
+    const rowFailed = await AppointmentReminders.checkAndSendReminders();
+    expect(rowFailed.errors).toBe(1);
+    expect(rowFailed).not.toHaveProperty('scanFailed');
+  });
+});
+
 describe('preference-skip closes the window', () => {
   test('72h preference skip marks reminder_72h_sent (guarded on appointment_time) so the row stops rescanning', async () => {
     const reminderRow = row72();

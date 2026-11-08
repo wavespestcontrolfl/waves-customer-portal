@@ -203,7 +203,7 @@ export default function DashboardPageV2() {
       {/* Alerts stay the first dashboard content, even with AI charts pinned. */}
       {sectionVisible("today") && (
         <TodaySection alerts={alerts?.alerts ?? null} alertsStale={!!errors.alerts}
-          alertsLoading={pending.alerts && !alerts} today={today} staleVisits={staleVisits}
+          alertFailures={alerts?.failures} alertsLoading={pending.alerts && !alerts} today={today} staleVisits={staleVisits}
           errors={errors} pending={pending} onRetry={retryFeed} {...kpiStripProps} />
       )}
 

@@ -302,17 +302,21 @@ function payerNameCorroborates(payerName, customer = {}) {
   return personsOf(payerName).some((person) => personCorroborates(person, customerFirst, customerLast));
 }
 
-// Finite transcription spellings for phone-scoped call identity. Do not
+// Finite transcription spellings for phone-scoped call identity, and for
+// the record's spelling in staff dictation (utils/name-spelling.js). Do not
 // infer identity from edit distance: Aisha and Alisha can share one phone.
 // Payer identity retains its existing, stricter nickname policy.
-const SPOKEN_FIRST_NAME_GROUPS = [
+const SPOKEN_FIRST_NAME_SPELLINGS = [
   ['jason', 'jayson'], ['jennifer', 'jenifer'],
   ['debbie', 'debbi'], ['hannah', 'hanna'],
   // 2026-10-07: a voicemail and a callback minted two leads when the two
   // transcripts spelled one first name with c and with k.
   ['carl', 'karl'], ['eric', 'erik'], ['marc', 'mark'], ['nick', 'nik'],
   ['sara', 'sarah'], ['philip', 'phillip'],
-].map(group => new Set(group.flatMap(firstNameVariants)));
+  // 2026-11-06: staff texts greeted customers by the other spelling.
+  ['alison', 'allison', 'allyson', 'alyson'], ['gena', 'gina'], ['madison', 'madyson', 'maddison'],
+];
+const SPOKEN_FIRST_NAME_GROUPS = SPOKEN_FIRST_NAME_SPELLINGS.map(group => new Set(group.flatMap(firstNameVariants)));
 function spokenFirstNameVariants(name) {
   if (!name) return [];
   const variants = new Set(firstNameVariants(name));
@@ -324,6 +328,11 @@ function spokenFirstNameVariants(name) {
 function sameSpokenFirstName(a, b) {
   return !!b && spokenFirstNameVariants(a).includes(b);
 }
+/** The other listed spellings of one spoken first name, nicknames left out: 'sarah' -> ['sara']. */
+function spokenFirstNameSpellings(name) {
+  const group = SPOKEN_FIRST_NAME_SPELLINGS.find((spellings) => spellings.includes(name));
+  return group ? group.filter((spelling) => spelling !== name) : [];
+}
 
 module.exports = {
   normalizeNamePart,
@@ -334,5 +343,6 @@ module.exports = {
   sameFirstNameUnambiguous,
   sameSpokenFirstName,
   spokenFirstNameVariants,
+  spokenFirstNameSpellings,
   payerNameCorroborates,
 };

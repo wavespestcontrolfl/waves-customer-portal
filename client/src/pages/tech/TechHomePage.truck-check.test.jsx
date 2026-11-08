@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// Truck check (GATE_TRUCK_KIT) in the field workspace: the Tools tile and the
-// Today card follow one status read; gate off or unreadable, neither renders.
+// Truck check in the field workspace: the Tools tile and the
+// Today card follow one status read; until it is read, neither renders.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -61,8 +61,8 @@ describe('truck check in the field workspace', () => {
     expect(mocks.truckKit.reload).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps both away when the gate is off, and the card away when nothing is due', async () => {
-    mocks.truckKit = { loading: false, error: '', data: { enabled: false } };
+  it('keeps both away until the kit is read, and the card away when nothing is due', async () => {
+    mocks.truckKit = { loading: false, error: '', data: null };
     mount('/admin/today/tools');
     expect(await screen.findByRole('button', { name: /Protocols & SOPs/ })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Truck check/ })).not.toBeInTheDocument();

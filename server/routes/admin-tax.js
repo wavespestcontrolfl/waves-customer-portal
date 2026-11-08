@@ -845,9 +845,8 @@ router.put('/filings/:id', async (req, res, next) => {
       if (update.status === 'paid' && update.paid_date === undefined && !current.paid_date) update.paid_date = etDateString();
     }
     await db('tax_filing_calendar').where({ id: req.params.id }).update(update);
-    // GATE_TAX_DEADLINE_BELLS: a marked row's reminder bells are done. The typeof guard keeps a suite
-    // that mocks feature-gates without the reader working: off.
-    if (movesToDone && typeof featureGates.taxDeadlineBellsLive === 'function' && featureGates.taxDeadlineBellsLive()) {
+    // A marked row's reminder bells are done.
+    if (movesToDone) {
       await require('../services/tax-deadline-reminders').closeBellsForFiling(req.params.id);
     }
     res.json({ success: true });

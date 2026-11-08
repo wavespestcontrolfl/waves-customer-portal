@@ -1,5 +1,5 @@
 /**
- * Auto-dispatch 05:00 catch-up (GATE_AUTO_DISPATCH_CATCH_UP, owner 2026-10-26).
+ * Auto-dispatch 05:00 catch-up (owner 2026-10-26).
  *
  * The 04:10 night run is cut off when a deploy restarts the server while it
  * runs (2026-09-03 and 2026-10-26: the run moved nothing, nothing re-ran it,

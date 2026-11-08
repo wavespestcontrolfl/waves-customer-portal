@@ -303,6 +303,9 @@ export default function MobileServiceEditModal({
         >
           {baseName.toUpperCase()}: CHOOSE ONE
         </div>
+        <div className="text-ink-secondary" style={{ fontSize: 14, padding: '0 16px 10px' }}>
+          Changes the visit name only. Use Edit appointment to change how often visits repeat.
+        </div>
         <div>
           {TIER_OPTIONS.map((opt) => {
             const selected = tier === opt.key;

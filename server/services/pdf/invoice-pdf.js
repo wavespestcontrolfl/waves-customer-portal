@@ -17,6 +17,7 @@ const {
 } = require('./field-pdf');
 const { groupInvoiceLinesByProperty, propertyStreetLine } = require('@waves/invoice-property-groups');
 const { invoiceAmountDue } = require('../invoice-helpers');
+const { customerVisibleInvoiceNotes } = require('../invoice-notes');
 const {
   navy: NAVY, // headings, header bar
   ink: INK,
@@ -603,11 +604,12 @@ function generateInvoicePDF(invoice, res) {
   y = totalsBlock(doc, invoice, L, y + 8, W, { highlightTotal: true, paidStamp: isPaid, customer, partPayments: true });
   if (!isSettled) y = previousBalanceBlock(doc, invoice.previous_balance, L, y, W);
 
-  if (invoice.notes) {
+  const customerNotes = customerVisibleInvoiceNotes(invoice.notes);
+  if (customerNotes) {
     y += 10;
     doc.fontSize(PDF_TYPE.caption).font('Helvetica-Bold').fillColor(MUTED).text('NOTES', L, y, { characterSpacing: 1.2 });
     y += 12;
-    doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(BODY).text(invoice.notes, L, y, { width: W, lineGap: 3 });
+    doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(BODY).text(customerNotes, L, y, { width: W, lineGap: 3 });
   }
 
   footerBar(doc, isPaid ? 'Paid — thank you' : isPrepaid ? 'Covered by account credit — thank you' : 'Thank you for choosing Waves');

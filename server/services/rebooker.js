@@ -1233,8 +1233,8 @@ function parseWindow(w) {
   return { start: m[1], end: m[2] };
 }
 
-// Closed days for a series move's projection (GATE_SERIES_MOVE_SKIP_CLOSED_DAYS,
-// owner 2026-10-22 "fix series edit", 2026-10-24 "FIX"), or null when the move
+// Closed days for a series move's projection (owner 2026-10-22 "fix series
+// edit", 2026-10-24 "FIX"), or null when the move
 // keeps its projected dates. Read for:
 //   - a STAFF move (initiatedBy 'admin'): staff moves skip the closed-day
 //     refusal by design (reschedule(): the owner may book his own day off), so
@@ -1252,7 +1252,6 @@ function parseWindow(w) {
 // A failed read projects as before, like every series generator (fail-open).
 async function loadSeriesClosedDays(conn, { initiatedBy = null, deferred = false } = {}) {
   if (initiatedBy !== 'admin' && !deferred) return null;
-  if (!require('../config/feature-gates').seriesMoveSkipClosedDaysLive()) return null;
   const range = [etDateString(), etDateString(addETDays(new Date(), SERIES_CLOSED_DAYS_HORIZON_DAYS))];
   try {
     return { range, ...await require('./scheduling/blackout-dates').getBlackoutLayers(...range, conn) };
@@ -3645,7 +3644,7 @@ class SmartRebooker {
             });
           }
           // …and the closed days the projector moved re-dated visits off
-          // (GATE_SERIES_MOVE_SKIP_CLOSED_DAYS, staff moves), read BEFORE the
+          // (staff moves), read BEFORE the
           // locks: a day closed while this move waited refuses it the same
           // way (makeSeriesProjector assertClosedDaysUnchanged).
           await assertClosedDaysUnchanged(trx);

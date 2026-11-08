@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Bid Desk checklist (GATE_BID_CHECKLIST). One list per bid, built from shared/bid-checklist-templates.cjs when the
+ * Bid Desk checklist. One list per bid, built from shared/bid-checklist-templates.cjs when the
  * operator presses "Start checklist", then edited by hand: custom lines (with the quote or page cite from the
  * solicitation), edits, order, tick and untick, archive. Nothing here sends anything to a buyer, a contractor or an
  * agency. Every function takes the connection (a transaction in the routes), so a start runs under the bid-row lock.

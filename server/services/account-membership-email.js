@@ -1170,9 +1170,14 @@ async function sendMembershipRenewalReminder({
   lastServiceDate = null,
   idempotencyKey,
   termitePlan = false,
+  // A catch-up notice (GATE_MONEY_NOTICE_CATCHUP) can go out after its rung's
+  // day. The email then states the days actually left; daysOut (the rung)
+  // still keys the idempotency key and the metadata.
+  noticeDaysLeft = null,
 } = {}) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+  const shownDays = noticeDaysLeft ?? daysOut;
   // An annual prepay term notice (owner 2026-10-29): the customer pays 12
   // months up front, so the email must not read "Billing cadence: monthly"
   // or print the monthly rate. An empty monthlyRate drops the rate row (the
@@ -1191,8 +1196,8 @@ async function sendMembershipRenewalReminder({
         membershipStatus: 'Active',
         ...prepaidYear,
       }),
-      renewal_days_out: clean(daysOut),
-      renewal_notice_window: daysOut ? `${daysOut} days` : '',
+      renewal_days_out: clean(shownDays),
+      renewal_notice_window: shownDays ? `${shownDays} days` : '',
       last_service_date: displayDate(lastServiceDate),
     },
     idempotencyKey: idempotencyKey || `membership.renewal_reminder:${termId || customerId}:${daysOut || 'notice'}:${stableEventKey(renewalDate)}`,

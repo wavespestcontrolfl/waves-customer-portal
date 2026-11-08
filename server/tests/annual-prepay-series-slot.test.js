@@ -154,25 +154,17 @@ describe('seriesSlotAbsentDays', () => {
 
 describe('seriesSlotPatch', () => {
   const slot = { technicianId: 'tech-1', windowStart: '09:00' };
-  afterEach(() => { delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF; });
 
-  test('hand-off gate off: technician only, no time', () => {
-    expect(seriesSlotPatch(slot, { scheduledDate: '2026-12-15' })).toEqual({ technicianId: 'tech-1', windowStart: null });
-  });
-
-  test('hand-off gate on: technician and time', () => {
-    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+  test('technician and time', () => {
     expect(seriesSlotPatch(slot, { scheduledDate: '2026-12-15' })).toEqual({ technicianId: 'tech-1', windowStart: '09:00' });
   });
 
   test('a day the technician is out drops the technician and keeps the time', () => {
-    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
     const patch = seriesSlotPatch(slot, { scheduledDate: '2026-12-15', absentDays: new Set(['tech-1:2026-12-15']) });
     expect(patch).toEqual({ technicianId: null, windowStart: '09:00' });
   });
 
   test('a timed seed never takes the time', () => {
-    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
     expect(seriesSlotPatch(slot, { scheduledDate: '2026-12-15', timed: true })).toEqual({ technicianId: 'tech-1', windowStart: null });
   });
 });

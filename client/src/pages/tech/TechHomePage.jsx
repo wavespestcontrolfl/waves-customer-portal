@@ -300,11 +300,11 @@ function serviceTechnicianId(service) {
 
 import { serviceWindowLabel, groupServicesIntoStops, currentStopOf, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
 
-// The Tools tile for the truck check (GATE_TRUCK_KIT): present only while the
-// kit answered enabled. Kept out of the page component's decision count.
+// The Tools tile for the truck check: present once the kit has been read.
+// Kept out of the page component's decision count.
 const toolGapsOf = (kit) => (kit ? kit.gaps : undefined);
 function truckCheckTool(kit, onClick) {
-  if (!kit?.enabled) return [];
+  if (!kit) return [];
   return [{ label: 'Truck check', description: 'Confirm what is on your truck', icon: 'truck', onClick }];
 }
 
@@ -422,8 +422,8 @@ export default function TechHomePage({ section = 'today' }) {
   const [stopDetail, setStopDetail] = useState({});
   const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
   const socialPostEnabled = useFeatureFlag('tech_social_enabled', false);
-  // Truck check (GATE_TRUCK_KIT): the Tools tile and the Today card read this
-  // one status; gate off or unreadable, neither renders.
+  // Truck check: the Tools tile and the Today card read this one status;
+  // until it has been read, neither renders.
   const truckKit = useTruckKit();
   const recapCaptureEnabled = useFeatureFlag('pest-recap-v1', false);
   // The tech's station map: a station visit opens the sheet only once the

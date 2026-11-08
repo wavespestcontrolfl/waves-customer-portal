@@ -254,7 +254,6 @@ describe('GET /equipment', () => {
 // PR 2: the kit key rides with the custody columns and the dialog's
 // suggestions come from the truck kit's vocabulary.
 jest.mock('../services/truck-kit', () => ({
-  truckKitEnabled: jest.fn(() => true),
   kitKeyVocabulary: jest.fn(async () => [{ kit_key: 'moisture_meter', label: 'Moisture meter' }]),
   lockTruck: jest.fn(async () => ({ rows: [] })),
   closeTruckBellIfClear: jest.fn(async () => true),
@@ -447,21 +446,9 @@ describe('kit key', () => {
     expect(db.__state.inserted).toBeNull();
   });
 
-  test('kit_key writes need the gate: refused in the dark', async () => {
-    require('../services/truck-kit').truckKitEnabled.mockReturnValueOnce(false);
-    const res = await run('put', '/equipment/:id', { params: { id: TOOL }, body: { kit_key: 'moisture_meter' } });
-    expect(res.statusCode).toBe(400);
-    expect(res.body.error).toMatch(/GATE_TRUCK_KIT/);
-    expect(db.__state.updated).toBeNull();
-  });
-
-  test('GET /kit-keys answers the vocabulary with the gate on, 404 enabled:false with it off', async () => {
+  test('GET /kit-keys answers the vocabulary', async () => {
     const res = await run('get', '/kit-keys');
     expect(res.body).toEqual({ enabled: true, keys: [{ kit_key: 'moisture_meter', label: 'Moisture meter' }] });
-    require('../services/truck-kit').truckKitEnabled.mockReturnValueOnce(false);
-    const dark = await run('get', '/kit-keys');
-    expect(dark.statusCode).toBe(404);
-    expect(dark.body).toEqual({ enabled: false });
   });
 });
 
@@ -515,12 +502,8 @@ describe('receipt_line_id (receipt → equipment link)', () => {
     expect(res.statusCode).toBe(200);
   });
 
-  test('receipt_line_id needs the gate and a uuid; an empty value is ignored', async () => {
-    truckKit.truckKitEnabled.mockReturnValueOnce(false);
-    let res = await run('post', '/equipment', { body: { name: 'Synthetic duster', receipt_line_id: LINE } });
-    expect(res.statusCode).toBe(400);
-    expect(res.body.error).toMatch(/GATE_TRUCK_KIT/);
-    res = await run('post', '/equipment', { body: { name: 'Synthetic duster', receipt_line_id: 'not-a-uuid' } });
+  test('receipt_line_id needs a uuid; an empty value is ignored', async () => {
+    let res = await run('post', '/equipment', { body: { name: 'Synthetic duster', receipt_line_id: 'not-a-uuid' } });
     expect(res.statusCode).toBe(400);
     expect(db.__state.inserted).toBeNull();
     res = await run('post', '/equipment', { body: { name: 'Synthetic duster', receipt_line_id: '' } });

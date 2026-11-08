@@ -711,16 +711,37 @@ function reminderFreezeHours(guardMode, lock24h) {
 // The trailing arguments of loadReminderFreeze for a night run. Gate off they
 // are exactly the pre-gate call (the band alone); gate on they add the
 // explicit lock24h option, so no caller's default ever changes.
-function freezeReadArgs(guardMode, lock24h) {
+// GATE_NIGHT_TOLD_LOCK (`toldLock`, the run's one read, only with lock24h): the
+// option also freezes a visit the customer was told a time for (a known-slot promise).
+// GATE_DAY_ONLY_PROMISE (`dayOnly`, only with toldLock): the option also freezes a visit whose latest promise is a
+// day-only or unknown-window one (opts.anyPromise).
+function freezeReadArgs(guardMode, lock24h, toldLock = false, dayOnly = false) {
   const hours = reminderFreezeHours(guardMode, lock24h);
-  return lock24h === true ? [hours, { lock24h: true }] : [hours];
+  if (lock24h !== true) return [hours];
+  if (toldLock !== true) return [hours, { lock24h: true }];
+  return [hours, dayOnly === true ? { lock24h: true, toldLock: true, anyPromise: true } : { lock24h: true, toldLock: true }];
+}
+
+
+// The run's one read of GATE_NIGHT_TOLD_LOCK (config.nightToldLock) counts only
+// together with config.nightLock24h: a known-slot promise then freezes
+// a visit too (loadReminderFreeze opts.toldLock). Only this config carries it;
+// the rain pass and route-reorder never build it.
+function toldLockOf(config) {
+  return !!config && config.nightLock24h === true && config.nightToldLock === true;
+}
+
+// The run's one read of GATE_DAY_ONLY_PROMISE (config.dayOnlyPromise) counts only together with the told-lock
+// (toldLockOf): a day-only or unknown-window promise then freezes a visit too (loadReminderFreeze opts.anyPromise).
+function dayOnlyOf(config) {
+  return toldLockOf(config) && config.dayOnlyPromise === true;
 }
 
 // How the skip text names the reminder that froze a visit: gate off, flex
 // says 73-hour and tiers 72-hour (the 09-25 wording); gate on, both are the
 // 24-hour reminder. Codes stay the same either way.
-function frozenReminderLabel(guardMode, lock24h) {
-  if (lock24h === true) return '24-hour';
+function frozenReminderLabel(guardMode, lock24h, toldLock = false) {
+  if (lock24h === true) return toldLock === true ? '24-hour or told-time' : '24-hour';
   return guardMode === 'flex' ? '73-hour' : '72-hour';
 }
 
@@ -732,14 +753,14 @@ function frozenReminderLabel(guardMode, lock24h) {
 // freeze/guard-unknown every visit rather than move without the check.
 // Pulled out of runAutoDispatch to keep its complexity budget (see
 // buildPlacementAudit above). Returns { reminderFreeze, anchorMap, neighborMap, degraded }.
-async function loadGuardContext(guardMode, services, nowDate, lock24h = false) {
+async function loadGuardContext(guardMode, services, nowDate, lock24h = false, toldLock = false, dayOnly = false) {
   if (guardMode === 'legacy') {
     return {
       reminderFreeze: null, anchorMap: null, neighborMap: null, degraded: false,
     };
   }
   const ids = services.map((s) => s.id);
-  const reminderFreeze = await routeTiers.loadReminderFreeze(db, ids, nowDate, ...freezeReadArgs(guardMode, lock24h));
+  const reminderFreeze = await routeTiers.loadReminderFreeze(db, ids, nowDate, ...freezeReadArgs(guardMode, lock24h, toldLock, dayOnly));
   // ALL ids, not just change_count>0 — the durable move records (not the
   // best-effort stamp) decide whether a visit has spent drift budget.
   const anchorMap = await routeTiers.loadAnchorMap(db, ids);
@@ -831,14 +852,14 @@ async function flexWindowFor(service, {
 // (flex mode's own-schedule freeze needs hours, not whole days). Returns
 // { window, meta, skip }; `skip` is {code, description} when the visit
 // cannot move this run/window.
-async function resolveDayMoveWindow(guardMode, service, guardCtx, today, nowDate, lock24h = false) {
+async function resolveDayMoveWindow(guardMode, service, guardCtx, today, nowDate, lock24h = false, toldLock = false) {
   if (guardMode === 'legacy') return { window: null, meta: null, skip: null };
   const { reminderFreeze, anchorMap, neighborMap } = guardCtx;
   if (!reminderFreeze || reminderFreeze.failed) {
     return { window: null, meta: null, skip: { code: 'REMINDER_STATUS_UNKNOWN', description: 'Reminder-sent status unreadable — frozen (fail closed)' } };
   }
   if (reminderFreeze.frozen.has(service.id)) {
-    return { window: null, meta: null, skip: { code: 'REMINDER_SENT_FROZEN', description: `${frozenReminderLabel(guardMode, lock24h)} reminder already sent — visit is frozen` } };
+    return { window: null, meta: null, skip: { code: 'REMINDER_SENT_FROZEN', description: `${frozenReminderLabel(guardMode, lock24h, toldLock)} reminder already sent — visit is frozen` } };
   }
   if (guardMode === 'flex') {
     return flexWindowFor(service, {
@@ -882,14 +903,14 @@ async function resolveDayMoveWindow(guardMode, service, guardCtx, today, nowDate
 // runAutoDispatch's pass-2 loop for the same complexity-budget reason as
 // resolveDayMoveWindow. Returns { window, meta, skip }; skip.degraded flags
 // a read failure the caller must fold into the run's health status.
-async function recheckDayMoveWindow(guardMode, service, meta, nowDate, lock24h = false) {
+async function recheckDayMoveWindow(guardMode, service, meta, nowDate, lock24h = false, toldLock = false, dayOnly = false) {
   if (guardMode === 'legacy') return { window: null, meta: null, skip: null };
-  const applyFreeze = await routeTiers.loadReminderFreeze(db, [service.id], nowDate, ...freezeReadArgs(guardMode, lock24h));
+  const applyFreeze = await routeTiers.loadReminderFreeze(db, [service.id], nowDate, ...freezeReadArgs(guardMode, lock24h, toldLock, dayOnly));
   if (applyFreeze.failed) {
     return { window: null, meta: null, skip: { code: 'REMINDER_STATUS_UNKNOWN', description: 'Reminder-sent status unreadable at apply time — frozen (fail closed)', degraded: true } };
   }
   if (applyFreeze.frozen.has(service.id)) {
-    return { window: null, meta: null, skip: { code: 'REMINDER_SENT_FROZEN', description: `${frozenReminderLabel(guardMode, lock24h)} reminder was sent during the run — visit is frozen` } };
+    return { window: null, meta: null, skip: { code: 'REMINDER_SENT_FROZEN', description: `${frozenReminderLabel(guardMode, lock24h, toldLock)} reminder was sent during the run — visit is frozen` } };
   }
   const todayNow = etDateString(nowDate);
   if (guardMode === 'flex') {
@@ -1197,7 +1218,7 @@ async function evaluateServiceForRun(service, run) {
 
   // ── Day-move guard (only when a guard mode is active) ──
   const guard = dayMoveGuarded(guardMode, service)
-    ? await resolveDayMoveWindow(guardMode, service, run.guardCtx, run.today, run.nowDate, config.nightLock24h === true)
+    ? await resolveDayMoveWindow(guardMode, service, run.guardCtx, run.today, run.nowDate, config.nightLock24h === true, toldLockOf(config))
     : { window: null, meta: null, skip: null };
   if (guard.skip) return logSkip(run, service, guardSkipReason(guard.skip));
 
@@ -1338,7 +1359,7 @@ function movedDescription(appliedAudit) {
 async function recheckPlannedMove(pm, run) {
   if (!dayMoveGuarded(run.guardMode, pm.service)) return null;
   const recheckNow = new Date();
-  const recheck = await recheckDayMoveWindow(run.guardMode, pm.service, pm.ctx.tierMeta, recheckNow, run.config.nightLock24h === true);
+  const recheck = await recheckDayMoveWindow(run.guardMode, pm.service, pm.ctx.tierMeta, recheckNow, run.config.nightLock24h === true, toldLockOf(run.config), dayOnlyOf(run.config));
   if (recheck.skip) {
     if (recheck.skip.degraded) run.guardReadDegraded = true;
     return recheck.skip;
@@ -1702,7 +1723,7 @@ async function runAutoDispatch(opts = {}) {
     // (flex's) series neighbors, one query pair at most. FAIL CLOSED — a
     // failed read freezes/guard-unknowns every visit rather than moving
     // without the check.
-    run.guardCtx = await loadGuardContext(run.guardMode, services, nowDate, config.nightLock24h === true);
+    run.guardCtx = await loadGuardContext(run.guardMode, services, nowDate, config.nightLock24h === true, toldLockOf(config), dayOnlyOf(config));
     run.guardReadDegraded = run.guardCtx.degraded;
     await loadRunMoveCounts(run, services);
 
@@ -1765,4 +1786,4 @@ async function runAutoDispatch(opts = {}) {
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
 }
 
-module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule, standingConflict } };
+module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule, standingConflict, dayOnlyOf, freezeReadArgs } };

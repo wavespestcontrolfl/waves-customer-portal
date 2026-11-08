@@ -204,7 +204,8 @@ describe('needs-a-person notice', () => {
         notice.collect(bucket, { ...visit(`s${n}`, '2026-11-26'), first_name: 'Pat', last_name: 'Example' }, kind, conflict);
       }
     }
-    await notice.raiseNotices(bucket);
+    // Dated within 14 days of the run, so each one rings (a farther conflict is a quiet list line).
+    await notice.raiseNotices(bucket, { nowDate: new Date('2026-11-20T12:00:00Z') });
     expect(raiseAdminAlert).toHaveBeenCalledTimes(n);
     for (const [category, spec] of raiseAdminAlert.mock.calls) {
       expect(category).toBe('schedule_conflict');
@@ -238,7 +239,7 @@ describe('needs-a-person notice', () => {
 });
 
 
-// D1 (GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET; owner 2026-10-22): a conflict
+// D1 (owner 2026-10-22): a conflict
 // more than 14 days out does not ring; one standing Activity row lists the
 // run's far conflicts and retires on a run with none.
 describe('needs-a-person notice: far double bookings are listed quietly until 14 days out', () => {
@@ -247,7 +248,6 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
   const NOW = new Date('2026-11-01T12:00:00Z'); // the last date that rings: 2026-11-15
   const visit = (id, date) => ({ id, customer_id: `c-${id}`, scheduled_date: date });
   beforeEach(() => {
-    process.env.GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET = 'true';
     raiseAdminAlert.mockClear();
     deliverOpsDigest.mockClear();
     retireIfClean.mockClear();
@@ -256,7 +256,6 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     audit.standingNoticeKeys.mockResolvedValue(new Set());
     audit.recentBudgetKeys.mockResolvedValue(new Set());
   });
-  afterEach(() => { delete process.env.GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET; });
 
   test('near conflicts ring; far ones are lines on one Activity row (fyi, never the bell)', async () => {
     const bucket = new Map();
@@ -368,15 +367,7 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     expect(await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true })).toBe(1);
     expect(raiseAdminAlert.mock.calls[0][2].dedupeKey).toBe('auto-dispatch-needs-person:far:2026-11-20');
     expect(deliverOpsDigest).not.toHaveBeenCalled();
-  });
-
-  test('gate off: a far conflict rings as an ordinary notice, and any list left from before retires', async () => {
-    delete process.env.GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET;
-    const bucket = new Map();
-    notice.collect(bucket, visit('far', '2026-11-20'), 'no_slot', { kind: 'overlap' });
-    expect(await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true })).toBe(1);
-    expect(raiseAdminAlert.mock.calls[0][2].dedupeKey).toBe('auto-dispatch-needs-person:far:2026-11-20');
-    expect(deliverOpsDigest).not.toHaveBeenCalled();
+    // Any list left from before retires.
     expect(retireIfClean).toHaveBeenCalledTimes(1);
   });
 
@@ -419,15 +410,15 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     expect(await notice.farListedVisitIds(conn(null, true))).toBeNull();
   });
 
-  test('gate off with a list standing: a conflict whose notice could not be written stays listed; then the list retires', async () => {
-    delete process.env.GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET;
+  test('no Activity feed with a list standing: a conflict whose notice could not be written stays listed; then the list retires', async () => {
+    inAppEnabled.mockReturnValue(false);
     const listSpy = jest.spyOn(notice, 'farListedVisitIds').mockResolvedValue(['held']);
     try {
       audit.ringsLeft.mockResolvedValue(0);
       const bucket = new Map();
       notice.collect(bucket, visit('held', '2026-11-20'), 'no_slot', { kind: 'overlap' });
       expect(await notice.raiseNotices(bucket, { nowDate: NOW, scanComplete: true })).toBe(0);
-      // Gate off, every conflict rings when the allowance allows: none is "2 weeks out".
+      // No Activity feed, every conflict rings when the allowance allows: none is "2 weeks out".
       expect(deliverOpsDigest.mock.calls[0][0]).toMatchObject({
         itemKeys: ['held:2026-11-20'],
         headline: 'Schedule — 1 double booking not alerted yet',
@@ -445,8 +436,8 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     }
   });
 
-  test('gate off with a list standing: an internal test customer\'s conflict does not keep it standing', async () => {
-    delete process.env.GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET;
+  test('no Activity feed with a list standing: an internal test customer\'s conflict does not keep it standing', async () => {
+    inAppEnabled.mockReturnValue(false);
     const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
     const listSpy = jest.spyOn(notice, 'farListedVisitIds').mockResolvedValue(['demo']);
     try {
@@ -460,8 +451,8 @@ describe('needs-a-person notice: far double bookings are listed quietly until 14
     }
   });
 
-  test('gate off with no list standing: a notice that could not be written starts no list', async () => {
-    delete process.env.GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET;
+  test('no Activity feed and no list standing: a notice that could not be written starts no list', async () => {
+    inAppEnabled.mockReturnValue(false);
     const listSpy = jest.spyOn(notice, 'farListedVisitIds').mockResolvedValue([]);
     try {
       audit.ringsLeft.mockResolvedValue(0);

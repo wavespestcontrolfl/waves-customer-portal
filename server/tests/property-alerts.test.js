@@ -23,7 +23,7 @@ const {
   runPropertyAlertsSweep,
   _test: {
     triggeredRainAreas, rainRuleCandidates, reassuranceRuleCandidates,
-    candidatePassesCaps, deliverAlert, RAIN_ALERT_INCHES, CHINCH_SEASON_MONTHS,
+    candidatePassesCaps, deliverAlert, RAIN_ALERT_INCHES, CHINCH_SEASON_MONTHS, latePlanNamesNoPassedDay,
   },
 } = require('../services/property-alerts');
 
@@ -81,6 +81,7 @@ beforeEach(() => {
   getAreaRainfall.mockImplementation(async () => null);
   NotificationService.notifyCustomer.mockImplementation(async () => ({ id: 'note-1' }));
   delete process.env.GATE_PROPERTY_ALERTS;
+  delete process.env.GATE_WATERING_CATCHUP;
   appPlanEnabled.mockReturnValue(false);
 });
 
@@ -295,6 +296,39 @@ describe('sweep gate', () => {
     expect(knex.__inserts).toHaveLength(0);
   });
 
+  test('a failed rule read still delivers the other rules, then fails the sweep (job_health sees it)', async () => {
+    process.env.GATE_PROPERTY_ALERTS = 'true';
+    const knex = knexFor({
+      'service_records as sr': [{ service_record_id: 'sr-1', customer_id: 'cust-1', service_type: 'Lawn Care Program', service_date: '2026-07-06' }],
+      service_findings: [{ service_record_id: 'sr-1', category: 'no_activity', severity: 'info' }],
+      customer_alerts: [],
+      // The rain rule's first read fails.
+      get lawn_water_areas() { throw new Error('connection lost'); },
+    });
+    await expect(runPropertyAlertsSweep({ now: JULY_NOW, knex })).rejects.toThrow('property-alerts sweep: 1 rule(s) failed (rainRuleCandidates)');
+    expect(NotificationService.notifyCustomer).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyCustomer.mock.calls[0][4].dedupeKey).toBe('lawn_inspection_reassurance:sr-1');
+  });
+
+  test('gate off: a failed rule read also fails the sweep, with nothing delivered', async () => {
+    const knex = knexFor({ get lawn_water_areas() { throw new Error('connection lost'); } });
+    await expect(runPropertyAlertsSweep({ now: JAN_NOW, knex })).rejects.toThrow('property-alerts sweep: 1 rule(s) failed (rainRuleCandidates)');
+    expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
+  });
+
+  test("one candidate's failed delivery is counted as skipped and does not fail the sweep", async () => {
+    process.env.GATE_PROPERTY_ALERTS = 'true';
+    const knex = knexFor({
+      lawn_water_areas: [{ id: 'area-1', rain_adjustment_factor: 1 }],
+      'customers as c': [{ id: 'cust-1', lawn_water_area_id: 'area-1' }],
+      'service_records as sr': [],
+      customer_alerts: [],
+    });
+    getAreaRainfall.mockImplementation(async () => 3.0);
+    NotificationService.notifyCustomer.mockRejectedValue(new Error('push down'));
+    await expect(runPropertyAlertsSweep({ now: JAN_NOW, knex })).resolves.toMatchObject({ delivered: 0, skipped: 1 });
+  });
+
   test('gate on: candidates flow through caps to delivery', async () => {
     process.env.GATE_PROPERTY_ALERTS = 'true';
     const knex = knexFor({
@@ -439,9 +473,9 @@ describe('saved weekly watering plan delivery', () => {
     expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
   });
 
-  test('a failed plan reader suppresses the legacy irrigation alert', async () => {
+  test('a failed plan reader suppresses the legacy irrigation alert, then fails the sweep', async () => {
     loadCustomerWateringPlan.mockRejectedValue(new Error('snapshot unavailable'));
-    expect((await runPropertyAlertsSweep({ now: MONDAY, knex: knexFor(tables) })).delivered).toBe(0);
+    await expect(runPropertyAlertsSweep({ now: MONDAY, knex: knexFor(tables) })).rejects.toThrow('property-alerts sweep: 1 rule(s) failed (weeklyPlanCandidates)');
     expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
   });
 
@@ -457,6 +491,94 @@ describe('saved weekly watering plan delivery', () => {
     const knex = knexFor({ ...tables, customer_alerts: [{ customer_id: 'cust-1', dedupe_key: 'irrigation_weekly_plan:2026-08-30',
       rule_key: 'irrigation_weekly_plan', fired_at: '2026-08-31T14:05:09Z' }] });
     expect((await runPropertyAlertsSweep({ now: MONDAY, knex })).delivered).toBe(1);
+  });
+
+  test('last week\'s push sent late (Wednesday) does not cap this Monday', async () => {
+    const knex = knexFor({ ...tables, customer_alerts: [{ customer_id: 'cust-1', dedupe_key: 'irrigation_weekly_plan:2026-08-30',
+      rule_key: 'irrigation_weekly_plan', fired_at: '2026-09-02T14:05:09Z' }] });
+    expect((await runPropertyAlertsSweep({ now: MONDAY, knex })).delivered).toBe(1);
+  });
+
+  // GATE_WATERING_CATCHUP (owner 2026-11-06 "jobs 1-6"): the daily 10:05 run may
+  // deliver the week's push Tuesday or Wednesday, only for a plan that cannot name a
+  // watering day that has passed. The ledger key blocks a second push.
+  describe('late delivery (GATE_WATERING_CATCHUP)', () => {
+    const TUESDAY = new Date('2026-09-08T14:05:00Z');
+    const WEDNESDAY = new Date('2026-09-09T14:05:00Z');
+    const THURSDAY = new Date('2026-09-10T14:05:00Z');
+    // A one-day order: "your permitted watering day" may already be gone.
+    const ONE_DAY_PLAN = { ...PLAN, legalMaxEvents: 1, events: 1 };
+    // Irrigation not permitted: "no lawn watering", names no day.
+    const NO_WATERING_PLAN = { ...PLAN, legalMaxEvents: 0, events: 0, title: 'This week: no lawn watering' };
+
+    test('gate off: a Tuesday run still never delivers, even a plan that names no day', async () => {
+      loadCustomerWateringPlan.mockResolvedValue(NO_WATERING_PLAN);
+      const knex = knexFor(tables);
+      expect((await runPropertyAlertsSweep({ now: TUESDAY, knex })).delivered).toBe(0);
+      expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
+      expect(knex.__inserts).toHaveLength(0);
+    });
+
+    test('gate on: a one-day-order plan is not pushed on Tuesday (its day may be gone), and no cap is used', async () => {
+      process.env.GATE_WATERING_CATCHUP = 'true';
+      loadCustomerWateringPlan.mockResolvedValue(ONE_DAY_PLAN);
+      const knex = knexFor(tables);
+      const summary = await runPropertyAlertsSweep({ now: TUESDAY, knex });
+      expect(summary.delivered).toBe(0);
+      expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
+      expect(knex.__inserts).toHaveLength(0);
+      // The same plan still goes out on Monday, exactly as before.
+      expect((await runPropertyAlertsSweep({ now: MONDAY, knex: knexFor(tables) })).delivered).toBe(1);
+    });
+
+    test('gate on: a plan that names no day goes out once on Tuesday; Wednesday\'s run finds the ledger row and sends nothing', async () => {
+      process.env.GATE_WATERING_CATCHUP = 'true';
+      jest.setSystemTime(TUESDAY);
+      loadCustomerWateringPlan.mockResolvedValue(NO_WATERING_PLAN);
+      const knex = knexFor(tables);
+      expect((await runPropertyAlertsSweep({ now: TUESDAY, knex })).delivered).toBe(1);
+      expect(NotificationService.notifyCustomer).toHaveBeenCalledTimes(1);
+      const args = NotificationService.notifyCustomer.mock.calls[0];
+      expect(args.slice(0, 4)).toEqual(['cust-1', 'lawn_health', NO_WATERING_PLAN.title, NO_WATERING_PLAN.notificationBody]);
+      expect(args[4].dedupeKey).toBe('irrigation_weekly_plan:2026-09-06');
+      expect(await args[4].pushOptions.shouldContinue()).toBe(true);
+      // The provider-leg re-check applies the same rule: a plan that now names a day stops.
+      loadCustomerWateringPlan.mockResolvedValue(ONE_DAY_PLAN);
+      expect(await args[4].pushOptions.shouldContinue()).toBe(false);
+      loadCustomerWateringPlan.mockResolvedValue(NO_WATERING_PLAN);
+
+      const ledger = knex.__inserts.map(({ row }) => ({ ...row, fired_at: TUESDAY.toISOString() }));
+      expect(ledger).toHaveLength(1);
+      expect(ledger[0]).toMatchObject({ customer_id: 'cust-1', rule_key: 'irrigation_weekly_plan', dedupe_key: 'irrigation_weekly_plan:2026-09-06' });
+      jest.setSystemTime(WEDNESDAY);
+      const wednesday = await runPropertyAlertsSweep({ now: WEDNESDAY, knex: knexFor({ ...tables, customer_alerts: ledger }) });
+      expect(wednesday).toMatchObject({ delivered: 0, capped: 1 });
+      expect(NotificationService.notifyCustomer).toHaveBeenCalledTimes(1);
+    });
+
+    test('gate on: Thursday never delivers', async () => {
+      process.env.GATE_WATERING_CATCHUP = 'true';
+      loadCustomerWateringPlan.mockResolvedValue(NO_WATERING_PLAN);
+      const knex = knexFor(tables);
+      expect((await runPropertyAlertsSweep({ now: THURSDAY, knex })).delivered).toBe(0);
+      expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
+      expect(knex.__inserts).toHaveLength(0);
+    });
+
+    test('the safety rule: only a plan with no permitted day, or every day permitted with a day left per run', () => {
+      const wed = WEDNESDAY; // plan week runs to Sunday 2026-09-13: Wed..Sun = 5 days left
+      const plan = (over) => ({ ...PLAN, validThrough: '2026-09-13', ...over });
+      expect(latePlanNamesNoPassedDay(plan({ legalMaxEvents: 0, events: 0 }), wed)).toBe(true);
+      expect(latePlanNamesNoPassedDay(plan({ legalMaxEvents: 7, events: 2 }), wed)).toBe(true);
+      expect(latePlanNamesNoPassedDay(plan({ legalMaxEvents: 7, events: 5 }), wed)).toBe(true);
+      expect(latePlanNamesNoPassedDay(plan({ legalMaxEvents: 7, events: 6 }), wed)).toBe(false);
+      for (const days of [1, 2, 3, 6]) expect(latePlanNamesNoPassedDay(plan({ legalMaxEvents: days, events: 0 }), wed)).toBe(false);
+      // Missing facts fail closed.
+      expect(latePlanNamesNoPassedDay(plan({}), wed)).toBe(false);
+      expect(latePlanNamesNoPassedDay(plan({ legalMaxEvents: null, events: 0 }), wed)).toBe(false);
+      expect(latePlanNamesNoPassedDay(plan({ legalMaxEvents: 7, events: null }), wed)).toBe(false);
+      expect(latePlanNamesNoPassedDay(plan({ legalMaxEvents: 7, events: 1, validThrough: null }), wed)).toBe(false);
+    });
   });
 
   test('the app gate off retains the established rain rule', async () => {

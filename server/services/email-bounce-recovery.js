@@ -795,6 +795,13 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
   }
 }
 
+// Is this message's stored copy never re-sent? The shared no-replay categories, or a day-only appointment email the
+// delayed-send chokepoint no longer clears (time-promise.js dayOnlyStoredCopyStale): same skip, same status, nothing re-sent.
+async function storedCopyRefusedFor(bouncedMessage) {
+  if (staleStoredCopyReason(parseJsonArray(bouncedMessage.categories))) return true;
+  return require('./time-promise').dayOnlyStoredCopyStale(bouncedMessage);
+}
+
 /**
  * Everything after the one-shot ledger row exists: decide, stage the recovery row, send. Shared by
  * the bounce webhook (attemptRecovery) and the held-recovery sweep (retryHeldRecoveries), so a
@@ -823,7 +830,7 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     averageCopy: parseJsonArray(bouncedMessage.categories).includes(ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY),
     moveNoticeCopy: parseJsonArray(bouncedMessage.categories).includes(MOVE_NOTICE_CATEGORY),
     carbonCopy: parseJsonArray(bouncedMessage.categories).includes(CARBON_COPY_CATEGORY),
-    storedCopyRefused: !!staleStoredCopyReason(parseJsonArray(bouncedMessage.categories)),
+    storedCopyRefused: await storedCopyRefusedFor(bouncedMessage),
     min: minConfidence(),
   });
 

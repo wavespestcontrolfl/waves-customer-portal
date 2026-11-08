@@ -2337,6 +2337,13 @@ describe('ReviewPhase — missing-contact capture wiring', () => {
     expect(screen.queryByTestId('contact-gap-fields')).not.toBeInTheDocument();
   });
 
+  it('shows the first application amount on the confirm step, and nothing when none is passed', () => {
+    const { rerender } = render(<ReviewPhase {...baseProps} firstVisitAmount={60.8} />);
+    expect(screen.getByTestId('confirm-first-visit-amount')).toHaveTextContent('First application: $60.80');
+    rerender(<ReviewPhase {...baseProps} firstVisitAmount={null} />);
+    expect(screen.queryByTestId('confirm-first-visit-amount')).not.toBeInTheDocument();
+  });
+
   it('disables Confirm via confirmDisabled the same way an existing disabling condition does', () => {
     render(<ReviewPhase {...baseProps} confirmDisabled />);
     expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeDisabled();
@@ -2367,6 +2374,14 @@ describe('SuccessCard — already-accepted retry', () => {
     // Anchor + its SVG each carry the label — assert at least the link.
     expect(screen.getAllByLabelText('Download on the App Store').length).toBeGreaterThan(0);
     expect(screen.getAllByLabelText('Get it on Google Play').length).toBeGreaterThan(0);
+  });
+
+  it('the booked pay-link card names the first visit day and window; a card with no committed visit does not', () => {
+    const payInvoice = { success: true, nextStep: 'pay_invoice', invoicePayUrl: 'https://example.test/pay/abc' };
+    const { rerender } = render(<SuccessCard acceptResult={{ ...payInvoice, reservationCommitted: true }} firstVisit="Mon, Nov 9, 9:00-11:00 AM" />);
+    expect(screen.getByText('Your first visit: Mon, Nov 9, 9:00-11:00 AM.')).toBeInTheDocument();
+    rerender(<SuccessCard acceptResult={{ ...payInvoice, reservationCommitted: false }} firstVisit="Mon, Nov 9, 9:00-11:00 AM" />);
+    expect(screen.queryByText(/Your first visit:/)).not.toBeInTheDocument();
   });
 
   it('does not promise a booking-link text for an already-accepted one-time retry, but keeps the booking button', () => {

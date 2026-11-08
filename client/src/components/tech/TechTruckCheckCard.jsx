@@ -2,10 +2,10 @@ import { Link } from 'react-router-dom';
 import { Truck } from 'lucide-react';
 import { lastCheckedLabel } from './useTruckKit';
 
-// Today column card (GATE_TRUCK_KIT): shown only while a truck check is due,
+// Today column card: shown only while a truck check is due,
 // so a checked truck costs the technician nothing on the Today page.
 export default function TechTruckCheckCard({ kit, base, visitSearch = '' }) {
-  if (!kit?.enabled || !kit.truck || !kit.due) return null;
+  if (!kit?.truck || !kit.due) return null;
   const count = kit.kit?.length || 0;
   return (
     <section className="tf-card" aria-label="Truck check">

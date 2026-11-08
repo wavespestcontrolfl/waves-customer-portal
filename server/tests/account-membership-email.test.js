@@ -536,6 +536,35 @@ describe('sendMembershipRenewalReminder (annual prepay year-end notice)', () => 
     expect(sent.payload.billing_cadence).toBe('monthly');
     expect(sent.payload.monthly_rate).toBe('$159.00');
   });
+
+  test('a catch-up notice states the days actually left; the rung keeps the idempotency key', async () => {
+    setDbQueues({ customers: [chain({ first: customer() }), chain({ first: customer() })] });
+
+    await AccountMembershipEmail.sendMembershipRenewalReminder({
+      customerId: 'cust-1',
+      renewalDate: '2027-01-05',
+      daysOut: 7,
+      termId: 'term-1',
+      noticeDaysLeft: 4,
+    });
+
+    const sent = EmailTemplates.sendTemplate.mock.calls[0][0];
+    expect(sent.payload.renewal_notice_window).toBe('4 days');
+    expect(sent.idempotencyKey).toBe('membership.renewal_reminder:term-1:7:2027-01-05');
+  });
+
+  test('without noticeDaysLeft the notice window is the rung, as before', async () => {
+    setDbQueues({ customers: [chain({ first: customer() }), chain({ first: customer() })] });
+
+    await AccountMembershipEmail.sendMembershipRenewalReminder({
+      customerId: 'cust-1',
+      renewalDate: '2027-01-05',
+      daysOut: 7,
+      termId: 'term-1',
+    });
+
+    expect(EmailTemplates.sendTemplate.mock.calls[0][0].payload.renewal_notice_window).toBe('7 days');
+  });
 });
 
 describe('sendTermiteRenewalReminder (45/30-day termite annual renewal notice, slice 5)', () => {

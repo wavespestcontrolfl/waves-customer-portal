@@ -827,6 +827,56 @@ describe('runWeeklyIrrigationEmailSweep', () => {
       db.raw = originalRaw;
     }
   });
+
+  // GATE_WATERING_CATCHUP: the Monday catch-up run (irrigation-weekly-catchup.js)
+  // passes skipDeliveredBeforeFetch. The customer-week record (email_messages
+  // trigger_event_id irrigation.weekly:<customer>:<weekEnding>) blocks every repeat.
+  describe('Monday catch-up run (skipDeliveredBeforeFetch)', () => {
+    const CATCH_UP_NOW = new Date('2026-07-06T09:01:00-04:00');
+    const SENT_RECORD = { status: 'sent', categories: ['irrigation', 'irrigation_weekly'], provider_message_id: 'sg-1', queued_at: '2026-07-06T11:00:00Z', updated_at: '2026-07-06T11:00:05Z', error_message: null };
+    const emailRecord = (rows) => db.mockImplementation((table) => makeBuilder(
+      String(table).startsWith('customers') ? { rows: [CANDIDATE] } : (table === 'email_messages' ? { rows } : {}),
+    ));
+    beforeEach(() => { isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); });
+
+    test('a customer the killed sweep already emailed: skipped before any weather or forecast call, nothing sent', async () => {
+      emailRecord([SENT_RECORD]);
+      const summary = await runWeeklyIrrigationEmailSweep({ now: CATCH_UP_NOW, skipDeliveredBeforeFetch: true });
+      expect(summary).toMatchObject({ sent: 0, deduped: 1, attempted: 0 });
+      expect(fetchServiceWeekWeather).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    test('without the option (the 7:00 tick) the same record still blocks the repeat send, after the weather call as today', async () => {
+      emailRecord([SENT_RECORD]);
+      const summary = await runWeeklyIrrigationEmailSweep({ now: CATCH_UP_NOW });
+      expect(summary).toMatchObject({ sent: 0, deduped: 1 });
+      expect(fetchServiceWeekWeather).toHaveBeenCalledTimes(1);
+      expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    test('an in-flight or unreadable record is not proof of a send: the customer takes the normal path and its own stop', async () => {
+      emailRecord([{ ...SENT_RECORD, status: 'queued', updated_at: new Date().toISOString(), queued_at: new Date().toISOString() }]);
+      const summary = await runWeeklyIrrigationEmailSweep({ now: CATCH_UP_NOW, skipDeliveredBeforeFetch: true });
+      expect(fetchServiceWeekWeather).toHaveBeenCalledTimes(1);
+      expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+      expect(summary.plan.claimed_elsewhere).toBe(1);
+    });
+
+    test('a customer the sweep never reached gets one email, on the same send key the 7:00 run uses', async () => {
+      emailRecord([]);
+      const caughtUp = await runWeeklyIrrigationEmailSweep({ now: CATCH_UP_NOW, skipDeliveredBeforeFetch: true });
+      expect(caughtUp).toMatchObject({ sent: 1, deduped: 0 });
+      expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+      await runWeeklyIrrigationEmailSweep({ now: NOW });
+      const [catchUpCall, tickCall] = EmailTemplateLibrary.sendTemplate.mock.calls.map(([args]) => args);
+      // One customer-week key: the template library's idempotency dedupe sees the
+      // catch-up and the 7:00 run (and any later catch-up) as the same email.
+      expect(catchUpCall.idempotencyKey).toBe(tickCall.idempotencyKey);
+      expect(catchUpCall.triggerEventId).toBe(`irrigation.weekly:cust-1:${WEEK_ENDING}`);
+    });
+  });
 });
 
 describe('findLawnEmailAudienceGaps', () => {

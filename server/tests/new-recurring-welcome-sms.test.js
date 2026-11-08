@@ -480,6 +480,32 @@ describe('new recurring welcome SMS', () => {
     expect(requeue.data.status).toBe('active');
   });
 
+  test('a failed queue scan rejects, so the cron records the failure in job_health', async () => {
+    mockDb.schema.hasTable.mockRejectedValueOnce(new Error('connection lost'));
+
+    await expect(service.processDueWelcomes()).rejects.toThrow('connection lost');
+    expect(mockLogger.error).toHaveBeenCalledWith('[new-recurring-welcome] queue scan failed: connection lost');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test("one sequence's failed delivery is counted and does not reject the sweep", async () => {
+    mockDueSequences = [{
+      id: 'seq-1',
+      customer_id: 'customer-1',
+      step: 0,
+      metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+    }];
+    mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone: '(941) 555-1234' };
+    mockScheduledServiceRow = { status: 'pending' };
+    mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
+    mockSendCustomerMessage.mockRejectedValue(new Error('provider exploded'));
+
+    const results = await service.processDueWelcomes();
+
+    expect(results.errors).toBe(1);
+    expect(results.sent).toBe(0);
+  });
+
   test('processDueWelcomes treats a suppression sentinel (sent:true, template-disabled sid) as not sent — released, attempt refunded, never completed', async () => {
     mockDueSequences = [{
       id: 'seq-1',

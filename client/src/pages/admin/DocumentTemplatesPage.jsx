@@ -182,6 +182,36 @@ function customerName(customer) {
   return fullName || customer?.companyName || customer?.email || customer?.phone || "Unnamed customer";
 }
 
+// A generated link belongs to the customer and inputs it was made for. The
+// key lets the page hide it, and refuse to copy it, the moment any of them change.
+function documentLinkKey({ customerId, templateKey, propertyAddress, values, allowUnresolved }) {
+  return JSON.stringify([customerId || "", templateKey || "", (propertyAddress || "").trim(), values, Boolean(allowUnresolved)]);
+}
+
+const LINK_CHANGED_MESSAGE = "The customer or document changed while the link was being created. Create the link again.";
+
+// The link on screen, only while the inputs still match the ones it was made for.
+function liveLinkUrl(link, currentKey) {
+  return link && link.key === currentKey ? link.url : "";
+}
+
+function linkReadyLabel(link) {
+  return link.name ? `Document link ready for ${link.name}` : "Document link ready";
+}
+
+// Applies a Create link response. A response from an older request, or one made for inputs that have
+// since changed, shows no link: it says so instead.
+function applyLinkResponse(data, made, latest, set) {
+  if (made.request !== latest.request) return;
+  if (made.key !== latest.key) {
+    set.error(LINK_CHANGED_MESSAGE);
+    return;
+  }
+  set.link({ url: data.signingUrl || data.contract?.signingUrl || "", key: made.key, name: made.name });
+  set.preview(data.rendered || null);
+  set.toast("Document link created");
+}
+
 function customerSearchLabel(customer) {
   if (!customer) return "";
   return [customerName(customer), customer.address, customer.phone, customer.email].filter(Boolean).join(" · ");
@@ -255,7 +285,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
   const [sendValues, setSendValues] = useState("");
   const [sendAllowUnresolved, setSendAllowUnresolved] = useState(false);
   const [sendPropertyAddress, setSendPropertyAddress] = useState("");
-  const [signingUrl, setSigningUrl] = useState("");
+  const [signingLink, setSigningLink] = useState(null);
   const [bulkAudience, setBulkAudience] = useState("active_pest");
   const [bulkGuideType, setBulkGuideType] = useState("pest");
   const [bulkChannel, setBulkChannel] = useState("sms");
@@ -273,6 +303,8 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
   const listPendingRef = useRef(null);
   const detailRequestRef = useRef(0);
   const bulkPreviewRequestRef = useRef(0);
+  const linkRequestRef = useRef(0);
+  const linkKeyRef = useRef("");
   const lastLoadedCategoryRef = useRef(null);
   const newModeRef = useRef(newMode);
   newModeRef.current = newMode;
@@ -329,7 +361,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
         setTemplateDraft(EMPTY_TEMPLATE);
         setVersionDraft(EMPTY_VERSION);
         setPreview(null);
-        setSigningUrl("");
+        setSigningLink(null);
         invalidateBulkPreview();
         setBulkResult(null);
         setDetailError("");
@@ -364,7 +396,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
       setTemplateDraft((draft) => (keepUnsaved === "template" && saved ? keepUnsavedEdits(saved.template, draft, nextTemplate) : nextTemplate));
       setVersionDraft((draft) => (keepUnsaved === "version" && saved ? keepUnsavedEdits(saved.version, draft, next.version) : next.version));
       setPreview(null);
-      setSigningUrl("");
+      setSigningLink(null);
       invalidateBulkPreview();
       setBulkResult(null);
       if (nextTemplate.templateKey?.includes("lawn")) {
@@ -438,6 +470,15 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
 
   const activeVersion = detail?.template?.activeVersion;
   const selectedCustomerId = selectedCustomer?.id || sendCustomerId.trim();
+  const currentLinkKey = documentLinkKey({
+    customerId: selectedCustomerId,
+    templateKey: templateDraft.templateKey,
+    propertyAddress: sendPropertyAddress,
+    values: sendValues,
+    allowUnresolved: sendAllowUnresolved,
+  });
+  linkKeyRef.current = currentLinkKey;
+  const signingUrl = liveLinkUrl(signingLink, currentLinkKey);
 
   // The property override is scoped to one customer+template selection: a
   // stale value silently carried onto the next customer would rewrite
@@ -479,7 +520,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
     setTemplateDraft(EMPTY_TEMPLATE);
     setVersionDraft(EMPTY_VERSION);
     setPreview(null);
-    setSigningUrl("");
+    setSigningLink(null);
     setSendCustomerId("");
     setCustomerQuery("");
     setCustomerResults([]);
@@ -591,7 +632,8 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
     setSaving(true);
     setError("");
     setToast("");
-    setSigningUrl("");
+    setSigningLink(null);
+    const made = { key: currentLinkKey, name: selectedCustomer && customerName(selectedCustomer), request: ++linkRequestRef.current };
     try {
       const data = await api(`/admin/document-templates/${encodeURIComponent(templateDraft.templateKey)}/contracts`, {
         method: "POST",
@@ -602,9 +644,9 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
           ...(sendPropertyAddress.trim() ? { propertyAddress: sendPropertyAddress.trim() } : {}),
         },
       });
-      setSigningUrl(data.signingUrl || data.contract?.signingUrl || "");
-      setPreview(data.rendered || null);
-      setToast("Document link created");
+      applyLinkResponse(data, made, { request: linkRequestRef.current, key: linkKeyRef.current }, {
+        link: setSigningLink, preview: setPreview, toast: setToast, error: setError,
+      });
     } catch (err) {
       setError(err.message || "Could not create document link");
     } finally {
@@ -613,11 +655,12 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
   };
 
   const copySigningUrl = async () => {
-    if (!signingUrl) return;
+    const url = liveLinkUrl(signingLink, linkKeyRef.current);
+    if (!url) return;
     setToast("");
     try {
       if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
-      await navigator.clipboard.writeText(signingUrl);
+      await navigator.clipboard.writeText(url);
       setError("");
       setToast("Document link copied");
     } catch {
@@ -1087,7 +1130,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                     <div className="mt-3 rounded-xs border-hairline border-zinc-200 bg-zinc-50 p-2">
                       <div className="mb-2 flex items-center gap-2 text-ui-body font-medium text-zinc-900">
                         <Link2 size={14} />
-                        Document link ready
+                        {linkReadyLabel(signingLink)}
                       </div>
                       <div className="break-all text-ui-body leading-5 text-zinc-800">{signingUrl}</div>
                       <Button size="sm" variant="secondary" className="mt-2" onClick={copySigningUrl}>

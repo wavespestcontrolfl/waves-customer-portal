@@ -183,6 +183,8 @@ function attachSockets(httpServer) {
         socket.join('dispatch:admins');
       }
       startStaffSocketRevalidation(socket);
+      // Live words under the staff mic (GATE_DICTATION_LIVE_WORDS): staff sockets only, gate checked per session.
+      require('../services/dictation-live').registerDictationLive(socket);
       // A board open across a deploy that retired an alert type drops those
       // cards here (see services/retired-dispatch-alerts.js).
       if (!ownRoomOnly) require('../services/retired-dispatch-alerts').emitRetiredAlertResolutions(socket);

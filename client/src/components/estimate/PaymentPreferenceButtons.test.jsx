@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, setupFeeBilledWithFirstVisit, standardInvoiceShape } from './PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, setupFeeBilledWithFirstVisit, standardInvoiceShape } from './PaymentPreferenceButtons';
 import { resolvePaymentTiming } from '../../lib/paymentTiming';
 import {
   AFTER_VISIT_CARD_CONSENT_TEXT as CLIENT_AFTER_VISIT_CARD_CONSENT_TEXT,
@@ -622,5 +622,25 @@ describe('standardInvoiceShape (after-visit promise gate)', () => {
   it('no invoice rows at all is not setup-only (nothing is collected at accept)', () => {
     expect(standardInvoiceShape({ selectedFrequency: {} }).setupOnly).toBe(false);
     expect(standardInvoiceShape().setupOnly).toBe(false);
+  });
+});
+
+// The confirm step repeats the invoice box's first-application figure; it must
+// stay silent wherever the box has no such figure or the charge is quoted elsewhere.
+describe('confirmStepFirstVisitAmount', () => {
+  const quarterly = { billingFrequencyKey: 'quarterly', monthly: 32.67, perVisit: 98 };
+  const base = { serviceMode: 'recurring', paymentPreference: 'pay_at_visit', siteConfirmationHold: false, selectedFrequency: quarterly };
+
+  it('returns the same amount the invoice box shows for a per-application plan', () => {
+    expect(confirmStepFirstVisitAmount(base)).toBe(98);
+  });
+
+  it.each([
+    ['one-time visit', { serviceMode: 'one_time' }],
+    ['annual prepay', { paymentPreference: 'prepay_annual' }],
+    ['on-site confirmation hold', { siteConfirmationHold: true }],
+    ['monthly-billed plan with no first-visit amount', { selectedFrequency: { billingFrequencyKey: 'monthly', monthly: 45 } }],
+  ])('returns null for %s', (_label, override) => {
+    expect(confirmStepFirstVisitAmount({ ...base, ...override })).toBeNull();
   });
 });

@@ -124,6 +124,13 @@ function termiteRenewalGraceDeadlineFor(term) {
   return etDateString(addETDays(parseETDateTime(`${later}T12:00`), TERMITE_RENEWAL_GRACE_DAYS));
 }
 const CUSTOMER_NOTICE_DAYS = [30, 15, 7];
+// GATE_MONEY_NOTICE_CATCHUP (owner 2026-11-06): a 30/15/7 notice whose day
+// passed at most this many days ago, and that is still unsent, goes out on
+// the next run. Smaller than the 8-day gap between the 15 and 7 rungs, so a
+// late window never reaches the next rung's day; the bound also keeps the
+// first run after the flip from sending notices for long-past days. The
+// termite bond texts in workflows/renewal-reminder.js use the same bound.
+const NOTICE_CATCHUP_DAYS = 3;
 // Termite annual-plan terms (annual_plan_version set) get an EXTRA 45-day
 // rung ahead of the shared ladder above (owner ruling §A2: 45 and 30 days
 // before the cancellation deadline). Every other term (lawn/mosquito/rodent/
@@ -860,7 +867,7 @@ async function coverageCandidateRows(term, conn, termStart, termEnd) {
 }
 
 async function coverageRowsForTerm(term, conn = db, {
-  includeTerminalStatuses = false, extraCandidateRows = null, projectFirstActivationOn = null,
+  includeTerminalStatuses = false, extraCandidateRows = null, projectFirstActivationOn = null, activationWindow,
 } = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
@@ -872,15 +879,22 @@ async function coverageRowsForTerm(term, conn = db, {
   // pick). First activation slides term_end by the payment lag
   // (ensureCoverageRowsForTerm's anchorLagDays — same anchors, same
   // windowFixedAtCreation exemption), so the stored window alone would miss
-  // the tail a late payment adds. The successor-term cap is not applied:
-  // that only over-reports coverage (a stricter guard), never under.
+  // the tail a late payment adds. By default the successor-term cap is not
+  // applied: that only over-reports coverage (a stricter guard), never under.
+  // `activationWindow` (true) projects the window first activation itself
+  // persists instead (firstActivationTermEnd: from the original end, capped
+  // the day before a later term; a failed read keeps the stored end), for a
+  // caller that names the bill covering a visit, where an over-report would
+  // send staff to a bill that does not cover it.
   if (projectFirstActivationOn && termEnd && termStart && !windowFixedAtCreation(term)) {
     const mintAnchor = coverageSeriesAnchor(termStart, { firstVisitDate: term?.first_visit_date || null }) || termStart;
     const paidAnchor = coverageSeriesAnchor(termStart, {
       firstVisitDate: term?.first_visit_date || null, notBefore: projectFirstActivationOn,
     }) || termStart;
     const lag = daysUntil(mintAnchor, paidAnchor);
-    if (lag != null && lag > 0) termEnd = addDaysYmd(termEnd, lag);
+    if (lag != null && lag > 0) {
+      termEnd = activationWindow ? (await firstActivationTermEnd(term, conn, termEnd, lag)).end : addDaysYmd(termEnd, lag);
+    }
   }
   if (!term?.customer_id || !coverageServiceType || !coverageVisitCount || !termStart || !termEnd) {
     return [];
@@ -1238,6 +1252,51 @@ async function findWindowSlideMarker(term, conn) {
   };
 }
 
+// The term_end a FIRST activation gives a term whose paid anchor sits
+// `lagDays` after its minted anchor. ensureCoverageRowsForTerm persists it,
+// and coverageRowsForTerm's `activationWindow` projection reads it. The window
+// slides by the lag from the term's ORIGINAL end (a prior slide's marker, so a
+// retried activation never slides twice) and never ends before the stored end.
+// Never slide into a successor term: a long-pending invoice can be paid after
+// the customer already bought the NEXT year, and overlapping paid windows would
+// let both terms claim the same visits, so the slide stops the day before the
+// earliest later term. ANY later term caps the slide — status-shape filtering
+// here has already missed the decided-lapse form (status 'cancelled' +
+// renewal_decision 'cancel' still counts as paid coverage in
+// coveredTermsAsOf), and capping on a genuinely dead successor merely
+// under-extends, which the seeder's shortfall exception surfaces. Being
+// conservative can't create overlapping paid coverage; being clever can.
+// Fails SAFE: without certainty that the slide was not already applied, or
+// about successors, the window is not extended (`failed` says which read
+// failed). Returns { end, priorSlide, laterTermStart, failed }; the caller logs.
+async function firstActivationTermEnd(term, conn, termEnd, lagDays) {
+  let priorSlide;
+  try {
+    priorSlide = await findWindowSlideMarker(term, conn);
+  } catch (err) {
+    return { end: termEnd, priorSlide: null, laterTermStart: null, failed: `window-slide marker lookup failed (${err.message}) — coverage window not extended this run` };
+  }
+  const slideBase = priorSlide?.originalTermEnd || termEnd;
+  let end = addDaysYmd(slideBase, lagDays);
+  let laterTermStart = null;
+  try {
+    const successor = await conn('annual_prepay_terms')
+      .where({ customer_id: term.customer_id })
+      .whereNot({ id: term.id })
+      .where('term_start', '>', slideBase)
+      .orderBy('term_start', 'asc')
+      .first('term_start');
+    if (successor && dateOnly(successor.term_start) <= end) {
+      laterTermStart = dateOnly(successor.term_start);
+      end = addDaysYmd(laterTermStart, -1);
+    }
+  } catch (err) {
+    return { end: termEnd, priorSlide, laterTermStart: null, failed: `successor check failed (${err.message}) — coverage window not extended` };
+  }
+  // A retry never SHRINKS a window an earlier run already persisted.
+  return { end: end < termEnd ? termEnd : end, priorSlide, laterTermStart, failed: null };
+}
+
 // Lawn rounds neighborhood day (lawn-area-days.js): a lawn_rounds_9 term that
 // covers NO series yet creates a new series parent, which is born on its area's
 // anchor. Returns { roundAnchor } for coverageScheduleDates
@@ -1444,51 +1503,19 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // (no change, no double slide) and grows only by what a genuinely later
   // anchor adds.
   let priorSlide = null;
-  let slideMarkerUnreadable = false;
   const slideEligible = !alreadyActivated && !windowFixedAtCreation(term)
     && anchorLagDays != null && anchorLagDays > 0 && !!(await annualPrepayColumns(conn)).term_end;
   if (slideEligible) {
-    try {
-      priorSlide = await findWindowSlideMarker(term, conn);
-    } catch (err) {
-      // Fail SAFE (same posture as the successor check): without certainty
-      // the slide was not already applied, don't slide again.
-      slideMarkerUnreadable = true;
-      logger.warn(`[annual-prepay] term ${term.id} window-slide marker lookup failed (${err.message}) — coverage window not extended this run`);
-    }
-  }
-  if (slideEligible && !slideMarkerUnreadable) {
-    const slideBase = priorSlide?.originalTermEnd || termEnd;
-    effectiveTermEnd = addDaysYmd(slideBase, anchorLagDays);
-    // Never slide into a successor term: a long-pending invoice can be paid
-    // after the customer already bought the NEXT year, and overlapping paid
-    // windows would let both terms claim the same visits. Cap at the day
-    // before the earliest later term; the resulting shortfall (if any) files
-    // the coverage-shortfall exception below for operator reconciliation.
-    try {
-      // ANY later term caps the slide — status-shape filtering here has
-      // already missed the decided-lapse form (status 'cancelled' +
-      // renewal_decision 'cancel' still counts as paid coverage in
-      // coveredTermsAsOf), and capping on a genuinely dead successor merely
-      // under-extends, which the shortfall exception below surfaces. Being
-      // conservative can't create overlapping paid coverage; being clever can.
-      const successor = await conn('annual_prepay_terms')
-        .where({ customer_id: term.customer_id })
-        .whereNot({ id: term.id })
-        .where('term_start', '>', slideBase)
-        .orderBy('term_start', 'asc')
-        .first('term_start');
-      if (successor && dateOnly(successor.term_start) <= effectiveTermEnd) {
-        effectiveTermEnd = addDaysYmd(dateOnly(successor.term_start), -1);
-        logger.warn(`[annual-prepay] term ${term.id} window slide capped at ${effectiveTermEnd} — successor term starts ${dateOnly(successor.term_start)}`);
-      }
-    } catch (err) {
-      // Fail SAFE: without certainty about successors, don't extend at all.
-      logger.warn(`[annual-prepay] term ${term.id} successor check failed (${err.message}) — coverage window not extended`);
-      effectiveTermEnd = termEnd;
-    }
-    // A retry never SHRINKS a window an earlier run already persisted.
-    if (effectiveTermEnd < termEnd) effectiveTermEnd = termEnd;
+    // The marker read, the later-term cap and both fail-safe paths live in
+    // firstActivationTermEnd, which the read-only activation projection
+    // (coverageRowsForTerm `activationWindow`) shares. A capped slide's
+    // shortfall (if any) files the coverage-shortfall exception below for
+    // operator reconciliation.
+    const slide = await firstActivationTermEnd(term, conn, termEnd, anchorLagDays);
+    priorSlide = slide.priorSlide;
+    effectiveTermEnd = slide.end;
+    if (slide.failed) logger.warn(`[annual-prepay] term ${term.id} ${slide.failed}`);
+    else if (slide.laterTermStart) logger.warn(`[annual-prepay] term ${term.id} window slide capped at ${addDaysYmd(slide.laterTermStart, -1)} — successor term starts ${slide.laterTermStart}`);
   }
   // A rounds term tied to an existing series places its dates from that
   // series' stored round anchor, so a gap-fill lands on the dates the series
@@ -4666,7 +4693,9 @@ async function pafDeferredHoldingTerm(scheduledService, conn, { throwOnError = f
 
 // Did this year BUY the visit? Shared by the deferred-prepay hold and
 // prepayYearBillingVisit. Throws on a failed read.
-async function termBoughtVisit(term, scheduledService, conn, { projectFirstActivationOn = null } = {}) {
+// `activationWindow` passes through to coverageRowsForTerm's projection (the
+// window first activation itself persists); Billing recovery asks for it.
+async function termBoughtVisit(term, scheduledService, conn, { projectFirstActivationOn = null, activationWindow } = {}) {
   // A visit billed to a third-party payer (a visit-specific or account
   // payer assigned after the accept) is not held: completion bills it to
   // that payer, so it never releases the year's charge either (GitHub Codex
@@ -4680,7 +4709,7 @@ async function termBoughtVisit(term, scheduledService, conn, { projectFirstActiv
   // payment on `projectFirstActivationOn` when not yet activated, ownership,
   // callbacks out), minus a visit the stamp-time price check would refuse —
   // never every same-service visit on the plan.
-  const sold = await coverageRowsForTerm(term, conn, projectFirstActivationOn ? { projectFirstActivationOn } : {});
+  const sold = await coverageRowsForTerm(term, conn, projectFirstActivationOn ? { projectFirstActivationOn, activationWindow } : {});
   if (!sold.some((row) => String(row.id) === String(scheduledService.id))) return false;
   const { heldIds } = await holdPriceDriftedRows(term, sold, conn, {
     includeCompleted: true, skipRow: (r) => rowPrepaidElsewhere(term, r),
@@ -6388,6 +6417,14 @@ async function reconcileOneCoveredTermInSweep(term, conn, todayKey, summary) {
   await reverseCancelledPendingCompletionGrantsInSweep(term, conn, summary);
 }
 
+// A whole-pass failure the sweep logged and kept going past. The renewal-reminders
+// workflow reads `failedPasses` and throws once every step has run, so job_health
+// records the failure. The key exists only after a failure.
+function notePassFailed(summary, pass) {
+  if (!summary.failedPasses) summary.failedPasses = [];
+  summary.failedPasses.push(pass);
+}
+
 async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } = {}) {
   const summary = { terms: 0, settled: 0, credited: 0, reversed: 0, disputeRecovered: 0 };
   if (!(await annualPrepayTableExists())) return summary;
@@ -6397,6 +6434,7 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     terms = await coveredTermsAsOf(conn, todayKey).select('t.*');
   } catch (err) {
     logger.warn(`[annual-prepay] covered-term sweep query failed: ${err.message}`);
+    notePassFailed(summary, 'covered-term query');
     return summary;
   }
   for (const term of terms) {
@@ -6426,6 +6464,7 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     }
   } catch (err) {
     logger.warn(`[annual-prepay] sweep expired-window marker pass failed: ${err.message}`);
+    notePassFailed(summary, 'expired-window marker pass');
   }
   // WaveGuard extension-credit recovery pass: a refund-cancelled term is no
   // longer covered, so it never enters the dated loop above — an extension
@@ -6558,6 +6597,7 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     }
   } catch (err) {
     logger.warn(`[annual-prepay] sweep WaveGuard extension-credit recovery failed: ${err.message}`);
+    notePassFailed(summary, 'extension-credit recovery');
   }
   // WaveGuard extension-credit RESTORE recovery pass (codex #3344 r5 P1):
   // the dated loop above restores only covered-TODAY terms, so a refunded
@@ -6643,6 +6683,7 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     }
   } catch (err) {
     logger.warn(`[annual-prepay] sweep WaveGuard extension-credit restore recovery failed: ${err.message}`);
+    notePassFailed(summary, 'extension-credit restore recovery');
   }
   // Paid-late declined terms whose historical reconcile has not completed —
   // expired ones too (they are outside the dated loop above).
@@ -6874,6 +6915,7 @@ async function restampUnstampedActiveTerms({
       .select('t.*');
   } catch (err) {
     logger.warn(`[annual-prepay] restamp sweep query failed: ${err.message}`);
+    notePassFailed(summary, 'restamp query');
     return summary;
   }
 
@@ -8490,7 +8532,7 @@ async function termNoticeAddress(termiteRung, term, customer) {
 // prior term_end). So the successor 12-month window starts the day AFTER
 // term_end and ends on the next anniversary — no overlap, no drift.
 async function sendTermNoticeEmail({
-  termiteRung, customer, term, daysOut, cancelLink, planAddress, coversRungs = null,
+  termiteRung, customer, term, daysOut, cancelLink, planAddress, coversRungs = null, noticeDaysLeft = null,
 }) {
   try {
     // newEnd is derived from newStart, not from term_end directly — exactly
@@ -8531,6 +8573,8 @@ async function sendTermNoticeEmail({
         // 15/7-day rungs of a termite plan share this generic sender; flag
         // them so the prepaid-year wording applies to prepay terms only.
         ...(isTermiteAnnualPlanTerm(term) ? { termitePlan: true } : {}),
+        // A catch-up send states the days actually left (runGenericNoticeLadder).
+        ...(noticeDaysLeft != null ? { noticeDaysLeft } : {}),
       });
     const confirmed = result?.sent === true || result?.ok === true;
     if (!confirmed) logger.warn(`[annual-prepay] renewal email not sent for term ${term.id}: ${result?.reason || 'not_sent'}`);
@@ -9369,6 +9413,7 @@ function sendTermNoticeEmailFor(ctx) {
     cancelLink: ctx.cancelLink,
     planAddress: ctx.planAddress,
     coversRungs: ctx.coversRungs,
+    noticeDaysLeft: ctx.opts?.noticeDaysLeft ?? null,
   });
 }
 
@@ -10015,25 +10060,28 @@ async function escalateMissedNotice(term) {
 // One termite sub-pass: its candidate query AND per-row work isolated, so a
 // failure (even the candidate query itself) never skips the independent
 // safety-net passes that follow it the same day.
-async function runTermiteSubPass(label, loadCandidates, fn) {
+async function runTermiteSubPass(label, loadCandidates, fn, failedPasses = []) {
   try {
     return await forEachTermIsolated(await loadCandidates(), `${label} failed`, fn);
   } catch (err) {
     logger.error(`[annual-prepay] ${label} aborted: ${err.message}`);
+    failedPasses.push(label);
     return 0;
   }
 }
 
-async function runTermiteNoticePass(today, termCols) {
+async function runTermiteNoticePass(today, termCols, failedPasses = []) {
   const sent = await runTermiteSubPass(
     'termite notice-obligation pass',
     () => termiteNoticeObligationCandidates({ today }),
     async (term) => (await processTermiteNoticeObligations(term, today)).sent,
+    failedPasses,
   );
   await runTermiteSubPass(
     'termite late-notice escalation retry',
     () => termiteLateNoticeEscalationCandidates(),
     retryLateNoticeEscalations,
+    failedPasses,
   );
   // Gated on its own two columns (20260926000108) so a DB that has not
   // run that migration yet still gets every other part of this pass.
@@ -10042,6 +10090,7 @@ async function runTermiteNoticePass(today, termCols) {
       'termite undelivered-notice escalation',
       () => termiteUndeliveredNoticeEscalationCandidates({ today }),
       (term) => escalateUndeliveredRungs(term, today),
+      failedPasses,
     );
   }
   // Durable staff escalation, atomically deduped via notifyAdmin's own
@@ -10050,6 +10099,7 @@ async function runTermiteNoticePass(today, termCols) {
     'termite missed-notice escalation',
     () => termiteMissedNoticeEscalationCandidates({ today }),
     escalateMissedNotice,
+    failedPasses,
   );
   // A witness conflict whose staff bell never got a confirmed insert
   // (Codex #4921 r10 P2) — gated on its own columns (20260926000109).
@@ -10058,6 +10108,7 @@ async function runTermiteNoticePass(today, termCols) {
       'termite witness-conflict bell retry',
       () => termiteWitnessConflictCandidates(),
       refileWitnessConflictBell,
+      failedPasses,
     );
   }
   return sent;
@@ -10081,8 +10132,14 @@ async function runTermiteNoticePass(today, termCols) {
 // missing, the termite pass is skipped, and excluding termite terms here
 // too would leave them with NO 30-day notice at all — so they fall back to
 // this exact-day send (sendCustomerTermNotice still picks the termite copy).
-function genericNoticeCandidates(daysOut, target, excludeTermite30) {
+//
+// `anchorWindow` is { from, to }: the anchor dates this run may notice. Gate off,
+// from === to === today + daysOut (the exact-day match). Catch-up gate on,
+// `from` reaches NOTICE_CATCHUP_DAYS back, and a rung whose later rung was
+// already sent is never sent (the later notice supersedes it).
+function genericNoticeCandidates(daysOut, anchorWindow, excludeTermite30) {
   const noticeCol = noticeColumnForDaysOut(daysOut);
+  const range = [anchorWindow.from, anchorWindow.to];
   return db('annual_prepay_terms')
     .whereIn('status', ACTIVE_STATUSES)
     .whereNull('renewal_decision')
@@ -10092,9 +10149,13 @@ function genericNoticeCandidates(daysOut, target, excludeTermite30) {
       this.whereNull(claimCol).orWhere(claimCol, '<', new Date(Date.now() - NOTICE_CLAIM_TTL_MS));
     })
     .where(function renewalAnchorMatches() {
-      this.where('term_end', target).orWhere('last_scheduled_service_date', target);
+      this.whereBetween('term_end', range).orWhereBetween('last_scheduled_service_date', range);
     })
     .modify((qb) => { if (daysOut === 30 && excludeTermite30) qb.whereNull('annual_plan_version'); })
+    .modify((qb) => {
+      if (anchorWindow.from === anchorWindow.to) return;
+      for (const later of CUSTOMER_NOTICE_DAYS.filter((days) => days < daysOut)) qb.whereNull(noticeColumnForDaysOut(later));
+    })
     .select('*');
 }
 
@@ -10105,24 +10166,40 @@ function genericNoticeCandidates(daysOut, target, excludeTermite30) {
 // on term_end — its contractual notice is N days before THAT date, never a
 // last-visit anchor (a visit up to 120 days early would stamp the rung and
 // suppress the real notice).
-function genericNoticeAnchored(term, target) {
-  if (dateOnly(term.term_end) === target) return true;
+function genericNoticeAnchored(term, anchorWindow) {
+  const termEnd = dateOnly(term.term_end);
+  if (termEnd >= anchorWindow.from && termEnd <= anchorWindow.to) return true;
   return !isTermiteAnnualPlanTerm(term) && isLastServiceNearTermEnd(term);
 }
 
+// The days from today to the anchor a notice matched: term_end when it falls
+// inside the window, else the last-visit anchor. On time that is the rung
+// itself. A catch-up send (GATE_MONEY_NOTICE_CATCHUP) has fewer days left, and
+// its email states them (Codex #7715); the rung still keys the claim, the stamp
+// and the idempotency key. Null when the anchor date is unreadable.
+function daysLeftToNoticeAnchor(term, anchorWindow, today) {
+  const termEnd = dateOnly(term.term_end);
+  const inWindow = termEnd && termEnd >= anchorWindow.from && termEnd <= anchorWindow.to;
+  return daysUntil(today, inWindow ? termEnd : dateOnly(term.last_scheduled_service_date));
+}
+
 async function runGenericNoticeLadder(today, termiteReady) {
+  const catchUpDays = require('../config/feature-gates').moneyNoticeCatchupLive() ? NOTICE_CATCHUP_DAYS : 0;
   let sent = 0;
   for (const daysOut of CUSTOMER_NOTICE_DAYS) {
-    const target = addDaysYmd(today, daysOut);
+    const anchorWindow = { from: addDaysYmd(today, daysOut - catchUpDays), to: addDaysYmd(today, daysOut) };
     // Termite pass ran → it owns the termite 30; not ready → the termite 30
     // falls back here, with baseline columns only for every claim/stamp/
     // release (Codex #4921 r8 — a pre-000106 schema has no late columns).
-    const terms = (await genericNoticeCandidates(daysOut, target, termiteReady))
-      .filter((term) => genericNoticeAnchored(term, target));
+    const terms = (await genericNoticeCandidates(daysOut, anchorWindow, termiteReady))
+      .filter((term) => genericNoticeAnchored(term, anchorWindow));
     sent += await forEachTermIsolated(
       terms,
       'reminder failed',
-      async (term) => (await sendCustomerTermNotice(term, daysOut, { baseline: !termiteReady })).sent,
+      async (term) => (await sendCustomerTermNotice(term, daysOut, {
+        baseline: !termiteReady,
+        ...(catchUpDays ? { noticeDaysLeft: daysLeftToNoticeAnchor(term, anchorWindow, today) } : {}),
+      })).sent,
     );
   }
   return sent;
@@ -10133,9 +10210,12 @@ async function checkAndSend({ today = etDateString() } = {}) {
   await activatePaidPendingTerms();
   const termCols = await annualPrepayColumns();
   const termiteReady = termiteNoticeColumnsReady(termCols);
-  const termiteSent = termiteReady ? await runTermiteNoticePass(today, termCols) : 0;
+  const failedPasses = [];
+  const termiteSent = termiteReady ? await runTermiteNoticePass(today, termCols, failedPasses) : 0;
   const genericSent = await runGenericNoticeLadder(today, termiteReady);
-  return { sent: termiteSent + genericSent };
+  // The renewal-reminders workflow throws on `failedPasses` after its other
+  // steps ran. The key exists only after a termite pass aborted.
+  return failedPasses.length ? { sent: termiteSent + genericSent, failedPasses } : { sent: termiteSent + genericSent };
 }
 
 async function hasAnnualPrepayRenewal(customerId, termEnd) {
@@ -11662,6 +11742,8 @@ module.exports = {
   pafDeferredPrepayCoversVisit,
   pafDeferredHoldingTerm,
   prepayYearBillingVisit,
+  // Billing recovery names the unpaid prepay bill that bought a listed visit (admin-billing-recovery.js).
+  termBoughtVisit,
   pafHeldStampCovers,
   annualCoverageVerdictForPrediction,
   deferredPrepayHoldCustomerIds,
@@ -11743,6 +11825,9 @@ module.exports = {
   // suspendActiveTermsForDisputedInvoice stamps (ADMIN-BUG-R17-FINDING-1).
   annualPrepayColumns,
   _private: {
+    runGenericNoticeLadder,
+    NOTICE_CATCHUP_DAYS,
+    daysLeftToNoticeAnchor,
     stampTermCoverageOnly,
     PARENT_DECISION_LOCK_SESSIONS,
     supersedeRenewWithCustomerCancel,

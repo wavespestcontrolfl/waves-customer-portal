@@ -1052,6 +1052,23 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
+  // The phone banner for a customer stuck booking from an estimate, or back on an expired one (owner 2026-11-05,
+  // "1, 2 and 3": the estimate page audit's fix 3). estimate-stuck-alert.js writes the bell row (one standing row per
+  // estimate, rung once per Eastern day) and closes it once the estimate is accepted, declined or archived; this
+  // entry is the banner bell-banners.js sends for a write that rang, so `build` takes the row's own words.
+  estimate_stuck: {
+    label: 'Customer stuck booking an estimate',
+    category: 'estimate_stuck',
+    priority: 'high',
+    group: 'Leads & Sales',
+    rule: { area: 'Estimates', severity: 'needs-you', who: 'person', doneWhen: 'estimate_booked_or_closed', closedBy: 'server/services/estimate-stuck-alert.js' },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'A customer is stuck booking an estimate',
+      body: p.alertBody || 'Open the estimate to see where they stopped.',
+      link: p.alertLink || '/admin/estimates',
+    }),
+  },
   bundle_quote_requested: {
     label: 'Bundle quote requested',
     category: 'estimate',

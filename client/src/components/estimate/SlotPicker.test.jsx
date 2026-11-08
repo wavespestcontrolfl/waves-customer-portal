@@ -2,7 +2,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import SlotPicker from './SlotPicker';
 import { setGlassDefault } from '../../lib/estimate-glass-copy';
 
@@ -347,6 +347,43 @@ describe('SlotPicker best times and the rain tier (GATE_CUSTOMER_RAIN_RANK)', ()
   });
 });
 
+// A YYYY-MM-DD date `days` from today, in the browser's own calendar (what the date box compares).
+function ymdFromToday(days) {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+describe('date past the booking limit', () => {
+  it('names the last day and never calls the slots API for a date beyond the box limit', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2099-06-01')], expander: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SlotPicker token="synthetic-token" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} />);
+    const box = await screen.findByLabelText(/pick one that works for you/i);
+    const lastDay = new Date(`${box.getAttribute('max')}T12:00:00Z`)
+      .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+    fireEvent.change(box, { target: { value: ymdFromToday(200) } });
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(`We book up to 90 days ahead. Pick a date on or before ${lastDay}.`);
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the limit the server sends when its 400 says the date is too far out', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2099-06-01')], expander: [] }));
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: 'date is beyond the booking horizon', lastBookableDate: '2027-02-03', horizonDays: 90 }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SlotPicker token="synthetic-token" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} />);
+    fireEvent.change(await screen.findByLabelText(/pick one that works for you/i), { target: { value: ymdFromToday(80) } });
+    expect(await screen.findByRole('alert')).toHaveTextContent('We book up to 90 days ahead. Pick a date on or before Wed, Feb 3.');
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+  });
+});
+
 describe('date availability failures', () => {
   it.each(['http', 'network'])('shows a retryable error instead of an empty day on %s failure', async (failure) => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2099-06-01')], expander: [] }));
@@ -355,13 +392,14 @@ describe('date availability failures', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ primary: [slot('retried', '2099-06-11')], expander: [] }));
     vi.stubGlobal('fetch', fetchMock);
     render(<SlotPicker token="synthetic-token" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} />);
-    fireEvent.change(await screen.findByLabelText(/pick one that works for you/i), { target: { value: '2099-06-11' } });
+    const pickedYmd = ymdFromToday(10);
+    fireEvent.change(await screen.findByLabelText(/pick one that works for you/i), { target: { value: pickedYmd } });
     expect(await screen.findByRole('alert')).toHaveTextContent('We couldn’t load times for that day');
     expect(screen.queryByText(/No open times then/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
     await screen.findByText(/Arrival window:/);
-    expect(fetchMock.mock.calls[2][0]).toContain('date=2099-06-11');
+    expect(fetchMock.mock.calls[2][0]).toContain(`date=${pickedYmd}`);
   });
 });
 
@@ -408,6 +446,13 @@ describe('SlotPicker (B18: an estimate parked for the office)', () => {
 // the date search and a picked date. Ids and dates here are synthetic (the
 // 2099 calendar matches 2026's weekdays).
 describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
+  // The fixtures live in 2099; the date box only takes days inside its booking
+  // limit, so pin the page's clock (Date only) near them.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2099-10-01T12:00:00Z'));
+  });
+  afterEach(() => vi.useRealTimers());
   const OPEN = (slotId, date, windowStart = '09:00') => slot(slotId, date, { windowStart, windowEnd: '13:00', routeOptimal: false });
   const SLOT_NOV21 = OPEN('s-nov21', '2099-11-21');
   const SLOT_NOV22 = OPEN('s-nov22', '2099-11-22', '11:00');
@@ -470,6 +515,23 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
     expect(dateCalls(fetchMock)).toHaveLength(0);
     // The date search and the specific-date control stay under the list.
     expect(screen.getByText(/pick one that works for you/i)).toBeInTheDocument();
+  });
+
+  it('the day grid marks every day the 90-day read opened, while the list stays at 3', async () => {
+    stubFetch({
+      wide: {
+        primary: [SLOT_NOV21, SLOT_NOV22, SLOT_DEC06],
+        expander: [SLOT_DEC13, SLOT_DEC20],
+        metadata: { firstDayAvailability: { date: '2099-11-21', openCount: 1 } },
+      },
+    });
+    renderPicker();
+    await screen.findByText('The next 2 weeks are full. Here are open times after that:');
+    expect(pickChips()).toHaveLength(3);
+    // Days beyond the 3 listed times still have openings in the grid.
+    expect(screen.getByRole('option', { name: /Sunday, December 13, 1 opening/ })).toBeEnabled();
+    expect(screen.getByRole('option', { name: /Sunday, December 20, 1 opening/ })).toBeEnabled();
+    expect(screen.queryByRole('option', { name: /Sunday, December 13, no open times/ })).not.toBeInTheDocument();
   });
 
   it('says "Looking further ahead…" while the 90-day read runs', async () => {

@@ -32,19 +32,17 @@
  * it read the visit with the conflict read on and found none (closeResolved).
  * A run that could not look at the visit closes nothing.
  *
- * FAR CONFLICTS (GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET; owner 2026-10-22,
- * audit decision D1: "note double bookings more than 2 weeks away quietly;
- * alert when they are 2 weeks out"). Gate on, a conflict dated more than
- * FAR_DAYS ahead does not ring: it is a line on ONE standing Activity row
- * (an ops digest, audience fyi: the Agents Activity feed, never the bell,
- * outside the ring allowance) that lists every far conflict of the run and
- * retires on a run with none (ops-digest-fall-off.js). Within FAR_DAYS the
- * conflict rings as the notice above. The digest needs the in-app Activity
+ * FAR CONFLICTS (owner 2026-10-22, audit decision D1: "note double bookings
+ * more than 2 weeks away quietly; alert when they are 2 weeks out"). A
+ * conflict dated more than FAR_DAYS ahead does not ring: it is a line on ONE
+ * standing Activity row (an ops digest, audience fyi: the Agents Activity
+ * feed, never the bell, outside the ring allowance) that lists every far
+ * conflict of the run and retires on a run with none (ops-digest-fall-off.js).
+ * Within FAR_DAYS the conflict rings as the notice above. The digest needs the in-app Activity
  * feed (ops-digest.js inAppEnabled); without it far conflicts ring as before.
  */
 const logger = require('../logger');
 const { toDateStr } = require('./dates');
-const { gateEnvValue } = require('../../config/feature-gates');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 const RESOLVED_TITLE = 'Visit placement alert resolved';
@@ -63,10 +61,8 @@ const REASON_KIND = {
 const noticeKey = (id, date) => `${KEY_PREFIX}${id}:${date}`;
 
 // Far conflicts (D1, header).
-const FAR_GATE = 'GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET';
 const FAR_DAYS = 14;
 const FAR_DIGEST_KEY = 'auto-dispatch-far-conflicts';
-const farGateOn = () => !!gateEnvValue(FAR_GATE);
 // The last date that rings; a conflict after it is far.
 const farCutoff = (nowDate) => etDateString(addETDays(nowDate, FAR_DAYS));
 
@@ -184,12 +180,12 @@ async function standingVisitIds() {
 }
 
 // The run's conflicts that ring now, and the far ones the Activity row lists
-// instead (D1). Off, or with no in-app Activity feed, every conflict rings.
+// instead (D1). With no in-app Activity feed, every conflict rings.
 function splitFar(bucket, nowDate) {
   const items = [...bucket.values()];
   let farOn = false;
   try {
-    farOn = farGateOn() && require('../ops-digest').inAppEnabled() === true;
+    farOn = require('../ops-digest').inAppEnabled() === true;
   } catch (err) {
     logger.warn(`[auto-dispatch] far double-booking check failed (${err.message}); every conflict rings`);
   }
@@ -263,8 +259,8 @@ async function farListedVisitIds(conn = require('../../models/db')) {
 
 // The standing Activity row of the run's far conflicts (D1): one ops digest,
 // audience fyi (Activity only, never the bell; not a ring-allowance lane),
-// refreshed in place each run and retired on a run with none, or with the
-// lane off once every conflict on it has its notice (fall-off). The list is
+// refreshed in place each run and retired on a run with none, or with no
+// Activity feed once every conflict on it has its notice (fall-off). The list is
 // a snapshot, so it changes only after a COMPLETE conflict scan
 // (`scanComplete`: the run did not fail, conflict reads were on and none
 // failed); otherwise it stays as it is, the way a notice closes only on
@@ -281,7 +277,7 @@ async function reportFarConflicts({ far, waiting }, { enabled, scanComplete }) {
       await require('../ops-digest-fall-off').retireIfClean(FAR_DIGEST_KEY, { lockKey: `ops-digest:${FAR_DIGEST_KEY}` });
       return;
     }
-    // Gate off (or no Activity feed): never start a list; keep one that still
+    // No Activity feed: never start a list; keep one that still
     // stands, with the conflicts whose notice is not written yet.
     if (!enabled) {
       const standing = await module.exports.farListedVisitIds();
@@ -336,8 +332,9 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
   // notice is persisted (allowance spent, a failed write): the list keeps it
   // tracked, and re-read by the next run (index.js conflictsToSettle), even
   // when the scan no longer loads its visit.
-  // Gate off, a list still standing keeps the same ones until their notice
-  // stands too, then retires (reportFarConflicts never starts a list then).
+  // With no Activity feed, a list still standing keeps the same ones until
+  // their notice stands too, then retires (reportFarConflicts never starts a
+  // list then).
   const waiting = nearItems.filter((item) => !persisted.has(item.key) && listable(item));
   await reportFarConflicts({ far: farItems, waiting }, { enabled: farOn, scanComplete });
   return rang;

@@ -26,7 +26,17 @@ Production is deployed by Railway from the GitHub `main` branch for
   `server/tests/portal-dockerfile.test.js` fails when client code reads a
   `VITE_` name the file lacks. The app still gets every variable at runtime.
   Rollback: clear the Dockerfile path; the next deploy builds with Nixpacks
-  (`nixpacks.toml` adds ffmpeg; the seo-pipeline-worker still builds that way).
+  (`nixpacks.toml` adds ffmpeg).
+- seo-pipeline-worker builder: Dockerfile `deploy/seo-worker.Dockerfile`,
+  selected by the service variable
+  `RAILWAY_DOCKERFILE_PATH=deploy/seo-worker.Dockerfile` on that service only.
+  It has the same Node 24 base and Node floor check as the portal, plus
+  ffmpeg. It drops the Nixpacks build step (`npm run build`, the client
+  bundle, which the worker never serves). As under Nixpacks, it has no
+  browser. Its CMD is the worker script. Nixpacks pinned the worker to Node
+  24.10.0, older than the 24.22.1 security floor. Start command:
+  `node server/scripts/run-seo-pipeline-worker.js`. Rollback: delete the
+  variable; the next deploy builds with Nixpacks.
 - Build steps (in the Dockerfile): `npm ci --include=dev`, then
   `npm run build && npx playwright install --with-deps chromium`, then a
   smoke check that runs ffmpeg and prints a PDF from Chromium

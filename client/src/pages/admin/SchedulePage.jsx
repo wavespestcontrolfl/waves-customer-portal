@@ -20274,6 +20274,7 @@ export function CompletionPanel({
               <div style={noteBoxPhotos ? { border: `1px solid ${M.hairline}`, borderRadius: 12, background: M.card, overflow: "hidden" } : undefined}>
               <div style={{ position: "relative" }}>
                 <textarea
+                  data-own-mic="true"
                   value={notes}
                   onChange={handleNotesInput}
                   rows={quickComplete ? 3 : 5}
@@ -22782,6 +22783,7 @@ export function CompletionPanel({
           <div style={noteBoxPhotos ? { border: `1px solid ${D.border}`, borderRadius: 10, background: D.input, overflow: "hidden" } : undefined}>
           <div style={{ position: "relative" }}>
             <textarea
+              data-own-mic="true"
               value={notes}
               onChange={handleNotesInput}
               rows={quickComplete ? 3 : 5}

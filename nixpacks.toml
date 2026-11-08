@@ -1,6 +1,6 @@
-# The portal builds from deploy/portal.Dockerfile once its Dockerfile path is
-# set (it installs ffmpeg itself); this file still serves the
-# seo-pipeline-worker and the portal's rollback to Nixpacks.
+# The portal builds from deploy/portal.Dockerfile and the seo-pipeline-worker
+# from deploy/seo-worker.Dockerfile once each service's Dockerfile path is set
+# (both install ffmpeg themselves); this file serves a rollback to Nixpacks.
 #
 # Railway build (service setting: builder = Nixpacks). Extends the auto-detected
 # Node setup phase — "..." keeps nixpacks' defaults — with ffmpeg on PATH:

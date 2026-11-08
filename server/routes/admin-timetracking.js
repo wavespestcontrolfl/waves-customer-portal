@@ -2217,6 +2217,8 @@ async function ensureDocTable() {
 //   category=<one of DOC_CATEGORIES> | 'all'
 //   technicianId=<uuid> — docs bound to that tech
 //   technicianId='company' — only company-wide docs (technician_id IS NULL)
+//   archived=only — the archived docs instead of the active ones, so an
+//     admin can find one and restore it (POST /documents/:id/restore)
 // requireAdmin: documents now hold per-tech HR records (W-4, I-9,
 // license, cert expirations). Tech-role tokens must not be able to
 // list/read/upload/edit those, even their own — pre-existing tech
@@ -2224,10 +2226,10 @@ async function ensureDocTable() {
 router.get('/documents', requireAdmin, async (req, res, next) => {
   try {
     await ensureDocTable();
-    const { category, technicianId } = req.query;
+    const { category, technicianId, archived } = req.query;
     let query = db('company_documents')
       .leftJoin('technicians', 'company_documents.technician_id', 'technicians.id')
-      .where('company_documents.is_archived', false)
+      .where('company_documents.is_archived', archived === 'only')
       .select('company_documents.*', 'technicians.name as technician_name')
       .orderBy('company_documents.created_at', 'desc');
     if (category && category !== 'all') query = query.where('company_documents.category', category);
@@ -2320,6 +2322,25 @@ router.delete('/documents/:id', requireAdmin, async (req, res, next) => {
     await db('company_documents').where({ id: req.params.id }).update({ is_archived: true, updated_at: new Date() });
     logger.info(`[docs] Archived document: ${req.params.id}`);
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// POST /documents/:id/restore — undo an archive. Only the flag changes: the
+// stored file (s3_key) and every metadata field stay as they were. A document
+// that is not archived is returned unchanged.
+router.post('/documents/:id/restore', requireAdmin, async (req, res, next) => {
+  try {
+    const [restored] = await db('company_documents')
+      .where({ id: req.params.id, is_archived: true })
+      .update({ is_archived: false, updated_at: new Date() })
+      .returning('*');
+    if (restored) {
+      logger.info(`[docs] Restored document: ${req.params.id}`);
+      return res.json(restored);
+    }
+    const doc = await db('company_documents').where({ id: req.params.id }).first();
+    if (!doc) return res.status(404).json({ error: 'Document not found' });
+    res.json(doc);
   } catch (err) { next(err); }
 });
 

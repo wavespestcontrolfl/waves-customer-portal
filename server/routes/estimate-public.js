@@ -2391,6 +2391,18 @@ async function lockAcceptInvoiceDepositLedger(trx, { estimateId, customerId, sch
   }
 }
 
+// The later due date of an accept invoice, else null (the caller keeps today). GATE_ESTIMATE_DUE_FIRST_VISIT on
+// (owner 2026-11-06 "walk all"): the ET day of the first booked visit linked to the accept, read on the accept
+// transaction, when that day is after today. No linked visit, a visit today or earlier, a visit date that cannot be
+// read, or the gate off: null. The reminder ladder then starts on that due date (invoice-followups.js
+// newSequenceAnchor).
+async function acceptInvoiceVisitDueDate(trx, scheduledServiceId) {
+  if (!scheduledServiceId || !require('../config/feature-gates').estimateDueFirstVisitLive()) return null;
+  const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('scheduled_date');
+  const visitDay = require('../utils/date-only').dateOnlyString(visit?.scheduled_date);
+  return visitDay && visitDay > etDateString() ? visitDay : null;
+}
+
 function roundInvoiceAmount(value) {
   const amount = Number(value);
   return Number.isFinite(amount) ? Math.round(amount * 100) / 100 : null;
@@ -10379,7 +10391,27 @@ async function retireOrDenyDroppedCapture(estimate, setupIntentId) {
 // transaction — customer_id gets linked, reservation_expires_at cleared.
 // Paths without slotId behave exactly as pre-PR-B.1 (EstimateConverter
 // creates scheduled_services post-transaction).
-router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
+// One log line for every refused accept (estimate page audit 2026-11-05): the
+// server kept no record of a refusal, so a customer stuck at Approve left no
+// trace. Every refusal goes out through res.json (sent by the handler, thrown
+// and answered by its catch, or sent by the rate limiter), so it is logged
+// there. Never the bearer token: the estimate id, once the handler read the row.
+function logAcceptRefusals(req, res, next) {
+  const send = res.json.bind(res);
+  res.json = (payload) => {
+    if (res.statusCode >= 400 && res.statusCode < 500) {
+      const code = (payload && payload.code) || 'no-code';
+      const reason = String((payload && payload.error) || '').slice(0, 160);
+      logger.info(`[estimate-accept] refused ${res.statusCode} ${code} for estimate ${res.locals.acceptEstimateId || 'unknown'}: ${reason}`);
+      // The office's stuck alert for a refusal the page does not walk them through (estimate-stuck-alert.js; never throws).
+      require('../services/estimate-stuck-alert').noteAcceptRefused(req, res.locals.acceptEstimateId, res.statusCode, payload);
+    }
+    return send(payload);
+  };
+  next();
+}
+
+router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req, res, next) => {
   // A captured SetupIntent a reloadable in-transaction refusal drops: retired
   // AFTER the transaction rolls back (never Stripe I/O under the row locks, and
   // never retired by a refusal that did not end the accept).
@@ -10401,6 +10433,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    res.locals.acceptEstimateId = estimate.id;
     await reconcileFrozenMembershipSnapshot(estimate);
     // Fresh ACCEPT of a persisted bermuda-suppression estimate requires the
     // gate to still be live — acceptance bills/schedules from stored rows
@@ -13591,7 +13624,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           title: invoiceDraft.title,
           lineItems: invoiceDraft.lineItems,
           notes: invoiceDraft.notes,
-          dueDate: etDateString(),
+          dueDate: (await acceptInvoiceVisitDueDate(trx, acceptLinkedSsId)) || etDateString(),
           ...(requestedInvoiceDepositCredit > 0
             ? { depositCredit: { amount: requestedInvoiceDepositCredit, estimateId: estimate.id } }
             : {}),
@@ -14029,8 +14062,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const invoiceModeAnchorId = acceptLinkedSsId || standardConversionResult?.firstScheduledServiceId || null;
           if (invoiceModeAnchorId) {
             if (!acceptLinkedSsId) {
+              // The visit this accept just booked is now the invoice's first linked visit: its due date follows it.
+              const anchorDueDate = await acceptInvoiceVisitDueDate(trx, invoiceModeAnchorId);
               await trx('invoices').where({ id: invoiceIdResult }).whereNull('scheduled_service_id')
-                .update({ scheduled_service_id: invoiceModeAnchorId });
+                .update({
+                  scheduled_service_id: invoiceModeAnchorId,
+                  ...(anchorDueDate ? { due_date: anchorDueDate } : {}),
+                });
             }
             await EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage(trx, {
               invoiceId: invoiceIdResult,
@@ -14349,7 +14387,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               title: invoiceTitle,
               lineItems,
               notes: invoiceNotes,
-              dueDate: etDateString(),
+              dueDate: (await acceptInvoiceVisitDueDate(trx, attachScheduledServiceId)) || etDateString(),
               ...(requestedStandardDepositCredit > 0
                 ? { depositCredit: { amount: requestedStandardDepositCredit, estimateId: estimate.id } }
                 : {}),
@@ -17843,7 +17881,34 @@ function resolveOptOutBeforeResult(parsedData) {
 // disclosures the confirm panel renders, plus the one case the owner ruled must
 // never be self-serve. `mode` flips the wording for a restore — the same tier
 // move reads "Dropping X" one way and "Adding X back" the other.
-function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label, mode = 'remove' }) {
+// What follows "$X per application" for a line that joins the plan (owner 2026-11-06):
+// the year's application count and the "$Y a month" average, worded as the estimate's
+// service cards word them (same shared formatter and context line). The average
+// is the shared builder's, reconciled against the plan's monthly total, so it
+// matches what the card shows once the line is added; when the numbers do not
+// reconcile (or the count is unknown) the sentence ends after the price as before.
+function joinedLineTermsText({ rows, row, perApplicationOf, afterMonthlyTotal, prefMonthlyOff }) {
+  const visits = Math.round(Number(row?.visitsPerYear) || 0);
+  if (!(visits > 0)) return '.';
+  const key = String(row.service || row.name || '');
+  const planMonthly = afterMonthlyTotal == null ? null : afterMonthlyTotal - prefMonthlyOff;
+  const model = planMonthly == null ? null : monthlyAverageShared.buildMonthlyAverage({
+    services: rows.map((r) => ({
+      key: String(r.service || r.name || ''),
+      label: r.name || r.service,
+      perApplication: perApplicationOf(r),
+      visits: Number(r.visitsPerYear),
+    })),
+    planMonthly,
+  });
+  const monthly = model?.services.find((s) => s.key === key)?.monthly;
+  const count = `, ${visits} application${visits === 1 ? '' : 's'} per year.`;
+  return monthly > 0
+    ? `${count} ${monthlyAverageShared.monthlyText(monthly)}. ${monthlyAverageShared.CONTEXT_LINE}`
+    : count;
+}
+
+function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label, mode = 'remove', afterMonthlyTotal }) {
   const disclosures = [];
   // 'restore' and 'add' read the same way to the customer — a line joining the
   // plan — except that an add was never on it, so nothing comes "back".
@@ -17936,17 +18001,18 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
   // customer confirms amounts higher than they will pay (codex #3684 r3 P1).
   // Same derivation as the /preferences write, per side, converted back to
   // per-application (monthlyOff × 12 ÷ visits).
-  const pestPrefPerAppOff = (result, data) => {
+  const pestPrefOff = (result, data) => {
     try {
       const pest = detectPestRecurring(recurringServicesWithSupplements(result || {}));
       const visits = Number(pest?.visitsPerYear || 0);
-      if (!pest || !(visits > 0)) return 0;
+      if (!pest || !(visits > 0)) return { perApplication: 0, monthly: 0 };
       const { monthlyOff } = computePrefDiscount(data?.preferences, pest, false, 0);
-      return Math.round(((monthlyOff * 12) / visits) * 100) / 100;
-    } catch (_) { return 0; }
+      return { perApplication: Math.round(((monthlyOff * 12) / visits) * 100) / 100, monthly: monthlyOff };
+    } catch (_) { return { perApplication: 0, monthly: 0 }; }
   };
-  const beforePestOff = pestPrefPerAppOff(beforeResult, beforeData);
-  const afterPestOff = pestPrefPerAppOff(afterResult, afterData);
+  const beforePestOff = pestPrefOff(beforeResult, beforeData).perApplication;
+  const afterPrefOff = pestPrefOff(afterResult, afterData);
+  const afterPestOff = afterPrefOff.perApplication;
   const effectivePerApplication = (row, prefOff = 0) => {
     // manualFinalAnnual is the FINAL customer amount when an operator manual
     // discount hit the row; annualAfterDiscount is only post-WaveGuard, and
@@ -17984,11 +18050,18 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
       if (beforeKeys.has(String(after.service || after.name || ''))) continue;
       const pa = effectivePerApplication(after, afterPestOff);
       if (!pa) continue;
+      const terms = joinedLineTermsText({
+        rows: svcRows(afterResult),
+        row: after,
+        perApplicationOf: (r) => effectivePerApplication(r, afterPestOff),
+        afterMonthlyTotal,
+        prefMonthlyOff: afterPrefOff.monthly,
+      });
       disclosures.push({
         code: mode === 'add' ? 'added_per_application' : 'restored_per_application',
         message: mode === 'add'
-          ? `${after.name || after.service} is $${pa.toFixed(2)} per application.`
-          : `${after.name || after.service} comes back at $${pa.toFixed(2)} per application.`,
+          ? `${after.name || after.service} is $${pa.toFixed(2)} per application${terms}`
+          : `${after.name || after.service} comes back at $${pa.toFixed(2)} per application${terms}`,
       });
     }
   }
@@ -18478,6 +18551,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     const impact = optOutImpact({
       beforeResult, afterResult, beforeData, afterData: parsedData, label,
       mode: mode === 'restore' && staffOffered ? 'add' : mode,
+      afterMonthlyTotal: reprice.serverTotals.monthlyTotal,
     });
     if (included === false && impact.wouldChargeBundled.length) {
       return { status: 400, body: ({
@@ -32034,6 +32108,87 @@ async function composeEstimateDataPayload(estimate, {
     };
 }
 
+// Whether a tap on the expired card reopens the estimate by itself right now.
+// POST /:token/extension-request auto-grants only while the lifetime grant is
+// unused AND no request landed in the last 24 hours (its DEDUPE_OPEN); any
+// other tap only tells the office, so the card must not promise a reopen. The
+// claim's re-price hold and county-roll address checks need no copy here: they
+// already make the row ineligible (isEstimateExtensionRequestEligible →
+// estimateOffCustomerSurface).
+const EXTENSION_REQUEST_DEDUPE_MS = 24 * 60 * 60 * 1000;
+function extensionSelfServeNow(estimate, nowMs = Date.now()) {
+  if (estimate.extension_auto_granted_at) return false;
+  if (!estimate.extension_requested_at) return true;
+  const requestedMs = new Date(estimate.extension_requested_at).getTime();
+  return Number.isFinite(requestedMs) && nowMs - requestedMs >= EXTENSION_REQUEST_DEDUPE_MS;
+}
+
+// Body of the eligible-expired 404 on GET /:token/data. Only ever built for a
+// real, published estimate that died of expiry; every other 404 stays the bare
+// `{ error }` so unknown tokens remain indistinguishable (generic-404 contract).
+function expiredEstimateBody(estimate) {
+  const body = {
+    error: 'Estimate not found',
+    extensionRequestEligible: true,
+    expiresAt: estimate.expires_at || null,
+  };
+  if (estimate.sent_at) body.sentAt = estimate.sent_at;
+  if (extensionSelfServeNow(estimate)) body.extensionSelfServe = true;
+  return body;
+}
+
+// A customer opened the link of an estimate that expired. Recorded in
+// audit_log only: estimate_checkout_events and estimate_views are read
+// without a kind filter by the payment-step follow-up email and the
+// engagement rules, so a row there would trigger customer messages.
+// Skips what the customer view count skips: a verified staff preview, the
+// page's own internal refresh, signed PDF render passes, and the
+// shouldCountView filters (it returns false for expired rows, so it is not
+// called here).
+async function recordExpiredOpen({ req, ip, estimate, extensionOffered, isPdfRenderPass, docRenderPin, verifiedStaffPreview }) {
+  if (verifiedStaffPreview || isPdfRenderPass || docRenderPin) return;
+  if (req.query?.refresh === '1' && estimate.viewed_at) return;
+  const userAgent = requestUserAgent(req);
+  if (!estimateHasBeenSent(estimate)
+    || isBotUserAgent(userAgent)
+    || hasAdminMarker(req)
+    || isAdminIp(ip)) return;
+  // A signal only: a failed write (or a test's whole-module mock without the
+  // helper) must never turn the customer's 404 card into a 500.
+  try {
+    await require('../services/audit-log').auditEstimateExpiredOpen({
+      estimateId: estimate.id,
+      expiresAt: estimate.expires_at || null,
+      extensionOffered,
+      ipAddress: ip || null,
+      userAgent: userAgent ? String(userAgent).slice(0, 500) : null,
+    });
+  } catch (err) {
+    logger.warn(`[estimate-expired-open] audit write failed for estimate ${estimate.id}: ${err.message}`);
+  }
+  // The office's "came back to an expired estimate" alert, not awaited so the page never waits on it
+  // (estimate-stuck-alert.js; never throws).
+  require('../services/estimate-stuck-alert').noteExpiredReturn(estimate, {
+    offered: extensionOffered, selfServe: extensionSelfServeNow(estimate),
+  });
+}
+
+// The 404 body for an expired estimate that passes
+// isEstimateExtensionRequestEligible, and the record of the open. The card's button is offered only when POST
+// /:token/extension-request would act on a tap: the gate is on, no fixed bid
+// blocks it, and the pricing-authority verdict passes (that POST answers the
+// generic 404, no reopen and no office request, for any other row, so its
+// button would only fail). Every row the button is not offered for gets the
+// bare body, byte-identical to an unknown token's.
+async function expiredEstimate404Body({ req, ip, estimate, isPdfRenderPass, docRenderPin, verifiedStaffPreview }) {
+  const extension = require('../services/estimate-extension');
+  const extensionOffered = featureGates.isEnabled('estimateExtensionRequest')
+    && !(await extension.fixedBidBlocksExtension(db, estimate))
+    && await extension.extensionDeliverableUnderGate(db, estimate);
+  await recordExpiredOpen({ req, ip, estimate, extensionOffered, isPdfRenderPass, docRenderPin, verifiedStaffPreview });
+  return extensionOffered ? expiredEstimateBody(estimate) : { error: 'Estimate not found' };
+}
+
 router.get('/:token/data', dataLimiter, async (req, res, next) => {
   try {
     // This JSON carries the customer's address, phone/email, notes, pricing,
@@ -32142,10 +32297,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // ever INCLUDED when true — an explicit `false` here would distinguish
       // real-but-ineligible tokens (drafts, archived, send_failed) from
       // unknown ones and break the generic-404 contract.
-      if (featureGates.isEnabled('estimateExtensionRequest')
-        && isEstimateExtensionRequestEligible(estimate)
-        && !(await require('../services/estimate-extension').fixedBidBlocksExtension(db, estimate))) {
-        return res.status(404).json({ error: 'Estimate not found', extensionRequestEligible: true });
+      //
+      // Same eligible-only rule for the three details the expired card shows
+      // (expiresAt, sentAt, extensionSelfServe; see expiredEstimate404Body).
+      if (isEstimateExtensionRequestEligible(estimate)) {
+        return res.status(404).json(await expiredEstimate404Body({ req, ip, estimate, isPdfRenderPass, docRenderPin, verifiedStaffPreview }));
       }
       return res.status(404).json({ error: 'Estimate not found' });
     }
@@ -32483,6 +32639,8 @@ module.exports.commercialAgreementBlockedFor = commercialAgreementBlockedFor;
 module.exports.sendEstimatePage = sendEstimatePage;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;
+// GATE_ESTIMATE_DUE_FIRST_VISIT: the accept invoice's later due date, on its own line for the unit test.
+module.exports.acceptInvoiceVisitDueDate = acceptInvoiceVisitDueDate;
 module.exports.selectTierCeiling = selectTierCeiling;
 module.exports.applyMembershipRepriceToEstimate = applyMembershipRepriceToEstimate;
 module.exports.shapePreferenceAddOns = shapePreferenceAddOns;
@@ -32726,6 +32884,7 @@ module.exports.stampedTreeShrubPalmCountInBundle = stampedTreeShrubPalmCountInBu
 module.exports.frequencyFromRecurringService = frequencyFromRecurringService;
 module.exports.buildOfferTiersBlock = buildOfferTiersBlock;
 module.exports.offerTierMemberBlock = offerTierMemberBlock;
+module.exports.logAcceptRefusals = logAcceptRefusals;
 module.exports.resolveProspectiveOwnerId = resolveProspectiveOwnerId;
 // Area add-on classification seams (GATE_AREA_ADDONS), exported for server/tests/area-addon-flow.test.js.
 module.exports.collectServiceCategories = collectServiceCategories;

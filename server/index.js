@@ -1180,7 +1180,7 @@ app.use('/api/admin/sms-templates', require('./routes/admin-sms-templates'));
 app.use('/api/admin/email', require('./routes/admin-email'));
 // Bid Desk (GATE_BID_DESK, dark): the router answers 404 for every path while the gate is off.
 app.use('/api/admin/bid-desk', require('./routes/admin-bid-desk'));
-// Bid kit (GATE_BID_KIT, dark): the router answers 404 for every path while the gate is off.
+// Bid kit (admin only).
 app.use('/api/admin/bid-kit', require('./routes/admin-bid-kit'));
 // Trip link summary (GATE_TRIP_LINK, dark): the router answers 404 for every path while the gate is off.
 app.use('/api/admin/trip-link', require('./routes/admin-trip-link'));
@@ -1822,11 +1822,7 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
         cron.schedule('*/15 * * * *', async () => {
           try {
             await runExclusive('recipient-optin-sweep', async () => {
-              const { sweepUndispatchedOptins, sweepOnSiteFollowUps } = require('./services/recipient-optin');
-              await sweepUndispatchedOptins();
-              // Caller demotion + booking-confirmation replays to on-site
-              // recipients that were held or failed after their YES.
-              await sweepOnSiteFollowUps();
+              await require('./services/recipient-optin').runRecipientOptinSweeps();
             });
           } catch (err) {
             logger.error(`[cron] recipient opt-in sweep failed: ${err.message}`);

@@ -190,7 +190,10 @@ router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
   let processed = 0;
   let retryNeeded = false;
   for (const ev of events) {
+    let retryCritical = false;
     try {
+      // Decided BEFORE any lookup or transaction (see isRetryCriticalEvent): any failure of this event is then redelivered.
+      retryCritical = await isRetryCriticalEvent(ev);
       await handleEvent(ev);
       processed++;
     } catch (err) {
@@ -199,11 +202,92 @@ router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
       // must ANY failure to process a bounce / dropped / blocked event (a lookup that failed
       // before the message was even classified would otherwise lose a failure the rate
       // review letter's notice depends on). The event ledger dedupes what already committed.
-      if ((err && err.retryWebhook) || ['bounce', 'dropped', 'blocked'].includes(String(ev && ev.event || '').toLowerCase())) retryNeeded = true;
+      if (retryCritical || (err && err.retryWebhook) || ['bounce', 'dropped', 'blocked'].includes(String(ev && ev.event || '').toLowerCase())) retryNeeded = true;
     }
   }
   res.status(retryNeeded ? 500 : 200).json({ received: events.length, processed });
 });
+
+/**
+ * GATE_CALL_BOUNCE_OTHER_SPELLING (owner 2026-11-05), the route side of an automation hard bounce. True = the other-spelling
+ * retry owns this bounce and nothing else is raised for it (no untracked alert, no transcript rescue, no read-back card):
+ * the bounced step was re-queued to the call's other spelling, or that other spelling bounced too, in which case the
+ * office gets the one existing bounced-contact alert for the address on file, and still no rescue or card.
+ */
+function settleSpellingOutcome(spelling, ev) {
+  if (spelling?.retried || spelling?.retryOwned) return true;
+  if (!spelling?.retryFailed) return false;
+  bounceRecovery.alertBouncedContactAddress(spelling.bouncedEmail, {
+    ...ev, reason: `its other spelling from the call bounced too: ${String(ev.reason || ev.response || 'mailbox rejected').trim()}`,
+  }).catch((err) => logger.error(`[sendgrid-webhook] bounced-contact alert failed: ${err.message}`));
+  return true;
+}
+
+/**
+ * GATE_CALL_BOUNCE_OTHER_SPELLING: is this event retry-critical, i.e. may it be the DELIVERY that commits an other-spelling retry?
+ * Decided before the event's lookups and transaction, narrowly: the gate is on, the event is `delivered`, and the send it names is
+ * bound by `retry_send_id` to a claim still `resending` -- or this pre-check itself fails (we cannot rule it out). Then ANY failure of
+ * the event (the message lookups, the event-ledger insert, the delivery update, the retry hook, the COMMIT) answers non-2xx so
+ * SendGrid redelivers it; the redelivery is idempotent through the event ledger and the claim. Gate off, a non-delivered event, or a
+ * send provably not bound: today's contract, unchanged. Never throws.
+ */
+async function isRetryCriticalEvent(ev) {
+  try {
+    if (!require('../config/feature-gates').callBounceOtherSpellingLive()) return false;
+    if (String(ev?.event || '').toLowerCase() !== 'delivered') return false;
+    const messageId = ev.sg_message_id ? String(ev.sg_message_id).split('.')[0] : null;
+    if (!messageId) return false;
+    const bound = await db('call_email_spelling_retries as c')
+      .join('automation_step_sends as s', 's.id', 'c.retry_send_id')
+      .where({ 's.sendgrid_message_id': messageId, 'c.status': 'resending' })
+      .first('c.id');
+    if (bound) return true;
+    // The delivery can beat the runner's save of the message id: the send is then named by its custom arg alone.
+    const byArg = await require('../services/call-email-spelling-retry')
+      .findRetrySendByCustomArg({ ev, messageId, email: ev.email, resendingOnly: true });
+    return !!byArg;
+  } catch (err) {
+    logger.warn(`[sendgrid-webhook] retry pre-check failed (treated as retry-critical): ${err.code || err.name}`);
+    return true;
+  }
+}
+
+/**
+ * The automation branch's event transaction. A DELIVERED event that worked on a retry claim (spelling.touched) must be redelivered
+ * when its transaction fails for ANY reason, the COMMIT included: the route answers non-2xx for err.retryWebhook, the event ledger row
+ * rolled back with the transaction and the claim is still `resending`, so the redelivery commits once (a second delivery after a
+ * commit finds no `resending` claim and is a no-op). Bounce / dropped / blocked events are already redelivered on any failure.
+ */
+async function processAutomationEvent(ev, messageId, email, automationSend) {
+  let spelling = null;
+  try {
+    const processedNew = await processWebhookEvent(ev, messageId, email, async (trx) => {
+      spelling = await handleAutomationEvent(ev, automationSend, trx);
+    });
+    return { processedNew, spelling };
+  } catch (err) {
+    if (spelling?.touched && err && typeof err === 'object') err.retryWebhook = true;
+    throw err;
+  }
+}
+
+/**
+ * Fallback (GATE_CALL_BOUNCE_OTHER_SPELLING): a BOUND retry send carries its own row id as custom arg `automation_step_send_id`, so
+ * an event that beats the runner's post-send message-id write still finds it. Trusted only for that send, to its own recipient,
+ * while unbound or bound to this message id; the id is then saved so the runner's later write changes nothing. Null = not found.
+ */
+async function retrySendByCustomArg(ev, messageId, email) {
+  if (!ev.automation_step_send_id) return null;
+  const retrySvc = require('../services/call-email-spelling-retry');
+  const named = await retrySvc.findRetrySendByCustomArg({ ev, messageId, email });
+  return named ? retrySvc.adoptRetrySendMessageId(named, messageId) : null;
+}
+
+// The automation step send an event belongs to: by message id, else (a bound retry send only) by its custom arg.
+async function findAutomationSend(ev, messageId, email) {
+  const byMessageId = await db('automation_step_sends').where({ sendgrid_message_id: messageId }).first();
+  return byMessageId || retrySendByCustomArg(ev, messageId, email);
+}
 
 async function handleEvent(ev) {
   const messageId = ev.sg_message_id ? ev.sg_message_id.split('.')[0] : null;
@@ -255,9 +339,7 @@ async function handleEvent(ev) {
   // Automation step sends are always single-recipient (one customer per
   // step), so message id alone is unique there. Belt-and-suspenders email
   // filter anyway.
-  const automationSend = !newsletterDelivery ? await db('automation_step_sends')
-    .where({ sendgrid_message_id: messageId })
-    .first() : null;
+  const automationSend = newsletterDelivery ? null : await findAutomationSend(ev, messageId, email);
   let emailMessage = !newsletterDelivery && !automationSend
     ? await db('email_messages')
       .where({ provider_message_id: messageId })
@@ -365,7 +447,8 @@ async function handleEvent(ev) {
     return;
   }
   if (automationSend) {
-    const processedNew = await processWebhookEvent(ev, messageId, email, (trx) => handleAutomationEvent(ev, automationSend, trx));
+    const { processedNew, spelling } = await processAutomationEvent(ev, messageId, email, automationSend);
+    if (processedNew && settleSpellingOutcome(spelling, ev)) return;
     if (processedNew) {
       // Automations span both streams: newsletter-group templates
       // (cold_lead nurture, referral nudges) are MARKETING — their bounces
@@ -1075,7 +1158,10 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
           status: 'delivered', delivered_at: now, updated_at: now,
         });
       }
-      break;
+      // A send to the other spelling of a call-captured address delivered: that address replaces the bounced one on
+      // the customer (owner 2026-11-05). Nothing happens for any other send.
+      // `touched` (a claim was found) is returned so the route can request redelivery if the transaction then fails.
+      return require('../services/call-email-spelling-retry').onAutomationDelivered({ sendRow }, client);
 
     case 'open':
       if (!sendRow.opened_at) {
@@ -1108,9 +1194,15 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
       // bad, just that we already knew. Cancelling on either was destructive
       // since enrollment.status='cancelled' is terminal.
       if (ev.type === 'bounce') {
+        // GATE_CALL_BOUNCE_OTHER_SPELLING (owner 2026-11-05): a call-captured address whose other spelling the call
+        // settled is retried once instead of cancelling; the caller then raises no alert, rescue or card.
+        const spelling = await require('../services/call-email-spelling-retry').onAutomationHardBounce({ ev, sendRow }, client);
+        if (spelling.retried) return spelling;
         await cancelActiveEnrollments({ email: ev.email, reason: 'hard_bounce' }, client);
+        return spelling;
       }
-      break;
+      // A dead-domain "blocked" event for the BOUND retry send fails the claim like a hard bounce would (alert only, no card).
+      return require('../services/call-email-spelling-retry').onAutomationDeadDomain({ ev, sendRow }, client);
     }
 
     case 'spamreport':
@@ -1151,6 +1243,7 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
     default:
       break;
   }
+  return null;
 }
 
 async function unsubscribeNewsletterSubscriber(email, at, client = db) {
@@ -1217,6 +1310,7 @@ module.exports.bindNewsletterDeliveryMessageId = bindNewsletterDeliveryMessageId
 module.exports.reconcileNewsletterSendStatus = reconcileNewsletterSendStatus;
 module.exports.handleNewsletterEvent = handleNewsletterEvent;
 module.exports.handleEmailMessageEvent = handleEmailMessageEvent;
+module.exports.handleAutomationEvent = handleAutomationEvent;
 module.exports.handleEvent = handleEvent;
 module.exports.staleEmailSuppressionGroupKey = staleEmailSuppressionGroupKey;
 module.exports.newsletterSuppressionGroupKeyForEvent = newsletterSuppressionGroupKeyForEvent;

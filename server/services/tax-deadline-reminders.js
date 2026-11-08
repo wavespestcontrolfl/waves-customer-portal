@@ -1,10 +1,10 @@
 /**
- * Tax deadline bells (GATE_TAX_DEADLINE_BELLS, owner 2026-10-30, "All tax deadlines ring").
+ * Tax deadline bells (owner 2026-10-30, "All tax deadlines ring").
  *
- * The 8:23 ET tax deadline job used to text the owner phone. That text is an owner-phone
+ * The 8:23 ET tax deadline job used to text the owner phone (that text path is removed). That text is an owner-phone
  * internal alert, which twilio.js turns into the internal_admin_alert trigger, and the bell
  * policy denies that trigger: from 2026-09-01 the owner got nothing while the job still
- * marked every row reminded. With the gate on, each reminder is an admin bell instead,
+ * marked every row reminded. Each reminder is an admin bell instead,
  * raised through raiseAdminAlert (docs/admin-notifications.md) in category `tax` with
  * `bellDefault: true`: it rings by default and a saved Settings override still wins.
  *
@@ -203,7 +203,7 @@ async function sweepBells({ today, closeKeys, openKeys, conn = db }) {
 }
 
 /**
- * The gate-on body of the 8:23 ET job. Never throws for one bad row. Returns counts.
+ * The body of the 8:23 ET job. Never throws for one bad row. Returns counts.
  * Injectable: now, raise (raiseAdminAlert), episodes (closeAdminAlertKeys/openAdminAlertKeys).
  */
 async function runTaxDeadlineReminders({

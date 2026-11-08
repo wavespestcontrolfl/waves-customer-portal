@@ -20490,8 +20490,8 @@ const CallRecordingProcessor = {
                       }
                       // A copied hour (the call set none) that another stop
                       // holds on visit 2's date moves to the nearest free whole
-                      // hour that day (GATE_CALL_FOLLOWUP_FREE_HOUR, owner
-                      // 2026-10-22; scheduling/plan-taken-hour.js), read under
+                      // hour that day (owner 2026-10-22;
+                      // scheduling/plan-taken-hour.js), read under
                       // the fence above so a concurrent fenced call booking
                       // cannot pick the same hour. A time set on the call and
                       // a package visit 2 keep theirs; the idempotency key

@@ -6,8 +6,7 @@
  * and links to its Assets row; any other equipment line links to a new-row
  * dialog with the name filled in. The Assets save that carries
  * receipt_line_id writes purchase_receipt_lines.equipment_id, so the purchase
- * that replaced a tool is traceable from the line. Live only with
- * GATE_TRUCK_KIT; off, the agent rings its plain bell as before.
+ * that replaced a tool is traceable from the line.
  */
 const truckKit = require('../truck-kit');
 
@@ -16,10 +15,8 @@ const TITLE_MAX = 120;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LINE_STATUS = 'agent_equipment';
 
-// The bell body and link for an agent_equipment line, or null when the gate
-// is off (the caller keeps its plain bell).
+// The bell body and link for an agent_equipment line.
 async function equipmentBellFor(conn, { lineId, line }) {
-  if (!truckKit.truckKitEnabled()) return null;
   const title = String(line?.raw_title || '').trim();
   const alert = await truckKit.matchReceiptToOpenAlert(title, conn);
   if (alert) {

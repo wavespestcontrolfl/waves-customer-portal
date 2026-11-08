@@ -3385,6 +3385,7 @@ function AdminAutopayPanelV2({
   customerName,
   canCharge = false,
   collectionHold = null,
+  onRateChanged,
 }) {
   const [state, setState] = useState(null);
   const [loadError, setLoadError] = useState(false);
@@ -3474,9 +3475,11 @@ function AdminAutopayPanelV2({
     setErr("");
     setMsg("");
     try {
+      // expectedAmount = the amount the confirm showed: the server charges
+      // the rate stored now and refuses (rate_changed) if it moved since.
       const result = await adminFetch(`/admin/customers/${customerId}/charge-now`, {
         method: "POST",
-        body: JSON.stringify({ billedMonth: duesMonth }),
+        body: JSON.stringify({ billedMonth: duesMonth, expectedAmount: amt }),
       });
       const payment = result?.payment;
       const collected = Number.parseFloat(payment?.amount);
@@ -3491,6 +3494,10 @@ function AdminAutopayPanelV2({
       load();
     } catch (e) {
       setErr(e.message || "Charge failed");
+      // Nothing was charged. Re-read the profile so the button and the next
+      // confirm show the current rate; a failed re-read keeps the old amount,
+      // and the server refuses it again.
+      if (e.body?.rate_changed) Promise.resolve(onRateChanged?.()).catch(() => {});
     }
     setCharging(false);
   };
@@ -6578,6 +6585,7 @@ function CustomerProfileBilling({
         customerName={`${c.firstName} ${c.lastName}`}
         canCharge={isAdmin}
         collectionHold={collectionHold}
+        onRateChanged={onRefresh}
       />{" "}
       <AccountCreditPanelV2
         customerId={c.id}

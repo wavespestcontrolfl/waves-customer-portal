@@ -32,6 +32,7 @@ const {
 const { billingEmailRefusal } = require('./billing-email-sender');
 const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing');
 const BillingEmailDetails = require('./billing-email-details');
+const { customerVisibleInvoiceNotes } = require('./invoice-notes');
 
 function acceptedInvoiceEmailEvidence(result) {
   return result.deduped ? { deduped: true, sentAt: storedEmailAcceptedAt(result.message) } : {};
@@ -467,7 +468,7 @@ async function sendInvoiceEmailCore(invoiceId, options = {}) {
   // Customer-facing service summary (the AI-written / operator-edited note that
   // already shows on the invoice PDF). Render it as its own paragraph so the
   // summary reaches the customer in the email body, not just the attachment.
-  const summaryNote = clean(invoice.notes).slice(0, 1200);
+  const summaryNote = clean(customerVisibleInvoiceNotes(invoice.notes)).slice(0, 1200);
   const summaryEscaped = summaryNote
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const summaryHtml = summaryNote
