@@ -1,5 +1,5 @@
 // Real PostgreSQL transactions (rolled back) behind the neighborhood merge
-// routes (GATE_NEIGHBORHOOD_MERGE, owner ruling 2026-10-25); auth is a stub.
+// routes (owner ruling 2026-10-25); auth is a stub.
 // All names, addresses and codes are synthetic.
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
@@ -31,8 +31,6 @@ postgres('neighborhood merge routes', () => {
   let trx;
   let server;
   let baseUrl;
-  const GATES = ['GATE_NEIGHBORHOOD_ACCESS', 'GATE_NEIGHBORHOOD_MERGE'];
-  const OLD = Object.fromEntries(GATES.map((g) => [g, process.env[g]]));
   const tag = randomUUID().slice(0, 8);
 
   const call = async (method, path, body) => {
@@ -100,7 +98,6 @@ postgres('neighborhood merge routes', () => {
   });
   beforeEach(async () => {
     jest.clearAllMocks();
-    for (const g of GATES) process.env[g] = 'true';
     trx = await database.transaction();
     mockConnection = trx;
     // Only this test's rows: park everything already in the scratch database.
@@ -108,27 +105,10 @@ postgres('neighborhood merge routes', () => {
   });
   afterEach(async () => {
     await trx.rollback();
-    for (const g of GATES) {
-      if (OLD[g] === undefined) delete process.env[g];
-      else process.env[g] = OLD[g];
-    }
   });
   afterAll(async () => {
     await new Promise((resolve) => server.close(resolve));
     await database.destroy();
-  });
-
-  test('gate off: both merge routes answer 404 enabled:false and the list carries no merge data', async () => {
-    delete process.env.GATE_NEIGHBORHOOD_MERGE;
-    const a = await neighborhood('Gateoff A');
-    const b = await neighborhood('Gateoff B');
-    await home(a);
-    expect(await merge(a, b)).toEqual({ status: 404, body: { enabled: false } });
-    expect((await call('POST', `/merges/${randomUUID()}/undo`)).status).toBe(404);
-    const list = await call('GET', '/');
-    expect(list.body.mergeEnabled).toBe(false);
-    expect(list.body.neighborhoods.every((n) => !('mergedIn' in n))).toBe(true);
-    expect(await hoodRow(a)).toEqual({ active: true, merged_into_id: null });
   });
 
   test('merge: homes, entries and ledger rows move; the source becomes an inactive pointer; the list and search follow', async () => {
@@ -161,7 +141,6 @@ postgres('neighborhood merge routes', () => {
     expect(row.journal.properties.map((h) => h.id).sort()).toEqual([live.propertyId, gone.propertyId].sort());
 
     const list = await call('GET', '/');
-    expect(list.body.mergeEnabled).toBe(true);
     expect(list.body.neighborhoods.map((n) => n.id)).toEqual([target]);
     expect(list.body.neighborhoods[0]).toMatchObject({ propertyCount: 2, mergedIn: [{ mergeId: r.body.mergeId, name: hoodName('Country Lane Lwr') }] });
     const found = await call('GET', `/?q=${encodeURIComponent('lane lwr')}`);
@@ -336,9 +315,6 @@ postgres('neighborhood merge routes', () => {
     expect((await call('POST', '/merge-suggestions/dismiss', { sourceId: 'x', targetId: kept })).status).toBe(400);
     expect((await call('POST', '/merge-suggestions/dismiss', { sourceId: randomUUID(), targetId: kept })).status).toBe(404);
     expect((await call('POST', '/merge-suggestions/dismiss', { sourceId: kept, targetId: kept })).status).toBe(404);
-    delete process.env.GATE_NEIGHBORHOOD_MERGE;
-    expect(await call('GET', '/merge-suggestions')).toEqual({ status: 404, body: { enabled: false } });
-    expect((await call('POST', '/merge-suggestions/dismiss', { sourceId: spelled, targetId: kept })).status).toBe(404);
   });
 
   test('a chain: A into B, then B into C; undo of A into B waits for the later one, and the pointer chain reaches C', async () => {

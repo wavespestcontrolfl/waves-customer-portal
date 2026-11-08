@@ -1072,7 +1072,7 @@ export default function TechHomePage({ section = 'today' }) {
           service={{
             // What the Wrap-up reads: billing facts, the customer, the check-in time.
             ...wrapUpSheetFields(fastCompleteService),
-            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            // The stop's gate and access codes for the sheet header.
             ...accessSheetFields(fastCompleteService),
             id: fastCompleteService.id,
             customerName: fastCompleteService.customer_name || fastCompleteService.customerName,
@@ -1157,7 +1157,7 @@ export default function TechHomePage({ section = 'today' }) {
             customerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
             onSiteAt: onSiteTimeOf(treeShrubFastService) || null,
             ...completionBillingFacts(treeShrubFastService),
-            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            // The stop's gate and access codes for the sheet header.
             ...accessSheetFields(treeShrubFastService),
             // The visit the tech tapped, checked against the live context
             // (same fields the pest sheet routes with).
@@ -1193,7 +1193,7 @@ export default function TechHomePage({ section = 'today' }) {
           service={{
             // What the Wrap-up reads: billing facts, the customer, the check-in time.
             ...wrapUpSheetFields(lawnReserviceFastService),
-            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            // The stop's gate and access codes for the sheet header.
             ...accessSheetFields(lawnReserviceFastService),
             id: lawnReserviceFastService.id,
             customerName: lawnReserviceFastService.customer_name || lawnReserviceFastService.customerName,
@@ -1248,7 +1248,7 @@ export default function TechHomePage({ section = 'today' }) {
           onCancelled={() => { closeFastSheetsBehindDetails(); setDetailService(null); fetchSchedule(); }}
           onRescheduled={() => { closeFastSheetsBehindDetails(); fetchSchedule(); }}
           onBillingChanged={() => { closeFastSheetsBehindDetails(); setDetailService(null); fetchSchedule(); }}
-          // GATE_SCHEDULE_ACCESS_CODES: after Wrong code or Add gate code in
+          // After Wrong code or Add gate code in
           // Details → Access, reload the route and hand the section this
           // visit's fresh row (null when the reload did not bring it back).
           onAccessChanged={async () => {

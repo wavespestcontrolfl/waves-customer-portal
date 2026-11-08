@@ -1,4 +1,4 @@
-// Homes not placed + Add as unconfirmed (GATE_NEIGHBORHOOD_UNPLACED, owner
+// Homes not placed + Add as unconfirmed (owner
 // ruling 2026-10-26), on real PostgreSQL transactions (rolled back); auth is a
 // stub. All names, addresses and codes are synthetic.
 const SKIP = !process.env.DATABASE_URL;
@@ -17,6 +17,11 @@ jest.mock('../middleware/admin-auth', () => ({
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jest.fn(async () => null) }));
+// Nothing here reaches the county: the by-address search answers no lot unless a test passes its own.
+jest.mock('../services/property-lookup/county-parcel-gis', () => ({
+  ...jest.requireActual('../services/property-lookup/county-parcel-gis'),
+  lookupCountyParcelsByAddress: jest.fn(async () => []),
+}));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-neighborhood-access');
@@ -28,8 +33,6 @@ postgres('homes not placed and add as unconfirmed', () => {
   let trx;
   let server;
   let baseUrl;
-  const GATES = ['GATE_NEIGHBORHOOD_ACCESS', 'GATE_NEIGHBORHOOD_NAMING', 'GATE_NEIGHBORHOOD_UNPLACED'];
-  const OLD = Object.fromEntries(GATES.map((g) => [g, process.env[g]]));
   // Starts with a digit, so the community name's title case leaves it as written.
   const tag = `7${randomUUID().slice(0, 7)}`;
 
@@ -88,16 +91,11 @@ postgres('homes not placed and add as unconfirmed', () => {
   });
   beforeEach(async () => {
     jest.clearAllMocks();
-    for (const g of GATES) process.env[g] = 'true';
     trx = await database.transaction();
     mockConnection = trx;
   });
   afterEach(async () => {
     await trx.rollback();
-    for (const g of GATES) {
-      if (OLD[g] === undefined) delete process.env[g];
-      else process.env[g] = OLD[g];
-    }
   });
   afterAll(async () => {
     await new Promise((resolve) => server.close(resolve));
@@ -162,13 +160,9 @@ postgres('homes not placed and add as unconfirmed', () => {
     const link = await call('PUT', `/properties/${zipOnly.propertyId}/neighborhood`, { create: { name: homes[1].countyLot.community, county: 'Manatee' } });
     expect(link.status).toBe(200);
     expect(mine((await call('GET', '/unplaced')).body.homes).map((h) => h.propertyId)).toEqual([saved.propertyId]);
-
-    delete process.env.GATE_NEIGHBORHOOD_UNPLACED;
-    expect(await call('GET', '/unplaced')).toEqual({ status: 404, body: { enabled: false } });
-    expect((await call('GET', '/')).body.unplacedEnabled).toBe(false);
   });
 
-  test('add as unconfirmed: needs confirm, no date, the live code stays live; ignored with the switch off; not a boolean = 400', async () => {
+  test('add as unconfirmed: needs confirm, no date, the live code stays live; not a boolean = 400', async () => {
     const hood = await neighborhood(`Unconfirmed ${tag}`);
     const live = await call('POST', `/${hood}/entries`, { access_type: 'keypad', code: '1111' });
     expect(live.body.status).toBe('active');
@@ -180,10 +174,5 @@ postgres('homes not placed and add as unconfirmed', () => {
       { code: '2222', status: 'needs_confirm', last_confirmed_at: null },
     ]);
     expect((await call('POST', `/${hood}/entries`, { access_type: 'keypad', code: '3333', unconfirmed: 'yes' })).status).toBe(400);
-    expect((await call('GET', '/')).body.unplacedEnabled).toBe(true);
-
-    delete process.env.GATE_NEIGHBORHOOD_UNPLACED;
-    const ignored = await call('POST', `/${hood}/entries`, { access_type: 'keypad', code: '4444', unconfirmed: true });
-    expect(ignored.body.status).toBe('active');
   });
 });

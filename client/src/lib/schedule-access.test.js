@@ -1,16 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { acceptedRowsFor, accessLinesOf, scheduleAccessOn } from './schedule-access';
+import { acceptedRowsFor, accessLinesOf } from './schedule-access';
 
 // Alert text exactly as server/services/nextstop-alerts.js composes it.
-const row = (alerts, extra = {}) => ({ id: 'visit-1', scheduleAccessEnabled: true, propertyAlerts: alerts, ...extra });
+const row = (alerts, extra = {}) => ({ id: 'visit-1', propertyAlerts: alerts, ...extra });
 
 describe('accessLinesOf', () => {
-  it('draws nothing while the gate is off, even when the row has gate alerts', () => {
-    const off = { id: 'visit-1', propertyAlerts: [{ type: 'gate', text: 'Gate: 1234' }] };
-    expect(scheduleAccessOn(off)).toBe(false);
-    expect(accessLinesOf(off)).toEqual([]);
-    expect(accessLinesOf({ ...off, scheduleAccessEnabled: 'true' })).toEqual([]);
+  it('draws nothing for a missing row or a row without alerts', () => {
     expect(accessLinesOf(null)).toEqual([]);
+    expect(accessLinesOf({ id: 'visit-1' })).toEqual([]);
   });
 
   it("reads the customer's own gate code and the profile's other codes", () => {
