@@ -263,6 +263,28 @@ describe('a moved visit must still be movable under the fence', () => {
     expect(w.rowWrites()).toEqual([]);
   });
 
+  test('its 24-hour reminder was turned off meanwhile (read with the transaction handle)', async () => {
+    const off = new Set();
+    const loadReminder24hOffIds = jest.fn(async (_conn, rows) => new Set(rows.filter((r) => off.has(r.id)).map((r) => r.id)));
+    const w = plan4({ over: { loadReminder24hOffIds } });
+    w.lockDayRows.mockImplementationOnce(async () => { off.add('b'); });
+    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:reminder_24h_off', moved: 0 });
+    expect(w.rowWrites()).toEqual([]);
+    expect(loadReminder24hOffIds).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({ id: expect.any(String), customer_id: expect.any(String) })]);
+    expect(loadReminder24hOffIds.mock.calls[0][0]).toBe(w.acquireOccupancyLock.mock.calls[0][0]); // the transaction handle
+  });
+
+  test('its 24-hour reminder still on: the move is written', async () => {
+    const w = plan4({ over: { loadReminder24hOffIds: jest.fn(async () => new Set()) } });
+    expect((await w.run()).status).toBe('applied');
+  });
+
+  test('deps without the reminder read (older callers) skip the check', async () => {
+    const w = plan4();
+    expect(w.deps.loadReminder24hOffIds).toBeUndefined();
+    expect((await w.run()).status).toBe('applied');
+  });
+
   // GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a"): the move transaction re-reads the told-lock facts.
   const recurring = { a: { route_order: 1, is_recurring: true, recurring_parent_id: 'p-a' }, b: { route_order: 2, is_recurring: true, recurring_parent_id: 'p-b' },
     c: { route_order: 3, is_recurring: true, recurring_parent_id: 'p-c' }, d: { route_order: 4, is_recurring: true, recurring_parent_id: 'p-d' } };

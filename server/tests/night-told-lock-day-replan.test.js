@@ -34,7 +34,7 @@ const TECH = '00000000-0000-4000-8000-000000000001';
 const HQ = { lat: 27.4330885, lng: -82.4056801 };
 
 /** A chainable fake knex: reads resolve from `tables`, only inserts into day_replan_plans are expected. */
-function fakeConn({ stopsByDate = {}, reminders = [], failReminders = false, blocks = [] } = {}) {
+function fakeConn({ stopsByDate = {}, reminders = [], failReminders = false, blocks = [], notificationPrefs = [], failPrefs = false } = {}) {
   const calls = [];
   const inserts = [];
   const conn = (table) => {
@@ -46,6 +46,10 @@ function fakeConn({ stopsByDate = {}, reminders = [], failReminders = false, blo
             let out = [];
             if (table === 'scheduled_services') out = stopsByDate[target.date] || [];
             if (table === 'tech_schedule_blocks') out = blocks;
+            if (table === 'notification_prefs') {
+              if (failPrefs) return Promise.reject(new Error('prefs down')).then(resolve, reject);
+              out = notificationPrefs;
+            }
             if (table === 'appointment_reminders') {
               if (failReminders) return Promise.reject(new Error('reminders down')).then(resolve, reject);
               out = reminders;
@@ -270,5 +274,69 @@ describe('shadow run: the fixed list records each reason', () => {
     const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: withParent() } });
     await runDayReplanIfEnabled({ now: NOW, conn });
     expect(fixedOf(inserts).every(([, why]) => why === 'person_placed')).toBe(true);
+  });
+});
+
+// The day re-plan keeps a visit whose 24-hour reminder will not go out: apply re-times silently, and that reminder is the
+// only notice of the new hour.
+describe('reminder_24h_off', () => {
+  const ctxWith = (extra = {}) => ({ dateStr: TOMORROW, now: NOW, visitCounts: new Map(), customerCounts: new Map(), sent24: new Set(), ...extra });
+  const stop = (extra = {}) => ({ id: 's1', status: 'confirmed', window_start: '09:00:00', visit_id: null, customer_id: 'c1', ...extra });
+  const dayRows = () => [row('a', 0.30, 8), row('b', 0.02, 9)];
+
+  test('a stop whose reminder is off is fixed; others are not', () => {
+    const ctx = ctxWith({ reminder24hOff: new Set(['s1']) });
+    expect(_internals.fixedReason(stop(), ctx)).toBe('reminder_24h_off');
+    expect(_internals.fixedReason(stop({ id: 's2' }), ctx)).toBeNull();
+  });
+
+  test('a context with no reminder fact skips the check (callers that never load it keep their behavior)', () => {
+    expect(_internals.fixedReason(stop(), ctxWith())).toBeNull();
+  });
+
+  test('order: the sent reminder and the 24-hour reach come first, the told-lock reasons after', () => {
+    const off = new Set(['s1']);
+    expect(_internals.fixedReason(stop(), ctxWith({ sent24: new Set(['s1']), reminder24hOff: off }))).toBe('reminder_24h_sent');
+    expect(_internals.fixedReason(stop({ window_start: '05:00:00' }), ctxWith({ reminder24hOff: off }))).toBe('within_24h');
+    const told = ctxWith({ reminder24hOff: off, toldLock: true, told: new Set(['s1']), personPlaced: new Set(['s1']) });
+    expect(_internals.fixedReason(stop({ customer_confirmed: true }), told)).toBe('reminder_24h_off');
+  });
+
+  test('loadDayContext: a customer who turned the 24-hour reminder off fixes that visit only', async () => {
+    const { conn } = fakeConn({ stopsByDate: { [TOMORROW]: dayRows() }, notificationPrefs: [{ customer_id: 'cust-a', service_reminder_24h: false }] });
+    const ctx = await _internals.loadDayContext(conn, TOMORROW, NOW);
+    expect([...ctx.reminder24hOff]).toEqual(['a']);
+    expect(_internals.fixedReason(dayRows()[0], ctx)).toBe('reminder_24h_off');
+    expect(_internals.fixedReason(dayRows()[1], ctx)).toBeNull();
+  });
+
+  test('loadDayContext: texts off for a text reminder fixes that visit', async () => {
+    const { conn } = fakeConn({ stopsByDate: { [TOMORROW]: dayRows() }, notificationPrefs: [{ customer_id: 'cust-b', sms_enabled: false }] });
+    const ctx = await _internals.loadDayContext(conn, TOMORROW, NOW);
+    expect([...ctx.reminder24hOff]).toEqual(['b']);
+  });
+
+  test('loadDayContext: reminders on (no prefs rows) leave the day unchanged', async () => {
+    const { conn } = fakeConn({ stopsByDate: { [TOMORROW]: dayRows() } });
+    const ctx = await _internals.loadDayContext(conn, TOMORROW, NOW);
+    expect(ctx.reminder24hOff.size).toBe(0);
+    expect(_internals.fixedReason(dayRows()[0], ctx)).toBeNull();
+  });
+
+  test('loadDayContext: an answer that is not a clear "will send" (unknown) fixes the visit', async () => {
+    const reminders = require('../services/appointment-reminders');
+    const spy = jest.spyOn(reminders, 'loadVisitReminder24hAnswers').mockResolvedValue(new Map([['a', true]]));
+    try {
+      const { conn } = fakeConn({ stopsByDate: { [TOMORROW]: dayRows() } });
+      const ctx = await _internals.loadDayContext(conn, TOMORROW, NOW);
+      expect([...ctx.reminder24hOff]).toEqual(['b']);
+    } finally { spy.mockRestore(); }
+  });
+
+  test('loadDayContext: a failed read does not throw and fixes every visit of the day', async () => {
+    const { conn } = fakeConn({ stopsByDate: { [TOMORROW]: dayRows() }, failPrefs: true });
+    const ctx = await _internals.loadDayContext(conn, TOMORROW, NOW);
+    expect([...ctx.reminder24hOff].sort()).toEqual(['a', 'b']);
+    for (const r of dayRows()) expect(_internals.fixedReason(r, ctx)).toBe('reminder_24h_off');
   });
 });
