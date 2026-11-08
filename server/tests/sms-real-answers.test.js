@@ -143,7 +143,7 @@ describe('GATE_SMS_REAL_ANSWERS off — byte-identical to v11', () => {
 
   test('currentPromptVersion() resolves to PROMPT_VERSION while the gate is off', () => {
     clearGates();
-    expect(currentPromptVersion()).toBe(PROMPT_VERSION);
+    expect(currentPromptVersion()).toBe(`${PROMPT_VERSION}+e`); // edit learning's e tag is always on
   });
 });
 
@@ -297,7 +297,7 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
   });
 
   test('currentPromptVersion() resolves to REAL_ANSWERS_PROMPT_VERSION while the gate is on', () => {
-    expect(currentPromptVersion()).toBe(REAL_ANSWERS_PROMPT_VERSION);
+    expect(currentPromptVersion()).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+e`);
   });
 
   test('currentPromptVersion() folds in whichever category gates are ALSO on — a different combination is a different version (pre-push audit P1 round 2)', () => {
@@ -313,31 +313,31 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     // judgments/sms_pathology_entries/sms_sealed_eval_runs, and the bare
     // REAL_ANSWERS_PROMPT_VERSION is already 29 chars — a full-word tag
     // would overflow the column with just one category gate on.
-    expect(complaintsOnly).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+c`);
+    expect(complaintsOnly).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+ce`);
     expect(complaintsOnly.length).toBeLessThanOrEqual(40);
 
     process.env.GATE_SMS_AGENT_BILLING_DISPUTES = 'true';
     const complaintsAndBilling = currentPromptVersion();
     // sorted, so flip ORDER never changes the identity
-    expect(complaintsAndBilling).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+bc`);
+    expect(complaintsAndBilling).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+bce`);
     expect(complaintsAndBilling).not.toBe(complaintsOnly);
     expect(complaintsAndBilling.length).toBeLessThanOrEqual(40);
 
     delete process.env.GATE_SMS_AGENT_COMPLAINTS;
     const billingOnly = currentPromptVersion();
-    expect(billingOnly).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+b`);
+    expect(billingOnly).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+be`);
     expect(billingOnly).not.toBe(complaintsOnly);
     expect(billingOnly).not.toBe(complaintsAndBilling);
 
     delete process.env.GATE_SMS_AGENT_BILLING_DISPUTES;
-    expect(currentPromptVersion()).toBe(REAL_ANSWERS_PROMPT_VERSION); // back to the bare identity
+    expect(currentPromptVersion()).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+e`); // back to the bare identity plus the e tag
   });
 
   test('the worst case (all four category gates on) still fits the varchar(40) prompt_version columns (pre-push audit P1 round 3)', () => {
     for (const g of CATEGORY_GATES) process.env[g] = 'true';
     const allFour = currentPromptVersion();
-    expect(allFour).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+bclm`);
-    expect(allFour.length).toBe(37); // '7_m' + '+bclm': the compact scheme (#5610) leaves room under PROMPT_VERSION_COLUMN_MAX
+    expect(allFour).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+bcelm`);
+    expect(allFour.length).toBe(38); // '7_m' + '+bcelm': the compact scheme (#5610) leaves room under PROMPT_VERSION_COLUMN_MAX
     expect(allFour.length).toBeLessThanOrEqual(40);
   });
 

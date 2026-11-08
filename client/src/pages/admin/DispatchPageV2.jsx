@@ -384,7 +384,7 @@ function lawnReserviceSheetService(row) {
   return {
     // What the Wrap-up reads: billing facts, the customer, the check-in time.
     ...wrapUpSheetFields(row),
-    // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+    // The stop's gate and access codes for the sheet header.
     ...accessSheetFields(row),
     id: row.id,
     customerName: row.customer_name || row.customerName,
@@ -1029,7 +1029,7 @@ export default function DispatchPageV2({
   const lawnSheetService = (row) => ({
     // What the Wrap-up reads to know whether the visit invoices and who pays.
     ...completionBillingFacts(row),
-    // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+    // The stop's gate and access codes for the sheet header.
     ...accessSheetFields(row),
     id: row.id,
     customerName: pickOf(row, 'customer_name', 'customerName'),
@@ -1064,7 +1064,7 @@ export default function DispatchPageV2({
   const pestSheetService = (row) => ({
     // What the Wrap-up reads: billing facts, the customer, the check-in time.
     ...wrapUpSheetFields(row),
-    // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+    // The stop's gate and access codes for the sheet header.
     ...accessSheetFields(row),
     id: row.id,
     customerName: pickOf(row, 'customer_name', 'customerName'),
@@ -2154,7 +2154,7 @@ export default function DispatchPageV2({
             customerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
             onSiteAt: onSiteTimeOf(treeShrubFastService) || null,
             ...completionBillingFacts(treeShrubFastService),
-            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            // The stop's gate and access codes for the sheet header.
             ...accessSheetFields(treeShrubFastService),
             // The visit the user opened, checked against the live context
             // (same fields TechHomePage routes the sheet with).
@@ -2257,7 +2257,7 @@ export default function DispatchPageV2({
             address: shortAddress(assessmentFastService.address) || assessmentFastService.address || "",
             // The whole address, for the "Create estimate" prefill (the line above is display only).
             fullAddress: assessmentFastService.address || "",
-            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            // The stop's gate and access codes for the sheet header.
             ...accessSheetFields(assessmentFastService),
             timeLabel: serviceWindowLabel(assessmentFastService) || "",
             // The visit the user opened. The sheet sends it with the completion
@@ -2643,7 +2643,7 @@ export default function DispatchPageV2({
           }}
           // GATE_NEW_CALLER_BOOKING: Link customer on a visit booked by address.
           newCallerBooking={safeData.newCallerBooking === true}
-          // GATE_SCHEDULE_ACCESS_CODES: a gate code was reported or added from
+          // A gate code was reported or added from
           // Details. Refetch the day (the list row shows it too) and hand the
           // sheet's Access section this visit's fresh row; the sheet keeps its
           // own snapshot. A visit the refetch misses (moved, week row) = null.

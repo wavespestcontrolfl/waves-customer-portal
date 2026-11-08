@@ -13,10 +13,10 @@
  *                                     overwritten by the county lookup
  * POST   /:neighborhoodId/entries   — office adds an entry (active, confirmed now;
  *                                     other live codes there then need confirming).
- *                                     { unconfirmed: true } under GATE_NEIGHBORHOOD_UNPLACED:
+ *                                     { unconfirmed: true }:
  *                                     needs_confirm, no confirmation date, nothing demoted
  * GET    /unplaced                  — homes the directory cannot place (owner ruling
- *                                     2026-10-26; GATE_NEIGHBORHOOD_UNPLACED, off = 404)
+ *                                     2026-10-26)
  * PATCH  /entries/:id               — edit an entry (a new value counts as confirmed),
  *                                     or { action: 'confirm' | 'retire' }
  *                                     Both take gate_location (a Google Maps link or
@@ -36,17 +36,14 @@
  * GET    /merge-suggestions         — entries whose names read as one community
  * POST   /merge-suggestions/dismiss — "not the same" ({ sourceId, targetId }): never
  *                                     suggested again
- *                                     Both merge routes are GATE_NEIGHBORHOOD_MERGE
- *                                     (owner ruling 2026-10-25); off = 404.
+ *                                     (merge: owner ruling 2026-10-25)
  *
  * A neighborhood's gate code is shared by every stop in it and is staff-only:
  * every route but the two /visits ones requires full admin, and every
- * response is no-store. The /visits routes (owner ruling 2026-10-03, dark
- * behind GATE_NEIGHBORHOOD_TECH_ACTIONS) also admit a technician, only
+ * response is no-store. The /visits routes (owner ruling 2026-10-03) also admit a technician, only
  * through a visit assigned to them: an added code is live at once, a code
  * marked wrong drops to needs_confirm and the office decides. No bell. QR / app passes are stored as instructions only,
- * never as a code. Dark behind GATE_NEIGHBORHOOD_ACCESS (read at call time):
- * off answers 404 { enabled: false } on every route.
+ * never as a code.
  *
  * Never log a code or an instructions value — ids and error codes only (knex
  * errors carry bindings, so err.message is never logged either).
@@ -55,9 +52,6 @@ const express = require('express');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
-const {
-  neighborhoodAccessLive, neighborhoodTechActionsLive, neighborhoodMergeLive, neighborhoodUnplacedLive,
-} = require('../config/feature-gates');
 const {
   isKeypadCode, lockCommunity, matchKey, visitNeighborhoodIds, parseGateLocation,
 } = require('../services/neighborhood-access');
@@ -71,9 +65,7 @@ const { unplacedHomes } = require('../services/neighborhood-naming');
 const router = express.Router();
 router.use(adminAuthenticate);
 router.use((req, res, next) => {
-  // no-store first, so the disabled answer is never cached past a gate flip.
   res.set('Cache-Control', 'no-store');
-  if (!neighborhoodAccessLive()) return res.status(404).json({ enabled: false });
   return next();
 });
 
@@ -263,10 +255,6 @@ async function liveCodeTaken(trx, neighborhoodId, code, exceptId) {
 
 // Declared BEFORE the router's requireAdmin below: these two are the only
 // routes a technician reaches here.
-function techActionsLive(req, res, next) {
-  if (!neighborhoodTechActionsLive()) return res.status(404).json({ enabled: false });
-  return next();
-}
 
 // Every open route screen refetches on dispatch:job_update: a shared code
 // changed for every stop in the neighborhood, not only on the phone that
@@ -371,7 +359,7 @@ function validateVisitCode(body) {
   return { value: { code: raw.replace(/\s+/g, ''), gate_label: label } };
 }
 
-router.post('/visits/:visitId/entries', requireTechOrAdmin, techActionsLive, async (req, res) => {
+router.post('/visits/:visitId/entries', requireTechOrAdmin, async (req, res) => {
   const checked = validateVisitCode(req.body);
   if (checked.error) return res.status(400).json({ error: checked.error });
   const { code, gate_label: gateLabel } = checked.value;
@@ -421,7 +409,7 @@ router.post('/visits/:visitId/entries', requireTechOrAdmin, techActionsLive, asy
   }
 });
 
-router.post('/visits/:visitId/entries/:entryId/wrong', requireTechOrAdmin, techActionsLive, async (req, res) => {
+router.post('/visits/:visitId/entries/:entryId/wrong', requireTechOrAdmin, async (req, res) => {
   const { entryId } = req.params;
   if (!UUID_RE.test(entryId)) return res.status(404).json({ error: 'Gate code not found' });
   // The code the technician was shown: an entry the office edited since is a
@@ -535,8 +523,7 @@ router.get('/', async (req, res) => {
     const staffNames = new Map(staffIds.length
       ? (await db('technicians').whereIn('id', staffIds).select('id', 'name')).map((t) => [t.id, t.name])
       : []);
-    const mergeEnabled = neighborhoodMergeLive();
-    const merged = mergeEnabled ? await mergesInto(db, ids) : new Map();
+    const merged = await mergesInto(db, ids);
 
     const neighborhoods = page.map((n) => {
       const rows = byNeighborhood.get(n.id);
@@ -551,13 +538,13 @@ router.get('/', async (req, res) => {
         county: n.county || null,
         propertyCount: n.property_count,
         hasConflict: conflicted,
-        ...(mergeEnabled ? { mergedIn: merged.get(n.id) || [] } : {}),
+        mergedIn: merged.get(n.id) || [],
         entries: rows
           .filter((r) => includeRetired || r.status !== 'retired')
           .map((r) => serializeEntry(r, { cutoff, conflicted, staffNames })),
       };
     });
-    res.json({ neighborhoods, total, limit, offset, mergeEnabled, unplacedEnabled: neighborhoodUnplacedLive() });
+    res.json({ neighborhoods, total, limit, offset });
   } catch (err) {
     logFailure('list', err);
     res.status(500).json({ error: 'Could not load gate codes' });
@@ -709,10 +696,10 @@ router.post('/:neighborhoodId/entries', async (req, res) => {
   const entry = checked.value;
   // "I have not seen this work" (owner ruling 2026-10-26): an old code is not
   // a confirmation. It files needs_confirm with no date and leaves every other
-  // code as it is. Honoured only under GATE_NEIGHBORHOOD_UNPLACED.
+  // code as it is.
   const flag = req.body && req.body.unconfirmed;
   if (flag !== undefined && typeof flag !== 'boolean') return res.status(400).json({ error: 'unconfirmed must be true or false' });
-  const unconfirmed = flag === true && neighborhoodUnplacedLive();
+  const unconfirmed = flag === true;
   try {
     const result = await db.transaction(async (trx) => {
       const hood = await trx('neighborhoods').where({ id: neighborhoodId }).forUpdate().first('id', 'active');
@@ -815,7 +802,7 @@ router.patch('/entries/:id', async (req, res) => {
   }
 });
 
-// ---- merge (GATE_NEIGHBORHOOD_MERGE, owner ruling 2026-10-25) ---------------
+// ---- merge (owner ruling 2026-10-25) ---------------
 // The office joins split entries of one community. Both routes yield to every
 // other writer (gateWrite), so a merge never makes a property or visit write fail.
 const MERGE_BUSY = { status: 503, body: { error: 'Those neighborhoods are busy right now. Try again in a moment.', code: 'busy' } };
@@ -839,12 +826,7 @@ class DryRunDone extends Error {
   }
 }
 
-function mergeLive(req, res, next) {
-  if (!neighborhoodMergeLive()) return res.status(404).json({ enabled: false });
-  return next();
-}
-
-router.post('/:neighborhoodId/merge', mergeLive, async (req, res) => {
+router.post('/:neighborhoodId/merge', async (req, res) => {
   const sourceId = req.params.neighborhoodId;
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   if (!UUID_RE.test(sourceId)) return res.status(404).json({ error: 'Neighborhood not found' });
@@ -874,7 +856,7 @@ router.post('/:neighborhoodId/merge', mergeLive, async (req, res) => {
   return res.status(dryRun ? 200 : 201).json({ ...result, dryRun });
 });
 
-router.post('/merges/:mergeId/undo', mergeLive, async (req, res) => {
+router.post('/merges/:mergeId/undo', async (req, res) => {
   const { mergeId } = req.params;
   if (!UUID_RE.test(mergeId)) return res.status(404).json({ error: 'Merge not found' });
   try {
@@ -898,7 +880,7 @@ router.post('/merges/:mergeId/undo', mergeLive, async (req, res) => {
 
 // Suggested merges (owner ruling 2026-10-25): a list for the office; a person
 // always taps Merge, nothing here merges.
-router.get('/merge-suggestions', mergeLive, async (req, res) => {
+router.get('/merge-suggestions', async (req, res) => {
   try {
     return res.json({ suggestions: await suggestMerges(db) });
   } catch (err) {
@@ -907,7 +889,7 @@ router.get('/merge-suggestions', mergeLive, async (req, res) => {
   }
 });
 
-router.post('/merge-suggestions/dismiss', mergeLive, async (req, res) => {
+router.post('/merge-suggestions/dismiss', async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const { sourceId, targetId } = body;
   if (typeof sourceId !== 'string' || !UUID_RE.test(sourceId) || typeof targetId !== 'string' || !UUID_RE.test(targetId)) {
@@ -927,7 +909,6 @@ router.post('/merge-suggestions/dismiss', mergeLive, async (req, res) => {
 // one is the office pick above (PUT /properties/:id/neighborhood); nothing
 // here links.
 router.get('/unplaced', async (req, res) => {
-  if (!neighborhoodUnplacedLive()) return res.status(404).json({ enabled: false });
   try {
     return res.json({ homes: await unplacedHomes() });
   } catch (err) {

@@ -142,7 +142,7 @@ describe('the drafter prompt and its identity', () => {
     const plain = drafter.buildSystemPromptWithProfile('').system;
     patch.setActivePatchSnapshot(snapshot('C'));
     const patched = drafter.buildSystemPromptWithProfile('');
-    expect(patched.promptPatchVersion).toBe(`${drafter.currentPromptVersionBase()}+C`);
+    expect(patched.promptPatchVersion).toBe(`${drafter.currentPromptVersionBase()}C`); // the base already carries the e tag, so the letter joins it
     expect(patched.system).toContain(block().text);
     expect(patched.system.indexOf('LEARNED REPLY RULES')).toBeLessThan(patched.system.indexOf('Respond with ONLY a JSON object'));
     // Removing the block gives back exactly the plain prompt.
@@ -154,15 +154,15 @@ describe('the drafter prompt and its identity', () => {
   test('the tag joins the category tags and the voice profile still composes after the block', () => {
     setEnv('GATE_SMS_AGENT_COMPLAINTS', 'true');
     patch.setActivePatchSnapshot(snapshot('G'));
-    expect(drafter.currentPromptVersion()).toMatch(/\+cG$/);
+    expect(drafter.currentPromptVersion()).toMatch(/\+ceG$/);
     const withProfile = drafter.buildSystemPromptWithProfile('Warm and brief.');
     expect(withProfile.applied).toBe(true);
     expect(withProfile.system).toContain(block().text);
   });
 
-  test('longest live combination (next-of-series base, four categories, voice pin, edit learning) plus a patch fits 40 and is applied', () => {
+  test('longest live combination (next-of-series base, four categories, voice pin; edit learning is always on) plus a patch fits 40 and is applied', () => {
     setEnv('GATE_SMS_OFFERS_SCHEDULER', 'true');
-    for (const name of ['GATE_SMS_AGENT_COMPLAINTS', 'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL', 'GATE_SMS_EDIT_LEARNING']) setEnv(name, 'true');
+    for (const name of ['GATE_SMS_AGENT_COMPLAINTS', 'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL']) setEnv(name, 'true');
     setEnv('GATE_SMS_VOICE_PROFILE_PIN', '4');
     const base = drafter.currentPromptVersionBase();
     expect(base).toBe('house_voice_v12_real_answers26_n+bcelmv');
@@ -190,7 +190,7 @@ describe('the drafter prompt and its identity', () => {
     const plain = drafter.buildSystemPromptWithProfile('').system;
     patch.setActivePatchSnapshot(snapshot('C'));
     expect(drafter.buildSystemPromptWithProfile('').system).toBe(plain);
-    expect(drafter.currentPromptVersion()).toBe(drafter.PROMPT_VERSION);
+    expect(drafter.currentPromptVersion()).toBe(`${drafter.PROMPT_VERSION}+e`);
   });
 
   test('a patch, live or exam-only, applies only on the base identity it was built on', () => {
@@ -204,14 +204,14 @@ describe('the drafter prompt and its identity', () => {
     expect(stale.system).toBe(plain);
     expect(stale.promptPatchVersion).toBeNull();
     const own = drafter.buildSystemPromptWithProfile('', { promptPatch: snapshot('C') });
-    expect(own.promptPatchVersion).toBe(`${drafter.currentPromptVersionBase()}+C`);
+    expect(own.promptPatchVersion).toBe(`${drafter.currentPromptVersionBase()}C`);
   });
 
   test('an exam-only candidate applies in any mode and never needs the live snapshot', () => {
     setEnv('GATE_SMS_PROMPT_AUTOPROMOTE', 'observe');
     const exam = drafter.buildSystemPromptWithProfile('', { promptPatch: snapshot('I') });
     expect(exam.system).toContain(block().text);
-    expect(exam.promptPatchVersion).toBe(`${drafter.currentPromptVersionBase()}+I`);
+    expect(exam.promptPatchVersion).toBe(`${drafter.currentPromptVersionBase()}I`);
     expect(drafter.currentPromptVersion()).toBe(drafter.currentPromptVersionBase());
     // null means "no patch at all", even over a live one.
     setEnv('GATE_SMS_PROMPT_AUTOPROMOTE', 'true');

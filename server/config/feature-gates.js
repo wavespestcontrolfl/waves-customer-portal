@@ -48,9 +48,7 @@
  *   GATE_CALLER_CALLBACK_PROMISE_CLOSE=true (owner plan 2026-11-04, option A: "the bell AND THE PROMISE close themselves when they call or text, a visit is booked, or staff reach them" and "also closes the stale 'open' promises". Only consulted inside the caller-callback-bell job (which still needs GATE_CALLER_CALLBACK_BELL). On, when the caller called back, texted, or a person followed up (a staff call that reached them, a person's delivered text, a booked visit) after the call, the job closes that customer call_back promise as kept (status fulfilled, fulfillment closed_by caller_callback_bell, naming the inbound call or text it rests on), for every untouched AI-heard candidate in the 30-day window whether or not its bell rang, and for the promises of bells already raised; written only while the row is still open, untouched by a person and unchanged since it was read. A closed lead, a closed promise or a gone row never writes the promise. Internal records only: sends nothing to a customer, calls no paid API. Read at call time via callerCallbackPromiseCloseLive(), strict 'true', dark by default; off = the job behaves exactly as before.)
  *   GATE_SMS_VOICE_PROFILE_PIN=<voice_profiles.version integer> (owner 2026-10-24 "do all": the texting AI's drafter uses THAT voice profile version instead of the newest approved one. Only a version that was once approved (status approved, or superseded with an approval row in activity_log) counts; a missing, pending or rejected version, or a value that is not a whole number, falls back to the newest approved profile and logs once, with no customer data. The nightly distiller keeps running and approving as before: only the drafter's reading is pinned. The same pin is what graduation, the sealed exam and auto-send read as the effective profile. The phone agent keeps reading the newest approved profile. Each draft's intended_actions.voice_profile_version already carries the version used. Read at call time by server/services/sms-shadow-drafter.js via smsVoiceProfilePinVersion(); dark by default (unset = byte-identical); a set pin adds the prompt-version tag v. Sends nothing to a customer.)
  *   GATE_SOCIAL_REACH_INGEST=true (owner 2026-11-01, "add a portal read of Facebook and Instagram reach for the Sunday numbers, at no cost": the daily social engagement sweep also reads each Facebook post's reach and views (Graph post_total_media_view_unique and post_media_view) and each Instagram media's reach and views (insights metrics reach and views) into social_post_engagement.reach and .views, and GET /api/social/series/numbers hands them to the weekly series job. Off = likes, comments and shares only, no extra Graph calls. A metric Meta refuses or a missing scope (read_insights, pages_read_engagement, instagram_manage_insights) leaves reach and views NULL (not measured), never zero, with one warning per sweep; the sweep never fails on it. Free Graph reads only. Unset = today's behavior, read at call time (rollback = unset, no redeploy); strict 'true'. Reader: socialReachIngestLive().)
- *   GATE_SMS_EDIT_LEARNING=true (owner 2026-10-24 "do all": the texting AI learns from the owner's edits to its suggestions. The nightly voice-corpus miner also mines legacy ai_revised sends and stops mining a composer send that sent a suggestion unchanged (that would train the drafter on its own text), and the drafter's few-shot examples rank edited-suggestion replies and replies the judge scored human_better first, then newest, instead of newest only. The sealed-exam, opt-out and complaint exclusions stay. Strict opt-in via gateEnvValue, read at call time by server/services/sms-voice-corpus-miner.js and server/services/sms-shadow-drafter.js via smsEditLearningLive(); dark by default (off = byte-identical); on adds the prompt-version tag e. Sends nothing to a customer.)
  *   GATE_SMS_PROMPT_B1=true (owner 2026-10-24 "go b1", "yes all": the texting AI's suggestion drafter stops stalling and stops making false promises, in one prompt change. A missed-visit text gets 2-3 real open times to rebook (with no times it keeps the apology and the follow-up wording); a covered pest re-service text gets 2-3 of the re-service booking page's own openings; a reply never says a link, text, email, report, quote, proposal or photo "is being sent" unless the reply carries it, never promises that the office or a teammate will confirm, cancel, add, move, call or email something, never lets the follow-up timing promise more than a reply, and never opens a reply in an ongoing thread with Hi, Hello or Hey and a name; the latest finished visit's customer-safe notes (up to about 1,200 characters) and its findings reach the facts. Needs GATE_SMS_REAL_ANSWERS. Strict opt-in via gateEnvValue, read at call time by server/services/sms-shadow-drafter.js and server/services/context-aggregator.js via smsPromptB1Live(); dark by default (off = byte-identical prompt, facts and checks); on stamps a fresh prompt version (real_answers27_n, 28_n with GATE_SMS_OFFERS_SCHEDULER). Drafts are suggestion cards only: staff send them; sends, schedules and books nothing.)
- *   GATE_SMS_JUDGE_V2=true (owner 2026-10-24 "yes all": the grader of the texting AI drafts also answers the owner's question, could the person who replied have sent the AI draft instead (yes, yes with an edit, no), and counts a false promise as unsafe: a link, text, email, report, quote, proposal or photo "being sent", the office or a teammate "will confirm/cancel/add/move/call/email", or "within the hour" turned into a promise that a quote, proposal, photo, report or visit arrives by then. Rows carry judge_version j2 and could_send; the autonomy safety backstop then counts j2 rows only, so the stricter ruler never mixes with the old one; the sealed exam summary also counts could_send. Strict opt-in via gateEnvValue, read at call time by smsJudgeV2Live() in server/services/sms-shadow-judge.js and sms-graduation.js; dark by default; off = byte-identical prompt, parser output and rows. Measurement only: sends, holds and changes nothing, and the drafter prompt and its prompt_version are untouched.)
  *   GATE_DUPLICATES_SAME_ADDRESS=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers at the same address with different phones, for the office to merge or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; read at request time via duplicatesSameAddressLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
  *   GATE_DUPLICATES_SAME_NAME=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers with the same first and last name but a different phone and address, for the office to merge, merge while keeping the other address as a second property, or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; pairs the shared-phone and same-address lists already show are left out; read at request time via duplicatesSameNameLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
  *   GATE_QUIET_OVERDUE_LIST=true (owner 2026-10-24: one standing Billing bell listing open self-pay invoices no reminder reaches (paused with no end, stopped, finished, Auto Pay hold 7+ days, never set up); weekday 11:47 ET cron; admin only, sends nothing to a customer)
@@ -58,7 +56,7 @@
  *   GATE_UNBILLED_VISITS_LIST=true (owner 2026-10-25, Air Jobs Plan step 3: one standing Billing bell listing visits done in the last 30 days with no invoice, read from the Billing recovery page's own list; replaces the c02 check on the owner's MacBook Air; daily 07:23 ET cron; admin only, sends nothing to a customer)
  *   GATE_CASH_FORECAST=true (owner 2026-11-05, cash forecast step 1: an owner-only Cash today card on Banking shows each checking account's balance from Plaid's free /accounts/get read, card balances owed, and Stripe payouts on the way. Read-only: it writes nothing, sends nothing, and never calls Plaid's paid balance read. Read at call time via cashForecastLive(), strict 'true', dark by default; off = the route answers 404 and the card is hidden.)
  *   GATE_INVOICE_NOT_ON_SPARK=true (owner 2026-11-05: one standing Tax bell listing, by vendor, emailed vendor invoices from 3 to 14 days ago that no Spark card or business debit charge paid (accounts named in INVOICE_OK_ACCOUNT_LABELS); daily 07:37 ET cron; read-only except its one admin bell; sends nothing to a customer; no money moves)
- *   GATE_SMS_LEDGER_STALL_FEED=true (owner 2026-11-01 "go": the texting AI's learning loop also learns from the two misses its own grader finds most: the draft stalled (deferred or handed off) when the facts already held the answer, or the person who replied knew a fact the facts did not hold. The nightly 4:20 AM ET pathology job also classifies each judge-v2 judgment that is human_better with could_send no into stalled_deferred, knew_more or other (evidence type judgment_stall, same batch cap and sanitizing as the draft_unsafe feed), and the weekly proposer counts new evidence by the base prompt identity so a learned-rule letter does not reset a cell. Auto-promote may then turn a stalled_deferred proposal into a rule that states a fact the facts already hold; knew_more is never eligible and every text guard in sms-prompt-patch.js is unchanged. Strict opt-in via gateEnvValue, read at call time by smsLedgerStallFeedLive() in server/services/sms-pathology-ledger.js (auto-promote reaches it through the ledger's countedPromptVersions()); needs GATE_SMS_PATHOLOGY_LEDGER (the nightly job) and GATE_SMS_JUDGE_V2 (the judgments); off = byte-identical feed, counts, prompts and rows. Sends, holds and changes nothing on its own)
+ *   GATE_SMS_LEDGER_STALL_FEED=true (owner 2026-11-01 "go": the texting AI's learning loop also learns from the two misses its own grader finds most: the draft stalled (deferred or handed off) when the facts already held the answer, or the person who replied knew a fact the facts did not hold. The nightly 4:20 AM ET pathology job also classifies each judge-v2 judgment that is human_better with could_send no into stalled_deferred, knew_more or other (evidence type judgment_stall, same batch cap and sanitizing as the draft_unsafe feed), and the weekly proposer counts new evidence by the base prompt identity so a learned-rule letter does not reset a cell. Auto-promote may then turn a stalled_deferred proposal into a rule that states a fact the facts already hold; knew_more is never eligible and every text guard in sms-prompt-patch.js is unchanged. Strict opt-in via gateEnvValue, read at call time by smsLedgerStallFeedLive() in server/services/sms-pathology-ledger.js (auto-promote reaches it through the ledger's countedPromptVersions()); needs GATE_SMS_PATHOLOGY_LEDGER (the nightly job); the judge-v2 judgments it reads are always written; off = byte-identical feed, counts, prompts and rows. Sends, holds and changes nothing on its own)
  *   GATE_IB_LEAD_CONVERT=true (the Intelligence Bar's convert_lead write tool, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan: an admin can convert one lead to an EXISTING customer on a confirm card (never owner-direct), by running the Leads page's own Convert to Customer handler (POST /admin/leads/:id/convert) in process. Writes the lead only (status won, customer link, value fields, a converted activity row, the ad funnel stage, and the lead's own estimate attached to the customer); creates no customer, books nothing, charges nothing, accepts no estimate and sends NO text, email or call to anyone. Needs GATE_IB_PLATFORM. Read at call time via ibLeadConvertLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
  *   GATE_IB_INVOICE_EDITS=true (the Intelligence Bar's invoice edit write tools, owner ruling 2026-10-12 "yes to all recommendations" on the Stage 3 plan, edit-type Invoices page actions: edit_invoice (title, notes and due date only: PUT /admin/invoices/:id; line items and the tax rate stay on the Invoices page), archive_invoice and unarchive_invoice (POST /:id/archive, /:id/unarchive) and unvoid_invoice (POST /:id/unvoid), each on its own confirm card (admin only, never owner-direct) by running the Invoices page's own handler in process. None sends a message, moves money, charges a card or refunds. Needs GATE_IB_PLATFORM. Read at call time via ibInvoiceEditsLive(), strict 'true', dark by default; off = the tools are not offered and a forced call refuses with gate_off, changing nothing.)
  *   GATE_IB_AGENT_REVIEW_DRAFTS=true (the Intelligence Bar's Agent Review draft tools, owner ask 2026-10-28, gap 7: an admin can list the AI-suggested replies waiting in the Communications composer as Agent Review drafts (list_agent_review_drafts), and approve (approve_agent_review_draft: send the draft as written, recorded accepted), revise (revise_agent_review_draft: send edited wording, recorded corrected) or ignore (ignore_agent_review_draft: record ignored, no text) ONE of them. Approve and revise run the composer's own POST /admin/communications/sms handler in process with the draft attached (its verification, atomic claim, thread parking, provider-boundary checks, canonical sender and accepted / corrected settlement), are ALWAYS a confirm card on every login including the owner's, and show the exact text, the recipient name and masked number, the inbound text it answers and any newer-text warning; the send uses exactly the carded text and stops if the customer texts again before the provider handoff. Needs GATE_IB_PLATFORM. Read at call time via ibAgentReviewDraftsLive(), strict 'true', dark by default; off = the tools are not offered and a forced call refuses, changing nothing.)
@@ -79,7 +77,6 @@
  *   GATE_IB_GENERAL_EDIT=true (needs GATE_IB_PLATFORM; the Intelligence Bar's find_admin_edits and propose_admin_edit tools, owner ruling 2026-10-12: a general EDIT tool for a reviewed allow-list of small internal edits only, on the owner login only, ALWAYS a confirm card, never owner-direct. propose_admin_edit takes one method and endpoint pattern from the generated catalog (server/services/intelligence-bar/admin-write-catalog.json), the path parameters and a body limited to the fields the reviewed row lists (any other field is refused), shows each field's new value (and the current one when a reviewed read supplies it), and on Confirm sends that exact body as a PUT or PATCH to this server as the logged-in owner, so the screen's own checks apply. Never a customer message, money, price, delete, bulk change, setting, user or credential; address text shows an ADDRESS CHANGE card. Read at call time via ibGeneralEditLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call.)
  *   GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT=true (an estimate sent to a customer after their Waves Assessment closes that assessment visit quietly — no report, text, review ask or invoice; a sweep every ten minutes, owner ruling 2026-10-04; off = nothing runs)
  *   GATE_ESTIMATE_DUE_FIRST_VISIT=true (owner 2026-11-06 "walk all": an estimate-accept invoice is due on the day of the first booked visit linked to the accept, when that day is after today, and its reminder cadence starts on that due date; off = due on the accept day, reminders count from the send)
- *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file is flagged needs_confirm and listed on the Gate codes page, with no bell (owner ruling 2026-10-03); read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
  *   GATE_CALL_PROMISE_AI_CLOSE=true (owner 2026-10-24: an open Waves call promise closes on its own when the same AI check the text-follow-up lane uses finds, across every line (texts both ways, calls, emails, visits booked, moved or completed, estimates, payments), a later record that kept it, quoted exactly; a customer text confirming it was done also closes it. Read at call time via callPromiseAiCloseLive(), strict 'true', dark by default; off = exactly today's behavior. Needs GATE_CALL_COMMITMENTS and PROMISE_EVIDENCE_CLOSE. Staff can Reopen from the Owed tab. Sends nothing to a customer.)
  *   GATE_CALL_PROMISE_LATER_TEXT_CHECK=true (owner 2026-10-25 "build it": a record proof the call-promise AI check accepted is no longer held for good by any later human text. The AI reads the texts that came after the proof and answers one question: does any of them say this promise was not kept, was undone, went wrong or is still needed? Only a clear no lets the proof close the promise; yes, unclear, a failed read, any later message with no words (a photo) or too long to read whole, more later texts than it reads, and card-number fragments it cannot attribute keep it held as before. Needs GATE_CALL_PROMISE_AI_CLOSE. Read at call time via callPromiseLaterTextCheckLive(), strict 'true', dark by default; off = exactly today's behavior. Staff can Reopen from the Owed tab. Sends nothing to a customer.)
  *   GATE_CALL_PROMISE_AI_NO_CUSTOMER=true (owner 2026-11-05, "A, AI": the call-promise AI check also judges an open Waves promise on a call with NO customer record (a job candidate, a vendor, a prospect not yet on file), by the caller's phone identity: texts and calls both ways, same checker, same guards (admissible witness, evidence-hash cache, later-human-text hold, model budgets). A number that is one of ours, a carrier sentinel, or on more than one customer record is skipped. At most 10 model calls per Eastern day for these promises across the watchdog pass and the Owed-queue pass (about $0.05 a day expected), newest call first. Read at call time via callPromiseAiNoCustomerLive(), strict 'true', dark by default, honoured only while GATE_CALL_PROMISE_AI_CLOSE is live; off = exactly today's behavior. Staff can Reopen from the Owed tab. Sends nothing to anyone.)
@@ -99,12 +96,6 @@
  *   GATE_SETUP_FEE_APPLICATION_SETTLED=true (owner 2026-10-28, the three false setup-fee alerts of #6830: the setup-fee alert reconcile, which also runs right after a completion parks a new alert, counts a parked visit's application as billed when a prepay year whose bill is live (paid, or awaiting payment on a live prepay invoice) bought that visit, or when the visit's own invoices bill its base line plus its own add-on lines for the frozen visit charge. Billed = the alert closes, or shrinks to the charge still owed, instead of telling staff to bill the visit by hand. Read at call time via setupFeeApplicationSettledLive(), strict 'true', dark by default; off = exactly today's behavior. Sends nothing to a customer and creates no invoice.)
  *   GATE_SETUP_FEE_OPEN_INVOICE_NOTICE=true (owner 2026-10-31 "do these", the setup fee on an unpaid visit invoice: when the setup-fee alert's fee is not paid yet but the customer's open invoices (scheduled, sent, viewed, overdue or partly paid) carry fee lines that GATE_SETUP_FEE_SETTLED_ANYWHERE counts once they are paid, the alert stays open but says the fee is already on that invoice and must not be billed again, and the morning digest stops listing it as a fee to bill. The fee still counts as covered only once paid: paying the invoice resolves the alert, voiding it brings the fee instruction back. Read at call time via setupFeeOpenInvoiceNoticeLive(), strict 'true', dark by default; off = today's alert text, and a standing notice is rewritten back on the next reconcile. Sends nothing to a customer and creates no invoice.)
  *   GATE_CALL_ADDRESS_FAMILY_CARD=true (owner 2026-10-24 "yes build": a caller on a number no account carries who states a service address a live customer already has no longer gets a new customer record. The call files ONE suggest-only office card, "<caller> called about <customer>'s home. Add as a contact?", with two actions: Attach as contact (the caller's name, number and role go into the first free service-contact slot of that customer and the call is relinked to it) and New customer (the card is closed and the call is reprocessed, which creates the record the old way). While the gate is on, any family-account card basis also keeps the pass from creating a customer for the call. Read at call time via callAddressFamilyCardLive(), strict 'true', dark by default; off = byte-identical to before. Sends no message and starts no opt-in.)
- *   GATE_NEIGHBORHOOD_NAMING=true (the neighborhood sweep names every live home's community: it looks up homes never checked, names Sarasota homes from the plat number on the county's plat layer, and for a home the county cannot name uses the community the customer said on a call, linked as unconfirmed and kept out of the shared directory (no code filed from it, no entries read for its visits, no shared visitor pass) until the county or the office confirms it; read at call time via neighborhoodNamingLive(), dark by default; honoured only while GATE_NEIGHBORHOOD_ACCESS is live; off = the sweep is byte-identical to before. No message, no bell.)
- *   GATE_NEIGHBORHOOD_ADDRESS_LOOKUP=true (when a home's stored pin sits on another lot, the neighborhood naming asks the county roll for the home's own address and links it only when the lots at that house number, full street and ZIP all name one community; also reads a '#201' unit tail as a unit; read at call time via neighborhoodAddressLookupLive(), dark by default; honoured only while GATE_NEIGHBORHOOD_NAMING is live; off = the pin-only match as before. No message, no bell.)
- *   GATE_NEIGHBORHOOD_TECH_ACTIONS=true (on a visit assigned to them, a technician can add a keypad gate code to that visit's neighborhood (live at once; other live codes there then need confirming) and mark a neighborhood code wrong (it drops to needs_confirm, the office decides whether to retire it); owner ruling 2026-10-03. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodTechActionsLive(), dark by default; off = the two routes answer 404 and the schedule feed carries no action data. No bell, nothing sent to a customer.)
- *   GATE_NEIGHBORHOOD_MERGE=true (the office can merge one neighborhood gate-code entry into another of the same county on Customers → Gate codes: homes, gate entries and filing-ledger rows move, the merged entry stays as an inactive pointer so new homes with its name land on the kept one, and Undo merge puts back what it moved; owner ruling 2026-10-25. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodMergeLive(), dark by default; off = the merge routes answer 404 and the page shows no merge buttons. Staff only, no bell, nothing sent to a customer.)
- *   GATE_NEIGHBORHOOD_UNPLACED=true (Customers → Gate codes lists homes the directory cannot place — the county's lot at the pin matches the home's number and street but not its ZIP, or the customer saved a gate code on a home with no neighborhood — with a one-tap office link to the county's community; Add entry gets an "I have not seen this work" box that files Needs confirm with no date and demotes nothing; owner ruling 2026-10-26. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodUnplacedLive(), dark by default; off = the list route answers 404 and the box is ignored. Staff only, nothing links by itself, no bell, nothing sent to a customer.)
- *   GATE_SCHEDULE_ACCESS_CODES=true (Gate and access codes on the office schedule, owner ruling 2026-10-26: Dispatch → Schedule shows each stop's codes on the phone list row, in the Complete service header (every Fast Complete sheet, the tech app's too), in a new Access section in Details (with Wrong code and Add gate code, which need GATE_NEIGHBORHOOD_TECH_ACTIONS) and in the desktop side panel. The lines are the day feed's gate alerts, the ones the tech app's stop brief shows; Details and the panel also list the office's accepted codes for the stop. The day feed carries `scheduleAccessEnabled` on each row while it is on. Strict opt-in: exactly 'true', read at call time via scheduleAccessCodesLive(). Ships DARK; off = the screens exactly as before. Staff screens only; nothing is sent to a customer.)
  *   GATE_HIRED_PACKET=true (owner ruling 2026-10-25, D7: the "Hired" button on the Staff page. On a prospective placeholder row an admin enters the hire's name, email, first day and pay, and one click makes the row an active staff account and emails the hire a set-password link (works 7 days) with a pointer to the Onboarding card. A "Resend link" action appears while the hire has not set a password yet. It never changes a customer; it sends ONE staff email per click. Strict opt-in: exactly 'true' in every environment, read at call time via hiredPacketLive(). Ships DARK; off = no button, both endpoints answer 404 before any database work and the Staff list is unchanged. The manual steps (rename, email, Active, Forgot password) still work.)
  *   GATE_STAFF_DOC_PREFILL=true (owner ruling 2026-10-25: a NEW staff form record opens with fields filled from the staff record, for the Vehicle Use & Commuting Agreement: assigned vehicle, home address and start date from the technicians row. The signer checks each value and saves; a typed value always wins. Never a checkbox, never a typed signature. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffDocPrefillLive(). Ships DARK; off = GET /versions/:id/prefill answers 404 { enabled: false } before any query and the form opens empty. Reads only; sends nothing to anyone.)
  *   GATE_REVIEW_BONUS_ASK_FIRST=true (census M8, second technician, 2026-10-25: a Google review bonus goes to the technician on the review ask that reached the customer, the latest ask delivered by email or text in the 45 days before the review (a click on the link is not used: nothing proves the customer made it); then today's order (latest service record, latest completed visit, latest ask). Changes who a NEW bonus row names; existing payout rows are never re-attributed. Read at call time via reviewBonusAskFirstLive(), strict 'true', dark by default; off = today's order byte for byte; rollback = unset. Bonus pay, so the owner flips it. Sends nothing.)
@@ -350,7 +341,6 @@
  *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT=true (call routing: a call with a confirmed on-the-hour time and a trusted address is no longer held only because the service is unclear — ambiguous_pest_or_service fails open so the Waves Assessment fallback books it; needs GATE_CALL_FAIL_OPEN_BOOKING; the office still gets the advisory card; off = byte-identical today)
- *   GATE_CALL_WHOLE_STRUCTURE_NO_UNIT=true (call booker: a WDO inspection or termite pre-treat on a unit-less duplex/building address is not held for the missing unit; condo/apartment interior work still is)
  *   GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT=true (call booker: a business address (Google addressUse.business) given with no unit is not held for the missing unit when the caller says they own/lease/occupy the WHOLE building; the extraction judges it and the code verifies the pinned caller quote; suite/unit/strip-mall wording keeps the hold)
  *   GATE_CALL_FIRST_NAME_ADVISORY=true (call booker: a new caller who gave a last name but no first name still becomes a customer and books; the missing first name files an advisory office card instead of holding the booking; strict opt-in, read at call time)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
@@ -492,7 +482,6 @@
  *   GATE_MISSED_CALL_REPUSH=true (a customer_missed_call bell still unread and not done 30 minutes after it rang gets ONE more admin push, same tag, renotify, during office hours Mon-Sat 8:00-18:00 ET; no new bell row, stamped metadata.repushed_at so it never repeats. Admin push only. Strict opt-in, read via isEnabled. Off = no sweep work. Rollback: unset.)
  *   GATE_CALL_EXTRACTION_SYSTEM_PROMPT=true (call extraction V2 sends its rules and output contract as a static system part and only the call's own facts and transcript as the user message, so the provider can cache the rules across calls. Same rules, different order and channel: its calls are their own prompt-version cohort (`s`, or `b` with the agent-proposed-slot block). Strict opt-in, read once per call via callExtractionSystemPromptLive(). Off = the one-message prompt, byte-identical. Rollback: unset.)
  *   GATE_CALL_EXTRACTION_V1_FALLBACK=true (call extraction V1 (extractCallData, the legacy extractor that still feeds the routing legs) runs on Gemini alone. When Gemini fails for a PROVIDER reason (a non-2xx answer such as 402 credits depleted, 429 or 5xx; a network error or timeout; GEMINI_API_KEY missing; or invalid JSON after the existing two parse attempts), this gate retries the SAME prompt through the house dispatcher: Claude first (MODELS.CALL_EXTRACTION_ANTHROPIC, pinned like the V2 Claude leg), then OpenAI (the pinned CALL_EXTRACTION_MODEL leg) if Claude also fails. Output goes through the same normalizeCallExtraction tail, so its shape is identical; the provider that served it is stamped as extraction_v1_provider in metadata.processing_timings and a warn line names the fallback. A bad answer that is not a provider failure keeps today's behavior, and when every backup leg fails the call takes the same path as before (extraction_failed with the attempt counter, or the invalid-JSON stub). Strict opt-in, read at call time via callExtractionV1FallbackLive(). Off = Gemini only, byte-identical. Rollback: unset. Sends nothing to a customer.)
- *   GATE_CALL_SPELLING_COLLAPSE_TRIGGER=true (call processing: the spelling-preserving second transcription pass and the contact decoder also run when the primary transcript shows what a collapsed spelling leaves behind: a name said twice in a row ("Serov, Serov"), a phrase that announces a spelling with no letters after it ("that's S", "with a C"), or, for the decoder, an extracted last name one or two letters from the stored one. Each match costs one extra transcription pass; the log line "[call-proc] spelling collapse trigger" names which signal fired. Strict opt-in, read at call time via callSpellingCollapseTriggerLive(). Off = the pass runs only on the signals it ran on before, byte-identical. Rollback: unset. See services/contact-dictation.js spellingCollapseSignals.)
  *   GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING=true (owner ruling 2026-10-06: a commercial Waves Assessment that Waves staff book on the call with NO price discussed auto-books, on OUTBOUND callback calls (lead_auto_bridge) as well as inbound, instead of always going to the office. Only the Waves Assessment catalog row (every service view of the call must resolve to it) and only when no price came up at all; any price mentioned goes to the priced path (GATE_CALL_COMMERCIAL_DICTATED_BOOKING), unchanged. The staff commitment and the caller acceptance are grounded word for word in the right speaker's turns (call-reschedule-agreement.js), including the shape where STAFF proposes the day and time, the caller says yes and staff then commits ("How does noon on Thursday sound?" / "Perfect." / "I'll book you for that"), which has its own extraction instruction while this gate is on. On an OUTBOUND recording the speaker labels are LLM-inferred and have swapped, so staff identity is proven independent of the labels: an Agent-labeled turn says "this is <name> with|from|at Waves" and no Caller-labeled turn does; otherwise it holds. Also needs GATE_CALL_AGENT_COMMIT_BOOKING (its kill switch) and GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. OUTBOUND calls qualify only as lead callback bridges (call metadata.type lead_auto_bridge) AND only when outbound booking creation itself is on: GATE_CALL_OUTBOUND_BOOKING plus V2 routing in enforce mode (CALL_EXTRACTION_V2_ENABLED=true and CALL_EXTRACTION_V2_DRIVES_ROUTING=true or CALL_TRIAGE_ENFORCE_V2_GATES=true); this gate never authorizes outbound creation by itself, and the routing lane and the creation path read one predicate (outboundAutoBookingEnabled). Only clears commercial_requires_quote and the advisory card still files; the on-the-hour rule, capacity, address validation and unit checks still apply. Strict opt-in, read at call time via callCommercialAssessmentBookingLive(). Off = byte-identical, outbound stays excluded. See services/call-commercial-dictated-booking.js.)
  *   GATE_LEAD_EMAIL_LINKS=true (Activity timeline only: also lists email that was sent to a prospect before they became a customer, matched by the lead / estimate the send recorded (email_messages.lead_id / estimate_id) through leads.customer_id and estimates.customer_id, not by address. Strict opt-in, read at call time via leadEmailLinksLive(). Dark = the timeline lists exactly what it did before. Recording the link on each send is not gated (additive columns).)
  *   GATE_RATE_REVIEW=true (annual rate review RANKING backend, plan annual-rate-review-2026-09-30 step 2: the monthly 1st-of-month job (scheduler.js, 6:20 AM ET) ranks every active recurring plan line whose anniversary falls in the following month into rate_review_snapshots (current rate per billing lane, today's list rate, treatment-minute median, revenue/hour, band A-D, whole-dollar proposal, exception flags) and sends ONE ACT:/OK: ops email to contact@; admin-only read routes + a recompute POST under /api/admin/rate-review. Strict opt-in, read at call time via rateReviewLive(). Dark = the cron tick returns before any query, the routes answer 404, nothing is written. The ranking never writes a rate or sends a customer anything. The APPLY lane (services/rate-review-apply.js, step 3) rides the same gate: an admin POST creates draft notice rows for approved rows (nothing sent — the comms lane sends), and the nightly 3:10 AM ET job writes the noticed rate on its effective date for SENT notices (per-application visits + per_application_fee + ledger slice, monthly dues + slice, or the prepaid term's next_term_prepay_amount), one transaction per notice, holds belled. Off = the apply tick returns before any query and the schedule route answers 404; customers keep the lower, current rate. The notice-sending lane is a later PR.)
@@ -1547,35 +1536,6 @@ const gates = {
   // call time in sms-operational-extractor.js. Off = strict form only.
   accessCodeCapture: gateEnvValue('GATE_ACCESS_CODE_CAPTURE'),
 
-  // Access codes section (server half): a text that states a gate, door,
-  // lockbox, garage, call-box or pass code is filed as a `found` row in
-  // customer_access_codes for the office to accept, dismiss or retire, and the
-  // admin API at /api/admin/access-codes serves them. Needs
-  // GATE_ACCESS_CODES_SECTION_SINCE (an offset ISO instant) for the sweep, so
-  // turning it on never reads history. Read at call time in
-  // services/access-code-capture.js; this entry is for logGateStatus only.
-  accessCodesSection: gateEnvValue('GATE_ACCESS_CODES_SECTION'),
-
-  // Access codes from call transcripts (owner 2026-10-23): the same sweep also
-  // reads calls (inbound, outbound, voicemail) into the same found list. Needs
-  // GATE_ACCESS_CODES_SECTION and GATE_ACCESS_CODES_CALLS_SINCE (an offset ISO
-  // instant), so turning it on never reads history. Read at call time in
-  // services/access-code-capture.js; this entry is for logGateStatus only.
-  accessCodesCalls: gateEnvValue('GATE_ACCESS_CODES_CALLS'),
-
-  // Access codes from inbound customer emails (owner 2026-10-24): the same
-  // sweep also reads emails into the same found list. Exactly `true` (not 1 or
-  // on); needs GATE_ACCESS_CODES_SECTION and GATE_ACCESS_CODES_EMAILS_SINCE (an
-  // offset ISO instant), so turning it on never reads history. Read at call
-  // time in services/access-code-capture.js; this entry is for logGateStatus only.
-  accessCodesEmails: process.env.GATE_ACCESS_CODES_EMAILS === 'true',
-
-  // The found-codes bell (owner ruling 2026-10-24): one standing admin row lists
-  // the access codes waiting on Customers → Gate codes, rings when a code joins
-  // and closes itself when none wait. Exactly `true`. Read at call time in
-  // services/access-code-found-bell.js; this entry is for logGateStatus only.
-  accessCodesFoundBell: process.env.GATE_ACCESS_CODES_FOUND_BELL === 'true',
-
   // Email asks + staff promises, same shape as the SMS lane above. Also
   // requires GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE. Read at call time in
   // email-operational-actions.js; this entry is for logGateStatus only.
@@ -1616,15 +1576,9 @@ const gates = {
   // Voice profile pin for the texting AI (owner 2026-10-24): a voice_profiles.version integer. Read at call
   // time by server/services/sms-shadow-drafter.js smsVoiceProfilePinVersion() — this entry is for logGateStatus only.
   smsVoiceProfilePin: Boolean(String(process.env.GATE_SMS_VOICE_PROFILE_PIN || '').trim()),
-  // Learn from the owner's edited suggestions (owner 2026-10-24): miner + exemplar ranking. Read at call time by
-  // sms-voice-corpus-miner.js and sms-shadow-drafter.js smsEditLearningLive() — this entry is for logGateStatus only.
-  smsEditLearning: gateEnvValue('GATE_SMS_EDIT_LEARNING'),
   // Prompt change B1 for the texting AI's suggestion drafter (owner 2026-10-24). Read at call time by
   // sms-shadow-drafter.js and context-aggregator.js smsPromptB1Live() — this entry is for logGateStatus only.
   smsPromptB1: gateEnvValue('GATE_SMS_PROMPT_B1'),
-  // Stricter SMS draft judge (owner 2026-10-24): the could-send question + false-promise rule. Read at call time by
-  // sms-shadow-judge.js and sms-graduation.js smsJudgeV2Live() — this entry is for logGateStatus only.
-  smsJudgeV2: gateEnvValue('GATE_SMS_JUDGE_V2'),
   // Judge-v2 stall and knew-more feed for the pathology ledger (owner 2026-11-01). Read at call time by
   // sms-pathology-ledger.js smsLedgerStallFeedLive() — this entry is for logGateStatus only.
   smsLedgerStallFeed: gateEnvValue('GATE_SMS_LEDGER_STALL_FEED'),
@@ -2061,14 +2015,6 @@ const gates = {
   // shows the flip.
   leadCallReminder: process.env.GATE_LEAD_CALL_REMINDER === 'true',
 
-  // Lead Repeat Form — a row that is still a lead (not yet a customer) and
-  // sends the website quote form again keeps its open SMS intake state, so
-  // its next CALL / TEXT or service reply is handled as for a new lead, and
-  // rings one Leads alert (owner 2026-10-24, "A: both parts"). Sends nothing
-  // to the lead. Off unless exactly 'true'; off, a repeat form writes its
-  // note and clears the intake state, as before.
-  leadRepeatForm: process.env.GATE_LEAD_REPEAT_FORM === 'true',
-
   // Current Customer Quote Text — a current or past customer who sends the
   // website quote form gets the lead text's CALL or TEXT offer (at most one a
   // day per phone, no STOP line) and rings one Leads alert; a CALL or TEXT
@@ -2357,13 +2303,6 @@ const gates = {
   // call-recording-processor.js reads GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL
   // at call time via callLeadFormAddressStreetLevelLive().
   callLeadFormAddressStreetLevel: process.env.GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL === 'true',
-  // Whole-structure calls (WDO inspection, termite pre-treat / perimeter
-  // treatment) are not held because the address lacks a unit number: Google's
-  // "missing subpremise" on a duplex or building-level job is waived, and ONLY
-  // that (every other address check, commercial and condo/apartment interior
-  // work keep today's hold). Explicit service allowlist in
-  // call-triage-flags.js. Owner ruling 2026-09-30. Off → byte-identical.
-  callWholeStructureNoUnit: process.env.GATE_CALL_WHOLE_STRUCTURE_NO_UNIT === 'true',
   // A business address with no unit is not held for the "which unit?" ask when
   // the caller says they own, bought, lease or occupy the WHOLE building and
   // Google Address Validation says the address is a business. Same waiver
@@ -2434,12 +2373,6 @@ const gates = {
   // is for logGateStatus only — the canonical CALL-TIME reader is
   // callExtractionV1FallbackLive() below.
   callExtractionV1Fallback: process.env.GATE_CALL_EXTRACTION_V1_FALLBACK === 'true',
-  // The second transcription pass and the contact decoder also run when the primary
-  // transcript shows what a collapsed spelling leaves behind (a repeated name token, an
-  // announced spelling with no letters). Ships DARK: off unless exactly 'true'. This entry
-  // is for logGateStatus only — the canonical CALL-TIME reader is
-  // callSpellingCollapseTriggerLive() below.
-  callSpellingCollapseTrigger: process.env.GATE_CALL_SPELLING_COLLAPSE_TRIGGER === 'true',
   // A new caller who gave a last name but no first name still becomes a customer and
   // books; the missing first name files an advisory card (owner ruling 2026-10-02).
   // Ships DARK: off unless exactly 'true'. This entry is for logGateStatus only —
@@ -2505,30 +2438,6 @@ const gates = {
   // a staged rollout.) Requires a real catalog service (no generic-placeholder
   // fallback for outbound). Off → outbound bookings stay manual.
   callOutboundBooking: process.env.GATE_CALL_OUTBOUND_BOOKING === 'true',
-  // Owner ruling 2026-09-26: the four customer-facing call-processor features
-  // #4912 deliberately kept inbound-only (booking-confirmation implied
-  // consent, the dropped-mid-intake call-back card, customer-less lead
-  // creation, the approval-gated unit/address clarify draft) may run the
-  // same on an OUTBOUND call ONLY when the person contacted Waves FIRST —
-  // a prior inbound call/text, a lead record, or an existing customer
-  // (server/services/outbound-call-reason.js's hasPriorContact, unbounded,
-  // reused rather than a second query). NEVER on a cold/sales call we
-  // placed to someone who never contacted us. The shared outboundReturn
-  // MessagesEligible flag is prior contact ONLY (codex pre-push r4 P1,
-  // reversing r1's own guidance): each site keeps its OWN existing "real
-  // conversation" precondition instead — a confirmed booking
-  // (GATE_CALL_OUTBOUND_BOOKING), a workable lead signal, or the drop
-  // detector's own MIN_CALL_SECONDS engagement floor — so a short but
-  // genuinely confirmed exchange (offer → acceptance → confirmation, as
-  // few as 3 turns) still gets its confirmation SMS. The ONE exception is
-  // the clarify draft: nothing else at that site rules out an early drop,
-  // so it alone ALSO requires hasRealTwoWayConversation (>= 4 exchanged
-  // turns across >= 2 distinct speaker labels) on top of the shared flag.
-  // Sends customer SMS + creates records — owner-flip only. Off → every
-  // one of the four sites stays byte-identical to today (the
-  // `!isOutboundCall(call)` checks are untouched; the lead-creation site's
-  // new outbound restriction is a no-op while this gate is off).
-  callOutboundReturnMessages: process.env.GATE_CALL_OUTBOUND_RETURN_MESSAGES === 'true',
   // Call-ingest completeness watchdog: a 30-min cron that diffs Twilio's own
   // call ledger against call_log and rings an admin bell for any answered
   // inbound call (completed, >=20s) the pipeline never received — born from
@@ -4064,34 +3973,6 @@ const gates = {
   // DATA_HYGIENE_VAULT_KEY). Read at call time; kill switch = unset.
   plaidSync: gateEnvValue('GATE_PLAID_SYNC'),
 
-  // Tax ledger rules + inbox (2026-10-23): deterministic payee rules that
-  // pre-fill the Bank Import suggestion (category for an expense, or
-  // personal / transfer / income / review) on every staged bank row, and an
-  // Inbox tab under /admin/tax with one-tap decisions that can also write a
-  // rule. Suggestion-only: no row changes status without the operator, the
-  // expense itself still goes through /bank-import/:id/create-expense, an
-  // Income decision keeps the row listed (nothing counts it as revenue), and
-  // nothing leaves the admin. Nested under GATE_BANK_IMPORT; read at call
-  // time via gateEnvValue so a flip needs no redeploy; dark by default.
-  taxLedger: gateEnvValue('GATE_TAX_LEDGER'),
-
-  // Shared bills + home office (2026-10-24): a bill that is part business
-  // (a phone plan with business lines, home internet) books at its business
-  // share when Bank Import turns the staged row into an expense, and the
-  // simplified home-office deduction (sq ft x $5, max 300 sq ft) is kept per
-  // tax year and added to the tax package. Nested under GATE_BANK_IMPORT; read
-  // at call time via taxSharedBillsLive(); dark by default. Off = create-expense
-  // and the tax package behave exactly as before.
-  taxSharedBills: gateEnvValue('GATE_TAX_SHARED_BILLS'),
-
-  // Tax return engine (2026-10-24): tax-year records (filing status, other
-  // income, estimates paid, carryovers in), a federal return computed from the
-  // P&L and the books (Schedule C, Schedule SE, NOL, QBI, income tax) and a
-  // Return tab under Admin > Tax > Reports. Nested under GATE_BANK_IMPORT; read
-  // at call time via taxReturnEngineLive(); dark by default. Off = the routes
-  // 404 and the tab stays hidden; nothing else reads it.
-  taxReturnEngine: gateEnvValue('GATE_TAX_RETURN_ENGINE'),
-
   // Slab pre-treat for a home is not taxed (2026-10-24): Florida taxes a
   // pre-construction termite treatment only for a nonresidential building
   // (Rule 12A-1.009), so a builder whose account is commercial owes no tax on
@@ -4148,15 +4029,6 @@ const gates = {
   // dark by default. Off = these services are taxed by the customer's
   // property_type exactly as before.
   lawnSprayNoTax: gateEnvValue('GATE_LAWN_SPRAY_NO_TAX'),
-
-  // Tax worksheets (2026-10-25): Tax > Reports > Sales tax (the Florida DR-15
-  // lines for a month, quarter, half year or year from the books) and 1099s
-  // (who was paid for contract labor or legal and professional work, and who
-  // needs a 1099-NEC). Read-only; Mark filed uses the filing calendar's own
-  // route. Nested under GATE_BANK_IMPORT; read at call time via
-  // taxWorksheetsLive(); dark by default. Off = the routes 404 and the tabs
-  // stay hidden.
-  taxWorksheets: gateEnvValue('GATE_TAX_WORKSHEETS'),
 
   // Stops-away tracker count (2026-08-14): "N stops away" on the portal
   // ServiceTracker + public /track page. Read-only, fires no comms; count
@@ -5801,22 +5673,11 @@ function smsVoiceProfilePinVersion() {
   return n > 0 ? n : null;
 }
 
-// GATE_SMS_EDIT_LEARNING read at CALL time — strict opt-in via gateEnvValue, dark. Owner 2026-10-24.
-// Read by sms-voice-corpus-miner.js (what it mines) and sms-shadow-drafter.js (exemplar ranking, prompt version).
-function smsEditLearningLive() {
-  return gateEnvValue('GATE_SMS_EDIT_LEARNING');
-}
-
 // GATE_SMS_PROMPT_B1 read at CALL time — strict opt-in via gateEnvValue, dark. Owner 2026-10-24. The change is part of the
 // real-answers prompt, so it applies only while GATE_SMS_REAL_ANSWERS is also on. Read by sms-shadow-drafter.js (prompt,
 // facts, checks, prompt version) and context-aggregator.js (the latest visit's notes and findings). Suggestion cards only.
 function smsPromptB1Live() {
   return gateEnvValue('GATE_SMS_PROMPT_B1') && gateEnvValue('GATE_SMS_REAL_ANSWERS');
-}
-
-// GATE_SMS_JUDGE_V2 read at CALL time — strict opt-in via gateEnvValue, dark. Owner 2026-10-24. Measurement only.
-function smsJudgeV2Live() {
-  return gateEnvValue('GATE_SMS_JUDGE_V2');
 }
 
 // GATE_SERIES_MOVE_CARRIES_VISIT read at CALL time — strict `=== 'true'`.
@@ -6086,28 +5947,6 @@ function fastCompleteReportLive() {
   return process.env.GATE_FAST_COMPLETE_REPORT === 'true';
 }
 
-// GATE_NEIGHBORHOOD_ACCESS read at CALL time — strict `=== 'true'`; unset = kill.
-// Files a saved neighborhood gate code under the property's neighborhood
-// (services/neighborhood-access.js fileGateCodeAfterSave).
-function neighborhoodAccessLive() {
-  return process.env.GATE_NEIGHBORHOOD_ACCESS === 'true';
-}
-
-// GATE_NEIGHBORHOOD_NAMING read at CALL time — strict `=== 'true'`; unset = kill.
-// The neighborhood sweep's naming pass (services/neighborhood-naming.js). Needs
-// the directory itself live.
-function neighborhoodNamingLive() {
-  return neighborhoodAccessLive() && process.env.GATE_NEIGHBORHOOD_NAMING === 'true';
-}
-
-// GATE_NEIGHBORHOOD_ADDRESS_LOOKUP read at CALL time — strict `=== 'true'`;
-// unset = kill. The county search by a home's own address when its pin sits on
-// another lot (services/neighborhood-access.js homeParcel). Needs the naming
-// pass live.
-function neighborhoodAddressLookupLive() {
-  return neighborhoodNamingLive() && process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP === 'true';
-}
-
 // GATE_SETUP_FEE_SETTLED_ANYWHERE read at CALL time — strict `=== 'true'`; unset = kill.
 // setup-fee-obligation.js setupFeeSettledElsewhere() is the ONE predicate behind the
 // unminted-setup-fee alert, its completion hold and setup-fee-alert-reconcile.js.
@@ -6169,30 +6008,6 @@ function promisePhoneMatchCloseMode() {
 // (routes/admin-triage.js attach-contact / new-customer) all read it here.
 function callAddressFamilyCardLive() {
   return process.env.GATE_CALL_ADDRESS_FAMILY_CARD === 'true';
-}
-
-// A technician's add / mark-wrong on a visit's neighborhood gate codes
-// (routes/admin-neighborhood-access.js). Needs the directory itself live.
-function neighborhoodTechActionsLive() {
-  return neighborhoodAccessLive() && process.env.GATE_NEIGHBORHOOD_TECH_ACTIONS === 'true';
-}
-
-// The office's merge of one neighborhood entry into another
-// (services/neighborhood-merge.js). Needs the directory itself live.
-function neighborhoodMergeLive() {
-  return neighborhoodAccessLive() && process.env.GATE_NEIGHBORHOOD_MERGE === 'true';
-}
-
-// The office's "Homes not placed" list and the Add-as-unconfirmed box
-// (routes/admin-neighborhood-access.js). Needs the directory itself live.
-function neighborhoodUnplacedLive() {
-  return neighborhoodAccessLive() && process.env.GATE_NEIGHBORHOOD_UNPLACED === 'true';
-}
-
-// Gate and access codes on the office schedule (owner ruling 2026-10-26), read
-// at CALL time. Strict `=== 'true'`, dark by default; unset is the kill switch.
-function scheduleAccessCodesLive() {
-  return process.env.GATE_SCHEDULE_ACCESS_CODES === 'true';
 }
 
 // Staff onboarding documents (services/staff-onboarding.js), read at CALL time.
@@ -6718,16 +6533,6 @@ function estimateAssessmentFirstLive() {
   return process.env.GATE_ESTIMATE_ASSESSMENT_FIRST === 'true';
 }
 
-// GATE_TAX_SHARED_BILLS read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
-function taxSharedBillsLive() {
-  return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_SHARED_BILLS');
-}
-
-// GATE_TAX_RETURN_ENGINE read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
-function taxReturnEngineLive() {
-  return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_RETURN_ENGINE');
-}
-
 // GATE_SLAB_HOME_NO_TAX read at CALL time (so a flip needs no redeploy).
 function slabHomeNoTaxLive() {
   return gateEnvValue('GATE_SLAB_HOME_NO_TAX');
@@ -6767,11 +6572,6 @@ function slabBusinessSiteTaxLive() {
 // GATE_LAWN_SPRAY_NO_TAX read at CALL time (so a flip needs no redeploy).
 function lawnSprayNoTaxLive() {
   return gateEnvValue('GATE_LAWN_SPRAY_NO_TAX');
-}
-
-// GATE_TAX_WORKSHEETS read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
-function taxWorksheetsLive() {
-  return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_WORKSHEETS');
 }
 
 // GATE_PORTAL_CHAT_CUSTOMER_CAP read at CALL time (so a flip needs no redeploy); strict 'true'.
@@ -8219,11 +8019,6 @@ function estimateSlotOnePerHourLive() {
   return process.env.GATE_ESTIMATE_SLOT_ONE_PER_HOUR === 'true';
 }
 
-// GATE_ACCESS_CODES_FOUND_BELL read at CALL time (so a flip needs no redeploy); strict 'true'.
-function accessCodesFoundBellLive() {
-  return process.env.GATE_ACCESS_CODES_FOUND_BELL === 'true';
-}
-
 // GATE_LEAD_DRAFT_PROPERTY_LOOKUP read at CALL time (so a flip needs no redeploy); strict 'true'.
 function leadDraftPropertyLookupLive() {
   return process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP === 'true';
@@ -8377,16 +8172,6 @@ function callExtractionSystemPromptLive() {
 // gates-map entry above is for logGateStatus only.
 function callExtractionV1FallbackLive() {
   return process.env.GATE_CALL_EXTRACTION_V1_FALLBACK === 'true';
-}
-
-// GATE_CALL_SPELLING_COLLAPSE_TRIGGER read at CALL time — strict `=== 'true'`, dark by
-// default. The canonical reader for call-recording-processor.js: on, the second
-// transcription pass and the contact decoder also run when spellingCollapseSignals
-// (contact-dictation.js) finds the marks a collapsed spelling leaves in the primary
-// transcript. Off, only detectContactDictationSignals decides, byte-identical to before.
-// The `callSpellingCollapseTrigger` gates-map entry above is for logGateStatus only.
-function callSpellingCollapseTriggerLive() {
-  return process.env.GATE_CALL_SPELLING_COLLAPSE_TRIGGER === 'true';
 }
 
 // GATE_CALL_FIRST_NAME_ADVISORY read at CALL time — strict `=== 'true'`, dark by
@@ -9448,9 +9233,7 @@ module.exports.homeLineLive = homeLineLive;
 module.exports.portalActivityLive = portalActivityLive;
 module.exports.emailReclassifyPickLive = emailReclassifyPickLive;
 module.exports.smsVoiceProfilePinVersion = smsVoiceProfilePinVersion;
-module.exports.smsEditLearningLive = smsEditLearningLive;
 module.exports.smsPromptB1Live = smsPromptB1Live;
-module.exports.smsJudgeV2Live = smsJudgeV2Live;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
 // GATE_CUSTOMER_LAST_TOUCH reader, on its own line so gate PRs never conflict.
 module.exports.customerLastTouchLive = customerLastTouchLive;
@@ -9461,7 +9244,6 @@ module.exports.callCommercialDictatedBookingLive = callCommercialDictatedBooking
 module.exports.callCommercialAssessmentBookingLive = callCommercialAssessmentBookingLive;
 module.exports.callExtractionSystemPromptLive = callExtractionSystemPromptLive;
 module.exports.callExtractionV1FallbackLive = callExtractionV1FallbackLive;
-module.exports.callSpellingCollapseTriggerLive = callSpellingCollapseTriggerLive;
 module.exports.callFirstNameAdvisoryLive = callFirstNameAdvisoryLive;
 module.exports.callbackSpokenNumberLinkLive = callbackSpokenNumberLinkLive;
 module.exports.callLeadFormAddressStreetLevelLive = callLeadFormAddressStreetLevelLive;
@@ -9609,20 +9391,6 @@ module.exports.estimateDraftRetireOnSendLive = estimateDraftRetireOnSendLive;
 module.exports.reportOnlyPaymentAlertLive = reportOnlyPaymentAlertLive;
 // GATE_SMS_UNANSWERED_REPLY reader, on its own line.
 module.exports.smsUnansweredReplyLive = smsUnansweredReplyLive;
-// GATE_NEIGHBORHOOD_ACCESS reader, on its own line.
-module.exports.neighborhoodAccessLive = neighborhoodAccessLive;
-// GATE_NEIGHBORHOOD_NAMING reader, on its own line.
-module.exports.neighborhoodNamingLive = neighborhoodNamingLive;
-// GATE_NEIGHBORHOOD_ADDRESS_LOOKUP reader, on its own line.
-module.exports.neighborhoodAddressLookupLive = neighborhoodAddressLookupLive;
-// GATE_NEIGHBORHOOD_TECH_ACTIONS reader, on its own line.
-module.exports.neighborhoodTechActionsLive = neighborhoodTechActionsLive;
-// GATE_NEIGHBORHOOD_MERGE reader, on its own line.
-module.exports.neighborhoodMergeLive = neighborhoodMergeLive;
-// GATE_NEIGHBORHOOD_UNPLACED reader, on its own line.
-module.exports.neighborhoodUnplacedLive = neighborhoodUnplacedLive;
-// GATE_SCHEDULE_ACCESS_CODES reader, on its own line.
-module.exports.scheduleAccessCodesLive = scheduleAccessCodesLive;
 // GATE_CONTACT_REPORT_TEXT reader, on its own line.
 module.exports.contactReportTextLive = contactReportTextLive;
 // GATE_CONTACT_LOGIN reader, on its own line.
@@ -10481,16 +10249,10 @@ module.exports.commercialAutopayLive = commercialAutopayLive;
 module.exports.commercialFirstVisitLive = commercialFirstVisitLive;
 // GATE_ESTIMATE_ASSESSMENT_FIRST reader, on its own line so gate PRs never conflict.
 module.exports.estimateAssessmentFirstLive = estimateAssessmentFirstLive;
-// GATE_TAX_SHARED_BILLS reader, on its own line so gate PRs never conflict.
-module.exports.taxSharedBillsLive = taxSharedBillsLive;
-// GATE_TAX_RETURN_ENGINE reader, on its own line so gate PRs never conflict.
-module.exports.taxReturnEngineLive = taxReturnEngineLive;
 // GATE_SLAB_HOME_NO_TAX reader, on its own line so gate PRs never conflict.
 module.exports.slabHomeNoTaxLive = slabHomeNoTaxLive;
 // GATE_LAWN_SPRAY_NO_TAX reader, on its own line so gate PRs never conflict.
 module.exports.lawnSprayNoTaxLive = lawnSprayNoTaxLive;
-// GATE_TAX_WORKSHEETS reader, on its own line so gate PRs never conflict.
-module.exports.taxWorksheetsLive = taxWorksheetsLive;
 // GATE_PUBLIC_LLM_SHARED_CAP reader, on its own line so gate PRs never conflict.
 module.exports.publicLlmSharedCapLive = publicLlmSharedCapLive;
 // GATE_PORTAL_CHAT_CUSTOMER_CAP reader, on its own line so gate PRs never conflict.
@@ -10511,8 +10273,6 @@ module.exports.promisePhoneMatchCloseMode = promisePhoneMatchCloseMode;
 module.exports.satellitePalmCountTypedLive = satellitePalmCountTypedLive;
 // GATE_CALL_ADDRESS_FAMILY_CARD reader, on its own line so gate PRs never conflict.
 module.exports.callAddressFamilyCardLive = callAddressFamilyCardLive;
-// GATE_ACCESS_CODES_FOUND_BELL reader, on its own line so gate PRs never conflict.
-module.exports.accessCodesFoundBellLive = accessCodesFoundBellLive;
 // GATE_PLAN_RATE_LEDGER_RECONCILE reader, on its own line so gate PRs never conflict.
 module.exports.planRateLedgerReconcileLive = planRateLedgerReconcileLive;
 // GATE_LEAD_DRAFT_PROPERTY_LOOKUP reader, on its own line so gate PRs never conflict.

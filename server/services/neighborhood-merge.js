@@ -1,6 +1,5 @@
 /**
- * Merge one neighborhood gate-code entry into another (GATE_NEIGHBORHOOD_MERGE,
- * owner ruling 2026-10-25).
+ * Merge one neighborhood gate-code entry into another (owner ruling 2026-10-25).
  *
  * The directory makes one entry per county plat name, so one gated community
  * can show up several times ("Country Club East Lwr", "Country Club East at

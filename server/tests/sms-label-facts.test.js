@@ -67,7 +67,7 @@ describe('gate off — byte-identical', () => {
     expect(sha(buildSystemPrompt())).toBe('8fc58d9bcd7cdf437f7f6d49290a01c375c696f31f346a2db121ed59e98da0f3');
     expect(sha(buildSystemPromptWithProfile('Warm and brief.').system)).toBe('7e35da9035dd011a3f0b6ab8596b9876926956fbaf1ca05139d59f4ef8248a9b');
     expect(buildSystemPrompt()).not.toContain('LABEL FACTS');
-    expect(currentPromptVersion()).toBe(PROMPT_VERSION);
+    expect(currentPromptVersion()).toBe(`${PROMPT_VERSION}+e`); // edit learning's e tag is always on
   });
 
   test('compliance guard is a no-op gate off and the numeric ban is unchanged', () => {
@@ -2732,11 +2732,11 @@ describe('prompt rules and hand-off narrowing', () => {
     process.env[GATE] = 'true';
     // #5331 (payment facts) minted 5_cflvp; #5610 (missed visit) the compact '7_m' (one cumulative key, LABEL FACTS included)
     expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers25_n');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers25_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers25_n+e');
     expect(REAL_ANSWERS_PROMPT_VERSION.startsWith(require('../services/sms-shadow-drafter').REAL_ANSWERS_VERSION_FAMILY)).toBe(true); // gratitude discovery LIKE 'family%'
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
     const all = currentPromptVersion();
-    expect(all).toBe('house_voice_v12_real_answers25_n+bclm');
+    expect(all).toBe('house_voice_v12_real_answers25_n+bcelm');
     expect(all.length).toBeLessThanOrEqual(40);
   });
 });
@@ -2768,7 +2768,7 @@ describe('generateGroundedDraft — LABEL FACTS reach the facts block and the co
     const r = await generateGroundedDraft(args(client));
     expect(mockFetchLabelFacts).toHaveBeenCalledWith({ customerId: 'cust-1' });
     expect(r.factsBlock).toContain(`- ${RAIN3}`);
-    expect(r.promptVersion).toBe('house_voice_v12_real_answers25_n');
+    expect(r.promptVersion).toBe('house_voice_v12_real_answers25_n+e');
     expect(r.converged).toBe(true);
     expect(r.passes).toBe(1);
   });
@@ -2874,7 +2874,7 @@ describe('sealed-eval fact contract for the _cfl version', () => {
 
   test('every real gate-on facts block satisfies the live contract, with or without label facts', () => {
     process.env[GATE] = 'true';
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers25_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers25_n+e');
     for (const extras of [{}, { labelFacts: labelFacts([product({ rainfastMinutes: 180 })]) }]) {
       expect(itemCompatibleWith(buildFactsBlock(context, { now: NOW, ...extras }), currentPromptVersion())).toBe(true);
     }

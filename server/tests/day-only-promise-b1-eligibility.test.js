@@ -269,7 +269,8 @@ describe('dayOnlyEligibility: the level rule and stop-wide judging', () => {
 
   test.each(['scheduled_services', 'appointment_reminders', 'messaging_audit_log as a'])('a failed read of %s: nobody is eligible and the level is hour (fail closed)', async (table) => {
     const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1')], failOn: table });
-    expect(await verdict(conn)).toEqual({ s1: { eligible: false, level: 'hour' } });
+    // failed: true tells a read failure from a real "customer was told an hour" verdict (same eligible/level).
+    expect(await verdict(conn)).toEqual({ s1: { eligible: false, level: 'hour', failed: true } });
   });
 
   test('no ids: empty map and no read', async () => {
@@ -384,8 +385,18 @@ describe('loadTimeDisplay', () => {
     test('a failed read: showHour true for every row', async () => {
       const conn = fakeConn({ services: [svc('s1'), svc('s2')], reminders: [office('s1'), office('s2')], failOn: 'appointment_reminders' });
       const out = await loadTimeDisplay(conn, [row('s1', '2026-11-20'), row('s2', '2026-11-21')], NOW);
+      expect(out.get('s1')).toEqual({ showHour: true, level: 'hour', eligible: false, failed: true });
+      expect(out.get('s2')).toEqual({ showHour: true, level: 'hour', eligible: false, failed: true });
+    });
+
+    test('the failed marker is only on a failed read: a real hour verdict and a good read carry none', async () => {
+      const hour = { id: 1, appointment_id: 's1', purpose: 'appointment_confirmation', sent_at: '2026-11-09T14:00:00Z', metadata: { rendered_slot_ms: SLOT } };
+      const told = fakeConn({ services: [svc('s1')], reminders: [office('s1')], messages: [hour] });
+      const out = await loadTimeDisplay(told, [row('s1', '2026-11-20')], NOW);
       expect(out.get('s1')).toEqual({ showHour: true, level: 'hour', eligible: false });
-      expect(out.get('s2').showHour).toBe(true);
+      expect('failed' in out.get('s1')).toBe(false);
+      const good = fakeConn({ services: [svc('s2')], reminders: [office('s2')] });
+      expect('failed' in (await loadTimeDisplay(good, [row('s2', '2026-11-20')], NOW)).get('s2')).toBe(false);
     });
 
     test('one bulk read for many rows', async () => {

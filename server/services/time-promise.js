@@ -258,26 +258,30 @@ async function memberIntentState(conn, member) {
  *  still holds (currentIntent): true = a set time (never), false = the day only was chosen (skip the source and customer-pick
  *  rules), otherwise infer. Inferred: a recurring child unless the customer picked its slot; a first or one-time visit only
  *  from an office source AND only while the customer has not since picked its slot (a self-service reschedule keeps the office
- *  source, but the hour is now the customer's own). Any read fails closed (not eligible; the customer-pick read: picked). */
+ *  source, but the hour is now the customer's own). Any read fails closed. Returns { eligible, degraded }: `degraded` is true
+ *  when a move-history read FAILED (the intent's history read threw, or isCustomerPickedVisit swallowed the error and answered
+ *  picked), so the caller can tell a failed read from a real "the customer picked it" verdict. */
 async function memberEligible(conn, member, source) {
   let state;
   try {
     state = await memberIntentState(conn, member);
   } catch {
-    return false;
+    return { eligible: false, degraded: true };
   }
-  if (state.intent === true) return false;
-  if (state.intent === false) return true;
-  if (!isRecurringChild(member) && !OFFICE_BOOKING_SOURCES.includes(source)) return false; // no move-history read
+  if (state.intent === true) return { eligible: false, degraded: false };
+  if (state.intent === false) return { eligible: true, degraded: false };
+  if (!isRecurringChild(member) && !OFFICE_BOOKING_SOURCES.includes(source)) return { eligible: false, degraded: false }; // no move-history read
   // Lazy: auto-dispatch/eligibility pulls the route optimizer, which reads the feature gates at load time.
-  return !(await require('./auto-dispatch/eligibility').isCustomerPickedVisit(member, conn, state.rows)).picked;
+  const verdict = await require('./auto-dispatch/eligibility').isCustomerPickedVisit(member, conn, state.rows);
+  return { eligible: !verdict.picked, degraded: verdict.degraded === true };
 }
 
 /**
- * Which visits may be promised only the DAY? Map<id, { eligible, level }>, one bulk read per fact, stop-wide: every live
+ * Which visits may be promised only the DAY? Map<id, { eligible, level, failed? }>, one bulk read per fact, stop-wide: every live
  * member of a visit's stop must be eligible, else none is. `level` comes from loadPromiseLevels; a level of 'hour' is
- * never eligible (the customer already has an hour). Any read failure: not eligible, level 'hour' (fail closed: the
- * customer keeps today's window copy). A recurring child is judged by who placed its slot (isCustomerPickedVisit, one read
+ * never eligible (the customer already has an hour). Any read failure: not eligible, level 'hour', failed true (fail
+ * closed: the customer keeps today's window copy; `failed` is the only way to tell it from a real 'hour' verdict). A swallowed
+ * move-history read failure (isCustomerPickedVisit's degraded answer) is also not eligible and failed true, with its real level. A recurring child is judged by who placed its slot (isCustomerPickedVisit, one read
  * per child of the stop). A first or one-time visit needs an office booking source (OFFICE_BOOKING_SOURCES; any other source
  * is rejected without a read) AND the same customer-pick check, since a customer's self-service reschedule leaves the office
  * source in place.
@@ -295,13 +299,19 @@ async function dayOnlyEligibility(conn, ids, now = new Date(), { ignoreLevel = f
       const level = levels.get(id) || 'hour';
       const members = facts.get(String(id)) || [];
       let eligible = level !== 'hour' && members.length > 0;
+      let degraded = false;
       for (const member of eligible ? members : []) {
-        if (!(await memberEligible(conn, member, sources.get(String(member.id))))) { eligible = false; break; }
+        const verdict = await memberEligible(conn, member, sources.get(String(member.id)));
+        if (!verdict.eligible) { eligible = false; degraded = verdict.degraded; break; }
       }
-      result.set(id, { eligible, level });
+      // A degraded move-history read is not eligible (senders keep today's window copy) and carries the same failed marker
+      // as a failed bulk read, so an AI context says only the day while a screen keeps the hour.
+      result.set(id, degraded ? { eligible, level, failed: true } : { eligible, level });
     }
   } catch {
-    for (const id of ids) result.set(id, { eligible: false, level: 'hour' });
+    // failed: true marks a READ FAILURE (as opposed to a real "customer was told an hour" verdict, which has the same
+    // eligible/level). A screen ignores it and keeps showing the hour; an AI context (day-only-ai-context.js) says only the day.
+    for (const id of ids) result.set(id, { eligible: false, level: 'hour', failed: true });
   }
   return result;
 }
@@ -442,11 +452,11 @@ function composeStartAt(row) {
 }
 
 /**
- * Should a customer screen show the HOUR for each of these visits? Map<id, { showHour, level, eligible }>. Rows carry at
+ * Should a customer screen show the HOUR for each of these visits? Map<id, { showHour, level, eligible, failed? }>. Rows carry at
  * least id, scheduled_date and window_start. Gate off: showHour true for every row and NO database read. Gate on:
  * showHour = !eligible || the start is missing/invalid || it is within DAY_PROMISE_CUTOFF_HOURS. One bulk eligibility
  * read for all rows. A failed read: showHour true for every row (the safe side for a screen: the customer keeps seeing
- * the hour they may have been told).
+ * the hour they may have been told) and `failed: true` on each, so an AI context can choose the other safe side.
  */
 async function loadTimeDisplay(conn, rows, now = new Date()) {
   const out = new Map();
@@ -457,12 +467,14 @@ async function loadTimeDisplay(conn, rows, now = new Date()) {
   }
   const verdicts = await dayOnlyEligibility(conn, list.map((r) => r.id), now);
   for (const r of list) {
-    const { eligible, level } = verdicts.get(r.id) || { eligible: false, level: 'hour' };
+    const { eligible, level, failed } = verdicts.get(r.id) || { eligible: false, level: 'hour' };
     const hours = hoursUntil(composeStartAt(r), now);
     out.set(r.id, {
       showHour: !eligible || !Number.isFinite(hours) || hours <= DAY_PROMISE_CUTOFF_HOURS,
       level,
       eligible,
+      // Only on a failed eligibility read; every other row keeps its shape. Callers that ignore it behave as before.
+      ...(failed === true ? { failed: true } : {}),
     });
   }
   return out;

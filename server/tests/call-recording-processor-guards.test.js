@@ -2373,8 +2373,9 @@ describe('hasRealTwoWayConversation lives ONLY at the clarify-draft site, not in
   const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
   test('the shared outboundReturnMessagesEligible gate does not call hasRealTwoWayConversation', () => {
-    const gateLine = src.split('\n').find((l) => l.includes("isEnabled('callOutboundReturnMessages')") && l.includes('isOutboundCall(call)'));
-    expect(gateLine).toBeDefined();
+    const lines = src.split('\n');
+    const gateLine = lines[lines.findIndex((l) => l.includes('let outboundReturnMessagesEligible = false;')) + 1];
+    expect(gateLine).toContain('isOutboundCall(call)');
     expect(gateLine).not.toContain('hasRealTwoWayConversation');
   });
 
