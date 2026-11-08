@@ -27,6 +27,8 @@ jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }))
 // math is genuine, without pulling the whole appointment-reminders module
 // (and its own dependencies) into this orchestrator test.
 jest.mock('../services/appointment-reminders', () => ({
+  // The night run's reminders-off lock (auto-dispatch/reminder-off.js): every 24-hour reminder goes out here.
+  loadVisitReminder24hAnswers: jest.fn(async (_conn, visits) => new Map(visits.map((v) => [v.id, true]))),
   composeScheduledApptTime: jest.fn((svc) => {
     if (!svc) return null;
     const datePart = String(svc.scheduled_date || '').slice(0, 10);
