@@ -10,8 +10,13 @@ const TOKEN = '11111111-2222-3333-4444-555555555555';
 
 function query(subscriber, { tokenRotated = false } = {}) {
   const q = {};
-  q.where = jest.fn(() => q);
+  // The opt-out predicate nests its status test in where(fn)/orWhere(fn)
+  // (whereOptOutNeedsWrite, sweep #7765 B5); run the callbacks on this chain.
+  q.where = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q); return q; });
+  q.orWhere = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q); return q; });
   q.whereNot = jest.fn(() => q);
+  q.whereNotNull = jest.fn(() => q);
+  q.whereRaw = jest.fn(() => q);
   q.first = jest.fn(async () => (tokenRotated ? null : subscriber));
   // The r45 atomic consumption returns the updated rows (id, email) — a
   // rotated/removed token matches nothing.

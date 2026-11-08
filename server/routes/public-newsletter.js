@@ -18,7 +18,7 @@ const {
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 const {
-  subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE,
+  subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE, whereOptOutNeedsWrite,
   WAITLIST_SOURCE, applyWaitlistTags,
 } = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
@@ -110,9 +110,8 @@ router.post('/unsubscribe/:token', async (req, res) => {
     // token correctly matches nothing.
     let unsubRows = [];
     if (isUuid) {
-      unsubRows = await db('newsletter_subscribers')
-        .where({ unsubscribe_token: req.params.token })
-        .whereNot({ status: 'unsubscribed' })
+      unsubRows = await whereOptOutNeedsWrite(db('newsletter_subscribers')
+        .where({ unsubscribe_token: req.params.token }))
         .update({
           status: 'unsubscribed',
           unsubscribed_at: new Date(),

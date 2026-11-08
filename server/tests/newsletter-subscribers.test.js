@@ -49,6 +49,8 @@ const {
   confirmByToken,
   CONFIRM_RESEND_COOLDOWN_MS,
   CONFIRM_TTL_MS,
+  hasLiveConfirmation,
+  whereOptOutNeedsWrite,
 } = require('../services/newsletter-subscribers');
 
 afterEach(() => {
@@ -426,5 +428,36 @@ describe('purgeStalePendingSubscribers keeps opt-out history', () => {
     // status='pending' before it ran.
     expect(del.del).toBe(true);
     for (const r of queries) expect(r.wheres).toContainEqual({ status: 'pending' });
+  });
+});
+
+describe('opt-outs reach an unsubscribed row that holds a live re-signup token', () => {
+  test('hasLiveConfirmation: pending and live re-signup rows yes; the original link and active rows no', () => {
+    const live = { ...UNSUB_ROW, confirmation_sent_at: new Date(Date.now() - 60 * 1000) };
+    expect(hasLiveConfirmation({ status: 'pending' })).toBe(true);
+    expect(hasLiveConfirmation(live)).toBe(true);
+    expect(hasLiveConfirmation({ ...INACTIVE_ROW, confirmation_sent_at: new Date(Date.now() - 60 * 1000) })).toBe(true);
+    expect(hasLiveConfirmation({ ...UNSUB_ROW })).toBe(false);
+    expect(hasLiveConfirmation({ status: 'active' })).toBe(false);
+    expect(hasLiveConfirmation(null)).toBe(false);
+  });
+
+  test('whereOptOutNeedsWrite = not yet unsubscribed, OR unsubscribed with a re-signup token newer than the opt-out', () => {
+    const calls = [];
+    const mk = (tag) => {
+      const q = {
+        where: (a) => { calls.push([tag, 'where', typeof a === 'function' ? 'fn' : a]); if (typeof a === 'function') a.call(q); return q; },
+        whereNot: (a) => { calls.push([tag, 'whereNot', a]); return q; },
+        orWhere: (a) => { calls.push([tag, 'orWhere', 'fn']); a.call(mk('inner')); return q; },
+        whereNotNull: (c) => { calls.push([tag, 'whereNotNull', c]); return q; },
+        whereRaw: (r) => { calls.push([tag, 'whereRaw', r]); return q; },
+      };
+      return q;
+    };
+    whereOptOutNeedsWrite(mk('outer'));
+    expect(calls).toContainEqual(['outer', 'whereNot', { status: 'unsubscribed' }]);
+    expect(calls).toContainEqual(['inner', 'where', { status: 'unsubscribed' }]);
+    expect(calls).toContainEqual(['inner', 'whereNotNull', 'confirmation_sent_at']);
+    expect(calls.find((c) => c[1] === 'whereRaw')[2]).toContain('confirmation_sent_at > unsubscribed_at');
   });
 });

@@ -123,7 +123,7 @@ const { generateEstimate, normalizeRoachType, constants: pricingConstants } = re
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
-const { subscribeOrResubscribe } = require('../services/newsletter-subscribers');
+const { subscribeOrResubscribe, hasLiveConfirmation } = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
@@ -4178,11 +4178,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // opted out until the link is clicked (sweep #7765 B5).
           publicSignup: true,
         });
-        // A throttled repeat on a still-pending row sends no second email, but
-        // the lead still rides that pending confirmation: stamp it so the
-        // click enrolls this lead.
+        // A throttled repeat sends no second email, but while the earlier
+        // confirmation is still waiting for its click (a pending row, or an
+        // opted-out row holding a live re-signup token) the lead rides it:
+        // stamp it so the click enrolls this lead, not an older one.
         if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent'
-            || (result.action === 'confirmation_throttled' && result.subscriber?.status === 'pending')) {
+            || (result.action === 'confirmation_throttled' && hasLiveConfirmation(result.subscriber))) {
           await db('newsletter_subscribers').where({ id: result.subscriber.id }).update({
             quote_lead_automation_pending: true,
             // Carried through double opt-in so the confirmed enrollment can

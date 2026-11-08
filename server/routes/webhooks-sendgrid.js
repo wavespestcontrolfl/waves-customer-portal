@@ -1105,9 +1105,8 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
         updated_at: at,
       });
     } else if (updates.subscriberAction === 'unsubscribe_if_active') {
-      await client('newsletter_subscribers')
-        .where({ id: delivery.subscriber_id })
-        .whereNot({ status: 'unsubscribed' })
+      await optOutNeedsWrite()(client('newsletter_subscribers')
+        .where({ id: delivery.subscriber_id }))
         .update({
           status: 'unsubscribed',
           unsubscribed_at: at,
@@ -1254,12 +1253,17 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
   return null;
 }
 
+// Lazy: keeps the subscriber service (and its sunset import) out of this
+// route's load path. See whereOptOutNeedsWrite (sweep #7765 B5).
+function optOutNeedsWrite() {
+  return require('../services/newsletter-subscribers').whereOptOutNeedsWrite;
+}
+
 async function unsubscribeNewsletterSubscriber(email, at, client = db) {
   if (!email) return;
   const lc = String(email).trim().toLowerCase();
-  await client('newsletter_subscribers')
-    .whereRaw('LOWER(email) = ?', [lc])
-    .whereNot({ status: 'unsubscribed' })
+  await optOutNeedsWrite()(client('newsletter_subscribers')
+    .whereRaw('LOWER(email) = ?', [lc]))
     .update({
       status: 'unsubscribed',
       unsubscribed_at: at,

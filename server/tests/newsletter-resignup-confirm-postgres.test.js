@@ -151,14 +151,34 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     expect((await reload(row.id)).status).toBe('unsubscribed');
   });
 
-  test('an opt-out after the re-signup email kills the new link', async () => {
+  test('a one-click-style opt-out after the re-signup email kills the new link, even though the row is already unsubscribed', async () => {
     const email = addr();
     const row = await unsubscribedRow(email);
     await signup(email);
     const minted = await reload(row.id);
-    await db('newsletter_subscribers').where({ id: row.id }).update({ unsubscribed_at: new Date() });
+    // The same statement shape the unsubscribe route and the SendGrid
+    // unsubscribe events use.
+    const hit = await svc.whereOptOutNeedsWrite(db('newsletter_subscribers').where({ id: row.id }))
+      .update({ status: 'unsubscribed', unsubscribed_at: new Date(), updated_at: new Date() });
+    expect(hit).toBe(1);
     expect((await svc.confirmByToken(minted.confirmation_token)).action).toBe('unsubscribed');
     expect((await reload(row.id)).status).toBe('unsubscribed');
+    // A repeat opt-out with no outstanding re-signup never rewrites the date.
+    const stamped = (await reload(row.id)).unsubscribed_at;
+    const again = await svc.whereOptOutNeedsWrite(db('newsletter_subscribers').where({ id: row.id }))
+      .update({ unsubscribed_at: new Date() });
+    expect(again).toBe(0);
+    expect((await reload(row.id)).unsubscribed_at).toEqual(stamped);
+  });
+
+  test('an inactive row that opts out after a re-signup email also loses the link', async () => {
+    const email = addr();
+    const row = await insert({ email, status: 'inactive', confirmation_sent_at: ago(60 * DAY), confirmed_at: ago(60 * DAY - MIN), deactivated_at: ago(20 * DAY) });
+    await signup(email);
+    const minted = await reload(row.id);
+    await svc.whereOptOutNeedsWrite(db('newsletter_subscribers').where({ id: row.id }))
+      .update({ status: 'unsubscribed', unsubscribed_at: new Date(), updated_at: new Date() });
+    expect((await svc.confirmByToken(minted.confirmation_token)).action).toBe('unsubscribed');
   });
 
   test('an expired re-signup link (past 7 days) confirms nothing', async () => {

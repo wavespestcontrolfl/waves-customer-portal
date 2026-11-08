@@ -522,6 +522,33 @@ function resignupTokenState(sub) {
   return (Date.now() - sentMs) > CONFIRM_TTL_MS ? 'expired' : 'live';
 }
 
+// Does this subscriber hold a confirmation that is still waiting for its
+// click: a pending row, or an unsubscribed/inactive row with a live public
+// re-signup token? Callers that ride extra state on the outstanding
+// confirmation (the quote wizard's lead) use it after a throttled repeat.
+function hasLiveConfirmation(sub) {
+  if (!sub) return false;
+  if (sub.status === 'pending') return true;
+  return (sub.status === 'unsubscribed' || sub.status === 'inactive') && resignupTokenState(sub) === 'live';
+}
+
+// For the opt-out writers (one-click unsubscribe, SendGrid unsubscribe events)
+// that used to skip rows already at status='unsubscribed': a row that is
+// unsubscribed but holds a live public re-signup token (confirmation_sent_at
+// later than unsubscribed_at) is NOT done yet. The opt-out must land on it
+// too, advancing unsubscribed_at so the emailed link stops confirming.
+// Rows with no outstanding re-signup stay skipped, so their opt-out date is
+// never rewritten.
+function whereOptOutNeedsWrite(query) {
+  return query.where(function optOutNeedsWrite() {
+    this.whereNot({ status: 'unsubscribed' }).orWhere(function liveResignup() {
+      this.where({ status: 'unsubscribed' })
+        .whereNotNull('confirmation_sent_at')
+        .whereRaw('(unsubscribed_at IS NULL OR confirmation_sent_at > unsubscribed_at)');
+    });
+  });
+}
+
 function whereResignupTokenLive(query) {
   return query
     .where('confirmation_sent_at', '>', new Date(Date.now() - CONFIRM_TTL_MS))
@@ -857,4 +884,4 @@ async function relinkArchivedLinkedSubscribers(conn = db) {
   });
 }
 
-module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS, CONFIRM_RESEND_COOLDOWN_MS, WAITLIST_SOURCE, sanitizeWaitlistTags, applyWaitlistTags };
+module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS, CONFIRM_RESEND_COOLDOWN_MS, whereOptOutNeedsWrite, hasLiveConfirmation, WAITLIST_SOURCE, sanitizeWaitlistTags, applyWaitlistTags };
