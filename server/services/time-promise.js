@@ -281,13 +281,15 @@ async function dayOnlyEligibility(conn, ids, now = new Date(), { ignoreLevel = f
  * send promise only the day? { dayOnly, level, eligible }. `id` is one visit, or `ids` every member of a stop (all must
  * be eligible). The cheap checks (gate, cutoff, the customer's 24-hour reminder) run first, so a gate-off send, an
  * inside-the-cutoff send and a 24-hour-reminder-off customer read nothing from the database.
+ * `ignoreLevel` (a delayed move recovery whose caller proved the visit's only hour promise predates the notice): the old
+ * promise level is not read, as for a move.
  */
-async function dayOnlySendDecision(conn, { id = null, ids = null, startAt, now = new Date(), reminder24hEnabled } = {}) {
+async function dayOnlySendDecision(conn, { id = null, ids = null, startAt, now = new Date(), reminder24hEnabled, ignoreLevel = false } = {}) {
   const wanted = (ids && ids.length ? ids : [id]).filter((v) => v != null);
   const no = { dayOnly: false, level: null, eligible: false };
   if (!wanted.length) return no;
   if (!shouldPromiseDayOnly({ startAt, now, reminder24hEnabled, customerPicked: false, level: 'none' })) return no;
-  const verdicts = await dayOnlyEligibility(conn, wanted, now);
+  const verdicts = await dayOnlyEligibility(conn, wanted, now, { ignoreLevel });
   // A stop is judged as a whole: every requested member must be eligible, and no member's latest promise may be an hour.
   const all = wanted.map((w) => verdicts.get(w) || { eligible: false, level: 'hour' });
   const eligible = all.every((a) => a.eligible);
@@ -369,14 +371,30 @@ async function dayOnlyReplayDecision(conn, { id, startAt, now = new Date(), remi
   }
 }
 
+/** Limits an intent UPDATE to the visits still on the slot a move wrote. `slot` = { date, windowStart }: windowStart a time
+ *  means that start (HH:MM), null means no window, undefined means any start on that date. A slot without a usable date
+ *  matches nothing. */
+function onlyWhileAtSlot(query, slot) {
+  const date = slot && slot.date ? dateOnlyString(slot.date) : null;
+  if (!date) return query.whereRaw('1 = 0');
+  query.whereRaw('scheduled_services.scheduled_date = ?::date', [date]);
+  if (slot.windowStart === null) return query.whereNull('scheduled_services.window_start');
+  if (slot.windowStart === undefined) return query;
+  return query.whereRaw("to_char(scheduled_services.window_start, 'HH24:MI') = ?", [String(slot.windowStart).slice(0, 5)]);
+}
+
 /** Records the office's "customer asked for this time" (true) or "day only" (false) on the moved visit(s). Gate off: nothing
  *  is written (the UPDATE payloads stay exactly today's). Throws on a failed write, so a caller inside a transaction fails
- *  the move with it and a best-effort caller can catch. */
-async function recordCustomerAskedTime(conn, ids, asked) {
+ *  the move with it and a best-effort caller can catch.
+ *  `slot` (optional, { date, windowStart }): the slot the move set. A caller that writes AFTER its move committed passes it, so
+ *  the write lands only while the visit still holds that slot: a later move that changed the slot owns the column, and this
+ *  delayed write then updates 0 rows. A caller inside the moving transaction needs no slot. */
+async function recordCustomerAskedTime(conn, ids, asked, slot) {
   if (!dayOnlyPromiseOn()) return 0;
   const list = [...new Set((ids || []).filter((v) => v != null).map(String))];
   if (!list.length) return 0;
-  return conn('scheduled_services').whereIn('id', list).update({ customer_asked_time: asked === true });
+  const query = conn('scheduled_services').whereIn('id', list);
+  return (slot === undefined ? query : onlyWhileAtSlot(query, slot)).update({ customer_asked_time: asked === true });
 }
 
 /** The visit's start time from its ET date and window start, or null. */

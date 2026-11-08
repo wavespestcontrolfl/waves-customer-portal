@@ -287,6 +287,52 @@ describe('a bounced day-only reschedule text (handleUndeliveredSms)', () => {
     expect(AppointmentEmail.sendAppointmentRescheduledEmail).not.toHaveBeenCalled();
   });
 
+  // Finding: the bounced day text is excluded by the reader, so the visit's latest delivered promise can be the OLD date's hour
+  // confirmation. That promise predates the move notice (or is for another date) and must not supersede it.
+  describe('the promise that stands is judged against the notice being recovered', () => {
+    const told = require('../services/auto-dispatch/told-visits');
+    const hourPromise = (communicatedAt, startAt) => ({ visit_id: 'svc-1', start_at: startAt, communicated_at: communicatedAt, source: 'message' });
+    const OLD_CONFIRMATION = hourPromise('2099-10-20T12:00:00.000Z', '2099-10-30T14:00:00.000Z'); // before the move, for the old date
+
+    test('an old delivered hour confirmation (old date, before the move) does not suppress: the NEW date gets the day email, level ignored', async () => {
+      jest.spyOn(timePromise, 'loadPromiseLevels').mockResolvedValue(new Map([['svc-1', 'hour']]));
+      jest.spyOn(told, 'resolvePromises').mockResolvedValue(new Map([['svc-1', OLD_CONFIRMATION]]));
+      const decision = jest.spyOn(timePromise, 'dayOnlySendDecision').mockResolvedValue({ dayOnly: true });
+      await bounce();
+      expect(AppointmentEmail.sendAppointmentRescheduledEmail).toHaveBeenCalledTimes(1);
+      expect(AppointmentEmail.sendAppointmentRescheduledEmail.mock.calls[0][0]).toMatchObject({ dayOnly: true, windowUnknown: false, appointmentTime: new Date(SLOT_MS) });
+      expect(decision).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'svc-1', ignoreLevel: true }));
+    });
+
+    test('the same plus a LATER delivered 24-hour window for the new date: suppressed', async () => {
+      jest.spyOn(timePromise, 'loadPromiseLevels').mockResolvedValue(new Map([['svc-1', 'hour']]));
+      jest.spyOn(told, 'resolvePromises').mockResolvedValue(new Map([['svc-1', hourPromise('2099-11-03T21:00:00.000Z', '2099-11-04T21:00:00.000Z')]]));
+      jest.spyOn(timePromise, 'dayOnlySendDecision').mockResolvedValue({ dayOnly: true });
+      await bounce();
+      expect(AppointmentEmail.sendAppointmentRescheduledEmail).not.toHaveBeenCalled();
+    });
+
+    test('a promise newer than the notice but for a different date is not the notice\'s: the day email still goes', async () => {
+      jest.spyOn(timePromise, 'loadPromiseLevels').mockResolvedValue(new Map([['svc-1', 'hour']]));
+      jest.spyOn(told, 'resolvePromises').mockResolvedValue(new Map([['svc-1', hourPromise('2099-10-25T12:00:00.000Z', '2099-11-09T21:00:00.000Z')]]));
+      jest.spyOn(timePromise, 'dayOnlySendDecision').mockResolvedValue({ dayOnly: true });
+      await bounce();
+      expect(AppointmentEmail.sendAppointmentRescheduledEmail).toHaveBeenCalledTimes(1);
+    });
+
+    test('a newer unknown-window promise, or one that cannot be resolved, fails closed', async () => {
+      jest.spyOn(timePromise, 'loadPromiseLevels').mockResolvedValue(new Map([['svc-1', 'hour']]));
+      jest.spyOn(timePromise, 'dayOnlySendDecision').mockResolvedValue({ dayOnly: true });
+      jest.spyOn(told, 'resolvePromises').mockResolvedValue(new Map([['svc-1', hourPromise('2099-10-25T12:00:00.000Z', null)]]));
+      await bounce();
+      jest.spyOn(told, 'resolvePromises').mockResolvedValue(new Map());
+      await bounce();
+      jest.spyOn(told, 'resolvePromises').mockRejectedValue(new Error('read failed'));
+      await bounce();
+      expect(AppointmentEmail.sendAppointmentRescheduledEmail).not.toHaveBeenCalled();
+    });
+  });
+
   test('the promise cannot be read: suppressed (a day email must not supersede a window it cannot see)', async () => {
     jest.spyOn(timePromise, 'loadPromiseLevels').mockRejectedValue(new Error('read failed'));
     await bounce();
@@ -304,6 +350,19 @@ describe('a bounced day-only reschedule text (handleUndeliveredSms)', () => {
   });
 
   afterEach(() => { jest.restoreAllMocks(); });
+});
+
+describe('the customer move intent write is bound to the slot that move committed (customerMoveSlot)', () => {
+  const { customerMoveSlot } = AppointmentReminders._test;
+  test('the pinned slot wins; with no start key any start on that date; an explicit null start is "no window"', () => {
+    expect(customerMoveSlot('2099-11-04T09:00', { expectSchedule: { date: '2099-11-04', windowStart: '13:00:00' } }, {})).toEqual({ date: '2099-11-04', windowStart: '13:00:00' });
+    expect(customerMoveSlot('2099-11-04T09:00', { expectSchedule: { date: '2099-11-04' } }, {})).toEqual({ date: '2099-11-04', windowStart: undefined });
+    expect(customerMoveSlot('2099-11-04T09:00', { expectSchedule: { date: '2099-11-04', windowStart: null } }, {})).toEqual({ date: '2099-11-04', windowStart: null });
+  });
+  test('otherwise the slot the caller named; a windowless visit has no start', () => {
+    expect(customerMoveSlot('2099-11-04T09:30', {}, { windowless: false })).toEqual({ date: '2099-11-04', windowStart: '09:30' });
+    expect(customerMoveSlot('2099-11-04T08:00', undefined, { windowless: true })).toEqual({ date: '2099-11-04', windowStart: null });
+  });
 });
 
 describe('a held or merged move notice re-sent as a confirmation keeps the recorded intent (confirmationDayOnly)', () => {

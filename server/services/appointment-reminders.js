@@ -783,7 +783,7 @@ async function deliverBouncedMoveNoticeEmail({ kind, audit, customerId, schedule
   const dayText = kind === 'rescheduled' && isDayPromise(meta);
   let dayOnly = false;
   if (dayText) {
-    const verdict = await revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime });
+    const verdict = await revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, noticeAt: meta.move_notice_at || audit.created_at });
     if (verdict === 'suppress') {
       logger.info(`[appt-remind] bounced day-only ${kind} text for ${scheduledServiceId}: a later promise already stands (or none can be read) - recovery email suppressed as stale`);
       return;
@@ -1264,11 +1264,11 @@ function reminder24hWillSend(prefs) {
 }
 
 /** True when this send may promise only the day. Gate off (or any error): false, and nothing is read. */
-async function dayOnlyForSend({ id, startAt, reminder24hEnabled }) {
+async function dayOnlyForSend({ id, startAt, reminder24hEnabled, ignoreLevel = false }) {
   try {
     const timePromise = require('./time-promise');
     if (!timePromise.dayOnlyPromiseOn()) return false;
-    const decision = await timePromise.dayOnlySendDecision(db, { id, startAt, reminder24hEnabled });
+    const decision = await timePromise.dayOnlySendDecision(db, { id, startAt, reminder24hEnabled, ...(ignoreLevel ? { ignoreLevel: true } : {}) });
     return decision.dayOnly === true;
   } catch (err) {
     logger.warn(`[appt-remind] day-only decision failed for ${id} (${err.message}) - sending the window copy`);
@@ -1284,13 +1284,25 @@ async function confirmationDayOnly(record, { scheduledServiceId, apptTime, prefs
   return (await dayOnlyForSend(args)) || moveReplayDayOnly(args);
 }
 
+/** The slot a customer move committed, for binding its intent write to it: the caller's pinned slot (options.expectSchedule)
+ *  when it passed one, else the slot it named (`newTime`), with no window when the visit is windowless. */
+function customerMoveSlot(newTime, options, resolved) {
+  const pinned = options && options.expectSchedule;
+  if (pinned && pinned.date) {
+    const hasStart = Object.prototype.hasOwnProperty.call(pinned, 'windowStart');
+    return { date: String(pinned.date).slice(0, 10), windowStart: hasStart ? pinned.windowStart || null : undefined };
+  }
+  const named = appointmentTimeParts(newTime);
+  return { date: named.date, windowStart: resolved?.windowless ? null : named.windowStart || null };
+}
+
 /** A customer move (GATE_DAY_ONLY_PROMISE part B2): records what the customer chose for the new slot. 'set_time' (an hour
  *  they picked) -> customer_asked_time true; 'day' ("any time that day") -> false. Gate off, or no choice named: nothing is
  *  written. Best-effort: the move is committed, and an unwritten column only leaves the intent to be inferred. */
-async function recordCustomerMoveIntent(scheduledServiceId, timePromise) {
+async function recordCustomerMoveIntent(scheduledServiceId, timePromise, slot) {
   if (timePromise !== 'set_time' && timePromise !== 'day') return;
   try {
-    await require('./time-promise').recordCustomerAskedTime(db, [scheduledServiceId], timePromise === 'set_time');
+    await require('./time-promise').recordCustomerAskedTime(db, [scheduledServiceId], timePromise === 'set_time', slot);
   } catch (err) {
     logger.warn(`[appt-remind] customer_asked_time write failed for ${scheduledServiceId}: ${err.message}`);
   }
@@ -1359,14 +1371,36 @@ function bouncedOccurrenceDate(metadata) {
   return metadata.guard_slot_ms != null && Number.isFinite(guard) ? etDateString(new Date(guard)) : null;
 }
 
+/** Does this promise stand AFTER the notice being recovered, for the notice's own visit date? Only then does it supersede the
+ *  notice. A promise at or before the notice's time (the confirmation sent before a move) is the OLD slot's; so is a known
+ *  hour on a different date than the notice's. An unreadable time, or an unknown window newer than the notice, supersedes
+ *  (fail closed), as does a promise that cannot be resolved at all. */
+function promiseSupersedesNotice(promise, notice) {
+  if (!promise) return true; // the level read said 'hour' but no promise resolves now: unprovable, so it stands
+  const at = new Date(promise.communicated_at).getTime();
+  if (!Number.isFinite(at)) return true;
+  if (at <= notice.at.getTime()) return false;
+  if (promise.start_at == null) return true;
+  return !notice.visitDate || etDateString(new Date(promise.start_at)) === notice.visitDate;
+}
+
 /** Is a delayed day-only send stale? True when the visit's latest promise is already an hour (the 24-hour text went, or
  *  anything newer than the original send), or the promise cannot be read: a delayed send must never become a newer day
- *  promise over a known window. This is the ONE rule in front of the shared send decision. */
-async function delayedSendIsStale(scheduledServiceId) {
+ *  promise over a known window. This is the ONE rule in front of the shared send decision.
+ *  `notice` ({ at, visitDate }) is given by a MOVE notice's recovery: an hour promise only counts when it supersedes that
+ *  notice (promiseSupersedesNotice). One that does not (the old date's confirmation, which the bounced move text had
+ *  replaced) is set aside, and notice.setAsideOld is set so the day decision ignores that old level too. */
+async function delayedSendIsStale(scheduledServiceId, notice = null) {
   if (!scheduledServiceId) return false;
   try {
-    const levels = await require('./time-promise').loadPromiseLevels(db, [scheduledServiceId], new Date());
-    return levels.get(scheduledServiceId) === 'hour';
+    const timePromise = require('./time-promise');
+    const levels = await timePromise.loadPromiseLevels(db, [scheduledServiceId], new Date());
+    if (levels.get(scheduledServiceId) !== 'hour') return false;
+    if (!notice) return true;
+    const promise = (await require('./auto-dispatch/told-visits').resolvePromises(db, [scheduledServiceId], new Date())).get(scheduledServiceId);
+    if (promiseSupersedesNotice(promise, notice)) return true;
+    notice.setAsideOld = true;
+    return false;
   } catch (err) {
     logger.warn(`[appt-remind] day-only bounce recovery for ${scheduledServiceId}: promise unreadable (${err.message})`);
     return true;
@@ -1384,11 +1418,16 @@ async function delayedSendIsStale(scheduledServiceId) {
  *   'window'    it no longer does (gate rolled back, the 24-hour reminder switched off, inside the cutoff): the day-only
  *               body must not go. The caller sends window copy if it can render it, else suppresses.
  * `apptTime` is the visit's start the caller already knows; absent, it is read from the visit.
+ * `noticeAt` (a MOVE notice's recovery, with `apptTime` the slot that notice quoted): only a promise made AFTER that notice, for
+ * that notice's date, supersedes it. The old date's confirmation does not: the move replaced it, and its level is ignored.
  */
-async function revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime }) {
-  if (await delayedSendIsStale(scheduledServiceId)) return 'suppress';
+async function revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, noticeAt }) {
+  const noticeTime = noticeAt ? new Date(noticeAt) : null;
+  const notice = noticeTime && !Number.isNaN(noticeTime.getTime()) && apptTime
+    ? { at: noticeTime, visitDate: etDateString(new Date(apptTime)), setAsideOld: false } : null;
+  if (await delayedSendIsStale(scheduledServiceId, notice)) return 'suppress';
   const startAt = apptTime || (scheduledServiceId ? await scheduledServiceApptTime(scheduledServiceId) : null);
-  return (await dayOnlyNow({ customerId, scheduledServiceId, apptTime: startAt })) ? 'day' : 'window';
+  return (await dayOnlyNow({ customerId, scheduledServiceId, apptTime: startAt, ignoreLevel: notice?.setAsideOld === true })) ? 'day' : 'window';
 }
 
 /** The email recovery of a bounced appointment text. A window text recovers as before. A day-only text goes through the
@@ -5791,7 +5830,7 @@ const AppointmentReminders = {
         return { skippedStale: true };
       }
       // GATE_DAY_ONLY_PROMISE part B2: what the customer chose for the new slot (an hour, or any time that day).
-      await recordCustomerMoveIntent(scheduledServiceId, options.timePromise);
+      await recordCustomerMoveIntent(scheduledServiceId, options.timePromise, customerMoveSlot(newTime, options, resolved));
 
       // Repair-release for a retained unit-move hold (codex #3609 uncapped
       // audit + r33/r34 P1s): a PARTIAL move retains move_hold_until on
@@ -7084,6 +7123,7 @@ AppointmentReminders.deliverMoveNoticeEmail = deliverMoveNoticeEmail;
 
 AppointmentReminders._test = {
   confirmationDayOnly,
+  customerMoveSlot,
   isBookedAfterNoPick,
   render72hReminder,
   NO_PICK_REMINDER_KEY,
@@ -7255,12 +7295,12 @@ async function replayRecipient({ customerId, scheduledServiceId, contactKey, acc
 // recovery): the SAME shared decision a fresh send uses, on the live gate, the customer's CURRENT preferences
 // (reminder24hWillSend) and the full eligibility. Gate off (or any error, unreadable preferences): false, and the caller
 // sends window copy.
-async function dayOnlyNow({ customerId, scheduledServiceId, apptTime }) {
+async function dayOnlyNow({ customerId, scheduledServiceId, apptTime, ignoreLevel = false }) {
   try {
     if (!require('./time-promise').dayOnlyPromiseOn()) return false;
     const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
     if (prefs.unavailable) return false;
-    return await dayOnlyForSend({ id: scheduledServiceId, startAt: apptTime, reminder24hEnabled: reminder24hWillSend(prefs) });
+    return await dayOnlyForSend({ id: scheduledServiceId, startAt: apptTime, reminder24hEnabled: reminder24hWillSend(prefs), ...(ignoreLevel ? { ignoreLevel: true } : {}) });
   } catch {
     return false;
   }

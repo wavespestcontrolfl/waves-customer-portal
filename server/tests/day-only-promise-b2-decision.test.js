@@ -28,9 +28,13 @@ function fakeConn({ services = [], reminders = [], moves = {}, messages = [], fa
     const notIns = [];
     const eq = {};
     const chain = {};
-    for (const m of ['join', 'leftJoin', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'distinct', 'orWhere', 'orderBy']) {
+    const raws = [];
+    for (const m of ['join', 'leftJoin', 'whereBetween', 'whereNotNull', 'distinct', 'orWhere', 'orderBy']) {
       chain[m] = () => chain;
     }
+    const nulled = [];
+    chain.whereNull = (col) => { nulled.push(col); return chain; };
+    chain.whereRaw = (sql, bindings) => { raws.push([sql, bindings]); return chain; };
     chain.where = (col, val) => { if (typeof col === 'string') eq[col] = val; else if (col && typeof col === 'object') Object.assign(eq, col); return chain; };
     chain.whereIn = (col, values) => { ins.push([col, (Array.isArray(values) ? values : []).map(String)]); return chain; };
     chain.whereNotIn = (col, values) => { notIns.push([col, values.map(String)]); return chain; };
@@ -49,7 +53,17 @@ function fakeConn({ services = [], reminders = [], moves = {}, messages = [], fa
       const rows = table === 'scheduled_services' ? services.filter((r) => String(r.id) === String(eq.id)) : [];
       return rows[0] && cols.length ? Object.fromEntries(cols.map((c) => [c, rows[0][c]])) : rows[0];
     };
-    chain.update = async (payload) => { updates.push({ table, ins: [...ins], payload }); return ins.length ? ins[0][1].length : 1; };
+    chain.update = async (payload) => {
+      updates.push({ table, ins: [...ins], payload, raws: [...raws], nulls: [...nulled] });
+      // Slot-bound writes (recordCustomerAskedTime with a slot) apply only to the rows still at that slot.
+      if (raws.length || nulled.length) {
+        const hit = pick(services).filter((r) => raws.every(([sql, b]) => (sql.includes('scheduled_date') ? String(r.scheduled_date) === b[0] : sql.includes('1 = 0') ? false : String(r.window_start || '').slice(0, 5) === b[0]))
+          && nulled.every((col) => r[col.split('.').pop()] == null));
+        hit.forEach((r) => Object.assign(r, payload));
+        return hit.length;
+      }
+      return ins.length ? ins[0][1].length : 1;
+    };
     return chain;
   };
   conn.raw = (sql, bindings) => ({ sql, bindings });
@@ -261,6 +275,49 @@ describe('recordCustomerAskedTime', () => {
       ['scheduled_services', ['s4'], { customer_asked_time: false }],
     ]);
   }));
+
+  describe('bound to the slot the move wrote (a delayed post-commit write)', () => {
+    const slotConn = (window_start) => fakeConn({ services: [svc('s1', { scheduled_date: '2026-11-15', window_start, customer_asked_time: null })] });
+
+    test('the slot still holds: the write lands', withGate('true', async () => {
+      const conn = slotConn('09:00:00');
+      expect(await recordCustomerAskedTime(conn, ['s1'], false, { date: '2026-11-15', windowStart: '09:00' })).toBe(1);
+      expect(await recordCustomerAskedTime(conn, ['s1'], false, { date: '2026-11-15' })).toBe(1);
+    }));
+
+    test('a later customer move changed the slot: the earlier move\'s delayed write updates 0 rows and true stays', withGate('true', async () => {
+      const conn = slotConn('09:00:00');
+      // Move 1 (office, day only) commits 2026-11-15 09:00; move 2 (customer, a set time) then lands 2026-11-17 13:00 and writes true.
+      const visit = (await conn('scheduled_services').select())[0];
+      Object.assign(visit, { scheduled_date: '2026-11-17', window_start: '13:00:00' });
+      expect(await recordCustomerAskedTime(conn, ['s1'], true, { date: '2026-11-17', windowStart: '13:00' })).toBe(1);
+      expect(visit.customer_asked_time).toBe(true);
+      // Move 1's delayed effect now runs with ITS slot and wants false.
+      expect(await recordCustomerAskedTime(conn, ['s1'], false, { date: '2026-11-15', windowStart: '09:00' })).toBe(0);
+      // Same date, different start is also a different slot.
+      expect(await recordCustomerAskedTime(conn, ['s1'], false, { date: '2026-11-17', windowStart: '09:00' })).toBe(0);
+      expect(visit.customer_asked_time).toBe(true);
+    }));
+
+    test('windowStart null means no window; a slot without a date writes nothing; gate off writes nothing', withGate('true', async () => {
+      const conn = slotConn(null);
+      expect(await recordCustomerAskedTime(conn, ['s1'], false, { date: '2026-11-15', windowStart: null })).toBe(1);
+      expect(await recordCustomerAskedTime(conn, ['s1'], false, { date: '2026-11-15', windowStart: '09:00' })).toBe(0);
+      expect(await recordCustomerAskedTime(conn, ['s1'], false, {})).toBe(0);
+    }));
+
+    test('gate off with a slot: no write', withGate(undefined, async () => {
+      const conn = slotConn('09:00:00');
+      expect(await recordCustomerAskedTime(conn, ['s1'], false, { date: '2026-11-15' })).toBe(0);
+      expect(conn.updates).toEqual([]);
+    }));
+
+    test('no slot given (a caller inside the moving transaction): the UPDATE carries no slot condition', withGate('true', async () => {
+      const conn = slotConn('09:00:00');
+      await recordCustomerAskedTime(conn, ['s1'], true);
+      expect(conn.updates[0].raws).toEqual([]);
+    }));
+  });
 
   test('a failed write throws, so a caller inside a transaction fails the move with it', withGate('true', async () => {
     const conn = () => ({ whereIn: () => ({ update: async () => { throw new Error('write failed'); } }) });

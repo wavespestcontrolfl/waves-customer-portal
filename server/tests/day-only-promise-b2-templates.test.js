@@ -178,7 +178,7 @@ describe('the callers pass what the decision needs (source scans)', () => {
 
   test('dispatch board: the plan carries the box, every moved member records the intent, the sender gets the date it moved from', () => {
     expect(dispatch).toContain('customerAskedTime: body?.customerAskedTime === true }');
-    expect(dispatch).toContain('await recordVisitMoveIntent({ result, plan, serviceId });');
+    expect(dispatch).toContain('await recordVisitMoveIntent({ result, plan, serviceId, newDate });');
     expect(dispatch).toContain('previousDate: result.originalDate, customerAskedTime: plan?.customerAskedTime');
     expect(dispatch).toContain('const ids = [serviceId, ...(visitMove?.moved || [])];');
   });

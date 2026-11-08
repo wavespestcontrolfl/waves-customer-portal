@@ -6543,15 +6543,32 @@ function partialVisitMoveReply(result, serviceId) {
 // GATE_DAY_ONLY_PROMISE part B2: the office's "customer asked for this time" (or day only) for the new slot, written on every
 // member that moved. Gate off: nothing is written. Best-effort: the move is committed, and a failed write only leaves the
 // column as it was (the senders then infer the intent).
-async function recordVisitMoveIntent({ result, plan, serviceId }) {
+async function recordVisitMoveIntent({ result, plan, serviceId, newDate }) {
   try {
     const visitMove = result?.visitMove;
     if (visitMove?.alreadyAtTarget === true && !(visitMove.moved || []).length) return;
     const ids = [serviceId, ...(visitMove?.moved || [])];
-    await require('../services/time-promise').recordCustomerAskedTime(db, ids, plan?.customerAskedTime === true);
+    const asked = plan?.customerAskedTime === true;
+    const timePromise = require('../services/time-promise');
+    // Each write is bound to the slot its move landed (a later move changes the slot, and then owns the column).
+    for (const id of new Set(ids.map(String))) {
+      await timePromise.recordCustomerAskedTime(db, [id], asked, movedSlotFor(id, { result, plan, newDate }));
+    }
   } catch (err) {
     logger.warn(`[dispatch] customer_asked_time write failed for ${serviceId}: ${err.message}`);
   }
+}
+
+// The slot a moved member landed: the unit move's own record for it (visitMove.members[].landed), trusted fully (a windowless
+// member has no start). With no such record (a single-row move): the requested date and window start; no start named = undefined
+// (any start on that date).
+function movedSlotFor(id, { result, plan, newDate }) {
+  const landed = (result?.visitMove?.members || []).find((m) => String(m.id) === String(id))?.landed;
+  if (landed) {
+    return { date: String(landed.scheduled_date || newDate || '').split('T')[0], windowStart: landed.window_start ? String(landed.window_start).slice(0, 5) : null };
+  }
+  const start = parseRescheduleWindow(plan?.effectiveWindow).start;
+  return { date: String(newDate || '').split('T')[0], windowStart: start ? String(start).slice(0, 5) : undefined };
 }
 
 // Effects: the one customer notice for a completed move.
@@ -6612,7 +6629,7 @@ async function applyVisitMoveEffects({ result, plan, serviceId, newDate, notifyC
     || result?.visitMove?.parentRetargetFailed === true; // the parent still describes the old stop (codex r28 P1)
   const repeatNotice = notifyCustomer !== false && !partialVisitMove ? repeatedMoveNoticeVerdict({ result, expectVisit }) : null;
   const willNotify = notifyCustomer !== false && !partialVisitMove && !repeatNotice;
-  await recordVisitMoveIntent({ result, plan, serviceId });
+  await recordVisitMoveIntent({ result, plan, serviceId, newDate });
   await syncRescheduleReminder(serviceId, newDate, effectiveWindow, { willNotify, preserveMoveHold: partialVisitMove });
   await broadcastVisitMove({ result, serviceId, actor, qualityDates });
   if (partialVisitMove) return partialVisitMoveReply(result, serviceId);
@@ -7725,4 +7742,6 @@ module.exports._test = {
   captureReminderGuards,
   seriesNoticeDayOnly,
   renderSeriesDayBody,
+  recordVisitMoveIntent,
+  movedSlotFor,
 };

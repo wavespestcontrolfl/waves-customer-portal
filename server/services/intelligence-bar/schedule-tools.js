@@ -1725,7 +1725,10 @@ async function textMovedStop(s, plan) {
 // Best-effort: the batch is committed, so a failed write is only logged.
 async function recordMovedStopIntent(s, plan) {
   try {
-    await require('../time-promise').recordCustomerAskedTime(db, [s.id], plan.customerAskedTime === true);
+    // Bound to the slot THIS move wrote (the same one its reminder sync is pinned to): a later move that changed the slot owns
+    // the column, so this delayed write then updates nothing.
+    const windowStart = s.window_start ? String(s.window_start).slice(0, 5) : null;
+    await require('../time-promise').recordCustomerAskedTime(db, [s.id], plan.customerAskedTime === true, { date: plan.dateStr, windowStart });
   } catch (err) {
     logger.warn(`[intelligence-bar:schedule] customer_asked_time write failed for ${s.id}: ${err.message}`);
   }
