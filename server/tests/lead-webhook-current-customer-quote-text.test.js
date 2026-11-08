@@ -68,14 +68,12 @@ const { notifyAdmin } = require('../services/notification-service');
 
 const PHONE_RAW = '9415550142';
 const PHONE = '+19415550142';
-const GATES = ['GATE_CURRENT_CUSTOMER_QUOTE_TEXT', 'GATE_LEAD_REPEAT_FORM'];
+const GATES = ['GATE_CURRENT_CUSTOMER_QUOTE_TEXT'];
 const ORIGINAL = Object.fromEntries(GATES.map((g) => [g, process.env[g]]));
 
-function load(gate, { repeatForm } = {}) {
+function load(gate) {
   if (gate === undefined) delete process.env.GATE_CURRENT_CUSTOMER_QUOTE_TEXT;
   else process.env.GATE_CURRENT_CUSTOMER_QUOTE_TEXT = gate;
-  if (repeatForm === undefined) delete process.env.GATE_LEAD_REPEAT_FORM;
-  else process.env.GATE_LEAD_REPEAT_FORM = repeatForm;
   let router;
   jest.isolateModules(() => {
     router = require('../routes/lead-webhook');
@@ -248,7 +246,7 @@ describe('gate on: a current or past customer sends the quote form', () => {
 
 describe('unchanged paths', () => {
   test('a row that is still a lead keeps the repeat-form rules: its alert, no text', async () => {
-    const router = load('true', { repeatForm: 'true' });
+    const router = load('true');
     mockTables.customers = [row({ pipeline_stage: 'new_lead', lead_intake_status: 'awaiting_service' })];
     mockTables.leads = [{ id: 'lead-9' }];
     await submit(router);

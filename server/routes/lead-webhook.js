@@ -617,7 +617,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       // audit trail. Existing customers must not continue into lead acquisition:
       // no new-lead notifications, lead auto-replies, lead intake state, draft
       // estimates, leads rows, or lead-agent processing. A row that is still a
-      // lead is one exception under GATE_LEAD_REPEAT_FORM: it keeps an open
+      // lead is one exception (the repeat form): it keeps an open
       // intake state (buildExistingCustomerLeadUpdates) and rings one Leads
       // alert (ringRepeatFormAlert); still no text, lead row or draft here. A
       // current or past customer is the other, under
@@ -2061,11 +2061,11 @@ const LEAD_PIPELINE_STAGES = ['new_lead', 'contacted', 'estimate_sent', 'estimat
 // next text from them.
 const OPEN_INTAKE_STATUSES = ['awaiting_service', 'awaiting_address'];
 
-// GATE_LEAD_REPEAT_FORM (owner 2026-10-24, "A: both parts"): a form whose
-// phone matches a row that is still a lead comes from that same lead, whose
-// texts still answer our lead text.
+// Owner 2026-10-24, "A: both parts": a form whose phone matches a row that is
+// still a lead comes from that same lead, whose texts still answer our lead
+// text.
 function isRepeatFormFromLead(existing) {
-  return isEnabled('leadRepeatForm') && LEAD_PIPELINE_STAGES.includes(existing?.pipeline_stage);
+  return LEAD_PIPELINE_STAGES.includes(existing?.pipeline_stage);
 }
 
 // One Leads alert for a form from a row that is still a lead. Before, such a

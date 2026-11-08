@@ -2061,14 +2061,6 @@ const gates = {
   // shows the flip.
   leadCallReminder: process.env.GATE_LEAD_CALL_REMINDER === 'true',
 
-  // Lead Repeat Form — a row that is still a lead (not yet a customer) and
-  // sends the website quote form again keeps its open SMS intake state, so
-  // its next CALL / TEXT or service reply is handled as for a new lead, and
-  // rings one Leads alert (owner 2026-10-24, "A: both parts"). Sends nothing
-  // to the lead. Off unless exactly 'true'; off, a repeat form writes its
-  // note and clears the intake state, as before.
-  leadRepeatForm: process.env.GATE_LEAD_REPEAT_FORM === 'true',
-
   // Current Customer Quote Text — a current or past customer who sends the
   // website quote form gets the lead text's CALL or TEXT offer (at most one a
   // day per phone, no STOP line) and rings one Leads alert; a CALL or TEXT
