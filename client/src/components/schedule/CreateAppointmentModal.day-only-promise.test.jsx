@@ -37,7 +37,7 @@ function futureDate(days = 30) {
   return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
 }
 
-function installFetch({ serviceKey = 'pest_re_service', serviceName = 'Pest Re-Service', services: catalog = null, probe = { enabled: false, suggestion: null }, probeFails = false } = {}) {
+function installFetch({ serviceKey = 'pest_re_service', serviceName = 'Pest Re-Service', services: catalog = null, probe = { enabled: false, suggestion: null }, probeFails = false, reminder24hOn = true, omitReminder = false } = {}) {
   const fetcher = vi.fn((input, options = {}) => {
     const url = String(input);
     if (url.includes('/admin/triage?')) return Promise.resolve(json({ items: [] }));
@@ -53,7 +53,7 @@ function installFetch({ serviceKey = 'pest_re_service', serviceName = 'Pest Re-S
     }
     if (url.endsWith('/admin/schedule') && options.method === 'POST') return Promise.resolve(json({ id: 'appt-1' }));
     if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [], canChangeAppointmentAddress: false }));
-    if (url.includes('/schedule-estimates')) return Promise.resolve(json({ estimates: [] }));
+    if (url.includes('/schedule-estimates')) return Promise.resolve(json({ estimates: [], ...(omitReminder ? {} : { reminder24hOn }) }));
     if (url.endsWith('/admin/technicians')) return Promise.resolve(json({ technicians: [] }));
     if (url.endsWith('/admin/discounts')) return Promise.resolve(json([]));
     if (url.endsWith('/annual-prepay-availability')) return Promise.resolve(json({ enabled: false }));
@@ -107,12 +107,40 @@ describe('the New Appointment time picker', () => {
     await mountWithService();
     const box = await screen.findByLabelText(BOX);
     expect(box.checked).toBe(false);
-    expect(hint().textContent).toBe("Promise the day only: 'We'll text your arrival window the day before.'");
+    await waitFor(() => expect(hint().textContent).toBe("Promise the day only: 'We'll text your arrival window the day before.'"));
     const submit = screen.getByRole('button', { name: 'Schedule appointment' });
     await waitFor(() => expect(submit.disabled).toBe(false));
     fireEvent.click(submit);
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
     expect(JSON.parse(schedulePosts(fetcher)[0][1].body)).not.toHaveProperty('customerAskedTime');
+  });
+
+  it('gate on: the phone script shows only while the day-only promise can be made (reminder on, slot beyond 24.25 h)', async () => {
+    gate.on = true;
+    installFetch({ reminder24hOn: false });
+    await mountWithService();
+    await screen.findByLabelText(BOX);
+    // The customer's 24-hour reminder will not go out: the window text never comes, so the script is withheld.
+    await waitFor(() => expect(hint().textContent).toBe('Tell the customer this time.'));
+  });
+
+  it('gate on: an unknown reminder answer reads as "will not go out" (the senders\' answer for unreadable preferences)', async () => {
+    gate.on = true;
+    installFetch({ omitReminder: true });
+    await mountWithService();
+    await screen.findByLabelText(BOX);
+    expect(hint().textContent).toBe('Tell the customer this time.');
+  });
+
+  it('gate on: a slot inside the 24.25-hour cutoff gets "Tell the customer this time."', async () => {
+    gate.on = true;
+    installFetch();
+    await mountWithService();
+    await waitFor(() => expect(hint().textContent).toContain('Promise the day only'));
+    const soon = new Date();
+    const today = [soon.getFullYear(), String(soon.getMonth() + 1).padStart(2, '0'), String(soon.getDate()).padStart(2, '0')].join('-');
+    fireEvent.change(document.getElementById('new-appt-date'), { target: { value: today } });
+    expect(hint().textContent).toBe('Tell the customer this time.');
   });
 
   it('gate on: a checked box swaps the line for "Tell the customer this time." and sends customerAskedTime: true', async () => {

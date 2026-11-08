@@ -6116,7 +6116,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 </div>
               )}{" "}
               {dayOnlyPromiseOn && moveNotifyOffered && (
-                <AskedTimeBoxLegacy id="edit-appt-asked-time" checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={saving} colors={D} style={{ marginBottom: 14 }} />
+                <AskedTimeBoxLegacy id="edit-appt-asked-time" checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={saving} colors={D} style={{ marginBottom: 14 }} slot={{ date: form.scheduledDate, start: form.windowStart, reminder24hOn: service.reminder24hOn }} />
               )}{" "}
               {moveNotifyOffered && (
                 <div style={{ marginBottom: 14 }}>

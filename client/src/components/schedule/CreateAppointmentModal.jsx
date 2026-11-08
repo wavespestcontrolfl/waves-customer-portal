@@ -55,7 +55,7 @@ import { formatETTime } from '../../lib/timezone';
 import InPersonCardSheet from './InPersonCardSheet';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { AskedTimeBoxLegacy } from './DayOnlyPromiseLegacy';
-import { askedTimeCreateFields } from './dayOnlyPromise';
+import { askedTimeCreateFields, reminderAnswerFor } from './dayOnlyPromise';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -1848,6 +1848,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setServiceResults([]);
   }, [selectedCustomer?.id]);
 
+  // GATE_DAY_ONLY_PROMISE part E: will the chosen customer's 24-hour reminder go out? Rides the schedule-estimates reply below.
+  const [bookingReminder24h, setBookingReminder24h] = useState(null);
   useEffect(() => {
     const customerId = selectedCustomer?.id;
     // When booking a SPECIFIC estimate (defaultEstimateId), the estimate — not
@@ -1876,6 +1878,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       if (customerId) {
         const r = await adminFetch(`/admin/customers/${customerId}/schedule-estimates`);
         list = Array.isArray(r.estimates) ? r.estimates : [];
+        setBookingReminder24h({ id: customerId, on: r.reminder24hOn === true });
       }
       // Ensure the estimate we were opened to book is present even when the
       // selected customer doesn't own it yet — a lead's quote (customer_id NULL)
@@ -5781,7 +5784,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
           </div>
           {dayOnlyPromiseOn && !newCallerBookMode && (
-            <AskedTimeBoxLegacy id="new-appt-asked-time" checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={partialCommitLocked} colors={D} />
+            <AskedTimeBoxLegacy id="new-appt-asked-time" checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={partialCommitLocked} colors={D} slot={{ date: apptDate, start: windowStart, timeChosen, reminder24hOn: reminderAnswerFor(bookingReminder24h, selectedCustomer) }} />
           )}
           {duplicateConflict && (
             <section ref={duplicateConflictRef} aria-label="Existing recurring programs" style={{ padding: 16, marginBottom: 16, border: `1px solid ${D.border}`, borderRadius: 8, fontSize: 14, lineHeight: 1.5 }}>

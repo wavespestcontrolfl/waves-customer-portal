@@ -2787,9 +2787,52 @@ async function visitPrefsRow(customerId, scheduledServiceId = null) {
   }
 }
 
+// The three preference fields reminder24hWillSend reads, from the customer's notification_prefs row and the owner-resolved
+// channel row. THE one place that maps them: getReminderPrefs (the senders) and loadReminder24hAnswers (the office's bulk
+// read) both call it, so the two cannot drift.
+function reminder24hInputsFromRows(prefs, channelPrefs) {
+  return {
+    smsEnabled: prefs?.sms_enabled !== false,
+    serviceReminder24h: prefs?.service_reminder_24h !== false,
+    reminder24hChannel: apptChannel(channelPrefs?.service_reminder_24h_channel, { preserveAppChoice: true }),
+  };
+}
+
+/**
+ * Will the 24-hour reminder go out, for each of these customers? Map<customerId, boolean>, from THREE bulk reads however
+ * many customers (the customers, their account owners, the prefs rows): the office's "customer asked for this time" hint
+ * (GATE_DAY_ONLY_PROMISE part E) reads it. Same rule as the senders: reminder24hWillSend over the prefs fields that
+ * getReminderPrefs builds (reminder24hInputsFromRows), with the channel taken from the account owner's row for a
+ * secondary profile (resolveChannelPrefsRow). A customer with no prefs row has the table defaults (reminder on). While
+ * property texts are ENFORCED the answer depends on each visit's saved property (and the senders log a decision row per
+ * read), so no answer is returned at all: the caller reads that as unknown. Throws on a failed read.
+ */
+async function loadReminder24hAnswers(conn, customerIds) {
+  const out = new Map();
+  const ids = [...new Set((customerIds || []).filter((v) => v != null).map(String))];
+  if (!ids.length || require('./property-notification-prefs').propertyTextsEnforced()) return out;
+  const customers = await conn('customers').whereIn('id', ids).select('id', 'account_id', 'is_primary_profile');
+  const accounts = [...new Set(customers.filter((c) => c.is_primary_profile !== true && c.account_id).map((c) => c.account_id))];
+  const owners = accounts.length
+    ? await conn('customers').whereIn('account_id', accounts).where({ is_primary_profile: true }).select('id', 'account_id') : [];
+  const ownerOf = new Map(owners.map((o) => [String(o.account_id), String(o.id)]));
+  const rows = await conn('notification_prefs').whereIn('customer_id', [...ids, ...ownerOf.values()]).select('*');
+  const prefsOf = new Map(rows.map((r) => [String(r.customer_id), r]));
+  const accountOf = new Map(customers.map((c) => [String(c.id), c]));
+  for (const id of ids) {
+    const customer = accountOf.get(id);
+    const ownerId = customer && customer.is_primary_profile !== true && customer.account_id ? ownerOf.get(String(customer.account_id)) : null;
+    const own = prefsOf.get(id);
+    const channel = ownerId && ownerId !== id && prefsOf.get(ownerId) ? prefsOf.get(ownerId) : own;
+    out.set(id, reminder24hWillSend({ unavailable: false, ...reminder24hInputsFromRows(own, channel) }));
+  }
+  return out;
+}
+
 async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) {
   const prefs = await visitPrefsRow(customerId, scheduledServiceId);
   const channelPrefs = await resolveChannelPrefsRow(customerId, prefs);
+  const reminder24hInputs = reminder24hInputsFromRows(prefs, channelPrefs);
 
   return {
     raw: prefs || {},
@@ -2804,7 +2847,7 @@ async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) 
     // secondary-profile appointment whose owner lookup failed is equally
     // unknowable.
     unavailable: prefs?.__prefsUnavailable === true || channelPrefs?.__prefsUnavailable === true,
-    smsEnabled: prefs?.sms_enabled !== false,
+    smsEnabled: reminder24hInputs.smsEnabled,
     // Portal-wide email opt-out (pre-push #3588 P1): the email-first 72h
     // promotion must not route around it — AppointmentEmail sends on the
     // transactional_required stream and does not enforce this toggle
@@ -2814,7 +2857,7 @@ async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) 
     emailEnabled: prefs?.email_enabled !== false,
     appointmentConfirmation: prefs?.appointment_confirmation !== false,
     serviceReminder72h: prefs?.service_reminder_72h !== false,
-    serviceReminder24h: prefs?.service_reminder_24h !== false,
+    serviceReminder24h: reminder24hInputs.serviceReminder24h,
     confirmationChannel: apptChannel(channelPrefs?.appointment_confirmation_channel),
     // Explicit confirmation-channel choice: stamped by the notifications
     // route on any customer write of the channel; read from the same
@@ -2827,7 +2870,7 @@ async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) 
     // from the same owner-resolved row as the channel itself so a secondary
     // profile honors the account owner's choice.
     reminder72hChannelExplicit: channelPrefs?.service_reminder_72h_channel_explicit === true,
-    reminder24hChannel: apptChannel(channelPrefs?.service_reminder_24h_channel, { preserveAppChoice: true }),
+    reminder24hChannel: reminder24hInputs.reminder24hChannel,
   };
 }
 
@@ -7190,6 +7233,8 @@ AppointmentReminders.visitPrefsRow = visitPrefsRow;
 // 24-hour reminder will really be sent before promising only the day.
 AppointmentReminders.getReminderPrefs = getReminderPrefs;
 AppointmentReminders.reminder24hWillSend = reminder24hWillSend;
+// GATE_DAY_ONLY_PROMISE part E: the office's bulk read of the same answer (the phone-script hint).
+AppointmentReminders.loadReminder24hAnswers = loadReminder24hAnswers;
 
 // classifyDeliveryCertainty verdict -> replay result.
 const REPLAY_DELIVERY_RESULT = Object.freeze({

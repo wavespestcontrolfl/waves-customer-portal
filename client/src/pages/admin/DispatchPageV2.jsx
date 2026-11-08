@@ -47,11 +47,12 @@ import { useOutletContext, useSearchParams } from "react-router-dom";
 import { Plus } from "lucide-react";
 import {
   CompletionPanel,
-  RescheduleModal,
-  EditServiceModal,
+  RescheduleModal as BaseRescheduleModal,
+  EditServiceModal as BaseEditServiceModal,
   ProtocolPanel,
   completionResumeOwed,
 } from "./SchedulePage";
+import { withOfficeFields } from "../../components/schedule/useHydratedOfficeService";
 import ProtocolReferenceTabV2 from "./ProtocolReferenceTabV2";
 import {
   ViewModeSelectorV2,
@@ -64,7 +65,7 @@ import MobileDayStrip from "../../components/schedule/MobileDayStrip";
 import MobileDispatchList from "../../components/schedule/MobileDispatchList";
 import useDispatchReadiness from "../../components/schedule/useDispatchReadiness";
 import ScheduleClientSearch from "../../components/schedule/ScheduleClientSearch";
-import MobileAppointmentDetailSheet from "../../components/schedule/MobileAppointmentDetailSheet";
+import BaseMobileAppointmentDetailSheet from "../../components/schedule/MobileAppointmentDetailSheet";
 import { onSiteTimeOf } from "../../lib/on-site-time";
 import { completionBillingFacts, wrapUpSheetFields } from "../../lib/completion-billing-facts";
 import { accessSheetFields } from "../../lib/schedule-access";
@@ -114,6 +115,12 @@ import { requestDispatchSync } from "../../lib/dispatchSync";
 const RevenuePanel = lazy(
   () => import("../../components/dispatch/RevenuePanelV2"),
 );
+
+// GATE_DAY_ONLY_PROMISE part E: these open on a row from ANY feed. The editors wait for the visit's office fields when the
+// row lacks them (a moving save must not overwrite the stored "customer asked for this time"); the sheet shows at once.
+const RescheduleModal = withOfficeFields(BaseRescheduleModal, { block: true });
+const EditServiceModal = withOfficeFields(BaseEditServiceModal, { block: true });
+const MobileAppointmentDetailSheet = withOfficeFields(BaseMobileAppointmentDetailSheet, { block: false });
 
 const ACTIVE_MOBILE_COMPLETION_STATUSES = new Set(["en_route", "on_site"]);
 const PRE_SERVICE_STATUSES = new Set(["pending", "confirmed", "rescheduled"]);

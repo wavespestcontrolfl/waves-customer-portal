@@ -18,7 +18,7 @@ vi.mock('../../components/schedule/useBestTimes', () => ({
   useBestTimes: () => ({ pickedByTech: [], availability: undefined }),
 }));
 
-const BASE = { id: 'fixture-visit', customerId: 'fixture-account', customerName: 'Fixture account', serviceType: 'Pest Control', scheduledDate: '2035-01-02', windowStart: '08:00', windowEnd: '09:00', status: 'confirmed', notes: 'Existing note' };
+const BASE = { reminder24hOn: true, id: 'fixture-visit', customerId: 'fixture-account', customerName: 'Fixture account', serviceType: 'Pest Control', scheduledDate: '2035-01-02', windowStart: '08:00', windowEnd: '09:00', status: 'confirmed', notes: 'Existing note' };
 
 beforeEach(() => {
   gate.on = false;
@@ -59,6 +59,28 @@ describe('Edit appointment', () => {
     expect(screen.getByTestId('asked-time-hint')).toHaveTextContent("Promise the day only: 'We'll text your arrival window the day before.'");
     const body = await saveEdit();
     expect(body.customerAskedTime).toBe(false);
+  });
+
+  it('gate on: the phone script is withheld when the 24-hour reminder will not go out, or the answer is unknown', () => {
+    gate.on = true;
+    const off = render(<EditServiceModal service={{ ...BASE, reminder24hOn: false }} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.change(document.querySelector('input[type="date"]'), { target: { value: '2035-01-09' } });
+    expect(screen.getByTestId('asked-time-hint')).toHaveTextContent('Tell the customer this time.');
+    off.unmount();
+    const { reminder24hOn: _unknown, ...unknown } = BASE;
+    render(<EditServiceModal service={unknown} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.change(document.querySelector('input[type="date"]'), { target: { value: '2035-01-09' } });
+    expect(screen.getByTestId('asked-time-hint')).toHaveTextContent('Tell the customer this time.');
+  });
+
+  it('gate on: moving the visit inside the 24.25-hour cutoff swaps the script for "Tell the customer this time."', () => {
+    gate.on = true;
+    render(<EditServiceModal service={BASE} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.change(document.querySelector('input[type="date"]'), { target: { value: '2035-01-09' } });
+    expect(screen.getByTestId('asked-time-hint')).toHaveTextContent('Promise the day only');
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+    fireEvent.change(document.querySelector('input[type="date"]'), { target: { value: today } });
+    expect(screen.getByTestId('asked-time-hint')).toHaveTextContent('Tell the customer this time.');
   });
 
   it('gate on: pre-filled from the visit (true = checked), the hint changes, and the save sends true', async () => {

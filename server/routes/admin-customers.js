@@ -3221,6 +3221,19 @@ router.get('/:id/comms', requireAdmin, async (req, res, next) => {
   }
 });
 
+// { reminder24hOn } for ONE customer (appointment-reminders.loadReminder24hAnswers, the senders' own rule), or {} with the gate
+// off or when the answer is unknown (a failed read, or property texts enforced): the client reads a missing field as "the
+// reminder will not go out", which is what the senders do with unreadable preferences.
+async function reminder24hField(customerId) {
+  try {
+    if (!require('../services/time-promise').dayOnlyPromiseOn()) return {};
+    const answers = await require('../services/appointment-reminders').loadReminder24hAnswers(db, [customerId]);
+    return answers.has(String(customerId)) ? { reminder24hOn: answers.get(String(customerId)) } : {};
+  } catch {
+    return {};
+  }
+}
+
 // GET /api/admin/customers/:id/schedule-estimates — bookable estimates
 // formatted for the New Appointment modal. Surfaces accepted estimates plus
 // still-open quotes the customer has been sent (sent / viewed) so a phone
@@ -3393,7 +3406,9 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         } : null,
       };
     }));
-    res.json({ estimates: out });
+    // GATE_DAY_ONLY_PROMISE part E: will this customer's 24-hour reminder go out? The booking window's phone-script hint needs
+    // it (a day-only promise is made only when that text will go out). Gate off: the reply is exactly today's, nothing read.
+    res.json({ estimates: out, ...(await reminder24hField(customer.id)) });
   } catch (err) { next(err); }
 });
 
@@ -7244,3 +7259,4 @@ function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, verify
   });
 }
 module.exports.setCustomerBillToFromBar = setCustomerBillToFromBar;
+module.exports.reminder24hField = reminder24hField;

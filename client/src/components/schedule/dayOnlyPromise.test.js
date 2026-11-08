@@ -1,15 +1,65 @@
 import { describe, expect, it } from 'vitest';
 import {
-  ASKED_TIME_CHECKED_HINT, PHONE_SCRIPT_HINT, askedTimeCreateFields, askedTimeHint, askedTimeMoveFields, toldBadgeText,
+  ASKED_TIME_CHECKED_HINT, DAY_PROMISE_CUTOFF_HOURS, PHONE_SCRIPT_HINT, askedTimeCreateFields, askedTimeHint, askedTimeMoveFields,
+  dayScriptApplies, reminderAnswerFor, rescheduleHintSlot, startsBeyondCutoff, toldBadgeText,
 } from './dayOnlyPromise';
 
 describe('day-only promise words and request fields', () => {
-  it('the helper line is the phone script until the box is checked', () => {
-    expect(askedTimeHint(false)).toBe(PHONE_SCRIPT_HINT);
-    expect(askedTimeHint(undefined)).toBe(PHONE_SCRIPT_HINT);
-    expect(askedTimeHint(true)).toBe(ASKED_TIME_CHECKED_HINT);
+  // 2026-11-10 9:00 AM ET (14:00Z) is "now"; Nov is EST, so the ET wall clock is UTC-5.
+  const NOW = new Date('2026-11-10T14:00:00Z');
+  const OK = { date: '2026-11-12', start: '09:00', reminder24hOn: true };
+
+  it('the cutoff is the server\'s 24.25 hours', () => {
+    expect(DAY_PROMISE_CUTOFF_HOURS).toBe(24.25);
+  });
+
+  it('the helper line is the phone script only while the box is off, the slot is beyond the cutoff and the reminder will go out', () => {
+    expect(askedTimeHint(false, OK, NOW)).toBe(PHONE_SCRIPT_HINT);
+    expect(askedTimeHint(undefined, OK, NOW)).toBe(PHONE_SCRIPT_HINT);
+    expect(askedTimeHint(true, OK, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
     expect(PHONE_SCRIPT_HINT).toBe("Promise the day only: 'We'll text your arrival window the day before.'");
     expect(ASKED_TIME_CHECKED_HINT).toBe('Tell the customer this time.');
+  });
+
+  it('inside the cutoff, with the reminder off, with an unknown answer, or with no slot: "Tell the customer this time."', () => {
+    // 24.25 h after NOW is Wed 11-11 9:15 AM ET: 9:15 is not beyond it (the server uses <=), 9:30 is.
+    expect(askedTimeHint(false, { ...OK, date: '2026-11-11', start: '09:15' }, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
+    expect(askedTimeHint(false, { ...OK, date: '2026-11-11', start: '09:30' }, NOW)).toBe(PHONE_SCRIPT_HINT);
+    expect(askedTimeHint(false, { ...OK, date: '2026-11-10', start: '15:00' }, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
+    expect(askedTimeHint(false, { ...OK, reminder24hOn: false }, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
+    expect(askedTimeHint(false, { ...OK, reminder24hOn: undefined }, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
+    expect(askedTimeHint(false, { ...OK, reminder24hOn: null }, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
+    expect(askedTimeHint(false, { ...OK, start: '' }, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
+    expect(askedTimeHint(false, { ...OK, date: '' }, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
+    expect(askedTimeHint(false, { ...OK, timeChosen: false }, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
+    expect(askedTimeHint(false, undefined, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
+    expect(startsBeyondCutoff(undefined, NOW)).toBe(false);
+    expect(dayScriptApplies(null, NOW)).toBe(false);
+  });
+
+  it('the cutoff is judged on the ET wall clock across a DST change', () => {
+    // 2026-11-01 01:30 ET fell back; a visit on 11-03 at 10:00 ET from 11-02 08:00 ET is 26+ hours out (EST), beyond the cutoff.
+    expect(startsBeyondCutoff({ date: '2026-11-03', start: '10:00' }, new Date('2026-11-02T13:00:00Z'))).toBe(true);
+  });
+
+  it('the reschedule window judges the custom slot while that picker is open, else the earliest suggestion', () => {
+    const options = [
+      { date: '2026-11-13', suggestedWindow: { start: '08:00' } },
+      { date: '2026-11-11', suggestedWindow: { start: '09:00' } },
+    ];
+    expect(rescheduleHintSlot({ options, showManual: false, manualDate: '', manualTime: '08:00', reminder24hOn: true }))
+      .toEqual({ date: '2026-11-11', start: '09:00', reminder24hOn: true });
+    expect(rescheduleHintSlot({ options, showManual: true, manualDate: '2026-11-20', manualTime: '10:00', reminder24hOn: true }))
+      .toEqual({ date: '2026-11-20', start: '10:00', reminder24hOn: true });
+    expect(rescheduleHintSlot({ options: [], showManual: false, manualDate: '', manualTime: '08:00' })).toEqual({ date: '', start: '', reminder24hOn: undefined });
+  });
+
+  it('the booking window: no customer yet reads on; another customer\'s or a missing answer reads off', () => {
+    expect(reminderAnswerFor(null, null)).toBe(true);
+    expect(reminderAnswerFor(null, { id: 'c1' })).toBe(false);
+    expect(reminderAnswerFor({ id: 'c1', on: true }, { id: 'c1' })).toBe(true);
+    expect(reminderAnswerFor({ id: 'c1', on: true }, { id: 'c2' })).toBe(false);
+    expect(reminderAnswerFor({ id: 'c1', on: false }, { id: 'c1' })).toBe(false);
   });
 
   it('the create request carries customerAskedTime only with the gate on AND the box checked', () => {

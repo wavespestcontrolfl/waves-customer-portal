@@ -2,14 +2,54 @@
 // the "Customer asked for this time" box and the "Told: ..." badge. Pure helpers, no styles, so the Tier 1 dialogs and the
 // legacy inline-style windows share one set of words. The gate reaches the client as the `day_only_promise` flag on
 // GET /api/admin/feature-flags (useFeatureFlag). Gate off: no box, no field, no badge.
+import { etDatetimeLocalToISO } from '../../lib/timezone';
 
 export const ASKED_TIME_LABEL = 'Customer asked for this time';
 export const PHONE_SCRIPT_HINT = "Promise the day only: 'We'll text your arrival window the day before.'";
 export const ASKED_TIME_CHECKED_HINT = 'Tell the customer this time.';
 
-/** The helper line under the time picker: the phone script while the box is off, the set-time line while it is on. */
-export function askedTimeHint(checked) {
-  return checked === true ? ASKED_TIME_CHECKED_HINT : PHONE_SCRIPT_HINT;
+// The server's DAY_PROMISE_CUTOFF_HOURS (services/time-promise.js): inside this many hours the 24-hour text takes over, so no
+// sender promises only the day. A server test pins this number to the server's.
+export const DAY_PROMISE_CUTOFF_HOURS = 24.25;
+
+/** Does the chosen slot start more than the cutoff from now? `slot` = { date 'YYYY-MM-DD', start 'HH:MM' (ET), timeChosen }.
+ *  No date, no start or a time not chosen yet: false (the server's rule for a missing start: window copy stays). */
+export function startsBeyondCutoff(slot, now = new Date()) {
+  if (!slot || slot.timeChosen === false) return false;
+  const iso = etDatetimeLocalToISO(`${String(slot.date || '').slice(0, 10)}T${String(slot.start || '').slice(0, 5)}`);
+  return iso !== null && (Date.parse(iso) - now.getTime()) / 3600000 > DAY_PROMISE_CUTOFF_HOURS;
+}
+
+/** Will the office be able to promise only the day for this slot? The server's rule (time-promise.shouldPromiseDayOnly): the
+ *  slot starts after the cutoff AND the customer's 24-hour reminder will go out (`slot.reminder24hOn === true`). A missing or
+ *  unknown reminder answer reads as "will not go out", as the senders read unreadable preferences. */
+export function dayScriptApplies(slot, now = new Date()) {
+  return !!slot && slot.reminder24hOn === true && startsBeyondCutoff(slot, now);
+}
+
+/** The helper line under the time picker. Box checked: "Tell the customer this time." Box unchecked: the day-only phone
+ *  script only while the server would really promise only the day (dayScriptApplies); otherwise the same "Tell the customer
+ *  this time." line, since the text with the window never comes. */
+export function askedTimeHint(checked, slot, now = new Date()) {
+  if (checked === true) return ASKED_TIME_CHECKED_HINT;
+  return dayScriptApplies(slot, now) ? PHONE_SCRIPT_HINT : ASKED_TIME_CHECKED_HINT;
+}
+
+/** The slot the reschedule window's hint judges: the custom date and time while that picker is open, else the EARLIEST
+ *  suggested option (if even that starts after the cutoff, every option does). `options` = the dialog's suggestions
+ *  ({ date, suggestedWindow: { start } }). */
+export function rescheduleHintSlot({ options, showManual, manualDate, manualTime, reminder24hOn }) {
+  if (showManual) return { date: manualDate, start: manualTime, reminder24hOn };
+  const starts = (options || []).map((o) => `${o.date}T${String(o.suggestedWindow?.start || '').slice(0, 5)}`).sort();
+  const [date, start] = (starts[0] || 'T').split('T');
+  return { date, start, reminder24hOn };
+}
+
+/** The booking window's answer for the chosen customer (`answer` = { id, on } from the schedule-estimates reply): no customer
+ *  yet reads as a new customer with the table defaults (reminder on); an answer for another customer, or none yet, reads off. */
+export function reminderAnswerFor(answer, customer) {
+  if (!customer) return true;
+  return !!answer && answer.id === customer.id && answer.on === true;
 }
 
 /** The create request field: only a checked box sends it (the server stores true; nothing else is written). */

@@ -18,7 +18,7 @@ import {
 import AvailabilityStrip, { stripCoversRouteWarning } from "./AvailabilityStrip";
 import SlotConflictNotice from "./SlotConflictNotice";
 import { seriesMoveSummary } from "./seriesMove";
-import { ASKED_TIME_LABEL, askedTimeHint, toldBadgeText } from "./dayOnlyPromise";
+import { ASKED_TIME_LABEL, askedTimeHint, rescheduleHintSlot, toldBadgeText } from "./dayOnlyPromise";
 
 // GATE_DAY_ONLY_PROMISE: what the customer was told (feed field `told`), shown beside the visit's name.
 function ToldBadge({ service }) {
@@ -28,7 +28,7 @@ function ToldBadge({ service }) {
 }
 
 // GATE_DAY_ONLY_PROMISE: "Customer asked for this time" and the phone-script line under it.
-function AskedTimeField({ checked, onChange, disabled }) {
+function AskedTimeField({ checked, onChange, disabled, slot }) {
   return (
     <div>
       <Checkbox
@@ -38,7 +38,7 @@ function AskedTimeField({ checked, onChange, disabled }) {
         onChange={(event) => onChange?.(event.target.checked)}
         disabled={disabled}
       />
-      <p data-testid="asked-time-hint" className="mt-1 text-ui-body text-ink-secondary">{askedTimeHint(checked)}</p>
+      <p data-testid="asked-time-hint" className="mt-1 text-ui-body text-ink-secondary">{askedTimeHint(checked, slot)}</p>
     </div>
   );
 }
@@ -102,7 +102,7 @@ export default function RescheduleDialogView({
               <option value="sms">Text message</option>
             </Select>
           </Field>
-          {dayOnlyPromiseOn && <AskedTimeField checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={sending} />}
+          {dayOnlyPromiseOn && <AskedTimeField checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={sending} slot={rescheduleHintSlot({ options, showManual, manualDate, manualTime, reminder24hOn: service.reminder24hOn })} />}
           {seriesConfirm && (
             <Card data-testid="series-move-confirm"><CardBody>
               <h3 className="text-ui-body font-medium mb-2">Move to {seriesConfirmDate || seriesConfirm.body.newDate}?</h3>

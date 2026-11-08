@@ -3,7 +3,7 @@
 // components/ui with the same words (dayOnlyPromise.js). The caller shows these only with the gate on.
 import { ASKED_TIME_LABEL, askedTimeHint, toldBadgeText } from './dayOnlyPromise';
 
-export function AskedTimeBoxLegacy({ id, checked, onChange, disabled = false, colors, style }) {
+export function AskedTimeBoxLegacy({ id, checked, onChange, disabled = false, colors, style, slot }) {
   const text = colors?.text || '#18181B';
   const muted = colors?.muted || '#71717A';
   const accent = colors?.teal || '#18181B';
@@ -20,7 +20,7 @@ export function AskedTimeBoxLegacy({ id, checked, onChange, disabled = false, co
         />
         <span style={{ fontSize: 13, color: text }}>{ASKED_TIME_LABEL}</span>
       </label>
-      <div data-testid="asked-time-hint" style={{ fontSize: 12, color: muted, marginTop: 2 }}>{askedTimeHint(checked)}</div>
+      <div data-testid="asked-time-hint" style={{ fontSize: 12, color: muted, marginTop: 2 }}>{askedTimeHint(checked, slot)}</div>
     </div>
   );
 }

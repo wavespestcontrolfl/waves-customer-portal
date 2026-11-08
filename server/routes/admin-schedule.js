@@ -1537,7 +1537,8 @@ async function recordOfficeMoveIntent(conn, ids, body) {
 
 // GATE_DAY_ONLY_PROMISE part E: stamps each office row with what the customer was told (`told: { level, dayOnly }`, visits of
 // the next 14 days) and the stored "customer asked for this time" choice (`customerAskedTime`), for the visit card and the
-// edit window. ONE bulk read for the whole payload (time-promise.loadOfficeToldFields), never per row. Gate off: no read and
+// edit window, plus whether the customer's 24-hour reminder will go out (`reminder24hOn`, for the phone-script hint). ONE bulk read
+// per fact for the whole payload (time-promise.loadOfficeToldFields), never per row. Gate off: no read and
 // no field. A technician's feed is the field view and gets neither. Never throws: a failed read leaves the payload as is.
 async function attachOfficeToldFields(req, rows) {
   try {
@@ -1548,9 +1549,26 @@ async function attachOfficeToldFields(req, rows) {
       if (!found) continue;
       if (found.customerAskedTime !== undefined) row.customerAskedTime = found.customerAskedTime;
       if (found.told) row.told = found.told;
+      if (found.reminder24hOn !== undefined) row.reminder24hOn = found.reminder24hOn;
     }
   } catch (err) {
     logger.warn(`[admin-schedule] told fields failed (${err.code || err.name || 'error'})`);
+  }
+}
+
+// GATE_DAY_ONLY_PROMISE part E: { office } for ONE visit (the same fields attachOfficeToldFields stamps on a feed row), or {} with
+// the gate off, for a technician, or when the visit is gone. Never throws: a failed read leaves the reply as it was.
+async function officeFieldsForVisit(id) {
+  try {
+    const timePromise = require('../services/time-promise');
+    if (!timePromise.dayOnlyPromiseOn()) return {};
+    const row = await db('scheduled_services').where({ id }).first('id', 'scheduled_date', 'status');
+    if (!row) return {};
+    const found = (await timePromise.loadOfficeToldFields(db, [row])).get(row.id);
+    return found ? { office: found } : {};
+  } catch (err) {
+    logger.warn(`[admin-schedule] office fields failed (${err.code || err.name || 'error'})`);
+    return {};
   }
 }
 
@@ -11167,6 +11185,8 @@ router.get('/list', async (req, res, next) => {
       ...(s._approximate ? { approximate: true, matchReasons: s._matchReasons } : {}),
     }));
 
+    // GATE_DAY_ONLY_PROMISE part E: the list, and the client search that reads it, open the same edit window as the day feed.
+    await attachOfficeToldFields(req, mapped);
     res.json({
       services: mapped,
       ...(customerSearchFuzzy && search ? { approximateCount: approximateServices.length } : {}),
@@ -24420,7 +24440,10 @@ router.get('/:id/series-summary', async (req, res, next) => {
 // membership, whatever its own feed carries.
 router.get('/:id/visit-summary', requireAdmin, async (req, res, next) => {
   try {
-    res.json({ visit: await require('../services/visit-groups').visitSummaryForService(db, req.params.id) });
+    const visit = await require('../services/visit-groups').visitSummaryForService(db, req.params.id);
+    // GATE_DAY_ONLY_PROMISE part E: the office fields (customerAskedTime, told, reminder24hOn) for a visit opened from a row that
+    // does not carry them (month, customer pages, any feed). Gate off: the reply is exactly today's, and nothing more is read.
+    res.json({ visit, ...(await officeFieldsForVisit(req.params.id)) });
   } catch (err) { next(err); }
 });
 
