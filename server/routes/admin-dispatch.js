@@ -5539,6 +5539,25 @@ async function renderSeriesDayBody({ state, templateKey, vars, serviceId }) {
   return body;
 }
 
+// GATE_DAY_ONLY_PROMISE part B2: surfaces where the CUSTOMER picks the new slot of a series move (the public rescheduler, a text
+// reply or accepted text offer, the call agent). The row's recorded surface decides, so a reconciled pass agrees with the live one.
+const CUSTOMER_SERIES_SURFACES = new Set(['customer_web', 'sms_reply', 'call_reschedule', 'call_makeup']);
+
+// A customer-driven series move records "the customer asked for this time" (true) on every row it moved, each bound to the slot
+// it landed, BEFORE the notice decision reads the intent: an earlier office move may have left customer_asked_time=false, and the
+// customer's own hour must not read as day only. Office surfaces and gate off: nothing is written. Throws on a failed write, so
+// the pass fails closed (the row stays unfinished and the reconciler retries) rather than texting a day-only notice.
+async function recordCustomerSeriesIntent({ surface, rows }) {
+  if (!CUSTOMER_SERIES_SURFACES.has(surface)) return;
+  const timePromise = require('../services/time-promise');
+  for (const row of rows) {
+    await timePromise.recordCustomerAskedTime(db, [row.id], true, {
+      date: String(row.date).split('T')[0],
+      windowStart: row.windowStart ? String(row.windowStart).slice(0, 5) : null,
+    });
+  }
+}
+
 async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, notify: notifyArg, actorId, reasonText, qualityDates = null }) {
   const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
   // The text is driven by the intent the OPERATION was recorded with
@@ -5693,6 +5712,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // (conflict_count > 0 AND conflict_card_at IS NULL) treats it as finished.
     if (!cardOnly && !dueConflicts.length && !preserved.length && overlapDates.length && !markers.conflict_card_at) await stampMarker('conflict_card_at');
     if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };
+    await recordCustomerSeriesIntent({ surface: markers.source_surface, rows: reminderOccurrences });
     const seriesReminderGuards = [];
     let seriesGuardSnapshotFailed = false;
     const remindersThisPass = !markers.reminders_synced_at;
@@ -7744,4 +7764,5 @@ module.exports._test = {
   renderSeriesDayBody,
   recordVisitMoveIntent,
   movedSlotFor,
+  recordCustomerSeriesIntent,
 };

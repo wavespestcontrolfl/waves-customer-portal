@@ -17,7 +17,7 @@ jest.mock('../services/appointment-reminders', () => ({
 const timePromise = require('../services/time-promise');
 const dispatch = require('../routes/admin-dispatch');
 
-const { recordVisitMoveIntent, movedSlotFor } = dispatch._test;
+const { recordVisitMoveIntent, movedSlotFor, recordCustomerSeriesIntent } = dispatch._test;
 
 afterEach(() => jest.restoreAllMocks());
 
@@ -65,5 +65,58 @@ describe('dispatch board move: recordVisitMoveIntent', () => {
   test('a failed write is logged, never thrown (the move is committed)', async () => {
     jest.spyOn(timePromise, 'recordCustomerAskedTime').mockRejectedValue(new Error('write failed'));
     await expect(recordVisitMoveIntent({ result: {}, plan: {}, serviceId: 's1', newDate: '2026-11-15' })).resolves.toBeUndefined();
+  });
+});
+
+describe('a customer-driven series move records the set-time intent before the notice decision', () => {
+  const rows = [
+    { id: 'c1', date: '2026-11-15', windowStart: '09:00:00' },
+    { id: 'c2', date: '2026-11-22T00:00:00.000Z', windowStart: null },
+  ];
+  const gate = process.env.GATE_DAY_ONLY_PROMISE;
+  afterEach(() => { if (gate === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = gate; });
+
+  test('customer surfaces: true on every moved row, each bound to the slot it landed (a windowless row to "no window")', async () => {
+    process.env.GATE_DAY_ONLY_PROMISE = 'true';
+    for (const surface of ['customer_web', 'sms_reply', 'call_reschedule', 'call_makeup']) {
+      const spy = jest.spyOn(timePromise, 'recordCustomerAskedTime').mockResolvedValue(1);
+      await recordCustomerSeriesIntent({ surface, rows });
+      expect(spy.mock.calls.map((c) => [c[1], c[2], c[3]])).toEqual([
+        [['c1'], true, { date: '2026-11-15', windowStart: '09:00' }],
+        [['c2'], true, { date: '2026-11-22', windowStart: null }],
+      ]);
+      spy.mockRestore();
+    }
+  });
+
+  test('office surfaces write nothing (their behavior is unchanged)', async () => {
+    process.env.GATE_DAY_ONLY_PROMISE = 'true';
+    const spy = jest.spyOn(timePromise, 'recordCustomerAskedTime').mockResolvedValue(1);
+    for (const surface of ['dispatch_board', 'edit_modal', 'quick_move', 'intelligence_bar', undefined]) await recordCustomerSeriesIntent({ surface, rows });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  test('gate off: no UPDATE at all, even for a customer surface', async () => {
+    delete process.env.GATE_DAY_ONLY_PROMISE;
+    const conn = jest.fn();
+    const db = require('../models/db');
+    db.mockImplementation(conn);
+    await recordCustomerSeriesIntent({ surface: 'customer_web', rows });
+    expect(conn).not.toHaveBeenCalled();
+    db.mockReset();
+  });
+
+  test('a failed write throws, so the pass fails closed and the reconciler retries (no day-only text over the customer\'s hour)', async () => {
+    process.env.GATE_DAY_ONLY_PROMISE = 'true';
+    jest.spyOn(timePromise, 'recordCustomerAskedTime').mockRejectedValue(new Error('write failed'));
+    await expect(recordCustomerSeriesIntent({ surface: 'customer_web', rows })).rejects.toThrow('write failed');
+  });
+
+  test('the effects pass writes it before it reads the notice decision, from the row\'s recorded surface', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    const pass = src.slice(src.indexOf('async function applySeriesMoveEffects({'));
+    const write = pass.indexOf('await recordCustomerSeriesIntent({ surface: markers.source_surface, rows: reminderOccurrences });');
+    expect(write).toBeGreaterThan(0);
+    expect(write).toBeLessThan(pass.indexOf('await seriesNoticeDayOnly('));
   });
 });

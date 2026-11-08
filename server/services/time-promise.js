@@ -353,6 +353,7 @@ async function dayOnlyMoveDecision(conn, {
  * A held or merged MOVE notice re-sent later as a confirmation (a quiet-hours hold, a coalesced repeat move; part B2): may it
  * still promise only the day? The recorded intent decides, not the caller: `customer_asked_time` must be explicitly FALSE
  * (day only was chosen for the visit's current slot; true = a set time stays a window, NULL = today's rules decide).
+ * Every live member of the stop must be eligible (dayOnlyEligibility, old level ignored), as for any day-only decision.
  * The move replaced the old promise, so an older hour promise does not block it, but a window promised for THIS date (a
  * newer known window) always does: a day promise is never sent over a newer known window. An unknown-window promise or an
  * unreadable promise: false. Gate, the 24.25 h cutoff and the 24-hour reminder as in shouldPromiseDayOnly. Never throws.
@@ -362,6 +363,9 @@ async function dayOnlyReplayDecision(conn, { id, startAt, now = new Date(), remi
     if (id == null || !shouldPromiseDayOnly({ startAt, now, reminder24hEnabled, customerPicked: false, level: 'none' })) return false;
     const row = await conn('scheduled_services').where({ id: String(id) }).first('customer_asked_time');
     if (!row || row.customer_asked_time !== false) return false;
+    // Stop-wide, like every other day-only decision: every live member of the visit's stop must be eligible too (a sibling the
+    // customer picked blocks it), with the old level ignored (the move replaced the old promise; the check below judges the new date).
+    if ((await dayOnlyEligibility(conn, [String(id)], now, { ignoreLevel: true })).get(String(id))?.eligible !== true) return false;
     const promise = (await resolvePromises(conn, [id], now)).get(id);
     if (!promise) return true;
     if (promise.start_at == null) return promise.level === 'day';

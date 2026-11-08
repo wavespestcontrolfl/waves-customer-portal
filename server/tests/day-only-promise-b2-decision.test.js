@@ -240,6 +240,25 @@ describe('dayOnlyReplayDecision: a held or merged move notice re-sent as a confi
     expect(await replay(fakeConn({ services: [svc('s1', { customer_asked_time: false })], messages: [day] }))).toBe(true);
   }));
 
+  describe('a grouped stop is judged as a whole (every live member must be eligible)', () => {
+    const member = (id, over) => svc(id, { visit_id: 'v1', customer_asked_time: false, ...over });
+
+    test('anchor marked day only but a sibling marked set time: the window copy, even with no promise at all', withGate('true', async () => {
+      const conn = fakeConn({ services: [member('s1'), member('s2', { customer_asked_time: true })] });
+      expect(await replay(conn)).toBe(false);
+    }));
+
+    test('every live member marked day only: the day row again; an ended sibling does not block', withGate('true', async () => {
+      expect(await replay(fakeConn({ services: [member('s1'), member('s2')] }))).toBe(true);
+      expect(await replay(fakeConn({ services: [member('s1'), member('s2', { customer_asked_time: true, status: 'cancelled' })] }))).toBe(true);
+    }));
+
+    test('an old hour level does not block (the move replaced it), a stop-wide read failure is false', withGate('true', async () => {
+      expect(await replay(fakeConn({ services: [member('s1'), member('s2')], messages: [hourFor('2026-11-12')] }))).toBe(true);
+      expect(await replay(fakeConn({ services: [member('s1'), member('s2')], failOn: 'appointment_reminders' }))).toBe(false);
+    }));
+  });
+
   test('a set time (true) stays a window; an unrecorded intent (NULL) is today\'s rules, not this one', withGate('true', async () => {
     expect(await replay(fakeConn({ services: [svc('s1', { customer_asked_time: true })] }))).toBe(false);
     expect(await replay(fakeConn({ services: [svc('s1')] }))).toBe(false);
