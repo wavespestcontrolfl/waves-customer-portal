@@ -329,6 +329,26 @@ describe('llm-dispatch-metrics', () => {
       expect(outDaily[0].detail).toMatch(/ZERO calls yesterday/);
     });
 
+    it('gives event-driven policies the quiet-days grace even after a near-daily week', () => {
+      // 2026-11-06: no blog hero image was made, so imageScreen (6 of 7 days,
+      // ~59 calls) and visionAnalysis read "ZERO calls yesterday"; both ran
+      // again on 11-07. A busy week must not turn them into near-daily lanes.
+      const { detectExceptions, EVENT_DRIVEN_POLICIES, DAILY_CADENCE_MIN_DAYS } = load();
+      expect([...EVENT_DRIVEN_POLICIES]).toEqual(expect.arrayContaining(['imageScreen', 'visionAnalysis']));
+      const live = [{ policy: 'report', total: 30, fallbacks: 0, failed: 0 }];
+      const priorWeek = [
+        { policy: 'imageScreen', total: 59, activeDays: DAILY_CADENCE_MIN_DAYS + 1 },
+        { policy: 'visionAnalysis', total: 43, activeDays: DAILY_CADENCE_MIN_DAYS + 1 },
+        { policy: 'report', total: 200, activeDays: 7 },
+      ];
+      // One zero day inside an active recent window: no alarm.
+      expect(detectExceptions(live, priorWeek, null, true, new Set(['imageScreen', 'visionAnalysis', 'report']))).toEqual([]);
+      // Silent for the whole recent window: both alarm, as bursty lanes.
+      const out = detectExceptions(live, priorWeek, null, true, new Set(['report']));
+      expect(out.map((e) => e.policy).sort()).toEqual(['imageScreen', 'visionAnalysis']);
+      for (const e of out) expect(e.detail).toMatch(/silent for \d\+ days/);
+    });
+
     it('never flags a retired policy as gone silent — its provider call was removed on purpose', () => {
       const { detectExceptions, RETIRED_POLICIES, DAILY_CADENCE_MIN_DAYS } = load();
       expect([...RETIRED_POLICIES]).toEqual(expect.arrayContaining(['visitBrief', 'jobCardParagraph']));
