@@ -1,8 +1,9 @@
-// The lawn service outline on the v13 program, behind GATE_LAWN_OUTLINE_V13 (owner 2026-10-22:
-// "lawn service outline ... updated with the new protocols, check other sections").
+// The lawn service outline on the v13 program (owner 2026-10-22: "lawn service outline ... updated with the
+// new protocols, check other sections"). It is live whenever GATE_LAWN_V13 is; the old outline remains only with
+// GATE_LAWN_V13 off (GATE_LAWN_OUTLINE_V13, its own gate, was removed 2026-11-07).
 // Synthetic inputs: no database.
 //
-// Pins: the gate needs GATE_LAWN_V13; the outline reads the grass the estimate recorded
+// Pins: GATE_LAWN_V13 off keeps the old outline; the outline reads the grass the estimate recorded
 // (never the bermudaSuppression flag or a note); bahia is blocked; every other lawn gets the
 // same customer page, with no grass on it (owner 2026-10-24: "i dont think we make this for
 // specific lawn types"); every section is drawn and keeps its text lines; the month text is
@@ -16,8 +17,8 @@ const { PROGRAM_DETAIL_V13 } = require('../services/service-report/lawn-program-
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 const { validateCustomerCopy } = require('../services/service-report/premium-experience');
 
-const GATE_NAMES = ['GATE_LAWN_V13', 'GATE_LAWN_OUTLINE_V13', 'GATE_LAWN_BERMUDA_REMOVAL'];
-const BOTH = { GATE_LAWN_V13: 'true', GATE_LAWN_OUTLINE_V13: 'true' };
+const GATE_NAMES = ['GATE_LAWN_V13', 'GATE_LAWN_BERMUDA_REMOVAL'];
+const V13_ON = { GATE_LAWN_V13: 'true' };
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const CONDITIONAL_TAIL = ' may be relevant when turf condition, weather, label directions, and local rules allow.';
@@ -108,8 +109,8 @@ const visible = ({ title, intro, property, season, sections, treatmentCategories
 );
 
 describe('the gate', () => {
-  test('GATE_LAWN_OUTLINE_V13 alone does nothing: it needs GATE_LAWN_V13', async () => {
-    await withGates({ GATE_LAWN_OUTLINE_V13: 'true' }, async () => {
+  test('GATE_LAWN_V13 off keeps the old outline: its sections and its seed-v1 stamp', async () => {
+    await withGates({}, async () => {
       const result = await build(ST_AUG_ESTIMATE, { month: 10 });
       expect(section(result, 'your_turf_type')).toBeTruthy();
       expect(section(result, 'lawn_program')).toBeUndefined();
@@ -118,12 +119,12 @@ describe('the gate', () => {
     });
   });
 
-  test('stamps: the v13 outline carries its own content version; off keeps seed-v1', async () => {
-    await withGates({ GATE_LAWN_V13: 'true' }, async () => {
+  test('stamps: the v13 outline carries its own content version; GATE_LAWN_V13 off keeps seed-v1', async () => {
+    await withGates({}, async () => {
       expect(outline.contentLibraryVersion()).toBe('seed-v1');
       expect((await build(ST_AUG_ESTIMATE)).meta.contentLibraryVersion).toBe('seed-v1');
     });
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       expect(outline.contentLibraryVersion()).toBe('lawn-v13-copy-2');
       expect(outline.CONTENT_LIBRARY_VERSION).toBe('seed-v1');
       const result = await build(ST_AUG_ESTIMATE);
@@ -134,11 +135,8 @@ describe('the gate', () => {
 });
 
 describe('the grass is the one the estimate recorded', () => {
-  test('a St. Augustine estimate reads St. Augustine; the old whole-estimate scan read its bermudaSuppression flag as Bermuda', async () => {
-    await withGates({ GATE_LAWN_V13: 'true' }, async () => {
-      expect((await build(ST_AUG_ESTIMATE)).meta.turf.turfType).toBe('bermuda');
-    });
-    await withGates(BOTH, async () => {
+  test('a St. Augustine estimate reads St. Augustine, never its bermudaSuppression flag as Bermuda', async () => {
+    await withGates(V13_ON, async () => {
       const result = await build(ST_AUG_ESTIMATE);
       expect(result.meta.turf.turfType).toBe('st_augustine');
       // The page names the program, not the grass.
@@ -147,7 +145,7 @@ describe('the grass is the one the estimate recorded', () => {
   });
 
   test('every stored lawn shape the send path reads: engine inputs, form inputs, the saved request, stored results', async () => {
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       expect((await build(estimateWith(engineLawn('zoysia')))).meta.turf.turfType).toBe('zoysia');
       expect((await build(estimateWith({ engineInput: { services: { lawn: { track: 'bermuda' } } } }))).meta.turf.turfType).toBe('bermuda');
       expect((await build(estimateWith({ inputs: { svcLawn: true, grassType: 'C2' } }))).meta.turf.turfType).toBe('zoysia');
@@ -159,7 +157,7 @@ describe('the grass is the one the estimate recorded', () => {
   });
 
   test('the composer pick wins over the recorded grass', async () => {
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       expect((await build(ST_AUG_ESTIMATE, { turfType: 'zoysia' })).meta.turf.turfType).toBe('zoysia');
       const picked = await build(estimateWith({ ...engineLawn('st_augustine'), result: { results: { lawnMeta: { grassType: 'bahia' } } } }), { turfType: 'st_augustine' });
       expect(picked.meta.turf.turfType).toBe('st_augustine');
@@ -168,14 +166,14 @@ describe('the grass is the one the estimate recorded', () => {
   });
 
   test("a pest-only estimate's default grassType is not a lawn plan: unknown", async () => {
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       const pestOnly = estimateWith({ inputs: { grassType: 'st_augustine' }, engineRequest: { selectedServices: ['PEST'], options: { grassType: 'st_augustine' } } });
       expect((await build(pestOnly)).meta.turf.turfType).toBe('unknown');
     });
   });
 
   test('no recorded grass is unknown, never a guess from a note or the rest of the estimate', async () => {
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       const estimate = estimateWith(
         { engineRequest: { profile: { possibleGrassType: 'BAHIA' } }, inputs: { bermudaSuppression: true } },
         { notes: 'Bermuda creeping in from the neighbor', description: 'Front yard St. Augustine' },
@@ -198,7 +196,7 @@ describe('the grass is the one the estimate recorded', () => {
     ['engine inputs, bahia', engineLawn('bahia')],
     ['engine inputs St. Augustine, stored result bahia', { ...engineLawn('st_augustine'), result: { results: { lawnMeta: { grassType: 'bahia' } } } }],
   ])('bahia (%s) is blocked: v13 has no bahia program', async (_label, estimateData) => {
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       const result = await build(estimateWith(estimateData), { month: 10 });
       expect(result.meta.turf.turfType).toBe('bahia');
       expect(result.validation.status).toBe('blocked');
@@ -208,7 +206,7 @@ describe('the grass is the one the estimate recorded', () => {
   });
 
   test('a mixed lawn gets the one program and no staff wording', async () => {
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       const result = await build(estimateWith(formLawn('mixed')), { month: 6 });
       expect(result.meta.turf.turfType).toBe('mixed');
       expect(result.content.sections.map((s) => s.key)).toEqual(V13_KEYS);
@@ -221,7 +219,7 @@ describe('the grass is the one the estimate recorded', () => {
 
 describe('one page for every lawn', () => {
   test.each(MONTHS)('month %i: every lawn the program covers gets the same page, and no grass is named on it but the program basis', async (month) => {
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       const page = visible((await build(ST_AUG_ESTIMATE, { month })).content);
       for (const grass of ['bermuda', 'zoysia', 'mixed', 'unknown']) {
         expect([grass, visible((await build(estimateWith(formLawn(grass)), { month })).content)]).toEqual([grass, page]);
@@ -240,12 +238,12 @@ describe('regenerating an older outline', () => {
   const guessedPacket = { turf_type: 'bermuda', input_snapshot_json: { turfType: null, month: 10 } };
   const pickedPacket = { turf_type: 'zoysia', input_snapshot_json: { turfType: 'zoysia', month: 10 } };
 
-  test('gate off keeps the packet grass; the v13 outline keeps only a staff pick and re-reads the estimate', async () => {
-    await withGates({ GATE_LAWN_V13: 'true' }, async () => {
+  test('GATE_LAWN_V13 off keeps the packet grass; the v13 outline keeps only a staff pick and re-reads the estimate', async () => {
+    await withGates({}, async () => {
       expect(outline.regenerationTurfType(guessedPacket)).toBe('bermuda');
       expect(outline.regenerationTurfType(pickedPacket)).toBe('zoysia');
     });
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       expect(outline.regenerationTurfType(guessedPacket)).toBeNull();
       expect(outline.regenerationTurfType(pickedPacket)).toBe('zoysia');
       const regenerated = await build(ST_AUG_ESTIMATE, { month: 10, turfType: outline.regenerationTurfType(guessedPacket) });
@@ -257,7 +255,7 @@ describe('regenerating an older outline', () => {
 
 describe('the sections', () => {
   test('one program section, the report month text, the drawn year, no tier line and no restricted-season line', async () => {
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       const result = await build(ST_AUG_ESTIMATE, { month: 10 });
       expect(result.content.sections.map((s) => s.key)).toEqual(V13_KEYS);
       expect(result.content.title).toBe('Your Waves Lawn Care Program Overview');
@@ -282,7 +280,7 @@ describe('the sections', () => {
   });
 
   test('every drawn section keeps text bullets that say what the drawing says', async () => {
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       const result = await build(ST_AUG_ESTIMATE, { month: 10 });
       // Every section is boxed (owner 2026-10-24: "make the boxes").
       expect(result.content.sections.map((s) => [s.key, s.visual?.type])).toEqual([
@@ -305,14 +303,14 @@ describe('the sections', () => {
       expect(cards.bullets).toEqual(cards.visual.items.map((c) => `${c.label}: ${c.text}`));
       expect(section(result, 'program_year').bullets[9]).toBe('October: Fertilizer, Pre-emergent; as needed: Disease control, Insect control, Weed control, Wetting agent');
       // The legacy outline draws nothing.
-      await withGates({ GATE_LAWN_V13: 'true' }, async () => {
+      await withGates({}, async () => {
         expect((await build(ST_AUG_ESTIMATE, { month: 10 })).content.sections.some((s) => 'visual' in s)).toBe(false);
       });
     });
   });
 
   test('the year chart is the recipe: each month\'s whole-lawn step, what may be added, and the rule\'s limited months', async () => {
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       const { visual } = section(await build(ST_AUG_ESTIMATE, { month: 10 }), 'program_year');
       const byMonth = Object.fromEntries(visual.months.map((m) => [m.label, m]));
       expect(visual.months.map((m) => m.label)).toEqual(MONTH_ABBR);
@@ -339,7 +337,7 @@ describe('the sections', () => {
   });
 
   test('a lawn with no program (bahia) draws an empty year and no chips', async () => {
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       const result = await build(estimateWith(formLawn('bahia')), { month: 10 });
       expect(section(result, 'program_year').visual.months.every((m) => !m.main.length && !m.asNeeded.length)).toBe(true);
       expect(section(result, 'season_focus').visual.items).toEqual([]);
@@ -347,7 +345,7 @@ describe('the sections', () => {
   });
 
   test.each(MONTHS)('month %i: the season text is the lawn report\'s own "why now" text', async (month) => {
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       const result = await build(ST_AUG_ESTIMATE, { month });
       const season = section(result, 'season_focus');
       expect(season.title).toBe(`${MONTH_ABBR[month - 1]} Service Focus`);
@@ -357,7 +355,7 @@ describe('the sections', () => {
   });
 
   test('every outline the program covers passes validation and the customer-copy checks', async () => {
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       for (const grass of ['st_augustine', 'bermuda', 'zoysia', 'mixed', 'unknown']) {
         for (const month of MONTHS) {
           const result = await build(estimateWith(formLawn(grass)), { month });
@@ -385,7 +383,7 @@ describe('the month bullets cover every v13 line', () => {
   }
 
   test('every line of every track, each plan size included, names a category', async () => {
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       for (const track of Object.values(v13)) {
         for (const visit of track.visits) {
           for (const step of stepsOf(visit)) {
@@ -398,8 +396,8 @@ describe('the month bullets cover every v13 line', () => {
     });
   });
 
-  test('the lines the GATE_LAWN_V13 outline drops reach their categories', async () => {
-    await withGates(BOTH, async () => {
+  test('the lines the first v13 outline dropped reach their categories', async () => {
+    await withGates(V13_ON, async () => {
       const categoryOf = (name) => {
         const line = Object.values(v13).flatMap((t) => t.visits).flatMap(stepsOf).flatMap(linesOf).find((l) => l.startsWith(name));
         return categoriesOf(outline.customerProtocolBullets({ primary: line, secondary: '' }))[0];
@@ -409,14 +407,10 @@ describe('the month bullets cover every v13 line', () => {
       expect(categoryOf('Advion Insect Granule')).toBe('Insect control');
       expect(categoryOf('Topchoice Granular Insecticide')).toBe('Insect control');
     });
-    await withGates({ GATE_LAWN_V13: 'true' }, async () => {
-      const april = v13.st_augustine.visits.find((v) => v.month === 'Apr');
-      expect(categoriesOf(outline.customerProtocolBullets(april))).not.toContain('Fertilizer and nutrition');
-    });
   });
 
   test('April lists the 12x bag and the 9x pre-emergent bag', async () => {
-    await withGates(BOTH, async () => {
+    await withGates(V13_ON, async () => {
       const result = await build(ST_AUG_ESTIMATE, { month: 4 });
       expect(categoriesOf(section(result, 'season_focus').bullets)).toEqual(expect.arrayContaining([
         'Fertilizer and nutrition',
@@ -429,8 +423,8 @@ describe('the month bullets cover every v13 line', () => {
 
   test('no product name, number or rate reaches a bullet, and add-on steps never do', async () => {
     const aprilBullets = async (gates) => withGates(gates, async () => section(await build(ST_AUG_ESTIMATE, { month: 4 }), 'season_focus').bullets);
-    expect(await aprilBullets({ ...BOTH, GATE_LAWN_BERMUDA_REMOVAL: 'true' })).toEqual(await aprilBullets(BOTH));
-    await withGates({ ...BOTH, GATE_LAWN_BERMUDA_REMOVAL: 'true' }, async () => {
+    expect(await aprilBullets({ ...V13_ON, GATE_LAWN_BERMUDA_REMOVAL: 'true' })).toEqual(await aprilBullets(V13_ON));
+    await withGates({ ...V13_ON, GATE_LAWN_BERMUDA_REMOVAL: 'true' }, async () => {
       for (const grass of ['st_augustine', 'bermuda', 'zoysia']) {
         for (const month of MONTHS) {
           const bullets = section(await build(estimateWith(formLawn(grass)), { month }), 'season_focus').bullets;

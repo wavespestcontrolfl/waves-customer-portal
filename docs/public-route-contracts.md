@@ -4450,7 +4450,7 @@ excludes pricing, vendor, SKU, dilution, MOA, inventory fields),
 CTA telemetry limit, privacy headers `no-store`/`noindex`/`no-referrer`,
 generic 404 for missing, draft, revoked, or malformed tokens; the payload's
 `content` is the packet's stored `content_json`, frozen when the packet was
-built. A packet built while `GATE_LAWN_OUTLINE_V13` was live (stamped
+built. A packet built on the v13 lawn outline (stamped
 `content_library_version` `lawn-v13-copy-2`; packets built before the
 2026-11-01 program wording carry `lawn-v13-copy-1`) may carry a `visual` object on a
 section, beside the unchanged `title`/`body`/`bullets`, which stay the text
