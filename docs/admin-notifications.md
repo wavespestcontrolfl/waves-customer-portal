@@ -346,7 +346,10 @@ customer's message by this rule.
    condition holds (the row's first `RERING` match is `periodic`: held, never closed). Recently done offers Reopen for a
    `quiet-72h` row; the Reopen stamps `metadata.quietHoldFrom`, so the row gets 72 more hours (a relevance re-arm
    stamps it too, and a quiet refresh keeps the row's own stamp). A new emission with changed content rings a
-   fallen-off alert back, as after a person's Done, and a ringing refresh drops the stamp. `shadow` counts and logs,
+   fallen-off alert back, as after a person's Done, and a ringing refresh drops the stamp. The auto-dispatch schedule
+   notices (a visit with no arrival time, a visit that needs a person) change their words once, 7 days before the
+   visit (`server/services/auto-dispatch/audit.js` `visitSubject`; owner 2026-11-08, dispatch audit), so a fallen-off
+   one rings once more while its problem stands. `shadow` counts and logs,
    writes nothing. A run is recorded (audit_log `admin_alert_quiet_fall_off.close`, `metadata.retention` on each row)
    only when it closed a row. `server/scripts/quiet-fall-off-dry-run.js` prints what would close;
    `server/scripts/reopen-quiet-fall-off.js (--since <ISO> | --run <id>) [--apply]` reopens what the policy closed.

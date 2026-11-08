@@ -40,6 +40,12 @@
  * conflict of the run and retires on a run with none (ops-digest-fall-off.js).
  * Within FAR_DAYS the conflict rings as the notice above. The digest needs the in-app Activity
  * feed (ops-digest.js inAppEnabled); without it far conflicts ring as before.
+ *
+ * SOON WORDS (owner 2026-11-08, "fix": dispatch audit, Fix 1). Inside the last
+ * audit.SOON_DAYS days before its visit the notice says so ("The Nov 15 visit,
+ * 7 days away or less, ..."). The words change once, so a notice closed while
+ * the conflict stands (a person's Done, or the 72-hour quiet close) rings one
+ * more time before the visit (audit.visitSubject).
  */
 const logger = require('../logger');
 const { toDateStr } = require('./dates');
@@ -96,13 +102,14 @@ function collectUnmoved(bucket, service, reasonCode, conflict) {
 }
 
 
-function whyFor(item, spoken) {
+// `subject`: "The Nov 15 visit", with the soon words inside SOON_DAYS (audit.visitSubject).
+function whyFor(item, subject) {
   const [now, still] = PROBLEM[item.problem];
-  if (item.kind === 'move_limit') return `The ${spoken} visit used all its automatic moves and ${still}.`;
+  if (item.kind === 'move_limit') return `${subject} used all its automatic moves and ${still}.`;
   const reason = {
     no_near_slot: 'every open slot adds too much drive', no_slot: 'no open slot fits it',
   }[item.kind] || 'auto-dispatch did not move it';
-  return `The ${spoken} visit ${now}, and ${reason}.`;
+  return `${subject} ${now}, and ${reason}.`;
 }
 
 // [templates with the customer's name, generic wording] for the headline
@@ -117,12 +124,12 @@ function actionFor(item) {
   return [[(who) => `place ${who}'s visit; it overlaps a stop`, (who) => `place ${who}'s visit`], 'place a visit that overlaps another stop'];
 }
 
-async function raiseOne(item, raiseAdminAlert, shortDateET) {
+async function raiseOne(item, raiseAdminAlert, subject) {
   const [templates, generic] = actionFor(item);
   return raiseAdminAlert('schedule_conflict', {
     area: 'Schedule',
     action: await require('./audit').namedVisitAction(item.customer_id, templates, generic),
-    why: whyFor(item, shortDateET(`${item.date}T12:00:00Z`)),
+    why: whyFor(item, subject),
     severity: 'needs-you',
     link: `/admin/dispatch?tab=schedule&date=${item.date}&appointment=${encodeURIComponent(item.id)}`,
     subject: { type: 'visit', id: item.id },
@@ -327,7 +334,7 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
   if (!bucket) return 0;
   await closeResolved(bucket, { nowDate, clearedIds });
   const { nearItems, farItems, farOn } = splitFar(bucket, nowDate);
-  const { rang, persisted } = await ringNear(nearItems);
+  const { rang, persisted } = await ringNear(nearItems, nowDate);
   // A conflict that just came within FAR_DAYS stays on the list until its
   // notice is persisted (allowance spent, a failed write): the list keeps it
   // tracked, and re-read by the next run (index.js conflictsToSettle), even
@@ -342,14 +349,14 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
 
 // The ordinary notices, soonest first inside the shared ring allowance.
 // Returns how many writes rang and the keys whose notice now stands. Never throws.
-async function ringNear(nearItems) {
+async function ringNear(nearItems, nowDate) {
   const persisted = new Set();
   let rang = 0;
   if (!nearItems.length) return { rang, persisted };
   try {
     const audit = require('./audit');
     const { raiseAdminAlert } = require('../admin-alert-compose');
-    const { shortDateET } = require('../admin-alert-names');
+    const soonEnd = audit.soonEndFor(nowDate);
     const standing = await audit.standingNoticeKeys(`${KEY_PREFIX}%`, RESOLVED_TITLE);
     for (const item of nearItems) if (standing.has(item.key)) persisted.add(item.key);
     // The allowance counts a key once (audit.recentBudgetKeys), so a key may
@@ -367,7 +374,7 @@ async function ringNear(nearItems) {
       // raiseMissingGeoNotices, Codex #6208 r13 to r16).
       if (left <= 0) break;
       try {
-        const written = await raiseOne(item, raiseAdminAlert, shortDateET);
+        const written = await raiseOne(item, raiseAdminAlert, audit.visitSubject(item.date, soonEnd));
         if (written) persisted.add(item.key);
         // Only a write that rang spends a slot.
         if (audit.noticeRang(written)) { left -= 1; rang += 1; }
