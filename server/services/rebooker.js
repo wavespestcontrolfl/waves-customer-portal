@@ -2566,8 +2566,7 @@ class SmartRebooker {
       if (capacityCommitFit) {
         await persistArrivalOrder(trx, capacityCommitFit, serviceId);
       } else if (placementWindowChanged && (useArrivalWindows || options.placeInRoute === true)) {
-        // Staff route insertion (GATE_STAFF_ROUTE_INSERTION; a no-op when
-        // off): the staff check placed this visit between stops, so number
+        // Staff route insertion: the staff check placed this visit between stops, so number
         // the day in that order and the board shows it where the box did.
         // A stop still shared with a live member is left as it was by the
         // placement itself (the check never placed it either).
@@ -4445,8 +4444,7 @@ class SmartRebooker {
             code: 'SLOT_TAKEN',
           });
         }
-        // Staff route insertion (GATE_STAFF_ROUTE_INSERTION; a no-op when
-        // off): every occurrence this sweep moves was checked by the staff
+        // Staff route insertion: every occurrence this sweep moves was checked by the staff
         // rule, so number its day in the order that check certified.
         if (updateData.window_start
           && (useArrivalWindows || options.placeInRoute === true)

@@ -4048,54 +4048,10 @@ const gates = {
   // changes, and a technician filter where the screen can change the
   // technician. No "doesn't fit" verdict, and Save never says "anyway". The
   // find-time route reads it through gateEnvValue() at call time (GET
-  // /find-time/ui tells the pickers; a summary search with openTimes answers
-  // summary.open_times). Needs GATE_BEST_TIME_HINTS. Dark in every
+  // /find-time/ui tells the pickers). Needs GATE_BEST_TIME_HINTS. Dark in every
   // environment. Kill switch: unset, and the pickers show the availability
   // strip as before. This entry is for logGateStatus only.
   openTimesBox: gateEnvValue('GATE_OPEN_TIMES_BOX'),
-
-  // Board open times (owner 2026-10-26, "start step 4"): while a visit is
-  // dragged on the Dispatch day or week grid, the hours that fit it light up
-  // with what each adds to the day's driving, amber over 30 min, the best one
-  // tagged. The open-times search for the board's own days (the day grid:
-  // every technician; the week grid: the visit's own technician). Display
-  // only: the drop saves as before. The admin schedule day view carries it to
-  // Dispatch as boardOpenTimes; the find-time route allows the open-times
-  // search under it too. Needs GATE_BEST_TIME_HINTS. Dark in every
-  // environment. Kill switch: unset, and a drag lights nothing.
-  boardOpenTimes: gateEnvValue('GATE_BOARD_OPEN_TIMES'),
-
-  // New Appointment route times (owner 2026-10-26, "fix both"): the open-times
-  // box on New Appointment runs the same route check as Edit and the board, on
-  // a new stop at the searched address, instead of the older gap check (which
-  // offers no start after 4 PM). The find-time route reads it through
-  // gateEnvValue() at call time. Needs GATE_BEST_TIME_HINTS, GATE_OPEN_TIMES_BOX
-  // and GATE_ADMIN_ARRIVAL_WINDOWS. Suggestions only: the New Appointment save
-  // is unchanged. Dark in every environment. Kill switch: unset, and New
-  // Appointment searches the gaps as before. This entry is for logGateStatus
-  // only.
-  newApptRouteTimes: gateEnvValue('GATE_NEW_APPT_ROUTE_TIMES'),
-
-  // New Appointment stop order (owner 2026-10-26, "OK GO"): after a New
-  // Appointment save (POST /api/admin/schedule), the booked visit's technician
-  // day is numbered in the order the route check certifies (placeMovedVisit,
-  // like a staff move), so the board and the tech app list the visit in its
-  // place instead of last. Needs
-  // GATE_STAFF_ROUTE_INSERTION and GATE_ADMIN_ARRIVAL_WINDOWS. Never changes a
-  // time or sends a message. The create route reads it through gateEnvValue()
-  // at call time. Dark in every environment. Kill switch: unset. This entry is
-  // for logGateStatus only.
-  newApptStopOrder: gateEnvValue('GATE_NEW_APPT_STOP_ORDER'),
-
-  // Phone agent stop order (owner 2026-10-26, "go d"): a fresh call-pipeline
-  // booking numbers its technician's day the same way (placeMovedVisit, audit
-  // source 'phone_call'), so the tech app lists it in its place instead of
-  // last. A street-level pending row stays as it was. Needs
-  // GATE_STAFF_ROUTE_INSERTION and GATE_ADMIN_ARRIVAL_WINDOWS. Never changes a
-  // time or sends a message. call-recording-processor.js reads it through
-  // gateEnvValue() at call time. Dark in every environment. Kill switch:
-  // unset. This entry is for logGateStatus only.
-  callBookingStopOrder: gateEnvValue('GATE_CALL_BOOKING_STOP_ORDER'),
 
   // New-caller booking by address (owner 2026-10-25): with no customer
   // selected, the New customer block open, an address picked from the
@@ -4278,16 +4234,6 @@ const gates = {
   // never changes neighbours' promises or sends notifications. Call-time
   // kill switch in scheduling/arrival-route.js; off in every environment.
   adminArrivalWindows: gateEnvValue('GATE_ADMIN_ARRIVAL_WINDOWS'),
-  // Staff route insertion (owner 2026-10-25, "go" + "save order"): with
-  // capacity mode off, a staff check of a MOVED visit (another day,
-  // technician or start) tries it at every place in the technician's stored
-  // order instead of after the last numbered stop, keeps every later stop 15
-  // minutes inside its arrival window, and the staff save numbers that day in
-  // the certified order. Never changes a customer's time or sends a message.
-  // Dark in every environment; scheduling/arrival-route.js reads it through
-  // gateEnvValue() at call time. Kill switch: unset. This entry is for
-  // logGateStatus only.
-  staffRouteInsertion: gateEnvValue('GATE_STAFF_ROUTE_INSERTION'),
   // Shared 08:00–18:00 capacity, catalog durations and complete-route booking.
   // Dark in every environment; callers read at operation time. Owner activation.
   schedulingCapacity: gateEnvValue('GATE_SCHEDULING_CAPACITY'),

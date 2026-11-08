@@ -100,8 +100,8 @@ function enumerateDates(from, to, { includeWeekends = false } = {}) {
   return dates;
 }
 
-// Staff existing-appointment pickers (and New Appointment's box, a new stop,
-// under GATE_NEW_APPT_ROUTE_TIMES) can use the slack in each promised
+// Staff existing-appointment pickers (and New Appointment's box, a new stop)
+// can use the slack in each promised
 // arrival window. Evaluate every on-the-hour promise against the COMPLETE
 // resulting route, not just the gap between two stored service-end blocks.
 // Staff pickers under GATE_PICKER_ROAD_CHECK (owner 2026-10-26: Google
@@ -225,7 +225,7 @@ async function findArrivalWindowSlots(opts) {
       // checker, so the ranking simulates the visit being saved, not the
       // one stored.
       const context = await loadArrivalRouteContext({
-        // A new visit (New Appointment, GATE_NEW_APPT_ROUTE_TIMES) is a new
+        // A new visit (New Appointment) is a new
         // stop at the searched address; an existing one loads its saved row.
         ...(opts.arrivalWindow.prospective ? { prospective: opts.arrivalWindow.prospective } : {
           serviceId: opts.arrivalWindow.serviceId, changes: opts.arrivalWindow.changes,

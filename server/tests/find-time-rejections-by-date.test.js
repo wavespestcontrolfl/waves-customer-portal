@@ -81,7 +81,7 @@ test('the pre-capacity arrival finder keeps its enumerator\'s refusal counts, pe
   });
 });
 
-test('a new stop (New Appointment, GATE_NEW_APPT_ROUTE_TIMES) runs the same finder on a prospective context', async () => {
+test('a new stop (New Appointment) runs the same finder on a prospective context', async () => {
   const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
   enumerateArrivalPlacements.mockReturnValue({ placements: [{ windowStart: '17:00', windowEnd: '18:00', fit }], evaluated: 12, rejections: {} });
   const prospective = { lat: 27.4, lng: -82.5, estimated_duration_minutes: 60 };

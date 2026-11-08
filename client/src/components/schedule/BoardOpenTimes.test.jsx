@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// Open times on the Dispatch board (owner 2026-10-26, "start step 4";
-// GATE_BOARD_OPEN_TIMES): the drag-time search, its fits and the lit hours.
+// Open times on the Dispatch board (owner 2026-10-26, "start step 4"):
+// the drag-time search, its fits and the lit hours.
 import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, renderHook, screen, waitFor } from '@testing-library/react';
@@ -39,7 +39,7 @@ describe('useBoardOpenTimes', () => {
   };
   it('the day grid: one search for that day on every route; the best fit is the least added drive', async () => {
     const fetch = stubFind([{ date: '2035-01-02', status: 'open', hours: [hour('09:00', 12, 't1'), hour('11:00', 4, 't2')] }]);
-    const { result } = renderHook(() => useBoardOpenTimes({ enabled: true, service: VISIT, durationOf: duration, dates: ['2035-01-02'] }));
+    const { result } = renderHook(() => useBoardOpenTimes({ service: VISIT, durationOf: duration, dates: ['2035-01-02'] }));
     await waitFor(() => expect(result.current.fits).toHaveLength(2));
     const body = JSON.parse(fetch.mock.calls[0][1].body);
     expect(body).toMatchObject({
@@ -52,7 +52,7 @@ describe('useBoardOpenTimes', () => {
   it('the week grid: the visit\'s own route across the shown days; an unassigned visit asks nothing', async () => {
     const fetch = stubFind([{ date: '2035-01-01', status: 'open', hours: [hour('09:00', 5, 't1')] }, { date: '2035-01-05', status: 'full', hours: [] }]);
     const { result, rerender } = renderHook((props) => useBoardOpenTimes({
-      enabled: true, durationOf: duration, dates: ['2035-01-01', '2035-01-02', '2035-01-05'], ownRoute: true, ...props,
+      durationOf: duration, dates: ['2035-01-01', '2035-01-02', '2035-01-05'], ownRoute: true, ...props,
     }), { initialProps: { service: VISIT } });
     await waitFor(() => expect(result.current.fits).toHaveLength(1));
     expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ technicianId: 't1', dateFrom: '2035-01-01', dateTo: '2035-01-05' });
@@ -61,12 +61,11 @@ describe('useBoardOpenTimes', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(result.current).toEqual({ fits: null, best: null });
   });
-  it('gate off or nothing dragged: no search, nothing lit', async () => {
+  it('nothing dragged: no search, nothing lit', async () => {
     const fetch = stubFind([{ date: '2035-01-02', status: 'open', hours: [hour('09:00', 5, 't1')] }]);
-    const { result, rerender } = renderHook((props) => useBoardOpenTimes({ durationOf: duration, dates: ['2035-01-02'], ...props }), {
-      initialProps: { enabled: false, service: VISIT },
+    const { result } = renderHook((props) => useBoardOpenTimes({ durationOf: duration, dates: ['2035-01-02'], ...props }), {
+      initialProps: { service: null },
     });
-    rerender({ enabled: true, service: null });
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(fetch).not.toHaveBeenCalled();
     expect(result.current).toEqual({ fits: null, best: null });

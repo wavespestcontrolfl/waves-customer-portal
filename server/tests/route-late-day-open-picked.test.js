@@ -55,13 +55,12 @@ mockDayRows = [row('A', '08:00', '11:22', 202, P1, { route_order: 1 }), row('B',
 // The visit being moved here lives on another day, at B's address, and takes 10 minutes.
 const STORED = row('N', '09:00', '09:10', 10, P2, { scheduled_date: '2099-03-02' });
 
-const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_STAFF_ROUTE_INSERTION', 'GATE_ROUTE_CHECK_LATE_DAYS', 'GATE_SCHEDULING_CAPACITY'];
+const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_ROUTE_CHECK_LATE_DAYS', 'GATE_SCHEDULING_CAPACITY'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(GATES.map((k) => [k, process.env[k]]));
   GATES.forEach((k) => { delete process.env[k]; });
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
-  process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
   process.env.GATE_ROUTE_CHECK_LATE_DAYS = 'true';
   db.state.target = STORED;
 });

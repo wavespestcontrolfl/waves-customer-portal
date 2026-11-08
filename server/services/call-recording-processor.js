@@ -6580,26 +6580,17 @@ async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadS
   }
 }
 
-// Phone agent stop order (GATE_CALL_BOOKING_STOP_ORDER, owner 2026-10-26
-// "go d"): a fresh call booking numbers its technician's day in the order the
-// staff route check certifies (placeMovedVisit, the writer New Appointment and
-// staff moves use), so the tech app and the board list it in its place, not
-// last. A street-level pending row (its address waits on the office) stays as
-// it was. The writer is a no-op unless GATE_STAFF_ROUTE_INSERTION is on, runs
-// under a savepoint and never fails the booking. Read at call time; a partial
-// test mock of the gates module reads as off.
-// The shared auto-save helper (owner 2026-10-29, Route Check Everywhere 2b) is
-// the placement for the automatic writers: with the gate above off it places the
-// same booking through that helper (source 'call_booking'). With
-// the gate above on, THIS call is the only placement, so the helper never adds
-// a second one.
+// Phone agent stop order (owner 2026-10-26 "go d"): a fresh call booking
+// numbers its technician's day in the order the staff route check certifies
+// (placeMovedVisit, the writer New Appointment and staff moves use), so the
+// tech app and the board list it in its place, not last. A street-level
+// pending row (its address waits on the office) stays as it was. The writer
+// runs under a savepoint and never fails the booking. THIS call is the only
+// placement for a call booking, so the shared auto-save helper never adds a
+// second one.
 async function placeCallBookingInRoute(trx, created, { streetLevelPending = false } = {}) {
   if (streetLevelPending || !created?.id) return null;
-  const gates = require('../config/feature-gates');
-  if (typeof gates.gateEnvValue === 'function' && gates.gateEnvValue('GATE_CALL_BOOKING_STOP_ORDER')) {
-    return require('./scheduling/arrival-route').placeMovedVisit(trx, { serviceId: created.id, source: 'phone_call' });
-  }
-  return require('./scheduling/staff-save-route-check').placeAutoSavedVisit(trx, { visit: created, source: 'call_booking' });
+  return require('./scheduling/arrival-route').placeMovedVisit(trx, { serviceId: created.id, source: 'phone_call' });
 }
 
 // Convert the call's lead to won when the pipeline books an appointment,

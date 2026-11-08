@@ -7414,8 +7414,6 @@ router.get('/', async (req, res, next) => {
       visitCloseout: legacyCloseoutEnabled,
       // GATE_NEW_CALLER_BOOKING: New Appointment's Book saves a new caller's visit by address, no customer yet.
       newCallerBooking: isEnabled('newCallerBooking'),
-      // GATE_BOARD_OPEN_TIMES: a drag on the Dispatch day or week grid lights the hours that fit the visit.
-      boardOpenTimes: isEnabled('boardOpenTimes'),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
@@ -8634,13 +8632,6 @@ async function assertNoCallBookingConflict(guard) {
   const conflict = await callBookingDuplicateConflict(guard);
   if (conflict) throw Object.assign(new Error('The phone agent already booked this visit for this customer.'), { callBookingConflict: conflict });
 }
-
-// New Appointment stop order (GATE_NEW_APPT_STOP_ORDER), read at call time. A
-// partial test mock of the gates module reads as off.
-const newApptStopOrderLive = () => {
-  const gates = require('../config/feature-gates');
-  return typeof gates.gateEnvValue === 'function' && !!gates.gateEnvValue('GATE_NEW_APPT_STOP_ORDER');
-};
 
 router.post('/', requireAdmin, scheduleCreateHandler);
 // GATE_DAY_ONLY_PROMISE: the column the office's "customer asked for this time" box writes. True only when the request
@@ -10357,16 +10348,13 @@ async function scheduleCreateHandler(req, res, next) {
         });
       }
 
-      // New Appointment stop order (GATE_NEW_APPT_STOP_ORDER, owner 2026-10-26
-      // "OK GO"): like a staff move, number the booked visit's technician day
-      // in the order the route check certifies, so the board and the tech app
-      // list it in its place, not last. The staff writer is a no-op unless
-      // GATE_STAFF_ROUTE_INSERTION is on, runs under a savepoint and never
-      // fails the booking; an unassigned, untimed or shared visit stays as it
-      // was. Recurring children and boosters keep today's behavior.
-      if (newApptStopOrderLive()) {
-        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: svc.id, source: 'new_appointment', staffSave: true, lateDays: true });
-      }
+      // New Appointment stop order (owner 2026-10-26 "OK GO"): like a staff
+      // move, number the booked visit's technician day in the order the route
+      // check certifies, so the board and the tech app list it in its place,
+      // not last. The staff writer runs under a savepoint and never fails the
+      // booking; an unassigned, untimed or shared visit stays as it was.
+      // Recurring children and boosters keep today's behavior.
+      await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: svc.id, source: 'new_appointment', staffSave: true, lateDays: true });
       // Route check (owner 2026-10-29; a no-op when arrival-window routing is
       // off): AFTER the stop-order placement above (the check reads the
       // visit where it is saved, so it must see the placed order), the booked
@@ -11643,8 +11631,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // Route check (owner 2026-10-29; a no-op when arrival-window
                 // routing is off): a row whose slot moved has its technician's
                 // day numbered first in the order the arrival-window check
-                // certifies (inside this transaction; needs
-                // GATE_STAFF_ROUTE_INSERTION too), THEN gets the check Edit's
+                // certifies (inside this transaction), THEN gets the check Edit's
                 // save runs, on the road times the pickers already bought.
                 // Placement first: the check reads the row where it is saved, so
                 // a moved row not yet placed can read late in a stale order.
@@ -17855,7 +17842,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           }
         }
       }
-      // Staff route insertion (GATE_STAFF_ROUTE_INSERTION; a no-op when off):
+      // Staff route insertion:
       // an edit that moved this visit (another day, start or technician)
       // numbers its technician's day in the order the save check certified,
       // unless the office typed a new route number (the form sends the stored

@@ -2261,7 +2261,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // Route check (owner 2026-10-29; a no-op when arrival-window routing is
       // off): the booked visit's technician day is numbered first in the
       // order the arrival-window check certifies (placeMovedVisit, inside this
-      // transaction; it needs GATE_STAFF_ROUTE_INSERTION too), THEN the visit
+      // transaction), THEN the visit
       // gets the check Edit's save runs, on the road times the pickers already
       // bought. Placement first: the check reads the visit where it is saved,
       // so a visit not yet placed can read late in a stale order. WARN ONLY: a

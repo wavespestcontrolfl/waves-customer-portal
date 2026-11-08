@@ -4192,7 +4192,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     openTimes: true,
     techPick: !addressOnlyTimes,
     // The route check Edit uses, on a new stop at this address
-    // (GATE_NEW_APPT_ROUTE_TIMES; the server decides, gaps while it is off).
+    // (the server decides).
     arrivalWindows: true,
   });
 
