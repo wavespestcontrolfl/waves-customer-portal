@@ -55,6 +55,17 @@ describe('evaluateSameQuestion', () => {
     expect(run([GHOST], candidate('lawn care')).would_block).toBe(false);
   });
 
+  test('"inspection" is a broad service word: a home pest inspection checklist is not the same question as a WDO inspection post', () => {
+    const wdo = post('/termite/wdo-inspection-sampletown-fl/', 'WDO Inspection in Sampletown, FL', 'wdo inspection sampletown');
+    const r = run([wdo], candidate('home pest inspection checklist north port'));
+    expect(r.tokens).toEqual(['inspection']);
+    expect(r.would_block).toBe(false);
+    expect(r.reason).toBe('broad_single_word');
+    expect(r.findings).toEqual([]);
+    // A narrower two-word topic still finds its owner.
+    expect(run([wdo], candidate('wdo inspection in venice')).would_block).toBe(true);
+  });
+
   test('a one-word topic held by MORE than the rare threshold of posts is a cluster, not an owner', () => {
     const many = [1, 2, 3, 4].map((n) => post(`/pest-control/millipede-guide-${n}/`, `Millipede Question ${n}`, `millipede ${n}`));
     const r = run(many, candidate('florida millipede'));
