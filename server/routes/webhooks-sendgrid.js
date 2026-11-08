@@ -156,64 +156,12 @@ function applyRetryableNewsletterDeliveryFilter(query) {
 // Body cap. SendGrid posts many events in one JSON array and flushes a batch
 // "within approximately 30 seconds or when the batch size reaches 768
 // kilobytes" (twilio.com/docs/sendgrid/for-developers/tracking-events/
-// twilio-sendgrid-event-webhook-overview); no batch size is recorded anywhere
-// else in this repo. body-parser's 100 KB default refused real batches, and
-// SendGrid re-sent each at the same size until it gave up, losing its bounces.
-// 5 MB leaves room for the event that crosses the flush size and for a body
-// that arrives compressed (the cap counts decoded bytes).
-const EVENTS_BODY_LIMIT_BYTES = 5 * 1024 * 1024;
-// In-flight budget, taken BEFORE a body is read: every body is buffered before
-// the key, timestamp and signature checks, so without it unauthenticated
-// callers could hold any number of 5 MB buffers at once. Each request counts at
-// its Content-Length, or at the full cap when it has none (chunked) or when it
-// is compressed: express.raw inflates gzip or deflate before the cap applies,
-// so a small compressed Content-Length can still fill 5 MB. 4 x the
-// cap = 20 MB per process: about 26 full 768 KB batches in flight together,
-// far above what our sends produce. A request over the budget gets 503 before
-// any byte is read; SendGrid retries a non-2xx answer for up to 24 hours
-// (twilio.com/docs/sendgrid/for-developers/tracking-events/getting-started-event-webhook).
-// A body still arriving after uploadTimeoutMs is cut off, so a stalled upload
-// cannot hold its share. Exported (as _eventsBodyBudget) for tests only.
-const eventsBodyBudget = {
-  budgetBytes: 4 * EVENTS_BODY_LIMIT_BYTES,
-  uploadTimeoutMs: 30 * 1000,
-  inFlightBytes: 0,
-};
-
-function refuseBeforeBody(res, status, message, extraHeaders = {}) {
-  // Connection: close, so Node does not drain the refused body from the socket.
-  return res.status(status).set({ Connection: 'close', ...extraHeaders }).send(message);
-}
-
-function reserveEventsBody(req, res, next) {
-  const lengthHeader = req.headers['content-length'];
-  const chunked = req.headers['transfer-encoding'] != null;
-  const encoding = String(req.headers['content-encoding'] || 'identity').trim().toLowerCase();
-  const declared = chunked || lengthHeader == null ? null : Number(lengthHeader);
-  if (declared > EVENTS_BODY_LIMIT_BYTES) return refuseBeforeBody(res, 413, 'Payload too large');
-  const exact = declared != null && Number.isFinite(declared) && encoding === 'identity';
-  const cost = exact ? declared : EVENTS_BODY_LIMIT_BYTES;
-  if (eventsBodyBudget.inFlightBytes + cost > eventsBodyBudget.budgetBytes) {
-    logger.warn('[sendgrid-webhook] in-flight body budget full — answering 503');
-    return refuseBeforeBody(res, 503, 'Busy, retry later', { 'Retry-After': '30' });
-  }
-  eventsBodyBudget.inFlightBytes += cost;
-  let released = false;
-  const uploadTimer = setTimeout(() => {
-    if (!req.complete) req.destroy(new Error('sendgrid webhook upload timeout'));
-  }, eventsBodyBudget.uploadTimeoutMs);
-  const release = () => {
-    clearTimeout(uploadTimer);
-    if (released) return;
-    released = true;
-    eventsBodyBudget.inFlightBytes -= cost;
-  };
-  res.once('finish', release);
-  res.once('close', release);
-  return next();
-}
-
-router.post('/events', reserveEventsBody, express.raw({ type: '*/*', limit: EVENTS_BODY_LIMIT_BYTES }), async (req, res) => {
+// twilio-sendgrid-event-webhook-overview). body-parser's 100 KB default refused
+// real batches, and SendGrid re-sent each at the same size until it gave up,
+// losing its bounces. 1 MB is the bound every other route already parses
+// before any auth (the global express.json limit in server/index.js), so this
+// adds no new exposure.
+router.post('/events', express.raw({ type: '*/*', limit: '1mb' }), async (req, res) => {
   // Fail closed unless the public key is configured — we don't want anyone
   // POSTing fake bounces to suppress recipients.
   if (!process.env.SENDGRID_WEBHOOK_PUBLIC_KEY) {
@@ -1375,4 +1323,3 @@ module.exports.handleEvent = handleEvent;
 module.exports.staleEmailSuppressionGroupKey = staleEmailSuppressionGroupKey;
 module.exports.newsletterSuppressionGroupKeyForEvent = newsletterSuppressionGroupKeyForEvent;
 module.exports.shouldRecordNewsletterSuppression = shouldRecordNewsletterSuppression;
-module.exports._eventsBodyBudget = eventsBodyBudget;
