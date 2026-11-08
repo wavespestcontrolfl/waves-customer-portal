@@ -153,7 +153,15 @@ function applyRetryableNewsletterDeliveryFilter(query) {
     .whereNull('clicked_at');
 }
 
-router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
+// Body cap. SendGrid posts many events in one JSON array and flushes a batch
+// "within approximately 30 seconds or when the batch size reaches 768
+// kilobytes" (twilio.com/docs/sendgrid/for-developers/tracking-events/
+// twilio-sendgrid-event-webhook-overview). body-parser's 100 KB default refused
+// real batches, and SendGrid re-sent each at the same size until it gave up,
+// losing its bounces. 1 MB is the bound every other route already parses
+// before any auth (the global express.json limit in server/index.js), so this
+// adds no new exposure.
+router.post('/events', express.raw({ type: '*/*', limit: '1mb' }), async (req, res) => {
   // Fail closed unless the public key is configured — we don't want anyone
   // POSTing fake bounces to suppress recipients.
   if (!process.env.SENDGRID_WEBHOOK_PUBLIC_KEY) {
