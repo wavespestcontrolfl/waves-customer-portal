@@ -4550,7 +4550,7 @@ async function rearmRescheduleReminderWindows(guards, unguardedFallback) {
 // GET /api/admin/dispatch/:serviceId/reschedule-options
 router.get('/:serviceId/reschedule-options', async (req, res, next) => {
   try {
-    // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees why.
+    // A technician whose Team tab switch is off sees why.
     const refusal = await techMoveRefusal(req);
     if (refusal) return res.status(refusal.status).json(refusal.payload);
     // Route-checked day list: only an admin's list may buy Google road
@@ -4575,7 +4575,7 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
       .where({ id: req.params.serviceId })
       .first('id', 'scheduled_date', 'is_recurring');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees
+    // A technician whose Team tab switch is off sees
     // why, not move choices the commit would refuse (plus the customer-pick
     // offer while GATE_QUICKMOVE_CUSTOMER_PICK is on).
     {
@@ -5238,7 +5238,7 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       });
       if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
     }
-    // GATE_TECH_MOVE_SWITCH: the commit is the enforcer.
+    // The commit is the enforcer.
     {
       const refusal = await techMoveRefusal(req);
       if (refusal) return res.status(refusal.status).json(refusal.payload);
@@ -6628,7 +6628,7 @@ async function runPlannedVisitMove({ plan, serviceId, newDate, reasonCode, reaso
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
-    // GATE_TECH_MOVE_SWITCH: the commit is the enforcer. First, so a refused
+    // The commit is the enforcer. First, so a refused
     // technician takes no row lock below.
     {
       const refusal = await techMoveRefusal(req);

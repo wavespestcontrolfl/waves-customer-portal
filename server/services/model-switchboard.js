@@ -847,7 +847,7 @@ const LANE_DESCRIBE = {
   'sms-commitment-fulfillment': 'Checks whether recorded SMS requests were completed',
   'sms-commitment-thread-close': 'Closes an open SMS follow-up when a later text in the same thread says it was done',
   'call-commitment-contact-check': 'Judges whether a person\'s later text or call back delivered what Waves promised on a call (PROMISE_CONTACT_CHECK)',
-  'call-promise-later-text-check': 'Decides whether a later text says a call promise the AI found kept was not kept (GATE_CALL_PROMISE_LATER_TEXT_CHECK)',
+  'call-promise-later-text-check': 'Decides whether a later text says a call promise the AI found kept was not kept',
   'sms-operational-actions': 'Captures operational facts from customer texts for the profile',
   'email-operational-actions': 'Captures customer asks and staff promises from email',
   sms_intent: 'Works out what an inbound text is asking for',

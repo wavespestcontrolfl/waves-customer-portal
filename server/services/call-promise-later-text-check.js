@@ -1,8 +1,7 @@
 'use strict';
 
 /**
- * The later-text check for a held AI close of a Waves call promise (owner 2026-10-25 "build it",
- * GATE_CALL_PROMISE_LATER_TEXT_CHECK).
+ * The later-text check for a held AI close of a Waves call promise (owner 2026-10-25 "build it").
  *
  * call-promise-ai-close.js holds a record proof the AI accepted whenever a human text came after it
  * (latestHumanTextAt: a customer's text, or one a person from Waves sent), and only the thread check's clear

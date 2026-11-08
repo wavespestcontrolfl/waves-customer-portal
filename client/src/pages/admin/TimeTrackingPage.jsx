@@ -3151,7 +3151,7 @@ const EMPTY_TECH_FORM = {
   // Field eligibility is separate from employment: an office admin stays
   // active without ever appearing as a dispatch target.
   fieldDispatchable: false,
-  // GATE_TECH_MOVE_SWITCH: a technician added now cannot move visits until the
+  // A technician added now cannot move visits until the
   // owner ticks this (owner 2026-10-25).
   canMoveVisits: false,
   // GATE_STAFF_GOOGLE_SIGNIN: the company Google account this person signs
@@ -3899,7 +3899,7 @@ export function TeamTab({ showToast }) {
               (off: never offered as a booking slot or a dispatch target)
             </span>{" "}
           </label>
-          {/* GATE_TECH_MOVE_SWITCH (owner 2026-10-25): may this person move
+          {/* (Owner 2026-10-25): may this person move
               their visits (Quick Move, Reschedule)? Admins always can. */}
           <label
             style={{
