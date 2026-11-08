@@ -69,7 +69,7 @@ const SCENARIOS = {
   'client-built': clientBuilt,
   'server-summary': serverSummary,
   'lawn-v2': lawnReportV2,
-  'lawn-story': { ...lawnLayoutReport, reportTemplate: true, lawnLayout: { ...lawnLayoutReport.lawnLayout, story: true } },
+  'lawn-story': lawnLayoutReport,
   'mosquito-v2': mosquitoReportV2,
   'pest-v2': pestReportV2,
   // Rain / spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark) —

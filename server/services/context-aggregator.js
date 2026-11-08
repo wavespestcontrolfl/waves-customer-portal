@@ -29,6 +29,7 @@ const { sendTimeTrackTokenLive } = require('./sms-track-links');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { gateEnvValue } = require('../config/feature-gates');
 const { loadVisitLoops, emptyVisitLoops } = require('./visit-loops-facts');
+const { DAY_ONLY_ARRIVAL_NOTE, loadDayOnlyCheck } = require('./day-only-ai-context');
 
 // Statuses that represent a real, confidently-stated upcoming visit. This is
 // an ALLOW-list (fail-closed) on purpose: a deny-list of cancelled/completed
@@ -1594,6 +1595,9 @@ class ContextAggregator {
     // generateGroundedDraft's context param, never persisted here.
     const liveEtaGroups = buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta, customer });
 
+    // GATE_DAY_ONLY_PROMISE (part D): ONE bulk read for the listed visits. A visit whose customer was told only the day
+    // carries the date and DAY_ONLY_ARRIVAL_NOTE in place of the hour. Gate off: no read, the same context as today.
+    const isDayOnly = await loadDayOnlyCheck(db, upcomingServices);
     const context = {
       known: true,
       // LIVE ETA send-time freshness snapshot input (see the comment above
@@ -1630,7 +1634,8 @@ class ContextAggregator {
       upcomingServices: upcomingServices.map((s, i) => withSeriesKey(withScheduledServiceId({
         type: s.service_type,
         date: s.scheduled_date,
-        window: this.deriveWindow(s),
+        window: isDayOnly(s) ? DAY_ONLY_ARRIVAL_NOTE : this.deriveWindow(s),
+        ...(isDayOnly(s) ? { windowDayOnly: true } : {}),
         status: s.status,
         // The customer-facing tracker state (Codex round-4 P2, PR #5334),
         // normalized to the same operational-style labels buildFactsBlock's

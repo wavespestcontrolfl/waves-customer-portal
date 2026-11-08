@@ -143,7 +143,7 @@ function makeSummaryDb({ active = 0, total = 0, runs = [] } = {}) {
   return dbi;
 }
 
-const CURRENT = require('../services/sms-shadow-drafter').PROMPT_VERSION;
+const CURRENT = require('../services/sms-shadow-drafter').currentPromptVersion();
 const completeRun = (leg, over = {}) => ({
   id: `run-${leg}`,
   prompt_version: CURRENT,

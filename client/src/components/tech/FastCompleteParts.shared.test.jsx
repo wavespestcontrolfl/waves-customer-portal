@@ -75,13 +75,13 @@ describe('Fast Complete shared parts', () => {
   });
 });
 
-// GATE_SCHEDULE_ACCESS_CODES (owner ruling 2026-10-26): the stop's codes in the
+// Schedule access codes (owner ruling 2026-10-26): the stop's codes in the
 // Complete service header, from the day row's gate lines.
 describe('SheetHeader access codes', () => {
   afterEach(cleanup);
   const service = {
     serviceType: 'Pest Control',
-    scheduleAccessEnabled: true,
+   
     propertyAlerts: [
       { type: 'gate', text: 'Gate: #2424 (neighborhood, confirm on site)' },
       { type: 'gate', text: 'Lockbox: 2468' },
@@ -97,10 +97,8 @@ describe('SheetHeader access codes', () => {
     expect(block.textContent).toBe('Gate#2424confirm on siteLockbox2468');
   });
 
-  it('shows nothing once the visit is saved, while the gate is off, or with no code', () => {
+  it('shows nothing once the visit is saved or with no code', () => {
     const { rerender } = render(header({ service, done: true }));
-    expect(screen.queryByLabelText('Access codes')).toBeNull();
-    rerender(header({ service: { ...service, scheduleAccessEnabled: undefined } }));
     expect(screen.queryByLabelText('Access codes')).toBeNull();
     rerender(header({ service: { ...service, propertyAlerts: [{ type: 'pet', text: '1 dog' }] } }));
     expect(screen.queryByLabelText('Access codes')).toBeNull();

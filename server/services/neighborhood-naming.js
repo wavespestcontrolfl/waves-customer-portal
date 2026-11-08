@@ -1,5 +1,5 @@
 /**
- * Neighborhood naming pass (GATE_NEIGHBORHOOD_NAMING; owner 2026-10-24 "ok go").
+ * Neighborhood naming pass (owner 2026-10-24 "ok go").
  *
  * The directory (neighborhood-access.js) only learns a home's community when a
  * gate code is saved, so most live homes were never looked up, and Sarasota
@@ -10,9 +10,8 @@
  *     and checked homes whose county_subdivision is a bare Sarasota plat number
  *     (their plat name is now read from the plat layer). The lookup and plat
  *     read run outside any transaction; the write is
- *     resolvePropertyNeighborhood's claim, so a concurrent writer wins. With
- *     GATE_NEIGHBORHOOD_ADDRESS_LOOKUP, a home whose pin sits on another lot is
- *     looked up by its own address instead (neighborhood-access.js homeParcel).
+ *     resolvePropertyNeighborhood's claim, so a concurrent writer wins. A home whose pin sits on
+ *     another lot is looked up by its own address instead (neighborhood-access.js homeParcel).
  *  2. Caller pass. A home the county could not name takes the community the
  *     customer SAID on a call about that same address (call extraction
  *     subdivision_or_community), matched to the county's directory entry of that
@@ -262,7 +261,7 @@ async function runNamingPass({
   return { county, caller };
 }
 
-// ---- homes not placed (GATE_NEIGHBORHOOD_UNPLACED, owner ruling 2026-10-26) ----
+// ---- homes not placed (owner ruling 2026-10-26) ----
 // For the office's list on the Gate codes page: live homes with no
 // neighborhood where the county's lot at the pin carries the home's number and
 // street under another ZIP (stamped by the county pass, for the current

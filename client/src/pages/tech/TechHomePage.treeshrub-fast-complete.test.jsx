@@ -24,7 +24,7 @@ vi.mock('../../components/tech/FastCompleteSheet', () => ({ default: () => null 
 vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({
   default: ({ service, onFullForm }) => (
     <div>
-      Tree and shrub sheet for {service.id} <span data-testid="sheet-access">{service.scheduleAccessEnabled === true ? service.propertyAlerts.map((a) => a.text).join('|') : 'off'}</span>
+      Tree and shrub sheet for {service.id} <span data-testid="sheet-access">{(service.propertyAlerts || []).map((a) => a.text).join('|')}</span>
       <button type="button" onClick={onFullForm}>Sheet full form</button>
     </div>
   ),
@@ -103,9 +103,9 @@ it('sends the sheet\'s full-form escape to the Dispatch typed completion', async
   expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument();
 });
 
-// GATE_SCHEDULE_ACCESS_CODES (owner ruling 2026-10-26): the sheet's copy of the row
+// Schedule access codes (owner ruling 2026-10-26): the sheet's copy of the row
 // keeps the codes, so the Complete service header can show them (Codex P2 on #6784).
-const ACCESS = { scheduleAccessEnabled: true, propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)' }, { type: 'pet', text: '1 dog' }] };
+const ACCESS = { propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)' }, { type: 'pet', text: '1 dog' }] };
 
 it('hands the sheet the row\'s gate codes for its header', async () => {
   rows = [row('svc-ts-codes', { treeShrubFastCompleteEnabled: true, ...ACCESS })];

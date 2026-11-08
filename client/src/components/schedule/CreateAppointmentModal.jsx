@@ -550,13 +550,13 @@ export function quickAddConfirmFlags(conflict, { separateAccount = false } = {})
     : { confirmAttach: true, confirmMatchedAccountId: conflict?.match?.accountId };
 }
 
-// GATE_NEW_APPT_PHONE_MATCH one Save: how long the form must hold still on
+// One Save for a new caller: how long the form must hold still on
 // the new customer before the booking continues, and how long to wait for a
 // form that is still loading before handing Save back to staff.
 const QUICK_ADD_SAVE_SETTLE_MS = 400;
 const QUICK_ADD_SAVE_WAIT_MS = 15000;
 
-// GATE_NEW_APPT_PHONE_MATCH: the ten digits a typed phone compares on (a
+// The ten digits a typed phone compares on (a
 // leading US 1 dropped), or '' until the number is complete.
 export function quickAddPhoneDigits(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
@@ -1569,7 +1569,7 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', defaultAnnualPrepay = false, addressFirstTimes = false, newCustomerPhoneMatch = false, newCallerBooking = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', defaultAnnualPrepay = false, newCallerBooking = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -1670,8 +1670,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     firstName: '', lastName: '', phone: '', email: '', profileLabel: '',
     address: '', city: '', state: 'FL', zip: '',
   }));
-  // Address-first best times (GATE_NEW_APPT_ADDRESS_TIMES, owner 2026-10-24,
-  // replacing the Dispatch "Find a time" drawer): a NEW caller has no customer
+  // Address-first best times (owner 2026-10-24, replacing the Dispatch
+  // "Find a time" drawer): a NEW caller has no customer
   // record, so the time box searches on the New customer block's address
   // alone. The target is set only when a suggestion is picked (geocoded
   // coordinates), never from half-typed text, and any hand edit to the
@@ -1692,13 +1692,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // In-flight guard: a double-click on a confirm action must not pass the
   // same confirmation twice and insert two profiles.
   const [quickAddSubmitting, setQuickAddSubmitting] = useState(false);
-  // GATE_NEW_APPT_PHONE_MATCH (owner 2026-10-24): the New customer block's
+  // Phone match (owner 2026-10-24): the New customer block's
   // phone is looked up once it has ten digits, and each customer already on
   // that number is offered with one tap. Never an automatic pick: a household
   // often shares one phone across two customers or two homes.
   const [quickAddPhoneMatches, setQuickAddPhoneMatches] = useState({ digits: '', customers: [] });
   const phoneMatchSeqRef = useRef(0);
-  // Same gate: one Save books a new caller. Save creates the customer first
+  // One Save books a new caller. Save creates the customer first
   // and parks here ({ customerId, totalAtSave }) until the form has settled on
   // that customer; then the same Save continues into the booking, once.
   const [pendingQuickAddSave, setPendingQuickAddSave] = useState(null);
@@ -3084,9 +3084,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return true;
   };
 
-  // Quick add customer. `submitQuickAdd` takes explicit confirm flags;
-  // `handleQuickAdd` stays the zero-arg onClick handler so a click event
-  // never leaks into the request body.
+  // Quick add customer. `submitQuickAdd` takes explicit confirm flags.
   // Resolves to the created customer once it is selected, else null.
   const submitQuickAdd = async (extraFlags = {}) => {
     if (quickAddSubmitting) return null;
@@ -3118,15 +3116,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       setQuickAddSubmitting(false);
     }
   };
-  const handleQuickAdd = () => submitQuickAdd();
 
-  // GATE_NEW_APPT_PHONE_MATCH: look the typed phone up once it is complete.
+  // Look the typed phone up once it is complete.
   // Only an exact ten-digit match is offered (the search also matches names,
   // notes and partial numbers); a late answer for an older number is dropped.
   // limit=500 is the list route's page cap: a ten-digit search returns a
   // handful of rows, and no profile on the number may be cut off before the
   // exact-match filter.
-  const typedPhoneDigits = newCustomerPhoneMatch && showQuickAdd ? quickAddPhoneDigits(quickAdd.phone) : '';
+  const typedPhoneDigits = showQuickAdd ? quickAddPhoneDigits(quickAdd.phone) : '';
   useEffect(() => {
     const seq = ++phoneMatchSeqRef.current;
     if (!typedPhoneDigits) {
@@ -4136,10 +4133,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   });
   // Advisory drive-detour suggestions for the picked day — a chip only sets
   // the start time (window end is derived from durations at submit).
-  // No customer yet (a new caller): with the gate on, the New customer
+  // No customer yet (a new caller): the New customer
   // block's picked address is the search subject instead. Only while the
   // block is open: collapsing it hides the address, so the chips for it go too.
-  const addressOnlyTimes = addressFirstTimes && !selectedCustomer && showQuickAdd && !!quickAddTarget;
+  const addressOnlyTimes = !selectedCustomer && showQuickAdd && !!quickAddTarget;
   // A chip was scored for one technician, so taking it books that technician
   // (leaving Auto would let assignment land elsewhere and falsify the
   // advertised detour). Not in address-only mode: no service is known yet,
@@ -5143,7 +5140,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     alreadySubmitting: saving,
     addressAskPending,
   }) && !discountSaveBlockedReason && !previewConfirming && !previewGroupError && !tierCatalogBlocksSave;
-  // GATE_NEW_APPT_PHONE_MATCH: one Save books a new caller. With no customer
+  // One Save books a new caller. With no customer
   // selected and the New customer block open, Save first adds the customer
   // (the same quick-add the Add customer button sends), then books through
   // handleSubmit once the form has settled on that customer: its property
@@ -5226,7 +5223,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       if (modalMountedRef.current) setNewCallerSubmitting(false);
     }
   };
-  const quickAddSaveMode = newCustomerPhoneMatch && !selectedCustomer && showQuickAdd;
+  const quickAddSaveMode = !selectedCustomer && showQuickAdd;
   const canSaveNewCustomer = quickAddSaveMode && timeChosen
     && !!(quickAdd.firstName && quickAdd.lastName && quickAdd.phone)
     && services.length > 0 && !saving && !quickAddSubmitting && !quickAddConflict && !pendingQuickAddSave
@@ -5546,10 +5543,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           lat: parts.lat ?? null,
                           lng: parts.lng ?? null,
                         });
-                        // GATE_NEW_APPT_PHONE_MATCH: bring the best times into view
+                        // Bring the best times into view
                         // (below the fold on a phone). A picked suggestion only: a
                         // blur geocode means staff already moved to another field.
-                        if (newCustomerPhoneMatch && addressFirstTimes && parts.source === 'suggestion') {
+                        if (parts.source === 'suggestion') {
                           const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
                           dateSectionRef.current?.scrollIntoView?.({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
                         }
@@ -5616,10 +5613,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       {newCallerError && <div role="alert" style={{ color: D.red }}>{newCallerError}</div>}
                     </div>
                   )}
-                  {newCallerBookMode ? null : newCustomerPhoneMatch ? (
+                  {newCallerBookMode ? null : (
                     <div style={{ fontSize: 14, color: D.muted }}>{quickAddSubmitting ? 'Adding the customer…' : 'Schedule appointment adds this customer and books the visit.'}</div>
-                  ) : (
-                    <button onClick={handleQuickAdd} disabled={quickAddSubmitting} style={{ padding: '10px 16px', background: D.text, color: D.white, border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 500, cursor: 'pointer', minHeight: 44, width: '100%', opacity: quickAddSubmitting ? 0.6 : 1 }}>{quickAddSubmitting ? 'Adding…' : 'Add customer'}</button>
                   )}
                 </div>
               )}

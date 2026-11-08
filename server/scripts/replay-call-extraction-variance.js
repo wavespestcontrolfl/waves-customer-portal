@@ -1454,7 +1454,7 @@ async function replayCall(call, context) {
   const priorV2Valid = priorV2 && helpers.isV2Extraction(priorV2);
   const priorV2Flat = priorV2Valid ? helpers.flatView(priorV2) : null;
   const storedAvUnwaived = parseJson(call.ai_address_validation, null);
-  // A whole-structure unit waiver (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT) was decided
+  // A whole-structure unit waiver was decided
   // for the PRIOR extraction's service and property. It rebuilds for the prior
   // route only; a fresh extraction is judged on the unwaived verdict unless it
   // names the same service and property type (codex #5378 pre-push P1).

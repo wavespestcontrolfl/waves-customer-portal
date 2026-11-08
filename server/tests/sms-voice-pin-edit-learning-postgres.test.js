@@ -1,4 +1,4 @@
-// GATE_SMS_VOICE_PROFILE_PIN + GATE_SMS_EDIT_LEARNING against Postgres. Synthetic fixtures only; each test runs in a
+// GATE_SMS_VOICE_PROFILE_PIN + edit learning against Postgres. Synthetic fixtures only; each test runs in a
 // transaction that is rolled back. Discovered by CI's serial DB-gated step; skipped without DATABASE_URL.
 const SKIP = !process.env.DATABASE_URL;
 const suite = SKIP ? describe.skip : describe;
@@ -19,7 +19,7 @@ const { _test: { mineSmsPairs } } = require('../services/sms-voice-corpus-miner'
 jest.setTimeout(30000);
 
 const HOUR = 3600 * 1000;
-const GATES = ['GATE_SMS_VOICE_PROFILE_PIN', 'GATE_SMS_EDIT_LEARNING'];
+const GATES = ['GATE_SMS_VOICE_PROFILE_PIN'];
 
 suite('voice profile pin and edit learning (PostgreSQL)', () => {
   let database;
@@ -161,7 +161,7 @@ suite('voice profile pin and edit learning (PostgreSQL)', () => {
     });
   });
 
-  describe('GATE_SMS_EDIT_LEARNING: the miner', () => {
+  describe('edit learning: the miner', () => {
     async function seedReplies() {
       const now = Date.now();
       const out = {};
@@ -182,19 +182,13 @@ suite('voice profile pin and edit learning (PostgreSQL)', () => {
       return new Set(rows.map((r) => r.source_id));
     };
 
-    test('gate off: only message_type manual, accepted-unchanged sends included, exactly as before', async () => {
+    test('edited suggestions are mined (corrected manual, ai_revised); unchanged ones and ai_approved are not', async () => {
       const ids = await seedReplies();
-      expect(await mine()).toEqual(new Set([ids.plain, ids.accepted, ids.corrected]));
-    });
-
-    test('gate on: edited suggestions are mined (corrected manual, ai_revised); unchanged ones and ai_approved are not', async () => {
-      const ids = await seedReplies();
-      process.env.GATE_SMS_EDIT_LEARNING = 'true';
       expect(await mine()).toEqual(new Set([ids.plain, ids.corrected, ids.revised]));
     });
   });
 
-  describe('GATE_SMS_EDIT_LEARNING: exemplar ranking', () => {
+  describe('edit learning: exemplar ranking', () => {
     const INTENT = 'edit_learning_test_intent';
     const texts = (rows) => rows.map((r) => r.reply_text);
 
@@ -238,23 +232,17 @@ suite('voice profile pin and edit learning (PostgreSQL)', () => {
       });
     }
 
-    test('off (default call): newest first, byte for byte as before (the accepted-unchanged reply still shows)', async () => {
+    test('edited and human_better first (newest within the tier), then the rest newest first; unchanged replies dropped', async () => {
       await seed();
       const rows = await drafter.fetchVoiceExemplars({ intent: INTENT, limit: 5, dbi: mockDb, throwOnError: true });
-      expect(texts(rows)).toEqual(['reply accepted', 'reply plain-new', 'reply corrected', 'reply revised', 'reply human-better']);
-    });
-
-    test('on: edited and human_better first (newest within the tier), then the rest newest first; unchanged replies dropped', async () => {
-      await seed();
-      const rows = await drafter.fetchVoiceExemplars({ intent: INTENT, limit: 5, dbi: mockDb, throwOnError: true, outcomeRanked: true });
       expect(texts(rows)).toEqual(['reply corrected', 'reply revised', 'reply human-better', 'reply plain-new', 'reply draft-better']);
-      const all = await drafter.fetchVoiceExemplars({ intent: INTENT, limit: 5, dbi: mockDb, throwOnError: true, outcomeRanked: true });
+      const all = await drafter.fetchVoiceExemplars({ intent: INTENT, limit: 5, dbi: mockDb, throwOnError: true });
       expect(texts(all)).not.toContain('reply accepted');
     });
 
-    test('on, with room for every row: opt-out, complaint and sealed-exam exclusions stay', async () => {
+    test('with room for every row: opt-out, complaint and sealed-exam exclusions stay', async () => {
       await seed();
-      const rows = await drafter.fetchVoiceExemplars({ intent: INTENT, limit: 50, dbi: mockDb, throwOnError: true, outcomeRanked: true });
+      const rows = await drafter.fetchVoiceExemplars({ intent: INTENT, limit: 50, dbi: mockDb, throwOnError: true });
       expect(texts(rows)).toEqual(['reply corrected', 'reply revised', 'reply human-better', 'reply plain-new', 'reply draft-better', 'reply plain-old']);
     });
 
@@ -263,7 +251,7 @@ suite('voice profile pin and edit learning (PostgreSQL)', () => {
       const customerId = await addCustomer();
       const smsId = await addSms({ customerId, body: 'reply body', at: new Date(), metadata: { agent_decision_id: 'not-a-uuid' } });
       await corpusRow({ key: 'malformed', ageHours: 0.5, smsId });
-      const rows = await drafter.fetchVoiceExemplars({ intent: INTENT, limit: 50, dbi: mockDb, throwOnError: true, outcomeRanked: true });
+      const rows = await drafter.fetchVoiceExemplars({ intent: INTENT, limit: 50, dbi: mockDb, throwOnError: true });
       expect(texts(rows)).toContain('reply malformed');
     });
   });
