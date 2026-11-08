@@ -43,19 +43,6 @@ export function askedTimeHint(checked, slot, now = new Date()) {
   return dayScriptApplies(slot, now) ? PHONE_SCRIPT_HINT : ASKED_TIME_CHECKED_HINT;
 }
 
-/** The slot the reschedule window's hint judges: the custom date and time while that picker is open, else the EARLIEST
- *  suggested option (if even that starts after the cutoff, every option does). `options` = the dialog's suggestions
- *  ({ date, suggestedWindow: { start } }). `originalDate`: the visit's date before the move. */
-export function rescheduleHintSlot({ options, showManual, manualDate, manualTime, reminder24hOn, originalDate }) {
-  if (showManual) return { date: manualDate, start: manualTime, reminder24hOn, originalDate };
-  const picks = (options || []).map((o) => ({ date: o.date, start: String(o.suggestedWindow?.start || '').slice(0, 5) }));
-  const earliest = picks.map((o) => `${o.date}T${o.start}`).sort()[0] || 'T';
-  const [date, start] = earliest.split('T');
-  // A suggestion on the visit's own date is a same-date re-time (window wording): the hint judges that one.
-  const sameDate = originalDate ? picks.find((o) => String(o.date).slice(0, 10) === String(originalDate).slice(0, 10)) : null;
-  return { date: sameDate ? sameDate.date : date, start: sameDate ? sameDate.start : start, reminder24hOn, originalDate };
-}
-
 /** The booking window's answer for the chosen customer (`answer` = { id, on, byProperty } from the schedule-estimates reply):
  *  no customer yet reads as a new customer with the table defaults (reminder on); an answer for another customer, or none yet,
  *  reads off. While property texts are enforced the reply carries each saved property's own answer (`byProperty`): the

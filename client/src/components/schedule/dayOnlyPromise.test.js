@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ASKED_TIME_CHECKED_HINT, DAY_PROMISE_CUTOFF_HOURS, PHONE_SCRIPT_HINT, askedTimeCreateFields, askedTimeHint, askedTimeMoveFields,
-  dayScriptApplies, reminderAnswerFor, rescheduleHintSlot, startsBeyondCutoff, toldBadgeText,
+  dayScriptApplies, reminderAnswerFor, startsBeyondCutoff, toldBadgeText,
 } from './dayOnlyPromise';
 
 describe('day-only promise words and request fields', () => {
@@ -45,33 +45,9 @@ describe('day-only promise words and request fields', () => {
     expect(askedTimeHint(false, { ...move, originalDate: undefined }, NOW)).toBe(PHONE_SCRIPT_HINT); // the booking window has none
   });
 
-  it('the reschedule window: a suggestion on the visit\'s own date makes the hint the second line', () => {
-    const options = [
-      { date: '2026-11-13', suggestedWindow: { start: '08:00' } },
-      { date: '2026-11-12', suggestedWindow: { start: '10:00' } },
-    ];
-    const base = { options, showManual: false, manualDate: '', manualTime: '08:00', reminder24hOn: true };
-    expect(rescheduleHintSlot({ ...base, originalDate: '2026-11-12' })).toEqual({ date: '2026-11-12', start: '10:00', reminder24hOn: true, originalDate: '2026-11-12' });
-    expect(askedTimeHint(false, rescheduleHintSlot({ ...base, originalDate: '2026-11-12' }), NOW)).toBe(ASKED_TIME_CHECKED_HINT);
-    expect(askedTimeHint(false, rescheduleHintSlot({ ...base, originalDate: '2026-11-20' }), NOW)).toBe(PHONE_SCRIPT_HINT);
-    expect(askedTimeHint(false, rescheduleHintSlot({ ...base, showManual: true, manualDate: '2026-11-12', manualTime: '11:00', originalDate: '2026-11-12' }), NOW)).toBe(ASKED_TIME_CHECKED_HINT);
-  });
-
   it('the cutoff is judged on the ET wall clock across a DST change', () => {
     // 2026-11-01 01:30 ET fell back; a visit on 11-03 at 10:00 ET from 11-02 08:00 ET is 26+ hours out (EST), beyond the cutoff.
     expect(startsBeyondCutoff({ date: '2026-11-03', start: '10:00' }, new Date('2026-11-02T13:00:00Z'))).toBe(true);
-  });
-
-  it('the reschedule window judges the custom slot while that picker is open, else the earliest suggestion', () => {
-    const options = [
-      { date: '2026-11-13', suggestedWindow: { start: '08:00' } },
-      { date: '2026-11-11', suggestedWindow: { start: '09:00' } },
-    ];
-    expect(rescheduleHintSlot({ options, showManual: false, manualDate: '', manualTime: '08:00', reminder24hOn: true }))
-      .toEqual({ date: '2026-11-11', start: '09:00', reminder24hOn: true, originalDate: undefined });
-    expect(rescheduleHintSlot({ options, showManual: true, manualDate: '2026-11-20', manualTime: '10:00', reminder24hOn: true }))
-      .toEqual({ date: '2026-11-20', start: '10:00', reminder24hOn: true, originalDate: undefined });
-    expect(rescheduleHintSlot({ options: [], showManual: false, manualDate: '', manualTime: '08:00' })).toEqual({ date: '', start: '', reminder24hOn: undefined, originalDate: undefined });
   });
 
   it('the booking window: no customer yet reads on; another customer\'s or a missing answer reads off', () => {

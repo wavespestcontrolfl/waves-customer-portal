@@ -96,18 +96,69 @@ describe('Edit appointment', () => {
       expect(screen.getByTestId('asked-time-hint')).toHaveTextContent(SCRIPT);
     });
 
-    it('reschedule window: a suggested option on the visit\'s own date gives the second line; none on that date gives the script', async () => {
-      gate.on = true;
-      const option = (date, start) => ({ date, displayDate: date, suggestedWindow: { start, end: '12:00', display: `${start} window` }, driveMinutes: 5 });
+    describe('reschedule window: every suggested option judges its own slot', () => {
+      const option = (date, start) => ({ date, displayDate: `Day ${date}`, suggestedWindow: { start, end: '12:00', display: `${start} window` }, driveMinutes: 5 });
+      const todayET = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
       const serve = (options) => vi.stubGlobal('fetch', vi.fn(async (url) => ({ ok: true, json: async () => (String(url).endsWith('/reschedule-options') ? { options } : {}) })));
-      serve([option('2035-01-02', '10:00'), option('2035-01-09', '09:00')]);
-      const first = render(<RescheduleModal service={BASE} onClose={vi.fn()} onRescheduled={vi.fn()} />);
-      await waitFor(() => expect(screen.queryByText(/Loading/i)).toBeNull());
-      expect(screen.getByTestId('asked-time-hint')).toHaveTextContent('Tell the customer this time.');
-      first.unmount();
-      serve([option('2035-01-09', '09:00'), option('2035-01-10', '09:00')]);
-      render(<RescheduleModal service={BASE} onClose={vi.fn()} onRescheduled={vi.fn()} />);
-      await waitFor(() => expect(screen.getByTestId('asked-time-hint')).toHaveTextContent(SCRIPT));
+      const hints = async () => {
+        await waitFor(() => expect(screen.queryAllByTestId('option-hint').length).toBeGreaterThan(0));
+        return screen.getAllByTestId('option-hint').map((node) => node.textContent);
+      };
+
+      it('a same-date option and a later-date option show different lines', async () => {
+        gate.on = true;
+        serve([option('2035-01-02', '10:00'), option('2035-01-09', '09:00')]);
+        render(<RescheduleModal service={BASE} onClose={vi.fn()} onRescheduled={vi.fn()} />);
+        expect(await hints()).toEqual(['Tell the customer this time.', SCRIPT]);
+        // No window-level line that could contradict an option's own.
+        expect(screen.queryByTestId('asked-time-hint')).toBeNull();
+      });
+
+      it('an option inside the 24.25-hour cutoff shows the second line', async () => {
+        gate.on = true;
+        serve([option(todayET(), '23:00'), option('2035-01-09', '09:00')]);
+        render(<RescheduleModal service={BASE} onClose={vi.fn()} onRescheduled={vi.fn()} />);
+        expect(await hints()).toEqual(['Tell the customer this time.', SCRIPT]);
+      });
+
+      it('reminders off or unknown: every option shows the second line', async () => {
+        gate.on = true;
+        serve([option('2035-01-09', '09:00'), option('2035-01-10', '09:00')]);
+        render(<RescheduleModal service={{ ...BASE, reminder24hOn: false }} onClose={vi.fn()} onRescheduled={vi.fn()} />);
+        expect(await hints()).toEqual(['Tell the customer this time.', 'Tell the customer this time.']);
+      });
+
+      it('a checked box makes every option show the second line', async () => {
+        gate.on = true;
+        serve([option('2035-01-09', '09:00'), option('2035-01-10', '09:00')]);
+        render(<RescheduleModal service={BASE} onClose={vi.fn()} onRescheduled={vi.fn()} />);
+        expect(await hints()).toEqual([SCRIPT, SCRIPT]);
+        fireEvent.click(screen.getByLabelText('Customer asked for this time'));
+        expect(await hints()).toEqual(['Tell the customer this time.', 'Tell the customer this time.']);
+      });
+
+      it('the custom picker has its own line that follows the manual slot', async () => {
+        gate.on = true;
+        serve([option('2035-01-09', '09:00')]);
+        render(<RescheduleModal service={BASE} onClose={vi.fn()} onRescheduled={vi.fn()} />);
+        await hints();
+        fireEvent.click(screen.getByRole('button', { name: /Pick Custom Date/ }));
+        fireEvent.change(screen.getByLabelText('Date'), { target: { value: '2035-01-02' } }); // the visit's own date
+        expect(screen.getByTestId('asked-time-hint')).toHaveTextContent('Tell the customer this time.');
+        fireEvent.change(screen.getByLabelText('Date'), { target: { value: '2035-01-09' } });
+        expect(screen.getByTestId('asked-time-hint')).toHaveTextContent(SCRIPT);
+        // The options keep their own lines meanwhile.
+        expect(screen.getAllByTestId('option-hint').map((node) => node.textContent)).toEqual([SCRIPT]);
+      });
+
+      it('gate off: no line anywhere', async () => {
+        serve([option('2035-01-09', '09:00')]);
+        render(<RescheduleModal service={BASE} onClose={vi.fn()} onRescheduled={vi.fn()} />);
+        await waitFor(() => expect(screen.getByText('Day 2035-01-09')).toBeInTheDocument());
+        fireEvent.click(screen.getByRole('button', { name: /Pick Custom Date/ }));
+        expect(screen.queryByTestId('option-hint')).toBeNull();
+        expect(screen.queryByTestId('asked-time-hint')).toBeNull();
+      });
     });
   });
 
@@ -241,8 +292,10 @@ describe('Reschedule', () => {
     fetch.mockClear();
     render(<RescheduleModal service={BASE} onClose={vi.fn()} onRescheduled={vi.fn()} />);
     fireEvent.click(screen.getByLabelText('Customer asked for this time'));
+    const raw = await moveCustom();
+    // The custom picker's line (the picker is open now): a checked box says to name the time.
     expect(screen.getByTestId('asked-time-hint')).toHaveTextContent('Tell the customer this time.');
-    expect(JSON.parse(await moveCustom()).customerAskedTime).toBe(true);
+    expect(JSON.parse(raw).customerAskedTime).toBe(true);
   });
 
   it('gate on: pre-filled from the visit and shows the Told badge', () => {
