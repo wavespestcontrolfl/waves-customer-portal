@@ -1726,7 +1726,7 @@
     },
     {
       "endpoint": "/admin/neighborhood-access/customers/:customerId/properties",
-      "reviewed": "Handler + propertyViews: customer_properties, neighborhoods and neighborhood_access reads mapped to label, address, gate label, access type, code, instructions, status. Gate and access codes are kept by owner decision (owner login); a home linked only from the customer's words (neighborhood_source 'caller', GATE_NEIGHBORHOOD_NAMING) lists no entries until confirmed; read end to end. Re-signed 2026-10-25 (GATE_NEIGHBORHOOD_MERGE): only the route's feature-gates import line changed (adds neighborhoodMergeLive); handler, propertyViews, signals and unresolved unchanged. Re-signed 2026-10-26 (GATE_NEIGHBORHOOD_UNPLACED): the same import line now spans lines and adds neighborhoodUnplacedLive; handler unchanged.",
+      "reviewed": "Handler + propertyViews: customer_properties, neighborhoods and neighborhood_access reads mapped to label, address, gate label, access type, code, instructions, status. Gate and access codes are kept by owner decision (owner login); a home linked only from the customer's words (neighborhood_source 'caller') lists no entries until confirmed; read end to end. Re-signed 2026-11-07 (gate removal): the route no longer imports or checks the feature gates it once read; handler, propertyViews, signals and unresolved unchanged.",
       "scope": "customer",
       "scopeParam": "customerId",
       "params": {
@@ -1737,7 +1737,7 @@
       },
       "signals": [],
       "unresolved": [],
-      "hash": "1cbe07b0442d51da5f19dfa1d6641d14"
+      "hash": "82846a9dae937d96dfed365bc794eb31"
     },
     {
       "endpoint": "/admin/payers",

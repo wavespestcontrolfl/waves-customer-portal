@@ -6708,7 +6708,7 @@ router.get('/', async (req, res, next) => {
 
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
     const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
-    // Neighborhood gate-code directory (dark behind GATE_NEIGHBORHOOD_ACCESS):
+    // Neighborhood gate-code directory:
     // the shared entry for a visit whose customer has no gate code. A failed
     // read just shows no fallback.
     let neighborhoodGateByVisit = new Map();
@@ -6717,20 +6717,14 @@ router.get('/', async (req, res, next) => {
     // a pin have a key, so every other row is byte-identical to before.
     let gateWaypointByVisit = new Map();
     // Visits whose stop is in an active neighborhood, when a visit's assigned
-    // technician may add a gate code or mark one wrong
-    // (GATE_NEIGHBORHOOD_TECH_ACTIONS); empty = the field screen offers neither.
+    // technician may add a gate code or mark one wrong;
+    // an empty set = the field screen offers neither.
     let gateActionVisits = new Set();
-    const neighborhoodTechActions = require('../config/feature-gates').neighborhoodTechActionsLive();
-    // GATE_SCHEDULE_ACCESS_CODES: the office schedule draws each row's gate
-    // lines (propertyAlerts) only while this is on; read once per request.
-    const scheduleAccessCodes = require('../config/feature-gates').scheduleAccessCodesLive();
     try {
-      if (require('../config/feature-gates').neighborhoodAccessLive()) {
-        const neighborhoodAccess = require('../services/neighborhood-access');
-        neighborhoodGateByVisit = await neighborhoodAccess.neighborhoodGateEntriesForVisits(db, services);
-        gateWaypointByVisit = await neighborhoodAccess.neighborhoodGateWaypointsForVisits(db, services);
-        if (neighborhoodTechActions) gateActionVisits = await neighborhoodAccess.gateActionVisitIds(db, services);
-      }
+      const neighborhoodAccess = require('../services/neighborhood-access');
+      neighborhoodGateByVisit = await neighborhoodAccess.neighborhoodGateEntriesForVisits(db, services);
+      gateWaypointByVisit = await neighborhoodAccess.neighborhoodGateWaypointsForVisits(db, services);
+      gateActionVisits = await neighborhoodAccess.gateActionVisitIds(db, services);
     } catch (err) {
       logger.warn(`[admin-schedule] neighborhood gate lookup failed (${err.code || err.name || 'error'})`);
     }
@@ -7206,7 +7200,6 @@ router.get('/', async (req, res, next) => {
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
         ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
-        ...(scheduleAccessCodes ? { scheduleAccessEnabled: true } : {}),
         ...(gateWaypointByVisit.has(s.id) ? { gateWaypoint: gateWaypointByVisit.get(s.id) } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
@@ -7904,14 +7897,11 @@ router.get('/week', async (req, res, next) => {
     // (owner 2026-10-24, #6653): the mobile dispatch list and appointment
     // sheet route Directions through it before the house. One lookup for the
     // week; only a visit with a pin gets the key, so every other row is
-    // byte-identical. Dark behind GATE_NEIGHBORHOOD_ACCESS; a failed read
-    // routes plainly.
+    // byte-identical. A failed read routes plainly.
     try {
-      if (require('../config/feature-gates').neighborhoodAccessLive()) {
-        const pins = await require('../services/neighborhood-access').neighborhoodGateWaypointsForVisits(db, weekGateVisits);
-        days.flatMap((day) => day.services).filter((row) => pins.has(row.id))
-          .forEach((row) => { row.gateWaypoint = pins.get(row.id); });
-      }
+      const pins = await require('../services/neighborhood-access').neighborhoodGateWaypointsForVisits(db, weekGateVisits);
+      days.flatMap((day) => day.services).filter((row) => pins.has(row.id))
+        .forEach((row) => { row.gateWaypoint = pins.get(row.id); });
     } catch (err) {
       logger.warn(`[admin-schedule] week gate waypoint lookup failed (${err.code || err.name || 'error'})`);
     }

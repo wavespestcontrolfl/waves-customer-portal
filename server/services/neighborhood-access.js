@@ -8,7 +8,7 @@
  * 2026-10-01); a customer's own property codes never come here.
  *
  * Two callers: the one-time backfill (ops/agents/neighborhood-access-backfill.js)
- * and, behind GATE_NEIGHBORHOOD_ACCESS, the 15-minute filing sweep below,
+ * and the 15-minute filing sweep below,
  * which picks up a gate code saved by ANY writer (office, customer portal,
  * call, customer text, Intelligence Bar) without a hook in each one.
  */
@@ -178,13 +178,12 @@ const ABBREVIATIONS = {
   WALKS: 'WALK', WELLS: 'WLS', TERR: 'TER', CRT: 'CT', CRCL: 'CIR', CIRC: 'CIR',
 };
 // A '#' tail ("500 Sample Loop #201") is a unit too, read before the '#' is
-// spaced out (GATE_NEIGHBORHOOD_ADDRESS_LOOKUP; off, the number stays a street word).
+// spaced out.
 const HASH_UNIT_TAIL = /\s*#\s*[A-Za-z0-9-]+\s*(?=,|$)/;
 // The street's words as written: house number, unit tail and any city/state/ZIP
 // tail removed, nothing abbreviated yet.
 function streetWords(line, cities = []) {
-  const raw = require('../config/feature-gates').neighborhoodAddressLookupLive()
-    ? String(line || '').replace(HASH_UNIT_TAIL, ' ') : String(line || '');
+  const raw = String(line || '').replace(HASH_UNIT_TAIL, ' ');
   let s = ` ${raw.toUpperCase().replace(/[^A-Z0-9,\s]/g, ' ').replace(/\s+/g, ' ').trim()} `;
   s = s.replace(/,.*$/, ' '); // ", FL 34285" / ", SARASOTA FL"
   s = s.replace(/\s(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|LOT)\s.*$/, ' ');
@@ -250,7 +249,7 @@ function zipOnlyMismatch(parcel, property) {
 }
 
 // Sarasota's parcel roll gives a plat's NUMBER ("3491"; "0000" = none), and
-// the plat layer holds its name. Behind GATE_NEIGHBORHOOD_NAMING the caller
+// the plat layer holds its name. The caller
 // swaps that name in: returns the parcel with `platName` (a raw plat name,
 // which then goes through the same community collapse as any county name) when
 // the number names exactly one community, else the parcel unchanged. THROWS
@@ -266,7 +265,7 @@ async function withPlatName(parcel, platLookup = lookupSarasotaPlatNames) {
   return communities.size === 1 ? { ...parcel, platName: named[0] } : parcel;
 }
 
-// GATE_NEIGHBORHOOD_ADDRESS_LOOKUP. A stored pin is often on another lot: a ZIP
+// Address lookup. A stored pin is often on another lot: a ZIP
 // centre, or a few doors off (29 of the first 40 never-checked homes, 10-24).
 // Then the county roll is asked for the home's own address, and a lot counts
 // only under the pin path's own proof, parcelMatchesProperty (the home's house
@@ -298,13 +297,12 @@ async function parcelByAddress(property, { county, addressLookup = lookupCountyP
   return communities.size === 1 ? lots[0] : null;
 }
 
-// The lot a home is linked by: the pin's when it is the home's own; else, with
-// GATE_NEIGHBORHOOD_ADDRESS_LOOKUP, the home's own lot found by its address;
+// The lot a home is linked by: the pin's when it is the home's own; else
+// the home's own lot found by its address;
 // else the pin's, so the caller still reads the miss. THROWS when the address
 // search cannot answer (the naming pass then waits an hour, never "no name").
 async function homeParcel(property, pinParcel, { addressLookup } = {}) {
   if (pinParcel && parcelMatchesProperty(pinParcel, property)) return pinParcel;
-  if (!require('../config/feature-gates').neighborhoodAddressLookupLive()) return pinParcel;
   const county = countyHint(property.zip) || pinParcel?.county;
   return (await parcelByAddress(property, { county, addressLookup })) || pinParcel;
 }
@@ -464,7 +462,7 @@ function sameStreetLine(a, b) {
 }
 
 // ---- runtime filing sweep (gate-code directory PR 2) --------------------------
-// Every 15 minutes, behind GATE_NEIGHBORHOOD_ACCESS: each customer whose
+// Every 15 minutes: each customer whose
 // current neighborhood gate code has not been filed yet — no
 // neighborhood_access_filings row, or one for a different value (compared by
 // sha256, the code itself is never stored there) — has it filed under their
@@ -542,14 +540,14 @@ async function fileOneSavedCode(customerId, lookup, platLookup, addressLookup) {
     && Number.isFinite(Number(v)) && Number(v) !== 0);
   const lookUp = !snapshot.neighborhood_id && !snapshot.neighborhood_checked_at && snapshot.neighborhood_source !== 'office' && hasPin;
   let parcel = lookUp ? await lookup(Number(snapshot.latitude), Number(snapshot.longitude), { county: countyHint(snapshot.zip) }) : null;
-  // Address gate: a pin on another lot asks the county by the home's own
+  // Address lookup: a pin on another lot asks the county by the home's own
   // address (network, so before the transaction). A failed search leaves the
   // pin's answer, and the home is looked up again next pass.
   if (lookUp) parcel = await homeParcel(snapshot, parcel, { addressLookup }).catch(() => parcel);
-  // Naming gate: a Sarasota plat number gets its plat name (network, so before
+  // Plat name: a Sarasota plat number gets its plat name (network, so before
   // the transaction). The plat layer failing leaves the home unchecked, to be
   // tried again next pass — never stamped "checked, no name".
-  if (parcel && require('../config/feature-gates').neighborhoodNamingLive()) {
+  if (parcel) {
     parcel = await withPlatName(parcel, platLookup).catch(() => null);
   }
 
@@ -660,8 +658,6 @@ async function settleConflicts(touched, logger) {
 async function sweepSavedGateCodes({
   lookup = lookupCountyParcelByPoint, platLookup = lookupSarasotaPlatNames, addressLookup = lookupCountyParcelsByAddress,
 } = {}) {
-  const { neighborhoodAccessLive } = require('../config/feature-gates');
-  if (!neighborhoodAccessLive()) return { skipped: 'gate_off' };
   const logger = require('./logger');
   // A cleared code clears its filing: restoring the same code later is new
   // evidence (A → blank → A files again, like A → B → A). The
@@ -675,13 +671,11 @@ async function sweepSavedGateCodes({
   // Naming pass first, so a home it links is filed in this same sweep. A crash
   // here must not stop the filing below; it counts as a failed step.
   let naming = null;
-  if (require('../config/feature-gates').neighborhoodNamingLive()) {
-    try {
-      naming = await require('./neighborhood-naming').runNamingPass({ lookup, platLookup, addressLookup });
-    } catch (err) {
-      failed += 1;
-      logger.warn(`[neighborhood-access] naming pass failed (${err.code || err.name || 'error'})`);
-    }
+  try {
+    naming = await require('./neighborhood-naming').runNamingPass({ lookup, platLookup, addressLookup });
+  } catch (err) {
+    failed += 1;
+    logger.warn(`[neighborhood-access] naming pass failed (${err.code || err.name || 'error'})`);
   }
   const customerIds = await unfiledGateCodeCustomers(db);
   const tally = {};
