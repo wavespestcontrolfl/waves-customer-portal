@@ -16,10 +16,10 @@ import {
 } from "../../../components/ui";
 import { etParts, etDateString } from "../../../lib/timezone";
 
-// Florida sales tax return worksheet (DR-15), GATE_TAX_WORKSHEETS: the lines
+// Florida sales tax return worksheet (DR-15): the lines
 // of the return for one period, worked out by the server from the books.
 // Reads the books only; the one write is Mark filed on the existing filing
-// calendar row (PUT /filings/:id). Renders nothing while the gate is off.
+// calendar row (PUT /filings/:id).
 // Same shared V2 primitives and fetch idiom as ReturnTab.
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -152,7 +152,6 @@ function FilingBox({ sheet, busy, onMarkFiled }) {
 export default function SalesTaxTab() {
   const thisYear = etParts().year;
   const prev = previousMonth();
-  const [enabled, setEnabled] = useState(false);
   const [kind, setKind] = useState("month");
   const [year, setYear] = useState(prev.year);
   const [index, setIndex] = useState(prev.month);
@@ -164,14 +163,6 @@ export default function SalesTaxTab() {
   // owner already left must not fill the screen under the new period
   const seq = useRef(0);
 
-  useEffect(() => {
-    let live = true;
-    adminFetch(`${T}/worksheets/status`)
-      .then((d) => { if (live) setEnabled(!!d?.enabled); })
-      .catch(() => { if (live) setEnabled(false); });
-    return () => { live = false; };
-  }, []);
-
   const load = useCallback(() => {
     const mine = ++seq.current;
     setSheet(null);
@@ -182,7 +173,7 @@ export default function SalesTaxTab() {
       .then((d) => { if (mine === seq.current) setSheet(d); })
       .catch((e) => { if (mine === seq.current) setSheetError(e.message); });
   }, [kind, year, index]);
-  useEffect(() => { if (enabled) load(); }, [enabled, load]);
+  useEffect(() => { load(); }, [load]);
 
   const markFiled = async (id, body) => {
     if (busy) return;
@@ -198,7 +189,6 @@ export default function SalesTaxTab() {
     }
   };
 
-  if (!enabled) return null;
   const years = [];
   for (let y = thisYear; y >= FIRST_YEAR; y -= 1) years.push(y);
   const onKind = (e) => {

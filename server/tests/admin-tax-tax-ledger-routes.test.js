@@ -1,12 +1,9 @@
 /**
- * /admin/tax/bank-import/ledger/* routes (GATE_TAX_LEDGER, nested under
- * GATE_BANK_IMPORT).
+ * /admin/tax/bank-import/ledger/* routes (nested under GATE_BANK_IMPORT).
  *
  * Locked-down behaviors:
- *  1. Bank import on but the ledger gate off → /ledger/status answers
- *     {enabled:false} without touching the table; every other ledger route
- *     is a 404 (dark means invisible).
- *  2. Gate on → status counts enabled rules, open rows (later and income
+ *  1. Bank import off → every ledger route is a 404, status included.
+ *  2. Bank import on → status counts enabled rules, open rows (later and income
  *     shelves excluded) and the income shelf; the inbox pages with a
  *     clamped limit and open | later | income views.
  *  3. decide validates the id, hands the body to the service and maps the
@@ -68,8 +65,8 @@ jest.mock('../services/bank-import', () => ({
   verifyPendingPayoutClaims: jest.fn(() => Promise.resolve(0)),
   retryPendingEchoes: jest.fn(() => Promise.resolve(0)),
 }));
-// The service has its own suite; the route test asserts the wiring, the gate
-// and the error mapping. isOn stays real so the gate reads the env.
+// The service has its own suite; the route test asserts the wiring and the
+// error mapping.
 jest.mock('../services/tax-ledger-rules', () => ({
   ...jest.requireActual('../services/tax-ledger-rules'),
   decide: jest.fn(), listRules: jest.fn(), createRule: jest.fn(), updateRule: jest.fn(), applyRules: jest.fn(), applyAfterImport: jest.fn(() => Promise.resolve(null)), ensureSeedRules: jest.fn(() => Promise.resolve(0)),
@@ -100,33 +97,20 @@ beforeEach(() => {
   for (const fn of ['decide', 'listRules', 'createRule', 'updateRule', 'applyRules']) ledger[fn].mockReset();
   ledger.applyAfterImport.mockClear();
   process.env.GATE_BANK_IMPORT = 'true';
-  delete process.env.GATE_TAX_LEDGER;
 });
 
-describe('gate darkness (bank import on, ledger off)', () => {
-  test('status answers enabled:false without touching the table', async () => {
-    const res = await get(`${P}/status`);
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ enabled: false });
-    expect(mockDb).not.toHaveBeenCalled();
-  });
-  test('every other ledger route is a 404', async () => {
-    for (const [method, path] of [['GET', `${P}/inbox`], ['POST', `${P}/decide`], ['GET', `${P}/rules`], ['POST', `${P}/rules`], ['PUT', `${P}/rules/r1`], ['POST', `${P}/rules/apply`]]) {
+describe('bank import off', () => {
+  test('every ledger route is a 404, status included', async () => {
+    delete process.env.GATE_BANK_IMPORT;
+    for (const [method, path] of [['GET', `${P}/status`], ['GET', `${P}/inbox`], ['POST', `${P}/decide`], ['GET', `${P}/rules`], ['POST', `${P}/rules`], ['PUT', `${P}/rules/r1`], ['POST', `${P}/rules/apply`]]) {
       const res = method === 'GET' ? await get(path) : await send(method, path, { id: 'x' });
       expect([method, path, res.status]).toEqual([method, path, 404]);
     }
     expect(ledger.decide).not.toHaveBeenCalled();
   });
-  test('bank import off hides the ledger too, status included', async () => {
-    delete process.env.GATE_BANK_IMPORT; process.env.GATE_TAX_LEDGER = 'true';
-    expect((await get(`${P}/status`)).status).toBe(404);
-    expect((await get(`${P}/inbox`)).status).toBe(404);
-  });
 });
 
-describe('gate on', () => {
-  beforeEach(() => { process.env.GATE_TAX_LEDGER = 'true'; });
-
+describe('bank import on', () => {
   test('the ledger snapshots heal dangling links first, like the Bank Import ones (an expense deleted while the page is open reopens its row)', async () => {
     const bankImport = require('../services/bank-import');
     bankImport.resetDanglingLinks.mockClear();
@@ -141,7 +125,7 @@ describe('gate on', () => {
   test('status counts enabled rules and open rows, later rows excluded', async () => {
     state.counts = { tax_ledger_rules: 37, bank_transactions: 12 };
     const res = await get(`${P}/status`);
-    expect(await res.json()).toEqual({ enabled: true, rules: 37, inbox: 12, income: 12, bankImport: 12, unexamined: 12 });
+    expect(await res.json()).toEqual({ rules: 37, inbox: 12, income: 12, bankImport: 12, unexamined: 12 });
     expect(ledger.ensureSeedRules).toHaveBeenCalled(); // the seeds are counted from the first status on
     const rules = state.queries.find((q) => q.table === 'tax_ledger_rules');
     expect(rules.wheres).toContainEqual({ enabled: true });
@@ -239,11 +223,9 @@ describe('gate on', () => {
 });
 
 describe('manual matching', () => {
-  test('POST /bank-import/match runs the gated rule pass after the matcher, so the Inbox prefill does not wait for the next sync', async () => {
-    process.env.GATE_TAX_LEDGER = 'true';
+  test('POST /bank-import/match runs the rule pass after the matcher, so the Inbox prefill does not wait for the next sync', async () => {
     const res = await send('POST', '/admin/tax/bank-import/match', {});
     expect(res.status).toBe(200);
     expect(ledger.applyAfterImport).toHaveBeenCalledWith('manual match', { budget: 2000 }); // the same budget as the matcher
-    delete process.env.GATE_TAX_LEDGER;
   });
 });

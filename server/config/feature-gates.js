@@ -4056,34 +4056,6 @@ const gates = {
   // DATA_HYGIENE_VAULT_KEY). Read at call time; kill switch = unset.
   plaidSync: gateEnvValue('GATE_PLAID_SYNC'),
 
-  // Tax ledger rules + inbox (2026-10-23): deterministic payee rules that
-  // pre-fill the Bank Import suggestion (category for an expense, or
-  // personal / transfer / income / review) on every staged bank row, and an
-  // Inbox tab under /admin/tax with one-tap decisions that can also write a
-  // rule. Suggestion-only: no row changes status without the operator, the
-  // expense itself still goes through /bank-import/:id/create-expense, an
-  // Income decision keeps the row listed (nothing counts it as revenue), and
-  // nothing leaves the admin. Nested under GATE_BANK_IMPORT; read at call
-  // time via gateEnvValue so a flip needs no redeploy; dark by default.
-  taxLedger: gateEnvValue('GATE_TAX_LEDGER'),
-
-  // Shared bills + home office (2026-10-24): a bill that is part business
-  // (a phone plan with business lines, home internet) books at its business
-  // share when Bank Import turns the staged row into an expense, and the
-  // simplified home-office deduction (sq ft x $5, max 300 sq ft) is kept per
-  // tax year and added to the tax package. Nested under GATE_BANK_IMPORT; read
-  // at call time via taxSharedBillsLive(); dark by default. Off = create-expense
-  // and the tax package behave exactly as before.
-  taxSharedBills: gateEnvValue('GATE_TAX_SHARED_BILLS'),
-
-  // Tax return engine (2026-10-24): tax-year records (filing status, other
-  // income, estimates paid, carryovers in), a federal return computed from the
-  // P&L and the books (Schedule C, Schedule SE, NOL, QBI, income tax) and a
-  // Return tab under Admin > Tax > Reports. Nested under GATE_BANK_IMPORT; read
-  // at call time via taxReturnEngineLive(); dark by default. Off = the routes
-  // 404 and the tab stays hidden; nothing else reads it.
-  taxReturnEngine: gateEnvValue('GATE_TAX_RETURN_ENGINE'),
-
   // Slab pre-treat for a home is not taxed (2026-10-24): Florida taxes a
   // pre-construction termite treatment only for a nonresidential building
   // (Rule 12A-1.009), so a builder whose account is commercial owes no tax on
@@ -4140,15 +4112,6 @@ const gates = {
   // dark by default. Off = these services are taxed by the customer's
   // property_type exactly as before.
   lawnSprayNoTax: gateEnvValue('GATE_LAWN_SPRAY_NO_TAX'),
-
-  // Tax worksheets (2026-10-25): Tax > Reports > Sales tax (the Florida DR-15
-  // lines for a month, quarter, half year or year from the books) and 1099s
-  // (who was paid for contract labor or legal and professional work, and who
-  // needs a 1099-NEC). Read-only; Mark filed uses the filing calendar's own
-  // route. Nested under GATE_BANK_IMPORT; read at call time via
-  // taxWorksheetsLive(); dark by default. Off = the routes 404 and the tabs
-  // stay hidden.
-  taxWorksheets: gateEnvValue('GATE_TAX_WORKSHEETS'),
 
   // Stops-away tracker count (2026-08-14): "N stops away" on the portal
   // ServiceTracker + public /track page. Read-only, fires no comms; count
@@ -6710,16 +6673,6 @@ function estimateAssessmentFirstLive() {
   return process.env.GATE_ESTIMATE_ASSESSMENT_FIRST === 'true';
 }
 
-// GATE_TAX_SHARED_BILLS read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
-function taxSharedBillsLive() {
-  return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_SHARED_BILLS');
-}
-
-// GATE_TAX_RETURN_ENGINE read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
-function taxReturnEngineLive() {
-  return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_RETURN_ENGINE');
-}
-
 // GATE_SLAB_HOME_NO_TAX read at CALL time (so a flip needs no redeploy).
 function slabHomeNoTaxLive() {
   return gateEnvValue('GATE_SLAB_HOME_NO_TAX');
@@ -6759,11 +6712,6 @@ function slabBusinessSiteTaxLive() {
 // GATE_LAWN_SPRAY_NO_TAX read at CALL time (so a flip needs no redeploy).
 function lawnSprayNoTaxLive() {
   return gateEnvValue('GATE_LAWN_SPRAY_NO_TAX');
-}
-
-// GATE_TAX_WORKSHEETS read at CALL time (so a flip needs no redeploy); needs GATE_BANK_IMPORT too, like the ledger.
-function taxWorksheetsLive() {
-  return gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_WORKSHEETS');
 }
 
 // GATE_PORTAL_CHAT_CUSTOMER_CAP read at CALL time (so a flip needs no redeploy); strict 'true'.
@@ -10473,16 +10421,10 @@ module.exports.commercialAutopayLive = commercialAutopayLive;
 module.exports.commercialFirstVisitLive = commercialFirstVisitLive;
 // GATE_ESTIMATE_ASSESSMENT_FIRST reader, on its own line so gate PRs never conflict.
 module.exports.estimateAssessmentFirstLive = estimateAssessmentFirstLive;
-// GATE_TAX_SHARED_BILLS reader, on its own line so gate PRs never conflict.
-module.exports.taxSharedBillsLive = taxSharedBillsLive;
-// GATE_TAX_RETURN_ENGINE reader, on its own line so gate PRs never conflict.
-module.exports.taxReturnEngineLive = taxReturnEngineLive;
 // GATE_SLAB_HOME_NO_TAX reader, on its own line so gate PRs never conflict.
 module.exports.slabHomeNoTaxLive = slabHomeNoTaxLive;
 // GATE_LAWN_SPRAY_NO_TAX reader, on its own line so gate PRs never conflict.
 module.exports.lawnSprayNoTaxLive = lawnSprayNoTaxLive;
-// GATE_TAX_WORKSHEETS reader, on its own line so gate PRs never conflict.
-module.exports.taxWorksheetsLive = taxWorksheetsLive;
 // GATE_PUBLIC_LLM_SHARED_CAP reader, on its own line so gate PRs never conflict.
 module.exports.publicLlmSharedCapLive = publicLlmSharedCapLive;
 // GATE_PORTAL_CHAT_CUSTOMER_CAP reader, on its own line so gate PRs never conflict.
