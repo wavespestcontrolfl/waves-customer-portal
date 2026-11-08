@@ -102,7 +102,7 @@ export default function RescheduleDialogView({
               <option value="sms">Text message</option>
             </Select>
           </Field>
-          {dayOnlyPromiseOn && <AskedTimeField checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={sending} slot={rescheduleHintSlot({ options, showManual, manualDate, manualTime, reminder24hOn: service.reminder24hOn })} />}
+          {dayOnlyPromiseOn && <AskedTimeField checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={sending} slot={rescheduleHintSlot({ options, showManual, manualDate, manualTime, reminder24hOn: service.reminder24hOn, originalDate: service.scheduledDate })} />}
           {seriesConfirm && (
             <Card data-testid="series-move-confirm"><CardBody>
               <h3 className="text-ui-body font-medium mb-2">Move to {seriesConfirmDate || seriesConfirm.body.newDate}?</h3>

@@ -12382,6 +12382,9 @@ async function comboTargetElapsed(row, changes, newDate, newWindow) {
 }
 
 // 'together': every refusal comes before any write.
+// { customerAskedTime } for a planner body that moves a shared stop, or {} with the gate off (the body stays exactly today's).
+const comboAskedTimeBody = (body) => (require('../services/time-promise').dayOnlyPromiseOn() ? { customerAskedTime: body.customerAskedTime === true } : {});
+
 async function planComboTogetherMove(req, row, changes, shown) {
   const body = req.body;
   const refuse = (status, message, code) => {
@@ -12423,6 +12426,10 @@ async function planComboTogetherMove(req, row, changes, shown) {
     notifyCustomer,
     body: {
       ...(changes.technician ? { technicianId: body.technicianId || null } : {}),
+      // GATE_DAY_ONLY_PROMISE part E: the office's "customer asked for this time" for the stop's new slot. The mover writes it in
+      // each member's own UPDATE (B3), the only write for this move: the per-row edit below never moves (its date and time keys
+      // are removed), so recordOfficeMoveIntent does not fire a second time. Gate off: the planner body is exactly today's.
+      ...comboAskedTimeBody(body),
       expectVisit: { id: shown.id, memberIds: shown.memberIds.map(String), liveCount: shown.liveCount, liveMemberIds: shown.liveMemberIds.map(String) },
     },
     actor,

@@ -37,6 +37,26 @@ describe('day-only promise words and request fields', () => {
     expect(dayScriptApplies(null, NOW)).toBe(false);
   });
 
+  it('a MOVE hint follows dayOnlyMoveDecision: a same-date re-time names the window, only a change of date can be the day', () => {
+    const move = { ...OK, originalDate: '2026-11-12' }; // beyond the cutoff, reminder on, same date as the visit already has
+    expect(askedTimeHint(false, move, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
+    expect(askedTimeHint(false, { ...move, originalDate: '2026-11-12T00:00:00.000Z' }, NOW)).toBe(ASKED_TIME_CHECKED_HINT);
+    expect(askedTimeHint(false, { ...move, originalDate: '2026-11-11' }, NOW)).toBe(PHONE_SCRIPT_HINT);
+    expect(askedTimeHint(false, { ...move, originalDate: undefined }, NOW)).toBe(PHONE_SCRIPT_HINT); // the booking window has none
+  });
+
+  it('the reschedule window: a suggestion on the visit\'s own date makes the hint the second line', () => {
+    const options = [
+      { date: '2026-11-13', suggestedWindow: { start: '08:00' } },
+      { date: '2026-11-12', suggestedWindow: { start: '10:00' } },
+    ];
+    const base = { options, showManual: false, manualDate: '', manualTime: '08:00', reminder24hOn: true };
+    expect(rescheduleHintSlot({ ...base, originalDate: '2026-11-12' })).toEqual({ date: '2026-11-12', start: '10:00', reminder24hOn: true, originalDate: '2026-11-12' });
+    expect(askedTimeHint(false, rescheduleHintSlot({ ...base, originalDate: '2026-11-12' }), NOW)).toBe(ASKED_TIME_CHECKED_HINT);
+    expect(askedTimeHint(false, rescheduleHintSlot({ ...base, originalDate: '2026-11-20' }), NOW)).toBe(PHONE_SCRIPT_HINT);
+    expect(askedTimeHint(false, rescheduleHintSlot({ ...base, showManual: true, manualDate: '2026-11-12', manualTime: '11:00', originalDate: '2026-11-12' }), NOW)).toBe(ASKED_TIME_CHECKED_HINT);
+  });
+
   it('the cutoff is judged on the ET wall clock across a DST change', () => {
     // 2026-11-01 01:30 ET fell back; a visit on 11-03 at 10:00 ET from 11-02 08:00 ET is 26+ hours out (EST), beyond the cutoff.
     expect(startsBeyondCutoff({ date: '2026-11-03', start: '10:00' }, new Date('2026-11-02T13:00:00Z'))).toBe(true);
@@ -48,10 +68,10 @@ describe('day-only promise words and request fields', () => {
       { date: '2026-11-11', suggestedWindow: { start: '09:00' } },
     ];
     expect(rescheduleHintSlot({ options, showManual: false, manualDate: '', manualTime: '08:00', reminder24hOn: true }))
-      .toEqual({ date: '2026-11-11', start: '09:00', reminder24hOn: true });
+      .toEqual({ date: '2026-11-11', start: '09:00', reminder24hOn: true, originalDate: undefined });
     expect(rescheduleHintSlot({ options, showManual: true, manualDate: '2026-11-20', manualTime: '10:00', reminder24hOn: true }))
-      .toEqual({ date: '2026-11-20', start: '10:00', reminder24hOn: true });
-    expect(rescheduleHintSlot({ options: [], showManual: false, manualDate: '', manualTime: '08:00' })).toEqual({ date: '', start: '', reminder24hOn: undefined });
+      .toEqual({ date: '2026-11-20', start: '10:00', reminder24hOn: true, originalDate: undefined });
+    expect(rescheduleHintSlot({ options: [], showManual: false, manualDate: '', manualTime: '08:00' })).toEqual({ date: '', start: '', reminder24hOn: undefined, originalDate: undefined });
   });
 
   it('the booking window: no customer yet reads on; another customer\'s or a missing answer reads off', () => {

@@ -51,3 +51,30 @@ export function withOfficeFields(Component, { block }) {
   }
   return WithOfficeFields;
 }
+
+/**
+ * The 24-hour-reminder answer the Edit appointment window's phone-script hint should use. `service.reminder24hOn` is the answer
+ * for the visit's CURRENT property; when staff pick a different address (`selectedPropertyId`, empty = unchanged) the visit's
+ * texts follow THAT property, so the answer comes from the customer's schedule-estimates reply, the same one the booking
+ * window reads: that property's own answer while property texts are enforced, else the customer row's. Until the reply is in
+ * (or if it fails) the answer is unknown (undefined), which the hint reads as "will not go out". Gate off, or no address
+ * change: the row's own answer and no request.
+ */
+export function usePropertyReminderAnswer(service, selectedPropertyId, enabled) {
+  const customerId = service ? service.customerId : null;
+  const changed = enabled === true && !!selectedPropertyId && !!customerId && String(selectedPropertyId) !== String(service.propertyId || '');
+  const [reply, setReply] = useState(null);
+  useEffect(() => {
+    if (!changed) return undefined;
+    let cancelled = false;
+    adminFetch(`/admin/customers/${customerId}/schedule-estimates`)
+      .then((r) => r.json())
+      .then((data) => { if (!cancelled) setReply({ customerId, data }); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [changed, customerId]);
+  if (!changed) return service ? service.reminder24hOn : undefined;
+  if (!reply || reply.customerId !== customerId) return undefined;
+  const own = reply.data && reply.data.reminder24hByProperty ? reply.data.reminder24hByProperty[selectedPropertyId] : undefined;
+  return own === undefined ? (reply.data ? reply.data.reminder24hOn : undefined) : own;
+}

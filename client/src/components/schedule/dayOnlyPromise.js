@@ -24,7 +24,15 @@ export function startsBeyondCutoff(slot, now = new Date()) {
  *  slot starts after the cutoff AND the customer's 24-hour reminder will go out (`slot.reminder24hOn === true`). A missing or
  *  unknown reminder answer reads as "will not go out", as the senders read unreadable preferences. */
 export function dayScriptApplies(slot, now = new Date()) {
-  return !!slot && slot.reminder24hOn === true && startsBeyondCutoff(slot, now);
+  return !!slot && slot.reminder24hOn === true && changesDate(slot) && startsBeyondCutoff(slot, now);
+}
+
+/** The MOVE rule of time-promise.dayOnlyMoveDecision: a same-date re-time always names the new window, so only a change of
+ *  DATE can be promised as the day. `slot.originalDate` (the visit's date before this save) is given by the edit and
+ *  reschedule windows; the booking window has none and is not a move. Both are plain 'YYYY-MM-DD' ET dates. */
+function changesDate(slot) {
+  if (!slot.originalDate) return true;
+  return String(slot.date || '').slice(0, 10) !== String(slot.originalDate).slice(0, 10);
 }
 
 /** The helper line under the time picker. Box checked: "Tell the customer this time." Box unchecked: the day-only phone
@@ -37,12 +45,15 @@ export function askedTimeHint(checked, slot, now = new Date()) {
 
 /** The slot the reschedule window's hint judges: the custom date and time while that picker is open, else the EARLIEST
  *  suggested option (if even that starts after the cutoff, every option does). `options` = the dialog's suggestions
- *  ({ date, suggestedWindow: { start } }). */
-export function rescheduleHintSlot({ options, showManual, manualDate, manualTime, reminder24hOn }) {
-  if (showManual) return { date: manualDate, start: manualTime, reminder24hOn };
-  const starts = (options || []).map((o) => `${o.date}T${String(o.suggestedWindow?.start || '').slice(0, 5)}`).sort();
-  const [date, start] = (starts[0] || 'T').split('T');
-  return { date, start, reminder24hOn };
+ *  ({ date, suggestedWindow: { start } }). `originalDate`: the visit's date before the move. */
+export function rescheduleHintSlot({ options, showManual, manualDate, manualTime, reminder24hOn, originalDate }) {
+  if (showManual) return { date: manualDate, start: manualTime, reminder24hOn, originalDate };
+  const picks = (options || []).map((o) => ({ date: o.date, start: String(o.suggestedWindow?.start || '').slice(0, 5) }));
+  const earliest = picks.map((o) => `${o.date}T${o.start}`).sort()[0] || 'T';
+  const [date, start] = earliest.split('T');
+  // A suggestion on the visit's own date is a same-date re-time (window wording): the hint judges that one.
+  const sameDate = originalDate ? picks.find((o) => String(o.date).slice(0, 10) === String(originalDate).slice(0, 10)) : null;
+  return { date: sameDate ? sameDate.date : date, start: sameDate ? sameDate.start : start, reminder24hOn, originalDate };
 }
 
 /** The booking window's answer for the chosen customer (`answer` = { id, on, byProperty } from the schedule-estimates reply):

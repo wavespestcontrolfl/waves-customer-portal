@@ -161,6 +161,7 @@ import legacyCompletionAreas from "../../../../shared/legacy-completion-areas.js
 import completionMarkerGrammar from "../../../../shared/completion-marker-grammar.json";
 import { useFeatureFlag, useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import { AskedTimeBoxLegacy, ToldBadgeLegacy } from "../../components/schedule/DayOnlyPromiseLegacy";
+import { usePropertyReminderAnswer } from "../../components/schedule/useHydratedOfficeService";
 import { askedTimeMoveFields } from "../../components/schedule/dayOnlyPromise";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import useDictationPending from "../../hooks/dictationPending";
@@ -2071,6 +2072,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [addressOptions, setAddressOptions] = useState([]);
   const [addressState, setAddressState] = useState("loading");
   const [selectedPropertyId, setSelectedPropertyId] = useState("");
+  // GATE_DAY_ONLY_PROMISE part E: the 24-hour-reminder answer for the property the save will use (the phone-script hint).
+  const reminder24hOn = usePropertyReminderAnswer(service, selectedPropertyId, dayOnlyPromiseOn);
   // Advisory drive-detour suggestions for the same fixed day — picking a
   // chip only fills the window fields (never saves). A terminal visit's
   // date/window edit is a record correction: there is no route to price,
@@ -6116,7 +6119,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 </div>
               )}{" "}
               {dayOnlyPromiseOn && moveNotifyOffered && (
-                <AskedTimeBoxLegacy id="edit-appt-asked-time" checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={saving} colors={D} style={{ marginBottom: 14 }} slot={{ date: form.scheduledDate, start: form.windowStart, reminder24hOn: service.reminder24hOn }} />
+                <AskedTimeBoxLegacy id="edit-appt-asked-time" checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={saving} colors={D} style={{ marginBottom: 14 }} slot={{ date: form.scheduledDate, start: form.windowStart, reminder24hOn, originalDate: service.scheduledDate }} />
               )}{" "}
               {moveNotifyOffered && (
                 <div style={{ marginBottom: 14 }}>
