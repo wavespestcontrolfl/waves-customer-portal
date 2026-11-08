@@ -2092,6 +2092,7 @@ module.exports = {
   productionPlaceholderPayloadValues,
   productionPlaceholderRenderedValues,
   activeSuppressionFor,
+  alertBlockedOperationalSend,
   resolveTemplateForSend,
   activeSuppressionsFor,
   isMarketingSend,
