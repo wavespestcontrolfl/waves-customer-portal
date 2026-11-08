@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../models/db');
+const { dayOnlyIds, dayOnlyFields } = require('../services/time-display');
 const { createDefaultCustomerRows } = require('../services/customer-default-rows');
 const { greetingFirstToken, estimateGreetingFirstToken, estimateGreetingFirstName } = require('../utils/greeting-first-name');
 // TTL-aware "no LIVE delivery claim" predicate + marker fragments,
@@ -1284,24 +1285,35 @@ function existingAppointmentTitle(appointment = {}) {
       weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
     })
     : '';
-  const time = appointment.windowDisplay || appointment.windowStart || '';
+  // GATE_DAY_ONLY_PROMISE (part C1): a day-only visit has no hour; the note stands in its place.
+  const time = appointment.windowDisplay || appointment.windowStart || (appointment.day_only ? appointment.arrival_note : '') || '';
   return [date, time].filter(Boolean).join(' · ') || 'Your scheduled appointment';
+}
+
+// GATE_DAY_ONLY_PROMISE (part C1): tag the linked visit when the customer was told only the day, so
+// shapeLinkedAppointment blanks its hour. A customer-picked slot (the estimate page's own booking) keeps its hour:
+// loadTimeDisplay answers per visit. One read for the one row; any failure leaves the row untagged (hour shown).
+async function withDayOnlyDisplay(row) {
+  if (!row) return row;
+  return (await dayOnlyIds(db, [row])).has(String(row.id)) ? { ...row, day_only_display: true } : row;
 }
 
 function shapeLinkedAppointment(row) {
   if (!row) return null;
+  const dayOnly = row.day_only_display === true;
   return {
     id: row.id,
     scheduledDate: dateOnly(row.scheduled_date),
-    windowStart: hhmm(row.window_start),
-    windowEnd: hhmm(row.window_end),
+    windowStart: dayOnly ? null : hhmm(row.window_start),
+    windowEnd: dayOnly ? null : hhmm(row.window_end),
     // Derived 2h arrival range FIRST: prod window_display values are only ever
     // a bare start time ("9:00 AM" — the phone-booking writer) or NULL, never a
     // range, so stored text can only lose information vs deriving from
     // window_start. Stored text is the fallback for rows with no parseable start.
-    windowDisplay: customerArrivalWindowDisplay(row.window_start) || row.window_display || null,
+    windowDisplay: dayOnly ? null : (customerArrivalWindowDisplay(row.window_start) || row.window_display || null),
     serviceType: row.service_type || 'Service visit',
     status: row.status || null,
+    ...dayOnlyFields(dayOnly),
     // The estimate's OWN uncommitted hold is offered through this same shape
     // on a reload (customer picked a slot, then refreshed) — without the
     // expiry the client rendered it as a committed appointment with no
@@ -9960,9 +9972,9 @@ async function handleEstimateView(req, res, next) {
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
-    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData, {
+    const linkedAppointment = await withDayOnlyDisplay(await findLinkedUpcomingAppointment(estimate, estData, {
       serviceModes: adoptionServiceModesForContract(estimate, estData),
-    });
+    }));
     // Resolved ONCE for this request and handed to every consumer below (the
     // bundle's flags, the hero fork) — a second lookup could answer
     // differently and put contradictory billing units on the same page
@@ -28381,9 +28393,9 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
 async function resolveEstimateAcceptance(estimate, estData, pricingBundle) {
   const defaultServiceMode = defaultServiceModeForEstimate(estData, estimate);
   const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
-  const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData, {
+  const linkedAppointment = await withDayOnlyDisplay(await findLinkedUpcomingAppointment(estimate, estData, {
     serviceModes: adoptionServiceModesForContract(estimate, estData),
-  });
+  }));
   // Narrow low-confidence commercial recurring estimate (the population whose
   // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
   // its accept, whatever the billing mode — invoice-mode holds the first-
@@ -32671,6 +32683,7 @@ module.exports.hasRegulatedCertificateServiceMix = hasRegulatedCertificateServic
 module.exports.glassCategoryEligible = glassCategoryEligible;
 module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
+module.exports.withDayOnlyDisplay = withDayOnlyDisplay;
 module.exports.resolveEstimateAcceptance = resolveEstimateAcceptance;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;

@@ -2684,6 +2684,8 @@ function SavedVisitDetails({ visits }) {
       <strong>{visit.serviceType || visit.type || 'Service visit'}</strong>
       <div>{parseDate(visit.date).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</div>
       {visit.windowStart && <div>Arrival {formatTime(visit.windowStart)} – {formatTime(arrivalWindowEnd(visit.windowStart))}</div>}
+      {/* GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour. */}
+      {!visit.windowStart && visit.day_only && visit.arrival_note && <div>{visit.arrival_note}</div>}
     </li>)}
   </ul>;
 }
@@ -3140,6 +3142,12 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
                 {nextService?.windowStart && (
                   <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
                     {formatTime(nextService.windowStart)} - {formatTime(arrivalWindowEnd(nextService.windowStart))}
+                  </div>
+                )}
+                {/* GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour. */}
+                {!nextService?.windowStart && nextService?.day_only && nextService.arrival_note && (
+                  <div data-testid="next-visit-day-only-note" style={{ marginTop: 2, fontSize: 14, color: muted }}>
+                    {nextService.arrival_note}
                   </div>
                 )}
               </div>
@@ -4451,7 +4459,9 @@ function nextVisitLabel(next) {
   if (!next) return 'No visit scheduled';
   if (next.customerPickBy) return `${PICK_DAY_LABEL} · Pick a time`;
   const day = parseDate(next.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-  const time = next.windowStart ? `${formatTime(next.windowStart)} – ${formatTime(arrivalWindowEnd(next.windowStart))}` : 'Time TBD';
+  const time = next.windowStart
+    ? `${formatTime(next.windowStart)} – ${formatTime(arrivalWindowEnd(next.windowStart))}`
+    : (next.day_only && next.arrival_note ? next.arrival_note : 'Time TBD');
   return `${day} · ${time}`;
 }
 
@@ -5413,6 +5423,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   // Time TBD note helper
   const renderTimeTBD = (s) => {
     if (s.windowStart) return null;
+    // GATE_DAY_ONLY_PROMISE: the time line above already says the window is texted the day before.
+    if (s.day_only) return null;
     if (s.customerPickBy) {
       return (
         <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
@@ -5519,7 +5531,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
         <div style={{ padding: '16px 18px' }}>
           <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{s.serviceType}</div>
           <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
-            {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : (s.customerPickBy ? 'Pick a time' : 'Time TBD')}
+            {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : (s.customerPickBy ? 'Pick a time' : (s.day_only && s.arrival_note ? s.arrival_note : 'Time TBD'))}
           </div>
 
           {/* Service description */}
@@ -5620,7 +5632,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
         <div style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy }}>{s.serviceType}</div>
         {s.customerPickBy && <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginTop: 2 }}>{PICK_DAY_LABEL}</div>}
         <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
-          {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : (s.customerPickBy ? 'Pick a time' : 'Time TBD')}
+          {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : (s.customerPickBy ? 'Pick a time' : (s.day_only && s.arrival_note ? s.arrival_note : 'Time TBD'))}
         </div>
         <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           Visit #{s.visitNum} — {s.description}
@@ -11979,6 +11991,8 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
     const windowEnd = clockLabel(arrivalWindowEnd(event.windowStart || event.window_start));
     if (windowStart && windowEnd) return `${windowStart} - ${windowEnd}`;
     if (windowStart) return windowStart;
+    // GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour.
+    if (event.day_only && event.arrival_note) return event.arrival_note;
 
     const checkIn = clockLabel(event.checkInTime || event.check_in_time);
     const checkOut = clockLabel(event.checkOutTime || event.check_out_time);
