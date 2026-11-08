@@ -2,7 +2,7 @@
 // GATE_DAY_ONLY_PROMISE part E: an editor opened on a row from any feed (the month view, a customer page) reads the visit's
 // office fields first, so its "Customer asked for this time" box starts from the stored choice.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 const gate = { on: true };
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: (key) => key === 'day_only_promise' && gate.on }));
@@ -29,46 +29,94 @@ describe('needsOfficeFields', () => {
 });
 
 describe('withOfficeFields', () => {
-  it('a row without the fields: the editor waits, reads visit-summary once, then opens with the stored choice', async () => {
+  const Wrapped = withOfficeFields(Probe, { block: true });
+  const asText = () => screen.getByTestId('probe').textContent;
+
+  it('a row without the fields: the editor waits, reads visit-summary once, then opens with the stored choice (true = checked)', async () => {
     const fetcher = vi.fn(async () => reply({ visit: null, office: { customerAskedTime: true, told: { level: 'hour' }, reminder24hOn: true } }));
     vi.stubGlobal('fetch', fetcher);
-    const Wrapped = withOfficeFields(Probe, { block: true });
     render(<Wrapped service={{ id: 'v1' }} />);
     expect(screen.queryByTestId('probe')).toBeNull();
-    await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('true|hour|true'));
+    await waitFor(() => expect(asText()).toBe('true|hour|true'));
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(String(fetcher.mock.calls[0][0])).toMatch(/\/admin\/schedule\/v1\/visit-summary$/);
   });
 
-  it('a failed read still opens the editor, with the choice unknown (unchecked), no badge and no reminder answer', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
-    const Wrapped = withOfficeFields(Probe, { block: true });
+  it('a successful read with no recorded choice (office present, customerAskedTime null) is a real "no choice": opens unchecked', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => reply({ visit: null, office: { customerAskedTime: null, reminder24hOn: true } })));
     render(<Wrapped service={{ id: 'v1' }} />);
-    await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('null|-|undefined'));
+    await waitFor(() => expect(asText()).toBe('null|-|true'));
   });
 
-  it('the visit sheet (block: false) shows at once and merges the fields in', async () => {
+  it('a failed read is retried once, then the editor does NOT open on a default: Try again and Close show instead', async () => {
+    const fetcher = vi.fn(async () => { throw new Error('offline'); });
+    vi.stubGlobal('fetch', fetcher);
+    const onClose = vi.fn();
+    render(<Wrapped service={{ id: 'v1' }} onClose={onClose} />);
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('Could not load this appointment. You can try again.'));
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId('probe')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('Try again reads again and opens the editor when the read now works', async () => {
+    let healthy = false;
+    const fetcher = vi.fn(async () => {
+      if (!healthy) throw new Error('offline');
+      return reply({ visit: null, office: { customerAskedTime: true } });
+    });
+    vi.stubGlobal('fetch', fetcher);
+    render(<Wrapped service={{ id: 'v1' }} onClose={vi.fn()} />);
+    await screen.findByRole('alert');
+    healthy = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(asText()).toBe('true|-|undefined'));
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it('a non-OK reply, a reply without `office`, and an office without the stored choice are all UNKNOWN (retried, then the failed panel)', async () => {
+    for (const make of [
+      () => ({ ok: false, status: 500, json: async () => ({ office: { customerAskedTime: true } }) }),
+      () => reply({ visit: null }),
+      () => reply({ visit: null, office: { told: { level: 'day' } } }),
+    ]) {
+      const fetcher = vi.fn(async () => make());
+      vi.stubGlobal('fetch', fetcher);
+      const view = render(<Wrapped service={{ id: 'v1' }} onClose={vi.fn()} />);
+      await screen.findByRole('alert');
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(screen.queryByTestId('probe')).toBeNull();
+      view.unmount();
+    }
+  });
+
+  it('the visit sheet (block: false) shows at once, merges the fields in, and keeps showing without them if the read never works', async () => {
+    const Sheet = withOfficeFields(Probe, { block: false });
     vi.stubGlobal('fetch', vi.fn(async () => reply({ visit: null, office: { customerAskedTime: false, told: { level: 'day' } } })));
-    const Wrapped = withOfficeFields(Probe, { block: false });
-    render(<Wrapped service={{ id: 'v1' }} />);
-    expect(screen.getByTestId('probe').textContent).toBe('undefined|-|undefined');
-    await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('false|day|undefined'));
+    render(<Sheet service={{ id: 'v1' }} />);
+    expect(asText()).toBe('undefined|-|undefined');
+    await waitFor(() => expect(asText()).toBe('false|day|undefined'));
+    cleanup();
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
+    render(<Sheet service={{ id: 'v2' }} />);
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(2));
+    expect(asText()).toBe('undefined|-|undefined');
   });
 
   it('no request: a row that carries the fields, the gate off, or a technician\'s sheet', async () => {
     const fetcher = vi.fn(async () => reply({}));
     vi.stubGlobal('fetch', fetcher);
-    const Wrapped = withOfficeFields(Probe, { block: true });
     render(<Wrapped service={{ id: 'v1', customerAskedTime: false, reminder24hOn: true }} />);
-    expect(screen.getByTestId('probe').textContent).toBe('false|-|true');
+    expect(asText()).toBe('false|-|true');
     cleanup();
     gate.on = false;
     render(<Wrapped service={{ id: 'v1' }} />);
-    expect(screen.getByTestId('probe').textContent).toBe('undefined|-|undefined');
+    expect(asText()).toBe('undefined|-|undefined');
     cleanup();
     gate.on = true;
     render(<Wrapped service={{ id: 'v1' }} adminActions={false} />);
-    expect(screen.getByTestId('probe').textContent).toBe('undefined|-|undefined');
+    expect(asText()).toBe('undefined|-|undefined');
     expect(fetcher).not.toHaveBeenCalled();
   });
 });
