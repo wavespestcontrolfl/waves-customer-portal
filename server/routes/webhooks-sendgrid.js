@@ -153,7 +153,12 @@ function applyRetryableNewsletterDeliveryFilter(query) {
     .whereNull('clicked_at');
 }
 
-router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
+// SendGrid posts many events in one JSON array, and a big send can pass
+// body-parser's 100 KB default. A rejected batch is retried at the same size
+// until SendGrid gives up, so its bounces and drops would never be recorded.
+const EVENTS_BODY_LIMIT = '5mb';
+
+router.post('/events', express.raw({ type: '*/*', limit: EVENTS_BODY_LIMIT }), async (req, res) => {
   // Fail closed unless the public key is configured — we don't want anyone
   // POSTing fake bounces to suppress recipients.
   if (!process.env.SENDGRID_WEBHOOK_PUBLIC_KEY) {
