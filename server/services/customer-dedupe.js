@@ -1495,7 +1495,7 @@ const SINGLETON_BOOLEAN_SEMANTICS = { notification_prefs: 'and', property_prefer
 // they never pass through the boolean AND rule (each is settled on its own).
 const CHANNEL_CHOICE_STAMPS = new Set(['request_channel_explicit', 'appointment_confirmation_channel_explicit']);
 
-// The confirmation channel's choice stamp after a merge (GATE_NEW_CLIENT_CONFIRM_EMAIL):
+// The confirmation channel's choice stamp after a merge:
 // the kept row reads as chosen when either row was chosen or predates the stamp
 // (anything but false). A merge can keep or add a choice, never turn one back
 // into a default, because a lost Text choice would let a first-visit confirmation
