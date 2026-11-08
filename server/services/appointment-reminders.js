@@ -11,7 +11,7 @@
  * All dates displayed in America/New_York timezone.
  *
  * Booking confirmations for a NEW client (no completed visit) go by text AND
- * email under GATE_NEW_CLIENT_CONFIRM_EMAIL: resolveConfirmationChannel
+ * email: resolveConfirmationChannel
  * promotes the default 'sms' channel to 'both' and the existing 'both' path
  * delivers it. An explicit portal choice, an unreadable prefs row, an email
  * opt-out or no usable email keeps today's SMS-led behavior (see
@@ -300,9 +300,9 @@ async function resolve72hChannel(prefChannel, scheduledServiceId, { prefsUnavail
   return (await isOneTimeVisit(scheduledServiceId)) ? 'email' : 'sms';
 }
 
-// Effective channel for a booking CONFIRMATION (owner ruling 2026-10-24,
-// GATE_NEW_CLIENT_CONFIRM_EMAIL): a NEW client gets the text AND the email.
-// Under the gate a confirmation whose channel resolves to the default 'sms'
+// Effective channel for a booking CONFIRMATION (owner ruling 2026-10-24):
+// a NEW client gets the text AND the email.
+// A confirmation whose channel resolves to the default 'sms'
 // is promoted to 'both' — the existing text + email path (Codex #3361,
 // #3588, #3609 hardening), never a parallel send. Same fail-closed order as
 // resolve72hChannel; anything that is not a provable "new client with a
@@ -314,7 +314,6 @@ async function resolve72hChannel(prefChannel, scheduledServiceId, { prefsUnavail
 //     row that predates the stamp counts as picked (20261024230000), so only a
 //     customer created after it can be promoted;
 //   - portal-wide email off, or the confirmation toggle off: 'sms';
-//   - gate off: 'sms';
 //   - new client = no scheduled_services row with status 'completed' for this
 //     customer, AND member_since (the became-a-customer date) unset or within
 //     NEW_CLIENT_DAYS, both read at send time. Either test failing keeps
@@ -334,8 +333,6 @@ async function resolveConfirmationChannel(prefs, { customerId, scheduledServiceI
   if (prefs.emailEnabled === false || prefs.appointmentConfirmation === false) return 'sms';
   if (!customerId) return 'sms';
   try {
-    // Read inside the try: a gate reader that cannot be read fails closed.
-    if (!require('../config/feature-gates').newClientConfirmEmailLive()) return 'sms';
     const completed = await db('scheduled_services')
       .where({ customer_id: customerId, status: 'completed' })
       .first('id');
@@ -2734,7 +2731,7 @@ async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) 
     // Explicit confirmation-channel choice: stamped by the notifications
     // route on any customer write of the channel; read from the same
     // owner-resolved row as the channel itself. The new-client text + email
-    // promotion (GATE_NEW_CLIENT_CONFIRM_EMAIL) skips it.
+    // promotion skips it.
     confirmationChannelExplicit: channelPrefs?.appointment_confirmation_channel_explicit === true,
     reminder72hChannel: apptChannel(channelPrefs?.service_reminder_72h_channel, { preserveAppChoice: true }),
     // Explicit delivery-method choice (Codex #3588 P1): stamped by the
@@ -2964,7 +2961,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       logger.info(`[appt-remind] Confirmation skipped by preference for customer ${customerId}`);
       return false;
     }
-    // New-client promotion (GATE_NEW_CLIENT_CONFIRM_EMAIL): every later read
+    // New-client promotion: every later read
     // of the channel below uses this value, so the send-window hold, the held
     // email leg and deliverAppointmentNotice all see the same channel.
     const confirmationChannel = await resolveConfirmationChannel(prefs, { customerId, scheduledServiceId });
