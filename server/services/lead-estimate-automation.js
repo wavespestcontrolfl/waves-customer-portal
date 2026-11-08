@@ -490,8 +490,8 @@ function mapServiceKeyToEstimateServices(serviceKey, { instant = null } = {}) {
 // `measurements`: county-assessed { homeSqFt, lotSqFt } or null, read by the
 // caller (the webhook reads the cache before its phone lock; the background
 // lookup passes its own; lead-draft-measurements.js). Left undefined, the
-// build reads the lookup cache itself (free; null when the
-// cache has no trusted size).
+// build reads the lookup cache itself (free; null while
+// GATE_LEAD_DRAFT_PROPERTY_LOOKUP is off).
 async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, body = {}, readiness = {}, measurements } = {}) {
   const serviceInterest = firstNonEmpty(readiness.serviceInterest, intake.serviceInterest, customer.service_interest);
   const serviceKey = readiness.serviceKey || null;

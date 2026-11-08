@@ -2020,6 +2020,14 @@ const gates = {
   // flowing while quoting stays manual.
   leadEstimateAutomation: process.env.GATE_LEAD_ESTIMATE_AUTOMATION === 'true',
 
+  // Lead draft county size (owner 2026-10-24, option A of the lead draft
+  // page): a lead draft priced on the default home size gets the county-
+  // assessed home and lot size from the property lookup (a free cache read at
+  // build time; one paid lookup in the background, then a guarded re-price of
+  // an untouched draft). Exactly `true`. Read at call time in
+  // services/lead-draft-measurements.js; this entry is for logGateStatus only.
+  leadDraftPropertyLookup: process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP === 'true',
+
   // Lead Estimate Auto-Send — sends generated lead-webhook draft estimates
   // after a delay. Requires leadEstimateAutomation in the scheduler too.
   leadEstimateAutoSend: process.env.GATE_LEAD_ESTIMATE_AUTO_SEND === 'true',
@@ -7924,6 +7932,11 @@ function estimateSlotOnePerHourLive() {
   return process.env.GATE_ESTIMATE_SLOT_ONE_PER_HOUR === 'true';
 }
 
+// GATE_LEAD_DRAFT_PROPERTY_LOOKUP read at CALL time (so a flip needs no redeploy); strict 'true'.
+function leadDraftPropertyLookupLive() {
+  return process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP === 'true';
+}
+
 // GATE_FOLLOWUP_DUE_ALERT read at CALL time (so a flip needs no redeploy); strict 'true', dark (owner 2026-11-02, B1).
 // On, the daily 8:20 AM ET job in services/followup-due-alerts.js raises one admin bell per flagged follow-up that is due
 // and not booked, plus one catch-up bell for the older ones. Off = the cron returns before any read.
@@ -10133,6 +10146,8 @@ module.exports.satellitePalmCountTypedLive = satellitePalmCountTypedLive;
 module.exports.callAddressFamilyCardLive = callAddressFamilyCardLive;
 // GATE_PLAN_RATE_LEDGER_RECONCILE reader, on its own line so gate PRs never conflict.
 module.exports.planRateLedgerReconcileLive = planRateLedgerReconcileLive;
+// GATE_LEAD_DRAFT_PROPERTY_LOOKUP reader, on its own line so gate PRs never conflict.
+module.exports.leadDraftPropertyLookupLive = leadDraftPropertyLookupLive;
 // GATE_ESTIMATE_CONSUMER_NOTICE reader, on its own line so gate PRs never conflict.
 module.exports.estimateConsumerNoticeLive = estimateConsumerNoticeLive;
 // GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND reader, on its own line so gate PRs never conflict.

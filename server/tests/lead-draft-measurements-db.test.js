@@ -1,5 +1,6 @@
 /**
- * The lead draft background re-price against a real estimates row: one live lookup for a draft still on the
+ * The lead draft background re-price (GATE_LEAD_DRAFT_PROPERTY_LOOKUP)
+ * against a real estimates row: one live lookup for a draft still on the
  * default size, then a re-price through the real draft builder, written only
  * while the row is exactly as the webhook created it. The lookup is stubbed
  * (no network); the rows are this suite's own, removed after. It refuses any
@@ -36,7 +37,9 @@ maybeDescribe('lead draft background re-price (live Postgres)', () => {
     ({ buildAutomatedLeadDraftEstimate, evaluateLeadEstimateAutomationReadiness } = require('../services/lead-estimate-automation'));
     ({ estimateEditVersion } = require('../services/admin-estimate-persistence'));
   });
+  beforeEach(() => { process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP = 'true'; });
   afterEach(() => {
+    delete process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP;
     performPropertyLookup.mockReset();
   });
   afterAll(async () => {
@@ -66,10 +69,12 @@ maybeDescribe('lead draft background re-price (live Postgres)', () => {
   const rebuildFor = (inputs) => jest.fn((measurements) => buildAutomatedLeadDraftEstimate({ ...inputs, measurements }));
 
   // The row the webhook inserts for a draft priced on the defaults (the real
-  // builder, with no cached county size).
+  // builder, gate off, so it reads no cache).
   async function webhookDraft() {
     const inputs = lead();
-    const draft = await buildAutomatedLeadDraftEstimate({ ...inputs, measurements: null });
+    delete process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP;
+    const draft = await buildAutomatedLeadDraftEstimate(inputs);
+    process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP = 'true';
     expect(draft.automation.sizeSource).toBe('default');
     const [row] = await db('estimates').insert({
       customer_name: 'Pat Synthetic',
@@ -162,6 +167,17 @@ maybeDescribe('lead draft background re-price (live Postgres)', () => {
       expect(estimateEditVersion(await reread(row.id))).toBe(before);
       performPropertyLookup.mockReset();
     }
+  });
+
+  test('gate off: nothing is scheduled, read or spent', async () => {
+    const { row, inputs } = await webhookDraft();
+    delete process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP;
+    const rebuild = rebuildFor(inputs);
+    expect(await runLeadDraftPropertyLookup({ estimateId: row.id, address: ADDRESS, rebuild })).toEqual({ skipped: 'disabled' });
+    await scheduleLeadDraftPropertyLookup({ estimateId: row.id, address: ADDRESS, rebuild });
+    expect(await pendingLeadMeasurements(row.id)).toBeUndefined();
+    expect(performPropertyLookup).not.toHaveBeenCalled();
+    expect(rebuild).not.toHaveBeenCalled();
   });
 
   test('the webhook\'s scheduled call re-prices in the background', async () => {

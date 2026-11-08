@@ -1,6 +1,6 @@
 /**
  * Real home and lot size for website lead drafts (owner 2026-10-24, option A
- * of the lead draft page). The website forms
+ * of the lead draft page; GATE_LEAD_DRAFT_PROPERTY_LOOKUP). The website forms
  * carry no size, so a lead draft priced on 2,000 / 8,000 sq ft defaults. These
  * cover which county figures count, the free cache read the builder makes, and
  * what a county-sized draft carries. The background re-price against a real
@@ -47,6 +47,7 @@ function readyLead({ customer = {}, body = {} } = {}) {
 }
 
 afterEach(() => {
+  delete process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP;
   performPropertyLookup.mockReset();
 });
 
@@ -91,7 +92,18 @@ describe('county sizes a lead draft may use', () => {
 });
 
 describe('the draft builder\'s cache read', () => {
-  test('a cached county record prices the draft on the real size, read cache-only', async () => {
+  test('gate off: no lookup is read and the draft prices on the defaults, as before', async () => {
+    const lead = readyLead();
+    const draft = await buildAutomatedLeadDraftEstimate(lead);
+    expect(performPropertyLookup).not.toHaveBeenCalled();
+    expect(draft.automation.sizeSource).toBe('default');
+    expect(draft.automation.engineInput).toMatchObject({ homeSqFt: 2000, lotSqFt: 8000, lotSizeMeasured: false });
+    expect(draft.automation.review).toContain('property_measurements_defaulted');
+    expect(draft.estimateData.automation.leadEstimateAutomation.review).toContain('property_measurements_defaulted');
+  });
+
+  test('gate on: a cached county record prices the draft on the real size, read cache-only', async () => {
+    process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP = 'true';
     performPropertyLookup.mockResolvedValue(lookupOf(countyRecord()));
     const lead = readyLead();
     const draft = await buildAutomatedLeadDraftEstimate(lead);
@@ -112,7 +124,8 @@ describe('the draft builder\'s cache read', () => {
     expect(lead.readiness.review).toContain('property_measurements_defaulted'); // the caller's object is not rewritten
   });
 
-  test('a cache miss, a unit address or a lookup error keeps the defaults', async () => {
+  test('gate on: a cache miss, a unit address or a lookup error keeps the defaults', async () => {
+    process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP = 'true';
     performPropertyLookup.mockResolvedValueOnce(null);
     expect((await buildAutomatedLeadDraftEstimate(readyLead())).automation.sizeSource).toBe('default');
 
@@ -141,6 +154,7 @@ describe('the draft builder\'s cache read', () => {
   });
 
   test('measurements passed in (the background lookup) skip the cache read', async () => {
+    process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP = 'true';
     const draft = await buildAutomatedLeadDraftEstimate({ ...readyLead(), measurements: { homeSqFt: 3100, lotSqFt: 14500, source: 'county_assessed' } });
     expect(performPropertyLookup).not.toHaveBeenCalled();
     expect(draft.automation.engineInput).toMatchObject({ homeSqFt: 3100, lotSqFt: 14500 });

@@ -27,11 +27,12 @@
 // not snap to a different house; anything else keeps the default and the
 // flag for staff. Imputed sizes are never written to the customer or the
 // property row: they stay on the draft's engine input, with provenance.
-// Logs carry ids and outcomes only, never an address.
+// Dark behind GATE_LEAD_DRAFT_PROPERTY_LOOKUP (read at call time). Logs carry
+// ids and outcomes only, never an address.
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
+const { leadDraftPropertyLookupLive, isEnabled } = require('../config/feature-gates');
 const { lookupOptionsFor } = require('./property-lookup/lookup-callers');
 const { resolvePropertyFacts, SQFT_SOURCES } = require('./estimator-engine/source-arbitration');
 const { hasWrongPremiseFlag } = require('./lookup-confidence');
@@ -89,7 +90,7 @@ function countyMeasurements(lookup) {
 
 // The draft builder's read: cache only, never spends, never throws.
 async function cachedLeadMeasurements(address) {
-  if (!wholeHomeAddress(address)) return null;
+  if (!leadDraftPropertyLookupLive() || !wholeHomeAddress(address)) return null;
   try {
     const { performPropertyLookup } = require('../routes/property-lookup-v2');
     const lookup = await performPropertyLookup(address, lookupOptionsFor('lead_draft', { cacheOnly: true, persist: false }));
@@ -125,7 +126,7 @@ function untouchedDefaultedDraft(row) {
  * logs it); the draft then stays as it was.
  */
 async function runLeadDraftPropertyLookup({ estimateId, address, rebuild, conn = db, onMeasurements = () => {} }) {
-  if (!isEnabled('leadEstimateAutomation')) return { skipped: 'disabled' };
+  if (!leadDraftPropertyLookupLive() || !isEnabled('leadEstimateAutomation')) return { skipped: 'disabled' };
   if (!estimateId || typeof rebuild !== 'function' || !wholeHomeAddress(address)) return { skipped: 'not_eligible' };
   const { estimateEditVersion } = require('./admin-estimate-persistence');
   const before = await conn('estimates').where({ id: estimateId }).first();
@@ -176,6 +177,7 @@ async function runLeadDraftPropertyLookup({ estimateId, address, rebuild, conn =
 // webhook starts after it always finds it. Returns a promise that settles
 // (never rejects) when the step is done; the webhook does not wait on it.
 function scheduleLeadDraftPropertyLookup(args) {
+  if (!leadDraftPropertyLookupLive()) return Promise.resolve();
   let settle;
   const pending = new Promise((resolve) => { settle = resolve; });
   pendingMeasurements.set(args.estimateId, pending);
