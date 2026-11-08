@@ -864,9 +864,9 @@ const ICS_DAY_ONLY_DESCRIPTION = "We'll text your arrival window the day before.
 // DTSTART/DTEND for an all-day event on `date` (YYYY-MM-DD): the end date is exclusive, so it is the next day.
 function allDayEventLines(date) {
   const compact = (d) => d.replace(/-/g, '');
-  const next = new Date(`${date}T12:00:00Z`);
-  next.setUTCDate(next.getUTCDate() + 1);
-  return [`DTSTART;VALUE=DATE:${compact(date)}`, `DTEND;VALUE=DATE:${compact(next.toISOString().slice(0, 10))}`];
+  const nextDay = new Date(`${date}T12:00:00Z`);
+  nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+  return [`DTSTART;VALUE=DATE:${compact(date)}`, `DTEND;VALUE=DATE:${compact(nextDay.toISOString().slice(0, 10))}`];
 }
 
 // Folds a content line to the 75-octet limit RFC 5545 requires; unfolded
