@@ -1866,10 +1866,23 @@ function slotPinFor(meta) {
 // from, so both cases SUPPRESS it (logged by the scheduler as stale_replay). That is safe: the 24-hour reminder still gives
 // the window to every customer who will get it, and a customer who switched it off chose that. A read failure holds the row
 // for a bounded retry (failClosed).
+// A queued MOVE notice carries its own stamp (move_notice_at, saved by time-promise.js promiseMetaOf) and the slot it quoted
+// (guard_slot_ms / promised_date): the chokepoint then judges the promises against that notice, so the old date's window
+// confirmation does not supersede it. {} for any other queued day-only body (a confirmation or 72-hour reminder).
+function queuedMoveNotice(meta) {
+  if (!meta.move_notice_at) return {};
+  const slot = Number(meta.guard_slot_ms);
+  return {
+    noticeAt: meta.move_notice_at,
+    ...(Number.isFinite(slot) && meta.guard_slot_ms != null ? { apptTime: new Date(slot) } : {}),
+    ...(meta.promised_date ? { noticeDate: meta.promised_date } : {}),
+  };
+}
+
 async function dayPromiseStillValid(meta) {
   try {
     const verdict = await require('../appointment-reminders').revalidateDelayedDaySend({
-      customerId: meta.customer_id, scheduledServiceId: meta.scheduled_service_id,
+      customerId: meta.customer_id, scheduledServiceId: meta.scheduled_service_id, ...queuedMoveNotice(meta),
     });
     if (verdict === 'day') return { eligible: true };
     return { eligible: false, reason: verdict === 'suppress' ? 'day-promise-superseded' : 'day-promise-no-longer-valid' };

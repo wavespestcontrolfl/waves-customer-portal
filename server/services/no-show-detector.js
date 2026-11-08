@@ -581,7 +581,10 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .where((qb) => qb.whereRaw("fb.metadata->>'provider_sid' IS NULL").orWhereNull('fbs.id')
         .orWhereIn('fbs.status', DELIVERED_SMS_STATUSES))
       .whereRaw("sm.rows @> ANY (SELECT jsonb_build_array(jsonb_build_object('id', v)) FROM unnest(?::text[]) AS v)", [visitIds])
-      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'sm.result', conn.raw("(fb.metadata->>'communicated_at')::timestamptz as sent_at")),
+      // promise_level: the fallback row of a DAY-ONLY series notice carries the day marker (GATE_DAY_ONLY_PROMISE part B2),
+      // so the moved siblings read as a day promise, not an unknown window.
+      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'sm.result', conn.raw("(fb.metadata->>'communicated_at')::timestamptz as sent_at"),
+        conn.raw("fb.metadata->>'promise_level' as promise_level")),
     () => conn('series_moves as sm')
       // The move's own series text, joined by the series_move_id its metadata
       // carries, and held to the SAME delivery bar as any other promise
@@ -616,7 +619,8 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // limits) could abort the whole tick (codex P2 round 11). The GIN index
       // still serves each generated element.
       .whereRaw("sm.rows @> ANY (SELECT jsonb_build_array(jsonb_build_object('id', v)) FROM unnest(?::text[]) AS v)", [visitIds])
-      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'sm.result', 'a.sent_at'),
+      // promise_level: a DAY-ONLY series notice (GATE_DAY_ONLY_PROMISE part B2) tells the siblings the day, not an hour.
+      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'sm.result', 'a.sent_at', conn.raw("a.metadata->>'promise_level' as promise_level")),
   ];
   const results = [];
   if (conn.isTransaction) {
@@ -828,6 +832,14 @@ function anchorStopStartAt(move) {
   return Number.isFinite(at.getTime()) ? at.toISOString() : null;
 }
 
+// What a series notice told one moved visit: its start (only an anchor-stop partner is told one) or, for a DAY-ONLY notice
+// (promise_level 'day', GATE_DAY_ONLY_PROMISE part B2: no start was quoted, every moved visit was told the DAY), start_at null
+// with level 'day'. An unmarked notice keeps its exact shape.
+function seriesTold(move, anchorStopPartner) {
+  if (move.promise_level === 'day') return { start_at: null, level: 'day' };
+  return { start_at: anchorStopPartner ? anchorStopStartAt(move) : null };
+}
+
 function seriesSupersessions(rows = [], candidates = new Set()) {
   // One row per DELIVERED recipient of the move's text (a fan-out to two
   // appointment contacts writes two audit rows), so keep the earliest
@@ -844,7 +856,7 @@ function seriesSupersessions(rows = [], candidates = new Set()) {
       if (prior && instant(prior.communicated_at) <= instant(move.sent_at)) continue;
       const anchorStopPartner = occurrence.partner === true
         && String(occurrence.forOccurrenceId || '') === String(move.anchor_service_id || '');
-      earliest.set(key, { visit_id: visitId, start_at: anchorStopPartner ? anchorStopStartAt(move) : null, communicated_at: move.sent_at, source: 'series_move', source_id: move.id });
+      earliest.set(key, { visit_id: visitId, ...seriesTold(move, anchorStopPartner), communicated_at: move.sent_at, source: 'series_move', source_id: move.id });
     }
   }
   return [...earliest.values()];

@@ -27,7 +27,7 @@ const { sendCustomerMessage, classifyDeliveryCertainty } = require('./messaging/
 const { readCachedLineType, cacheLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
 const { getAppointmentContacts, isServiceContactRole, firstNameFrom, PREFS_UNAVAILABLE } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
-const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays, etParts } = require('../utils/datetime-et');
+const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays, etParts, dateOnlyString } = require('../utils/datetime-et');
 
 // Fallback parts for resolveCommittedVisitTime from a caller's appointment
 // time: the 'YYYY-MM-DDTHH:MM' strings every registration path builds, or
@@ -700,7 +700,7 @@ function cancellationBinding(stamp) {
 // (MOVE_NOTICE_REFUSALS). `cancellation` binds a cancellation email to its own
 // notice (cancellationNoticeStamp). Returns true when the email went out.
 // Never throws.
-async function deliverMoveNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, arrivalWindow, windowUnknown, notificationEventKey, noticeAt, cancellation, sendOutcome }) {
+async function deliverMoveNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, arrivalWindow, windowUnknown, notificationEventKey, noticeAt, cancellation, sendOutcome, dayOnly }) {
   try {
     if (!require('../config/feature-gates').moveNoticeEmailLive() || !customerId || !scheduledServiceId) return false;
     if (MOVE_NOTICE_REFUSALS.has(sendOutcome?.blockedCode)) return false;
@@ -713,6 +713,8 @@ async function deliverMoveNoticeEmail({ kind, customerId, scheduledServiceId, ap
     const res = await MOVE_NOTICE_SENDERS[kind]({
       customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, arrivalWindow, windowUnknown, notificationEventKey, stillCurrent,
       idempotencyKey: moveNoticeEmailKey(kind, scheduledServiceId, { apptTime, windowUnknown, notificationEventKey, noticeAt, cancellation }),
+      // GATE_DAY_ONLY_PROMISE part B2: a day-only reschedule text is followed by the day-only email (kind 'rescheduled' only).
+      ...require('./day-only-move-notice').moveEmailDayArg(dayOnly, kind),
     });
     if (res?.ok) {
       logger.info(`[appt-remind] ${kind} email sent for ${scheduledServiceId} (the text reached nobody)`);
@@ -753,7 +755,9 @@ function bouncedNoticeKind(audit) {
 // reminder row's, which its claim binding (cancellationStillOwned) proves is
 // still the same cancellation.
 function bouncedNoticeTime(kind, meta, row) {
-  const quoted = [meta.rendered_slot_ms, meta.move_notice_slot_ms]
+  // A day-only text records no rendered slot; its queued-and-replayed twin keeps only B1's promise fields, so the guard slot
+  // (guard_slot_ms) is the last place the quoted slot survives.
+  const quoted = [meta.rendered_slot_ms, meta.move_notice_slot_ms, meta.guard_slot_ms]
     .filter((ms) => ms != null).map(Number).find(Number.isFinite);
   if (quoted !== undefined) return new Date(quoted);
   return kind === 'cancelled' && row?.appointment_time ? new Date(row.appointment_time) : null;
@@ -769,14 +773,30 @@ async function deliverBouncedMoveNoticeEmail({ kind, audit, customerId, schedule
     logger.info(`[appt-remind] bounced ${kind} notice for ${scheduledServiceId}: no quoted time on record, no email`);
     return;
   }
+  // GATE_DAY_ONLY_PROMISE part B2: a bounced DAY-ONLY reschedule text (window_unknown only because it quoted no window) goes
+  // through B1's delayed-send chokepoint (revalidateDelayedDaySend) before its recovery email: 'day' -> the day-only email;
+  // 'window' (inside the cutoff, the gate rolled back, the 24-hour reminder off) -> today's window email; 'suppress' (a later
+  // promise already stands, or none can be read) -> no email.
+  const dayText = kind === 'rescheduled' && isDayPromise(meta);
+  let dayOnly = false;
+  if (dayText) {
+    const verdict = await revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, noticeAt: meta.move_notice_at || audit.created_at });
+    if (verdict === 'suppress') {
+      logger.info(`[appt-remind] bounced day-only ${kind} text for ${scheduledServiceId}: a later promise already stands (or none can be read) - recovery email suppressed as stale`);
+      return;
+    }
+    dayOnly = verdict === 'day';
+  }
+  const windowUnknown = meta.window_unknown === true && !dayText;
   await deliverMoveNoticeEmail({
     kind, customerId, scheduledServiceId, apptTime,
     serviceLabel: smsServiceLabelStored(row.service_type),
-    arrivalWindow: meta.window_unknown === true ? require('../utils/sms-time-format').UNKNOWN_ARRIVAL_WINDOW : formatArrivalWindow(apptTime),
-    windowUnknown: meta.window_unknown === true,
+    arrivalWindow: windowUnknown ? require('../utils/sms-time-format').UNKNOWN_ARRIVAL_WINDOW : formatArrivalWindow(apptTime),
+    windowUnknown,
     notificationEventKey: meta.notificationEventKey,
     noticeAt: meta.move_notice_at || audit.created_at,
     cancellation: cancellationBinding(meta),
+    ...dayOnlyArg(dayOnly),
   });
 }
 
@@ -1241,11 +1261,11 @@ function reminder24hWillSend(prefs) {
 }
 
 /** True when this send may promise only the day. Gate off (or any error): false, and nothing is read. */
-async function dayOnlyForSend({ id, startAt, reminder24hEnabled }) {
+async function dayOnlyForSend({ id, startAt, reminder24hEnabled, ignoreLevel = false }) {
   try {
     const timePromise = require('./time-promise');
     if (!timePromise.dayOnlyPromiseOn()) return false;
-    const decision = await timePromise.dayOnlySendDecision(db, { id, startAt, reminder24hEnabled });
+    const decision = await timePromise.dayOnlySendDecision(db, { id, startAt, reminder24hEnabled, ...(ignoreLevel ? { ignoreLevel: true } : {}) });
     return decision.dayOnly === true;
   } catch (err) {
     logger.warn(`[appt-remind] day-only decision failed for ${id} (${err.message}) - sending the window copy`);
@@ -1257,7 +1277,46 @@ async function dayOnlyForSend({ id, startAt, reminder24hEnabled }) {
  *  no 24-hour text will ever follow) is never day-only. */
 async function confirmationDayOnly(record, { scheduledServiceId, apptTime, prefs }) {
   if (!scheduledServiceId || record?.windows_preclosed === true) return false;
-  return dayOnlyForSend({ id: scheduledServiceId, startAt: apptTime, reminder24hEnabled: reminder24hWillSend(prefs) });
+  const args = { id: scheduledServiceId, startAt: apptTime, reminder24hEnabled: reminder24hWillSend(prefs) };
+  return (await dayOnlyForSend(args)) || moveReplayDayOnly(args);
+}
+
+/** The slot a customer move committed, for binding its intent write to it: the caller's pinned slot (options.expectSchedule)
+ *  when it passed one, else the slot it named (`newTime`), with no window when the visit is windowless. */
+function customerMoveSlot(newTime, options, resolved) {
+  const pinned = options && options.expectSchedule;
+  if (pinned && pinned.date) {
+    const hasStart = Object.prototype.hasOwnProperty.call(pinned, 'windowStart');
+    return { date: dateOnlyString(pinned.date) || '', windowStart: hasStart ? pinned.windowStart || null : undefined };
+  }
+  const named = appointmentTimeParts(newTime);
+  return { date: named.date, windowStart: resolved?.windowless ? null : named.windowStart || null };
+}
+
+/** A customer move (GATE_DAY_ONLY_PROMISE part B2): records what the customer chose for the new slot. 'set_time' (an hour
+ *  they picked) -> customer_asked_time true; 'day' ("any time that day") -> false. Gate off, or no choice named: nothing is
+ *  written. Best-effort: the move is committed, and an unwritten column only leaves the intent to be inferred. */
+async function recordCustomerMoveIntent(scheduledServiceId, timePromise, slot) {
+  if (timePromise !== 'set_time' && timePromise !== 'day') return;
+  try {
+    await require('./time-promise').recordCustomerAskedTime(db, [scheduledServiceId], timePromise === 'set_time', slot);
+  } catch (err) {
+    logger.warn(`[appt-remind] customer_asked_time write failed for ${scheduledServiceId}: ${err.message}`);
+  }
+}
+
+/** A held or merged MOVE notice re-sent as a confirmation (GATE_DAY_ONLY_PROMISE part B2) keeps the recorded intent: a day
+ *  intent (customer_asked_time false) re-sends the day row even though the old promise was an hour (the move replaced it); a
+ *  set time (true) stays a window. Gate off (or any error): false, and nothing is read. */
+async function moveReplayDayOnly({ id, startAt, reminder24hEnabled }) {
+  try {
+    const timePromise = require('./time-promise');
+    if (!timePromise.dayOnlyPromiseOn()) return false;
+    return await timePromise.dayOnlyReplayDecision(db, { id, startAt, reminder24hEnabled });
+  } catch (err) {
+    logger.warn(`[appt-remind] day-only replay decision failed for ${id} (${err.message}) - sending the window copy`);
+    return false;
+  }
 }
 
 /** The `dayOnly: true` argument of an email leg, or nothing: the window email's call keeps its exact shape. */
@@ -1309,14 +1368,36 @@ function bouncedOccurrenceDate(metadata) {
   return metadata.guard_slot_ms != null && Number.isFinite(guard) ? etDateString(new Date(guard)) : null;
 }
 
+/** Does this promise stand AFTER the notice being recovered, for the notice's own visit date? Only then does it supersede the
+ *  notice. A promise at or before the notice's time (the confirmation sent before a move) is the OLD slot's; so is a known
+ *  hour on a different date than the notice's. An unreadable time, or an unknown window newer than the notice, supersedes
+ *  (fail closed), as does a promise that cannot be resolved at all. */
+function promiseSupersedesNotice(promise, notice) {
+  if (!promise) return true; // the level read said 'hour' but no promise resolves now: unprovable, so it stands
+  const at = new Date(promise.communicated_at).getTime();
+  if (!Number.isFinite(at)) return true;
+  if (at <= notice.at.getTime()) return false;
+  if (promise.start_at == null) return true;
+  return !notice.visitDate || etDateString(new Date(promise.start_at)) === notice.visitDate;
+}
+
 /** Is a delayed day-only send stale? True when the visit's latest promise is already an hour (the 24-hour text went, or
  *  anything newer than the original send), or the promise cannot be read: a delayed send must never become a newer day
- *  promise over a known window. This is the ONE rule in front of the shared send decision. */
-async function delayedSendIsStale(scheduledServiceId) {
+ *  promise over a known window. This is the ONE rule in front of the shared send decision.
+ *  `notice` ({ at, visitDate }) is given by a MOVE notice's recovery: an hour promise only counts when it supersedes that
+ *  notice (promiseSupersedesNotice). One that does not (the old date's confirmation, which the bounced move text had
+ *  replaced) is set aside, and notice.setAsideOld is set so the day decision ignores that old level too. */
+async function delayedSendIsStale(scheduledServiceId, notice = null) {
   if (!scheduledServiceId) return false;
   try {
-    const levels = await require('./time-promise').loadPromiseLevels(db, [scheduledServiceId], new Date());
-    return levels.get(scheduledServiceId) === 'hour';
+    const timePromise = require('./time-promise');
+    const levels = await timePromise.loadPromiseLevels(db, [scheduledServiceId], new Date());
+    if (levels.get(scheduledServiceId) !== 'hour') return false;
+    if (!notice) return true;
+    const promise = (await require('./auto-dispatch/told-visits').resolvePromises(db, [scheduledServiceId], new Date())).get(scheduledServiceId);
+    if (promiseSupersedesNotice(promise, notice)) return true;
+    notice.setAsideOld = true;
+    return false;
   } catch (err) {
     logger.warn(`[appt-remind] day-only bounce recovery for ${scheduledServiceId}: promise unreadable (${err.message})`);
     return true;
@@ -1334,11 +1415,18 @@ async function delayedSendIsStale(scheduledServiceId) {
  *   'window'    it no longer does (gate rolled back, the 24-hour reminder switched off, inside the cutoff): the day-only
  *               body must not go. The caller sends window copy if it can render it, else suppresses.
  * `apptTime` is the visit's start the caller already knows; absent, it is read from the visit.
+ * `noticeAt` (a MOVE notice's recovery, with `apptTime` the slot that notice quoted, or `noticeDate` its ET date): only a promise
+ * made AFTER that notice, for that notice's date, supersedes it. Every delayed move recovery (a bounced text, a queued contact
+ * text, a stored move email) passes it; a non-move send passes neither and keeps the plain rule. The old date's confirmation does not: the move replaced it, and its level is ignored.
  */
-async function revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime }) {
-  if (await delayedSendIsStale(scheduledServiceId)) return 'suppress';
+async function revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, noticeAt, noticeDate }) {
+  const noticeTime = noticeAt ? new Date(noticeAt) : null;
+  const visitDate = noticeDate || (apptTime ? etDateString(new Date(apptTime)) : null);
+  const notice = noticeTime && !Number.isNaN(noticeTime.getTime()) && visitDate
+    ? { at: noticeTime, visitDate, setAsideOld: false } : null;
+  if (await delayedSendIsStale(scheduledServiceId, notice)) return 'suppress';
   const startAt = apptTime || (scheduledServiceId ? await scheduledServiceApptTime(scheduledServiceId) : null);
-  return (await dayOnlyNow({ customerId, scheduledServiceId, apptTime: startAt })) ? 'day' : 'window';
+  return (await dayOnlyNow({ customerId, scheduledServiceId, apptTime: startAt, ignoreLevel: notice?.setAsideOld === true })) ? 'day' : 'window';
 }
 
 /** The email recovery of a bounced appointment text. A window text recovers as before. A day-only text goes through the
@@ -5740,6 +5828,9 @@ const AppointmentReminders = {
         logger.info(`[appt-remind] Reschedule sync skipped for ${scheduledServiceId} — the service no longer holds the caller's slot`);
         return { skippedStale: true };
       }
+      // GATE_DAY_ONLY_PROMISE part B2: what the customer chose for the new slot (an hour, or any time that day).
+      await recordCustomerMoveIntent(scheduledServiceId, options.timePromise, customerMoveSlot(newTime, options, resolved));
+
       // Repair-release for a retained unit-move hold (codex #3609 uncapped
       // audit + r33/r34 P1s): a PARTIAL move retains move_hold_until on
       // every planned member — the detached straggler AND the landed
@@ -5792,9 +5883,21 @@ const AppointmentReminders = {
           const time = formatTime(newApptTime);
 
           const serviceLabel = smsServiceLabelStored(record.service_type);
+          // GATE_DAY_ONLY_PROMISE part B2: a customer move that chose "any time that day" (options.timePromise 'day') to
+          // another date more than 24.25 h out promises only the new day. 'set_time' or no choice: today's copy, unchanged.
+          const dayMove = require('./day-only-move-notice');
+          const dayState = { dayOnly: await dayMove.customerMoveDayOnly({
+            options, resolved, serviceId: scheduledServiceId, customerId: record.customer_id, newStartAt: newApptTime,
+          }) };
+          const renderDay = (firstName) => dayMove.renderDayRescheduled({
+            state: dayState, serviceId: scheduledServiceId, customerId: record.customer_id, firstName, serviceLabel,
+            apptTime: newApptTime, keep: { move_notice_slot_ms: newApptTime.getTime() },
+          });
           const differentTimeLine = await rescheduledTextLine(scheduledServiceId, { customerId: record.customer_id });
           noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
+            const dayBody = await renderDay(firstName);
+            if (dayBody) return dayBody;
             return renderRequiredTemplate('appointment_rescheduled', {
               first_name: firstName,
               service_type: serviceLabel,
@@ -5808,7 +5911,7 @@ const AppointmentReminders = {
               entity_type: 'scheduled_service',
               entity_id: scheduledServiceId,
             });
-          }, 'appointment_rescheduled', 'appointment_confirmation', {
+          }, 'appointment_rescheduled', 'appointment_confirmation', dayMove.withDayMeta({
             scheduled_service_id: scheduledServiceId,
             rendered_slot_ms: newApptTime.getTime(),
             // A windowless notice promised no window: the slot still guards
@@ -5820,7 +5923,7 @@ const AppointmentReminders = {
             // The slot this text quotes, kept for its email version when safeSend leaves out the
             // promised slot (window_unknown): a bounce must not quote a later move's time.
             move_notice_slot_ms: newApptTime.getTime(),
-          }, { sendOutcome: rescheduleNoticeOutcome });
+          }, dayState, newApptTime.getTime()), { sendOutcome: rescheduleNoticeOutcome });
           if (noticeSent) {
             await this.markRescheduleNoticeSent(scheduledServiceId);
             logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
@@ -5829,6 +5932,7 @@ const AppointmentReminders = {
             await deliverMoveNoticeEmail({
               kind: 'rescheduled', customerId: record.customer_id, scheduledServiceId, apptTime: newApptTime, serviceLabel,
               ...rescheduleEmailWindow(resolved, newApptTime), noticeAt: now, sendOutcome: rescheduleNoticeOutcome,
+              ...dayMove.dayOnlyArg(dayState),
             });
           }
         }
@@ -7017,6 +7121,8 @@ AppointmentReminders.smsServiceLabelStored = smsServiceLabelStored;
 AppointmentReminders.deliverMoveNoticeEmail = deliverMoveNoticeEmail;
 
 AppointmentReminders._test = {
+  confirmationDayOnly,
+  customerMoveSlot,
   isBookedAfterNoPick,
   render72hReminder,
   NO_PICK_REMINDER_KEY,
@@ -7080,6 +7186,10 @@ AppointmentReminders.composeScheduledApptTime = composeScheduledApptTime;
 // The visit-aware prefs row for the call-booking confirmation email and the
 // deferred-replay recheck (app property scope, PR 3).
 AppointmentReminders.visitPrefsRow = visitPrefsRow;
+// GATE_DAY_ONLY_PROMISE part B2: the move-notice senders (services/day-only-move-notice.js) ask whether the customer's
+// 24-hour reminder will really be sent before promising only the day.
+AppointmentReminders.getReminderPrefs = getReminderPrefs;
+AppointmentReminders.reminder24hWillSend = reminder24hWillSend;
 
 // classifyDeliveryCertainty verdict -> replay result.
 const REPLAY_DELIVERY_RESULT = Object.freeze({
@@ -7184,12 +7294,12 @@ async function replayRecipient({ customerId, scheduledServiceId, contactKey, acc
 // recovery): the SAME shared decision a fresh send uses, on the live gate, the customer's CURRENT preferences
 // (reminder24hWillSend) and the full eligibility. Gate off (or any error, unreadable preferences): false, and the caller
 // sends window copy.
-async function dayOnlyNow({ customerId, scheduledServiceId, apptTime }) {
+async function dayOnlyNow({ customerId, scheduledServiceId, apptTime, ignoreLevel = false }) {
   try {
     if (!require('./time-promise').dayOnlyPromiseOn()) return false;
     const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
     if (prefs.unavailable) return false;
-    return await dayOnlyForSend({ id: scheduledServiceId, startAt: apptTime, reminder24hEnabled: reminder24hWillSend(prefs) });
+    return await dayOnlyForSend({ id: scheduledServiceId, startAt: apptTime, reminder24hEnabled: reminder24hWillSend(prefs), ...(ignoreLevel ? { ignoreLevel: true } : {}) });
   } catch {
     return false;
   }
@@ -7266,6 +7376,8 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
 }
 AppointmentReminders.sendConfirmationToServiceContact = sendConfirmationToServiceContact;
 AppointmentReminders.revalidateDelayedDaySend = revalidateDelayedDaySend;
+// GATE_DAY_ONLY_PROMISE part B2: the move-notice senders (services/day-only-move-notice.js) build their day fields with the same helper.
+AppointmentReminders.dayGuardMeta = dayGuardMeta;
 
 // Shared with twilio.js's en-route/arrival senders (owner ruling
 // 2026-09-25) — see the function's own comment.

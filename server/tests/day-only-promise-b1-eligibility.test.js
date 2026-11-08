@@ -123,10 +123,13 @@ describe('dayOnlyEligibility: a first or one-time visit also fails once the cust
     expect(conn.calls.reschedule_log).toBeUndefined();
   });
 
-  test('customer_asked_time false still skips both the source rule and the customer-pick rule', async () => {
-    const conn = fakeConn({ services: [svc('s1', { customer_asked_time: false })], reminders: [office('s1', 'booking_new')], moves: customerMove });
+  test('customer_asked_time false (written with the move that placed the slot) still skips both the source rule and the customer-pick rule', async () => {
+    // after_intent false: the newest slot change is not newer than the intent, so the intent holds (day-only-promise-b2-intent-stale.test.js
+    // pins the stale cases).
+    const own = { s1: customerMove.s1.map((r) => ({ ...r, after_intent: false })) };
+    const conn = fakeConn({ services: [svc('s1', { customer_asked_time: false, customer_asked_time_at: '2026-11-09T12:00:00Z' })], reminders: [office('s1', 'booking_new')], moves: own });
     expect((await verdict(conn)).s1.eligible).toBe(true);
-    expect(conn.calls.reschedule_log).toBeUndefined();
+    expect(conn.calls.reschedule_log).toBe(1);
   });
 
   test('stop-wide: one member the customer rescheduled makes the whole stop ineligible', async () => {
@@ -207,11 +210,11 @@ describe('dayOnlyEligibility: customer_asked_time is the explicit intent for the
   test('false: eligible without the source rule and without the customer-pick rule', async () => {
     const onlineSource = fakeConn({ services: [svc('s1', { customer_asked_time: false })], reminders: [office('s1', 'booking_new')] });
     expect((await verdict(onlineSource)).s1.eligible).toBe(true);
-    const moves = { s1: [{ created_at: '2026-11-08T10:00:00Z', new_date: '2026-11-15', initiated_by: 'customer_self_serve' }] };
-    const pickedChild = fakeConn({ services: [child('s1', { customer_asked_time: false })], moves });
+    const moves = { s1: [{ created_at: '2026-11-08T10:00:00Z', new_date: '2026-11-15', initiated_by: 'customer_self_serve', after_intent: false }] };
+    const pickedChild = fakeConn({ services: [child('s1', { customer_asked_time: false, customer_asked_time_at: '2026-11-08T10:00:00Z' })], moves });
     expect((await verdict(pickedChild)).s1.eligible).toBe(true);
-    // The move history is not even read.
-    expect(pickedChild.calls.reschedule_log).toBeUndefined();
+    // The move history is read once, only to prove the intent is not stale; the pick check is not asked.
+    expect(pickedChild.calls.reschedule_log).toBe(1);
   });
 
   test('false still obeys the level rule: an hour already told is never eligible', async () => {

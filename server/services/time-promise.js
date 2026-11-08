@@ -7,13 +7,14 @@
  * booking and the AI call agent keep the customer's own hour pick (a set time, locked), so they are never day-only.
  *
  * This module is the stable API the later parts call (senders, customer screens, AI context, the office booking box).
- * Nothing in the app calls it yet except tests. It sends nothing and spends nothing. With the gate off every function
+ * Parts B1 (booking confirmation, 72-hour reminder) and B2 (move notices) call it. It sends nothing and spends nothing. With the gate off every function
  * here answers "today's behavior".
  */
 
-const { loadPromiseLevels } = require('./auto-dispatch/told-visits');
+const { loadPromiseLevels, resolvePromises } = require('./auto-dispatch/told-visits');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
+const { etDateString } = require('../utils/datetime-et');
 
 // The 24-hour reminder takes over inside this many hours. It is the same boundary the reminder sender uses:
 // appointment-reminders.js reminder72hStillReachable (`> 24.25` hours out) and the cron branches (72-hour `hoursUntil >
@@ -37,11 +38,17 @@ const DAY_PROMISE_META = Object.freeze({ window_unknown: true, promise_level: 'd
 // an unknown-window promise, which the readers count as an hour.
 const PROMISE_META_KEYS = Object.freeze(['promise_level', 'window_unknown', 'guard_slot_ms', 'promised_date']);
 
-/** The day-only fields present on a send's metadata, or {} for a window send (and for anything that is not a day promise). */
+// A MOVE notice's own stamp (move_notice_at, appointment-reminders.js / admin-schedule.js). Kept apart from PROMISE_META_KEYS:
+// a fallback to the window copy clears those keys but must keep the stamp (a bounce rebuilds the email key from it). It rides with a
+// stored day-only body so the later send can tell which promise stands AFTER the move (revalidateDelayedDaySend noticeAt).
+const MOVE_NOTICE_STAMP = 'move_notice_at';
+
+/** The day-only fields present on a send's metadata (plus a move notice's stamp), or {} for a window send (and for anything
+ *  that is not a day promise). */
 function promiseMetaOf(meta) {
   if (!meta || meta.promise_level !== 'day') return {};
   const out = {};
-  for (const key of PROMISE_META_KEYS) if (meta[key] !== undefined && meta[key] !== null) out[key] = meta[key];
+  for (const key of [...PROMISE_META_KEYS, MOVE_NOTICE_STAMP]) if (meta[key] !== undefined && meta[key] !== null) out[key] = meta[key];
   return out;
 }
 
@@ -52,7 +59,7 @@ function withPromiseMeta(meta, saved) {
 
 // The email templates a day-only send uses (services/appointment-email.js; seeded by the B1 migration). A stored copy of
 // one of these is a DAY promise that was true when it was written.
-const DAY_EMAIL_TEMPLATE_KEYS = Object.freeze(['appointment.confirmation_day', 'appointment.reminder_72h_day']);
+const DAY_EMAIL_TEMPLATE_KEYS = Object.freeze(['appointment.confirmation_day', 'appointment.reminder_72h_day', 'appointment.rescheduled_day']);
 
 /** Is this stored email message a day-only appointment email? (Both stored-copy email rails ask this before a re-send.) */
 function isDayOnlyEmail(message) {
@@ -82,6 +89,14 @@ async function storedDateStillHolds(message, scheduledServiceId) {
   return dateOnlyString(visit?.scheduled_date) === promised;
 }
 
+/** The move context of a stored day-only MOVE email (template appointment.rescheduled_day): { noticeAt, noticeDate }, so the
+ *  chokepoint judges the promises against that notice. {} for any other day-only email (a confirmation or 72-hour reminder:
+ *  an older hour promise still suppresses it). The notice time is the row's creation; no creation time, no context. */
+function storedMoveNotice(message) {
+  if (String(message?.template_key || '') !== 'appointment.rescheduled_day' || !message.created_at) return {};
+  return { noticeAt: message.created_at, noticeDate: promisedDateFromEmailKey(message.idempotency_key) };
+}
+
 /**
  * Must a stored day-only email NOT be re-sent from its stored copy? The email twin of the text replay: both email replay
  * boundaries (transactional-email-provider-retry.js retryOne, email-bounce-recovery.js runRecoveryFlow) ask this before
@@ -100,7 +115,7 @@ async function dayOnlyStoredCopyStale(message) {
     // The stored HTML names a DAY: it is still true only while the visit is on that same ET calendar date. A silent move to
     // another eligible date must not let it go, and no promise is read for a mismatch.
     if (!(await storedDateStillHolds(message, scheduledServiceId))) return true;
-    const verdict = await require('./appointment-reminders').revalidateDelayedDaySend({ customerId, scheduledServiceId });
+    const verdict = await require('./appointment-reminders').revalidateDelayedDaySend({ customerId, scheduledServiceId, ...storedMoveNotice(message) });
     return verdict !== 'day';
   } catch {
     return true;
@@ -195,7 +210,7 @@ const CUSTOMER_OR_UNKNOWN_SOURCES = Object.freeze([
 const ENDED_STATUSES = ['cancelled', 'completed', 'skipped'];
 
 const MEMBER_COLUMNS = ['id', 'visit_id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id',
-  'date_exception', 'date_exception_source', 'date_exception_at', 'customer_asked_time'];
+  'date_exception', 'date_exception_source', 'date_exception_at', 'customer_asked_time', 'customer_asked_time_at'];
 
 /** The live members of each requested row's stop: Map<requested id, member rows[]>. A row with no stop is its own
  *  member; an ended (cancelled, completed, skipped) row has none. Throws on a failed read. */
@@ -229,19 +244,49 @@ async function loadBookingSources(conn, memberIds) {
 
 const isRecurringChild = (m) => m.is_recurring === true && m.recurring_parent_id != null;
 
-/** May this ONE member be promised only the day? `customer_asked_time` is the explicit intent for the current slot:
- *  true = a set time (never), false = the day only was chosen (skip the source and customer-pick rules), NULL = infer.
- *  Inferred: a recurring child unless the customer picked its slot; a first or one-time visit only from an office source AND
- *  only while the customer has not since picked its slot (a self-service reschedule keeps the office source, but the hour is
- *  now the customer's own). The customer-pick read fails closed (picked). Returns { eligible, degraded }: `degraded` is
- *  true when that move-history read FAILED (isCustomerPickedVisit swallowed the error and answered picked), so the caller
- *  can tell a failed read from a real "the customer picked it" verdict. */
+/**
+ * The explicit intent a member still carries for the slot it holds NOW: true, false, or null (read as not recorded, so the
+ * existing inference decides). THE one read rule for customer_asked_time. An intent is written with one move, so it holds only
+ * while no slot change was logged AFTER it: `newestSlotChange` is the newest slot-changing reschedule_log row (the row
+ * isCustomerPickedVisit reads, loadNewestSlotRows with intent), carrying `after_intent` (that row is newer than
+ * customer_asked_time_at, compared in SQL; the move's own log row shares its transaction's now(), so equal is NOT newer).
+ * No slot change logged: the intent holds. A NULL customer_asked_time_at (written at booking) holds only while none is logged.
+ */
+function currentIntent(member, newestSlotChange) {
+  const asked = member && member.customer_asked_time;
+  if (asked !== true && asked !== false) return null;
+  if (!newestSlotChange) return asked;
+  if (member.customer_asked_time_at == null) return null;
+  return newestSlotChange.after_intent === false ? asked : null;
+}
+
+/** A member's current explicit intent and the move history it was judged on: { intent, rows }. Reads the history (one query,
+ *  reused by the pick check) only for a member that has an explicit value. Throws on a failed read. */
+async function memberIntentState(conn, member) {
+  if (member.customer_asked_time !== true && member.customer_asked_time !== false) return { intent: null, rows: null };
+  const rows = await require('./auto-dispatch/eligibility').loadNewestSlotRows(conn, member.id, { withIntent: true });
+  return { intent: currentIntent(member, rows[0] || null), rows };
+}
+
+/** May this ONE member be promised only the day? `customer_asked_time` is the explicit intent for the current slot, while it
+ *  still holds (currentIntent): true = a set time (never), false = the day only was chosen (skip the source and customer-pick
+ *  rules), otherwise infer. Inferred: a recurring child unless the customer picked its slot; a first or one-time visit only
+ *  from an office source AND only while the customer has not since picked its slot (a self-service reschedule keeps the office
+ *  source, but the hour is now the customer's own). Any read fails closed. Returns { eligible, degraded }: `degraded` is true
+ *  when a move-history read FAILED (the intent's history read threw, or isCustomerPickedVisit swallowed the error and answered
+ *  picked), so the caller can tell a failed read from a real "the customer picked it" verdict. */
 async function memberEligible(conn, member, source) {
-  if (member.customer_asked_time === true) return { eligible: false, degraded: false };
-  if (member.customer_asked_time === false) return { eligible: true, degraded: false };
+  let state;
+  try {
+    state = await memberIntentState(conn, member);
+  } catch {
+    return { eligible: false, degraded: true };
+  }
+  if (state.intent === true) return { eligible: false, degraded: false };
+  if (state.intent === false) return { eligible: true, degraded: false };
   if (!isRecurringChild(member) && !OFFICE_BOOKING_SOURCES.includes(source)) return { eligible: false, degraded: false }; // no move-history read
   // Lazy: auto-dispatch/eligibility pulls the route optimizer, which reads the feature gates at load time.
-  const verdict = await require('./auto-dispatch/eligibility').isCustomerPickedVisit(member, conn);
+  const verdict = await require('./auto-dispatch/eligibility').isCustomerPickedVisit(member, conn, state.rows);
   return { eligible: !verdict.picked, degraded: verdict.degraded === true };
 }
 
@@ -255,11 +300,12 @@ async function memberEligible(conn, member, source) {
  * is rejected without a read) AND the same customer-pick check, since a customer's self-service reschedule leaves the office
  * source in place.
  */
-async function dayOnlyEligibility(conn, ids, now = new Date()) {
+async function dayOnlyEligibility(conn, ids, now = new Date(), { ignoreLevel = false } = {}) {
   const result = new Map();
   if (!ids || ids.length === 0) return result;
   try {
-    const levels = await loadPromiseLevels(conn, ids, now);
+    // A MOVE replaces the old promise (part B2), so its decision ignores the level: every visit reads as 'none'.
+    const levels = ignoreLevel ? new Map(ids.map((id) => [id, 'none'])) : await loadPromiseLevels(conn, ids, now);
     const facts = await loadStopFacts(conn, ids);
     const memberIds = [...new Set([...facts.values()].flat().map((m) => String(m.id)))];
     const sources = await loadBookingSources(conn, memberIds);
@@ -289,13 +335,15 @@ async function dayOnlyEligibility(conn, ids, now = new Date()) {
  * send promise only the day? { dayOnly, level, eligible }. `id` is one visit, or `ids` every member of a stop (all must
  * be eligible). The cheap checks (gate, cutoff, the customer's 24-hour reminder) run first, so a gate-off send, an
  * inside-the-cutoff send and a 24-hour-reminder-off customer read nothing from the database.
+ * `ignoreLevel` (a delayed move recovery whose caller proved the visit's only hour promise predates the notice): the old
+ * promise level is not read, as for a move.
  */
-async function dayOnlySendDecision(conn, { id = null, ids = null, startAt, now = new Date(), reminder24hEnabled } = {}) {
+async function dayOnlySendDecision(conn, { id = null, ids = null, startAt, now = new Date(), reminder24hEnabled, ignoreLevel = false } = {}) {
   const wanted = (ids && ids.length ? ids : [id]).filter((v) => v != null);
   const no = { dayOnly: false, level: null, eligible: false };
   if (!wanted.length) return no;
   if (!shouldPromiseDayOnly({ startAt, now, reminder24hEnabled, customerPicked: false, level: 'none' })) return no;
-  const verdicts = await dayOnlyEligibility(conn, wanted, now);
+  const verdicts = await dayOnlyEligibility(conn, wanted, now, { ignoreLevel });
   // A stop is judged as a whole: every requested member must be eligible, and no member's latest promise may be an hour.
   const all = wanted.map((w) => verdicts.get(w) || { eligible: false, level: 'hour' });
   const eligible = all.every((a) => a.eligible);
@@ -303,6 +351,109 @@ async function dayOnlySendDecision(conn, { id = null, ids = null, startAt, now =
   const level = levels.includes('hour') ? 'hour' : levels.includes('day') ? 'day' : 'none';
   const dayOnly = shouldPromiseDayOnly({ startAt, now, reminder24hEnabled, customerPicked: !eligible, level });
   return { dayOnly, level, eligible };
+}
+
+// ── Move notices (part B2): an office move, a customer move, a rain move and a series move ──
+
+/** The ET calendar day of a date-like value ('YYYY-MM-DD', a Date, an ISO string), or null. */
+function dayOf(value) {
+  try {
+    return value == null || value === '' ? null : dateOnlyString(value) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** What an office request says about the new time: "the customer asked for this time" (true) is a set time; anything
+ *  else (the box absent or unchecked) chooses the day only. */
+function officeMoveIntent(customerAskedTime) {
+  return customerAskedTime === true ? 'set_time' : 'day';
+}
+
+/**
+ * Should this MOVE notice promise only the new DAY? True only when ALL hold:
+ *  - the gate is on;
+ *  - the DATE changes (`oldDate !== newDate`): a same-day re-time always names the new window, and a day-only "now Tuesday"
+ *    for a visit that was already Tuesday reads wrong;
+ *  - the new start is more than DAY_PROMISE_CUTOFF_HOURS away (the 24-hour text will still go out and give the window);
+ *  - the customer's 24-hour reminder will really be sent (`reminder24hEnabled`, see reminder24hWillSend);
+ *  - the intent is day-only: 'set_time' -> never; 'day' -> yes; anything else (a rain move, a series move, a caller that
+ *    does not say) -> the visit's recorded intent (`customer_asked_time` true = set time, false = day only, NULL = inferred
+ *    as dayOnlyEligibility does: a first visit by its booking source, a recurring child unless the customer picked its slot).
+ * The OLD promise level is not read: the move replaces the old promise. Any read failure is false (the window text is the
+ * safe side). `ids` (or `id`) are the visits whose recorded intent decides; every one must be day-only.
+ */
+async function dayOnlyMoveDecision(conn, {
+  id = null, ids = null, newStartAt, oldDate, newDate, now = new Date(), reminder24hEnabled, intent,
+} = {}) {
+  try {
+    if (!dayOnlyPromiseOn()) return false;
+    const from = dayOf(oldDate);
+    const to = dayOf(newDate);
+    if (!from || !to || from === to) return false;
+    if (!shouldPromiseDayOnly({ startAt: newStartAt, now, reminder24hEnabled, customerPicked: false, level: 'none', gateOn: true })) return false;
+    if (intent === 'set_time') return false;
+    if (intent === 'day') return true;
+    const wanted = (ids && ids.length ? ids : [id]).filter((v) => v != null);
+    if (!wanted.length) return false;
+    const verdicts = await dayOnlyEligibility(conn, wanted, now, { ignoreLevel: true });
+    return wanted.every((w) => verdicts.get(w)?.eligible === true);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A held or merged MOVE notice re-sent later as a confirmation (a quiet-hours hold, a coalesced repeat move; part B2): may it
+ * still promise only the day? The recorded intent decides, not the caller: `customer_asked_time` must be explicitly FALSE
+ * (day only was chosen for the visit's current slot; true = a set time stays a window, NULL = today's rules decide).
+ * Every live member of the stop must be eligible (dayOnlyEligibility, old level ignored), as for any day-only decision.
+ * The move replaced the old promise, so an older hour promise does not block it, but a window promised for THIS date (a
+ * newer known window) always does: a day promise is never sent over a newer known window. An unknown-window promise or an
+ * unreadable promise: false. Gate, the 24.25 h cutoff and the 24-hour reminder as in shouldPromiseDayOnly. Never throws.
+ */
+async function dayOnlyReplayDecision(conn, { id, startAt, now = new Date(), reminder24hEnabled } = {}) {
+  try {
+    if (id == null || !shouldPromiseDayOnly({ startAt, now, reminder24hEnabled, customerPicked: false, level: 'none' })) return false;
+    const row = await conn('scheduled_services').where({ id: String(id) }).first('id', 'customer_asked_time', 'customer_asked_time_at');
+    if (!row || (await memberIntentState(conn, { ...row, id: row.id ?? String(id) })).intent !== false) return false;
+    // Stop-wide, like every other day-only decision: every live member of the visit's stop must be eligible too (a sibling the
+    // customer picked blocks it), with the old level ignored (the move replaced the old promise; the check below judges the new date).
+    if ((await dayOnlyEligibility(conn, [String(id)], now, { ignoreLevel: true })).get(String(id))?.eligible !== true) return false;
+    const promise = (await resolvePromises(conn, [id], now)).get(id);
+    if (!promise) return true;
+    if (promise.start_at == null) return promise.level === 'day';
+    return etDateString(new Date(promise.start_at)) !== etDateString(startAt instanceof Date ? startAt : new Date(startAt));
+  } catch {
+    return false;
+  }
+}
+
+/** Limits an intent UPDATE to the visits still on the slot a move wrote. `slot` = { date, windowStart }: windowStart a time
+ *  means that start (HH:MM), null means no window, undefined means any start on that date. A slot without a usable date
+ *  matches nothing. */
+function onlyWhileAtSlot(query, slot) {
+  const date = slot && slot.date ? dateOnlyString(slot.date) : null;
+  if (!date) return query.whereRaw('1 = 0');
+  query.whereRaw('scheduled_services.scheduled_date = ?::date', [date]);
+  if (slot.windowStart === null) return query.whereNull('scheduled_services.window_start');
+  if (slot.windowStart === undefined) return query;
+  return query.whereRaw("to_char(scheduled_services.window_start, 'HH24:MI') = ?", [String(slot.windowStart).slice(0, 5)]);
+}
+
+/** Records the office's "customer asked for this time" (true) or "day only" (false) on the moved visit(s). Gate off: nothing
+ *  is written (the UPDATE payloads stay exactly today's). Throws on a failed write, so a caller inside a transaction fails
+ *  the move with it and a best-effort caller can catch.
+ *  `slot` (optional, { date, windowStart }): the slot the move set. A caller that writes AFTER its move committed passes it, so
+ *  the write lands only while the visit still holds that slot: a later move that changed the slot owns the column, and this
+ *  delayed write then updates 0 rows. A caller inside the moving transaction needs no slot. */
+async function recordCustomerAskedTime(conn, ids, asked, slot) {
+  if (!dayOnlyPromiseOn()) return 0;
+  const list = [...new Set((ids || []).filter((v) => v != null).map(String))];
+  if (!list.length) return 0;
+  const query = conn('scheduled_services').whereIn('id', list);
+  // customer_asked_time_at: the database clock, so the intent reads as stale once a newer slot change is logged (currentIntent).
+  return (slot === undefined ? query : onlyWhileAtSlot(query, slot)).update({ customer_asked_time: asked === true, customer_asked_time_at: conn.raw('now()') });
 }
 
 /** The visit's start time from its ET date and window start, or null. */
@@ -356,9 +507,14 @@ module.exports = {
   dayOnlyEligibility,
   dayOnlySendDecision,
   loadTimeDisplay,
+  dayOnlyMoveDecision,
+  dayOnlyReplayDecision,
+  officeMoveIntent,
+  recordCustomerAskedTime,
   DAY_PROMISE_CUTOFF_HOURS,
   DAY_PROMISE_META,
   dayOnlyPromiseOn,
+  currentIntent,
   shouldPromiseDayOnly,
   showHourFor,
   // Re-exported so later parts read the visit's promise level from one place.

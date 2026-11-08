@@ -5515,6 +5515,49 @@ function seriesNoticeIdentity({ result, newDate, startForText }) {
   };
 }
 
+// GATE_DAY_ONLY_PROMISE part B2: may this series notice promise only the first date (and say each arrival window comes the
+// day before)? The anchor's recorded/inferred intent decides (an office move or a system placement: day only; a time the
+// customer picked: its window). The date must change, the quoted start must be more than 24.25 h out, and a date-only move
+// (no start) keeps today's copy. Gate off: false, nothing read. Never throws.
+async function seriesNoticeDayOnly({ result, serviceId, customerId, newDate, startForText }) {
+  if (!startForText) return false;
+  return require('../services/day-only-move-notice').moveNoticeDayOnly({
+    serviceId,
+    customerId,
+    newStartAt: parseETDateTime(rescheduleReminderTime(String(newDate).split('T')[0], { start: startForText })),
+    oldDate: result.originalDate,
+    newDate: String(newDate).split('T')[0],
+  });
+}
+
+// The day-only series row's body, or null (then today's row renders). Resets `state` to the window copy when the row fails.
+async function renderSeriesDayBody({ state, templateKey, vars, serviceId }) {
+  const dayMove = require('../services/day-only-move-notice');
+  const key = state.dayOnly ? dayMove.seriesDayKey(templateKey) : null;
+  const body = key ? await dayMove.renderDayRow(key, vars, { workflow: 'dispatch_series_reschedule', entity_type: 'scheduled_service', entity_id: serviceId }) : null;
+  if (state.dayOnly && !body) dayMove.dayFellBack(state, state.keep);
+  return body;
+}
+
+// GATE_DAY_ONLY_PROMISE part B2: surfaces where the CUSTOMER picks the new slot of a series move (the public rescheduler, a text
+// reply or accepted text offer, the call agent). The row's recorded surface decides, so a reconciled pass agrees with the live one.
+const CUSTOMER_SERIES_SURFACES = new Set(['customer_web', 'sms_reply', 'call_reschedule', 'call_makeup']);
+
+// A customer-driven series move records "the customer asked for this time" (true) on every row it moved, each bound to the slot
+// it landed, BEFORE the notice decision reads the intent: an earlier office move may have left customer_asked_time=false, and the
+// customer's own hour must not read as day only. Office surfaces and gate off: nothing is written. Throws on a failed write, so
+// the pass fails closed (the row stays unfinished and the reconciler retries) rather than texting a day-only notice.
+async function recordCustomerSeriesIntent({ surface, rows }) {
+  if (!CUSTOMER_SERIES_SURFACES.has(surface)) return;
+  const timePromise = require('../services/time-promise');
+  for (const row of rows) {
+    await timePromise.recordCustomerAskedTime(db, [row.id], true, {
+      date: dateOnlyString(row.date) || '',
+      windowStart: row.windowStart ? String(row.windowStart).slice(0, 5) : null,
+    });
+  }
+}
+
 async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, notify: notifyArg, actorId, reasonText, qualityDates = null }) {
   const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
   // The text is driven by the intent the OPERATION was recorded with
@@ -5669,6 +5712,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // (conflict_count > 0 AND conflict_card_at IS NULL) treats it as finished.
     if (!cardOnly && !dueConflicts.length && !preserved.length && overlapDates.length && !markers.conflict_card_at) await stampMarker('conflict_card_at');
     if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };
+    await recordCustomerSeriesIntent({ surface: markers.source_surface, rows: reminderOccurrences });
     const seriesReminderGuards = [];
     let seriesGuardSnapshotFailed = false;
     const remindersThisPass = !markers.reminders_synced_at;
@@ -5952,8 +5996,13 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           // label the reminders use; "visit" when the visit has no clean name.
           // The series-moved copy has no {service_name}, so it is not looked up.
           const nameVars = await seriesNoticeNameVars(notice.templateKey, serviceId, svc.service_type);
+          const dayState = { dayOnly: await seriesNoticeDayOnly({ result, serviceId, customerId: customer.id, newDate, startForText }), keep: {} };
           notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
+            const dayBody = await renderSeriesDayBody({
+              state: dayState, templateKey: notice.templateKey, serviceId, vars: { first_name: firstName, start_date: displayDate, ...nameVars },
+            });
+            if (dayBody) return dayBody;
             return renderRequiredTemplate(notice.templateKey, {
               first_name: firstName,
               start_date: displayDate,
@@ -5965,7 +6014,9 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
               entity_id: serviceId,
             });
           }, notice.messageType, 'appointment',
-          { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText, ...notice.slotMeta }, {
+          require('../services/day-only-move-notice').withDayMeta(
+            { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText, ...notice.slotMeta }, dayState, notice.slotMeta.rendered_slot_ms,
+          ), {
             // Authenticated staff explicitly asked to notify the customer of
             // the series move — exempt from the 8AM-8PM send window like the
             // neighboring rain-out and quick-move actions. A CUSTOMER-driven
@@ -6414,7 +6465,7 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   if (shownStopRefusal) return shownStopRefusal;
   const disclosureRefusal = await planCollectiveDisclosure({ serviceId, newDate, observedForMove, body, actor, rescheduleOptions });
   if (disclosureRefusal) return disclosureRefusal;
-  return { plan: { rescheduleOptions, effectiveWindow, expectVisit, qualityDates } };
+  return { plan: { rescheduleOptions, effectiveWindow, expectVisit, qualityDates, customerAskedTime: body?.customerAskedTime === true } };
 }
 
 // Effects: the collective choke point widened this move to the series.
@@ -6509,8 +6560,39 @@ function partialVisitMoveReply(result, serviceId) {
   });
 }
 
+// GATE_DAY_ONLY_PROMISE part B2: the office's "customer asked for this time" (or day only) for the new slot, written on every
+// member that moved. Gate off: nothing is written. Best-effort: the move is committed, and a failed write only leaves the
+// column as it was (the senders then infer the intent).
+async function recordVisitMoveIntent({ result, plan, serviceId, newDate }) {
+  try {
+    const visitMove = result?.visitMove;
+    if (visitMove?.alreadyAtTarget === true && !(visitMove.moved || []).length) return;
+    const ids = [serviceId, ...(visitMove?.moved || [])];
+    const asked = plan?.customerAskedTime === true;
+    const timePromise = require('../services/time-promise');
+    // Each write is bound to the slot its move landed (a later move changes the slot, and then owns the column).
+    for (const id of new Set(ids.map(String))) {
+      await timePromise.recordCustomerAskedTime(db, [id], asked, movedSlotFor(id, { result, plan, newDate }));
+    }
+  } catch (err) {
+    logger.warn(`[dispatch] customer_asked_time write failed for ${serviceId}: ${err.message}`);
+  }
+}
+
+// The slot a moved member landed: the unit move's own record for it (visitMove.members[].landed), trusted fully (a windowless
+// member has no start). With no such record (a single-row move): the requested date and window start; no start named = undefined
+// (any start on that date).
+function movedSlotFor(id, { result, plan, newDate }) {
+  const landed = (result?.visitMove?.members || []).find((m) => String(m.id) === String(id))?.landed;
+  if (landed) {
+    return { date: dateOnlyString(landed.scheduled_date || newDate) || '', windowStart: landed.window_start ? String(landed.window_start).slice(0, 5) : null };
+  }
+  const start = parseRescheduleWindow(plan?.effectiveWindow).start;
+  return { date: dateOnlyString(newDate) || '', windowStart: start ? String(start).slice(0, 5) : undefined };
+}
+
 // Effects: the one customer notice for a completed move.
-async function sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow }) {
+async function sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow, plan }) {
   // Shared notice path (recipient routing incl. appointment_notify_primary
   // and service contacts, arrival-window copy, terminal/slot recheck at
   // the provider handoff, guarded reminder close/re-arm) — replaces this
@@ -6531,7 +6613,9 @@ async function sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow
     // One notice for the WHOLE stop: recorded as stop-wide so the no-show
     // detector treats it as superseding every member's own promise rather
     // than only the tapped service's (codex P1, PR #4403 round 26).
-    { stopWideFor: result.visitMove?.visitId || null },
+    // previousDate / customerAskedTime: the day-only decision (GATE_DAY_ONLY_PROMISE part B2) judges the date change and
+    // the office's "customer asked for this time".
+    { stopWideFor: result.visitMove?.visitId || null, previousDate: result.originalDate, customerAskedTime: plan?.customerAskedTime },
   );
   return moveReply(200, { ...result, notificationSent: notice.sent, notificationError: notice.error });
 }
@@ -6565,12 +6649,13 @@ async function applyVisitMoveEffects({ result, plan, serviceId, newDate, notifyC
     || result?.visitMove?.parentRetargetFailed === true; // the parent still describes the old stop (codex r28 P1)
   const repeatNotice = notifyCustomer !== false && !partialVisitMove ? repeatedMoveNoticeVerdict({ result, expectVisit }) : null;
   const willNotify = notifyCustomer !== false && !partialVisitMove && !repeatNotice;
+  await recordVisitMoveIntent({ result, plan, serviceId, newDate });
   await syncRescheduleReminder(serviceId, newDate, effectiveWindow, { willNotify, preserveMoveHold: partialVisitMove });
   await broadcastVisitMove({ result, serviceId, actor, qualityDates });
   if (partialVisitMove) return partialVisitMoveReply(result, serviceId);
   if (repeatNotice) return moveReply(200, { ...result, notificationSent: false, ...repeatNotice });
   if (notifyCustomer === false) return moveReply(200, result);
-  return sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow });
+  return sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow, plan });
 }
 
 // The staff single-visit move: plan, move (stage 2, the rebooker's own
@@ -7675,4 +7760,9 @@ module.exports._test = {
   reentryEditPlan,
   rearmRescheduleReminderWindows,
   captureReminderGuards,
+  seriesNoticeDayOnly,
+  renderSeriesDayBody,
+  recordVisitMoveIntent,
+  movedSlotFor,
+  recordCustomerSeriesIntent,
 };

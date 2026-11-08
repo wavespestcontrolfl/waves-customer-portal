@@ -88,4 +88,4 @@ async function loadPromiseLevels(conn, ids, now = new Date()) {
   return levels;
 }
 
-module.exports = { loadToldVisitIds, loadPromiseLevels };
+module.exports = { loadToldVisitIds, loadPromiseLevels, resolvePromises };

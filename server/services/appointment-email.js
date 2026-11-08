@@ -805,34 +805,51 @@ async function sendAppointmentNoShowEmail({
 // `notificationEventKey`: the text's stop-wide key when one notice spoke for a
 // grouped stop (admin-schedule.js stopWideMeta); recorded as the text records
 // it, so the detector reads this email as speaking for every member too.
-async function sendAppointmentRescheduledEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, arrivalWindow, windowUnknown, notificationEventKey, idempotencyKey, stillCurrent } = {}) {
+async function sendRescheduledVariant({ customerId, scheduledServiceId, appointmentTime, serviceLabel, arrivalWindow, windowUnknown, notificationEventKey, idempotencyKey, stillCurrent, dayOnly = false } = {}) {
   const apptTime = toDate(appointmentTime);
   if (!apptTime) return { ok: false, reason: 'no_appointment_time' };
   const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
   return sendTemplate({
     customerId,
     scheduledServiceId,
-    templateKey: 'appointment.rescheduled',
+    // GATE_DAY_ONLY_PROMISE part B2: the day-only reschedule email (`appointment.rescheduled_day`); the event type stays
+    // appointment.rescheduled, which the no-show detector reads.
+    templateKey: dayTemplateKey('appointment.rescheduled', true, dayOnly),
     eventType: 'appointment.rescheduled',
     payload: {
       ...(stampedLabel ? { property_label: stampedLabel } : {}),
       service_type: clean(serviceLabel) || 'service',
       appointment_day: formatETDay(apptTime),
       appointment_date: formatETDate(apptTime),
-      arrival_window: clean(arrivalWindow),
+      // A day-only email carries no hour at all.
+      ...(dayOnly ? {} : { arrival_window: clean(arrivalWindow) }),
     },
-    idempotencyKey,
+    // A day-only key carries the ET day in the slot segment (`day-<date>`): the no-show detector then recovers a day
+    // promise from it and never an invented hour.
+    idempotencyKey: dayOnly ? emailKey(`appointment.rescheduled:${scheduledServiceId}`, idempotencyKey, apptTime, true) : idempotencyKey,
     categories: ['appointment_rescheduled', MOVE_NOTICE_CATEGORY],
     triggerEventId: `appointment.rescheduled:${scheduledServiceId}`,
     metadata: {
       scheduled_service_id: scheduledServiceId,
       ...(windowUnknown ? { window_unknown: true } : {}),
       ...(notificationEventKey ? { notificationEventKey } : {}),
+      ...dayOnlyMetadata(dayOnly),
     },
     moveHoldServiceId: scheduledServiceId,
     renderedSlotMs: apptTime.getTime(),
     stillCurrent,
   });
+}
+
+// dayOnly (GATE_DAY_ONLY_PROMISE part B2): the day-only email; a day template that is missing, disabled or refuses to render sends
+// today's window email (B1's windowFallbackAllowed rule; the move email leg runs only when the text reached nobody, so it is never strict).
+async function sendAppointmentRescheduledEmail(args = {}) {
+  if (args.dayOnly === true) {
+    const result = await sendRescheduledVariant(args);
+    if (!windowFallbackAllowed(result, args)) return result;
+    logger.warn('[appointment-email] appointment.rescheduled_day could not be sent (template missing, disabled or refused) - sending the window email');
+  }
+  return sendRescheduledVariant({ ...args, dayOnly: false });
 }
 
 async function sendAppointmentCancelledEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, idempotencyKey, stillCurrent } = {}) {
