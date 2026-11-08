@@ -7,7 +7,7 @@ const maybeDescribe = SKIP ? describe.skip : describe;
  * customers on a far-future day: A at 8 AM, B at 9 AM far east, C, D and E in the north at 10 AM, 11 AM and 1 PM,
  * and a new customer next to B. Taking 9 AM moves B, C and D one hour later into the free noon hour, which saves
  * far more than 10 drive minutes over the free noon and 3 PM times, so it is found; a customer in that chain with
- * reminder texts off stops it. Nothing may change a visit or send anything: outbound channels are stubbed and
+ * reminder texts off, or with the 72-hour reminder off, stops it. Nothing may change a visit or send anything: outbound channels are stubbed and
  * asserted never called. The whole test runs inside one transaction that always rolls back, and it refuses any
  * database but a private QA one or CI's.
  */
@@ -192,12 +192,18 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
     expect(sentAnything()).toEqual([]);
   });
 
-  test('a customer in the chain with reminder texts off is never moved', async () => {
-    await mockConn('notification_prefs').insert({ customer_id: visitOf('c').customerId, sms_enabled: false });
+  // Two reminder facts stop the chain at C, each through its own rule. Texts off: C's 24-hour reminder will not go
+  // out, so the re-plan's own lock (day-replan fixedReason, reminder_24h_off) holds C first. The 72-hour reminder off
+  // while the 24-hour one still goes out: the re-plan would move C, and the make-room rule (both reminders) holds it.
+  test.each([
+    ['reminder texts off', { sms_enabled: false }, 'fixed_reminder_24h_off'],
+    ['the 72-hour reminder off (the 24-hour one still goes out)', { service_reminder_72h: false }, 'reminders_off'],
+  ])('a customer in the chain with %s is never moved', async (_label, prefs, reason) => {
+    await mockConn('notification_prefs').insert({ customer_id: visitOf('c').customerId, ...prefs });
     const report = await run();
     expect(report.passed.find((p) => p.start === '09:00')).toBeUndefined();
     // The whole tally on a failure, so the reason that won is named.
-    expect(report.byReason).toEqual(expect.objectContaining({ reminders_off: expect.any(Number) }));
+    expect(report.byReason).toEqual(expect.objectContaining({ [reason]: expect.any(Number) }));
     expect(sentAnything()).toEqual([]);
   });
 });
