@@ -3,7 +3,7 @@
 // page's choices D1-B, D2-A, "do whatever you recommend"). Since 2026-11-01 it draws the new layout
 // (lawn-outline-visual.js; its section order is pinned in lawn-outline-visual.test.js). Synthetic inputs: no database.
 //
-// Pins: the gate needs GATE_LAWN_OUTLINE_V13 and is strict; off = the v13 outline exactly; on = the layout's content
+// Pins: the gate needs GATE_LAWN_V13 and is strict; off = the v13 outline exactly; on = the layout's content
 // stamp, the month list (the report's own month text, one thing to do at home, the build month and the next two open)
 // for a plan drawn by month, the product list from the v13 track with the catalog's active ingredient and never a
 // rate, the watering-order tile only for Manatee and Sarasota and only until the order ends, and every word passing
@@ -14,8 +14,8 @@ const { PROGRAM_DETAIL_V13 } = require('../services/service-report/lawn-program-
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 const { validateCustomerCopy } = require('../services/service-report/premium-experience');
 
-const GATE_NAMES = ['GATE_LAWN_V13', 'GATE_LAWN_OUTLINE_V13', 'GATE_LAWN_OUTLINE_DETAIL', 'GATE_LAWN_BERMUDA_REMOVAL'];
-const V13 = { GATE_LAWN_V13: 'true', GATE_LAWN_OUTLINE_V13: 'true' };
+const GATE_NAMES = ['GATE_LAWN_V13', 'GATE_LAWN_OUTLINE_DETAIL', 'GATE_LAWN_BERMUDA_REMOVAL'];
+const V13 = { GATE_LAWN_V13: 'true' };
 const DETAIL = { ...V13, GATE_LAWN_OUTLINE_DETAIL: 'true' };
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
 const OCT_26 = new Date('2026-10-26T12:00:00Z');
@@ -108,8 +108,8 @@ const section = (result, key) => result.content.sections.find((s) => s.key === k
 const tileTitles = (result, key) => section(result, key).visual.items.map((item) => item.title);
 
 describe('the gate', () => {
-  test('GATE_LAWN_OUTLINE_DETAIL needs GATE_LAWN_OUTLINE_V13 and reads strict "true" only', async () => {
-    await withGates({ GATE_LAWN_V13: 'true', GATE_LAWN_OUTLINE_DETAIL: 'true' }, async () => {
+  test('GATE_LAWN_OUTLINE_DETAIL needs GATE_LAWN_V13 and reads strict "true" only', async () => {
+    await withGates({ GATE_LAWN_OUTLINE_DETAIL: 'true' }, async () => {
       const result = await build();
       expect(section(result, 'problems')).toBeUndefined();
       expect(result.meta.contentLibraryVersion).toBe('seed-v1');
