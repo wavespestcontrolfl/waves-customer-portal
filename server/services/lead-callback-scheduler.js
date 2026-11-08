@@ -1,6 +1,5 @@
 /**
- * Booked lead calls, part 2b (GATE_LEAD_CALL_TEXT_FOLLOWUP, the same gate as
- * lead-call-text-followup.js). Owner 2026-10-24, wording approved:
+ * Booked lead calls, part 2b (lead-call-text-followup.js). Owner 2026-10-24, wording approved:
  *
  *   15 minutes before: the lead gets "Hi {First}, Adam from Waves here. I'll
  *     call you in about 15 minutes." and the owner gets a bell "Leads — call
@@ -19,7 +18,6 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
 const { inRingHours, customerBlocker } = require('./lead-call-reply-ring');
 const { etParts, etDateString, formatETTime } = require('../utils/datetime-et');
 
@@ -263,7 +261,6 @@ async function noAnswerBells(now) {
  * when any step failed, so job_health records the tick as failed.
  */
 async function runLeadCallbackTick({ now = new Date() } = {}) {
-  if (!isEnabled('leadCallTextFollowup')) return { skipped: 'gate_off' };
   const out = {};
   const failed = [];
   for (const [name, step] of [['reminded', sendReminders], ['rang', ringDue], ['stranded', settleStrandedRings], ['noAnswer', noAnswerBells]]) {

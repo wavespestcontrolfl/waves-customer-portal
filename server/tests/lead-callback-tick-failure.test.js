@@ -1,5 +1,5 @@
 /**
- * runLeadCallbackTick (every-minute cron, scheduler.js, GATE_LEAD_CALL_TEXT_FOLLOWUP).
+ * runLeadCallbackTick (every-minute cron, scheduler.js).
  * Each step used to turn its failure into the value 'error' and the tick
  * returned normally, so job_health recorded success. Now every step still runs,
  * then the tick throws when any step failed. One request's failed ring is the
@@ -7,7 +7,6 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../services/lead-call-text-followup', () => ({
   _shared: { sendFollowup: jest.fn(), raiseLeadBell: jest.fn(async () => true) },
 }));
@@ -88,12 +87,5 @@ describe('runLeadCallbackTick', () => {
     });
     await expect(runLeadCallbackTick({ now: NOON_ET })).resolves.toMatchObject({ rang: 0 });
     expect(logger.error).toHaveBeenCalledWith('[lead-callback-scheduler] ring step failed for request req-1 (Error)');
-  });
-
-  test('gate off: no reads, no throw', async () => {
-    require('../config/feature-gates').isEnabled.mockReturnValueOnce(false);
-    const state = stubDb({ failStep: [1, 2, 3, 4] });
-    await expect(runLeadCallbackTick({ now: NOON_ET })).resolves.toEqual({ skipped: 'gate_off' });
-    expect(state.limitCalls).toBe(0);
   });
 });

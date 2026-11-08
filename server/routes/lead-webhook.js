@@ -760,8 +760,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       serviceKeyInstant: keyedService ? keyedService.instant === true : null,
       serviceKeyUnverified: !!serviceKey && !keyedService,
     };
-    // County home and lot size from the lookup cache (null while
-    // GATE_LEAD_DRAFT_PROPERTY_LOOKUP is off), read BEFORE the phone lock:
+    // County home and lot size from the lookup cache (null when the
+    // cache has no trusted size), read BEFORE the phone lock:
     // the read takes its own pool connection, which must never wait while
     // the lock's transaction holds one.
     const draftMeasurements = draftReadiness.ready ? await cachedLeadMeasurements(fullAddress) : null;
@@ -820,7 +820,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       });
       // A draft priced on the default size gets the county's real home and
       // lot size from one background property lookup, after the row is
-      // committed (GATE_LEAD_DRAFT_PROPERTY_LOOKUP). The rebuild reuses this
+      // committed. The rebuild reuses this
       // submission's own inputs; the website's answer never waits on it.
       if (createdEstimateId && automatedDraftEstimate?.automation?.sizeSource === 'default') {
         scheduleLeadDraftPropertyLookup({
