@@ -439,3 +439,36 @@ describe('the customer movers name a surface that records the intent', () => {
     expect(read('../services/call-reschedule-apply.js').match(/sourceSurface: 'call_reschedule'/g).length).toBeGreaterThanOrEqual(2);
   });
 });
+
+// An intent is stamped with its move's transaction now(); the move's own slot-changing reschedule_log row must carry the SAME time,
+// i.e. be inserted in the SAME transaction as the UPDATE that carries the intent. A post-commit audit row is strictly later and would
+// make the move's own intent read stale at once (currentIntent). This pins every mover that writes the columns.
+describe('every mover that writes the intent audits its move in the same transaction', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const root = path.join(__dirname, '..');
+  const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
+  const walk = (dir) => fs.readdirSync(path.join(root, dir), { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]));
+
+  test('only the rebooker and the Intelligence Bar mover call moveIntentColumns (a new caller must be added here, with its log row)', () => {
+    const callers = [...walk('services'), ...walk('routes')].filter((f) => f.endsWith('.js') && /\bmoveIntentColumns\(/.test(read(f)) && !f.endsWith('time-promise.js')).sort();
+    expect(callers).toEqual(['services/intelligence-bar/schedule-tools.js', 'services/rebooker.js']);
+  });
+
+  test('rebooker (single, series anchor, carried partners; visit-groups members, customer web and call reschedule all run through it): every log row goes through the move transaction', () => {
+    const src = read('services/rebooker.js');
+    const inserts = src.match(/\w+\('reschedule_log'\)\.insert\(/g);
+    expect(inserts).toHaveLength(3);                       // single, series anchor, series partners
+    for (const call of inserts) expect(call).toMatch(/^trx\(/);
+    expect(src).not.toMatch(/\bdb\('reschedule_log'\)\.insert/);
+  });
+
+  test('Intelligence Bar: with the gate on the row is inserted in the batch transaction (savepoint), and the post-commit append skips an audited stop', () => {
+    const src = read('services/intelligence-bar/schedule-tools.js');
+    expect(src).toContain('if (auditInTrx) await auditMovedStopInTrx(trx, c, dateStr, reason);');
+    expect(src).toContain('await trx.transaction((sp) => insertMoveAudit(sp, c, dateStr, reason));');
+    expect(src).toContain('if (c.auditedInTrx) continue;');
+    // The only other insert of the row is the post-commit one (gate off), through the db connection.
+    expect(src.match(/insertMoveAudit\(db, /g)).toHaveLength(1);
+  });
+});
