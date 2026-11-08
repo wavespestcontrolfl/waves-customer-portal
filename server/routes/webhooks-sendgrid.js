@@ -165,7 +165,9 @@ const EVENTS_BODY_LIMIT_BYTES = 5 * 1024 * 1024;
 // In-flight budget, taken BEFORE a body is read: every body is buffered before
 // the key, timestamp and signature checks, so without it unauthenticated
 // callers could hold any number of 5 MB buffers at once. Each request counts at
-// its Content-Length, or at the full cap when it has none (chunked). 4 x the
+// its Content-Length, or at the full cap when it has none (chunked) or when it
+// is compressed: express.raw inflates gzip or deflate before the cap applies,
+// so a small compressed Content-Length can still fill 5 MB. 4 x the
 // cap = 20 MB per process: about 26 full 768 KB batches in flight together,
 // far above what our sends produce. A request over the budget gets 503 before
 // any byte is read; SendGrid retries a non-2xx answer for up to 24 hours
@@ -186,9 +188,11 @@ function refuseBeforeBody(res, status, message, extraHeaders = {}) {
 function reserveEventsBody(req, res, next) {
   const lengthHeader = req.headers['content-length'];
   const chunked = req.headers['transfer-encoding'] != null;
+  const encoding = String(req.headers['content-encoding'] || 'identity').trim().toLowerCase();
   const declared = chunked || lengthHeader == null ? null : Number(lengthHeader);
   if (declared > EVENTS_BODY_LIMIT_BYTES) return refuseBeforeBody(res, 413, 'Payload too large');
-  const cost = declared == null || !Number.isFinite(declared) ? EVENTS_BODY_LIMIT_BYTES : declared;
+  const exact = declared != null && Number.isFinite(declared) && encoding === 'identity';
+  const cost = exact ? declared : EVENTS_BODY_LIMIT_BYTES;
   if (eventsBodyBudget.inFlightBytes + cost > eventsBodyBudget.budgetBytes) {
     logger.warn('[sendgrid-webhook] in-flight body budget full — answering 503');
     return refuseBeforeBody(res, 503, 'Busy, retry later', { 'Retry-After': '30' });

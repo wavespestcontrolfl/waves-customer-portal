@@ -50,10 +50,10 @@ async function postSigned(body) {
 
 // Sends the headers (and an optional first chunk) and keeps the body open:
 // the request holds its share of the budget until it is destroyed.
-function openUpload(declaredBytes, firstChunk = '[') {
+function openUpload(declaredBytes, firstChunk = '[', extraHeaders = {}) {
   const req = http.request({
     host: '127.0.0.1', port, path: PATH, method: 'POST',
-    headers: { 'content-type': 'application/json', 'content-length': String(declaredBytes) },
+    headers: { 'content-type': 'application/json', 'content-length': String(declaredBytes), ...extraHeaders },
   });
   const response = new Promise((resolve) => {
     req.on('response', (res) => { res.resume(); resolve({ status: res.statusCode, closed: false }); });
@@ -125,6 +125,16 @@ describe('SendGrid event webhook body size and in-flight budget', () => {
 
     const after = await postSigned('[]');
     expect(after.status).toBe(200);
+  });
+
+  test('a compressed upload holds the full cap, whatever its Content-Length', async () => {
+    // express.raw inflates gzip before the 5 MB cap applies, so 1 KB on the
+    // wire can still fill 5 MB of memory.
+    const slots = budget.budgetBytes / (5 * MB);
+    for (let i = 0; i < slots; i += 1) openUpload(1024, null, { 'content-encoding': 'gzip' });
+    await waitFor(() => budget.inFlightBytes === budget.budgetBytes);
+
+    expect((await postSigned('[]')).status).toBe(503);
   });
 
   test('a finished request frees its bytes for the next one', async () => {
