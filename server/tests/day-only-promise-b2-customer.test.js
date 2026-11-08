@@ -212,14 +212,10 @@ describe('handleReschedule: a customer move', () => {
     expect(mockDb.updates.filter((u) => u.table === 'scheduled_services')).toEqual([]);
   });
 
-  test('the recorded intent: day -> customer_asked_time false, set_time -> true; none -> nothing written', async () => {
-    const written = () => mockDb.updates.filter((u) => u.table === 'scheduled_services').map((u) => u.patch);
+  test('handleReschedule writes no intent itself: the move that set the slot writes it in its own UPDATE (rebooker.js moveIntentColumns)', async () => {
+    const written = () => mockDb.updates.filter((u) => u.table === 'scheduled_services');
     await reschedule({ timePromise: 'day', previousDate: '2099-11-02' });
-    expect(written()).toEqual([{ customer_asked_time: false, customer_asked_time_at: 'now()' }]);
-    mockDb.updates = [];
     await reschedule({ timePromise: 'set_time', previousDate: '2099-11-02' });
-    expect(written()).toEqual([{ customer_asked_time: true, customer_asked_time_at: 'now()' }]);
-    mockDb.updates = [];
     await reschedule(undefined);
     expect(written()).toEqual([]);
   });
@@ -350,19 +346,6 @@ describe('a bounced day-only reschedule text (handleUndeliveredSms)', () => {
   });
 
   afterEach(() => { jest.restoreAllMocks(); });
-});
-
-describe('the customer move intent write is bound to the slot that move committed (customerMoveSlot)', () => {
-  const { customerMoveSlot } = AppointmentReminders._test;
-  test('the pinned slot wins; with no start key any start on that date; an explicit null start is "no window"', () => {
-    expect(customerMoveSlot('2099-11-04T09:00', { expectSchedule: { date: '2099-11-04', windowStart: '13:00:00' } }, {})).toEqual({ date: '2099-11-04', windowStart: '13:00:00' });
-    expect(customerMoveSlot('2099-11-04T09:00', { expectSchedule: { date: '2099-11-04' } }, {})).toEqual({ date: '2099-11-04', windowStart: undefined });
-    expect(customerMoveSlot('2099-11-04T09:00', { expectSchedule: { date: '2099-11-04', windowStart: null } }, {})).toEqual({ date: '2099-11-04', windowStart: null });
-  });
-  test('otherwise the slot the caller named; a windowless visit has no start', () => {
-    expect(customerMoveSlot('2099-11-04T09:30', {}, { windowless: false })).toEqual({ date: '2099-11-04', windowStart: '09:30' });
-    expect(customerMoveSlot('2099-11-04T08:00', undefined, { windowless: true })).toEqual({ date: '2099-11-04', windowStart: null });
-  });
 });
 
 describe('a held or merged move notice re-sent as a confirmation keeps the recorded intent (confirmationDayOnly)', () => {
