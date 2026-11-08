@@ -1,6 +1,6 @@
 /**
  * GATE_DAY_ONLY_PROMISE part E: what the office sees. time-promise.loadOfficeToldFields reads what each customer was told
- * (ONE bulk loadPromiseLevels read for the open visits of the next 14 days) and the stored "customer asked for this time"
+ * (ONE bulk resolvePromises read for the open visits of the next 14 days) and the stored "customer asked for this time"
  * choice (ONE bulk read); routes/admin-schedule.js attachOfficeToldFields stamps `told` and `customerAskedTime` on the
  * payload rows. Gate off: no read, no field. Synthetic ids only; nothing is sent.
  */
@@ -13,10 +13,11 @@ jest.mock('../services/auto-dispatch/told-visits', () => ({
   loadPromiseLevels: jest.fn(),
   resolvePromises: jest.fn(),
   loadToldVisitIds: jest.fn(),
+  promiseLevelOf: jest.requireActual('../services/auto-dispatch/told-visits').promiseLevelOf,
 }));
 
 const db = require('../models/db');
-const { loadPromiseLevels } = require('../services/auto-dispatch/told-visits');
+const { loadPromiseLevels, resolvePromises } = require('../services/auto-dispatch/told-visits');
 const { loadOfficeToldFields, TOLD_HORIZON_DAYS } = require('../services/time-promise');
 const { attachOfficeToldFields } = require('../routes/admin-schedule');
 
@@ -52,7 +53,19 @@ const withGate = (value, fn) => async () => {
 
 beforeEach(() => {
   loadPromiseLevels.mockReset();
-  loadPromiseLevels.mockImplementation(async (conn, ids) => new Map(ids.map((id) => [id, 'none'])));
+  resolvePromises.mockReset();
+  resolvePromises.mockImplementation(async (conn, ids) => new Map(ids.map((id) => [id, null])));
+});
+
+describe('promiseLevelOf (the one rule loadPromiseLevels also uses)', () => {
+  const { promiseLevelOf } = jest.requireActual('../services/auto-dispatch/told-visits');
+  test('none / day / hour, an unknown window fails closed as hour', () => {
+    expect(promiseLevelOf(null)).toBe('none');
+    expect(promiseLevelOf({ start_at: null, level: 'day' })).toBe('day');
+    expect(promiseLevelOf({ start_at: '2026-11-12T14:00:00Z' })).toBe('hour');
+    expect(promiseLevelOf({ start_at: '2026-11-12T14:00:00Z', level: 'day' })).toBe('hour');
+    expect(promiseLevelOf({ start_at: null })).toBe('hour');
+  });
 });
 
 describe('loadOfficeToldFields', () => {
@@ -61,21 +74,43 @@ describe('loadOfficeToldFields', () => {
     const out = await loadOfficeToldFields(conn, [row('s1', '2026-11-12')], NOW);
     expect(out.size).toBe(0);
     expect(conn).not.toHaveBeenCalled();
-    expect(loadPromiseLevels).not.toHaveBeenCalled();
+    expect(resolvePromises).not.toHaveBeenCalled();
   }));
 
-  test('gate on: ONE bulk level read and ONE bulk intent read for the whole payload, levels day/hour/none mapped', withGate('true', async () => {
-    loadPromiseLevels.mockResolvedValue(new Map([['s1', 'day'], ['s2', 'hour'], ['s3', 'none']]));
+  test('gate on: ONE bulk promise read and ONE bulk intent read for the whole payload, levels day/hour/none mapped', withGate('true', async () => {
+    resolvePromises.mockResolvedValue(new Map([
+      ['s1', { start_at: null, level: 'day' }], ['s2', { start_at: '2026-11-13T14:00:00Z' }], ['s3', null],
+    ]));
     const conn = fakeConn({ stored: [
       { id: 's1', customer_asked_time: false }, { id: 's2', customer_asked_time: true }, { id: 's3', customer_asked_time: null },
     ] });
     const out = await loadOfficeToldFields(conn, [row('s1', '2026-11-12'), row('s2', '2026-11-13'), row('s3', '2026-11-14')], NOW);
-    expect(loadPromiseLevels).toHaveBeenCalledTimes(1);
-    expect(loadPromiseLevels.mock.calls[0][1]).toEqual(['s1', 's2', 's3']);
+    expect(resolvePromises).toHaveBeenCalledTimes(1);
+    expect(loadPromiseLevels).not.toHaveBeenCalled();
+    expect(resolvePromises.mock.calls[0][1]).toEqual(['s1', 's2', 's3']);
     expect(conn.calls).toEqual(['scheduled_services']);
-    expect(out.get('s1')).toEqual({ customerAskedTime: false, told: { level: 'day', dayOnly: true } });
-    expect(out.get('s2')).toEqual({ customerAskedTime: true, told: { level: 'hour', dayOnly: false } });
-    expect(out.get('s3')).toEqual({ customerAskedTime: null, told: { level: 'none', dayOnly: false } });
+    expect(out.get('s1')).toEqual({ customerAskedTime: false, told: { level: 'day', dayOnly: true, date: null, window: null } });
+    expect(out.get('s2')).toEqual({ customerAskedTime: true, told: { level: 'hour', dayOnly: false, date: '2026-11-13', window: '9:00 AM - 11:00 AM' } });
+    expect(out.get('s3')).toEqual({ customerAskedTime: null, told: { level: 'none', dayOnly: false, date: null, window: null } });
+  }));
+
+  test('the badge shows what the customer was told: a 09:00 promise on a 30-minute visit reads 9:00 AM - 11:00 AM', withGate('true', async () => {
+    resolvePromises.mockResolvedValue(new Map([['short', { start_at: '2026-11-12T14:00:00Z' }]]));
+    const out = await loadOfficeToldFields(fakeConn(), [row('short', '2026-11-12', { window_start: '09:00:00', window_end: '09:30:00' })], NOW);
+    expect(out.get('short').told).toEqual({ level: 'hour', dayOnly: false, date: '2026-11-12', window: '9:00 AM - 11:00 AM' });
+  }));
+
+  test('after a silent move the told date and window are the PROMISED ones, not the visit\'s current slot', withGate('true', async () => {
+    // Promised Tue 10 Nov 4:30 PM ET (21:30Z); the visit now sits on the 13th.
+    resolvePromises.mockResolvedValue(new Map([['moved', { start_at: '2026-11-10T21:30:00Z' }]]));
+    const out = await loadOfficeToldFields(fakeConn(), [row('moved', '2026-11-13', { window_start: '08:00:00' })], NOW);
+    expect(out.get('moved').told).toMatchObject({ level: 'hour', date: '2026-11-10', window: '4:30 PM - 6:30 PM' });
+  }));
+
+  test('an unknown slot is level hour (fail closed) with no date and no window', withGate('true', async () => {
+    resolvePromises.mockResolvedValue(new Map([['unk', { start_at: null }]]));
+    const out = await loadOfficeToldFields(fakeConn(), [row('unk', '2026-11-12')], NOW);
+    expect(out.get('unk').told).toEqual({ level: 'hour', dayOnly: false, date: null, window: null });
   }));
 
   test('the told horizon is the next 14 days; ended and moved visits are skipped; the intent still comes for every row', withGate('true', async () => {
@@ -87,7 +122,7 @@ describe('loadOfficeToldFields', () => {
       row('camel', undefined, { scheduledDate: '2026-11-11' }),
     ];
     const out = await loadOfficeToldFields(conn, rows, NOW);
-    expect(loadPromiseLevels.mock.calls[0][1]).toEqual(['in', 'camel']);
+    expect(resolvePromises.mock.calls[0][1]).toEqual(['in', 'camel']);
     expect(out.get('far')).toEqual({ customerAskedTime: true });
     expect(out.get('past')).toEqual({ customerAskedTime: false });
     expect(out.get('done')).toBeUndefined();
@@ -109,23 +144,23 @@ describe('loadOfficeToldFields', () => {
   }));
 
   test('a failed level read leaves no badge (never a guessed hour); the intent still comes', withGate('true', async () => {
-    loadPromiseLevels.mockRejectedValue(new Error('boom'));
+    resolvePromises.mockRejectedValue(new Error('boom'));
     const conn = fakeConn({ stored: [{ id: 's1', customer_asked_time: true }] });
     const out = await loadOfficeToldFields(conn, [row('s1', '2026-11-12')], NOW);
     expect(out.get('s1')).toEqual({ customerAskedTime: true });
   }));
 
   test('a failed intent read leaves the box unset; the badge still comes', withGate('true', async () => {
-    loadPromiseLevels.mockResolvedValue(new Map([['s1', 'day']]));
+    resolvePromises.mockResolvedValue(new Map([['s1', { start_at: null, level: 'day' }]]));
     const out = await loadOfficeToldFields(fakeConn({ fail: true }), [row('s1', '2026-11-12')], NOW);
-    expect(out.get('s1')).toEqual({ told: { level: 'day', dayOnly: true } });
+    expect(out.get('s1')).toEqual({ told: { level: 'day', dayOnly: true, date: null, window: null } });
   }));
 
   test('no rows: no read', withGate('true', async () => {
     const conn = fakeConn();
     expect((await loadOfficeToldFields(conn, [], NOW)).size).toBe(0);
     expect(conn).not.toHaveBeenCalled();
-    expect(loadPromiseLevels).not.toHaveBeenCalled();
+    expect(resolvePromises).not.toHaveBeenCalled();
   }));
 });
 
@@ -146,19 +181,19 @@ describe('attachOfficeToldFields (the admin schedule payload)', () => {
   });
 
   test('gate on: stamps told and customerAskedTime on the rows with one bulk level read', withGate('true', async () => {
-    loadPromiseLevels.mockResolvedValue(new Map([['a', 'day'], ['b', 'hour']]));
+    resolvePromises.mockResolvedValue(new Map([['a', { start_at: null, level: 'day' }], ['b', { start_at: '2026-11-13T14:00:00Z' }]]));
     const rows = [{ id: 'a', scheduledDate: soon(3), status: 'confirmed' }, { id: 'b', scheduledDate: soon(4), status: 'confirmed' }];
     await attachOfficeToldFields({ techRole: 'admin' }, rows);
-    expect(loadPromiseLevels).toHaveBeenCalledTimes(1);
-    expect(rows[0]).toMatchObject({ customerAskedTime: true, told: { level: 'day', dayOnly: true } });
-    expect(rows[1]).toMatchObject({ customerAskedTime: false, told: { level: 'hour', dayOnly: false } });
+    expect(resolvePromises).toHaveBeenCalledTimes(1);
+    expect(rows[0]).toMatchObject({ customerAskedTime: true, told: { level: 'day', dayOnly: true, window: null } });
+    expect(rows[1]).toMatchObject({ customerAskedTime: false, told: { level: 'hour', dayOnly: false, window: '9:00 AM - 11:00 AM' } });
   }));
 
   test('gate off: no field, no read', withGate(undefined, async () => {
     const rows = [{ id: 'a', scheduledDate: soon(3), status: 'confirmed' }];
     await attachOfficeToldFields({ techRole: 'admin' }, rows);
     expect(rows[0]).toEqual({ id: 'a', scheduledDate: soon(3), status: 'confirmed' });
-    expect(loadPromiseLevels).not.toHaveBeenCalled();
+    expect(resolvePromises).not.toHaveBeenCalled();
     expect(db).not.toHaveBeenCalled();
   }));
 
@@ -167,12 +202,12 @@ describe('attachOfficeToldFields (the admin schedule payload)', () => {
     await attachOfficeToldFields({ techRole: 'technician' }, rows);
     expect(rows[0]).not.toHaveProperty('told');
     expect(rows[0]).not.toHaveProperty('customerAskedTime');
-    expect(loadPromiseLevels).not.toHaveBeenCalled();
+    expect(resolvePromises).not.toHaveBeenCalled();
   }));
 
   test('a read that throws leaves the payload as it was', withGate('true', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
-    loadPromiseLevels.mockRejectedValue(new Error('boom'));
+    resolvePromises.mockRejectedValue(new Error('boom'));
     const rows = [{ id: 'a', scheduledDate: soon(3), status: 'confirmed' }];
     await expect(attachOfficeToldFields({ techRole: 'admin' }, rows)).resolves.toBeUndefined();
     expect(rows[0]).not.toHaveProperty('told');

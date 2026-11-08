@@ -162,7 +162,6 @@ import completionMarkerGrammar from "../../../../shared/completion-marker-gramma
 import { useFeatureFlag, useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import { AskedTimeBoxLegacy, ToldBadgeLegacy } from "../../components/schedule/DayOnlyPromiseLegacy";
 import { askedTimeMoveFields } from "../../components/schedule/dayOnlyPromise";
-import { formatTimeWindow as formatToldWindow } from "../../components/schedule/timeWindow";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import useDictationPending from "../../hooks/dictationPending";
 import { Mic, MicOff } from "lucide-react";
@@ -4902,7 +4901,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 {customerName}
               </span>{" "}
               {dayOnlyPromiseOn && (
-                <ToldBadgeLegacy told={service.told} windowLabel={formatToldWindow(service.windowStart, service.windowEnd)} colors={D} />
+                <ToldBadgeLegacy told={service.told} currentDate={service.scheduledDate} colors={D} />
               )}{" "}
             </div>{" "}
           </div>{" "}

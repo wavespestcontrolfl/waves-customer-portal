@@ -19,11 +19,10 @@ import AvailabilityStrip, { stripCoversRouteWarning } from "./AvailabilityStrip"
 import SlotConflictNotice from "./SlotConflictNotice";
 import { seriesMoveSummary } from "./seriesMove";
 import { ASKED_TIME_LABEL, askedTimeHint, toldBadgeText } from "./dayOnlyPromise";
-import { formatTimeWindow } from "./timeWindow";
 
 // GATE_DAY_ONLY_PROMISE: what the customer was told (feed field `told`), shown beside the visit's name.
 function ToldBadge({ service }) {
-  const text = toldBadgeText(service.told, formatTimeWindow(service.windowStart, service.windowEnd));
+  const text = toldBadgeText(service.told, service.scheduledDate);
   if (!text) return null;
   return <Badge className="ml-2 align-middle" data-testid="told-badge">{text}</Badge>;
 }

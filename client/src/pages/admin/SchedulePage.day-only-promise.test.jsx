@@ -78,13 +78,13 @@ describe('Edit appointment', () => {
     expect(body).not.toHaveProperty('customerAskedTime');
   });
 
-  it('gate on: the badge reads "Told: day only" for level day, the current window for level hour, nothing for none', () => {
+  it('gate on: the badge reads "Told: day only" for level day, the promised window for level hour, nothing for none', () => {
     gate.on = true;
     const day = render(<EditServiceModal service={{ ...BASE, told: { level: 'day', dayOnly: true } }} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
     expect(screen.getByTestId('told-badge')).toHaveTextContent('Told: day only');
     day.unmount();
-    const hour = render(<EditServiceModal service={{ ...BASE, told: { level: 'hour', dayOnly: false } }} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
-    expect(screen.getByTestId('told-badge').textContent).toMatch(/^Told: .*8.*9/);
+    const hour = render(<EditServiceModal service={{ ...BASE, told: { level: 'hour', dayOnly: false, date: '2035-01-02', window: '8:00 AM - 10:00 AM' } }} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.getByTestId('told-badge')).toHaveTextContent('Told: 8:00 AM - 10:00 AM');
     hour.unmount();
     render(<EditServiceModal service={{ ...BASE, told: { level: 'none', dayOnly: false } }} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
     expect(screen.queryByTestId('told-badge')).not.toBeInTheDocument();

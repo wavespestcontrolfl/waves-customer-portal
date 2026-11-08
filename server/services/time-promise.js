@@ -11,10 +11,11 @@
  * here answers "today's behavior".
  */
 
-const { loadPromiseLevels, resolvePromises } = require('./auto-dispatch/told-visits');
+const { loadPromiseLevels, resolvePromises, promiseLevelOf } = require('./auto-dispatch/told-visits');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
+const { formatSmsTimeRange, arrivalWindowRange } = require('../utils/sms-time-format');
 
 // The 24-hour reminder takes over inside this many hours. It is the same boundary the reminder sender uses:
 // appointment-reminders.js reminder72hStillReachable (`> 24.25` hours out) and the cron branches (72-hour `hoursUntil >
@@ -500,12 +501,31 @@ async function loadTimeDisplay(conn, rows, now = new Date()) {
 const TOLD_HORIZON_DAYS = 14;
 
 /**
+ * What the customer was told, from the resolved promise itself (never the visit's current window): { level, dayOnly, date,
+ * window }. level is told-visits.promiseLevelOf, the same rule loadPromiseLevels uses. A known slot (start_at, an ISO
+ * instant) gives `date` (its ET date) and `window` (the arrival range the customer heard: the ET start plus 2 hours, as
+ * arrivalWindowRange quotes it; the visit's own window is the job's length, never quoted). An unknown slot gives null for
+ * both. A day-only promise event carries no date (start_at null, level 'day'), so its date and window are null too.
+ */
+function toldOf(promise) {
+  const level = promiseLevelOf(promise);
+  const told = { level, dayOnly: level === 'day', date: null, window: null };
+  const start = promise && promise.start_at != null ? new Date(promise.start_at) : null;
+  if (!start || Number.isNaN(start.getTime())) return told;
+  const { hour, minute } = etParts(start);
+  const pad = (n) => String(n).padStart(2, '0');
+  told.date = etDateString(start);
+  told.window = formatSmsTimeRange(arrivalWindowRange(`${pad(hour)}:${pad(minute)}`));
+  return told;
+}
+
+/**
  * What the office's visit cards and edit window need: Map<id, { customerAskedTime, told }>. Rows carry at least id,
  * scheduled date (`scheduled_date` or `scheduledDate`) and status. Gate off: an EMPTY map and NO database read, so a
  * payload stays byte-for-byte today's. Gate on: ONE bulk read of the CURRENT intent (`customer_asked_time` judged by currentIntent) for every row,
- * and ONE bulk loadPromiseLevels read for the open visits of the next TOLD_HORIZON_DAYS days (never per row).
- * `told` = { level: 'none' | 'day' | 'hour', dayOnly: level === 'day' }. A failed read leaves that field out: the office
- * sees no badge rather than a promise nobody can prove (the fail-closed answer of loadPromiseLevels would read as "hour").
+ * and ONE bulk resolvePromises read for the open visits of the next TOLD_HORIZON_DAYS days (never per row).
+ * `told` = { level: 'none' | 'day' | 'hour', dayOnly, date, window } (toldOf). A failed read leaves that field out: the office
+ * sees no badge rather than a promise nobody can prove (the fail-closed answer would read as "hour").
  */
 async function loadOfficeToldFields(conn, rows, now = new Date()) {
   const out = new Map();
@@ -541,11 +561,8 @@ async function loadOfficeToldFields(conn, rows, now = new Date()) {
       return day && day >= first && day <= last && ![...ENDED_STATUSES, 'rescheduled'].includes(String(r.status || ''));
     });
     if (open.length) {
-      const levels = await loadPromiseLevels(conn, open.map((r) => r.id), now);
-      for (const r of open) {
-        const level = levels.get(r.id);
-        if (level) entry(r.id).told = { level, dayOnly: level === 'day' };
-      }
+      const promises = await resolvePromises(conn, open.map((r) => r.id), now);
+      for (const r of open) entry(r.id).told = toldOf(promises.get(r.id));
     }
   } catch { /* no badge */ }
   return out;

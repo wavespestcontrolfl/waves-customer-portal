@@ -22,14 +22,27 @@ export function askedTimeMoveFields(enabled, checked) {
   return enabled === true ? { customerAskedTime: checked === true } : {};
 }
 
+const SHORT_DAY = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+/** "Tue, Nov 10" from a 'YYYY-MM-DD' (or ISO) date text; '' when it is not a calendar date. */
+function shortDay(value) {
+  const m = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return '';
+  return SHORT_DAY.format(new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))));
+}
+
 /**
- * The badge text for what the customer was told (`told` from the admin schedule feed), or '' for nothing to show.
- * level 'day' -> "Told: day only"; level 'hour' -> "Told: {window}" (the visit's current window); level 'none' or no
- * `told` (gate off, outside the next 14 days, or a failed read) -> ''.
+ * The badge text for what the customer was told (`told` from the admin schedule feed), or '' for nothing to show. It shows
+ * the PROMISE, never the visit's current window (a visit's window is the job's length, and a silent move changes it):
+ * level 'day' -> "Told: day only"; level 'hour' -> "Told: {told.window}" (the arrival range the customer heard), or
+ * "Told: time not recorded" when the slot is unknown; level 'none' or no `told` (gate off, outside the next 14 days, or a
+ * failed read) -> ''. When the promised date (told.date) is known and differs from the visit's current date
+ * (`currentDate`, 'YYYY-MM-DD'), the short date leads: "Told: Tue, Nov 10, 9:00 AM - 11:00 AM".
  */
-export function toldBadgeText(told, windowLabel) {
+export function toldBadgeText(told, currentDate) {
   if (!told || typeof told !== 'object') return '';
-  if (told.level === 'day') return 'Told: day only';
-  if (told.level === 'hour') return windowLabel ? `Told: ${windowLabel}` : 'Told: an arrival window';
-  return '';
+  if (told.level !== 'day' && told.level !== 'hour') return '';
+  const body = told.level === 'day' ? 'day only' : (told.window || 'time not recorded');
+  const promisedDay = told.date && String(told.date).slice(0, 10) !== String(currentDate || '').slice(0, 10) ? shortDay(told.date) : '';
+  return `Told: ${promisedDay ? `${promisedDay}, ` : ''}${body}`;
 }

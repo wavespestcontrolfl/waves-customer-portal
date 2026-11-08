@@ -933,9 +933,9 @@ export default function MobileAppointmentDetailSheet({
             </div>
           )}
           {/* GATE_DAY_ONLY_PROMISE: what the customer was told (the feed carries `told` only with the gate on). */}
-          {toldBadgeText(service.told, timeWindow) && (
+          {toldBadgeText(service.told, service.scheduledDate) && (
             <div style={{ marginTop: 6 }}>
-              <Badge density="comfortable" data-testid="told-badge">{toldBadgeText(service.told, timeWindow)}</Badge>
+              <Badge density="comfortable" data-testid="told-badge">{toldBadgeText(service.told, service.scheduledDate)}</Badge>
             </div>
           )}
         </section>

@@ -25,8 +25,8 @@ export function AskedTimeBoxLegacy({ id, checked, onChange, disabled = false, co
   );
 }
 
-export function ToldBadgeLegacy({ told, windowLabel, colors, style }) {
-  const text = toldBadgeText(told, windowLabel);
+export function ToldBadgeLegacy({ told, currentDate, colors, style }) {
+  const text = toldBadgeText(told, currentDate);
   if (!text) return null;
   return (
     <span
