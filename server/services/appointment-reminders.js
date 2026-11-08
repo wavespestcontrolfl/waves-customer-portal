@@ -27,7 +27,7 @@ const { sendCustomerMessage, classifyDeliveryCertainty } = require('./messaging/
 const { readCachedLineType, cacheLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
 const { getAppointmentContacts, isServiceContactRole, firstNameFrom, PREFS_UNAVAILABLE } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
-const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays, etParts, dateOnlyString } = require('../utils/datetime-et');
+const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays, etParts } = require('../utils/datetime-et');
 
 // Fallback parts for resolveCommittedVisitTime from a caller's appointment
 // time: the 'YYYY-MM-DDTHH:MM' strings every registration path builds, or
