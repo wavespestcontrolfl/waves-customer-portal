@@ -1649,11 +1649,10 @@ const REGISTRY = {
     },
   },
 
-  // The report text to an on-location contact (GATE_CONTACT_REPORT_TEXT,
-  // services/contact-report-text.js). Same frozen-recipient contract as the
+  // The report text to an on-location contact (services/contact-report-text.js).
+  // Same frozen-recipient contract as the
   // held contact notice above: the row belongs to the contact's phone, and
-  // the recheck proves that phone is still a confirmed contact, the gate is
-  // on, the report is recent and a combined-stop summary is not revoked. The
+  // the recheck proves that phone is still a confirmed contact, the report is recent and a combined-stop summary is not revoked. The
   // send itself runs inside smsHandoff: the same check under the customer row
   // lock a contact save takes, held through the provider request, so a
   // contact removed or replaced either commits first (refused) or waits

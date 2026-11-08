@@ -1,4 +1,4 @@
-// Report text to on-location contacts (GATE_CONTACT_REPORT_TEXT, owner
+// Report text to on-location contacts (owner
 // 2026-10-03): one plain text with the report link to each confirmed contact
 // when the account holder's visit-complete text goes out. It rides the
 // scheduled-SMS rail; this suite covers the queue, the send-time recheck, the
@@ -75,7 +75,6 @@ const queueReads = (customer = CUSTOMER) => {
 };
 
 beforeEach(() => {
-  process.env.GATE_CONTACT_REPORT_TEXT = 'true';
   db.mockClear();
   db.transaction.mockClear();
   db.mockState.queue = {};
@@ -84,25 +83,6 @@ beforeEach(() => {
   logger.warn.mockClear();
   renderSmsTemplate.mockReset().mockResolvedValue(RENDERED);
   optinHeldPhoneKeys.mockReset().mockResolvedValue(new Map());
-});
-afterAll(() => { delete process.env.GATE_CONTACT_REPORT_TEXT; });
-
-describe('gate', () => {
-  test('dark unless exactly true', () => {
-    for (const value of [undefined, '', '1', 'on', 'TRUE']) {
-      if (value === undefined) delete process.env.GATE_CONTACT_REPORT_TEXT; else process.env.GATE_CONTACT_REPORT_TEXT = value;
-      expect(ContactReportText.enabled()).toBe(false);
-    }
-    process.env.GATE_CONTACT_REPORT_TEXT = 'true';
-    expect(ContactReportText.enabled()).toBe(true);
-  });
-
-  test('off: nothing is queued and the database is not read', async () => {
-    delete process.env.GATE_CONTACT_REPORT_TEXT;
-    expect(await ContactReportText.queueContactReportTexts(ARGS)).toBe(0);
-    expect(db).not.toHaveBeenCalled();
-    expect(db.transaction).not.toHaveBeenCalled();
-  });
 });
 
 describe('queueContactReportTexts', () => {
@@ -306,12 +286,6 @@ describe('recheckContactReportText: is the queued text still right to send', () 
   test('a contact who is still confirmed: eligible', async () => {
     queue('customers', CUSTOMER);
     expect(await ContactReportText.recheckContactReportText(META)).toEqual({ eligible: true });
-  });
-
-  test('the gate turned off after the queue: dropped', async () => {
-    delete process.env.GATE_CONTACT_REPORT_TEXT;
-    expect(await ContactReportText.recheckContactReportText(META)).toEqual({ eligible: false, reason: 'contact-report-gate-off' });
-    expect(db).not.toHaveBeenCalled();
   });
 
   test('a report older than 24 hours is not announced', async () => {
@@ -550,42 +524,28 @@ describe('summarySmsRecipient: who gets the combined-stop summary text', () => {
 
   beforeEach(() => resolveServiceContactSmsRecipient.mockReset().mockResolvedValue({ phone: '(941) 555-0123', name: 'Riley Tenant', role: 'service_contact' }));
 
-  test('gate on: the account holder', async () => {
+  test('the account holder', async () => {
     expect(await summarySmsRecipient(CUSTOMER)).toMatchObject({ phone: '+19415550100', name: 'Dana', role: 'primary' });
     expect(resolveServiceContactSmsRecipient).not.toHaveBeenCalled();
   });
 
-  test('gate on, account holder with no phone: the slot-1 contact rule', async () => {
+  test('account holder with no phone: the slot-1 contact rule', async () => {
     expect((await summarySmsRecipient({ ...CUSTOMER, phone: null })).phone).toBe('(941) 555-0123');
   });
 
-  test('gate off: the slot-1 contact rule, unchanged', async () => {
-    delete process.env.GATE_CONTACT_REPORT_TEXT;
+  test('account holder with no phone: the slot-1 contact rule is asked with the caller options', async () => {
     const opts = { dbh: {} };
-    expect((await summarySmsRecipient(CUSTOMER, opts)).phone).toBe('(941) 555-0123');
-    expect(resolveServiceContactSmsRecipient).toHaveBeenCalledWith(CUSTOMER, opts);
+    expect((await summarySmsRecipient({ ...CUSTOMER, phone: null }, opts)).phone).toBe('(941) 555-0123');
+    expect(resolveServiceContactSmsRecipient).toHaveBeenCalledWith({ ...CUSTOMER, phone: null }, opts);
   });
 
   test('a slot-1 tenant, or a slot-1 occupant on a manager account, never gets the summary: the holder does', async () => {
-    delete process.env.GATE_CONTACT_REPORT_TEXT;
     expect(await summarySmsRecipient({ ...CUSTOMER, service_contact_role: 'tenant' }))
       .toMatchObject({ phone: '+19415550100', role: 'primary' });
-    // Gate on but no holder phone: no text at all, never the tenant.
-    process.env.GATE_CONTACT_REPORT_TEXT = 'true';
+    // No holder phone: no text at all, never the tenant.
     expect((await summarySmsRecipient({ ...CUSTOMER, phone: null, contact_role: 'property_manager' })).phone).toBe('');
     // A slot-1 manager on a manager account still gets it.
     expect((await summarySmsRecipient({ ...CUSTOMER, phone: null, contact_role: 'property_manager', service_contact_role: 'property_manager' })).phone)
       .toBe('(941) 555-0123');
-  });
-});
-
-describe('the portal card mentions the report text under the gate, with the condition in its wording', () => {
-  test('the server flag is the gate; the card says "when your own visit-complete texts are on"', () => {
-    const source = fs.readFileSync(path.join(__dirname, '..', 'routes/notifications.js'), 'utf8');
-    expect(source).toMatch(/function contactReportTextsOn\(\) \{\s+return require\('\.\.\/config\/feature-gates'\)\.contactReportTextLive\(\);/);
-    // Both holder payloads plus the contact's own card (contact login).
-    expect(source.match(/contactReportTexts: contactReportTextsOn\(\),/g)).toHaveLength(3);
-    const card = fs.readFileSync(path.join(__dirname, '..', '..', 'client/src/pages/PortalPage.jsx'), 'utf8');
-    expect(card).toMatch(/appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit/);
   });
 });
