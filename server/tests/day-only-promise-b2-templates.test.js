@@ -177,15 +177,16 @@ describe('the callers pass what the decision needs (source scans)', () => {
     expect(schedule).toMatch(/sendRescheduleNoticeForVisit\(id, bulkTargetDate, bulkNoticeStart, \{\s*previousDate: bulkPreviousDate, customerAskedTime: payload\?\.customerAskedTime,/);
   });
 
-  test('dispatch board: the plan carries the box, every moved member records the intent, the sender gets the date it moved from', () => {
+  test('dispatch board: the plan carries the box into the rebooker (which writes it in each member\'s own UPDATE), the sender gets the date it moved from', () => {
     expect(dispatch).toContain('customerAskedTime: body?.customerAskedTime === true }');
-    expect(dispatch).toContain('await recordVisitMoveIntent({ result, plan, serviceId, newDate });');
+    expect(dispatch).toContain('rescheduleOptions.customerAskedTime = body?.customerAskedTime === true;');
     expect(dispatch).toContain('previousDate: result.originalDate, customerAskedTime: plan?.customerAskedTime');
-    expect(dispatch).toContain('const ids = [serviceId, ...(visitMove?.moved || [])];');
+    expect(dispatch).not.toContain('recordVisitMoveIntent');
   });
 
-  test('Intelligence Bar: the batch mover records the intent per moved stop and passes the previous date', () => {
-    expect(ib).toContain('await recordMovedStopIntent(s, plan);');
+  test('Intelligence Bar: the batch mover writes the intent in each moved stop\'s own UPDATE and passes the previous date', () => {
+    expect(ib).toContain('moveIntentColumns(trx, { customerAskedTime }, { slotChanged: c.observedDate !== dateStr })');
+    expect(ib).not.toContain('recordMovedStopIntent');
     expect(ib).toContain('previousDate: s.scheduled_date,');
     expect(ib).toContain('customerAskedTime: input.customer_asked_time === true,');
   });

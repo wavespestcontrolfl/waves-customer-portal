@@ -330,6 +330,12 @@ function dayPromiseMoveOptions(svc, timePromise) {
     : {};
 }
 
+// GATE_DAY_ONLY_PROMISE part B3: the rebooker option that records the customer's own hour for a single move. A later "any time
+// that day" choice (timePromise 'day') passes customerAskedTime: false here instead. Gate off: nothing.
+function dayPromiseMoveIntent() {
+  return require('../services/time-promise').dayOnlyPromiseOn() ? { customerAskedTime: true } : {};
+}
+
 // handleReschedule's options for a customer move: the repeat-move deferral and the day-promise choice, as a spread (none
 // when both are absent).
 async function moveNoticeArgs(svc, timePromise) {
@@ -1480,6 +1486,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             beforeMove: noticeRecheck,
             moveGuard: officeApprovalRecheck,
             placeInRoute: bookingPlacesInRoute(), // GATE_ROUTE_CHECK_BOOKING_SAVES
+            // GATE_DAY_ONLY_PROMISE part B3: the picker's slots are hours the customer chose, recorded by this move's own UPDATE
+            // (rebooker.js moveIntentColumns). Gate off: no key, so the call keeps today's exact arguments.
+            ...dayPromiseMoveIntent(),
             // No arrivalGraceMinutes (owner ruling 2026-09-28, scope cut
             // Codex r1 P1 #5314): this page's own commit runs a STRICT
             // pre-verify travel probe that a grace-kept slot would fail

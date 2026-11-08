@@ -1281,30 +1281,6 @@ async function confirmationDayOnly(record, { scheduledServiceId, apptTime, prefs
   return (await dayOnlyForSend(args)) || moveReplayDayOnly(args);
 }
 
-/** The slot a customer move committed, for binding its intent write to it: the caller's pinned slot (options.expectSchedule)
- *  when it passed one, else the slot it named (`newTime`), with no window when the visit is windowless. */
-function customerMoveSlot(newTime, options, resolved) {
-  const pinned = options && options.expectSchedule;
-  if (pinned && pinned.date) {
-    const hasStart = Object.prototype.hasOwnProperty.call(pinned, 'windowStart');
-    return { date: dateOnlyString(pinned.date) || '', windowStart: hasStart ? pinned.windowStart || null : undefined };
-  }
-  const named = appointmentTimeParts(newTime);
-  return { date: named.date, windowStart: resolved?.windowless ? null : named.windowStart || null };
-}
-
-/** A customer move (GATE_DAY_ONLY_PROMISE part B2): records what the customer chose for the new slot. 'set_time' (an hour
- *  they picked) -> customer_asked_time true; 'day' ("any time that day") -> false. Gate off, or no choice named: nothing is
- *  written. Best-effort: the move is committed, and an unwritten column only leaves the intent to be inferred. */
-async function recordCustomerMoveIntent(scheduledServiceId, timePromise, slot) {
-  if (timePromise !== 'set_time' && timePromise !== 'day') return;
-  try {
-    await require('./time-promise').recordCustomerAskedTime(db, [scheduledServiceId], timePromise === 'set_time', slot);
-  } catch (err) {
-    logger.warn(`[appt-remind] customer_asked_time write failed for ${scheduledServiceId}: ${err.message}`);
-  }
-}
-
 /** A held or merged MOVE notice re-sent as a confirmation (GATE_DAY_ONLY_PROMISE part B2) keeps the recorded intent: a day
  *  intent (customer_asked_time false) re-sends the day row even though the old promise was an hour (the move replaced it); a
  *  set time (true) stays a window. Gate off (or any error): false, and nothing is read. */
@@ -5828,8 +5804,9 @@ const AppointmentReminders = {
         logger.info(`[appt-remind] Reschedule sync skipped for ${scheduledServiceId} — the service no longer holds the caller's slot`);
         return { skippedStale: true };
       }
-      // GATE_DAY_ONLY_PROMISE part B2: what the customer chose for the new slot (an hour, or any time that day).
-      await recordCustomerMoveIntent(scheduledServiceId, options.timePromise, customerMoveSlot(newTime, options, resolved));
+      // GATE_DAY_ONLY_PROMISE part B2/B3: the customer's choice for the new slot is NOT written here: the move that set the slot
+      // writes it in its own UPDATE (rebooker.js moveIntentColumns: a customer surface records "asked for this time"), so it
+      // cannot land over a later move's intent. options.timePromise only decides THIS notice.
 
       // Repair-release for a retained unit-move hold (codex #3609 uncapped
       // audit + r33/r34 P1s): a PARTIAL move retains move_hold_until on
@@ -7122,7 +7099,6 @@ AppointmentReminders.deliverMoveNoticeEmail = deliverMoveNoticeEmail;
 
 AppointmentReminders._test = {
   confirmationDayOnly,
-  customerMoveSlot,
   isBookedAfterNoPick,
   render72hReminder,
   NO_PICK_REMINDER_KEY,

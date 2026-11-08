@@ -35,6 +35,8 @@ async function assertAssignableSlotTechnician(technicianId, trx, date, { initiat
   }
 }
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
+// Lazy: time-promise pulls the promise readers, which must not load while this module loads.
+const moveIntentColumns = (...args) => require('./time-promise').moveIntentColumns(...args);
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks, techScopedConfirmActive } = require('./scheduling/occupancy');
@@ -123,6 +125,11 @@ const CONFLICT_SNAPSHOT_FIELDS = [
 
 function hhmm(value) {
   return value ? String(value).slice(0, 5) : null;
+}
+
+// Did this single move change the slot (the date or the window start)? Only then does it record an intent (moveIntentColumns).
+function slotChangedBy(service, updates, newDateStr) {
+  return dateOnlyString(service.scheduled_date) !== newDateStr || hhmm(updates.window_start) !== hhmm(service.window_start);
 }
 
 function conflictSnapshotItem(target, row) {
@@ -2516,6 +2523,8 @@ class SmartRebooker {
           : {})
         .update({
           ...updates,
+          // Day-only promise (B3): the intent of this move, written by this same UPDATE (gate off: nothing added).
+          ...moveIntentColumns(trx, options, { slotChanged: slotChangedBy(service, updates, newDateStr) }),
           track_token_expires_at: scheduledServiceTrackTokenExpiry(trx, newDate, windowEnd),
           // The move's own change time (same stamp the series path writes):
           // SMS follow-up proves a move by the row changing after the request.
@@ -3949,6 +3958,7 @@ class SmartRebooker {
           anyLivePartner = anyLivePartner || liveStatus;
           await fencePartner({ partner, pUpdate, dateStr, partnerDateChanges, techChanges, keptTech });
           pUpdate.track_token_expires_at = scheduledServiceTrackTokenExpiry(trx, date, pUpdate.window_end);
+          Object.assign(pUpdate, moveIntentColumns(trx, options, { series: true }));
           if (pUpdate.window_start) await probePartnerSlot(partner, pUpdate, keptTech, dateStr);
           const awaitingPlacement = applyPartnerPlacementPatch(partner, pUpdate);
           // A carried partner that lands on another day and carries a limited area add-on is judged for that day, as the
@@ -4086,6 +4096,8 @@ class SmartRebooker {
           // Day change invalidates the row's route sequence — clear it so the
           // destination day appends the stop (consumers sort NULLs last).
           ...(sibDateChanges ? { route_order: null } : {}),
+          // Day-only promise (B3): a customer-driven series move records its intent in this same UPDATE.
+          ...moveIntentColumns(trx, options, { series: true }),
         };
         // Rewound rows need the post-commit cleanup (tech pointer release +
         // customer tracker refresh) — collected here, applied after the trx

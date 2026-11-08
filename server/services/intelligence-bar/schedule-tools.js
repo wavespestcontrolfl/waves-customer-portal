@@ -1482,7 +1482,7 @@ async function probeMoveOverlaps(trx, classified, dateStr) {
 // P1), the package visit 2 recheck, the area add-on limit, then the CAS
 // update (status + observed schedule fields + visit_id + tracker snapshot, no
 // FOR UPDATE; a miss aborts the batch).
-async function writeMovedStop(trx, c, dateStr, reason) {
+async function writeMovedStop(trx, c, dateStr, reason, customerAskedTime) {
   const { applyTrackLifecycleCas, singleMoveStamp } = require('../rebooker');
   const s = c.s;
   await require('../visit-groups').assertRowMovableAlone(trx, s.id, s.visit_id);
@@ -1510,6 +1510,9 @@ async function writeMovedStop(trx, c, dateStr, reason) {
       scheduled_date: dateStr,
       ...recurringDispatchDuePatch(s, { scheduled_date: dateStr }),
       ...(c.observedDate !== dateStr ? singleMoveStamp(s, dateStr, 'admin_ib') : {}),
+      // GATE_DAY_ONLY_PROMISE part B2/B3: the office's choice for the new date, in this same UPDATE, so it belongs to this move
+      // alone (a later move's intent cannot be overwritten). Gate off: nothing added.
+      ...require('../time-promise').moveIntentColumns(trx, { customerAskedTime }, { slotChanged: c.observedDate !== dateStr }),
       // Old day's sequence number is meaningless on the new date — NULL
       // appends the stop after the target day's ordered run.
       route_order: null,
@@ -1531,14 +1534,14 @@ async function writeMovedStop(trx, c, dateStr, reason) {
 // Phase A: the COMPLETE approved set moves in ONE transaction (pre-push r21
 // P1): a CAS miss, a grouped/frozen refusal, or any target drift aborts EVERY
 // move (all-or-none, like bulk_update_leads).
-async function moveBatchTrx(trx, classified, dateStr, reason) {
+async function moveBatchTrx(trx, classified, dateStr, reason, customerAskedTime) {
   const overlappedIds = await probeMoveOverlaps(trx, classified, dateStr);
   // ONE tech-day fence over every day this batch touches (each stop's leaving day + the joining day).
   await require('../scheduling/tech-day-lock').lockTechDays(trx, classified.flatMap((c) => [
     { techId: c.s.technician_id, date: c.observedDate },
     { techId: c.s.technician_id, date: dateStr },
   ]));
-  for (const c of classified) await writeMovedStop(trx, c, dateStr, reason);
+  for (const c of classified) await writeMovedStop(trx, c, dateStr, reason, customerAskedTime);
   // The probe ran on the technician each stop was read with. The CAS does not
   // pin technician_id (the notice follows the stop), so a concurrent
   // reassignment can commit a stop onto another route: when scoping is on
@@ -1576,10 +1579,10 @@ async function moveBatchTrx(trx, classified, dateStr, reason) {
 
 // Deadlock retry (codex #3609 r31 P2) around the WHOLE batch — locks
 // re-acquired fresh on 40P01.
-async function runMoveBatch(classified, dateStr, reason) {
+async function runMoveBatch(classified, dateStr, reason, customerAskedTime) {
   for (let attempt = 0; ; attempt++) {
     try {
-      return await db.transaction((trx) => moveBatchTrx(trx, classified, dateStr, reason));
+      return await db.transaction((trx) => moveBatchTrx(trx, classified, dateStr, reason, customerAskedTime));
     } catch (err) {
       if (!(err && err.code === '40P01' && attempt < 2)) throw err;
     }
@@ -1724,19 +1727,6 @@ async function textMovedStop(s, plan) {
   }
 }
 
-// GATE_DAY_ONLY_PROMISE part B2: the office's choice for the new slot, on the moved stop. Gate off: nothing is written.
-// Best-effort: the batch is committed, so a failed write is only logged.
-async function recordMovedStopIntent(s, plan) {
-  try {
-    // Bound to the slot THIS move wrote (the same one its reminder sync is pinned to): a later move that changed the slot owns
-    // the column, so this delayed write then updates nothing.
-    const windowStart = s.window_start ? String(s.window_start).slice(0, 5) : null;
-    await require('../time-promise').recordCustomerAskedTime(db, [s.id], plan.customerAskedTime === true, { date: plan.dateStr, windowStart });
-  } catch (err) {
-    logger.warn(`[intelligence-bar:schedule] customer_asked_time write failed for ${s.id}: ${err.message}`);
-  }
-}
-
 // Notification phase — runs only after EVERY approved stop has been moved,
 // released, and audited, so one slow SMS provider can never delay or strand
 // the rest of the confirmed batch. Activates a moved LEGACY outbound-review
@@ -1749,7 +1739,6 @@ async function notifyMovedCustomers(plan, movedIds) {
     try {
       await require('../outbound-review-confirm').activateLegacyOutboundReviewRowIfNeeded(db, s.id, 'ib-bulk-move');
     } catch { /* helper is internally best-effort; never strand the batch */ }
-    await recordMovedStopIntent(s, plan);
     if (!plan.notifyCustomers) continue;
     const outcome = await textMovedStop(s, plan);
     if (outcome.sent) textedCount++;
@@ -1826,7 +1815,7 @@ async function commitMove(plan, actionContext) {
   }
   let overlapMovedIds;
   try {
-    overlapMovedIds = await runMoveBatch(classified, plan.dateStr, plan.reason);
+    overlapMovedIds = await runMoveBatch(classified, plan.dateStr, plan.reason, plan.customerAskedTime);
   } catch (err) {
     return moveBatchFailure(err);
   }

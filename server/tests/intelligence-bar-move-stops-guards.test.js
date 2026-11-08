@@ -678,3 +678,52 @@ describe('move_stops_to_day route check', () => {
     expect(overlapCalls.every((a) => a.arrivalWindow === undefined)).toBe(true);
   });
 });
+
+// GATE_DAY_ONLY_PROMISE part B3: the office's "customer asked for this time" rides each moved stop's OWN UPDATE (inside the move's
+// transaction), never a write after the commit. Gate off: the UPDATE carries neither column.
+describe('move_stops_to_day: the intent is written by the move itself', () => {
+  const OLD_GATE = process.env.GATE_DAY_ONLY_PROMISE;
+  afterEach(() => { if (OLD_GATE === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = OLD_GATE; });
+
+  async function confirmedMove(input) {
+    const listChain = chain({ select: jest.fn().mockResolvedValue([stop('svc-ok', 'confirmed')]) });
+    const update = chain();
+    const svcSeq = [chain(), update];
+    let svcIdx = 0;
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') {
+        if (listChain.select.mock.calls.length === 0) return listChain;
+        return svcSeq[svcIdx++];
+      }
+      if (table === 'reschedule_log') return chain();
+      if (table === 'job_status_history') return chain();
+      throw new Error(`Unexpected db('${table}') call`);
+    });
+    const result = await executeScheduleTool('move_stops_to_day', { service_ids: ['svc-ok'], new_date: '2099-01-15', confirmed: true, ...input });
+    expect(result).toMatchObject({ success: true, moved_count: 1 });
+    return update.update.mock.calls[0][0];
+  }
+
+  test('gate on: true when the operator says the customer asked for the time, false (day only) otherwise, with the database clock', async () => {
+    process.env.GATE_DAY_ONLY_PROMISE = 'true';
+    expect(await confirmedMove({ customer_asked_time: true })).toMatchObject({ scheduled_date: '2099-01-15', customer_asked_time: true, customer_asked_time_at: { sql: 'now()' } });
+    expect(await confirmedMove({})).toMatchObject({ customer_asked_time: false, customer_asked_time_at: { sql: 'now()' } });
+  });
+
+  test('gate off: neither column on the UPDATE', async () => {
+    delete process.env.GATE_DAY_ONLY_PROMISE;
+    const payload = await confirmedMove({ customer_asked_time: true });
+    expect(payload).not.toHaveProperty('customer_asked_time');
+    expect(payload).not.toHaveProperty('customer_asked_time_at');
+  });
+
+  test('the tool schema declares the box and the proposal shows it (gate on only)', async () => {
+    process.env.GATE_DAY_ONLY_PROMISE = 'true';
+    db.mockImplementation(() => chain({ select: jest.fn().mockResolvedValue([stop('svc-ok', 'confirmed')]) }));
+    const proposal = await executeScheduleTool('move_stops_to_day', { service_ids: ['svc-ok'], new_date: '2099-01-15', customer_asked_time: true });
+    expect(proposal).toMatchObject({ proposal: true, customer_asked_time: true });
+    delete process.env.GATE_DAY_ONLY_PROMISE;
+    db.mockImplementation(() => chain({ select: jest.fn().mockResolvedValue([stop('svc-ok', 'confirmed')]) }));
+    expect(await executeScheduleTool('move_stops_to_day', { service_ids: ['svc-ok'], new_date: '2099-01-15', customer_asked_time: true })).not.toHaveProperty('customer_asked_time');
+  });
+});
