@@ -290,11 +290,19 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
 
 // GATE_DAY_ONLY_PROMISE (part D): which of these visit rows (id, scheduled_date, window_start) must be stated as the day
 // only? One bulk read inside the turn's transaction when there is one (so a cancelled turn stops here, not after).
+// loadDayOnlyCheck never throws, but a SQL error it swallowed still leaves the transaction ABORTED, and turn.transaction's
+// closing query then rejects. So a non-cancellation failure is caught HERE, outside the transaction, and answers day-only
+// for every row (the same wording loadDayOnlyCheck gives a failed read). A cancellation still propagates.
 async function dayOnlyCheck(rows, turn) {
   if (!dayOnlyPromiseOn()) return () => false; // gate off: no transaction, no read
-  return turn
-    ? turn.transaction('day-only promise', (database) => loadDayOnlyCheck(database, rows))
-    : loadDayOnlyCheck(db, rows);
+  if (!turn) return loadDayOnlyCheck(db, rows);
+  try {
+    return await turn.transaction('day-only promise', (database) => loadDayOnlyCheck(database, rows));
+  } catch (err) {
+    if (isToolCancellation(err)) throw err;
+    logger.warn(`[ai-assistant] day-only promise read failed, saying only the day: ${err.message}`);
+    return () => true;
+  }
 }
 
 async function getUpcomingServices(customerId, turn) {
@@ -585,17 +593,24 @@ function reservicePageSwitchesOn() {
 
 // A re-service already open in the line: its date and window for the model,
 // and a button to move it only when the reschedule page would accept it.
-async function bookedReserviceResult(customerId, line, booked, database = db) {
+// This read runs inside the turn's transaction; the day-only check does NOT (dayOnlyCheck, outside it), because a failed
+// query there would abort the transaction this one still has to commit.
+async function bookedReserviceMove(customerId, booked, database = db) {
   // The reschedule route's own token format: any other token is a 404 there.
   const token = /^\/reschedule\/([^/]+)$/.exec(String(booked.rescheduleUrl || ''))?.[1];
   const { TOKEN_RE: RESCHEDULE_TOKEN_RE } = require('../../routes/reschedule-public')._internals;
   // Without a readable visit id the gate-on answer is the day only (nothing to judge the hour by).
-  if (token && !RESCHEDULE_TOKEN_RE.test(token)) return { result: bookedReserviceFacts(line, booked, false, dayOnlyPromiseOn()) };
+  if (token && !RESCHEDULE_TOKEN_RE.test(token)) return { movable: false, visit: null };
   // The button is optional: a failed lookup keeps the booked visit's facts.
   const row = token && await database('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id');
   const movable = Boolean(row && await movableVisit(row.id, database));
-  const visit = row ? bookedVisitRow(row.id, booked) : null;
-  const dayOnly = visit ? (await loadDayOnlyCheck(database, [visit]))(visit) : dayOnlyPromiseOn();
+  return { movable, visit: row ? bookedVisitRow(row.id, booked) : null };
+}
+
+async function bookedReserviceResult(customerId, line, booked, turn) {
+  const read = (database) => bookedReserviceMove(customerId, booked, database);
+  const { movable, visit } = turn ? await turn.transaction('booked re-service move', read) : await read();
+  const dayOnly = visit ? (await dayOnlyCheck([visit], turn))(visit) : dayOnlyPromiseOn();
   return {
     result: bookedReserviceFacts(line, booked, movable, dayOnly),
     action: movable ? {
@@ -682,9 +697,7 @@ async function offerReservice(customerId, input, actions, { secondaryProperty = 
   }
   if (decision.booked) {
     try {
-      decision = turn
-        ? await turn.transaction('booked re-service move', (database) => bookedReserviceResult(customerId, line, decision.booked, database))
-        : await bookedReserviceResult(customerId, line, decision.booked);
+      decision = await bookedReserviceResult(customerId, line, decision.booked, turn);
     } catch (err) {
       if (isToolCancellation(err)) throw err;
       logger.warn(`[ai-assistant] booked re-service move read failed, no button: ${err.message}`);
