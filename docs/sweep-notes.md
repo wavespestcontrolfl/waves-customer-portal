@@ -100,22 +100,6 @@ has no "Triage done" comment.
 
 ## Already-catalogued open findings (reference, don't re-report as new)
 
-- Sweep #7765 B2, owner decision pending: document request and reminder
-  emails (`sendEmailDelivery` in `document-contract-delivery.js`) and the
-  signed-copy email (`contract-signed-email.js`) call `sendgrid.sendOne` with
-  no local `email_suppressions` check and write no `email_messages` row, so a
-  `do_not_email` or manual `unsubscribe` row does not stop them. Proposed fix:
-  check `activeSuppressionFor(..., 'transactional_required')` before each send
-  and record a blocked outcome. Effect: those addresses stop getting document
-  emails. (triaged 2026-11-08)
-- Sweep #7765 B3, owner decision pending: a first-attempt `sendTemplate` row
-  left `queued` with `provider_handoff_phase = 'started'` (the process died
-  between the marker and SendGrid's answer) is held forever; nothing settles
-  it or alerts. Production had no such row on 2026-11-08. Proposed fix: a
-  sweep that settles it `failed` with `provider_retry_exhausted_at` (never a
-  re-send) and raises one bell. Settling changes how the visit-summary review
-  ask and other readers of the row behave, and the bell is a new owner alert.
-  (triaged 2026-11-08)
 - Sweep #7765 B4, owner decision pending: newsletter proof replies ("APPROVED",
   "HOLD") are matched on the From header and the subject token only. Proposed
   fix: also require `hasAlignedAuth(..., { strict: true })`, as the estimate
@@ -123,15 +107,13 @@ has no "Triage done" comment.
   DKIM/SPF from Gmail's own Authentication-Results line is ignored. The
   company domain publishes DMARC `p=reject`, so a spoofed From on it is
   already refused upstream. (triaged 2026-11-08)
-- Sweep #7765 B5, owner decision pending: the public newsletter `/subscribe`
-  flips an `unsubscribed` or `inactive` row to `pending` before the reader
-  confirms; the 30-day pending purge then deletes the row and the opt-out
-  with it; a `pending` row re-sends the confirmation on every submit with no
-  cooldown. Proposed fix: mint the token without changing status or the
-  sunset markers until `confirmByToken`, refuse a resend within ~10 minutes,
-  and make the purge revert rows with opt-out history instead of deleting
-  them. Effect: fewer confirmation emails, and old opt-outs survive.
-  Production had no re-submitted pending row on 2026-11-08. (triaged 2026-11-08)
+- Sweep #7765 B5 residual, parked (P3): the B5 fix (#7778) keeps an opted-out
+  row opted out until the emailed link is clicked. A second SendGrid
+  unsubscribe event for a delivery that already has `unsubscribed_at` is
+  dropped before the subscriber write, so it does not revoke a live re-signup
+  link. The reader can still revoke it from the unsubscribe page or any
+  one-click POST, and the link only confirms what the reader asked for.
+  (triaged 2026-11-08)
 - A monthly autopay charge refused before Stripe (no usable payment method,
   sweep #6273 B1) and a wholly missed 8:00 AM billing run (#5874 B2) both end
   as "no dues payment row this month" with no retry. With 3 monthly-billing
