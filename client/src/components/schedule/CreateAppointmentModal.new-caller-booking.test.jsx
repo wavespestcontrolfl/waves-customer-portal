@@ -196,7 +196,7 @@ describe('CreateAppointmentModal new-caller Book', () => {
       ? new Promise((resolve) => { release = () => resolve(json({ ok: true, id: 'visit-1', scheduledDate: futureDate(), warnings: [] }, { status: 201 })); })
       : base(input, options)));
     // Phone match on: a typed name and phone make the one-Save customer flow ready to save.
-    mount({ newCallerBooking: true, newCustomerPhoneMatch: true });
+    mount({ newCallerBooking: true });
     fireEvent.click(screen.getByText('pick suggestion'));
     await screen.findByText('This call');
     await addService();
@@ -262,7 +262,7 @@ describe('CreateAppointmentModal new-caller Book', () => {
     fetcher.mockImplementation((input, options = {}) => (String(input).endsWith('/admin/customers/quick-add') && options.method === 'POST'
       ? new Promise((resolve) => { releaseAdd = () => resolve(json({ customer: { id: 'cust-new' } })); })
       : base(input, options)));
-    mount({ newCallerBooking: true, newCustomerPhoneMatch: true });
+    mount({ newCallerBooking: true });
     fireEvent.click(screen.getByText('pick suggestion'));
     await screen.findByText('This call');
     await addService();
