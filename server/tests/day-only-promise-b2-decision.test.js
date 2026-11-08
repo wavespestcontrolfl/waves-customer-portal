@@ -298,49 +298,6 @@ describe('recordCustomerAskedTime', () => {
     ]);
   }));
 
-  describe('bound to the slot the move wrote (a delayed post-commit write)', () => {
-    const slotConn = (window_start) => fakeConn({ services: [svc('s1', { scheduled_date: '2026-11-15', window_start, customer_asked_time: null })] });
-
-    test('the slot still holds: the write lands', withGate('true', async () => {
-      const conn = slotConn('09:00:00');
-      expect(await recordCustomerAskedTime(conn, ['s1'], false, { date: '2026-11-15', windowStart: '09:00' })).toBe(1);
-      expect(await recordCustomerAskedTime(conn, ['s1'], false, { date: '2026-11-15' })).toBe(1);
-    }));
-
-    test('a later customer move changed the slot: the earlier move\'s delayed write updates 0 rows and true stays', withGate('true', async () => {
-      const conn = slotConn('09:00:00');
-      // Move 1 (office, day only) commits 2026-11-15 09:00; move 2 (customer, a set time) then lands 2026-11-17 13:00 and writes true.
-      const visit = (await conn('scheduled_services').select())[0];
-      Object.assign(visit, { scheduled_date: '2026-11-17', window_start: '13:00:00' });
-      expect(await recordCustomerAskedTime(conn, ['s1'], true, { date: '2026-11-17', windowStart: '13:00' })).toBe(1);
-      expect(visit.customer_asked_time).toBe(true);
-      // Move 1's delayed effect now runs with ITS slot and wants false.
-      expect(await recordCustomerAskedTime(conn, ['s1'], false, { date: '2026-11-15', windowStart: '09:00' })).toBe(0);
-      // Same date, different start is also a different slot.
-      expect(await recordCustomerAskedTime(conn, ['s1'], false, { date: '2026-11-17', windowStart: '09:00' })).toBe(0);
-      expect(visit.customer_asked_time).toBe(true);
-    }));
-
-    test('windowStart null means no window; a slot without a date writes nothing; gate off writes nothing', withGate('true', async () => {
-      const conn = slotConn(null);
-      expect(await recordCustomerAskedTime(conn, ['s1'], false, { date: '2026-11-15', windowStart: null })).toBe(1);
-      expect(await recordCustomerAskedTime(conn, ['s1'], false, { date: '2026-11-15', windowStart: '09:00' })).toBe(0);
-      expect(await recordCustomerAskedTime(conn, ['s1'], false, {})).toBe(0);
-    }));
-
-    test('gate off with a slot: no write', withGate(undefined, async () => {
-      const conn = slotConn('09:00:00');
-      expect(await recordCustomerAskedTime(conn, ['s1'], false, { date: '2026-11-15' })).toBe(0);
-      expect(conn.updates).toEqual([]);
-    }));
-
-    test('no slot given (a caller inside the moving transaction): the UPDATE carries no slot condition', withGate('true', async () => {
-      const conn = slotConn('09:00:00');
-      await recordCustomerAskedTime(conn, ['s1'], true);
-      expect(conn.updates[0].raws).toEqual([]);
-    }));
-  });
-
   test('a failed write throws, so a caller inside a transaction fails the move with it', withGate('true', async () => {
     const conn = Object.assign(() => ({ whereIn: () => ({ update: async () => { throw new Error('write failed'); } }) }), { raw: () => 'now' });
     await expect(recordCustomerAskedTime(conn, ['s1'], true)).rejects.toThrow('write failed');

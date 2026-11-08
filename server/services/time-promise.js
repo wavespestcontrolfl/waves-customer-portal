@@ -429,31 +429,48 @@ async function dayOnlyReplayDecision(conn, { id, startAt, now = new Date(), remi
   }
 }
 
-/** Limits an intent UPDATE to the visits still on the slot a move wrote. `slot` = { date, windowStart }: windowStart a time
- *  means that start (HH:MM), null means no window, undefined means any start on that date. A slot without a usable date
- *  matches nothing. */
-function onlyWhileAtSlot(query, slot) {
-  const date = slot && slot.date ? dateOnlyString(slot.date) : null;
-  if (!date) return query.whereRaw('1 = 0');
-  query.whereRaw('scheduled_services.scheduled_date = ?::date', [date]);
-  if (slot.windowStart === null) return query.whereNull('scheduled_services.window_start');
-  if (slot.windowStart === undefined) return query;
-  return query.whereRaw("to_char(scheduled_services.window_start, 'HH24:MI') = ?", [String(slot.windowStart).slice(0, 5)]);
-}
-
 /** Records the office's "customer asked for this time" (true) or "day only" (false) on the moved visit(s). Gate off: nothing
- *  is written (the UPDATE payloads stay exactly today's). Throws on a failed write, so a caller inside a transaction fails
- *  the move with it and a best-effort caller can catch.
- *  `slot` (optional, { date, windowStart }): the slot the move set. A caller that writes AFTER its move committed passes it, so
- *  the write lands only while the visit still holds that slot: a later move that changed the slot owns the column, and this
- *  delayed write then updates 0 rows. A caller inside the moving transaction needs no slot. */
-async function recordCustomerAskedTime(conn, ids, asked, slot) {
+ *  is written (the UPDATE payloads stay exactly today's). Throws on a failed write. ONLY for a caller that runs inside the
+ *  transaction that moved the visit (admin-schedule.js recordOfficeMoveIntent): the intent then belongs to that move. A mover
+ *  that owns its UPDATE writes the columns in the same statement instead (moveIntentColumns); a write AFTER the commit could
+ *  land over a later move's intent (A -> B -> C -> B) and is never used. */
+async function recordCustomerAskedTime(conn, ids, asked) {
   if (!dayOnlyPromiseOn()) return 0;
   const list = [...new Set((ids || []).filter((v) => v != null).map(String))];
   if (!list.length) return 0;
-  const query = conn('scheduled_services').whereIn('id', list);
   // customer_asked_time_at: the database clock, so the intent reads as stale once a newer slot change is logged (currentIntent).
-  return (slot === undefined ? query : onlyWhileAtSlot(query, slot)).update({ customer_asked_time: asked === true, customer_asked_time_at: conn.raw('now()') });
+  return conn('scheduled_services').whereIn('id', list).update(intentColumns(conn, asked));
+}
+
+/** The two intent columns, as they are written together: the value and the database clock (now()). */
+function intentColumns(conn, asked) {
+  return { customer_asked_time: asked === true, customer_asked_time_at: conn.raw('now()') };
+}
+
+// Where the CUSTOMER picks the new slot of a move (rebooker options.sourceSurface): the public rescheduler, a text reply or
+// accepted text offer, the call agent (a staff-applied call reschedule included, call-reschedule-apply.js). Such a move records
+// "the customer asked for this time" without its caller saying so.
+const CUSTOMER_MOVE_SURFACES = Object.freeze(['customer_web', 'sms_reply', 'call_reschedule', 'call_makeup']);
+
+/** The intent a move records for the slot it sets: an explicit boolean from the caller (options.customerAskedTime: the office
+ *  box on a dispatch board move) or true for a customer surface; otherwise undefined (the move records no intent). */
+function moveIntentFor(options, { series = false } = {}) {
+  if (!series && typeof options?.customerAskedTime === 'boolean') return options.customerAskedTime;
+  return CUSTOMER_MOVE_SURFACES.includes(options?.sourceSurface) ? true : undefined;
+}
+
+/**
+ * The intent columns a MOVER adds to its own UPDATE of scheduled_services, so the intent is written by the same statement,
+ * in the same transaction, as the slot change it describes (and shares its now() with the move's reschedule_log row): the
+ * intent is bound to its own move, with no later write to race a newer move (customer_asked_time_at, currentIntent). {} when the
+ * gate is off (the UPDATE payload stays exactly today's), when the move records no intent, or when the move did not change the
+ * slot (`slotChanged` false: a technician-only change keeps the intent of the slot it holds). `series`: a series move records
+ * the intent of a CUSTOMER surface only (an office series move keeps its current behavior).
+ */
+function moveIntentColumns(conn, options, { slotChanged = true, series = false } = {}) {
+  if (!dayOnlyPromiseOn() || slotChanged !== true) return {};
+  const asked = moveIntentFor(options, { series });
+  return asked === undefined ? {} : intentColumns(conn, asked);
 }
 
 /** The visit's start time from its ET date and window start, or null. */
@@ -511,6 +528,9 @@ module.exports = {
   dayOnlyReplayDecision,
   officeMoveIntent,
   recordCustomerAskedTime,
+  moveIntentColumns,
+  moveIntentFor,
+  CUSTOMER_MOVE_SURFACES,
   DAY_PROMISE_CUTOFF_HOURS,
   DAY_PROMISE_META,
   dayOnlyPromiseOn,

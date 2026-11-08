@@ -1482,7 +1482,7 @@ async function probeMoveOverlaps(trx, classified, dateStr) {
 // P1), the package visit 2 recheck, the area add-on limit, then the CAS
 // update (status + observed schedule fields + visit_id + tracker snapshot, no
 // FOR UPDATE; a miss aborts the batch).
-async function writeMovedStop(trx, c, dateStr, reason) {
+async function writeMovedStop(trx, c, dateStr, reason, customerAskedTime) {
   const { applyTrackLifecycleCas, singleMoveStamp } = require('../rebooker');
   const s = c.s;
   await require('../visit-groups').assertRowMovableAlone(trx, s.id, s.visit_id);
@@ -1510,6 +1510,9 @@ async function writeMovedStop(trx, c, dateStr, reason) {
       scheduled_date: dateStr,
       ...recurringDispatchDuePatch(s, { scheduled_date: dateStr }),
       ...(c.observedDate !== dateStr ? singleMoveStamp(s, dateStr, 'admin_ib') : {}),
+      // GATE_DAY_ONLY_PROMISE part B2/B3: the office's choice for the new date, in this same UPDATE, so it belongs to this move
+      // alone (a later move's intent cannot be overwritten). Gate off: nothing added.
+      ...require('../time-promise').moveIntentColumns(trx, { customerAskedTime }, { slotChanged: c.observedDate !== dateStr }),
       // Old day's sequence number is meaningless on the new date — NULL
       // appends the stop after the target day's ordered run.
       route_order: null,
@@ -1531,14 +1534,24 @@ async function writeMovedStop(trx, c, dateStr, reason) {
 // Phase A: the COMPLETE approved set moves in ONE transaction (pre-push r21
 // P1): a CAS miss, a grouped/frozen refusal, or any target drift aborts EVERY
 // move (all-or-none, like bulk_update_leads).
-async function moveBatchTrx(trx, classified, dateStr, reason) {
+async function moveBatchTrx(trx, classified, dateStr, reason, customerAskedTime) {
   const overlappedIds = await probeMoveOverlaps(trx, classified, dateStr);
   // ONE tech-day fence over every day this batch touches (each stop's leaving day + the joining day).
   await require('../scheduling/tech-day-lock').lockTechDays(trx, classified.flatMap((c) => [
     { techId: c.s.technician_id, date: c.observedDate },
     { techId: c.s.technician_id, date: dateStr },
   ]));
-  for (const c of classified) await writeMovedStop(trx, c, dateStr, reason);
+  // GATE_DAY_ONLY_PROMISE part B3: with the gate on, each stop's reschedule_log row is written in THIS transaction, right after the
+  // UPDATE that carries the stop's intent, so the intent and its own log row share the transaction's now() (currentIntent reads
+  // the intent as current). A post-commit row would be strictly later and make the intent read stale at once. Gate off: the row is
+  // written after the commit, exactly as before. The flags are reset per attempt (a deadlock retry rolled the rows back).
+  const auditInTrx = require('../time-promise').dayOnlyPromiseOn();
+  for (const c of classified) {
+    c.auditedInTrx = false;
+    c.auditFailedInTrx = false;
+    await writeMovedStop(trx, c, dateStr, reason, customerAskedTime);
+    if (auditInTrx) await auditMovedStopInTrx(trx, c, dateStr, reason);
+  }
   // The probe ran on the technician each stop was read with. The CAS does not
   // pin technician_id (the notice follows the stop), so a concurrent
   // reassignment can commit a stop onto another route: when scoping is on
@@ -1576,10 +1589,10 @@ async function moveBatchTrx(trx, classified, dateStr, reason) {
 
 // Deadlock retry (codex #3609 r31 P2) around the WHOLE batch — locks
 // re-acquired fresh on 40P01.
-async function runMoveBatch(classified, dateStr, reason) {
+async function runMoveBatch(classified, dateStr, reason, customerAskedTime) {
   for (let attempt = 0; ; attempt++) {
     try {
-      return await db.transaction((trx) => moveBatchTrx(trx, classified, dateStr, reason));
+      return await db.transaction((trx) => moveBatchTrx(trx, classified, dateStr, reason, customerAskedTime));
     } catch (err) {
       if (!(err && err.code === '40P01' && attempt < 2)) throw err;
     }
@@ -1632,23 +1645,41 @@ async function releaseMovedStop(c) {
   }
 }
 
-// The reschedule_log audit row, matching the rebooker's conventions. True
-// when the append failed (the card discloses it — GH r19 P2).
-async function auditMovedStop(c, dateStr, reason) {
+// The reschedule_log audit row, matching the rebooker's conventions. Throws on a failed insert.
+function insertMoveAudit(conn, c, dateStr, reason) {
   const s = c.s;
   const window = s.window_start ? `${s.window_start}-${s.window_end}` : null;
+  return conn('reschedule_log').insert({
+    scheduled_service_id: s.id,
+    customer_id: s.customer_id,
+    original_date: c.oldDate,
+    new_date: dateStr,
+    reason_code: 'admin',
+    initiated_by: 'admin_ib',
+    original_window: window,
+    new_window: window,
+    notes: reason || null,
+  });
+}
+
+// The same row, inside the batch transaction under a SAVEPOINT (GATE_DAY_ONLY_PROMISE part B3): a failed insert rolls back to the
+// savepoint only, the batch stands, and the stop is reported in auditFailures like a failed post-commit append.
+async function auditMovedStopInTrx(trx, c, dateStr, reason) {
   try {
-    await db('reschedule_log').insert({
-      scheduled_service_id: s.id,
-      customer_id: s.customer_id,
-      original_date: c.oldDate,
-      new_date: dateStr,
-      reason_code: 'admin',
-      initiated_by: 'admin_ib',
-      original_window: window,
-      new_window: window,
-      notes: reason || null,
-    });
+    await trx.transaction((sp) => insertMoveAudit(sp, c, dateStr, reason));
+    c.auditedInTrx = true;
+  } catch (err) {
+    c.auditFailedInTrx = true;
+    logger.error(`[intelligence-bar:schedule] reschedule_log insert failed for ${c.s.id}: ${err.message}`);
+  }
+}
+
+// The post-commit append (gate off, or a stop the transaction did not audit). True when the append failed (the card discloses it —
+// GH r19 P2).
+async function auditMovedStop(c, dateStr, reason) {
+  const s = c.s;
+  try {
+    await insertMoveAudit(db, c, dateStr, reason);
     return false;
   } catch (err) {
     logger.error(`[intelligence-bar:schedule] reschedule_log insert failed for ${s.id}: ${err.message}`);
@@ -1663,7 +1694,10 @@ async function applyPostCommit(classified, dateStr, reason) {
   const auditFailures = [];
   for (const c of classified) {
     if (await releaseMovedStop(c)) lifecycleCleanupFailures.push(c.s.id);
-    if (await auditMovedStop(c, dateStr, reason)) auditFailures.push(c.s.id);
+    // Audited inside the batch transaction (gate on): nothing to append; a failed in-transaction append is reported, not retried
+    // here (a late row would make the stop's recorded intent read stale).
+    if (c.auditedInTrx) continue;
+    if (c.auditFailedInTrx || await auditMovedStop(c, dateStr, reason)) auditFailures.push(c.s.id);
   }
   return { lifecycleCleanupFailures, auditFailures };
 }
@@ -1724,19 +1758,6 @@ async function textMovedStop(s, plan) {
   }
 }
 
-// GATE_DAY_ONLY_PROMISE part B2: the office's choice for the new slot, on the moved stop. Gate off: nothing is written.
-// Best-effort: the batch is committed, so a failed write is only logged.
-async function recordMovedStopIntent(s, plan) {
-  try {
-    // Bound to the slot THIS move wrote (the same one its reminder sync is pinned to): a later move that changed the slot owns
-    // the column, so this delayed write then updates nothing.
-    const windowStart = s.window_start ? String(s.window_start).slice(0, 5) : null;
-    await require('../time-promise').recordCustomerAskedTime(db, [s.id], plan.customerAskedTime === true, { date: plan.dateStr, windowStart });
-  } catch (err) {
-    logger.warn(`[intelligence-bar:schedule] customer_asked_time write failed for ${s.id}: ${err.message}`);
-  }
-}
-
 // Notification phase — runs only after EVERY approved stop has been moved,
 // released, and audited, so one slow SMS provider can never delay or strand
 // the rest of the confirmed batch. Activates a moved LEGACY outbound-review
@@ -1749,7 +1770,6 @@ async function notifyMovedCustomers(plan, movedIds) {
     try {
       await require('../outbound-review-confirm').activateLegacyOutboundReviewRowIfNeeded(db, s.id, 'ib-bulk-move');
     } catch { /* helper is internally best-effort; never strand the batch */ }
-    await recordMovedStopIntent(s, plan);
     if (!plan.notifyCustomers) continue;
     const outcome = await textMovedStop(s, plan);
     if (outcome.sent) textedCount++;
@@ -1826,7 +1846,7 @@ async function commitMove(plan, actionContext) {
   }
   let overlapMovedIds;
   try {
-    overlapMovedIds = await runMoveBatch(classified, plan.dateStr, plan.reason);
+    overlapMovedIds = await runMoveBatch(classified, plan.dateStr, plan.reason, plan.customerAskedTime);
   } catch (err) {
     return moveBatchFailure(err);
   }
