@@ -4299,7 +4299,7 @@ under `GATE_LEAD_TURNSTILE`. Owner alert (owner 2026-10-14): a verified lead nev
 call to the owner at any hour. It takes the `new_lead` bell; the legacy
 lead SMS to the owner goes only if that bell fails. The alert never
 changes the response, the lead's one automated text, or the estimate
-draft. A diff that places a call from this route is a P0. Repeat form from a lead (`GATE_LEAD_REPEAT_FORM`, dark; owner
+draft. A diff that places a call from this route is a P0. Repeat form from a lead (owner
 2026-10-24): a submission whose phone matches a live customers row still
 takes the existing-customer branch (its note; no leads row, no automated
 text, no draft, no new-lead bell) and the response is unchanged. When that
@@ -4307,8 +4307,8 @@ row is still a lead (`pipeline_stage` new_lead, contacted, estimate_sent,
 estimate_viewed, follow_up or lost), an open `lead_intake_status`
 (`awaiting_service`, `awaiting_address`) is kept instead of cleared, and
 one Leads admin alert rings (`ringRepeatFormAlert`; none inside the
-5-minute duplicate window). Any other row is unchanged by that gate, nothing is
-sent to the submitter, and gate off = as before. Current or past customer
+5-minute duplicate window). Any other row is unchanged by that rule, and nothing is
+sent to the submitter. Current or past customer
 (`GATE_CURRENT_CUSTOMER_QUOTE_TEXT`, dark; owner 2026-11-02 "text and bell"): a
 row in `active_customer`, `won`, `at_risk`, `churned`, `past_customer` or
 `dormant` (`server/services/customer-stages.js`) still takes the

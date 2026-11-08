@@ -1,6 +1,6 @@
 /**
  * Public lead webhook — a repeat form from a row that is still a lead
- * (GATE_LEAD_REPEAT_FORM, owner 2026-10-24 "A: both parts").
+ * (owner 2026-10-24 "A: both parts"; its gate was removed 2026-11-07).
  *
  * A form whose phone matches a live customers row takes the existing-customer
  * branch: a note, no lead row, no text, no new-lead bell. That branch also
@@ -9,8 +9,8 @@
  * lead re-sent the form 29 s before replying TEXT), and nobody was told about
  * the form (five leads Aug 17 - Oct 18, none called).
  *
- * Gate on, a row that is still a lead keeps an open intake state and rings one
- * Leads alert; a customer row is unchanged. Gate off, both are as before.
+ * A row that is still a lead keeps an open intake state and rings one Leads
+ * alert; a customer row is unchanged.
  * Drives the real POST handler with an in-memory db behind a recording mock and
  * the real alert composer (it throws under NODE_ENV=test when the copy breaks
  * docs/admin-notifications.md), with notifyAdmin mocked. All names are synthetic.
@@ -66,22 +66,13 @@ const { notifyAdmin } = require('../services/notification-service');
 
 const PHONE_RAW = '9415550142';
 const PHONE = '+19415550142';
-const ORIGINAL = process.env.GATE_LEAD_REPEAT_FORM;
-
-function load(gate) {
-  if (gate === undefined) delete process.env.GATE_LEAD_REPEAT_FORM;
-  else process.env.GATE_LEAD_REPEAT_FORM = gate;
+function load() {
   let router;
   jest.isolateModules(() => {
     router = require('../routes/lead-webhook');
   });
   return router;
 }
-
-afterAll(() => {
-  if (ORIGINAL === undefined) delete process.env.GATE_LEAD_REPEAT_FORM;
-  else process.env.GATE_LEAD_REPEAT_FORM = ORIGINAL;
-});
 
 async function submit(router) {
   const layer = router.stack.find((l) => l.route && l.route.path === '/' && l.route.methods.post);
@@ -125,9 +116,9 @@ beforeEach(() => {
   mockTables.recentFormNote = null;
 });
 
-describe('gate on: a repeat form from a row that is still a lead', () => {
+describe('a repeat form from a row that is still a lead', () => {
   test('keeps the open intake state and rings one Leads alert that opens the lead', async () => {
-    const router = load('true');
+    const router = load();
     mockTables.customers = [row()];
 
     const res = await submit(router);
@@ -155,7 +146,7 @@ describe('gate on: a repeat form from a row that is still a lead', () => {
   });
 
   test('the alert key is the one the relevance sweep closes once the lead is contacted', async () => {
-    const router = load('true');
+    const router = load();
     mockTables.customers = [row()];
     await submit(router);
     const { CLASSES } = require('../services/admin-alert-relevance');
@@ -166,14 +157,14 @@ describe('gate on: a repeat form from a row that is still a lead', () => {
   });
 
   test('an address ask in progress (awaiting_address) is kept too', async () => {
-    const router = load('true');
+    const router = load();
     mockTables.customers = [row({ lead_intake_status: 'awaiting_address' })];
     await submit(router);
     expect(customerUpdate().payload).not.toHaveProperty('lead_intake_status');
   });
 
   test('a closed intake state is still cleared, and the lead still gets the alert', async () => {
-    const router = load('true');
+    const router = load();
     mockTables.customers = [row({ pipeline_stage: 'estimate_sent', lead_intake_status: 'estimate_drafted' })];
     await submit(router);
     expect(customerUpdate().payload.lead_intake_status).toBeNull();
@@ -181,7 +172,7 @@ describe('gate on: a repeat form from a row that is still a lead', () => {
   });
 
   test('a double submit inside the 5-minute window keeps the state and rings nothing', async () => {
-    const router = load('true');
+    const router = load();
     mockTables.customers = [row()];
     mockTables.recentFormNote = { id: 'note-1' };
 
@@ -193,7 +184,7 @@ describe('gate on: a repeat form from a row that is still a lead', () => {
   });
 
   test('no live lead row: the alert opens the customer instead', async () => {
-    const router = load('true');
+    const router = load();
     mockTables.customers = [row()];
     mockTables.leads = [];
     await submit(router);
@@ -203,7 +194,7 @@ describe('gate on: a repeat form from a row that is still a lead', () => {
   });
 
   test('a failed alert is logged and the form still answers success', async () => {
-    const router = load('true');
+    const router = load();
     notifyAdmin.mockRejectedValueOnce(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
     mockTables.customers = [row()];
     const res = await submit(router);
@@ -213,7 +204,7 @@ describe('gate on: a repeat form from a row that is still a lead', () => {
 
 describe('the alert opens the lead the form attached to', () => {
   test('an attached call lead wins over the newest-lead lookup', async () => {
-    load('true');
+    load();
     let helper;
     jest.isolateModules(() => { helper = require('../routes/lead-webhook')._test.ringRepeatFormAlert; });
     await helper(row(), 'lead-attached');
@@ -224,9 +215,9 @@ describe('the alert opens the lead the form attached to', () => {
 
 describe('unchanged paths', () => {
   test.each(['active_customer', 'won', 'at_risk', 'dormant', 'churned', null])(
-    'gate on, a %s row: intake cleared, note only, no alert',
+    'a %s row: intake cleared, note only, no alert',
     async (stage) => {
-      const router = load('true');
+      const router = load();
       mockTables.customers = [row({ pipeline_stage: stage })];
       await submit(router);
       expect(customerUpdate().payload.lead_intake_status).toBeNull();
@@ -234,12 +225,4 @@ describe('unchanged paths', () => {
     },
   );
 
-  test.each([undefined, 'false', '1', 'TRUE'])('gate %s: a lead row is cleared and no alert rings', async (gate) => {
-    const router = load(gate);
-    mockTables.customers = [row()];
-    await submit(router);
-    expect(customerUpdate().payload.lead_intake_status).toBeNull();
-    expect(notifyAdmin).not.toHaveBeenCalled();
-    expect(newestLeadLookups()).toHaveLength(0);
-  });
 });
