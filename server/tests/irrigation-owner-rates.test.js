@@ -1,13 +1,11 @@
 /**
- * GATE_IRRIGATION_OWNER_RATES (owner 2026-10-09, "build it"): ONE sprinkler head rate table for every reader.
- * Off = the package table (spray 1.5, rotor 0.5 in/hr) exactly as before; on = the owner table (spray 15, rotor 40
- * minutes per quarter inch). A customer's MEASURED rate outranks either table.
+ * ONE sprinkler head rate table for every reader (owner 2026-10-09, "build it"): the owner table (spray 15, rotor 40
+ * minutes per quarter inch). The package table (spray 1.5, rotor 0.5 in/hr) stays only for stored plans decided before
+ * the owner table went live. A customer's MEASURED rate outranks either table.
  */
 jest.mock('../models/db', () => { const m = jest.fn(); m.fn = { now: () => 'now()' }; m.raw = jest.fn((e) => e); return m; });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const fs = require('fs');
-const path = require('path');
 const pkg = require('../../packages/irrigation-runtime');
 const { irrigationRates, irrigationRateOptions } = require('../services/irrigation-rates');
 const { decideWeekPlan, renderWeekPlanEmail, renderWeekPlanReport } = require('../services/irrigation-week-plan');
@@ -22,22 +20,8 @@ const ONE_DAY = { maxDaysPerWeek: 1, label: 'Test order', expiresOn: '2026-12-31
 const SPRAY = { runMinutes: 20, wateringDays: ['Mon', 'Wed'], systemType: ['spray'] };
 const ROTOR = { runMinutes: 60, wateringDays: ['Mon', 'Wed'], systemType: ['rotor'] };
 
-let saved;
-beforeEach(() => { saved = process.env.GATE_IRRIGATION_OWNER_RATES; delete process.env.GATE_IRRIGATION_OWNER_RATES; });
-afterEach(() => { if (saved === undefined) delete process.env.GATE_IRRIGATION_OWNER_RATES; else process.env.GATE_IRRIGATION_OWNER_RATES = saved; });
-const gateOn = () => { process.env.GATE_IRRIGATION_OWNER_RATES = 'true'; };
-const gateOff = () => { delete process.env.GATE_IRRIGATION_OWNER_RATES; };
-
 describe('rate table chooser', () => {
-  test('off or anything but exactly "true" = the package table', () => {
-    expect(irrigationRates()).toBe(HEAD_PRECIP_RATE_IN_PER_HR);
-    for (const v of ['1', 'TRUE', 'yes', '']) {
-      process.env.GATE_IRRIGATION_OWNER_RATES = v;
-      expect(irrigationRates()).toBe(HEAD_PRECIP_RATE_IN_PER_HR);
-    }
-  });
-  test('on = the owner table (15 / 40 minutes per quarter inch)', () => {
-    gateOn();
+  test('a new decision uses the owner table (15 / 40 minutes per quarter inch)', () => {
     expect(irrigationRates()).toBe(OWNER_HEAD_RATE_IN_PER_HR);
     expect(irrigationRateOptions()).toEqual({ rates: { spray: 1, rotor: 0.375 } });
   });
@@ -85,18 +69,16 @@ describe('Monday plan (decideWeekPlan) and its generic sentences', () => {
   const advice = () => buildIrrigationAdvice({ grassType: 'st_augustine', month: 8, irrigationInchesPerWeek: 2, rainfallInches7d: 0.6 });
   const decide = (extra = {}) => decideWeekPlan({ advice: advice(), grassType: 'st_augustine', forecastEt0Inches: 1.6, forecastRainInches: 0.3, ...SPRAY, county: 'Manatee', now: new Date('2026-08-28T12:00:00Z'), ...extra }).plan;
 
-  test('gate off: default-rate plan unchanged; gate on: owner minutes', () => {
-    const off = decide();
+  test('a stored package-table decision keeps its minutes; a new decision uses the owner minutes', () => {
+    const off = decide({ rateTable: 'package' });
     expect(off).toMatchObject({ action: 'run', rateSource: 'system_type_default', rateInPerHr: 1.5 });
-    gateOn();
     const on = decide();
     expect(on).toMatchObject({ action: 'run', rateSource: 'system_type_default', rateInPerHr: 1 });
     expect(on.minutesPerEvent).toBeGreaterThan(off.minutesPerEvent);
     expect(on.minutesPerEvent).toBe(Math.max(5, Math.round((on.depthInches / 1) * 60 / 5) * 5));
   });
 
-  test('gate on: a measured rate still wins', () => {
-    gateOn();
+  test('a measured rate still wins', () => {
     expect(decide({ explicitInchesPerWeek: 1.2 })).toMatchObject({ rateSource: 'measured', rateInPerHr: 1.8 });
   });
 
@@ -105,7 +87,7 @@ describe('Monday plan (decideWeekPlan) and its generic sentences', () => {
   const HOLD = buildWeekPlan({ targetInchesPerWeek: 0.2, season: 'peak', restriction: ONE_DAY });
   const CONDITIONAL = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY, forecastRainInches: 1 });
 
-  test('gate off: the generic sentences read exactly as they always did (20 and 60)', () => {
+  test('a stored package-table plan: the generic sentences read exactly as they always did (20 and 60)', () => {
     const email = renderWeekPlanEmail(EVENTS_ONLY, CTX);
     expect(email.week_plan).toContain('run one full cycle on each turf zone — ½ to ¾ inch of water, which is about 20 minutes on spray zones and 60 on rotor zones');
     expect(renderWeekPlanEmail(HOLD, CTX).week_plan).toContain('one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones)');
@@ -113,7 +95,7 @@ describe('Monday plan (decideWeekPlan) and its generic sentences', () => {
     expect(renderWeekPlanReport(CONDITIONAL, { restriction: ONE_DAY }).detail).toContain('(½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones)');
   });
 
-  test('gate on: the same sentences, computed from the owner table (30 and 80)', () => {
+  test('the same sentences, computed from the owner table (30 and 80)', () => {
     const OWNER = { ...CTX, rateTable: 'owner' };
     const email = renderWeekPlanEmail(EVENTS_ONLY, OWNER);
     expect(email.week_plan).toContain('run one full cycle on each turf zone — ½ to ¾ inch of water, which is about 30 minutes on spray zones and 80 on rotor zones');
@@ -124,7 +106,7 @@ describe('Monday plan (decideWeekPlan) and its generic sentences', () => {
     expect(all).not.toMatch(/about 20 minutes on spray/);
   });
 
-  test('the "typical rates" note drops the University of Florida attribution only with the gate on', () => {
+  test('the "typical rates" note drops the University of Florida attribution only for the owner table', () => {
     const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY, ...SPRAY });
     expect(renderWeekPlanEmail(plan, CTX).plan_note).toContain('Minutes assume typical spray heads rates from University of Florida turf guidance.');
     const note = renderWeekPlanEmail(plan, { ...CTX, rateTable: 'owner' }).plan_note;
@@ -136,27 +118,22 @@ describe('Monday plan (decideWeekPlan) and its generic sentences', () => {
 describe('weekly email, report figure and schedule guard', () => {
   const derivedFor = (rates) => deriveIrrigationInchesPerWeek({ runMinutes: 30, wateringDays: ['Mon', 'Thu'], systemType: ['spray'] }, rates ? { rates } : undefined);
 
-  test('the schedule provenance sentence: UF attribution off; plain "typical rate" on, with the owner rate per hour', () => {
+  test('the schedule provenance sentence: UF attribution for the package table; plain "typical rate" for the owner table, with the owner rate per hour', () => {
     const args = (derived, rateTable) => ({ scheduleSource: 'portal_derived', derived, scheduleFmt: String(derived.inchesPerWeek), rateTable });
     const off = weeklyEmail._private.buildScheduleNote(args(derivedFor()));
     expect(off).toContain('using the typical spray heads rate from University of Florida turf guidance (about 1.5" per hour).');
-    gateOn();
     const on = weeklyEmail._private.buildScheduleNote(args(derivedFor(OWNER_HEAD_RATE_IN_PER_HR), 'owner'));
     expect(on).toContain('using the typical spray heads rate (about 1" per hour).');
     expect(on).not.toMatch(/University of Florida/);
   });
 
-  test('the report\'s portal figure (portalIrrigationInches): 1.5 in/hr off, 1.0 in/hr on', () => {
+  test('the report\'s portal figure (portalIrrigationInches) uses 1.0 in/hr', () => {
     const prefs = { irrigation_run_minutes: 30, watering_days: ['Mon', 'Thu'], irrigation_system_type: ['spray'] };
-    expect(portalIrrigationInches(prefs)).toBe(1.5);
-    gateOn();
     expect(portalIrrigationInches(prefs)).toBe(1);
   });
 
   test('the report\'s portal figure: a typed weekly-inches entry outranks the table', () => {
     const prefs = { irrigation_inches_per_week: 0.8, irrigation_run_minutes: 30, watering_days: ['Mon', 'Thu'], irrigation_system_type: ['spray'] };
-    expect(portalIrrigationInches(prefs)).toBe(0.8);
-    gateOn();
     expect(portalIrrigationInches(prefs)).toBe(0.8);
   });
 
@@ -169,32 +146,14 @@ describe('weekly email, report figure and schedule guard', () => {
       irrigation_system_type: ['spray'],
       irrigation_confirmed_fields: ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type'],
     };
-    // The table is an argument, not a gate read: the same row answers differently per table, whatever the gate says.
+    // The table is an argument: the same row answers differently per table.
     expect(sizingFieldsUnconfirmed(row, 'package')).toBe(true);
-    expect(sizingFieldsUnconfirmed(row, 'owner')).toBe(false);
-    gateOn();
-    expect(sizingFieldsUnconfirmed(row, 'package')).toBe(true);
-    gateOff();
     expect(sizingFieldsUnconfirmed(row, 'owner')).toBe(false);
   });
 
-  test('schedule guard: the rate table is required (no silent read of the live gate)', () => {
+  test('schedule guard: the rate table is required (no silent default)', () => {
     expect(() => sizingFieldsUnconfirmed({})).toThrow(/rate table/);
     expect(() => sizingFieldsUnconfirmed({}, 'live')).toThrow(/rate table/);
     expect(() => scheduleUnconfirmedAfterMove({ irrigation_home_changed_at: '2026-10-01T00:00:00Z' })).toThrow(/rate table/);
-  });
-});
-
-describe('portal carries the choice', () => {
-  test('GET /api/property/preferences adds irrigationOwnerRates only through the gate-checked spread', () => {
-    const src = fs.readFileSync(path.join(__dirname, '../routes/property.js'), 'utf8');
-    expect(src).toMatch(/function irrigationRatesPayload\(\) \{\s*return irrigationOwnerRatesLive\(\) \? \{ irrigationOwnerRates: true \} : \{\};\s*\}/);
-    expect(src.match(/\.\.\.irrigationRatesPayload\(\)/g)).toHaveLength(2);
-  });
-  test('the payload helper: absent off, true on', () => {
-    const { irrigationOwnerRatesLive } = require('../services/irrigation-rates');
-    expect(irrigationOwnerRatesLive()).toBe(false);
-    gateOn();
-    expect(irrigationOwnerRatesLive()).toBe(true);
   });
 });
