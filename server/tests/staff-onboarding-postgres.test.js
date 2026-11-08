@@ -8,7 +8,6 @@ const describeDb = enabled ? describe : describe.skip;
 if (enabled) {
   const expected = `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
   if (process.env.WAVES_LOCAL_DEV !== '1' || process.env.RAILWAY_DEPLOYMENT_ID || new URL(process.env.DATABASE_URL).pathname !== expected) throw new Error('Staff-document integration tests require this worktree’s private QA database.');
-  process.env.GATE_STAFF_ONBOARDING_DOCS = 'true';
   process.env.GATE_CONTROLLED_STAFF_DOCUMENTS = 'true';
 }
 const schema = `qa_staff_onboarding_${randomUUID().replaceAll('-', '')}`;
@@ -197,12 +196,12 @@ describeDb('staff onboarding documents on PostgreSQL', () => {
     expect(await onboarding.hasCompletedIssuedRecord(db, first.id, KEY, new Date(Date.now() - 86400000 * 365))).toBe(false);
   });
 
-  test('gate off: empty answers and no reads; the agreement rule does not depend on the gate', async () => {
-    process.env.GATE_STAFF_ONBOARDING_DOCS = 'false';
+  test('staff documents off: empty answers and no reads; the agreement rule does not depend on the gate', async () => {
+    process.env.GATE_CONTROLLED_STAFF_DOCUMENTS = 'false';
     try {
       expect(await onboarding.onboardingFor(first)).toEqual({ enabled: false, documents: [], counts: { outstanding: 0, total: 0 } });
       expect(await onboarding.onboardingForTeam()).toEqual({ enabled: false, technicians: [] });
       expect(await onboarding.hasCompletedIssuedRecord(db, first.id, KEY)).toBe(true);
-    } finally { process.env.GATE_STAFF_ONBOARDING_DOCS = 'true'; }
+    } finally { process.env.GATE_CONTROLLED_STAFF_DOCUMENTS = 'true'; }
   });
 });
