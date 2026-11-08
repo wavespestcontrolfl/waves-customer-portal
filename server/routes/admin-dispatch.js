@@ -5552,7 +5552,7 @@ async function recordCustomerSeriesIntent({ surface, rows }) {
   const timePromise = require('../services/time-promise');
   for (const row of rows) {
     await timePromise.recordCustomerAskedTime(db, [row.id], true, {
-      date: String(row.date).split('T')[0],
+      date: dateOnlyString(row.date) || '',
       windowStart: row.windowStart ? String(row.windowStart).slice(0, 5) : null,
     });
   }
@@ -6585,10 +6585,10 @@ async function recordVisitMoveIntent({ result, plan, serviceId, newDate }) {
 function movedSlotFor(id, { result, plan, newDate }) {
   const landed = (result?.visitMove?.members || []).find((m) => String(m.id) === String(id))?.landed;
   if (landed) {
-    return { date: String(landed.scheduled_date || newDate || '').split('T')[0], windowStart: landed.window_start ? String(landed.window_start).slice(0, 5) : null };
+    return { date: dateOnlyString(landed.scheduled_date || newDate) || '', windowStart: landed.window_start ? String(landed.window_start).slice(0, 5) : null };
   }
   const start = parseRescheduleWindow(plan?.effectiveWindow).start;
-  return { date: String(newDate || '').split('T')[0], windowStart: start ? String(start).slice(0, 5) : undefined };
+  return { date: dateOnlyString(newDate) || '', windowStart: start ? String(start).slice(0, 5) : undefined };
 }
 
 // Effects: the one customer notice for a completed move.

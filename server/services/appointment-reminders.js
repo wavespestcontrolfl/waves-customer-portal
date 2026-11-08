@@ -27,7 +27,7 @@ const { sendCustomerMessage, classifyDeliveryCertainty } = require('./messaging/
 const { readCachedLineType, cacheLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
 const { getAppointmentContacts, isServiceContactRole, firstNameFrom, PREFS_UNAVAILABLE } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
-const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays, etParts } = require('../utils/datetime-et');
+const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays, etParts, dateOnlyString } = require('../utils/datetime-et');
 
 // Fallback parts for resolveCommittedVisitTime from a caller's appointment
 // time: the 'YYYY-MM-DDTHH:MM' strings every registration path builds, or
@@ -1290,7 +1290,7 @@ function customerMoveSlot(newTime, options, resolved) {
   const pinned = options && options.expectSchedule;
   if (pinned && pinned.date) {
     const hasStart = Object.prototype.hasOwnProperty.call(pinned, 'windowStart');
-    return { date: String(pinned.date).slice(0, 10), windowStart: hasStart ? pinned.windowStart || null : undefined };
+    return { date: dateOnlyString(pinned.date) || '', windowStart: hasStart ? pinned.windowStart || null : undefined };
   }
   const named = appointmentTimeParts(newTime);
   return { date: named.date, windowStart: resolved?.windowless ? null : named.windowStart || null };
