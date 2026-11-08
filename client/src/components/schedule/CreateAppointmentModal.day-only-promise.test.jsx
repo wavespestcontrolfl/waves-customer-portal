@@ -37,6 +37,8 @@ function futureDate(days = 30) {
   return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
 }
 
+const estimatesBody = (reminder24hOn, omit) => ({ estimates: [], ...(omit ? {} : { reminder24hOn }) });
+
 function installFetch({ serviceKey = 'pest_re_service', serviceName = 'Pest Re-Service', services: catalog = null, probe = { enabled: false, suggestion: null }, probeFails = false, reminder24hOn = true, omitReminder = false } = {}) {
   const fetcher = vi.fn((input, options = {}) => {
     const url = String(input);
@@ -53,7 +55,7 @@ function installFetch({ serviceKey = 'pest_re_service', serviceName = 'Pest Re-S
     }
     if (url.endsWith('/admin/schedule') && options.method === 'POST') return Promise.resolve(json({ id: 'appt-1' }));
     if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [], canChangeAppointmentAddress: false }));
-    if (url.includes('/schedule-estimates')) return Promise.resolve(json({ estimates: [], ...(omitReminder ? {} : { reminder24hOn }) }));
+    if (url.includes('/schedule-estimates')) return Promise.resolve(json(estimatesBody(reminder24hOn, omitReminder)));
     if (url.endsWith('/admin/technicians')) return Promise.resolve(json({ technicians: [] }));
     if (url.endsWith('/admin/discounts')) return Promise.resolve(json([]));
     if (url.endsWith('/annual-prepay-availability')) return Promise.resolve(json({ enabled: false }));
