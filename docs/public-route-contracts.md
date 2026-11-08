@@ -4377,9 +4377,17 @@ strings (newer sites; they win) and the optional `tags` array (older sites send 
 lowercase hyphen slug capped at 40 chars, plus the fixed `out_of_area_waitlist` tag; every
 other posted tag is dropped, and every other source ignores `tags`/`zip`/`city` entirely. The write goes
 to the existing `newsletter_subscribers.tags` jsonb, replaces that row's earlier `zip:`/`city:`
-tags, and only touches the signup's own `pending` row (a new or re-armed double-opt-in), so an
-anonymous post cannot retag an already-confirmed subscriber. It is best-effort: a failure
-never fails the signup, and the zip/city values are never logged); the quiz and feedback tokens are the same
+tags, and only touches the signup's own mid-confirmation row: a `pending` row (a new or re-armed
+double-opt-in), or an `unsubscribed`/`inactive` row that still holds the exact confirmation token
+this signup just minted (sweep #7765 B5: a public re-signup leaves such a row opted out until the
+emailed link is clicked), so an anonymous post cannot retag an already-confirmed subscriber. It is
+best-effort: a failure never fails the signup, and the zip/city values are never logged. The
+same B5 rule shapes the rest of subscribe: a repeat submit for an address whose last confirmation
+is under 10 minutes old sends no second email and answers exactly the same, and an `unsubscribed`/
+`inactive` address is only changed by the confirm POST, never by the subscribe POST. An unsubscribe
+(one-click POST or a SendGrid unsubscribe event) that lands on an already-`unsubscribed` row holding
+a live re-signup token advances `unsubscribed_at`, which revokes that emailed link; the unsubscribe
+GET page shows its confirm form for such a row); the quiz and feedback tokens are the same
 per-recipient uuid `engagement_token` (newsletter_send_deliveries) — GET
 renders a confirm page only and the delivery-row write happens on a
 deliberate POST form submission (scanner-safe, mirrors confirm), answer/

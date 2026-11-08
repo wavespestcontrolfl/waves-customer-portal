@@ -56,6 +56,30 @@ describe('public newsletter unsubscribe scanner safety', () => {
     expect(q.update).not.toHaveBeenCalled();
   });
 
+  test('GET on an unsubscribed row with a live re-signup link still renders the form; without one it says already unsubscribed', async () => {
+    const live = {
+      id: 'sub-2', email: 'reader@example.com', status: 'unsubscribed',
+      unsubscribed_at: new Date(Date.now() - 86400000), confirmation_sent_at: new Date(Date.now() - 60000),
+    };
+    db.mockReturnValue(query(live));
+    const liveRes = response();
+    await routeHandler('get')({ params: { token: TOKEN } }, liveRes);
+    expect(liveRes.body).toContain('Confirm unsubscribe.');
+
+    db.mockReturnValue(query({ ...live, confirmation_sent_at: new Date(Date.now() - 2 * 86400000) }));
+    const doneRes = response();
+    await routeHandler('get')({ params: { token: TOKEN } }, doneRes);
+    expect(doneRes.body).toContain("You're already unsubscribed.");
+  });
+
+  test('POST reaches an unsubscribed row that holds a live re-signup link (opt-out predicate, one statement)', async () => {
+    const q = query({ id: 'sub-2', email: 'reader@example.com', status: 'unsubscribed' });
+    db.mockReturnValue(q);
+    await routeHandler('post')({ params: { token: TOKEN }, body: { confirm_unsubscribe: '1' } }, response());
+    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining('confirmation_sent_at > unsubscribed_at'));
+    expect(q.update).toHaveBeenCalledTimes(1);
+  });
+
   test('form POST performs the opt-out and renders completion HTML', async () => {
     const q = query({ id: 'sub-1', email: 'reader@example.com', status: 'active' });
     db.mockReturnValue(q);

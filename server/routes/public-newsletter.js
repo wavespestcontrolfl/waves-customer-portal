@@ -18,7 +18,7 @@ const {
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 const {
-  subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE, whereOptOutNeedsWrite,
+  subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE, whereOptOutNeedsWrite, hasLiveConfirmation,
   WAITLIST_SOURCE, applyWaitlistTags,
 } = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
@@ -166,7 +166,9 @@ router.get('/unsubscribe/:token', async (req, res) => {
     // rejects HTML-special characters.
     const email = sub ? escapeHtml(sub.email) : '';
     let heading; let bodyHtml;
-    if (sub?.status === 'unsubscribed') {
+    // An unsubscribed row that holds a live re-signup token (sweep #7765 B5)
+    // still gets the form: the POST revokes that emailed confirmation link.
+    if (sub?.status === 'unsubscribed' && !hasLiveConfirmation(sub)) {
       heading = "You're already unsubscribed.";
       bodyHtml = `<p>No more newsletters will be sent${email ? ` to <span class="email">${email}</span>` : ' to this address'}.</p>`;
     } else if (sub) {
