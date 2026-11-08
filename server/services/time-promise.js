@@ -38,11 +38,17 @@ const DAY_PROMISE_META = Object.freeze({ window_unknown: true, promise_level: 'd
 // an unknown-window promise, which the readers count as an hour.
 const PROMISE_META_KEYS = Object.freeze(['promise_level', 'window_unknown', 'guard_slot_ms', 'promised_date']);
 
-/** The day-only fields present on a send's metadata, or {} for a window send (and for anything that is not a day promise). */
+// A MOVE notice's own stamp (move_notice_at, appointment-reminders.js / admin-schedule.js). Kept apart from PROMISE_META_KEYS:
+// a fallback to the window copy clears those keys but must keep the stamp (a bounce rebuilds the email key from it). It rides with a
+// stored day-only body so the later send can tell which promise stands AFTER the move (revalidateDelayedDaySend noticeAt).
+const MOVE_NOTICE_STAMP = 'move_notice_at';
+
+/** The day-only fields present on a send's metadata (plus a move notice's stamp), or {} for a window send (and for anything
+ *  that is not a day promise). */
 function promiseMetaOf(meta) {
   if (!meta || meta.promise_level !== 'day') return {};
   const out = {};
-  for (const key of PROMISE_META_KEYS) if (meta[key] !== undefined && meta[key] !== null) out[key] = meta[key];
+  for (const key of [...PROMISE_META_KEYS, MOVE_NOTICE_STAMP]) if (meta[key] !== undefined && meta[key] !== null) out[key] = meta[key];
   return out;
 }
 
@@ -83,6 +89,14 @@ async function storedDateStillHolds(message, scheduledServiceId) {
   return dateOnlyString(visit?.scheduled_date) === promised;
 }
 
+/** The move context of a stored day-only MOVE email (template appointment.rescheduled_day): { noticeAt, noticeDate }, so the
+ *  chokepoint judges the promises against that notice. {} for any other day-only email (a confirmation or 72-hour reminder:
+ *  an older hour promise still suppresses it). The notice time is the row's creation; no creation time, no context. */
+function storedMoveNotice(message) {
+  if (String(message?.template_key || '') !== 'appointment.rescheduled_day' || !message.created_at) return {};
+  return { noticeAt: message.created_at, noticeDate: promisedDateFromEmailKey(message.idempotency_key) };
+}
+
 /**
  * Must a stored day-only email NOT be re-sent from its stored copy? The email twin of the text replay: both email replay
  * boundaries (transactional-email-provider-retry.js retryOne, email-bounce-recovery.js runRecoveryFlow) ask this before
@@ -101,7 +115,7 @@ async function dayOnlyStoredCopyStale(message) {
     // The stored HTML names a DAY: it is still true only while the visit is on that same ET calendar date. A silent move to
     // another eligible date must not let it go, and no promise is read for a mismatch.
     if (!(await storedDateStillHolds(message, scheduledServiceId))) return true;
-    const verdict = await require('./appointment-reminders').revalidateDelayedDaySend({ customerId, scheduledServiceId });
+    const verdict = await require('./appointment-reminders').revalidateDelayedDaySend({ customerId, scheduledServiceId, ...storedMoveNotice(message) });
     return verdict !== 'day';
   } catch {
     return true;

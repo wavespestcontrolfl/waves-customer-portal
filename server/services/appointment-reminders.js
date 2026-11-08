@@ -1418,13 +1418,15 @@ async function delayedSendIsStale(scheduledServiceId, notice = null) {
  *   'window'    it no longer does (gate rolled back, the 24-hour reminder switched off, inside the cutoff): the day-only
  *               body must not go. The caller sends window copy if it can render it, else suppresses.
  * `apptTime` is the visit's start the caller already knows; absent, it is read from the visit.
- * `noticeAt` (a MOVE notice's recovery, with `apptTime` the slot that notice quoted): only a promise made AFTER that notice, for
- * that notice's date, supersedes it. The old date's confirmation does not: the move replaced it, and its level is ignored.
+ * `noticeAt` (a MOVE notice's recovery, with `apptTime` the slot that notice quoted, or `noticeDate` its ET date): only a promise
+ * made AFTER that notice, for that notice's date, supersedes it. Every delayed move recovery (a bounced text, a queued contact
+ * text, a stored move email) passes it; a non-move send passes neither and keeps the plain rule. The old date's confirmation does not: the move replaced it, and its level is ignored.
  */
-async function revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, noticeAt }) {
+async function revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, noticeAt, noticeDate }) {
   const noticeTime = noticeAt ? new Date(noticeAt) : null;
-  const notice = noticeTime && !Number.isNaN(noticeTime.getTime()) && apptTime
-    ? { at: noticeTime, visitDate: etDateString(new Date(apptTime)), setAsideOld: false } : null;
+  const visitDate = noticeDate || (apptTime ? etDateString(new Date(apptTime)) : null);
+  const notice = noticeTime && !Number.isNaN(noticeTime.getTime()) && visitDate
+    ? { at: noticeTime, visitDate, setAsideOld: false } : null;
   if (await delayedSendIsStale(scheduledServiceId, notice)) return 'suppress';
   const startAt = apptTime || (scheduledServiceId ? await scheduledServiceApptTime(scheduledServiceId) : null);
   return (await dayOnlyNow({ customerId, scheduledServiceId, apptTime: startAt, ignoreLevel: notice?.setAsideOld === true })) ? 'day' : 'window';
