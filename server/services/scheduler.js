@@ -1212,11 +1212,10 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // EVERY 5 MIN — text-thread lead reader (GATE_SMS_LEAD_EXTRACTION, read in
-  // the sweep): a quiet thread from an unknown number becomes a lead. The
-  // durable per-thread claim fences overlapping ticks and instances.
+  // EVERY 5 MIN — text-thread lead reader: a quiet thread from an unknown
+  // number becomes a lead. The durable per-thread claim fences overlapping
+  // ticks and instances.
   cron.schedule('*/5 * * * *', async () => {
-    if (!isEnabled('smsLeadExtraction')) return;
     try {
       await runExclusive('sms-lead-extraction', async () => {
         await require('./sms-lead-extraction').sweepSmsLeadCandidates();
@@ -1226,11 +1225,9 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // EVERY 30 MIN — reply outcome signals (GATE_SMS_REPLY_OUTCOMES, read in the
-  // sweep too): records what each customer did after a Waves text reply.
-  // Measurement only; the unique reply key makes a repeated tick harmless.
+  // EVERY 30 MIN — reply outcome signals: records what each customer did
+  // after a Waves text reply. Measurement only; the unique reply key makes a repeated tick harmless.
   cron.schedule('13,43 * * * *', async () => {
-    if (!isEnabled('smsReplyOutcomes')) return;
     try {
       await runExclusive('sms-reply-outcomes', async () => {
         await require('./sms-reply-outcomes').sweepReplyOutcomes();

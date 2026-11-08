@@ -2027,20 +2027,6 @@ const gates = {
   // entry only; the call-time reader is leadRepeatSweepLive().
   leadRepeatSweep: process.env.GATE_LEAD_REPEAT_SWEEP === 'true',
 
-  // Text-thread lead reader (owner 2026-10-23): every 5 minutes a model reads
-  // the text thread of a number with no customer and no lead, once the number
-  // has been quiet for 5 minutes, and makes a lead (name, address, email,
-  // service) through the call path's lead writer, with one admin bell per
-  // lead. Sends nothing to the texter. Off unless exactly 'true'.
-  smsLeadExtraction: process.env.GATE_SMS_LEAD_EXTRACTION === 'true',
-
-  // Reply outcome signals (owner 2026-10-24): every 30 minutes, for each Waves
-  // text reply that is 72 hours old, record what the customer did next (confused
-  // or repeated follow-up, opt-out, call within the hour, thanks, silence) in
-  // sms_reply_outcomes, with the AI draft's prompt_version. Measurement only:
-  // sends, changes and holds nothing. Off unless exactly 'true'.
-  smsReplyOutcomes: process.env.GATE_SMS_REPLY_OUTCOMES === 'true',
-
   // SMS prompt auto-promote (owner rulings 2026-09-27 and 2026-10-24): the texting drafter's
   // prompt improves with no human approval step. A pathology proposal becomes ONE candidate
   // rule block, the sealed exam grades the drafter with it against the current prompt, a
