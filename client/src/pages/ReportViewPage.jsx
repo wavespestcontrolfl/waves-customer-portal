@@ -10,7 +10,7 @@ import PoisonControlCopy, { applicatorIdLine } from '../components/report/Poison
 import { LawnLeadCard, LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import { LawnLayoutBody, LawnLayoutSwitch, LawnYourPartCard } from '../components/report/lawnV2/LawnLayout';
 import LawnNewSodCard from '../components/report/lawnV2/LawnNewSodCard';
-import { alsoSteps, lawnLayoutStatusData, lawnStoryActive, lawnTodaysResult, reentryIsTimed, reentryRow, withoutRepeatedAppliedCard } from '../components/report/lawnV2/lawnLayoutRules';
+import { alsoSteps, lawnLayoutActive, lawnLayoutStatusData, lawnTodaysResult, reentryIsTimed, reentryRow, withoutRepeatedAppliedCard } from '../components/report/lawnV2/lawnLayoutRules';
 import '../components/report/lawnV2/lawnStory.css';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
@@ -60,7 +60,7 @@ import {
   docTransition,
 } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
-import CustomerReportHeader, { sharedReportTemplateActive } from '../components/report/CustomerReportHeader';
+import CustomerReportHeader, { usesSharedReportTemplate } from '../components/report/CustomerReportHeader';
 import ServiceReportDocument, { sanitizeReentryCopy } from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -2787,13 +2787,13 @@ function polishStatusProps(data, mode, override, layout) {
 
 // The lawn status card, standard or on the lawn layout (the layout drops "Your documents" and a next appointment the
 // plan area prints; see lawnLayoutStatusData).
-function LawnStatusCard({ data, mode, layout, story = false }) {
+function LawnStatusCard({ data, mode, layout, compact = false }) {
   const base = layout ? lawnLayoutStatusData(data, mode) : data;
   const props = polishStatusProps(base, mode, layout ? lawnTodaysResult(data) : (data.reportV2?.todaysResult || null), layout);
-  return <ServiceStatusCard data={props.data} mode={mode} resultOverride={props.override} compact={story} />;
+  return <ServiceStatusCard data={props.data} mode={mode} resultOverride={props.override} compact={compact} />;
 }
 
-// compact: GATE_LAWN_REPORT_STORY. The headline names the lawn service plainly, the technician line steps aside
+// compact (the lawn layout's status card). The headline names the lawn service plainly, the technician line steps aside
 // when the technician's note prints right below, and a lawn score card ("Your lawn today") joins the hero.
 function ServiceStatusCard({ data, mode, resultOverride = null, compact = false }) {
   const technician = data.technician?.name || data.technicianName || 'Your Waves technician';
@@ -4438,7 +4438,7 @@ function productWhyText(why, substitution) {
   return substitution ? `This approved seasonal equivalent was used for today's protocol window. ${why}` : why;
 }
 
-// GATE_LAWN_REPORT_STORY (presentation 'story', lawn only): one product as the lawn story explains it, purpose
+// The lawn layout's presentation 'story' (lawn only): one product as the lawn story explains it, purpose
 // first, then the product, where it went, why it was used, how it works, and its label and safety notes. The card's
 // details accordion is shared with the record presentation.
 function TreatmentStoryFace({ facts }) {
@@ -6650,9 +6650,9 @@ function NotFoundState() {
 }
 
 function LegacyReport({ data, token, glass = false }) {
-  // GATE_REPORT_SHARED_TEMPLATE: a live older report takes the shared customer header and the
-  // stacked layout. The older payload carries the customer's name and city, not a street address.
-  const sharedTemplate = glass && sharedReportTemplateActive(data);
+  // A live older report takes the shared customer header and the stacked layout. The older payload
+  // carries the customer's name and city, not a street address.
+  const sharedTemplate = glass && usesSharedReportTemplate(data);
   const pdfUrl = `${API_BASE}/reports/${token}`;
   const firstName = greetingFirstName(data);
   // The /report route is shell-wrapped (owner 2026-07-06), so the shell's
@@ -6777,9 +6777,9 @@ function visualProofMomentIntro(moments = []) {
 }
 
 function ServiceReportV1({ data, token, mode = 'live' }) {
-  // GATE_REPORT_SHARED_TEMPLATE: the live web view takes the shared customer header and the stacked
-  // layout (reportTemplate.css). The PDF document and the static render never do.
-  const sharedTemplate = mode === 'live' && sharedReportTemplateActive(data);
+  // The live web view takes the shared customer header and the stacked layout (reportTemplate.css).
+  // The PDF document and the static render never do.
+  const sharedTemplate = mode === 'live' && usesSharedReportTemplate(data);
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
   const reportUrl = typeof window !== 'undefined' ? `${window.location.origin}/report/${token}` : `/report/${token}`;
   const serviceCoverage = normalizeServiceCoverage(data);
@@ -6787,8 +6787,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const dynamicContext = data.dynamicContext || {};
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
-  // GATE_LAWN_REPORT_STORY: a live lawn report the lawn layout orders takes the story order (lawnStory.css).
-  const storyLayout = lawnStoryActive(data, mode);
+  // A live lawn report the lawn layout orders takes the story order (lawnStory.css).
+  const lawnLayoutOn = lawnLayoutActive(data, mode);
   const customerSafeObservationLabels = new Set(
     serviceCompletionChoicesFor(data.serviceLine, 'observations').map(({ label }) => label),
   );
@@ -8786,7 +8786,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 14px;
           line-height: 1.5;
         }
-        /* GATE_LAWN_REPORT_STORY: the products explained inside "what we did" (presentation 'story'). */
+        /* The products explained inside "what we did" (presentation 'story'). */
         .treatment-story .applied-products-header {
           margin-bottom: 20px;
         }
@@ -10297,8 +10297,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* Ask Waves floats with the customer: sticky under the shell header for
             the whole scroll (owner ask 2026-07-09). Live only — the pdf/static
             document keeps the legacy section below instead. */}
-        {/* GATE_LAWN_REPORT_STORY: the story order prints Ask Waves in the page (its "ask" section) instead. */}
-        {!storyLayout && <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />}
+        {/* The lawn layout prints Ask Waves in the page (its "ask" section) instead. */}
+        {!lawnLayoutOn && <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />}
 
         {/* GATE_LAWN_REPORT_LAYOUT: from the status card down to the review ask the page body is the
             standard one, unless the payload carries the lawn layout key on a live lawn report: then
@@ -10311,10 +10311,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           layout={(
             <LawnLayoutBody
               data={data}
-              story={storyLayout}
               slots={{
                 ask: <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />,
-                status: <LawnStatusCard data={data} mode={mode} layout story={storyLayout} />,
+                status: <LawnStatusCard data={data} mode={mode} layout compact />,
                 blog: <BlogPostCard data={data} mode={mode} />,
                 reservice: <ReserviceReportCard data={data} mode={mode} />,
                 plan: <PlanSummaryCard data={data} mode={mode} />,
@@ -10334,7 +10333,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 highlights: <ServiceHighlightsSection moments={orderedProofMoments} />,
                 markedPhotos: <MarkedPhotosSection data={data} mode={mode} />,
                 productsKind: appliedProductsKind(data),
-                poisonNote: <PoisonControlNote data={data} listsProducts showApplicator />,
                 products: <AppliedProductsSection data={data} mode={mode} />,
               }}
             />

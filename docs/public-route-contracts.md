@@ -3342,12 +3342,6 @@ Two changes exist, both only while the gate is live, only for a frozen instructi
 
 The PDF cache key gains `:wir=c` (rain covered it) or `:wir=a` (the amount line) for such a visit only while the gate is live; the stamp reads the location through the frozen identity map center, like the render.
 
-`GATE_LAWN_REPORT_STORY` (dark, strict `true`, read at call time; needs `GATE_LAWN_REPORT_LAYOUT`;
-gate off leaves the payload, the PDF and every cached PDF key byte-identical) adds one optional
-member inside the `lawnLayout` key that `GATE_LAWN_REPORT_LAYOUT` (next paragraph) adds:
-`lawnLayout.story: true` (lawn only, only while that key is present; no new route, token, privacy
-or rate-limit surface). The live web page then prints the story order (`STORY_LAYOUT_ORDER`); the
-PDF document, static and SMS renders ignore it.
 `GATE_LAWN_REPORT_LAYOUT` (dark, strict `true`, read at call time; gate off leaves the
 payload, the PDF and every cached PDF key byte-identical) adds one optional key to the lawn
 `/api/reports/:token/data` payload (lawn only; no new route, token, privacy or rate-limit
@@ -3355,19 +3349,8 @@ surface; tree & shrub and pest payloads never change): top-level `lawnLayout:
 { mowingRange: { minInches, maxInches, grassLabel } | null }`. `mowingRange` is the row of the
 Mowing Height table (`HEIGHT_BAND_BY_GRASS`, `turf-height.js`) for the lawn's grass (the visit's
 own reading, else the turf profile); null for a grass the table does not list. The live web page
-orders and trims the lawn report from the key (a lead is also needed); the PDF document, static
+orders and trims the lawn report from the key (a lead is also needed) in the story order (`LAYOUT_ORDER`); the PDF document, static
 and SMS renders ignore it, so the lawn PDF signature carries no part for this gate.
-`GATE_REPORT_SHARED_TEMPLATE` (dark, strict `true`, read at call time; gate off leaves every
-payload below byte-identical) adds one optional top-level key, `reportTemplate: true`, to the
-LIVE web payloads of the regular customer reports (`server/services/service-report/report-template.js`):
-`/api/reports/:token/data` in `live` mode only (a `service_report_v1` record and an older record;
-the `pdf`, `static` and `sms_preview` modes, the PDF and every cached PDF key never carry it),
-`/api/reports/project/:token/data` (the page has only the live view), the lawn-diagnostic and
-pest-identifier report GETs (beside `report`, see below), and the staff-only
-`/api/admin/report-preview/:scheduledServiceId/data`. No new route, token, privacy or
-rate-limit surface; nothing about the customer is added or removed. The page prints the pest
-report's customer header and one stacked layout from the key; WDO inspection and pre-treatment
-certificate pages ignore it (the page decides from the report type).
 `GATE_LAWN_EXPECTATIONS` (dark; gate off leaves the lawn payload unchanged, key
 for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
 (lawn only, never tree & shrub; no new route, token, privacy or rate-limit
@@ -4786,9 +4769,6 @@ success/autoExtended/expiresAt/smsSent/emailSent — no PII),
 diagnostics, strictly whitelisted customer-safe payload — no internal
 scores, raw AI, product names, label constraints, reconciliation/QA
 internals, or tech notes — generic 404 for missing/draft/expired/malformed.
-`GATE_REPORT_SHARED_TEMPLATE` (dark; off leaves the payload unchanged) adds
-top-level `reportTemplate: true` beside `report` and `glassDefault`; `report`
-itself never changes.
 `GATE_LAWN_JEV_TIMING_CHECK` (dark, `off` | `shadow` | `enforce`; needs `GATE_TYPED_DECISIONS`; off leaves the payload and the stored row unchanged) acts when the diagnosis is STORED, not when this page is read: in `enforce` the writers (this page's source rows from the public lawn assessment, the tech lawn diagnostic and the admin Analyze photos button) drop Jev-flagged timing sentences from `customer_summary` before the insert, waiting at most 3000 ms and failing open; `shadow` only records the verdict after the insert. Only the summary's sentences go to TypeSafe. The payload keys and shape never change, and `safeCustomerSummary` still drops word-list timing sentences at read.
 `GATE_LAWN_DIAGNOSTIC_EVIDENCE` (dark; off leaves the payload unchanged, key
 for key, and makes no extra read) adds two things. `basis`: one fixed sentence,
@@ -4915,9 +4895,7 @@ payload via buildPublicPestReport, generic 404, plus a set-once
 `report_first_viewed_at` funnel stamp. Deliberately NOT behind
 GATE_PEST_IDENTIFIER: sent reports are owner-initiated communications
 (admin manual send works pre-launch), and an invalid token 404s exactly
-like the dark surface — only analyze/claim are gated. `GATE_REPORT_SHARED_TEMPLATE`
-(dark; off leaves the payload unchanged) adds top-level `reportTemplate: true`
-beside `report`; `report` itself never changes.)
+like the dark surface — only analyze/claim are gated.)
 `/api/public/bug-id-extension/identify` (POST that writes nothing but the daily counter; anonymous photo identification for the Waves Bug Identifier Chrome extension, owner 2026-10-31 — no auth, no token, no Turnstile (the widget cannot render on a chrome-extension:// page). Paid vision per accepted request, so: the whole `/api/public/bug-id-extension` surface answers the generic 404, any method, while GATE_BUG_ID_EXTENSION is dark — first in server/index.js ahead of the global cors() (so an OPTIONS preflight reads 404 too), the global /api/ limiter and the 50 MB photo parser, again in the router ahead of its limiters; 6 req/hour and 15 req/day per IP (IPv6 /64-collapsed via unauthenticatedAuthLimitKey, in-memory, skipped outside production and for bodies that fail the shape check); then ONE worldwide daily cap, its own `bug-id-extension` bucket in public_llm_daily_usage (BUG_ID_EXTENSION_CAP: 100/day by default, env PUBLIC_LLM_DAILY_CAP_BUG_ID_EXTENSION, America/New_York day), consumed once per request after validation and right before the paid call, counted whatever GATE_PUBLIC_LLM_SHARED_CAP says and FAIL-CLOSED (429) on a database error; it never touches the website funnels' `photo-assessment` bucket. Body: `photos`, 1–3 `{ data, mimeType }` with plain base64 `data` (≤6,000,000 chars each) and mimeType image/jpeg, image/png or image/webp — anything else 400 (413 for an oversized photo) before any limiter count or model call. Runs identifyPestV2 on the Gemini-only ladder (same as the customer app) and answers 200 `{ success: true, result }` where `result` is ONLY the engine's customer-facing v2 object (every string catalog copy or a fixed template; unapproved catalog entries stay unnamed) — never the engine's `internal` block (which models answered) or its `v1` mapping; 503 when vision is unavailable; 429 over a limiter or the cap. Persists nothing else: no identification row, no photo, no lead, no pricing; logs only tier, wording, species slug and photo count. Privacy headers (no-store, noindex, no-referrer) on every handler response. No CORS headers: the extension's host permission lets it read the answer, ordinary web pages cannot.)
 `/api/public/pest-forecast` (+ `/pest-forecast/locations`, `/pest-forecast/nearest`) (read-only,
 no auth, no DB writes, no PII — returns a deterministic Florida
