@@ -196,7 +196,7 @@ const CUSTOMER_OR_UNKNOWN_SOURCES = Object.freeze([
 const ENDED_STATUSES = ['cancelled', 'completed', 'skipped'];
 
 const MEMBER_COLUMNS = ['id', 'visit_id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id',
-  'date_exception', 'date_exception_source', 'date_exception_at', 'customer_asked_time'];
+  'date_exception', 'date_exception_source', 'date_exception_at', 'customer_asked_time', 'customer_asked_time_at'];
 
 /** The live members of each requested row's stop: Map<requested id, member rows[]>. A row with no stop is its own
  *  member; an ended (cancelled, completed, skipped) row has none. Throws on a failed read. */
@@ -230,17 +230,47 @@ async function loadBookingSources(conn, memberIds) {
 
 const isRecurringChild = (m) => m.is_recurring === true && m.recurring_parent_id != null;
 
-/** May this ONE member be promised only the day? `customer_asked_time` is the explicit intent for the current slot:
- *  true = a set time (never), false = the day only was chosen (skip the source and customer-pick rules), NULL = infer.
- *  Inferred: a recurring child unless the customer picked its slot; a first or one-time visit only from an office source AND
- *  only while the customer has not since picked its slot (a self-service reschedule keeps the office source, but the hour is
- *  now the customer's own). The customer-pick read fails closed (picked). */
+/**
+ * The explicit intent a member still carries for the slot it holds NOW: true, false, or null (read as not recorded, so the
+ * existing inference decides). THE one read rule for customer_asked_time. An intent is written with one move, so it holds only
+ * while no slot change was logged AFTER it: `newestSlotChange` is the newest slot-changing reschedule_log row (the row
+ * isCustomerPickedVisit reads, loadNewestSlotRows with intent), carrying `after_intent` (that row is newer than
+ * customer_asked_time_at, compared in SQL; the move's own log row shares its transaction's now(), so equal is NOT newer).
+ * No slot change logged: the intent holds. A NULL customer_asked_time_at (written at booking) holds only while none is logged.
+ */
+function currentIntent(member, newestSlotChange) {
+  const asked = member && member.customer_asked_time;
+  if (asked !== true && asked !== false) return null;
+  if (!newestSlotChange) return asked;
+  if (member.customer_asked_time_at == null) return null;
+  return newestSlotChange.after_intent === false ? asked : null;
+}
+
+/** A member's current explicit intent and the move history it was judged on: { intent, rows }. Reads the history (one query,
+ *  reused by the pick check) only for a member that has an explicit value. Throws on a failed read. */
+async function memberIntentState(conn, member) {
+  if (member.customer_asked_time !== true && member.customer_asked_time !== false) return { intent: null, rows: null };
+  const rows = await require('./auto-dispatch/eligibility').loadNewestSlotRows(conn, member.id, { withIntent: true });
+  return { intent: currentIntent(member, rows[0] || null), rows };
+}
+
+/** May this ONE member be promised only the day? `customer_asked_time` is the explicit intent for the current slot, while it
+ *  still holds (currentIntent): true = a set time (never), false = the day only was chosen (skip the source and customer-pick
+ *  rules), otherwise infer. Inferred: a recurring child unless the customer picked its slot; a first or one-time visit only
+ *  from an office source AND only while the customer has not since picked its slot (a self-service reschedule keeps the office
+ *  source, but the hour is now the customer's own). Any read fails closed (not eligible; the customer-pick read: picked). */
 async function memberEligible(conn, member, source) {
-  if (member.customer_asked_time === true) return false;
-  if (member.customer_asked_time === false) return true;
+  let state;
+  try {
+    state = await memberIntentState(conn, member);
+  } catch {
+    return false;
+  }
+  if (state.intent === true) return false;
+  if (state.intent === false) return true;
   if (!isRecurringChild(member) && !OFFICE_BOOKING_SOURCES.includes(source)) return false; // no move-history read
   // Lazy: auto-dispatch/eligibility pulls the route optimizer, which reads the feature gates at load time.
-  return !(await require('./auto-dispatch/eligibility').isCustomerPickedVisit(member, conn)).picked;
+  return !(await require('./auto-dispatch/eligibility').isCustomerPickedVisit(member, conn, state.rows)).picked;
 }
 
 /**
@@ -361,8 +391,8 @@ async function dayOnlyMoveDecision(conn, {
 async function dayOnlyReplayDecision(conn, { id, startAt, now = new Date(), reminder24hEnabled } = {}) {
   try {
     if (id == null || !shouldPromiseDayOnly({ startAt, now, reminder24hEnabled, customerPicked: false, level: 'none' })) return false;
-    const row = await conn('scheduled_services').where({ id: String(id) }).first('customer_asked_time');
-    if (!row || row.customer_asked_time !== false) return false;
+    const row = await conn('scheduled_services').where({ id: String(id) }).first('id', 'customer_asked_time', 'customer_asked_time_at');
+    if (!row || (await memberIntentState(conn, { ...row, id: row.id ?? String(id) })).intent !== false) return false;
     // Stop-wide, like every other day-only decision: every live member of the visit's stop must be eligible too (a sibling the
     // customer picked blocks it), with the old level ignored (the move replaced the old promise; the check below judges the new date).
     if ((await dayOnlyEligibility(conn, [String(id)], now, { ignoreLevel: true })).get(String(id))?.eligible !== true) return false;
@@ -398,7 +428,8 @@ async function recordCustomerAskedTime(conn, ids, asked, slot) {
   const list = [...new Set((ids || []).filter((v) => v != null).map(String))];
   if (!list.length) return 0;
   const query = conn('scheduled_services').whereIn('id', list);
-  return (slot === undefined ? query : onlyWhileAtSlot(query, slot)).update({ customer_asked_time: asked === true });
+  // customer_asked_time_at: the database clock, so the intent reads as stale once a newer slot change is logged (currentIntent).
+  return (slot === undefined ? query : onlyWhileAtSlot(query, slot)).update({ customer_asked_time: asked === true, customer_asked_time_at: conn.raw('now()') });
 }
 
 /** The visit's start time from its ET date and window start, or null. */
@@ -457,6 +488,7 @@ module.exports = {
   DAY_PROMISE_CUTOFF_HOURS,
   DAY_PROMISE_META,
   dayOnlyPromiseOn,
+  currentIntent,
   shouldPromiseDayOnly,
   showHourFor,
   // Re-exported so later parts read the visit's promise level from one place.

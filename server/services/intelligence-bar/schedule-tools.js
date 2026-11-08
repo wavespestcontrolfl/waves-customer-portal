@@ -89,6 +89,7 @@ const SCHEDULE_TOOLS = [
         new_date: { type: 'string', description: 'YYYY-MM-DD target date' },
         reason: { type: 'string' },
         notify_customers: { type: 'boolean', description: 'Text each customer the new date and arrival window. Default false (silent move) — only set true when the operator explicitly asks to notify customers.' },
+        customer_asked_time: { type: 'boolean', description: 'The customer asked for this exact time, so the notice keeps the window. Default false (the notice promises only the new day). Set true only when the operator says the customer asked for the time.' },
       },
       required: ['service_ids', 'new_date'],
     },
@@ -1391,6 +1392,8 @@ function moveProposal(plan) {
     // Surfaced on the confirmation card — the operator must see whether
     // committing will text the customers.
     will_text_customers: notifyCustomers,
+    // GATE_DAY_ONLY_PROMISE part B2: shown on the card so the operator sees which promise the notice makes. Gate off: no key.
+    ...(require('../time-promise').dayOnlyPromiseOn() ? { customer_asked_time: plan.customerAskedTime === true } : {}),
     stops,
     ...plan.skipped,
     note: `Would move ${stops.length} stop(s) to ${dateStr}${notifyCustomers ? ' and TEXT each customer the new arrival window' : ' silently (no customer texts)'}. Re-call with confirmed:true to apply.`,

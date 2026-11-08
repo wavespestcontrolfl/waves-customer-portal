@@ -215,10 +215,10 @@ describe('handleReschedule: a customer move', () => {
   test('the recorded intent: day -> customer_asked_time false, set_time -> true; none -> nothing written', async () => {
     const written = () => mockDb.updates.filter((u) => u.table === 'scheduled_services').map((u) => u.patch);
     await reschedule({ timePromise: 'day', previousDate: '2099-11-02' });
-    expect(written()).toEqual([{ customer_asked_time: false }]);
+    expect(written()).toEqual([{ customer_asked_time: false, customer_asked_time_at: 'now()' }]);
     mockDb.updates = [];
     await reschedule({ timePromise: 'set_time', previousDate: '2099-11-02' });
-    expect(written()).toEqual([{ customer_asked_time: true }]);
+    expect(written()).toEqual([{ customer_asked_time: true, customer_asked_time_at: 'now()' }]);
     mockDb.updates = [];
     await reschedule(undefined);
     expect(written()).toEqual([]);

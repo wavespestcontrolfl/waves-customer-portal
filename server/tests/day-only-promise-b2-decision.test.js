@@ -274,6 +274,9 @@ describe('dayOnlyReplayDecision: a held or merged move notice re-sent as a confi
   }));
 });
 
+// The intent's own clock: the database's now() (customer_asked_time_at), so currentIntent can tell a stale intent.
+const AT_NOW = { sql: 'now()', bindings: undefined };
+
 describe('recordCustomerAskedTime', () => {
   test('gate off: no write at all (the UPDATE payloads stay today\'s)', withGate(undefined, async () => {
     const conn = fakeConn();
@@ -289,9 +292,9 @@ describe('recordCustomerAskedTime', () => {
     await recordCustomerAskedTime(conn, ['s4'], 'yes');
     await recordCustomerAskedTime(conn, [], true);
     expect(conn.updates.map((u) => [u.table, u.ins[0][1], u.payload])).toEqual([
-      ['scheduled_services', ['s1', 's2'], { customer_asked_time: true }],
-      ['scheduled_services', ['s3'], { customer_asked_time: false }],
-      ['scheduled_services', ['s4'], { customer_asked_time: false }],
+      ['scheduled_services', ['s1', 's2'], { customer_asked_time: true, customer_asked_time_at: AT_NOW }],
+      ['scheduled_services', ['s3'], { customer_asked_time: false, customer_asked_time_at: AT_NOW }],
+      ['scheduled_services', ['s4'], { customer_asked_time: false, customer_asked_time_at: AT_NOW }],
     ]);
   }));
 
@@ -339,7 +342,7 @@ describe('recordCustomerAskedTime', () => {
   });
 
   test('a failed write throws, so a caller inside a transaction fails the move with it', withGate('true', async () => {
-    const conn = () => ({ whereIn: () => ({ update: async () => { throw new Error('write failed'); } }) });
+    const conn = Object.assign(() => ({ whereIn: () => ({ update: async () => { throw new Error('write failed'); } }) }), { raw: () => 'now' });
     await expect(recordCustomerAskedTime(conn, ['s1'], true)).rejects.toThrow('write failed');
   }));
 });

@@ -109,7 +109,8 @@ describe('the migration', () => {
   test('has a later stamp than the frozen B1 migration, and a different id', () => {
     const dir = path.join(__dirname, '..', 'models', 'migrations');
     const files = fs.readdirSync(dir).filter((f) => /day_only/.test(f)).sort();
-    expect(files).toEqual(['20261106120000_day_only_promise_templates.js', '20261106130000_day_only_move_templates.js']);
+    // The frozen pair, then the intent-time column (20261107200000, no templates).
+    expect(files).toEqual(['20261106120000_day_only_promise_templates.js', '20261106130000_day_only_move_templates.js', '20261107200000_day_only_intent_written_at.js']);
     expect(migration._test.MIGRATION_ID).toBe('20261106130000_day_only_move_templates');
     expect(b1._test.SMS_TEMPLATES.map((t) => t.key).filter((k) => byKey[k])).toEqual([]);
   });

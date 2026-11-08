@@ -186,6 +186,7 @@ describe('recordOfficeMoveIntent (the write inside the moving transaction)', () 
     const writes = [];
     const fn = (table) => ({ whereIn: (_col, ids) => ({ update: async (patch) => { writes.push({ table, ids, patch }); return ids.length; } }) });
     fn.writes = writes;
+    fn.raw = (sql) => ({ raw: sql });
     return fn;
   };
 
