@@ -45,6 +45,10 @@ jest.mock('../models/db', () => {
 const {
   subscribeOrResubscribe,
   purgeStalePendingSubscribers,
+  lookupByToken,
+  confirmByToken,
+  CONFIRM_RESEND_COOLDOWN_MS,
+  CONFIRM_TTL_MS,
 } = require('../services/newsletter-subscribers');
 
 afterEach(() => {
@@ -138,7 +142,9 @@ describe('joining the waitlist alone sends no email (unaffected by the fix)', ()
     // incapable of matching 'waitlist'. Nothing in newsletter-subscribers.js
     // updates or emails a subscriber row outside subscribeOrResubscribe /
     // confirmByToken (both require an explicit call this test never makes).
-    expect(updateCalls).toHaveLength(0);
+    // The purge may now REVERT opted-out rows (sweep #7765 B5) but must never
+    // activate or re-pend anything.
+    expect(updateCalls.every((c) => c.payload.status !== 'pending' && c.payload.status !== 'active')).toBe(true);
   });
 
   test('a bare waitlist row has no confirmation apparatus set — nothing for a link/email to have gone out from', () => {
@@ -191,5 +197,234 @@ describe('subscribeOrResubscribe — waitlist races', () => {
     });
     const result = await subscribeOrResubscribe({ email: 'pat@example.com', source: 'newsletter_footer', requireConfirmation: true, linkCustomer: false });
     expect(result.action).toBe('confirmation_sent');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sweep #7765 B5: a public double-opt-in signup must not undo an opt-out
+// before the reader proves they own the address; repeat submits are throttled;
+// the stale-pending purge never deletes opt-out history.
+// ---------------------------------------------------------------------------
+
+// A recording db: every query logs its where/whereRaw/whereNull/whereNotNull
+// calls and, on update/del, the payload. `firsts` feeds .first() in order and
+// `updateCounts` feeds each update's affected-row count (default 1).
+function useRecordingDb({ firsts = [], updateCounts = [], delCount = 0 } = {}) {
+  const db = require('../models/db');
+  const queries = [];
+  db.mockImplementation((table) => {
+    const rec = { table, wheres: [], raws: [], nulls: [], notNulls: [], fnWheres: [] };
+    const q = {};
+    q.where = (arg, ...rest) => {
+      if (typeof arg === 'function') {
+        const calls = [];
+        const stub = {
+          whereNull: (c) => { calls.push(['whereNull', c]); return stub; },
+          orWhere: (...a) => { calls.push(['orWhere', ...a]); return stub; },
+        };
+        arg.call(stub);
+        rec.fnWheres.push(calls);
+      } else rec.wheres.push(rest.length ? [arg, ...rest] : arg);
+      return q;
+    };
+    q.whereRaw = (sql) => { rec.raws.push(sql); return q; };
+    q.whereNull = (c) => { rec.nulls.push(c); return q; };
+    q.whereNotNull = (c) => { rec.notNulls.push(c); return q; };
+    q.first = async () => (firsts.length ? firsts.shift() : null);
+    q.update = async (payload) => { rec.update = payload; queries.push(rec); return updateCounts.length ? updateCounts.shift() : 1; };
+    q.del = async () => { rec.del = true; queries.push(rec); return delCount; };
+    return q;
+  });
+  return queries;
+}
+
+const UNSUB_ROW = {
+  id: 'sub-9',
+  email: 'reader@example.com',
+  first_name: 'Rae',
+  last_name: null,
+  source: 'newsletter_footer',
+  status: 'unsubscribed',
+  confirmation_token: 'old-tok',
+  confirmation_sent_at: new Date('2026-01-01T00:00:00Z'),
+  confirmed_at: new Date('2026-01-01T00:05:00Z'),
+  subscribed_at: new Date('2026-01-01T00:00:00Z'),
+  unsubscribed_at: new Date('2026-02-01T00:00:00Z'),
+  resubscribed_at: null,
+  deactivated_at: null,
+  deactivated_reason: null,
+  reengagement_flagged_at: null,
+};
+const INACTIVE_ROW = {
+  ...UNSUB_ROW,
+  status: 'inactive',
+  unsubscribed_at: null,
+  deactivated_at: new Date('2026-02-01T00:00:00Z'),
+  deactivated_reason: 'sunset_no_engagement',
+  reengagement_flagged_at: new Date('2026-01-20T00:00:00Z'),
+};
+const PUBLIC = { email: 'reader@example.com', source: 'newsletter_footer', requireConfirmation: true, publicSignup: true, linkCustomer: false };
+const OPT_OUT_FIELDS = ['status', 'unsubscribed_at', 'resubscribed_at', 'confirmed_at', 'deactivated_at', 'deactivated_reason', 'reengagement_flagged_at', 'tags'];
+
+describe('public signup on an unsubscribed/inactive row keeps the opt-out until confirm', () => {
+  test.each([['unsubscribed', UNSUB_ROW], ['inactive', INACTIVE_ROW]])('%s row: only a fresh token and stamp are written', async (_label, row) => {
+    const queries = useRecordingDb({ firsts: [{ ...row }, { ...row, confirmation_token: 'new' }] });
+    const result = await subscribeOrResubscribe({ ...PUBLIC, firstName: 'Rae' });
+    expect(result.action).toBe('confirmation_sent');
+    const write = queries.find((r) => r.update);
+    for (const field of OPT_OUT_FIELDS) expect(write.update).not.toHaveProperty(field);
+    expect(write.update.confirmation_sent_at).toBeInstanceOf(Date);
+    expect(write.update.confirmation_token).toBeDefined();
+    expect(write.update.source).toBe('newsletter_footer');
+    // CAS on the status the caller read: a concurrent opt-out/confirm wins.
+    expect(write.wheres).toContainEqual({ id: row.id, status: row.status });
+  });
+
+  test('inside the cooldown (update matches no row) nothing is sent: confirmation_throttled', async () => {
+    useRecordingDb({ firsts: [{ ...UNSUB_ROW }, { ...UNSUB_ROW, confirmation_sent_at: new Date() }], updateCounts: [0] });
+    const result = await subscribeOrResubscribe(PUBLIC);
+    expect(result.action).toBe('confirmation_throttled');
+  });
+
+  test('the cooldown predicate is "never sent, or older than 10 minutes"', async () => {
+    const queries = useRecordingDb({ firsts: [{ ...UNSUB_ROW }, { ...UNSUB_ROW }] });
+    const before = Date.now();
+    await subscribeOrResubscribe(PUBLIC);
+    const write = queries.find((r) => r.update);
+    expect(write.fnWheres).toHaveLength(1);
+    const calls = write.fnWheres[0];
+    expect(calls).toContainEqual(['whereNull', 'confirmation_sent_at']);
+    const cutoff = calls.find((c) => c[0] === 'orWhere');
+    expect(cutoff[1]).toBe('confirmation_sent_at');
+    expect(cutoff[2]).toBe('<=');
+    expect(CONFIRM_RESEND_COOLDOWN_MS).toBe(10 * 60 * 1000);
+    expect(cutoff[3].getTime()).toBeGreaterThanOrEqual(before - CONFIRM_RESEND_COOLDOWN_MS);
+    expect(cutoff[3].getTime()).toBeLessThanOrEqual(Date.now() - CONFIRM_RESEND_COOLDOWN_MS);
+  });
+
+  test('callers that are not the public form keep the old behavior (row goes pending, markers cleared)', async () => {
+    const queries = useRecordingDb({ firsts: [{ ...INACTIVE_ROW }, { ...INACTIVE_ROW }] });
+    const result = await subscribeOrResubscribe({ ...PUBLIC, publicSignup: false });
+    expect(result.action).toBe('confirmation_sent');
+    const write = queries.find((r) => r.update);
+    expect(write.update.status).toBe('pending');
+    expect(write.update.deactivated_at).toBeNull();
+    expect(write.update.resubscribed_at).toBeInstanceOf(Date);
+    expect(write.fnWheres).toHaveLength(0);
+  });
+
+  test('a trusted flow (requireConfirmation:false) still skips an inactive row untouched', async () => {
+    const queries = useRecordingDb({ firsts: [{ ...INACTIVE_ROW }] });
+    const result = await subscribeOrResubscribe({ email: 'reader@example.com', source: 'admin_add', linkCustomer: false });
+    expect(result.action).toBe('skipped_inactive');
+    expect(queries.some((r) => r.update)).toBe(false);
+  });
+});
+
+describe('resend cooldown on a pending row', () => {
+  const PENDING = { ...UNSUB_ROW, status: 'pending', confirmed_at: null, unsubscribed_at: null, confirmation_sent_at: new Date() };
+
+  test('public form inside the cooldown: confirmation_throttled, no email action', async () => {
+    useRecordingDb({ firsts: [{ ...PENDING }, { ...PENDING }], updateCounts: [0] });
+    const result = await subscribeOrResubscribe(PUBLIC);
+    expect(result.action).toBe('confirmation_throttled');
+  });
+
+  test('public form after the cooldown: confirmation_resent with the same token', async () => {
+    const queries = useRecordingDb({ firsts: [{ ...PENDING }, { ...PENDING }], updateCounts: [1] });
+    const result = await subscribeOrResubscribe(PUBLIC);
+    expect(result.action).toBe('confirmation_resent');
+    const write = queries.find((r) => r.update);
+    expect(write.update.confirmation_token).toBeUndefined();
+    expect(write.update.confirmation_sent_at).toBeInstanceOf(Date);
+    expect(write.fnWheres).toHaveLength(1);
+  });
+
+  test('other requireConfirmation callers are not throttled', async () => {
+    const queries = useRecordingDb({ firsts: [{ ...PENDING }, { ...PENDING }] });
+    const result = await subscribeOrResubscribe({ ...PUBLIC, publicSignup: false });
+    expect(result.action).toBe('confirmation_resent');
+    expect(queries.find((r) => r.update).fnWheres).toHaveLength(0);
+  });
+});
+
+describe('lookupByToken / confirmByToken for a public re-signup token', () => {
+  const sentAt = (msAgo) => new Date(Date.now() - msAgo);
+  const resignup = (row, msAgo = 60 * 1000) => ({ ...row, confirmation_token: 'new-tok', confirmation_sent_at: sentAt(msAgo) });
+
+  test.each([['unsubscribed', UNSUB_ROW], ['inactive', INACTIVE_ROW]])('a live re-signup token on a %s row is confirmable', async (_l, row) => {
+    useRecordingDb({ firsts: [resignup(row)] });
+    expect((await lookupByToken('new-tok')).action).toBe('pending');
+  });
+
+  test('the original signup link on an unsubscribed row is still the stale "unsubscribed" page', async () => {
+    useRecordingDb({ firsts: [{ ...UNSUB_ROW }] }); // sent 01-01 < confirmed 01-01 00:05 < unsubscribed 02-01
+    expect((await lookupByToken('old-tok')).action).toBe('unsubscribed');
+  });
+
+  test('a link confirmed and opted out inside the 7-day window stays stale', async () => {
+    const t0 = Date.now() - 3 * 24 * 3600 * 1000;
+    useRecordingDb({ firsts: [{ ...UNSUB_ROW, confirmation_sent_at: new Date(t0), confirmed_at: new Date(t0 + 1000), unsubscribed_at: new Date(t0 + 2000) }] });
+    expect((await lookupByToken('old-tok')).action).toBe('unsubscribed');
+  });
+
+  test('a re-signup token past the 7-day window reads expired', async () => {
+    useRecordingDb({ firsts: [resignup(UNSUB_ROW, CONFIRM_TTL_MS + 60 * 1000)] });
+    expect((await lookupByToken('new-tok')).action).toBe('expired');
+  });
+
+  test('an opt-out after the re-signup email kills its link', async () => {
+    useRecordingDb({ firsts: [{ ...resignup(INACTIVE_ROW), unsubscribed_at: new Date() }] });
+    expect((await lookupByToken('new-tok')).action).toBe('unsubscribed');
+  });
+
+  test.each([['unsubscribed', UNSUB_ROW], ['inactive', INACTIVE_ROW]])('confirm applies the comeback to a %s row, CAS on token + status', async (_l, row) => {
+    const queries = useRecordingDb({ firsts: [resignup(row), { ...resignup(row), status: 'active' }] });
+    const result = await confirmByToken('new-tok');
+    expect(result.action).toBe('confirmed');
+    const flip = queries.find((r) => r.update && r.update.status === 'active');
+    expect(flip.wheres).toContainEqual({ id: row.id, confirmation_token: 'new-tok', status: row.status });
+    expect(flip.update).toMatchObject({
+      unsubscribed_at: null, deactivated_at: null, deactivated_reason: null, reengagement_flagged_at: null,
+    });
+    expect(flip.update.confirmed_at).toBeInstanceOf(Date);
+    expect(flip.update.resubscribed_at).toBeInstanceOf(Date);
+    expect(String(flip.update.tags)).toContain('COALESCE(tags');
+    // The live-token ordering is enforced in the same statement.
+    expect(flip.raws.join(' ')).toContain('confirmation_sent_at > unsubscribed_at');
+    expect(flip.raws.join(' ')).toContain('confirmation_sent_at > deactivated_at');
+    expect(flip.raws.join(' ')).toContain('confirmation_sent_at > confirmed_at');
+  });
+
+  test('a stale link confirms nothing: no update runs', async () => {
+    const queries = useRecordingDb({ firsts: [{ ...UNSUB_ROW }] });
+    const result = await confirmByToken('old-tok');
+    expect(result.action).toBe('unsubscribed');
+    expect(queries.some((r) => r.update)).toBe(false);
+  });
+
+  test('a lost CAS (opt-out landed first) re-reads the current truth instead of activating', async () => {
+    const row = resignup(UNSUB_ROW);
+    useRecordingDb({ firsts: [row, { ...row, unsubscribed_at: new Date() }], updateCounts: [0] });
+    const result = await confirmByToken('new-tok');
+    expect(result.action).toBe('unsubscribed');
+  });
+});
+
+describe('purgeStalePendingSubscribers keeps opt-out history', () => {
+  test('reverts rows with unsubscribed_at, then deactivated_at, then deletes only what is left', async () => {
+    const queries = useRecordingDb({ updateCounts: [2, 1], delCount: 3 });
+    const removed = await purgeStalePendingSubscribers();
+    expect(removed).toBe(3);
+    expect(queries).toHaveLength(3);
+    const [unsub, inactive, del] = queries;
+    expect(unsub.notNulls).toContain('unsubscribed_at');
+    expect(unsub.update).toMatchObject({ status: 'unsubscribed', confirmation_token: null });
+    expect(inactive.notNulls).toContain('deactivated_at');
+    expect(inactive.update).toMatchObject({ status: 'inactive', confirmation_token: null });
+    // The delete never targets a row carrying history: those two groups left
+    // status='pending' before it ran.
+    expect(del.del).toBe(true);
+    for (const r of queries) expect(r.wheres).toContainEqual({ status: 'pending' });
   });
 });

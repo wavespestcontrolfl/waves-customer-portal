@@ -4174,8 +4174,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           source: 'quote_wizard',
           strict: true,
           requireConfirmation: true,
+          // Unverified public email: throttle repeats, keep an opted-out row
+          // opted out until the link is clicked (sweep #7765 B5).
+          publicSignup: true,
         });
-        if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
+        // A throttled repeat on a still-pending row sends no second email, but
+        // the lead still rides that pending confirmation: stamp it so the
+        // click enrolls this lead.
+        if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent'
+            || (result.action === 'confirmation_throttled' && result.subscriber?.status === 'pending')) {
           await db('newsletter_subscribers').where({ id: result.subscriber.id }).update({
             quote_lead_automation_pending: true,
             // Carried through double opt-in so the confirmed enrollment can
@@ -4185,7 +4192,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             updated_at: new Date(),
           });
           try {
-            await sendConfirmationEmail(result.subscriber);
+            if (result.action !== 'confirmation_throttled') await sendConfirmationEmail(result.subscriber);
           } catch (e) {
             logger.error(`[public-quote] confirmation email failed for subscriber id=${result.subscriber?.id}: ${e.message}`);
           }

@@ -445,6 +445,9 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
       source: req.body.source || 'public_form',
       strict: true,
       requireConfirmation: true,
+      // Anonymous form: repeat submits are throttled and an opted-out row
+      // stays opted out until the emailed link is clicked (sweep #7765 B5).
+      publicSignup: true,
     });
 
     // Out-of-area waitlist signups carry zip/city tags so the office can see
@@ -467,7 +470,9 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
     // can't be used as an enumeration oracle to learn which addresses are
     // confirmed subscribers. We still only SEND a confirmation email when the
     // row is genuinely pending; an already-active address is a silent no-op
-    // and an attacker can't tell the two apart from the response.
+    // and an attacker can't tell the two apart from the response. A repeat
+    // submit inside the resend cooldown ('confirmation_throttled') sends
+    // nothing and answers the same way.
     if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
       try {
         await sendConfirmationEmail(result.subscriber);

@@ -204,7 +204,7 @@ describe('POST /subscribe', () => {
     expect(mockNsUpdates).toHaveLength(0);
     expect(subscribeOrResubscribe).toHaveBeenCalledTimes(2);
     expect(subscribeOrResubscribe.mock.calls[0][0]).toEqual({
-      email: 'a@example.com', firstName: null, lastName: null, source: 'public_form', strict: true, requireConfirmation: true,
+      email: 'a@example.com', firstName: null, lastName: null, source: 'public_form', strict: true, requireConfirmation: true, publicSignup: true,
     });
   });
 
@@ -215,4 +215,21 @@ describe('POST /subscribe', () => {
     const logged = JSON.stringify([...logger.error.mock.calls, ...logger.info.mock.calls]);
     expect(logged).not.toMatch(/33570|ruskin/);
   });
+});
+
+// Sweep #7765 B5: the public form's answer must not reveal whether a
+// confirmation went out, and a throttled repeat must send nothing.
+describe('POST /subscribe — resend cooldown parity', () => {
+  const { sendConfirmationEmail } = require('../services/newsletter-confirm');
+
+  test.each([['confirmation_sent', 1], ['confirmation_resent', 1], ['confirmation_throttled', 0], ['already_active', 0]])(
+    '%s answers the same body and sends %i email(s)', async (action, sends) => {
+      mockSubscribeResult = { action, subscriber: { id: 7, email: 'reader@example.com', status: 'pending', tags: [] } };
+      const out = await post({ email: 'reader@example.com', source: 'out_of_area_waitlist', tags: ['zip:33570'] });
+      expect(out).toEqual({ status: 200, body: { success: true, pending: true } });
+      expect(sendConfirmationEmail).toHaveBeenCalledTimes(sends);
+      // Waitlist tags only follow a send, never a throttled repeat.
+      expect(mockNsUpdates).toHaveLength(sends);
+    },
+  );
 });
