@@ -77,6 +77,18 @@ beforeEach(() => {
 afterAll(() => { delete process.env.GATE_ALERT_RING_BUDGET; delete process.env.GATE_AGENT_ACTIVITY; });
 
 describe('exemption predicate', () => {
+  test.each(budget.BUDGETED_CATEGORIES)('internal category %s is budgeted (a plain row has no exemption)', (category) => {
+    expect(budget.exemptReason({ category, metadata: {} })).toBeNull();
+  });
+
+  // Codex rounds 4-5 on #7691 found customer-action alerts outside the customer lists (a repeat quote form, a portal service
+  // request). Every category a customer-facing route raises stays outside the budget, so none of them can ever be held.
+  test.each(['service', 'estimate', 'lead', 'customer', 'schedule', 'appointment', 'visit_prep_photos', 'customer_promotion_review',
+    'review_low_rating', 'service-prefs', 'estimate_change_request', 'typed_decisions', 'wdo_report_attention', 'a_new_category'])(
+    'category %s is not budgeted: it always rings', (category) => {
+      expect(budget.exemptReason({ category, metadata: {} })).toBe('not_budgeted');
+    });
+
   test.each(require('../services/admin-alert-retention').KEEP_UNTIL_SETTLED_CATEGORIES)('money category %s is exempt (always rings, never held)', (category) => {
     expect(budget.exemptReason({ category, metadata: {} })).toBe('money');
   });
@@ -121,7 +133,7 @@ describe('exemption predicate', () => {
   test('a known lead sending the quote form again is customer contact, by its dedupe key (the emitter sets no contact flag)', () => {
     expect(budget.exemptReason({ category: 'lead', metadata: { dedupeKey: 'lead-repeat-form:cust-1' } })).toBe('customer_contact');
     expect(budget.exemptReason({ category: 'lead', metadata: {}, dedupeKey: 'lead-repeat-form:cust-1' })).toBe('customer_contact');
-    expect(budget.exemptReason({ category: 'lead', metadata: { dedupeKey: 'lead-other:cust-1' } })).toBeNull();
+    expect(budget.exemptReason({ category: 'alert', metadata: { dedupeKey: 'lead-other:cust-1' } })).toBeNull();
     // The emitter still keys its alert this way: a rename must fail here, not hold the alert in production.
     const src = fs.readFileSync(path.join(__dirname, '../routes/lead-webhook.js'), 'utf8');
     for (const prefix of budget.CUSTOMER_KEY_PREFIXES) expect(src).toContain(`dedupeKey: \`${prefix}`);

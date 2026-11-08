@@ -5,7 +5,8 @@
 // quiet, stamped ringBudgetHeld with its Eastern day): no bell row, no phone banner, no sound. ONE count row in the bell
 // ("System — 3 more alerts held today", dedupe key ring-budget:<day>) says how many were held and lists them.
 //
-// Always rings, never counted and never held:
+// Only the internal categories in BUDGETED_CATEGORIES are budgeted; every other category always rings. Inside them,
+// these always ring, are never counted and never held:
 //   - customer contact: the scorecard's customer lists below, a registry rule or alert that declares `contact: true`, and
 //     the customer-comms triggers the bell policy always admits;
 //   - a promise we owe a customer: `promise: true` (declared or in the registry rule) and the promise triggers;
@@ -81,6 +82,13 @@ const CUSTOMER_TRIGGER_KEYS = Object.freeze([...SCORECARD_TRIGGER_KEYS, ...POLIC
 
 // The auto-dispatch emitters (server/services/auto-dispatch/*): every notice there is raised under category
 // schedule_conflict (the move-check-down notice, category system, is the one exception) with one of these dedupe keys.
+// The internal alert types the budget covers (14-day production census, 2026-11-07: engineering and system faults, content,
+// stale-visit and inventory checks, review-reply drafts, agent gaps, stuck estimates). Every other category always rings, so
+// an alert raised by a customer's own action (a portal service request, an estimate reply, a reschedule, a repeat quote form,
+// photos before a visit) can never be held, and a new category rings until someone adds it here on evidence. The bell
+// policy's owner-chosen default-on categories (DEFAULT_ON_CATEGORIES) stay out on purpose.
+const BUDGETED_CATEGORIES = Object.freeze(['alert', 'system', 'content', 'stale_visit_sweep', 'inventory', 'review', 'agents', 'estimate_stuck']);
+
 // Customer contact that an emitter marks only by its dedupe key: a known lead sending the quote form again
 // (routes/lead-webhook.js ringRepeatFormAlert, category 'lead', key lead-repeat-form:<customer id>) is a person reaching out.
 const CUSTOMER_KEY_PREFIXES = Object.freeze(['lead-repeat-form:']);
@@ -144,7 +152,8 @@ function exemptReason({ category, metadata, dedupeKey } = {}) {
     || promiseReason(meta, triggerKey, rule)
     || (trigger?.techVisible ? 'tech_visible' : null)
     || (meta.timeCritical === true ? 'time_critical' : null)
-    || dispatchReason(category, key);
+    || dispatchReason(category, key)
+    || (BUDGETED_CATEGORIES.includes(category) ? null : 'not_budgeted');
 }
 
 function customerReason(category, meta, triggerKey, rule, key = '') {
@@ -388,6 +397,7 @@ module.exports = {
   CUSTOMER_CATEGORIES,
   CUSTOMER_TRIGGER_KEYS,
   CUSTOMER_KEY_PREFIXES,
+  BUDGETED_CATEGORIES,
   SCORECARD_TRIGGER_KEYS,
   PROMISE_TRIGGER_KEYS,
   DISPATCH_CATEGORIES,
