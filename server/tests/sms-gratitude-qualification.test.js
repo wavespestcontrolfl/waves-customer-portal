@@ -188,7 +188,7 @@ describe('sms gratitude qualification', () => {
       // Gate off (default here): currentPromptVersion() === PROMPT_VERSION
       // (pre-push audit P1) — see the dedicated boundary test below for the
       // gate-on case.
-      promptVersion: 'house_voice_v11',
+      promptVersion: 'house_voice_v11+e',
       fixtureSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       sourceSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       sourceFiles: expect.arrayContaining(['server/services/sms-gratitude-grading.js']),
@@ -844,8 +844,8 @@ describe('sms gratitude qualification', () => {
       // not the static PROMPT_VERSION, which never moves once the gate goes
       // live and would otherwise stamp every pin "v11" forever.
       const { REAL_ANSWERS_PROMPT_VERSION } = require('../services/sms-shadow-drafter');
-      expect(inHoursPins.promptVersion).toBe(REAL_ANSWERS_PROMPT_VERSION);
-      expect(afterHoursPins.promptVersion).toBe(REAL_ANSWERS_PROMPT_VERSION);
+      expect(inHoursPins.promptVersion).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+e`);
+      expect(afterHoursPins.promptVersion).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+e`);
     } finally {
       Date.now = realNow;
       if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;

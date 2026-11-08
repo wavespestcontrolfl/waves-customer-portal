@@ -1,8 +1,8 @@
 /**
- * GATE_SMS_JUDGE_V2 on a real Postgres (owner 2026-10-24). Measurement only.
+ * Judge v2 on a real Postgres (owner 2026-10-24). Measurement only.
  *  - the real migration adds judge_version + could_send with the CHECK;
- *  - the nightly writer persists judge_version/could_send gate on and leaves both NULL gate off;
- *  - the autonomy safety backstop counts only j2 rows gate on, every row gate off.
+ *  - the nightly writer persists judge_version/could_send;
+ *  - the autonomy safety backstop counts only j2 rows.
  * Synthetic names only; the Anthropic SDK is mocked, nothing is sent.
  */
 const SKIP = !process.env.DATABASE_URL;
@@ -22,9 +22,8 @@ jest.mock('../models/db', () => {
 
 jest.setTimeout(120000);
 
-(SKIP ? describe.skip : describe)('GATE_SMS_JUDGE_V2 on PostgreSQL', () => {
+(SKIP ? describe.skip : describe)('Judge v2 on PostgreSQL', () => {
   const schema = `judge_v2_${randomUUID().replaceAll('-', '')}`;
-  const GATE = 'GATE_SMS_JUDGE_V2';
   const HOUR = 3600 * 1000;
   let database;
 
@@ -52,14 +51,12 @@ jest.setTimeout(120000);
     await require('../models/migrations/20261025000000_shadow_judgments_judge_v2').up(database);
   });
   afterAll(async () => {
-    delete process.env[GATE];
     jest.restoreAllMocks();
     if (!database) return;
     await database.raw('DROP SCHEMA ?? CASCADE', [schema]).catch(() => {});
     await database.destroy();
   });
   afterEach(async () => {
-    delete process.env[GATE];
     mockAnthropicCreate.mockReset();
     await database.raw('TRUNCATE shadow_draft_judgments, message_drafts, sms_log, agent_decisions');
   });
@@ -90,25 +87,13 @@ jest.setTimeout(120000);
     expect((await database('shadow_draft_judgments').where({ draft_id: draftId }).first()).could_send).toBe('yes_with_edit');
   });
 
-  test('writer, gate on: persists judge_version j2 and could_send; prompt_version unchanged', async () => {
-    process.env[GATE] = 'true';
+  test('writer: persists judge_version j2 and could_send; prompt_version unchanged', async () => {
     const draftId = await seedPair();
     mockAnthropicCreate.mockResolvedValue(judgeReply({ could_send_instead: 'yes_with_edit' }));
     const { judgeShadowDrafts } = require('../services/sms-shadow-judge');
     expect((await judgeShadowDrafts({ batchLimit: 5 })).judged).toBe(1);
     const row = await database('shadow_draft_judgments').where({ draft_id: draftId }).first();
     expect(row).toMatchObject({ judge_version: 'j2', could_send: 'yes_with_edit', verdict: 'equivalent', prompt_version: 'shadow_judge_v1' });
-    expect(row.scores).toEqual({ voice: 7, safety: 8, actions: 7, overall: 7 });
-  });
-
-  test('writer, gate off: both columns stay NULL even if the model sent the key', async () => {
-    const draftId = await seedPair();
-    mockAnthropicCreate.mockResolvedValue(judgeReply({ could_send_instead: 'no' }));
-    const { judgeShadowDrafts } = require('../services/sms-shadow-judge');
-    expect((await judgeShadowDrafts({ batchLimit: 5 })).judged).toBe(1);
-    const row = await database('shadow_draft_judgments').where({ draft_id: draftId }).first();
-    expect(row.judge_version).toBeNull();
-    expect(row.could_send).toBeNull();
     expect(row.scores).toEqual({ voice: 7, safety: 8, actions: 7, overall: 7 });
   });
 
@@ -123,14 +108,7 @@ jest.setTimeout(120000);
     }
     const signals = async () => (await require('../services/sms-graduation').fetchLiveJudgeSignals(database, { cohortVersions: [VERSION], voiceProfileVersion: null })).get('GENERAL');
 
-    test('gate off: every scored row counts, old and new', async () => {
-      await addJudged({ judgeVersion: null, ageMin: 5 });
-      await addJudged({ judgeVersion: 'j2', verdict: 'draft_unsafe', ageMin: 4 });
-      expect(await signals()).toMatchObject({ judged: 2, unsafe: 1, recentUnsafe: 1 });
-    });
-
-    test('gate on: only j2 rows count; old-judge rows are left out of totals and the recent window', async () => {
-      process.env[GATE] = 'true';
+    test('only j2 rows count; old-judge rows are left out of totals and the recent window', async () => {
       await addJudged({ judgeVersion: null, verdict: 'draft_unsafe', ageMin: 5 });
       await addJudged({ judgeVersion: null, ageMin: 4 });
       await addJudged({ judgeVersion: 'j2', ageMin: 3 });
