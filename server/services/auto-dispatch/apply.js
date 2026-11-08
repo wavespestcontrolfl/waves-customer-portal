@@ -386,7 +386,11 @@ function makeMoveGuard({ service, best, config = {} }) {
     await assertNotToldOnMove(trx, row, config, refuse);
     // REMINDERS-OFF LOCK (owner 2026-11-07, reminder-off.js): the 24-hour reminder is the customer's only notice of
     // this move, so a row whose reminder will not go out never moves. Read on the move transaction; fails closed.
-    await reminderOff.assertRemindersOn(trx, [row], refuse);
+    // Only on the call that writes this row's placement (the rebooker passes `destination`): the unit mover's later
+    // technician assignment (visit-groups alignMember) runs this guard again after the slot committed, with no
+    // destination. That step changes no day or hour, and the fresh row it reads already shows the new slot, so a
+    // first placement would read as a move and be left on its old technician (Codex #7767 r1 P2).
+    if (destination) await reminderOff.assertRemindersOn(trx, [row], refuse);
   };
 }
 

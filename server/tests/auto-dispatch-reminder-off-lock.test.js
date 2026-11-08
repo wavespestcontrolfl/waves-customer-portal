@@ -136,13 +136,16 @@ describe('the move guards', () => {
   // A weekday a few days later (the member guard refuses a weekend for a skip-weekends series only).
   const best = { date: shiftDateStr(FAR, 2), start_time: '08:00', end_time: '09:00', technician_id: 't1' };
 
+  // The rebooker's call writes this row's placement and names it (`destination`).
+  const destination = { date: best.date, windowStart: '08:00' };
+
   test('makeMoveGuard: the moving row with its reminder off is refused inside the move transaction (409)', async () => {
     const guard = makeMoveGuard({ service, best, config: {} });
     answers({ s1: false });
-    await expect(guard({ trx: fakeTrx([service]), technicianId: 't1' }))
+    await expect(guard({ trx: fakeTrx([service]), technicianId: 't1', destination }))
       .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', message: expect.stringContaining('24-hour reminder off') });
     answers({ s1: true });
-    await expect(guard({ trx: fakeTrx([service]), technicianId: 't1' })).resolves.toBeUndefined();
+    await expect(guard({ trx: fakeTrx([service]), technicianId: 't1', destination })).resolves.toBeUndefined();
   });
 
   test('makeMoveGuard: a grouped member the rebooker hands over is the row checked', async () => {
@@ -150,8 +153,20 @@ describe('the move guards', () => {
     const member = { ...service, id: 's2', customer_id: 'c2' };
     answers({ s1: true, s2: false });
     const trx = fakeTrx([member]);
-    await expect(guard({ trx, technicianId: 't1', service: member })).rejects.toMatchObject({ message: expect.stringContaining('service s2 has its 24-hour reminder off') });
+    await expect(guard({ trx, technicianId: 't1', service: member, destination })).rejects.toMatchObject({ message: expect.stringContaining('service s2 has its 24-hour reminder off') });
     expect(trx.ssReads).toEqual([['s2']]);
+  });
+
+  // Codex #7767 r1 P2: the unit mover (visit-groups alignMember) runs the guard again to assign the technician, after
+  // the member's slot committed and with no destination. A first placement's fresh row then shows its new slot.
+  test('makeMoveGuard: the technician step after a grouped move (no destination) reads no reminder answer', async () => {
+    const guard = makeMoveGuard({ service: { ...service, window_start: null, recurring_dispatch_due_date: FAR }, best, config: {} });
+    answers({ s2: false });
+    const placedNow = { id: 's2', window_start: '08:00', window_end: '09:00', estimated_duration_minutes: 60, service_type: 'Quarterly Pest Control' };
+    const trx = fakeTrx([{ ...placedNow, customer_id: 'c2', property_id: null, recurring_dispatch_due_date: FAR }]);
+    await expect(guard({ trx, technicianId: 't2', service: placedNow })).resolves.toBeUndefined();
+    expect(loadVisitReminder24hAnswers).not.toHaveBeenCalled();
+    expect(trx.ssReads).toEqual([]);
   });
 
   test('makeMemberGuard: a sibling with its reminder off holds the whole visit (409, names the sibling)', async () => {
