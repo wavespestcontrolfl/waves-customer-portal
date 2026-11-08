@@ -181,6 +181,20 @@ maybeDescribe('daily ring budget (live Postgres)', () => {
     }
   });
 
+  test('a known lead sending the quote form again rings past the budget: its key arrives as an option, the way lead-webhook.js raises it', async () => {
+    for (let i = 0; i < 10; i += 1) await write(`fill ${i}`);
+    const out = await NotificationService.notifyAdmin('lead', `${RUN} repeat form`, 'Fixture body.', {
+      link: '/admin/leads', dedupeKey: `lead-repeat-form:${RUN}`, dedupeOpenOnly: true, refreshOnDedupe: true, bumpOnRefresh: true,
+      dedupeVersion: new Date().toISOString(), bell: true, metadata: { fixture: RUN, area: 'Leads', severity: 'needs-you', who: 'person' },
+    });
+    const row = await db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [`lead-repeat-form:${RUN}`]).first();
+    expect(out && row).toBeTruthy();
+    made.push(row.id);
+    expect(row.metadata.feed).toBeUndefined();
+    expect(row.metadata.ringBudgetHeld).toBeUndefined();
+    expect(row.metadata.ringBudgetDay).toBeUndefined();
+  });
+
   test('time-critical field work after ten rings still rings, also when a quiet held row of the same key becomes urgent', async () => {
     for (let i = 0; i < 10; i += 1) await write(`fill ${i}`);
     const urgent = await write('urgent', { category: 'alert', metadata: { fixture: RUN, opsKey: 'combined-booking-check', timeCritical: true } });

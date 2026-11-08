@@ -81,6 +81,9 @@ const CUSTOMER_TRIGGER_KEYS = Object.freeze([...SCORECARD_TRIGGER_KEYS, ...POLIC
 
 // The auto-dispatch emitters (server/services/auto-dispatch/*): every notice there is raised under category
 // schedule_conflict (the move-check-down notice, category system, is the one exception) with one of these dedupe keys.
+// Customer contact that an emitter marks only by its dedupe key: a known lead sending the quote form again
+// (routes/lead-webhook.js ringRepeatFormAlert, category 'lead', key lead-repeat-form:<customer id>) is a person reaching out.
+const CUSTOMER_KEY_PREFIXES = Object.freeze(['lead-repeat-form:']);
 const DISPATCH_CATEGORIES = Object.freeze(['schedule_conflict']);
 const DISPATCH_KEY_PREFIXES = Object.freeze([
   'rain-pass:', 'auto-dispatch-', 'recurring-dispatch:', 'recurring-no-window:',
@@ -136,16 +139,18 @@ function exemptReason({ category, metadata, dedupeKey } = {}) {
   const triggerKey = meta.triggerKey || null;
   const trigger = registryTrigger(triggerKey);
   const rule = trigger?.rule;
-  return customerReason(category, meta, triggerKey, rule)
+  const key = String(dedupeKey ?? meta.dedupeKey ?? '');
+  return customerReason(category, meta, triggerKey, rule, key)
     || promiseReason(meta, triggerKey, rule)
     || (trigger?.techVisible ? 'tech_visible' : null)
     || (meta.timeCritical === true ? 'time_critical' : null)
-    || dispatchReason(category, String(dedupeKey ?? meta.dedupeKey ?? ''));
+    || dispatchReason(category, key);
 }
 
-function customerReason(category, meta, triggerKey, rule) {
+function customerReason(category, meta, triggerKey, rule, key = '') {
   const declared = meta.contact === true || rule?.contact === true;
-  return declared || CUSTOMER_CATEGORIES.includes(category) || (triggerKey && CUSTOMER_TRIGGER_KEYS.includes(triggerKey)) ? 'customer_contact' : null;
+  const byKey = CUSTOMER_KEY_PREFIXES.some((prefix) => key.startsWith(prefix));
+  return declared || byKey || CUSTOMER_CATEGORIES.includes(category) || (triggerKey && CUSTOMER_TRIGGER_KEYS.includes(triggerKey)) ? 'customer_contact' : null;
 }
 
 function promiseReason(meta, triggerKey, rule) {
@@ -382,6 +387,7 @@ module.exports = {
   COUNT_KEY_PREFIX,
   CUSTOMER_CATEGORIES,
   CUSTOMER_TRIGGER_KEYS,
+  CUSTOMER_KEY_PREFIXES,
   SCORECARD_TRIGGER_KEYS,
   PROMISE_TRIGGER_KEYS,
   DISPATCH_CATEGORIES,

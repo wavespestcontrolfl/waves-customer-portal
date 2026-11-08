@@ -118,6 +118,15 @@ describe('exemption predicate', () => {
     expect(budget.exemptReason({ category: 'alert', metadata: { contact: 'yes', promise: 1 } })).toBeNull();
   });
 
+  test('a known lead sending the quote form again is customer contact, by its dedupe key (the emitter sets no contact flag)', () => {
+    expect(budget.exemptReason({ category: 'lead', metadata: { dedupeKey: 'lead-repeat-form:cust-1' } })).toBe('customer_contact');
+    expect(budget.exemptReason({ category: 'lead', metadata: {}, dedupeKey: 'lead-repeat-form:cust-1' })).toBe('customer_contact');
+    expect(budget.exemptReason({ category: 'lead', metadata: { dedupeKey: 'lead-other:cust-1' } })).toBeNull();
+    // The emitter still keys its alert this way: a rename must fail here, not hold the alert in production.
+    const src = fs.readFileSync(path.join(__dirname, '../routes/lead-webhook.js'), 'utf8');
+    for (const prefix of budget.CUSTOMER_KEY_PREFIXES) expect(src).toContain(`dedupeKey: \`${prefix}`);
+  });
+
   test.each(budget.PROMISE_TRIGGER_KEYS)('promise trigger %s is exempt', (triggerKey) => {
     expect(budget.exemptReason({ category: 'alert', metadata: { triggerKey } })).toBe('promise');
   });
