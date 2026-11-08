@@ -233,20 +233,24 @@ const isRecurringChild = (m) => m.is_recurring === true && m.recurring_parent_id
  *  true = a set time (never), false = the day only was chosen (skip the source and customer-pick rules), NULL = infer.
  *  Inferred: a recurring child unless the customer picked its slot; a first or one-time visit only from an office source AND
  *  only while the customer has not since picked its slot (a self-service reschedule keeps the office source, but the hour is
- *  now the customer's own). The customer-pick read fails closed (picked). */
+ *  now the customer's own). The customer-pick read fails closed (picked). Returns { eligible, degraded }: `degraded` is
+ *  true when that move-history read FAILED (isCustomerPickedVisit swallowed the error and answered picked), so the caller
+ *  can tell a failed read from a real "the customer picked it" verdict. */
 async function memberEligible(conn, member, source) {
-  if (member.customer_asked_time === true) return false;
-  if (member.customer_asked_time === false) return true;
-  if (!isRecurringChild(member) && !OFFICE_BOOKING_SOURCES.includes(source)) return false; // no move-history read
+  if (member.customer_asked_time === true) return { eligible: false, degraded: false };
+  if (member.customer_asked_time === false) return { eligible: true, degraded: false };
+  if (!isRecurringChild(member) && !OFFICE_BOOKING_SOURCES.includes(source)) return { eligible: false, degraded: false }; // no move-history read
   // Lazy: auto-dispatch/eligibility pulls the route optimizer, which reads the feature gates at load time.
-  return !(await require('./auto-dispatch/eligibility').isCustomerPickedVisit(member, conn)).picked;
+  const verdict = await require('./auto-dispatch/eligibility').isCustomerPickedVisit(member, conn);
+  return { eligible: !verdict.picked, degraded: verdict.degraded === true };
 }
 
 /**
  * Which visits may be promised only the DAY? Map<id, { eligible, level, failed? }>, one bulk read per fact, stop-wide: every live
  * member of a visit's stop must be eligible, else none is. `level` comes from loadPromiseLevels; a level of 'hour' is
  * never eligible (the customer already has an hour). Any read failure: not eligible, level 'hour', failed true (fail
- * closed: the customer keeps today's window copy; `failed` is the only way to tell it from a real 'hour' verdict). A recurring child is judged by who placed its slot (isCustomerPickedVisit, one read
+ * closed: the customer keeps today's window copy; `failed` is the only way to tell it from a real 'hour' verdict). A swallowed
+ * move-history read failure (isCustomerPickedVisit's degraded answer) is also not eligible and failed true, with its real level. A recurring child is judged by who placed its slot (isCustomerPickedVisit, one read
  * per child of the stop). A first or one-time visit needs an office booking source (OFFICE_BOOKING_SOURCES; any other source
  * is rejected without a read) AND the same customer-pick check, since a customer's self-service reschedule leaves the office
  * source in place.
@@ -263,10 +267,14 @@ async function dayOnlyEligibility(conn, ids, now = new Date()) {
       const level = levels.get(id) || 'hour';
       const members = facts.get(String(id)) || [];
       let eligible = level !== 'hour' && members.length > 0;
+      let degraded = false;
       for (const member of eligible ? members : []) {
-        if (!(await memberEligible(conn, member, sources.get(String(member.id))))) { eligible = false; break; }
+        const verdict = await memberEligible(conn, member, sources.get(String(member.id)));
+        if (!verdict.eligible) { eligible = false; degraded = verdict.degraded; break; }
       }
-      result.set(id, { eligible, level });
+      // A degraded move-history read is not eligible (senders keep today's window copy) and carries the same failed marker
+      // as a failed bulk read, so an AI context says only the day while a screen keeps the hour.
+      result.set(id, degraded ? { eligible, level, failed: true } : { eligible, level });
     }
   } catch {
     // failed: true marks a READ FAILURE (as opposed to a real "customer was told an hour" verdict, which has the same
