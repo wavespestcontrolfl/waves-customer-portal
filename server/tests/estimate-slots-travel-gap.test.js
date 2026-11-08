@@ -137,3 +137,42 @@ test('gate on: the buffer env is honoured', async () => {
   // Coordless stop + zero buffer → touching is allowed again.
   expect(await filterCollidingSlots([candidateSlot()], { ...RANGE, coords: PALMETTO })).toHaveLength(1);
 });
+
+// Booking make-room (booking-make-room.js): the stop that gives up 9 AM moves one hour later, and the page's own
+// filter judges the new 9-10 visit on the day as it would be (Codex r3 on #7736).
+describe('a make-room hour on the moved day (makeRoomPlacement)', () => {
+  const { makeRoomPlacement } = estimateSlotAvailability._internals;
+  const movedRow = (overrides = {}) => neighbourRow({ id: 'ss-b', window_start: '09:00:00', window_end: '10:00:00', ...overrides });
+  const MOVED = new Map([['ss-b', 60]]);
+  const placement = (extra = {}) => makeRoomPlacement({
+    estimateZone: null, coords: PALMETTO, serviceMix: null, candidateExpectedMinutes: null, estimateId: 'est-1', lineRanking: null, ...extra,
+  });
+
+  test('the filter reads a moved stop at its new time: 9 AM no longer overlaps it', async () => {
+    wireRows([movedRow()]);
+    expect(await filterCollidingSlots([candidateSlot()], { ...RANGE, coords: PALMETTO })).toHaveLength(0);
+    wireRows([movedRow()]);
+    expect(await filterCollidingSlots([candidateSlot()], { ...RANGE, coords: PALMETTO, shiftedServiceMinutes: MOVED })).toHaveLength(1);
+    expect(lastChain.select.mock.calls[0]).toContain('scheduled_services.id');
+  });
+
+  test('gate on: the moved stop is the new visit\'s next neighbour, so the travel gap refuses the hour', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    // Bradenton, ~33 drive minutes away, now at 10:00: no free minute after a 9-10 visit that fills its hour.
+    wireRows([movedRow()]);
+    await expect(placement()(candidateSlot(), MOVED)).resolves.toBe('page_collision');
+  });
+
+  test('gate on: when the estimate\'s expected minutes leave room for the drive and the buffer, the hour passes', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    // Same pin (0 drive minutes); 40 expected minutes leave 20 free minutes, more than the 15-minute buffer.
+    wireRows([movedRow(PALMETTO)]);
+    await expect(placement({ candidateExpectedMinutes: 40 })(candidateSlot(), MOVED)).resolves.toBe(true);
+  });
+
+  test('the service-line rule: a technician the ranking rules out is refused', async () => {
+    wireRows([movedRow()]);
+    const lineRanking = { rankOf: (techId) => (techId === 'tech-2' ? 0 : null) };
+    await expect(placement({ lineRanking })(candidateSlot(), MOVED)).resolves.toBe('service_line');
+  });
+});

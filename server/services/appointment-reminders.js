@@ -7266,6 +7266,12 @@ AppointmentReminders.loadReminder24hAnswers = loadReminder24hAnswers;
 AppointmentReminders.loadVisitReminder24hAnswers = loadVisitReminder24hAnswers;
 AppointmentReminders.loadBookingReminder24hAnswers = loadBookingReminder24hAnswers;
 
+// The 72-hour reminder's effective channel (email-first for one-time visits
+// under GATE_REMINDER_72H_EMAIL_FIRST), for the make-room check
+// (scheduling/booking-make-room.js), which reads the settings through
+// getReminderPrefs above.
+AppointmentReminders.resolve72hChannel = resolve72hChannel;
+
 // classifyDeliveryCertainty verdict -> replay result.
 const REPLAY_DELIVERY_RESULT = Object.freeze({
   sent: { sent: true },
