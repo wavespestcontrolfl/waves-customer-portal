@@ -59,7 +59,7 @@ const { visitTimeElapsed } = require('../services/reschedule-eligibility');
 const visitPrep = require('../services/visit-prep');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const { recordPageView } = require('../services/customer-page-views');
-const { dayOnlyIds, dayOnlyFields, shownSlotFor } = require('../services/time-display');
+const { dayOnlyVisit, dayOnlyFields, shownSlotFor } = require('../services/time-display');
 
 // Token-keyed appointment data — never cacheable.
 router.use(noStore);
@@ -685,10 +685,17 @@ async function prepPhotosField(svc, state, visitUnknown) {
   }
 }
 
+// GATE_DAY_ONLY_PROMISE (part C1): the stop this row belongs to, for the day-only decision. A grouped stop is judged as
+// a whole (dayOnlyVisit): its members at its earliest start, the start the page and the calendar file show. Every link
+// to one stop then agrees. Ungrouped: no members, and the row is judged at its own start.
+function dayOnlyStop(visitInfo, members) {
+  return { members: Array.isArray(members) ? members : null, stopStart: visitInfo?.visit?.windowStart || null };
+}
+
 // GATE_DAY_ONLY_PROMISE (part C1): is this visit shown as day-only? When it is, the grouped stop's start (an hour
 // the page payload carries in service.visit) is blanked too. One read.
-async function blankDayOnlyVisit(svc, visitInfo) {
-  const dayOnly = (await dayOnlyIds(db, [svc])).has(String(svc.id));
+async function blankDayOnlyVisit(svc, visitInfo, members) {
+  const dayOnly = await dayOnlyVisit(db, svc, dayOnlyStop(visitInfo, members));
   if (dayOnly && visitInfo.visit) visitInfo.visit = { ...visitInfo.visit, windowStart: null };
   return dayOnly;
 }
@@ -719,11 +726,11 @@ router.get('/:token', async (req, res, next) => {
     // until the lookup works (never a solo page over a possibly grouped stop).
     // `members` is internal (ICS verdict input) — stripped with visitUnknown
     // so the payload spread below never carries raw member rows.
-    const { visitUnknown, members: _visitMembers, ...visitInfo } = visitInfoRaw;
+    const { visitUnknown, members: visitMembers, ...visitInfo } = visitInfoRaw;
     // GATE_DAY_ONLY_PROMISE (part C1): a day-only visit shows the date and no hour. The server blanks every hour field
     // (an older client bundle then renders the date alone); the confirm POST fills the row's current start in for the
     // blank echo (shownSlotFor). One read for this payload.
-    const dayOnly = await blankDayOnlyVisit(svc, visitInfo);
+    const dayOnly = await blankDayOnlyVisit(svc, visitInfo, visitMembers);
     // Grouped: the state is the STOP's (all members + the stop's window),
     // whichever member's link this is; ungrouped: the row's own.
     const { state, phase: livePhase } = visitUnknown ? { state: 'not_available', phase: null } : pageStateForGroup(svc, visitInfo);
@@ -923,7 +930,8 @@ router.get('/:token/calendar.ics', async (req, res, next) => {
 
     // GATE_DAY_ONLY_PROMISE (part C1): a visit the customer was told only the day for is an ALL-DAY event. The UID is the
     // same one the timed event uses, so a later download (after the 24-hour text, with the hour) updates this entry.
-    const dayOnly = (await dayOnlyIds(db, [svc])).has(String(svc.id));
+    // A grouped stop is judged as a whole (dayOnlyStop), so every member's link gives the same event.
+    const dayOnly = await dayOnlyVisit(db, svc, dayOnlyStop(visitInfo, visitInfo.members));
     const when = dayOnly ? allDayEventLines(date) : [`DTSTART:${icsStamp(startAt)}`, `DTEND:${icsStamp(endAt)}`];
     const description = dayOnly
       ? ICS_DAY_ONLY_DESCRIPTION
@@ -1014,7 +1022,7 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
     // prove which slot it meant is exactly the one to reject.
     // GATE_DAY_ONLY_PROMISE (part C1): a day-only page shows no hour, so the client echoes none. shownSlotFor fills the
     // row's CURRENT start in for that blank echo (the date must still match); every other body is compared as it came.
-    const shown = await shownSlotFor(db, svc, req.body);
+    const shown = await shownSlotFor(db, svc, req.body, dayOnlyStop(preInfo, preInfo.members));
     if (!slotMatchesShown(svc, shown)) {
       return res.status(409).json({
         error: 'This appointment just changed — please refresh.',

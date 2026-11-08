@@ -42,6 +42,25 @@ const svcRow = (overrides = {}) => ({
   ...overrides,
 });
 
+// The live members of one grouped stop, read through db('scheduled_services').select().
+const memberRow = (id, start, end) => ({
+  id, status: 'pending', source_action: null, customer_confirmed: false, scheduled_date: '2099-01-12',
+  window_start: start, window_end: end, technician_id: null,
+});
+const CHAINED = [memberRow('svc-1', '09:00:00', '11:00:00'), memberRow('svc-2', '11:00:00', '13:00:00')];
+async function withMembers(members, fn) {
+  mockDb.mockImplementation((table) => {
+    const api = chain(table);
+    if (table === 'scheduled_services') api.select = async () => members;
+    return api;
+  });
+  try {
+    return await fn();
+  } finally {
+    mockDb.mockImplementation((table) => chain(table));
+  }
+}
+
 function dayOnly(...ids) {
   mockLoadTimeDisplay.mockImplementation(async (_conn, rows) => new Map(rows.map((r) => [
     r.id, { showHour: !ids.includes(r.id), level: 'none', eligible: ids.includes(r.id) },
@@ -95,7 +114,7 @@ describe('GET /:token (the appointment page payload)', () => {
   });
 
   test('a grouped stop blanks the stop\'s start too', async () => {
-    dayOnly('svc-1');
+    dayOnly('svc-1', 'svc-2');
     mockState.svc = svcRow({ visit_id: 'visit-1' });
     // The stop has two live members; the page reads them through db('scheduled_services').select().
     const members = [
@@ -113,6 +132,30 @@ describe('GET /:token (the appointment page payload)', () => {
     expect(body.service.visit.windowStart).toBeNull();
     expect(body.appointment.windowStart).toBeNull();
     expect(body.appointment.arrivalWindow).toBeNull();
+  });
+
+  // Chained members of one stop (local codex audit on C1, P1): 09:00-11:00 then 11:00-13:00. The page promises the
+  // stop's 09:00 arrival, so the stop is judged at 09:00 and as a whole: every link to it must agree.
+  test('a grouped stop is judged as a whole: every member, at the stop\'s earliest start, in one read', async () => {
+    dayOnly('svc-1', 'svc-2');
+    mockState.svc = svcRow({ id: 'svc-2', visit_id: 'visit-1', window_start: '11:00:00', window_end: '13:00:00' });
+    mockLoadTimeDisplay.mockClear();
+    const body = await withMembers(CHAINED, getPage);
+    expect(mockLoadTimeDisplay).toHaveBeenCalledTimes(1);
+    expect(mockLoadTimeDisplay.mock.calls[0][1].map((r) => [r.id, r.window_start])).toEqual([['svc-2', '09:00'], ['svc-1', '09:00']]);
+    expect(body.appointment.windowStart).toBeNull();
+    expect(body.appointment.day_only).toBe(true);
+  });
+
+  test('one member that still shows its hour makes the whole stop show it, on every member\'s link', async () => {
+    dayOnly('svc-2'); // the 09:00 member is inside the cutoff (or was told an hour)
+    for (const [id, start, end] of [['svc-1', '09:00:00', '11:00:00'], ['svc-2', '11:00:00', '13:00:00']]) {
+      mockState.svc = svcRow({ id, visit_id: 'visit-1', window_start: start, window_end: end });
+      const body = await withMembers(CHAINED, getPage);
+      expect(body.appointment.day_only).toBeUndefined();
+      expect(body.appointment.arrivalWindow).toBe('9:00 AM - 11:00 AM');
+      expect(body.service.visit.windowStart).toBe('09:00');
+    }
   });
 });
 

@@ -36,6 +36,27 @@ async function dayOnlyIds(conn, rows, now = new Date()) {
   return hidden;
 }
 
+/**
+ * Is this visit shown as day-only? A grouped stop is judged as a WHOLE, the way its notices are (dayOnlySendDecision): the
+ * stop's earliest start sets the 24-hour cutoff, and every member must be day-only. Every link to one stop (the page, its
+ * calendar file, its confirm) then gives the same answer. `stop` = { members, stopStart }: the stop's member rows and its
+ * earliest start (HH:MM). No members: the row alone, at its own start. Never throws; a failure shows the hour.
+ */
+async function dayOnlyVisit(conn, row, stop = {}, now = new Date()) {
+  if (!row || row.id == null) return false;
+  const members = stop && Array.isArray(stop.members) && stop.members.length ? stop.members : [];
+  const start = (stop && stop.stopStart) || row.window_start;
+  const ids = new Set();
+  const rows = [];
+  for (const m of [row, ...members]) {
+    if (!m || m.id == null || ids.has(String(m.id))) continue;
+    ids.add(String(m.id));
+    rows.push({ id: m.id, scheduled_date: row.scheduled_date, window_start: start });
+  }
+  const hidden = await dayOnlyIds(conn, rows, now);
+  return rows.every((r) => hidden.has(String(r.id)));
+}
+
 /** The two fields a day-only payload adds. `{}` when the hour is shown, so nothing changes for those payloads. */
 function dayOnlyFields(dayOnly) {
   return dayOnly ? { day_only: true, arrival_note: ARRIVAL_NOTE } : {};
@@ -47,14 +68,14 @@ function dayOnlyFields(dayOnly) {
  * shows this visit as day-only, the row's CURRENT start stands in: the confirm lands on the visit's current slot and the
  * date still has to match. Every other body (an hour was echoed, gate off, hour shown now, any failure) is returned as
  * it came, so the comparison is exactly today's. A visit that crossed the 24-hour cutoff after the page loaded now shows
- * its hour, so the blank body fails the match and the customer reloads to see it.
+ * its hour, so the blank body fails the match and the customer reloads to see it. `stop` is the page's grouped stop
+ * (dayOnlyVisit), so the confirm judges the stop the same way the page did.
  */
-async function shownSlotFor(conn, row, shown) {
+async function shownSlotFor(conn, row, shown, stop = {}) {
   const body = shown || {};
   if (body.windowStart != null && body.windowStart !== '') return body;
   if (!row || !row.window_start) return body;
-  const hidden = await dayOnlyIds(conn, [row]);
-  return hidden.has(String(row.id)) ? { ...body, windowStart: String(row.window_start).slice(0, 5) } : body;
+  return (await dayOnlyVisit(conn, row, stop)) ? { ...body, windowStart: String(row.window_start).slice(0, 5) } : body;
 }
 
-module.exports = { ARRIVAL_NOTE, dayOnlyIds, dayOnlyFields, shownSlotFor };
+module.exports = { ARRIVAL_NOTE, dayOnlyIds, dayOnlyVisit, dayOnlyFields, shownSlotFor };

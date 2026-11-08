@@ -9,7 +9,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const logger = require('../services/logger');
 const {
-  ARRIVAL_NOTE, dayOnlyIds, dayOnlyFields, shownSlotFor,
+  ARRIVAL_NOTE, dayOnlyIds, dayOnlyVisit, dayOnlyFields, shownSlotFor,
 } = require('../services/time-display');
 
 const conn = Symbol('conn');
@@ -58,6 +58,47 @@ describe('time-display', () => {
   test('ids compare as strings (numeric ids from the database)', async () => {
     mockLoadTimeDisplay.mockResolvedValue(new Map([[7, { showHour: false }]]));
     expect((await dayOnlyIds(conn, [row(7)])).has('7')).toBe(true);
+  });
+
+  describe('dayOnlyVisit (a grouped stop is judged as a whole)', () => {
+    // Chained members of one stop: 09:00 and 11:00. The stop promises its earliest start.
+    const stop = { members: [row('a', '09:00:00'), row('b', '11:00:00')], stopStart: '09:00' };
+
+    test('ungrouped: the row alone, at its own start', async () => {
+      mockLoadTimeDisplay.mockResolvedValue(verdicts({ a: false }));
+      expect(await dayOnlyVisit(conn, row('a'))).toBe(true);
+      expect(mockLoadTimeDisplay).toHaveBeenCalledWith(conn, [{ id: 'a', scheduled_date: '2099-01-12', window_start: '09:00:00' }], expect.any(Date));
+    });
+
+    test('grouped: every member at the stop\'s earliest start, in one read', async () => {
+      mockLoadTimeDisplay.mockResolvedValue(verdicts({ a: false, b: false }));
+      expect(await dayOnlyVisit(conn, row('b', '11:00:00'), stop)).toBe(true);
+      expect(mockLoadTimeDisplay).toHaveBeenCalledTimes(1);
+      expect(mockLoadTimeDisplay.mock.calls[0][1]).toEqual([
+        { id: 'b', scheduled_date: '2099-01-12', window_start: '09:00' },
+        { id: 'a', scheduled_date: '2099-01-12', window_start: '09:00' },
+      ]);
+    });
+
+    test('one member that shows its hour shows the hour for the whole stop, from either link', async () => {
+      mockLoadTimeDisplay.mockResolvedValue(verdicts({ a: true, b: false }));
+      expect(await dayOnlyVisit(conn, row('a', '09:00:00'), stop)).toBe(false);
+      expect(await dayOnlyVisit(conn, row('b', '11:00:00'), stop)).toBe(false);
+    });
+
+    test('a failed read shows the hour', async () => {
+      mockLoadTimeDisplay.mockRejectedValue(new Error('db down'));
+      expect(await dayOnlyVisit(conn, row('b', '11:00:00'), stop)).toBe(false);
+      expect(await dayOnlyVisit(conn, null, stop)).toBe(false);
+    });
+
+    test('shownSlotFor fills a blank echo only when the whole stop is day-only', async () => {
+      const blank = { date: '2099-01-12', windowStart: '' };
+      mockLoadTimeDisplay.mockResolvedValue(verdicts({ a: true, b: false }));
+      expect(await shownSlotFor(conn, row('b', '11:00:00'), blank, stop)).toBe(blank);
+      mockLoadTimeDisplay.mockResolvedValue(verdicts({ a: false, b: false }));
+      expect(await shownSlotFor(conn, row('b', '11:00:00'), blank, stop)).toEqual({ ...blank, windowStart: '11:00' });
+    });
   });
 
   describe('shownSlotFor (the confirm echo of a day-only page)', () => {
