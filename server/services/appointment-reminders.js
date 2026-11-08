@@ -2775,18 +2775,14 @@ function reminder24hInputsFromRows(prefs, channelPrefs) {
 }
 
 /**
- * Will the 24-hour reminder go out, for each of these customers? Map<customerId, boolean>, from THREE bulk reads however
- * many customers (the customers, their account owners, the prefs rows): the office's "customer asked for this time" hint
- * (GATE_DAY_ONLY_PROMISE part E) reads it. Same rule as the senders: reminder24hWillSend over the prefs fields that
- * getReminderPrefs builds (reminder24hInputsFromRows), with the channel taken from the account owner's row for a
- * secondary profile (resolveChannelPrefsRow). A customer with no prefs row has the table defaults (reminder on). While
- * property texts are ENFORCED the answer depends on each visit's saved property (and the senders log a decision row per
- * read), so no answer is returned at all: the caller reads that as unknown. Throws on a failed read.
+ * The customer-level facts the 24-hour answer needs, from THREE bulk reads however many customers (the customers, their
+ * account owners, the prefs rows): Map<customerId, { own, channel }> where `own` is the customer's notification_prefs row
+ * (undefined = the table defaults, reminder on) and `channel` the row the channel is read from (the account owner's row
+ * for a secondary profile, as resolveChannelPrefsRow does). Throws on a failed read.
  */
-async function loadReminder24hAnswers(conn, customerIds) {
+async function loadCustomerReminderContext(conn, ids) {
   const out = new Map();
-  const ids = [...new Set((customerIds || []).filter((v) => v != null).map(String))];
-  if (!ids.length || require('./property-notification-prefs').propertyTextsEnforced()) return out;
+  if (!ids.length) return out;
   const customers = await conn('customers').whereIn('id', ids).select('id', 'account_id', 'is_primary_profile');
   const accounts = [...new Set(customers.filter((c) => c.is_primary_profile !== true && c.account_id).map((c) => c.account_id))];
   const owners = accounts.length
@@ -2799,10 +2795,66 @@ async function loadReminder24hAnswers(conn, customerIds) {
     const customer = accountOf.get(id);
     const ownerId = customer && customer.is_primary_profile !== true && customer.account_id ? ownerOf.get(String(customer.account_id)) : null;
     const own = prefsOf.get(id);
-    const channel = ownerId && ownerId !== id && prefsOf.get(ownerId) ? prefsOf.get(ownerId) : own;
-    out.set(id, reminder24hWillSend({ unavailable: false, ...reminder24hInputsFromRows(own, channel) }));
+    out.set(id, { own, channel: ownerId && ownerId !== id && prefsOf.get(ownerId) ? prefsOf.get(ownerId) : own });
   }
   return out;
+}
+
+/** reminder24hWillSend over a customer's context, with the property's toggles laid over the row when `overlay` is given. */
+function reminder24hAnswer({ own, channel }, overlay) {
+  const prefs = overlay ? require('./property-notification-prefs').overlayPropertyPrefs(overlay.property, overlay.row, own) : own;
+  return reminder24hWillSend({ unavailable: false, ...reminder24hInputsFromRows(prefs, channel) });
+}
+
+const distinctIds = (values) => [...new Set((values || []).filter((v) => v != null).map(String))];
+
+/**
+ * Will the 24-hour reminder go out, for each of these customers (their own row, no saved property)? Map<customerId,
+ * boolean>, from THREE bulk reads. Same rule as the senders: reminder24hWillSend over the prefs fields getReminderPrefs builds
+ * (reminder24hInputsFromRows), the channel from the account owner's row for a secondary profile. No prefs row = table
+ * defaults (reminder on). Throws on a failed read.
+ */
+async function loadReminder24hAnswers(conn, customerIds) {
+  const ids = distinctIds(customerIds);
+  const context = await loadCustomerReminderContext(conn, ids);
+  return new Map(ids.map((id) => [id, reminder24hAnswer(context.get(id))]));
+}
+
+/**
+ * Will the 24-hour reminder go out for each of these VISITS? Map<visit id, boolean>; `visits`: [{ id, customer_id,
+ * property_id }]. The office's "customer asked for this time" hint (GATE_DAY_ONLY_PROMISE part E) reads it. The customer row
+ * decides, except while property texts are ENFORCED (propertyTextsEnforced) for a visit stamped with an active non-primary
+ * saved property of its customer: that property's toggles (its own row, else the relationship default, quiet for
+ * rental_owned / managed_for_client) lie over the customer row, exactly as resolveAppointmentPrefs does for the senders
+ * (property-notification-prefs.overlayPropertyPrefs). Shadow mode or scope off: the customer row, no property read. READ-ONLY
+ * (no decision log). Reads: the three customer reads, plus two (properties, property prefs) only when enforced and a visit
+ * is stamped. Throws on a failed read.
+ */
+async function loadVisitReminder24hAnswers(conn, visits) {
+  const list = (visits || []).filter((v) => v && v.id != null && v.customer_id);
+  const context = await loadCustomerReminderContext(conn, distinctIds(list.map((v) => v.customer_id)));
+  const propertyPrefs = require('./property-notification-prefs');
+  const overlays = propertyPrefs.propertyTextsEnforced() ? await propertyPrefs.loadVisitProperties(conn, list) : new Map();
+  return new Map(list.map((v) => [v.id, reminder24hAnswer(context.get(String(v.customer_id)), overlays.get(v.id))]));
+}
+
+/**
+ * The booking window's answers for ONE customer: { customer, properties } where `customer` is the customer row's answer and
+ * `properties` maps each active non-primary saved property id to ITS answer, present only while property texts are enforced
+ * (otherwise the customer row decides for every property and the map is empty). The modal picks by the property it books.
+ * Throws on a failed read.
+ */
+async function loadBookingReminder24hAnswers(conn, customerId) {
+  const id = String(customerId);
+  const context = (await loadCustomerReminderContext(conn, [id])).get(id);
+  const propertyPrefs = require('./property-notification-prefs');
+  const properties = {};
+  if (propertyPrefs.propertyTextsEnforced()) {
+    const own = await conn('customer_properties').where({ customer_id: id }).select('id');
+    const found = await propertyPrefs.loadVisitProperties(conn, own.map((p) => ({ id: p.id, customer_id: id, property_id: p.id })));
+    for (const [propertyId, overlay] of found) properties[propertyId] = reminder24hAnswer(context, overlay);
+  }
+  return { customer: reminder24hAnswer(context), properties };
 }
 
 async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) {
@@ -7211,6 +7263,8 @@ AppointmentReminders.getReminderPrefs = getReminderPrefs;
 AppointmentReminders.reminder24hWillSend = reminder24hWillSend;
 // GATE_DAY_ONLY_PROMISE part E: the office's bulk read of the same answer (the phone-script hint).
 AppointmentReminders.loadReminder24hAnswers = loadReminder24hAnswers;
+AppointmentReminders.loadVisitReminder24hAnswers = loadVisitReminder24hAnswers;
+AppointmentReminders.loadBookingReminder24hAnswers = loadBookingReminder24hAnswers;
 
 // classifyDeliveryCertainty verdict -> replay result.
 const REPLAY_DELIVERY_RESULT = Object.freeze({

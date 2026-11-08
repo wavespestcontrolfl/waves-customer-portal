@@ -1878,7 +1878,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       if (customerId) {
         const r = await adminFetch(`/admin/customers/${customerId}/schedule-estimates`);
         list = Array.isArray(r.estimates) ? r.estimates : [];
-        setBookingReminder24h({ id: customerId, on: r.reminder24hOn === true });
+        setBookingReminder24h({ id: customerId, on: r.reminder24hOn === true, byProperty: r.reminder24hByProperty });
       }
       // Ensure the estimate we were opened to book is present even when the
       // selected customer doesn't own it yet — a lead's quote (customer_id NULL)
@@ -5784,7 +5784,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
           </div>
           {dayOnlyPromiseOn && !newCallerBookMode && (
-            <AskedTimeBoxLegacy id="new-appt-asked-time" checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={partialCommitLocked} colors={D} slot={{ date: apptDate, start: windowStart, timeChosen, reminder24hOn: reminderAnswerFor(bookingReminder24h, selectedCustomer) }} />
+            <AskedTimeBoxLegacy id="new-appt-asked-time" checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={partialCommitLocked} colors={D} slot={{ date: apptDate, start: windowStart, timeChosen, reminder24hOn: reminderAnswerFor(bookingReminder24h, selectedCustomer, selectedPropertyId) }} />
           )}
           {duplicateConflict && (
             <section ref={duplicateConflictRef} aria-label="Existing recurring programs" style={{ padding: 16, marginBottom: 16, border: `1px solid ${D.border}`, borderRadius: 8, fontSize: 14, lineHeight: 1.5 }}>

@@ -45,11 +45,15 @@ export function rescheduleHintSlot({ options, showManual, manualDate, manualTime
   return { date, start, reminder24hOn };
 }
 
-/** The booking window's answer for the chosen customer (`answer` = { id, on } from the schedule-estimates reply): no customer
- *  yet reads as a new customer with the table defaults (reminder on); an answer for another customer, or none yet, reads off. */
-export function reminderAnswerFor(answer, customer) {
+/** The booking window's answer for the chosen customer (`answer` = { id, on, byProperty } from the schedule-estimates reply):
+ *  no customer yet reads as a new customer with the table defaults (reminder on); an answer for another customer, or none yet,
+ *  reads off. While property texts are enforced the reply carries each saved property's own answer (`byProperty`): the
+ *  property the modal books decides, and with none selected (or none listed) the customer row does. */
+export function reminderAnswerFor(answer, customer, propertyId) {
   if (!customer) return true;
-  return !!answer && answer.id === customer.id && answer.on === true;
+  if (!answer || answer.id !== customer.id) return false;
+  const own = answer.byProperty && propertyId ? answer.byProperty[propertyId] : undefined;
+  return (own === undefined ? answer.on : own) === true;
 }
 
 /** The create request field: only a checked box sends it (the server stores true; nothing else is written). */

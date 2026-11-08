@@ -3221,14 +3221,15 @@ router.get('/:id/comms', requireAdmin, async (req, res, next) => {
   }
 });
 
-// { reminder24hOn } for ONE customer (appointment-reminders.loadReminder24hAnswers, the senders' own rule), or {} with the gate
-// off or when the answer is unknown (a failed read, or property texts enforced): the client reads a missing field as "the
-// reminder will not go out", which is what the senders do with unreadable preferences.
+// { reminder24hOn, reminder24hByProperty } for ONE customer (appointment-reminders.loadBookingReminder24hAnswers, the senders'
+// own rule, read-only): the customer row's answer, and while property texts are enforced each saved property's own. {} with the
+// gate off or on a failed read: the client reads a missing field as "the reminder will not go out", which is what the senders
+// do with unreadable preferences.
 async function reminder24hField(customerId) {
   try {
     if (!require('../services/time-promise').dayOnlyPromiseOn()) return {};
-    const answers = await require('../services/appointment-reminders').loadReminder24hAnswers(db, [customerId]);
-    return answers.has(String(customerId)) ? { reminder24hOn: answers.get(String(customerId)) } : {};
+    const answers = await require('../services/appointment-reminders').loadBookingReminder24hAnswers(db, customerId);
+    return { reminder24hOn: answers.customer, reminder24hByProperty: answers.properties };
   } catch {
     return {};
   }

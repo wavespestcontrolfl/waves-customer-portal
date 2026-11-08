@@ -555,7 +555,7 @@ async function loadOfficeToldFields(conn, rows, now = new Date()) {
   const list = Array.isArray(rows) ? rows.filter((r) => r && r.id != null) : [];
   if (!list.length) return out;
   const entry = (id) => entryOf(out, id);
-  let customerOf = new Map();
+  let visitsForReminders = [];
   try {
     // The CURRENT intent (currentIntent, the one read rule), not the raw column: an intent a later slot-changing move left
     // behind reads as not recorded (null), so the box never pre-checks a choice the customer made for an older slot. Both
@@ -563,7 +563,7 @@ async function loadOfficeToldFields(conn, rows, now = new Date()) {
     const slotRows = (extra) => `EXISTS (SELECT 1 FROM reschedule_log WHERE reschedule_log.scheduled_service_id = scheduled_services.id
       AND new_date IS NOT NULL AND ${require('./auto-dispatch/eligibility').SLOT_CHANGED_SQL}${extra})`;
     const stored = await conn('scheduled_services').whereIn('id', list.map((r) => r.id)).select(
-      'id', 'customer_id', 'customer_asked_time', 'customer_asked_time_at',
+      'id', 'customer_id', 'property_id', 'customer_asked_time', 'customer_asked_time_at',
       conn.raw(`${slotRows('')} AS has_slot_change`),
       conn.raw(`${slotRows(' AND reschedule_log.created_at > scheduled_services.customer_asked_time_at')} AS slot_after_intent`),
     );
@@ -572,7 +572,7 @@ async function loadOfficeToldFields(conn, rows, now = new Date()) {
       const intent = currentIntent(r, newest);
       entry(r.id).customerAskedTime = intent === true ? true : intent === false ? false : null;
     }
-    customerOf = new Map(stored.map((r) => [r.id, r.customer_id]));
+    visitsForReminders = stored.map((r) => ({ id: r.id, customer_id: r.customer_id, property_id: r.property_id }));
   } catch { /* no pre-fill: the box starts unchecked */ }
   try {
     const first = etDateString(now);
@@ -586,23 +586,21 @@ async function loadOfficeToldFields(conn, rows, now = new Date()) {
       for (const r of open) entry(r.id).told = toldOf(promises.get(r.id));
     }
   } catch { /* no badge */ }
-  await addReminder24hFields(conn, out, customerOf);
+  await addReminder24hFields(conn, out, visitsForReminders);
   return out;
 }
 
 /**
- * `reminder24hOn` per row: will the customer's 24-hour reminder go out (appointment-reminders.loadReminder24hAnswers, the
- * senders' own rule, ONE bulk read per payload)? The office's phone-script hint needs it, because a day-only promise is made
- * only when that text will go out (shouldPromiseDayOnly). A failed read, or an answer the senders' rule cannot give in bulk,
- * leaves the field OUT: the client reads that as "will not go out", the senders' own answer for unreadable preferences
- * (reminder24hWillSend), so the hint then tells staff to name the time.
+ * `reminder24hOn` per row: will the customer's 24-hour reminder go out for THIS visit (appointment-reminders.
+ * loadVisitReminder24hAnswers, the senders' own rule including a saved property's toggles under enforcement, read-only, bulk
+ * per payload)? The office's phone-script hint needs it, because a day-only promise is made only when that text will go out
+ * (shouldPromiseDayOnly). A failed read leaves the field OUT: the client reads that as "will not go out", the senders' own
+ * answer for unreadable preferences (reminder24hWillSend), so the hint then tells staff to name the time.
  */
-async function addReminder24hFields(conn, out, customerOf) {
+async function addReminder24hFields(conn, out, visits) {
   try {
-    const answers = await require('./appointment-reminders').loadReminder24hAnswers(conn, [...customerOf.values()]);
-    for (const [id, customerId] of customerOf) {
-      if (answers.has(String(customerId))) entryOf(out, id).reminder24hOn = answers.get(String(customerId));
-    }
+    const answers = await require('./appointment-reminders').loadVisitReminder24hAnswers(conn, visits);
+    for (const [id, on] of answers) entryOf(out, id).reminder24hOn = on;
   } catch { /* no field */ }
 }
 

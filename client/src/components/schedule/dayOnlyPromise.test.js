@@ -62,6 +62,17 @@ describe('day-only promise words and request fields', () => {
     expect(reminderAnswerFor({ id: 'c1', on: false }, { id: 'c1' })).toBe(false);
   });
 
+  it('the booking window under enforced property texts: the property it books decides, else the customer row', () => {
+    const answer = { id: 'c1', on: true, byProperty: { 'p-rental': false, 'p-home': true } };
+    expect(reminderAnswerFor(answer, { id: 'c1' }, 'p-rental')).toBe(false);
+    expect(reminderAnswerFor(answer, { id: 'c1' }, 'p-home')).toBe(true);
+    expect(reminderAnswerFor(answer, { id: 'c1' }, '')).toBe(true);
+    expect(reminderAnswerFor(answer, { id: 'c1' }, 'p-primary')).toBe(true);
+    expect(reminderAnswerFor({ id: 'c1', on: false, byProperty: { 'p-home': true } }, { id: 'c1' }, '')).toBe(false);
+    expect(reminderAnswerFor({ id: 'c1', on: false, byProperty: { 'p-home': true } }, { id: 'c1' }, 'p-home')).toBe(true);
+    expect(reminderAnswerFor({ id: 'c1', on: true, byProperty: {} }, { id: 'c1' }, 'p-home')).toBe(true);
+  });
+
   it('the create request carries customerAskedTime only with the gate on AND the box checked', () => {
     expect(askedTimeCreateFields(true, true)).toEqual({ customerAskedTime: true });
     expect(askedTimeCreateFields(true, false)).toEqual({});
