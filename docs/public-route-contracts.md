@@ -983,6 +983,11 @@ horizon, `seasonalMaxHorizonDays()`, when seasonal browse applies, else
 an ET `YYYY-MM-DD`. The estimate page words "We book up to N days ahead. Pick a
 date on or before <day>." from these two fields; a 400 without them keeps the old
 retry message.
+`?timeOfDay=` on the same route accepts `morning`, `afternoon` or `evening` (trimmed,
+any case). Any other value, `any` or none applies no time-of-day filter. Before
+2026-11-07 any string passed through: an unknown value filtered like `afternoon`
+and, because the slot cache key carries it, forced a fresh list build on every new
+value. The estimate page sends no `timeOfDay`.
 `/book`'s self-booking offers (`/api/booking/availability`, `/find-slots`,
 the `/capture-intent` revalidation, public re-service, and inspection
 booking) evaluate the new visit at every position in the technician's route,
@@ -4299,7 +4304,7 @@ under `GATE_LEAD_TURNSTILE`. Owner alert (owner 2026-10-14): a verified lead nev
 call to the owner at any hour. It takes the `new_lead` bell; the legacy
 lead SMS to the owner goes only if that bell fails. The alert never
 changes the response, the lead's one automated text, or the estimate
-draft. A diff that places a call from this route is a P0. Repeat form from a lead (`GATE_LEAD_REPEAT_FORM`, dark; owner
+draft. A diff that places a call from this route is a P0. Repeat form from a lead (owner
 2026-10-24): a submission whose phone matches a live customers row still
 takes the existing-customer branch (its note; no leads row, no automated
 text, no draft, no new-lead bell) and the response is unchanged. When that
@@ -4307,8 +4312,8 @@ row is still a lead (`pipeline_stage` new_lead, contacted, estimate_sent,
 estimate_viewed, follow_up or lost), an open `lead_intake_status`
 (`awaiting_service`, `awaiting_address`) is kept instead of cleared, and
 one Leads admin alert rings (`ringRepeatFormAlert`; none inside the
-5-minute duplicate window). Any other row is unchanged by that gate, nothing is
-sent to the submitter, and gate off = as before. Current or past customer
+5-minute duplicate window). Any other row is unchanged by that rule, and nothing is
+sent to the submitter. Current or past customer
 (`GATE_CURRENT_CUSTOMER_QUOTE_TEXT`, dark; owner 2026-11-02 "text and bell"): a
 row in `active_customer`, `won`, `at_risk`, `churned`, `past_customer` or
 `dormant` (`server/services/customer-stages.js`) still takes the
@@ -7699,8 +7704,7 @@ stays inside its 3 reserved minutes either way). No `<Dial>`,
 PIN (`services/tech-voice-pin.js`: salted hash, 3 tries a call, a 15-minute
 lockout after 5 wrong in a row with one admin alert) and then answers fixed
 commands with no model, always in the technician's own scope: next stop,
-access notes, last treatment, the stop's codes (only while
-`GATE_ACCESS_CODES_SECTION` is on; `listForVisit`, one `audit_log` row
+access notes, last treatment, the stop's codes (`listForVisit`, one `audit_log` row
 without the codes), the set-text reply (only while `GATE_TECH_SET_TEXTS`
 is on), and a set text
 only after a read-back of the name, street and wording and a spoken "yes"

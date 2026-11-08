@@ -1,8 +1,6 @@
 /**
- * GET /api/admin/schedule: GATE_SCHEDULE_ACCESS_CODES (owner ruling
- * 2026-10-26) marks each day row `scheduleAccessEnabled` so the office
- * schedule draws the row's gate lines; off, the row is what it was. The gate
- * lines themselves (propertyAlerts) never change with it.
+ * GET /api/admin/schedule (owner ruling 2026-10-26): each day row carries its
+ * gate lines (propertyAlerts) so the office schedule can draw them.
  *
  * Real migrated PostgreSQL, real router, real adminAuthenticate with a signed
  * staff token (the admin-schedule-neighborhood-gate-actions.pg.test.js
@@ -22,9 +20,8 @@ const { randomUUID } = require('node:crypto');
 
 const DATE = '2099-04-17';
 
-postgres('scheduleAccessEnabled on GET /api/admin/schedule', () => {
+postgres('gate lines on GET /api/admin/schedule', () => {
   let db, server, baseUrl, admin, token, customerId, propertyId, visitId;
-  const OLD = process.env.GATE_SCHEDULE_ACCESS_CODES;
 
   beforeAll(async () => {
     db = require('../models/db');
@@ -57,11 +54,6 @@ postgres('scheduleAccessEnabled on GET /api/admin/schedule', () => {
     });
   });
 
-  afterEach(() => {
-    if (OLD === undefined) delete process.env.GATE_SCHEDULE_ACCESS_CODES;
-    else process.env.GATE_SCHEDULE_ACCESS_CODES = OLD;
-  });
-
   afterAll(async () => {
     if (server) await new Promise((r) => server.close(r));
     if (db) {
@@ -84,20 +76,8 @@ postgres('scheduleAccessEnabled on GET /api/admin/schedule', () => {
   const gateAlerts = (row) => row.propertyAlerts.filter((a) => a.type === 'gate');
   const LINES = [{ type: 'gate', text: 'Gate: #1234' }, { type: 'gate', text: 'Lockbox: 5678' }];
 
-  test('on: the row is marked and carries its gate lines', async () => {
-    process.env.GATE_SCHEDULE_ACCESS_CODES = 'true';
+  test('the row carries its gate lines', async () => {
     const row = await feedRow();
-    expect(row.scheduleAccessEnabled).toBe(true);
     expect(gateAlerts(row)).toEqual(LINES);
-  });
-
-  test('off, or any value but exactly "true": the row is what it was', async () => {
-    for (const value of [undefined, 'TRUE', '1', 'yes']) {
-      if (value === undefined) delete process.env.GATE_SCHEDULE_ACCESS_CODES;
-      else process.env.GATE_SCHEDULE_ACCESS_CODES = value;
-      const row = await feedRow();
-      expect(row).not.toHaveProperty('scheduleAccessEnabled');
-      expect(gateAlerts(row)).toEqual(LINES);
-    }
   });
 });

@@ -138,7 +138,7 @@ export default function MobileAppointmentDetailSheet({
   // address offers Link customer; onCustomerLinked refetches the day.
   newCallerBooking = false,
   onCustomerLinked,
-  // GATE_SCHEDULE_ACCESS_CODES: after Wrong code or Add gate code, refetch the
+  // After Wrong code or Add gate code, refetch the
   // day and resolve to this visit's fresh row (or null) for the Access section.
   onAccessChanged,
 }) {
@@ -961,8 +961,7 @@ export default function MobileAppointmentDetailSheet({
           </section>
         )}
 
-        {/* Access — the stop's gate and access codes (GATE_SCHEDULE_ACCESS_CODES,
-            owner ruling 2026-10-26), with Wrong code and Add gate code. */}
+        {/* Access — the stop's gate and access codes (owner ruling 2026-10-26), with Wrong code and Add gate code. */}
         <ScheduleAccessSection service={service} variant="sheet" actions onChanged={onAccessChanged} />
 
         {/* Appointment note — editable */}

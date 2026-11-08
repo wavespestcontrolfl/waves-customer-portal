@@ -196,7 +196,7 @@ const contactLinksOf = (contact) => CONTACT_LINKS
   .filter((link) => link.value);
 
 // The stop's gate and access codes in large digits under the contact lines
-// (GATE_SCHEDULE_ACCESS_CODES, owner ruling 2026-10-26): the lines the day
+// (owner ruling 2026-10-26): the lines the day
 // feed carries on the row (lib/schedule-access.js), the same ones the tech
 // app's stop brief shows. A neighborhood code says so; one nobody has
 // confirmed yet is amber and says "confirm on site". No codes = no block.

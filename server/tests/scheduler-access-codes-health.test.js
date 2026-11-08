@@ -1,8 +1,7 @@
 /**
- * The access-codes sweep cron: dark unless GATE_ACCESS_CODES_SECTION is on, a
- * tick the cron lock skipped for lack of a connection is a missed tick in job
- * health, a tick covered by a concurrent run (lease_held) is not, and a thrown
- * sweep never escapes the tick. Same mocking shape as
+ * The access-codes sweep cron: a tick the cron lock skipped for lack of a
+ * connection is a missed tick in job health, a tick covered by a concurrent
+ * run (lease_held) is not, and a thrown sweep never escapes the tick. Same mocking shape as
  * scheduler-neighborhood-access-health.test.js.
  */
 jest.mock('../utils/scheduled-cron', () => ({ schedule: jest.fn(), scheduleTimeout: jest.fn(), scheduleInterval: jest.fn() }));
@@ -16,19 +15,18 @@ jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((name) => name === 'cronJobs'), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
-  neighborhoodAccessLive: jest.fn(() => false),
 }));
 jest.mock('../utils/cron-lock', () => ({
   runExclusive: jest.fn(async (name, task) => task()),
   settleDeadRunningJobs: jest.fn(async () => []),
   recordMissedTick: jest.fn(async () => {}),
 }));
-jest.mock('../services/access-code-capture', () => ({ enabled: jest.fn(), runAccessCodeNet: jest.fn() }));
+jest.mock('../services/access-code-capture', () => ({ runAccessCodeNet: jest.fn() }));
 
 const cron = require('../utils/scheduled-cron');
 const logger = require('../services/logger');
 const { recordMissedTick } = require('../utils/cron-lock');
-const { enabled, runAccessCodeNet } = require('../services/access-code-capture');
+const { runAccessCodeNet } = require('../services/access-code-capture');
 const { initScheduledJobs } = require('../services/scheduler');
 
 function sweepTick() {
@@ -42,14 +40,7 @@ function sweepTick() {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  enabled.mockReturnValue(true);
   runAccessCodeNet.mockResolvedValue({ scanned: 3, read: 2, found: 1, failed: 0, skipped: 1 });
-});
-
-test('gate off: the tick still runs the sweep, which only does ownership cleanup', async () => {
-  enabled.mockReturnValue(false);
-  await sweepTick()();
-  expect(runAccessCodeNet).toHaveBeenCalled();
 });
 
 test('a pass logs its counts only', async () => {

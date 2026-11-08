@@ -14,7 +14,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 const access = require('../services/access-code-capture');
 const { dispatchWithFallback } = require('../services/llm/call');
 
-const { emailAsMessage, emailEligible, emailsEnabled, verifyEmailItems, buildEmailPrompt, readEmailAccessCodes, flagsAccess, EMAIL_VERSION } = access;
+const { emailAsMessage, emailEligible, verifyEmailItems, buildEmailPrompt, readEmailAccessCodes, flagsAccess, EMAIL_VERSION } = access;
 
 const AUTH = 'mx.google.com; dkim=pass header.d=example.invalid header.s=s1; spf=pass smtp.mailfrom=example.invalid';
 const email = (extra = {}) => ({
@@ -24,27 +24,6 @@ const email = (extra = {}) => ({
 });
 const item = (extra = {}) => ({ kind: 'neighborhood_gate', code: '#4821', instructions: null, life: 'standing', quote: 'The gate code is #4821', ...extra });
 const verify = (body, items, ctx = {}) => verifyEmailItems(items, emailAsMessage(email({ body_text: body }), null), ctx);
-
-describe('emailsEnabled', () => {
-  const OLD = { section: process.env.GATE_ACCESS_CODES_SECTION, emails: process.env.GATE_ACCESS_CODES_EMAILS };
-  afterEach(() => {
-    for (const [key, value] of [['GATE_ACCESS_CODES_SECTION', OLD.section], ['GATE_ACCESS_CODES_EMAILS', OLD.emails]]) {
-      if (value === undefined) delete process.env[key]; else process.env[key] = value;
-    }
-  });
-  test('needs the section gate and exactly `true`', () => {
-    process.env.GATE_ACCESS_CODES_SECTION = 'true';
-    process.env.GATE_ACCESS_CODES_EMAILS = 'true';
-    expect(emailsEnabled()).toBe(true);
-    for (const value of ['1', 'on', 'TRUE', ' true', 'false', '']) {
-      process.env.GATE_ACCESS_CODES_EMAILS = value;
-      expect(emailsEnabled()).toBe(false);
-    }
-    process.env.GATE_ACCESS_CODES_EMAILS = 'true';
-    process.env.GATE_ACCESS_CODES_SECTION = 'false';
-    expect(emailsEnabled()).toBe(false);
-  });
-});
 
 describe('emailEligible: which emails are read', () => {
   test('a customer email that passed authentication is read', () => {

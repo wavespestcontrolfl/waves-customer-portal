@@ -177,10 +177,7 @@ postgres('GET /week rows carry the Fast Complete routing fields the day rows car
   // it must be on the week row exactly when it is on the day row.
   describe("the neighborhood's pinned gate", () => {
     const PIN = { lat: 27.4321, lng: -82.4567 };
-    let savedAccess;
     beforeEach(async () => {
-      savedAccess = process.env.GATE_NEIGHBORHOOD_ACCESS;
-      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
       const [{ id: neighborhoodId }] = await trx('neighborhoods').insert({
         name: 'Synthetic Week Gate', county: 'Manatee', match_key: `manatee|synthetic week gate ${randomUUID()}`,
         source: 'office', subdivision_names: JSON.stringify([]),
@@ -191,18 +188,13 @@ postgres('GET /week rows carry the Fast Complete routing fields the day rows car
       });
       await trx('customer_properties').where({ id: propertyId }).update({ neighborhood_id: neighborhoodId, neighborhood_source: 'office' });
     });
-    afterEach(() => {
-      if (savedAccess === undefined) delete process.env.GATE_NEIGHBORHOOD_ACCESS; else process.env.GATE_NEIGHBORHOOD_ACCESS = savedAccess;
-    });
     const dayRow = async (id) => (await get('/', { date: DATE })).services.find((s) => s.id === id);
     const weekRow = async (id) => (await get('/week', { start: DATE })).days.find((d) => d.date === DATE).services.find((s) => s.id === id);
 
-    test('reaches the week row as on the day row; no key with the directory gate off', async () => {
+    test('reaches the week row as on the day row', async () => {
       const row = await visit(VISITS.pest);
       expect((await dayRow(row.id)).gateWaypoint).toEqual(PIN);
       expect((await weekRow(row.id)).gateWaypoint).toEqual(PIN);
-      delete process.env.GATE_NEIGHBORHOOD_ACCESS;
-      expect(await weekRow(row.id)).not.toHaveProperty('gateWaypoint');
     });
 
     test.each([
