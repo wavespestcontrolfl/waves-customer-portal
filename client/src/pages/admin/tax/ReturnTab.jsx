@@ -16,9 +16,9 @@ import {
 } from "../../../components/ui";
 import { etParts } from "../../../lib/timezone";
 
-// Federal return (GATE_TAX_RETURN_ENGINE): the year's inputs, the return the
+// Federal return: the year's inputs, the return the
 // server computes from the books, the carryovers it hands to next year, and
-// Mark filed, which freezes the answer. Renders nothing while the gate is off.
+// Mark filed, which freezes the answer.
 // The numbers are the server's: this file only shows them. Same shared V2
 // primitives and fetch idiom as LedgerInboxTab and SharedBillsPanel.
 
@@ -215,7 +215,6 @@ function YearForm({ detail, disabled, busy, onSave, onDirty }) {
 
 export default function ReturnTab() {
   const thisYear = etParts().year;
-  const [enabled, setEnabled] = useState(false);
   const [year, setYear] = useState(thisYear);
   const [detail, setDetail] = useState(null);
   const [ret, setRet] = useState(null);
@@ -227,14 +226,6 @@ export default function ReturnTab() {
   // only the newest year's answers may land: a slow answer for a year the
   // owner already left must not fill the screen under the new year
   const seq = useRef(0);
-
-  useEffect(() => {
-    let live = true;
-    adminFetch(`${T}/return-engine/status`)
-      .then((d) => { if (live) setEnabled(!!d?.enabled); })
-      .catch(() => { if (live) setEnabled(false); });
-    return () => { live = false; };
-  }, []);
 
   const load = useCallback(() => {
     const mine = ++seq.current;
@@ -250,7 +241,7 @@ export default function ReturnTab() {
       .then((d) => { if (mine === seq.current) setRet(d); })
       .catch((e) => { if (mine === seq.current) setRetError(e.message); });
   }, [year]);
-  useEffect(() => { if (enabled) load(); }, [enabled, load]);
+  useEffect(() => { load(); }, [load]);
 
   const run = async (fn) => {
     if (busy) return;
@@ -266,7 +257,6 @@ export default function ReturnTab() {
     }
   };
 
-  if (!enabled) return null;
   const filed = detail?.row?.status === "filed";
   const years = [];
   for (let y = thisYear; y >= FIRST_YEAR; y -= 1) years.push(y);

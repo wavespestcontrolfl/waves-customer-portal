@@ -1,5 +1,5 @@
 /**
- * services/tax-shared-bills (GATE_TAX_SHARED_BILLS): the pure text and money
+ * services/tax-shared-bills: the pure text and money
  * rules, plus the CRUD validation (db mocked).
  *
  * Locked-down behaviors:
@@ -211,27 +211,10 @@ describe('home office validation', () => {
 
 describe('home office, actual method validation', () => {
   const year = etParts().year;
-  beforeEach(() => { process.env.GATE_BANK_IMPORT = 'true'; process.env.GATE_TAX_RETURN_ENGINE = 'true'; });
-  afterEach(() => { delete process.env.GATE_BANK_IMPORT; delete process.env.GATE_TAX_RETURN_ENGINE; });
   const ok = { method: 'actual', sq_ft: '350', home_sq_ft: '1000', rent: '1200', utilities: 300.5 };
   test('saves the actual method with money rounded to cents and the unused amounts at 0', async () => {
     await svc.upsertHomeOffice(year, { ...ok, rent: '1200.005', notes: ' n ' });
     expect(state.upserted[0]).toMatchObject({ tax_year: year, method: 'actual', sq_ft: 350, months: 12, home_sq_ft: 1000, rent: 1200.01, utilities: 300.5, insurance: 0, other: 0, notes: 'n' });
-  });
-  test('writing the actual method needs the return engine, and simplified never does', async () => {
-    delete process.env.GATE_TAX_RETURN_ENGINE;
-    await expect(svc.upsertHomeOffice(year, ok)).rejects.toMatchObject({ status: 400, message: 'the actual method needs the return engine' });
-    process.env.GATE_TAX_RETURN_ENGINE = 'true';
-    delete process.env.GATE_BANK_IMPORT; // the engine gate is nested under Bank Import
-    await expect(svc.upsertHomeOffice(year, ok)).rejects.toMatchObject({ status: 400 });
-    expect(state.upserted).toEqual([]);
-    delete process.env.GATE_TAX_RETURN_ENGINE;
-    await expect(svc.upsertHomeOffice(year, { sq_ft: 120 })).resolves.toBeTruthy();
-    expect(state.upserted[0].method).toBe('simplified');
-  });
-  test('an actual row still computes while the engine is off (the tax package reads it)', () => {
-    delete process.env.GATE_TAX_RETURN_ENGINE;
-    expect(svc.homeOfficeDeduction({ method: 'actual', sq_ft: 300, home_sq_ft: 1000, rent: 1000 })).toBe(300);
   });
   test('the simplified method clears the actual fields', async () => {
     await svc.upsertHomeOffice(year, { sq_ft: 120 });
@@ -251,19 +234,6 @@ describe('home office, actual method validation', () => {
   });
   test('the 300 sq ft limit still holds for simplified', async () => {
     await expect(svc.upsertHomeOffice(year, { method: 'simplified', sq_ft: 301 })).rejects.toMatchObject({ status: 400 });
-  });
-});
-
-describe('isOn', () => {
-  afterEach(() => { delete process.env.GATE_TAX_SHARED_BILLS; delete process.env.GATE_BANK_IMPORT; });
-  test('needs both GATE_BANK_IMPORT and GATE_TAX_SHARED_BILLS, read at call time', () => {
-    expect(svc.isOn()).toBe(false);
-    process.env.GATE_TAX_SHARED_BILLS = 'true';
-    expect(svc.isOn()).toBe(false);
-    process.env.GATE_BANK_IMPORT = 'true';
-    expect(svc.isOn()).toBe(true);
-    delete process.env.GATE_TAX_SHARED_BILLS;
-    expect(svc.isOn()).toBe(false);
   });
 });
 

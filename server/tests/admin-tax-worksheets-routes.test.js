@@ -1,12 +1,11 @@
 /**
- * /admin/tax/worksheets (GATE_TAX_WORKSHEETS, nested under GATE_BANK_IMPORT):
- * the Sales tax (DR-15) and 1099s screens.
+ * /admin/tax/worksheets (nested under GATE_BANK_IMPORT): the Sales tax
+ * (DR-15) and 1099s screens.
  *
  * Locked-down behaviors:
- *  1. Gate off (or GATE_BANK_IMPORT off) -> /worksheets/status answers
- *     {enabled:false}; /worksheets/sales-tax and /worksheets/1099 are 404s that
- *     touch nothing.
- *  2. Gate on -> both routes pass the query to the service and answer its
+ *  1. GATE_BANK_IMPORT off -> /worksheets/sales-tax and /worksheets/1099 are
+ *     404s that touch nothing.
+ *  2. GATE_BANK_IMPORT on -> both routes pass the query to the service and answer its
  *     shape; a service error keeps its status and message.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -79,13 +78,12 @@ beforeEach(() => {
   ws.salesTaxSheet.mockReset();
   ws.form1099List.mockReset();
   process.env.GATE_BANK_IMPORT = 'true';
-  delete process.env.GATE_TAX_WORKSHEETS;
 });
-afterAll(() => { delete process.env.GATE_BANK_IMPORT; delete process.env.GATE_TAX_WORKSHEETS; });
+afterAll(() => { delete process.env.GATE_BANK_IMPORT; });
 
-describe('gate darkness', () => {
-  test('status answers enabled:false and both screens are 404s that touch nothing', async () => {
-    expect(await (await get(`${P}/worksheets/status`)).json()).toEqual({ enabled: false });
+describe('bank import off', () => {
+  test('both screens are 404s that touch nothing', async () => {
+    delete process.env.GATE_BANK_IMPORT;
     for (const path of ['/worksheets/sales-tax?kind=month&year=2026&index=9', '/worksheets/1099?year=2025']) {
       const res = await get(`${P}${path}`);
       expect([path, res.status]).toEqual([path, 404]);
@@ -95,21 +93,9 @@ describe('gate darkness', () => {
     expect(ws.salesTaxSheet).not.toHaveBeenCalled();
     expect(ws.form1099List).not.toHaveBeenCalled();
   });
-
-  test('the worksheets gate alone is not enough without GATE_BANK_IMPORT', async () => {
-    process.env.GATE_TAX_WORKSHEETS = 'true';
-    delete process.env.GATE_BANK_IMPORT;
-    expect(await (await get(`${P}/worksheets/status`)).json()).toEqual({ enabled: false });
-    expect((await get(`${P}/worksheets/1099?year=2025`)).status).toBe(404);
-  });
 });
 
-describe('gate on', () => {
-  beforeEach(() => { process.env.GATE_TAX_WORKSHEETS = 'true'; });
-
-  test('status says enabled', async () => {
-    expect(await (await get(`${P}/worksheets/status`)).json()).toEqual({ enabled: true });
-  });
+describe('bank import on', () => {
 
   test('sales tax passes the period query to the service and answers its sheet', async () => {
     ws.salesTaxSheet.mockResolvedValue({ period: { label: 'Sep 2026' }, lines: { amount_due: 50 } });

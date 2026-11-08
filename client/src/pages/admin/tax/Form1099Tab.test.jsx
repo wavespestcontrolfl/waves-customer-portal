@@ -6,7 +6,7 @@ import { cleanup, configure, fireEvent, render, screen, waitFor } from '@testing
 import Form1099Tab from './Form1099Tab.jsx';
 import { etParts } from '../../../lib/timezone';
 
-// Locked-down behaviors: hidden (and silent) while the gate is off; payees with
+// Locked-down behaviors: payees with
 // their status, how-paid words and the footers; a payee expands to its
 // payments; a changed year re-reads; a failed read shows the server's message.
 
@@ -15,7 +15,6 @@ configure({ asyncUtilTimeout: 10000 });
 const LAST_YEAR = etParts().year - 1;
 
 let calls;
-let status;
 let list;
 let listError;
 
@@ -25,7 +24,6 @@ function json(body, ok = true) {
 
 beforeEach(() => {
   calls = [];
-  status = { enabled: true };
   listError = null;
   list = {
     year: LAST_YEAR, threshold: 2000, due_date: `${LAST_YEAR + 1}-02-01`,
@@ -50,7 +48,6 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
     const u = String(url);
     calls.push({ url: u, method: opts.method || 'GET' });
-    if (u.includes('/worksheets/status')) return json(status);
     if (u.includes('/worksheets/1099')) return listError ? json({ error: listError }, false) : json(list);
     return json({});
   }));
@@ -58,14 +55,6 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 const listCalls = () => calls.filter((c) => c.url.includes('/worksheets/1099'));
-
-it('renders nothing and makes only the status request while the gate is off', async () => {
-  status = { enabled: false };
-  const { container } = render(<Form1099Tab />);
-  await waitFor(() => expect(calls.length).toBe(1));
-  expect(calls[0].url).toContain('/admin/tax/worksheets/status');
-  expect(container).toBeEmptyDOMElement();
-});
 
 it('reads last year by default and shows the payees, statuses, how paid words and footers', async () => {
   render(<Form1099Tab />);
