@@ -1,6 +1,6 @@
 /**
- * Lead call/text follow-ups (GATE_LEAD_CALL_TEXT_FOLLOWUP, off unless exactly
- * 'true'). Owner 2026-10-24, wording approved word for word:
+ * Lead call/text follow-ups (owner 2026-10-24, wording approved word for
+ * word):
  *
  *   TEXT, any hour:   "Great, we can handle it by text! What service(s) are you interested in?"
  *   CALL after hours: "Got it! What time tomorrow works best for us to call you?"
@@ -25,7 +25,6 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
 const { parseCallTextReply } = require('./sms-service-intent');
 const { withSmsConsentLock } = require('../utils/customer-comms-lock');
 const { CUSTOMER_STAGES, FORMER_CUSTOMER_STAGES } = require('./customer-stages');
@@ -369,7 +368,7 @@ async function answerTimeAsk({ customer, request, body, smsLogId, now }) {
  */
 async function hasOpenTimeAsk({ customer, fromPhone, now = new Date() }) {
   try {
-    if (!isEnabled('leadCallTextFollowup') || !customer?.id) return false;
+    if (!customer?.id) return false;
     const digits = phoneDigits(fromPhone);
     if (digits.length !== 10) return false;
     const open = await db('lead_callback_requests')
@@ -391,7 +390,6 @@ async function hasOpenTimeAsk({ customer, fromPhone, now = new Date() }) {
  */
 async function handleLeadReply({ customer, body, fromPhone, smsLogId = null, now = new Date() }) {
   try {
-    if (!isEnabled('leadCallTextFollowup')) return { action: 'none', reason: 'gate_off' };
     if (!customer?.id || !String(body || '').trim()) return { action: 'none', reason: 'no_input' };
     if (!/^\+1\d{10}$/.test(String(fromPhone || ''))) return { action: 'none', reason: 'bad_phone' };
     const digits = phoneDigits(fromPhone);

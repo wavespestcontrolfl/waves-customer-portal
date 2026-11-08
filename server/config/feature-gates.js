@@ -1986,20 +1986,6 @@ const gates = {
   // regardless. Complements the reactive competitor harvest (backlink-deep-harvest.js).
   localOpportunityProspector: isProd ? process.env.GATE_LOCAL_OPPORTUNITY_PROSPECTOR === 'true' : true,
 
-  // Lead Call-Reply Ring — a web lead who answers our lead text with a bare
-  // CALL between 8 AM and 8 PM ET rings Adam's cell with the press-1 bridge
-  // (owner 2026-10-24, "ring my cell, like we had before"). One ring per
-  // phone per 24 h; a ring nobody connects raises a "Missed call request"
-  // bell. Off unless exactly 'true'. See services/lead-call-reply-ring.js.
-  leadCallReplyRing: process.env.GATE_LEAD_CALL_REPLY_RING === 'true',
-
-  // Lead Call/Text Follow-up — a lead who answers our lead text with TEXT
-  // gets "What service(s) are you interested in?"; a CALL after 8 PM gets
-  // "What time tomorrow works best for us to call you?" and a clear time
-  // books a 15-minute call slot with a confirmation text (owner 2026-10-24).
-  // Off unless exactly 'true'. See services/lead-call-text-followup.js.
-  leadCallTextFollowup: process.env.GATE_LEAD_CALL_TEXT_FOLLOWUP === 'true',
-
   // GATE_LEAD_CALL_REMINDER: read at CALL time via leadCallReminderLive(); this entry is for logGateStatus, so the boot log
   // shows the flip.
   leadCallReminder: process.env.GATE_LEAD_CALL_REMINDER === 'true',

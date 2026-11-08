@@ -4705,10 +4705,9 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // EVERY MIN — booked lead calls (GATE_LEAD_CALL_TEXT_FOLLOWUP): the
+  // EVERY MIN — booked lead calls: the
   // 15-minute reminder, the press-1 ring at the booked time, and the 8 AM
   // bell for a time question never answered (lead-callback-scheduler.js).
-  // Gate off = no reads.
   cron.schedule('* * * * *', async () => {
     try {
       await runExclusive('lead-callback-scheduler', async () => {
