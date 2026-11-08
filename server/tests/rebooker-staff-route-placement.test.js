@@ -1,8 +1,8 @@
 /**
- * Staff route insertion (GATE_STAFF_ROUTE_INSERTION, owner 2026-10-25 "save
+ * Staff route insertion (owner 2026-10-25 "save
  * order"): when a staff move's arrival check placed the visit between stops,
  * rescheduleOnce numbers the day in that order AFTER the row's own CAS write
- * (arrival-route.js placeMovedVisit, which reads the gate itself and is
+ * (arrival-route.js placeMovedVisit, which is
  * stubbed here). Proves only rescheduleOnce's decision to call it; the
  * placement and the numbers it writes are proven in
  * staff-route-insertion.test.js and on PostgreSQL in

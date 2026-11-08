@@ -5,7 +5,7 @@ jest.mock('../services/scheduling/picker-road-spend', () => ({
   releaseRoadSpend: jest.fn(async () => {}),
 }));
 
-// GATE_STAFF_ROUTE_INSERTION (owner 2026-10-25): with capacity mode off, a
+// Staff route insertion (owner 2026-10-25): with capacity mode off, a
 // staff check of a MOVED visit tries every place in the stored route, keeps
 // every later stop 15 minutes inside its arrival window, and hands the save
 // the order it certified. Synthetic stops on the calibrated drive model; no
@@ -18,12 +18,11 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const DATE = etDateString(addETDays(new Date(), 10));
 const OTHER_DAY = etDateString(addETDays(new Date(), 9));
-const GATES = ['GATE_DRIVE_TIME_CALIBRATION', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_STAFF_ROUTE_INSERTION', 'GATE_SCHEDULING_CAPACITY'];
+const GATES = ['GATE_DRIVE_TIME_CALIBRATION', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY'];
 const saved = Object.fromEntries(GATES.map(key => [key, process.env[key]]));
 beforeEach(() => {
   process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
-  process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
   delete process.env.GATE_SCHEDULING_CAPACITY;
 });
 afterAll(() => {
@@ -46,22 +45,6 @@ const context = ({ rows = numberedDay(), target = moved(), placedAt } = {}) => (
 });
 const at = (start, hours = 1) => ({ windowStart: start, windowEnd: hour(Number(start.slice(0, 2)) + hours) });
 const order = fit => fit.arrivals.map(row => row.id);
-
-describe('gate off', () => {
-  beforeEach(() => { delete process.env.GATE_STAFF_ROUTE_INSERTION; });
-
-  test('a moved visit still goes after the last numbered stop, so 9 AM misses its window', () => {
-    const fit = evaluateArrivalPlacement(context(), at('09:00'));
-    expect(fit).toMatchObject({ feasible: false, reason: 'arrival_window' });
-  });
-
-  test('a fit carries no route order to write', () => {
-    const fit = evaluateArrivalPlacement(context({ target: moved('13:00') }), at('13:00'));
-    expect(fit.feasible).toBe(true);
-    expect(fit).not.toHaveProperty('routeOrder');
-    expect(order(fit)).toEqual(['north', 'south', 'target']);
-  });
-});
 
 describe('a moved visit tries every place', () => {
   test('9 AM fits between the two stops, and each hour gets its own number', () => {
@@ -133,11 +116,6 @@ describe('a check of the visit where it is saved keeps today\'s answer', () => {
       expect(fit).not.toHaveProperty('routeOrder');
     });
 
-    test('gate off: the stored number runs 10 AM first, so the 8 AM stop is late and the hour is refused', () => {
-      delete process.env.GATE_STAFF_ROUTE_INSERTION;
-      expect(evaluateArrivalPlacement(stays(), at('13:00')).feasible).toBe(false);
-    });
-
     test('a hand-built context with no saved place (the gap tool) keeps the saved order', () => {
       const input = stays();
       delete input.placedAt;
@@ -183,28 +161,11 @@ test('a stored order that runs against the clock also tries the time order', () 
   const inverted = [stop('north', '08:00', 27.55, { route_order: 2 }), stop('south', '10:00', 27.45, { route_order: 1 })];
   const fit = evaluateArrivalPlacement(context({ rows: inverted }), at('09:00'));
   expect(fit.routeOrder).toEqual(['north', 'target', 'south']);
-  delete process.env.GATE_STAFF_ROUTE_INSERTION;
-  expect(evaluateArrivalPlacement(context({ rows: inverted }), at('09:00')).feasible).toBe(false);
-});
-
-test('capacity mode keeps its own rules with the staff gate on', () => {
-  process.env.GATE_SCHEDULING_CAPACITY = 'true';
-  const probe = () => evaluateArrivalPlacement(context(), { ...at('09:00'), allowInsertion: false });
-  const withGate = probe();
-  delete process.env.GATE_STAFF_ROUTE_INSERTION;
-  expect(JSON.stringify(withGate)).toBe(JSON.stringify(probe()));
 });
 
 describe('placeMovedVisit writes nothing unless it may', () => {
   const conn = () => Object.assign(jest.fn(() => { throw new Error('no query expected'); }), {
     isTransaction: true, transaction: jest.fn(() => { throw new Error('no savepoint expected'); }),
-  });
-
-  test('gate off', async () => {
-    delete process.env.GATE_STAFF_ROUTE_INSERTION;
-    const trx = conn();
-    await expect(placeMovedVisit(trx, { serviceId: 'target' })).resolves.toBeNull();
-    expect(trx.transaction).not.toHaveBeenCalled();
   });
 
   test('capacity mode (its commits write their own order)', async () => {

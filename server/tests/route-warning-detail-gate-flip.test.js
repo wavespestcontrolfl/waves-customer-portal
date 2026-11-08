@@ -43,7 +43,7 @@ const flip = async () => {
   return { off, on };
 };
 
-beforeEach(() => { delete process.env.GATE_ROUTE_WARNING_DETAIL; delete process.env.GATE_SCHEDULING_CAPACITY; delete process.env.GATE_STAFF_ROUTE_INSERTION; });
+beforeEach(() => { delete process.env.GATE_ROUTE_WARNING_DETAIL; delete process.env.GATE_SCHEDULING_CAPACITY; });
 afterEach(() => { delete process.env.GATE_ROUTE_WARNING_DETAIL; });
 
 test('an unverified route (a stop with no pin): the warning is worded with the gate on, the snapshot is the same either way', async () => {

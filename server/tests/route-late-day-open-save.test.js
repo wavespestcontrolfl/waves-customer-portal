@@ -63,14 +63,13 @@ function fakeConn(target) {
   return { conn, updates };
 }
 
-const GATES = ['GATE_STAFF_ROUTE_INSERTION', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_ROUTE_CHECK_LATE_DAYS',
+const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_ROUTE_CHECK_LATE_DAYS',
   'GATE_SCHEDULING_CAPACITY', 'GATE_SAVE_ROAD_TIMES'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(GATES.map((k) => [k, process.env[k]]));
   GATES.forEach((k) => { delete process.env[k]; });
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
-  process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
   process.env.GATE_ROUTE_CHECK_LATE_DAYS = 'true';
   mockDayRows = [A, B, NEW];
 });

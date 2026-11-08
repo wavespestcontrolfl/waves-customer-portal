@@ -51,7 +51,7 @@ const DAY = '2097-06-10';
 const HQ = { lat: 27.4330885, lng: -82.4056801 };
 // GATE_REMINDER_72H_EMAIL_FIRST is cleared too: these fixture visits are one-time, and under it their 72-hour reminder
 // goes by email, so they would never move.
-const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_STAFF_ROUTE_INSERTION', 'GATE_NIGHT_TOLD_LOCK', 'GATE_DAY_ONLY_PROMISE', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_TECH_START_POINTS', 'GATE_REMINDER_72H_EMAIL_FIRST', 'GATE_SLOT_TRAVEL_GAP'];
+const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_NIGHT_TOLD_LOCK', 'GATE_DAY_ONLY_PROMISE', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_TECH_START_POINTS', 'GATE_REMINDER_72H_EMAIL_FIRST', 'GATE_SLOT_TRAVEL_GAP'];
 
 maybeDescribe('make-room check on real PostgreSQL', () => {
   let database;
@@ -82,7 +82,6 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
     for (const key of GATES) delete process.env[key];
     // Production's route rules: arrival windows on, staff route insertion on, capacity off.
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
-    process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
     mockConn = await database.transaction();
 
     techId = randomUUID();

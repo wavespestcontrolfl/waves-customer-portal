@@ -2819,13 +2819,11 @@ describe('advisory route check on the create and reschedule saves', () => {
     let route;
     beforeEach(() => {
       gateOn();
-      process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
       route = createRoute();
       occupancy.findConflictingVisits.mockImplementation((args) => (args && args.arrivalWindow
         ? Promise.resolve(route.conflictRows()) : actualOccupancy.findConflictingVisits(args)));
       placeSpy.mockImplementation(async () => route.place());
     });
-    afterEach(() => { delete process.env.GATE_STAFF_ROUTE_INSERTION; });
 
     test('premise: unplaced, the saved visit reads infeasible', () => {
       expect(route.savedFit().feasible).toBe(false);

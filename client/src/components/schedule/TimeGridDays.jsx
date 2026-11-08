@@ -520,7 +520,7 @@ function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, owesCompletio
             onCreateStart={onCreateSlot ? handleCreateStart : undefined}
           />
         ))}
-        {/* GATE_BOARD_OPEN_TIMES: while a visit is dragged, the hours that fit it on its own route this day. */}
+        {/* While a visit is dragged, the hours that fit it on its own route this day. */}
         {fits && <LitHours fits={fits} best={best} minutesToTopPx={minutesToTopPx} hourHeight={(60 / SLOT_MIN) * SLOT_HEIGHT} />}
         {sel && (
           <div
@@ -745,9 +745,6 @@ export default function TimeGridDays({
   onStatsChange,  // receives aggregated stats (totalCount, completedCount, …) for the visible range
   refreshKey = 0, // bump to force a week-fetch refresh from the parent
   hideUnassignedRail = false,
-  // GATE_BOARD_OPEN_TIMES (day feed `boardOpenTimes`): a drag lights the
-  // hours that fit the visit on its own route, day by day.
-  openTimesOnDrag,
 }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -813,7 +810,6 @@ export default function TimeGridDays({
   // the shown days (a week drop keeps the technician).
   const [dragging, setDragging] = useState(null);
   const { fits: dragFits, best: bestFit } = useBoardOpenTimes({
-    enabled: openTimesOnDrag,
     service: dragging,
     durationOf: effectiveDuration,
     dates: days.map((day) => day.date),

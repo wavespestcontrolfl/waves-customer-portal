@@ -68,8 +68,7 @@ async function staffSaveRouteWarnings(conn, { serviceId, date, windowStart, wind
 /**
  * Number the visit's technician day in the order the route check certified
  * (placeMovedVisit, staff save). Call INSIDE the write transaction after the
- * insert or update: outside one it is a silent no-op. Never throws, and a no-op
- * unless GATE_STAFF_ROUTE_INSERTION is on as well.
+ * insert or update: outside one it is a silent no-op. Never throws.
  */
 async function placeStaffSavedVisit(conn, { serviceId, source } = {}) {
   if (!conn || !serviceId) return null;

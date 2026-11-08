@@ -550,8 +550,7 @@ async function attemptMoves({ alertId, actorId, stop, date, absentTechId, window
           technicianId: candidate.tech.id,
           keepStatus: true,
           // fitsWindow certified this candidate with the staff arrival check,
-          // so the move numbers the receiving day the same way
-          // (GATE_STAFF_ROUTE_INSERTION; a no-op when off).
+          // so the move numbers the receiving day the same way.
           placeInRoute: true,
           seriesPolicy: 'single',
           // Never the whole-visit mover: with visitPolicy 'single' the unit

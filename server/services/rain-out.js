@@ -2670,7 +2670,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             ...(actorUserId ? { actorId: actorUserId } : {}),
             overlapAdvisory: true,
             // The day options came from the staff arrival check, so the move
-            // numbers the day the way it checked (GATE_STAFF_ROUTE_INSERTION).
+            // numbers the day the way it checked.
             placeInRoute: true,
             // GATE_SAVE_ROAD_BUY: an admin's move buys its road times before
             // the series transaction (the dispatch route passes none for a technician).
@@ -2757,7 +2757,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           // their own visit must not be told about it.
           ...(actorUserId ? { actorId: actorUserId } : {}),
           overlapAdvisory: true,
-          // Same as the series call above (GATE_STAFF_ROUTE_INSERTION).
+          // Same as the series call above.
           placeInRoute: true,
           ...(roadSpender ? { roadSpender } : {}),
           excludeServiceIds: [job.id],

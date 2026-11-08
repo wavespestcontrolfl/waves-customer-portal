@@ -4076,8 +4076,7 @@ async function createAppointment(input, actionContext = {}) {
     appointment = created;
     // Route check (owner 2026-10-29; a no-op when arrival-window routing is
     // off): the booked visit's technician day is numbered first in the
-    // order the arrival-window check certifies (inside this transaction; needs
-    // GATE_STAFF_ROUTE_INSERTION too), THEN the visit gets the check Edit's
+    // order the arrival-window check certifies (inside this transaction), THEN the visit gets the check Edit's
     // save runs, on the road times the pickers already bought. Placement
     // first: the check reads the visit where it is saved, so an unplaced visit
     // can read late in a stale order. ADVISORY ONLY: its result is a warning in
@@ -4626,8 +4625,8 @@ async function rescheduleAppointment(input, actionContext = {}) {
       }
       // Route check (owner 2026-10-29; a no-op when arrival-window routing is
       // off): the moved visit's technician day is numbered first in the
-      // order the arrival-window check certifies (inside this transaction;
-      // needs GATE_STAFF_ROUTE_INSERTION too), THEN the visit gets the check
+      // order the arrival-window check certifies (inside this transaction),
+      // THEN the visit gets the check
       // Edit's save runs, on the road times the pickers already bought.
       // Placement first: the check reads the visit where it is saved, so a
       // moved visit not yet placed can read late in a stale order. ADVISORY
