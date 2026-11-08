@@ -120,7 +120,8 @@ async function sendSignedContractCopy(contractId) {
   try {
     suppression = await documentEmailSuppression(DOCUMENT_SIGNED_COPY_EMAIL, to);
   } catch (err) {
-    logger.warn(`[contract-signed-email] suppression check failed for contract ${contractId}: ${err.message}`);
+    // Never err.message: a knex error carries the query with its bindings, the recipient address among them.
+    logger.warn(`[contract-signed-email] suppression check failed for contract ${contractId} (${err.code || err.name || 'error'})`);
     return { ok: false, error: 'suppression_check_failed' };
   }
   if (suppression) {

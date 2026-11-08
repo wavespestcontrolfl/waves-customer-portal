@@ -408,7 +408,8 @@ async function assertEmailNotSuppressed(contract, recipient) {
   try {
     suppression = await documentEmailSuppression(DOCUMENT_REQUEST_EMAIL, recipient);
   } catch (err) {
-    logger.warn(`[document-delivery] suppression check failed for contract ${contract.id}: ${err.message}`);
+    // Never err.message: a knex error carries the query with its bindings, the recipient address among them.
+    logger.warn(`[document-delivery] suppression check failed for contract ${contract.id} (${err.code || err.name || 'error'})`);
     throw deliveryError('Could not check the email suppression list. Nothing was sent; try again.', 503, 'EMAIL_PREFLIGHT_UNAVAILABLE');
   }
   if (!suppression) return;

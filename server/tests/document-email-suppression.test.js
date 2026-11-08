@@ -53,6 +53,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 jest.mock('../services/pdf/contract-pdf', () => ({ buildContractPDFBuffer: jest.fn(async () => Buffer.from('%PDF-1.4 test')) }));
 
 const sendgrid = require('../services/sendgrid-mail');
+const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { deliverDocumentRequestChannels } = require('../services/document-contract-delivery');
@@ -115,12 +116,13 @@ describe('document request and reminder email', () => {
   });
 
   test('a failed suppression read sends nothing and names the reason', async () => {
-    mockSuppressionReadError = new Error('connection reset');
+    mockSuppressionReadError = new Error(`select * from email_suppressions where LOWER(email) = '${EMAIL}'`);
     const result = await deliverDocumentRequestChannels('contract-1', { actorType: 'admin' }, { channels: ['email'] });
 
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     expect(result.ok).toBe(false);
     expect(result.deliveries).toEqual([expect.objectContaining({ code: 'EMAIL_PREFLIGHT_UNAVAILABLE' })]);
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(EMAIL);
   });
 });
 
@@ -148,10 +150,11 @@ describe('signed-copy email', () => {
   });
 
   test('a failed suppression read sends nothing', async () => {
-    mockSuppressionReadError = new Error('connection reset');
+    mockSuppressionReadError = new Error(`select * from email_suppressions where LOWER(email) = '${EMAIL}'`);
     const result = await sendSignedContractCopy('contract-2');
 
     expect(result).toEqual({ ok: false, error: 'suppression_check_failed' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(EMAIL);
   });
 });
