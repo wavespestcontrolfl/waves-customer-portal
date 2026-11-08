@@ -1849,7 +1849,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   }, [selectedCustomer?.id]);
 
   // GATE_DAY_ONLY_PROMISE part E: will the chosen customer's 24-hour reminder go out? Rides the schedule-estimates reply below.
-  const [bookingReminder24h, setBookingReminder24h] = useState(null);
+  const [bookingReminder24h, setBookingReminder24h] = useState({});
   useEffect(() => {
     const customerId = selectedCustomer?.id;
     // When booking a SPECIFIC estimate (defaultEstimateId), the estimate — not
@@ -1878,7 +1878,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       if (customerId) {
         const r = await adminFetch(`/admin/customers/${customerId}/schedule-estimates`);
         list = Array.isArray(r.estimates) ? r.estimates : [];
-        setBookingReminder24h({ id: customerId, on: r.reminder24hOn === true, byProperty: r.reminder24hByProperty });
+        setBookingReminder24h((answers) => ({ ...answers, [customerId]: { on: r.reminder24hOn === true, byProperty: r.reminder24hByProperty } }));
       }
       // Ensure the estimate we were opened to book is present even when the
       // selected customer doesn't own it yet — a lead's quote (customer_id NULL)

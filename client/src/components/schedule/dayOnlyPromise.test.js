@@ -51,22 +51,32 @@ describe('day-only promise words and request fields', () => {
   });
 
   it('the booking window: no customer yet reads on; another customer\'s or a missing answer reads off', () => {
-    expect(reminderAnswerFor(null, null)).toBe(true);
-    expect(reminderAnswerFor(null, { id: 'c1' })).toBe(false);
-    expect(reminderAnswerFor({ id: 'c1', on: true }, { id: 'c1' })).toBe(true);
-    expect(reminderAnswerFor({ id: 'c1', on: true }, { id: 'c2' })).toBe(false);
-    expect(reminderAnswerFor({ id: 'c1', on: false }, { id: 'c1' })).toBe(false);
+    expect(reminderAnswerFor({}, null)).toBe(true);
+    expect(reminderAnswerFor({}, { id: 'c1' })).toBe(false);
+    expect(reminderAnswerFor({ c1: { on: true } }, { id: 'c1' })).toBe(true);
+    expect(reminderAnswerFor({ c1: { on: true } }, { id: 'c2' })).toBe(false);
+    expect(reminderAnswerFor({ c1: { on: false } }, { id: 'c1' })).toBe(false);
+  });
+
+  it('answers are keyed by customer, so a late reply for customer A can never replace customer B\'s answer', () => {
+    // The booking modal records each reply with: answers => ({ ...answers, [customerId]: reply }).
+    const record = (answers, customerId, reply) => ({ ...answers, [customerId]: reply });
+    let answers = {};
+    answers = record(answers, 'B', { on: true });   // B was chosen and B's reply arrived first
+    answers = record(answers, 'A', { on: false });  // A's slow reply lands afterwards
+    expect(reminderAnswerFor(answers, { id: 'B' })).toBe(true);
+    expect(reminderAnswerFor(answers, { id: 'A' })).toBe(false);
   });
 
   it('the booking window under enforced property texts: the property it books decides, else the customer row', () => {
-    const answer = { id: 'c1', on: true, byProperty: { 'p-rental': false, 'p-home': true } };
-    expect(reminderAnswerFor(answer, { id: 'c1' }, 'p-rental')).toBe(false);
-    expect(reminderAnswerFor(answer, { id: 'c1' }, 'p-home')).toBe(true);
-    expect(reminderAnswerFor(answer, { id: 'c1' }, '')).toBe(true);
-    expect(reminderAnswerFor(answer, { id: 'c1' }, 'p-primary')).toBe(true);
-    expect(reminderAnswerFor({ id: 'c1', on: false, byProperty: { 'p-home': true } }, { id: 'c1' }, '')).toBe(false);
-    expect(reminderAnswerFor({ id: 'c1', on: false, byProperty: { 'p-home': true } }, { id: 'c1' }, 'p-home')).toBe(true);
-    expect(reminderAnswerFor({ id: 'c1', on: true, byProperty: {} }, { id: 'c1' }, 'p-home')).toBe(true);
+    const answers = { c1: { on: true, byProperty: { 'p-rental': false, 'p-home': true } } };
+    expect(reminderAnswerFor(answers, { id: 'c1' }, 'p-rental')).toBe(false);
+    expect(reminderAnswerFor(answers, { id: 'c1' }, 'p-home')).toBe(true);
+    expect(reminderAnswerFor(answers, { id: 'c1' }, '')).toBe(true);
+    expect(reminderAnswerFor(answers, { id: 'c1' }, 'p-primary')).toBe(true);
+    expect(reminderAnswerFor({ c1: { on: false, byProperty: { 'p-home': true } } }, { id: 'c1' }, '')).toBe(false);
+    expect(reminderAnswerFor({ c1: { on: false, byProperty: { 'p-home': true } } }, { id: 'c1' }, 'p-home')).toBe(true);
+    expect(reminderAnswerFor({ c1: { on: true, byProperty: {} } }, { id: 'c1' }, 'p-home')).toBe(true);
   });
 
   it('the create request carries customerAskedTime only with the gate on AND the box checked', () => {

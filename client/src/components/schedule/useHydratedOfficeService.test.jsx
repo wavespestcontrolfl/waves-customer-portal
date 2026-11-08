@@ -7,7 +7,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 const gate = { on: true };
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: (key) => key === 'day_only_promise' && gate.on }));
 
-import { needsOfficeFields, withOfficeFields } from './useHydratedOfficeService';
+import { needsOfficeFields, usePropertyReminderAnswer, withOfficeFields } from './useHydratedOfficeService';
 
 const Probe = ({ service }) => (
   <div data-testid="probe">{String(service.customerAskedTime)}|{service.told ? service.told.level : '-'}|{String(service.reminder24hOn)}</div>
@@ -118,5 +118,42 @@ describe('withOfficeFields', () => {
     render(<Wrapped service={{ id: 'v1' }} adminActions={false} />);
     expect(asText()).toBe('undefined|-|undefined');
     expect(fetcher).not.toHaveBeenCalled();
+  });
+});
+
+describe('a late reply for an earlier row never replaces the current row\'s answer (A then B)', () => {
+  it('office fields: visit v1\'s late reply after switching to v2 leaves v2\'s fields', async () => {
+    let releaseA;
+    const heldA = new Promise((resolve) => { releaseA = resolve; });
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (String(url).includes('/v1/')) { await heldA; return reply({ visit: null, office: { customerAskedTime: true } }); }
+      return reply({ visit: null, office: { customerAskedTime: false } });
+    }));
+    const Wrapped = withOfficeFields(Probe, { block: true });
+    const view = render(<Wrapped service={{ id: 'v1' }} />);
+    view.rerender(<Wrapped service={{ id: 'v2' }} />);
+    await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('false|-|undefined'));
+    releaseA();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.getByTestId('probe').textContent).toBe('false|-|undefined');
+  });
+
+  it('property reminder answer: customer A\'s late reply after switching to B leaves B\'s answer', async () => {
+    let releaseA;
+    const heldA = new Promise((resolve) => { releaseA = resolve; });
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (String(url).includes('/cust-a/')) { await heldA; return reply({ reminder24hOn: false, reminder24hByProperty: {} }); }
+      return reply({ reminder24hOn: true, reminder24hByProperty: {} });
+    }));
+    const Answer = ({ customerId }) => {
+      const on = usePropertyReminderAnswer({ id: 'v', customerId, propertyId: 'p-home', reminder24hOn: false }, 'p-other', true);
+      return <div data-testid="answer">{String(on)}</div>;
+    };
+    const view = render(<Answer customerId="cust-a" />);
+    view.rerender(<Answer customerId="cust-b" />);
+    await waitFor(() => expect(screen.getByTestId('answer').textContent).toBe('true'));
+    releaseA();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.getByTestId('answer').textContent).toBe('true');
   });
 });

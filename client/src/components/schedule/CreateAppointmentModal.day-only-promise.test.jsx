@@ -145,6 +145,34 @@ describe('the New Appointment time picker', () => {
     expect(hint().textContent).toBe('Tell the customer this time.');
   });
 
+  it('gate on: customer A\'s late schedule-estimates reply after switching to customer B does not change B\'s answer', async () => {
+    gate.on = true;
+    let releaseA;
+    const heldA = new Promise((resolve) => { releaseA = resolve; });
+    const CUSTOMER_B = { id: 'customer-b', firstName: 'Grace', lastName: 'Hopper', phone: '5550100' };
+    const base = installFetch();
+    // Only this test's two special replies; everything else goes to the shared fake.
+    vi.stubGlobal('fetch', vi.fn((url, options) => {
+      const u = String(url);
+      if (u.includes('/schedule-estimates')) {
+        return u.includes('/customer-a/')
+          ? heldA.then(() => json({ estimates: [], reminder24hOn: false, reminder24hByProperty: {} }))
+          : Promise.resolve(json({ estimates: [], reminder24hOn: true, reminder24hByProperty: {} }));
+      }
+      return u.includes('/admin/customers?search=') ? Promise.resolve(json({ customers: [CUSTOMER_B] })) : base(url, options);
+    }));
+    await mountWithService();
+    await screen.findByLabelText(BOX);
+    fireEvent.click(screen.getByLabelText('Clear selected customer'));
+    fireEvent.change(screen.getByPlaceholderText('Search by name or phone...'), { target: { value: 'Grace' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Grace/ }));
+    await waitFor(() => expect(hint().textContent).toContain('Promise the day only'));
+    releaseA();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // A's reply says "reminder off"; B's answer (on) must stand.
+    expect(hint().textContent).toContain('Promise the day only');
+  });
+
   it('gate on: a checked box swaps the line for "Tell the customer this time." and sends customerAskedTime: true', async () => {
     gate.on = true;
     const fetcher = installFetch();

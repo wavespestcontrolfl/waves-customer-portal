@@ -43,13 +43,16 @@ export function askedTimeHint(checked, slot, now = new Date()) {
   return dayScriptApplies(slot, now) ? PHONE_SCRIPT_HINT : ASKED_TIME_CHECKED_HINT;
 }
 
-/** The booking window's answer for the chosen customer (`answer` = { id, on, byProperty } from the schedule-estimates reply):
- *  no customer yet reads as a new customer with the table defaults (reminder on); an answer for another customer, or none yet,
- *  reads off. While property texts are enforced the reply carries each saved property's own answer (`byProperty`): the
- *  property the modal books decides, and with none selected (or none listed) the customer row does. */
-export function reminderAnswerFor(answer, customer, propertyId) {
+/** The booking window's answer for the chosen customer. `answers` = { [customerId]: { on, byProperty } }, one entry per
+ *  schedule-estimates reply, KEYED by customer so a late reply for an earlier customer can only fill that customer's own entry
+ *  (it can never replace the chosen customer's answer). No customer yet reads as a new customer with the table defaults
+ *  (reminder on); a customer with no reply yet reads off. While property texts are enforced the reply carries each saved
+ *  property's own answer (`byProperty`): the property the modal books decides, and with none selected (or none listed) the
+ *  customer row does. */
+export function reminderAnswerFor(answers, customer, propertyId) {
   if (!customer) return true;
-  if (!answer || answer.id !== customer.id) return false;
+  const answer = answers ? answers[customer.id] : undefined;
+  if (!answer) return false;
   const own = answer.byProperty && propertyId ? answer.byProperty[propertyId] : undefined;
   return (own === undefined ? answer.on : own) === true;
 }
