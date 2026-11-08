@@ -16,6 +16,11 @@ jest.mock('../services/admin-alert-episodes', () => ({
   openAdminAlertKeys: (...args) => mockOpenKeys(...args),
   closeAdminAlertKeys: (...args) => mockClose(...args),
 }));
+// Nothing here reaches the county: the by-address search answers no lot unless a test passes its own.
+jest.mock('../services/property-lookup/county-parcel-gis', () => ({
+  ...jest.requireActual('../services/property-lookup/county-parcel-gis'),
+  lookupCountyParcelsByAddress: jest.fn(async () => []),
+}));
 const { randomUUID } = require('node:crypto');
 const { sweepSavedGateCodes, VALUE_HASH_SQL } = require('../services/neighborhood-access');
 
@@ -23,7 +28,6 @@ jest.setTimeout(30000);
 postgres('neighborhood gate-code filing sweep', () => {
   let database;
   let trx;
-  const OLD_GATE = process.env.GATE_NEIGHBORHOOD_ACCESS;
 
   const neighborhood = async (name) => {
     const [row] = await trx('neighborhoods')
@@ -59,7 +63,6 @@ postgres('neighborhood gate-code filing sweep', () => {
   });
   beforeEach(async () => {
     jest.clearAllMocks();
-    process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
     trx = await database.transaction();
     mockConnection = trx;
     // Only this test's rows: every customer already coded counts as filed.
@@ -72,15 +75,8 @@ postgres('neighborhood gate-code filing sweep', () => {
   });
   afterEach(async () => {
     await trx.rollback();
-    if (OLD_GATE === undefined) delete process.env.GATE_NEIGHBORHOOD_ACCESS;
-    else process.env.GATE_NEIGHBORHOOD_ACCESS = OLD_GATE;
   });
   afterAll(() => database.destroy());
-
-  test('off: nothing is read or written', async () => {
-    process.env.GATE_NEIGHBORHOOD_ACCESS = 'false';
-    expect(await sweepSavedGateCodes()).toEqual({ skipped: 'gate_off' });
-  });
 
   test('a saved code files once under a linked property\'s neighborhood, ledgered by hash', async () => {
     const n = await neighborhood('Oakwood Glen');
@@ -128,7 +124,7 @@ postgres('neighborhood gate-code filing sweep', () => {
     const r = await sweepSavedGateCodes({ lookup });
     expect(lookup).toHaveBeenCalledTimes(1);
     // The ZIP's one county goes along, so a slow earlier county cannot spend the shared deadline.
-    expect(lookup).toHaveBeenCalledWith(expect.any(Number), expect.any(Number), { county: 'Manatee' });
+    expect(lookup).toHaveBeenCalledWith(expect.any(Number), expect.any(Number), expect.objectContaining({ county: 'Manatee' }));
     expect(r.tally).toEqual({ filed: 1 });
     const n = await trx('neighborhoods').where('name', 'Heron Pointe').first('id');
     expect(await accessRows(n.id)).toEqual([expect.objectContaining({ code: '2222#', status: 'active' })]);
@@ -368,7 +364,8 @@ postgres('neighborhood gate-code filing sweep', () => {
     // Nothing was ledgered, so the customer is still pending.
     const r = await sweepSavedGateCodes({ lookup });
     expect(r.tally).toEqual({ filed: 1 });
-    expect(lookup).toHaveBeenCalledTimes(2);
+    // First pass: the naming pass asks, then the filing asks. Second pass: the naming pass waits out its day; the filing asks.
+    expect(lookup).toHaveBeenCalledTimes(3);
     const linked = await trx('customer_properties').where({ customer_id: customerId }).first('neighborhood_id');
     expect(linked.neighborhood_id).not.toBeNull();
   });

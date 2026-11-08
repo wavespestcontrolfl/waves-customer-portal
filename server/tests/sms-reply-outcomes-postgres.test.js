@@ -2,7 +2,6 @@
 // All names, phones and message text are synthetic.
 const postgres = process.env.DATABASE_URL ? describe : describe.skip;
 let mockConnection;
-let mockGateOn = true;
 jest.mock('../models/db', () => new Proxy((...args) => mockConnection(...args), {
   get(_target, key) {
     const value = mockConnection?.[key];
@@ -10,10 +9,6 @@ jest.mock('../models/db', () => new Proxy((...args) => mockConnection(...args), 
   },
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => {
-  const actual = jest.requireActual('../config/feature-gates');
-  return { ...actual, isEnabled: (key) => (key === 'smsReplyOutcomes' ? mockGateOn : actual.isEnabled(key)) };
-});
 
 const { randomUUID } = require('node:crypto');
 const logger = require('../services/logger');
@@ -76,7 +71,6 @@ postgres('reply outcome signals', () => {
   });
   beforeEach(async () => {
     jest.clearAllMocks();
-    mockGateOn = true;
     trx = await database.transaction();
     mockConnection = trx;
     await migration.up(trx);
@@ -89,13 +83,6 @@ postgres('reply outcome signals', () => {
   });
   afterAll(async () => {
     await database.destroy();
-  });
-
-  test('gate off: nothing is read or written', async () => {
-    const replyId = await askAndReply();
-    mockGateOn = false;
-    expect(await sweep()).toEqual({ skipped: 'gate_off' });
-    expect(await rowFor(replyId)).toBeUndefined();
   });
 
   test('silence: no text, no call, no opt-out', async () => {

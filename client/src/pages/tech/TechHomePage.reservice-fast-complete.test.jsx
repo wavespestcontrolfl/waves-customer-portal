@@ -24,7 +24,7 @@ vi.mock('../../components/ServiceRecapModal', () => ({ default: ({ service }) =>
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
   default: ({ service, onFullForm, onViewDetails, voiceFillEnabled, suspended }) => (
     <div data-recap-enabled={String(service.recapEnabled)} data-reservice-asks={String(service.reserviceAsksEnabled)} data-voice-fill-enabled={String(voiceFillEnabled)} data-suspended={String(!!suspended)}>
-      Fast Complete sheet for {service.id} <span data-testid="sheet-access">{service.scheduleAccessEnabled === true ? service.propertyAlerts.map((a) => a.text).join('|') : 'off'}</span>
+      Fast Complete sheet for {service.id} <span data-testid="sheet-access">{(service.propertyAlerts || []).map((a) => a.text).join('|')}</span>
       <button type="button" onClick={onFullForm}>Sheet full form</button>
       {onViewDetails && <button type="button" onClick={onViewDetails}>Sheet details</button>}
     </div>
@@ -223,9 +223,9 @@ it('the voice-fill flag alone never opens the sheet: the routing gate still deci
   expect(screen.queryByText(/Fast Complete sheet/)).not.toBeInTheDocument();
 });
 
-// GATE_SCHEDULE_ACCESS_CODES (owner ruling 2026-10-26): the sheet's copy of the row
+// Schedule access codes (owner ruling 2026-10-26): the sheet's copy of the row
 // keeps the codes, so the Complete service header can show them (Codex P2 on #6784).
-const ACCESS = { scheduleAccessEnabled: true, propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)' }, { type: 'pet', text: '1 dog' }] };
+const ACCESS = { propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)' }, { type: 'pet', text: '1 dog' }] };
 
 it('hands the sheet the row\'s gate codes for its header', async () => {
   rows = [row('svc-codes', { reserviceFastCompleteEnabled: true, ...ACCESS })];
@@ -243,7 +243,7 @@ it('Details → Access gets the visit\'s fresh row from a route reload after a g
   await screen.findByText('Appointment details for svc-access');
   globalThis.__accessFreshRow = undefined;
   const reportedWrong = [{ type: 'gate', text: 'Gate: #4821 (neighborhood)', neighborhoodEntryId: 'e1', neighborhoodEntryCode: '#4821', reportedWrong: true }];
-  rows = [row('svc-access', { reserviceFastCompleteEnabled: true, scheduleAccessEnabled: true, propertyAlerts: reportedWrong })];
+  rows = [row('svc-access', { reserviceFastCompleteEnabled: true, propertyAlerts: reportedWrong })];
   const loadsBefore = fetchMock.mock.calls.filter(([path]) => path.includes('/admin/schedule?')).length;
   fireEvent.click(screen.getByRole('button', { name: 'Access changed' }));
   await waitFor(() => expect(globalThis.__accessFreshRow).toBeDefined());

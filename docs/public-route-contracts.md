@@ -7704,8 +7704,7 @@ stays inside its 3 reserved minutes either way). No `<Dial>`,
 PIN (`services/tech-voice-pin.js`: salted hash, 3 tries a call, a 15-minute
 lockout after 5 wrong in a row with one admin alert) and then answers fixed
 commands with no model, always in the technician's own scope: next stop,
-access notes, last treatment, the stop's codes (only while
-`GATE_ACCESS_CODES_SECTION` is on; `listForVisit`, one `audit_log` row
+access notes, last treatment, the stop's codes (`listForVisit`, one `audit_log` row
 without the codes), the set-text reply (only while `GATE_TECH_SET_TEXTS`
 is on), and a set text
 only after a read-back of the name, street and wording and a spoken "yes"
