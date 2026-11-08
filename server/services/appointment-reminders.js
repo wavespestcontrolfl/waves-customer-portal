@@ -7266,14 +7266,10 @@ AppointmentReminders.loadReminder24hAnswers = loadReminder24hAnswers;
 AppointmentReminders.loadVisitReminder24hAnswers = loadVisitReminder24hAnswers;
 AppointmentReminders.loadBookingReminder24hAnswers = loadBookingReminder24hAnswers;
 
-// The reminder settings for the make-room check (scheduling/booking-make-room.js).
-// Not exported as `getReminderPrefs` on purpose: messaging/deferred-replay-
-// registry.js destructures that name today, gets undefined and fails its
-// channel recheck closed, so exporting that name would change which deferred
-// texts replay. That is its own change.
-AppointmentReminders.readReminderPrefs = getReminderPrefs;
 // The 72-hour reminder's effective channel (email-first for one-time visits
-// under GATE_REMINDER_72H_EMAIL_FIRST), for the same check.
+// under GATE_REMINDER_72H_EMAIL_FIRST), for the make-room check
+// (scheduling/booking-make-room.js), which reads the settings through
+// getReminderPrefs above.
 AppointmentReminders.resolve72hChannel = resolve72hChannel;
 
 // classifyDeliveryCertainty verdict -> replay result.

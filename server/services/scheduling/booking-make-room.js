@@ -3,7 +3,10 @@
  *
  * A new customer on the estimate page may take the best hour on a route even when a regular stop holds it. That
  * stop moves later by the new visit's length in whole hours (1 hour for a visit up to 60 minutes: the owner's
- * 2026-11-03 rule), and so does each later stop it would then overlap, until a free hour takes the last one. This
+ * 2026-11-03 rule), and so does each later stop it would then overlap, until a free hour takes the last one. When the
+ * 1-hour move fails a rule (most often the travel gap: no time to drive from the new visit to the moved stop), the
+ * same chain is tried 2 hours later instead (owner 2026-11-07 "B": a moved visit may shift up to 2 hours, not 1).
+ * A visit longer than 60 minutes already moves its own length in whole hours, so it has that one shift. This
  * module FINDS such hours for one customer's list. It never writes a visit and never changes the list.
  *
  * An hour counts only when every rule holds:
@@ -104,6 +107,16 @@ function shiftMinutesFor(durationMin) {
   return 60 * Math.max(1, Math.ceil(durationMin / 60));
 }
 
+// The most a moved stop may shift when its first shift is 1 hour (owner 2026-11-07 "B": up to 2 hours, not 1).
+const MAX_SHIFT_MIN = 120;
+
+// The shifts to try for one hour, in order: the owner's 1-hour move first, then 2 hours. A longer visit's own shift
+// (2 hours or more) is the only one.
+function shiftsFor(durationMin) {
+  const first = shiftMinutesFor(durationMin);
+  return first < MAX_SHIFT_MIN ? [first, MAX_SHIFT_MIN] : [first];
+}
+
 const sameTech = (row, techId) => techId != null && row.technician_id != null && String(row.technician_id) === String(techId);
 
 // One technician's timed stops with a pin, in start order: the order the chain walks.
@@ -114,13 +127,14 @@ function ownStops(rows, techId) {
 
 /**
  * The stops a new visit at [startMin, startMin + durationMin) pushes later, in order. `own` is the technician's timed
- * stops in start order. Each moved stop keeps its length and moves the same whole hours; the chain ends at the first
- * stop the moved ones no longer overlap. Stops that already overlap each other would still overlap after the move,
- * and the writer refuses that (day-replan apply.js assertNoClash), so such a chain is refused here too.
+ * stops in start order. Each moved stop keeps its length and moves the same whole hours (`shiftMin`, by default the
+ * new visit's length in whole hours); the chain ends at the first stop the moved ones no longer overlap. Stops that
+ * already overlap each other would still overlap after the move, and the writer refuses that (day-replan apply.js
+ * assertNoClash), so such a chain is refused here too.
  * Returns { moves: [{ row, fromMin, toMin, widthMin }] } or { reason }. Pure.
  */
-function buildChain(own, { startMin, durationMin, closeMin }) {
-  const shift = shiftMinutesFor(durationMin);
+function buildChain(own, { startMin, durationMin, closeMin, shiftMin = shiftMinutesFor(durationMin) }) {
+  const shift = shiftMin;
   const moves = [];
   let busyUntil = startMin + durationMin;
   for (const row of own) {
@@ -194,24 +208,35 @@ function chainRanges(candidate) {
     ...candidate.moves.map((m) => ({ startMin: m.toMin, endMin: m.toMin + m.widthMin }))];
 }
 
-// One hour on one technician-day, with the checks that need no read. Returns { candidate } or { reason }.
-function tryHour({ day, startMin, env, request }) {
+// One shift of one hour, with the checks that need no read. Returns { candidate } or { reason }.
+function chainCandidate({ day, startMin, env, request, slot, shiftMin }) {
   const { durationMin } = request;
-  // routeMode: every hour that passes is checked on the arrival-window route (routeKeepsWindows), like the page's own
-  // capacity-mode slots, which is what filterCollidingSlots asks of a slot in capacity mode.
-  const slot = { date: day.dateStr, windowStart: hhmm(startMin), windowEnd: hhmm(startMin + durationMin), durationMinutes: durationMin, techId: day.techId, routeMode: 'arrival_windows' };
-  if (!request.admit(slot)) return { reason: 'not_offerable' };
-  const chain = buildChain(day.own, { startMin, durationMin, closeMin: env.closeMin });
+  const chain = buildChain(day.own, { startMin, durationMin, closeMin: env.closeMin, shiftMin });
   if (chain.reason) return { reason: chain.reason };
   const fixed = chain.moves.map((m) => env.fixedReason(m.row, day.quick)).find(Boolean);
   if (fixed) return { reason: `fixed_${fixed}` };
-  const candidate = { dateStr: day.dateStr, techId: day.techId, startMin, durationMin, moves: chain.moves, slot };
+  const candidate = { dateStr: day.dateStr, techId: day.techId, startMin, durationMin, shiftMin, moves: chain.moves, slot };
   if (hitsAny(chainRanges(candidate), day.taken)) return { reason: 'taken_by_other' };
   const { prev } = neighbours(day.own, startMin, day.home);
   candidate.detourMin = addedDrive(env.legMin, prev, request.point, pointOf(chain.moves[0].row));
   candidate.savingMin = request.bestFree ? request.bestFree.detourMin - candidate.detourMin : null;
   if (candidate.savingMin != null && candidate.savingMin < MIN_SAVING_MIN) return { reason: 'saving_below_bar' };
   return { candidate };
+}
+
+// One hour on one technician-day, with the checks that need no read. Returns { candidate } or { reason }. The
+// candidate is the first shift that passes them; `later` is the 2-hour shift that also passed, for the full check to
+// try when the 1-hour one fails there. When no shift passes, the reason is the first shift's.
+function tryHour({ day, startMin, env, request }) {
+  const { durationMin } = request;
+  // routeMode: every hour that passes is checked on the arrival-window route (routeKeepsWindows), like the page's own
+  // capacity-mode slots, which is what filterCollidingSlots asks of a slot in capacity mode.
+  const slot = { date: day.dateStr, windowStart: hhmm(startMin), windowEnd: hhmm(startMin + durationMin), durationMinutes: durationMin, techId: day.techId, routeMode: 'arrival_windows' };
+  if (!request.admit(slot)) return { reason: 'not_offerable' };
+  const tries = shiftsFor(durationMin).map((shiftMin) => chainCandidate({ day, startMin, env, request, slot, shiftMin }));
+  const [candidate, later] = tries.map((t) => t.candidate).filter(Boolean);
+  if (!candidate) return { reason: tries[0].reason };
+  return { candidate: later ? { ...candidate, later } : candidate };
 }
 
 function tally(report, reason) {
@@ -438,7 +463,7 @@ function defaultDeps() {
     loadArrivalRouteContext: arrivalRoute.loadArrivalRouteContext,
     evaluateArrivalPlacement: arrivalRoute.evaluateArrivalPlacement,
     arrivalWindowsOn: arrivalRoute.arrivalWindowRoutingEnabled,
-    getReminderPrefs: reminders.readReminderPrefs,
+    getReminderPrefs: reminders.getReminderPrefs,
     resolve72hChannel: reminders.resolve72hChannel,
     assignableTechIds: async (conn) => (await eligibility.applyAssignable(conn('technicians')).select('technicians.id')).map((row) => row.id),
     absentTechDays: eligibility.absentTechDays,
@@ -458,21 +483,36 @@ function defaultDeps() {
 
 function summaryOf(candidate) {
   return {
-    date: candidate.dateStr, start: hhmm(candidate.startMin), techId: candidate.techId,
+    date: candidate.dateStr, start: hhmm(candidate.startMin), techId: candidate.techId, shiftMin: candidate.shiftMin,
     detourMin: candidate.detourMin, savingMin: candidate.savingMin,
     moves: candidate.moves.map((m) => ({ id: m.row.id, from: hhmm(m.fromMin), to: hhmm(m.toMin) })),
   };
 }
 
-// The candidates that need reads, best saving first, within the budget.
+// Full-check reasons a 2-hour move cannot change: the moved stops' own facts (the 2-hour chain holds every stop of the
+// 1-hour one, from the same first stop) and a failed check.
+const SAME_FOR_ANY_SHIFT = /^(changed$|fixed_|reminders_|prefs_unreadable$|error$)/;
+
+// One full check within the budget: null when every rule holds, else why, or TIMED_OUT.
+async function checkOne(candidate, ctx, deadline) {
+  try {
+    return await raceBudget(fullCheck(candidate, ctx), deadline);
+  } catch {
+    return 'error';
+  }
+}
+
+// The candidates that need reads, best saving first, within the budget. An hour whose 1-hour move fails is checked
+// again with its 2-hour move (owner 2026-11-07 "B"); the hour counts once, with the last reason or the passing move.
 async function checkCandidates(candidates, { conn, env, request, deadline, report }) {
-  const caches = { blocks: new Map(), routes: new Map(), days: new Map() };
+  const ctx = { conn, env, request, caches: { blocks: new Map(), routes: new Map(), days: new Map() } };
   for (const candidate of candidates.sort(bySaving).slice(0, MAX_FULL_CHECKS)) {
-    let why;
-    try {
-      why = await raceBudget(fullCheck(candidate, { conn, env, request, caches }), deadline);
-    } catch {
-      why = 'error';
+    let checkedMove = candidate;
+    let why = await checkOne(candidate, ctx, deadline);
+    if (why && why !== TIMED_OUT && candidate.later && !SAME_FOR_ANY_SHIFT.test(why)) {
+      report.twoHourTried += 1;
+      checkedMove = candidate.later;
+      why = await checkOne(checkedMove, ctx, deadline);
     }
     if (why === TIMED_OUT) {
       report.timedOut = true;
@@ -480,7 +520,7 @@ async function checkCandidates(candidates, { conn, env, request, deadline, repor
     }
     report.checked += 1;
     if (why) tally(report, why);
-    else report.passed.push(summaryOf(candidate));
+    else report.passed.push(summaryOf(checkedMove));
   }
 }
 
@@ -523,8 +563,8 @@ function logReport(report) {
   const saving = best ? (best.savingMin == null ? 'no_free_time' : best.savingMin) : '-';
   logger.info(`[booking-make-room] mode=${report.mode} surface=${report.surface} free=${report.free ? report.free.count : '-'}`
     + ` best_free=${report.free?.best ? report.free.best.detourMin : '-'} dates=${report.dates} tried=${report.tried}`
-    + ` candidates=${report.candidates} checked=${report.checked} passed=${report.passed.length} best_saving=${saving}`
-    + ` moved=${best ? best.moves.length : '-'} timed_out=${report.timedOut} ms=${report.ms}`
+    + ` candidates=${report.candidates} checked=${report.checked} two_hour_tried=${report.twoHourTried} passed=${report.passed.length}`
+    + ` best_saving=${saving} best_shift=${best ? best.shiftMin : '-'} moved=${best ? best.moves.length : '-'} timed_out=${report.timedOut} ms=${report.ms}`
     + (report.skipped ? ` skipped=${report.skipped}` : '') + (report.error ? ` error=${String(report.error).slice(0, 120)}` : ''));
 }
 
@@ -563,7 +603,7 @@ function checkRow(report) {
 async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = null, pool, coords, durationMinutes, capabilityRows, zoneSlug,
   dateFrom, dateTo, admit, placement, now = new Date(), conn, deps, budgetMs = DEFAULT_BUDGET_MS } = {}) {
   const startedAt = Date.now();
-  const report = { mode, surface, estimateId, durationMin: null, free: null, dates: 0, tried: 0, candidates: 0, checked: 0, passed: [], byReason: {}, timedOut: false, skipped: null, error: null, ms: 0 };
+  const report = { mode, surface, estimateId, durationMin: null, free: null, dates: 0, tried: 0, candidates: 0, checked: 0, twoHourTried: 0, passed: [], byReason: {}, timedOut: false, skipped: null, error: null, ms: 0 };
   const knex = conn || require('../../models/db');
   try {
     const point = pointOf(coords);
@@ -617,5 +657,5 @@ module.exports = {
   bookingMakeRoomMode,
   startBackgroundCheck,
   recordMakeRoomCheck,
-  _internals: { buildChain, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, remindersByText, moveBlockedReason, datesFor, bySaving, defaultDeps, resetBackgroundChecks, MIN_SAVING_MIN, MAX_FULL_CHECKS, MAX_IN_FLIGHT, DEDUPE_MS },
+  _internals: { buildChain, shiftsFor, MAX_SHIFT_MIN, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, remindersByText, moveBlockedReason, datesFor, bySaving, defaultDeps, resetBackgroundChecks, MIN_SAVING_MIN, MAX_FULL_CHECKS, MAX_IN_FLIGHT, DEDUPE_MS },
 };

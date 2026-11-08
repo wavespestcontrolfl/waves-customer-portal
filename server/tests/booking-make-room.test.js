@@ -375,6 +375,102 @@ describe('the chain', () => {
   });
 });
 
+describe('the 2-hour move (owner 2026-11-07 "B": a moved visit may shift up to 2 hours, not 1)', () => {
+  const { buildChain, shiftsFor, MAX_SHIFT_MIN } = _internals;
+  // Room after the chain: A (confirmed) 8, B 9, C 10, nothing 11 AM-2 PM, E 2 PM, F 3 PM. Nobody was told an hour.
+  const roomyDay = () => [
+    stop('a', 8, 10, { customer_confirmed: true }), stop('b', 9, 20), stop('c', 10, 30), stop('e', 14, 50), stop('f', 15, 60),
+  ];
+  const ROOMY_FREE = [{ date: DAY, windowStart: '12:00', techId: TECH }];
+  // The page's travel gap as the 11-06 dry run saw it: a stop moved 1 hour starts when the new visit ends, so there is
+  // no time to drive; 2 hours later there is.
+  const noTimeToDrive = async (_slot, shifted) => ([...shifted.values()].every((m) => m >= 120) ? true : 'page_collision');
+  const shiftsAt = (placement, start) => placement.mock.calls.filter(([s]) => s.windowStart === start).map(([, shifted]) => [...shifted.values()]);
+
+  test('a visit up to 60 minutes tries 1 hour, then 2 hours; a longer visit keeps its own whole hours only', () => {
+    expect(MAX_SHIFT_MIN).toBe(120);
+    expect(shiftsFor(30)).toEqual([60, 120]);
+    expect(shiftsFor(60)).toEqual([60, 120]);
+    expect(shiftsFor(90)).toEqual([120]);
+    expect(shiftsFor(150)).toEqual([180]);
+  });
+
+  test('a 2-hour chain moves each stop 2 hours and must still end by the day close', () => {
+    const own = roomyDay();
+    const chain = buildChain(own, { startMin: 9 * 60, durationMin: 60, closeMin: 17 * 60, shiftMin: 120 });
+    expect(chain.moves.map((m) => [m.row.id, m.toMin / 60])).toEqual([['visit-b', 11], ['visit-c', 12]]);
+    expect(buildChain(own, { startMin: 14 * 60, durationMin: 60, closeMin: 17 * 60, shiftMin: 120 })).toEqual({ reason: 'past_day_close' });
+  });
+
+  test('when the 1-hour move leaves no time to drive, the same hour is checked with the 2-hour move and found', async () => {
+    const placement = jest.fn(noTimeToDrive);
+    const { report, inserted, deps } = await check({ deps: makeDeps({ rows: roomyDay(), told: [] }), pool: ROOMY_FREE, placement });
+    const nine = report.passed.find((p) => p.start === '09:00');
+    expect(nine).toMatchObject({ shiftMin: 120, savingMin: 16 });
+    expect(moves(nine)).toEqual(['visit-b 09:00->11:00', 'visit-c 10:00->12:00']);
+    // The page judged 9 AM twice: the 1-hour move, then the 2-hour one.
+    expect(shiftsAt(placement, '09:00')).toEqual([[60, 60], [120, 120]]);
+    // The route check ran on the 2-hour day.
+    const routes = deps.evaluated.filter((e) => e.placement.windowStart === '09:00');
+    expect(routes).toHaveLength(1);
+    expect(routes[0].context.rows.find((r) => r.id === 'visit-b').window_start).toBe('11:00');
+    // 8 AM tries 2 hours too (its confirmed stop A is a full-day fact, read after the page's rules) and then fails on A.
+    expect(report.twoHourTried).toBe(3);
+    expect(report.byReason).toEqual({ fixed_customer_confirmed: 1, saving_below_bar: 2 });
+    const logged = JSON.parse(inserted[0].report);
+    expect(logged.twoHourTried).toBe(3);
+    expect(logged.passed.map((p) => p.shiftMin)).toEqual([120, 120]);
+  });
+
+  test('a 1-hour move that passes stays 1 hour: the 2-hour move is never checked', async () => {
+    const placement = jest.fn(PAGE_PLACES);
+    const { report } = await check({ deps: makeDeps({ rows: roomyDay(), told: [] }), pool: ROOMY_FREE, placement });
+    expect(report.passed.find((p) => p.start === '09:00')).toMatchObject({ shiftMin: 60 });
+    expect(report.twoHourTried).toBe(0);
+    expect(placement.mock.calls.every(([, shifted]) => [...shifted.values()].every((m) => m === 60))).toBe(true);
+  });
+
+  test('a moved stop\'s own facts are the same for any shift: no 2-hour check after them', async () => {
+    const prefs = { 'cust-b': { smsEnabled: false, serviceReminder72h: true, serviceReminder24h: true } };
+    const placement = jest.fn(PAGE_PLACES);
+    const { report } = await check({ deps: makeDeps({ rows: roomyDay(), told: [], prefs }), pool: ROOMY_FREE, placement });
+    expect(starts(report)).not.toContain('09:00');
+    expect(report.byReason.reminders_off).toBe(1);
+    expect(report.twoHourTried).toBe(0);
+    expect(shiftsAt(placement, '09:00')).toEqual([[60, 60]]);
+  });
+
+  test('when the 1-hour move lands on a visit that needs no read, the 2-hour move goes on alone', async () => {
+    // An unassigned visit holds 10-11 AM: B moved 1 hour would land on it; B moved 2 hours does not.
+    const rows = [stop('a', 8, 10, { customer_confirmed: true }), stop('b', 9, 20), stop('u', 10, 70, { technician_id: null }), stop('e', 14, 50), stop('f', 15, 60)];
+    const placement = jest.fn(PAGE_PLACES);
+    const { report } = await check({ deps: makeDeps({ rows, told: [] }), pool: [{ date: DAY, windowStart: '16:00', techId: TECH }], placement });
+    const nine = report.passed.find((p) => p.start === '09:00');
+    expect(nine).toMatchObject({ shiftMin: 120 });
+    expect(moves(nine)).toEqual(['visit-b 09:00->11:00']);
+    expect(shiftsAt(placement, '09:00')).toEqual([[120]]);
+    expect(report.twoHourTried).toBe(0);
+  });
+
+  test('a visit longer than 60 minutes has one shift: no 2-hour retry', async () => {
+    const placement = jest.fn(async () => 'page_collision');
+    const { report } = await check({ deps: makeDeps({ rows: roomyDay(), told: [] }), pool: ROOMY_FREE, placement, durationMinutes: 90 });
+    expect(report.passed).toEqual([]);
+    expect(report.twoHourTried).toBe(0);
+    expect(placement.mock.calls.every(([, shifted]) => [...shifted.values()].every((m) => m === 120))).toBe(true);
+  });
+
+  test('when both moves fail, the hour counts once, with the 2-hour move\'s reason', async () => {
+    const placement = jest.fn(async (_slot, shifted) => ([...shifted.values()].every((m) => m >= 120) ? 'service_line' : 'page_collision'));
+    const { report } = await check({ deps: makeDeps({ rows: roomyDay(), told: [] }), pool: ROOMY_FREE, placement });
+    expect(report.passed).toEqual([]);
+    expect(report.twoHourTried).toBe(3);
+    expect(report.byReason.service_line).toBe(3);
+    expect(report.byReason.page_collision).toBeUndefined();
+    expect(report.checked).toBe(3);
+  });
+});
+
 describe('never throws', () => {
   test('a failed day read records the error and finds nothing', async () => {
     const deps = makeDeps();
