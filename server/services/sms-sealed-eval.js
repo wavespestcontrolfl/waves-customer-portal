@@ -624,8 +624,9 @@ function mcNemarExact(b, c) {
 }
 
 // Which judge ruler graded these result rows: 'j1' (no stamp, the old judge) or the stamped version, sorted and
-// joined when a run mixes them. GATE_SMS_JUDGE_V2 grades stricter, so two runs on different rulers must not be
-// compared (a gate flip between runs, or mid-run on a resume, would read as a regression or an improvement).
+// joined when a run mixes them. Judge v2 grades stricter, so two runs on different rulers must not be
+// compared (a run graded before v2 carries no stamp and reads as 'j1'; comparing it with a v2 run would read as a
+// regression or an improvement).
 function judgeRulerOf(rows) {
   const versions = new Set(rows.filter((r) => r.verdict !== 'ungradable').map((r) => parseScores(r.scores)?.judge_version || 'j1'));
   return [...versions].sort().join('+');
@@ -799,8 +800,8 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
     return false;
   }
 
-  // GATE_SMS_JUDGE_V2: the owner-question answer rides in the scores jsonb (no migration); every reader
-  // picks named keys from it, so the extra key is tolerated. Absent when the gate is off.
+  // Judge v2: the owner-question answer rides in the scores jsonb (no migration); every reader
+  // picks named keys from it, so the extra key is tolerated. Absent on rows graded before v2.
   const scores = parseScores(judgment.scores);
   // judge_version rides along so a run (and a baseline comparison) can tell which ruler graded it.
   const storedScores = scores && judgment.could_send
@@ -844,7 +845,7 @@ async function finalizeRun({ runId, dbi = db } = {}) {
     if (r.verdict) verdictCounts[r.verdict] = (verdictCounts[r.verdict] || 0) + 1;
     if (r.verdict === 'draft_unsafe') unsafe += 1;
     const s = parseScores(r.scores);
-    // GATE_SMS_JUDGE_V2 runs only: count the owner-question answers beside the verdicts (flat keys).
+    // Count the owner-question answers beside the verdicts (flat keys); results graded before v2 have none.
     if (s?.could_send) couldSendCounts[`could_send_${s.could_send}`] = (couldSendCounts[`could_send_${s.could_send}`] || 0) + 1;
     if (s) {
       for (const key of Object.keys(sums)) {
