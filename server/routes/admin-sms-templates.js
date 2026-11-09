@@ -163,7 +163,7 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   // with no instruction; lawn-watering-sms.js passes this same requiredVars
   // list to getTemplate at render time.
   lawn_watering_instruction: Object.freeze(['watering_lines']),
-  // The short watering text (GATE_LAWN_WATERING_SHORT_TEXT): same contract.
+  // The short watering text: same contract.
   lawn_watering_instruction_short: Object.freeze(['watering_lines']),
   // Auto Pay setup text: the link IS the text. A body or variant without
   // {secure_link} would send the customer a message with nothing to open;
