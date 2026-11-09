@@ -527,7 +527,7 @@ describe('every lawn visit gets a watering text or an office alert', () => {
   test('a frozen "none" instruction goes out as its own text', async () => {
     const h = harness({ notes: { lawnWateringFreeze: { wateringInstruction: { ...NONE, completedAt: new Date().toISOString() } } } });
     expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'sent' });
-    expect(h.sendCustomerMessage.mock.calls[0][0].body).toBe("Watering after today's visit: No watering change from today's treatment.");
+    expect(h.sendCustomerMessage.mock.calls[0][0].body).toBe("Watering after today's visit: No change. Keep your usual schedule.");
   });
 
   test.each([
@@ -723,9 +723,9 @@ describe('GATE_LAWN_WATERING_TEXT_FORECAST: the rain sentence closes the text', 
   });
 });
 
-describe('GATE_LAWN_WATERING_SHORT_TEXT', () => {
+describe('short lawn watering text', () => {
   const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
-  const ENV_KEYS = ['GATE_LAWN_WATERING_SMS', 'GATE_LAWN_WATERING_RULE', 'GATE_LAWN_WATERING_SHORT_TEXT'];
+  const ENV_KEYS = ['GATE_LAWN_WATERING_SMS', 'GATE_LAWN_WATERING_RULE'];
   let saved;
   beforeEach(() => {
     saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -743,24 +743,24 @@ describe('GATE_LAWN_WATERING_SHORT_TEXT', () => {
   const WATER = { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'label' };
   const fresh = () => buildWateringInstruction({ rules: [DRY, WATER], completedAt: new Date().toISOString(), plainWhenNoSetup: true, labelFirst: true });
 
-  test('plan: short steps under the short template; off keeps the plan shape byte for byte', () => {
+  test('plan: short steps under the short template; the full-lines fallback keeps the plan shape', () => {
     const instruction = fresh();
-    const off = lawnWateringSmsPlan(planArgs({ instruction, completedAt: instruction.completedAt }));
+    const off = lawnWateringSmsPlan(planArgs({ instruction, completedAt: instruction.completedAt, shortText: false }));
     expect(Object.keys(off)).toEqual(['send', 'vars']);
     expect(off.vars.watering_lines).toMatch(/^Skip your turf watering until today's treatment has dried\./);
-    const on = lawnWateringSmsPlan(planArgs({ instruction, completedAt: instruction.completedAt, shortText: true }));
+    const on = lawnWateringSmsPlan(planArgs({ instruction, completedAt: instruction.completedAt }));
     expect(on.templateKey).toBe('lawn_watering_instruction_short');
     expect(on.vars.watering_lines).toMatch(/^Let the treatment dry first\. Then water about 1\/4 inch by .+, even on an off day\.$/);
   });
 
   test('plan: an unknown shape sends the full lines', () => {
-    const plan = lawnWateringSmsPlan(planArgs({ shortText: true }));
+    const plan = lawnWateringSmsPlan(planArgs());
     expect(plan).toEqual({ send: true, vars: { watering_lines: 'Skip watering until 8:00 PM tonight. Water normally after that.' } });
   });
 
   test('plan: the forecast sentence goes short too', () => {
     const instruction = { ...fresh(), forecast: { inches: 0.4, checkpointLabel: 'Sat 1 PM' } };
-    const plan = lawnWateringSmsPlan(planArgs({ instruction, completedAt: instruction.completedAt, shortText: true, forecastLine: 'About 0.4 inch of rain is forecast by Sat 1 PM. Long.' }));
+    const plan = lawnWateringSmsPlan(planArgs({ instruction, completedAt: instruction.completedAt, forecastLine: 'About 0.4 inch of rain is forecast by Sat 1 PM. Long.' }));
     expect(plan.vars.watering_lines).toMatch(/Rain forecast: about 0\.4 inch by Sat 1 PM\. If 1\/4 inch falls by then, skip the run\. If not, run it\.$/);
   });
 
@@ -784,8 +784,7 @@ describe('GATE_LAWN_WATERING_SHORT_TEXT', () => {
     lawn_watering_instruction_short: 'Lawn watering: {watering_lines}',
   };
 
-  test('gate on: sends the short text under the short template', async () => {
-    process.env.GATE_LAWN_WATERING_SHORT_TEXT = 'true';
+  test('sends the short text under the short template', async () => {
     const h = harness(TEMPLATES);
     expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'sent' });
     const sent = h.sendCustomerMessage.mock.calls[0][0];
@@ -796,20 +795,11 @@ describe('GATE_LAWN_WATERING_SHORT_TEXT', () => {
     expect(sent.metadata.templateKey).toBe('lawn_watering_instruction_short');
   });
 
-  test('gate on, short row missing: sends the full text under the original row', async () => {
-    process.env.GATE_LAWN_WATERING_SHORT_TEXT = 'true';
+  test('short row missing: sends the full text under the original row', async () => {
     const h = harness({ lawn_watering_instruction: TEMPLATES.lawn_watering_instruction });
     expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'sent' });
     const sent = h.sendCustomerMessage.mock.calls[0][0];
     expect(sent.body).toMatch(/^Watering after today's visit: Skip your turf watering until today's treatment has dried\./);
     expect(sent.metadata.templateKey).toBe('lawn_watering_instruction');
-  });
-
-  test('gate off: the full text, the original row, never the short one', async () => {
-    delete process.env.GATE_LAWN_WATERING_SHORT_TEXT;
-    const h = harness(TEMPLATES);
-    expect(await sendLawnWateringSms(h.state, h.deps)).toEqual({ status: 'sent' });
-    expect(h.getTemplate).toHaveBeenCalledTimes(1);
-    expect(h.getTemplate.mock.calls[0][0]).toBe('lawn_watering_instruction');
   });
 });

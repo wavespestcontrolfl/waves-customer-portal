@@ -3144,7 +3144,7 @@ instruction (`state` hold, water_in or hold_then_water_in, never none) as one
 separate customer text right after the lawn completion text, rendered from the
 `lawn_watering_instruction` SMS template with the instruction's `lines` joined
 by single spaces, at most once per visit
-(`structured_notes.lawnWateringSmsStatus`). `GATE_LAWN_WATERING_SHORT_TEXT` (dark)
+(`structured_notes.lawnWateringSmsStatus`). The short text
 adds no public payload field either: the same text is sent as short steps built
 from the frozen instruction's fields under the `lawn_watering_instruction_short`
 template; the payload, `lines`, banner and PDF are unchanged.
