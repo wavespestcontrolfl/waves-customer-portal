@@ -89,7 +89,7 @@ const heroAltVision = require('../services/content/hero-alt-vision');
 
 // 1x1 transparent PNG — enough for the real sharp compressToWebp step that
 // runs inside the autonomous hero pipeline.
-const HERO_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+const HERO_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
 // publishAstro/publishAstroDraft write hero bytes + markdown (+ any legacy
 // .md removal) as ONE git-data commit via gh.commitFiles — per-file Contents
@@ -1844,7 +1844,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
       content: '## What you are seeing\n\nAnt trails around Bradenton patios usually start with moisture, food access, and tiny exterior gaps.',
     };
@@ -1926,7 +1926,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Termite bait station beside a Bradenton home',
       content: '## What shapes the price\n\nHome size, construction type, and the treatment approach all shape what termite work costs in Bradenton.',
     });
@@ -1988,7 +1988,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
       // No visible FAQ pre-repair — buildFrontmatter's schema_types is Article-only.
       content: '## What you are seeing\n\nAnt trails around Bradenton patios usually start with moisture, food access, and tiny exterior gaps.',
@@ -2028,7 +2028,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
       // Hardcoded monthly price with no calculator/quote framing — a P0 the
       // legacy publish path previously shipped (only schema validation ran).
@@ -2068,7 +2068,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Comparison of pest control options',
       content: 'Every option has trade-offs worth weighing before you pick a provider for your home.',
     };
@@ -2098,7 +2098,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Comparison of pest control options',
       // A DEFINITE finding — a disparaging table cell ("Worst follow-up") is
       // a P0. The manual/calendar lane previously ran NO comparison scan at
@@ -2137,7 +2137,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Comparison of pest control options',
       // No named competitor anywhere; the business-SHAPED title phrase
       // ("Comparing Pest Control") and generic category columns can only
@@ -2174,7 +2174,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
       content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments and exterior sealing.',
     };
@@ -2208,7 +2208,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Rodent exclusion around a Bradenton home',
       content: '## Sealing entry points\n\nRats squeeze through dime-sized gaps.\n\n## Frequently Asked Questions\n\nQ: How fast can you help?',
     };
@@ -2239,7 +2239,7 @@ describe('Astro publisher hero image republish', () => {
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
       content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments.',
     };
@@ -2278,7 +2278,7 @@ describe('publishAstro stamps astro_requires_human_merge (audit lane 4b)', () =>
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
       content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments.',
     };
@@ -2584,7 +2584,7 @@ describe('publishAstro catch persists an already-opened PR marker (Codex round 3
       technically_reviewed_at: '2026-05-08',
       fact_checked_by: 'Virginia Gelser',
       fact_checked_at: '2026-05-08',
-      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
       hero_image_alt: 'Ant trail near a Bradenton patio',
       content: '## What you are seeing\n\nWaves Pest Control keeps Bradenton homes pest-free with seasonal treatments.',
       ...overrides,
@@ -2889,7 +2889,7 @@ describe('Pages poll auto-merge per-tick cap', () => {
 describe('generateHeroBuffer (publish-time AI hero)', () => {
   const imageGenerator = require('../services/content/image-generator');
   // 1x1 transparent PNG
-  const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
   beforeEach(() => jest.clearAllMocks());
 
@@ -4460,7 +4460,7 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
 
 
 describe('generatePlannedImage — one deadline per slot, safer candidate when both screens fail (Codex r6 P2 on #3964)', () => {
-  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
   const args = { title: 'T', keyword: 'K', mode: 'blog-hero', slug: 'x/y', index: 0 };
 
   test('the screen retry reuses the first call\'s deadline and, when both fail, the candidate without a logo ships with its warning', async () => {
