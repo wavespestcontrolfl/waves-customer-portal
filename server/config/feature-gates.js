@@ -6993,15 +6993,6 @@ function multiTechConfirmLive() {
   return gateEnvValue('GATE_MULTI_TECH_CONFIRM');
 }
 
-// GATE_ROUTE_ORDER_TIME_FALLBACK read at CALL time - strict `=== 'true'`. The one reader for
-// arrival-route.js placeInSavepoint (owner 2026-11-01, "build fixes", dispatch lane F1): when the
-// route check REFUSES to place a visit, the visit is numbered by its arrival time among the
-// day's numbered stops instead of keeping route_order NULL (which lists it last). Off = the
-// refusal leaves the number empty, byte-identical to before.
-function routeOrderTimeFallbackLive() {
-  return process.env.GATE_ROUTE_ORDER_TIME_FALLBACK === 'true';
-}
-
 // GATE_ADS_CAPACITY_WORK_DAYS read at CALL time - strict `=== 'true'`. The one
 // reader for BudgetManager.getTechCountForArea: on, a dated capacity count skips
 // a technician on a date they are absent or do not work; off, every assignable
@@ -9775,17 +9766,6 @@ function quoteSamePersonMatchLive() {
 function bugIdExtensionLive() {
   return process.env.GATE_BUG_ID_EXTENSION === 'true';
 }
-// GATE_STAFF_EDIT_LOCK_START_ONLY read at CALL time, strict `=== 'true'`, dark. On, a staff edit that changes only a
-// plan visit's window END (same date, same start) does not set auto_dispatch_locked. Off = any window change locks. Kill = unset.
-function staffEditLockStartOnlyLive() {
-  return process.env.GATE_STAFF_EDIT_LOCK_START_ONLY === 'true';
-}
-// GATE_PREPAY_SEED_SERIES_SLOT read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01, "fix seeder"). On, the
-// visits an annual prepay seeds copy the technician and the usual start time of the customer's existing visits of
-// the same service (services/annual-prepay-series-slot.js). Off = seeds carry no technician and no time. Kill = unset.
-function prepaySeedSeriesSlotLive() {
-  return process.env.GATE_PREPAY_SEED_SERIES_SLOT === 'true';
-}
 // GATE_TECH_VOICE_LINE read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01, hands-free field voice PR 3a). On,
 // POST /api/webhooks/twilio/tech-voice admits a call to TECH_VOICE_NUMBER from an active technician's own cell, after
 // reserving its billed minutes (services/tech-voice-usage.js: one call at a time, 3 a call, 15 a day, 150 a month per
@@ -10016,12 +9996,6 @@ module.exports.inspectionReuseLeadShellLive = inspectionReuseLeadShellLive;
 module.exports.inventoryUnitAutofixDryOzLive = inventoryUnitAutofixDryOzLive;
 // GATE_QUOTE_SAME_PERSON_MATCH reader, on its own line so gate PRs never conflict.
 module.exports.quoteSamePersonMatchLive = quoteSamePersonMatchLive;
-// GATE_ROUTE_ORDER_TIME_FALLBACK reader, on its own line so gate PRs never conflict.
-module.exports.routeOrderTimeFallbackLive = routeOrderTimeFallbackLive;
-// GATE_STAFF_EDIT_LOCK_START_ONLY reader, on its own line so gate PRs never conflict.
-module.exports.staffEditLockStartOnlyLive = staffEditLockStartOnlyLive;
-// GATE_PREPAY_SEED_SERIES_SLOT reader, on its own line so gate PRs never conflict.
-module.exports.prepaySeedSeriesSlotLive = prepaySeedSeriesSlotLive;
 // GATE_PAYER_PACKET_AUTOSEND reader, on its own line so gate PRs never conflict.
 module.exports.payerPacketAutosendLive = payerPacketAutosendLive;
 // GATE_TECH_VOICE_LINE reader, on its own line so gate PRs never conflict.
