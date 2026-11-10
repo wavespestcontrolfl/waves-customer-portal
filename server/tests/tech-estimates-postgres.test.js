@@ -82,10 +82,12 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
     enriched: { propertyType: 'single_family' },
   });
 
+  let customerSeq = 0;
   const customer = async (line1) => {
     const id = randomUUID();
     await trx('customers').insert({
-      id, first_name: 'Synthetic', last_name: 'Fixture', email: `${id}@example.invalid`, phone: `fixture-${id.slice(0, 8)}`,
+      id, first_name: 'Synthetic', last_name: 'Fixture', email: `${id}@example.invalid`,
+      phone: `+1941555${String(100 + (customerSeq += 1)).padStart(4, '0')}`,
       address_line1: line1, city: 'Test City', state: 'FL', zip: '00000', active: true, pipeline_stage: 'active_customer',
     });
     return id;
@@ -93,6 +95,7 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
 
   beforeEach(async () => {
     process.env.GATE_TECH_ESTIMATES = 'true';
+    customerSeq = 0;
     trx = await database.transaction();
     require('../models/db').connection = trx;
     const technicianId = randomUUID();
@@ -105,12 +108,29 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
     });
     const routeCustomer = await customer('100 Test Lane');
     const otherCustomer = await customer('200 Test Lane');
-    await trx('scheduled_services').insert({
-      id: randomUUID(), customer_id: routeCustomer, technician_id: technicianId, service_type: 'Quarterly Pest Control',
-      status: 'pending', scheduled_date: etDateString(new Date()), window_start: '09:00', window_end: '10:00',
-      estimated_duration_minutes: 30,
+    const otherTechnician = randomUUID();
+    await trx('technicians').insert({
+      id: otherTechnician, name: 'Other Synthetic Tech', email: `${otherTechnician}@example.invalid`, role: 'technician',
+      active: true, employment_status: 'active',
     });
-    ids = { technicianId, routeCustomer, otherCustomer };
+    const visit = async (customerId, tech, over = {}) => {
+      const id = randomUUID();
+      await trx('scheduled_services').insert({
+        id, customer_id: customerId, technician_id: tech, service_type: 'Quarterly Pest Control',
+        status: 'pending', scheduled_date: etDateString(new Date()), window_start: '09:00', window_end: '10:00',
+        estimated_duration_minutes: 30, ...over,
+      });
+      return id;
+    };
+    ids = {
+      technicianId, routeCustomer, otherCustomer,
+      routeVisit: await visit(routeCustomer, technicianId),
+      // The same customer's second home: the visit carries its own service address.
+      secondHomeVisit: await visit(routeCustomer, technicianId, {
+        service_address_line1: '900 Second Home Rd', service_address_city: 'Test City', service_address_state: 'FL', service_address_zip: '00000',
+      }),
+      otherVisit: await visit(otherCustomer, otherTechnician),
+    };
     mockCaller.id = technicianId;
     mockCaller.role = 'technician';
     lookupSpy = jest.spyOn(lookupRoutes, 'performPropertyLookup').mockImplementation(async () => countyLookup());
@@ -153,7 +173,7 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
 
   test('a technician with the switch on and a qualified general capability prices PEST for a customer on his route, and nothing is saved', async () => {
     const before = await counts();
-    const res = await price({ customerId: ids.routeCustomer, services: ['PEST'] });
+    const res = await price({ visitId: ids.routeVisit, services: ['PEST'] });
     expect(res.status).toBe(200);
     expect(res.body.monthlyTotal).toBeGreaterThan(0);
     expect(res.body.annualTotal).toBeGreaterThan(0);
@@ -165,9 +185,9 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
   });
 
   test('every forged pricing key from the phone changes no number', async () => {
-    const clean = await price({ customerId: ids.routeCustomer, services: ['PEST'] });
+    const clean = await price({ visitId: ids.routeVisit, services: ['PEST'] });
     const forged = await price({
-      customerId: ids.routeCustomer,
+      visitId: ids.routeVisit,
       services: ['PEST'],
       manualDiscount: { type: 'PERCENT', value: 50, internalReason: 'x' },
       linePriceOverrides: { PEST: 1 },
@@ -189,8 +209,8 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
   });
 
   test('a typed home size changes the price and sends the quote to the office first', async () => {
-    const base = await price({ customerId: ids.routeCustomer, services: ['PEST'] });
-    const edited = await price({ customerId: ids.routeCustomer, services: ['PEST'], facts: { homeSqFt: 4200, stories: 2 } });
+    const base = await price({ visitId: ids.routeVisit, services: ['PEST'] });
+    const edited = await price({ visitId: ids.routeVisit, services: ['PEST'], facts: { homeSqFt: 4200, stories: 2 } });
     expect(edited.status).toBe(200);
     expect(edited.body.officeFirst.reasons).toEqual(expect.arrayContaining(['changed_fact:homeSqFt', 'changed_fact:stories']));
     expect(edited.body.annualTotal).not.toBe(base.body.annualTotal);
@@ -210,36 +230,69 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
   test('each of the six services comes back as its own priced engine line (an admin may quote all six)', async () => {
     mockCaller.role = 'admin';
     for (const key of ['PEST', 'OT_PEST', 'MOSQUITO', 'OT_MOSQUITO', 'RODENT_BAIT', 'TERMITE_BAIT']) {
-      const res = await price({ customerId: ids.routeCustomer, services: [key] });
+      const res = await price({ visitId: ids.routeVisit, services: [key] });
       expect([key, res.status]).toEqual([key, 200]);
       expect(res.body.lines.length).toBeGreaterThan(0);
       expect(res.body.monthlyTotal + res.body.oneTimeTotal).toBeGreaterThan(0);
     }
     // All six together: still one whole quote.
-    const all = await price({ customerId: ids.routeCustomer, services: ['PEST', 'OT_PEST', 'MOSQUITO', 'OT_MOSQUITO', 'RODENT_BAIT', 'TERMITE_BAIT'] });
+    const all = await price({ visitId: ids.routeVisit, services: ['PEST', 'OT_PEST', 'MOSQUITO', 'OT_MOSQUITO', 'RODENT_BAIT', 'TERMITE_BAIT'] });
     expect(all.status).toBe(200);
     expect(all.body.lines.length).toBeGreaterThanOrEqual(6);
   });
 
-  test('an off-route customer is a 404 and nothing is looked up', async () => {
-    const res = await price({ customerId: ids.otherCustomer, services: ['PEST'] });
-    expect(res).toEqual({ status: 404, body: { error: 'Customer not found' } });
+  test('another technician\'s visit is a 404 and nothing is looked up; so is his own visit once it is cancelled or old', async () => {
+    expect(await price({ visitId: ids.otherVisit, services: ['PEST'] })).toEqual({ status: 404, body: { error: 'Visit not found' } });
+    await trx('scheduled_services').where({ id: ids.routeVisit }).update({ status: 'cancelled' });
+    expect((await price({ visitId: ids.routeVisit, services: ['PEST'] })).status).toBe(404);
+    await trx('scheduled_services').where({ id: ids.routeVisit }).update({ status: 'completed', scheduled_date: '2020-01-06' });
+    expect((await price({ visitId: ids.routeVisit, services: ['PEST'] })).status).toBe(404);
     expect(lookupSpy).not.toHaveBeenCalled();
+  });
+
+  test('a visit at the customer\'s second home looks up and prices that house, not the primary address', async () => {
+    const res = await price({ visitId: ids.secondHomeVisit, services: ['PEST'] });
+    expect(res.status).toBe(200);
+    expect(lookupSpy.mock.calls[0][0]).toBe('900 Second Home Rd, Test City, FL 00000');
+    const primary = await price({ visitId: ids.routeVisit, services: ['PEST'] });
+    expect(lookupSpy.mock.calls[1][0]).toBe('100 Test Lane, Test City, FL 00000');
+    expect(primary.status).toBe(200);
+  });
+
+  test('the paid lookup budget is per technician and per day, kept in the shared counter: a miss counts, a cached address does not, and over the budget is 429', async () => {
+    const bucket = `tech-estimate-lookup:${ids.technicianId}`;
+    const used = async () => Number((await trx('public_llm_daily_usage').where({ bucket }).first('count'))?.count || 0);
+    // A cached address (the default mock answers the cache read): nothing is counted.
+    expect((await price({ visitId: ids.routeVisit, services: ['PEST'] })).status).toBe(200);
+    expect(await used()).toBe(0);
+    // A miss: one unit, then the live lookup.
+    lookupSpy.mockImplementation(async (_address, options) => (options.cacheOnly ? null : countyLookup()));
+    expect((await price({ visitId: ids.routeVisit, services: ['PEST'] })).status).toBe(200);
+    expect(await used()).toBe(1);
+    // The day's budget is spent: the next miss is refused before the paid call.
+    await trx('public_llm_daily_usage').where({ bucket }).update({ count: 30 });
+    lookupSpy.mockClear();
+    const refused = await price({ visitId: ids.routeVisit, services: ['PEST'] });
+    expect(refused.status).toBe(429);
+    expect(refused.body.code).toBe('daily_limit');
+    expect(lookupSpy.mock.calls.map((call) => call[1])).toEqual([{ cacheOnly: true, persist: false }]);
+    // Another technician's budget is untouched.
+    expect(await trx('public_llm_daily_usage').whereNot({ bucket }).where('bucket', 'like', 'tech-estimate-lookup:%').first()).toBeUndefined();
   });
 
   test('gate off, and the technician\'s switch off, are both 404 {enabled:false}', async () => {
     delete process.env.GATE_TECH_ESTIMATES;
-    expect(await price({ customerId: ids.routeCustomer, services: ['PEST'] })).toEqual({ status: 404, body: { enabled: false } });
+    expect(await price({ visitId: ids.routeVisit, services: ['PEST'] })).toEqual({ status: 404, body: { enabled: false } });
     process.env.GATE_TECH_ESTIMATES = 'true';
     await trx('technicians').where({ id: ids.technicianId }).update({ can_create_estimates: false });
-    expect(await price({ customerId: ids.routeCustomer, services: ['PEST'] })).toEqual({ status: 404, body: { enabled: false } });
+    expect(await price({ visitId: ids.routeVisit, services: ['PEST'] })).toEqual({ status: 404, body: { enabled: false } });
     expect(lookupSpy).not.toHaveBeenCalled();
   });
 
   describe('save a draft and read his own', () => {
     test('price, then create with the digest: one draft, one tool row, one audit event, at the previewed price', async () => {
       const before = await counts();
-      const { preview, saved } = await priceThenCreate({ customerId: ids.routeCustomer, services: ['PEST'] });
+      const { preview, saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
       expect(preview.body.digest).toMatch(/^[0-9a-f]{64}$/);
       expect(saved.status).toBe(200);
       const after = await counts();
@@ -270,8 +323,20 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
       expect(Object.keys(events[0].metadata).sort()).toEqual(['customer_id', 'estimate_id', 'office_first', 'technician_id']);
     });
 
+    test('a create from the second-home visit stores the second home\'s address, and a bare customer id saves nothing', async () => {
+      const { saved } = await priceThenCreate({ visitId: ids.secondHomeVisit, services: ['PEST'] });
+      expect(saved.status).toBe(200);
+      const row = await estimateRow(saved.body.id);
+      expect(row.address).toBe('900 Second Home Rd, Test City, FL 00000');
+      expect(row.customer_id).toBe(ids.routeCustomer);
+      const before = await counts();
+      const bare = await create({ customerId: ids.routeCustomer, services: ['PEST'], clientDraftId: randomUUID(), digest: 'a'.repeat(64) });
+      expect(bare.status).toBe(400);
+      expect(await counts()).toEqual(before);
+    });
+
     test('a retry with the same draft id writes nothing more and answers the same estimate', async () => {
-      const body = { customerId: ids.routeCustomer, services: ['PEST'] };
+      const body = { visitId: ids.routeVisit, services: ['PEST'] };
       const { preview, saved } = await priceThenCreate(body);
       const afterFirst = await counts();
       const again = await create({ ...body, clientDraftId: saved.body.id, digest: preview.body.digest });
@@ -281,7 +346,7 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
     });
 
     test('the same draft id from another login is refused and writes nothing', async () => {
-      const body = { customerId: ids.routeCustomer, services: ['PEST'] };
+      const body = { visitId: ids.routeVisit, services: ['PEST'] };
       const { preview, saved } = await priceThenCreate(body);
       const afterFirst = await counts();
       const otherId = randomUUID();
@@ -295,13 +360,13 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
 
     test('a digest that is not the current price is 409 price_changed and writes nothing', async () => {
       const before = await counts();
-      const { saved } = await priceThenCreate({ customerId: ids.routeCustomer, services: ['PEST'] }, { digest: 'b'.repeat(64) });
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] }, { digest: 'b'.repeat(64) });
       expect(saved).toEqual({ status: 409, body: { error: 'The price changed. Price it again.', code: 'price_changed' } });
       expect(await counts()).toEqual(before);
     });
 
     test('a typed fact is priced, stored as a detailed reason, and shown to the phone as the same code', async () => {
-      const { saved } = await priceThenCreate({ customerId: ids.routeCustomer, services: ['PEST'], facts: { homeSqFt: 4200, stories: 2 } });
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'], facts: { homeSqFt: 4200, stories: 2 } });
       expect(saved.status).toBe(200);
       expect(saved.body.officeFirst).toEqual({ required: true, reasons: ['changed_fact:homeSqFt', 'changed_fact:stories'] });
       expect((await trx('tech_estimates').where({ estimate_id: saved.body.id }).first()).office_first_reasons)
@@ -310,7 +375,7 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
 
     test('Sold by = the creator for an active W-2 technician', async () => {
       await trx('technicians').where({ id: ids.technicianId }).update({ employment_type: 'w2' });
-      const { saved } = await priceThenCreate({ customerId: ids.routeCustomer, services: ['PEST'] });
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
       const row = await estimateRow(saved.body.id);
       expect(row).toEqual(expect.objectContaining({ sold_by_technician_id: ids.technicianId, sold_by_source: 'creator', sold_by_lead_id: null }));
       expect(row.sold_by_set_at).toBeInstanceOf(Date);
@@ -324,13 +389,13 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
     ])('%s gets no Sold by', async (_label, patch, role) => {
       if (Object.keys(patch).length) await trx('technicians').where({ id: ids.technicianId }).update(patch);
       mockCaller.role = role;
-      const { saved } = await priceThenCreate({ customerId: ids.routeCustomer, services: ['PEST'] });
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
       expect(saved.status).toBe(200);
       expect(await estimateRow(saved.body.id)).toEqual(expect.objectContaining({ sold_by_technician_id: null, sold_by_source: null }));
     });
 
     test('the list and the read show his own estimates only', async () => {
-      const mine = await priceThenCreate({ customerId: ids.routeCustomer, services: ['PEST'] });
+      const mine = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
       const otherId = randomUUID();
       await trx('technicians').insert({ id: otherId, name: 'Synthetic Other', email: `${otherId}@example.invalid`, role: 'technician', active: true, employment_status: 'active', can_create_estimates: true });
       await trx('technician_capabilities').insert({ technician_id: otherId, service_category: 'general', capability_level: 'qualified', active: true, source: 'admin' });
@@ -357,8 +422,22 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
       expect((await read('')).body.estimates[0]).toEqual(expect.objectContaining({ who: 'Sample Person', addressLine: '300 Test Lane' }));
     });
 
+    test('an estimate made from a visit carries the customer\'s name, mobile number and email, so it can be sent; the phone never sees them', async () => {
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
+      expect(saved.status).toBe(200);
+      const row = await estimateRow(saved.body.id);
+      expect(row).toMatchObject({ customer_id: ids.routeCustomer, customer_name: 'Synthetic Fixture', customer_phone: '+19415550101' });
+      expect(row.customer_email).toMatch(/@example\.invalid$/);
+      expect(JSON.stringify(saved.body)).not.toMatch(/5550101|example\.invalid/);
+      // A stored number the save would refuse is left off: the estimate still saves, with no phone.
+      await trx('customers').where({ id: ids.routeCustomer }).update({ phone: '(141) 555-0101' });
+      const second = await priceThenCreate({ visitId: ids.routeVisit, services: ['OT_PEST'] });
+      expect(second.saved.status).toBe(200);
+      expect((await estimateRow(second.saved.body.id)).customer_phone).toBeNull();
+    });
+
     test('an archived estimate is left out of his list', async () => {
-      const { saved } = await priceThenCreate({ customerId: ids.routeCustomer, services: ['PEST'] });
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
       await trx('estimates').where({ id: saved.body.id }).update({ archived_at: new Date() });
       expect((await read('')).body.estimates).toEqual([]);
       expect((await read(`/${saved.body.id}`)).status).toBe(404);
@@ -377,10 +456,10 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
   describe('the office bell for a held estimate', () => {
     const bells = (estimateId) => trx('notifications').where({ recipient_type: 'admin' })
       .whereRaw("metadata->>'dedupeKey' = ?", [`tech-estimate-office-first:${estimateId}`]);
-    const HELD = () => ({ customerId: ids.routeCustomer, services: ['PEST'], facts: { homeSqFt: 4200, stories: 2 } });
+    const HELD = () => ({ visitId: ids.routeVisit, services: ['PEST'], facts: { homeSqFt: 4200, stories: 2 } });
 
     test('a held create writes one open bell row for the estimate; a quote he may send himself writes none', async () => {
-      const clean = await priceThenCreate({ customerId: ids.routeCustomer, services: ['PEST'] });
+      const clean = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
       expect(clean.saved.body.officeFirst.required).toBe(false);
       expect(await bells(clean.saved.body.id)).toEqual([]);
 
@@ -441,7 +520,8 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     const INSIDE = new Date('2026-03-10T15:00:00.000Z'); // 11:00 AM ET
     const OUTSIDE = new Date('2026-03-10T03:00:00.000Z'); // 11:00 PM ET the evening before
-    const PHONE = '+19415550142';
+    // The number the save stores for the fixture customer (the send works on exactly what the save stored).
+    const CUSTOMER_PHONE = '+19415550101';
     const bells = (estimateId) => trx('notifications').where({ recipient_type: 'admin' })
       .whereRaw("metadata->>'dedupeKey' = ?", [`tech-estimate-office-first:${estimateId}`]);
     const auditRows = (action) => trx('audit_log').where({ action });
@@ -453,11 +533,10 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
       });
       return { status: res.status, body: await res.json().catch(() => ({})) };
     }
-    // A saved clean draft with a textable number (a route customer's, or a new person's).
-    async function draft(body = { customerId: ids.routeCustomer, services: ['PEST'] }) {
+    // A saved clean draft, left exactly as the save stored it (a customer on his visit, or a new person he typed).
+    async function draft(body = { visitId: ids.routeVisit, services: ['PEST'] }) {
       const { saved } = await priceThenCreate(body);
       expect(saved.status).toBe(200);
-      await trx('estimates').where({ id: saved.body.id }).update({ customer_phone: PHONE });
       return saved.body.id;
     }
 
@@ -484,10 +563,10 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
       const row = await estimateRow(id);
       expect(res.body).toEqual({ id, status: 'sent', sentAt: row.sent_at.toISOString() });
       expect(row.status).toBe('sent');
-      expect(JSON.stringify(res.body)).not.toMatch(new RegExp(`${row.token}|http|9415550142`));
+      expect(JSON.stringify(res.body)).not.toMatch(new RegExp(`${row.token}|http|9415550\\d{3}`));
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
       expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({
-        to: PHONE, channel: 'sms', audience: 'customer', customerId: ids.routeCustomer, estimateId: id, entryPoint: 'tech_estimate_send',
+        to: CUSTOMER_PHONE, channel: 'sms', audience: 'customer', customerId: ids.routeCustomer, estimateId: id, entryPoint: 'tech_estimate_send',
         metadata: { original_message_type: 'estimate_sent' },
       });
       expect(sendCustomerMessage.mock.calls[0][0].consentBasis).toBeUndefined();
@@ -496,14 +575,14 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
       expect(tool.text_request_confirmed_at).toBeNull();
       const audits = await auditRows('tech_estimate.sent');
       expect(audits).toHaveLength(1);
-      expect(JSON.stringify(audits[0])).not.toMatch(/9415550142/);
+      expect(JSON.stringify(audits[0])).not.toMatch(/9415550\d{3}/);
       expect(ownerSpy).toHaveBeenCalledTimes(1);
       expect(await ownerSpy.mock.results[0].value).toMatchObject({ ok: true });
       const lines = await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'ownerAlert' = 'tech-estimate-sent'");
       expect(lines).toHaveLength(1);
       expect(lines[0].title).toBe('Estimates — look over the estimate to Synthetic Fixture');
       expect(lines[0].body).toBe('Synthetic texted this estimate from the route.');
-      expect(JSON.stringify(lines[0])).not.toMatch(/9415550142|\$\d/);
+      expect(JSON.stringify(lines[0])).not.toMatch(/9415550\d{3}|\$\d/);
       expect((await counts()).audit_log).toBe(before.audit_log + 1);
       expect(await bells(id)).toEqual([]);
     });
@@ -531,8 +610,7 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
     });
 
     test('a held estimate is 409 office_first from the stored row: no claim, no provider call, still a draft', async () => {
-      const { saved } = await priceThenCreate({ customerId: ids.routeCustomer, services: ['PEST'], facts: { homeSqFt: 4200, stories: 2 } });
-      await trx('estimates').where({ id: saved.body.id }).update({ customer_phone: PHONE });
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'], facts: { homeSqFt: 4200, stories: 2 } });
       const res = await send(saved.body.id, { askedForText: true, office_first_reasons: [] });
       expect(res).toEqual({ status: 409, body: { error: 'The office checks this one first.', code: 'office_first' } });
       expect(sendCustomerMessage).not.toHaveBeenCalled();
@@ -626,6 +704,7 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
 
     test('a draft with no mobile number is 422 office_sends: nothing claimed or sent, and the office is told once', async () => {
       const id = await draft();
+      // On purpose: the save stored the customer's number, so clear it to test a draft that has none.
       await trx('estimates').where({ id }).update({ customer_phone: null });
       expect(await send(id)).toEqual({ status: 422, body: { error: 'This estimate has no mobile number. Ask the office to send it.', code: 'office_sends' } });
       expect((await estimateRow(id)).status).toBe('draft');

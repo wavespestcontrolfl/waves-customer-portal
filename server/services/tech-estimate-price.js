@@ -4,8 +4,8 @@
  * The technician estimate tool's price preview (GATE_TECH_ESTIMATES, owner 2026-11-09). Step 1 of 4:
  * it prices and saves nothing, sends nothing. tech-estimate-save.js (step 2a) saves the same quote as a draft.
  *
- * The phone sends WHO (a customer on his route, or a new person he typed), WHICH pest services, and edits to a
- * few measured facts. The SERVER does the rest, on the path that already makes estimates with no office user
+ * The phone sends WHO (a visit of his: the customer and the house he is standing at; or a new person he typed),
+ * WHICH pest services, and edits to a few measured facts. The SERVER does the rest, on the path that already makes estimates with no office user
  * (services/moving-auto-estimate.js): the property lookup, the county-confirmed sizes (lead-draft-measurements
  * countyMeasurements), the arbitrated facts (estimator-engine/source-arbitration), the engine input
  * (estimator-engine/draft-builder buildEngineInput) and the price as a DRY RUN of the shared estimate save
@@ -134,24 +134,65 @@ function normalizeFacts(raw) {
 
 const joinAddress = (parts) => parts.map((p) => String(p || '').trim()).filter(Boolean).join(', ');
 
-// Who is being quoted: { customerId, address } or { prospect, address }. A customer off his route is a 404, like an unknown id.
+// A visit of his, with the columns the place rule reads. technicianCurrentVisitFilter is the portal's own read scope
+// for a technician (his assignment, not a dead one, inside the access window); an admin is unscoped.
+function ownVisit(req, visitId) {
+  const { technicianCurrentVisitFilter } = require('./technician-visit-scope');
+  return technicianCurrentVisitFilter(req, db('scheduled_services')
+    .leftJoin('customers as c', 'scheduled_services.customer_id', 'c.id')
+    .where('scheduled_services.id', visitId))
+    .first('scheduled_services.customer_id',
+      'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+      'scheduled_services.service_address_city', 'scheduled_services.service_address_state', 'scheduled_services.service_address_zip',
+      'c.address_line1 as customer_address_line1', 'c.address_line2 as customer_address_line2',
+      'c.city as customer_city', 'c.state as customer_state', 'c.zip as customer_zip',
+      // Who the estimate is for, as the office builder stores it on the estimate (never shown to the phone).
+      'c.first_name as customer_first_name', 'c.last_name as customer_last_name', 'c.phone as customer_phone', 'c.email as customer_email');
+}
+
+// The customer's name, mobile number and email for the estimate row, read on the server from the visit's customer. The
+// office builder sends the same three with a customer id; without them the estimate could not be texted or emailed by
+// anyone. A stored number the shared save would refuse (US-shaped but not a real number) is left off, so the save
+// never fails on a number the technician cannot correct.
+function visitContact(visit) {
+  const { nanpPhoneProblem } = require('../utils/phone');
+  const text = (value) => String(value || '').trim();
+  const name = [text(visit.customer_first_name), text(visit.customer_last_name)].filter(Boolean).join(' ');
+  const phone = text(visit.customer_phone);
+  const email = text(visit.customer_email);
+  return {
+    ...(name ? { customerName: name } : {}),
+    ...(phone && !nanpPhoneProblem(phone) ? { customerPhone: phone } : {}),
+    ...(email ? { customerEmail: email } : {}),
+  };
+}
+
+// Who is being quoted: { customerId, visitId, address } or { prospect, address }.
+// A customer is always quoted through a VISIT of his, never by a bare customer id: a customer can have more than one
+// saved property, and the quote is for the house he is standing at. That house is the visit's stamped service address
+// when it has one (a second home or a rental), else the customer's primary address: the arrival detector's own rule,
+// the one the lead flag uses (field-lead-gps.js visitedPremise). A visit that is not his is a 404, like an unknown id.
 async function resolveSubject(req, body) {
-  const { customerId, prospect } = body;
-  if ((customerId ? 1 : 0) + (prospect ? 1 : 0) !== 1) throw new PriceRefusal(400, 'Send either a customer or a new person.');
+  const { visitId, prospect } = body;
+  if ((visitId ? 1 : 0) + (prospect ? 1 : 0) !== 1) throw new PriceRefusal(400, 'Send either a visit or a new person.');
   if (prospect) {
     const checked = normalizeProspect(prospect);
     if (checked.error) throw new PriceRefusal(400, checked.error);
     const p = checked.prospect;
     return { prospect: p, address: joinAddress([p.address, p.city, `FL ${p.zip}`]) };
   }
-  const { technicianServicesCustomer } = require('./technician-visit-scope');
-  const notFound = new PriceRefusal(404, 'Customer not found');
-  if (typeof customerId !== 'string' || !UUID_RE.test(customerId)) throw notFound;
-  if (!(await technicianServicesCustomer(req, customerId))) throw notFound;
-  const row = await db('customers').where({ id: customerId }).first('id', 'address_line1', 'address_line2', 'city', 'state', 'zip');
-  if (!row) throw notFound;
-  const address = joinAddress([row.address_line1, row.address_line2, row.city, `${row.state || 'FL'} ${row.zip || ''}`]);
-  return { customerId: row.id, address };
+  const notFound = new PriceRefusal(404, 'Visit not found');
+  if (typeof visitId !== 'string' || !UUID_RE.test(visitId)) throw notFound;
+  const visit = await ownVisit(req, visitId);
+  if (!visit || !visit.customer_id) throw notFound;
+  const place = require('./field-lead-gps').visitedPremise(visit);
+  const state = (visit.service_address_line1 ? visit.service_address_state : visit.customer_state) || 'FL';
+  return {
+    customerId: String(visit.customer_id),
+    visitId,
+    contact: visitContact(visit),
+    address: joinAddress([place.address, place.unit, place.city, `${state} ${place.zip || ''}`]),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -160,17 +201,39 @@ async function resolveSubject(req, body) {
 const OFFICE_PRICES = Object.freeze({ error: 'The office needs to price this one.', code: 'office_prices' });
 const officePrices = () => new PriceRefusal(422, OFFICE_PRICES.error, { code: OFFICE_PRICES.code });
 
-async function lookupFor(address) {
+// One technician's budget of PAID lookups for one Eastern day. An address already in the 180-day lookup cache costs
+// nothing and is never counted, so an honest day (a price, a re-price, the save) spends one unit per new address.
+const DAILY_PAID_LOOKUPS = 30;
+
+async function lookupFor(req, address) {
   const { performPropertyLookup } = require('../routes/property-lookup-v2');
   const { lookupOptionsFor } = require('./property-lookup/lookup-callers');
-  let lookup;
-  try {
-    lookup = await performPropertyLookup(address, lookupOptionsFor('tech_estimate_tool', { prioritizeAccuracy: true }));
-  } catch (err) {
+  const unavailable = (err) => {
     logger.warn(`[tech-estimates] property lookup failed: ${err.code || err.name}`);
-    throw new PriceRefusal(502, 'The property lookup is not available right now. Try again, or ask the office.');
+    return new PriceRefusal(502, 'The property lookup is not available right now. Try again, or ask the office.');
+  };
+  // The free read first: only a cache miss spends money.
+  let cached;
+  try {
+    cached = await performPropertyLookup(address, lookupOptionsFor('tech_estimate_tool', { cacheOnly: true, persist: false }));
+  } catch (err) {
+    throw unavailable(err);
   }
-  return lookup;
+  if (cached) return cached;
+  // The last point before the paid call. The counter is the portal's shared daily counter (one row per bucket and day,
+  // all processes, kept across deploys); failClosed: a counter that cannot be read refuses the paid call.
+  const { consumeSharedDailyCap } = require('../middleware/public-llm-shared-cap');
+  const budget = await consumeSharedDailyCap({
+    bucket: `tech-estimate-lookup:${req.technicianId}`, defaultMax: DAILY_PAID_LOOKUPS, failClosed: true,
+  });
+  if (!budget.allowed) {
+    throw new PriceRefusal(429, 'You reached today\'s limit of new address lookups. Ask the office to price this one.', { code: 'daily_limit' });
+  }
+  try {
+    return await performPropertyLookup(address, lookupOptionsFor('tech_estimate_tool', { prioritizeAccuracy: true }));
+  } catch (err) {
+    throw unavailable(err);
+  }
 }
 
 // Only a county-confirmed single-family home at an address with no unit is priced here (the move estimates' own bar).
@@ -234,7 +297,7 @@ function estimateBody({ subject, keys, facts: layered, engineInputs }) {
   };
   const who = subject.prospect
     ? { customerName: [subject.prospect.firstName, subject.prospect.lastName].filter(Boolean).join(' '), customerPhone: subject.prospect.phone }
-    : { customerId: subject.customerId };
+    : { customerId: subject.customerId, ...subject.contact };
   return { ...who, address: subject.address, showOneTimeOption: false, billByInvoice: false, estimateData: { engineInputs, inputs } };
 }
 
@@ -311,7 +374,7 @@ async function prepareQuote(req, body) {
   const keys = normalizeServices(body.services, allowed);
   const facts = normalizeFacts(body.facts);
   const subject = await resolveSubject(req, body);
-  const lookup = await lookupFor(subject.address);
+  const lookup = await lookupFor(req, subject.address);
   assertCountyConfirmedHome(lookup, subject.address);
   const layered = layerFacts(lookup, facts, keys);
   const { buildEngineInput } = require('./estimator-engine/draft-builder');
