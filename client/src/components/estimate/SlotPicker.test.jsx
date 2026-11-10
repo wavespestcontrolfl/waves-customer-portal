@@ -726,15 +726,15 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
       expect(screen.getAllByRole('link', { name: 'Call (941) 297-5749' })[0]).toHaveAttribute('href', 'tel:+19412975749');
     });
 
-    // 08:00 ET: today's 09:00 opening is inside the 2-hour booking lead, so the glass picker drops it;
-    // the answer's first day (today) must not hide the line.
-    it('shows the line when the only opening inside 7 days is a today slot the glass picker dropped as stale', async () => {
+    // 08:00 ET: today's 09:00 opening is inside the 2-hour booking lead, so the glass picker drops it.
+    // The capped list cannot show that days 2-7 are empty, so the line makes no claim.
+    it('stays away after the glass picker drops a stale today slot while the first open day is today', async () => {
       setGlassDefault(true);
       try {
         stubFetch({ list: { primary: [OPEN('today', '2099-10-01'), OPEN('late', '2099-10-12')], expander: [], metadata: { firstDayAvailability: { date: '2099-10-01', openCount: 1 } } } });
         renderPicker();
-        await screen.findByTestId(NOTE);
-        expect(screen.getByTestId(NOTE).textContent).toMatch(LINE);
+        await screen.findAllByText(/Arrival window|Pick/);
+        expect(screen.queryByTestId(NOTE)).not.toBeInTheDocument();
       } finally {
         setGlassDefault(false);
       }
