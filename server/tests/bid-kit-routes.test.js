@@ -134,6 +134,7 @@ const DOCX_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingm
 let server;
 let baseUrl;
 let lastAppError = null; // the last error a route passed to the app's error chain
+let lastFileUploadReq = null; // the last POST …/file request, so a test can see when multer starts to read it
 let mockCredentialRows = [];
 
 async function call(method, url, body, headers = admin) {
@@ -170,6 +171,7 @@ async function signed(over = {}) {
 beforeAll(async () => {
   const app = express();
   app.use(express.json());
+  app.use((req, _res, next) => { if (req.method === 'POST' && req.path.endsWith('/file')) lastFileUploadReq = req; next(); });
   app.use('/api/admin/bid-kit', require('../routes/admin-bid-kit'));
   app.use('/api/admin/feature-flags', require('../routes/admin-feature-flags'));
   app.use('/api/public/credentials', require('../routes/public-credentials'));
@@ -799,6 +801,7 @@ describe('files', () => {
     const { isUploadHangUp } = require('../middleware/errors');
     const item = await create();
     lastAppError = null;
+    lastFileUploadReq = null;
     const boundary = 'bidkithangup';
     const head = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="license.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4\n`;
     const { port } = new URL(baseUrl);
@@ -810,9 +813,12 @@ describe('files', () => {
     client.on('error', () => {});
     client.write(head);
     client.write(Buffer.alloc(16 * 1024, 1));
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Cut the socket only once multer is reading the body (it pipes the request), so the cut lands
+    // mid-upload on a slow machine too. No fixed wait.
+    for (let i = 0; i < 1000 && !(lastFileUploadReq && lastFileUploadReq.readableFlowing); i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(lastFileUploadReq && lastFileUploadReq.readableFlowing).toBe(true);
     client.destroy();
-    for (let i = 0; i < 100 && !lastAppError; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    for (let i = 0; i < 250 && !lastAppError; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
     expect(lastAppError).toBeInstanceOf(Error);
     expect(['Request aborted', 'Request closed']).toContain(lastAppError.message);
     expect(isUploadHangUp(lastAppError, { destroyed: true })).toBe(true);

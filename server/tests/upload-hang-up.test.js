@@ -65,8 +65,9 @@ describe('a real upload cut by the client (real multer, real socket)', () => {
     const reachedRoute = jest.fn();
     const laterHandlers = jest.fn();
     let seenByGuard = null;
+    let uploadReq = null;
     const app = express();
-    app.post('/upload', multer({ storage: multer.memoryStorage() }).single('photo'), (req, res) => { reachedRoute(); res.json({ ok: true }); });
+    app.post('/upload', (req, res, next) => { uploadReq = req; next(); }, multer({ storage: multer.memoryStorage() }).single('photo'), (req, res) => { reachedRoute(); res.json({ ok: true }); });
     app.use((err, req, res, next) => { seenByGuard = err; next(err); });
     app.use(uploadHangUp);
     app.use((err, req, res, next) => { laterHandlers(err); next(); }); // four arguments: Express reads this as an error handler
@@ -83,9 +84,12 @@ describe('a real upload cut by the client (real multer, real socket)', () => {
       client.on('error', () => {});
       client.write(head);
       client.write(Buffer.alloc(16 * 1024, 1));
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // Cut the socket only once multer is reading the body (it pipes the request), so the cut lands
+      // mid-upload on a slow machine too. No fixed wait.
+      for (let i = 0; i < 1000 && !(uploadReq && uploadReq.readableFlowing); i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(uploadReq && uploadReq.readableFlowing).toBe(true);
       client.destroy();
-      for (let i = 0; i < 100 && !seenByGuard; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+      for (let i = 0; i < 250 && !seenByGuard; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
       expect(seenByGuard).toBeInstanceOf(Error);
       expect(['Request aborted', 'Request closed']).toContain(seenByGuard.message);
       await new Promise((resolve) => setTimeout(resolve, 50));
