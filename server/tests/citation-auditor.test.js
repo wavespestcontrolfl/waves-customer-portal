@@ -169,6 +169,82 @@ describe('classifyListing', () => {
     expect(classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p><p>Serving Manatee and Sarasota counties since 2019.</p>`), candidatesFor({})).status).toBe('verified');
   });
 
+  // First audit of real listing pages (2026-11-09): 36 of 46 "mismatched" listings were right. Their JSON-LD printed
+  // "N/A" for parts the directory does not hold, or put several parts in one field.
+  describe('placeholders state nothing, and one field may carry several parts of the address', () => {
+    const SARASOTA = WAVES_LOCATIONS.find((l) => l.id === 'sarasota');
+    const VENICE = WAVES_LOCATIONS.find((l) => l.id === 'venice');
+    const NA = 'N/A';
+    const listing = (loc, { address, telephone = loc.phone, text = loc.phone } = {}) => classifyListing(
+      page(`<h1>Waves Pest Control</h1><p>${text}</p>${ld({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone, address })}`),
+      candidatesFor({ location_id: loc.id }),
+    );
+    const fields = (r) => (r.detail.mismatches || []).map((m) => m.field);
+
+    test('a locality that carries the state, ZIP and country, with placeholder ZIP and state fields, is verified', () => {
+      const r = listing(SARASOTA, { address: { streetAddress: '1450 Pine Warbler Pl', addressLocality: 'Sarasota, FL 34240 USA', addressRegion: NA, postalCode: NA } });
+      expect(r.status).toBe('verified');
+      expect(listing(VENICE, { address: { streetAddress: '1978 S Tamiami Trl #10', addressLocality: 'Venice, FL 34293', addressRegion: NA, postalCode: NA } }).status).toBe('verified');
+    });
+
+    test('the same listing with another street is still mismatched, on the address alone', () => {
+      const r = listing(SARASOTA, { address: { streetAddress: '99 Old Rd #328', addressLocality: 'Sarasota, FL 34240 USA', addressRegion: NA, postalCode: NA } });
+      expect(r.status).toBe('mismatched');
+      expect(fields(r)).toEqual(['address']);
+    });
+
+    test('a locality whose own ZIP or state is not the office\'s is still a city mismatch', () => {
+      const zip = listing(SARASOTA, { address: { streetAddress: '1450 Pine Warbler Pl', addressLocality: 'Sarasota, FL 34236 USA' } });
+      expect([zip.status, fields(zip)]).toEqual(['mismatched', ['city']]);
+      const state = listing(SARASOTA, { address: { streetAddress: '1450 Pine Warbler Pl', addressLocality: 'Sarasota, GA 34240' } });
+      expect([state.status, fields(state)]).toEqual(['mismatched', ['city']]);
+      const city = listing(SARASOTA, { address: { streetAddress: '1450 Pine Warbler Pl', addressLocality: 'Tampa, FL 34240' } });
+      expect([city.status, fields(city)]).toEqual(['mismatched', ['city']]);
+    });
+
+    test('a placeholder street with the whole address in the locality is verified; a placeholder phone falls back to the page text', () => {
+      const whole = { streetAddress: NA, addressLocality: '1978 S Tamiami Trl #10 Venice, FL 34293', addressRegion: NA, postalCode: NA };
+      expect(listing(VENICE, { address: whole }).status).toBe('verified');
+      expect(listing(VENICE, { address: whole, telephone: NA }).status).toBe('verified');
+      expect(listing(VENICE, { address: { ...whole, addressLocality: '1978 S Tamiami Trl, #10  Venice, FL 34293' } }).status).toBe('verified');
+    });
+
+    test('the whole address given as the street, or repeated in the locality, is verified', () => {
+      expect(listing(VENICE, { address: { streetAddress: '1978 S Tamiami Trl #10 Venice, FL 34293' } }).status).toBe('verified');
+      expect(listing(SARASOTA, { address: { streetAddress: '1450 Pine Warbler Pl', addressLocality: '1450 Pine Warbler Pl Sarasota, FL 34240' } }).status).toBe('verified');
+    });
+
+    test('a whole address in one field that is not the office\'s never passes', () => {
+      const street = listing(VENICE, { address: { streetAddress: '99 Old Rd Venice, FL 34293' } });
+      expect([street.status, fields(street)]).toEqual(['mismatched', ['address']]);
+      const locality = listing(VENICE, { address: { streetAddress: NA, addressLocality: '99 Old Rd Venice, FL 34293' } });
+      expect([locality.status, fields(locality)]).toEqual(['mismatched', ['city']]);
+      const otherZip = listing(VENICE, { address: { streetAddress: '1978 S Tamiami Trl #10 Venice, FL 34285' } });
+      expect([otherZip.status, fields(otherZip)]).toEqual(['mismatched', ['address']]);
+    });
+
+    test('a listing that states only placeholders is judged on its page text, never mismatched', () => {
+      const all = { streetAddress: NA, addressLocality: NA, addressRegion: NA, postalCode: NA };
+      expect(listing(SARASOTA, { address: all, telephone: NA }).status).toBe('verified'); // our phone is in the text, no address shown
+      const noPhone = listing(SARASOTA, { address: all, telephone: NA, text: 'Pest control for homes and offices.' });
+      expect(noPhone.status).toBe('fetch-blocked');
+      expect(noPhone.detail.reason).toBe('phone_not_found');
+      const otherAddress = listing(SARASOTA, { address: all, text: `${SARASOTA.phone} - 99 Old Rd, Tampa, FL 33601` });
+      expect(otherAddress.status).toBe('unverified');
+    });
+
+    test.each(['n/a', 'NA', 'N / A', 'None', 'null', '-', '--', 'Not Available'])('"%s" is a placeholder', (value) => {
+      const r = listing(SARASOTA, { address: { streetAddress: '1450 Pine Warbler Pl', addressLocality: 'Sarasota', addressRegion: value, postalCode: value }, telephone: value });
+      expect(r.status).toBe('verified');
+    });
+
+    test('a real value that only looks short is still judged', () => {
+      const r = listing(SARASOTA, { address: { streetAddress: '1450 Pine Warbler Pl', addressLocality: 'Sarasota', addressRegion: 'GA', postalCode: '34236' }, telephone: '(941) 555-0142' });
+      expect(r.status).toBe('mismatched');
+      expect(fields(r)).toEqual(['phone', 'postal_code', 'region']);
+    });
+  });
+
   describe('street matching is on the FULL normalized street, never a partial', () => {
     const SARASOTA = WAVES_LOCATIONS.find((l) => l.id === 'sarasota');
     const VENICE = WAVES_LOCATIONS.find((l) => l.id === 'venice');

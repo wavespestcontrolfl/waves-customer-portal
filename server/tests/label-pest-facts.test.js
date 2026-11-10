@@ -1,4 +1,4 @@
-// GATE_PEST_LABEL_FACTS (owner 2026-10-24, "labels go"): which pests the
+// Pest label facts (owner 2026-10-24, "labels go"): which pests the
 // technician named today, and what a product's reviewed label list lets the
 // writer say about them. Synthetic notes only.
 

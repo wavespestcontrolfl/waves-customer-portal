@@ -155,9 +155,9 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, technici
     // off or no visit is named, so the answer is byte for byte as before.
     const visitKeys = {};
     const serviceId = typeof req.query.serviceId === 'string' ? req.query.serviceId : '';
-    // GATE_REVIEW_FIRST_ASK_LOCK: whether this visit's customer was never asked for a review (the
+    // Whether this visit's customer was never asked for a review (the
     // panel then shows "First review ask", locked on).
-    if (require('../config/feature-gates').reviewFirstAskLockLive() && serviceId) {
+    if (serviceId) {
       // A re-service visit stays off, as the completion's own rule does.
       const visit = await ReviewService.firstAskLockVisit(serviceId);
       visitKeys.firstReviewAsk = Boolean(visit) && await ReviewService.customerNeverAskedForReview(visit.customer_id);

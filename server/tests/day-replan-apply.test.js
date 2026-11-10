@@ -475,3 +475,22 @@ describe('repair of a committed day', () => {
     expect(w.syncMovedReminders).not.toHaveBeenCalled();
   });
 });
+
+describe('writeMoves: the initiator and reason code (booking make-room moves reuse the writer)', () => {
+  const move = (extra = {}) => ({ id: 'a', toStart: H(12), widthMin: 60, openEnd: false, ...extra });
+  const write = (w, extra = {}) => w.conn.transaction((trx) => applyInternals.writeMoves(trx, w.deps, { dateStr: DATE, moves: [move()], ...extra }));
+
+  test('a call without them logs day_replan, as before', async () => {
+    const w = plan4();
+    await write(w);
+    expect(w.logRows().map((l) => [l.initiated_by, l.reason_code])).toEqual([['day_replan', 'day_replan']]);
+  });
+
+  test('a custom initiator and reason code are logged; the window and the open end are written the same way', async () => {
+    const w = plan4();
+    const written = await write(w, { initiator: 'booking_make_room', reasonCode: 'booking_make_room', moves: [move({ openEnd: true })] });
+    expect(w.logRows().map((l) => [l.initiated_by, l.reason_code, l.new_window])).toEqual([['booking_make_room', 'booking_make_room', '12:00']]);
+    expect(written).toEqual([expect.objectContaining({ id: 'a', start: '12:00', end: '13:00' })]);
+    expect(w.rowWrites().find((u) => 'window_start' in u.patch).patch).toMatchObject({ window_start: '12:00', window_end: null });
+  });
+});

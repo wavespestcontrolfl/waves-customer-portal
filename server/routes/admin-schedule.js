@@ -16,7 +16,6 @@ const { MISTING_SERVICE_CATALOG_KEY: MISTING_SERVICE_KEY, MISTING_REFILL_CATALOG
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
-const { pestReportVoiceLive, pestQuietVisitLive } = require('../config/feature-gates');
 const { specialtyReportVoiceLive, techWorkDaysLive } = require('../config/feature-gates');
 const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive, reserviceAsksLive } = require('../config/feature-gates');
 const { isReserviceVisit } = require('../services/reservice-asks');
@@ -28082,17 +28081,14 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       ? {
         ...reportPromptContext,
         writerRules: true,
-        pestVoice: pestReportVoiceLive(),
-        pestQuietVisit: pestQuietVisitLive(),
         specialtyVoice: specialtyReportVoiceLive(),
       }
       : reportPromptContext;
     const selectedSystemPrompt = selectReportCopyPrompt(systemPrompt, groundingServiceType, promptContext);
-    // GATE_PEST_QUIET_VISIT trims empty inputs under the one-voice pest prompt,
-    // and GATE_SPECIALTY_REPORT_VOICE the same lines under its one-voice prompt.
+    // The one-voice pest prompt trims empty inputs, and GATE_SPECIALTY_REPORT_VOICE
+    // the same lines under its one-voice prompt.
     const inputLines = observedAndReportedLines({
-      quiet: (promptContext.pestQuietVisit === true && pestVoiceServes(groundingServiceType, promptContext))
-        || specialtyVoiceServes(promptContext),
+      quiet: pestVoiceServes(groundingServiceType, promptContext) || specialtyVoiceServes(promptContext),
       observations: promptObs,
       stationObserved: stationLines.observed,
       interaction: customerInteraction,

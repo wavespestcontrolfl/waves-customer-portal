@@ -136,13 +136,14 @@ test.each([
   expect(mockBuildContext.mock.calls[1][0].writerRules).toBe(false);
 });
 
-test('gate on: pest gets the owner rules, the technician note block and no product names or rates', async () => {
+test('gate on: pest gets the one-voice prompt, the technician note block and no product names or rates', async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';
   const res = mkRes();
   await handler(mkReq({ serviceNotes: 'Ghost ants on the slider track. Treated the thresholds and the lanai side of the foundation.' }), res);
   expect(res.statusCode).toBe(200);
   const call = mockProvider.mock.calls[0][0];
-  expect(call.system).toContain(OWNER_RULES);
+  expect(call.system).toContain('# pest_report_voice_v2');
+  expect(call.system).not.toContain(OWNER_RULES);
   expect(call.text).toContain(TECHNICIAN_NOTE_HEADER);
   expect(call.text).toContain('Products applied: 1 recorded. Names, amounts and rates are withheld on purpose');
   expect(call.text).not.toContain('Taurus');
@@ -525,7 +526,7 @@ describe('booked reason', () => {
     expect(text).toContain('BOOKED REASON (why the customer booked this visit, typed on the re-service page');
     expect(text).toContain('Reason: Ants on the kitchen counter again.');
     expect(text).not.toMatch(/Gate code|4821/);
-    expect(system).toContain('CROSS-SERVICE MODIFIER — CALLBACK / RESERVICE');
+    expect(system).toContain('THIS VISIT IS A RE-SERVICE. Follow A RE-SERVICE above.');
   });
 
   test('gate off: the booked reason stays unread', async () => {
@@ -829,31 +830,19 @@ describe('a rejected draft is repaired, not written blind again', () => {
   });
 });
 
-// GATE_PEST_QUIET_VISIT (owner 2026-10-24): under the one-voice pest prompt an
-// empty field sends no line, the sheet's customer-home choice is left out (it
-// opens on "home — spoke with them" every time), and the writer gets
-// pest_report_voice_v2. Off, or without the voice prompt, every line stays.
-describe('GATE_PEST_QUIET_VISIT', () => {
+// Owner 2026-10-24: under the one-voice pest prompt an empty field sends no
+// line, the sheet's customer-home choice is left out (it opens on "home —
+// spoke with them" every time), and the writer gets pest_report_voice_v2.
+// Another writer keeps every line.
+describe('the quiet pest report', () => {
   const quietBody = (note) => ({
     serviceNotes: note, customerInteraction: 'Customer home — spoke with them', pestActivityRating: 1, fresh: true,
   });
   beforeEach(() => {
     process.env.GATE_REPORT_WRITER_RULES = 'true';
-    process.env.GATE_PEST_REPORT_VOICE = 'true';
-  });
-  afterEach(() => { delete process.env.GATE_PEST_REPORT_VOICE; delete process.env.GATE_PEST_QUIET_VISIT; });
-
-  test('off: the voice prompt keeps the empty lines and the customer-home line', async () => {
-    await handler(mkReq(quietBody('Quarterly. Sprayed around the outside of the house.')), mkRes());
-    const { system, text } = mockProvider.mock.calls[0][0];
-    expect(system).toContain('# pest_report_voice_v1');
-    expect(text).toContain('Observations: None noted');
-    expect(text).toContain('Customer interaction: Customer home — spoke with them');
-    expect(text).toContain('Customer concern (as reported, not a verified finding): None');
   });
 
-  test('on: the v2 prompt, and an empty field or the sheet setting sends no line', async () => {
-    process.env.GATE_PEST_QUIET_VISIT = 'true';
+  test('the v2 prompt, and an empty field or the sheet setting sends no line', async () => {
     const res = mkRes();
     await handler(mkReq(quietBody('Quarterly. Sprayed around the outside of the house.')), res);
     expect(res.statusCode).toBe(200);
@@ -863,8 +852,7 @@ describe('GATE_PEST_QUIET_VISIT', () => {
     expect(text).toContain('[OBSERVED BY TECHNICIAN]\nPest activity rating: 1/5');
   });
 
-  test('on: recorded observations and a concern still reach the writer', async () => {
-    process.env.GATE_PEST_QUIET_VISIT = 'true';
+  test('recorded observations and a concern still reach the writer', async () => {
     await handler(mkReq({
       ...quietBody('Quarterly. Swept the lanai screen.'), observations: ['Webs along the lanai screen'], customerConcern: 'Ants by the back door',
     }), mkRes());
@@ -874,18 +862,7 @@ describe('GATE_PEST_QUIET_VISIT', () => {
     expect(text).not.toContain('Customer interaction:');
   });
 
-  test('on without the voice prompt: the stacked pest writer keeps every line', async () => {
-    delete process.env.GATE_PEST_REPORT_VOICE;
-    process.env.GATE_PEST_QUIET_VISIT = 'true';
-    await handler(mkReq(quietBody('Quarterly. Treated the thresholds.')), mkRes());
-    const { system, text } = mockProvider.mock.calls[0][0];
-    expect(system).toContain(OWNER_RULES);
-    expect(text).toContain('Observations: None noted');
-    expect(text).toContain('Customer interaction: Customer home — spoke with them');
-  });
-
-  test('on: a remaining-service writer keeps every line', async () => {
-    process.env.GATE_PEST_QUIET_VISIT = 'true';
+  test('a remaining-service writer keeps every line', async () => {
     mockProfile = { serviceKey: 'rodent_trapping', findingsType: 'rodent_trapping' };
     mockServiceType = 'Rodent Trapping';
     await handler(mkReq(quietBody('Checked the traps in the garage.')), mkRes());
@@ -931,7 +908,7 @@ describe('GATE_SPECIALTY_REPORT_VOICE', () => {
     expect(text).toContain('Checked the traps in the garage.');
   });
 
-  test('on: recorded observations and a concern still reach the writer', async () => {
+  test('recorded observations and a concern still reach the writer', async () => {
     process.env.GATE_SPECIALTY_REPORT_VOICE = 'true';
     await handler(mkReq({
       ...body('Set traps in the attic.'), observations: ['Droppings along the attic hatch'], customerConcern: 'Scratching in the attic at night',
@@ -942,14 +919,15 @@ describe('GATE_SPECIALTY_REPORT_VOICE', () => {
     expect(text).not.toContain('Customer interaction:');
   });
 
-  test('on: a pest visit keeps its own writer and inputs', async () => {
+  test('on: a pest visit keeps its own one-voice writer and inputs', async () => {
     process.env.GATE_SPECIALTY_REPORT_VOICE = 'true';
     mockProfile = { serviceKey: 'pest_general_quarterly', findingsType: null };
     mockServiceType = 'Quarterly Pest Control Service';
     await handler(mkReq(body('Quarterly. Treated the thresholds.')), mkRes());
     const { system, text } = mockProvider.mock.calls[0][0];
     expect(system).not.toContain('# specialty_report_voice_v1');
-    expect(text).toContain('Customer interaction: Customer home — spoke with them');
+    expect(system).toContain('# pest_report_voice_v2');
+    expect(text).not.toContain('Customer interaction:');
   });
 
   test('on: a flea visit keeps the stacked writer', async () => {
@@ -980,7 +958,7 @@ test('the returned report writes german with a small g mid-sentence', async () =
   expect(report).toContain('If you still see german cockroaches in the kitchen, text or call us.');
 });
 
-// GATE_PEST_LABEL_FACTS reads which pests the technician named; the route
+// The pest label facts read which pests the technician named; the route
 // hands the context its own redacted note and observations to read them from.
 test('the grounding context gets the redacted note and observations as visitTexts', async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';

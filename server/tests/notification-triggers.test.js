@@ -355,19 +355,12 @@ describe('notification trigger push tags', () => {
     expect(withCustomer.link).toBe('/admin/customers?customerId=cust-789');
   });
 
-  test('GATE_PORTAL_ITEM_CLOSE: the add-service bell carries its request id and customer on top of its metadata; off, or with no request row, the build is exactly as before', () => {
+  test('the add-service bell carries its request id and customer on top of its metadata; with no request row, the build has none', () => {
     const payload = { customerName: 'Pat Fixture', suggestedService: 'Mosquito', previousTier: 'Bronze', customerId: 'cust-789', requestId: 'req-456' };
-    try {
-      delete process.env.GATE_PORTAL_ITEM_CLOSE;
-      expect(TRIGGER_REGISTRY.bundle_quote_requested.build(payload)).not.toHaveProperty('alert');
-      process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
-      expect(TRIGGER_REGISTRY.bundle_quote_requested.build(payload).alert).toEqual({ requestId: 'req-456', customerId: 'cust-789' });
-      // a self-applied bundle has no request row; a request with no customer cannot be judged
-      expect(TRIGGER_REGISTRY.bundle_quote_requested.build({ ...payload, requestId: undefined })).not.toHaveProperty('alert');
-      expect(TRIGGER_REGISTRY.bundle_quote_requested.build({ ...payload, customerId: undefined })).not.toHaveProperty('alert');
-    } finally {
-      delete process.env.GATE_PORTAL_ITEM_CLOSE;
-    }
+    expect(TRIGGER_REGISTRY.bundle_quote_requested.build(payload).alert).toEqual({ requestId: 'req-456', customerId: 'cust-789' });
+    // a self-applied bundle has no request row; a request with no customer cannot be judged
+    expect(TRIGGER_REGISTRY.bundle_quote_requested.build({ ...payload, requestId: undefined })).not.toHaveProperty('alert');
+    expect(TRIGGER_REGISTRY.bundle_quote_requested.build({ ...payload, customerId: undefined })).not.toHaveProperty('alert');
   });
 
   test('notification body sanitizer redacts customer contact details across triggers', () => {

@@ -18,11 +18,11 @@ const crypto = require('crypto');
 // The Queue can pick any other referrer. The row closes when the card is answered in the bell, the Queue or a
 // script (referral-inbound.js calls closeReferralInboundBell), and the sweep closes a row whose card left the
 // list for another reason. It rings once per card; a card that leaves the list and comes back rings again.
-// Dark behind GATE_REFERRAL_INBOUND_BELL, and only while GATE_REFERRAL_INBOUND_CONFIRM serves the Queue.
+// Dark behind GATE_REFERRAL_INBOUND_BELL.
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { referralInboundBellLive, referralInboundConfirmLive } = require('../config/feature-gates');
+const { referralInboundBellLive } = require('../config/feature-gates');
 const { composeAdminAlert, raiseAdminAlert, cutAtWord, MAX_WHY_CHARS, MAX_BUTTON_LABEL_CHARS } = require('./admin-alert-compose');
 const { fitAction, shortDateET, tidyName } = require('./admin-alert-names');
 const episodes = require('./admin-alert-episodes');
@@ -40,7 +40,6 @@ const CLOSE_RESOLUTIONS = {
   confirmed: 'Referrer confirmed',
   dismissed: 'Marked not a referral',
   gone: 'No longer waiting in Referrals → Queue',
-  queue_off: 'The Referrals Queue confirm step is off',
 };
 
 const keyFor = (customerId) => `${KEY_PREFIX}${customerId}`;
@@ -239,11 +238,6 @@ async function syncReferralInboundBells({ now = new Date() } = {}) {
   if (!referralInboundBellLive()) return { skipped: 'disabled' };
   const open = await episodes.openAdminAlertKeys(db, KEY_PREFIX);
   const tally = { raised: 0, unchanged: 0, closed: 0, failed: 0 };
-  if (!referralInboundConfirmLive()) {
-    // No card is served while the Queue's own gate is off: what is open closes.
-    tally.closed = Number(await episodes.closeAdminAlertKeys(db, open, 'referral_queue_off', { now, resolution: CLOSE_RESOLUTIONS.queue_off })) || 0;
-    return tally;
-  }
   // Every listed card, plus every open row: a row whose card is gone (or past the list's first 50) is read alone.
   const ids = new Set(open.map((key) => key.slice(KEY_PREFIX.length)).filter((id) => UUID_RE.test(id)));
   for (const card of await inbound.listInboundReferrals(db)) ids.add(String(card.customerId));
@@ -335,7 +329,7 @@ async function runButton({ row, item, technicianId }) {
 }
 
 const buttonHandler = {
-  live: () => referralInboundBellLive() && referralInboundConfirmLive(),
+  live: () => referralInboundBellLive(),
   run: runButton,
 };
 
