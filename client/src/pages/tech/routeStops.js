@@ -8,6 +8,10 @@ import { onSiteTimeOf } from '../../lib/on-site-time';
 // TERMINAL_ROW_STATUSES — keep the two in sync.
 export const TERMINAL_STATUSES = new Set(['completed', 'skipped', 'cancelled', 'no_show']);
 
+// Client copy of server/services/technician-visit-scope.js TECH_DEAD_ASSIGNMENT_STATUSES: a visit in one of these is no
+// longer the technician's to read on the server. A completed visit still is. Keep the two in sync.
+export const DEAD_ASSIGNMENT_STATUSES = new Set(['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show']);
+
 function stopKeyOf(service) {
   return service && service.visit && service.visit.id ? `visit:${service.visit.id}` : `row:${service.id}`;
 }

@@ -83,3 +83,17 @@ describe('FieldLeadModal with the gate on', () => {
     expect(posted.customerId).toBeUndefined();
   });
 });
+
+describe('FieldLeadModal opened by the estimate tool for a new person', () => {
+  it('opens the Neighbor form filled in and posts the prospect', async () => {
+    mockGateOn = true;
+    const prospect = { firstName: 'Pat', lastName: '', phone: '9415550100', address: '100 Sample St', city: '', zip: '34205' };
+    render(<FieldLeadModal service={{}} initialProspect={prospect} onClose={() => {}} />);
+    expect(screen.getByLabelText('First name')).toHaveValue('Pat');
+    expect(screen.getByLabelText('ZIP')).toHaveValue('34205');
+    pickService('Pest');
+    submit();
+    await waitFor(() => expect(posted).not.toBeNull());
+    expect(posted).toEqual({ leadServiceType: 'Pest', notes: '', urgency: 'normal', prospect });
+  });
+});
