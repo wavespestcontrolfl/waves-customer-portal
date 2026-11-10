@@ -200,7 +200,7 @@ export function RowInclusions({ items, collapsible = false }) {
 // count, else the single visit-bearing treatment row's, else (with no rows at
 // all) the cadence key's. Several rows of differing counts resolve to null
 // rather than advertising one number for all of them. Shared by the card's
-// cadence line and the monthly-average line (GATE_ESTIMATE_MONTHLY_AVERAGE).
+// cadence line and the monthly-average line.
 export function perApplicationVisitsForFrequency(frequency) {
   if (!frequency) return null;
   const CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
@@ -560,10 +560,10 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
         </div>
       ) : null}
 
-      {/* GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): a second, smaller
+      {/* Monthly average (owner 2026-10-20): a second, smaller
           line under the per-application price. The price above stays the
           price; this is an average of the year, never "$X/mo" as the price.
-          Absent (null) with the gate off, so the card is unchanged. */}
+          Absent (null) when the plan has no average, so the card is unchanged. */}
       {monthlyAverageShown ? (
         <div data-monthly-average-line="" style={{ fontSize: 14, fontWeight: 500, color: CUSTOMER_SURFACE.muted, marginTop: 6, fontVariantNumeric: 'tabular-nums' }}>
           {monthlyAverageLine}

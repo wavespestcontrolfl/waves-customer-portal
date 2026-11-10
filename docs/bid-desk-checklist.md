@@ -1,6 +1,6 @@
 # Bid Desk checklist
 
-Behind `GATE_BID_CHECKLIST` (dark; needs `GATE_BID_DESK`). Off, the Bid Desk works exactly as before. The gate row in `docs/gates-and-env.md` has the full contract; this page is the working guide.
+Part of the Bid Desk (`GATE_BID_DESK`). The row in `docs/gates-and-env.md` has the full contract; this page is the working guide.
 
 Nothing here is sent to a buyer, a general contractor or an agency. The only output is the admin bell.
 
@@ -46,7 +46,7 @@ An RFQ uses the quote rows and an ITN uses the RFP rows (same keys, so changing 
 
 `add=missing` after a type change adds the new type's stop checks and own rows after the lines already on the bid (positions only grow); the page shows them in position order.
 
-Routes (all under `/api/admin/bid-desk/:id/checklist`, 404 while the gate is off):
+Routes (all under `/api/admin/bid-desk/:id/checklist`):
 
 - `POST /start` with an optional `{ "type": "..." }` copies the template lines into the bid, once. A second press changes nothing. The type in the body is saved on the bid. `POST /start?add=missing` adds only template lines the bid does not carry; a line the operator archived still counts as carried and does not come back. A bid with no live lines counts as not started: a plain start inserts every template line the bid does not carry, so a custom line added and then removed never blocks it. A template line removed on purpose (archived) is not brought back; when every template line was removed, start adds nothing and answers `allRemoved` with a plain message the page shows. GET also returns `checklist_missing`, the number of template lines for the bid's type not carried; the page offers "Add missing lines for this type" whenever it is above 0.
 - `POST /` adds a custom line (`label`, optional `sourceText` = the quote or page from the solicitation, `notes`, `required`).
@@ -71,4 +71,4 @@ For all of them: the bid is not historical, its status is new or bid, a SAM.gov 
 
 ## Reading the page
 
-With the gate on, the detail panel shows Bid details, Estimate and proposal, Documents, Checklist and Submission record, and the list shows a progress chip such as 7/12. The list and detail replies carry `checklist_live: true` while the gate is on; without that key the page shows nothing new.
+The detail panel shows Bid details, Estimate and proposal, Documents, Checklist and Submission record, and the list shows a progress chip such as 7/12.

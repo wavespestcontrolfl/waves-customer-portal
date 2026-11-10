@@ -6,6 +6,12 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
   ...jest.requireActual('../services/auto-dispatch/eligibility'),
   isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
 }));
+// The reminders-off lock's own reads (auto-dispatch/reminder-off.js) have their own suite:
+// auto-dispatch-reminder-off-lock.test.js. This fake trx does not model them.
+jest.mock('../services/auto-dispatch/reminder-off', () => ({
+  ...jest.requireActual('../services/auto-dispatch/reminder-off'),
+  assertRemindersOn: jest.fn(async () => {}),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // The rebooker's keepStatus contract: the row lands the status its CAS matched.
@@ -916,6 +922,23 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     });
     // The explicit option is passed; the band stays the module default for the 24-hour leg.
     expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2', 's3'], expect.any(Date), undefined, { lock24h: true });
+  });
+
+  test('GATE_NIGHT_TOLD_LOCK (config.nightToldLock with nightLock24h): tiers siblings are frozen by a told time too; the option is passed only then', async () => {
+    const members = [primary, { id: 's2', status: 'pending' }, { id: 's3', status: 'confirmed' }];
+    const guard = (config) => makeMemberGuard({ service: SERVICE, best: BEST, config: { guardMode: 'tiers', ...config }, techChanged: false });
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set(['s3']) });
+    const trx = fakeTrx();
+    await expect(guard({ nightLock24h: true, nightToldLock: true })({ trx, members })).rejects.toMatchObject({
+      code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's3', message: expect.stringContaining('already told its time'),
+    });
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2', 's3'], expect.any(Date), undefined, { lock24h: true, toldLock: true });
+    // The told-lock reads nothing without nightLock24h, and nightLock24h alone is today's call.
+    routeTiers.loadReminderFreeze.mockResolvedValue({ failed: false, frozen: new Set() });
+    await guard({ nightLock24h: false, nightToldLock: true })({ trx: fakeTrx(), members }).catch(() => {});
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(expect.anything(), ['s2', 's3'], expect.any(Date));
+    await guard({ nightLock24h: true, nightToldLock: false })({ trx: fakeTrx(), members }).catch(() => {});
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(expect.anything(), ['s2', 's3'], expect.any(Date), undefined, { lock24h: true });
   });
 
   test('the primary is rechecked on the move transaction with a fresh row read (Codex #6055 r5, r7)', async () => {

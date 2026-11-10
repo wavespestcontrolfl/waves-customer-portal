@@ -2936,6 +2936,19 @@ function parseDateOnly(value, field) {
   return String(value).slice(0, 10);
 }
 
+// A payment plan's dates must not be in the past, and the first payment cannot come before the plan starts (the same rules
+// the Intelligence Bar card applies). Equal dates are fine. Both are YYYY-MM-DD strings, so they compare as text.
+function assertPaymentPlanDates(planStartDate, nextPaymentDate, today) {
+  const problem = (planStartDate < today && 'planStartDate cannot be in the past')
+    || (nextPaymentDate < today && 'nextPaymentDate cannot be in the past')
+    || (nextPaymentDate < planStartDate && 'nextPaymentDate cannot be before planStartDate');
+  if (!problem) return;
+  const err = new Error(problem);
+  err.statusCode = 400;
+  err.isOperational = true;
+  throw err;
+}
+
 // req.ibApprovedPayment is set only by recordPaymentFromBar (the Intelligence Bar card): the amount due the card showed, the
 // card's settlementFence (its invoice pin, held-report and annual-plan checks, run before the Stripe retirement and again under
 // the invoice row lock), and that the invoice is still
@@ -3689,6 +3702,7 @@ const paymentPlanCreateHandler = async (req, res, next) => {
 
     const planStartDate = parseDateOnly(body.planStartDate || body.plan_start_date || etDateString(), 'planStartDate');
     const nextPaymentDate = parseDateOnly(body.nextPaymentDate || body.next_payment_date, 'nextPaymentDate');
+    assertPaymentPlanDates(planStartDate, nextPaymentDate, etDateString());
     const paymentMethodId = body.paymentMethodId || body.payment_method_id || null;
     const notes = cleanOptionalText(body.notes || body.note, 500);
     const createdBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';

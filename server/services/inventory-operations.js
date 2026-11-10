@@ -16,6 +16,13 @@
  * movement -> claim-update) wrap both in ONE db.transaction. Omitted (every
  * other caller), behavior is byte-for-byte unchanged: a fresh db.transaction
  * is opened here exactly as before.
+ *
+ * options.idempotencyKey (adjustStock only): the portal's Manual Adjustment
+ * form sends one key per draft. A repeat send of the same draft (a double tap,
+ * or a retry after a lost reply) returns the movement that draft already saved
+ * and changes no stock; the same key with other values is refused (409). It is
+ * checked under the product lock, so two sends at once run one after the
+ * other and the second sees the first. Omitted, nothing changes.
  */
 const crypto = require('crypto');
 const Joi = require('joi');
@@ -165,10 +172,43 @@ async function previewStockAdjustment(productId, raw, options = {}) {
   return adjustmentPreview(await loadProduct(productId), input, options);
 }
 
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9_-]{8,100}$/;
+
+function idempotencyKeyFrom(options) {
+  const key = options.idempotencyKey;
+  if (key === undefined || key === null) return null;
+  if (typeof key !== 'string' || !IDEMPOTENCY_KEY.test(key)) throw inventoryError('Invalid idempotency key');
+  return key;
+}
+
+function adjustmentDigest(input) {
+  return crypto.createHash('sha256').update(JSON.stringify([input.movementType, input.quantity ?? null,
+    input.setTotal ?? null, input.unit ?? null, input.lotNumber || null, input.reason || null, input.note || null]))
+    .digest('base64url');
+}
+
+const adjustmentHref = product => `/admin/inventory?tab=products&search=${encodeURIComponent(product.name)}&productId=${product.id}`;
+
+// An earlier send of the same draft already saved this movement: answer with it and change nothing.
+async function savedAdjustment(trx, product, key, digest) {
+  const movement = await trx('product_inventory_movements').where({ product_id: product.id })
+    .whereRaw("metadata->>'idempotencyKey' = ?", [key]).first();
+  if (!movement) return null;
+  if (movement.metadata?.idempotencyDigest !== digest) {
+    throw inventoryError('This adjustment was already saved with other values. Check Movement History before you adjust again.', 409, 'idempotency_key_mismatch');
+  }
+  return { success: true, replayed: true, product, movement,
+    verification: { persisted: true, product_id: product.id, movement_id: movement.id, replayed: true }, href: adjustmentHref(product) };
+}
+
 async function adjustStock(productId, raw, options = {}) {
   const input = validated(adjustmentSchema, raw);
+  const idempotencyKey = idempotencyKeyFrom(options);
+  const digest = idempotencyKey && adjustmentDigest(input);
   const run = async (trx) => {
     const product = await loadProduct(productId, trx, true);
+    const replay = idempotencyKey && await savedAdjustment(trx, product, idempotencyKey, digest);
+    if (replay) return replay;
     const preview = adjustmentPreview(product, input, options);
     assertVersion(preview._version, options.expectedVersion);
     const plan = adjustmentPlan(product, input, options);
@@ -183,7 +223,8 @@ async function adjustStock(productId, raw, options = {}) {
       metadata: { source: options.source || 'admin_manual_adjustment', adjustedBy: options.actorId || null,
         reason: input.reason || null, note: input.note || null, delta: plan.delta, setTotal: input.setTotal ?? null,
         enteredQuantity: plan.enteredQuantity, enteredUnit: plan.enteredUnit, conversionConfidence: plan.conversionConfidence,
-        ...(options.extraMetadata || {}) },
+        ...(options.extraMetadata || {}),
+        ...(idempotencyKey ? { idempotencyKey, idempotencyDigest: digest } : {}) },
     }).returning('*');
     const saved = await trx('products_catalog').where({ id: productId }).first();
     if (!movement?.id || numberOrNull(saved?.inventory_on_hand) !== plan.stockAfter || saved.inventory_unit !== plan.inventoryUnit) {
@@ -191,7 +232,7 @@ async function adjustStock(productId, raw, options = {}) {
     }
     await clearStockShortfallAlert(trx, productId, plan.stockAfter, plan.inventoryUnit);
     return { success: true, product: updated, movement,
-      verification: { persisted: true, product_id: productId, movement_id: movement.id, stock_match: true }, href: `/admin/inventory?tab=products&search=${encodeURIComponent(product.name)}&productId=${productId}` };
+      verification: { persisted: true, product_id: productId, movement_id: movement.id, stock_match: true }, href: adjustmentHref(product) };
   };
   return options.trx ? run(options.trx) : db.transaction(run);
 }

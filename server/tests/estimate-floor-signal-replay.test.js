@@ -16,6 +16,7 @@ const {
   rawEngineInputs,
   estimateLawnFloorArmed,
   savedLawnCostPlusSignal,
+  savedLawnMinimumAfterDiscountSignal,
   lawnRowsShowFloorEnforcement,
   estimatePestFloorSignal,
   savedFloorReplaySignals,
@@ -57,7 +58,24 @@ describe('savedFloorReplaySignals — tri-state', () => {
     // re-arm every new estimate.
     expect(savedFloorReplaySignals({
       result: { lineItems: [{ service: 'lawn_care', minimumCollectedAnnualPrice: 900, costFloorAnnual: 900 }] },
-    })).toEqual({ lawnCostPlusList: false });
+    })).toEqual({ lawnCostPlusList: false, lawnMinimumPerVisitAfterDiscount: 0 });
+  });
+
+  it('lawn $55 minimum after discounts: stamped quotes keep it, older lawn quotes pin 0, no lawn pins nothing', () => {
+    // A quote priced under the rule replays with it.
+    expect(savedLawnMinimumAfterDiscountSignal({
+      result: { lineItems: [{ service: 'lawn_care' }], pricingMetadata: { lawnMinimumPerVisitAfterDiscount: 55 } },
+    })).toEqual({ lawnMinimumPerVisitAfterDiscount: 55 });
+    // A lawn quote saved before the rule (no stamp) keeps its old price: new quotes only.
+    expect(savedLawnMinimumAfterDiscountSignal({ result: { results: { lawn: [{ v: 9 }] } } }))
+      .toEqual({ lawnMinimumPerVisitAfterDiscount: 0 });
+    // No lawn priced: a lawn added later takes the live minimum.
+    expect(savedLawnMinimumAfterDiscountSignal({ result: { lineItems: [{ service: 'pest_control' }] } })).toEqual({});
+    // A posted value is not evidence.
+    expect(savedLawnMinimumAfterDiscountSignal({
+      engineInputs: { lawnMinimumPerVisitAfterDiscount: 55 },
+      result: { lineItems: [{ service: 'lawn_care' }] },
+    })).toEqual({ lawnMinimumPerVisitAfterDiscount: 0 });
   });
 
   it('cost-plus list: a stamp on a priced lawn replays as stamped, with its knob snapshot', () => {

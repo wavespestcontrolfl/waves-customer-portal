@@ -59,6 +59,7 @@ const { visitTimeElapsed } = require('../services/reschedule-eligibility');
 const visitPrep = require('../services/visit-prep');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const { recordPageView } = require('../services/customer-page-views');
+const { dayOnlyVisit, dayOnlyFields, shownSlotFor } = require('../services/time-display');
 
 // Token-keyed appointment data — never cacheable.
 router.use(noStore);
@@ -684,6 +685,32 @@ async function prepPhotosField(svc, state, visitUnknown) {
   }
 }
 
+// GATE_DAY_ONLY_PROMISE (part C1): the stop this row belongs to, for the day-only decision. A grouped stop is judged as
+// a whole (dayOnlyVisit): its members at its earliest start, the start the page and the calendar file show. Every link
+// to one stop then agrees. Ungrouped: no members, and the row is judged at its own start.
+function dayOnlyStop(visitInfo, members) {
+  return { members: Array.isArray(members) ? members : null, stopStart: visitInfo?.visit?.windowStart || null };
+}
+
+// GATE_DAY_ONLY_PROMISE (part C1): is this visit shown as day-only? When it is, the grouped stop's start (an hour
+// the page payload carries in service.visit) is blanked too. One read.
+async function blankDayOnlyVisit(svc, visitInfo, members) {
+  const dayOnly = await dayOnlyVisit(db, svc, dayOnlyStop(visitInfo, members));
+  if (dayOnly && visitInfo.visit) visitInfo.visit = { ...visitInfo.visit, windowStart: null };
+  return dayOnly;
+}
+
+// The page payload's hour fields. windowStart stays the ROW's own start: it pins the slot the confirm POST proves
+// (slotMatchesShown). The arrival promise is the VISIT's when grouped: the technician arrives for the stop. A day-only
+// visit has neither, plus day_only and the note (nothing is added otherwise).
+function appointmentTimeFields(svc, visitInfo, dayOnly) {
+  if (dayOnly) return { windowStart: null, arrivalWindow: null, ...dayOnlyFields(true) };
+  return {
+    windowStart: hhmm(svc.window_start),
+    arrivalWindow: arrivalWindowLabel(visitInfo.visit?.windowStart || hhmm(svc.window_start)),
+  };
+}
+
 router.get('/:token', async (req, res, next) => {
   if (!TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Not found' });
@@ -699,7 +726,11 @@ router.get('/:token', async (req, res, next) => {
     // until the lookup works (never a solo page over a possibly grouped stop).
     // `members` is internal (ICS verdict input) — stripped with visitUnknown
     // so the payload spread below never carries raw member rows.
-    const { visitUnknown, members: _visitMembers, ...visitInfo } = visitInfoRaw;
+    const { visitUnknown, members: visitMembers, ...visitInfo } = visitInfoRaw;
+    // GATE_DAY_ONLY_PROMISE (part C1): a day-only visit shows the date and no hour. The server blanks every hour field
+    // (an older client bundle then renders the date alone); the confirm POST fills the row's current start in for the
+    // blank echo (shownSlotFor). One read for this payload.
+    const dayOnly = await blankDayOnlyVisit(svc, visitInfo, visitMembers);
     // Grouped: the state is the STOP's (all members + the stop's window),
     // whichever member's link this is; ungrouped: the row's own.
     const { state, phase: livePhase } = visitUnknown ? { state: 'not_available', phase: null } : pageStateForGroup(svc, visitInfo);
@@ -723,8 +754,7 @@ router.get('/:token', async (req, res, next) => {
         // windowStart stays the ROW's own start — it pins the slot the
         // confirm POST proves (slotMatchesShown). The arrival promise is
         // the VISIT's when grouped: the technician arrives for the stop.
-        windowStart: hhmm(svc.window_start),
-        arrivalWindow: arrivalWindowLabel(visitInfo.visit?.windowStart || hhmm(svc.window_start)),
+        ...appointmentTimeFields(svc, visitInfo, dayOnly),
       },
       // Whether the .ics route would actually serve this visit (codex r33
       // P2): the page must not render an Add-to-calendar action whose
@@ -835,6 +865,17 @@ function icsStamp(date) {
   return `${date.toISOString().replace(/[-:]/g, '').split('.')[0]}Z`;
 }
 
+// A day-only visit's calendar entry: all day, with no hour (part C1).
+const ICS_DAY_ONLY_DESCRIPTION = "We'll text your arrival window the day before.";
+
+// DTSTART/DTEND for an all-day event on `date` (YYYY-MM-DD): the end date is exclusive, so it is the next day.
+function allDayEventLines(date) {
+  const compact = (d) => d.replace(/-/g, '');
+  const nextDay = new Date(`${date}T12:00:00Z`);
+  nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+  return [`DTSTART;VALUE=DATE:${compact(date)}`, `DTEND;VALUE=DATE:${compact(nextDay.toISOString().slice(0, 10))}`];
+}
+
 // Folds a content line to the 75-octet limit RFC 5545 requires; unfolded
 // long lines are the classic reason an .ics silently fails to import.
 function icsFold(line) {
@@ -887,6 +928,15 @@ router.get('/:token/calendar.ics', async (req, res, next) => {
     if (!startAt || Number.isNaN(startAt.getTime())) return res.status(404).json({ error: 'Not found' });
     const endAt = new Date(startAt.getTime() + ARRIVAL_PROMISE_MINUTES * 60000);
 
+    // GATE_DAY_ONLY_PROMISE (part C1): a visit the customer was told only the day for is an ALL-DAY event. The UID is the
+    // same one the timed event uses, so a later download (after the 24-hour text, with the hour) updates this entry.
+    // A grouped stop is judged as a whole (dayOnlyStop), so every member's link gives the same event.
+    const dayOnly = await dayOnlyVisit(db, svc, dayOnlyStop(visitInfo, visitInfo.members));
+    const when = dayOnly ? allDayEventLines(date) : [`DTSTART:${icsStamp(startAt)}`, `DTEND:${icsStamp(endAt)}`];
+    const description = dayOnly
+      ? ICS_DAY_ONLY_DESCRIPTION
+      : `Your technician arrives any time inside this 2-hour window. On service day we'll text you a live tracking link. Questions? (941) 297-5749`;
+
     const serviceLabel = calendarSummaryLabel(await resolveServiceLabel(svc), visitInfo);
     const lines = [
       'BEGIN:VCALENDAR',
@@ -902,12 +952,9 @@ router.get('/:token/calendar.ics', async (req, res, next) => {
       // same time.
       `UID:${calendarUid(svc, visitInfo)}@wavespestcontrol.com`,
       `DTSTAMP:${icsStamp(new Date())}`,
-      `DTSTART:${icsStamp(startAt)}`,
-      `DTEND:${icsStamp(endAt)}`,
+      ...when,
       `SUMMARY:${icsEscape(`Waves Pest Control - ${serviceLabel}`)}`,
-      `DESCRIPTION:${icsEscape(
-        `Your technician arrives any time inside this 2-hour window. On service day we'll text you a live tracking link. Questions? (941) 297-5749`
-      )}`,
+      `DESCRIPTION:${icsEscape(description)}`,
       'END:VEVENT',
       'END:VCALENDAR',
     ].map(icsFold);
@@ -973,7 +1020,10 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
     // whole router 404s while GATE_APPOINTMENT_PAGE is off), so there is
     // no older client to stay compatible with, and a confirm that cannot
     // prove which slot it meant is exactly the one to reject.
-    if (!slotMatchesShown(svc, req.body)) {
+    // GATE_DAY_ONLY_PROMISE (part C1): a day-only page shows no hour, so the client echoes none. shownSlotFor fills the
+    // row's CURRENT start in for that blank echo (the date must still match); every other body is compared as it came.
+    const shown = await shownSlotFor(db, svc, req.body, dayOnlyStop(preInfo, preInfo.members));
+    if (!slotMatchesShown(svc, shown)) {
       return res.status(409).json({
         error: 'This appointment just changed — please refresh.',
         code: 'CHANGED',
@@ -1000,7 +1050,7 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
       // confirms siblings at a slot nobody was shown.
       if (svc.visit_id) {
         let locked = null;
-        const ok = await underStopLock(svc, async (trx) => { locked = await confirmGroupedOrSolo(trx, svc, req.body); });
+        const ok = await underStopLock(svc, async (trx) => { locked = await confirmGroupedOrSolo(trx, svc, shown); });
         if (!ok) return res.status(409).json({ error: 'This appointment just changed — please refresh.', code: 'CHANGED' });
         // A visit_id with ONE live member is not grouped (local codex
         // audit): the page rendered single-row behavior, so the existing
@@ -1114,7 +1164,7 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
         // still belongs to svc.visit_id. The live member set must be the
         // size the page showed (membersMatchShown) — a mismatch rolls this
         // confirm back and reloads the page (CHANGED).
-        await membersMatchShown(trx, svc, req.body);
+        await membersMatchShown(trx, svc, shown);
         await confirmGroupedSiblings(trx, svc);
         aggregateConfirmed = await visitAllConfirmed(trx, svc.visit_id);
       }
@@ -1151,13 +1201,13 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
       const now = await db('scheduled_services')
         .where({ id: svc.id })
         .first('status', 'customer_confirmed', 'scheduled_date', 'window_start');
-      if (confirmRaceVerdict(now) === 'idempotent_success' && slotMatchesShown(now, req.body)) {
+      if (confirmRaceVerdict(now) === 'idempotent_success' && slotMatchesShown(now, shown)) {
         if (svc.visit_id) {
           // Grouped (local audit): the anchor alone proves nothing about the
           // visit — a dispatch-owned sibling may still be pending, or the
           // membership may have changed (which is what made the CAS miss).
           // Same contract as the other grouped paths, under the stop lock.
-          const grouped = await groupedAggregateUnderLock(svc, req.body);
+          const grouped = await groupedAggregateUnderLock(svc, shown);
           if (!grouped.ok) return res.status(409).json({ error: 'This appointment just changed — please refresh.', code: 'CHANGED' });
           // ONE live member is not grouped: the single-row race verdict
           // applies, on the LOCKED row (same as the already-confirmed path).

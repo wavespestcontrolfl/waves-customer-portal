@@ -279,6 +279,53 @@ async function isPersonPlacedVisit(input, db, opts = {}) {
   }
 }
 
+/**
+ * Did the CUSTOMER pick this visit's current slot? (GATE_DAY_ONLY_PROMISE, services/time-promise.js dayOnlyEligibility.)
+ * The same evidence as isPersonPlacedVisit, but only customer sources count: the newest slot-changing reschedule_log row
+ * was made by a CUSTOMER_INITIATORS source, or the visit carries a customer date exception newer than that row. A
+ * system or office placement is not a customer pick, so the customer keeps the day-only promise for it.
+ * A read error answers picked (fail closed): the customer keeps today's window copy.
+ */
+async function isCustomerPickedVisit(input, db, loadedRows = null) {
+  if (!input || !input.id) return { picked: false };
+  try {
+    const newestRows = loadedRows || await loadNewestSlotRows(db, input.id);
+    const newestAt = newestRows.length ? new Date(newestRows[0].created_at) : null;
+    const exceptionAt = input.date_exception === true && input.date_exception_at
+      && CUSTOMER_INITIATORS.has(String(input.date_exception_source || '')) ? new Date(input.date_exception_at) : null;
+    if (exceptionAt && !Number.isNaN(exceptionAt.getTime()) && (!newestAt || exceptionAt > newestAt)) return { picked: true };
+    const dateStr = toDateStr(input.scheduled_date);
+    const placement = newestRows.find((r) => (!dateStr || toDateStr(r.new_date) === dateStr) && CUSTOMER_INITIATORS.has(r.initiated_by));
+    return { picked: Boolean(placement) };
+  } catch (err) {
+    return { picked: true, degraded: true, reason_description: `Could not read the move history: ${err.message}` };
+  }
+}
+
+/**
+ * The visit's NEWEST slot-changing reschedule_log rows (every row of the newest move, which share its transaction's
+ * created_at), chosen entirely in SQL: created_at has microsecond precision and a JS Date keeps only milliseconds, so the
+ * timestamp never round-trips through JS as a key. Each row also carries `after_intent`: whether it is NEWER than the visit's
+ * customer_asked_time_at (compared in SQL, so the microseconds and the tz-less created_at both compare exactly; NULL when the
+ * intent has no time), which is how time-promise.js currentIntent decides whether a recorded intent is stale. The ONE move
+ * history read for isCustomerPickedVisit and for the intent. Throws on a failed read.
+ */
+async function loadNewestSlotRows(db, serviceId, { withIntent = false } = {}) {
+  const query = db('reschedule_log')
+    .where('scheduled_service_id', serviceId)
+    .whereNotNull('new_date')
+    .whereRaw(SLOT_CHANGED_SQL)
+    .whereRaw(`created_at = (SELECT max(r2.created_at) FROM reschedule_log r2
+        WHERE r2.scheduled_service_id = reschedule_log.scheduled_service_id
+          AND r2.new_date IS NOT NULL
+          AND (r2.original_date IS DISTINCT FROM r2.new_date OR r2.original_window IS DISTINCT FROM r2.new_window))`);
+  return withIntent
+    ? query.select('created_at', 'new_date', 'initiated_by',
+      db.raw(`reschedule_log.created_at > (SELECT s.customer_asked_time_at FROM scheduled_services s
+        WHERE s.id = reschedule_log.scheduled_service_id) AS after_intent`))
+    : query.select('created_at', 'new_date', 'initiated_by');
+}
+
 module.exports = {
-  isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit, VALID_STATUSES, SLOT_CHANGED_SQL,
+  isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit, isCustomerPickedVisit, loadNewestSlotRows, CUSTOMER_INITIATORS, VALID_STATUSES, SLOT_CHANGED_SQL,
 };

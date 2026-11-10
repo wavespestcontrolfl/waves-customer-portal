@@ -81,7 +81,8 @@ import {
 //   refund-error. Watch for decorative misuse.
 import { useState, useEffect, useCallback, useRef } from "react";
 import InvoiceAddressDialog from "../../components/admin/InvoiceAddressDialog";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
+import { registerLeaveGuard } from "../../lib/navigation-guard";
 import {
   ExternalLink,
   FileText,
@@ -206,6 +207,26 @@ async function adminUpload(path, formData) {
   }
   return r.json();
 }
+// Mirrors the server's payer rules so the row only offers what the server
+// accepts: payer invoices refuse card, credit, plan and Tap to Pay; an
+// invoice on a payer statement refuses manual payment (it is paid on the
+// statement); a "withdrawn to payer" invoice refuses every collection path.
+function invoicePayerActions(inv = {}, canCollect = false) {
+  const withdrawnToPayer = /^payer_billed:/.test(
+    String(inv.scheduled_send_error || ""),
+  );
+  const payerBilled = !!inv.payer_id || withdrawnToPayer;
+  const onPayerStatement = !!inv.payer_statement_id;
+  return {
+    payerBilled,
+    tapToPay: canCollect && !payerBilled,
+    applyCredit: canCollect && !payerBilled,
+    paymentPlan: canCollect && !payerBilled,
+    addPayment: canCollect && !onPayerStatement && !withdrawnToPayer,
+    statementLink: canCollect && onPayerStatement && !!inv.payer_id,
+  };
+}
+
 function annualPrepayInvoiceLabel(inv = {}) {
   const status = String(inv.annual_prepay_status || "").toLowerCase();
   if (!status) return null;
@@ -1042,12 +1063,18 @@ export function buildInvoiceListParams({
   }
   return params;
 }
+// One wording for every way out of a create/edit form with unsaved work.
+const confirmDiscardBuilder = () =>
+  window.confirm("Discard your unsaved invoice changes?");
+
 export default function AdminInvoicesPage() {
   const [tab, setTab] = useState("list");
   const [stats, setStats] = useState(null);
   const [statsLoading, setStatsLoading] = useState(true);
   const [statsError, setStatsError] = useState(false);
   const [builderPending, setBuilderPending] = useState(false);
+  // True while the open create/edit form holds work that is not saved yet.
+  const [builderDirty, setBuilderDirty] = useState(false);
   const statsRequestRef = useRef(0);
   const [toast, setToast] = useState("");
   const [toastTone, setToastTone] = useState("ok");
@@ -1093,6 +1120,62 @@ export default function AdminInvoicesPage() {
     );
   };
   useEffect(() => () => clearTimeout(toastTimerRef.current), []);
+  // While the form holds unsaved work, every way off this page asks first,
+  // like the header's "Invoice list" button: a same-tab link (sidebar, tab
+  // bar, page finder), browser Back/Forward, sign-out and app alert taps (the
+  // shared registry in lib/navigation-guard.js), and a reload or tab close.
+  // Same capture-phase link and history pattern as EstimateToolViewV2. Another
+  // URL of this page keeps the form mounted, so it never asks; a link to
+  // another site gets only the browser's own leave prompt.
+  useEffect(() => {
+    if (!builderDirty) return undefined;
+    const pagePath = window.location.pathname;
+    const beforeUnload = (event) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const guardLink = (event) => {
+      const link = event.target.closest?.("a[href]");
+      if (!link || link.target === "_blank" || link.hasAttribute("download")) return;
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      if (link.origin !== window.location.origin || link.pathname === pagePath) return;
+      if (confirmDiscardBuilder()) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    // BrowserRouter stamps an index on each history entry, so a declined
+    // Back/Forward steps back to this entry before the router's own popstate
+    // listener can unmount the form.
+    let entryIndex = window.history.state?.idx;
+    let restoring = false;
+    const guardHistory = (event) => {
+      if (restoring) {
+        restoring = false;
+        event.stopImmediatePropagation();
+        return;
+      }
+      const nextIndex = event.state?.idx;
+      if (!Number.isInteger(entryIndex) || !Number.isInteger(nextIndex) || entryIndex === nextIndex) return;
+      // The browser has already moved to the popped-to URL here.
+      if (window.location.pathname === pagePath || confirmDiscardBuilder()) {
+        entryIndex = nextIndex;
+        return;
+      }
+      event.stopImmediatePropagation();
+      restoring = true;
+      window.history.go(entryIndex - nextIndex);
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    window.addEventListener("popstate", guardHistory, true);
+    document.addEventListener("click", guardLink, true);
+    const unregister = registerLeaveGuard(confirmDiscardBuilder);
+    return () => {
+      window.removeEventListener("beforeunload", beforeUnload);
+      window.removeEventListener("popstate", guardHistory, true);
+      document.removeEventListener("click", guardLink, true);
+      unregister();
+    };
+  }, [builderDirty]);
   return (
     <UiSurface
       density="comfortable"
@@ -1110,6 +1193,7 @@ export default function AdminInvoicesPage() {
           onClick: () => {
             if (builderPending) return;
             if (tab === "create") {
+              if (builderDirty && !confirmDiscardBuilder()) return;
               setEditInvoice(null);
               setTab("list");
             } else {
@@ -1160,6 +1244,7 @@ export default function AdminInvoicesPage() {
           showToast={showToast}
           editInvoice={editInvoice}
           onPendingChange={setBuilderPending}
+          onDirtyChange={setBuilderDirty}
           onCreated={(opts) => {
             loadStats();
             setEditInvoice(null);
@@ -2613,6 +2698,7 @@ function InvoiceList({
                   inv.status,
                 );
                 const depositApplied = invoiceDepositCreditTotal(lineItems);
+                const payerActions = invoicePayerActions(inv, canCollect);
                 return (
                   <div
                     key={inv.id}
@@ -2898,7 +2984,7 @@ function InvoiceList({
                               Copy link
                             </Button>
                           )}
-                          {canCollect && (
+                          {payerActions.tapToPay && (
                             <Button
                               onClick={async () => {
                                 try {
@@ -2945,7 +3031,7 @@ function InvoiceList({
                           {isAdminUser &&
                             canCollect &&
                             cardOnFile &&
-                            !inv.payer_id && (
+                            !payerActions.payerBilled && (
                               <Button
                                 onClick={() => setCardOnFileInvoice(inv)}
                                 title="Charge the customer's saved card or bank on file — collects now, no send needed"
@@ -2960,7 +3046,26 @@ function InvoiceList({
                                 Charge card on file
                               </Button>
                             )}
-                          {canCollect && (
+                          {payerActions.statementLink && (
+                            <Link
+                              to={`/admin/payers?payer=${encodeURIComponent(inv.payer_id)}`}
+                              title="Billed on the payer's monthly statement — record the payment there"
+                              style={{
+                                textDecoration: "none",
+                                display: "inline-flex",
+                                alignItems: "center",
+                              }}
+                              className={cn(
+                                buttonStyles({
+                                  variant: "secondary",
+                                  density: "comfortable",
+                                }),
+                              )}
+                            >
+                              Record payment on the payer statement
+                            </Link>
+                          )}
+                          {payerActions.addPayment && (
                             <Button
                               onClick={() => setPaymentModalInvoice(inv)}
                               title="Record cash, check, Zelle, Venmo, or PayPal payment and close the invoice"
@@ -2975,7 +3080,7 @@ function InvoiceList({
                               Add payment
                             </Button>
                           )}
-                          {canCollect && (
+                          {payerActions.applyCredit && (
                             <Button
                               onClick={() => setApplyCreditInvoice(inv)}
                               title="Apply the customer's account credit — covers the invoice and marks it prepaid"
@@ -2990,7 +3095,8 @@ function InvoiceList({
                               Apply credit
                             </Button>
                           )}
-                          {canCollect && !inv.active_payment_plan && (
+                          {payerActions.paymentPlan &&
+                            !inv.active_payment_plan && (
                             <Button
                               onClick={() => setPaymentPlanModalInvoice(inv)}
                               title="Create a payment plan and send the confirmation email"
@@ -6177,6 +6283,21 @@ function addDaysDateInput(dateString, days) {
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
 }
+// One message when the plan dates cannot be used, else "". Dates are YYYY-MM-DD, so they compare as text; `today` is Eastern.
+// The server enforces the same rules.
+function planDateProblem({ today, planStartDate, nextPaymentDate }) {
+  if (planStartDate && planStartDate < today) return "Start date cannot be in the past.";
+  if (nextPaymentDate && nextPaymentDate < today) return "Next payment cannot be in the past.";
+  if (planStartDate && nextPaymentDate && nextPaymentDate < planStartDate) {
+    return "Next payment cannot be before the start date.";
+  }
+  return "";
+}
+
+function laterDate(a, b) {
+  return b && b > a ? b : a;
+}
+
 function PaymentPlanModal({
   invoice,
   isMobile,
@@ -6212,8 +6333,9 @@ function PaymentPlanModal({
     Number.isFinite(amount) &&
     amount > 0 &&
     Math.round(amount * 100) <= Math.round(owed * 100);
+  const dateProblem = planDateProblem({ today: startDate, planStartDate, nextPaymentDate });
   const createDisabled =
-    saving || !validAmount || !nextPaymentDate || !planStartDate;
+    saving || !validAmount || !nextPaymentDate || !planStartDate || Boolean(dateProblem);
   const createPlan = async () => {
     if (savingRef.current) return;
     if (createDisabled) return;
@@ -6329,6 +6451,7 @@ function PaymentPlanModal({
               <Input
                 type="date"
                 value={planStartDate}
+                min={startDate}
                 onChange={(e) => setPlanStartDate(e.target.value)}
                 disabled={saving}
               />
@@ -6339,12 +6462,18 @@ function PaymentPlanModal({
               <Input
                 type="date"
                 value={nextPaymentDate}
+                min={laterDate(startDate, planStartDate)}
                 onChange={(e) => setNextPaymentDate(e.target.value)}
                 disabled={saving}
               />
             </Field>
           </div>
         </div>
+        {dateProblem && (
+          <div className="text-alert-fg text-ui-body" role="alert">
+            {dateProblem}
+          </div>
+        )}
         <Field label={<>Note (optional)</>} className="min-w-0">
           <Textarea
             value={notes}
@@ -6417,6 +6546,7 @@ function CreateInvoice({
   editInvoice,
   isMobile,
   onPendingChange,
+  onDirtyChange,
 }) {
   const [discountsLoading, setDiscountsLoading] = useState(true);
   const [discountsError, setDiscountsError] = useState("");
@@ -6611,6 +6741,42 @@ function CreateInvoice({
     onPendingChange(saving || aiNotesLoading || aiMessageLoading);
     return () => onPendingChange(false);
   }, [saving, aiNotesLoading, aiMessageLoading, onPendingChange]);
+  // Unsaved work = the editable fields differ from how the form looked right
+  // after mount. Only mount effects fill those fields without the operator
+  // (the edit prefill, the create-mode line cleanup), and their updates land in
+  // the same re-render as `draftReady`, so the baseline is taken there — before
+  // anyone can type, and never waiting on a slow fetch. Later loads (discounts,
+  // properties in edit mode, searches) do not write these fields.
+  const draftSnapshot = JSON.stringify([
+    selectedCustomer,
+    selectedService,
+    serviceDate,
+    lineItems,
+    notes,
+    emailMessage,
+    title,
+    sendTiming,
+    sendCustomAt,
+    dueTiming,
+    dueCustomDate,
+    requestReview,
+    reviewTiming,
+    reviewCustomAt,
+    queuedAttachments.map((f) => [f.name, f.size, f.lastModified]),
+  ]);
+  const draftBaselineRef = useRef(null);
+  const [draftReady, setDraftReady] = useState(false);
+  useEffect(() => { setDraftReady(true); }, []);
+  // The schedule-retry panel shows only after the invoice row exists, so the
+  // form holds nothing left to lose there.
+  const draftSaved = !!pendingScheduleInvoice;
+  useEffect(() => {
+    if (!draftReady) return;
+    if (draftBaselineRef.current === null)
+      draftBaselineRef.current = draftSnapshot;
+    onDirtyChange(!draftSaved && draftBaselineRef.current !== draftSnapshot);
+  }, [draftReady, draftSaved, draftSnapshot, onDirtyChange]);
+  useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
   useEffect(() => {
     let alive = true;
     setDiscountsLoading(true);
@@ -9256,6 +9422,7 @@ function CreateInvoice({
             >
               <Field className="min-w-0" label="Notes (optional)">
                 <Textarea
+                  data-own-mic="true"
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                   rows={2}
@@ -9320,6 +9487,7 @@ function CreateInvoice({
               >
                 <Field className="min-w-0" label="Email message (optional)">
                   <Textarea
+                    data-own-mic="true"
                     value={emailMessage}
                     onChange={(e) =>
                       setEmailMessage(e.target.value.slice(0, 800))

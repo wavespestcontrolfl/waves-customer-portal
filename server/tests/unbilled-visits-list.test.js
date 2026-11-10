@@ -68,20 +68,27 @@ describe('the list', () => {
   });
 
   test('the next step says what the office does with each visit', () => {
-    const [plain, review, noRecord, voided, elsewhere] = listItems(pageList({
+    const [plain, review, noRecord, voided, elsewhere, prepay, prepayNoRecord] = listItems(pageList({
       leaks: [
         visit({ scheduled_service_id: 'a', completed_at: '2026-10-01T15:00:00Z' }),
         visit({ scheduled_service_id: 'c', completed_at: '2026-10-03T15:00:00Z', billable: false }),
         visit({ scheduled_service_id: 'd', completed_at: '2026-10-04T15:00:00Z', voided_invoice_number: 'WPC-TEST-0001' }),
         visit({ scheduled_service_id: 'e', completed_at: '2026-10-05T15:00:00Z', billed_elsewhere_invoice_number: 'WPC-TEST-0002' }),
       ],
-      needsReview: [visit({ scheduled_service_id: 'b', completed_at: '2026-10-02T15:00:00Z' })],
+      needsReview: [
+        visit({ scheduled_service_id: 'b', completed_at: '2026-10-02T15:00:00Z' }),
+        visit({ scheduled_service_id: 'f', completed_at: '2026-10-06T15:00:00Z', prepay_invoice_number: 'WPC-TEST-0003' }),
+        visit({ scheduled_service_id: 'g', completed_at: '2026-10-07T15:00:00Z', prepay_invoice_number: 'WPC-TEST-0003', billable: false }),
+      ],
     }));
     expect(nextStepWords(plain)).toBe('bill or mark free');
     expect(nextStepWords(review)).toBe('check, then bill or mark free');
     expect(nextStepWords(noRecord)).toBe('finish its completion first');
     expect(nextStepWords(voided)).toBe('bill or mark free; invoice WPC-TEST-0001 was voided');
     expect(nextStepWords(elsewhere)).toBe('bill or mark free; it was marked billed on WPC-TEST-0002, which is no longer live');
+    // owner 2026-11-06 "fix": a visit an unpaid prepay bill covers is recorded on that bill, never billed again
+    expect(nextStepWords(prepay)).toBe('prepay bill WPC-TEST-0003 covers it, so mark it billed elsewhere on that bill');
+    expect(nextStepWords(prepayNoRecord)).toBe('finish its completion first');
   });
 
   test('several visits: one rule-clean Billing bell that opens Billing recovery, the list in the detail', () => {
@@ -130,6 +137,35 @@ describe('the list', () => {
       expect(alert.headline).toBe('Billing — bill or mark free 1 unbilled visit');
       expect(alert.why).toBe('One visit done Oct 23 has no invoice; $97.00 is not billed.');
     }
+  });
+
+  test('a visit an unpaid prepay bill covers: the bell asks to mark it billed on that bill, never to bill it', () => {
+    const prepay = (over = {}) => visit({ prepay_invoice_number: 'WPC-TEST-0003', completed_at: '2026-11-05T15:00:00Z', ...over });
+    const short = composeAdminAlert(composeList(listItems(pageList({ needsReview: [prepay({ customer: 'Al Test', service_type: 'Pest Control' })] }))).spec);
+    expect(short.headline).toBe("Billing — mark Al Test's visit billed on its prepay bill");
+    expect(short.why).toBe("Al Test's Pest Control on Nov 5 has no invoice of its own; prepay bill WPC-TEST-0003 covers it.");
+
+    // a longer name keeps the shorter ask, and a why the rule cannot carry drops the name
+    const one = composeList(listItems(pageList({ needsReview: [prepay()] })));
+    const alert = composeAdminAlert(one.spec);
+    expect(alert.headline).toBe("Billing — mark Pat Synthetic's visit billed elsewhere");
+    expect(alert.why).toBe('One visit done Nov 5 has no invoice of its own; prepay bill WPC-TEST-0003 covers it.');
+    expect(one.detail.split('\n').slice(2)).toEqual([
+      'Pat Synthetic · Quarterly Pest Control Service · done Nov 5 · $97.00 · prepay bill WPC-TEST-0003 covers it, so mark it billed elsewhere on that bill',
+      'Open Billing recovery to bill each visit, mark it free, or mark it billed elsewhere on its prepay bill.',
+    ]);
+
+    // every visit on a prepay bill: the count asks for the prepay records and the why names no unbilled money
+    const two = composeAdminAlert(composeList(listItems(pageList({
+      needsReview: [prepay({ scheduled_service_id: 'a' }), prepay({ scheduled_service_id: 'b', prepay_invoice_number: 'WPC-TEST-0004' })],
+    }))).spec);
+    expect(two.headline).toBe('Billing — mark 2 visits billed on their prepay bills');
+    expect(two.why).toBe('2 visits have no invoice of their own; their prepay bills cover them, and the oldest was done Nov 5.');
+
+    // a list with any visit to bill keeps the plain ask and money
+    const mixed = composeAdminAlert(composeList(listItems(pageList({ leaks: [visit({ scheduled_service_id: 'c' })], needsReview: [prepay({ scheduled_service_id: 'a' })] }))).spec);
+    expect(mixed.headline).toBe('Billing — bill or mark free 2 unbilled visits');
+    expect(mixed.why).toBe('2 visits have no invoice, $194 in all; the oldest was done Oct 20.');
   });
 
   test('a long list stays rule-clean and the detail names how many more there are', () => {

@@ -166,11 +166,14 @@ postgres('termite renewal invoices — the Bill-To fence through pay-link handof
     await db('invoices').where({ id: plain.invoiceId }).update({ status: 'sending', send_claim_token: randomUUID() });
     expect(await inFlight({ customerId: renewal.customerId })).toBe(true);
     expect(await inFlight({ payerId: inactivePayer })).toBe(true);
-    // A standalone invoice's live send claim is the fence too (#6117 r8 P1). A stale claim (no write
-    // for 10 minutes) is not, so a stuck row never blocks a Bill-To change for good.
+    // A standalone invoice's live send claim is the fence too (#6117 r8 P1). The Bill-To change also moves
+    // an invoice that rides no visit (GATE_BILL_TO_NO_VISIT_INVOICES, removed: always on), so a STALE claim
+    // (no write for 10 minutes) still fences it through the linked rules: withdrawing it would turn a send
+    // the provider may have accepted into a plain draft and lose its delivery review. Stale-claim recovery
+    // (processScheduledSends) parks the row, and the change goes through after that.
     expect(await inFlight({ customerId: plain.customerId })).toBe(true);
     await db('invoices').where({ id: plain.invoiceId }).update({ updated_at: new Date(Date.now() - 11 * 60 * 1000) });
-    expect(await inFlight({ customerId: plain.customerId })).toBe(false);
+    expect(await inFlight({ customerId: plain.customerId })).toBe(true);
 
     await db('invoices').where({ id: renewal.invoiceId }).update({ status: 'processing', send_claim_token: null, stripe_payment_intent_id: 'pi_synthetic_clearing' });
     expect(await inFlight({ customerId: renewal.customerId })).toBe(true);

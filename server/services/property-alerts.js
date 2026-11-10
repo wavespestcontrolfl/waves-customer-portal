@@ -36,7 +36,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, wateringCatchupLive } = require('../config/feature-gates');
 const { getAreaRainfall } = require('./lawn-water-area');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
@@ -214,19 +214,48 @@ async function weeklyPlanCandidates({ now = new Date() } = {}) {
 }
 
 // Keep a valid weekly plan authoritative all week. Candidates are read daily
-// to suppress competing advisories, but only Monday can deliver the push.
+// to suppress competing advisories, but only Monday can deliver the push
+// (Tuesday and Wednesday too with GATE_WATERING_CATCHUP, for a safe plan).
 const RULES = [weeklyPlanCandidates, rainRuleCandidates, reassuranceRuleCandidates];
+
+const DAY_MS = 24 * 3600 * 1000;
+
+// ET days the weekly-plan push may go out on the daily 10:05 run. Monday always.
+// GATE_WATERING_CATCHUP (owner 2026-11-06 "jobs 1-6"): Tuesday and Wednesday too, so
+// a lost Monday tick does not lose the week's push. The ledger key blocks a repeat.
+function weeklyPlanDeliveryDay(now) {
+  const { dayOfWeek } = etParts(now);
+  return dayOfWeek === 1 || ((dayOfWeek === 2 || dayOfWeek === 3) && wateringCatchupLive());
+}
+
+// A push after Monday must never tell a customer to water on a day that has passed.
+// The plan names "your permitted watering day(s)", never a weekday: the order on file
+// carries only a count of days (legalMaxEvents = maxDaysPerWeek), and which days an
+// address may water is not on file. The weekly email stops sending a "this week" plan
+// after Monday noon for the same reason. Two plans name no day that can be gone:
+// - 0 permitted days: "no lawn watering" (a hold, restriction_prohibits);
+// - every day permitted (7): any day left is a permitted day, so the plan holds while
+//   the plan week has a day left for each of its runs.
+// A 1- to 6-day order stays Monday-only. A missing field fails closed.
+function latePlanNamesNoPassedDay(plan, now) {
+  const legalDays = plan.legalMaxEvents;
+  if (legalDays === 0) return true;
+  if (legalDays !== 7) return false;
+  const daysLeft = Math.round((Date.parse(`${plan.validThrough}T12:00:00Z`) - Date.parse(`${etDateString(now)}T12:00:00Z`)) / DAY_MS) + 1;
+  return Number.isInteger(plan.events) && plan.events <= daysLeft;
+}
 
 async function weeklyPlanStillCurrent(candidate, { now = new Date(), knex = db } = {}) {
   const { dayOfWeek, hour } = etParts(now);
-  if (!appPlanEnabled() || !gateEnvValue('GATE_PROPERTY_ALERTS') || dayOfWeek !== 1 || hour < 8 || hour >= 20) return false;
+  if (!appPlanEnabled() || !gateEnvValue('GATE_PROPERTY_ALERTS') || !weeklyPlanDeliveryDay(now) || hour < 8 || hour >= 20) return false;
   const { inCustomerQuietHours } = require('./notification-dispatcher');
   const prefs = await knex('notification_prefs').where({ customer_id: candidate.customerId })
     .first('weather_alerts', 'quiet_hours_start', 'quiet_hours_end');
   if (prefs && (prefs.weather_alerts === false || inCustomerQuietHours(prefs, now))) return false;
   const plan = await loadCustomerWateringPlan(candidate.customerId, { now });
   return plan?.notificationEligible === true
-    && plan.weekEnding === candidate.payload.weekEnding && plan.availableAt === candidate.payload.availableAt;
+    && plan.weekEnding === candidate.payload.weekEnding && plan.availableAt === candidate.payload.availableAt
+    && (dayOfWeek === 1 || latePlanNamesNoPassedDay(plan, now));
 }
 
 // ---------------------------------------------------------------------------
@@ -251,10 +280,13 @@ async function candidatePassesCaps(candidate, { now = new Date(), knex = db } = 
   const capMs = CROSS_RULE_CAP_DAYS * 24 * 3600 * 1000;
   const cooldownMs = candidate.cooldownDays * 24 * 3600 * 1000;
   for (const row of recent) {
-    // Monday's execution can drift by seconds (or cross a DST change).
-    // A completed prior calendar week must not cancel the next whole week.
+    // Monday's execution can drift by seconds (or cross a DST change), and with
+    // GATE_WATERING_CATCHUP a week's push can go out Tuesday or Wednesday. A push
+    // fired before this plan week began (on or before its weekEnding Sunday) belongs
+    // to an earlier week and must not cancel this one. On a Monday this is the same
+    // test as the old "on or before 7 days ago" for any Monday push.
     if (candidate.ruleKey === 'irrigation_weekly_plan' && row.rule_key === candidate.ruleKey
-      && etDateString(new Date(row.fired_at)) <= etDateString(addETDays(now, -CROSS_RULE_CAP_DAYS))) continue;
+      && etDateString(new Date(row.fired_at)) <= candidate.payload.weekEnding) continue;
     const age = now.getTime() - new Date(row.fired_at).getTime();
     if (age < capMs) return false;
     if (row.rule_key === candidate.ruleKey && age < cooldownMs) return false;
@@ -355,6 +387,7 @@ async function runPropertyAlertsSweep({ now = new Date(), knex = db, maxAlerts =
 
   let candidates = [];
   let weeklyRuleFailed = false;
+  const failedRules = [];
   for (const rule of RULES) {
     try {
       candidates.push(...await rule({ now, knex }));
@@ -362,8 +395,14 @@ async function runPropertyAlertsSweep({ now = new Date(), knex = db, maxAlerts =
       if (rule === weeklyPlanCandidates && appPlanEnabled()) weeklyRuleFailed = true;
       // One rule's failure never blocks the others.
       logger.warn(`[property-alerts] rule failed (${rule.name}): ${err.message}`);
+      failedRules.push(rule.name);
     }
   }
+  // Thrown after the sweep's last step so job_health records a failed rule
+  // read (runExclusive records only a throwing body); delivery is unchanged.
+  const throwIfRuleFailed = () => {
+    if (failedRules.length > 0) throw new Error(`property-alerts sweep: ${failedRules.length} rule(s) failed (${failedRules.join(', ')})`);
+  };
   const weeklyCustomers = new Set(candidates.filter((c) => c.ruleKey === 'irrigation_weekly_plan').map((c) => c.customerId));
   candidates = candidates.filter((candidate) => candidate.ruleKey === 'irrigation_weekly_plan'
     || (!weeklyCustomers.has(candidate.customerId) && !(weeklyRuleFailed && candidate.ruleKey === 'rain_skip_irrigation')));
@@ -372,11 +411,12 @@ async function runPropertyAlertsSweep({ now = new Date(), knex = db, maxAlerts =
   if (!gateOn) {
     // Shadow mode: report what WOULD fire so the flip decision has data.
     logger.info(`[property-alerts] gate off — would evaluate ${candidates.length} candidate(s)`);
+    throwIfRuleFailed();
     return summary;
   }
 
   for (const candidate of candidates) {
-    if (candidate.ruleKey === 'irrigation_weekly_plan' && etParts(now).dayOfWeek !== 1) continue;
+    if (candidate.ruleKey === 'irrigation_weekly_plan' && !weeklyPlanDeliveryDay(now)) continue;
     if (summary.delivered >= maxAlerts) {
       // No silent caps: say what was dropped.
       logger.warn(`[property-alerts] run cap ${maxAlerts} reached — ${candidates.length - summary.delivered - summary.capped - summary.skipped} candidate(s) deferred to the next run`);
@@ -395,6 +435,7 @@ async function runPropertyAlertsSweep({ now = new Date(), knex = db, maxAlerts =
       logger.warn(`[property-alerts] candidate failed (${candidate.ruleKey}/${candidate.customerId}): ${err.message}`);
     }
   }
+  throwIfRuleFailed();
   return summary;
 }
 
@@ -427,6 +468,7 @@ module.exports = {
     reassuranceRuleCandidates,
     candidatePassesCaps,
     deliverAlert,
+    latePlanNamesNoPassedDay,
     RAIN_ALERT_INCHES,
     CHINCH_SEASON_MONTHS,
     CROSS_RULE_CAP_DAYS,

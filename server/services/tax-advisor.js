@@ -157,18 +157,36 @@ function normalizeTaxAlerts(report) {
   return degraded;
 }
 
+// A read that failed degrades to its empty value (the report still runs), but the
+// section is named so the stored report can say "could not be read" instead of
+// presenting it as empty. `gaps` is per run: the exported advisor is a shared instance.
+function noteGap(gaps, section, err, empty) {
+  logger.warn(`[TaxAdvisor] ${section} read failed: ${err.message}`);
+  if (!gaps.includes(section)) gaps.push(section);
+  return empty;
+}
+
+// Admin report text only: names the sections that came back unread.
+function withPartialNote(report, gaps) {
+  if (!gaps.length) return report;
+  const note = `Partial data: ${gaps.join(', ')} could not be read this week. Treat ${gaps.length === 1 ? 'that section' : 'those sections'} as unknown, not empty.`;
+  report.executive_summary = `${typeof report.executive_summary === 'string' ? report.executive_summary : ''} ${note}`.trim();
+  return report;
+}
+
 class TaxAdvisor {
 
   async generateWeeklyReport() {
     logger.info('[TaxAdvisor] Running weekly tax analysis...');
 
-    const snapshot = await this.gatherFinancialSnapshot();
-    const deadlines = await this.getUpcomingDeadlines();
-    const equipment = await this.getEquipmentSummary();
-    const expenses = await this.getExpenseSummary();
-    const taxRates = await this.getCurrentTaxRates();
-    const exemptions = await this.getExemptionStatus();
-    const procurement = await this.getProcurementSummary();
+    const gaps = [];
+    const snapshot = await this.gatherFinancialSnapshot(gaps);
+    const deadlines = await this.getUpcomingDeadlines(gaps);
+    const equipment = await this.getEquipmentSummary(gaps);
+    const expenses = await this.getExpenseSummary(gaps);
+    const taxRates = await this.getCurrentTaxRates(gaps);
+    const exemptions = await this.getExemptionStatus(gaps);
+    const procurement = await this.getProcurementSummary(gaps);
     const staff = await this.getStaffSummary();
 
     const analysisData = {
@@ -183,7 +201,7 @@ class TaxAdvisor {
     };
 
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-      const fallback = this.generateFallbackReport(analysisData);
+      const fallback = withPartialNote(this.generateFallbackReport(analysisData), gaps);
       await this.storeReport(fallback, analysisData);
       return fallback;
     }
@@ -327,6 +345,7 @@ Please search for current FL and federal tax changes, then provide your analysis
         logger.warn('[TaxAdvisor] AI report had malformed header fields or alert entries — cleaned them');
       }
 
+      withPartialNote(report, gaps);
       await this.storeReport(report, analysisData, rawText);
 
       // Tell the owner when the report has critical alerts or high savings
@@ -340,7 +359,7 @@ Please search for current FL and federal tax changes, then provide your analysis
 
     } catch (err) {
       logger.error(`[TaxAdvisor] AI analysis failed: ${err.message}`);
-      const fallback = this.generateFallbackReport(analysisData);
+      const fallback = withPartialNote(this.generateFallbackReport(analysisData), gaps);
       await this.storeReport(fallback, analysisData);
       return fallback;
     }
@@ -368,7 +387,7 @@ Please search for current FL and federal tax changes, then provide your analysis
     }
   }
 
-  async gatherFinancialSnapshot() {
+  async gatherFinancialSnapshot(gaps = []) {
     try {
       const year = new Date().getFullYear();
       const startOfYear = `${year}-01-01`;
@@ -380,7 +399,7 @@ Please search for current FL and federal tax changes, then provide your analysis
           db.raw('SUM(total_revenue) as ytd_revenue'),
           db.raw('SUM(tax_collected) as ytd_tax_collected'),
           db.raw('COUNT(DISTINCT date) as days_tracked'),
-        ).first().catch(() => null);
+        ).first().catch((err) => noteGap(gaps, 'revenue', err, null));
 
       // Expenses
       const expenseTotal = await db('expenses')
@@ -389,7 +408,7 @@ Please search for current FL and federal tax changes, then provide your analysis
           db.raw('SUM(amount) as total'),
           db.raw('SUM(tax_deductible_amount) as deductible'),
           db.raw('COUNT(*) as count'),
-        ).first().catch(() => null);
+        ).first().catch((err) => noteGap(gaps, 'year-to-date expenses', err, null));
 
       return {
         ytdRevenue: parseFloat(revenue?.ytd_revenue || 0),
@@ -400,12 +419,11 @@ Please search for current FL and federal tax changes, then provide your analysis
         expenseCount: parseInt(expenseTotal?.count || 0),
       };
     } catch (err) {
-      logger.warn(`[TaxAdvisor] Financial snapshot error: ${err.message}`);
-      return { ytdRevenue: 0, ytdTaxCollected: 0, ytdExpenses: 0 };
+      return noteGap(gaps, 'financial snapshot', err, { ytdRevenue: 0, ytdTaxCollected: 0, ytdExpenses: 0 });
     }
   }
 
-  async getUpcomingDeadlines() {
+  async getUpcomingDeadlines(gaps = []) {
     try {
       const upcoming = await db('tax_filing_calendar')
         .where('due_date', '>=', db.fn.now())
@@ -421,10 +439,10 @@ Please search for current FL and federal tax changes, then provide your analysis
         status: f.status,
         amountDue: f.amount_due ? parseFloat(f.amount_due) : null,
       }));
-    } catch { return []; }
+    } catch (err) { return noteGap(gaps, 'filing deadlines', err, []); }
   }
 
-  async getEquipmentSummary() {
+  async getEquipmentSummary(gaps = []) {
     try {
       const equip = await db('equipment_register').where('active', true);
       return {
@@ -439,10 +457,10 @@ Please search for current FL and federal tax changes, then provide your analysis
           method: e.depreciation_method, irsClass: e.irs_class,
         })),
       };
-    } catch { return { totalAssets: 0, items: [] }; }
+    } catch (err) { return noteGap(gaps, 'equipment', err, { totalAssets: 0, items: [] }); }
   }
 
-  async getExpenseSummary() {
+  async getExpenseSummary(gaps = []) {
     try {
       const year = String(new Date().getFullYear());
       const byCategory = await db('expenses')
@@ -461,10 +479,10 @@ Please search for current FL and federal tax changes, then provide your analysis
         deductible: parseFloat(c.deductible || 0),
         count: parseInt(c.count),
       }));
-    } catch { return []; }
+    } catch (err) { return noteGap(gaps, 'expenses', err, []); }
   }
 
-  async getCurrentTaxRates() {
+  async getCurrentTaxRates(gaps = []) {
     try {
       // Same effective/expiry bound as TaxCalculator.calculateTax, and
       // deliberately NOT filtered by `active` for the same reason: a
@@ -495,20 +513,20 @@ Please search for current FL and federal tax changes, then provide your analysis
         seenCounties.add(row.county);
         return true;
       });
-    } catch { return []; }
+    } catch (err) { return noteGap(gaps, 'tax rates', err, []); }
   }
 
-  async getExemptionStatus() {
+  async getExemptionStatus(gaps = []) {
     try {
       const exemptions = await db('tax_exemptions').where('active', true);
       const expiringSoon = exemptions.filter(e =>
         e.expiry_date && new Date(e.expiry_date) < new Date(Date.now() + 90 * 86400000)
       );
       return { total: exemptions.length, expiringSoon: expiringSoon.length };
-    } catch { return { total: 0, expiringSoon: 0 }; }
+    } catch (err) { return noteGap(gaps, 'tax exemptions', err, { total: 0, expiringSoon: 0 }); }
   }
 
-  async getProcurementSummary() {
+  async getProcurementSummary(gaps = []) {
     try {
       const year = new Date().getFullYear();
       const productSpend = await db('vendor_pricing')
@@ -527,7 +545,7 @@ Please search for current FL and federal tax changes, then provide your analysis
           totalSpend: parseFloat(v.total || 0),
         })),
       };
-    } catch { return { topVendors: [] }; }
+    } catch (err) { return noteGap(gaps, 'procurement', err, { topVendors: [] }); }
   }
 
   // ── Report Storage ─────────────────────────────────────────

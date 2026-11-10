@@ -123,6 +123,34 @@ describe('hold countdown bar', () => {
     expect(live()).toMatch(/less than one minute/i);
   });
 
+  it('says nothing and shows no 0:00 before the first tick (clock still null), then stays quiet at 15:00', () => {
+    const props = { holdExpiresAt: '2026-09-11T19:00:00.000Z', onExtendHold: vi.fn() };
+    const { container, rerender } = render(<ReviewPhase {...reviewProps({ ...props, secondsRemaining: null })} />);
+    expect(screen.queryByText(/Your time is held for/)).not.toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/less than one minute/i);
+    rerender(<ReviewPhase {...reviewProps({ ...props, secondsRemaining: 899 })} />);
+    expect(screen.getByText('Your time is held for 14:59')).toBeInTheDocument();
+    expect(container.querySelector('[aria-live="polite"]').textContent).toBe('');
+  });
+
+  it('clears a threshold message when an extension pushes the clock above 3:00, and announces again on the way down', () => {
+    const props = { holdExpiresAt: '2026-09-11T19:00:00.000Z', onExtendHold: vi.fn() };
+    const { container, rerender } = render(<ReviewPhase {...reviewProps({ ...props, secondsRemaining: 45 })} />);
+    const live = () => container.querySelector('[aria-live="polite"]').textContent;
+    expect(live()).toMatch(/less than one minute/i);
+    rerender(<ReviewPhase {...reviewProps({ ...props, secondsRemaining: 900 })} />);
+    expect(live()).toBe('');
+    rerender(<ReviewPhase {...reviewProps({ ...props, secondsRemaining: 170 })} />);
+    expect(live()).toMatch(/three minutes/i);
+    rerender(<ReviewPhase {...reviewProps({ ...props, secondsRemaining: 50 })} />);
+    expect(live()).toMatch(/less than one minute/i);
+  });
+
+  it('the page clock starts and resets at null, not 0', () => {
+    expect(pageSource).toMatch(/const \[countdownSeconds, setCountdownSeconds\] = useState\(null\)/);
+    expect(pageSource).toMatch(/if \(!reservation\?\.expiresAt\) \{\s+setCountdownSeconds\(null\);/);
+  });
+
   // The 0:00 rescue continuation lives inside EstimateViewPageInner, which a
   // unit render can't drive without the whole /data payload — so the guard is
   // pinned at the source, the way the server suites pin route wiring.

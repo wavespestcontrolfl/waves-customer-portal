@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, setupFeeBilledWithFirstVisit, standardInvoiceShape } from './PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, setupFeeBilledWithFirstVisit, standardInvoiceShape } from './PaymentPreferenceButtons';
 import { resolvePaymentTiming } from '../../lib/paymentTiming';
 import {
   AFTER_VISIT_CARD_CONSENT_TEXT as CLIENT_AFTER_VISIT_CARD_CONSENT_TEXT,
@@ -238,26 +238,11 @@ describe('PaymentPreferenceButtons', () => {
 
     expect(onSelect).toHaveBeenCalledWith('pay_at_visit');
     expect(screen.getByText('WaveGuard Membership Setup')).toBeInTheDocument();
-    expect(screen.getByText('Per application')).toBeInTheDocument();
+    expect(screen.getByText('First application')).toBeInTheDocument();
     expect(screen.getByText('Invoice total')).toBeInTheDocument();
     expect(screen.getAllByText('$99.00').length).toBeGreaterThan(0);
     expect(screen.getByText('$125.00')).toBeInTheDocument();
     expect(screen.getByText('$224.00')).toBeInTheDocument();
-  });
-
-  it('names the preview row "First application" when the page shows the monthly average (EST-2026-1185)', () => {
-    render(
-      <PaymentPreferenceButtons
-        onSelect={vi.fn()}
-        disabled={false}
-        serviceMode="recurring"
-        setupFee={null}
-        selectedFrequency={{ key: 'quarterly', monthly: 41.6667 }}
-        firstApplicationLabel
-      />,
-    );
-    expect(screen.getByText('First application')).toBeInTheDocument();
-    expect(screen.queryByText('Per application')).toBeNull();
   });
 
   it('previews up-front extra rows (rodent bait-station setup) inside the first invoice (codex #3591 r33 P1)', () => {
@@ -273,7 +258,7 @@ describe('PaymentPreferenceButtons', () => {
       />,
     );
     expect(screen.getByText('Bait Station Setup')).toBeInTheDocument();
-    expect(screen.getByText('Per application')).toBeInTheDocument();
+    expect(screen.getByText('First application')).toBeInTheDocument();
     expect(screen.getByText('Invoice total')).toBeInTheDocument();
     expect(screen.getAllByText('$99.00').length).toBeGreaterThan(0);
     expect(screen.getByText('$89.00')).toBeInTheDocument();
@@ -318,7 +303,7 @@ describe('PaymentPreferenceButtons', () => {
       />,
     );
 
-    expect(screen.getByText('Per application')).toBeInTheDocument();
+    expect(screen.getByText('First application')).toBeInTheDocument();
     expect(screen.getByText('$125.00')).toBeInTheDocument();
     expect(screen.queryByText('$600.00')).not.toBeInTheDocument();
     expect(screen.queryByText('$244.00')).not.toBeInTheDocument();
@@ -344,7 +329,7 @@ describe('PaymentPreferenceButtons', () => {
     );
 
     expect(screen.getByText('WaveGuard Membership Setup')).toBeInTheDocument();
-    expect(screen.queryByText('Per application')).not.toBeInTheDocument();
+    expect(screen.queryByText('First application')).not.toBeInTheDocument();
     expect(screen.getAllByText('$99.00').length).toBeGreaterThan(0);
     // Both breakdown boxes render, so the combined fineprint is gone
     // (owner 2026-08-30) — the boxes carry the when-money-moves copy.
@@ -404,7 +389,7 @@ describe('PaymentPreferenceButtons', () => {
 
     // No exact "First application $X" / invoice rows — they'd contradict the
     // "$X–$Y, confirmed on site" range, and the accept creates no invoice.
-    expect(screen.queryByText('Per application')).not.toBeInTheDocument();
+    expect(screen.queryByText('First application')).not.toBeInTheDocument();
     expect(screen.queryByText('Invoice total')).not.toBeInTheDocument();
     expect(screen.queryByText(/after confirmation, we open the invoice/i)).not.toBeInTheDocument();
     expect(screen.getAllByText(/confirm your exact price on/i).length).toBeGreaterThan(0);
@@ -637,5 +622,25 @@ describe('standardInvoiceShape (after-visit promise gate)', () => {
   it('no invoice rows at all is not setup-only (nothing is collected at accept)', () => {
     expect(standardInvoiceShape({ selectedFrequency: {} }).setupOnly).toBe(false);
     expect(standardInvoiceShape().setupOnly).toBe(false);
+  });
+});
+
+// The confirm step repeats the invoice box's first-application figure; it must
+// stay silent wherever the box has no such figure or the charge is quoted elsewhere.
+describe('confirmStepFirstVisitAmount', () => {
+  const quarterly = { billingFrequencyKey: 'quarterly', monthly: 32.67, perVisit: 98 };
+  const base = { serviceMode: 'recurring', paymentPreference: 'pay_at_visit', siteConfirmationHold: false, selectedFrequency: quarterly };
+
+  it('returns the same amount the invoice box shows for a per-application plan', () => {
+    expect(confirmStepFirstVisitAmount(base)).toBe(98);
+  });
+
+  it.each([
+    ['one-time visit', { serviceMode: 'one_time' }],
+    ['annual prepay', { paymentPreference: 'prepay_annual' }],
+    ['on-site confirmation hold', { siteConfirmationHold: true }],
+    ['monthly-billed plan with no first-visit amount', { selectedFrequency: { billingFrequencyKey: 'monthly', monthly: 45 } }],
+  ])('returns null for %s', (_label, override) => {
+    expect(confirmStepFirstVisitAmount({ ...base, ...override })).toBeNull();
   });
 });

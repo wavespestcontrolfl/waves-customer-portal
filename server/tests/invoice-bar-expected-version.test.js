@@ -250,9 +250,9 @@ describe('unvoid: setup-fee and dues invoices are left to the Invoices page (Inv
   const reason = (invoice) => InvoiceService._unvoidObligationReason(db, invoice);
   const SETUP_LINE = { description: 'Bait Station Setup — one-time setup fee', amount: 99 };
 
-  test('an ordinary invoice has no obligation: the four reads come back empty', async () => {
+  test('an ordinary invoice has no obligation: the customer default read and the four reads come back empty', async () => {
     await expect(reason(row({ status: 'void' }))).resolves.toBeNull();
-    expect(calls.map((c) => c.table)).toEqual(['sms_log', 'invoice_followup_sequences', 'setup_fee_claims', 'dispatch_alerts', 'invoices']);
+    expect(calls.map((c) => c.table)).toEqual(['customers', 'sms_log', 'invoice_followup_sequences', 'setup_fee_claims', 'dispatch_alerts', 'invoices']);
   });
 
   test('a membership-dues month and the setup line are found from the lines, with no read', async () => {
@@ -385,18 +385,13 @@ describe('unvoid: the bar restores the row and nothing else (structural refusal 
       expect(calls.map((c) => c.table)).not.toContain('scheduled_services');
     });
 
-    // Owner ruling 2026-10-22 ("move"): with GATE_BILL_TO_NO_VISIT_INVOICES on, the restore's withdrawal moves an invoice with no
+    // Owner ruling 2026-10-22 ("move"): the restore's withdrawal moves an invoice with no
     // visit to the customer default, so the card refuses it the same way.
-    test('gate on: an invoice with no visit and a customer default payer is linked_payer_owner; no default, no refusal', async () => {
-      process.env.GATE_BILL_TO_NO_VISIT_INVOICES = 'true';
-      try {
-        owner({ customerPayer: 'payer-2' });
-        await expect(reason(row({ status: 'void' }))).resolves.toBe('linked_payer_owner');
-        owner({});
-        await expect(reason(row({ status: 'void' }))).resolves.toBeNull();
-      } finally {
-        delete process.env.GATE_BILL_TO_NO_VISIT_INVOICES;
-      }
+    test('an invoice with no visit and a customer default payer is linked_payer_owner; no default, no refusal', async () => {
+      owner({ customerPayer: 'payer-2' });
+      await expect(reason(row({ status: 'void' }))).resolves.toBe('linked_payer_owner');
+      owner({});
+      await expect(reason(row({ status: 'void' }))).resolves.toBeNull();
     });
 
     test('the bar’s restore also refuses on the draft row under the lock (a payer assigned after the card), before the withdrawal runs', async () => {

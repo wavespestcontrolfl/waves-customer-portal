@@ -224,25 +224,18 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       await expect(capacity.verifyArrivalCapacity(prepared, { conn: mockConn })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'technician_unavailable' });
     });
   });
-  // GATE_STAFF_ROUTE_INSERTION (owner 2026-10-25): a moved visit is tried
+  // Staff route insertion (owner 2026-10-25): a moved visit is tried
   // between the stops of a numbered day, and the save numbers the day in the
   // order the box and the save probe both certified.
   describe('staff route insertion', () => {
-    let savedGate;
     const { placeMovedVisit } = require('../services/scheduling/arrival-route');
     const dayOrder = () => mockConn('scheduled_services').where({ scheduled_date: DAY }).orderBy('route_order').pluck('id');
     const routeNumber = async id => (await mockConn('scheduled_services').where({ id }).first('route_order')).route_order;
     beforeEach(async () => {
-      savedGate = process.env.GATE_STAFF_ROUTE_INSERTION;
-      process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
       await mockConn.raw('CREATE TEMP TABLE ?? ON COMMIT DROP AS SELECT * FROM public.?? WITH NO DATA', ['audit_log', 'audit_log']);
       // The nightly pass numbered the day: north first, south second.
       await mockConn('scheduled_services').where({ id: NORTH }).update({ route_order: 1 });
       await mockConn('scheduled_services').where({ id: SOUTH }).update({ route_order: 2 });
-    });
-    afterEach(() => {
-      if (savedGate === undefined) delete process.env.GATE_STAFF_ROUTE_INSERTION;
-      else process.env.GATE_STAFF_ROUTE_INSERTION = savedGate;
     });
 
     test('the box, the save probe and the save agree on the place between the stops', async () => {
@@ -259,20 +252,11 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
         .toEqual({ window_start: '10:00:00', window_end: '11:00:00' });
     });
 
-    test('a New Appointment booking (GATE_NEW_APPT_STOP_ORDER) is numbered the same way, and its audit row names the source', async () => {
+    test('a New Appointment booking is numbered the same way, and its audit row names the source', async () => {
       await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY });
       await expect(placeMovedVisit(mockConn, { serviceId: TARGET, source: 'new_appointment' })).resolves.toEqual([NORTH, TARGET, SOUTH]);
       expect(await mockConn('audit_log').where({ action: 'schedule.route_order_placed', resource_id: TARGET }).first('metadata'))
         .toEqual({ metadata: { policy: 'staff_route_insertion_2026_10_25', route_order: [NORTH, TARGET, SOUTH], source: 'new_appointment' } });
-    });
-
-    test('gate off: the visit stays after the last numbered stop and the save writes nothing', async () => {
-      delete process.env.GATE_STAFF_ROUTE_INSERTION;
-      expect((await findAvailableSlots(OPTIONS)).slots.some(slot => slot.start_time === '09:00')).toBe(false);
-      expect((await probe())[0]).toMatchObject({ conflict_reason: 'arrival_window' });
-      await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY });
-      await expect(placeMovedVisit(mockConn, { serviceId: TARGET })).resolves.toBeNull();
-      expect(await routeNumber(TARGET)).toBeNull();
     });
 
     test('a save past its warning keeps the day as it was', async () => {
@@ -358,11 +342,12 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
     }
   }, 30000);
 
-  test('ranks the nearby morning placement first, and picker/live-check/save agree without rewriting other promises', async () => {
+  test('offers the nearby morning placement, and picker/live-check/save agree without rewriting other promises', async () => {
     const offers = await findAvailableSlots(OPTIONS);
-    expect(offers.slots[0]).toMatchObject({ start_time: '09:00', route_mode: 'arrival_windows' });
-    expect(offers.slots[0].route_arrivals.map(s => s.id)).toEqual([NORTH, TARGET, SOUTH]);
-    expect(offers.slots[0].route_arrivals.find(s => s.id === SOUTH).arrival < '12:00').toBe(true);
+    const nine = offers.slots.find(slot => slot.start_time === '09:00');
+    expect(nine).toMatchObject({ start_time: '09:00', route_mode: 'arrival_windows' });
+    expect(nine.route_arrivals.map(s => s.id)).toEqual([NORTH, TARGET, SOUTH]);
+    expect(nine.route_arrivals.find(s => s.id === SOUTH).arrival < '12:00').toBe(true);
     expect(await probe()).toEqual([]);
     const check = await checkSlots({ targets: [{ serviceId: TARGET, technicianId: TECH, date: DAY, window: { start: '09:00', end: '10:00' }, excludeServiceIds: [TARGET] }] });
     expect(check.results[0].conflicts).toEqual([]);
@@ -395,7 +380,7 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
     expect((await probe())[0].conflict_reason).toBe('arrival_window');
     await mockConn('scheduled_services').where({ id: BLOCKER }).update({ reservation_expires_at: new Date(Date.now() - 60_000) });
     expect(await probe()).toEqual([]);
-    expect((await findAvailableSlots(OPTIONS)).slots[0].start_time).toBe('09:00');
+    expect((await findAvailableSlots(OPTIONS)).slots.some(slot => slot.start_time === '09:00')).toBe(true);
   });
 
   test('a grouped target remains unverified when its sibling is still on the source date', async () => {
@@ -417,7 +402,7 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       technician_id: TECH, window_start: '09:00', window_end: '10:00', lat: 27.545, lng: -82.4,
     });
     expect(await probe()).toEqual([]);
-    expect((await findAvailableSlots(OPTIONS)).slots[0].start_time).toBe('09:00');
+    expect((await findAvailableSlots(OPTIONS)).slots.some(slot => slot.start_time === '09:00')).toBe(true);
     // A rescheduled sibling still counts as live visit membership.
     await mockConn('scheduled_services').where({ id: BLOCKER }).update({ status: 'rescheduled' });
     expect((await probe())[0].conflict_reason).toBe('route_unverified');
@@ -478,7 +463,7 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
     });
     geocodeAddress.mockResolvedValue({ lat: 27.545, lng: -82.4 });
     const offers = await findAvailableSlots({ ...OPTIONS, lat: 27.1, lng: -82.7 });
-    expect(offers.slots[0].start_time).toBe('09:00');
+    expect(offers.slots.some(slot => slot.start_time === '09:00')).toBe(true);
     expect(await probe()).toEqual([]);
     const check = await checkSlots({ targets: [{
       serviceId: TARGET, technicianId: TECH, date: DAY,

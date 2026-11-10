@@ -279,3 +279,53 @@ describe("pipeline health line", () => {
     expect(line.textContent).toContain("p50 pass 41 s (7d)");
   });
 });
+
+// A failed load must not look like an empty log: the first load says so and offers Retry,
+// and a failed refresh over a list already shown says the list may be out of date.
+describe("CallLogTabV2 call history load failure", () => {
+  const call = (id, phone) => ({ id, direction: "inbound", from_phone: phone, answered_by: "missed", created_at: new Date().toISOString() });
+  let callsUp;
+  let callsRequests;
+  beforeEach(() => {
+    callsUp = false;
+    callsRequests = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const u = String(url);
+      if (u.includes("/ai/admin/calls?")) {
+        callsRequests += 1;
+        if (!callsUp) return { ok: false, status: 503, statusText: "Unavailable", json: async () => ({ error: "synthetic outage" }) };
+        return { ok: true, status: 200, json: async () => ({ calls: [call("call-1", "+19415550123")] }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    }));
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("shows an error with Retry instead of 'No calls recorded yet.', then lists calls on Retry", async () => {
+    render(<MemoryRouter><CallLogTabV2 /></MemoryRouter>);
+    expect(await screen.findByText("Call history could not load.")).toBeInTheDocument();
+    expect(screen.queryByText("No calls recorded yet.")).not.toBeInTheDocument();
+
+    callsUp = true;
+    const before = callsRequests;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("button", { name: "Create Lead" })).toBeInTheDocument();
+    expect(callsRequests).toBeGreaterThan(before);
+    expect(screen.queryByText("Call history could not load.")).not.toBeInTheDocument();
+  });
+
+  it("keeps the list and warns it may be out of date when a later reload fails", async () => {
+    callsUp = true;
+    render(<MemoryRouter><CallLogTabV2 /></MemoryRouter>);
+    await screen.findByRole("button", { name: "Create Lead" });
+
+    callsUp = false;
+    fireEvent.change(screen.getByPlaceholderText(/Search calls/), { target: { value: "941" } });
+    expect(await screen.findByText("Call history could not refresh. The list below may be out of date.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create Lead" })).toBeInTheDocument();
+    expect(screen.queryByText("Call history could not load.")).not.toBeInTheDocument();
+  });
+});

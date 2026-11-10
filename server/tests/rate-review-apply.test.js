@@ -1681,22 +1681,28 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
-    const route = src.slice(src.indexOf("router.post('/:id/prepay-switch',"), src.indexOf("router.post('/:id/prepay-switch/undo'"));
+    // The switch's transaction lives in runPrepaySwitch (shared with the Intelligence Bar card); the route below it
+    // is the wrapper that supplies the acknowledgement and the operator from the request.
+    const route = src.slice(src.indexOf('async function runPrepaySwitch('), src.indexOf("router.post('/:id/prepay-switch/undo'"));
     const call = route.indexOf('RateReviewApply.noticedRenewalAmountConflict(trx, {');
     expect(call).toBeGreaterThan(0);
     expect(route.slice(Math.max(0, call - 600), call)).toMatch(/rateReviewLive\(\)/);
     expect(route.slice(call, call + 400)).toMatch(/amount: switchTermAmount/);
     expect(route.slice(call, call + 400)).toMatch(/lock: true/);
-    const check = route.indexOf('if (noticed && req.body?.acknowledgeNoticedAmount !== true) throw RateReviewApply.noticedRenewalAmountError(noticed);', call);
+    const check = route.indexOf('if (noticed && acknowledgeNoticedAmount !== true) throw RateReviewApply.noticedRenewalAmountError(noticed);', call);
     expect(check).toBeGreaterThan(call);
     const record = route.indexOf('RateReviewApply.recordNoticedAmountOverride(trx, {', check);
     expect(record).toBeGreaterThan(check);
-    expect(route.slice(record, record + 400)).toMatch(/source: 'schedule_prepay_switch'/);
-    expect(route.slice(record, record + 400)).toMatch(/adminUserId: req\.technicianId/);
+    expect(route.slice(record, record + 400)).toMatch(/source: actor\.source \|\| 'schedule_prepay_switch'/);
+    expect(route.slice(record, record + 400)).toMatch(/adminUserId: actor\.id/);
     const termWrite = route.indexOf('AnnualPrepayRenewals.createTermForAnnualPrepay(');
     expect(record).toBeLessThan(termWrite);
     expect(route.slice(termWrite, termWrite + 1500)).toMatch(/prepayAmount: switchTermAmount,/);
-    expect(route).toMatch(/if \(err && err\.noticedRenewalAmount\) return res\.status\(409\)\.json\(err\.noticedRenewalAmount\);/);
+    expect(route).toMatch(/if \(err && err\.noticedRenewalAmount\) return \{ httpStatus: 409, httpBody: err\.noticedRenewalAmount/);
+    const wrapper = route.slice(route.indexOf("router.post('/:id/prepay-switch',"));
+    expect(wrapper).toMatch(/acknowledgeNoticedAmount: req\.body\?\.acknowledgeNoticedAmount === true/);
+    expect(wrapper).toMatch(/actor: \{ id: req\.technicianId \|\| null/);
+    expect(wrapper).toMatch(/if \(out\.httpStatus\) return res\.status\(out\.httpStatus\)\.json\(out\.httpBody\);/);
   });
   test('all three renewal writers record the override, inside the write transaction, right after the acknowledgement check', () => {
     const fs = require('fs');

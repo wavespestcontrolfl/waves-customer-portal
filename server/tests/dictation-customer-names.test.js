@@ -1,10 +1,10 @@
 /**
- * GATE_DICTATION_CUSTOMER_NAMES: the staff mic word list also carries customer names.
- * Gate off (buildDictationPrompt) is byte-identical to before; gate on (buildDictationHints)
+ * The staff mic word list also carries customer names: buildDictationHints
  * puts the on-screen customer first, then today's/tomorrow's route, then (admin only) people
  * who texted or called and recently updated active customers; stays under 1800 characters;
  * a technician login sees only its own stops; the list is cached 5 minutes per scope and day;
- * surnames come back as transcriber keywords. Synthetic names only.
+ * the on-screen customer's first name, then the surnames, come back as transcriber keywords, and
+ * the on-screen record name comes back for the name respell. Synthetic names only.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -18,10 +18,9 @@ jest.mock('../services/pest-recap', () => ({
 }));
 
 const {
-  buildDictationPrompt, buildDictationHints, resetNameCache, PROMPT_MAX_CHARS, NAMES_SECTION_CAPS, KEYWORD_MAX,
+  buildDictationHints, resetNameCache, PROMPT_MAX_CHARS, NAMES_SECTION_CAPS, KEYWORD_MAX,
 } = require('../services/dictation-word-list');
 const { mergeTranscriptionKeywords, transcriptionKeywords } = require('../services/call-recording-processor')._test;
-const featureGates = require('../config/feature-gates');
 
 const CUSTOMER_ID = '11111111-1111-4111-8111-111111111111';
 
@@ -66,53 +65,7 @@ beforeEach(() => {
   ]);
 });
 
-describe('gate reader', () => {
-  const original = process.env.GATE_DICTATION_CUSTOMER_NAMES;
-  afterAll(() => {
-    if (original === undefined) delete process.env.GATE_DICTATION_CUSTOMER_NAMES;
-    else process.env.GATE_DICTATION_CUSTOMER_NAMES = original;
-  });
-  test('dark unless exactly "true"', () => {
-    delete process.env.GATE_DICTATION_CUSTOMER_NAMES;
-    expect(featureGates.dictationCustomerNamesLive()).toBe(false);
-    process.env.GATE_DICTATION_CUSTOMER_NAMES = '1';
-    expect(featureGates.dictationCustomerNamesLive()).toBe(false);
-    process.env.GATE_DICTATION_CUSTOMER_NAMES = 'true';
-    expect(featureGates.dictationCustomerNamesLive()).toBe(true);
-  });
-});
-
-describe('gate off: buildDictationPrompt is byte-identical to before', () => {
-  test('no customer-name section and no name query is made', async () => {
-    const calls = [];
-    const knex = makeKnex({ calls });
-    const prompt = await buildDictationPrompt({ customerId: CUSTOMER_ID }, knex);
-    expect(prompt).toContain('Customer on this screen: Testa Examplesmith, Testa, Examplesmith.');
-    expect(prompt).not.toMatch(/Customers who may be named/);
-    expect(calls.some((c) => c.table === 'conversations as cv')).toBe(false);
-  });
-
-  test('golden: exact text from origin/main for fixed synthetic records', async () => {
-    const data = {
-      customers: { first_name: 'Testa', last_name: 'Examplesmith' },
-      technicians: [{ name: 'Alex Samplestaff' }, { name: 'Jordan Fixturehand' }],
-      services: [{ name: 'Quarterly Pest Control', short_name: 'Pest' }, { name: 'Lawn Fertilization', short_name: null }],
-      product_aliases: [{ product_id: 1, alias_name: 'Synthetic Spray' }],
-    };
-    const knex = (table) => {
-      const c = {
-        where: () => c, whereIn: () => c, orderBy: () => c,
-        first: () => Promise.resolve(Array.isArray(data[table]) ? data[table][0] : data[table]),
-        select: () => Promise.resolve(data[table] || []),
-      };
-      return c;
-    };
-    const prompt = await buildDictationPrompt({ customerId: CUSTOMER_ID }, knex);
-    expect(prompt).toBe("Dictated by Waves Pest Control staff (pest control and lawn care, Southwest Florida). Customer on this screen: Testa Examplesmith, Testa, Examplesmith. Staff who may be named: Alex Samplestaff, Jordan Fixturehand, Alex, Jordan. Products that may be said: Examplex, Synthetic Spray. Services that may be said: Quarterly Pest Control, Pest, Lawn Fertilization. Other words that may be said: Ants, Roaches, Spiders, Silverfish, Wasps, Earwigs, Fleas, Crickets, Centipedes, perimeter, foundation, spot treatment, bait placement, granules, lanai, linear feet, re-service, broadcast, granular, spreader, soil drench, foliar, pounds, ounces, gallons, per thousand, square feet, front lawn, back lawn, side lawns, weeds, dollarweed, sedge, crabgrass, chinch bugs, sod webworms, fungus, fertilizer, pre-emergent, Waves Pest Control, WaveGuard.");
-  });
-});
-
-describe('gate on: buildDictationHints', () => {
+describe('buildDictationHints', () => {
   test('on-screen customer first, then the route, then texters and recent customers, full names', async () => {
     const { prompt } = await buildDictationHints({ customerId: CUSTOMER_ID, scope: {} }, makeKnex());
     const section = prompt.match(/Customers who may be named: ([^.]*)\./)[1];
@@ -139,10 +92,12 @@ describe('gate on: buildDictationHints', () => {
   });
 
   test('a name with no on-screen customer still lists the route', async () => {
-    const { prompt, keywords } = await buildDictationHints({ scope: {} }, makeKnex({ onScreen: undefined }));
+    const { prompt, keywords, recordName } = await buildDictationHints({ scope: {} }, makeKnex({ onScreen: undefined }));
     expect(prompt).toMatch(/Customers who may be named: Route Todayman, Second Stopper/);
     expect(prompt).not.toMatch(/Customer on this screen/);
     expect(keywords[0]).toBe('Todayman');
+    // no customer on screen: nothing to respell toward
+    expect(recordName).toBeNull();
   });
 
   test('products shrink to 400 characters and the prompt stays under the cap with a huge world', async () => {
@@ -161,16 +116,22 @@ describe('gate on: buildDictationHints', () => {
     expect(prompt).toContain('Alex Samplestaff');
     expect(prompt).toContain('Quarterly Pest Control');
     for (const name of list('Customers who may be named').split(', ')) expect(name).toMatch(/^(Testa Examplesmith|[VCR]First\d+ [VCR]Last\d+)$/);
-    // the keywords are surnames of names that fit, on-screen first, capped
-    expect(keywords[0]).toBe('Examplesmith');
+    // the keywords are the on-screen first name, then surnames of names that fit, capped
+    expect(keywords.slice(0, 2)).toEqual(['Testa', 'Examplesmith']);
     expect(keywords.length).toBeLessThanOrEqual(KEYWORD_MAX);
     expect(keywords.every((word) => prompt.includes(word))).toBe(true);
   });
 
-  test('keywords: surnames in prompt order, on-screen first, de-duplicated', async () => {
+  test('keywords: the on-screen first name, then surnames in prompt order, de-duplicated', async () => {
     const dup = [P('Route', 'Todayman'), P('Another', 'Todayman')];
     const { keywords } = await buildDictationHints({ customerId: CUSTOMER_ID, scope: {} }, makeKnex({ visits: dup }));
-    expect(keywords).toEqual(['Examplesmith', 'Todayman', 'Callerson', 'Updatedson']);
+    // other customers' first names stay out: only the on-screen one is spelled exactly
+    expect(keywords).toEqual(['Testa', 'Examplesmith', 'Todayman', 'Callerson', 'Updatedson']);
+  });
+
+  test('the on-screen record name comes back for the respell', async () => {
+    const { recordName } = await buildDictationHints({ customerId: CUSTOMER_ID, scope: {} }, makeKnex());
+    expect(recordName).toEqual({ firstName: 'Testa', lastName: 'Examplesmith' });
   });
 
   test('technician fence: only its own stops, no texting or recent-customer reads', async () => {
@@ -185,7 +146,7 @@ describe('gate on: buildDictationHints', () => {
     expect(prompt).toMatch(/Customers who may be named: Testa Examplesmith, Route Todayman, Second Stopper\./);
     expect(prompt).not.toContain('Callerson');
     expect(prompt).not.toContain('Updatedson');
-    expect(keywords).toEqual(['Examplesmith', 'Todayman', 'Stopper']);
+    expect(keywords).toEqual(['Testa', 'Examplesmith', 'Todayman', 'Stopper']);
   });
 
   test('cached 5 minutes per login scope: a second clip does not re-query, another scope does', async () => {

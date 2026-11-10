@@ -817,7 +817,8 @@ postgres('SMS commitments on PostgreSQL', () => {
     const now = new Date(message.created_at.getTime() + 5000);
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     await verifySmsFulfillment(commitment, { records: [{ ref: 'sms:x', type: 'sms', id: 'x', text: 'hi', created_at: now }], failures: [] }, { now });
-    const prompt = dispatchWithFallback.mock.calls.at(-1)?.[1]?.text || '';
+    const request = dispatchWithFallback.mock.calls.at(-1)?.[1] || {};
+    const prompt = `${request.system || ''}\n${request.text || ''}`;
     expect(prompt).toContain('a record after the promised day still fulfills it');
     expect(prompt).not.toContain('on the promised day when sms_context.due_date names one');
   });

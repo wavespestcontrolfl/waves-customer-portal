@@ -29,6 +29,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: () => true, sendOne: jest.fn().mockResolvedValue({ messageId: 'sg-1' }), serviceGroupId: () => null,
 }));
+// The local suppression check (sweep #7765 B2) has its own suite: document-email-suppression.test.js.
+jest.mock('../services/document-email-suppression', () => ({
+  ...jest.requireActual('../services/document-email-suppression'),
+  documentEmailSuppression: jest.fn(async () => null),
+  alertBlockedDocumentEmail: jest.fn(async () => {}),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true, providerMessageId: 'tw-1' }),
 }));

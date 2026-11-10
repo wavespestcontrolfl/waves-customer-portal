@@ -1,18 +1,12 @@
-// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): the shared builder and the
+// Monthly average (owner 2026-10-20): the shared builder and the
 // server decision of whether the average may be shown. No database.
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
-const mockGate = { on: true };
-jest.mock('../config/feature-gates', () => ({
-  isEnabled: jest.fn((gate) => (gate === 'estimateMonthlyAverage' ? mockGate.on : false)),
-}));
 
 const shared = require('../../shared/estimate-monthly-average.cjs');
 const { monthlyAverageFor } = require('../services/estimate-monthly-average');
 
 const { buildMonthlyAverage, emailParts } = shared;
 const sumCents = (model) => model.services.reduce((a, s) => a + Math.round(s.monthly * 100), 0);
-
-beforeEach(() => { mockGate.on = true; });
 
 describe('buildMonthlyAverage', () => {
   test('single service: pest $94 x 4 a year averages $31.33 a month', () => {
@@ -152,15 +146,10 @@ describe('monthlyAverageFor (server decision)', () => {
   const estimateOf = (monthly, extra = {}) => ({ id: 'e1', category: 'RESIDENTIAL', monthly_total: monthly, estimate_data: {}, ...extra });
   const pest = proposalOf([perApp('Pest Control — 4 applications/yr', 94, 4)]);
 
-  test('single service, gate on', () => {
+  test('single service', () => {
     const result = monthlyAverageFor({ estimate: estimateOf(31.33), proposal: pest, bundle: null });
     expect(result.model.services[0].monthly).toBe(31.33);
     expect(result.inputs).toEqual({ planMonthly: 31.33, credit: null, bundleDiscountPct: 0, oneTime: null });
-  });
-
-  test('gate off: nothing, for every plan shape', () => {
-    mockGate.on = false;
-    expect(monthlyAverageFor({ estimate: estimateOf(31.33), proposal: pest })).toBeNull();
   });
 
   test('multi service with bundle discount and one-time setup (setup stays out of the average)', () => {
@@ -301,17 +290,18 @@ describe('reviewedAverageStale (reviewed and scheduled sends)', () => {
     expect(averageText(null)).toBeNull();
   });
 
-  test('gate off with nothing recorded: not stale, and nothing is read', async () => {
-    mockGate.on = false;
-    const loadRow = jest.fn();
+  test('nothing recorded and no average now: not stale', async () => {
+    const spy = jest.spyOn(require('../services/estimate-monthly-average'), 'emailAverageParts').mockResolvedValue(null);
+    const loadRow = jest.fn(async () => ({}));
     expect(await reviewedAverageStale(reviewed({ provider: 'sendgrid' }), loadRow)).toBe(false);
-    expect(loadRow).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 
-  test('a recorded average with the gate now off is stale; an SMTP or absent review never is', async () => {
-    mockGate.on = false;
+  test('a recorded average that no longer applies is stale; an SMTP or absent review never is', async () => {
+    const spy = jest.spyOn(require('../services/estimate-monthly-average'), 'emailAverageParts').mockResolvedValue(null);
     const loadRow = jest.fn(async () => ({}));
     expect(await reviewedAverageStale(reviewed({ provider: 'sendgrid', monthlyAverage: averageText(parts) }), loadRow)).toBe(true);
+    spy.mockRestore();
     expect(await reviewedAverageStale(reviewed({ provider: 'smtp', monthlyAverage: averageText(parts) }), loadRow)).toBe(false);
     expect(await reviewedAverageStale(null, loadRow)).toBe(false);
     expect(await reviewedAverageStale(reviewed(null), loadRow)).toBe(false);

@@ -33,6 +33,7 @@ const logger = require('./logger');
 const { completionInvoiceAmount, hasAuthoritativeZeroPrice } = require('./billing-lane');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const { billByInvoiceVisit } = require('./bill-by-invoice');
+const { ACCEPT_MINT_NOTE_RE } = require('./invoice-notes');
 // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
 // billing-lane's one resolver (lazy, so no require cycle).
 const stampedZeroFreeLive = () => require('./billing-lane').stampedZeroFreeLive();
@@ -264,7 +265,7 @@ async function resolveCompletionChargeCap({
   // when the invoice actually carries the setup-fee line (a
   // first-application-only accept invoice gets NO allowance — r3);
   // everything still fails closed when no accepted amount exists.
-  const acceptMintedInvoice = /Auto-generated from accepted estimate #/.test(String(invoice.notes || ''));
+  const acceptMintedInvoice = ACCEPT_MINT_NOTE_RE.test(String(invoice.notes || ''));
   // Secure plan-choice setup fee: a per-application selection on the
   // series parent legitimately adds the $99 line to the first
   // completion invoice (owner decision 2026-07-24) — same bounded

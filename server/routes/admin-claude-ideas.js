@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { sendIdeaToClaude, cancelClaudeIdea, ideaSendLive } = require('../services/admin-claude-ideas');
+const { sendIdeaToClaude, cancelClaudeIdea, ideaSendLive, answerSendLive } = require('../services/admin-claude-ideas');
 const { UUID_RE } = require('../services/admin-alert-send-to-claude');
 const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 
@@ -12,10 +12,12 @@ const OWNER_ONLY = 'This action is limited to the owner account.';
 router.use(adminAuthenticate, requireAdmin);
 
 // GET /api/admin/claude-ideas/status — does the Intelligence Bar box show "Send to Claude"? enabled only for the owner
-// login while GATE_IB_SEND_TO_CLAUDE is on; never 404, so the palette can ask.
+// login while GATE_IB_SEND_TO_CLAUDE is on; never 404, so the palette can ask. `answerButton: true` joins it while
+// GATE_IB_ANSWER_SEND_TO_CLAUDE is on too (the button under a stuck answer); absent otherwise.
 router.get('/status', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ enabled: ideaSendLive() && ibFullAccess(req) });
+  const enabled = ideaSendLive() && ibFullAccess(req);
+  res.json({ enabled, ...(enabled && answerSendLive() ? { answerButton: true } : {}) });
 });
 
 // POST /api/admin/claude-ideas — the box's free "Send to Claude" button (GATE_IB_SEND_TO_CLAUDE, owner 2026-11-03). Body:

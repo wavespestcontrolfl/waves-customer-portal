@@ -25,6 +25,7 @@ const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
 const { shouldSkipClientPaymentErrorAlert, manualPayOptionsFromEnv } = require('./pay-v2-helpers');
 // Lives in services/pay-combined.js (shared with the customer-dunning set); import it from there.
 const { invoiceCreditWouldFullyCover } = require('../services/pay-combined');
+const { customerVisibleInvoiceNotes } = require('../services/invoice-notes');
 
 /**
  * Public pay routes — no auth required.
@@ -740,7 +741,7 @@ router.get('/:token', async (req, res, next) => {
         cardBrand: data.card_brand,
         cardLastFour: data.card_last_four,
         receiptUrl: data.receipt_url,
-        notes: data.notes,
+        notes: customerVisibleInvoiceNotes(data.notes),
         annualPrepay,
         attachments: attachments.map((a) => ({
           id: a.id,

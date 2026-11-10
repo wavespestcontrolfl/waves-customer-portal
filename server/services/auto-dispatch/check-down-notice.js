@@ -21,16 +21,13 @@
  * (audit.js BUDGET_LANE_KEYS) but never held back by it: a stopped tool is
  * the notice that must reach a person.
  *
- * Behind GATE_AUTO_DISPATCH_CHECK_DOWN_NOTICE, read at call time. Off, or the
- * check itself off: a standing notice closes, so a rollback leaves none —
- * also on the nights auto-dispatch does not run (scheduler.js upkeep path).
+ * With the check itself off, a standing notice closes — also on the nights
+ * auto-dispatch does not run (scheduler.js upkeep path).
  * Raised through admin-alert-episodes.raiseAdminAlertWithReopen, which reads
  * and reopens the row under the key's lock (Codex #6465 r1).
  */
 const logger = require('../logger');
-const { gateEnvValue } = require('../../config/feature-gates');
 
-const GATE = 'GATE_AUTO_DISPATCH_CHECK_DOWN_NOTICE';
 const KEY = 'auto-dispatch-check-down';
 const LINK = '/admin/agents?tab=dispatch';
 
@@ -125,10 +122,6 @@ async function noteRun(state, { enabled = true, nowDate = new Date(), deps = {} 
   try {
     const db = deps.db || require('../../models/db');
     const episodes = deps.episodes || require('../admin-alert-episodes');
-    if (!gateEnvValue(GATE)) {
-      await closeNotice(episodes, db, nowDate, 'gate_off', 'The move-check-down notice is turned off');
-      return { action: 'off' };
-    }
     if (!enabled) {
       await closeNotice(episodes, db, nowDate, 'check_off', 'The move check is turned off');
       return { action: 'check_off' };
@@ -149,4 +142,4 @@ async function noteRun(state, { enabled = true, nowDate = new Date(), deps = {} 
   }
 }
 
-module.exports = { noteRun, causeText, shortCause, GATE, KEY };
+module.exports = { noteRun, causeText, shortCause, KEY };

@@ -138,7 +138,7 @@ function inWords(value, now) {
   return days === 1 ? 'tomorrow' : `in ${days} days`;
 }
 
-// GATE_BID_CHECKLIST: the last day to send questions to the buyer. The reminder is for the office only.
+// The last day to send questions to the buyer. The reminder is for the office only.
 function questionsReminderSpec(bid, now = new Date()) {
   const title = titleOf(bid, null);
   const when = inWords(bid.questions_due_at, now);
@@ -157,7 +157,7 @@ function questionsReminderSpec(bid, now = new Date()) {
   };
 }
 
-// GATE_BID_CHECKLIST: the job walk (site visit). A mandatory walk is named as such: missing it can disqualify the bid.
+// The job walk (site visit). A mandatory walk is named as such: missing it can disqualify the bid.
 function jobWalkReminderSpec(bid, now = new Date()) {
   const title = titleOf(bid, null);
   const when = inWords(bid.job_walk_at, now);

@@ -145,6 +145,9 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
   const today = etDateString();
   const alerts = [];
   // Generators that threw. Each one fail-softs, so `alerts` silently lacks that queue; needs-me reads this.
+  // `id` names the generator. A generator that emits alerts under other ids lists
+  // them in `alertIds`: dashboard-alerts-cron.js keeps those ids' state rows, so a
+  // failed read never looks like a cleared alert.
   const failures = [];
 
   // 1. Invoices 60+ days overdue. paid_at IS NULL is the source of truth
@@ -540,7 +543,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
       }
     }
   } catch (err) {
-    failures.push({ id: 'closeout_gaps_today' });
+    failures.push({ id: 'closeout_gaps_today', alertIds: ['closeout_gaps_today', 'closeout_sweep_incomplete'] });
     logger.error(`[dashboard-alerts] closeout_gaps_today: ${err.message}`);
     // A generator failure must not read as resolution: re-emit the alert
     // as it last stood (same-day persisted row, else the in-process carry).
@@ -598,7 +601,10 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         });
       }
     }
-  } catch (err) { failures.push({ id: 'persisted_admin_alerts' }); logger.error(`[dashboard-alerts] persisted_admin_alerts: ${err.message}`); }
+  } catch (err) {
+    failures.push({ id: 'persisted_admin_alerts', alertIds: ['admin_waveguard_inventory_forecast', 'admin_lawn_pricing_invariant_sweep'] });
+    logger.error(`[dashboard-alerts] persisted_admin_alerts: ${err.message}`);
+  }
 
   // ——— Action Inbox generators (kind: 'action') — "do this now" items, as
   // opposed to the watch-state alarms above. Same fail-soft contract: each

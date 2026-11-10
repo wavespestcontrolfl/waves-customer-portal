@@ -1,9 +1,10 @@
 /**
  * Portal messages against live Postgres (GATE_PORTAL_MESSAGES): the office answers a portal item inside the
- * portal. Pins: one thread per customer (channel 'portal'), an answer closes the item it answers (chat
- * resolved, request resolved quietly) and its bells, the one customer notice (bell + push, else the reply
- * email), a retried send is one answer, unread / mark read, and that a customer only ever reads their own
- * thread. Every row is synthetic and tagged with this run's id; cleanup removes only those rows. It refuses
+ * portal and the customer writes back. Pins: one thread per customer (channel 'portal'), an answer closes
+ * the item it answers (chat resolved, request resolved quietly, a portal message answered) and its bells,
+ * the one customer notice (bell + push, else the reply email), a retried send is one answer, a customer
+ * message rings one bell per thread and is a Portal-tab item until answered or handled, unread / mark read,
+ * and that a customer only ever reads their own thread. Every row is synthetic and tagged with this run's id; cleanup removes only those rows. It refuses
  * any database but a private QA one or CI's.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'portal-messages-postgres-only';
@@ -23,6 +24,10 @@ jest.mock('../services/push-notifications', () => ({
   sendToCustomer: jest.fn(async () => mockPushResult),
   resolveNotificationPropertyId: jest.fn(async () => null),
 }));
+jest.mock('../services/portal-ask-push', () => ({
+  pushPortalAsk: jest.fn(async () => ({ sent: true })),
+  shortName: (first, last) => [first, last ? `${last[0]}.` : ''].filter(Boolean).join(' '),
+}));
 
 afterAll(async () => { if (!SKIP) await require('../models/db').destroy(); });
 
@@ -33,6 +38,7 @@ maybeDescribe('portal messages (live Postgres)', () => {
   let PortalMessages;
   let AccountMembershipEmail;
   let PushService;
+  let portalAskPush;
 
   const phone = () => `+1941555${String(Math.floor(Math.random() * 9000) + 1000)}`;
   const actor = { technicianId: null, role: 'admin' };
@@ -80,13 +86,14 @@ maybeDescribe('portal messages (live Postgres)', () => {
     PortalMessages = require('../services/portal-messages');
     AccountMembershipEmail = require('../services/account-membership-email');
     PushService = require('../services/push-notifications');
+    portalAskPush = require('../services/portal-ask-push');
   }, 60000);
 
   afterAll(async () => {
     delete process.env.GATE_PORTAL_MESSAGES;
     if (!db) return;
     const threads = await db('conversations').whereIn('customer_id', ids.customers).where({ channel: 'portal' }).pluck('id');
-    await db('notifications').whereRaw('title like ? or recipient_id = any(?)', [`%${RUN}%`, ids.customers]).del();
+    await db('notifications').whereRaw("title like ? or metadata->>'portalConversationId' = any(?) or recipient_id = any(?)", [`%${RUN}%`, threads, ids.customers]).del();
     await db('conversations').whereIn('id', threads).del();
     await db('service_requests').whereIn('id', ids.requests).del();
     await db('agent_sessions').whereIn('id', ids.sessions).del();
@@ -382,6 +389,7 @@ maybeDescribe('portal messages (live Postgres)', () => {
     const { escalationId } = await chat(pat.id, { alert: false });
     process.env.GATE_PORTAL_MESSAGES = 'false';
     await expect(PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'x', actor })).rejects.toMatchObject({ status: 404, code: 'disabled' });
+    await expect(PortalMessages.customerPost({ customer: pat, body: 'x' })).rejects.toMatchObject({ status: 404 });
     await expect(PortalMessages.customerThread(pat.id)).rejects.toMatchObject({ status: 404 });
     await expect(PortalMessages.customerUnread(pat.id)).rejects.toMatchObject({ status: 404 });
     await expect(PortalMessages.markRead(pat.id, randomUUID())).rejects.toMatchObject({ status: 404 });
@@ -408,6 +416,180 @@ maybeDescribe('portal messages (live Postgres)', () => {
     expect(await PortalMessages.markRead(pat.id, a1.message.id)).toEqual({ unread: 0 });
     expect(await PortalMessages.customerUnread(pat.id)).toBe(0);
   });
+  test('a customer message rings one bell per thread: a second message rewrites it, a new one comes after Done', async () => {
+    const pat = await customer();
+    const notifyAdmin = jest.spyOn(require('../services/notification-service'), 'notifyAdmin');
+    const first = await PortalMessages.customerPost({ customer: pat, body: 'Is the lawn treatment safe for my dog?' });
+    // The bell is written on the locked thread's own transaction: no second connection while the lock is held.
+    expect(notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({ trx: expect.anything() }));
+    notifyAdmin.mockRestore();
+    expect(first).toMatchObject({ from: 'you', body: 'Is the lawn treatment safe for my dog?' });
+    const [row] = await thread(pat.id);
+    let bells = await openAdminBells('portalConversationId', row.id);
+    expect(bells).toHaveLength(1);
+    expect(bells[0].title).toBe(`Comms — Answer Pat Synthetic${RUN}'s portal message`);
+    expect(bells[0].metadata).toMatchObject({ customerId: pat.id, portalMessageId: first.id, dedupeKey: `portal-message:${row.id}` });
+    expect(portalAskPush.pushPortalAsk).toHaveBeenCalledTimes(1);
+    expect(bells[0].body).toBe('They wrote in the portal: “Is the lawn treatment safe for my dog?”');
+
+    const second = await PortalMessages.customerPost({ customer: pat, body: 'Also, can you come Friday? I work Thursday.' });
+    bells = await openAdminBells('portalConversationId', row.id);
+    expect(bells).toHaveLength(1);
+    expect(bells[0].metadata.portalMessageId).toBe(second.id);
+    // Two sentences cannot stand in a bell's why: the plain line instead, the whole message in the full text.
+    expect(bells[0].body).toBe('They wrote in the portal and are waiting for an answer');
+    expect(bells[0].detail).toBe('Also, can you come Friday? I work Thursday.');
+    expect(portalAskPush.pushPortalAsk).toHaveBeenCalledTimes(2);
+
+    // The same words again are a new message: the bell is rewritten to it and rings again.
+    const third = await PortalMessages.customerPost({ customer: pat, body: 'Also, can you come Friday? I work Thursday.' });
+    bells = await openAdminBells('portalConversationId', row.id);
+    expect(bells).toHaveLength(1);
+    expect(bells[0].metadata.portalMessageId).toBe(third.id);
+    expect(bells[0].read_at).toBeNull();
+    expect(portalAskPush.pushPortalAsk).toHaveBeenCalledTimes(3);
+
+    await db('notifications').whereIn('id', bells.map((b) => b.id)).update({ done_at: new Date() });
+    await PortalMessages.customerPost({ customer: pat, body: 'Hello again' });
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(1);
+    expect((await thread(pat.id))[0].message_count).toBe(4);
+  });
+
+  test('the Portal tab lists an unanswered portal message; an answer, Mark handled or Close all older closes it', async () => {
+    process.env.GATE_PORTAL_INBOX = 'true';
+    const portalInbox = require('../services/portal-inbox');
+    const pat = await customer();
+    await PortalMessages.customerPost({ customer: pat, body: 'First question' });
+    await PortalMessages.customerPost({ customer: pat, body: 'Second line' });
+    const [row] = await thread(pat.id);
+    const mineOf = (items) => items.filter((i) => i.kind === 'message' && i.id === row.id);
+
+    let listed = mineOf((await portalInbox.list()).items);
+    expect(listed).toEqual([expect.objectContaining({ kind: 'message', customer: expect.objectContaining({ id: pat.id, firstName: 'Pat' }), customerMessage: 'First question\nSecond line', lastAnswer: '' })]);
+
+    // An answer closes it; a new customer message opens it again with only the new words and the answer.
+    await PortalMessages.staffReply({ kind: 'message', id: row.id, body: 'Answer one.', actor });
+    expect(mineOf((await portalInbox.list()).items)).toEqual([]);
+    await PortalMessages.customerPost({ customer: pat, body: 'Thanks, one more thing' });
+    listed = mineOf((await portalInbox.list()).items);
+    expect(listed[0]).toMatchObject({ customerMessage: 'Thanks, one more thing', lastAnswer: 'Answer one.' });
+
+    // Mark handled through the newest message stamps it once and closes its bell; a second finds nothing open.
+    expect(await portalInbox.markMessageHandled(row.id, listed[0].throughId, { technicianId: null, role: 'admin' })).toEqual({ handled: true, open: false });
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
+    expect(await portalInbox.markMessageHandled(row.id, listed[0].throughId, { technicianId: null, role: 'admin' })).toEqual({ handled: false, open: false });
+    // A message id that is not this thread's customer message is not something to mark.
+    expect(await portalInbox.markMessageHandled(row.id, randomUUID(), { technicianId: null, role: 'admin' })).toBeNull();
+    expect(mineOf((await portalInbox.list()).items)).toEqual([]);
+
+    // Close all older: a thread whose open message is 20 days old is stamped handled; nothing is sent.
+    await PortalMessages.customerPost({ customer: pat, body: 'Old ask' });
+    // Backdate the whole thread as if it were never handled (the handledAt stamp above is from now).
+    await db('conversations').where({ id: row.id }).update({
+      last_inbound_at: db.raw("now() - interval '20 days'"), last_message_at: db.raw("now() - interval '20 days'"), metadata: db.raw("metadata - 'handledAt'"),
+    });
+    expect(mineOf((await portalInbox.list()).olderItems)).toHaveLength(1);
+    const closed = await portalInbox.closeOlder(new Date(Date.now() - 16 * 24 * 3600 * 1000), { technicianId: null, role: 'admin' });
+    expect(closed.messages).toBeGreaterThanOrEqual(1);
+    expect(mineOf((await portalInbox.list()).olderItems)).toEqual([]);
+    expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledTimes(1);
+
+    // Gate off: no message items at all.
+    await PortalMessages.customerPost({ customer: pat, body: 'Newest' });
+    process.env.GATE_PORTAL_MESSAGES = 'false';
+    expect(mineOf((await portalInbox.list()).items)).toEqual([]);
+    delete process.env.GATE_PORTAL_INBOX;
+  });
+
+  test('a thread\'s bell follows the thread: no close over a newer customer message, no late ring after an answer', async () => {
+    process.env.GATE_PORTAL_INBOX = 'true';
+    const portalInbox = require('../services/portal-inbox');
+    const { closeItemBells, ringOffice } = PortalMessages.__private;
+    const pat = await customer();
+    const m1 = await PortalMessages.customerPost({ customer: pat, body: 'Can you come Monday?' });
+    const [row] = await thread(pat.id);
+    const m2 = await PortalMessages.customerPost({ customer: pat, body: 'Or Tuesday works.' });
+    // Mark handled through the message the screen showed (m1): m2 came after, so the item and its bell stay.
+    expect(await portalInbox.markMessageHandled(row.id, m1.id, actor)).toEqual({ handled: true, open: true });
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(1);
+    const item = (await portalInbox.list()).items.find((i) => i.kind === 'message' && i.id === row.id);
+    expect(item).toMatchObject({ customerMessage: 'Or Tuesday works.', throughId: m2.id });
+
+    // An answer's bell close that runs after a newer customer message (it saved and rang first) leaves its bell.
+    await PortalMessages.staffReply({ kind: 'message', id: row.id, body: 'Tuesday at 9.', actor });
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
+    await PortalMessages.customerPost({ customer: pat, body: 'Great, see you then.' });
+    expect(await closeItemBells('message', row.id, actor, row.id)).toBe(0);
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(1);
+
+    // A late ring for a message an answer already covered raises nothing.
+    await PortalMessages.staffReply({ kind: 'message', id: row.id, body: 'See you Tuesday.', actor });
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
+    jest.clearAllMocks();
+    await ringOffice(pat, row.id, m2);
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
+    expect(portalAskPush.pushPortalAsk).not.toHaveBeenCalled();
+
+    // Any answer lands in the thread and covers its open message: a reply to a chat hand-off closes that bell too.
+    await PortalMessages.customerPost({ customer: pat, body: 'One more question.' });
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(1);
+    const { escalationId } = await chat(pat.id, { alert: false });
+    await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'Answered both.', actor });
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
+    expect((await portalInbox.list()).items.filter((i) => i.kind === 'message' && i.id === row.id)).toEqual([]);
+  });
+
+  test('two sends whose rings run late in reverse order: the bell keeps the newest words', async () => {
+    const pat = await customer();
+    const { ringOffice } = PortalMessages.__private;
+    const m1 = await PortalMessages.customerPost({ customer: pat, body: 'Is Monday open?' });
+    const m2 = await PortalMessages.customerPost({ customer: pat, body: 'Never mind, Tuesday is better.' });
+    const [row] = await thread(pat.id);
+    jest.clearAllMocks();
+    // m1's ring arriving after m2's would put back stale words and ring the office again: it does nothing.
+    await ringOffice(pat, row.id, m1);
+    const bells = await openAdminBells('portalConversationId', row.id);
+    expect(bells).toHaveLength(1);
+    expect(bells[0].metadata.portalMessageId).toBe(m2.id);
+    expect(bells[0].detail).toBe('Never mind, Tuesday is better.');
+    expect(portalAskPush.pushPortalAsk).not.toHaveBeenCalled();
+  });
+
+  test('the office reads the whole thread behind a message item, every body whole', async () => {
+    process.env.GATE_PORTAL_INBOX = 'true';
+    const pat = await customer();
+    const long = `${'We have ants in the kitchen. '.repeat(60)}End.`.slice(0, 1990);
+    await PortalMessages.customerPost({ customer: pat, body: long });
+    await PortalMessages.customerPost({ customer: pat, body: 'Also the garage.' });
+    const [row] = await thread(pat.id);
+    const item = (await require('../services/portal-inbox').list()).items.find((i) => i.kind === 'message' && i.id === row.id);
+    expect(item.customerMessage.length).toBeLessThan(long.length);
+    const page = await PortalMessages.staffThread(row.id);
+    expect(page).toMatchObject({ hasMore: false });
+    expect(page.messages.map((m) => [m.direction, m.body])).toEqual([['inbound', long], ['inbound', 'Also the garage.']]);
+    await expect(PortalMessages.staffThread(randomUUID())).rejects.toMatchObject({ status: 404 });
+    process.env.GATE_PORTAL_MESSAGES = 'false';
+    await expect(PortalMessages.staffThread(row.id)).rejects.toMatchObject({ status: 404 });
+  });
+
+  test('an answer to a portal message closes its bell, and the customer sees both sides in order', async () => {
+    const pat = await customer();
+    // A request id is matched on its own side of the thread: the same id from the office is a new answer.
+    const clientRequestId = randomUUID();
+    const asked = await PortalMessages.customerPost({ customer: pat, body: 'When is my next visit?', clientRequestId });
+    const [row] = await thread(pat.id);
+    const answer = await PortalMessages.staffReply({ kind: 'message', id: row.id, body: 'Thursday morning.', clientRequestId, actor });
+    expect(answer.replay).toBeUndefined();
+    expect(await PortalMessages.customerPost({ customer: pat, body: 'When is my next visit?', clientRequestId })).toMatchObject({ id: asked.id });
+    expect(answer.closed).toBe(true);
+    expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
+    const view = await PortalMessages.customerThread(pat.id);
+    expect(view.messages.map((m) => [m.id, m.from])).toEqual([[asked.id, 'you'], [answer.message.id, 'waves']]);
+    expect(view.unread).toBe(1);
+    // A thread id from another customer is not an item this one can be answered on.
+    await expect(PortalMessages.staffReply({ kind: 'message', id: randomUUID(), body: 'x', actor })).rejects.toMatchObject({ status: 404 });
+  });
+
   test('a customer reads and marks only their own thread', async () => {
     const pat = await customer('Pat');
     const sam = await customer('Sam');

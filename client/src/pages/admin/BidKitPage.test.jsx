@@ -494,16 +494,11 @@ it("the facts sheet lists each value with a Copy button and copies it", async ()
   await waitFor(() => expect(writeText).toHaveBeenCalledWith("2027-06-30"));
 });
 
-it("opens at the item a bell linked to, and says so when the gate is off", async () => {
+it("opens at the item a bell linked to", async () => {
   route({ "GET /admin/bid-kit/": () => reply(payload()) });
   renderPage("/?item=i3");
   await screen.findByText("Certificate of insurance");
   expect(document.getElementById("bid-kit-i3")).toHaveClass("border-zinc-900");
-  cleanup();
-  route({ "GET /admin/bid-kit/": () => reply({ error: "Not found" }, { ok: false, status: 404 }) });
-  renderPage();
-  expect(await screen.findByText("Bid kit is not turned on yet.")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Facts sheet" })).toBeNull();
 });
 
 it("adding a custom item shows the fields for the type picked, and updates when the type changes", async () => {

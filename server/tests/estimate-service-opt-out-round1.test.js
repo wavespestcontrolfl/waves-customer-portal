@@ -174,7 +174,7 @@ describe('optOutImpact per-application disclosures (owner price-copy rule — no
       beforeData: {}, afterData: {}, label: 'Lawn Care', mode: 'restore',
     });
     const restored = impact.disclosures.find((d) => d.code === 'restored_per_application');
-    expect(restored.message).toBe('Lawn Care comes back at $106.00 per application.');
+    expect(restored.message).toBe('Lawn Care comes back at $106.00 per application, 6 applications per year.');
   });
 
   it('remove mode never emits a restored-line disclosure', () => {

@@ -520,6 +520,25 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/email',
     }),
   },
+  // The reminder banner for a lead's call request (GATE_LEAD_CALL_REMINDER, owner 2026-11-05, "remind"). A missed
+  // press-1 ring ("Missed call request") and a night call-back bell reach only the portal bell; one still open after
+  // one business hour, with nobody reaching the lead since, sends this ONE banner (services/lead-call-reminder.js,
+  // run by the alert-relevance sweep). pushOnly: the bell row already exists and is not rewritten, so `rule` is the
+  // retention expiry. `build` takes the bell row's own words as alertTitle/alertBody/alertLink. Admin-only like the
+  // lead bell; the owner can switch it off in Push Settings.
+  lead_call_reminder: {
+    label: 'Reminder: a lead still waits for a call',
+    category: 'lead',
+    priority: 'high',
+    group: 'Leads & Sales',
+    rule: { area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'Leads — call a lead back',
+      body: ['Reminder: nobody has reached this lead yet.', p.alertBody].filter(Boolean).join(' '),
+      link: p.alertLink || '/admin/leads',
+    }),
+  },
   // Sandy PR 2A: a live transfer went to the office WITHOUT its summary
   // (the handoff packet write failed or timed out). The staff member who
   // pressed 1 heard the generic whisper; this is the only record that a
@@ -533,7 +552,8 @@ const TRIGGER_REGISTRY = {
     priority: 'high',
     group: 'Communication',
     rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
-    techVisible: true, // the calls tab is staff-wide; whoever pressed 1 must see it
+    // Not tech-visible: technicians get no calls (owner 2026-10-02), so the Calls tab this links to is admin
+    // only, and the row names no customer (technician visibility audit C19, owner 2026-11-04 "ok go for all").
     build: (p) => ({
       title: `${agentName()} transfer without context`,
       body: `A caller${p.from ? ` from ${maskPhone(p.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,
@@ -1031,6 +1051,23 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
+  // The phone banner for a customer stuck booking from an estimate, or back on an expired one (owner 2026-11-05,
+  // "1, 2 and 3": the estimate page audit's fix 3). estimate-stuck-alert.js writes the bell row (one standing row per
+  // estimate, rung once per Eastern day) and closes it once the estimate is accepted, declined or archived; this
+  // entry is the banner bell-banners.js sends for a write that rang, so `build` takes the row's own words.
+  estimate_stuck: {
+    label: 'Customer stuck booking an estimate',
+    category: 'estimate_stuck',
+    priority: 'high',
+    group: 'Leads & Sales',
+    rule: { area: 'Estimates', severity: 'needs-you', who: 'person', doneWhen: 'estimate_booked_or_closed', closedBy: 'server/services/estimate-stuck-alert.js' },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'A customer is stuck booking an estimate',
+      body: p.alertBody || 'Open the estimate to see where they stopped.',
+      link: p.alertLink || '/admin/estimates',
+    }),
+  },
   bundle_quote_requested: {
     label: 'Bundle quote requested',
     category: 'estimate',
@@ -1402,6 +1439,19 @@ function pushTagFor(triggerKey, payload = {}) {
   return `waves-${triggerKey}`;
 }
 
+// GATE_ALERT_REGISTRY_LABELS (owner 2026-11-05, admin-alert plan S1): the labels a registry type's rule already declares,
+// in the shape a composed alert stores (area, severity, who, doneWhen, contact or promise), each kept only when the
+// composer would accept it. Never a subject: a rule names no record. {} while the gate is off, or when the reader is
+// missing (a test that mocks feature-gates) or anything throws, so the row is written exactly as before.
+function registryLabels(trigger) {
+  try {
+    const gates = require('../config/feature-gates');
+    if (!(typeof gates.alertRegistryLabelsLive === 'function' && gates.alertRegistryLabelsLive())) return {};
+    const { area, severity, who, doneWhen, contact, promise } = trigger?.rule || {};
+    return require('./admin-alert-compose').validStructuredFields({ area, severity, who, doneWhen, contact, promise });
+  } catch { return {}; }
+}
+
 /**
  * Fire a notification event. Non-blocking — never throws.
  *
@@ -1559,7 +1609,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     }
     // The one bell write, shared by a ring (the loop below) and a rescued Claude fault (writeRescuedFault): the
     // registry's built row under the given metadata, with the caller's dedupe and refresh options.
-    const bellMetadata = { ...(built.alert || {}), triggerKey, priority: trigger.priority, payload: safePayload };
+    // GATE_ALERT_REGISTRY_LABELS: the labels the type's rule declares sit under the built alert's own fields (which win).
+    const bellMetadata = { ...registryLabels(trigger), ...(built.alert || {}), triggerKey, priority: trigger.priority, payload: safePayload };
     const writeBell = (metadata) => NotificationService.notifyAdmin(
       trigger.category,
       built.title,
@@ -1825,6 +1876,7 @@ module.exports = {
     pushTagFor,
     PRIORITY_VIBRATE,
     redactSensitiveText,
+    registryLabels,
     sanitizeBuiltNotification,
     sanitizeNotificationPayload,
   },

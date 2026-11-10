@@ -30,6 +30,39 @@ function duplicateOfFromExtracted(extractedData) {
   return parseExtracted(extractedData)?.duplicate_of_lead_id || null;
 }
 
+// Free-text values are cut to the leads column they land in before any write:
+// a 300-character first name overflowed leads.first_name (varchar 255) and the
+// whole quote answered 500 (2026-11-05 new-customer walk). Sizes come from the
+// leads migrations (initial table: plain strings = 255; service_key 80).
+const LEAD_TEXT_LIMITS = {
+  first_name: 255,
+  last_name: 255,
+  email: 255,
+  phone: 255,
+  address: 255,
+  city: 255,
+  zip: 255,
+  service_interest: 255,
+  service_key: 80,
+};
+// Cut by whole characters (code points), as Postgres counts varchar length, so
+// an emoji at the cut never leaves half a surrogate pair behind. The one place
+// this slice lives: the lead clamp, the name cut and the estimate name use it.
+function cutChars(value, max) {
+  if (typeof value !== 'string' || value.length <= max) return value;
+  return Array.from(value).slice(0, max).join('');
+}
+function clampLeadText(fields) {
+  const out = { ...fields };
+  for (const [key, max] of Object.entries(LEAD_TEXT_LIMITS)) out[key] = cutChars(out[key], max);
+  return out;
+}
+// The narrowest name columns on the /calculate path: customers.first_name and
+// last_name, and customer_accounts.first_name and last_name, are varchar(50).
+// estimates.customer_name ("first last") is varchar(100).
+const CONTACT_NAME_MAX = 50;
+const ESTIMATE_CUSTOMER_NAME_MAX = 100;
+
 // `excludeLeadId` is the caller's OWN row (the token path re-checks a row the
 // property-lookup stage already minted) — a row is never its own prior.
 // `onlyLeadId` re-validates ONE already-chosen target against the exact same
@@ -90,7 +123,7 @@ const { generateEstimate, normalizeRoachType, constants: pricingConstants } = re
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
-const { subscribeOrResubscribe } = require('../services/newsletter-subscribers');
+const { subscribeOrResubscribe, hasLiveConfirmation } = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
@@ -1246,8 +1279,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // row written earlier in this request and the customer row are both
     // canonical — otherwise every quote like "CHARLES SANTIAGO" reintroduces raw
     // lead data after the backfill.
-    const contactFirstName = normalizeContactName(contact.firstName);
-    const contactLastName = normalizeContactName(contact.lastName);
+    // Cut once to the narrowest name column (50) so every later write — lead,
+    // customer account, customer, newsletter, estimate, bell — sees one value.
+    const contactFirstName = cutChars(normalizeContactName(contact.firstName), CONTACT_NAME_MAX);
+    const contactLastName = cutChars(normalizeContactName(contact.lastName), CONTACT_NAME_MAX);
     const contactEmail = contact.email;
     const contactPhone = contact.phoneForStorage;
     const normalizedPhone = contact.phoneE164;
@@ -2264,7 +2299,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // guessed/known id for someone else's lead matches zero rows and falls
       // through to creating a fresh lead below. /calculate already requires
       // contactEmail above, so a legitimate visitor's own row always matches.
-      const updateFields = {
+      const updateFields = clampLeadText({
         first_name: contactFirstName,
         last_name: contactLastName,
         email: contactEmail,
@@ -2295,7 +2330,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           [extractedData, extractedData]
         ),
         updated_at: new Date(),
-      };
+      });
       if (gclid) updateFields.gclid = gclid;
       if (wbraid) updateFields.wbraid = wbraid;
       if (gbraid) updateFields.gbraid = gbraid;
@@ -2444,32 +2479,36 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
     if (!lead) {
       const rows = await db('leads').insert({
-        first_name: contactFirstName,
-        last_name: contactLastName,
-        email: contactEmail,
-        phone: contactPhone,
-        address: quoteFullAddress,
-        city: quoteCity || null,
-        zip: quoteZip || null,
-        service_interest: serviceInterest,
-        service_key: leadServiceKey,
-        lead_type: 'quote_wizard',
-        first_contact_channel: 'website_quote',
-        lead_source_id: sourceMeta.leadSourceId,
-        monthly_value: leadMonthlyValue,
-        status: duplicateOfLeadId ? 'duplicate' : 'new',
-        gclid,
-        wbraid,
-        gbraid,
-        fbclid,
-        fbc,
-        fbp,
-        anon_id: anonId,
-        heard_about: wizardHeardAbout.heardAbout,
-        heard_about_prompt: wizardHeardAbout.heardAboutPrompt,
-        extracted_data: duplicateOfLeadId
-          ? JSON.stringify({ ...JSON.parse(extractedData), duplicate_of_lead_id: duplicateOfLeadId })
-          : extractedData,
+        // Spread, not insert(clampLeadText(...)): this insert line is the
+        // registered lead-writer anchor (config/lead-writer-registry.js).
+        ...clampLeadText({
+          first_name: contactFirstName,
+          last_name: contactLastName,
+          email: contactEmail,
+          phone: contactPhone,
+          address: quoteFullAddress,
+          city: quoteCity || null,
+          zip: quoteZip || null,
+          service_interest: serviceInterest,
+          service_key: leadServiceKey,
+          lead_type: 'quote_wizard',
+          first_contact_channel: 'website_quote',
+          lead_source_id: sourceMeta.leadSourceId,
+          monthly_value: leadMonthlyValue,
+          status: duplicateOfLeadId ? 'duplicate' : 'new',
+          gclid,
+          wbraid,
+          gbraid,
+          fbclid,
+          fbc,
+          fbp,
+          anon_id: anonId,
+          heard_about: wizardHeardAbout.heardAbout,
+          heard_about_prompt: wizardHeardAbout.heardAboutPrompt,
+          extracted_data: duplicateOfLeadId
+            ? JSON.stringify({ ...JSON.parse(extractedData), duplicate_of_lead_id: duplicateOfLeadId })
+            : extractedData,
+        }),
       }).returning(['id']);
       lead = rows[0];
     }
@@ -3354,7 +3393,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       };
       const estFields = {
         customer_id: customerId,
-        customer_name: `${contactFirstName} ${contactLastName}`,
+        customer_name: cutChars(`${contactFirstName} ${contactLastName}`, ESTIMATE_CUSTOMER_NAME_MAX),
         customer_phone: contactPhone,
         customer_email: contactEmail,
         address: quoteFullAddress,
@@ -4135,8 +4174,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           source: 'quote_wizard',
           strict: true,
           requireConfirmation: true,
+          // Unverified public email: throttle repeats, keep an opted-out row
+          // opted out until the link is clicked (sweep #7765 B5).
+          publicSignup: true,
         });
-        if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
+        // A throttled repeat sends no second email, but while the earlier
+        // confirmation is still waiting for its click (a pending row, or an
+        // opted-out row holding a live re-signup token) the lead rides it:
+        // stamp it so the click enrolls this lead, not an older one.
+        if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent'
+            || (result.action === 'confirmation_throttled' && hasLiveConfirmation(result.subscriber))) {
           await db('newsletter_subscribers').where({ id: result.subscriber.id }).update({
             quote_lead_automation_pending: true,
             // Carried through double opt-in so the confirmed enrollment can
@@ -4146,7 +4193,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             updated_at: new Date(),
           });
           try {
-            await sendConfirmationEmail(result.subscriber);
+            if (result.action !== 'confirmation_throttled') await sendConfirmationEmail(result.subscriber);
           } catch (e) {
             logger.error(`[public-quote] confirmation email failed for subscriber id=${result.subscriber?.id}: ${e.message}`);
           }
@@ -4460,6 +4507,10 @@ module.exports._internals = {
   trustedTreeShrubFootprintSqFt,
   deriveAddressUnverified,
   findPriorOpenWizardLeadId,
+  clampLeadText,
+  cutChars,
+  CONTACT_NAME_MAX,
+  LEAD_TEXT_LIMITS,
   duplicateOfFromExtracted,
   WIZARD_LEAD_REUSE_DAYS,
   isPublicCommercialQuote,

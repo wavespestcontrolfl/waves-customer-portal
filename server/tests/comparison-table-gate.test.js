@@ -2808,7 +2808,7 @@ describe('operator authorization: detection-only unknowns + feature-flag exempti
 // competitor it detected, and namedCompetitorListVerdict holds unattended
 // blog publishing to the owner list.
 describe('owner competitor list', () => {
-  const OPTS = { namedCompetitorEnabled: true, operatorBriefText: 'Orkin, Terminix, Massey, Turner, Aptive, Truly Nolen and Hughes Exterminators alternatives' };
+  const OPTS = { namedCompetitorEnabled: true, operatorBriefText: 'Orkin, Terminix, Massey, Turner, Aptive, Truly Nolen, Hughes Exterminators, EcoShield Pest Solutions and Rodent Solutions alternatives' };
   // The runner stores a successful whole-draft extraction on the verdict.
   const ext = (r, companies = []) => ({ ...r, companyExtraction: { ok: true, key: 'k', companies } });
 
@@ -2817,14 +2817,27 @@ describe('owner competitor list', () => {
     expect(approved.namedCompetitors).toEqual(['Massey Services', 'Orkin']);
     expect(gate.namedCompetitorListVerdict(ext(approved))).toEqual({ ok: true, approved: ['Massey Services', 'Orkin'] });
 
-    // Hughes is curated but NOT on the owner list.
-    const offList = gate.evaluate({ body: 'Orkin and Hughes Exterminators both offer recurring residential plans.', title: 'x' }, OPTS);
-    expect(gate.namedCompetitorListVerdict(ext(offList))).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Hughes Exterminators'] });
+    // EcoShield and Rodent Solutions are curated but NOT on the owner list.
+    const ecoshield = gate.evaluate({ body: 'Orkin and EcoShield Pest Solutions both offer recurring residential plans.', title: 'x' }, OPTS);
+    expect(gate.namedCompetitorListVerdict(ext(ecoshield))).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['EcoShield Pest Solutions'] });
+    const offList = gate.evaluate({ body: 'Orkin and Rodent Solutions Inc both offer recurring residential plans.', title: 'x' }, OPTS);
+    expect(gate.namedCompetitorListVerdict(ext(offList))).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Rodent Solutions Inc'] });
 
     // Owner ruling 2026-09-28 (~07:05Z): Aptive and Truly Nolen joined the list.
     for (const [body, name] of [
       ['Aptive offers recurring residential plans.', 'Aptive Environmental'],
       ['Truly Nolen offers recurring residential plans.', 'Truly Nolen'],
+      // Owner ruling 2026-11-05: All U Need joined the list.
+      ['All U Need Pest Control offers recurring residential plans.', 'All U Need Pest Control'],
+      // Owner ruling 2026-11-05: eight more companies joined the list.
+      ['Prodigy Pest Solutions offers recurring residential plans.', 'Prodigy Pest Solutions'],
+      ['Greenhouse Termite & Pest Control offers recurring residential plans.', 'Greenhouse Termite & Pest Control'],
+      ['Good News Pest Solutions offers recurring residential plans.', 'Good News Pest Solutions'],
+      ["Keller's Pest Control offers recurring residential plans.", "Keller's Pest Control"],
+      ['Arrow Environmental offers recurring residential plans.', 'Arrow Environmental'],
+      ['Hughes Exterminators offers recurring residential plans.', 'Hughes Exterminators'],
+      ['Farrow Pest Services offers recurring residential plans.', 'Farrow Pest Services'],
+      ["Westfall's Lawn and Pest Control offers recurring residential plans.", "Westfall's Lawn and Pest Control"],
     ]) {
       const r = gate.evaluate({ body, title: 'x' }, OPTS);
       expect(r.namedCompetitors).toEqual([name]);
@@ -2897,10 +2910,10 @@ describe('owner competitor list', () => {
   });
 
   test('a table draft records a competitor it names only through a link destination', () => {
-    const body = 'Intro. See [their plans](https://prodigypest.com/plans).\n\n<ComparisonTable columns={["What to weigh","Orkin","Waves"]} rows={[{ label: "Recurring plans", values: ["Yes","Yes"] }]} caption="Attributes as of June 2026, per each company public website." />\n\nOutro.';
-    const r = gate.evaluate({ body, title: 'x' }, { namedCompetitorEnabled: true, operatorBriefText: 'Orkin and Prodigy Pest alternatives' });
-    expect(r.namedCompetitors).toEqual(['Orkin', 'Prodigy Pest Solutions']);
-    expect(gate.namedCompetitorListVerdict(ext(r, ['Orkin']))).toMatchObject({ ok: false, offList: ['Prodigy Pest Solutions'] });
+    const body = 'Intro. See [their plans](https://ecoshieldpest.com/plans).\n\n<ComparisonTable columns={["What to weigh","Orkin","Waves"]} rows={[{ label: "Recurring plans", values: ["Yes","Yes"] }]} caption="Attributes as of June 2026, per each company public website." />\n\nOutro.';
+    const r = gate.evaluate({ body, title: 'x' }, { namedCompetitorEnabled: true, operatorBriefText: 'Orkin and EcoShield Pest alternatives' });
+    expect(r.namedCompetitors).toEqual(['EcoShield Pest Solutions', 'Orkin']);
+    expect(gate.namedCompetitorListVerdict(ext(r, ['Orkin']))).toMatchObject({ ok: false, offList: ['EcoShield Pest Solutions'] });
   });
 
   test('a verdict without recorded names fails closed', () => {

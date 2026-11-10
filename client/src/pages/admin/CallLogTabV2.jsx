@@ -516,6 +516,7 @@ export default function CallLogTabV2() {
   // retry, so the link is not silently empty until the tab remounts.
   const pinnedFetchRef = useRef(null);
   const [pinnedError, setPinnedError] = useState(null);
+  const [callsError, setCallsError] = useState(false);
   const [pinnedRetry, setPinnedRetry] = useState(0);
   useEffect(() => {
     // No focus (hash cleared): nothing pinned, and no stale failure either.
@@ -564,6 +565,7 @@ export default function CallLogTabV2() {
         if (callsResult.status !== "fulfilled") throw callsResult.reason;
         const d = callsResult.value;
         setCalls(d.calls || []);
+        setCallsError(false);
         setTranscriptSyncEnabled(d.transcript_sync_enabled === true);
         pinnedFetchRef.current = null;
         if (calibrationResult.status === "fulfilled") {
@@ -576,6 +578,7 @@ export default function CallLogTabV2() {
       })
       .catch(() => {
         if (seq !== loadSeqRef.current) return; // superseded
+        setCallsError(true);
         // Fail closed: a rejected reload must not leave the gated transcript
         // UI enabled on stale data.
         setTranscriptSyncEnabled(false);
@@ -1381,10 +1384,22 @@ export default function CallLogTabV2() {
               className="h-11 min-h-[44px] w-full max-w-none text-16 md:h-9 md:min-h-0 md:max-w-[360px] md:min-w-[200px] md:text-13"
             />{" "}
           </div>
-          {calls.length === 0 ? (
-            <div className="p-5 text-center text-ink-tertiary text-13">
-              No calls recorded yet.
+          {callsError && (
+            <div role="alert" className="mb-3 flex flex-wrap items-center gap-2 text-14 text-alert-fg">
+              <span>
+                {calls.length === 0
+                  ? "Call history could not load."
+                  : "Call history could not refresh. The list below may be out of date."}
+              </span>
+              <Button size="sm" variant="ghost" onClick={() => loadCalls(callLogSearch.trim())}>Retry</Button>
             </div>
+          )}
+          {calls.length === 0 ? (
+            !callsError && (
+              <div className="p-5 text-center text-ink-tertiary text-13">
+                No calls recorded yet.
+              </div>
+            )
           ) : (
             <div className="md:max-h-[600px] md:overflow-y-auto">
               {filteredCalls.map((c) => {

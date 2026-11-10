@@ -340,6 +340,13 @@ const DECODER_ROUTE = () => {
   });
 };
 const DECODER_DOWN_DEDUPE_MS = 24 * 60 * 60 * 1000;
+// Output cap for each leg of the chain. Gemini 2.5 Pro always thinks, and its
+// thinking shares this cap with the JSON answer. The shared Gemini call caps
+// at 2048 unless told otherwise, and 10 of 33 decoder legs Nov 1-5 stopped
+// there (MAX_TOKENS: 1583-2045 thinking tokens before the answer), so OpenAI
+// answered them instead. The old direct call sent no cap. 8192 is the cap the
+// pest photo engine uses for the same Gemini thinking behavior.
+const DECODER_MAX_OUTPUT_TOKENS = 8192;
 
 // One engineering row a day in the Activity feed when every model failed.
 // Fail-open: an alert problem never touches the call.
@@ -372,6 +379,7 @@ async function fetchDecoderWithFallback(prompt) {
     // The chain reads its budget from the payload; reserveFallbackBudget
     // splits it, so each leg keeps the old single-call limit.
     timeoutMs: DECODER_TIMEOUT_MS * 2,
+    maxTokens: DECODER_MAX_OUTPUT_TOKENS,
   }, {
     reserveFallbackBudget: true,
     validate: (result) => (result.json && Array.isArray(result.json.emails) ? null : 'decoder_shape_invalid'),

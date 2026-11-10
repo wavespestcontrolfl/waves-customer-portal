@@ -1,14 +1,11 @@
 /**
- * services/lead-call-text-followup.js (GATE_LEAD_CALL_TEXT_FOLLOWUP): the
- * owner's approved texts (2026-10-24), the time reader, and the day a night
+ * services/lead-call-text-followup.js: the owner's approved texts (2026-10-24), the time reader, and the day a night
  * ask is for. The claim and slot rules run against PostgreSQL in
  * lead-call-text-followup-postgres.test.js.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 
-const { isEnabled } = require('../config/feature-gates');
 const db = require('../models/db');
 const {
   handleLeadReply, parseCallTime, TEXT_REPLY_BODY, NIGHT_CALL_BODY, ENTRY_POINT, _test,
@@ -91,15 +88,7 @@ test('a slot is the ET wall time on the target day', () => {
   expect(_test.slotInstant('2026-12-01', 10 * 60).toISOString()).toBe('2026-12-01T15:00:00.000Z');
 });
 
-test('gate off: nothing is read or sent', async () => {
-  isEnabled.mockReturnValue(false);
-  await expect(handleLeadReply({ customer: { id: 'c1' }, body: 'text', fromPhone: '+19415550100' }))
-    .resolves.toEqual({ action: 'none', reason: 'gate_off' });
-  expect(db).not.toHaveBeenCalled();
-});
-
 test('a foreign number is never handled', async () => {
-  isEnabled.mockReturnValue(true);
   await expect(handleLeadReply({ customer: { id: 'c1' }, body: 'text', fromPhone: '+449415550100' }))
     .resolves.toEqual({ action: 'none', reason: 'bad_phone' });
   expect(db).not.toHaveBeenCalled();

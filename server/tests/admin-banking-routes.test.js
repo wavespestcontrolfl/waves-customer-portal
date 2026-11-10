@@ -27,6 +27,8 @@ jest.mock('../services/cash-forecast/inputs', () => ({
   updateItem: jest.fn(),
   deactivateItem: jest.fn(),
   saveSettings: jest.fn(),
+  saveMark: jest.fn(),
+  clearMark: jest.fn(),
 }));
 jest.mock('../services/banking-export', () => ({
   generateCSV: jest.fn(() => ({ content: 'csv', filename: 'test.csv', content_type: 'text/csv' })),
@@ -531,21 +533,43 @@ describe('admin banking routes', () => {
     test('gate off: every forecast route is 404 and nothing is read or written', async () => {
       delete process.env.GATE_CASH_FORECAST;
       for (const [method, path] of [['GET', '/cash-forecast'], ['GET', '/cash-forecast/inputs'], ['POST', '/cash-forecast/items'],
-        ['PATCH', '/cash-forecast/items/x'], ['DELETE', '/cash-forecast/items/x'], ['PUT', '/cash-forecast/settings']]) {
+        ['PATCH', '/cash-forecast/items/x'], ['DELETE', '/cash-forecast/items/x'], ['PUT', '/cash-forecast/settings'],
+        ['PUT', '/cash-forecast/marks/ACME'], ['DELETE', '/cash-forecast/marks/ACME']]) {
         const { status, body } = await call(method, path, { body: method === 'GET' || method === 'DELETE' ? undefined : {} });
         expect([method, path, status, body]).toEqual([method, path, 404, { error: 'Not found' }]);
       }
       expect(loadForecastInput).not.toHaveBeenCalled();
       expect(CashForecastInputs.createItem).not.toHaveBeenCalled();
       expect(CashForecastInputs.saveSettings).not.toHaveBeenCalled();
+      expect(CashForecastInputs.saveMark).not.toHaveBeenCalled();
+      expect(CashForecastInputs.clearMark).not.toHaveBeenCalled();
     });
 
     test('a non-owner admin gets 403 on the read and the writes, gate on', async () => {
       process.env.GATE_CASH_FORECAST = 'true';
       expect((await call('GET', '/cash-forecast', { token: 'admin2' })).status).toBe(403);
       expect((await call('PUT', '/cash-forecast/settings', { token: 'admin2', body: { floor_cents: 1 } })).status).toBe(403);
+      expect((await call('PUT', '/cash-forecast/marks/ACME', { token: 'admin2', body: { mark: 'business' } })).status).toBe(403);
+      expect((await call('DELETE', '/cash-forecast/marks/ACME', { token: 'admin2' })).status).toBe(403);
       expect(loadForecastInput).not.toHaveBeenCalled();
       expect(CashForecastInputs.saveSettings).not.toHaveBeenCalled();
+      expect(CashForecastInputs.saveMark).not.toHaveBeenCalled();
+      expect(CashForecastInputs.clearMark).not.toHaveBeenCalled();
+    });
+
+    test('a repeating-bill mark: the decoded key, the body and the owner id; clearing passes the key; 400 keeps the reason', async () => {
+      process.env.GATE_CASH_FORECAST = 'true';
+      CashForecastInputs.saveMark.mockResolvedValueOnce({ key: 'ACME LOAN', mark: 'business', updated_at: 'T' });
+      expect(await call('PUT', '/cash-forecast/marks/ACME%20LOAN', { body: { mark: 'business' } }))
+        .toEqual({ status: 200, body: { key: 'ACME LOAN', mark: 'business', updated_at: 'T' } });
+      expect(CashForecastInputs.saveMark).toHaveBeenCalledWith(db, 'ACME LOAN', { mark: 'business' }, 'admin-1');
+
+      CashForecastInputs.clearMark.mockResolvedValueOnce({ key: 'AT&T', mark: null, removed: true });
+      expect(await call('DELETE', `/cash-forecast/marks/${encodeURIComponent('AT&T')}`)).toEqual({ status: 200, body: { key: 'AT&T', mark: null, removed: true } });
+      expect(CashForecastInputs.clearMark).toHaveBeenCalledWith(db, 'AT&T');
+
+      CashForecastInputs.saveMark.mockRejectedValueOnce(Object.assign(new Error('mark must be one of: business, household'), { status: 400 }));
+      expect(await call('PUT', '/cash-forecast/marks/ACME', { body: { mark: 'x' } })).toEqual({ status: 400, body: { error: 'mark must be one of: business, household' } });
     });
 
     test('the owner gets 13 weeks from the engine; a failed read is a plain 500', async () => {

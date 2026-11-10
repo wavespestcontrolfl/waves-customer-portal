@@ -1375,17 +1375,13 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       } finally { spy.mockRestore(); delete process.env.GATE_VISIT_PREP_PHOTOS; }
     });
 
-    // Truck kit (GATE_TRUCK_KIT, docs/tool-inventory-tracker-scope.md PR 2): the
-    // readiness poll carries the tools exception only behind the gate, keyed on
-    // the visit's technician and service line.
-    test('readiness adds the truck tool gap behind GATE_TRUCK_KIT and nothing when the gate is dark', async () => {
+    // Truck kit (docs/tool-inventory-tracker-scope.md PR 2): the readiness
+    // poll carries the tools exception, keyed on the visit's technician and
+    // service line.
+    test('readiness adds the truck tool gap', async () => {
       const truckKit = require('../services/truck-kit');
       const spy = jest.spyOn(truckKit, 'toolGapIssue').mockResolvedValue({ kind: 'tools', status: 'hold', label: 'Truck lacks Moisture meter', tools: ['moisture_meter'] });
       try {
-        const dark = await jobCard.buildJobCard('svc1', { dbh: withTexts({}, []), readinessOnly: true, deps: { ...deps, protocols: {} }, now: new Date('2026-09-04T12:00:00Z') });
-        expect(spy).not.toHaveBeenCalled();
-        expect(dark.issues.some((issue) => issue.kind === 'tools')).toBe(false);
-        process.env.GATE_TRUCK_KIT = 'true';
         const lit = await jobCard.buildJobCard('svc1', { dbh: withTexts({}, []), readinessOnly: true, deps: { ...deps, protocols: {} }, now: new Date('2026-09-04T12:00:00Z') });
         expect(spy).toHaveBeenCalledWith(expect.objectContaining({ serviceLine: expect.any(String), serviceType: expect.any(String), addons: expect.any(Array) }), expect.anything());
         expect(lit.issues).toContainEqual({ kind: 'tools', status: 'hold', label: 'Truck lacks Moisture meter', tools: ['moisture_meter'] });
@@ -1394,7 +1390,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
         const degraded = await jobCard.buildJobCard('svc1', { dbh: withTexts({}, []), readinessOnly: true, deps: { ...deps, protocols: {} }, now: new Date('2026-09-04T12:00:00Z') });
         expect(degraded.issues.some((issue) => issue.kind === 'tools')).toBe(false);
         expect(Array.isArray(degraded.issues)).toBe(true);
-      } finally { spy.mockRestore(); delete process.env.GATE_TRUCK_KIT; }
+      } finally { spy.mockRestore(); }
     });
 
     test('on → an unreadable text history is null, not an empty list', async () => {

@@ -17,15 +17,23 @@ vi.mock('../tech/DictationButton', () => ({ default: () => null }));
 vi.mock('../../utils/imageCompression', () => ({ encodeJpegDataUrl: vi.fn(async () => 'data:image/jpeg;base64,QUJD') }));
 
 const CUSTOMER = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const OTHER_CUSTOMER = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const THREAD = '00000000-0000-4000-8000-0000000000b2';
 const IDEA_ID = '00000000-0000-4000-8000-0000000000a1';
 const AT = '2026-11-03T15:00:00.000Z';
+const ANSWER = 'There is no manual prepay option in this bar. Nothing was changed.';
 const reply = (status, body) => ({ ok: status < 400, status, statusText: '', headers: { get: () => null }, json: async () => body, clone() { return this; } });
 let fetchMock;
 let ideaAnswer;
 let statusAnswer;
+let queryAnswer;
 
+// The page the palette sits on; a test opens another customer with switchPageCustomer.
+let switchPageCustomer = () => {};
 function Page() {
-  usePublishIntelligenceBarPageData({ customer_id: CUSTOMER, viewed_date: '2026-11-03' });
+  const [customerId, setCustomerId] = React.useState(CUSTOMER);
+  switchPageCustomer = setCustomerId;
+  usePublishIntelligenceBarPageData({ customer_id: customerId, viewed_date: '2026-11-03' });
   return null;
 }
 async function mount({ mobile = false } = {}) {
@@ -50,9 +58,11 @@ beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
   statusAnswer = () => reply(200, { enabled: true });
+  queryAnswer = () => reply(200, { response: ANSWER, toolCalls: [], pendingActions: [], conversationHistory: [] });
   ideaAnswer = () => reply(200, { sent: true, id: IDEA_ID, at: AT, message: 'Sent to Claude.' });
   fetchMock = vi.fn((url) => {
     const u = String(url);
+    if (u.includes('/intelligence-bar/query')) return Promise.resolve(queryAnswer());
     if (u.endsWith('/claude-ideas/status')) return Promise.resolve(statusAnswer());
     if (u.endsWith('/claude-ideas')) return Promise.resolve(ideaAnswer());
     if (u.endsWith('/cancel')) return Promise.resolve(reply(200, { cancelled: true }));
@@ -91,7 +101,9 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude besid
     fireEvent.paste(box, { clipboardData: { getData: () => 'pasted words' } });
     type('Show the last tech note on this card.');
     fireEvent.click(await screen.findByRole('button', { name: 'Send to Claude (free)' }));
-    expect(await screen.findByText('Sent to Claude.')).toBeInTheDocument();
+    // A paste in the box: the Mac opens a locked tab that writes a plan only (owner 2026-11-05 "lock pastes").
+    expect(await screen.findByText('Sent to Claude. It has pasted text, so you get a plan only, in your bell.')).toBeInTheDocument();
+    expect(screen.queryByText('Sent to Claude.')).not.toBeInTheDocument();
     const posts = callsTo('/claude-ideas').filter(([, init]) => init?.method === 'POST');
     expect(posts).toHaveLength(1);
     expect(JSON.parse(posts[0][1].body)).toEqual({
@@ -242,5 +254,215 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude besid
     await act(async () => { vi.advanceTimersByTime(10001); });
     expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
     expect(screen.getByText('Sent to Claude.')).toBeInTheDocument();
+  });
+});
+
+// Under a stuck answer (GATE_IB_ANSWER_SEND_TO_CLAUDE): a gap line, a button, or nothing; and a tap sends only the owner's
+// own question for that answer, never the answer.
+describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under a stuck answer (%s)', (_name, mobile) => {
+  const stuck = (gapId) => ({ response: ANSWER, toolCalls: [], pendingActions: [], conversationHistory: [], answerClaude: { stuck: true, gapId } });
+  const QUESTION = 'Switch Pat Placeholder to annual prepay';
+  async function askQuestion(question = QUESTION, { paste = false } = {}) {
+    const box = screen.getByPlaceholderText(/Ask anything/);
+    if (paste) fireEvent.paste(box, { clipboardData: { getData: () => question } });
+    type(question);
+    fireEvent.keyDown(box, { key: 'Enter' });
+    await screen.findByText(ANSWER);
+  }
+  const answerButton = () => screen.queryByTestId('answer-send-to-claude');
+  const ideaPosts = () => callsTo('/claude-ideas').filter(([, init]) => init?.method === 'POST').map(([, init]) => JSON.parse(init.body));
+
+  it('shows "Claude has this as gap #N." and no button when a gap row was written', async () => {
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    queryAnswer = () => reply(200, stuck(7));
+    await mount({ mobile });
+    await askQuestion();
+    expect(await screen.findByText('Claude has this as gap #7.')).toBeInTheDocument();
+    expect(answerButton()).not.toBeInTheDocument();
+  });
+
+  it('shows the button when no gap row was written, and a tap sends the typed question and the page, never the answer', async () => {
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    queryAnswer = () => reply(200, stuck(null));
+    await mount({ mobile });
+    await askQuestion();
+    expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('');
+    const button = await screen.findByTestId('answer-send-to-claude');
+    expect(button).toHaveTextContent('Send to Claude (free)');
+    expect(screen.getByText("Bar couldn't do it?")).toBeInTheDocument();
+    if (mobile) expect(button.style.minHeight).toBe('44px');
+    fireEvent.click(button);
+    expect(await screen.findByText('Sent to Claude.')).toBeInTheDocument();
+    expect(ideaPosts()).toEqual([{
+      text: QUESTION,
+      page: { route: '/admin/customers' },
+      ids: { customer_id: CUSTOMER, viewed_date: '2026-11-03' },
+      pasted: false,
+    }]);
+    expect(JSON.stringify(ideaPosts())).not.toContain('manual prepay');
+    expect(answerButton()).not.toBeInTheDocument();
+  });
+
+  it('an answer a thread keeps after the page changes sends the page and record ids of its own Ask', async () => {
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    queryAnswer = () => reply(200, { ...stuck(null), threadId: THREAD, threadSeq: 1, threadsEnabled: true });
+    await mount({ mobile });
+    await askQuestion();
+    act(() => switchPageCustomer(OTHER_CUSTOMER));
+    fireEvent.click(await screen.findByTestId('answer-send-to-claude'));
+    expect(await screen.findByText('Sent to Claude.')).toBeInTheDocument();
+    expect(ideaPosts()).toEqual([{
+      text: QUESTION,
+      page: { route: '/admin/customers' },
+      ids: { customer_id: CUSTOMER, viewed_date: '2026-11-03' },
+      pasted: false,
+    }]);
+  });
+
+  it('a send that finishes after a newer answer arrived shows nothing under the newer answer', async () => {
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    queryAnswer = () => reply(200, stuck(null));
+    let finishSend = () => {};
+    ideaAnswer = () => new Promise((resolve) => { finishSend = () => resolve(reply(200, { sent: true, id: IDEA_ID, at: AT, message: 'Sent to Claude.' })); });
+    await mount({ mobile });
+    await askQuestion();
+    fireEvent.click(await screen.findByTestId('answer-send-to-claude'));
+    await waitFor(() => expect(ideaPosts()).toHaveLength(1));
+    const NEXT_ANSWER = 'Nothing was changed. The bar found no tool for that request.';
+    queryAnswer = () => reply(200, { ...stuck(null), response: NEXT_ANSWER });
+    type('Move every Friday visit to Thursday');
+    fireEvent.keyDown(screen.getByPlaceholderText(/Ask anything/), { key: 'Enter' });
+    await screen.findByText(NEXT_ANSWER);
+    expect(answerButton()).toBeDisabled();
+    expect(answerButton()).toHaveTextContent('Send to Claude (free)');
+    await act(async () => { finishSend(); });
+    expect(screen.queryByText('Sent to Claude.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
+    await waitFor(() => expect(answerButton()).toBeEnabled());
+    expect(ideaPosts()).toHaveLength(1);
+  });
+
+  it('a pasted question gets no button: pasted text may be a customer\'s words', async () => {
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    queryAnswer = () => reply(200, stuck(null));
+    await mount({ mobile });
+    await askQuestion(QUESTION, { paste: true });
+    expect(answerButton()).not.toBeInTheDocument();
+    expect(screen.queryByText("Bar couldn't do it?")).not.toBeInTheDocument();
+    expect(ideaPosts()).toHaveLength(0);
+  });
+
+  it('a pasted question that saved a gap still shows the gap line', async () => {
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    queryAnswer = () => reply(200, stuck(7));
+    await mount({ mobile });
+    await askQuestion(QUESTION, { paste: true });
+    expect(await screen.findByText('Claude has this as gap #7.')).toBeInTheDocument();
+    expect(answerButton()).not.toBeInTheDocument();
+  });
+
+  it('an answer opened from History never shows the earlier exchange\'s button, even with the same text', async () => {
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    queryAnswer = () => reply(200, stuck(null));
+    const base = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((url, init) => {
+      const u = String(url);
+      if (u.includes(`/threads/${THREAD}`)) {
+        return Promise.resolve(reply(200, { thread: { id: THREAD, title: 'Old chat', lastSeq: 4,
+          conversationHistory: [{ role: 'user', content: 'Synthetic old ask' }, { role: 'assistant', content: ANSWER }] } }));
+      }
+      if (u.includes('/threads') && !u.includes('/threads/latest')) return Promise.resolve(reply(200, { threads: [{ id: THREAD, title: 'Old chat' }] }));
+      return base(url, init);
+    });
+    await mount({ mobile });
+    await askQuestion();
+    expect(await screen.findByTestId('answer-send-to-claude')).toBeInTheDocument();
+    if (mobile) fireEvent.click(screen.getByLabelText('Conversation options'));
+    fireEvent.click(await screen.findByRole('button', { name: 'History', exact: true }));
+    fireEvent.click(await screen.findByRole('button', { name: /Old chat/ }));
+    await waitFor(() => expect(callsTo('').some(([url]) => String(url).includes(`/threads/${THREAD}`))).toBe(true));
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Old chat/ })).not.toBeInTheDocument());
+    await screen.findByText(ANSWER);
+    expect(answerButton()).not.toBeInTheDocument();
+    expect(ideaPosts()).toHaveLength(0);
+  });
+
+  it('Undo cancels with the send\'s time, says Cancelled, and brings the button back', async () => {
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    queryAnswer = () => reply(200, stuck(null));
+    await mount({ mobile });
+    await askQuestion();
+    fireEvent.click(await screen.findByTestId('answer-send-to-claude'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
+    expect(await screen.findByText('Cancelled.')).toBeInTheDocument();
+    const cancels = callsTo(`/claude-ideas/${IDEA_ID}/cancel`);
+    expect(cancels).toHaveLength(1);
+    expect(JSON.parse(cancels[0][1].body)).toEqual({ at: AT });
+    expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument();
+    expect(answerButton()).toBeInTheDocument();
+    // The composer is untouched by an answer-level Undo.
+    expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('');
+  });
+
+  it('answers a duplicate in plain words, and a failure with the button still there to try again', async () => {
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    queryAnswer = () => reply(200, stuck(null));
+    await mount({ mobile });
+    await askQuestion();
+    ideaAnswer = () => reply(422, { error: 'not_sent' });
+    fireEvent.click(await screen.findByTestId('answer-send-to-claude'));
+    expect(await screen.findByText("Couldn't send it. Try again.")).toBeInTheDocument();
+    ideaAnswer = () => reply(200, { duplicate: true, id: IDEA_ID });
+    fireEvent.click(screen.getByTestId('answer-send-to-claude'));
+    expect(await screen.findByText('You already sent this idea. Claude has it.')).toBeInTheDocument();
+    expect(answerButton()).not.toBeInTheDocument();
+  });
+
+  it('keeps the button, the question and the send note when the task card is refreshed', async () => {
+    const TASK = '00000000-0000-4000-8000-0000000000c3';
+    const task = { ...stuck(null), taskId: TASK, taskState: 'responded', receipts: [] };
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    queryAnswer = () => reply(200, task);
+    await mount({ mobile });
+    await askQuestion();
+    fireEvent.click(await screen.findByTestId('answer-send-to-claude'));
+    await screen.findByText('Sent to Claude.');
+    const before = fetchMock.mock.calls.length;
+    const baseFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((url, init) => (String(url).includes(`/tasks/${TASK}`) ? Promise.resolve(reply(200, task)) : baseFetch(url, init)));
+    fireEvent.click(screen.getByRole('button', { name: /Refresh/ }));
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(before));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes(`/tasks/${TASK}?`))).toBe(true));
+    expect(screen.getByText('Sent to Claude.')).toBeInTheDocument();
+    expect(ideaPosts()).toHaveLength(1);
+  });
+
+  it('shows nothing when the status has no answerButton, even for a stuck reply', async () => {
+    queryAnswer = () => reply(200, stuck(7));
+    await mount({ mobile });
+    await askQuestion();
+    expect(screen.queryByText(/Claude has this as gap/)).not.toBeInTheDocument();
+    expect(answerButton()).not.toBeInTheDocument();
+  });
+
+  it('shows nothing when the reply carries no answerClaude', async () => {
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    await mount({ mobile });
+    await askQuestion();
+    expect(screen.queryByText(/Claude has this as gap/)).not.toBeInTheDocument();
+    expect(answerButton()).not.toBeInTheDocument();
+  });
+
+  it('a question that came from a tapped choice or quick action is not the owner\'s words: no button', async () => {
+    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
+    queryAnswer = () => reply(200, { ...stuck(null), choices: ['Annual prepay (model wrote this)', 'Monthly'] });
+    await mount({ mobile });
+    await askQuestion();
+    expect(await screen.findByTestId('answer-send-to-claude')).toBeInTheDocument();
+    queryAnswer = () => reply(200, { ...stuck(null), response: 'Second answer from a tap.' });
+    fireEvent.click(screen.getByRole('button', { name: 'Annual prepay (model wrote this)' }));
+    await screen.findByText('Second answer from a tap.');
+    expect(answerButton()).not.toBeInTheDocument();
+    expect(ideaPosts()).toHaveLength(0);
   });
 });

@@ -14,6 +14,9 @@ jest.mock('../services/email-template-library', () => ({
   activeSuppressionFor: jest.fn(),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+// The delayed-send chokepoint a stored DAY-ONLY email is revalidated through (GATE_DAY_ONLY_PROMISE); its rules are pinned in
+// day-only-promise-b1-replay.test.js.
+jest.mock('../services/appointment-reminders', () => ({ revalidateDelayedDaySend: jest.fn(async () => 'day') }));
 jest.mock('../services/billing-email-provider-replay', () => ({
   isBillingEmailTemplateRetry: jest.fn(() => false),
   isBillingEmailProviderReplay: jest.fn(() => false),
@@ -148,6 +151,12 @@ describe('decideRecoveryAction', () => {
   test('skips a reschedule or cancellation notice (its stored copy may no longer be true)', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, moveNoticeCopy: true, min: 'high' }))
       .toEqual({ action: 'skip', status: 'move_notice_not_replayed' });
+  });
+  test('skips any other category in the shared no-replay map (the Multi-Home Discount email)', () => {
+    const { staleStoredCopyReason, MULTI_HOME_DISCOUNT_CATEGORY } = require('../constants/email-replay-exclusions');
+    expect(recovery.decideRecoveryAction({
+      candidate: { confidence: 'high' }, suppressed: false, storedCopyRefused: !!staleStoredCopyReason([MULTI_HOME_DISCOUNT_CATEGORY]), min: 'high',
+    })).toEqual({ action: 'skip', status: 'stored_copy_not_replayed' });
   });
   test('skips when the bounced address is no longer on file', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, ownedByOther: false, addressOnFile: false, min: 'high' }))
@@ -351,6 +360,24 @@ describe('attemptRecovery codex-fix behaviors', () => {
       expect.objectContaining({ metadata: expect.objectContaining({ status: 'monthly_average_not_replayed' }) }));
   });
 
+  test('a bounced Multi-Home Discount email is not re-sent from its old copy; staff get the suggested address', async () => {
+    const mockDb = orderedDb({
+      first: (table) => (table === 'customers' ? { id: 'c1', email: 'jane@gmial.com' } : null),
+      returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec1' }] : []),
+    });
+    db.mockImplementation(mockDb);
+    const res = await recovery.attemptRecovery(
+      { id: 'orig1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com', template_key: 'customer.multi_home_discount_on', suppression_group_key_snapshot: 'transactional_required', categories: ['multi_home_discount_on'] },
+      { event: 'bounce', type: 'bounce' },
+    );
+    expect(res).toEqual({ skipped: 'stored_copy_not_replayed' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries').pop().data)
+      .toMatchObject({ status: 'stored_copy_not_replayed', corrected_email: 'jane@gmail.com' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.stringContaining('Suggested correction: jane@gmail.com'),
+      expect.objectContaining({ metadata: expect.objectContaining({ status: 'stored_copy_not_replayed' }) }));
+  });
+
   test('a bounced cancellation notice is not re-sent from its old copy; staff get the suggested address', async () => {
     const mockDb = orderedDb({
       first: (table) => (table === 'customers' ? { id: 'c1', email: 'jane@gmial.com' } : null),
@@ -365,6 +392,55 @@ describe('attemptRecovery codex-fix behaviors', () => {
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.stringContaining('reschedule and cancellation notices are not re-sent from their old copy'),
       expect.objectContaining({ metadata: expect.objectContaining({ status: 'move_notice_not_replayed' }) }));
+  });
+
+  describe('a bounced day-only appointment email is revalidated before any corrected-address replay', () => {
+    const bouncedDay = (template = 'appointment.confirmation_day') => ({
+      id: 'orig1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com', template_key: template,
+      trigger_event_id: 'appointment.confirmation:svc-9', idempotency_key: 'appointment.confirmation:svc-9:day-2026-11-15:0123456789abcdef', suppression_group_key_snapshot: 'transactional_required', categories: ['appointment', 'appointment_confirmation'],
+    });
+    let visitDate = '2026-11-15';
+    const run = async (message) => {
+      db.mockImplementation(orderedDb({
+        first: (table) => (table === 'customers' ? { id: 'c1', email: 'jane@gmial.com' } : table === 'scheduled_services' ? { scheduled_date: visitDate } : null),
+        returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec1' }] : []),
+      }));
+      return recovery.attemptRecovery(message, { event: 'bounce', type: 'bounce' });
+    };
+    const { revalidateDelayedDaySend } = require('../services/appointment-reminders');
+    beforeEach(() => { visitDate = '2026-11-15'; revalidateDelayedDaySend.mockReset().mockResolvedValue('day'); });
+
+    test('the visit moved to another date since the email was written: not re-sent, chokepoint not asked', async () => {
+      visitDate = '2026-11-20';
+      expect(await run(bouncedDay())).toEqual({ skipped: 'stored_copy_not_replayed' });
+      expect(revalidateDelayedDaySend).not.toHaveBeenCalled();
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    });
+
+    test.each([['suppress'], ['window']])('the chokepoint says %s: the stored copy is not re-sent; staff get the suggested address', async (verdict) => {
+      revalidateDelayedDaySend.mockResolvedValue(verdict);
+      const res = await run(bouncedDay());
+      expect(res).toEqual({ skipped: 'stored_copy_not_replayed' });
+      expect(revalidateDelayedDaySend).toHaveBeenCalledWith({ customerId: 'c1', scheduledServiceId: 'svc-9' });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    });
+
+    test('an unreadable promise is not re-sent either (fail closed)', async () => {
+      revalidateDelayedDaySend.mockRejectedValue(new Error('read failed'));
+      expect(await run(bouncedDay('appointment.reminder_72h_day'))).toEqual({ skipped: 'stored_copy_not_replayed' });
+    });
+
+    test('the chokepoint says day: not skipped for being day-only (the ordinary replay rules decide)', async () => {
+      const res = await run(bouncedDay());
+      expect(res.skipped).not.toBe('stored_copy_not_replayed');
+      expect(revalidateDelayedDaySend).toHaveBeenCalledTimes(1);
+    });
+
+    test('a window appointment email never asks the chokepoint', async () => {
+      const res = await run({ ...bouncedDay('appointment.confirmation') });
+      expect(res.skipped).not.toBe('stored_copy_not_replayed');
+      expect(revalidateDelayedDaySend).not.toHaveBeenCalled();
+    });
   });
 
   test.each(['billing_late_payment_30_day', 'invoice.followup_14_day', 'payment.microdeposit_verification', 'billing.previsit_balance'])(

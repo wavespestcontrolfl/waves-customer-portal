@@ -97,6 +97,12 @@ shapes) is blocked outside the rendered blog page, gate on or off:
   Codex review, and the affiliate kill switch still apply. The poller checks
   the live Astro registry at merge time; it never fabricates approval data.
   Other content lanes retain their existing contracts.
+- The publish chokepoint's company-name check (`business-name-confirmer.js`)
+  does not count a linked active product's link text, display name or maker
+  as a company while the kill switch is on, nor the author's own background
+  (Augusta National). Before 2026-11-06 it parked the Bradenton and North
+  Port pilot drafts `named_competitor_off_list` on exactly those names. A
+  curated competitor is never exempt.
 - The writer never proposes affiliate products and never sees commission
   rates (rates are not a registry field by design). Product IDs enter via
   hand-authored briefs. `GATE_AFFILIATE_WRITER_PROPOSALS` is reserved for a
@@ -133,8 +139,11 @@ ships badly. Stihl is dealer-only — no program.
 
 ## Pilot composition & measurement (before the gate flips)
 
-- **6 hub-only articles**: 2 nonchemical prevention, 2 lawn/irrigation
-  measurement, 2 field-tool/equipment. Excluded: top local lead pages,
+- **6 hub-only articles** planned: 2 nonchemical prevention, 2 lawn/irrigation
+  measurement, 2 field-tool/equipment. Five since 2026-11-06: AP05 (catch
+  cups, Parrish) left the set because a live post already owns its topic,
+  and the two lawn briefs now name their city lawn page, which the
+  `hub_link_present` check requires. Excluded: top local lead pages,
   termite/WDO, German cockroach, bed bug, rodenticide, emergency/health-
   anxiety content.
 - **Baseline first**: 90 days of GSC + GA4/PostHog per candidate URL

@@ -70,6 +70,31 @@ function isNightLock24hEnabled() {
   }
 }
 
+// GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a"): a night tool never changes a
+// time the customer was already told, so the reminder freeze also holds a visit
+// whose 72-hour reminder was really sent. Same call-time, fail-closed read, once
+// per run, into config.nightToldLock. It only acts together with nightLock24h.
+function isNightToldLockEnabled() {
+  try {
+    const gates = require('../../config/feature-gates');
+    return typeof gates.nightToldLockLive === 'function' && gates.nightToldLockLive() === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// GATE_DAY_ONLY_PROMISE (owner 2026-11-05 "D2 a"): with the told-lock, a visit whose latest promise is day-only (or
+// an unknown window) is frozen too: the customer was told that day. Same call-time, fail-closed read, once per run,
+// into config.dayOnlyPromise. It only acts together with nightToldLock (and so nightLock24h).
+function isDayOnlyPromiseEnabled() {
+  try {
+    const gates = require('../../config/feature-gates');
+    return typeof gates.dayOnlyPromiseLive === 'function' && gates.dayOnlyPromiseLive() === true;
+  } catch (_) {
+    return false;
+  }
+}
+
 // GATE_AUTO_DISPATCH_CONFLICT_MOVES: same call-time, fail-closed convention.
 function isConflictMovesEnabled() {
   const { gateEnvValue } = require('../../config/feature-gates');
@@ -245,6 +270,12 @@ function moveRuleConfig(overrides) {
     // flat lock window either way. Resolved here once per run and carried on
     // this same config object into apply.js's guards.
     nightLock24h: overrides.nightLock24h ?? isNightLock24hEnabled(),
+    // GATE_NIGHT_TOLD_LOCK: with nightLock24h, a sent 72-hour reminder also
+    // freezes the visit (loadReminderFreeze opts.toldLock). Read once per run.
+    nightToldLock: overrides.nightToldLock ?? isNightToldLockEnabled(),
+    // GATE_DAY_ONLY_PROMISE: with nightToldLock, a day-only or unknown-window promise also freezes the visit
+    // (loadReminderFreeze opts.anyPromise). Read once per run, so it lands in config_snapshot.
+    dayOnlyPromise: overrides.dayOnlyPromise ?? isDayOnlyPromiseEnabled(),
   };
 }
 

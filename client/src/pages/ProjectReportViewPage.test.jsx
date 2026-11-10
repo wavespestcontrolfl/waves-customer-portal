@@ -49,9 +49,9 @@ afterEach(() => {
   document.documentElement.removeAttribute('data-glass-theme');
 });
 
-describe('ProjectReportViewPage theme gate', () => {
-  it('WDO inspection reports render as the paper document (no glass scene), even with the shared template on', async () => {
-    const { container, findAllByText, queryByRole } = renderProjectReport(payload('wdo_inspection', { reportTemplate: true }));
+describe('ProjectReportViewPage theme', () => {
+  it('WDO inspection reports render as the paper document (no glass scene, no shared template)', async () => {
+    const { container, findAllByText, queryByRole } = renderProjectReport(payload('wdo_inspection'));
     await findAllByText(/wdo inspection/i);
     expect(container.querySelector('.project-report-page')).not.toBeNull();
     expect(document.documentElement).not.toHaveAttribute('data-glass-theme');
@@ -60,8 +60,8 @@ describe('ProjectReportViewPage theme gate', () => {
     expect(queryByRole('region', { name: 'Share feedback' })).not.toBeInTheDocument();
   });
 
-  it('the pre-construction certificate stays the paper document, even with the shared template on', async () => {
-    const { container, findAllByText, queryByRole } = renderProjectReport(payload('pre_treatment_termite_certificate', { reportTemplate: true }));
+  it('the pre-construction certificate stays the paper document (no shared template)', async () => {
+    const { container, findAllByText, queryByRole } = renderProjectReport(payload('pre_treatment_termite_certificate'));
     await findAllByText(/Certificate of Compliance/i);
     expect(container.querySelector('.project-report-page')).not.toBeNull();
     expect(document.documentElement).not.toHaveAttribute('data-glass-theme');
@@ -70,7 +70,7 @@ describe('ProjectReportViewPage theme gate', () => {
     expect(queryByRole('region', { name: 'Share feedback' })).not.toBeInTheDocument();
   });
 
-  it('a regular termite treatment report keeps the glass theme (shared template off: its own header)', async () => {
+  it('a regular termite treatment report keeps the glass theme and takes the shared template', async () => {
     const { container, findByRole } = renderProjectReport(payload('termite_treatment'));
     await waitFor(() => {
       expect(document.documentElement).toHaveAttribute('data-glass-theme');
@@ -78,15 +78,14 @@ describe('ProjectReportViewPage theme gate', () => {
     // The glass attribute is set before the fetch resolves: wait for the loaded report before reading its classes.
     expect(await findByRole('heading', { level: 3, name: "How did today's visit go?" })).toBeInTheDocument();
     expect(container.querySelector('.project-report-page')).not.toBeNull();
-    expect(container.querySelector('.project-report-page')).not.toHaveClass('customer-report-template');
-    expect(container.querySelector('.report-header')).toBeNull();
+    expect(container.querySelector('.project-report-page')).toHaveClass('customer-report-template');
+    expect(container.querySelector('.report-header')).not.toBeNull();
     expect(await findByRole('region', { name: 'Share feedback' }))
       .toHaveAttribute('data-section', 'review-request-project');
   });
 
-  it('shared template on: a regular report takes the template class and the shared header with the project title and recorded address', async () => {
+  it('a regular report takes the template class and the shared header with the project title and recorded address', async () => {
     const { container, findByRole } = renderProjectReport(payload('termite_treatment', {
-      reportTemplate: true,
       title: 'Perimeter treatment',
       customerEmail: 'TEST@EXAMPLE.COM',
       customerPhone: '9415551212',
@@ -190,7 +189,7 @@ describe('ProjectReportViewPage Poison Control (owner 2026-09-26)', () => {
   });
 });
 
-describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)', () => {
+describe('ProjectReportViewPage pre-treat sticker', () => {
   const findings = {
     treatment_address: '100 Sample Way, Testville, FL 34000',
     lot_block: 'Lot 3',
@@ -206,17 +205,9 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     applicator_fdacs_id: 'JE000000',
   };
 
-  it('gate off: the field-grid certificate renders and no sticker', async () => {
-    const { findAllByText, queryByTestId } = renderProjectReport(
-      payload('pre_treatment_termite_certificate', { findings }),
-    );
-    await findAllByText(/Pre-Construction Termite Protection/i);
-    expect(queryByTestId('termite-notice-sticker')).not.toBeInTheDocument();
-  });
-
-  it('gate on: the notice fills the label blanks; slab-day final exterior line stays empty', async () => {
+  it('the notice fills the label blanks; slab-day final exterior line stays empty', async () => {
     const { findByTestId, getByText, queryByText } = renderProjectReport(
-      payload('pre_treatment_termite_certificate', { findings, pretreatStickerReport: true }),
+      payload('pre_treatment_termite_certificate', { findings }),
     );
     const sticker = await findByTestId('termite-notice-sticker');
     expect(sticker).toHaveTextContent('Notice of Termite Protection');
@@ -230,11 +221,25 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(getByText('Treatment Record Details')).toBeInTheDocument();
     expect(getByText(/EPA Reg\. 7969-210/)).toBeInTheDocument();
     expect(queryByText('Pre-Construction Termite Protection')).not.toBeInTheDocument();
+    // No final exterior visit recorded: no details line, and the label's date blank stays empty.
+    expect(queryByText('Final exterior treatment')).not.toBeInTheDocument();
   });
 
-  it('gate on: a recorded final exterior visit prints on its own line', async () => {
+  it('a certificate with every field blank still renders the notice and the details block', async () => {
+    const { findByTestId, getByText, queryByText } = renderProjectReport(
+      payload('pre_treatment_termite_certificate', { findings: {} }),
+    );
+    const sticker = await findByTestId('termite-notice-sticker');
+    expect(sticker).toHaveTextContent('Notice of Termite Protection');
+    expect(sticker).toHaveTextContent('Date of Final Ext. Treatment');
+    expect(sticker).not.toHaveTextContent('Activate your termite warranty');
+    expect(getByText('Treatment Record Details')).toBeInTheDocument();
+    expect(queryByText('Final exterior treatment')).not.toBeInTheDocument();
+    expect(queryByText(/Activate Your Termite Warranty/i)).not.toBeInTheDocument();
+  });
+
+  it('a recorded final exterior visit prints on its own line', async () => {
     const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
-      pretreatStickerReport: true,
       findings: {
         ...findings,
         final_exterior_date: '2026-09-14',
@@ -246,9 +251,8 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(sticker).toHaveTextContent('09/14/2026');
   });
 
-  it('gate on: the notice carries its WV-001 form stamp and the retreatment-contract clause', async () => {
+  it('the notice carries its WV-001 form stamp and the retreatment-contract clause', async () => {
     const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
-      pretreatStickerReport: true,
       findings: { ...findings, warranty_type: 'Renewable 5-year retreatment bond' },
     }));
     const sticker = await findByTestId('termite-notice-sticker');
@@ -257,9 +261,8 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(sticker).toHaveTextContent('Activate your termite warranty');
   });
 
-  it('gate on: the builder 1-year renewable to year 5 (Rule 5E-14.105(3)) states the renewable contract', async () => {
+  it('the builder 1-year renewable to year 5 (Rule 5E-14.105(3)) states the renewable contract', async () => {
     const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
-      pretreatStickerReport: true,
       findings: { ...findings, warranty_type: 'Builder 1-year, renewable yearly to year 5' },
     }));
     const sticker = await findByTestId('termite-notice-sticker');
@@ -267,9 +270,8 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(sticker).toHaveTextContent('Activate your termite warranty');
   });
 
-  it('gate on: a legacy builder 1-year warranty keeps the call to action but makes no renewable-contract claim', async () => {
+  it('a legacy builder 1-year warranty keeps the call to action but makes no renewable-contract claim', async () => {
     const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
-      pretreatStickerReport: true,
       findings: { ...findings, warranty_type: 'Builder 1-year' },
     }));
     const sticker = await findByTestId('termite-notice-sticker');
@@ -277,52 +279,17 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(sticker).toHaveTextContent('Activate your termite warranty');
   });
 
-  it('a blank warranty is missing data, not "no contract": no no-contract sentence, gate-off footer kept', async () => {
-    const on = renderProjectReport(payload('pre_treatment_termite_certificate', {
-      pretreatStickerReport: true,
+  it('a blank warranty is missing data, not "no contract": no no-contract sentence, no warranty call to action', async () => {
+    const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
       findings: { ...findings, warranty_type: '' },
     }));
-    const sticker = await on.findByTestId('termite-notice-sticker');
+    const sticker = await findByTestId('termite-notice-sticker');
     expect(sticker).not.toHaveTextContent('No retreatment contract covers this treatment');
     expect(sticker).not.toHaveTextContent('wavespestcontrol.com/register');
-    on.unmount();
-    const off = renderProjectReport(payload('pre_treatment_termite_certificate', {
-      findings: { ...findings, warranty_type: '' },
-    }));
-    await off.findAllByText(/Pre-Construction Termite Protection/i);
-    expect(off.getByText(/Activate Your Termite Warranty/i)).toBeInTheDocument();
   });
 
-  it('gate off: an addition to an existing building drops the warranty footer', async () => {
-    const { findAllByText, queryByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
-      findings: { ...findings, warranty_type: 'Addition to an existing building (no warranty required)' },
-    }));
-    await findAllByText(/Pre-Construction Termite Protection/i);
-    expect(queryByText(/Activate Your Termite Warranty/i)).not.toBeInTheDocument();
-  });
-
-  it('gate off: the certificate also prints a recorded final exterior treatment and scopes the signature', async () => {
-    // The staff send validates the final exterior record on both layouts
-    // (Codex #6490 r4), so the gate-off certificate prints it too.
-    const { findAllByText, findByText, getByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
-      findings: {
-        ...findings,
-        applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above.',
-        final_exterior_date: '2026-09-14',
-        final_exterior_time: '09:30',
-        final_exterior_product: 'Termidor SC',
-        final_exterior_active_ingredient: 'Fipronil',
-        final_exterior_applicator_name: 'Sam Example',
-      },
-    }));
-    await findAllByText(/Pre-Construction Termite Protection/i);
-    expect(await findByText('09/14/2026 9:30 AM · Termidor SC / Fipronil · applied by Sam Example')).toBeInTheDocument();
-    expect(getByText(/covers the initial treatment only/)).toBeInTheDocument();
-  });
-
-  it('gate on: "No warranty" drops the contract clause and the warranty call to action', async () => {
+  it('"No warranty" drops the contract clause and the warranty call to action', async () => {
     const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
-      pretreatStickerReport: true,
       findings: { ...findings, warranty_type: 'No warranty' },
     }));
     const sticker = await findByTestId('termite-notice-sticker');
@@ -336,9 +303,8 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(sticker).toHaveTextContent('Posted per FL Building Code 105.11');
   });
 
-  it('gate on: an addition to an existing building reads like "No warranty" (Rule 5E-14.105(3)(d))', async () => {
+  it('an addition to an existing building reads like "No warranty" (Rule 5E-14.105(3)(d))', async () => {
     const { findByTestId } = renderProjectReport(payload('pre_treatment_termite_certificate', {
-      pretreatStickerReport: true,
       findings: { ...findings, warranty_type: 'Addition to an existing building (no warranty required)' },
     }));
     const sticker = await findByTestId('termite-notice-sticker');
@@ -348,7 +314,7 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     expect(sticker).toHaveTextContent('No retreatment contract covers this treatment');
   });
 
-  it('both layouts print the Bora-Care record, and a later Bora-Care application scopes the signature', async () => {
+  it('prints the Bora-Care record, and a later Bora-Care application scopes the signature', async () => {
     const borate = {
       ...findings,
       applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above.',
@@ -356,24 +322,21 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
       wood_base_plate_pct: '85',
       borate_treatment_date: '2026-07-15',
     };
-    for (const pretreatStickerReport of [false, true]) {
-      const { findByText, getByText, unmount } = renderProjectReport(payload('pre_treatment_termite_certificate', { pretreatStickerReport, findings: borate }));
-      expect(await findByText('Final framing inspection 06/20/2026 · Wood base plates 85% of all base plates · Bora-Care applied 07/15/2026')).toBeInTheDocument();
-      expect(getByText('This signature covers the initial treatment only. The Bora-Care application is recorded separately above.')).toBeInTheDocument();
-      unmount();
-    }
-    // A share the server would refuse never prints.
-    const { findAllByText, queryByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
+    const { findByText, getByText } = renderProjectReport(payload('pre_treatment_termite_certificate', { findings: borate }));
+    expect(await findByText('Final framing inspection 06/20/2026 · Wood base plates 85% of all base plates · Bora-Care applied 07/15/2026')).toBeInTheDocument();
+    expect(getByText('This signature covers the initial treatment only. The Bora-Care application is recorded separately above.')).toBeInTheDocument();
+  });
+
+  it('a Bora-Care share the server would refuse never prints', async () => {
+    const { findByText, queryByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
       findings: { ...findings, framing_inspection_date: '2026-06-20', wood_base_plate_pct: '120' },
     }));
-    await findAllByText(/Pre-Construction Termite Protection/i);
-    expect(queryByText('Final framing inspection 06/20/2026')).toBeInTheDocument();
+    expect(await findByText('Final framing inspection 06/20/2026')).toBeInTheDocument();
     expect(queryByText(/120/)).not.toBeInTheDocument();
   });
 
-  it('gate on: a later exterior visit gets its own record line and the signature is scoped to the initial treatment', async () => {
+  it('a later exterior visit gets its own record line and the signature is scoped to the initial treatment', async () => {
     const { findByText, getByText } = renderProjectReport(payload('pre_treatment_termite_certificate', {
-      pretreatStickerReport: true,
       findings: {
         ...findings,
         applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above.',
@@ -386,5 +349,29 @@ describe('ProjectReportViewPage pre-treat sticker (GATE_PRETREAT_STICKER_REPORT)
     }));
     expect(await findByText('09/14/2026 9:30 AM · Termidor SC / Fipronil · applied by Sam Example')).toBeInTheDocument();
     expect(getByText(/This signature covers the initial treatment only\./)).toBeInTheDocument();
+  });
+});
+
+describe('ProjectReportViewPage follow-up appointment (GATE_DAY_ONLY_PROMISE)', () => {
+  it('day-only: the date and the arrival note, no hour', async () => {
+    const { findAllByText, queryByText } = renderProjectReport(payload('termite_treatment', {
+      upcomingAppointment: {
+        serviceType: 'Termite Follow-up', scheduledDate: '2999-01-05', windowStart: null, technicianName: 'Alex', status: 'confirmed',
+        day_only: true, arrival_note: 'Arrival window texted the day before',
+      },
+    }));
+    const rows = await findAllByText(/Arrival window texted the day before/);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows[0].textContent).toMatch(/January 5/);
+    expect(queryByText(/\d{1,2}:\d{2} (AM|PM)/)).toBeNull();
+  });
+
+  it('an hour the server sent still shows, with no note', async () => {
+    const { findAllByText, queryByText } = renderProjectReport(payload('termite_treatment', {
+      upcomingAppointment: { serviceType: 'Termite Follow-up', scheduledDate: '2999-01-05', windowStart: '08:00:00', technicianName: 'Alex', status: 'confirmed' },
+    }));
+    const rows = await findAllByText(/8:00 AM-10:00 AM/);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(queryByText(/texted the day before/)).toBeNull();
   });
 });

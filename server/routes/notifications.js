@@ -55,14 +55,6 @@ function serviceContactConsentUpdates(contacts = [], consentGiven = false) {
   };
 }
 
-// Whether the contact card mentions the report text: the gate alone. The
-// card's wording carries the condition itself ("when your own visit-complete
-// texts are on"), because whether that text goes out depends on the phone,
-// the per-property toggles and the delivery channel at each visit.
-function contactReportTextsOn() {
-  return require('../config/feature-gates').contactReportTextLive();
-}
-
 function serviceContactPayload(slot = {}) {
   const name = String(slot.name || '').trim();
   return {
@@ -154,7 +146,7 @@ function appPreferencesAvailable(req) {
 // the column itself drops in a follow-up deploy.)
 const CHANNEL_DB_COLUMNS = [
   'appointment_confirmation_channel',
-  // Same rule for the confirmation channel's stamp (GATE_NEW_CLIENT_CONFIRM_EMAIL):
+  // Same rule for the confirmation channel's stamp:
   // the confirmation sender reads it from the owner-resolved row with the
   // channel it describes, so it routes to the account's primary profile too.
   'appointment_confirmation_channel_explicit',
@@ -345,7 +337,7 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}, opts) {
     // Explicit-choice stamp, same contract as the 72h one below: a customer
     // write of the confirmation channel is a deliberate delivery-method
     // choice, Text included — the new-client text + email promotion
-    // (GATE_NEW_CLIENT_CONFIRM_EMAIL) must never override it.
+    // must never override it.
     dbUpdates.appointment_confirmation_channel_explicit = true;
   }
   if (updates.serviceReminder72hChannel !== undefined) {
@@ -844,7 +836,6 @@ async function savedPropertyPreferences(req) {
       }),
       serviceContacts: serviceContactsPayload(profile),
       maxServiceContacts: MAX_SERVICE_CONTACTS,
-      contactReportTexts: contactReportTextsOn(),
     };
   });
 }
@@ -923,7 +914,6 @@ async function contactPreferencePayload(req) {
     accountOff,
     emailAvailable: !!emailOnFile,
     reportsWithheld,
-    contactReportTexts: contactReportTextsOn(),
     consentAttestedAt: own?.consent_attested_at || null,
     smsOptin: optin?.status || 'none',
     consentVersion: SERVICE_CONTACT_CONSENT_VERSION,
@@ -963,12 +953,6 @@ router.put('/contact-preferences', async (req, res, next) => {
     // session's snapshot: a holder who removed the address since must not
     // have an email-only choice restored right behind their save.
     const asksEmailOnly = Object.keys(CONTACT_CHANNEL_KEY_BY_COLUMN).some((col) => patch[col] === 'email');
-    // Text-only delivery of the service report needs the contact report text
-    // (GATE_CONTACT_REPORT_TEXT) to exist — otherwise "text" would only hold
-    // the email, and no report would reach them (codex #6363 r9 P2).
-    if (patch.service_complete_channel === 'sms' && !contactReportTextsOn()) {
-      return res.status(400).json({ error: 'Service reports are delivered by email for this property.', code: 'REPORT_TEXT_UNAVAILABLE' });
-    }
     // Turning texts on (any text-capable choice) requires the attestation
     // when none is on file yet — the same consent rail as the holder's save.
     // Only a save that OPENS a text path (a purpose that will now text this
@@ -1089,7 +1073,6 @@ router.get('/property-preferences', async (req, res, next) => {
         }),
         serviceContacts: serviceContactsPayload(p),
         maxServiceContacts: MAX_SERVICE_CONTACTS,
-        contactReportTexts: contactReportTextsOn(),
       })),
     });
   } catch (err) {
@@ -1367,6 +1350,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       const consentUpdates = serviceContactConsentUpdates(contacts, updates.serviceContactsConsent);
       let lockedBefore = beforeRow;
       let lockedAt = null;
+      let loginPrefs;
       await db.transaction(async (trx) => {
         // Row lock + re-read: the audit diff below must describe the actual
         // DB transition — a concurrent save may have moved the row since the
@@ -1383,9 +1367,14 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           optinClaims = await claimRecipientOptins({ ...optinArgs, trx });
         }
+        // Contact login (GATE_CONTACT_LOGIN_HOLDER_ONLY): this signed-in holder
+        // save is the only writer of the per-phone login attestation.
+        loginPrefs = require('../services/customer-contact')
+          .loginAttestedPrefs(lockedBefore, contacts.map((c) => c.phone), !!consentUpdates.service_contacts_consent_at);
         await trx('customers').where({ id: req.params.customerId }).update({
           ...slotUpdates,
           ...consentUpdates,
+          ...(loginPrefs ? { service_preferences: JSON.stringify(loginPrefs) } : {}),
           updated_at: new Date(),
         });
         // A removed contact's own notification choices and portal sessions
@@ -1469,9 +1458,23 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           legacyClaims = await claimRecipientOptins({ ...legacyOptinArgs, trx });
         }
+        // Per-phone login attestation (GATE_CONTACT_LOGIN_HOLDER_ONLY). This save
+        // submitted slot 1 only, so only slot 1 is newly attested; slots 2 and 3 keep
+        // an attestation they already hold and gain none (a phone the call pipeline
+        // filed meanwhile needs the holder's explicit full-list save).
+        const { loginAttestedPrefs, loginAttestedPhoneKeys, phoneKeyOf } = require('../services/customer-contact');
+        const alreadyAttested = loginAttestedPhoneKeys(legacyLockedBefore);
+        const legacyLoginPrefs = loginAttestedPrefs(
+          legacyLockedBefore,
+          [contact.phone, ...[2, 3]
+            .map((n) => legacyLockedBefore[`service_contact${n}_phone`])
+            .filter((phone) => alreadyAttested.has(phoneKeyOf(phone)))],
+          !!legacyConsentUpdates.service_contacts_consent_at,
+        );
         await trx('customers').where({ id: req.params.customerId }).update({
           ...legacySlot1Updates,
           ...legacyConsentUpdates,
+          ...(legacyLoginPrefs ? { service_preferences: JSON.stringify(legacyLoginPrefs) } : {}),
           updated_at: new Date(),
         });
         // Same prune as the list save: a replaced slot-1 person's own choices

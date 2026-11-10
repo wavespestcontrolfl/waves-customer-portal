@@ -1,5 +1,5 @@
 /**
- * Tax deadline bells (GATE_TAX_DEADLINE_BELLS, owner 2026-10-30): which stage a filing row is in,
+ * Tax deadline bells (owner 2026-10-30): which stage a filing row is in,
  * the alert each stage raises, the sweep that closes bells, and the 8:23 ET job's two paths.
  * Injected clocks and fakes only: no database, no real alert, no text.
  */

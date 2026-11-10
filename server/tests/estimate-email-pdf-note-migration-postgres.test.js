@@ -1,7 +1,7 @@
 // Opt-in PostgreSQL regression. Every write stays inside a disposable schema.
 //
 // 20261019200000 publishes ONE new active version of fourteen live estimate
-// email templates (GATE_ESTIMATE_EMAIL_PDF note line). The pre-migration
+// email templates (estimate PDF note line). The pre-migration
 // content of each is the real shipped content, read from the migrated `public`
 // schema (the version this migration superseded when it has already run
 // there), so the test proves the migration against what production holds - and

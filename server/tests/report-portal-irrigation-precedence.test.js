@@ -8,7 +8,7 @@
 const { buildLawnWaterContext, portalIrrigationInches, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
 
 const DERIVED_PREFS = {
-  // 20 min × 4 days on spray (1.5"/hr) → 2.00"
+  // 20 min × 4 days on spray (owner table, 1.0"/hr) → 1.33"
   irrigation_inches_per_week: null,
   irrigation_run_minutes: 20,
   watering_days: ['Mon', 'Wed', 'Fri', 'Sun'],
@@ -21,17 +21,17 @@ describe('portalIrrigationInches', () => {
   });
 
   test('derives from runtime entries when inches are blank', () => {
-    expect(portalIrrigationInches(DERIVED_PREFS)).toBe(2);
+    expect(portalIrrigationInches(DERIVED_PREFS)).toBe(1.33);
   });
 
   test('a zero-inch legacy value falls through to derivation — <= 0 is "no schedule" everywhere', () => {
-    expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_inches_per_week: 0 })).toBe(2);
+    expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_inches_per_week: 0 })).toBe(1.33);
     expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_inches_per_week: '0', irrigation_run_minutes: null })).toBeNull();
   });
 
   test('toggle OFF blocks derivation — the runtime entries describe a system the customer says is not running', () => {
     expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_system: false })).toBeNull();
-    expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_system: true })).toBe(2);
+    expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_system: true })).toBe(1.33);
     // An explicit typed value keeps the existing prefs-only suppression
     // semantics downstream — the resolver still returns it.
     expect(portalIrrigationInches({ ...DERIVED_PREFS, irrigation_system: false, irrigation_inches_per_week: 1.25 })).toBe(1.25);
@@ -103,7 +103,7 @@ describe('mixed sources agree across the report', () => {
       turfProfile: { irrigation_inches_per_week: '0.75' },
       propertyPrefs: DERIVED_PREFS,
     });
-    expect(ctx.irrigationInchesPerWeek).toBe(2);
+    expect(ctx.irrigationInchesPerWeek).toBe(1.33);
   });
 
   test('tech readings still fill in when the portal has nothing usable', () => {

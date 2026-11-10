@@ -49,12 +49,13 @@ import { useParams } from 'react-router-dom';
 import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
 import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, monthlyText, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
 import { applicationMonthsBreakdown, oneTimeBesidePlan, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from '../lib/estimateMonthlyAverage';
+import { approveSlotLabel, firstVisitDayAndWindow } from '../lib/estimate-glass-slots';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import OfferTierPicker from '../components/estimate/OfferTierPicker';
 import SlotPicker from '../components/estimate/SlotPicker';
 import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
 import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
 import {
@@ -229,7 +230,7 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
   // Slot-aware label (PR C): once a slot is picked the CTA names it, so the
   // action reads as confirming THAT visit rather than restarting the flow.
   const label = glass
-    ? (slotMeta ? `Approve — ${slotMeta.dow} ${slotMeta.time}` : GLASS_COPY.ctaMain)
+    ? (slotMeta ? approveSlotLabel(slotMeta) : GLASS_COPY.ctaMain)
     : 'Get service today!';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '16px 0 24px' }}>
@@ -662,6 +663,45 @@ function HeaderTailSkeleton() {
   );
 }
 
+// Short ET dates for the expired card, or null when the card should keep its
+// generic copy (not eligible, a request outcome already showing, no usable
+// expiry date). ET like every other estimate-expiry surface, never the
+// browser zone. `sent` is null when the row has no send date.
+function expiredCardDates({ extensionEligible, requestState, expiresAt, sentAt }) {
+  if (!extensionEligible || !expiresAt || !['idle', 'sending', 'failed'].includes(requestState)) return null;
+  const shortEt = (iso) => {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime())
+      ? null
+      : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' });
+  };
+  const expired = shortEt(expiresAt);
+  if (!expired) return null;
+  return { expired, sent: sentAt ? shortEt(sentAt) : null };
+}
+
+function ExpiredCardCopy({ dates, selfServe }) {
+  return (
+    <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+      Your estimate{dates.sent ? ` from ${dates.sent}` : ''} expired on {dates.expired}.
+      {selfServe ? ' Tap below to reopen it for 7 days at the same price.' : ' Tap below to ask our office for more time.'}
+      {' '}Questions? Call us at{' '}
+      <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>.
+    </div>
+  );
+}
+
+function notFoundHeadline({ extended, expired }) {
+  if (extended) return "You're all set";
+  return expired ? 'Your estimate expired' : 'Estimate unavailable';
+}
+
+function extensionButtonLabel({ expired, selfServe, sending }) {
+  if (!expired) return sending ? 'Extending…' : 'Request an extension';
+  if (selfServe) return sending ? 'Reopening…' : 'Reopen my estimate';
+  return sending ? 'Sending…' : 'Ask for more time';
+}
+
 // extensionEligible comes from the /data 404 body: the server only sets it
 // when the token maps to a real, published estimate that died of expiry (and
 // the GATE_ESTIMATE_EXTENSION_REQUEST gate is on) — so garbage URLs never
@@ -669,7 +709,14 @@ function HeaderTailSkeleton() {
 // extension (the server texts the refreshed link too); once the lifetime
 // auto-grant is used, later clicks just notify the office. onExtended lets
 // the parent re-fetch /data — the link is live again after an auto-grant.
-function NotFoundCard({ token = null, extensionEligible = false, onExtended = null }) {
+//
+// expiresAt / sentAt / extensionSelfServe also come from that eligible 404 body.
+// With an expiry date the card says plainly that the estimate expired (and
+// when it was sent) instead of the generic "link may have expired" copy, and
+// words the button for what it does: a self-serve reopen when the server says a
+// tap wins the lifetime auto-grant (extensionSelfServe), an office request
+// otherwise.
+function NotFoundCard({ token = null, extensionEligible = false, onExtended = null, expiresAt, sentAt, extensionSelfServe }) {
   // idle | sending | extended | requested | failed. Terminal states render
   // even if a parent re-fetch flips extensionEligible off (a successful
   // auto-grant makes the estimate viewable again, which does exactly that).
@@ -721,6 +768,12 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
   // outcome the customer just got.
   const extendedNow = requestState === 'extended';
 
+  // The expired framing shows only while the request is still open to a tap
+  // (idle / sending / failed); the extended and requested outcomes keep their
+  // own copy. Dates are ET like every other estimate-expiry surface.
+  const expiredDates = expiredCardDates({ extensionEligible, requestState, expiresAt, sentAt });
+  const expiredHeadline = Boolean(expiredDates);
+
   return (
     <div style={estimateCard({ padding: 32, textAlign: 'center', marginTop: 40 })}>
       {/* An h1, not a styled div (G-07 measured h1Count === 0 here). This card
@@ -728,9 +781,11 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
           request flow and flips to a success headline, so role="alert" would
           be wrong on it. It needs the right heading element, not the card. */}
       <h1 style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>
-        {extendedNow ? "You're all set" : 'Estimate unavailable'}
+        {notFoundHeadline({ extended: extendedNow, expired: expiredHeadline })}
       </h1>
-      {!extendedNow ? (
+      {expiredHeadline ? (
+        <ExpiredCardCopy dates={expiredDates} selfServe={extensionSelfServe === true} />
+      ) : !extendedNow ? (
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           This link may have expired or isn't valid. Call us at{' '}
           <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
@@ -789,7 +844,7 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
                 opacity: requestState === 'sending' ? 0.8 : 1,
               }}
             >
-              {requestState === 'sending' ? 'Extending…' : 'Request an extension'}
+              {extensionButtonLabel({ expired: expiredHeadline, selfServe: extensionSelfServe === true, sending: requestState === 'sending' })}
             </button>
             {requestState === 'failed' ? (
               <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.5 }}>
@@ -2391,7 +2446,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
   );
 }
 
-// GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20, option A): the per-service
+// Monthly average (owner 2026-10-20, option A): the per-service
 // "$X a month" lines and the plan average for a multi-service plan, so the
 // customer can see the arithmetic. The per-application prices on the cards stay
 // the prices; this is an average of the year ("$X/mo" as THE price stays
@@ -2656,12 +2711,14 @@ function HoldCountdownBar({ secondsRemaining, checking = false, holdLimitReached
 
   // Threshold-only aria-live announcement (3:00 and 1:00) — not every tick.
   // Reset above 3:00 so an extension that pushes the clock back up can
-  // announce the same thresholds again on the way back down.
+  // announce the same thresholds again on the way back down. The message is
+  // cleared there too, so a stale threshold line never stays in the live region.
   const announcedRef = useRef({ warm: false, urgent: false });
   const [announcement, setAnnouncement] = useState('');
   useEffect(() => {
     if (secondsRemaining > 180) {
       announcedRef.current = { warm: false, urgent: false };
+      setAnnouncement('');
       return;
     }
     if (secondsRemaining <= 60 && !announcedRef.current.urgent) {
@@ -2723,6 +2780,11 @@ function HoldCountdownBar({ secondsRemaining, checking = false, holdLimitReached
   );
 }
 
+// Before the first tick there is no time to show: render nothing, not 0:00.
+function HoldCountdownBarWhenTimed(props) {
+  return Number.isFinite(props.secondsRemaining) ? <HoldCountdownBar {...props} /> : null;
+}
+
 function formatAppointmentLabel(appointment = {}) {
   const date = appointment.scheduledDate
     ? new Date(`${appointment.scheduledDate}T12:00:00Z`).toLocaleDateString(undefined, {
@@ -2732,7 +2794,8 @@ function formatAppointmentLabel(appointment = {}) {
       timeZone: 'America/New_York',
     })
     : '';
-  const time = appointment.windowDisplay || appointment.windowStart || '';
+  // GATE_DAY_ONLY_PROMISE: a day-only visit has no hour; the note stands in its place.
+  const time = appointment.windowDisplay || appointment.windowStart || (appointment.day_only ? appointment.arrival_note : '') || '';
   return [date, time].filter(Boolean).join(' · ') || 'Your scheduled appointment';
 }
 
@@ -4149,7 +4212,18 @@ export function ContactGapFields({
   );
 }
 
-export function ReviewPhase({ website = false, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, contactSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayAfterVisit = false, prepayCardCapture = false, captureMethodType = 'card', paymentTiming = null, holdExpiresAt = null, holdChecking = false, holdLimitReached = false, extendingHold = false, onExtendHold = null, onPickNewTime = null }) {
+// The acceptance line on the confirm step says "at the price shown": this shows it,
+// the same first-application amount the invoice box above the CTA shows.
+function ConfirmFirstVisitAmount({ amount }) {
+  if (!(amount > 0)) return null;
+  return (
+    <div data-testid="confirm-first-visit-amount" style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>
+      First application: <strong>{fmtMoney(amount)}</strong>
+    </div>
+  );
+}
+
+export function ReviewPhase({ website = false, firstVisitAmount, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, contactSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayAfterVisit = false, prepayCardCapture = false, captureMethodType = 'card', paymentTiming = null, holdExpiresAt = null, holdChecking = false, holdLimitReached = false, extendingHold = false, onExtendHold = null, onPickNewTime = null }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -4226,7 +4300,7 @@ export function ReviewPhase({ website = false, slotId, slotMeta = null, existing
   return (
     <div data-website-card="" style={{ ...estimateCard(), borderTop: `4px solid ${ESTIMATE_BUTTON_BG}` }}>
       {showHoldBar ? (
-        <HoldCountdownBar
+        <HoldCountdownBarWhenTimed
           secondsRemaining={secondsRemaining}
           checking={holdChecking}
           holdLimitReached={holdLimitReached}
@@ -4260,6 +4334,7 @@ export function ReviewPhase({ website = false, slotId, slotMeta = null, existing
                 ? `Visit: ${new Date(`${slotMeta.date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })}${slotMeta.time ? ` · ${slotMeta.time}` : ''}`
                 : `Slot: ${slotId}`}
       </div>
+      <ConfirmFirstVisitAmount amount={firstVisitAmount} />
       {autoPaySlot}
       {acceptanceTermsSlot}
       {contactSlot}
@@ -4307,7 +4382,32 @@ export function ReviewPhase({ website = false, slotId, slotMeta = null, existing
   );
 }
 
-export function SuccessCard({ acceptResult, appointmentLabel = null, recurring = false }) {
+// The website's estimate dialog loads this page with embed=1 in a frame that
+// never grows past the estimate: a link that leaves the estimate must open in
+// the full window.
+function embeddedLinkTarget() {
+  return new URLSearchParams(window.location.search).get('embed') === '1' ? '_top' : undefined;
+}
+
+// "Mon, Nov 9, 9:00-11:00 AM" for the booked card, from the appointment the
+// customer already had or the slot they just booked; null when neither has a start time.
+function successFirstVisit(existingAppointment, selectedSlotMeta) {
+  return existingAppointment
+    ? firstVisitDayAndWindow(existingAppointment.scheduledDate, existingAppointment.windowStart)
+    : firstVisitDayAndWindow(selectedSlotMeta?.date, selectedSlotMeta?.windowStart);
+}
+
+// The booked card's first-visit line; only for a visit that is actually committed.
+function FirstVisitLine({ committed, firstVisit }) {
+  if (!committed || !firstVisit) return null;
+  return (
+    <div style={{ fontSize: 17, fontWeight: 600, color: COLORS.navy, marginTop: 10 }}>
+      Your first visit: {firstVisit}.
+    </div>
+  );
+}
+
+export function SuccessCard({ acceptResult, appointmentLabel = null, firstVisit, recurring = false }) {
   const nextStep = acceptResult?.nextStep || (acceptResult?.invoiceMode ? 'pay_invoice' : 'confirmed');
   const bookingUrl = acceptResult?.bookingUrl || null;
   const invoicePayUrl = acceptResult?.invoicePayUrl || null;
@@ -4337,6 +4437,7 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
         <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           {title}
         </div>
+        <FirstVisitLine committed={reservationCommitted} firstVisit={firstVisit} />
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           {invoicePayUrl
             ? (isOneTimeInvoice
@@ -4349,6 +4450,9 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
         {invoicePayUrl ? (
           <a
             href={invoicePayUrl}
+            // Inside the website's estimate dialog (embed=1) the frame never
+            // grows past the estimate, so the pay page opens in the full window.
+            target={embeddedLinkTarget()}
             style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, textDecoration: 'none', fontSize: 16 }}
           >{payNowLabel}</a>
         ) : null}
@@ -4666,7 +4770,7 @@ export function PropertyGroupSwitcher({ group, preview = false }) {
 // Accept-path failures land the customer back in the REVIEW phase, not just
 // configure, so both branches must render it — a review-phase 500 used to
 // show nothing at all.
-function EstimateErrorBanner({ error }) {
+export function EstimateErrorBanner({ error }) {
   if (!error) return null;
   return (
     <div style={{
@@ -4674,13 +4778,13 @@ function EstimateErrorBanner({ error }) {
       border: `1px solid ${W.red}`, marginBottom: 16,
       color: W.red, fontSize: 14,
     }}>
-      Something went wrong: {error}. Try again or call{' '}
+      Something went wrong: {String(error).replace(/\.\s*$/, '')}. Try again or call{' '}
       <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: W.red }}>{WAVES_PHONE_DISPLAY}</a>.
     </div>
   );
 }
 
-function SlotIssueBanner({ kind = 'conflict', onRetry }) {
+export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
   const expired = kind === 'expired';
   // 'stale_hold': the recovery could not release the old hold, so the server
   // may still be offering it and the correct options stay hidden (codex r10
@@ -4707,7 +4811,7 @@ function SlotIssueBanner({ kind = 'conflict', onRetry }) {
           ? "We couldn't release your earlier time hold, so your options may be out of date. Tap refresh to try again."
           : expired
             ? 'Your time-slot hold expired — pick a time again to finish signing up.'
-            : "That slot was just taken. We've refreshed the options below — pick another."}
+            : note || "That slot was just taken. We've refreshed the options below — pick another."}
       </div>
       {onRetry ? (
         <button
@@ -5391,9 +5495,9 @@ export function ServiceSection({
   // a current monthly member whose accept preserves membership billing. Either
   // way the bundle card keeps its combined total (codex #3128 r6).
   billsMonthly = false,
-  // GATE_ESTIMATE_MONTHLY_AVERAGE: the "$X a month" line for this
+  // Monthly average: the "$X a month" line for this
   // service (and the one-time context sentence on a single-service page).
-  // Null with the gate off, so the card is unchanged.
+  // Null when the plan has no average, so the card is unchanged.
   monthlyAverageLine = null,
   monthlyAverageContext = null,
   waveGuardDiscountPct = null,
@@ -5988,6 +6092,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // Set from the /data 404 body — true only when the server confirms this
   // token is a real published estimate that expired (see NotFoundCard).
   const [extensionEligible, setExtensionEligible] = useState(false);
+  // Extra details the eligible-expired 404 body carries for the expired card.
+  const [expiredInfo, setExpiredInfo] = useState(null);
   // Staff draft preview (?adminPreview=1 — opened from the estimate tool's
   // "Customer View" / the estimates list's Preview). Makes the /data fetch
   // attach the staff session's Bearer token so the server will serve an
@@ -6045,6 +6151,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const [selected, setSelected] = useState({});
   const [selectedAddOns, setSelectedAddOns] = useState({});
   const [selectedSlotId, setSelectedSlotId] = useState(null);
+  // Website flow: counts customer time picks. The payment choices mount under
+  // the slot list, far below a phone screen, so a pick scrolls to them. A
+  // selection restored at mount or after a review cancel never bumps it.
+  const [websitePickTick, setWebsitePickTick] = useState(0);
+  useEffect(() => {
+    if (websitePickTick === 0) return undefined;
+    // Next frame: the payment section mounts with the pick's own render.
+    const frame = window.requestAnimationFrame(() => scrollToPaymentSection());
+    return () => window.cancelAnimationFrame(frame);
+  }, [websitePickTick]);
   // First open slot ymd, reported up by SlotPicker for the hero {date} token.
   const [firstSlotDate, setFirstSlotDate] = useState(null);
   // Slot metadata for the glass slot-aware CTAs/tech chip ("Approve — Tue
@@ -6263,7 +6379,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const [slotsRefreshSignal, setSlotsRefreshSignal] = useState(0);
   const [addServiceRequestState, setAddServiceRequestState] = useState({ status: 'idle', message: '' });
 
-  const [countdownSeconds, setCountdownSeconds] = useState(0);
+  // null = no clock yet (no hold, or the first tick has not run). Starting at
+  // 0 made a new hold read as "less than one minute left" for one render.
+  const [countdownSeconds, setCountdownSeconds] = useState(null);
   const countdownRef = useRef(null);
   // Hold-extend state (fix/reservation-hold-expiry). holdLimitReached mirrors
   // the server's 60-min-from-creation ceiling (POST .../extend 409
@@ -6289,6 +6407,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // a failed release left the stale contract in place with nothing to tap
   // (codex r10 P2).
   const [recoveryStuck, setRecoveryStuck] = useState(false);
+  // The server's reason for a slot_conflict recovery that is not a taken
+  // slot (a visit before the move-in date); null keeps the default copy.
+  const [deadHoldNote, setDeadHoldNote] = useState(null);
   // Recovery releases the hold and re-reads the contract. Until BOTH land,
   // `data.estimate.acceptance` still describes the dead hold, so leaving the
   // payment buttons live let a customer re-adopt the very hold being deleted
@@ -6552,6 +6673,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     if (r.status === 404) {
       const notFoundBody = await r.json().catch(() => ({}));
       setExtensionEligible(notFoundBody?.extensionRequestEligible === true);
+      setExpiredInfo(notFoundBody?.extensionRequestEligible === true && notFoundBody?.expiresAt
+        ? { expiresAt: notFoundBody.expiresAt, sentAt: notFoundBody.sentAt || null, extensionSelfServe: notFoundBody.extensionSelfServe === true }
+        : null);
       setNotFound(true);
       setLoadError(false);
       setLoading(false);
@@ -6567,6 +6691,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // the dead-end state or the loaded data would render the NotFoundCard.
     setNotFound(false);
     setExtensionEligible(false);
+    setExpiredInfo(null);
     const body = await r.json();
     // Aborted mid-flight (the caller navigated to a different :token and this
     // instance is unmounting): stop before ANY side effect. React drops
@@ -6978,7 +7103,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // a payment method re-adopted the dead hold. Refreshing the contract is
   // what actually reopens the picker, so every caller goes through here
   // rather than repeating the reset.
-  const recoverFromDeadHold = useCallback((phase) => {
+  const recoverFromDeadHold = useCallback((phase, note = null) => {
     // Never DURING Stripe's confirmation (codex r16 P1): recovery clears the
     // reservation, unmounts payment capture and DELETEs the hold, which
     // mid-confirmSetup would cancel a hold the confirmation is about to use
@@ -7006,6 +7131,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       || pendingRecoveryHoldRef.current
       || null;
     setCtaPhase(phase);
+    setDeadHoldNote(note);
     // Remembered until the release AND the refresh both succeed (codex r4
     // P1): otherwise an adopted hold's acceptance mode stays
     // `existing_appointment`, the picker stays hidden, and the banner's
@@ -7160,7 +7286,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // Countdown timer tied to reservation.expiresAt
   useEffect(() => {
     if (!reservation?.expiresAt) {
-      setCountdownSeconds(0);
+      setCountdownSeconds(null);
       if (countdownRef.current) clearInterval(countdownRef.current);
       return undefined;
     }
@@ -7424,7 +7550,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         body?.error === 'bundled_item_would_be_charged'
           // Owner ruling: this one goes to the office rather than becoming a
           // self-serve charge on the first invoice.
-          ? 'Removing this would end an included item on your plan. Give us a call at (941) 234-8929 and we\'ll sort it out with you.'
+          ? `Removing this would end an included item on your plan. Give us a call at ${WAVES_PHONE_DISPLAY} and we'll sort it out with you.`
           : body?.error === 'service_not_removable'
             ? 'This service can\'t be removed online. Give us a call and we\'ll take care of it.'
             : body?.error === 'service_not_addable' || body?.error === 'add_unavailable'
@@ -7754,6 +7880,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         setSelectedSlotId(null);
         setSelectedSlotMeta(null);
         if (/slot no longer available/i.test(message)) {
+          // A taken slot: the default copy, never a reason an earlier accept
+          // refusal left behind.
+          setDeadHoldNote(null);
           setCtaPhase('slot_conflict');
           setSlotsRefreshSignal((v) => v + 1);
         } else if (/estimate is no longer active/i.test(message)) {
@@ -8285,6 +8414,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // Server-supplied code first (RESERVATION_EXPIRED / SLOT_UNAVAILABLE)
           // — the regex is a fallback only, for legacy 409 bodies that predate
           // the code field.
+          const slotGone = body.code === 'SLOT_UNAVAILABLE'
+            || (body.code == null && /slot no longer available/i.test(body.error || ''));
           const expired = body.code === 'RESERVATION_EXPIRED'
             || (body.code == null && /expired|no active reservation/i.test(body.error || ''));
           // The accept path returns the SAME no-booking bodies /reserve and
@@ -8303,7 +8434,17 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // existing_appointment, so clearing the reservation alone left the
           // customer with recovery copy and no slot picker — and choosing a
           // payment method re-adopted the dead hold.
-          recoverFromDeadHold(expired ? 'reservation_expired' : 'slot_conflict');
+          if (expired || slotGone) {
+            recoverFromDeadHold(expired ? 'reservation_expired' : 'slot_conflict');
+            return;
+          }
+          // Every other 409 is about the estimate, not the time: a discount
+          // refresh, a re-price, a retired plan option, a visit before the
+          // move-in date. Read as "That slot was just taken", it sent the
+          // customer back to pick a time into the same refusal (estimate page
+          // audit 2026-11-05). Same recovery (some of these need its reload),
+          // but the banner says the server's reason.
+          recoverFromDeadHold('slot_conflict', body.error || null);
           return;
         }
         throw new Error(body.error || `accept failed: ${r.status}`);
@@ -8997,6 +9138,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         <NotFoundCard
           token={token}
           extensionEligible={extensionEligible && !readOnlyPreview}
+          expiresAt={expiredInfo?.expiresAt || null}
+          sentAt={expiredInfo?.sentAt || null}
+          extensionSelfServe={expiredInfo?.extensionSelfServe === true}
           onExtended={() => {
             // Refresh semantics, NOT a first load: the initial 404 never
             // marked the view counted, so a bare loadEstimate() would flip
@@ -9380,14 +9524,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // billedPerApplication flags); absent → false → today's behavior.
   const billsMonthly = isCommercialEstimate || cta?.monthlyBilled === true;
   const proposalPdfEmailed = cta?.proposalPdfEmailed === true;
-  // GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): the monthly average beside
-  // the per-application prices. Server switch (absent with the gate off) AND an
-  // open, recurring, per-application plan: not commercial, not billed monthly,
+  // Monthly average (owner 2026-10-20): the monthly average beside
+  // the per-application prices, for an open, recurring, per-application plan: not commercial, not billed monthly,
   // not the annual-prepay choice, not a one-time pick. pageMonthlyAverage
   // returns null whenever the per-service averages cannot be made to add up to
   // the plan's own monthly, and the page then shows nothing new.
   const monthlyAverage = resolvePageMonthlyAverage({
-    data, serviceMode, estimate, billsMonthly, isCommercialEstimate, cta, paymentPreference,
+    serviceMode, estimate, billsMonthly, isCommercialEstimate, cta, paymentPreference,
     services, selected, selectedCombo, combinedFrequency, pricing, renderFlags,
   }, manualDiscountMonthlyAmount);
   // Application months: computed once, whenever the monthly average applies. When the plan
@@ -9428,7 +9571,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         : null
     );
     // Charges that sit beside the plan and never enter the monthly average
-    // (GATE_ESTIMATE_MONTHLY_AVERAGE): a setup / first-visit fee, or an ADDITIVE
+    // (monthly average): a setup / first-visit fee, or an ADDITIVE
     // one-time breakdown row (a flea treatment). When the estimate offers a
     // one-time option, the breakdown rows are the either/or alternative to the
     // plan, not an extra charge, so they do not count.
@@ -10032,6 +10175,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             : (selectedSlotMeta?.date
               ? `${new Date(`${selectedSlotMeta.date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })}${selectedSlotMeta.time ? ` · ${selectedSlotMeta.time}` : ''}`
               : null)}
+          firstVisit={successFirstVisit(existingAppointment, selectedSlotMeta)}
           recurring={serviceMode !== 'one_time'}
         />
     );
@@ -10163,7 +10307,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 paymentTiming={paymentTiming}
                 setupFeeAfterFirstVisit={setupFeePromiseEnabled}
-                firstApplicationLabel={data?.monthlyAverageEnabled === true}
               />
             </>
           ) : null}
@@ -10292,6 +10435,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           <ReviewPhase
             website={websiteMode}
             paymentTiming={paymentTiming}
+            firstVisitAmount={confirmStepFirstVisitAmount({
+              serviceMode, paymentPreference, siteConfirmationHold: !!estimate.siteConfirmationHold, selectedFrequency: combinedFrequency,
+            })}
             slotId={selectedSlotId}
             slotMeta={selectedSlotMeta}
             existingAppointment={existingAppointment}
@@ -10517,7 +10663,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   token={token}
                   askToken={estimate.askToken}
                   selectedSlotId={selectedSlotId}
-                  onSelect={(slotId) => { if (!SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) setSelectedSlotId(slotId); }}
+                  onSelect={(slotId) => {
+                    if (SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) return;
+                    setSelectedSlotId(slotId);
+                    if (websiteMode && slotId) setWebsitePickTick((t) => t + 1);
+                  }}
                   onSelectMeta={(meta) => { if (!SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) setSelectedSlotMeta(meta); }}
                   selectedSlotFallbackMeta={selectedSlotMeta}
                   licenseNumber={estimate.licenseNumber}
@@ -10562,7 +10712,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
                 paymentTiming={paymentTiming}
                 setupFeeAfterFirstVisit={setupFeePromiseEnabled}
-                firstApplicationLabel={data?.monthlyAverageEnabled === true}
               />
             </div>
           ) : null
@@ -10575,16 +10724,18 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       kind="stale_hold"
       onRetry={() => recoverFromDeadHold(ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired'
         ? ctaPhase
-        : 'configure')}
+        : 'configure', ctaPhase === 'slot_conflict' ? deadHoldNote : null)}
     />
   ) : ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
     <SlotIssueBanner
       kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}
+      note={ctaPhase === 'slot_conflict' ? deadHoldNote : null}
       onRetry={() => {
         // A recovery that failed its release or refresh is what actually
         // blocks the picker (codex r4 P1) — retry THAT, not just the slots.
         if (pendingRecoveryHoldRef.current) {
-          recoverFromDeadHold(ctaPhase === 'slot_conflict' ? 'slot_conflict' : 'reservation_expired');
+          recoverFromDeadHold(ctaPhase === 'slot_conflict' ? 'slot_conflict' : 'reservation_expired',
+            ctaPhase === 'slot_conflict' ? deadHoldNote : null);
           return;
         }
         setSlotsRefreshSignal((v) => v + 1);
@@ -10602,7 +10753,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         bookingContent={<>{slotIssueBanner}{bookingContent}{paymentContent}</>} reviewContent={reviewContent}
         reviewing={!!reservation && (ctaPhase === 'review' || (ctaPhase === 'submitting' && !!inlineCardIntent))}
         busy={ctaPhase === 'submitting'} timer={reservation?.expiresAt ? (
-          <HoldCountdownBar
+          <HoldCountdownBarWhenTimed
             secondsRemaining={countdownSeconds}
             checking={holdChecking}
             holdLimitReached={holdLimitReached}
@@ -10835,7 +10986,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           would cover the confirm/cancel buttons. */}
       {glassContent && canShowSlotPicker && serviceMode === 'recurring' && !(ctaPhase === 'review' && reservation) ? (
         <GlassStickyBookBar
-          show={stickyBarPriced}
+          // Hidden while a remove/restore confirm is open: the bar would sit on
+          // its "Keep it" button, and a tap there would approve the plan.
+          show={stickyBarPriced && !((optOut.phase === 'preview' || optOut.phase === 'submitting') && optOut.quote)}
           slotMeta={selectedSlotMeta}
           onApprove={selectedSlotMeta ? scrollToPaymentSection : promptPickTime}
         />

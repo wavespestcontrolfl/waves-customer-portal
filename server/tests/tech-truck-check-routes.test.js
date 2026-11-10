@@ -1,14 +1,13 @@
 /**
- * routes/tech-truck-check.js — GATE_TRUCK_KIT tech surface. services/truck-kit.js
- * is mocked; these pin the route layer: the gate check on both handlers, the
- * login-derived technician, and the error-code to HTTP-status mapping.
+ * routes/tech-truck-check.js — the truck check tech surface. services/truck-kit.js
+ * is mocked; these pin the route layer: the login-derived
+ * technician, and the error-code to HTTP-status mapping.
  * Handlers are invoked directly (tests/admin-tech-out-routes.test.js pattern).
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/truck-kit', () => ({
-  truckKitEnabled: jest.fn(),
   truckKitStatus: jest.fn(),
   recordTruckCheck: jest.fn(),
 }));
@@ -38,17 +37,7 @@ async function run(method, { body = {} } = {}) {
 
 beforeEach(() => jest.clearAllMocks());
 
-test('gate off answers 404 { enabled: false } on both routes, with no service call', async () => {
-  truckKit.truckKitEnabled.mockReturnValue(false);
-  expect((await run('get')).statusCode).toBe(404);
-  expect((await run('get')).body).toEqual({ enabled: false });
-  expect((await run('post', { body: { results: [] } })).statusCode).toBe(404);
-  expect(truckKit.truckKitStatus).not.toHaveBeenCalled();
-  expect(truckKit.recordTruckCheck).not.toHaveBeenCalled();
-});
-
 test('GET reads the status of the signed-in technician and never caches it', async () => {
-  truckKit.truckKitEnabled.mockReturnValue(true);
   truckKit.truckKitStatus.mockResolvedValue({ enabled: true, truck: { id: 'v1' }, kit: [], lastCheck: null, due: false });
   const res = await run('get');
   expect(res.body).toEqual(expect.objectContaining({ enabled: true, truck: { id: 'v1' } }));
@@ -57,13 +46,11 @@ test('GET reads the status of the signed-in technician and never caches it', asy
 });
 
 test('POST passes the page\'s idempotency key through', async () => {
-  truckKit.truckKitEnabled.mockReturnValue(true);
   await run('post', { body: { results: [], clientKey: 'page-key-0001' } });
   expect(truckKit.recordTruckCheck).toHaveBeenCalledWith(expect.objectContaining({ clientKey: 'page-key-0001' }));
 });
 
 test('POST records a check for the signed-in technician and answers 201', async () => {
-  truckKit.truckKitEnabled.mockReturnValue(true);
   truckKit.recordTruckCheck.mockResolvedValue({ check: { id: 'k1' } });
   const results = [{ equipmentId: 'e1', state: 'present' }];
   const res = await run('post', { body: { results } });
@@ -73,7 +60,6 @@ test('POST records a check for the signed-in technician and answers 201', async 
 });
 
 test('POST maps the service errors: no truck 404, bad results 400, changed kit 409 with the kit', async () => {
-  truckKit.truckKitEnabled.mockReturnValue(true);
   const fail = (code, extra = {}) => Object.assign(new Error(code), { code, ...extra });
   truckKit.recordTruckCheck.mockRejectedValueOnce(fail('no_truck'));
   expect((await run('post')).statusCode).toBe(404);

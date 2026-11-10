@@ -2,7 +2,8 @@
 // The next 13 weeks for both checking accounts as one pool: money in, money out, and two end balances
 // each week (booked work only; booked plus expected new money once last year's months are set). The
 // numbers come from GET /admin/banking/cash-forecast; the owner types planned items, the floor and last
-// year's monthly receipts here. Read-only apart from those inputs.
+// year's monthly receipts here, and marks each repeating bill business or household (step 2c; a label
+// only). Read-only apart from those inputs.
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { CartesianGrid, Legend, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { ActionFeedback, Button, Card, Field, Input, Select, Table, THead, TBody, TR, TH, TD } from "../ui";
@@ -56,6 +57,7 @@ const LINE_WORDS = {
   ai_software: "AI and software",
   card_payments_off_feed: "Payments to cards outside the feed",
   other_spending: "Other spending",
+  repeating_bills: "Repeating bills",
   card_owed: "Spark card owed today",
   payroll: "Payroll",
   taxes: "Taxes",
@@ -72,6 +74,7 @@ const KIND_WORDS = {
   other: "Other",
 };
 const CADENCE_WORDS = { once: "Once", weekly: "Every week", biweekly: "Every 2 weeks", monthly: "Every month" };
+const MARK_WORDS = { business: "Business", household: "Household" };
 const lastFour = (label) => (String(label || "").match(/(\d{4})$/) || [])[1] || label;
 
 // One plain sentence per thing the forecast cannot see.
@@ -235,18 +238,29 @@ function ForecastChart({ forecast, floorCents, hasHire }) {
 const total = (lines) => Object.values(lines).reduce((s, v) => s + v, 0);
 const shownLines = (lines) => Object.entries(lines).filter(([, v]) => Math.abs(v) >= 0.5);
 
+// A repeating bill's own row under the Repeating bills line: its name, day and mark.
+const billRow = (b) => ({
+  key: `${b.key}-${b.day}-${b.amount_usd}`,
+  label: `${b.label} · ${day(b.day)}${b.mark ? ` · ${MARK_WORDS[b.mark]}` : ""}`,
+  v: -b.amount_usd,
+  sub: true,
+});
+
 function WeekDetail({ week, colSpan }) {
   const rows = [
-    ...shownLines(week.money_in).map(([k, v]) => [LINE_WORDS[k] || k, v]),
-    ...shownLines(week.money_out).map(([k, v]) => [LINE_WORDS[k] || k, -v]),
+    ...shownLines(week.money_in).map(([k, v]) => ({ key: k, label: LINE_WORDS[k] || k, v })),
+    ...shownLines(week.money_out).flatMap(([k, v]) => [
+      { key: k, label: LINE_WORDS[k] || k, v: -v },
+      ...(k === "repeating_bills" ? (week.bills || []).map(billRow) : []),
+    ]),
   ];
   return (
     <TR>
       <TD colSpan={colSpan}>
-        {rows.length === 0 ? <span style={muted}>Nothing moves this week.</span> : rows.map(([label, v]) => (
-          <div key={label} style={{ display: "flex", justifyContent: "space-between", maxWidth: 460, ...muted }}>
-            <span>{label}</span>
-            <span className="u-nums">{usd(v)}</span>
+        {rows.length === 0 ? <span style={muted}>Nothing moves this week.</span> : rows.map((r) => (
+          <div key={r.key} style={{ display: "flex", justifyContent: "space-between", maxWidth: 460, ...muted, paddingLeft: r.sub ? 16 : 0 }}>
+            <span>{r.label}</span>
+            <span className="u-nums">{usd(r.v)}</span>
           </div>
         ))}
       </TD>
@@ -300,6 +314,47 @@ function MissingData({ missing }) {
       <ul style={{ margin: 0, paddingLeft: 18 }}>
         {missing.map((m) => <li key={`${m.kind}-${m.account || m.label || ""}`} style={{ marginBottom: 4 }}>{missingText(m)}</li>)}
       </ul>
+    </Card>
+  );
+}
+
+// Bills the finder sees about once a month in the bank feed. The owner marks each merchant business or
+// household once; the mark is a label only (decision 2 A) and never changes a number.
+function RepeatingBills({ bills, onChanged }) {
+  const [saving, setSaving] = useState(null); // the merchant key being saved
+  const [error, setError] = useState(null);
+  const save = async (key, mark) => {
+    setSaving(key);
+    setError(null);
+    try {
+      if (mark) await readJson(`/admin/banking/cash-forecast/marks/${encodeURIComponent(key)}`, { method: "PUT", body: { mark } });
+      else await readJson(`/admin/banking/cash-forecast/marks/${encodeURIComponent(key)}`, { method: "DELETE" });
+      onChanged();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(null);
+    }
+  };
+  return (
+    <Card style={{ padding: 16, marginBottom: 16 }}>
+      <div style={heading}>Repeating bills</div>
+      <div style={muted}>Bills the bank feed shows about once a month, 3 times or more. Each one counts on its own day instead of in the weekly average. Mark each one business or household once; the mark is a label only.</div>
+      {bills.length === 0 && <div style={{ ...muted, marginTop: 8 }}>No bill repeats monthly in the bank feed yet.</div>}
+      {bills.map((b) => (
+        <div key={`${b.key}-${b.day_of_month}-${b.amount_usd}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: "1px solid #F4F4F5" }}>
+          <div>
+            <div style={{ color: "#09090B" }}>{b.label}</div>
+            <div style={muted}>About {usd(b.amount_usd)} every month, next {day(b.next_day)}</div>
+          </div>
+          <Select aria-label={`Business or household: ${b.label}`} value={b.mark || ""} disabled={saving === b.key} onChange={(e) => save(b.key, e.target.value)} style={{ width: 150, flexShrink: 0 }}>
+            <option value="">Not marked</option>
+            <option value="business">{MARK_WORDS.business}</option>
+            <option value="household">{MARK_WORDS.household}</option>
+          </Select>
+        </div>
+      ))}
+      {error && <ActionFeedback error className="mt-2">{error}</ActionFeedback>}
     </Card>
   );
 }
@@ -498,6 +553,7 @@ export default function CashForecastTab() {
         <ForecastChart forecast={forecast} floorCents={floorCents} hasHire={hasHire} />
         <MissingData missing={forecast.missing} />
         <ForecastWeeks forecast={forecast} hasHire={hasHire} />
+        <RepeatingBills bills={forecast.repeating || []} onChanged={load} />
         <PlannedItems inputs={inputs} onChanged={load} />
         <ForecastSettings key={inputs.settings.updated_at || "new"} settings={inputs.settings} missing={forecast.missing} onChanged={load} />
       </div>

@@ -227,34 +227,39 @@ describe('GATE_IB_OPENAI_BACKUP on /query', () => {
     expect(JSON.stringify(openaiRequests)).not.toContain(PENDING_ID);
   });
 
-  test('a failed backup rethrows the ORIGINAL Anthropic error', async () => {
+  test('a failed backup answers with the ORIGINAL Anthropic failure, not the backup\'s', async () => {
     process.env.GATE_IB_OPENAI_BACKUP = 'true';
     mockMessagesCreate.mockRejectedValue(LIMIT_ERROR);
     openaiScript = [{ status: 500, body: {} }];
     await withServer(async (baseUrl) => {
       const { status, body } = await postQuery(baseUrl, { prompt: 'find Jeff', context: 'customers' });
-      expect(status).toBe(400);
-      expect(body.error).toBe(LIMIT_ERROR.message);
+      // The failed model call is answered plainly (the model failure notice); the provider's own message is not shown.
+      expect(status).toBe(200);
+      expect(body.response).toMatch(/^The AI model did not answer this request \(error anthropic_400\)\./);
+      expect(body.response).not.toMatch(/specified API usage limits/);
     });
     expect(openaiRequests).toHaveLength(1);
   });
 
-  test('a request this server built wrongly (400 without a limit message) is not intercepted', async () => {
+  test('a request this server built wrongly (400 without a limit message) is not intercepted by the backup', async () => {
     process.env.GATE_IB_OPENAI_BACKUP = 'true';
     mockMessagesCreate.mockRejectedValue(Object.assign(new Error('400 tools.3.custom.input_schema: invalid'), { status: 400 }));
     await withServer(async (baseUrl) => {
-      const { status } = await postQuery(baseUrl, { prompt: 'find Jeff', context: 'customers' });
-      expect(status).toBe(400);
+      const { status, body } = await postQuery(baseUrl, { prompt: 'find Jeff', context: 'customers' });
+      expect(status).toBe(200);
+      expect(body.response).toMatch(/^The AI model did not answer this request \(error anthropic_400\)\./);
     });
     expect(openaiRequests).toHaveLength(0);
   });
 
-  test('gate off: the provider error propagates and OpenAI is never called', async () => {
+  test('backup gate off: the provider error is answered plainly and OpenAI is never called', async () => {
     mockMessagesCreate.mockRejectedValue(LIMIT_ERROR);
     await withServer(async (baseUrl) => {
       const { status, body } = await postQuery(baseUrl, { prompt: 'find Jeff', context: 'customers' });
-      expect(status).toBe(400);
-      expect(body.error).toBe(LIMIT_ERROR.message);
+      // The failed model call is answered plainly (the model failure notice); the provider's own message is not shown.
+      expect(status).toBe(200);
+      expect(body.response).toMatch(/^The AI model did not answer this request \(error anthropic_400\)\./);
+      expect(body.response).not.toMatch(/specified API usage limits/);
     });
     expect(openaiRequests).toHaveLength(0);
   });
@@ -333,15 +338,17 @@ describe('GATE_IB_OPENAI_BACKUP on /query', () => {
     expect(openaiRequests[2].input.find(item => item.id === 'rs_2')).toMatchObject({ type: 'reasoning', encrypted_content: 'enc_rs_2' });
   });
 
-  test('an unfinished function call never runs: the original Anthropic error is rethrown', async () => {
+  test('an unfinished function call never runs: the original Anthropic failure is answered', async () => {
     process.env.GATE_IB_OPENAI_BACKUP = 'true';
     mockMessagesCreate.mockRejectedValue(LIMIT_ERROR);
     openaiScript = [{ body: { id: 'r', status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [
       { type: 'function_call', call_id: 'call_x', name: 'query_customers', arguments: '{"search":', status: 'incomplete' }] } }];
     await withServer(async (baseUrl) => {
       const { status, body } = await postQuery(baseUrl, { prompt: 'find Jeff', context: 'customers' });
-      expect(status).toBe(400);
-      expect(body.error).toBe(LIMIT_ERROR.message);
+      // The failed model call is answered plainly (the model failure notice); the provider's own message is not shown.
+      expect(status).toBe(200);
+      expect(body.response).toMatch(/^The AI model did not answer this request \(error anthropic_400\)\./);
+      expect(body.response).not.toMatch(/specified API usage limits/);
     });
     expect(mockExecuteTool).not.toHaveBeenCalled();
     expect(mockCreatePendingAction).not.toHaveBeenCalled();

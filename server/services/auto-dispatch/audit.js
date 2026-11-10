@@ -194,6 +194,29 @@ async function retireResolvedNotices({ keyPattern, stillOpen, resolvedTitle, res
 // How far ahead a recurring visit with no arrival time and no due date raises
 // a notice: far enough to set a time in dispatch before the lock window.
 const NO_WINDOW_HORIZON_DAYS = 45;
+// The last days before its visit in which a schedule notice says the visit is
+// close (owner 2026-11-08, "fix": dispatch audit, Fix 1). Inside them the words
+// change once, and notifyAdmin rings a standing row whose words changed and
+// clears its done (DONE_CLEARED). So a notice closed while its problem stands
+// (a person's Done, or the 72-hour quiet close of admin-alert-retention.js)
+// rings one more time before the visit. Outside them the words are the old
+// ones: new far words would re-ring every standing notice on the next run.
+const SOON_DAYS = 7;
+
+// The last ET date (YYYY-MM-DD) a visit can be on and still be SOON_DAYS away or less.
+function soonEndFor(nowDate) {
+  const { etDateString, addETDays } = require('../../utils/datetime-et');
+  return etDateString(addETDays(nowDate, SOON_DAYS));
+}
+
+// A schedule notice's subject: "The Nov 30 visit", or, on or before `soonEnd`
+// (soonEndFor), "The Nov 30 visit, 7 days away or less,". The no-window notice
+// and the needs-person notice (needs-person-notice.js) share it.
+function visitSubject(date, soonEnd) {
+  const { shortDateET } = require('../admin-alert-names');
+  const spoken = shortDateET(`${date}T12:00:00Z`);
+  return soonEnd && date <= soonEnd ? `The ${spoken} visit, ${SOON_DAYS} days away or less,` : `The ${spoken} visit`;
+}
 // New notices the auto-dispatch lanes may ring in 24 hours, ALL lanes and all
 // runs together (no-window, missing pin, reminder sync): the daily budget of
 // docs/admin-notifications.md, the same number as DEFAULT_RING_BUDGET in
@@ -446,8 +469,8 @@ async function prepareNoWindowNotices(nowDate, today, to) {
 
 // One notice per windowless recurring visit. Same row lock + shared dedupe as
 // the due-date notice, so a staff placement that wins the lock makes this a no-op.
-async function flagNoWindowVisits(candidates, today, to) {
-  const { shortDateET } = require('../admin-alert-names');
+// `soonEnd` (soonEndFor): a visit on or before it gets the SOON_DAYS words.
+async function flagNoWindowVisits(candidates, today, to, soonEnd) {
   if (!candidates.length) return 0;
   const standing = await standingNoticeKeys('recurring-no-window:%', NO_WINDOW_RESOLVED_TITLE);
   // A slot is spent only when a NEW notice is raised: a candidate the locked
@@ -474,7 +497,7 @@ async function flagNoWindowVisits(candidates, today, to) {
         action: await namedVisitAction(row.customer_id,
           [(who) => `set an arrival time for ${who}'s visit`, (who) => `set a time for ${who}'s visit`],
           'set an arrival time for a recurring visit', trx),
-        why: `The ${shortDateET(`${date}T12:00:00Z`)} visit has no arrival time; set one in dispatch so it can be placed.`,
+        why: `${visitSubject(date, soonEnd)} has no arrival time; set one in dispatch so it can be placed.`,
         severity: 'needs-you',
         link: `/admin/dispatch?tab=schedule&date=${date}&appointment=${encodeURIComponent(row.id)}`,
         subject: { type: 'visit', id: String(row.id) },
@@ -637,7 +660,7 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
     if (notice) flagged += 1;
   }
   if (noWindowError) throw noWindowError;
-  return flagged + await flagNoWindowVisits(noWindowRows, today, noWindowEnd);
+  return flagged + await flagNoWindowVisits(noWindowRows, today, noWindowEnd, soonEndFor(nowDate));
 }
 
-module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits, retireResolvedNotices, standingNoticeKeys, retireMissingGeoNotices, maintainMissingGeoNotices, standingMissingGeoKeys, nearTermPinlessVisits, pinNoticeHeldOut, NEAR_TERM_PIN_DAYS, withinRingBudget, recentBudgetKeys, ringsLeft, missingGeoKey, namedVisitAction, noticeRang, NEW_NOTICES_PER_RUN };
+module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits, retireResolvedNotices, standingNoticeKeys, retireMissingGeoNotices, maintainMissingGeoNotices, standingMissingGeoKeys, nearTermPinlessVisits, pinNoticeHeldOut, NEAR_TERM_PIN_DAYS, withinRingBudget, recentBudgetKeys, ringsLeft, missingGeoKey, namedVisitAction, noticeRang, NEW_NOTICES_PER_RUN, SOON_DAYS, soonEndFor, visitSubject };

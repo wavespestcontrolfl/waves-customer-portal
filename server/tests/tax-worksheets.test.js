@@ -1,5 +1,5 @@
 /**
- * services/tax-worksheets (GATE_TAX_WORKSHEETS): the Florida DR-15 lines and
+ * services/tax-worksheets: the Florida DR-15 lines and
  * the 1099-NEC list.
  *
  * Locked-down behaviors:

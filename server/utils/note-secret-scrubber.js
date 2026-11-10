@@ -1,6 +1,6 @@
 /**
  * Fixed-format scrubber for the free-text notes the Intelligence Bar's general
- * admin read returns (GATE_IB_READ_NOTES; owner ruling 2026-10-13: the read
+ * admin read returns (owner ruling 2026-10-13: the read
  * RETURNS notes and access instructions, scrubbed of secrets).
  *
  * It removes only secrets with a recognisable SHAPE. It has no prose rules: a

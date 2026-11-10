@@ -797,6 +797,63 @@ function customerArrivalOption(dateStr, window) {
   return label ? `${displayDate(dateStr)}, ${label}` : displayDate(dateStr);
 }
 
+// GATE_DAY_ONLY_PROMISE part B2: a rain move to a day more than 24.25 h out names only the day ("Thu, Nov 12") and says the
+// arrival window comes the day before. The recorded/inferred intent decides (a customer's own set time keeps its window); the
+// rain move records no intent itself. Inside the cutoff (most rain moves: tomorrow or the day after) the decision is false and
+// the copy is today's. A dispatcher note, a custom message and a missing start keep today's copy. Never throws.
+async function rainMoveDayOnly({ job, customer, chosen, customerNote, isCustom }) {
+  if (isCustom || customerNote || !chosen?.date || !chosen.window?.start) return false;
+  const { parseETDateTime } = require('../utils/datetime-et');
+  const newStartAt = parseETDateTime(`${String(chosen.date)}T${String(chosen.window.start).slice(0, 5)}`);
+  return require('./day-only-move-notice').moveNoticeDayOnly({
+    serviceId: job.id, customerId: customer.id, newStartAt, oldDate: job.scheduled_date, newDate: String(chosen.date),
+  });
+}
+
+// The slot a rain-out text is guarded on (its chosen date and window start), or undefined.
+function chosenSlotMs(chosen) {
+  const { parseETDateTime } = require('../utils/datetime-et');
+  const at = chosen?.date ? parseETDateTime(`${String(chosen.date)}T${chosen.window?.start ? String(chosen.window.start).slice(0, 5) : '08:00'}`) : null;
+  return at && !Number.isNaN(at.getTime()) ? at.getTime() : undefined;
+}
+
+// The ABA-guard slot of a rain-out text as sendCustomerMessage's renderedSlotMs argument (nothing when there is none).
+function renderedSlotArg(chosen) {
+  const ms = chosenSlotMs(chosen);
+  return ms === undefined ? {} : { renderedSlotMs: ms };
+}
+
+// The day-only rung of the moved text (GATE_DAY_ONLY_PROMISE part B2): { body, sendArgs, metadata }. body is null when the
+// rung does not apply (a body already rendered, a custom message or a dispatcher note, a move inside the cutoff or a set
+// time, or a day row that is missing), so today's ladder renders; sendArgs and metadata then add nothing.
+async function dayRainRung({ skip, job, customer, chosen, customerNote, isCustom, weatherLead, reasonCode, rescheduleUrl, serviceId }) {
+  const none = { body: null, sendArgs: {}, metadata: {} };
+  if (skip || !(await rainMoveDayOnly({ job, customer, chosen, customerNote, isCustom }))) return none;
+  const body = await renderDayRainBody({
+    firstName: customer.first_name, serviceType: job.service_type, date: chosen.date, weatherLead, reasonCode, rescheduleUrl, serviceId,
+  });
+  if (!body) return none;
+  return { body, sendArgs: { promisedWindowUnknown: true }, metadata: require('./day-only-move-notice').dayMoveMeta(chosenSlotMs(chosen)) };
+}
+
+// The day-only rain-out text (rain_out_moved_day_v1): v3's shape with the day in {new_option} and the day-before line.
+// Null when the row is missing, disabled or unrenderable: the caller then renders today's ladder.
+async function renderDayRainBody({ firstName, serviceType, date, weatherLead, reasonCode, rescheduleUrl, serviceId }) {
+  const gateAccessClause = reasonCode === 'gate_locked' ? GATE_ACCESS_CLAUSE : '';
+  const linkClause = gateAccessClause + (rescheduleUrl
+    ? (isExtraReason(reasonCode)
+      ? ` New time & other options: ${rescheduleUrl}`
+      : ` New time, forecast & other options: ${rescheduleUrl}`)
+    : ' Need a different time? Reply to this message.');
+  return require('./day-only-move-notice').renderDayRow('rain_out_moved_day_v1', {
+    first_name: firstName || 'there',
+    service_type: (serviceType || 'service').toLowerCase(),
+    new_option: displayDate(date),
+    weather_lead: weatherLead,
+    link_clause: linkClause,
+  }, { workflow: 'tech_rain_out', entity_type: 'scheduled_service', entity_id: serviceId });
+}
+
 // Normalize a suggested start to an on-the-hour 1-hour block. The rebooker's
 // findBestWindow returns 2-3h arrival-promise ranges shared with the SMS
 // self-reschedule flow; rain-out books the tighter internal slot here without
@@ -1568,7 +1625,7 @@ async function getOptions(serviceId, { caller = null, reasonCode } = {}) {
   const dayOptionsRaw = await SmartRebooker.findRescheduleOptions(serviceId, 'weather_rain', {
     probeSpanMinutes: 60,
     travelGap: true,
-    // GATE_ROUTE_CHECK_STAFF_LISTS: the route check buys Google road times
+    // Route-checked day list: the route check buys Google road times
     // only for an admin caller; the tech route (isAdmin: false) and a call
     // with no caller stay on the estimate.
     caller,
@@ -1909,6 +1966,9 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     }
     renderedKey = CUSTOM_TEMPLATE_KEY;
   }
+  // The day-only rung (GATE_DAY_ONLY_PROMISE part B2) goes ahead of v3/v2; any failure falls through to today's ladder.
+  const dayRung = await dayRainRung({ skip: !!body, job, customer, chosen, customerNote, isCustom, weatherLead, reasonCode, rescheduleUrl, serviceId });
+  if (dayRung.body) { body = dayRung.body; renderedKey = 'rain_out_moved_day_v1'; }
   if (!body && process.env.GATE_RAINOUT_MOVE_BANNER === 'true') {
     // The v3 row state the pre-move note cap OBSERVED wins over a re-read:
     // a disabled row stays the kill switch and an absent row stays the v2
@@ -2014,12 +2074,10 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     // ABA guard (codex r39): the body quotes chosen.date/window — a
     // complete later move that stamped AND cleared its hold mid-render is
     // caught by the live-slot comparison at the canonical checkpoints.
-    ...(chosen?.date ? (() => {
-      const { parseETDateTime } = require('../utils/datetime-et');
-      const start = chosen.window?.start ? String(chosen.window.start).slice(0, 5) : '08:00';
-      const at = parseETDateTime(`${String(chosen.date)}T${start}`);
-      return at && !Number.isNaN(at.getTime()) ? { renderedSlotMs: at.getTime() } : {};
-    })() : {}),
+    ...renderedSlotArg(chosen),
+    // A day-only text quoted no window: the slot only guards the send and is not recorded as the promise (the audit row then
+    // carries the day marker below instead of rendered_slot_ms).
+    ...dayRung.sendArgs,
     identityTrustLevel: 'phone_matches_customer',
     // Send-window operator marker (validators/send-window.js): a quick-move
     // notice is the direct consequence of an operator's commit click with an
@@ -2048,6 +2106,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
       // original_message_type except on the legacy rung, which keeps v2's
       // kill-switch key there but rendered the legacy rain_out_moved row.
       templateKey: legacyRendered ? 'rain_out_moved' : renderedKey,
+      ...dayRung.metadata,
     },
   });
   if (result?.blocked || result?.sent === false) {
@@ -2611,7 +2670,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             ...(actorUserId ? { actorId: actorUserId } : {}),
             overlapAdvisory: true,
             // The day options came from the staff arrival check, so the move
-            // numbers the day the way it checked (GATE_STAFF_ROUTE_INSERTION).
+            // numbers the day the way it checked.
             placeInRoute: true,
             // GATE_SAVE_ROAD_BUY: an admin's move buys its road times before
             // the series transaction (the dispatch route passes none for a technician).
@@ -2698,7 +2757,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           // their own visit must not be told about it.
           ...(actorUserId ? { actorId: actorUserId } : {}),
           overlapAdvisory: true,
-          // Same as the series call above (GATE_STAFF_ROUTE_INSERTION).
+          // Same as the series call above.
           placeInRoute: true,
           ...(roadSpender ? { roadSpender } : {}),
           excludeServiceIds: [job.id],

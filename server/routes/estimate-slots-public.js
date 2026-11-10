@@ -44,6 +44,8 @@ const StripeService = require('../services/stripe');
 const { getAvailableSlots, findEstimateSlots, MAX_SLOT_HORIZON_DAYS } = require('../services/estimate-slot-availability');
 const { addETDays, etDateString } = require('../utils/datetime-et');
 const slotReservation = require('../services/slot-reservation');
+// Office alert when a customer gets stuck booking, plus the search and hold records (fire-and-forget, never throws).
+const stuckAlert = require('../services/estimate-stuck-alert');
 const { isCommercialAutoAcceptEstimate } = require('../services/estimate-commercial-identity');
 const {
   annualPrepayEligibleForEstimateData,
@@ -97,6 +99,9 @@ const {
 const { recordCheckoutStepReached, CHECKOUT_KIND } = require('../services/estimate-checkout-events');
 
 const TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
+// The ?timeOfDay= values available-slots passes on (estimate-slot-availability filterTimeOfDay;
+// same names as scheduling/parse-when.js VALID_TIME_OF_DAY, where 'any' means no filter).
+const SLOT_TIME_OF_DAY = new Set(['morning', 'afternoon', 'evening']);
 // Accept both the legacy admin slug tokens (nameSlug-8hex) AND the new
 // 64-char hex format. Post-estimate-versions PR every new token will be
 // 64-char hex; existing slug tokens remain valid for historical estimates
@@ -478,6 +483,8 @@ router.get('/:token/available-slots', async (req, res) => {
     return res.status(404).json({ error: 'Not found' });
   }
 
+  // The estimate a failure below is about, for the office's stuck alert.
+  let listed = null;
   try {
     const estimate = await db('estimates')
       .where({ token })
@@ -485,6 +492,7 @@ router.get('/:token/available-slots', async (req, res) => {
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
+    listed = estimate;
     const refusal = await slotBrowseRefusal(estimate);
     if (refusal) return res.status(refusal.status).json(refusal.body);
 
@@ -493,9 +501,11 @@ router.get('/:token/available-slots', async (req, res) => {
     if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= MAX_SLOT_HORIZON_DAYS) {
       opts.windowDays = windowDays;
     }
-    if (typeof req.query.timeOfDay === 'string' && req.query.timeOfDay.trim()) {
-      opts.timeOfDay = req.query.timeOfDay.trim();
-    }
+    // Only a known value reaches the lookup: the slot cache key carries opts.timeOfDay, so any other
+    // string forced a cache miss (a fresh list build per request) and filtered like 'afternoon'.
+    // An unknown value, 'any' or none = no filter. The page itself sends no timeOfDay.
+    const timeOfDay = typeof req.query.timeOfDay === 'string' ? req.query.timeOfDay.trim().toLowerCase() : '';
+    if (SLOT_TIME_OF_DAY.has(timeOfDay)) opts.timeOfDay = timeOfDay;
     opts.serviceMode = resolveSlotServiceMode(estimate, req.query.serviceMode);
     if (typeof req.query.selectedFrequency === 'string' && req.query.selectedFrequency.trim()) {
       opts.selectedFrequency = req.query.selectedFrequency.trim();
@@ -536,8 +546,15 @@ router.get('/:token/available-slots', async (req, res) => {
       const browseHorizonDays = seasonalBrowse && typeof slotAvailability.seasonalMaxHorizonDays === 'function'
         ? slotAvailability.seasonalMaxHorizonDays()
         : MAX_SLOT_HORIZON_DAYS;
-      if (date > etDateString(addETDays(new Date(), browseHorizonDays))) {
-        return res.status(400).json({ error: 'date is beyond the booking horizon' });
+      const lastBookableDate = etDateString(addETDays(new Date(), browseHorizonDays));
+      if (date > lastBookableDate) {
+        // The page words this for the customer from the two fields below, so
+        // the limit has one source: the horizon this route just compared against.
+        return res.status(400).json({
+          error: 'date is beyond the booking horizon',
+          lastBookableDate,
+          horizonDays: browseHorizonDays,
+        });
       }
       opts.dateFrom = date;
       opts.dateTo = date;
@@ -547,6 +564,7 @@ router.get('/:token/available-slots', async (req, res) => {
       // Offer list: the route check applies (GATE_CUSTOMER_ROUTE_CHECK). The reserve
       // refresh and the text-offer reads below omit `offer` and see the unfiltered list.
       const result = await getAvailableSlots(estimate.id, { ...opts, offer: true });
+      stuckAlert.noteSlotAnswer(req, estimate, { windowDays: opts.windowDays, date: opts.dateFrom }, result);
       return res.json(result);
     } catch (svcErr) {
       if (svcErr.code === 'ESTIMATE_NOT_FOUND' || svcErr.code === 'ESTIMATE_EXPIRED') {
@@ -558,6 +576,7 @@ router.get('/:token/available-slots', async (req, res) => {
       throw svcErr;
     }
   } catch (err) {
+    stuckAlert.noteSlotListFailed(req, listed, err);
     if (err.code === 'COMBINED_VISIT_UNAVAILABLE') {
       return res.status(409).json({ error: err.message, code: err.code });
     }
@@ -674,6 +693,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
       const result = await findEstimateSlots(estimate.id, {
         query, serviceMode, selectedFrequency, serviceCadences: findServiceCadences, offer: true,
       });
+      stuckAlert.noteSlotAnswer(req, estimate, { search: 'ai' }, result);
       return res.json(result);
     } catch (svcErr) {
       if (svcErr.code === 'ESTIMATE_NOT_FOUND' || svcErr.code === 'ESTIMATE_EXPIRED') {
@@ -783,6 +803,7 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
             || lockedAreaAddOnLimitRefusal(row, trx, date);
         },
       });
+      stuckAlert.noteHoldStarted(req, estimate, { scheduledServiceId, expiresAt });
       return res.status(201).json({
         scheduledServiceId,
         expiresAt,
@@ -1168,6 +1189,7 @@ router.delete('/:token/reserve/:scheduledServiceId', async (req, res) => {
       scheduledServiceId,
       estimateId: estimate.id,
     });
+    stuckAlert.noteHoldReleased(req, estimate, { scheduledServiceId, released: result.released });
     return res.json({ ok: true, released: result.released });
   } catch (err) {
     logger.error(`[estimate-slots-public:release] ${err.message}`, { stack: err.stack });

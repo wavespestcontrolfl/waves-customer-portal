@@ -1,6 +1,6 @@
 'use strict';
 
-// Bid kit data access (GATE_BID_KIT, dark, admin only). The only module that reads or writes bid_kit_items. A row read
+// Bid kit data access (admin only). The only module that reads or writes bid_kit_items. A row read
 // here never carries the private file key: has_file says whether a file exists, and the key comes out only through
 // fileInfo() for the signed-link route. Dates are read as text (YYYY-MM-DD) so no time zone can move them.
 const db = require('../models/db');

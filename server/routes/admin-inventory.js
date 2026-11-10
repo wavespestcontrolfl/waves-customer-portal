@@ -242,6 +242,25 @@ function assertSupportedInventoryUnit(unit, field = 'Inventory unit') {
   }
 }
 
+// The Products table's inline editor fills its stock box from the list as it
+// loaded. A visit closeout, receipt or count can move the live count after
+// that, and writing the typed count over it would undo the movement (and read
+// as a fresh shelf count to the count guard). So a stock change names the
+// count it started from, and a start that no longer matches the live count is
+// refused (daily-work audit 11-05).
+function assertStockEditStart(body, stockBefore) {
+  if (body.inventoryOnHandBefore === undefined) {
+    const err = new Error('inventoryOnHandBefore (the count the edit started from) is required to change stock');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (numberOrNull(body.inventoryOnHandBefore) !== stockBefore) {
+    const err = new Error('Stock changed after this product was opened; reload and enter the count again');
+    err.statusCode = 409;
+    throw err;
+  }
+}
+
 function unitReviewReasons(product = {}) {
   const reasons = [];
   const stock = numberOrNull(product.inventory_on_hand);
@@ -2760,8 +2779,8 @@ router.post('/:productId/adjust', async (req, res, next) => {
     const result = await inventoryOperations.adjustStock(req.params.productId, {
       movementType: body.movementType || 'correction', quantity: body.quantity, unit: body.unit,
       lotNumber: body.lotNumber, reason: body.reason, note: body.note,
-    }, { actorId: req.technicianId, source: 'admin_manual_adjustment', allowConversion: false });
-    res.json({ success: true, product: mapProduct(result.product), movement: result.movement });
+    }, { actorId: req.technicianId, source: 'admin_manual_adjustment', allowConversion: false, idempotencyKey: body.idempotencyKey });
+    res.json({ success: true, product: mapProduct(result.product), movement: result.movement, ...(result.replayed ? { replayed: true } : {}) });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
@@ -3163,6 +3182,32 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
     res.json({ success: true, request: result.request, ...(result.movement ? { movement: result.movement } : {}) });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
+// POST /restock-requests/:id/vendor-cancellation — the Restock tab's "Record
+// vendor cancellation": after the office has cancelled a dispatched automatic
+// order with the vendor, record it, so the request closes and a replacement can
+// be ordered (services/procurement/order-revoke.js, the same rules as
+// ops/agents/auto-order-revoke.js). Owner-only: STAFF_INVENTORY_REQUEST above
+// does not list it. The body names the order the tab showed ({ orderId,
+// version }; a changed order is a 409) and carries the operator's confirmation
+// that the vendor cancelled it, because the record clears the way for a
+// replacement order. Nothing is sent to the vendor.
+router.post('/restock-requests/:id/vendor-cancellation', async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    if (body.cancelledWithVendor !== true) {
+      return res.status(400).json({ error: 'Confirm that the vendor has cancelled this order first.', code: 'not_confirmed' });
+    }
+    const result = await require('../services/procurement/order-revoke').recordVendorCancellation(req.params.id, {
+      orderId: body.orderId, version: body.version, actorId: req.technicianId || null,
+    });
+    logger.info('restock vendor cancellation recorded', { requestId: req.params.id, orderId: body.orderId, technicianId: req.technicianId, requestStatus: result.requestStatus });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, code: err.code || null });
     next(err);
   }
 });
@@ -3801,6 +3846,7 @@ router.put('/:id', async (req, res, next) => {
       }
 
       if (stockChanged) {
+        assertStockEditStart(req.body, stockBefore);
         upd.inventory_on_hand = nextStock;
         upd.inventory_unit = nextUnit;
       }

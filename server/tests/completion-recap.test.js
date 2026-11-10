@@ -169,42 +169,15 @@ describe('completion recap', () => {
     expect(result.recap).not.toMatch(/Talstar|\$89|Technician note/i);
   });
 
-  describe('GATE_COMPLETION_TEXT_PLAIN', () => {
-    const REPLY = 'Reply to this message if anything needs attention before your next visit.';
-    const OLD_FILLER = 'You may continue to see normal activity for a short period as the service takes effect.';
+  describe('completion text from the record', () => {
     const AI_TEXT = 'We took care of the perimeter today and things look steady. - Waves';
-    const savedGate = process.env.GATE_COMPLETION_TEXT_PLAIN;
 
     beforeEach(() => {
       dispatchWithFallback.mockReset();
       dispatchWithFallback.mockResolvedValue({ ok: true, text: AI_TEXT });
     });
-    afterEach(() => {
-      if (savedGate === undefined) delete process.env.GATE_COMPLETION_TEXT_PLAIN;
-      else process.env.GATE_COMPLETION_TEXT_PLAIN = savedGate;
-    });
 
-    test('gate off keeps today\'s fixed text and today\'s AI call', async () => {
-      delete process.env.GATE_COMPLETION_TEXT_PLAIN;
-      expect(deterministicRecap({ serviceType: 'Pest Control', areasTreated: ['Garage'] })).toBe(
-        `Today we completed your Pest Control. We treated Garage. ${OLD_FILLER} ${REPLY}`,
-      );
-      expect(deterministicRecap({ serviceType: 'Termite Bait Station Service' })).toBe(
-        `Today we completed your Termite Bait Station Service. We treated the accessible service areas. ${OLD_FILLER} ${REPLY}`,
-      );
-      const result = await generateRecap({ visitOutcome: 'completed', serviceType: 'Pest Control' });
-      expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
-      expect(result).toEqual({ recap: AI_TEXT, source: 'ai' });
-    });
-
-    test('a gate value other than exactly true is off', async () => {
-      process.env.GATE_COMPLETION_TEXT_PLAIN = '1';
-      await generateRecap({ visitOutcome: 'completed', serviceType: 'Pest Control' });
-      expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
-    });
-
-    test('gate on with nothing recorded makes no AI call and returns the fixed text', async () => {
-      process.env.GATE_COMPLETION_TEXT_PLAIN = 'true';
+    test('with nothing recorded makes no AI call and returns the fixed text', async () => {
       const result = await generateRecap({
         visitOutcome: 'completed',
         serviceType: 'Quarterly Pest Control',
@@ -222,8 +195,7 @@ describe('completion recap', () => {
       });
     });
 
-    test('gate on with a record of the visit still calls the AI', async () => {
-      process.env.GATE_COMPLETION_TEXT_PLAIN = 'true';
+    test('with a record of the visit still calls the AI', async () => {
       const recorded = [
         { technicianNotes: 'Found ants at the back door.' },
         { notes: 'Found ants at the back door.' },
@@ -241,16 +213,14 @@ describe('completion recap', () => {
       }
     });
 
-    test('gate on: sensitive outcomes stay deterministic and unchanged', async () => {
-      process.env.GATE_COMPLETION_TEXT_PLAIN = 'true';
+    test('sensitive outcomes stay deterministic and unchanged', async () => {
       const result = await generateRecap({ visitOutcome: 'customer_declined', serviceType: 'Pest Control' });
       expect(dispatchWithFallback).not.toHaveBeenCalled();
       expect(result.source).toBe('deterministic');
       expect(result.recap).toContain('service was not completed');
     });
 
-    test('gate on: a termite or rodent station check says checked, not treated, and drops the filler', () => {
-      process.env.GATE_COMPLETION_TEXT_PLAIN = 'true';
+    test('a termite or rodent station check says checked, not treated, and drops the filler', () => {
       for (const name of [
         'Termite Bait Station Service', 'Rodent Bait Stations', 'Termite Bait Monitoring',
         'Rodent Monitoring Service (Monthly)', 'Quarterly Rodent Bait Station Service',
@@ -262,8 +232,7 @@ describe('completion recap', () => {
       }
     });
 
-    test('gate on: installing or setting up stations, and other station services, are not a station check', () => {
-      process.env.GATE_COMPLETION_TEXT_PLAIN = 'true';
+    test('installing or setting up stations, and other station services, are not a station check', () => {
       for (const name of [
         'Termite Bait Station Installation', 'Bait Station Setup', 'Rodent Bait Station Set Up',
         'Mosquito Treatment - Stations', 'Trap-Only Monitoring Retainer',
@@ -272,8 +241,7 @@ describe('completion recap', () => {
       }
     });
 
-    test('gate on: other visit with areas, and with no areas', () => {
-      process.env.GATE_COMPLETION_TEXT_PLAIN = 'true';
+    test('other visit with areas, and with no areas', () => {
       expect(deterministicRecap({ serviceType: 'Pest Control', areasTreated: ['Garage', 'Entry points'] })).toBe(
         'Today we completed your Pest Control. We treated Garage, Entry points.',
       );
@@ -282,8 +250,7 @@ describe('completion recap', () => {
       expect(none).not.toMatch(/normal activity|accessible service areas|reply/i);
     });
 
-    test('gate on: AI failure on a recorded visit falls back to the plain text', async () => {
-      process.env.GATE_COMPLETION_TEXT_PLAIN = 'true';
+    test('AI failure on a recorded visit falls back to the plain text', async () => {
       dispatchWithFallback.mockResolvedValue({ ok: false });
       const result = await generateRecap({
         visitOutcome: 'completed',

@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TimeGridDay from './TimeGridDay';
 
 let mockActive = null;
-const dnd = vi.hoisted(() => ({ props: null }));
+const dnd = vi.hoisted(() => ({ props: null, drops: [] }));
 const modal = vi.hoisted(() => ({ props: null }));
 vi.mock('./RescheduleConfirmModal', () => ({
   default: (props) => {
@@ -21,7 +21,7 @@ vi.mock('@dnd-kit/core', () => ({
   useSensor: () => ({}),
   useSensors: () => [],
   useDraggable: () => ({ attributes: {}, listeners: {}, setNodeRef: vi.fn(), transform: null, isDragging: false }),
-  useDroppable: () => ({ setNodeRef: vi.fn(), isOver: false }),
+  useDroppable: (props) => { dnd.drops.push(props); return { setNodeRef: vi.fn(), isOver: false }; },
   pointerWithin: vi.fn(),
 }));
 
@@ -48,6 +48,7 @@ beforeEach(() => {
 
 afterEach(() => {
   mockActive = null;
+  dnd.drops = [];
   cleanup();
   vi.restoreAllMocks();
 });
@@ -275,6 +276,65 @@ describe('TimeGridDay drag across lanes by role', () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     await drop('tech-2');
     expect(modal.props.open).toBeTruthy();
+  });
+});
+
+// The server refuses work for a technician marked out that day (422
+// TECH_NOT_ASSIGNABLE), so the lane must not offer it.
+describe('TimeGridDay lane of a technician marked out today', () => {
+  const TECHS = [{ id: 'tech-1', name: 'Alex Tech' }, { id: 'tech-2', name: 'Blair Tech', outToday: true }];
+  const LEFT_ON_LANE = {
+    id: 'svc-left', customerName: 'Left Customer', status: 'confirmed',
+    windowStart: '12:00', windowEnd: '13:00', windowDisplay: '12–1 PM',
+    technicianId: 'tech-2', technicianName: 'Blair Tech',
+  };
+  const slot = (techId, min) => dnd.drops.filter((d) => d.data?.techId === techId && d.data?.slotMin === min).at(-1);
+  const renderGrid = (props = {}) => render(
+    <TimeGridDay date="2026-07-15" services={[...SERVICES, LEFT_ON_LANE]} technicians={TECHS} onChange={vi.fn()} {...props} />,
+  );
+  beforeEach(() => localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' })));
+  afterEach(() => localStorage.removeItem('waves_admin_user'));
+
+  it('says Out today and takes no visit from another lane, even from a stale drop', async () => {
+    mockActive = { data: { current: { service: SERVICES[0] } } };
+    renderGrid();
+    expect(within(screen.getByText('Blair Tech').parentElement).getByText('Out today')).toBeInTheDocument();
+    expect(screen.getAllByText('Out today')).toHaveLength(1);
+    expect(slot('tech-2', 9 * 60).disabled).toBe(true);
+    expect(slot('tech-1', 9 * 60).disabled).toBe(false);
+    await act(async () => dnd.props.onDragEnd({
+      active: { data: { current: { service: SERVICES[0] } } },
+      over: { data: { current: { techId: 'tech-2', slotMin: 9 * 60 } } },
+    }));
+    expect(modal.props.open).toBeFalsy();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("still lets the lane's own visit move to another hour", async () => {
+    mockActive = { data: { current: { service: LEFT_ON_LANE } } };
+    renderGrid();
+    expect(slot('tech-2', 14 * 60).disabled).toBe(false);
+    await act(async () => dnd.props.onDragEnd({
+      active: { data: { current: { service: LEFT_ON_LANE } } },
+      over: { data: { current: { techId: 'tech-2', slotMin: 14 * 60 } } },
+    }));
+    expect(modal.props.open).toBeTruthy();
+    expect(modal.props.technicianChange).toBeNull();
+  });
+
+  it('offers no drag-create on the lane', () => {
+    const onCreateSlot = vi.fn();
+    renderGrid({ onCreateSlot });
+    const rowAt9 = (name) => screen.getByText(name).closest('.flex-1').querySelector(`[data-slot-min="${9 * 60}"]`);
+    // jsdom has no PointerEvent: a MouseEvent carries the left button.
+    const press = (el) => fireEvent(el, new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }));
+    expect(rowAt9('Blair Tech').getAttribute('aria-disabled')).toBe('true');
+    press(rowAt9('Blair Tech'));
+    fireEvent.pointerUp(window);
+    expect(onCreateSlot).not.toHaveBeenCalled();
+    press(rowAt9('Alex Tech'));
+    fireEvent.pointerUp(window);
+    expect(onCreateSlot).toHaveBeenCalledWith(expect.objectContaining({ techId: 'tech-1', windowStart: '09:00' }));
   });
 });
 

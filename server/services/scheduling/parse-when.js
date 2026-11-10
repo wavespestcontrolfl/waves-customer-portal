@@ -73,6 +73,16 @@ function nextWeekday(now, targetDow, forceNext) {
   return etDateString(addETDays(now, delta));
 }
 
+// The date of a named weekday. Without `afterToday` it is the first one on or after
+// today; with it, the first one AFTER today (1 to 7 days out). So "next Tuesday"
+// asked on a Friday is the Tuesday three days later, and asked on a Tuesday it is a
+// week out (owner 2026-11-06; it used to mean the Tuesday of the following week).
+function weekdayFrom(now, targetDow, afterToday) {
+  const skip = afterToday ? 1 : 0;
+  const delta = ((targetDow - etParts(now).dayOfWeek - skip + 7) % 7) + skip;
+  return etDateString(addETDays(now, delta));
+}
+
 function fallbackParse(query, now) {
   const q = String(query || '').toLowerCase();
   const timeOfDay = timeOfDayFromText(q);
@@ -100,8 +110,7 @@ function fallbackParse(query, now) {
   // Explicit weekday ("next tuesday", "on friday", "thursday")
   const dayMatch = q.match(/\b(next\s+)?(sunday|sun|monday|mon|tuesday|tues|tue|wednesday|weds|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat)\b/);
   if (dayMatch) {
-    const forceNext = !!dayMatch[1];
-    return single(nextWeekday(now, WEEKDAYS[dayMatch[2]], forceNext));
+    return single(weekdayFrom(now, WEEKDAYS[dayMatch[2]], !!dayMatch[1]));
   }
 
   // Month references ("july", "early july", "late june", "mid august")
@@ -156,7 +165,7 @@ Today is ${dow}, ${todayStr} (Eastern Time). All dates you output must be in YYY
 
 Interpret relative phrases against today:
 - "tomorrow" = the next day; "this weekend" = the upcoming Saturday-Sunday.
-- A bare weekday ("Tuesday") = the next upcoming one. "next Tuesday" = the one in the following week.
+- A bare weekday ("Tuesday") = the next upcoming one (today counts). "next Tuesday" = the coming Tuesday, the first Tuesday after today.
 - "early/mid/late <month>" = days 1-10 / 11-20 / 21-end of that month.
 - A single requested day uses the same value for date_from and date_to.
 - If no specific date is mentioned, set understood=false and use a sensible near-term window (today through ~14 days out).`;

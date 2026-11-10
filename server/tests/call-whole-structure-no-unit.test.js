@@ -1,5 +1,5 @@
 /**
- * GATE_CALL_WHOLE_STRUCTURE_NO_UNIT (owner ruling 2026-09-30, call-booker gates
+ * Whole-structure unit waiver (owner ruling 2026-09-30, call-booker gates
  * review item 7): a WDO inspection or termite pre-treat booked on a call is not
  * held because the address has no unit number. Never for interior condo /
  * apartment work, never when another address problem exists, never commercial.
@@ -52,14 +52,13 @@ function call(extracted, extra = {}) {
 }
 
 describe('applyWholeStructureUnitWaiver (pure)', () => {
-  const ok = { enabled: true, serviceKey: 'wdo_inspection', propertyType: 'multi_family', text: 'duplex WDO' };
+  const ok = { serviceKey: 'wdo_inspection', propertyType: 'multi_family', text: 'duplex WDO' };
 
-  test('gate off returns the very same verdict object', () => {
-    expect(applyWholeStructureUnitWaiver(AV_UNIT_MISSING, { ...ok, enabled: false })).toBe(AV_UNIT_MISSING);
+  test('a call with no qualifying service returns the very same verdict object', () => {
     expect(applyWholeStructureUnitWaiver(AV_UNIT_MISSING, {})).toBe(AV_UNIT_MISSING);
   });
 
-  test('gate on + allowlisted service + only the unit missing -> accepted verdict, evidence kept', () => {
+  test('allowlisted service + only the unit missing -> accepted verdict, evidence kept', () => {
     const out = applyWholeStructureUnitWaiver(AV_UNIT_MISSING, ok);
     expect(out).not.toBe(AV_UNIT_MISSING);
     expect(out.status).toBe('validated_accept');
@@ -208,10 +207,10 @@ describe('call-level waiver (service resolved the way the booking resolves it)',
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     expect(src.indexOf('const preAdoptionExtracted = { ...extracted };')).toBeGreaterThan(0);
     expect(src.indexOf('const preAdoptionExtracted = { ...extracted };')).toBeLessThan(src.indexOf('const adoption = adoptV2PrimaryFields('));
-    expect(src).toContain('preAdoptionExtracted,\n              transcription,');
+    expect(src).toContain('preAdoptionExtracted,\n            transcription,');
   });
 
-  test('both gates on: a call the Assessment gate may force to Waves Assessment is not waived (pre-push P1)', () => {
+  test('a call the Assessment gate may force to Waves Assessment is not waived (pre-push P1)', () => {
     const v2 = (patch) => ({
       meta: { schema_version: '1.20.0' },
       property: { property_type: 'multi_family' },
@@ -272,7 +271,7 @@ describe('routing effect', () => {
   }
   const opts = (av) => ({ contactPhone: '+19415550100', addressValidation: av });
   const waived = applyWholeStructureUnitWaiver(AV_UNIT_MISSING, {
-    enabled: true, serviceKey: 'wdo_inspection', propertyType: 'multi_family', text: '',
+    serviceKey: 'wdo_inspection', propertyType: 'multi_family', text: '',
   });
 
   test('without the waiver the unit-less duplex is held on the address (today)', () => {
@@ -308,34 +307,11 @@ describe('routing effect', () => {
   });
 });
 
-describe('gate wiring', () => {
-  const ENV = 'GATE_CALL_WHOLE_STRUCTURE_NO_UNIT';
-  function gateWith(value) {
-    const saved = process.env[ENV];
-    if (value === undefined) delete process.env[ENV]; else process.env[ENV] = value;
-    try {
-      let out;
-      jest.isolateModules(() => {
-        out = require('../config/feature-gates').isEnabled('callWholeStructureNoUnit');
-      });
-      return out;
-    } finally {
-      if (saved === undefined) delete process.env[ENV]; else process.env[ENV] = saved;
-    }
-  }
-
-  test('strict opt-in: off unless exactly "true"', () => {
-    expect(gateWith(undefined)).toBe(false);
-    expect(gateWith('')).toBe(false);
-    expect(gateWith('1')).toBe(false);
-    expect(gateWith('TRUE')).toBe(false);
-    expect(gateWith('true')).toBe(true);
-  });
-
-  test('the processor reads the gate and hands the waiver only the pure helper', () => {
+describe('waiver wiring', () => {
+  test('the processor hands the waiver only the pure helper and persists the shadow row first', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    expect(src).toContain("(isEnabled('callWholeStructureNoUnit') || isEnabled('callBusinessWholeBuildingNoUnit')) && isMissingUnitNumber(v2AddressValidation)");
-    expect(src).toContain("let wsAv = isEnabled('callWholeStructureNoUnit')");
+    expect(src).toContain('if (v2AddressValidation && isMissingUnitNumber(v2AddressValidation)) {');
+    expect(src).toContain('let wsAv = wholeStructureUnitWaiverForCall({');
     // The persisted shadow row is written BEFORE the waiver rewrites the verdict.
     expect(src.indexOf('ai_address_validation: v2AddressValidation')).toBeLessThan(src.lastIndexOf('wholeStructureUnitWaiverForCall({'));
   });
@@ -352,7 +328,7 @@ describe('gate wiring', () => {
 describe('persisted marker + stale unit ask', () => {
   test('a waived verdict is persisted as a marker on the ORIGINAL and the audits rebuild it', () => {
     const waived = applyWholeStructureUnitWaiver(AV_UNIT_MISSING, {
-      enabled: true, serviceKey: 'wdo_inspection', propertyType: 'multi_family', text: '',
+      serviceKey: 'wdo_inspection', propertyType: 'multi_family', text: '',
     });
     const persisted = JSON.parse(JSON.stringify({ ...AV_UNIT_MISSING, wholeStructureUnitWaived: waived.wholeStructureUnitWaived }));
     expect(persisted.status).toBe('ambiguous');

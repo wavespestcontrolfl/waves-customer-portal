@@ -67,13 +67,38 @@
       "outcome": "pass"
     },
     "W3-dev-01": {
-      "outcome": "pass"
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        "proposal:carded_where_contract_expects_direct",
+        "domain_rule:direct_commit_not_executed",
+        "read_back:first_name_not_saved",
+        "receipt:lead_audit_row_missing"
+      ]
     },
     "W3-dev-02": {
-      "outcome": "pass"
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        "proposal:carded_where_contract_expects_direct",
+        "domain_rule:direct_commit_not_executed",
+        "read_back:first_name_not_saved",
+        "receipt:lead_audit_row_missing",
+        "side_effect:first_change_not_left_in_place"
+      ]
     },
     "W3-dev-03": {
-      "outcome": "pass"
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        "proposal:carded_where_contract_expects_direct",
+        "domain_rule:direct_commit_not_executed",
+        "read_back:first_name_not_saved",
+        "receipt:lead_audit_row_missing"
+      ]
     },
     "W3-dev-04": {
       "outcome": "pass"
@@ -90,7 +115,15 @@
       ]
     },
     "W3-dev-07": {
-      "outcome": "pass"
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        "proposal:carded_where_contract_expects_direct",
+        "domain_rule:direct_commit_not_executed",
+        "read_back:lead_row_wrong",
+        "recovery:double_submit_wrote_twice"
+      ]
     },
     "W3-dev-08": {
       "outcome": "pass"
@@ -111,7 +144,16 @@
       "outcome": "pass"
     },
     "W4-dev-04": {
-      "outcome": "pass"
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        "proposal:carded_where_contract_expects_direct",
+        "domain_rule:direct_commit_not_executed",
+        "receipt:receipt_per_edit_missing",
+        "read_back:primary_flag_wrong",
+        "read_back:rental_not_reclassified"
+      ]
     },
     "W4-dev-05": {
       "outcome": "pass"
@@ -171,8 +213,14 @@
       "reasons": [
         "reschedule_notice_send"
       ],
-      "probe": "pass",
-      "probe_failures": []
+      "probe": "fail:carded_where_contract_expects_direct",
+      "probe_failures": [
+        "proposal:carded_where_contract_expects_direct",
+        "domain_rule:direct_commit_not_executed",
+        "read_back:moved_date_wrong",
+        "read_back:moved_window_start_wrong",
+        "domain_rule:moved_window_length_not_preserved"
+      ]
     },
     "W6-dev-02": {
       "outcome": "pass"
@@ -182,19 +230,41 @@
       "reasons": [
         "reschedule_notice_send"
       ],
-      "probe": "pass",
-      "probe_failures": []
+      "probe": "fail:carded_where_contract_expects_direct",
+      "probe_failures": [
+        "proposal:carded_where_contract_expects_direct",
+        "domain_rule:direct_commit_not_executed",
+        "read_back:moved_date_wrong",
+        "read_back:moved_window_start_wrong",
+        "domain_rule:moved_window_length_not_preserved"
+      ]
     },
     "W6-dev-04": {
       "outcome": "not_runnable",
       "reasons": [
         "reschedule_notice_send"
       ],
-      "probe": "pass",
-      "probe_failures": []
+      "probe": "fail:carded_where_contract_expects_direct",
+      "probe_failures": [
+        "proposal:carded_where_contract_expects_direct",
+        "domain_rule:direct_commit_not_executed",
+        "read_back:moved_date_wrong",
+        "read_back:moved_window_start_wrong",
+        "domain_rule:moved_window_length_not_preserved",
+        "recovery:resume_moved_again"
+      ]
     },
     "W6-dev-05": {
-      "outcome": "pass"
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        "proposal:carded_where_contract_expects_direct",
+        "domain_rule:direct_commit_not_executed",
+        "read_back:moved_date_wrong",
+        "read_back:moved_window_start_wrong",
+        "domain_rule:moved_window_length_not_preserved"
+      ]
     },
     "W6-dev-06": {
       "outcome": "not_runnable",
@@ -219,15 +289,31 @@
       ]
     },
     "W6-dev-09": {
-      "outcome": "pass"
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        "proposal:carded_where_contract_expects_direct",
+        "domain_rule:direct_commit_not_executed",
+        "read_back:moved_date_wrong",
+        "read_back:moved_window_start_wrong",
+        "domain_rule:moved_window_length_not_preserved"
+      ]
     },
     "W6-dev-10": {
       "outcome": "not_runnable",
       "reasons": [
         "reschedule_notice_send"
       ],
-      "probe": "pass",
-      "probe_failures": []
+      "probe": "fail:carded_where_contract_expects_direct",
+      "probe_failures": [
+        "proposal:carded_where_contract_expects_direct",
+        "domain_rule:direct_commit_not_executed",
+        "read_back:moved_date_wrong",
+        "read_back:moved_window_start_wrong",
+        "domain_rule:moved_window_length_not_preserved",
+        "recovery:clear_canceled_the_move"
+      ]
     },
     "W7-dev-01": {
       "outcome": "pass"

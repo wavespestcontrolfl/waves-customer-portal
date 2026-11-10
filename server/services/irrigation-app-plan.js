@@ -39,6 +39,10 @@ async function loadCustomerWateringPlan(customerId, { now = new Date(), customer
     availableAt: new Date(snapshot.availableAt).toISOString(),
     action: snapshot.plan.action,
     conditionalOnForecast: snapshot.plan.conditionalOnForecast === true,
+    // The days the watering order permits each week (0-7) and the plan's run count:
+    // property-alerts reads them to decide whether a push after Monday is safe.
+    legalMaxEvents: snapshot.plan.legalMaxEvents ?? null,
+    events: snapshot.plan.events ?? null,
     // Email also carries setup/reconfirmation plans. A watering push needs
     // the customer's own usable portal numbers for this home.
     notificationEligible: ['portal', 'portal_derived'].includes(inputs.scheduleSource)

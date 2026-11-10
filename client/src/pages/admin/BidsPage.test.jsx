@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation, useSearchParams } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-const { flags } = vi.hoisted(() => ({ flags: { bid_desk: true, bid_kit: true, ready: true } }));
+const { flags } = vi.hoisted(() => ({ flags: { bid_desk: true, ready: true } }));
 vi.mock("../../hooks/useFeatureFlag", () => ({
   useFeatureFlagReady: (key) => ({ enabled: flags[key] === true, ready: flags.ready, known: true }),
 }));
@@ -43,7 +43,7 @@ function renderAt(url) {
   );
 }
 
-beforeEach(() => { flags.bid_desk = true; flags.bid_kit = true; flags.ready = true; });
+beforeEach(() => { flags.bid_desk = true; flags.ready = true; });
 afterEach(cleanup);
 
 it("opens on Open bids when there is no tab param", () => {
@@ -79,15 +79,7 @@ it("switching tabs updates the URL and keeps the other params", () => {
   expect(screen.getByTestId("desk")).toHaveTextContent("bid=b1");
 });
 
-it("hides the Bid kit tab while its flag is off, even for ?tab=kit", () => {
-  flags.bid_kit = false;
-  renderAt("/admin/bids?tab=kit");
-  expect(screen.queryByRole("button", { name: "Bid kit" })).toBeNull();
-  expect(screen.queryByTestId("kit")).toBeNull();
-  expect(screen.getByTestId("desk")).toBeInTheDocument();
-});
-
-it("shows only the kit when only bid_kit is on", () => {
+it("shows only the kit when the Bid Desk flag is off", () => {
   flags.bid_desk = false;
   renderAt("/admin/bids");
   expect(screen.queryByRole("button", { name: "Open bids" })).toBeNull();
@@ -95,20 +87,11 @@ it("shows only the kit when only bid_kit is on", () => {
   expect(screen.queryByTestId("desk")).toBeNull();
 });
 
-it("fails closed when neither flag is on", () => {
-  flags.bid_desk = false;
-  flags.bid_kit = false;
-  renderAt("/admin/bids");
-  expect(screen.getByText("Bids are not turned on yet.")).toBeInTheDocument();
-  expect(screen.queryByTestId("desk")).toBeNull();
-  expect(screen.queryByTestId("kit")).toBeNull();
-});
-
 it("renders nothing until the flags are read", () => {
   flags.ready = false;
   renderAt("/admin/bids");
-  expect(screen.queryByText("Bids are not turned on yet.")).toBeNull();
   expect(screen.queryByTestId("desk")).toBeNull();
+  expect(screen.queryByTestId("kit")).toBeNull();
 });
 
 it("redirects /admin/bid-desk to Open bids and keeps ?bid= and the hash", () => {

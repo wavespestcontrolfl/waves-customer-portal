@@ -545,6 +545,13 @@ async function settleOnSiteFollowUps(customerIds = [], opts = {}) {
   return settled;
 }
 
+// A failed sweep read is a failed sweep, not an empty one: the cron body (index.js)
+// runs its other step, then throws, so job_health records the failure.
+function sweepReadFailed(what, err) {
+  logger.error(`[recipient-optin] ${what} read failed (${err.code || err.name || 'error'})`);
+  return err;
+}
+
 // Cron retry for follow-ups a YES could not finish (a send held outside the
 // window, a pending primary confirmation, an office-review hold, a failed read).
 // Random rotation so a long-waiting customer never starves later ones.
@@ -578,10 +585,32 @@ async function sweepOnSiteFollowUps({ limit = 25 } = {}) {
       .groupBy('customer_id')
       .orderByRaw('random()')
       .limit(limit);
-  } catch { return { settled: 0 }; }
+  } catch (err) { throw sweepReadFailed('follow-up sweep', err); }
   const settled = await settleOnSiteFollowUps(rows.map((r) => r.customer_id));
   if (settled) logger.info(`[recipient-optin] follow-up sweep settled ${settled} row(s)`);
   return { settled };
+}
+
+// The 15-minute cron body (index.js). Both sweeps run; a failed read in either
+// throws after the other ran, so job_health records the failure.
+async function runRecipientOptinSweeps() {
+  const failedSteps = [];
+  const stepFailed = (step, err) => {
+    // Code only, as sweepReadFailed logs: a driver message can carry row values.
+    logger.error(`[recipient-optin] ${step} sweep failed (${err?.code || err?.name || 'error'})`);
+    failedSteps.push(step);
+  };
+  try {
+    await sweepUndispatchedOptins();
+  } catch (err) { stepFailed('undispatched asks', err); }
+  // Caller demotion + booking-confirmation replays to on-site recipients that
+  // were held or failed after their YES.
+  try {
+    await sweepOnSiteFollowUps();
+  } catch (err) { stepFailed('on-site follow-ups', err); }
+  if (failedSteps.length > 0) {
+    throw new Error(`recipient-optin-sweep: ${failedSteps.length} step(s) failed (${failedSteps.join(', ')})`);
+  }
 }
 
 // Booking site: a recipient who already said YES on this account (an earlier
@@ -1312,7 +1341,7 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
       // review is touched each pass, so it never starves the rest.
       .orderBy('updated_at', 'asc')
       .limit(limit);
-  } catch { return { swept: 0 }; }
+  } catch (err) { throw sweepReadFailed('undispatched sweep', err); }
   let swept = 0;
   for (const row of rows) {
     try {
@@ -1468,6 +1497,7 @@ module.exports = {
   restoreConfirmedPhone,
   settleOnSiteFollowUps,
   sweepOnSiteFollowUps,
+  runRecipientOptinSweeps,
   rearmOnSiteFollowUp,
   noteHolderSetNotifyPrimary,
   callerDemotedForTextsOnly,

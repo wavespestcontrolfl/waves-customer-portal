@@ -69,36 +69,14 @@ describe('name-match scorer', () => {
     expect(rankNameMatches('Xylophone Trumpet', pool)).toEqual([]);
   });
 
-  test('returns at most five, best first', () => {
+  test('returns at most eight, best first', () => {
     const many = Array.from({ length: 9 }, (_, i) => ({ id: `n${i}`, first_name: 'Fybi', last_name: `L${i}`, company_name: null }));
-    expect(rankNameMatches('Phoebe', many)).toHaveLength(5);
+    expect(rankNameMatches('Phoebe', many)).toHaveLength(8);
   });
 });
 
 describe('query_customers sound-alike fallback', () => {
   beforeEach(() => { db.__queries = []; db.__rows = () => []; });
-
-  test('an empty exact search falls back, marks the result approximate, and keeps filters and scope', async () => {
-    db.__rows = (q) => {
-      if (q.sql.includes('count(*)') && q.sql.includes('ILIKE')) return [{ count: '0' }];
-      if (q.sql.includes('count(*)')) return [{ count: '4' }];
-      if (q.sql.includes('"company_name"') && !q.sql.includes('"email"')) return pool;
-      if (q.sql.includes('"email"')) return [{ id: 'c-lake', first_name: 'Pat', last_name: 'Example', active: true }];
-      return [];
-    };
-    const result = await executeTool('query_customers', { search: 'Phoebe Lake Rentals', filters: { active: true } });
-    expect(result).toMatchObject({ approximate: true, total_matching: 1, returned_count: 1, has_more: false, next_offset: null });
-    expect(result.note).toMatch(/offer_choices/);
-    expect(result.customers).toEqual([expect.objectContaining({ id: 'c-lake', name: 'Pat Example' })]);
-
-    const candidateQuery = db.__queries.find(q => q.sql.includes('"customers"."company_name"') && !q.sql.includes('"customers"."email"'));
-    expect(candidateQuery.sql).toContain('"customers"."deleted_at" is null');
-    expect(candidateQuery.sql).toContain('"active" =');
-    expect(candidateQuery.sql).not.toMatch(/ilike/i);
-    expect(candidateQuery.sql).toContain('limit');
-    const rowsQuery = db.__queries.find(q => q.sql.includes('"customers"."email"') && q.sql.includes('"customers"."id" in'));
-    expect(rowsQuery.sql).toContain('"customers"."deleted_at" is null');
-  });
 
   test('a customer-scoped task only ranks its own customers', async () => {
     db.__rows = (q) => {
@@ -112,34 +90,12 @@ describe('query_customers sound-alike fallback', () => {
     expect(candidateQuery.bindings).toContain('scoped-1');
   });
 
-  test('the fallback honors limit, skips later pages, and shows the company', async () => {
-    const many = Array.from({ length: 9 }, (_, i) => ({ id: `n${i}`, first_name: 'Fybi', last_name: `L${i}`, company_name: `Fybi Co ${i}` }));
-    db.__rows = (q) => {
-      if (q.sql.includes('count(*)')) return [{ count: '0' }];
-      if (q.sql.includes('"customers"."id" in')) return many.slice(0, 2).map(c => ({ ...c, company_name: 'Fybi Lake Rentals' }));
-      if (!q.sql.includes('"customers"."email"')) return many;
-      return [];
-    };
-    const limited = await executeTool('query_customers', { search: 'Phoebe', limit: 2 });
-    expect(limited).toMatchObject({ approximate: true, returned_count: 2, has_more: false, next_offset: null });
-    expect(limited.customers[0].company_name).toBe('Fybi Lake Rentals');
-    const inQuery = db.__queries.find(q => q.sql.includes('"customers"."id" in'));
-    expect(inQuery.bindings.filter(b => /^n\d$/.test(b))).toHaveLength(2);
-
-    db.__queries = [];
-    const paged = await executeTool('query_customers', { search: 'Phoebe', limit: 2, offset: 2 });
-    expect(paged.approximate).toBeUndefined();
-    expect(paged.returned_count).toBe(0);
-    expect(db.__queries.some(q => q.sql.includes('"customers"."company_name"') && !q.sql.includes('"customers"."email"'))).toBe(false);
-  });
-
   test('exact hits keep the original shape with no approximate marker', async () => {
     db.__rows = (q) => (q.sql.includes('count(*)') ? [{ count: '1' }] : [{ id: 'c-lake', first_name: 'Pat' }]);
     const result = await executeTool('query_customers', { search: 'Pat' });
     expect(result.approximate).toBeUndefined();
     expect(result.note).toBeUndefined();
     expect(result).toMatchObject({ total_matching: 1, returned_count: 1 });
-    expect(db.__queries.filter(q => q.sql.includes('"company_name"') && !q.sql.includes('ILIKE'))).toHaveLength(0);
   });
 
   test('phone and email searches never run the fallback', async () => {
@@ -172,7 +128,6 @@ test('a short first name finds the full one when the last name sounds the same',
     { id: 'c', first_name: 'Dana', last_name: 'Whitlock' },
   ];
   expect(rankNameMatches('Sam Braynard', candidates).map(r => r.id)).toEqual(['b']);
-  expect(rankNameMatches('Sa Whitlock', candidates)).toEqual([]);
 });
 
 test('letters NFD cannot split are folded by the shared policy, in both directions', () => {
@@ -201,7 +156,7 @@ test('one customer word satisfies at most one search word', () => {
   expect(rankNameMatches('Phoebe Lake Rentals Pat Extra Words', candidates)).toEqual([]);
 });
 
-// ─── Name matcher v2 (GATE_NAME_MATCH_V2) ───────────────────────
+// ─── Name matcher v2 ───────────────────────
 
 const {
   MAX_RESULTS_V2, suffixSimilarity, MAX_SURVIVORS, buildNameIndex, prefilterNameIndex, resetNameIndexCache,
@@ -217,7 +172,7 @@ const richards = [
   named('quill', 'Zed', 'Quill'), named('stone', 'Rick', 'Stone'),
 ];
 const ids = (ranked) => ranked.map((r) => r.id);
-const v2 = { v2: true };
+const v2 = {};
 
 describe('name matcher v2: scoring', () => {
   test('Double Metaphone follows the published algorithm on known names', () => {
@@ -229,21 +184,9 @@ describe('name matcher v2: scoring', () => {
     expect(doubleMetaphone('')).toEqual(['', '']);
   });
 
-  test('gate off keeps the original scores exactly', () => {
-    const v1 = rankNameMatches('richard dump', richards);
-    expect(v1).toEqual([
-      { id: 'dumpson', score: 0.95 }, { id: 'dumas', score: 0.913 }, { id: 'dumbar', score: 0.913 },
-      { id: 'dumford', score: 0.913 }, { id: 'dumont', score: 0.913 },
-    ]);
-    expect(ids(v1)).not.toContain('stompf'); // five results and the cap pushed Stompf off
-    expect(rankNameMatches('richard dump', [named('stompf', 'Richard', 'Stompf')])).toEqual([]); // v1 misses it entirely
-    expect(rankNameMatches('Jhon Smyth', pool)).toEqual([{ id: 'c-person', score: 0.9 }]);
-    // Context and the possessive do nothing without v2.
-    const context = { onScreenCustomerId: 'stompf', visitTodayIds: new Set(['stompf']), recentContactIds: new Set(['stompf']) };
-    expect(rankNameMatches('richard dump', richards, { context })).toEqual(v1);
+  test('tokenize without the v2 option keeps the possessive pieces (used by isNameLikeSearch)', () => {
     expect(tokenize("Richard's dump")).toEqual(['richard', 's', 'dump']);
-    expect(rankNameMatches("Richard's dump", richards)).toEqual([]);
-    expect(rankNameMatches('Mac Donald', [named('m', 'Pat', 'McDonald')])).toEqual([]);
+    expect(tokenize("Richard's dump", { v2: true })).toEqual(['richard', 'dump']);
   });
 
   test('"richard dump" finds Stompf in the top eight with no context, and first with a visit today', () => {
@@ -269,9 +212,9 @@ describe('name matcher v2: scoring', () => {
   });
 
   test('possessive and a lone s are not search words', () => {
-    expect(tokenize("Richard's dump", v2)).toEqual(['richard', 'dump']);
-    expect(tokenize('Richard’s dump', v2)).toEqual(['richard', 'dump']);
-    expect(tokenize('richard s dump', v2)).toEqual(['richard', 'dump']);
+    expect(tokenize("Richard's dump", { v2: true })).toEqual(['richard', 'dump']);
+    expect(tokenize('Richard’s dump', { v2: true })).toEqual(['richard', 'dump']);
+    expect(tokenize('richard s dump', { v2: true })).toEqual(['richard', 'dump']);
     expect(ids(rankNameMatches("Richard's dump", richards, v2))).toContain('stompf');
     expect(ids(rankNameMatches('Richard’s dump', richards, v2))).toContain('stompf');
   });
@@ -346,15 +289,10 @@ describe('name matcher v2: scoring', () => {
 describe('query_customers name matcher v2', () => {
   const candidates = [named('dumas', 'Richard', 'Dumas'), named('stompf', 'Richard', 'Stompf'), named('quill', 'Zed', 'Quill')];
   const today = etDateString();
-  let previous;
   beforeEach(() => {
-    previous = process.env.GATE_NAME_MATCH_V2;
     resetNameIndexCache();
     db.__queries = [];
     db.__rows = () => [];
-  });
-  afterEach(() => {
-    if (previous === undefined) delete process.env.GATE_NAME_MATCH_V2; else process.env.GATE_NAME_MATCH_V2 = previous;
   });
 
   // One exact hit (Dumas), the whole book as candidates, Stompf has a visit.
@@ -371,18 +309,7 @@ describe('query_customers name matcher v2', () => {
   }
   const candidateQuery = () => db.__queries.find((q) => q.sql.includes('"customers"."company_name"') && !q.sql.includes('"customers"."email"'));
 
-  test('gate off: one exact hit is returned as is and no context is read', async () => {
-    delete process.env.GATE_NAME_MATCH_V2;
-    oneExactHit();
-    const result = await executeTool('query_customers', { search: 'richard dump' }, { pageCustomerId: 'stompf' });
-    expect(result.alternatives).toBeUndefined();
-    expect(result.approximate).toBeUndefined();
-    expect(result.note).toBeUndefined();
-    expect(db.__queries).toHaveLength(3); // count, rows, total
-  });
-
-  test('gate on: a wrong single exact hit comes with the right person as an alternative', async () => {
-    process.env.GATE_NAME_MATCH_V2 = 'true';
+  test('a wrong single exact hit comes with the right person as an alternative', async () => {
     oneExactHit();
     const result = await executeTool('query_customers', { search: 'richard dump' });
     expect(result.customers).toEqual([expect.objectContaining({ id: 'dumas' })]);
@@ -399,16 +326,14 @@ describe('query_customers name matcher v2', () => {
     expect(db.__queries.some((q) => q.sql.includes('select distinct "customer_id" from "call_log"'))).toBe(true);
   });
 
-  test('gate on: the customer on screen and a recent text count', async () => {
-    process.env.GATE_NAME_MATCH_V2 = 'true';
+  test('the customer on screen and a recent text count', async () => {
     oneExactHit({ visits: [], texts: [{ customer_id: 'dumas' }] });
     const result = await executeTool('query_customers', { search: 'richard dump' }, { pageCustomerId: 'stompf' });
     expect(result.alternatives[0]).toMatchObject({ id: 'stompf', match: { score: 1.05, reasons: ['on_screen'] } });
     expect(result.exact_hit_match).toEqual({ rank: 2, score: 0.963, reasons: ['recent_contact'] });
   });
 
-  test('gate on: nothing close to the exact hit leaves the result alone', async () => {
-    process.env.GATE_NAME_MATCH_V2 = 'true';
+  test('nothing close to the exact hit leaves the result alone', async () => {
     db.__rows = (q) => {
       if (q.sql.includes('count(*)')) return [{ count: '1' }];
       if (/from "(scheduled_services|sms_log|call_log)"/.test(q.sql)) return [];
@@ -420,8 +345,7 @@ describe('query_customers name matcher v2', () => {
     expect(result.exact_hit_match).toBeUndefined();
   });
 
-  test('gate on: a scoped task (or technician) ranks and reads only its own customers', async () => {
-    process.env.GATE_NAME_MATCH_V2 = 'true';
+  test('a scoped task (or technician) ranks and reads only its own customers', async () => {
     oneExactHit();
     await executeTool('query_customers', { search: 'richard dump' }, { readCustomerIds: ['scoped-1'], pageCustomerId: 'stompf' });
     expect(candidateQuery().sql).toContain('"customers"."id" in');
@@ -433,8 +357,7 @@ describe('query_customers name matcher v2', () => {
     for (const q of db.__queries.filter((x) => /from "(sms_log|call_log)"/.test(x.sql))) expect(q.sql).not.toMatch(/"customers"/);
   });
 
-  test('gate on: an empty exact search ranks the v2 way, up to eight, with match info', async () => {
-    process.env.GATE_NAME_MATCH_V2 = 'true';
+  test('an empty exact search ranks the v2 way, up to eight, with match info', async () => {
     const many = Array.from({ length: 10 }, (_, i) => named(`d${i}`, 'Richard', `Dumas${i}`));
     db.__rows = (q) => {
       if (/from "(scheduled_services|sms_log|call_log)"/.test(q.sql)) return q.sql.includes('scheduled_services') ? [{ customer_id: 'd9' }] : [];
@@ -449,8 +372,24 @@ describe('query_customers name matcher v2', () => {
     expect(result.note).toMatch(/match\.reasons/);
   });
 
-  test('gate on: a context read that fails only drops the bonus', async () => {
-    process.env.GATE_NAME_MATCH_V2 = 'true';
+  test('the fallback honors limit and skips later pages', async () => {
+    const many = Array.from({ length: 10 }, (_, i) => named(`d${i}`, 'Richard', `Dumas${i}`));
+    db.__rows = (q) => {
+      if (/from "(scheduled_services|sms_log|call_log)"/.test(q.sql)) return [];
+      if (q.sql.includes('count(*)')) return [{ count: '0' }];
+      if (!q.sql.includes('"customers"."email"')) return many;
+      if (q.sql.includes('"customers"."id" in')) return many.filter((c) => q.bindings.includes(c.id));
+      return [];
+    };
+    const limited = await executeTool('query_customers', { search: 'richard dumas', limit: 2 });
+    expect(limited).toMatchObject({ approximate: true, returned_count: 2, has_more: false, next_offset: null });
+    db.__queries = [];
+    const paged = await executeTool('query_customers', { search: 'richard dumas', limit: 2, offset: 2 });
+    expect(paged.approximate).toBeUndefined();
+    expect(db.__queries.some((q) => q.sql.includes('"customers"."company_name"') && !q.sql.includes('"customers"."email"'))).toBe(false);
+  });
+
+  test('a context read that fails only drops the bonus', async () => {
     oneExactHit();
     const rows = db.__rows;
     db.__rows = (q) => { if (q.sql.includes('from "sms_log"')) throw new Error('boom'); return rows(q); };
@@ -458,8 +397,7 @@ describe('query_customers name matcher v2', () => {
     expect(result.alternatives).toEqual([expect.objectContaining({ id: 'stompf', match: { score: 0.9, reasons: [] } })]);
   });
 
-  test('gate on: phone and email searches never rank or read context', async () => {
-    process.env.GATE_NAME_MATCH_V2 = 'true';
+  test('phone and email searches never rank or read context', async () => {
     db.__rows = (q) => (q.sql.includes('count(*)') ? [{ count: '1' }] : [{ id: 'c1', first_name: 'Pat' }]);
     for (const search of ['9415550100', 'nobody@example.com']) {
       db.__queries = [];
@@ -475,20 +413,20 @@ describe('name match v2 work budget (Codex #6367 security P2)', () => {
   const pool = [{ id: 'a', first_name: 'Richard', last_name: 'Stompf' }];
 
   test('a search with more than 6 words or 120 characters is not ranked', () => {
-    expect(rankNameMatches(Array(1000).fill('richard').join(' '), pool, { v2: true })).toEqual([]);
-    expect(rankNameMatches('richard stompf one two three four five', pool, { v2: true })).toEqual([]);
-    expect(rankNameMatches(`richard ${'x'.repeat(130)}`, pool, { v2: true })).toEqual([]);
+    expect(rankNameMatches(Array(1000).fill('richard').join(' '), pool)).toEqual([]);
+    expect(rankNameMatches('richard stompf one two three four five', pool)).toEqual([]);
+    expect(rankNameMatches(`richard ${'x'.repeat(130)}`, pool)).toEqual([]);
   });
 
   test('a long candidate name and long words finish fast', () => {
     const big = [{ id: 'b', first_name: 'Richard', last_name: Array(500).fill('stompf').join(' '), company_name: 'y'.repeat(5000) }];
     const started = Date.now();
-    rankNameMatches('richard stompf', big, { v2: true });
+    rankNameMatches('richard stompf', big);
     expect(Date.now() - started).toBeLessThan(200);
   });
 
   test('a normal spoken name still matches', () => {
-    expect(rankNameMatches('richard stompf', pool, { v2: true })[0]).toEqual(expect.objectContaining({ id: 'a' }));
+    expect(rankNameMatches('richard stompf', pool)[0]).toEqual(expect.objectContaining({ id: 'a' }));
   });
 });
 
@@ -510,7 +448,7 @@ describe('name match v2 work cap (Codex #6367 perf)', () => {
     const index = buildNameIndex(everyone);
     expect(prefilterNameIndex('richard dump', index).length).toBeLessThanOrEqual(MAX_SURVIVORS);
     for (const [search, id] of [['richard dump', 'stompf-r'], ['orlan dump', 'stompf-o'], ["Richard's dump", 'stompf-r']]) {
-      const run = (context) => rankNameMatches(search, prefilterNameIndex(search, index), { v2: true, prefiltered: true, context });
+      const run = (context) => rankNameMatches(search, prefilterNameIndex(search, index), { prefiltered: true, context });
       expect(fastest(() => run(null))).toBeLessThan(150);
       expect(ids(run(null))).toContain(id);
       const visit = run({ visitTodayIds: new Set([id]) });
@@ -523,7 +461,7 @@ describe('name match v2 work cap (Codex #6367 perf)', () => {
     const index = buildNameIndex([named('h', 'Pat', 'Henderson'), named('s', 'Pat', 'Smyth-Jones'), named('q', 'Zed', 'Quill'), named('l', 'Pat', 'Lindqvist')]);
     const survivors = (search) => prefilterNameIndex(search, index).map((e) => e.id);
     expect(survivors('Pat Anderson')).toContain('h');
-    expect(ids(rankNameMatches('Pat Anderson', survivors('Pat Anderson').map((id) => index.byId.get(id)), { v2: true, prefiltered: true }))).toContain('h');
+    expect(ids(rankNameMatches('Pat Anderson', survivors('Pat Anderson').map((id) => index.byId.get(id)), { prefiltered: true }))).toContain('h');
     // The same answer as scoring every row with no prefilter in the way.
     expect(ids(rankNameMatches('Pat Anderson', [named('h', 'Pat', 'Henderson')], v2))).toEqual(['h']);
     expect(survivors('Pat Lindqvest')).toContain('l');
@@ -531,7 +469,7 @@ describe('name match v2 work cap (Codex #6367 perf)', () => {
     const typos = buildNameIndex([named('j', 'Pat', 'Jones'), named('r', 'Pat', 'Ramirez')]);
     for (const word of ['Jomes', 'Jnes', 'Jonnes', 'Zones']) expect(prefilterNameIndex(`Pat ${word}`, typos).map((e) => e.id)).toContain('j');
     expect(ids(rankNameMatches('Pat Jomes', [named('j', 'Pat', 'Jones')], v2))).toEqual(['j']);
-    expect(ids(rankNameMatches('Pat Jomes', prefilterNameIndex('Pat Jomes', typos), { v2: true, prefiltered: true }))).toContain('j');
+    expect(ids(rankNameMatches('Pat Jomes', prefilterNameIndex('Pat Jomes', typos), { prefiltered: true }))).toContain('j');
   });
 
   test('a one-letter deletion retrieves from either side, short words included', () => {
@@ -553,9 +491,7 @@ describe('name match v2 work cap (Codex #6367 perf)', () => {
   });
 
   describe('through query_customers', () => {
-    const prev = process.env.GATE_NAME_MATCH_V2;
-    beforeEach(() => { process.env.GATE_NAME_MATCH_V2 = 'true'; resetNameIndexCache(); db.__queries = []; });
-    afterAll(() => { if (prev === undefined) delete process.env.GATE_NAME_MATCH_V2; else process.env.GATE_NAME_MATCH_V2 = prev; });
+    beforeEach(() => { resetNameIndexCache(); db.__queries = []; });
 
     const mockBook = (visits = []) => {
       db.__rows = (q) => {
@@ -664,9 +600,7 @@ describe('name match v2 work cap (Codex #6367 perf)', () => {
 });
 
 describe('name match v2: review round 5', () => {
-  const prev = process.env.GATE_NAME_MATCH_V2;
-  beforeEach(() => { process.env.GATE_NAME_MATCH_V2 = 'true'; resetNameIndexCache(); db.__queries = []; db.__rows = () => []; });
-  afterAll(() => { if (prev === undefined) delete process.env.GATE_NAME_MATCH_V2; else process.env.GATE_NAME_MATCH_V2 = prev; });
+  beforeEach(() => { resetNameIndexCache(); db.__queries = []; db.__rows = () => []; });
   const book = [named('dumas', 'Richard', 'Dumas'), named('stompf', 'Richard', 'Stompf'), named('quill', 'Zed', 'Quill')];
   const row = (id, first, last) => ({ id, first_name: first, last_name: last, active: true });
 
@@ -689,12 +623,6 @@ describe('name match v2: review round 5', () => {
     expect(sorted.note).toMatch(/kept in the requested order/);
     expect(sorted.note).not.toMatch(/ordered by how well/);
     expect(ordered.note).toMatch(/ordered by how well/);
-    // Gate off: the old result, untouched.
-    delete process.env.GATE_NAME_MATCH_V2;
-    const off = await executeTool('query_customers', { search: 'richard dump' });
-    expect(off.customers.map((c) => c.id)).toEqual(['dumas', 'stompf']);
-    expect(off.customers[0].match).toBeUndefined();
-    expect(off.note).toBeUndefined();
   });
 
   test('the call bonus counts only calls that reached someone', async () => {

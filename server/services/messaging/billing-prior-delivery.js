@@ -1,4 +1,6 @@
 const { billingLegDeliveryState } = require('./billing-channel-routing');
+const { firstDeliveryDueDate } = require('../invoice-helpers');
+const { etDateString } = require('../../utils/datetime-et');
 
 function validOriginalTime(value) {
   if (!value) return null;
@@ -85,6 +87,9 @@ function invoiceDeliveryStampUpdates(db, options) {
     ...(options.sms ? { sms_sent_at: db.raw('COALESCE(sms_sent_at, ?)', [times.sms]) } : {}),
     ...(options.email
       ? { email_sent_at: db.raw('COALESCE(email_sent_at, ?)', [times.email]) } : {}),
+    // A first delivery after the bill's due day takes the day it was delivered: a deduped
+    // finalize keeps its original acceptance time; one with no valid time uses now.
+    due_date: firstDeliveryDueDate(db, etDateString(times.aggregate || options.now)),
   };
 }
 

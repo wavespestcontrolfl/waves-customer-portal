@@ -207,10 +207,33 @@ describe('optOutImpact in add mode', () => {
     const codes = impact.disclosures.map((d) => d.code);
     expect(codes).toContain('waveguard_tier_change');
     expect(impact.disclosures.find((d) => d.code === 'waveguard_tier_change').message).toMatch(/^Adding Mosquito moves/);
-    expect(impact.disclosures.find((d) => d.code === 'added_per_application').message).toBe('Mosquito is $60.00 per application.');
+    expect(impact.disclosures.find((d) => d.code === 'added_per_application').message).toBe('Mosquito is $60.00 per application, 12 applications per year.');
     expect(impact.disclosures.find((d) => d.code === 'recurring_per_application').message).toBe('Pest Control changes from $100.00 to $95.00 per application.');
     expect(codes).not.toContain('restored_per_application');
     expect(impact.wouldChargeBundled).toEqual([]);
+  });
+
+  it('adds the application count and the "$X a month" average, as the service cards word them, when the plan monthly reconciles', () => {
+    const mosquito9 = { service: 'mosquito', name: 'Mosquito', annualAfterDiscount: 60.8 * 9, visitsPerYear: 9 };
+    const impact = optOutImpact({
+      beforeResult: mk('Bronze', [pest(100)]),
+      afterResult: mk('Silver', [pest(95), mosquito9]),
+      beforeData: {}, afterData: {}, label: 'Mosquito', mode: 'add',
+      afterMonthlyTotal: 77.27,
+    });
+    expect(impact.disclosures.find((d) => d.code === 'added_per_application').message).toBe(
+      'Mosquito is $60.80 per application, 9 applications per year. $45.60 a month. Averaged over the year. You pay after each application.',
+    );
+  });
+
+  it('drops the monthly sentence, never invents one, when the plan monthly does not reconcile with the lines', () => {
+    const impact = optOutImpact({
+      beforeResult: mk('Bronze', [pest(100)]),
+      afterResult: mk('Silver', [pest(95), mosquito(60)]),
+      beforeData: {}, afterData: {}, label: 'Mosquito', mode: 'add',
+      afterMonthlyTotal: 500,
+    });
+    expect(impact.disclosures.find((d) => d.code === 'added_per_application').message).toBe('Mosquito is $60.00 per application, 12 applications per year.');
   });
 
   it('restore mode keeps its "back" wording', () => {
@@ -220,7 +243,7 @@ describe('optOutImpact in add mode', () => {
       beforeData: {}, afterData: {}, label: 'Mosquito', mode: 'restore',
     });
     expect(impact.disclosures.find((d) => d.code === 'waveguard_tier_change').message).toMatch(/^Adding Mosquito back moves/);
-    expect(impact.disclosures.find((d) => d.code === 'restored_per_application').message).toBe('Mosquito comes back at $60.00 per application.');
+    expect(impact.disclosures.find((d) => d.code === 'restored_per_application').message).toBe('Mosquito comes back at $60.00 per application, 12 applications per year.');
   });
 });
 

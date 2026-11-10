@@ -230,8 +230,7 @@ export const ADMIN_NAV_ITEMS = {
     adminOnly: true,
   },
   // Bids has two tabs: Open bids (bid invites found in the email table, GATE_BID_DESK) and Bid kit (the papers and facts
-  // every government bid asks for, GATE_BID_KIT). `bid_desk` / `bid_kit` come from GET /admin/feature-flags, which only
-  // carries each while its gate is on, so the entry shows when EITHER is on and is hidden everywhere (fails closed) otherwise.
+  // every government bid asks for). The Bid kit tab is always there, so the entry shows to every admin.
   bids: {
     id: "bids",
     keywords: [
@@ -241,7 +240,6 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/bids",
     label: "Bids",
     icon: Gavel,
-    anyFlag: ["bid_desk", "bid_kit"],
     adminOnly: true,
   },
   equipment: {

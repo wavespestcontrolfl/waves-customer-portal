@@ -2673,18 +2673,16 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
   }
 });
 
-// Sound-alike rows (GATE_CUSTOMER_SEARCH_FUZZY): when the exact search found fewer than 3
+// Sound-alike rows: when the exact search found fewer than 3
 // customers and reads as a name, "Did you mean" rows follow the exact ones on page 1. The
 // exact rows, `total` and the paging do not change; `approximateCount` says how many rows at
 // the end of `customers` carry `approximate: true`. `unsearched()` is the directory query with
 // its filters and the technician's assigned-visit scope but no text search, so the survivors are
-// read back through the same limits. Gate off: the rows come back untouched and `extra` is empty.
+// read back through the same limits. Without `suggest=1` or a search, the rows come back untouched and `extra` is empty.
 // Opt-in per caller (`suggest=1`): only a screen that marks the rows as suggestions asks for them;
 // every other consumer (bulk actions, plain pickers) gets today's exact rows (Codex pre-push).
 async function appendApproximateCustomers({ page, search, totalCount, exactRows, mappedRows, unsearched, withListColumns, suggest = false }) {
-  // GATE_CUSTOMER_SEARCH_FUZZY reader, on its own line so gate PRs never conflict.
-  const enabled = require('../config/feature-gates').customerSearchFuzzyLive();
-  if (!enabled || !search || !suggest) return { rows: mappedRows, extra: {} };
+  if (!search || !suggest) return { rows: mappedRows, extra: {} };
   let approximate = [];
   // Every exact match must be on this page, so none can come back as a suggestion here and
   // as an exact row on a later page (Codex r3; a small page limit would split them).
@@ -2827,7 +2825,7 @@ router.get('/', async (req, res, next) => {
     // search UIs keep working.
     const mappedRows = customers.map(mapCustomerListRow);
 
-    // Sound-alike rows after the exact ones (GATE_CUSTOMER_SEARCH_FUZZY; see appendApproximateCustomers).
+    // Sound-alike rows after the exact ones (see appendApproximateCustomers).
     const fuzzy = await appendApproximateCustomers({
       page, search: filters.search, totalCount, exactRows: customers, mappedRows,
       // The directory's own filters and the technician's scope, no text search.
@@ -3223,6 +3221,20 @@ router.get('/:id/comms', requireAdmin, async (req, res, next) => {
   }
 });
 
+// { reminder24hOn, reminder24hByProperty } for ONE customer (appointment-reminders.loadBookingReminder24hAnswers, the senders'
+// own rule, read-only): the customer row's answer, and while property texts are enforced each saved property's own. {} with the
+// gate off or on a failed read: the client reads a missing field as "the reminder will not go out", which is what the senders
+// do with unreadable preferences.
+async function reminder24hField(customerId) {
+  try {
+    if (!require('../services/time-promise').dayOnlyPromiseOn()) return {};
+    const answers = await require('../services/appointment-reminders').loadBookingReminder24hAnswers(db, customerId);
+    return { reminder24hOn: answers.customer, reminder24hByProperty: answers.properties };
+  } catch {
+    return {};
+  }
+}
+
 // GET /api/admin/customers/:id/schedule-estimates — bookable estimates
 // formatted for the New Appointment modal. Surfaces accepted estimates plus
 // still-open quotes the customer has been sent (sent / viewed) so a phone
@@ -3395,7 +3407,9 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         } : null,
       };
     }));
-    res.json({ estimates: out });
+    // GATE_DAY_ONLY_PROMISE part E: will this customer's 24-hour reminder go out? The booking window's phone-script hint needs
+    // it (a day-only promise is made only when that text will go out). Gate off: the reply is exactly today's, nothing read.
+    res.json({ estimates: out, ...(await reminder24hField(customer.id)) });
   } catch (err) { next(err); }
 });
 
@@ -3662,7 +3676,9 @@ router.get('/:id', async (req, res, next) => {
         ? db('estimates').where({ customer_id: c.id })
         : require('../services/call-commitments').whereEstimateOnCustomerRecord(db('estimates'), c)
       ).orderBy('created_at', 'desc'),
-      db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', db.raw('COALESCE(payment_methods.card_brand, payments.card_brand) as card_brand'), db.raw('COALESCE(payment_methods.last_four, payments.card_last_four) as last_four')).orderBy('payment_date', 'desc').limit(20),
+      // Each payment's own brand/last-four snapshot first (as getPaymentHistory): a card the
+      // account updater replaced keeps its old number on earlier payments.
+      db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', db.raw('COALESCE(payments.card_brand, payment_methods.card_brand) as card_brand'), db.raw('COALESCE(payments.card_last_four, payment_methods.last_four) as last_four')).orderBy('payment_date', 'desc').limit(20),
       lifetimeRevenueFor(db, c.id).then(net => ({ net })).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
       customerScheduledHistory(db, c.id, { focusServiceId }),
       // Upcoming, active-only — drives Customer 360's next appointment.
@@ -5200,13 +5216,6 @@ router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, re
     if (error) return res.status(400).json({ error: error.message });
     const patch = ContactPrefs.contactPrefPatchFromBody(updates);
     const asksEmailOnly = Object.values(patch).includes('email');
-    // Text-only report delivery exists only while the contact report text
-    // (GATE_CONTACT_REPORT_TEXT) does — the same refusal as the contact's own
-    // PUT (codex #6364 r2 P2): stored anyway, the choice would read as the
-    // default today and go live unseen at a later gate flip.
-    if (patch.service_complete_channel === 'sms' && !require('../config/feature-gates').contactReportTextLive()) {
-      return res.status(400).json({ error: 'Service reports are delivered by email for this property.', code: 'REPORT_TEXT_UNAVAILABLE' });
-    }
     // Every input the save depends on is read under the comms lock, as the
     // contact's own PUT reads it (codex #6364 r1 P2): the slot (a holder
     // replacing it meanwhile must not have the pruned row recreated), the
@@ -7251,3 +7260,4 @@ function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, verify
   });
 }
 module.exports.setCustomerBillToFromBar = setCustomerBillToFromBar;
+module.exports.reminder24hField = reminder24hField;

@@ -14,7 +14,11 @@ jest.mock('../services/pest-recap', () => ({
   sheetRecordFor: jest.fn(),
 }));
 
-const { buildDictationPrompt, composePrompt, cleanName, PROMPT_MAX_CHARS } = require('../services/dictation-word-list');
+const { buildDictationHints, composePrompt, cleanName, PROMPT_MAX_CHARS } = require('../services/dictation-word-list');
+
+// The prompt for an admin login. The customer-name sources are not in this fake knex, so they drop out
+// (a failed source drops its section); dictation-customer-names.test.js covers them.
+const buildDictationPrompt = async (context, knex) => (await buildDictationHints({ ...context, scope: {} }, knex)).prompt;
 
 const CUSTOMER_ID = '11111111-1111-4111-8111-111111111111';
 const SERVICE_ID = '22222222-2222-4222-8222-222222222222';
@@ -74,7 +78,7 @@ describe('buildDictationPrompt', () => {
     const calls = [];
     const prompt = await buildDictationPrompt({ serviceId: SERVICE_ID }, fakeKnex(baseData(), calls));
     expect(prompt).toContain('Customer on this screen: Testa Examplesmith');
-    const visit = calls.find((c) => c.table === 'scheduled_services');
+    const visit = calls.find((c) => c.table === 'scheduled_services' && c.where.some((w) => w.id === SERVICE_ID));
     expect(visit.where).toEqual([{ id: SERVICE_ID }]);
     expect(calls.find((c) => c.table === 'customers').where).toEqual([{ id: CUSTOMER_ID }]);
   });
@@ -82,7 +86,7 @@ describe('buildDictationPrompt', () => {
   test('a context id that is not a UUID is never looked up', async () => {
     const calls = [];
     const prompt = await buildDictationPrompt({ customerId: "1' OR '1'='1", serviceId: 'not-a-uuid' }, fakeKnex(baseData(), calls));
-    expect(calls.some((c) => c.table === 'customers' || c.table === 'scheduled_services')).toBe(false);
+    expect(calls.some((c) => c.where.some((w) => w.id !== undefined))).toBe(false);
     expect(prompt).not.toMatch(/Customer on this screen/);
   });
 

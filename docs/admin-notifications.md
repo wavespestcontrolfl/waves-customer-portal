@@ -70,7 +70,10 @@ only). Many rows still never name the customer (an older raw emitter, an ops che
   `server/services/admin-alert-customer.js` from the record behind it: a customer id (subject, top level,
   trigger payload, SMS thread, a customer page link), else the visit, estimate, invoice, lead or call it names,
   in one query per table for the page. An estimate or lead with no customer keeps its own name. The bell shows
-  "Customer: Name" under the title unless the title already carries the whole name.
+  "Customer: Name" under the title unless the title already carries the whole name. `GATE_ALERT_CUSTOMER_LINE`
+  (owner 2026-11-05) gives the admin bell this line alone while `GATE_ALERT_EXPLAINER` stays off: the same name
+  read (a database read, no AI call) adds `customer` and nothing else to each row, so there is no "What to do"
+  button and the row keeps "Show full text". Only the bell list gets names; the done list does not.
 - "Show full text" becomes **What to do**: what happened, one to three steps, and whether the owner or Claude
   fixes it. `server/services/admin-alert-explainer.js` asks an AI for it the first time an admin opens it
   (`POST /api/admin/notifications/:id/explain`, `TEXT_POLICIES.routineAnswer`, lane `alert_explainer`), from the
@@ -310,7 +313,7 @@ customer's message by this rule.
    (`server/services/auto-dispatch/check-down-notice.js`) rings once per outage and is never
    held back by the allowance; it counts toward it. A tool that has stopped moving visits is
    the notice that must reach a person.
-   Far double bookings (owner audit 2026-10-22, decision D1; `GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET`):
+   Far double bookings (owner audit 2026-10-22, decision D1):
    a visit auto-dispatch leaves in conflict more than 14 days out is a line on one standing
    Activity row (ops digest `auto-dispatch-far-conflicts`, audience fyi), outside the allowance
    and off the bell; it rings as the ordinary needs-a-person notice once it is within 14 days.
@@ -343,7 +346,10 @@ customer's message by this rule.
    condition holds (the row's first `RERING` match is `periodic`: held, never closed). Recently done offers Reopen for a
    `quiet-72h` row; the Reopen stamps `metadata.quietHoldFrom`, so the row gets 72 more hours (a relevance re-arm
    stamps it too, and a quiet refresh keeps the row's own stamp). A new emission with changed content rings a
-   fallen-off alert back, as after a person's Done, and a ringing refresh drops the stamp. `shadow` counts and logs,
+   fallen-off alert back, as after a person's Done, and a ringing refresh drops the stamp. The auto-dispatch schedule
+   notices (a visit with no arrival time, a visit that needs a person) change their words once, 7 days before the
+   visit (`server/services/auto-dispatch/audit.js` `visitSubject`; owner 2026-11-08, dispatch audit), so a fallen-off
+   one rings once more while its problem stands. `shadow` counts and logs,
    writes nothing. A run is recorded (audit_log `admin_alert_quiet_fall_off.close`, `metadata.retention` on each row)
    only when it closed a row. `server/scripts/quiet-fall-off-dry-run.js` prints what would close;
    `server/scripts/reopen-quiet-fall-off.js (--since <ISO> | --run <id>) [--apply]` reopens what the policy closed.
@@ -482,6 +488,14 @@ bell (the bell list, `getAdminNotifications` with `fullAccess`, hides `ownerOnly
 button route refuses them). The owner acts with his own words: step 1 for a system alert, step 2 (Intelligence Bar) for the rest.
 Nothing here sends anything to a customer or makes a model call.
 
+### Bell order and Area chip (owner 2026-11-05, `GATE_ALERT_BELL_ORDER`, dark)
+
+The bell lists the alerts that need the owner first. Rank 0 is `metadata.severity` `needs-you`; rank 1 is a row with no
+severity label (an older alert stays above known FYI rows); rank 2 is any other severity. Inside a rank the order is newest
+first. Each row whose `metadata.area` is one of the nine Areas also shows one Area chip (`areaChip`). The list response says
+`order: 'needs-you-first'` and the bell keeps that order (no day groups). The paging cursor is `<rank>~<timestamp>~<id>`. A cursor of
+the other order (the gate flipped under an open panel) restarts at page 1 with `restart: true`, and the bell replaces its list. The unread count and the Recently done list do not change. See `docs/gates-and-env.md`.
+
 ## 6. What is enforced today
 
 | Rule | Where | State |
@@ -493,11 +507,11 @@ Nothing here sends anything to a customer or makes a model call.
 | Done state: a done row is hidden from the bell list, its unread count and mark-all-read (the Activity feed keeps it, marked Done). Every id-addressed done write is `NotificationService.markAdminDone`; emitters that close inside their own fenced update spread `doneColumns` into it. Auto-done sources: the quiet fall-off (`quiet-72h`, a row with no activity for 72 hours; the only system close that Recently done offers Reopen for), episode closes (`closeAdminAlertKeys`, `done_by` `episodes`), the relevance sweep (`relevance`; also the customer-contact bells once a person answered, behind `GATE_ALERT_CONTACT_CLOSE`: a text-note bell once a person answered the customer and a visit of theirs was completed after it, a text no longer needing a reply, a voicemail callback request after a person called back or texted or a visit or quote followed, and, closed by `missed-call-bell.js` instead (`done_by` `supersede`), a missed call after a person texted the caller or a visit or quote followed, an email a person replied to, a lead a person contacted), an ops-digest fall-off resolve, a newer digest of the same check (`supersedePrior` on `deliverOpsDigest`, used by the unworked-comms and parked-run digests: each send closes the older open copy with `resolution` "Replaced by a newer digest from the same check" and `done_by` the sender's key, so one stays open; the SMS draft canary closes its old keyless FAILING rows the same way), a superseded missed-call bell (a voicemail on the same call, or the caller got through on a later call within 7 days: `retireCalledBackMissedCalls`, 2-minute call-alert cron), a retired missing-deduction bell, a superseded promise-chaser bell, a resolved no-show dispatch tracking bell, a booking-miss bell once its visit is booked, done on another day, or 14 days after its agreed day (`call-booking-miss-watchdog.js`; a visit booked on another day turns the bell into a date check), a logged-delivery bell once no live restock request may cover it (`purchase-receipts/sweep.js`; a delivery with no such request writes none), and every other system retire (a newer bell replaced it, a batch absorbed it, the work was done: the call-commitments watchdog, the follow-up pager, procurement, collections cards, the setup-fee and first-application alerts, the cancellation review bell). A system writer never retires an alert with `read_at` alone; `server/tests/notification-system-retire-closes-done-contract.test.js` fails any non-null `read_at` write that does not also close done, unless it is a named person's read or another table. Not done: any mark-read by a person (a thread open, mark-all-read, a dashboard dismiss). | `PUT /api/admin/notifications/:id/done` (same role scope as mark-read) and `/:id/reopen` (admin only; body `{ doneAt }` is the `done_at_token` the Recently-done list served, a row done again since answers 409 `changed`, and only a row a person closed (`done_by` a technician id or `claude`) can be reopened, a system close answers 409 `not_reopenable`); the bell's Done control | enforced |
 | Claude's own reminders, our engineering faults and the AI-test list leave the bell: an admin row with `metadata.opsJob` (unless `opsWho` is `person`) or in a named class is written Activity-only and stamped `who = claude`, `severity` `broken` for a fault and `fyi` for the AI-test list; customer-contact categories, registry events, customer-tied rows and `ops_digest` rows are never routed | `server/services/admin-alert-routing.js`, applied in `NotificationService.create` and `notifyAdmin`; `server/scripts/reroute-claude-queue-rows.js` moves rows already open | enforced while `GATE_ALERT_CLAUDE_QUEUE` is on (dark by default) |
 | A fault the code marks "Claude fixes this" that the bell policy would drop is written to Claude's queue instead (Activity-only, `who = claude`, `broken`, no push): the registry alerts in `CLAUDE_FAULT_TRIGGERS` and `token_alert` rows; customer-tied alerts and the `CLAUDE_FAULT_TRIGGERS_LEFT_OUT` triggers stay dropped | `rescueClaudeFault` in `server/services/admin-alert-routing.js`, called at the drop in `NotificationService.create` and `triggerNotification` | enforced while `GATE_ALERT_CLAUDE_FAULTS` is on (dark by default) |
-| Retention: a bell row idle 30 days, and an `fyi` row idle 7 days, is marked done (never deleted, read state kept). The 14-day Monday summary for an unread `needs-you` row is the Monday review bell (`server/services/monday-review-bell.js`, Mondays 9:20 AM ET, gate `GATE_MONDAY_REVIEW_BELL`) | `runAdminAlertRetention` in `server/services/admin-alert-retention.js`, nightly 1:32 AM ET, gate `GATE_ALERT_RETENTION` (`shadow` records one audit_log summary, `true` expires); undo with `server/scripts/undo-admin-alert-retention.js` | enforced when the gate is `true` |
+| Retention: a bell row idle 30 days, and an `fyi` row idle 7 days, is marked done (never deleted, read state kept). The 14-day Monday summary for an unread `needs-you` row is the Monday review bell (`server/services/monday-review-bell.js`, Mondays 9:20 AM ET, gate `GATE_MONDAY_REVIEW_BELL`; with `GATE_MONDAY_FELL_OFF_LINE` on, its first list names the customer alerts that fell off the bell after 3 quiet days with no reply instead) | `runAdminAlertRetention` in `server/services/admin-alert-retention.js`, nightly 1:32 AM ET, gate `GATE_ALERT_RETENTION` (`shadow` records one audit_log summary, `true` expires); undo with `server/scripts/undo-admin-alert-retention.js` | enforced when the gate is `true` |
 | Catalog (owner 2026-10-29, step D1): every `TRIGGER_REGISTRY` type declares a `rule`: area, severity, who, and either `doneWhen` + `closedBy` (the module that marks its rows done) or `expiryDays` (30 for needs-you and broken, 7 for fyi; only the retention sweep closes it). Severity `fyi` replaces the old `informational` flag. In watch mode a muted alert is countable: when the bell policy silences an admin row, one `audit_log` row per Eastern day per distinct alert records its category, trigger key and digit-free title stem, and for a composer alert its declared area, severity and who, with its kind (the dedupe key's class prefix). Nothing is refused | `server/tests/admin-alert-catalog-contract.test.js` fails a type with no valid rule; `auditBellPolicyMuted` in `server/services/audit-log.js`, called at both silence points (`NotificationService.create`, and `triggerNotification`, which checks the policy itself and returns before create), action `notification.bell_policy.muted` | contract enforced; watch mode behind `GATE_ALERT_CATALOG=watch` (dark by default) |
 | Customer declaration (owner 2026-10-29, "small" E1): a registry `rule` or a composed spec may declare `contact: true` (a customer reached us) or `promise: true` (a follow-up we owe a customer): only `true`, never both, and only on a `needs-you` type for a person. A declared alert rings whatever the bell policy's later steps say (a site's explicit `bell: false` still wins), and a customer's failed invoice payment (`bill_payment_error`) rings beside `payment_failed` | `bellAllowed` in `server/services/notification-bell-policy.js` (step 1b), fed by `triggerNotification` (the type's rule; its bell write then carries `bell: true`) and `NotificationService.create` (the row's metadata); the shape is checked by `server/tests/admin-alert-catalog-contract.test.js` and `composeAdminAlert` | enforced while `GATE_CUSTOMER_ALERTS_RING` is on (dark by default) |
 | Body over 110 chars moves to `detail`, read from the bell's "Show full text" (with `GATE_ALERT_EXPLAINER` on: "What to do", the original under "Show original text") | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
-| The bell names the customer a row is about, and "What to do" explains it in plain words (section 2) | `server/services/admin-alert-customer.js`, `server/services/admin-alert-explainer.js`, `POST /api/admin/notifications/:id/explain`, admin role only | enforced while `GATE_ALERT_EXPLAINER` is on (dark by default) |
+| The bell names the customer a row is about, and "What to do" explains it in plain words (section 2) | `server/services/admin-alert-customer.js`, `server/services/admin-alert-explainer.js`, `POST /api/admin/notifications/:id/explain`, admin role only | enforced while `GATE_ALERT_EXPLAINER` is on (dark by default); the customer line alone follows `GATE_ALERT_CUSTOMER_LINE` (dark by default) |
 | Send to Claude (section 5): a bell alert our own code wrote (system with no customer, marked Claude's, or a reviewed check class) can be moved to Claude's queue from the bell with an optional note, and un-sent for 10 seconds (`POST /api/admin/notifications/:id/unsend-from-claude`, while no Mac tab has started on it); fenced on the served version and the alert's dedupe lock; a refresh keeps an open sent row in Claude's queue; `needs-me` gives each alert's customer id and marks sent rows | `server/services/admin-alert-send-to-claude.js` behind `POST /api/admin/notifications/:id/send-to-claude` (admin only), `keepSentToClaude` in `server/services/admin-alert-routing.js`, `withCustomers` in `server/services/needs-me.js` | enforced while `GATE_ALERT_SEND_TO_CLAUDE` is on (dark by default; no explainer gate); the `needs-me` CLI always adds customer ids |
 | Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, claims the row against the version the bell served (one tap at a time), is recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced per kind while its gate is on (`referral_inbound`: `GATE_REFERRAL_INBOUND_BELL`, dark by default; `call_back`: `GATE_ALERT_CALL_BUTTON`, dark by default, the one kind that leaves its row open) |
 
@@ -527,6 +541,22 @@ existing `new_lead` bell row on the email id (`email-lead:<lead|draft>:<email id
 `notifyAdmin`'s `bannerKind` option, which is never stored on the row; a retry or re-sync finds the row and sends no
 second banner, and no second bell row is written. Gate off: the unkeyed row and no banner, as before.
 
+Lead call-back reminder banner (owner 2026-11-05, "remind"; gate `GATE_LEAD_CALL_REMINDER`, dark): two kinds of lead
+bell reach only the portal bell. A "Missed call request" bell (`lead-call-reply-missed:<callLogId>`, a press-1 ring nobody
+answered) and a night call-back bell (`lead-call-text-followup:<requestId>`, raised by `lead-call-text-followup.js`
+`raiseLeadBell`) send no banner. With the gate on, the alert-relevance sweep (every 10 minutes, after its closes) runs
+`server/services/lead-call-reminder.js`. A bell of those kinds that is still open one business hour after its latest
+event (the follow-up SLA's clock, 8 AM to 8 PM ET) sends ONE banner (`lead_call_reminder`, the Missed call sound) when
+nobody has reached the lead since. "Reached" uses the shared contact witnesses after that event: a person's text, a call
+a person placed and spoke on, an inbound call a person answered, a person's Gmail send to the lead's customer's own
+address, a visit booked for that customer, or an estimate handed off. A deleted lead, or one a person closed, sends nothing. Banners go out
+only from 8:00 AM up to 8:00 PM Eastern, and only for bells of the last 24 hours. The banner carries the row's own title,
+body and link, led by "Reminder: nobody has reached this lead yet.", `pushOnly` to admin-role phones with a tag per row.
+The bell row is not rewritten: it is stamped `metadata.leadCallReminderAt` in one statement fenced on the row being open
+and unchanged since it was read, so a row sends at most one banner. The stamp is not a ring, so the 3-day quiet fall-off
+still counts from the bell's own event. The owner turns it off in Push Settings (Leads & Sales group, "Reminder: a lead
+still waits for a call") or by unsetting the gate. It sends nothing to a lead.
+
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
 
@@ -550,6 +580,21 @@ The owner's open-visit banner (owner 2026-11-04, "banner"; `GATE_OWNER_NUDGE_BAN
 (the nudge's own per-technician claim), same words as the text, a tap opens `/tech`. It counts as delivered only when a phone
 accepted it; otherwise the text goes out as before. The owner can turn the type off in Push Settings (Alerts group,
 "Evening nudge: visits still open"), which sends the text instead. It sends nothing to a customer.
+
+Stuck-booking alert (owner 2026-11-05, "1, 2 and 3": the estimate page audit's fix 3 and fix 1's second step; no gate):
+`server/services/estimate-stuck-alert.js` raises one standing bell per estimate (category `estimate_stuck`, dedupeKey
+`estimate_stuck:<estimate id>`) when a customer gets stuck on the estimate page: the 90-day look-ahead found no times,
+five date or Waves AI searches in a row came back empty, a time they picked expired with no booking, the time list
+answered an error, or Approve was refused for a reason the page does not walk them through. The same row says when a
+customer came back to an expired estimate. It rings at most once per Eastern day (the day is the `dedupeVersion`, and
+`ringOnRefresh` rings only a new day); a second reason the same day rewrites the row without a ring. A ring also sends a
+phone banner with the New lead sound (`bell-banners.js` kind `estimate_stuck`, 7:00 AM to 9:00 PM Eastern). The category
+rings by default and the owner can silence it under Push Settings ("Customers stuck booking an estimate"); while it is
+silenced nothing raises or refreshes (notifyAdmin reads the mute only on a fresh insert) and the 5-minute pass closes the
+open rows. Bots, staff
+browsers and the office network never raise it. The 5-minute estimate tick closes a row once its estimate is accepted,
+declined or archived. Each date search, hold start and hold end is an `audit_log` row (`estimate_slot_search`,
+`estimate_hold_started`, `estimate_hold_ended`) for the next booking audit. It sends nothing to a customer.
 
 ## 7. How to raise one
 

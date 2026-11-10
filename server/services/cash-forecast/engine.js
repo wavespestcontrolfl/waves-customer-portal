@@ -13,6 +13,11 @@
  * owed, not cash. A pay run pays its net on the pay date and its taxes on the deposit rows' due dates;
  * a planned hire (no deposit rows yet) counts its full cost on the pay date, the safe side.
  *
+ * Repeating bills (step 2c, decision 2 A): a debit the bank feed shows about once a month, 3 times or more
+ * at a steady amount, counts on its own day at its usual amount instead of inside the trailing weekly
+ * average, so a lumpy week shows. The owner marks each one business or household once; the mark is a
+ * label only and never changes the pool math.
+ *
  * Shape: every money source returns flows { day, line, amount }; LINES says each line's side (in / out)
  * and edge (both balances, the expected balance only, or the hire scenario); one pass sums the flows
  * into weeks.
@@ -25,6 +30,14 @@ const MAX_LAG_DAYS = 91;
 const SETTLE_BUSINESS_DAYS = 2; // page rule: card money reaches the bank ~2 business days after payment
 const TRAILING_WEEKS = 8;
 const MIN_COHORT = 20; // a lag with fewer watched samples keeps the last share instead of a noisy one
+// Repeating bills: the look-back the finder reads, and its rules (tuned on the production feed, 2026-11-05).
+const FINDER_DAYS = 120;
+const REPEAT_RULES = {
+  minRepeats: 3,
+  gapDays: [25, 35], // each gap in a bill's latest run of debits: about a month
+  tolerance: 0.25, // each debit within 25% of the one before it
+  dueGraceDays: 5, // a bill due up to 5 days ago that the feed does not show yet still counts, today
+};
 
 // line -> [side, edge]. edge 'both' moves both end balances; 'expected' only the expected one; 'hire'
 // is the planned hire, shown as its own scenario.
@@ -40,6 +53,7 @@ const LINES = {
   ai_software: ['out', 'both'],
   card_payments_off_feed: ['out', 'both'],
   other_spending: ['out', 'both'],
+  repeating_bills: ['out', 'both'],
   card_owed: ['out', 'both'],
   payroll: ['out', 'both'],
   taxes: ['out', 'both'],
@@ -64,6 +78,7 @@ const EMPTY_INPUT = {
   taxRows: [],
   items: [],
   settings: { last_year_receipts: {} },
+  marks: {}, // repeating-bill key -> 'business' | 'household' (labels only)
   missing: [],
 };
 
@@ -78,6 +93,12 @@ const daysInMonth = (ym) => new Date(Date.UTC(Number(ym.slice(0, 4)), Number(ym.
 const lastYearMonth = (day) => `${Number(day.slice(0, 4)) - 1}${day.slice(4, 7)}`;
 const flow = (day, line, amount) => ({ day, line, amount });
 const sum = (list, pick) => list.reduce((s, x) => s + pick(x), 0);
+const byDay = (a, b) => a.day.localeCompare(b.day) || String(a.id).localeCompare(String(b.id));
+function median(values) {
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
 
 function normalize(input) {
   return {
@@ -199,14 +220,15 @@ const SPEND_RULES = [
   [() => true, 'other_spending'],
 ];
 
-// lines: [{ id, day, account, direction, amount, description, category, modeled }]. Debit totals per
-// line over [from, to]. Money in comes from the portal (visits, invoices, dues, Stripe), never from bank
-// credits; other money into the pool is not counted (the safe side).
-function classifySpend(lines, { pool, feedCards, from, to }) {
+// lines: [{ id, day, account, direction, amount, description, category, modeled }]. The debits that are
+// spending, each with the money-out line it belongs to (spendLine; null = not spending). Money in comes
+// from the portal (visits, invoices, dues, Stripe), never from bank credits; other money into the pool is
+// not counted (the safe side).
+function classifyLines(lines, { pool, feedCards }) {
   const inPool = new Set(pool);
   const isFeedCard = new Set(feedCards);
   const used = new Set();
-  const sorted = [...lines].sort((a, b) => a.day.localeCompare(b.day) || String(a.id).localeCompare(String(b.id)));
+  const sorted = [...lines].sort(byDay);
   const credits = sorted.filter((c) => c.direction === 'credit');
   const pair = (debitTest, creditTest, maxDays) => {
     for (const d of sorted.filter((x) => x.direction === 'debit' && debitTest(x))) {
@@ -223,16 +245,115 @@ function classifySpend(lines, { pool, feedCards, from, to }) {
   pair((d) => inPool.has(d.account) && CARD_PAYMENT_RE.test(norm(d.description)),
     (c) => isFeedCard.has(c.account) && CARD_PAYMENT_CREDIT_RE.test(norm(c.description)), 3);
 
+  return sorted.filter((l) => l.direction === 'debit' && !used.has(l.id) && !l.modeled && l.amount > 0
+    && (inPool.has(l.account) || isFeedCard.has(l.account)))
+    .map((l) => {
+      const kind = { pooled: inPool.has(l.account), feedCard: isFeedCard.has(l.account) };
+      return { ...l, spendLine: SPEND_RULES.find(([test]) => test(l, norm(l.description), kind))[1] };
+    });
+}
+
+// Debit totals per money-out line over [from, to], leaving out the debits in `skip` (a repeating bill's own
+// debits: the bill counts on its own days instead).
+function spendTotals(classified, { from, to, skip = new Set() }) {
   const totals = { products_fuel: 0, ai_software: 0, card_payments_off_feed: 0, other_spending: 0 };
-  const counted = sorted.filter((l) => l.direction === 'debit' && !used.has(l.id) && !l.modeled
-    && l.day >= from && l.day <= to && l.amount > 0 && (inPool.has(l.account) || isFeedCard.has(l.account)));
-  for (const l of counted) {
-    const kind = { pooled: inPool.has(l.account), feedCard: isFeedCard.has(l.account) };
-    const d = norm(l.description);
-    const line = SPEND_RULES.find(([test]) => test(l, d, kind))[1];
-    if (line) totals[line] += l.amount;
-  }
+  for (const l of classified) if (l.spendLine && l.day >= from && l.day <= to && !skip.has(l.id)) totals[l.spendLine] += l.amount;
   return { totals };
+}
+
+// ── Repeating bills (step 2c) ───────────────────────────────────────────────────────────────────────
+// Lines a monthly bill can come from: a payment to a card outside the feed stays with the card payoff
+// plan, and payroll funding is never spending.
+const BILL_LINES = new Set(['products_fuel', 'ai_software', 'other_spending']);
+// Words that say how a debit was paid, never who was paid.
+const KEY_NOISE = new Set(['POS', 'DEBIT', 'PURCHASE', 'ACH', 'WEB', 'PPD', 'CCD', 'ID', 'RECURRING', 'AUTOPAY', 'ONLINE',
+  'TO', 'FROM', 'PAYMENT', 'PMT', 'PYMT', 'PAYMT', 'BILL', 'PAY', 'INC', 'LLC', 'CO', 'COM', 'WWW']);
+
+// The merchant a debit names: its first two words without digits, punctuation, one-letter scraps or
+// payment words ("ACME CLOUD" for "Acme Cloud_shop" and "ACME CLOUD SHOP").
+function merchantKey(description) {
+  return norm(description).split(' ').filter((w) => w.length > 1 && !KEY_NOISE.has(w)).slice(0, 2).join(' ');
+}
+
+// One merchant's debits split by amount, in date order: a debit joins the first group whose latest debit
+// it is within the tolerance of, so two plans from one merchant stay two bills and a bill that grows a
+// little each month (a seat added) stays one.
+function amountGroups(debits, tolerance) {
+  const groups = [];
+  for (const d of [...debits].sort(byDay)) {
+    const home = groups.find((g) => Math.abs(d.amount - g[g.length - 1].amount) <= tolerance * g[g.length - 1].amount);
+    if (home) home.push(d);
+    else groups.push([d]);
+  }
+  return groups;
+}
+
+// The latest run of a group's debits each about a month after the one before (an older one-off or a
+// missed month ends the run; the debits before it stay in the trailing average).
+function monthlyRun(debits, [minGap, maxGap]) {
+  const fits = (n) => {
+    const gap = dayDiff(debits[n - 1].day, debits[n].day);
+    return gap >= minGap && gap <= maxGap;
+  };
+  let start = debits.length - 1;
+  while (start > 0 && fits(start)) start -= 1;
+  return debits.slice(start);
+}
+
+// The same day of the month after `day` (the month's last day when it is shorter), up to `last`.
+function monthlyAfter(day, last) {
+  const anchor = Number(day.slice(8, 10));
+  const out = [];
+  for (let m = 1; m <= 24; m += 1) {
+    const ym = new Date(Date.UTC(Number(day.slice(0, 4)), Number(day.slice(5, 7)) - 1 + m, 1)).toISOString().slice(0, 7);
+    const next = `${ym}-${String(Math.min(anchor, daysInMonth(ym))).padStart(2, '0')}`;
+    if (next > last) break;
+    out.push(next);
+  }
+  return out;
+}
+
+// A group is a bill when its latest monthly run has enough debits and its next day has not passed by more
+// than the grace (else it stopped or moved: the trailing average keeps it).
+function monthlyBill(key, group, { today, windowEnd, rules }) {
+  const debits = monthlyRun(group, rules.gapDays);
+  if (debits.length < rules.minRepeats) return null;
+  const last = debits[debits.length - 1];
+  const due = monthlyAfter(last.day, windowEnd);
+  if (!due.length || dayDiff(due[0], today) > rules.dueGraceDays) return null;
+  return {
+    key,
+    label: String(last.description || key).trim().slice(0, 60),
+    line: last.spendLine,
+    amount_usd: round2(median(debits.slice(-3).map((d) => d.amount))),
+    day_of_month: Number(last.day.slice(8, 10)),
+    last_day: last.day,
+    count: debits.length,
+    days: due.map((d) => (d < today ? today : d)),
+    memberIds: debits.map((d) => d.id),
+  };
+}
+
+// The repeating bills in the last FINDER_DAYS of spending debits, earliest next day first. marks: key ->
+// 'business' | 'household' (a label only).
+function findRepeating(classified, { today, windowEnd, marks = {}, rules = REPEAT_RULES }) {
+  const from = addDays(today, -FINDER_DAYS);
+  const byKey = new Map();
+  for (const l of classified) {
+    const key = BILL_LINES.has(l.spendLine) && l.day >= from && l.day <= today ? merchantKey(l.description) : '';
+    if (!key) continue;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(l);
+  }
+  const bills = [];
+  // Usage-based charges (API top-ups, fuel) come days apart, so no monthly run forms.
+  for (const [key, debits] of byKey) {
+    for (const group of amountGroups(debits, rules.tolerance)) {
+      const bill = monthlyBill(key, group, { today, windowEnd, rules });
+      if (bill) bills.push({ ...bill, mark: marks[key] || null });
+    }
+  }
+  return bills.sort((a, b) => a.days[0].localeCompare(b.days[0]) || a.key.localeCompare(b.key));
 }
 
 // ── Planned items ───────────────────────────────────────────────────────────────────────────────────
@@ -355,6 +476,11 @@ function spendFlows(i, c) {
   ]);
 }
 
+// Repeating bills on their own days (their debits are out of the trailing average).
+function repeatingFlows(i, c) {
+  return c.bills.flatMap((b) => b.days.map((d) => flow(d, 'repeating_bills', b.amount_usd)));
+}
+
 // Card owed today (past charges not yet paid), pay runs (net on the pay date; their taxes are tax
 // rows) and tax payments due in the window.
 function obligationFlows(i, c) {
@@ -380,7 +506,7 @@ function itemFlows(i, c) {
   });
 }
 
-const SOURCES = [stripeFlows, bookedFlows, invoiceFlows, duesFlows, expectedFlows, spendFlows, obligationFlows, itemFlows];
+const SOURCES = [stripeFlows, bookedFlows, invoiceFlows, duesFlows, expectedFlows, spendFlows, repeatingFlows, obligationFlows, itemFlows];
 
 // ── Context: everything the sources share ───────────────────────────────────────────────────────────
 function context(i) {
@@ -393,7 +519,11 @@ function context(i) {
   // work = the visit's value as booked work (for the expected line); value = the cash still to come
   // (0 once invoiced: the invoice brings that cash).
   const byWeek = (pick) => weeks.map((w) => sum(booked.filter((v) => v.week === w.index), pick));
-  const spend = classifySpend(i.bankLines, { pool: i.poolAccounts, feedCards: i.feedCards, from: trailingFrom, to: trailingTo }).totals;
+  const classified = classifyLines(i.bankLines, { pool: i.poolAccounts, feedCards: i.feedCards });
+  const bills = findRepeating(classified, { today: i.today, windowEnd: weeks[WEEKS - 1].end, marks: i.marks });
+  // a bill's own debits leave the trailing average: the bill counts on its own days instead
+  const skip = new Set(bills.flatMap((b) => b.memberIds));
+  const spend = spendTotals(classified, { from: trailingFrom, to: trailingTo, skip }).totals;
   const items = i.items.filter((it) => it.active !== false);
   // A payoff plan that has ended stands in for nothing.
   const payoffs = items.filter((it) => it.kind === 'card_payoff' && !(payoffEnd(it) && payoffEnd(it) < i.today));
@@ -420,6 +550,7 @@ function context(i) {
     perVisit: i.trailing.visits > 0 ? spend.products_fuel / i.trailing.visits : 0,
     items,
     payoffs,
+    bills,
     missing: [...i.missing],
     lateBeyond: [],
   };
@@ -473,18 +604,26 @@ function runFacts(c, i) {
   return facts.filter((f) => f.when).map((f) => f.fact);
 }
 
+// The repeating bills that land in week n, by day, for the week's lines.
+function billsInWeek(c, n) {
+  return c.bills.flatMap((b) => b.days.filter((d) => weekOf(c.weeks, d) === n)
+    .map((d) => ({ key: b.key, label: b.label, day: d, amount_usd: b.amount_usd, mark: b.mark })))
+    .sort((a, b) => a.day.localeCompare(b.day) || a.key.localeCompare(b.key));
+}
+
 function computeForecast(input) {
   const i = normalize(input);
   const c = context(i);
   const flows = SOURCES.flatMap((source) => source(i, c));
   const known = Number.isFinite(i.opening.bankUsd);
-  const weeks = weekRows(c, flows, known ? i.opening.bankUsd : 0);
+  const weeks = weekRows(c, flows, known ? i.opening.bankUsd : 0).map((w, n) => ({ ...w, bills: billsInWeek(c, n) }));
   return {
     today: c.today,
     window_end: c.windowEnd,
     opening: { bank_usd: known ? round2(i.opening.bankUsd) : null, partial: !!i.opening.partial, card_owed_usd: round2(i.opening.cardOwedUsd) },
     expected_available: !!c.season.ratioFor,
     weeks,
+    repeating: c.bills.map(({ memberIds, days, ...bill }) => ({ ...bill, next_day: days[0] })),
     lowest: {
       booked: lowestOf(weeks, 'end_booked'),
       expected: lowestOf(weeks, 'end_expected'),
@@ -503,6 +642,8 @@ function computeForecast(input) {
       weekly_usd: roundAll(c.weekly),
       products_fuel_per_visit_usd: round2(c.perVisit),
       baseline_weekly_work_usd: round2((i.trailing.workValueUsd / c.trailingDays.length) * 7),
+      finder_days: FINDER_DAYS,
+      repeating_bills: c.bills.length,
     },
     missing: [...c.missing, ...runFacts(c, i)],
   };
@@ -523,7 +664,8 @@ function lowestOf(rows, key) {
 module.exports = {
   computeForecast,
   _private: {
-    buildWeeks, weekOf, collectionCurve, spread, lander, seasonRatios, classifySpend, occurrences, hireCosts,
-    addDays, addBusinessDays, dayDiff, MAX_LAG_DAYS, WEEKS, TRAILING_WEEKS,
+    buildWeeks, weekOf, collectionCurve, spread, lander, seasonRatios, classifyLines, spendTotals, findRepeating,
+    merchantKey, monthlyAfter, occurrences, hireCosts, addDays, addBusinessDays, dayDiff, MAX_LAG_DAYS, WEEKS,
+    TRAILING_WEEKS, FINDER_DAYS, REPEAT_RULES,
   },
 };

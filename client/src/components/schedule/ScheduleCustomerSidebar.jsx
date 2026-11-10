@@ -425,7 +425,7 @@ export default function ScheduleCustomerSidebar({
                 </a>
               </div>
             )}
-            {/* The stop's gate and access codes, read only (GATE_SCHEDULE_ACCESS_CODES). */}
+            {/* The stop's gate and access codes, read only. */}
             <ScheduleAccessSection service={service} variant="panel" />
             {service.technicianName && (
               <div className="mt-4">

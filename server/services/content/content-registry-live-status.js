@@ -315,6 +315,11 @@ function computeBodySignals(html, contentType) {
   };
 }
 
+// No body was read (the redirect follow failed): every signal is unknown.
+const NO_BODY_SIGNALS = Object.freeze({
+  title: null, challenge: null, nonHtml: null, softNotFound: null, visibleTextLength: null,
+});
+
 function classifyLiveStatus({ status, redirectTargetUrl, canonicalTargetUrl, requestedUrl, noindex, challenge, softNotFound, nonHtml }) {
   if (!status) return 'unknown';
   const code = Number(status);
@@ -497,16 +502,16 @@ async function checkUrlLiveStatus(requestedUrl, {
       }
     }
 
-    const bodySignals = followError ? null : computeBodySignals(finalBody, finalContentType);
+    const bodySignals = followError ? NO_BODY_SIGNALS : computeBodySignals(finalBody, finalContentType);
     const sitemap = sitemapSignal({ sitemapPaths, requestedUrl, redirectTargetUrl, canonicalTargetUrl });
     const liveStatus = followError ? 'error' : redirectTargetUrl
       ? classifyRedirectLiveStatus({
         finalStatus, redirectTargetUrl, noindex,
-        challenge: bodySignals?.challenge, softNotFound: bodySignals?.softNotFound, nonHtml: bodySignals?.nonHtml,
+        challenge: bodySignals.challenge, softNotFound: bodySignals.softNotFound, nonHtml: bodySignals.nonHtml,
       })
       : classifyLiveStatus({
         status, redirectTargetUrl, canonicalTargetUrl, requestedUrl, noindex,
-        challenge: bodySignals?.challenge, softNotFound: bodySignals?.softNotFound, nonHtml: bodySignals?.nonHtml,
+        challenge: bodySignals.challenge, softNotFound: bodySignals.softNotFound, nonHtml: bodySignals.nonHtml,
       });
 
     return {
@@ -522,8 +527,12 @@ async function checkUrlLiveStatus(requestedUrl, {
       noindex_detected: noindex,
       sitemap_present: sitemap.present,
       sitemap_status: sitemap.status,
-      page_title: bodySignals?.title ?? null,
-      visible_text_length: bodySignals?.visibleTextLength ?? null,
+      page_title: bodySignals.title,
+      visible_text_length: bodySignals.visibleTextLength,
+      // Which body signal made a 'soft_404' (no document vs a not-found
+      // page), so a caller that expects a plain-text file can tell them apart.
+      non_html: bodySignals.nonHtml,
+      soft_not_found: bodySignals.softNotFound,
       content_type: finalContentType || null,
       truncated: finalTruncated,
       error: followError,
@@ -544,6 +553,8 @@ async function checkUrlLiveStatus(requestedUrl, {
       sitemap_status: sitemap.status,
       page_title: null,
       visible_text_length: null,
+      non_html: null,
+      soft_not_found: null,
       truncated: false,
       error: err.message,
     };

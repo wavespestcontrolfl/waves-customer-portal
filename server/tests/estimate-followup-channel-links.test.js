@@ -70,7 +70,7 @@ function makeBuilder(table, cfg = {}) {
   for (const m of [
     'join', 'whereIn', 'whereNotIn', 'whereNotNull', 'whereNull', 'whereNot',
     'where', 'whereBetween', 'select', 'groupBy', 'max', 'as', 'orderBy',
-    'orWhereNull', 'andWhere', 'whereNotExists', 'whereRaw',
+    'orWhereNull', 'andWhere', 'whereNotExists', 'whereRaw', 'distinctOn',
   ]) {
     b[m] = jest.fn(() => b);
   }

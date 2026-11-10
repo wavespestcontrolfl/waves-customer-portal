@@ -22,7 +22,7 @@ const access = require('../services/typed-decisions/visit-access-shadow');
 
 jest.setTimeout(60000);
 
-const GATES = ['GATE_TYPED_DECISIONS', 'GATE_TYPED_DECISIONS_CLEF', 'GATE_VISIT_ACCESS_FLAGS', 'GATE_NEIGHBORHOOD_ACCESS'];
+const GATES = ['GATE_TYPED_DECISIONS', 'GATE_TYPED_DECISIONS_CLEF', 'GATE_VISIT_ACCESS_FLAGS'];
 const saved = {};
 beforeAll(() => { for (const k of GATES) saved[k] = process.env[k]; });
 afterAll(() => { for (const k of GATES) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
@@ -450,7 +450,6 @@ describe('visit access shadow: rules that need no database', () => {
   });
 
   test('a shared neighborhood gate entry counts as a code on file, and its code never leaves', async () => {
-    process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
     const neighborhoodId = randomUUID();
     await database('neighborhoods').insert({ id: neighborhoodId, active: true });
     await database('neighborhood_access').insert({ neighborhood_id: neighborhoodId, gate_label: 'Main', access_type: 'keypad', code: '6612', status: 'active' });

@@ -42,7 +42,7 @@ const ROAD_DAY = dayAhead(1);
 const PLAIN_DAY = dayAhead(4);
 const NON_ROAD_DAY = dayAhead(12);
 const GATES = ['GATE_PICKER_ROAD_CHECK', 'GATE_SAVE_ROAD_TIMES', 'GATE_SAVE_ROAD_BUY', 'GATE_ADMIN_ARRIVAL_WINDOWS',
-  'GATE_STAFF_ROUTE_INSERTION', 'GATE_SCHEDULING_CAPACITY', 'GATE_DRIVE_TIME_CALIBRATION'];
+  'GATE_SCHEDULING_CAPACITY', 'GATE_DRIVE_TIME_CALIBRATION'];
 const savedEnv = Object.fromEntries(GATES.map((key) => [key, process.env[key]]));
 afterAll(() => {
   GATES.forEach((key) => { if (savedEnv[key] === undefined) delete process.env[key]; else process.env[key] = savedEnv[key]; });
@@ -97,7 +97,6 @@ beforeEach(() => {
   process.env.GATE_SAVE_ROAD_TIMES = 'true';
   process.env.GATE_SAVE_ROAD_BUY = 'true';
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
-  process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
   delete process.env.GATE_SCHEDULING_CAPACITY;
 });
 afterEach(() => { jest.restoreAllMocks(); });

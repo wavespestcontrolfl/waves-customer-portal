@@ -11,12 +11,10 @@
 // joins. Differing codes in one neighborhood still never ring (owner ruling
 // 2026-10-03). The copy never carries a code, the customer's words or a phone
 // number: it names the kind of code, who sent it and the day.
-// Dark behind GATE_ACCESS_CODES_FOUND_BELL (read at call time). With
-// GATE_ACCESS_CODES_SECTION off the list is not served, so the row closes.
 // Contract for the copy and the lifecycle: docs/admin-notifications.md.
 
 const db = require('../models/db');
-const { accessCodesFoundBellLive, alertEpisodesLive } = require('../config/feature-gates');
+const { alertEpisodesLive } = require('../config/feature-gates');
 const { composeAdminAlert, raiseAdminAlert, cutAtWord, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { fitAction, shortDateET, tidyName, listWords } = require('./admin-alert-names');
 
@@ -170,7 +168,6 @@ async function raiseFound(trx, composed, dedupeKey) {
 
 const CLOSE_RESOLUTIONS = {
   count_zero: 'No codes are waiting',
-  section_off: 'The access codes section is off',
   category_silenced: 'Gate codes found in messages are silenced in Settings',
 };
 
@@ -192,21 +189,17 @@ async function categorySilenced() {
 }
 
 /**
- * Five-minute cron entry point. Returns { skipped } when the gate is off,
- * else { count, outcome }: raised | refreshed | unchanged | suppressed |
+ * Five-minute cron entry point. Returns { count, outcome }: raised | refreshed | unchanged | suppressed |
  * closed | clear. A read or write failure throws and never closes the row.
  * One sync runs at a time across instances: it holds the same advisory lock
  * notifyAdmin takes for this row, and reads the codes inside it.
- * `waitingCodes`, `list`, `sectionOn` and `dedupeKey` are for tests.
+ * `waitingCodes`, `list` and `dedupeKey` are for tests.
  */
-async function syncFoundCodesBell({ now = new Date(), conn = db, gateEnabled, sectionOn, waitingCodes, list, dedupeKey = DEDUPE_KEY } = {}) {
-  if (!(gateEnabled ?? accessCodesFoundBellLive())) return { skipped: 'disabled' };
+async function syncFoundCodesBell({ now = new Date(), conn = db, waitingCodes, list, dedupeKey = DEDUPE_KEY } = {}) {
   const capture = require('./access-code-capture');
-  const section = sectionOn ?? capture.enabled();
   const readWaiting = waitingCodes || capture.listFoundWaiting;
   const readList = list || capture.listFound;
-  let stop = section ? null : 'section_off';
-  if (!stop && await categorySilenced()) stop = 'category_silenced';
+  const stop = (await categorySilenced()) ? 'category_silenced' : null;
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
     const waiting = stop ? [] : await readWaiting(trx);

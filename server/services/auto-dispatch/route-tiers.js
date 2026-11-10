@@ -32,9 +32,8 @@
  *     anywhere → the current scheduled_date IS the anchor (never moved).
  *     change_count > 0 with no dated evidence, or an unreadable evidence
  *     query → anchor UNKNOWN → NO MOVE (fail closed — never guess a budget).
- *     Re-dated by anything else (GATE_AUTO_DISPATCH_REDATE_ANCHOR, owner
- *     2026-10-22, auto-dispatch audit D2: "the new date becomes the planned
- *     date"): a person, a script or another automatic mover that put the
+ *     Re-dated by anything else (owner 2026-10-22, auto-dispatch audit D2:
+ *     "the new date becomes the planned date"): a person, a script or another automatic mover that put the
  *     visit on a new date after an auto move restarts the budget at that
  *     date (redateRestart), instead of leaving it measured from a date the
  *     visit no longer keeps — which blocks every day move (DRIFT_ANCHOR_STALE)
@@ -60,9 +59,7 @@
  *   (migration 20260720000000 invariant), so one predicate covers both.
  */
 const { toDateStr, shiftDateStr } = require('./dates');
-const { gateEnvValue } = require('../../config/feature-gates');
 
-const REDATE_ANCHOR_GATE = 'GATE_AUTO_DISPATCH_REDATE_ANCHOR';
 // An audit 'changed' row and its move's atomic reschedule_log row land
 // seconds apart (prod 2026-10-22: 347 of 347 pairs within 3 s).
 const MOVE_PAIR_WINDOW_MS = 10 * 60 * 1000;
@@ -154,8 +151,8 @@ function tierMoveWindow({ origDate, anchorDate, today, radius }) {
  * budget). Returns Map<serviceId, earliest 'YYYY-MM-DD' pre-move date>; a
  * service ABSENT from the map has no recorded auto-move. On query failure
  * returns null (callers must treat EVERY visit as anchor-unknown → no move;
- * fail closed). With GATE_AUTO_DISPATCH_REDATE_ANCHOR on at load, the map
- * also carries `redates` (toolMoveChains), which resolveAnchor reads.
+ * fail closed). The map also carries `redates` (toolMoveChains), which
+ * resolveAnchor reads.
  */
 async function loadAnchorMap(db, serviceIds) {
   const map = new Map();
@@ -193,7 +190,7 @@ async function loadAnchorMap(db, serviceIds) {
     };
     for (const r of moveRows) consider(r.scheduled_service_id, r.original_date, r.created_at);
     for (const r of auditRows) consider(r.scheduled_service_id, r.old_scheduled_date, r.created_at);
-    if (gateEnvValue(REDATE_ANCHOR_GATE)) map.redates = toolMoveChains(moveRows, auditRows);
+    map.redates = toolMoveChains(moveRows, auditRows);
     return map;
   } catch (_) {
     return null; // fail closed upstream
@@ -251,9 +248,8 @@ function toolMoveChains(moveRows, auditRows) {
 /**
  * The date a re-date auto-dispatch did not make restarted the drift budget
  * at (D2), or null: the visit's current date when it is no longer where the
- * newest auto move left it, else the chain's own restart. Null with the gate
- * off at load (no `redates`), for a visit no auto move touched, or for an
- * incomplete chain. A person's re-date is still the person's: eligibility.js
+ * newest auto move left it, else the chain's own restart. Null for a visit no
+ * auto move touched, or for an incomplete chain. A person's re-date is still the person's: eligibility.js
  * isPersonPlacedVisit keeps such a visit out of every move first.
  */
 function redateRestart(service, anchorMap) {
@@ -291,6 +287,20 @@ function resolveAnchor(service, anchorMap) {
  * that do not pass it (rebooker's staff series moves) keep the 72-hour
  * behavior, byte for byte.
  *
+ * `opts.toldLock` (GATE_NIGHT_TOLD_LOCK, owner 2026-11-05 "D1 a") only counts
+ * together with `lock24h`: a night tool never changes a time the customer was
+ * already told, so a visit whose latest promise has a known slot (the
+ * no-show detector's record of what really went out, auto-dispatch/told-visits.js)
+ * is frozen too, whatever the band. reminder_72h_sent is not read for this: the
+ * sender also sets it when the 72-hour reminder was skipped. A promise with an
+ * unknown window does not freeze here. One bulk read; a failure is `failed: true`.
+ * Callers that do not pass it are unchanged, byte for byte (route-reorder's
+ * 4:20 pass, the rebooker).
+ *
+ * `opts.anyPromise` (GATE_DAY_ONLY_PROMISE, owner 2026-11-05 "D1 a") is honored only when `toldLock` is: ANY
+ * resolved promise then freezes the visit, a day-only one or an unknown window too, because this tool moves
+ * DATES and a customer told only the day was still told that day.
+ *
  * Returns { failed, frozen:Set<id> }:
  *   failed=true  → the status could not be read; callers MUST treat EVERY
  *                  visit as frozen (fail closed).
@@ -302,6 +312,7 @@ async function loadReminderFreeze(db, serviceIds, now = new Date(), freezeHours,
   if (!serviceIds || serviceIds.length === 0) return { failed: false, frozen: new Set() };
   const lock24h = !!opts && opts.lock24h === true;
   const sentColumn = lock24h ? 'reminder_24h_sent' : 'reminder_72h_sent';
+  const toldLock = lock24h && opts.toldLock === true;
   const bandHours = freezeHours === undefined ? sendableHoursFor(lock24h) : freezeHours;
   try {
     const rows = await db('appointment_reminders')
@@ -359,6 +370,11 @@ async function loadReminderFreeze(db, serviceIds, now = new Date(), freezeHours,
           frozen.add(r.scheduled_service_id);
         }
       }
+    }
+
+    if (toldLock) {
+      const told = await require('./told-visits').loadToldVisitIds(db, serviceIds, now, ...(opts.anyPromise === true ? [{ anyPromise: true }] : []));
+      for (const id of told) frozen.add(id);
     }
 
     return { failed: false, frozen };

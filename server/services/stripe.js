@@ -3392,10 +3392,14 @@ const StripeService = {
       .leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id')
       .select(
         'payments.*',
-        // A removed method nulls payment_method_id (ON DELETE SET NULL) —
-        // fall back to the brand/last-four snapshot taken at charge time.
-        database.raw('COALESCE(payment_methods.card_brand, payments.card_brand) as card_brand'),
-        database.raw('COALESCE(payment_methods.last_four, payments.card_last_four) as last_four'),
+        // The payment's own brand/last-four snapshot comes first: Stripe's
+        // card account updater can replace a saved card's number
+        // (card-details-sync), and an earlier payment keeps the card it was
+        // made with. The live method fills a payment with no snapshot; a
+        // removed method (ON DELETE SET NULL) leaves the snapshot its delete
+        // trigger filled.
+        database.raw('COALESCE(payments.card_brand, payment_methods.card_brand) as card_brand'),
+        database.raw('COALESCE(payments.card_last_four, payment_methods.last_four) as last_four'),
         'payment_methods.processor as pm_processor',
         database.raw('COALESCE(payment_methods.method_type, payments.payment_method_type) as method_type'),
         database.raw('COALESCE(payment_methods.bank_name, payments.bank_name) as bank_name')

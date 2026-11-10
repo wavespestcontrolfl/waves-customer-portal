@@ -137,17 +137,3 @@ describe('findSoundAlikeCustomers', () => {
     expect(knex).not.toHaveBeenCalled();
   });
 });
-
-describe('customerSearchFuzzyLive', () => {
-  const { customerSearchFuzzyLive } = require('../config/feature-gates');
-  afterEach(() => { delete process.env.GATE_CUSTOMER_SEARCH_FUZZY; });
-  test('dark unless exactly "true"', () => {
-    expect(customerSearchFuzzyLive()).toBe(false);
-    for (const value of ['1', 'TRUE', 'yes', '']) {
-      process.env.GATE_CUSTOMER_SEARCH_FUZZY = value;
-      expect(customerSearchFuzzyLive()).toBe(false);
-    }
-    process.env.GATE_CUSTOMER_SEARCH_FUZZY = 'true';
-    expect(customerSearchFuzzyLive()).toBe(true);
-  });
-});

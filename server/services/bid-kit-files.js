@@ -1,6 +1,6 @@
 'use strict';
 
-// Bid kit files (GATE_BID_KIT, dark, admin only). Private S3 storage for the papers a bid asks for: a PDF, PNG, JPEG
+// Bid kit files (admin only). Private S3 storage for the papers a bid asks for: a PDF, PNG, JPEG
 // or DOCX, at most 15 MB, under `bid-kit/<item id>/<random>-<name>`. No public ACL is ever set, and a file opens only
 // through a signed link that lasts at most 5 minutes. Nothing here reads the database.
 const crypto = require('crypto');

@@ -400,3 +400,44 @@ describe('reverifyBouncedEmailFromCall — gate', () => {
     expect(res).toEqual({ skipped: 'gated_off' });
   });
 });
+
+describe('findSourceCall options (other-spelling resend reads the extraction only)', () => {
+  function chainFor(rows) {
+    const calls = [];
+    const chain = {};
+    for (const m of ['where', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'orderByRaw', 'limit']) {
+      chain[m] = jest.fn((...a) => { calls.push([m, ...a]); return chain; });
+    }
+    chain.modify = jest.fn((fn) => { fn(chain); return chain; });
+    chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
+    return { chain, calls };
+  }
+  const run = async (opts) => {
+    jest.resetModules();
+    const db = require('../models/db');
+    const { chain, calls } = chainFor([{ id: 'call1' }]);
+    db.mockReturnValue(chain);
+    const { findSourceCall } = require('../services/email-bounce-reverify');
+    const row = await findSourceCall({ bouncedEmail: 'jondoe@example.com', customerId: 'c1', ...opts });
+    return { row, calls };
+  };
+
+  test('default: needs a recording, no settled filter (the audio lane is unchanged)', async () => {
+    const { row, calls } = await run({});
+    expect(row).toEqual({ id: 'call1' });
+    expect(calls.some((c) => c[0] === 'whereNotNull' && c[1] === 'recording_url')).toBe(true);
+    expect(calls.some((c) => c[0] === 'whereRaw' && JSON.stringify(c).includes('email_spelling_settled'))).toBe(false);
+    expect(calls.some((c) => c[0] === 'where')).toBe(false); // customerId only ranks
+  });
+
+  test('requireRecording=false, requireSettled=true: no recording filter, only calls with a settled spelling', async () => {
+    const { calls } = await run({ requireRecording: false, requireSettled: true });
+    expect(calls.some((c) => c[0] === 'whereNotNull')).toBe(false);
+    expect(calls.some((c) => c[0] === 'whereRaw' && (c[2] || []).includes('%"email_spelling_settled"%'))).toBe(true);
+  });
+
+  test('onlyCustomerId keeps ONLY that customer\'s calls (the other-spelling resend needs a positive link)', async () => {
+    const { calls } = await run({ requireRecording: false, requireSettled: true, onlyCustomerId: 'c1' });
+    expect(calls).toContainEqual(['where', 'customer_id', 'c1']);
+  });
+});

@@ -16,14 +16,14 @@ jest.mock('../services/appointment-email', () => ({
   sendAppointmentReminderEmail: jest.fn(async () => ({ ok: true })),
   sendTechEnRouteEmail: jest.fn(async () => ({ ok: true })),
   // The recipient resolution the confirmation email itself uses; the
-  // new-client promotion (GATE_NEW_CLIENT_CONFIRM_EMAIL) reuses it.
+  // new-client promotion reuses it.
   _private: { loadCustomer: jest.fn(async (id) => ({ id })), resolveRecipients: jest.fn(async () => []) },
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
 jest.mock('../services/messaging/send-window', () => ({ isWithinSendWindowET: jest.fn(() => true) }));
 // gateEnvValue: getReminderPrefs now consults the per-property toggle resolver
 // (app property scope, PR 3), which reads GATE_APP_PROPERTY_SCOPE at call time.
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false), newClientConfirmEmailLive: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false) }));
 
 const db = require('../models/db');
 const AppointmentEmail = require('../services/appointment-email');
@@ -32,7 +32,7 @@ const { getAppointmentContacts } = require('../services/customer-contact');
 const AppointmentReminders = require('../services/appointment-reminders');
 
 const { apptChannel, resolve72hChannel, resolveConfirmationChannel, deliverConfirmation, isOneTimeVisit, deliverAppointmentNotice, deliverConfirmationByChannel, getReminderPrefs } = AppointmentReminders._test;
-const { isEnabled, newClientConfirmEmailLive } = require('../config/feature-gates');
+const { isEnabled } = require('../config/feature-gates');
 
 // Minimal knex-style chainable mock. first() resolves null so the
 // no-reachable-channel alert dedupe check finds no prior row and proceeds.
@@ -364,7 +364,7 @@ describe('getReminderPrefs account-level channel resolution', () => {
   });
 });
 
-describe('resolveConfirmationChannel — new client gets text AND email (GATE_NEW_CLIENT_CONFIRM_EMAIL)', () => {
+describe('resolveConfirmationChannel — new client gets text AND email', () => {
   const sampleRecipients = [{ email: 'sample.lead@example.com', name: 'Sample Lead', holder: true }];
   const prefsOf = (extra = {}) => ({
     unavailable: false,
@@ -389,16 +389,12 @@ describe('resolveConfirmationChannel — new client gets text AND email (GATE_NE
   };
 
   beforeEach(() => {
-    newClientConfirmEmailLive.mockImplementation(() => true);
     AppointmentEmail._private.loadCustomer.mockImplementation(async (id) => ({ id }));
     AppointmentEmail._private.resolveRecipients.mockImplementation(async () => sampleRecipients);
     visitsDb(null);
   });
-  afterEach(() => {
-    newClientConfirmEmailLive.mockImplementation(() => false);
-  });
 
-  test('gate ON, new client, usable email: the default sms channel is promoted to both', async () => {
+  test('new client, usable email: the default sms channel is promoted to both', async () => {
     await expect(resolveConfirmationChannel(prefsOf(), ids)).resolves.toBe('both');
     // Looked for a COMPLETED visit of this customer, and resolved the email
     // recipients the way the confirmation email does.
@@ -406,13 +402,6 @@ describe('resolveConfirmationChannel — new client gets text AND email (GATE_NE
     expect(AppointmentEmail._private.resolveRecipients).toHaveBeenCalledWith(
       { id: 'c1' }, { scheduledServiceId: 'ss1', eventType: 'appointment.confirmation' },
     );
-  });
-
-  test('gate OFF: stays sms and reads nothing', async () => {
-    newClientConfirmEmailLive.mockImplementation(() => false);
-    await expect(resolveConfirmationChannel(prefsOf(), ids)).resolves.toBe('sms');
-    expect(db).not.toHaveBeenCalled();
-    expect(AppointmentEmail._private.resolveRecipients).not.toHaveBeenCalled();
   });
 
   test('explicit portal choice of the confirmation channel (stamp) keeps sms', async () => {
@@ -463,17 +452,14 @@ describe('resolveConfirmationChannel — new client gets text AND email (GATE_NE
     expect(AppointmentEmail._private.resolveRecipients).not.toHaveBeenCalled();
   });
 
-  test('any thrown lookup keeps sms and warns (completed-visit read, recipient resolution, gate read)', async () => {
+  test('any thrown lookup keeps sms and warns (completed-visit read, recipient resolution)', async () => {
     const logger = require('../services/logger');
     visitsDb(null, { fail: true });
     await expect(resolveConfirmationChannel(prefsOf(), ids)).resolves.toBe('sms');
     visitsDb(null);
     AppointmentEmail._private.resolveRecipients.mockImplementation(async () => { throw new Error('prefs held'); });
     await expect(resolveConfirmationChannel(prefsOf(), ids)).resolves.toBe('sms');
-    AppointmentEmail._private.resolveRecipients.mockImplementation(async () => sampleRecipients);
-    newClientConfirmEmailLive.mockImplementation(() => { throw new Error('gate unreadable'); });
-    await expect(resolveConfirmationChannel(prefsOf(), ids)).resolves.toBe('sms');
-    expect(logger.warn).toHaveBeenCalledTimes(3);
+    expect(logger.warn).toHaveBeenCalledTimes(2);
   });
 
   test('no customer id keeps sms', async () => {
@@ -537,18 +523,6 @@ describe('resolveConfirmationChannel — new client gets text AND email (GATE_NE
       expect(smsAttempt).toHaveBeenCalledTimes(1);
       expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
     });
-
-    test('gate OFF: a new client is text-only, exactly as before', async () => {
-      newClientConfirmEmailLive.mockImplementation(() => false);
-      setDbQueues({
-        notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
-        customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
-      });
-      const smsAttempt = jest.fn(async () => true);
-      await call(smsAttempt);
-      expect(smsAttempt).toHaveBeenCalledTimes(1);
-      expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
-    });
   });
 
   describe('deliverConfirmation (admin manual / inline bookings) uses the promoted channel', () => {
@@ -601,13 +575,6 @@ describe('resolveConfirmationChannel — new client gets text AND email (GATE_NE
 
     test('a customer since more than 90 days ago after hours: the whole confirmation waits, no email', async () => {
       tableAwareDb({ completedRow: null, longStandingRow: { id: 'c1' } });
-      await expect(run()).resolves.toBe(false);
-      expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
-    });
-
-    test('gate OFF: a new client after hours keeps the old behavior, no email', async () => {
-      newClientConfirmEmailLive.mockImplementation(() => false);
-      tableAwareDb({ completedRow: null });
       await expect(run()).resolves.toBe(false);
       expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
     });
@@ -725,7 +692,7 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
 
   test("'sms' preference: runs the caller's SMS send, never emails", async () => {
     setDbQueues({
-      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms', appointment_confirmation_channel_explicit: true })],
       customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
     });
     const smsAttempt = jest.fn(async () => true);
@@ -817,7 +784,7 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
 
   test("'sms' preference: a consent-blocked text (smsPermanentlyBlocked) falls back to the confirmation email", async () => {
     setDbQueues({
-      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms', appointment_confirmation_channel_explicit: true })],
       customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
       scheduled_services: [
         // scheduledServiceApptTime resolves the slot for the email body...
@@ -843,7 +810,7 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
 
   test("'sms' preference: a delivered text never triggers the smsPermanentlyBlocked email leg", async () => {
     setDbQueues({
-      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms', appointment_confirmation_channel_explicit: true })],
       customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
     });
     const smsAttempt = jest.fn(async () => true);
@@ -857,7 +824,7 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
 
   test("'sms' preference: an ordinary failed send (no smsPermanentlyBlocked) still never emails — deferrals/sweeps own the retry", async () => {
     setDbQueues({
-      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+      notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms', appointment_confirmation_channel_explicit: true })],
       customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
     });
     const smsAttempt = jest.fn(async () => false);
@@ -918,7 +885,7 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
   describe('callback_number_needed (disclaimed caller ID, owner ruling 2026-09-25)', () => {
     test('disclaimed ANI + email on file: the confirmation is emailed, the disclaimed number is never texted', async () => {
       setDbQueues({
-        notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+        notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms', appointment_confirmation_channel_explicit: true })],
         customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
         scheduled_services: [
           firstChain({ scheduled_date: '2026-06-20', window_start: '08:00:00' }),
@@ -943,7 +910,7 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
     test('disclaimed ANI + no email on file: neither channel reaches the customer — stays held (crm_notes carries the warning)', async () => {
       AppointmentEmail.sendAppointmentConfirmationEmail.mockResolvedValueOnce({ skipped: true, reason: 'missing_email' });
       setDbQueues({
-        notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+        notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms', appointment_confirmation_channel_explicit: true })],
         customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
         scheduled_services: [
           firstChain({ scheduled_date: '2026-06-20', window_start: '08:00:00' }),

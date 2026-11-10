@@ -52,6 +52,7 @@
 //   missing signature verification or path that creates customers
 //   from arbitrary inbound numbers without rate-limiting.
 import { renderWithDidYouMean } from "../../components/admin/DidYouMean";
+import GreetingNameNote, { useGreetingNameCheck } from "../../components/admin/GreetingNameCheck";
 import { isAcceptedSms, unansweredSmsReply } from "../../utils/sms-delivery";
 import React, {
   useState,
@@ -1301,6 +1302,7 @@ export function SmsTab({
   useEffect(() => {
     if (smsIsTechnicianRole && sendTiming !== "now") setSendTiming("now");
   }, [smsIsTechnicianRole, sendTiming, setSendTiming]);
+  const nameCheck = useGreetingNameCheck({ customerId: selectedCustomerId, text: msgBody, setText: setMsgBody });
   const [sending, setSending] = useState(false);
   // Mirrors `sending` for async code that must not act mid-send: canceling
   // a review row while its /sms is in flight can land before the server's
@@ -1411,6 +1413,8 @@ export function SmsTab({
   const [smsLoadingMore, setSmsLoadingMore] = useState(false);
   const smsSearchRef = useRef("");
   const smsLoadSeqRef = useRef(0);
+  // Latest "To" box action: a search reply applies only if no keystroke or pick came after it.
+  const toSearchSeqRef = useRef(0);
   const smsRequestRef = useRef(null);
   const activeThreadRef = useRef(activeThread);
   activeThreadRef.current = activeThread;
@@ -1437,6 +1441,7 @@ export function SmsTab({
 
   const selectSmsRecipient = (contactPhone, ourNumber, customerId, replyTo) => {
     if (sending || uploading || hearing) return;
+    toSearchSeqRef.current += 1;
     const selectedDraft = setDraftForRecipient(contactPhone ? smsThreadKey(contactPhone) : "", (draft) => {
       const hasDraft = draft.msgBody.trim() || draft.attachments.length || draft.loadedMessageDraft;
       if (hasDraft && (draft.selectedCustomerId || null) !== (customerId || null)) {
@@ -3575,6 +3580,7 @@ export function SmsTab({
           value={toSearch || toNumber}
           onChange={async (e) => {
             const val = e.target.value;
+            const searchSeq = ++toSearchSeqRef.current;
             if (/^[\d\s()\-+]+$/.test(val)) {
               setToNumber(val);
               setToSearch("");
@@ -3592,10 +3598,8 @@ export function SmsTab({
                       },
                     },
                   );
-                  if (r.ok) {
-                    const d = await r.json();
-                    setToResults(d.customers || []);
-                  }
+                  const d = r.ok ? await r.json() : null;
+                  if (d && searchSeq === toSearchSeqRef.current) setToResults(d.customers || []);
                 } catch {
                   /* ignore */
                 }
@@ -3791,6 +3795,7 @@ export function SmsTab({
           <Textarea
             aria-label="Text message"
             name="smsMessage"
+            data-own-mic="true"
             placeholder={listening ? "Listening…" : "Type your message…"}
             value={msgBody}
             onChange={(e) => setMsgBody(e.target.value)}
@@ -3799,6 +3804,7 @@ export function SmsTab({
             className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-ui-body text-zinc-900 resize-y focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
           />
           </Field>
+          <GreetingNameNote check={nameCheck} disabled={rewritingSms || sending} />
           <div className="mt-2 flex items-center gap-2">
             <Button
               variant="secondary"

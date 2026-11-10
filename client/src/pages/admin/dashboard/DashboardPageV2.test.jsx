@@ -511,4 +511,16 @@ describe("DashboardPageV2 sections", () => {
     await waitFor(() => expect(within(document.getElementById("today")).getByText("Service Completion").parentElement.querySelector("polyline")).toBeNull());
   });
 
+  it("passes the alerts response's failed checks to the action inbox instead of All clear", async () => {
+    const fetchFixture = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => path.includes("/dashboard/alerts")
+      ? Promise.resolve({ asOf: "2026-11-05", alerts: [], failures: [{ id: "ar_overdue_60" }], hasCritical: false })
+      : fetchFixture(path, options));
+    renderPage();
+    await waitFor(() => expect(within(document.getElementById("today")).getByText(/1 check couldn't run: invoices 60\+ days overdue/)).toBeInTheDocument());
+    const today = document.getElementById("today");
+    expect(within(today).getByText("incomplete")).toBeInTheDocument();
+    expect(within(today).queryByText(/All clear/)).not.toBeInTheDocument();
+  });
+
 });

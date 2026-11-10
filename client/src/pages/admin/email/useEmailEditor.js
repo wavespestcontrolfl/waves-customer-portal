@@ -29,7 +29,7 @@ export function encodeEmailBody(text) {
 
 const uncertainKey = (userId) => `waves_email_schedule_uncertain:${userId}`;
 // Whether a refusal came from the schedule route after it looked the key up
-// (it says keyChecked). Any other refusal (sign-in, rate limit, gate off, a
+// (it says keyChecked). Any other refusal (sign-in, rate limit, a
 // proxy) never reached that lookup: the key stays, so a retry finds the first
 // row instead of queuing a second email.
 function keyLookedUp(result) {
@@ -408,7 +408,7 @@ export default function useEmailEditor(userId) {
     );
   };
 
-  // Schedule send (GATE_EMAIL_SEND_LATER). The server queues the email; the
+  // Schedule send. The server queues the email; the
   // draft clears only if it still holds the text that was queued. A request
   // whose answer was lost keeps its clientKey (uncertainSchedule), and the
   // Scheduled list reloads after every attempt.

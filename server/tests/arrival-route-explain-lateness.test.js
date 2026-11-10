@@ -62,7 +62,12 @@ describe('explain: true on the real evaluator', () => {
     // A is promised 10:00-12:00 for 2 hours. The new 10:00 visit sorts after A (same window, later
     // created) and would arrive 12:20, past its own limit. Placed FIRST it arrives 10:00 and A
     // still arrives 11:20, inside its window: every promise is kept.
-    const fit = evaluate([stop('A', '10:00', 120)], '10:00', 60, { explain: true });
+    // A route number the office typed keeps the check on the stored order (staff route
+    // insertion does not try other places), so only the explain pass sees the first position.
+    const target = prospective('10:00', 60);
+    const fit = evaluateArrivalPlacement({ ...context([stop('A', '10:00', 120)], target), routeOrderPinned: true }, {
+      windowStart: '10:00', windowEnd: '11:00', durationMinutes: 60, explain: true,
+    });
     expect(fit).toMatchObject({ feasible: false, reason: 'arrival_window' });
     expect(fit.lateness).toEqual({ targetLate: false, newlyLateStopIds: [], baselineLateStopIds: [], dayEndExceeded: false });
   });

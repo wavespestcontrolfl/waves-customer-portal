@@ -174,14 +174,14 @@ describe('ScheduleCustomerSidebar sibling-covered visit', () => {
   });
 });
 
-// GATE_SCHEDULE_ACCESS_CODES (owner ruling 2026-10-26): read-only Access block.
+// Schedule access codes (owner ruling 2026-10-26): read-only Access block.
 describe('ScheduleCustomerSidebar Access block', () => {
   it("shows the stop's codes with no buttons", async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}), clone() { return this; }, text: async () => '', headers: { get: () => null } })));
     try {
       render(
         <ScheduleCustomerSidebar
-          service={{ id: 'v0', customerId: 'c1', customerName: 'Test Customer', status: 'pending', address: '1 Test Lane', scheduleAccessEnabled: true, neighborhoodGateActions: true, propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)', neighborhoodEntryId: 'e1', neighborhoodEntryCode: '#4821' }] }}
+          service={{ id: 'v0', customerId: 'c1', customerName: 'Test Customer', status: 'pending', address: '1 Test Lane', neighborhoodGateActions: true, propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)', neighborhoodEntryId: 'e1', neighborhoodEntryCode: '#4821' }] }}
           onClose={() => {}}
         />,
       );

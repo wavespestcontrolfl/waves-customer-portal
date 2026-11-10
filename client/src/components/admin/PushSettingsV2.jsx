@@ -70,6 +70,7 @@ const BELL_CATEGORY_LABELS = {
   estimate_measurement_review: "Estimate measurement challenges",
   estimate_hot_view: "Estimate hot views",
   estimate_change_request: "Estimate change requests",
+  estimate_stuck: "Customers stuck booking an estimate",
   visit_prep_photos: "Customer photos before a visit",
   truck_kit: "Truck check tool issues",
   access_codes: "Gate codes found in messages",

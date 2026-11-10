@@ -1,6 +1,7 @@
 // GATE_LAWN_COST_PLUS_LIST (owner 2026-10-09): residential recurring lawn care
-// is listed at cost / (1 - 0.45), never below the market table, at least $55 a
-// visit. Discounts apply in full; the 35% collected-margin floor is a review
+// is listed at cost / (1 - 0.45), never below the market table (its $55 list
+// minimum was retired 2026-11-06 for the $55-after-discount minimum,
+// GATE_LAWN_MIN_AFTER_DISCOUNT; a basis stamped with it still replays it). Discounts apply in full; the 35% collected-margin floor is a review
 // line (owner 2026-11-02, "remove this"). Ships OFF: off must
 // price exactly as before, and a saved estimate replays as it was priced.
 const {
@@ -134,8 +135,15 @@ describe('gate ON: cost-plus list price', () => {
     expect(price(4540, ON).lawnSqFt).toBe(4540);
   });
 
-  test('the $55 per-visit minimum binds on a tiny lawn and is labeled', () => {
-    const tiers = byVisits(price(500, ON));
+  test('the retired list-side $55 minimum no longer binds; a basis that carries it still does', () => {
+    // Retired (owner 2026-11-06): the live knob is 0, so a tiny lawn lists at cost-plus.
+    expect(LAWN_PRICING_V2.costPlusList.minimumPerVisit).toBe(0);
+    for (const tier of price(500, ON).tiers) expect(tier.pricingSource).not.toBe('MINIMUM_PER_VISIT');
+    // A cost basis stamped before the retirement carries 55 and replays it.
+    const prior = LAWN_PRICING_V2.costPlusList.minimumPerVisit;
+    LAWN_PRICING_V2.costPlusList.minimumPerVisit = 55;
+    let tiers;
+    try { tiers = byVisits(price(500, ON)); } finally { LAWN_PRICING_V2.costPlusList.minimumPerVisit = prior; }
     for (const visits of [9, 12]) {
       expect(tiers[visits].perApp).toBe(55);
       expect(tiers[visits].annual).toBe(55 * visits);
@@ -178,7 +186,6 @@ describe('gate ON: cost-plus list price', () => {
     for (const sqft of SIZES) {
       for (const tier of price(sqft, ON).tiers) {
         expect(tier.annual).toBeGreaterThanOrEqual(tier.marketAnnual);
-        expect(tier.annual).toBeGreaterThanOrEqual(55 * tier.visits);
       }
     }
   });
@@ -710,7 +717,7 @@ describe('db-bridge rebases the knobs every sync', () => {
     await syncConstantsFromDB(fakeDb({ costPlusList: { listMargin: 0.5, materialPer1000SqftPerYear: { 9: 30 } } }));
     expect(LAWN_PRICING_V2.costPlusList.listMargin).toBe(0.5);
     expect(LAWN_PRICING_V2.costPlusList.materialPer1000SqftPerYear).toEqual({ 6: 16.33, 9: 30, 12: 29.84 });
-    expect(LAWN_PRICING_V2.costPlusList.minimumPerVisit).toBe(55);
+    expect(LAWN_PRICING_V2.costPlusList.minimumPerVisit).toBe(0);
 
     await syncConstantsFromDB(fakeDb({ targetCollectedMarginFloor: 0.35 }));
     expect(LAWN_PRICING_V2.costPlusList).toEqual(constants.LAWN_COST_PLUS_LIST_DEFAULTS);

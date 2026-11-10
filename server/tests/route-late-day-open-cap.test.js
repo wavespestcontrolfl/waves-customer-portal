@@ -34,8 +34,7 @@ const evaluate = (windowStart, durationMinutes, extra = {}) => {
 };
 const lateMinutesOfB = (fit) => minOf(fit.arrivals.find((a) => a.id === 'B').arrival) - 12 * 60;
 
-beforeEach(() => { process.env.GATE_STAFF_ROUTE_INSERTION = 'true'; delete process.env.GATE_SCHEDULING_CAPACITY; });
-afterEach(() => { delete process.env.GATE_STAFF_ROUTE_INSERTION; });
+beforeEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
 
 test('the cap is the insertion margin', () => {
   expect(INSERTION_MARGIN_MINUTES).toBe(15);

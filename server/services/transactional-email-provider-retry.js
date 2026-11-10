@@ -12,6 +12,12 @@ const RETRY_DELAYS_MS = [10 * 60 * 1000, 60 * 60 * 1000, 6 * 60 * 60 * 1000];
 const MAX_RETRIES = RETRY_DELAYS_MS.length;
 const CLAIM_LIMIT = 10;
 const STALE_CLAIM_MS = 10 * 60 * 1000;
+// A first-attempt row (provider_retry_count 0) stamped `started` whose process died before SendGrid
+// answered is settled only once it is older than the longest request the process can still have in
+// flight (sendgrid-mail REQUEST_TIMEOUT_MS) plus this margin for the time between the marker write and
+// the request, and for a late webhook event to land first.
+const FIRST_ATTEMPT_SETTLE_MARGIN_MS = 10 * 60 * 1000;
+const FIRST_ATTEMPT_UNKNOWN_REASON = 'Provider outcome unknown: first send attempt never confirmed (the worker stopped before SendGrid answered)';
 const HANDOFF_PHASE_PENDING = 'pending';
 const HANDOFF_PHASE_STARTED = 'started';
 const HANDOFF_PHASE_REJECTED = 'rejected';
@@ -260,6 +266,89 @@ async function recoverStaleClaims(now = new Date(), database = db) {
   return Number(requeued || 0) + uncertain + held + reopened + replaced;
 }
 
+// A first-attempt row is `queued` with the `started` marker for the length of one SendGrid request.
+// A process that dies inside that window (a deploy force-exits 25 s after SIGTERM without waiting for
+// in-flight sends) leaves the row held forever: the library refuses to re-send on ambiguity, the retry
+// rail only looks at provider_retry_count > 0, and a webhook event never arrives if the request never
+// left the box. The age a row must reach before it counts as abandoned, or null when the request
+// timeout is unknown (fail closed: settle nothing).
+function firstAttemptSettleAgeMs() {
+  const timeoutMs = Number(sendgrid.REQUEST_TIMEOUT_MS);
+  return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs + FIRST_ATTEMPT_SETTLE_MARGIN_MS : null;
+}
+
+// The row's own columns: first attempt, current attempt token carries the `started` marker (the
+// retryEvidence rule: a marker from an older token proves nothing), nothing scheduled, nothing
+// accepted, and untouched since before the cutoff.
+function stuckFirstAttemptRows(query, cutoff) {
+  return query
+    .where({ status: 'queued', provider_handoff_phase: HANDOFF_PHASE_STARTED })
+    .where((count) => count.where('provider_retry_count', 0).orWhereNull('provider_retry_count'))
+    .whereNull('provider_retry_next_at')
+    .whereNull('provider_retry_exhausted_at')
+    .whereNull('provider_message_id')
+    .whereNull('sent_at')
+    .whereNotNull('send_attempt_token')
+    .whereRaw('provider_handoff_attempt_token = send_attempt_token')
+    .where('queued_at', '<=', cutoff)
+    .where('updated_at', '<=', cutoff);
+}
+
+// SendGrid echoes the attempt token on every event (custom_args), so an event row for this token
+// proves the provider took this very attempt.
+function attemptEventExists(database, id, sendAttemptToken) {
+  return database('email_message_events').where('email_message_id', id)
+    .whereRaw("raw_event->>'send_attempt_token' = ?", [sendAttemptToken]);
+}
+
+// Settles first-attempt rows abandoned between the `started` marker and SendGrid's answer as
+// failed + exhausted ("outcome unknown"), reconciles a visit summary and raises one alert per row.
+// It NEVER requeues or re-sends: the request may have reached SendGrid. The row keeps its `started`
+// phase, so every reader that holds on it (sendTemplate's retry hold, the division ledger, the
+// dunning and receipt authorities, the summary evidence) keeps treating the delivery as uncertain.
+// A row with a webhook event for its current attempt is left alone (the provider accepted it).
+async function settleStuckFirstAttempts(now = new Date(), database = db) {
+  const ageMs = firstAttemptSettleAgeMs();
+  if (ageMs === null) return 0;
+  const cutoff = new Date(now.getTime() - ageMs);
+  const candidates = await stuckFirstAttemptRows(database('email_messages'), cutoff)
+    .whereNotExists(function noAttemptEvent() {
+      this.select(database.raw('1')).from('email_message_events')
+        .whereRaw('email_message_events.email_message_id = email_messages.id')
+        .whereRaw("email_message_events.raw_event->>'send_attempt_token' = email_messages.send_attempt_token");
+    })
+    .orderBy('queued_at', 'asc').limit(CLAIM_LIMIT).select('id', 'send_attempt_token');
+  let settled = 0;
+  for (const candidate of candidates) {
+    const updated = await database.transaction(async (trx) => {
+      // Hold the row first, then look for an event: a webhook transaction that wrote one has
+      // committed (or is waited out) by the time the lock is ours.
+      const held = await stuckFirstAttemptRows(trx('email_messages'), cutoff)
+        .where({ id: candidate.id, send_attempt_token: candidate.send_attempt_token })
+        .forUpdate().first('id');
+      if (!held) return null;
+      if (await attemptEventExists(trx, candidate.id, candidate.send_attempt_token).first('id')) return null;
+      const [row] = await stuckFirstAttemptRows(trx('email_messages'), cutoff)
+        .where({ id: candidate.id, send_attempt_token: candidate.send_attempt_token })
+        .update({
+          status: 'failed',
+          provider_retry_next_at: null,
+          provider_retry_exhausted_at: now,
+          error_message: FIRST_ATTEMPT_UNKNOWN_REASON,
+          updated_at: now,
+        }).returning('*');
+      if (!row) return null;
+      await reconcileExhaustedSummary(row, trx);
+      return row;
+    });
+    if (updated) {
+      settled += 1;
+      await alertExhausted(updated, updated.error_message);
+    }
+  }
+  return settled;
+}
+
 // A summary whose retries ended without a delivery — the provider block
 // never cleared, or the last request's outcome is unknown — is a terminal
 // failure for the office, exactly like a hard bounce: the sent effect
@@ -284,7 +373,9 @@ async function alertExhausted(message, reason) {
     await NotificationService.notifyAdmin(
       'alert',
       'Transactional email delivery failed',
-      `${message.template_key || 'Unknown template'} could not be delivered after ${message.provider_retry_count || MAX_RETRIES} provider retries. ${reason || 'Review the SendGrid rejection and contact record.'}`,
+      Number(message.provider_retry_count) === 0
+        ? `${message.template_key || 'Unknown template'} was handed to SendGrid but the outcome was never confirmed. It is not re-sent automatically. ${reason || 'Review the contact record.'}`
+        : `${message.template_key || 'Unknown template'} could not be delivered after ${message.provider_retry_count || MAX_RETRIES} provider retries. ${reason || 'Review the SendGrid rejection and contact record.'}`,
       {
         link: '/admin/communications',
         metadata: { dedupeKey, email_message_id: message.id, template_key: message.template_key || null },
@@ -799,6 +890,17 @@ async function holdGateLifecycleRetry(message) {
   return { sent: false, held: true };
 }
 
+// Why this row's stored copy must not be re-sent, or null. A category on the shared no-replay list, or (GATE_DAY_ONLY_PROMISE)
+// a day-only appointment email that the delayed-send chokepoint no longer clears. Decided BEFORE any update or dispatch, so a
+// stopped day-only retry leaves the row failed with no sent_at: it can never read as a newer day promise.
+async function storedCopyStopReason(message) {
+  const listed = staleStoredCopyReason(asArray(message.categories));
+  if (listed) return listed;
+  return (await require('./time-promise').dayOnlyStoredCopyStale(message))
+    ? 'Not re-sent from stored copy (the day-only promise is superseded or no longer valid).'
+    : null;
+}
+
 async function retryOne(message) {
   // A row scheduled before the ruling took effect settles the same way.
   if (isSenderRenderedEmail(message)) {
@@ -814,7 +916,7 @@ async function retryOne(message) {
     return stopRetry(message, { status: 'failed', reason: EMAIL_REPLACED_REASON, requote, reissue: replay && !requote });
   }
   // A row scheduled by an older build, or marked after scheduling, settles the same way.
-  const staleCopy = staleStoredCopyReason(asArray(message.categories));
+  const staleCopy = await storedCopyStopReason(message);
   if (staleCopy) return stopRetry(message, { status: 'failed', reason: staleCopy });
   let suppression;
   try {
@@ -1054,6 +1156,13 @@ async function retryOne(message) {
 async function runDueRetries({ limit = CLAIM_LIMIT } = {}) {
   const recovered = await recoverStaleClaims();
   if (Number(recovered) > 0) logger.warn(`[email-provider-retry] recovered ${recovered} stale claim(s)`);
+  // A failure here must not stop the due retries below.
+  try {
+    const abandoned = await settleStuckFirstAttempts();
+    if (abandoned > 0) logger.warn(`[email-provider-retry] settled ${abandoned} abandoned first-attempt send(s) as outcome unknown`);
+  } catch (err) {
+    logger.error(`[email-provider-retry] abandoned first-attempt sweep failed: ${err.message}`);
+  }
   const claimed = await claimDueRetries(limit);
   const results = [];
   for (const message of claimed) {
@@ -1086,6 +1195,9 @@ module.exports = {
   retryStateForProviderBlock,
   alertIfProviderRetriesExhausted,
   recoverStaleClaims,
+  settleStuckFirstAttempts,
+  FIRST_ATTEMPT_SETTLE_MARGIN_MS,
+  FIRST_ATTEMPT_UNKNOWN_REASON,
   claimDueRetries,
   markRetryFailure,
   markRetryHeld,

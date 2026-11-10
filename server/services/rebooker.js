@@ -35,6 +35,8 @@ async function assertAssignableSlotTechnician(technicianId, trx, date, { initiat
   }
 }
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
+// Lazy: time-promise pulls the promise readers, which must not load while this module loads.
+const moveIntentColumns = (...args) => require('./time-promise').moveIntentColumns(...args);
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks, techScopedConfirmActive } = require('./scheduling/occupancy');
@@ -123,6 +125,11 @@ const CONFLICT_SNAPSHOT_FIELDS = [
 
 function hhmm(value) {
   return value ? String(value).slice(0, 5) : null;
+}
+
+// Did this single move change the slot (the date or the window start)? Only then does it record an intent (moveIntentColumns).
+function slotChangedBy(service, updates, newDateStr) {
+  return dateOnlyString(service.scheduled_date) !== newDateStr || hhmm(updates.window_start) !== hhmm(service.window_start);
 }
 
 function conflictSnapshotItem(target, row) {
@@ -1233,8 +1240,8 @@ function parseWindow(w) {
   return { start: m[1], end: m[2] };
 }
 
-// Closed days for a series move's projection (GATE_SERIES_MOVE_SKIP_CLOSED_DAYS,
-// owner 2026-10-22 "fix series edit", 2026-10-24 "FIX"), or null when the move
+// Closed days for a series move's projection (owner 2026-10-22 "fix series
+// edit", 2026-10-24 "FIX"), or null when the move
 // keeps its projected dates. Read for:
 //   - a STAFF move (initiatedBy 'admin'): staff moves skip the closed-day
 //     refusal by design (reschedule(): the owner may book his own day off), so
@@ -1252,7 +1259,6 @@ function parseWindow(w) {
 // A failed read projects as before, like every series generator (fail-open).
 async function loadSeriesClosedDays(conn, { initiatedBy = null, deferred = false } = {}) {
   if (initiatedBy !== 'admin' && !deferred) return null;
-  if (!require('../config/feature-gates').seriesMoveSkipClosedDaysLive()) return null;
   const range = [etDateString(), etDateString(addETDays(new Date(), SERIES_CLOSED_DAYS_HORIZON_DAYS))];
   try {
     return { range, ...await require('./scheduling/blackout-dates').getBlackoutLayers(...range, conn) };
@@ -1647,10 +1653,10 @@ class SmartRebooker {
       options.push(buildOption(candidate, candidate.window));
     };
 
-    // GATE_ROUTE_CHECK_STAFF_LISTS (owner 2026-10-29): the eligible days are
+    // Route-checked day list (owner 2026-10-29): the eligible days are
     // collected and ranked by the dispatcher's route check instead of being
-    // probed one by one. Off, or the check cannot run: the loop below is the
-    // old one, call for call.
+    // probed one by one. Arrival-window routing off, or the check cannot run:
+    // the loop below probes them one by one.
     const routeRanked = require('./scheduling/route-ranked-days').routeRankedDaysLive();
     const eligible = [];
 
@@ -2517,6 +2523,8 @@ class SmartRebooker {
           : {})
         .update({
           ...updates,
+          // Day-only promise (B3): the intent of this move, written by this same UPDATE (gate off: nothing added).
+          ...moveIntentColumns(trx, options, { slotChanged: slotChangedBy(service, updates, newDateStr) }),
           track_token_expires_at: scheduledServiceTrackTokenExpiry(trx, newDate, windowEnd),
           // The move's own change time (same stamp the series path writes):
           // SMS follow-up proves a move by the row changing after the request.
@@ -2558,8 +2566,7 @@ class SmartRebooker {
       if (capacityCommitFit) {
         await persistArrivalOrder(trx, capacityCommitFit, serviceId);
       } else if (placementWindowChanged && (useArrivalWindows || options.placeInRoute === true)) {
-        // Staff route insertion (GATE_STAFF_ROUTE_INSERTION; a no-op when
-        // off): the staff check placed this visit between stops, so number
+        // Staff route insertion: the staff check placed this visit between stops, so number
         // the day in that order and the board shows it where the box did.
         // A stop still shared with a live member is left as it was by the
         // placement itself (the check never placed it either).
@@ -3645,7 +3652,7 @@ class SmartRebooker {
             });
           }
           // …and the closed days the projector moved re-dated visits off
-          // (GATE_SERIES_MOVE_SKIP_CLOSED_DAYS, staff moves), read BEFORE the
+          // (staff moves), read BEFORE the
           // locks: a day closed while this move waited refuses it the same
           // way (makeSeriesProjector assertClosedDaysUnchanged).
           await assertClosedDaysUnchanged(trx);
@@ -3950,6 +3957,7 @@ class SmartRebooker {
           anyLivePartner = anyLivePartner || liveStatus;
           await fencePartner({ partner, pUpdate, dateStr, partnerDateChanges, techChanges, keptTech });
           pUpdate.track_token_expires_at = scheduledServiceTrackTokenExpiry(trx, date, pUpdate.window_end);
+          Object.assign(pUpdate, moveIntentColumns(trx, options, { series: true }));
           if (pUpdate.window_start) await probePartnerSlot(partner, pUpdate, keptTech, dateStr);
           const awaitingPlacement = applyPartnerPlacementPatch(partner, pUpdate);
           // A carried partner that lands on another day and carries a limited area add-on is judged for that day, as the
@@ -4087,6 +4095,8 @@ class SmartRebooker {
           // Day change invalidates the row's route sequence — clear it so the
           // destination day appends the stop (consumers sort NULLs last).
           ...(sibDateChanges ? { route_order: null } : {}),
+          // Day-only promise (B3): a customer-driven series move records its intent in this same UPDATE.
+          ...moveIntentColumns(trx, options, { series: true }),
         };
         // Rewound rows need the post-commit cleanup (tech pointer release +
         // customer tracker refresh) — collected here, applied after the trx
@@ -4434,8 +4444,7 @@ class SmartRebooker {
             code: 'SLOT_TAKEN',
           });
         }
-        // Staff route insertion (GATE_STAFF_ROUTE_INSERTION; a no-op when
-        // off): every occurrence this sweep moves was checked by the staff
+        // Staff route insertion: every occurrence this sweep moves was checked by the staff
         // rule, so number its day in the order that check certified.
         if (updateData.window_start
           && (useArrivalWindows || options.placeInRoute === true)

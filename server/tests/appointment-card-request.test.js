@@ -76,6 +76,13 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// GATE_DAY_ONLY_PROMISE part C1: the page asks loadTimeDisplay (part B1) whether to show the hour. The real one runs
+// unless a test overrides it (gate off in these suites, so the real answer is "show the hour").
+const mockLoadTimeDisplayOverride = jest.fn();
+jest.mock('../services/time-promise', () => {
+  const actual = jest.requireActual('../services/time-promise');
+  return { ...actual, loadTimeDisplay: (...args) => (mockLoadTimeDisplayOverride.getMockImplementation() ? mockLoadTimeDisplayOverride(...args) : actual.loadTimeDisplay(...args)) };
+});
 
 const mockResolveForInvoice = jest.fn(async () => null);
 jest.mock('../services/payer', () => ({
@@ -2989,5 +2996,53 @@ describe('renderTemplate options', () => {
     expect(mockGetTemplate).toHaveBeenLastCalledWith('autopay_setup_link', { secure_link: 'https://wvs.link/x' }, {}, { requiredVars: ['secure_link'] });
     await renderTemplate({ secure_link: 'https://wvs.link/x' }, 'autopay_setup_link');
     expect(mockGetTemplate).toHaveBeenLastCalledWith('autopay_setup_link', { secure_link: 'https://wvs.link/x' });
+  });
+});
+
+describe('loadSecureCardPageData — the shown hour (part C1)', () => {
+  const NOTE = 'Arrival window texted the day before';
+  beforeEach(() => {
+    mockLoadTimeDisplayOverride.mockReset();
+    mockTableHandlers = {
+      appointment_card_requests: { first: () => ({ ...REQUEST }) },
+      scheduled_services: { first: () => ({ ...VISIT, window_start: '13:30:00', window_display: '9:00 AM' }) },
+      customers: { first: () => ({ ...CUSTOMER }) },
+    };
+    mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+    mockRetrieveSetupIntent.mockImplementation(echoMintedIntent);
+  });
+
+  test('BUG FIX (not gated): the hour comes from window_start, even when the stored window_display is stale', async () => {
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.windowDisplay).toBe('1:30 PM - 3:30 PM');
+    expect(res).not.toHaveProperty('day_only');
+    expect(res).not.toHaveProperty('arrival_note');
+  });
+
+  test('a visit with no window_start shows no hour (never the stale stored text)', async () => {
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, window_start: null, window_display: '9:00 AM' });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.windowDisplay).toBeNull();
+  });
+
+  test('day-only: no hour at all, day_only + the shared note', async () => {
+    mockLoadTimeDisplayOverride.mockImplementation(async (_conn, rows) => new Map(rows.map((r) => [r.id, { showHour: false, level: 'none', eligible: true }])));
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(mockLoadTimeDisplayOverride).toHaveBeenCalledTimes(1);
+    expect(res).toMatchObject({ windowDisplay: null, day_only: true, arrival_note: NOTE, dateDisplay: expect.any(String) });
+    expect(JSON.stringify(res)).not.toMatch(/1:30|13:30|3:30/);
+  });
+
+  test('customer-picked or inside the cutoff (showHour true): the hour is shown, no new key', async () => {
+    mockLoadTimeDisplayOverride.mockImplementation(async (_conn, rows) => new Map(rows.map((r) => [r.id, { showHour: true, level: 'hour', eligible: false }])));
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.windowDisplay).toBe('1:30 PM - 3:30 PM');
+    expect(res).not.toHaveProperty('day_only');
+  });
+
+  test('a loadTimeDisplay failure shows the hour', async () => {
+    mockLoadTimeDisplayOverride.mockRejectedValue(new Error('db down'));
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.windowDisplay).toBe('1:30 PM - 3:30 PM');
   });
 });

@@ -192,7 +192,7 @@ describe('Customer360ProfileV2 profile state', () => {
     const charges = fetch.mock.calls.filter(([url]) => String(url).endsWith('/charge-now'));
     expect(charges).toHaveLength(1);
     // the default is this month, posted as the month shown
-    expect(charges[0][1]).toMatchObject({ method: 'POST', body: JSON.stringify({ billedMonth: etDateString().slice(0, 7) }) });
+    expect(charges[0][1]).toMatchObject({ method: 'POST', body: JSON.stringify({ billedMonth: etDateString().slice(0, 7), expectedAmount: 100 }) });
   });
 
   it('an earlier dues month picked beside Charge now is named in the confirm and posted, and resets for the next customer', async () => {
@@ -223,7 +223,7 @@ describe('Customer360ProfileV2 profile state', () => {
       expect(await screen.findByText('Payment $100.00 is processing. Settlement is pending.')).toHaveAttribute('role', 'status');
       const charges = fetch.mock.calls.filter(([url]) => String(url).endsWith('/charge-now'));
       expect(charges).toHaveLength(1);
-      expect(charges[0][1]).toMatchObject({ method: 'POST', body: '{"billedMonth":"2026-09"}' });
+      expect(charges[0][1]).toMatchObject({ method: 'POST', body: '{"billedMonth":"2026-09","expectedAmount":100}' });
 
       // a month picked for one customer never carries to the next
       view.rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} embedded />);
@@ -260,6 +260,61 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(await screen.findByText('Payment $100.00 is processing. Settlement is pending.')).toHaveAttribute('role', 'status');
     expect(screen.queryByText('Synthetic decline')).not.toBeInTheDocument();
     expect(fetch.mock.calls.filter(([url]) => String(url).endsWith('/charge-now'))).toHaveLength(2);
+  });
+
+  it('a rate changed since the profile loaded charges nothing: the refusal shows, the profile is re-read, and the button shows the new rate', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const detail = customerDetail('customer-a', 'Avery');
+    Object.assign(detail.customer, { billingMode: 'monthly_membership', monthlyRate: 100 });
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const refusal = 'The monthly rate changed to $120.00 after you confirmed $100.00. Nothing was charged. Check the rate and confirm again.';
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/customer-a')) return response(detail);
+      if (path.endsWith('/charge-now')) {
+        // the stored rate moved after the page loaded; the next profile read carries it
+        detail.customer.monthlyRate = 120;
+        return response({ error: refusal, rate_changed: true, current_amount: 120 }, 409);
+      }
+      return response({});
+    }));
+    const { container } = render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded />);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    fireEvent.click(screen.getByRole('tab', { name: 'Billing', exact: true }));
+    const profileReads = () => fetch.mock.calls.filter(([url]) => String(url).endsWith('/customer-a')).length;
+    const before = profileReads();
+    fireEvent.click(screen.getByRole('button', { name: 'Charge now ($100.00)' }));
+    expect(await screen.findByText(refusal)).toHaveAttribute('role', 'alert');
+    const charges = fetch.mock.calls.filter(([url]) => String(url).endsWith('/charge-now'));
+    expect(charges).toHaveLength(1);
+    expect(JSON.parse(charges[0][1].body)).toMatchObject({ expectedAmount: 100 });
+    // the refusal re-reads the profile, so the button and the next confirm show the stored rate
+    expect(await screen.findByRole('button', { name: 'Charge now ($120.00)' })).toBeInTheDocument();
+    expect(profileReads()).toBe(before + 1);
+    expect(screen.getByText(refusal)).toBeInTheDocument();
+  });
+
+  it('a plain charge failure does not re-read the profile', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const detail = customerDetail('customer-a', 'Avery');
+    Object.assign(detail.customer, { billingMode: 'monthly_membership', monthlyRate: 100 });
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/customer-a')) return response(detail);
+      if (path.endsWith('/charge-now')) return response({ error: 'Synthetic decline' }, 502);
+      return response({});
+    }));
+    const { container } = render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded />);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    fireEvent.click(screen.getByRole('tab', { name: 'Billing', exact: true }));
+    const profileReads = () => fetch.mock.calls.filter(([url]) => String(url).endsWith('/customer-a')).length;
+    const before = profileReads();
+    fireEvent.click(screen.getByRole('button', { name: 'Charge now ($100.00)' }));
+    expect(await screen.findByText('Synthetic decline')).toHaveAttribute('role', 'alert');
+    expect(profileReads()).toBe(before);
   });
 
   it('preserves technician texting when the admin-only conversation route is closed to it', async () => {

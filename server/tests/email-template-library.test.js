@@ -154,6 +154,30 @@ describe('email template library rendering', () => {
     expect(rendered.text).toContain('Company: Waves & Co.');
   });
 
+  // Sweep #7765 B1: the preheader went into the HTML unescaped, so a payload
+  // value (a customer-typed referrer name) could close the hidden div and put
+  // a live link above the header. Plain-text previews render the same.
+  test.each([
+    ['service', serviceTemplate],
+    ['marketing', marketingTemplate],
+  ])('escapes payload values in the %s preheader and keeps previewText plain', (_mode, makeTemplate) => {
+    const hostile = 'Pat</div><a href="https://evil.example">Claim</a><div style="display:none">';
+    const rendered = EmailTemplates.renderTemplate({
+      template: makeTemplate({ allowed_variables: ['referrer_name'], required_variables: [] }),
+      version: version({
+        subject: 'Hello',
+        preview_text: 'A referral from {{referrer_name}} — labels & sheets.',
+        blocks: [{ type: 'paragraph', content: 'Hi.' }],
+      }),
+      payload: { referrer_name: hostile },
+    });
+
+    expect(rendered.html).not.toContain('<a href="https://evil.example"');
+    expect(rendered.html).toContain('A referral from Pat&lt;/div&gt;&lt;a href=&quot;https://evil.example&quot;&gt;Claim&lt;/a&gt;');
+    expect(rendered.html).toContain('labels &amp; sheets.');
+    expect(rendered.previewText).toBe(`A referral from ${hostile} — labels & sheets.`);
+  });
+
   test('renders default CTA settings when a version has no CTA block', () => {
     const rendered = EmailTemplates.renderTemplate({
       template: serviceTemplate({

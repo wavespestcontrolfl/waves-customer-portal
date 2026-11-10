@@ -31,10 +31,22 @@
 //
 // A missed visit being rebooked now has no limit.
 //
+// GATE_RESCHEDULE_CAP_ALL (dark, security audit run 3, owner 2026-11-05) adds
+// two rules that need no GATE_RESCHEDULE_MOVE_LIMITS and hold for every
+// customer, missed visits included:
+//  5. Day cap. One visit takes at most 3 customer moves per ET day; the next
+//     goes to the office, the way a first visit's third move does. Every
+//     commit counts: the 15-minute correction fold above is a first-visit
+//     rule and would let a link alternate two times all day.
+//  6. Notice coalescing. A customer move of a visit that already had another
+//     customer move in the last CORRECTION_MINUTES sends no notice of its own
+//     (repeatMoveInWindow); once the visit has been quiet that long, the
+//     confirmation sweep sends one with the latest time.
+//
 // Fail open: an unreadable history applies no limit. A limit only hands the
 // customer to the office, so a missed limit costs less than a wrong refusal.
 
-const { gateEnvValue } = require('../../config/feature-gates');
+const { gateEnvValue, rescheduleCapAllLive } = require('../../config/feature-gates');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { intervalDaysForPattern, normalizeRecurringPattern } = require('../recurring-appointment-seeder');
 const { LAWN_ROUNDS_9, roundOf } = require('../lawn-rounds');
@@ -54,6 +66,8 @@ const ALLOWANCE_BY_GAP_DAYS = Object.freeze([
   { from: 76, to: 100, days: 21 },
 ]);
 const FIRST_VISIT_ONLINE_MOVES = 2;
+// GATE_RESCHEDULE_CAP_ALL: customer moves of one visit per ET day, every customer.
+const DAY_MOVE_CAP = 3;
 // A second pick inside this window corrects the first; it is one move.
 const CORRECTION_MINUTES = 15;
 const MIN_CHOICES = 3;
@@ -219,6 +233,49 @@ function countedMoves(moves) {
   return moveStarts(moves).length;
 }
 
+// GATE_RESCHEDULE_CAP_ALL (dark): read at call time, unset = kill.
+function moveCapAllEnabled() {
+  return rescheduleCapAllLive();
+}
+
+// The customer's slot-changing picks of this visit made at or after `since`.
+// `database` may be the commit's own transaction, so the count is read under
+// the visit's row lock. Throws on an unreadable history; callers fail open.
+async function customerMovesSinceTime(svc, { database, since }) {
+  const rows = await database('reschedule_log')
+    .where({ scheduled_service_id: svc.id, initiated_by: SELF_SERVE_INITIATOR })
+    .where('created_at', '>=', since)
+    .select('original_date', 'new_date', 'original_window', 'new_window', 'created_at');
+  return rows.filter(slotChanged);
+}
+
+// True when this visit already took DAY_MOVE_CAP customer moves today (ET).
+// Gate off, or an unreadable history: false (a cap only hands the customer to
+// the office, so a missed cap costs less than a wrong refusal).
+async function dayCapReached(svc, { database, now = new Date() } = {}) {
+  if (!moveCapAllEnabled() || !svc?.id) return false;
+  try {
+    const since = parseETDateTime(`${etDateString(now)}T00:00`);
+    return (await customerMovesSinceTime(svc, { database, since })).length >= DAY_MOVE_CAP;
+  } catch {
+    return false;
+  }
+}
+
+// True when a customer move that just committed is a repeat: the visit has
+// another customer move inside the last CORRECTION_MINUTES (the commit's own
+// log row is one of the rows read). Gate off, or an unreadable history: false,
+// so the move sends its notice as before.
+async function repeatMoveInWindow(svc, { database, now = new Date() } = {}) {
+  if (!moveCapAllEnabled() || !svc?.id) return false;
+  try {
+    const since = new Date(now.getTime() - CORRECTION_MINUTES * 60 * 1000);
+    return (await customerMovesSinceTime(svc, { database, since })).length >= 2;
+  } catch {
+    return false;
+  }
+}
+
 // { dueDate, lastDate, firstVisitBlocked } for this visit, or null when no
 // limit applies (gate off, missed visit, unreadable history).
 //   lastDate: the last date the picker offers, or null (no plan allowance).
@@ -329,10 +386,14 @@ module.exports = {
   allowanceDays,
   roundEnd,
   FIRST_VISIT_ONLINE_MOVES,
+  DAY_MOVE_CAP,
   CORRECTION_MINUTES,
   MIN_CHOICES,
   SOON_DAYS,
   moveLimitsEnabled,
+  moveCapAllEnabled,
+  dayCapReached,
+  repeatMoveInWindow,
   loadMoveLimit,
   lateLimitApplies,
   applyLimit,

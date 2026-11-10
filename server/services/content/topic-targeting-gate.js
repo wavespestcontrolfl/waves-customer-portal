@@ -1141,11 +1141,16 @@ const SQ_FRAMING_WORDS = new Set([
 // these ("termite", "lawn", "cockroach") never identifies a single question:
 // the site rightly holds many posts about each. A narrower name (millipede)
 // is not here, and a one-word topic of it can block. Singular, post-fold
-// ("cockroach" folds to "roach").
+// ("cockroach" folds to "roach"). "inspection" is a service noun too: a home
+// pest inspection, a WDO (termite) inspection and a pre-purchase inspection are
+// different questions, and "home pest inspection checklist" reduces to it alone
+// (2026-11-07: an affiliate brief on a home walkthrough was stopped as the same
+// question as a WDO inspection post).
 const SQ_BROAD_TOKENS = new Set([
   'pest', 'bug', 'insect', 'termite', 'ant', 'roach', 'spider', 'mosquito', 'rodent', 'rat', 'mouse', 'flea', 'tick',
   'wasp', 'bee', 'hornet', 'fly', 'beetle', 'moth', 'lawn', 'grass', 'turf', 'sod', 'weed', 'tree', 'shrub', 'plant',
   'palm', 'mold', 'fungus', 'disease', 'irrigation', 'fertilizer', 'fertilization', 'herbicide', 'insecticide',
+  'inspection',
 ]);
 // A topic held by more live posts than this is a cluster the site already
 // covers from several angles; no single post answers it, so nothing blocks.

@@ -111,6 +111,49 @@ describe("comboMove 'together'", () => {
     expect(mockDispatch.runPlannedVisitMove).toHaveBeenCalledWith(expect.objectContaining({ serviceId: 'svc-a', newDate: TARGET, notifyCustomer: true, actor: { techRole: 'admin', technicianId: 'staff-1' } }));
   });
 
+  describe('GATE_DAY_ONLY_PROMISE part E: the office\'s "customer asked for this time" rides the whole-stop move', () => {
+    const withGate = async (value, fn) => {
+      const prior = process.env.GATE_DAY_ONLY_PROMISE;
+      if (value === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = value;
+      try { await fn(); } finally { if (prior === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = prior; }
+    };
+
+    test('gate on: a checked box is forwarded as true, an unchecked one (or none) as false; the per-row edit keeps nothing that moves', async () => {
+      await withGate('true', async () => {
+        const checked = request({ scheduledDate: TARGET, windowStart: '11:00', windowEnd: '12:00', customerAskedTime: true, comboMove: 'together' });
+        await planComboEditMove(checked);
+        expect(mockDispatch.planVisitMoveForStaff.mock.calls[0][0].body).toEqual({ customerAskedTime: true, expectVisit: SUMMARY });
+        // The move's own UPDATE writes the intent once per member (B3); the per-row edit has no date or time left, so
+        // update-details' recordOfficeMoveIntent (which fires only on a slot change) cannot write a second time.
+        expect(checked.body).not.toHaveProperty('scheduledDate');
+        expect(checked.body).not.toHaveProperty('windowStart');
+        mockDispatch.planVisitMoveForStaff.mockClear();
+        await planComboEditMove(request({ scheduledDate: TARGET, windowStart: '11:00', windowEnd: '12:00', customerAskedTime: false, comboMove: 'together' }));
+        expect(mockDispatch.planVisitMoveForStaff.mock.calls[0][0].body.customerAskedTime).toBe(false);
+        mockDispatch.planVisitMoveForStaff.mockClear();
+        await planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'together' }));
+        expect(mockDispatch.planVisitMoveForStaff.mock.calls[0][0].body.customerAskedTime).toBe(false);
+      });
+    });
+
+    test('gate off: the planner body is byte for byte today\'s even if the request carries the field', async () => {
+      await withGate(undefined, async () => {
+        await planComboEditMove(request({ scheduledDate: TARGET, windowStart: '11:00', windowEnd: '12:00', customerAskedTime: true, technicianId: 'tech-2', assignmentScope: 'this_only', comboMove: 'together' }));
+        expect(mockDispatch.planVisitMoveForStaff.mock.calls[0][0].body).toEqual({ technicianId: 'tech-2', expectVisit: SUMMARY });
+      });
+    });
+
+    test('Separate does not plan a move here: the split row then moves through the ordinary edit, which writes the intent once', async () => {
+      await withGate('true', async () => {
+        const req = request({ scheduledDate: TARGET, customerAskedTime: true, comboMove: 'separate' });
+        expect(await planComboEditMove(req)).toMatchObject({ separated: true });
+        expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
+        expect(req.body.customerAskedTime).toBe(true);
+        expect(req.body.scheduledDate).toBe(TARGET);
+      });
+    });
+  });
+
   test('a technician-only change reassigns the whole stop on its stored date and window, and texts nobody', async () => {
     const req = request({ scheduledDate: FUTURE, windowStart: '09:00', windowEnd: '10:00', technicianId: 'tech-2', notifyCustomer: true, comboMove: 'together' });
     await planComboEditMove(req);

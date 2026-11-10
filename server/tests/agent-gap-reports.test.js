@@ -653,7 +653,7 @@ describe('agent-gap-reports', () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
       collector.discovery({ query: 'add a second service address' }, MISS);
-      await expect(collector.flush({ reply: DECLINE })).resolves.toBeUndefined();
+      await expect(collector.flush({ reply: DECLINE })).resolves.toEqual([]);
     });
 
     test('the decline check recognizes refusals the bar has actually given', () => {
@@ -661,7 +661,10 @@ describe('agent-gap-reports', () => {
       for (const reply of ["I can't merge records directly", 'I cannot deactivate, edit, or delete it from the bar',
         'I could not find a way to do that from the bar.', "There's no tool in this bar that adds a property",
         "I don't have an inventory tool in this bar", 'That isn’t available from here', 'Recurring series edits are not supported yet',
-        'This is a system issue I can’t work around from here', 'There is no way to issue a refund']) {
+        'This is a system issue I can’t work around from here', 'There is no way to issue a refund',
+        // The 2026-11-05 prepay ask: each sentence of the reply that recorded no row.
+        "I couldn't make this change.", 'The bar can only switch billing to per application, per visit, one-time or monthly membership.',
+        'It has no manual prepay option.']) {
         expect(DECLINE_RE.test(reply)).toBe(true);
       }
     });
@@ -669,7 +672,9 @@ describe('agent-gap-reports', () => {
     test('a read that worked but found nothing, or a request missing information, is not a decline', () => {
       const { _private: { DECLINE_RE } } = load();
       for (const reply of ["I couldn't find any matching invoices", 'that time is not available', "I can't confirm the price without the invoice",
-        "I can't switch it without the rental's street address", 'Done — the visit moved to Thursday at 9 AM.']) {
+        "I can't switch it without the rental's street address", 'Done — the visit moved to Thursday at 9 AM.',
+        "I couldn't make this change without the customer's new address.", 'It has no scheduled visits this month.',
+        'The customer has no autopay card on file.']) {
         expect(DECLINE_RE.test(reply)).toBe(false);
       }
     });
@@ -1088,6 +1093,61 @@ describe('agent-gap-reports', () => {
       expect(digestMock).toHaveBeenCalledTimes(1);
     });
 
+    describe('flush() result and searched() (the stuck-answer "Send to Claude" line)', () => {
+      const MISS = { status: 'capability_unimplemented', capabilities: [] };
+      const found = (...ids) => ({ status: 'capabilities_found', capabilities: ids.map((id) => ({ id, domain: 'customers' })) });
+      const DECLINED = DECLINE;
+      const collectorFor = () => load().createGapCollector({ source: 'intelligence-bar' });
+
+      test('flush returns the rows it saved, with their ids', async () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'switch a customer to annual prepay' }, found('billing_switch'));
+        const saved = await collector.flush({ reply: DECLINED });
+        expect(saved).toHaveLength(1);
+        expect(saved[0]).toMatchObject({ id: 7, occurrences: 1 });
+      });
+
+      test('flush returns [] when nothing was written, the kill switch is off, or the write failed', async () => {
+        const quiet = collectorFor();
+        expect(await quiet.flush({ reply: 'Here are the three customers you asked about.' })).toEqual([]);
+        process.env.AGENT_GAP_REPORTS = 'off';
+        const off = collectorFor();
+        off.discovery({ query: 'switch a customer to annual prepay' }, MISS);
+        expect(await off.flush({ reply: DECLINED })).toEqual([]);
+        delete process.env.AGENT_GAP_REPORTS;
+        loggerMock.warn.mockClear();
+        const failing = collectorFor();
+        failing.discovery({ query: 'switch a customer to annual prepay' }, MISS);
+        dbMock.transaction = jest.fn(async () => { throw Object.assign(new Error('boom'), { code: 'X1' }); });
+        await expect(failing.flush({ reply: DECLINED })).resolves.toEqual([]);
+      });
+
+      test('searched() is false before any search and for a search-less request', async () => {
+        const collector = collectorFor();
+        expect(collector.searched()).toBe(false);
+        collector.toolResult('get_customer', { ok: true }, false, { round: 0 });
+        expect(collector.searched()).toBe(false);
+      });
+
+      test('searched() is true after a discover_capabilities search, found or missed, and after an API tool search', () => {
+        const hit = collectorFor();
+        hit.discovery({ query: 'switch a customer to annual prepay' }, found('billing_switch'));
+        expect(hit.searched()).toBe(true);
+        const miss = collectorFor();
+        miss.discovery({ query: 'export payroll hours' }, MISS);
+        expect(miss.searched()).toBe(true);
+        const api = collectorFor();
+        api.discovery({ query: 'export payroll hours' }, MISS, { fromToolSearch: true });
+        expect(api.searched()).toBe(true);
+      });
+
+      test('a discovery result with another status is not a search', () => {
+        const collector = collectorFor();
+        collector.discovery({ query: 'x' }, { status: 'error' });
+        expect(collector.searched()).toBe(false);
+      });
+    });
+
     test('prepareGapRow rejects a blocked signal with no usable code', () => {
       const { _private: { prepareGapRow } } = load();
       expect(prepareGapRow({ source: 'intelligence-bar', kind: 'blocked', summary: 'x' })).toBeNull();
@@ -1113,5 +1173,18 @@ describe('agent-gap-reports', () => {
       const run = new Date('2026-10-05T12:15:00Z');
       expect(gapWindowCutoff(7, run).toISOString()).toBe('2026-09-28T12:15:00.000Z');
     });
+  });
+});
+
+describe('firstOpenGapId', () => {
+  const { firstOpenGapId } = require('../services/agent-gap-reports');
+
+  test('names the first saved row Claude still has to build, never a closed one', () => {
+    expect(firstOpenGapId([{ id: 3, status: 'dismissed' }, { id: 4, status: 'building' }])).toBe(4);
+    expect(firstOpenGapId([{ id: 5, status: 'new' }])).toBe(5);
+    expect(firstOpenGapId([{ id: 6, status: 'by_design' }, { id: 8, status: 'fixed' }])).toBeNull();
+    expect(firstOpenGapId([null, { id: 9 }])).toBeNull();
+    expect(firstOpenGapId([])).toBeNull();
+    expect(firstOpenGapId(undefined)).toBeNull();
   });
 });

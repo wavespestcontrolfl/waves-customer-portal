@@ -188,6 +188,32 @@ describe('CustomersPageV2 workflow state', () => {
     expect(dialog.getByRole('button', { name: 'Has Balance' })).toBeInTheDocument();
   });
 
+  // A search can match one of a customer's other homes; the server then sends it as matchedHomeAddress.
+  // Every directory view shows and maps that home, and falls back to the main address without it.
+  it.each([
+    ['desktop cards', '/admin/customers', 1200],
+    ['workspace table', '/admin/customers?customer360=workspace', 1200],
+    ['mobile cards', '/admin/customers', 500],
+  ])('shows and maps the matched home in the %s', async (_name, entry, width) => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+    const rows = {
+      ...list,
+      customers: [
+        { id: 'c-match', firstName: 'Mia', lastName: 'Matched', address: '1 Main St, Sarasota, FL 34232', matchedHomeAddress: '9 Oak Ave, Venice' },
+        { id: 'c-plain', firstName: 'Pat', lastName: 'Plain', address: '2 Elm St, Sarasota, FL 34232' },
+      ],
+      total: 2,
+    };
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(rows) : response({})));
+    render(<MemoryRouter initialEntries={[entry]}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Mia Matched customer profile' });
+
+    const mapsHref = (address) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
+    expect(screen.getByRole('link', { name: '9 Oak Ave, Venice' })).toHaveAttribute('href', mapsHref('9 Oak Ave, Venice'));
+    expect(screen.queryByText('1 Main St, Sarasota, FL 34232')).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '2 Elm St, Sarasota, FL 34232' })).toHaveAttribute('href', mapsHref('2 Elm St, Sarasota, FL 34232'));
+  });
+
   it('names the customer in a technician\'s SMS link and leaves an admin\'s link as it was', async () => {
     const withPhone = { ...list, customers: [{ ...list.customers[0], phone: '+15555550104' }] };
     vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(withPhone) : response({})));

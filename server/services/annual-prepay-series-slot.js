@@ -13,8 +13,7 @@
  * (recurring-appointment-seeder.js seedFollowUpsForParent):
  *   - a technician who is not assignable (isAssignable) is not copied;
  *   - a date the technician is marked out (absentTechDays) stays unassigned;
- *   - the time is copied only while the taken-hour hand-off gate
- *     (GATE_PLAN_TAKEN_HOUR_HANDOFF) is on, and a start another stop already
+ *   - the time is copied, and a start another stop already
  *     holds is left off with the date as recurring_dispatch_due_date
  *     (scheduling/plan-taken-hour.js), so the night tool picks a free hour.
  * Every read here is best effort: a slot read never fails a seed.
@@ -149,15 +148,14 @@ async function seriesSlotAbsentDays(conn, slot, dates) {
 /**
  * What one seeded visit takes from the slot: `{ technicianId, windowStart }`.
  * The technician is null on a day they are out. An untimed seed takes the
- * time only while the taken-hour hand-off gate is on; a timed seed (the
+ * time; a timed seed (the
  * promised first visit) keeps its own window and takes the technician only.
  */
 function seriesSlotPatch(slot, { scheduledDate, absentDays = new Set(), timed = false } = {}) {
   const techId = slot.technicianId && !absentDays.has(`${slot.technicianId}:${ymd(scheduledDate)}`)
     ? slot.technicianId
     : null;
-  const copyTime = !timed && require('./scheduling/plan-taken-hour').handoffEnabled();
-  return { technicianId: techId, windowStart: copyTime ? slot.windowStart : null };
+  return { technicianId: techId, windowStart: timed ? null : slot.windowStart };
 }
 
 // The fields that drop a copied time and nothing else (the seed is written as before the gate).

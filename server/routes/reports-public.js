@@ -26,6 +26,15 @@ const {
   filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
+const { dayOnlyIds, dayOnlyFields } = require('../services/time-display');
+
+// The follow-up appointment's hour field: its window_start, or null with day_only + the note when the customer was told
+// only the day (GATE_DAY_ONLY_PROMISE, part C1; one read). {} when there is no appointment.
+async function followupTimeFields(appointment) {
+  if (!appointment) return {};
+  const dayOnly = (await dayOnlyIds(db, [appointment])).has(String(appointment.id));
+  return { windowStart: dayOnly ? null : appointment.window_start, ...dayOnlyFields(dayOnly) };
+}
 // Canonical (sorted-key) serializer — the repo's existing one, already shared
 // across service-report modules. Used to compare a JSONB round-trip against a
 // freshly built object without tripping over PostgreSQL's key ordering.
@@ -149,7 +158,6 @@ const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('../s
 const { stripFixedReentryTiming, sanitizeProductTargets, REENTRY_SAFE_COPY } = require('../services/social-media');
 const { publicOriginPdfSignature } = require('../utils/portal-url');
 const { reportCleanup1020PdfSignature } = require('../services/service-report/report-cleanup-1020');
-const { reportTemplatePayload } = require('../services/service-report/report-template');
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const {
   getHealthyStoredReportPdf,
@@ -930,6 +938,7 @@ router.get('/project/:token/data', async (req, res, next) => {
       customerId: project.customer_id,
       scheduledServiceId: project.scheduled_service_id,
     });
+    const followupTime = await followupTimeFields(upcomingAppointment);
 
     // WDO: serve the as-sent findings snapshot archived at send time, so the
     // public link always matches the emailed signed FDACS-13645 PDF even if
@@ -1036,8 +1045,6 @@ router.get('/project/:token/data', async (req, res, next) => {
       findings: project.project_type === 'pre_treatment_termite_certificate'
         ? require('../services/final-exterior-screen').screenFinalExteriorFindings(viewerFindings)
         : viewerFindings,
-      pretreatStickerReport: project.project_type === 'pre_treatment_termite_certificate'
-        && require('../config/feature-gates').isEnabled('pretreatStickerReport'),
       // Serve-time inspection-fee guard: covers legacy narratives and any
       // written by an old instance during the deploy window. Two passes —
       // the literal-cue scrub plus the VALUE scrub with the fee this project
@@ -1052,7 +1059,8 @@ router.get('/project/:token/data', async (req, res, next) => {
       upcomingAppointment: upcomingAppointment ? {
         serviceType: upcomingAppointment.service_type,
         scheduledDate: upcomingAppointment.scheduled_date,
-        windowStart: upcomingAppointment.window_start,
+        // GATE_DAY_ONLY_PROMISE (part C1): a day-only visit shows the date and no hour (windowStart + day_only fields).
+        ...followupTime,
         // NO window_end: it is the internal job-duration block — the customer
         // arrival window is always window_start + 2h, computed client-side
         // (owner rule; the client already ignored this field).
@@ -1060,8 +1068,6 @@ router.get('/project/:token/data', async (req, res, next) => {
         status: upcomingAppointment.status,
       } : null,
       photos: photosWithUrls,
-      // GATE_REPORT_SHARED_TEMPLATE: this page has only the live web view. Absent = byte-identical payload.
-      ...reportTemplatePayload(),
     });
   } catch (err) { next(err); }
 });
@@ -2522,9 +2528,6 @@ router.get('/:token/data', async (req, res, next) => {
       // so the print pipeline stays byte-identical.
       if (mode === 'live') {
         v1Data.glassDefault = true;
-        // GATE_REPORT_SHARED_TEMPLATE: the shared customer header and the stacked layout, live web view
-        // only. Absent = byte-identical payload.
-        Object.assign(v1Data, reportTemplatePayload());
       }
       return res.json(v1Data);
     }
@@ -2554,8 +2557,6 @@ router.get('/:token/data', async (req, res, next) => {
       dryTimes: service.dry_time_data,
       irrigation: service.irrigation_recommendation,
       pdfUrl: `/api/reports/${req.params.token}`,
-      // GATE_REPORT_SHARED_TEMPLATE: live web view only. Absent = byte-identical payload.
-      ...(mode === 'live' ? reportTemplatePayload() : {}),
     });
   } catch (err) {
     // A pin this report cannot legitimately show FAILS the request — never a

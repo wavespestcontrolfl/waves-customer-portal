@@ -493,8 +493,9 @@ router.get('/cash-today', requireFullAccess, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 // Owner 2026-11-04 "A A A A" (Banking decision page). The read works only from data the portal already
 // has (services/cash-forecast/load.js reads; engine.js computes; the free Plaid /accounts/get and
-// Stripe's balance read). The input routes store what the owner types: planned items, and the settings
-// (floor, last year's receipts by month). Owner only; 404 while the gate is off.
+// Stripe's balance read). The input routes store what the owner types: planned items, the settings
+// (floor, last year's receipts by month) and the business/household mark of each repeating bill (step
+// 2c; a label only). Owner only; 404 while the gate is off.
 function cashForecastGate(req, res, next) {
   if (!featureGates.cashForecastLive()) return res.status(404).json({ error: 'Not found' });
   return next();
@@ -543,5 +544,10 @@ router.delete('/cash-forecast/items/:id', requireFullAccess, cashForecastGate,
   cashForecastWrite((req) => CashForecastInputs.deactivateItem(db, req.params.id, req.technicianId)));
 router.put('/cash-forecast/settings', requireFullAccess, cashForecastGate,
   cashForecastWrite((req) => CashForecastInputs.saveSettings(db, req.body, req.technicianId)));
+// :key is a repeating bill's merchant key from the forecast, URL-encoded ("ACME%20CLOUD").
+router.put('/cash-forecast/marks/:key', requireFullAccess, cashForecastGate,
+  cashForecastWrite((req) => CashForecastInputs.saveMark(db, req.params.key, req.body, req.technicianId)));
+router.delete('/cash-forecast/marks/:key', requireFullAccess, cashForecastGate,
+  cashForecastWrite((req) => CashForecastInputs.clearMark(db, req.params.key)));
 
 module.exports = router;

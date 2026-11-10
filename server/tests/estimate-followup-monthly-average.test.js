@@ -1,11 +1,10 @@
 /**
- * GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE (owner 2026-10-21, "follow-ups too"):
+ * Follow-up monthly average (owner 2026-10-21, "follow-ups too"):
  * the unviewed, viewed, final and expiring follow-up emails show the same
  * monthly average the delivery email does, built by the same resolver
- * (emailAverageParts) from a row read at send time. Gate off = the payload is
- * the very same object the sender built before.
+ * (emailAverageParts) from a row read at send time. With no average the
+ * payload is the very same object the sender built.
  */
-const mockGates = { followup: true, base: true };
 const NOTE_BLOCKS = [
   { type: 'details', rows: [{ label: 'Estimate', value: '{{price_summary}}' }] },
   { type: 'paragraph', content: '{{estimate_average_note}}' },
@@ -17,10 +16,7 @@ jest.mock('../models/db', () => {
   mockDb.fn = { now: jest.fn(() => 'NOW()') };
   return mockDb;
 });
-jest.mock('../config/feature-gates', () => ({
-  isEnabled: jest.fn((gate) => (gate === 'estimateFollowupMonthlyAverage' ? mockGates.followup
-    : gate === 'estimateMonthlyAverage' ? mockGates.base : false)),
-}));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({ sent: true })),
@@ -96,7 +92,7 @@ function stageOf(calls) {
 function makeBuilder(table) {
   const calls = [];
   const b = {};
-  for (const m of ['join', 'whereIn', 'whereNotIn', 'whereNotNull', 'whereNull', 'whereNot', 'where', 'whereBetween', 'select', 'groupBy', 'max', 'as', 'orderBy', 'orWhereNull', 'andWhere', 'whereNotExists', 'whereRaw']) {
+  for (const m of ['join', 'whereIn', 'whereNotIn', 'whereNotNull', 'whereNull', 'whereNot', 'where', 'whereBetween', 'select', 'groupBy', 'max', 'as', 'orderBy', 'orWhereNull', 'andWhere', 'whereNotExists', 'whereRaw', 'distinctOn']) {
     b[m] = jest.fn((...args) => { calls.push([m, ...args]); return b; });
   }
   b.first = jest.fn(() => { b._mode = 'first'; return b; });
@@ -116,8 +112,6 @@ function makeBuilder(table) {
 beforeEach(() => {
   jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] }).setSystemTime(NOW);
   jest.clearAllMocks();
-  mockGates.followup = true;
-  mockGates.base = true;
   mockBilling.ctx = { billsPerApplication: true, livePricing: null };
   mockPdf.copy = { attachments: [], payload: {} };
   mockTemplate.activeVersion = { id: 'ver-1', blocks: NOTE_BLOCKS, text_body: null };
@@ -155,20 +149,6 @@ describe.each(STAGES)('%s stage (%s)', (stage, templateKey, mutate) => {
     const sent = await runStage(stage, mutate, multiRow);
     expect(sent.payload.price_summary).toBe('Priced per application · plan averages $72.30 a month');
     expect(sent.payload.estimate_average_note).toBe('Averaged over the year, bundle savings included. You pay after each application. One-time setup $99.00, not in the average.');
-  });
-
-  test('gate off: the payload is the sender\'s own, with no average key and today\'s price line', async () => {
-    mockGates.followup = false;
-    const sent = await runStage(stage, mutate);
-    expect(sent.payload.price_summary).toBe('Priced per application — full breakdown inside');
-    expect(sent.payload).not.toHaveProperty('estimate_average_note');
-  });
-
-  test('the base average gate off also withholds it', async () => {
-    mockGates.base = false;
-    const sent = await runStage(stage, mutate);
-    expect(sent.payload.price_summary).toBe('Priced per application — full breakdown inside');
-    expect(sent.payload).not.toHaveProperty('estimate_average_note');
   });
 });
 
@@ -287,8 +267,8 @@ describe('the send is pinned to the template version whose tokens were checked',
     expect(pinnedSend(EmailTemplates.sendTemplate.mock.calls)).toMatchObject({ templateKey, versionId: 'ver-1' });
   });
 
-  test.each(STAGES)('%s: no versionId key without the average (gate off)', async (stage, templateKey, mutate) => {
-    mockGates.followup = false;
+  test.each(STAGES)('%s: no versionId key when the template cannot show the note', async (stage, templateKey, mutate) => {
+    mockTemplate.activeVersion = { id: 'ver-1', blocks: [NOTE_BLOCKS[0]], text_body: null };
     await runStage(stage, mutate);
     expect(pinnedSend(EmailTemplates.sendTemplate.mock.calls)).not.toHaveProperty('versionId');
   });
@@ -348,7 +328,7 @@ describe('send-time check: the average is re-read at the provider boundary', () 
   test('the email spec records the exact copy it carries; an unpinned email installs no handoff', async () => {
     const email = await pinned();
     expect(email.averageText).toBe('$94.00 per application · $31.33 a month\nAveraged over the year. You pay after each application.');
-    mockGates.followup = false;
+    mockTemplate.activeVersion = { id: 'ver-1', blocks: [NOTE_BLOCKS[0]], text_body: null }; // no note block: no average
     const plain = { templateKey: KEY, stage: 'unviewed', payload: { first_name: 'T' } };
     expect(await installedHandoff(await _private.withAverageEmail(plain, row()))).toBeUndefined();
   });
@@ -402,7 +382,7 @@ describe('send-time check: the average is re-read at the provider boundary', () 
   test('a PDF-only email (no average) keeps the PDF handoff untouched', async () => {
     const pdfHandoff = jest.fn(async (dispatch) => { await dispatch(); return { ok: true }; });
     mockPdf.copy = { attachments: [], payload: {}, withProviderHandoff: pdfHandoff };
-    mockGates.followup = false;
+    mockTemplate.activeVersion = { id: 'ver-1', blocks: [NOTE_BLOCKS[0]], text_body: null }; // no note block: no average
     const email = { templateKey: KEY, stage: 'unviewed', payload: { first_name: 'T' } };
     expect(await installedHandoff(await _private.withAverageEmail(email, row()))).toBe(pdfHandoff);
   });
@@ -425,7 +405,7 @@ describe('send-time check: the average is re-read at the provider boundary', () 
     expect(EmailTemplates.sendTemplate.mock.calls[0][0].categories).toEqual([
       'estimate_followup', 'estimate_followup_unviewed', 'estimate_followup_monthly_average',
     ]);
-    mockGates.followup = false;
+    mockTemplate.activeVersion = { id: 'ver-1', blocks: [NOTE_BLOCKS[0]], text_body: null }; // no note block: no average
     EmailTemplates.sendTemplate.mockClear();
     const plain = await _private.withAverageEmail({ templateKey: KEY, stage: 'unviewed', payload: { first_name: 'T' } }, row());
     await _private.sendDualChannel(row(), { sms: null, email: plain });
@@ -491,7 +471,7 @@ describe('application months in the follow-ups', () => {
     expect(sent.payload.estimate_average_note).toBe('Averaged over the year. You pay after each application.');
   });
 
-  test('the send-time check compares the same text: it passes unchanged and vetoes when the monthly-average gate flips off in between', async () => {
+  test('the send-time check compares the same text: it passes unchanged and vetoes when the plan stops qualifying in between', async () => {
     freshOverride = est1185();
     const email = await _private.withAverageEmail(
       { templateKey: KEY, stage: 'unviewed', payload: _private.estimateEmailPayload(est1185(), 'Taylor', 'https://x.test') },
@@ -507,7 +487,7 @@ describe('application months in the follow-ups', () => {
     })();
     freshOverride = est1185();
     await expect(check()).resolves.toEqual({ ok: true });
-    mockGates.base = false;
+    mockBilling.ctx = { billsPerApplication: false, livePricing: null };
     await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'monthly_average_changed' });
   });
 });

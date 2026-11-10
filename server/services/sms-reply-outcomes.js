@@ -1,5 +1,5 @@
 /**
- * Reply outcome signals (GATE_SMS_REPLY_OUTCOMES, default OFF; owner "do all" 2026-10-24).
+ * Reply outcome signals (owner "do all" 2026-10-24).
  *
  * The SMS AI is judged by an LLM judge. This sweep adds the customer's side:
  * what did the person DO after each Waves reply to their text? One
@@ -349,9 +349,6 @@ async function measureReply({ dbh, reply, draft, now, duplicateOfProviderRow = f
  * query and by the unique key. Returns counts only.
  */
 async function sweepReplyOutcomes({ now = new Date(), limit = DEFAULT_LIMIT, lookbackDays = LOOKBACK_DAYS, dbh = db } = {}) {
-  const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('smsReplyOutcomes')) return { skipped: 'gate_off' };
-
   const replies = await readReplyCandidates({ dbh, now, limit, lookbackDays });
   const drafts = await resolveDrafts(replies, dbh);
   const queueRows = await findQueueRowsWithProviderRow(replies, dbh);

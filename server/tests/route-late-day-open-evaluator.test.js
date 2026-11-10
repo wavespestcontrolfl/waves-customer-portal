@@ -37,8 +37,8 @@ const evaluate = (rows, windowStart, durationMinutes, extra = {}) => {
   });
 };
 
-beforeEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; delete process.env.GATE_STAFF_ROUTE_INSERTION; });
-afterEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; delete process.env.GATE_STAFF_ROUTE_INSERTION; });
+beforeEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
+afterEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
 
 // A takes four hours, so B (promised 08:30, arrive by 10:30) is late with or without a new visit.
 const LATE_DAY = [stop('A', '08:00', 240), stop('B', '08:30', 60)];
@@ -133,11 +133,10 @@ describe('lateDays on: the hours that add no new late stop are listed and flagge
   });
 });
 
-describe('the insertion margin (GATE_STAFF_ROUTE_INSERTION) on a late day', () => {
+describe('the insertion margin on a late day', () => {
   const { _internals } = require('../services/scheduling/arrival-route');
 
   test('every place is tried: the hours that make A late, or push the already-late B more than 15 minutes later, are not listed', () => {
-    process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
     const { placements } = enumerateArrivalPlacements(context(LATE_DAY, prospective('09:00', 60)),
       { durationMinutes: 60, earliestStartMin: 8 * 60, latestServiceEndMin: 19 * 60, lateDays: true });
     const starts = placements.map((p) => p.windowStart);
@@ -200,7 +199,6 @@ describe('stale numbering: a stop is already late only when it is late in every 
   ];
 
   test('Codex reproduction: A is late only in B-then-A, B only in A-then-B; N, A, B is refused (no stop is late in both)', () => {
-    process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
     globalThis.__zeroLegs = true;
     // Two 120-minute stops promised 08:00-10:00, no driving, the van leaves at 09:55: whichever stop goes
     // second is 115 minutes late, so each stop is late in one baseline and on time in the other.
@@ -210,7 +208,6 @@ describe('stale numbering: a stop is already late only when it is late in every 
   });
 
   test('a stop that is late in every baseline still opens the day, as before', () => {
-    process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
     // B (promised 08:30, by 10:30) is late behind A's four hours in the stored order and in the clock order.
     const rows = [stop('A', '08:00', 240, { route_order: 1 }), stop('B', '08:30', 60)];
     const fit = evaluate(rows, '15:00', 60, { lateDays: true });

@@ -5,8 +5,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 21,
-        "verified_completion_ms": 77
+        "first_tool_result_ms": 104,
+        "verified_completion_ms": 366
       },
       "notes": [],
       "strength": null,
@@ -16,8 +16,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 20,
-        "verified_completion_ms": 46
+        "first_tool_result_ms": 44,
+        "verified_completion_ms": 96
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done."
@@ -29,8 +29,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 25
+        "first_tool_result_ms": 38,
+        "verified_completion_ms": 54
       },
       "notes": [],
       "strength": null,
@@ -40,8 +40,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 18
+        "first_tool_result_ms": 37,
+        "verified_completion_ms": 60
       },
       "notes": [],
       "strength": null,
@@ -51,8 +51,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 15,
-        "verified_completion_ms": 50
+        "first_tool_result_ms": 22,
+        "verified_completion_ms": 147
       },
       "notes": [],
       "strength": null,
@@ -62,8 +62,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 11,
-        "verified_completion_ms": 34
+        "first_tool_result_ms": 20,
+        "verified_completion_ms": 64
       },
       "notes": [],
       "strength": null,
@@ -73,8 +73,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 24
+        "first_tool_result_ms": 21,
+        "verified_completion_ms": 61
       },
       "notes": [],
       "strength": null,
@@ -84,8 +84,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 11,
-        "verified_completion_ms": 22
+        "first_tool_result_ms": 154,
+        "verified_completion_ms": 204
       },
       "notes": [
         "no attempt by design: the only resolver is a person in the notification UI; no tool marks an alert done, so the correct model reads and says so"
@@ -97,8 +97,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 22
+        "first_tool_result_ms": 29,
+        "verified_completion_ms": 104
       },
       "notes": [],
       "strength": null,
@@ -108,8 +108,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 22
+        "first_tool_result_ms": 45,
+        "verified_completion_ms": 125
       },
       "notes": [],
       "strength": null,
@@ -119,8 +119,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 21,
-        "verified_completion_ms": 119
+        "first_tool_result_ms": 133,
+        "verified_completion_ms": 342
       },
       "notes": [],
       "strength": null,
@@ -130,8 +130,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 14,
-        "verified_completion_ms": 95
+        "first_tool_result_ms": 28,
+        "verified_completion_ms": 87
       },
       "notes": [],
       "strength": null,
@@ -141,8 +141,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 19,
-        "verified_completion_ms": 64
+        "first_tool_result_ms": 29,
+        "verified_completion_ms": 118
       },
       "notes": [],
       "strength": null,
@@ -152,8 +152,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 11,
-        "verified_completion_ms": 40
+        "first_tool_result_ms": 23,
+        "verified_completion_ms": 73
       },
       "notes": [],
       "strength": null,
@@ -163,7 +163,7 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 17,
+        "first_tool_result_ms": 16,
         "verified_completion_ms": 76
       },
       "notes": [],
@@ -174,8 +174,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 39
+        "first_tool_result_ms": 23,
+        "verified_completion_ms": 134
       },
       "notes": [],
       "strength": null,
@@ -185,8 +185,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 10,
-        "verified_completion_ms": 32
+        "first_tool_result_ms": 51,
+        "verified_completion_ms": 150
       },
       "notes": [
         "no attempt by design: the correct model asks which Murphy; the lookup above returns both accounts and no write is issued"
@@ -198,8 +198,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 20
+        "first_tool_result_ms": 36,
+        "verified_completion_ms": 97
       },
       "notes": [],
       "strength": null,
@@ -217,8 +217,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 20,
-        "verified_completion_ms": 41
+        "first_tool_result_ms": 31,
+        "verified_completion_ms": 119
       },
       "notes": [],
       "strength": null,
@@ -228,41 +228,120 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 11,
-        "verified_completion_ms": 79
+        "first_tool_result_ms": 25,
+        "verified_completion_ms": 142
       },
       "notes": [],
       "strength": null,
       "contract_calls": 0
     },
     "W3-dev-01": {
-      "outcome": "pass",
-      "failures": [],
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        {
+          "point": "proposal",
+          "code": "carded_where_contract_expects_direct",
+          "detail": "1 card(s) for a write the contract commits without one"
+        },
+        {
+          "point": "domain_rule",
+          "code": "direct_commit_not_executed",
+          "detail": "update_lead_contact   {\"preview\":true,\"lead_id\":\"1be77133-85b6-4667-992f-fbab3c1f0310\",\"lead_name\":\"Murphy\",\"lead_status\":\"new\",\"changes\":{\"first_name\":{\"from\":null,\"to\":\"Jay\"}},\"_customer_id\":null,\"note\":\"Proposed — await"
+        },
+        {
+          "point": "read_back",
+          "code": "first_name_not_saved",
+          "detail": "lead 1be77133 first_name null"
+        },
+        {
+          "point": "receipt",
+          "code": "lead_audit_row_missing",
+          "detail": "lead_activities has no single Intelligence Bar entry for the edit"
+        }
+      ],
       "timings": {
-        "first_tool_result_ms": 14,
-        "verified_completion_ms": 42
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 47
       },
       "notes": [],
       "strength": null,
       "contract_calls": 1
     },
     "W3-dev-02": {
-      "outcome": "pass",
-      "failures": [],
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        {
+          "point": "proposal",
+          "code": "carded_where_contract_expects_direct",
+          "detail": "1 card(s) for a write the contract commits without one"
+        },
+        {
+          "point": "domain_rule",
+          "code": "direct_commit_not_executed",
+          "detail": "update_lead_contact   {\"preview\":true,\"lead_id\":\"e3509564-638c-4d89-bd23-960812f9967c\",\"lead_name\":\"Murphy\",\"lead_status\":\"new\",\"changes\":{\"first_name\":{\"from\":null,\"to\":\"Jay\"}},\"linked_customer_unchanged\":true,\"_customer_"
+        },
+        {
+          "point": "read_back",
+          "code": "first_name_not_saved",
+          "detail": "lead e3509564 first_name null"
+        },
+        {
+          "point": "receipt",
+          "code": "lead_audit_row_missing",
+          "detail": "lead_activities has no single Intelligence Bar entry for the edit"
+        },
+        {
+          "point": "side_effect",
+          "code": "first_change_not_left_in_place",
+          "detail": "lead 4 first_name null"
+        },
+        {
+          "point": "receipt",
+          "code": "lead_audit_row_missing",
+          "detail": "each lead should carry one Intelligence Bar entry for its own edit"
+        }
+      ],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 26
+        "first_tool_result_ms": 13,
+        "verified_completion_ms": 43
       },
       "notes": [],
       "strength": null,
       "contract_calls": 2
     },
     "W3-dev-03": {
-      "outcome": "pass",
-      "failures": [],
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        {
+          "point": "proposal",
+          "code": "carded_where_contract_expects_direct",
+          "detail": "1 card(s) for a write the contract commits without one"
+        },
+        {
+          "point": "domain_rule",
+          "code": "direct_commit_not_executed",
+          "detail": "update_lead_contact   {\"preview\":true,\"lead_id\":\"a71762d4-936d-4c6b-8813-1326312314f7\",\"lead_name\":\"Murphy\",\"lead_status\":\"new\",\"changes\":{\"first_name\":{\"from\":null,\"to\":\"Jay\"}},\"_customer_id\":null,\"note\":\"Proposed — await"
+        },
+        {
+          "point": "read_back",
+          "code": "first_name_not_saved",
+          "detail": "lead a71762d4 first_name null"
+        },
+        {
+          "point": "receipt",
+          "code": "lead_audit_row_missing",
+          "detail": "lead_activities has no single Intelligence Bar entry for the edit"
+        }
+      ],
       "timings": {
-        "first_tool_result_ms": 13,
-        "verified_completion_ms": 39
+        "first_tool_result_ms": 17,
+        "verified_completion_ms": 50
       },
       "notes": [],
       "strength": null,
@@ -272,19 +351,19 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 23,
-        "verified_completion_ms": 38
+        "first_tool_result_ms": 47,
+        "verified_completion_ms": 114
       },
       "notes": [],
       "strength": null,
-      "contract_calls": 1
+      "contract_calls": 2
     },
     "W3-dev-05": {
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 11,
-        "verified_completion_ms": 1574
+        "first_tool_result_ms": 31,
+        "verified_completion_ms": 1658
       },
       "notes": [
         "sends guard skipped: the pending double-opt-in is re-sent once to the new address; the case asserts exactly that one email and no other send"
@@ -309,8 +388,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 14,
-        "verified_completion_ms": 93
+        "first_tool_result_ms": 21,
+        "verified_completion_ms": 174
       },
       "notes": [
         "undeclared update_lead_contact allowed: the gate-off supersede scenario edits a second lead twice (Zed, then Zane) to prove the older pending card cannot be confirmed",
@@ -320,11 +399,34 @@
       "contract_calls": 2
     },
     "W3-dev-07": {
-      "outcome": "pass",
-      "failures": [],
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        {
+          "point": "proposal",
+          "code": "carded_where_contract_expects_direct",
+          "detail": "1 card(s) for a write the contract commits without one"
+        },
+        {
+          "point": "domain_rule",
+          "code": "direct_commit_not_executed",
+          "detail": "update_lead_contact   {\"preview\":true,\"lead_id\":\"12c15907-e665-43ae-9bd8-b54f6fed6277\",\"lead_name\":\"Ostrander\",\"lead_status\":\"new\",\"changes\":{\"first_name\":{\"from\":null,\"to\":\"Pat\"}},\"_customer_id\":null,\"note\":\"Proposed — aw"
+        },
+        {
+          "point": "read_back",
+          "code": "lead_row_wrong",
+          "detail": "{\"first_name\":null,\"last_name\":\"Ostrander\",\"phone\":\"+19415550401\"}"
+        },
+        {
+          "point": "recovery",
+          "code": "double_submit_wrote_twice",
+          "detail": "the lead was written more than once"
+        }
+      ],
       "timings": {
-        "first_tool_result_ms": 5,
-        "verified_completion_ms": 19
+        "first_tool_result_ms": 22,
+        "verified_completion_ms": 54
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done."
@@ -336,8 +438,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 13,
-        "verified_completion_ms": 33
+        "first_tool_result_ms": 23,
+        "verified_completion_ms": 58
       },
       "notes": [],
       "strength": null,
@@ -348,7 +450,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": null,
-        "verified_completion_ms": 15
+        "verified_completion_ms": 52
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done.",
@@ -361,8 +463,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 4,
-        "verified_completion_ms": 20
+        "first_tool_result_ms": 6,
+        "verified_completion_ms": 32
       },
       "notes": [
         "update_lead_contact: error: This action is not available to your role",
@@ -375,8 +477,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 32
+        "first_tool_result_ms": 34,
+        "verified_completion_ms": 146
       },
       "notes": [],
       "strength": null,
@@ -386,8 +488,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 16,
-        "verified_completion_ms": 48
+        "first_tool_result_ms": 49,
+        "verified_completion_ms": 173
       },
       "notes": [],
       "strength": null,
@@ -397,8 +499,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 33
+        "first_tool_result_ms": 32,
+        "verified_completion_ms": 117
       },
       "notes": [
         "add_customer_property: property_exists: A property with that street already exists for this customer"
@@ -407,13 +509,48 @@
       "contract_calls": 1
     },
     "W4-dev-04": {
-      "outcome": "pass",
-      "failures": [],
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        {
+          "point": "proposal",
+          "code": "carded_where_contract_expects_direct",
+          "detail": "1 card(s) for a write the contract commits without one"
+        },
+        {
+          "point": "domain_rule",
+          "code": "direct_commit_not_executed",
+          "detail": "update_customer_property   {\"proposal\":true,\"customer\":{\"id\":\"bd44c16f-9bab-40b7-bd40-10db67d18243\",\"name\":\"Lena Larkspur\"},\"property\":{\"id\":\"9cad853d-904d-4c0b-b018-ddd8b295c122\",\"address\":\"27 Sample Court, Samplecity, FL, 342"
+        },
+        {
+          "point": "domain_rule",
+          "code": "direct_commit_not_executed",
+          "detail": "set_primary_property  An earlier card in this request already changes the same record. Do not prepare this change now: tell the operator to confirm or cancel that card, then ask for this change again. {\"error\":\"An earlier card in this request already changes the same record. Do not prepare this change now: tell the operator to confirm or cancel that card, then ask for this change again.\",\"code\":\"sa"
+        },
+        {
+          "point": "receipt",
+          "code": "receipt_per_edit_missing",
+          "detail": "200: 1 receipts for two direct edits"
+        },
+        {
+          "point": "read_back",
+          "code": "primary_flag_wrong",
+          "detail": "[[\"3 Fixture Row\",true],[\"27 Sample Court\",false]]"
+        },
+        {
+          "point": "read_back",
+          "code": "rental_not_reclassified",
+          "detail": "occupancy rental_investment, relationship rental_owned"
+        }
+      ],
       "timings": {
-        "first_tool_result_ms": 15,
-        "verified_completion_ms": 95
+        "first_tool_result_ms": 23,
+        "verified_completion_ms": 111
       },
-      "notes": [],
+      "notes": [
+        "set_primary_property: same_record_card_open: An earlier card in this request already changes the same record. Do not prepare this change now: tell the operator to confirm or cancel that"
+      ],
       "strength": null,
       "contract_calls": 3
     },
@@ -421,8 +558,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 14,
-        "verified_completion_ms": 60
+        "first_tool_result_ms": 22,
+        "verified_completion_ms": 86
       },
       "notes": [],
       "strength": null,
@@ -440,8 +577,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 27,
-        "verified_completion_ms": 44
+        "first_tool_result_ms": 25,
+        "verified_completion_ms": 60
       },
       "notes": [],
       "strength": null,
@@ -451,8 +588,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 21
+        "first_tool_result_ms": 25,
+        "verified_completion_ms": 50
       },
       "notes": [
         "add_customer_property: property_exists: A property with that street already exists for this customer",
@@ -465,8 +602,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 26
+        "first_tool_result_ms": 43,
+        "verified_completion_ms": 133
       },
       "notes": [],
       "strength": null,
@@ -477,7 +614,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": 3,
-        "verified_completion_ms": 11
+        "verified_completion_ms": 20
       },
       "notes": [
         "add_customer_property: error: This action is not available to your role",
@@ -490,8 +627,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 16,
-        "verified_completion_ms": 55
+        "first_tool_result_ms": 43,
+        "verified_completion_ms": 212
       },
       "notes": [],
       "strength": null,
@@ -501,8 +638,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 160,
-        "verified_completion_ms": 1137
+        "first_tool_result_ms": 650,
+        "verified_completion_ms": 1884
       },
       "notes": [],
       "strength": null,
@@ -512,8 +649,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 29,
-        "verified_completion_ms": 991
+        "first_tool_result_ms": 51,
+        "verified_completion_ms": 1092
       },
       "notes": [],
       "strength": null,
@@ -523,8 +660,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 661,
-        "verified_completion_ms": 1266
+        "first_tool_result_ms": 22,
+        "verified_completion_ms": 59
       },
       "notes": [
         "find_available_slots returned 0 slots; the fixture seeds no technician capacity",
@@ -538,8 +675,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 23
+        "first_tool_result_ms": 25,
+        "verified_completion_ms": 45
       },
       "notes": [
         "no attempt by design: a recurring series is outside the first release; create_appointment has no recurrence input, so the correct model offers one visit and books nothing"
@@ -551,8 +688,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 14,
-        "verified_completion_ms": 28
+        "first_tool_result_ms": 28,
+        "verified_completion_ms": 59
       },
       "notes": [
         "no attempt by design: add-ons are outside the first release; the correct model declines the add-on and books nothing"
@@ -564,8 +701,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 949
+        "first_tool_result_ms": 62,
+        "verified_completion_ms": 1047
       },
       "notes": [],
       "strength": null,
@@ -575,8 +712,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 11,
-        "verified_completion_ms": 957
+        "first_tool_result_ms": 60,
+        "verified_completion_ms": 1128
       },
       "notes": [],
       "strength": null,
@@ -586,8 +723,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 19,
-        "verified_completion_ms": 998
+        "first_tool_result_ms": 54,
+        "verified_completion_ms": 1142
       },
       "notes": [],
       "strength": null,
@@ -597,8 +734,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 14,
-        "verified_completion_ms": 1553
+        "first_tool_result_ms": 32,
+        "verified_completion_ms": 1575
       },
       "notes": [],
       "strength": null,
@@ -608,8 +745,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 14,
-        "verified_completion_ms": 964
+        "first_tool_result_ms": 106,
+        "verified_completion_ms": 1087
       },
       "notes": [],
       "strength": null,
@@ -625,11 +762,39 @@
         }
       ],
       "probe": {
-        "outcome": "pass",
-        "failures": [],
+        "outcome": "fail",
+        "point": "proposal",
+        "code": "carded_where_contract_expects_direct",
+        "failures": [
+          {
+            "point": "proposal",
+            "code": "carded_where_contract_expects_direct",
+            "detail": "1 card(s) for a write the contract commits without one"
+          },
+          {
+            "point": "domain_rule",
+            "code": "direct_commit_not_executed",
+            "detail": "reschedule_appointment   {\"proposal\":true,\"tool\":\"reschedule_appointment\",\"params\":{\"appointment_id\":\"4a70362b-1fdb-4f4f-af90-9d1aafc0758d\",\"new_date\":\"2026-11-13\",\"new_time_window\":\"10:00 AM\",\"reason\":\"Operator moved the vis"
+          },
+          {
+            "point": "read_back",
+            "code": "moved_date_wrong",
+            "detail": "date Mon Nov 09 2026 00:00:00 GMT-0500 (Eastern Standard Time), expected 2026-11-13"
+          },
+          {
+            "point": "read_back",
+            "code": "moved_window_start_wrong",
+            "detail": "window start 09:00, expected 10:00"
+          },
+          {
+            "point": "domain_rule",
+            "code": "moved_window_length_not_preserved",
+            "detail": "stored window 09:00-11:00; the contract keeps the visit's stored block length, 09:00-12:00"
+          }
+        ],
         "timings": {
-          "first_tool_result_ms": 18,
-          "verified_completion_ms": 2426
+          "first_tool_result_ms": 29,
+          "verified_completion_ms": 2850
         },
         "notes": [],
         "strength": null,
@@ -640,8 +805,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 36
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 37
       },
       "notes": [
         "no attempt by design: the visit is already on a Friday, so the correct model asks which Friday; the schedule read above is the only call"
@@ -659,11 +824,64 @@
         }
       ],
       "probe": {
-        "outcome": "pass",
-        "failures": [],
+        "outcome": "fail",
+        "point": "proposal",
+        "code": "carded_where_contract_expects_direct",
+        "failures": [
+          {
+            "point": "proposal",
+            "code": "carded_where_contract_expects_direct",
+            "detail": "1 card(s) for a write the contract commits without one"
+          },
+          {
+            "point": "domain_rule",
+            "code": "direct_commit_not_executed",
+            "detail": "reschedule_appointment   {\"proposal\":true,\"tool\":\"reschedule_appointment\",\"params\":{\"appointment_id\":\"5f46b486-fcd6-48a9-a032-e527f0b6237f\",\"new_date\":\"2026-11-13\",\"new_time_window\":\"10:00 AM\",\"reason\":\"Operator moved the vis"
+          },
+          {
+            "point": "read_back",
+            "code": "moved_date_wrong",
+            "detail": "date Mon Nov 09 2026 00:00:00 GMT-0500 (Eastern Standard Time), expected 2026-11-13"
+          },
+          {
+            "point": "read_back",
+            "code": "moved_window_start_wrong",
+            "detail": "window start 09:00, expected 10:00"
+          },
+          {
+            "point": "domain_rule",
+            "code": "moved_window_length_not_preserved",
+            "detail": "stored window 09:00-11:00; the contract keeps the visit's stored block length, 09:00-12:00"
+          },
+          {
+            "point": "proposal",
+            "code": "carded_where_contract_expects_direct",
+            "detail": "1 card(s) for a write the contract commits without one"
+          },
+          {
+            "point": "domain_rule",
+            "code": "direct_commit_not_executed",
+            "detail": "reschedule_appointment   {\"proposal\":true,\"tool\":\"reschedule_appointment\",\"params\":{\"appointment_id\":\"5f46b486-fcd6-48a9-a032-e527f0b6237f\",\"new_date\":\"2026-11-12\",\"new_time_window\":\"10:00 AM\",\"reason\":\"Operator moved the vis"
+          },
+          {
+            "point": "read_back",
+            "code": "moved_date_wrong",
+            "detail": "date Mon Nov 09 2026 00:00:00 GMT-0500 (Eastern Standard Time), expected 2026-11-12"
+          },
+          {
+            "point": "read_back",
+            "code": "moved_window_start_wrong",
+            "detail": "window start 09:00, expected 10:00"
+          },
+          {
+            "point": "domain_rule",
+            "code": "moved_window_length_not_preserved",
+            "detail": "stored window 09:00-11:00; the contract keeps the visit's stored block length, 09:00-12:00"
+          }
+        ],
         "timings": {
-          "first_tool_result_ms": 13,
-          "verified_completion_ms": 4807
+          "first_tool_result_ms": 23,
+          "verified_completion_ms": 5002
         },
         "notes": [],
         "strength": null,
@@ -680,25 +898,86 @@
         }
       ],
       "probe": {
-        "outcome": "pass",
-        "failures": [],
+        "outcome": "fail",
+        "point": "proposal",
+        "code": "carded_where_contract_expects_direct",
+        "failures": [
+          {
+            "point": "proposal",
+            "code": "carded_where_contract_expects_direct",
+            "detail": "1 card(s) for a write the contract commits without one"
+          },
+          {
+            "point": "domain_rule",
+            "code": "direct_commit_not_executed",
+            "detail": "reschedule_appointment   {\"proposal\":true,\"tool\":\"reschedule_appointment\",\"params\":{\"appointment_id\":\"1b319e7d-6f79-4d9c-b829-6240524d9f2d\",\"new_date\":\"2026-11-13\",\"new_time_window\":\"10:00 AM\",\"reason\":\"Operator moved the vis"
+          },
+          {
+            "point": "read_back",
+            "code": "moved_date_wrong",
+            "detail": "date Mon Nov 09 2026 00:00:00 GMT-0500 (Eastern Standard Time), expected 2026-11-13"
+          },
+          {
+            "point": "read_back",
+            "code": "moved_window_start_wrong",
+            "detail": "window start 09:00, expected 10:00"
+          },
+          {
+            "point": "domain_rule",
+            "code": "moved_window_length_not_preserved",
+            "detail": "stored window 09:00-11:00; the contract keeps the visit's stored block length, 09:00-12:00"
+          },
+          {
+            "point": "recovery",
+            "code": "resume_moved_again",
+            "detail": "the resumed task changed the visit again"
+          }
+        ],
         "timings": {
-          "first_tool_result_ms": 19,
-          "verified_completion_ms": 2427
+          "first_tool_result_ms": 46,
+          "verified_completion_ms": 2539
         },
         "notes": [
-          "turn status 409 not_resumable This task has no interrupted step to continue.; no tool call reached; answer: "
+          "turn status 409 steps_unresolved Resolve the saved action outcomes before continuing; no tool call reached; answer: "
         ],
         "strength": null,
         "contract_calls": 2
       }
     },
     "W6-dev-05": {
-      "outcome": "pass",
-      "failures": [],
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        {
+          "point": "proposal",
+          "code": "carded_where_contract_expects_direct",
+          "detail": "1 card(s) for a write the contract commits without one"
+        },
+        {
+          "point": "domain_rule",
+          "code": "direct_commit_not_executed",
+          "detail": "reschedule_appointment   {\"proposal\":true,\"tool\":\"reschedule_appointment\",\"params\":{\"appointment_id\":\"d9e8c7b7-8f52-429b-9c20-27b350a29f70\",\"new_date\":\"2026-11-13\",\"new_time_window\":\"9:00 AM\",\"reason\":\"Operator moved the visi"
+        },
+        {
+          "point": "read_back",
+          "code": "moved_date_wrong",
+          "detail": "date Mon May 10 2027 00:00:00 GMT-0400 (Eastern Daylight Time), expected 2026-11-13"
+        },
+        {
+          "point": "read_back",
+          "code": "moved_window_start_wrong",
+          "detail": "window start 08:00, expected 09:00"
+        },
+        {
+          "point": "domain_rule",
+          "code": "moved_window_length_not_preserved",
+          "detail": "stored window 08:00-10:00; the contract keeps the visit's stored block length, 08:00-11:00"
+        }
+      ],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 1557
+        "first_tool_result_ms": 29,
+        "verified_completion_ms": 1619
       },
       "notes": [],
       "strength": null,
@@ -730,11 +1009,11 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 11,
-          "verified_completion_ms": 853
+          "first_tool_result_ms": 34,
+          "verified_completion_ms": 979
         },
         "notes": [
-          "series move attempt produced 0 card(s): [{\"executed\":true,\"outcome\":\"completed\",\"result\":{\"success\":true,\"appointment_id\":\"226f3310-add1-48be-9b59-5c65ad82bce5\",\"customer_name\":\"Wren Wexcombe\",\"old_date\":\"2027-01-04T05:00:00.000Z\",\"new_date"
+          "series move attempt produced 1 card(s): [{\"proposal\":true,\"tool\":\"reschedule_appointment\",\"params\":{\"appointment_id\":\"e61009a1-cffe-4921-994f-f26326918670\",\"new_date\":\"2026-11-13\",\"new_time_window\":\"9:00 AM\",\"reason\":\"Operator moved the vis"
         ],
         "strength": null,
         "contract_calls": 1
@@ -744,11 +1023,11 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 10,
-        "verified_completion_ms": 28
+        "first_tool_result_ms": 15,
+        "verified_completion_ms": 51
       },
       "notes": [
-        "reschedule_appointment: error: This appointment is grouped with another service at the same stop \u2014 move the stop from the schedule (the whole visit moves together), or sep",
+        "reschedule_appointment: grouped_visit_move_unsupported: This appointment is grouped with another service at the same stop, and the bar can't move one of them alone from here yet. Nothing was propo",
         "undeclared reschedule_appointment allowed: the naive move of one row of a grouped stop, which the tool must refuse"
       ],
       "strength": null,
@@ -766,19 +1045,47 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 30,
-        "verified_completion_ms": 1590
+        "first_tool_result_ms": 27,
+        "verified_completion_ms": 1599
       },
       "notes": [],
       "strength": null,
       "contract_calls": 1
     },
     "W6-dev-09": {
-      "outcome": "pass",
-      "failures": [],
+      "outcome": "fail",
+      "point": "proposal",
+      "code": "carded_where_contract_expects_direct",
+      "failures": [
+        {
+          "point": "proposal",
+          "code": "carded_where_contract_expects_direct",
+          "detail": "1 card(s) for a write the contract commits without one"
+        },
+        {
+          "point": "domain_rule",
+          "code": "direct_commit_not_executed",
+          "detail": "reschedule_appointment   {\"proposal\":true,\"tool\":\"reschedule_appointment\",\"params\":{\"appointment_id\":\"17c233a7-84c9-4378-a81d-4d2462dbeab0\",\"new_date\":\"2026-11-13\",\"new_time_window\":\"11:00 AM\",\"reason\":\"Operator moved the vis"
+        },
+        {
+          "point": "read_back",
+          "code": "moved_date_wrong",
+          "detail": "date Mon Nov 09 2026 00:00:00 GMT-0500 (Eastern Standard Time), expected 2026-11-13"
+        },
+        {
+          "point": "read_back",
+          "code": "moved_window_start_wrong",
+          "detail": "window start 13:00, expected 11:00"
+        },
+        {
+          "point": "domain_rule",
+          "code": "moved_window_length_not_preserved",
+          "detail": "stored window 13:00-15:00; the contract keeps the visit's stored block length, 13:00-13:00"
+        }
+      ],
       "timings": {
-        "first_tool_result_ms": 293,
-        "verified_completion_ms": 3812
+        "first_tool_result_ms": 23,
+        "verified_completion_ms": 3139
       },
       "notes": [
         "send_sms: SMS_OPTED_OUT: Recipient has opted out of SMS (sms_enabled=false on notification_prefs)",
@@ -797,11 +1104,44 @@
         }
       ],
       "probe": {
-        "outcome": "pass",
-        "failures": [],
+        "outcome": "fail",
+        "point": "proposal",
+        "code": "carded_where_contract_expects_direct",
+        "failures": [
+          {
+            "point": "proposal",
+            "code": "carded_where_contract_expects_direct",
+            "detail": "1 card(s) for a write the contract commits without one"
+          },
+          {
+            "point": "domain_rule",
+            "code": "direct_commit_not_executed",
+            "detail": "reschedule_appointment   {\"proposal\":true,\"tool\":\"reschedule_appointment\",\"params\":{\"appointment_id\":\"48300001-659e-4d9c-aba7-50c682db5399\",\"new_date\":\"2026-11-13\",\"new_time_window\":\"10:00 AM\",\"reason\":\"Operator moved the vis"
+          },
+          {
+            "point": "read_back",
+            "code": "moved_date_wrong",
+            "detail": "date Mon Nov 09 2026 00:00:00 GMT-0500 (Eastern Standard Time), expected 2026-11-13"
+          },
+          {
+            "point": "read_back",
+            "code": "moved_window_start_wrong",
+            "detail": "window start 09:00, expected 10:00"
+          },
+          {
+            "point": "domain_rule",
+            "code": "moved_window_length_not_preserved",
+            "detail": "stored window 09:00-11:00; the contract keeps the visit's stored block length, 09:00-12:00"
+          },
+          {
+            "point": "recovery",
+            "code": "clear_canceled_the_move",
+            "detail": "the move did not survive the clear"
+          }
+        ],
         "timings": {
-          "first_tool_result_ms": 16,
-          "verified_completion_ms": 2427
+          "first_tool_result_ms": 32,
+          "verified_completion_ms": 2500
         },
         "notes": [],
         "strength": null,
@@ -812,8 +1152,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 3102
+        "first_tool_result_ms": 21,
+        "verified_completion_ms": 3122
       },
       "notes": [
         "no outbound sms_log row: the provider stub sits above its writer, so recipient, body, status and type are read from the stub and the audit row only"
@@ -825,8 +1165,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 6,
-        "verified_completion_ms": 3113
+        "first_tool_result_ms": 15,
+        "verified_completion_ms": 3165
       },
       "notes": [
         "no outbound sms_log row: the provider stub sits above its writer, so recipient, body, status and type are read from the stub and the audit row only"
@@ -865,8 +1205,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 11,
-          "verified_completion_ms": 33
+          "first_tool_result_ms": 19,
+          "verified_completion_ms": 51
         },
         "notes": [
           "send_sms: target_relationship_mismatch: The message recipient does not match the selected customer"
@@ -879,11 +1219,11 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 8,
-        "verified_completion_ms": 1537
+        "first_tool_result_ms": 16,
+        "verified_completion_ms": 1565
       },
       "notes": [
-        "queued listing {\"customer_id\":\"445db724-4195-46dc-b36b-1674e705b5b1\",\"customer_name\":\"Quill Fennimore\",\"messages\":[{\"message_id\":\"925b8359-a8a3-4586-9577-9757ea6d37ef\",\"channe; cancel {\"proposal\":true,\"channel\":\"sms\",\"message_id\":\"925b8359-a8a3-4586-9577-9757ea6d37ef\",\"customer_id\":\"445db724-4195-46"
+        "queued listing {\"customer_id\":\"c2dcf782-fc83-4061-b695-777d87afbf38\",\"customer_name\":\"Quill Fennimore\",\"messages\":[{\"message_id\":\"0d9abb58-7f12-41c5-9b47-6d66ac2562e3\",\"channe; cancel {\"proposal\":true,\"channel\":\"sms\",\"message_id\":\"0d9abb58-7f12-41c5-9b47-6d66ac2562e3\",\"customer_id\":\"c2dcf782-fc83-40"
       ],
       "strength": null,
       "contract_calls": 1
@@ -905,8 +1245,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 262,
-        "verified_completion_ms": 681
+        "first_tool_result_ms": 18,
+        "verified_completion_ms": 63
       },
       "notes": [],
       "strength": null,
@@ -916,8 +1256,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 313,
-        "verified_completion_ms": 2147
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 1538
       },
       "notes": [
         "send_sms: SMS_OPTED_OUT: Recipient has opted out of SMS (sms_enabled=false on notification_prefs)",
@@ -930,8 +1270,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 11,
-        "verified_completion_ms": 1550
+        "first_tool_result_ms": 40,
+        "verified_completion_ms": 1580
       },
       "notes": [],
       "strength": null,
@@ -941,8 +1281,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 1558
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 1545
       },
       "notes": [
         "no outbound sms_log row: the provider stub sits above its writer, so recipient, body, status and type are read from the stub and the audit row only"
@@ -954,8 +1294,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 1550
+        "first_tool_result_ms": 16,
+        "verified_completion_ms": 1544
       },
       "notes": [
         "send_sms: error: Multiple customers match that name. Ask the operator which one, then retry with customer_id.",
@@ -969,7 +1309,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": 13,
-        "verified_completion_ms": 36
+        "verified_completion_ms": 35
       },
       "notes": [],
       "strength": null,
@@ -979,8 +1319,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 22,
-        "verified_completion_ms": 402
+        "first_tool_result_ms": 37,
+        "verified_completion_ms": 1178
       },
       "notes": [],
       "strength": null,
@@ -990,8 +1330,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 25,
-        "verified_completion_ms": 189
+        "first_tool_result_ms": 20,
+        "verified_completion_ms": 241
       },
       "notes": [],
       "strength": null,
@@ -1001,8 +1341,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 24,
-        "verified_completion_ms": 343
+        "first_tool_result_ms": 23,
+        "verified_completion_ms": 554
       },
       "notes": [],
       "strength": null,
@@ -1012,8 +1352,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 31,
-        "verified_completion_ms": 185
+        "first_tool_result_ms": 48,
+        "verified_completion_ms": 389
       },
       "notes": [
         "save_customer_estimate: invalid_input: Tool arguments do not match the required inputs",
@@ -1035,8 +1375,8 @@
         "outcome": "pass",
         "failures": [],
         "timings": {
-          "first_tool_result_ms": 23,
-          "verified_completion_ms": 325
+          "first_tool_result_ms": 25,
+          "verified_completion_ms": 639
         },
         "notes": [
           "measurement choice: one saved measurement per property, no selector on save_customer_estimate"
@@ -1049,8 +1389,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 14,
-        "verified_completion_ms": 201
+        "first_tool_result_ms": 31,
+        "verified_completion_ms": 464
       },
       "notes": [],
       "strength": null,
@@ -1060,8 +1400,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 4834,
-        "verified_completion_ms": 19341
+        "first_tool_result_ms": 59,
+        "verified_completion_ms": 273
       },
       "notes": [
         "save_customer_estimate: estimate_already_sent: That quote was already sent to the customer and is honored, so it was not changed and no card was made. Ask the operator whether to start a ",
@@ -1074,8 +1414,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 26,
-        "verified_completion_ms": 185
+        "first_tool_result_ms": 28,
+        "verified_completion_ms": 281
       },
       "notes": [],
       "strength": null,
@@ -1085,8 +1425,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 21,
-        "verified_completion_ms": 46
+        "first_tool_result_ms": 38,
+        "verified_completion_ms": 79
       },
       "notes": [
         "save_customer_estimate: missing_information: A saved service address, treatable lawn area and identified grass type are required. Update the missing property facts before pricing.",
@@ -1107,8 +1447,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 41,
-        "verified_completion_ms": 195
+        "first_tool_result_ms": 35,
+        "verified_completion_ms": 383
       },
       "notes": [],
       "strength": null,
@@ -1127,8 +1467,8 @@
         "outcome": "pass",
         "failures": [],
         "timings": {
-          "first_tool_result_ms": 11,
-          "verified_completion_ms": 1581
+          "first_tool_result_ms": 30,
+          "verified_completion_ms": 1590
         },
         "notes": [],
         "strength": null,
@@ -1156,8 +1496,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 12,
-          "verified_completion_ms": 34
+          "first_tool_result_ms": 18,
+          "verified_completion_ms": 49
         },
         "notes": [],
         "strength": null,
@@ -1176,8 +1516,8 @@
         }
       ],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 34
+        "first_tool_result_ms": 15,
+        "verified_completion_ms": 83
       },
       "notes": [],
       "strength": null,
@@ -1204,8 +1544,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 8,
-          "verified_completion_ms": 25
+          "first_tool_result_ms": 22,
+          "verified_completion_ms": 62
         },
         "notes": [],
         "strength": null,
@@ -1238,8 +1578,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 6,
-          "verified_completion_ms": 30
+          "first_tool_result_ms": 26,
+          "verified_completion_ms": 123
         },
         "notes": [],
         "strength": null,
@@ -1267,8 +1607,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 6,
-          "verified_completion_ms": 1559
+          "first_tool_result_ms": 25,
+          "verified_completion_ms": 1637
         },
         "notes": [],
         "strength": null,
@@ -1280,7 +1620,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": null,
-        "verified_completion_ms": 35
+        "verified_completion_ms": 42
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done.",
@@ -1294,7 +1634,7 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": null,
-        "verified_completion_ms": 21
+        "verified_completion_ms": 42
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done.",
@@ -1324,8 +1664,8 @@
           }
         ],
         "timings": {
-          "first_tool_result_ms": 10,
-          "verified_completion_ms": 38
+          "first_tool_result_ms": 16,
+          "verified_completion_ms": 41
         },
         "notes": [],
         "strength": null,
@@ -1336,8 +1676,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 35
+        "first_tool_result_ms": 10,
+        "verified_completion_ms": 44
       },
       "notes": [],
       "strength": null,
@@ -1347,8 +1687,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 18,
-        "verified_completion_ms": 104
+        "first_tool_result_ms": 16,
+        "verified_completion_ms": 87
       },
       "notes": [],
       "strength": null,
@@ -1358,8 +1698,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 17,
-        "verified_completion_ms": 52
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 47
       },
       "notes": [],
       "strength": null,
@@ -1369,8 +1709,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 32,
-        "verified_completion_ms": 608
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 84
       },
       "notes": [],
       "strength": null,
@@ -1381,10 +1721,10 @@
       "failures": [],
       "timings": {
         "first_tool_result_ms": 10,
-        "verified_completion_ms": 38
+        "verified_completion_ms": 22
       },
       "notes": [
-        "adjust_stock: product_ambiguous: Multiple products match \"sample granule\" \u2014 retry with product_id",
+        "adjust_stock: product_ambiguous: Multiple products match \"sample granule\" — retry with product_id",
         "undeclared adjust_stock allowed: the naive restock by an ambiguous product name, which the writer must refuse"
       ],
       "strength": null,
@@ -1394,8 +1734,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 31,
-        "verified_completion_ms": 61
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 27
       },
       "notes": [
         "update_restock_request: request_closed: Restock request is already received; refresh the list",
@@ -1408,8 +1748,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 16,
-        "verified_completion_ms": 26
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 20
       },
       "notes": [
         "adjust_stock: unit_required: The unit is missing, so no stock was changed. Talak is counted in fl_oz (container size 96 fl oz). Ask the operator one short question about",
@@ -1422,7 +1762,7 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 24,
+        "first_tool_result_ms": 26,
         "verified_completion_ms": 42
       },
       "notes": [],
@@ -1433,8 +1773,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 82,
-        "verified_completion_ms": 299
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 75
       },
       "notes": [],
       "strength": null,
@@ -1444,8 +1784,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 5,
-        "verified_completion_ms": 73
+        "first_tool_result_ms": 3,
+        "verified_completion_ms": 9
       },
       "notes": [
         "adjust_stock: error: This action is not available to your role",
@@ -1458,8 +1798,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 22,
-        "verified_completion_ms": 157
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 42
       },
       "notes": [
         "turn status 200; no tool call reached; answer: Done."

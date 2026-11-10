@@ -1,8 +1,8 @@
 # AGENTS.md
 
 Code-review rubric for the automated reviewers that audit diffs in the
-**waves-customer-portal** monorepo: the Codex pre-push hook, the `@codex`
-GitHub bot, the `claude-review` GitHub Action, and ultrareview. Every rule
+**waves-customer-portal** monorepo: the Codex pre-push hook and the `@codex`
+GitHub bot. Every rule
 names the failure it prevents and the file it protects. Codex invocations
 return JSON matching `.github/codex-review-schema.json`; every reviewer
 cites `file:line` for every finding.
@@ -147,8 +147,7 @@ execute the workflows they describe.
   logs.** Railway logs and `errors.log` are plain text. last4 is fine; the
   full PM object (BIN, fingerprint) is not.
 - **Hardcoded Anthropic model IDs.** Anthropic IDs live only in
-  `server/config/models.js` (tiers `DEEP` / `FLAGSHIP` / `WORKHORSE` /
-  `FAST` / `VOICE` / `VISION` / `EXTREME`) and `services/llm/deep.js`;
+  `server/config/models.js` (a tier it exports) and `services/llm/deep.js`;
   `check:domain-rules` enforces it. A new `'claude-…'` literal elsewhere
   pins a tier and defeats the env-var swap. Per-service OpenAI/Gemini
   defaults (transcription and extraction in
@@ -180,8 +179,7 @@ execute the workflows they describe.
   models may lead with a `thinking` block that has no `.text`, so the real
   answer sits in `content[1]` and the caller takes its "model returned
   nothing" branch. It is input-dependent, so a smoke test never reproduces
-  it; a tier swap (#2814) killed ten Claude-backed event sources for a
-  week this way. Flag any new raw `client.messages.create` read via
+  it. Flag any new raw `client.messages.create` read via
   `content[0]` without `stripThinkingBlocks` (`services/llm/deep.js`), or
   better, any raw call that bypasses the `llm/` helpers.
 - **America/New_York discipline.** Railway runs `TZ=UTC`; the portal is
@@ -201,9 +199,7 @@ execute the workflows they describe.
 - **No `{ virtual: true }` jest mocks of real modules.** A virtual mock
   registers under a synthesized key; in a warmed shared worker the module
   under test requires the REAL package and bypasses it — order-dependent,
-  green locally, red in CI (`google-ads-sync.test.js` made a live OAuth
-  call, #2843). `virtual` is only for modules that don't exist (e.g. the
-  `./stripe-webhook-helpers` mock in `stripe-webhook-refund-failed.test.js`).
+  green locally, red in CI. `virtual` is only for modules that don't exist.
 - **Feature flags fail closed.** `client/src/hooks/useFeatureFlag.js`
   returns `false` on API error by design. `|| true`, `?? true`,
   `localStorage` overrides, or env bypasses are P1 (P0 if they expose a V2
@@ -269,7 +265,7 @@ execute the workflows they describe.
 - **"Per application" price copy.** Customer-facing units read "per
   application", never "per visit", and no combined plan totals ("$X/mo",
   "$X/yr") appear on any customer-facing estimate surface. Owner exception
-  2026-10-20 (`GATE_ESTIMATE_MONTHLY_AVERAGE`): the per-application price
+  2026-10-20: the per-application price
   stays the price; a smaller "$X a month" average (plus a plan average
   for 2+ services, = stored monthly total) may sit beneath it; "$X/mo" as
   the price stays banned. Exempt: prepay previews (12-month LIST
@@ -277,7 +273,7 @@ execute the workflows they describe.
   the service-report cross-sell card headline (bare amount, no unit).
 - **Appointment windows start on the hour.** `window_start` is always
   HH:00:00 — flag slot/window creation that can produce :15/:30 starts
-  (`admin-leads.js` rejects them at entry, #3056). `window_end` is
+  (`admin-leads.js` rejects them at entry). `window_end` is
   duration-driven and may land off-hour (`classifySlot` yields 10:30 for a
   90-min service at 09:00) — never round or reject it. Customer-facing
   arrival copy is `window_start` → +120 min, display-only, via
@@ -350,7 +346,11 @@ execute the workflows they describe.
   authorized, never treatment (2026-09-26)), inserts keep idempotency keys,
   TCPA consent precedes any SMS; hard-bounced call-captured emails are
   re-verified against the recording and surfaced for owner read-back, never
-  auto-corrected or resent.
+  auto-corrected or resent (one exception, owner 2026-11-05: a spelling the
+  caller's letters settled, `email_spelling_settled`, is resent once to the
+  other pass's spelling for the same customer behind
+  `GATE_CALL_BOUNCE_OTHER_SPELLING`; the profile takes it only on delivery;
+  no card).
 - **Estimator engine authority.** `generateEstimate` is the sole dollar
   authority — LLM output proposes intent only and never reaches
   proposal/price fields; engine drafts never auto-send; existing customers
@@ -406,7 +406,8 @@ execute the workflows they describe.
   built-ins, e.g. `@waves/affiliate-registry`) must NOT be added — mark them
   SERVER-ONLY in their `package.json` description.
 - **Company name in copy** is "Waves Pest Control", never "Waves Lawn &
-  Pest". The mascot artwork carrying the old name is intentional.
+  Pest". Texts say "Waves" (owner 2026-11-04); legal lines keep the full
+  name. The mascot artwork carrying the old name is intentional.
 
 ## Implementation defaults
 
@@ -422,7 +423,7 @@ severity noted.
   diff adds or rewrites is P2 (remove decisions per CLAUDE.md rule 20 — not
   a one-use helper that just moves the branches); a warning on untouched
   legacy code is ignored. Never add `--max-warnings` to the lint-staged
-  command — it would block commits on pre-existing code (#3787).
+  command — it would block commits on pre-existing code.
 - **No compat shims for code changed in the same PR.** Migrate every
   internal call site; no deprecated wrappers, re-export aliases, or dual
   paths for callers this repo controls (P2). The inverse is mandatory for
@@ -468,6 +469,6 @@ severity noted.
 - Procedures go in a skill; orientation goes in `CLAUDE.md`; route
   contracts go in `docs/public-route-contracts.md`. `/lesson` routes a
   correction to the right file.
-- After every model upgrade, run `claude doctor` and a manual stale-fact
+- After every model upgrade, run `/doctor prompt-audit` and a manual stale-fact
   pass: verify each cited file, constant, and gate still exists as
   described, and drop anything the current models do unprompted.

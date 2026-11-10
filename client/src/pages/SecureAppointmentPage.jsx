@@ -121,7 +121,8 @@ function ContactRow() {
 }
 
 function VisitSummary({ data }) {
-  const parts = [data.serviceType, data.dateDisplay, data.windowDisplay].filter(Boolean);
+  // GATE_DAY_ONLY_PROMISE: the customer was told only the day, so the server sends no hour (windowDisplay null).
+  const parts = [data.serviceType, data.dateDisplay, data.windowDisplay || (data.day_only ? data.arrival_note : null)].filter(Boolean);
   if (!parts.length) return null;
   return (
     <div data-glass="soft" style={{ background: '#F8FCFE', border: '1px solid #CFE7F5', borderRadius: 8, padding: '12px 14px', marginTop: 12, fontSize: 16, color: S.text, fontWeight: 600 }}>

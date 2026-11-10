@@ -3,7 +3,7 @@ const Joi = require('joi');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { bidDeskLive, bidChecklistLive } = require('../config/feature-gates');
+const { bidDeskLive } = require('../config/feature-gates');
 const { markEmailAsBid, columnsFor } = require('../services/bid-desk');
 const checklist = require('../services/bid-desk/checklist');
 const { TYPES: SOLICITATION_TYPES } = require('../models/migrations/20261023130000_bid_desk_checklist');
@@ -13,16 +13,12 @@ const { closeDoneAlerts } = require('../services/bid-desk/close-alerts');
 
 // Bid Desk (GATE_BID_DESK, dark). Staff-only list, detail and decisions for bid invites found in the email table.
 // Nothing here sends a message to anyone; a due date only becomes "confirmed" when the operator types or confirms it.
-// GATE_BID_CHECKLIST (also dark) adds the solicitation type, the questions and job-walk dates, the estimate link, the
-// documents, the per-bid checklist and the submission record; with it off those fields are refused and the checklist
-// routes answer 404.
+// Each bid also carries the solicitation type, the questions and job-walk dates, the estimate link, the documents, the
+// per-bid checklist and the submission record.
 const router = express.Router();
 router.use(adminAuthenticate, requireAdmin);
 // Gate off = the whole surface answers 404, exactly as if it were not mounted.
 router.use((req, res, next) => (bidDeskLive() ? next() : res.status(404).json({ error: 'Not found' })));
-
-// The checklist routes answer 404 while GATE_BID_CHECKLIST is off, exactly as if they were not mounted.
-const requireChecklist = (req, res, next) => (bidChecklistLive() ? next() : res.status(404).json({ error: 'Not found' }));
 
 const STATUSES = ['new', 'bid', 'no_bid', 'submitted', 'won', 'lost'];
 const LIST_LIMIT = 500;
@@ -40,10 +36,9 @@ const patchKeys = {
   status: Joi.string().valid(...STATUSES),
   decision_note: Joi.string().trim().max(2000).allow('', null),
 };
-const patchSchema = Joi.object(patchKeys).min(1).unknown(false);
-// GATE_BID_CHECKLIST: the fields it adds. jobWalkAt and questionsDueAt are the same two dates as job_walk_at and
+// The checklist fields sit beside the date fields. jobWalkAt and questionsDueAt are the same two dates as job_walk_at and
 // questions_due_at (a request may use one spelling of each, not both).
-const checklistPatchSchema = Joi.object({
+const patchSchema = Joi.object({
   ...patchKeys,
   solicitationType: Joi.string().valid(...SOLICITATION_TYPES).allow(null),
   scored: Joi.boolean().strict().allow(null),
@@ -119,7 +114,7 @@ const sameInstantOrBothNull = (a, b) => (a == null && b == null) || (a != null &
 // The stamp each of the two extra dates keeps; changing the date clears it so the reminder fires once for the new date.
 const DATE_STAMPS = { job_walk_at: 'job_walk_reminder_sent_at', questions_due_at: 'questions_reminder_sent_at' };
 
-// The fields GATE_BID_CHECKLIST adds (only present in a request the gate-on schema let through).
+// The checklist fields of a bid update.
 function checklistPatch(value) {
   const patch = {};
   if (value.solicitationType !== undefined) patch.solicitation_type = value.solicitationType;
@@ -171,7 +166,7 @@ function buildPatch(bid, value) {
   return { patch, fenced };
 }
 
-// GATE_BID_CHECKLIST spells the two extra dates in camelCase; they are the same columns as job_walk_at and
+// The checklist form spells the two extra dates in camelCase; they are the same columns as job_walk_at and
 // questions_due_at.
 function withDateAliases(value) {
   const { jobWalkAt, questionsDueAt, ...rest } = value;
@@ -188,7 +183,6 @@ function present(row, extra = {}) {
 
 router.get('/', async (req, res, next) => {
   try {
-    const live = bidChecklistLive();
     const rows = await db('bid_opportunities as b')
       .leftJoin('emails as fe', 'fe.id', 'b.first_email_id')
       .select(columnsFor().map((column) => `b.${column}`))
@@ -197,10 +191,8 @@ router.get('/', async (req, res, next) => {
       // Open bids first by due date (undated last), then the decided ones, newest first.
       .orderByRaw("(b.status IN ('new', 'bid')) DESC, CASE WHEN b.status IN ('new', 'bid') THEN b.due_at END ASC NULLS LAST, b.created_at DESC")
       .limit(LIST_LIMIT);
-    if (!live) return res.json({ bids: rows.map((row) => present({ ...row, email_count: Number(row.email_count) })) });
     const progress = await checklist.progressForBids(db, rows.map((row) => row.id));
     return res.json({
-      checklist_live: true,
       bids: rows.map((row) => present({ ...row, email_count: Number(row.email_count) }, { checklist_progress: progress[row.id] || { checked: 0, required: 0 } })),
     });
   } catch (err) {
@@ -221,9 +213,9 @@ router.post('/from-email', async (req, res, next) => {
   }
 });
 
-// GATE_BID_CHECKLIST: estimates the operator can link to a bid, by estimate number (slug), id or customer name.
+// Estimates the operator can link to a bid, by estimate number (slug), id or customer name.
 // Registered before '/:id'. Lightweight rows only; the proposal itself opens on its own page.
-router.get('/estimates', requireChecklist, async (req, res, next) => {
+router.get('/estimates', async (req, res, next) => {
   try {
     const q = String(req.query.q || '').trim().slice(0, 100);
     if (q.length < 2) return res.json({ estimates: [] });
@@ -278,7 +270,6 @@ async function bidDocuments(conn, bidId) {
 router.get('/:id', async (req, res, next) => {
   try {
     if (!UUID.test(req.params.id)) return res.status(404).json({ error: 'Not found' });
-    const live = bidChecklistLive();
     const bid = await db('bid_opportunities').where({ id: req.params.id }).first(columnsFor());
     if (!bid) return res.status(404).json({ error: 'Not found' });
     const emails = await db('bid_opportunity_emails as l')
@@ -286,7 +277,6 @@ router.get('/:id', async (req, res, next) => {
       .where('l.bid_id', bid.id)
       .orderBy('l.received_at')
       .select('l.email_id', 'l.kind', 'l.received_at', 'e.subject', 'e.from_name', 'e.from_address');
-    if (!live) return res.json({ bid: present(bid), emails });
     const items = await checklist.listItems(db, bid.id);
     const estimate = bid.estimate_id
       ? await db('estimates').where({ id: bid.estimate_id }).first('id', 'estimate_slug', 'customer_name', 'status')
@@ -294,7 +284,6 @@ router.get('/:id', async (req, res, next) => {
     return res.json({
       bid: present(bid),
       emails,
-      checklist_live: true,
       checklist: items,
       checklist_progress: checklist.progressOf(items),
       // Template lines for the bid's type that it does not carry (what "Add missing lines" would add).
@@ -345,11 +334,9 @@ async function saveBidUpdate(trx, bidId, value, { precheck = null } = {}) {
 router.patch('/:id', async (req, res, next) => {
   try {
     if (!UUID.test(req.params.id)) return res.status(404).json({ error: 'Not found' });
-    // Gate off: only the original fields validate, so every field GATE_BID_CHECKLIST adds is refused.
-    const live = bidChecklistLive();
-    const { error, value: raw } = (live ? checklistPatchSchema : patchSchema).validate(req.body || {});
+    const { error, value: raw } = patchSchema.validate(req.body || {});
     if (error) return res.status(400).json({ error: 'Invalid bid update' });
-    const value = live ? withDateAliases(raw) : raw;
+    const value = withDateAliases(raw);
     const outcome = await db.transaction((trx) => saveBidUpdate(trx, req.params.id, value));
     res.status(outcome.status).json(outcome.body);
   } catch (err) {
@@ -357,7 +344,7 @@ router.patch('/:id', async (req, res, next) => {
   }
 });
 
-// ---------- the per-bid checklist (GATE_BID_CHECKLIST) ----------
+// ---------- the per-bid checklist ----------
 
 const invalid = (res) => res.status(400).json({ error: 'Invalid checklist update' });
 const notFound = (res) => res.status(404).json({ error: 'Not found' });
@@ -365,7 +352,7 @@ const bidExists = async (conn, id, lock = false) => conn('bid_opportunities').wh
 
 // Starts the checklist for the bid's type. Idempotent: lines already there are left alone. ?add=missing adds only the
 // template lines the bid does not carry. A type in the body is the type the operator picked; it is saved on the bid.
-router.post('/:id/checklist/start', requireChecklist, async (req, res, next) => {
+router.post('/:id/checklist/start', async (req, res, next) => {
   try {
     if (!UUID.test(req.params.id)) return notFound(res);
     const { error, value } = startSchema.validate(req.body || {});
@@ -387,7 +374,7 @@ router.post('/:id/checklist/start', requireChecklist, async (req, res, next) => 
   }
 });
 
-router.post('/:id/checklist/reorder', requireChecklist, async (req, res, next) => {
+router.post('/:id/checklist/reorder', async (req, res, next) => {
   try {
     if (!UUID.test(req.params.id)) return notFound(res);
     const { error, value } = reorderSchema.validate(req.body || {});
@@ -406,7 +393,7 @@ router.post('/:id/checklist/reorder', requireChecklist, async (req, res, next) =
 });
 
 // A custom line, with the quote or page cite it came from.
-router.post('/:id/checklist', requireChecklist, async (req, res, next) => {
+router.post('/:id/checklist', async (req, res, next) => {
   try {
     if (!UUID.test(req.params.id)) return notFound(res);
     const { error, value } = addItemSchema.validate(req.body || {});
@@ -424,7 +411,7 @@ router.post('/:id/checklist', requireChecklist, async (req, res, next) => {
 });
 
 // Edit, tick (checked: true) or untick (checked: false) one line.
-router.patch('/:id/checklist/:itemId', requireChecklist, async (req, res, next) => {
+router.patch('/:id/checklist/:itemId', async (req, res, next) => {
   try {
     if (!UUID.test(req.params.id) || !UUID.test(req.params.itemId)) return notFound(res);
     const { error, value } = updateItemSchema.validate(req.body || {});
@@ -441,7 +428,7 @@ router.patch('/:id/checklist/:itemId', requireChecklist, async (req, res, next) 
 });
 
 // Archive: the line leaves the list; the row stays.
-router.delete('/:id/checklist/:itemId', requireChecklist, async (req, res, next) => {
+router.delete('/:id/checklist/:itemId', async (req, res, next) => {
   try {
     if (!UUID.test(req.params.id) || !UUID.test(req.params.itemId)) return notFound(res);
     const outcome = await db.transaction(async (trx) => {

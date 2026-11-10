@@ -14,6 +14,7 @@ import { track, FUNNEL_EVENTS } from '../lib/analytics/events';
 import { useAuth } from '../hooks/useAuth';
 import { api } from '../utils/api';
 import { ESTIMATE_QUOTE_URL } from '../lib/estimateMarketingRedirects';
+import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { parseServiceParam } from '../lib/booking-service-param';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -995,6 +996,14 @@ export default function PublicBookingPage() {
                   className="waves-focus-ring"
                   style={inputStyle}
                 />
+                {/* Always shown: the server sends no text for an unknown number
+                    and the page must not reveal which case this is. */}
+                <p style={{ margin: '10px 0 0', fontSize: 14, lineHeight: 1.5, color: COLORS.slate600 }}>
+                  No code? We text only numbers we have on file. New here?{' '}
+                  <a href={ESTIMATE_QUOTE_URL} style={{ color: COLORS.glassNavy, fontWeight: 700 }}>Get a free quote</a>
+                  , or call{' '}
+                  <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: COLORS.glassNavy, fontWeight: 700, whiteSpace: 'nowrap' }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>.
+                </p>
                 <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
                   <Button
                     variant="primary"

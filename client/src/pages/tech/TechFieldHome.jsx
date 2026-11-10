@@ -3,7 +3,7 @@ import { onSiteStopsOf, serviceWindowLabel, stillOpenStopsOf, stopArrivalMs, sto
 import { directionsHref } from '../../lib/directionsHref';
 import { formatETTime } from '../../lib/timezone';
 
-// Today's tool gaps (GATE_TRUCK_KIT, /api/tech/truck-check `gaps`) by the
+// Today's tool gaps (/api/tech/truck-check `gaps`) by the
 // stop's services: the names of the tools a visit's checklist requires that
 // the technician's truck lacks.
 function gapNamesFor(stop, gaps) {

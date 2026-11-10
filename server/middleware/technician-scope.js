@@ -129,7 +129,7 @@ const TECHNICIAN_ALLOW_LIST = [
   // (owner 2026-11-04): their routes are requireAdmin, so a technician login
   // never reached them.
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|unread-count|link-library|agent-draft)$/ },
-  { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|send-prep|rewrite-sms|ai-draft)$/ },
+  { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|send-prep|rewrite-sms|ai-draft|name-check)$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/blocked-numbers$/ },
   // Facebook Messenger threads (GATE_MESSENGER_INBOX, dark): the router scopes a
   // technician to threads linked to a customer on their own route, like the SMS inbox.
@@ -189,7 +189,7 @@ const TECHNICIAN_ALLOW_LIST = [
   // stock. Receiving, marking ordered, cancelling and stock adjustments stay
   // admin-only.
   { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/inventory\/waveguard-forecast\/[^/]+\/restock-request$/ },
-  // Truck check (GATE_TRUCK_KIT, docs/tool-inventory-tracker-scope.md): a
+  // Truck check (docs/tool-inventory-tracker-scope.md): a
   // technician reads their own truck's kit and records a check of it. The
   // route resolves the truck from the login (the equipment row with category
   // vehicle assigned to req.technicianId), never from the body. Marking a tool

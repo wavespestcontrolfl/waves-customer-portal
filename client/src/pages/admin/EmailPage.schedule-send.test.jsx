@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Gmail-style Schedule send (GATE_EMAIL_SEND_LATER): the arrow beside Send
+// Gmail-style Schedule send: the arrow beside Send
 // queues the email with an Eastern wall-clock time and its plain text, the
 // Scheduled tab lists it, and Cancel send brings it back as a draft — never
 // over a draft already in progress.
@@ -17,7 +17,6 @@ vi.mock("../../hooks/useIsMobile", () => ({ default: () => false }));
 const mail = { id: "mail-a", gmail_thread_id: "thread-a", from_address: "a@example.invalid", subject: "Fixture", body_text: "Body", is_read: true, received_at: new Date().toISOString() };
 const response = (body, status = 200) => Promise.resolve({ ok: status >= 200 && status < 300, status, json: async () => body });
 let scheduledRows;
-let enabled;
 let gmailConnected;
 let reconciledRow;
 const posts = (suffix) => fetch.mock.calls.filter(([url, options = {}]) => options.method === "POST" && new URL(url, "https://fixture.invalid").pathname.endsWith(suffix));
@@ -32,7 +31,6 @@ beforeEach(() => {
   clearEmailDrafts(); sessionStorage.clear(); localStorage.clear();
   localStorage.setItem("waves_admin_token", "fixture-token");
   window.history.replaceState({}, "", "/admin/communications#tab=email");
-  enabled = true;
   gmailConnected = true;
   reconciledRow = null;
   scheduledRows = [];
@@ -44,7 +42,7 @@ beforeEach(() => {
     if (path.endsWith("/stats")) return response({ total: 1, unread: 0, today: 1, starred: 0, vendor: 0 });
     if (path.endsWith("/daily-digest")) return response({ total_received: 0 });
     if (path.endsWith("/customers")) return response({ customers: [] });
-    if (path.endsWith("/email/scheduled")) return response({ enabled, emails: scheduledRows });
+    if (path.endsWith("/email/scheduled")) return response({ emails: scheduledRows });
     if (path.endsWith("/email/schedule")) {
       const body = JSON.parse(options.body);
       scheduledRows = [{ id: "queued-1", to: body.to, subject: body.subject, draftText: body.draftText, sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
@@ -71,24 +69,6 @@ async function writeEmail() {
 }
 
 describe("Email schedule send", () => {
-  it("with the gate off, emails already queued keep their tab (cancellable) but there is no arrow", async () => {
-    enabled = false;
-    scheduledRows = [{ id: "queued-1", to: "customer@example.invalid", subject: "Guide", draftText: "Saved text", sendAt: "2026-10-23T13:00:00.000Z", status: "scheduled" }];
-    mount();
-    fireEvent.click(await screen.findByRole("button", { name: "Scheduled (1)" }, { timeout: 3000 }));
-    expect(await screen.findByRole("button", { name: "Cancel send" })).toBeInTheDocument();
-    await writeEmail();
-    expect(screen.queryByRole("button", { name: "Schedule send options" })).not.toBeInTheDocument();
-  });
-
-  it("hides the arrow and the Scheduled tab while the gate is off", async () => {
-    enabled = false;
-    mount();
-    await writeEmail();
-    expect(screen.queryByRole("button", { name: "Schedule send options" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^Scheduled/ })).not.toBeInTheDocument();
-  });
-
   it("queues the email for tomorrow morning with its plain text and an Eastern time", async () => {
     mount();
     await writeEmail();
@@ -130,7 +110,6 @@ describe("Email schedule send", () => {
   });
 
   it.each([
-    ["a gate-off answer", { enabled: false, error: "Schedule send is off." }, 404],
     ["a sign-in failure", { error: "Session expired. Sign in again." }, 401],
     ["a rate limit", { error: "Too many requests. Try again shortly." }, 429],
   ])("keeps the client key through %s, so a later retry finds the first row", async (_label, refusal, status) => {
@@ -455,7 +434,7 @@ describe("Email schedule send", () => {
     let hold = false;
     fetch.mockImplementation((input, options = {}) => {
       if (hold && String(input).endsWith("/email/scheduled") && !held.length) {
-        const stale = { enabled: true, emails: scheduledRows };
+        const stale = { emails: scheduledRows };
         return new Promise((resolve) => held.push(() => resolve({ ok: true, status: 200, json: async () => stale })));
       }
       return base(input, options);
