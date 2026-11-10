@@ -16,6 +16,11 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn() }));
+jest.mock('../utils/customer-comms-lock', () => ({
+  // The real helper opens a transaction and takes the advisory lock; here it just runs the callback and records the id.
+  withCustomerCommsLock: jest.fn(async (_db, customerId, fn) => fn({ customerId })),
+  lockCustomerComms: jest.fn(),
+}));
 jest.mock('../services/recipient-optin', () => ({ filterRecipientsByOptin: jest.fn(async (contacts) => contacts) }));
 jest.mock('../services/contact-notification-prefs', () => ({ filterContactsByOwnPrefs: jest.fn(async (contacts) => contacts) }));
 jest.mock('../services/property-notification-prefs', () => ({ prefsForVisit: jest.fn(async (prefs) => prefs) }));
@@ -42,6 +47,7 @@ jest.mock('../config/feature-gates', () => ({
 
 const db = require('../models/db');
 const CustomerContact = require('../services/customer-contact');
+const CommsLock = require('../utils/customer-comms-lock');
 const AppointmentEmail = require('../services/appointment-email');
 const gates = require('../config/feature-gates');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -252,15 +258,125 @@ describe('call pipeline: closeDayBeforeAfterBookingText hands the booked slot to
     await expect(callProc.closeDayBeforeAfterBookingText({ scheduledServiceId: 'ss1', scheduledDate: '2026-11-10', windowStart: '09:00' })).resolves.toBe(false);
   });
 
-  test('the pass calls it only after the primary text was delivered, never in the blocked or held branch', () => {
+  test('the close runs only inside the fence around the send; the held branch and the sent branch never call it directly', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    const call = 'await closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog, customerId, recipientPhone: smsRecipient });';
-    expect(src.split(call)).toHaveLength(2);
-    const at = src.indexOf(call);
-    const sentLog = src.lastIndexOf('Appointment SMS sent to customer', at);
-    const blockedLog = src.lastIndexOf('Appointment SMS blocked for customer', at);
-    expect(sentLog).toBeGreaterThan(blockedLog);
-    expect(at - sentLog).toBeLessThan(200);
+    // The old direct call in the "Appointment SMS sent" branch is gone.
+    expect(src).not.toContain('await closeDayBeforeAfterBookingText(');
+    const fence = 'sendBookingTextUnderReminderFence({';
+    expect(src.split(`await ${fence}`)).toHaveLength(2);
+    const at = src.indexOf(`await ${fence}`);
+    // The held branch (nothing is sent) is the other arm of the same ternary, before the fence.
+    const heldAt = src.lastIndexOf("code: holdImpliedSmsLeg ? 'implied_consent_non_ani_recipient'", at);
+    expect(heldAt).toBeGreaterThan(-1);
+    expect(at - heldAt).toBeLessThan(400);
+    const arm = src.slice(at, at + 1200);
+    expect(arm).toContain('close: () => closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog, customerId, recipientPhone: smsRecipient })');
+    expect(arm).toContain('send: async () => sendCustomerMessage({');
+    // primaryOk and the fence share one "really sent" test.
+    expect(src).toContain('const primaryOk = bookingTextWasSent(sendResult);');
+  });
+});
+
+describe('call pipeline: sendBookingTextUnderReminderFence (the text and the close under one customer-comms lock)', () => {
+  let fence;
+  let order;
+  beforeAll(() => { fence = require('../services/call-recording-processor')._test.sendBookingTextUnderReminderFence; });
+  beforeEach(() => {
+    order = [];
+    CommsLock.withCustomerCommsLock.mockImplementation(async (_db, customerId, fn) => {
+      order.push(`lock:${customerId}`);
+      const out = await fn({ customerId });
+      order.push('unlock');
+      return out;
+    });
+  });
+  const make = (result = { sent: true }) => ({
+    send: jest.fn(async () => { order.push('send'); return result; }),
+    close: jest.fn(async () => { order.push('close'); return true; }),
+  });
+
+  test('gate off: send once, the lock is never taken, no close', async () => {
+    const { send, close } = make();
+    await expect(fence({ customerId: 'c1', send, close })).resolves.toEqual({ sent: true });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+    expect(CommsLock.withCustomerCommsLock).not.toHaveBeenCalled();
+  });
+
+  test('a gate reader missing from a bare feature-gates mock reads as off', async () => {
+    const original = gates.bookingTextCoversDayBeforeLive;
+    delete gates.bookingTextCoversDayBeforeLive;
+    const { send, close } = make();
+    try {
+      await fence({ customerId: 'c1', send, close });
+    } finally {
+      gates.bookingTextCoversDayBeforeLive = original;
+    }
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(CommsLock.withCustomerCommsLock).not.toHaveBeenCalled();
+  });
+
+  test('gate on, text sent: lock taken with the customer id, send then close inside it, in that order', async () => {
+    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+    const { send, close } = make();
+    await expect(fence({ customerId: 'c1', send, close })).resolves.toEqual({ sent: true });
+    expect(CommsLock.withCustomerCommsLock).toHaveBeenCalledTimes(1);
+    expect(CommsLock.withCustomerCommsLock.mock.calls[0][1]).toBe('c1');
+    expect(order).toEqual(['lock:c1', 'send', 'close', 'unlock']);
+  });
+
+  test.each([{ sent: false }, { blocked: true, sent: false, code: 'QUIET_HOURS_HOLD' }, { blocked: true }])(
+    'gate on, text not sent (%j): no close, the result passes through',
+    async (result) => {
+      gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+      const { send, close } = make(result);
+      await expect(fence({ customerId: 'c1', send, close })).resolves.toBe(result);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(close).not.toHaveBeenCalled();
+    },
+  );
+
+  test('gate on, no customer id: unfenced send, no close', async () => {
+    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+    const { send, close } = make();
+    await fence({ customerId: null, send, close });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+    expect(CommsLock.withCustomerCommsLock).not.toHaveBeenCalled();
+  });
+
+  test('gate on, the lock cannot be taken before send ran: the confirmation still goes out once, unfenced, with no close', async () => {
+    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+    CommsLock.withCustomerCommsLock.mockRejectedValue(Object.assign(new Error('pool exhausted'), { code: 'ECONNRESET' }));
+    const { send, close } = make();
+    await expect(fence({ customerId: 'c1', send, close })).resolves.toEqual({ sent: true });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  test('gate on, send throws inside the lock: the error surfaces and send is not retried', async () => {
+    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+    const { send, close } = make();
+    send.mockRejectedValue(new Error('provider down'));
+    await expect(fence({ customerId: 'c1', send, close })).rejects.toThrow('provider down');
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  test('gate on, the close throws: swallowed, the send result still returns', async () => {
+    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+    const { send, close } = make();
+    close.mockRejectedValue(new Error('db down'));
+    await expect(fence({ customerId: 'c1', send, close })).resolves.toEqual({ sent: true });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate on, releasing the lock fails after the text went out: the send result stands, no second send', async () => {
+    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+    CommsLock.withCustomerCommsLock.mockImplementation(async (_db, _id, fn) => { await fn({}); throw new Error('commit lost'); });
+    const { send, close } = make();
+    await expect(fence({ customerId: 'c1', send, close })).resolves.toEqual({ sent: true });
+    expect(send).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -5183,6 +5183,52 @@ async function closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDat
   }
 }
 
+// The one test for "this confirmation text really went out" (not blocked, not held, not a failed send): the call site's
+// primaryOk and the day-before fence below both use it, so the two cannot drift.
+function bookingTextWasSent(sendResult) {
+  return !(sendResult.blocked || sendResult.sent === false);
+}
+
+// GATE_BOOKING_TEXT_COVERS_DAY_BEFORE: the 24-hour cron rechecks "reminder unsent" and sends inside the customer's
+// customer-comms lock (appointment-reminders withReminderSendFence). A close that sits outside that lock can land after the
+// cron passed its recheck, and the customer gets both texts. So, gate on, the confirmation text AND the close run inside ONE
+// hold of the same lock: the cron either already sent (its reminder goes first, then this confirmation follows; the tick
+// landed in the seconds between the reminder row's registration and this send, when no confirmation existed yet, and that
+// order cannot be prevented from here) or sees the closed flag. Gate off: send() only, byte for byte as before.
+// The fence never costs the customer the confirmation: if the lock cannot be taken BEFORE send ran, send() runs unfenced with
+// no close (the reminder stays armed). send never runs twice; an error from send surfaces as it always did; a failed close
+// is swallowed (best-effort, logged by code only). Lock order: the pass holds no transaction or customers row lock here (the
+// booking transaction has committed), and the messaging send path takes only the phone lock, never customer-comms.
+async function sendBookingTextUnderReminderFence({ customerId, send, close }) {
+  let fenced = false;
+  try {
+    fenced = Boolean(customerId) && Boolean(require('../config/feature-gates').bookingTextCoversDayBeforeLive?.());
+  } catch { fenced = false; }
+  if (!fenced) return send();
+  let sendStarted = false;
+  let sendDone = false;
+  let sendResult;
+  try {
+    return await require('../utils/customer-comms-lock').withCustomerCommsLock(db, customerId, async () => {
+      sendStarted = true;
+      sendResult = await send();
+      sendDone = true;
+      if (bookingTextWasSent(sendResult)) {
+        try { await close(); } catch (err) {
+          logger.warn(`[call-proc] day-before close inside the reminder fence failed: ${err.code || err.name || 'error'}`);
+        }
+      }
+      return sendResult;
+    });
+  } catch (err) {
+    // The text already went out and only releasing the lock failed: the send's own result stands, never a second send.
+    if (sendDone) return sendResult;
+    if (sendStarted) throw err;
+    logger.warn(`[call-proc] reminder fence unavailable for the booking text, sending unfenced: ${err.code || err.name || 'error'}`);
+    return send();
+  }
+}
+
 async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false, callbackNumberHoldActive = false, disclaimedPhone = null, callLogId = null }) {
   // Codex round-2 finding #4 (PR #4807), tightened round 3: the AUTHORITATIVE
   // stamp for the two main call-booking paths (fresh insert, idempotency-
@@ -23094,15 +23140,21 @@ const CallRecordingProcessor = {
                   // P2). The holder's own number never declines. Fail closed.
                   const contactDeclined = await require('./contact-notification-prefs')
                     .contactPhoneDeclinesText(customerId, smsRecipient, 'appointment_confirmation');
+                  // Built before the fence (it may mint an estimate link): only the send and the close sit inside the lock.
+                  const confirmationSmsBody = (holdImpliedSmsLeg || v2SmsBlocked || contactDeclined) ? null
+                    : await require('./composer-customer-links').appendEstimateAcceptLine(smsBody, estimateForConfirmationLink, { scheduledServiceId });
                   const sendResult = (holdImpliedSmsLeg || v2SmsBlocked || contactDeclined)
                     ? {
                       sent: false,
                       blocked: true,
                       code: holdImpliedSmsLeg ? 'implied_consent_non_ani_recipient' : (v2SmsBlocked ? 'v2_tcpa_gate' : 'contact_declined'),
                     }
-                    : await sendCustomerMessage({
+                    : await sendBookingTextUnderReminderFence({
+                      customerId,
+                      close: () => closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog, customerId, recipientPhone: smsRecipient }),
+                      send: async () => sendCustomerMessage({
                       to: smsRecipient,
-                      body: await require('./composer-customer-links').appendEstimateAcceptLine(smsBody, estimateForConfirmationLink, { scheduledServiceId }),
+                      body: confirmationSmsBody,
                       channel: 'sms',
                       audience: 'customer',
                       purpose: 'appointment_confirmation',
@@ -23122,8 +23174,9 @@ const CallRecordingProcessor = {
                       metadata: {
                         original_message_type: 'confirmation',
                       },
+                      }),
                     });
-                  const primaryOk = !(sendResult.blocked || sendResult.sent === false);
+                  const primaryOk = bookingTextWasSent(sendResult);
                   if (!primaryOk) {
                     // Send-window hold: this after-hours phone booking
                     // registered its reminder with sendConfirmation:false
@@ -23183,7 +23236,6 @@ const CallRecordingProcessor = {
                     };
                   } else {
                     logger.info(`[call-proc] Appointment SMS sent to customer ${customerId}`);
-                    await closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog, customerId, recipientPhone: smsRecipient });
                     appointmentResult = { smsSent: true, scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog };
                   }
                   // Gated fan-out to the OTHER appointment contacts: the same
@@ -26122,6 +26174,8 @@ CallRecordingProcessor._test = {
   CALL_EXTRACTION_V1_BACKUP_ROUTE,
   callTimeETString,
   closeDayBeforeAfterBookingText,
+  sendBookingTextUnderReminderFence,
+  bookingTextWasSent,
   CALL_EXTRACTION_ROUTE,
   CALL_EXTRACTION_MODEL_FOR,
   v1BackupTimingsJson,
