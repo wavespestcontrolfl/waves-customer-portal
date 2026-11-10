@@ -69,16 +69,16 @@ function techFirstName(technician) {
   return plainName(String(technician?.name || '').trim().split(/\s+/)[0]).slice(0, TECH_NAME_CHARS) || 'the technician';
 }
 
-// Raises the one bell. Throws when the alert cannot be raised: the caller (tech-estimate-save.js) catches it, because the
-// estimate is saved and the office also sees it in the estimate list.
-async function ringOfficeFirst({ estimate, detailed, technician }) {
+// Raises the one bell. Throws when the alert cannot be raised: the caller catches it, because the estimate is saved and the
+// office also sees it in the estimate list.
+async function raise({ estimate, technician, why, detail }) {
   const tech = techFirstName(technician);
   const who = await whoFor(estimate);
   const id = String(estimate.id);
   return compose.raiseAdminAlert('estimate', {
     area: 'Estimates',
     action: fitAction('Estimates', who, [(name) => `check ${tech}'s estimate for ${name}`]),
-    why: whyFor(detailed),
+    why,
     severity: 'needs-you',
     link: `/admin/estimates?estimateId=${encodeURIComponent(id)}`,
     subject: { type: 'estimate', id },
@@ -87,9 +87,21 @@ async function ringOfficeFirst({ estimate, detailed, technician }) {
   }, {
     bell: true,
     dedupeKey: `${KEY_PREFIX}${id}`,
-    detail: detailFor(detailed),
+    detail,
     metadata: { estimateId: id, customerId: estimate.customer_id || null, technicianId: technician?.id || null },
   });
 }
 
-module.exports = { ringOfficeFirst, KEY_PREFIX, DONE_WHEN, _private: { whyFor, detailFor, techFirstName } };
+const ringOfficeFirst = ({ estimate, detailed, technician }) => raise({ estimate, technician, why: whyFor(detailed), detail: detailFor(detailed) });
+
+// Step 4: a text the technician's send could not deliver (or whose outcome is unknown) is the office's to send. Same bell and
+// key as above: a quote he may send himself holds no office-first bell, so the key is free, and the sweep (class
+// tech_estimate_office_first) keeps the row open until the estimate is sent or closed.
+const ringSendFailed = ({ estimate, technician }) => raise({
+  estimate,
+  technician,
+  why: 'The text did not go from the phone, so check the estimate and send it.',
+  detail: 'A technician tried to text this estimate from the phone and it did not go, or the app cannot tell if it went. Check the send history on the estimate before you send it.',
+});
+
+module.exports = { ringOfficeFirst, ringSendFailed, whoFor, techFirstName, KEY_PREFIX, DONE_WHEN, _private: { whyFor, detailFor } };

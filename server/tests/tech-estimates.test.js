@@ -14,6 +14,8 @@ const mockState = {
   customers: [],
   // step 2a: his tool rows, the transaction's writes, and the wheres the own-reads ran
   own: [], inserts: [], toolRow: null, conflict: false, wheres: [], trx: null,
+  // step 4: the send's scripted transaction, the writes outside it, and the row the answer re-reads
+  sendScript: null, updates: [], fresh: null,
 };
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -34,6 +36,7 @@ jest.mock('../models/db', () => {
       _id: null,
       where(...args) {
         mockState.wheres.push([table, ...args]);
+        if (args[0] && typeof args[0] === 'object') builder._where = args[0];
         if (args[0] && typeof args[0] === 'object' && args[0].id) builder._id = args[0].id;
         else if (args[0] === 'scheduled_services.id') builder._id = args[1];
         if (args[0] === 't.technician_id') filters.technician = args[1];
@@ -51,6 +54,7 @@ jest.mock('../models/db', () => {
         if (table === 'technicians') return { can_create_estimates: mockState.switchOn };
         if (table === 'customers') return mockState.customers.find((c) => c.id === builder._id);
         if (table === 'tech_estimates as t') return builder.rows()[0];
+        if (table === 'estimates') return mockState.fresh;
         // The visit read: the row for that id, and only inside the caller's scope (see the visit-scope mock below).
         if (table === 'scheduled_services') return mockState.visits.find((v) => v.id === builder._id && (!builder._tech || v.technician_id === builder._tech));
         return undefined;
@@ -60,13 +64,14 @@ jest.mock('../models/db', () => {
         return Promise.resolve(rows).then(resolve, reject);
       },
       insert() { mockState.writes.push(table); return builder; },
-      update() { mockState.writes.push(table); return builder; },
+      update(patch) { mockState.writes.push(table); mockState.updates.push({ table, where: builder._where, patch }); return builder; },
     };
     return builder;
   };
   dbFn.raw = (sql) => ({ raw: sql });
   // The create's one transaction: the fake trx records the tool row and answers the retry reads.
   dbFn.transaction = async (work) => {
+    if (mockState.sendScript) return work(mockState.sendScript.trx);
     const trx = (table) => {
       const builder = {
         where() { return builder; },
@@ -115,6 +120,7 @@ const visitRow = (id, over = {}) => ({
   id, technician_id: 'tech-1', customer_id: CUSTOMER_ID,
   service_address_line1: null, service_address_line2: null, service_address_city: null, service_address_state: null, service_address_zip: null,
   customer_address_line1: '100 Sample St', customer_address_line2: null, customer_city: 'Sampletown', customer_state: 'FL', customer_zip: '34202',
+  customer_first_name: 'Casey', customer_last_name: 'Sample', customer_phone: '(941) 555-0111', customer_email: 'casey.sample@example.invalid',
   ...over,
 });
 const PROSPECT = { firstName: 'Sample', lastName: 'Person', phone: '(941) 555-0142', address: '200 Example Ave', city: 'Sampletown', zip: '34202' };
@@ -197,6 +203,9 @@ beforeEach(() => {
     conflict: false,
     wheres: [],
     trx: null,
+    sendScript: null,
+    updates: [],
+    fresh: null,
     caps: [
       { service_category: 'general', state: 'qualified' }, { service_category: 'mosquito', state: 'qualified' },
       { service_category: 'rodent', state: 'review_required' }, { service_category: 'termite', state: 'off' },
@@ -448,8 +457,10 @@ describe('POST /price: the body the tool builds for the save', () => {
     expect(arg.dryRun).toBe(true);
     expect(arg.requireLivePricing).toBe(true);
     expect(arg.technicianId).toBe('tech-1');
-    expect(Object.keys(arg.body).sort()).toEqual(['address', 'billByInvoice', 'customerId', 'estimateData', 'showOneTimeOption']);
+    expect(Object.keys(arg.body).sort()).toEqual(['address', 'billByInvoice', 'customerEmail', 'customerId', 'customerName', 'customerPhone', 'estimateData', 'showOneTimeOption']);
     expect(arg.body).toEqual(expect.objectContaining({ customerId: CUSTOMER_ID, address: '100 Sample St, Sampletown, FL 34202', showOneTimeOption: false, billByInvoice: false }));
+    // The contact on the estimate is the visit's customer, read on the server: never what the phone sent.
+    expect(arg.body).toEqual(expect.objectContaining({ customerName: 'Casey Sample', customerPhone: '(941) 555-0111', customerEmail: 'casey.sample@example.invalid' }));
     expect(Object.keys(arg.body.estimateData).sort()).toEqual(['engineInputs', 'inputs']);
     expect(Object.keys(arg.body.estimateData.inputs).sort()).toEqual([
       'address', 'customerId', 'homeSqFt', 'lotSqFt', 'pestFreq', 'propertyType', 'stories', 'svcMosquito', 'svcPest',
@@ -459,6 +470,12 @@ describe('POST /price: the body the tool builds for the save', () => {
     expect(savedInputs().services).toEqual({ pest: { frequency: 'quarterly', roachType: 'none' }, mosquito: { tier: 'monthly12' } });
     expect(savedInputs()).toEqual(expect.objectContaining({ homeSqFt: 1850, lotSqFt: 9200, isCommercial: false, category: 'RESIDENTIAL' }));
     expect(res.body.officeFirst).toEqual({ required: false, reasons: [] });
+  });
+
+  test('a customer with no usable contact: a number the save would refuse, or a blank name or email, is left off', async () => {
+    mockState.visits[0] = visitRow(VISIT_ID, { customer_first_name: ' ', customer_last_name: null, customer_phone: '(141) 555-0111', customer_email: '' });
+    expect((await price({ visitId: VISIT_ID, services: ['PEST'] })).status).toBe(200);
+    expect(Object.keys(savedBody()).sort()).toEqual(['address', 'billByInvoice', 'customerId', 'estimateData', 'showOneTimeOption']);
   });
 
   test('a new person: name and phone from the typed person only', async () => {
@@ -636,7 +653,7 @@ describe('POST /api/tech/estimates: what the create hands the shared save', () =
     expect(arg.technicianId).toBe('tech-1');
     expect(arg.database).toBe(mockState.trx);
     // The preview's body plus the retry key, and nothing else: no forged key reaches the save.
-    expect(Object.keys(arg.body).sort()).toEqual(['address', 'billByInvoice', 'clientDraftId', 'customerId', 'estimateData', 'showOneTimeOption']);
+    expect(Object.keys(arg.body).sort()).toEqual(['address', 'billByInvoice', 'clientDraftId', 'customerEmail', 'customerId', 'customerName', 'customerPhone', 'estimateData', 'showOneTimeOption']);
     expect(arg.body.clientDraftId).toBe(DRAFT_ID);
     expect({ ...arg.body, clientDraftId: undefined }).toEqual({ ...saveSpy.mock.calls[0][0].body, clientDraftId: undefined });
     expect(JSON.stringify(arg.body)).not.toMatch(new RegExp(`${SENTINEL}|manualDiscount|linePriceOverrides|serviceSpecific|operatorPriceAdjustment|moveId|waiveSetupFee|leadId|groupWithEstimateId`, 'i'));
@@ -936,6 +953,8 @@ describe('GET /api/tech/estimates and /:id', () => {
     id: ESTIMATE_ID, createdAt: '2026-11-09T15:00:00.000Z', status: 'sent', sentAt: '2026-11-09T16:00:00.000Z', acceptedAt: null,
     who: 'Sample Person', addressLine: '100 Sample St', monthlyTotal: 37.33, annualTotal: 448, oneTimeTotal: 99,
     officeFirst: { required: true, reasons: ['changed_fact:stories', 'office_review'] },
+    canSend: false,
+    needsTextRequest: true,
   };
 
   test('the list holds his rows only, in the fixed shape, with no token, phone, data or detailed reason', async () => {
@@ -976,10 +995,10 @@ describe('GET /api/tech/estimates and /:id', () => {
 
 describe('the technician allow-list', () => {
   const UUID = '00000000-0000-4000-8000-0000000000e1';
-  test('admits exactly the five tool routes and nothing else under /api/tech/estimates', () => {
+  test('admits exactly the six tool routes and nothing else under /api/tech/estimates', () => {
     for (const [method, path] of [
       ['GET', '/api/tech/estimates/setup'], ['POST', '/api/tech/estimates/price'], ['POST', '/api/tech/estimates'],
-      ['GET', '/api/tech/estimates'], ['GET', `/api/tech/estimates/${UUID}`],
+      ['GET', '/api/tech/estimates'], ['GET', `/api/tech/estimates/${UUID}`], ['POST', `/api/tech/estimates/${UUID}/send`],
     ]) {
       expect([method, path, technicianMayReach(method, path)]).toEqual([method, path, true]);
     }
@@ -987,10 +1006,273 @@ describe('the technician allow-list', () => {
       ['POST', '/api/tech/estimates/setup'], ['GET', '/api/tech/estimates/price'], ['PUT', '/api/tech/estimates/price'],
       ['PUT', '/api/tech/estimates'], ['DELETE', '/api/tech/estimates'], ['PATCH', `/api/tech/estimates/${UUID}`],
       ['PUT', `/api/tech/estimates/${UUID}`], ['DELETE', `/api/tech/estimates/${UUID}`], ['POST', `/api/tech/estimates/${UUID}`],
-      ['GET', '/api/tech/estimates/mine'], ['GET', `/api/tech/estimates/${UUID}/send`], ['POST', `/api/tech/estimates/${UUID}/send`],
+      ['GET', '/api/tech/estimates/mine'], ['GET', `/api/tech/estimates/${UUID}/send`], ['PUT', `/api/tech/estimates/${UUID}/send`], ['POST', '/api/tech/estimates/not-a-uuid/send'], ['POST', `/api/tech/estimates/${UUID}/send/x`],
       ['POST', '/api/tech/estimates/price/extra'], ['GET', '/api/tech/estimates/setup/x'], ['POST', '/api/tech/estimates/send'],
     ]) {
       expect([method, path, technicianMayReach(method, path)]).toEqual([method, path, false]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 4: POST /:id/send. The shared sender, the transaction and the bell are scripted: these tests pin what the route
+// DECIDES from the stored row and what it hands the sender. The real sender, claim and schema are in the Postgres suite.
+describe('POST /api/tech/estimates/:id/send', () => {
+  const sendRoutes = require('../routes/admin-estimates');
+  const sendTool = require('../services/tech-estimate-send');
+  const ownerAlerts = require('../services/owner-alerts');
+  const INSIDE = new Date('2026-03-10T15:00:00.000Z'); // 11:00 AM ET
+  const OUTSIDE = new Date('2026-03-10T03:00:00.000Z'); // 11:00 PM ET the evening before
+  const NEW_PERSON_PHONE = '+19415550142';
+  let senderSpy; let ownerSpy;
+
+  // The stored row the send locks: the estimate's columns plus the tool row's reasons.
+  const sendRow = (over = {}) => ({
+    id: ESTIMATE_ID, status: 'draft', customer_id: CUSTOMER_ID, customer_name: 'Casey Sample', customer_phone: NEW_PERSON_PHONE,
+    archived_at: null, price_locked_at: null, estimate_group_id: null, pricing_authority: 'SERVER', token: 'secret-token',
+    estimate_data: {}, tool_reasons: [], monthly_total: '37.33', annual_total: '448.00', onetime_total: '0', ...over,
+  });
+  // A scripted transaction: every builder method chains; first() answers the locked row, returning() the claim.
+  function script(row, { claim = true } = {}) {
+    const calls = [];
+    const trx = (table) => {
+      const builder = new Proxy({}, {
+        get: (_target, name) => {
+          if (name === 'then') return undefined;
+          return (...args) => {
+            calls.push({ table, name, args });
+            if (name === 'first') return Promise.resolve(row);
+            if (name === 'returning') return Promise.resolve(claim && row ? [{ ...row, status: 'sending' }] : []);
+            return builder;
+          };
+        },
+      });
+      return builder;
+    };
+    mockState.sendScript = { trx, calls };
+    return calls;
+  }
+  const send = (body = {}, id = ESTIMATE_ID) => call('POST', `/${id}/send`, body);
+  const sent = () => ({ sent: true, channels: { sms: { ok: true, real: true } }, sentChannels: ['sms'], failedChannels: [] });
+  const claimWrites = (calls) => calls.filter((c) => c.table === 'estimates' && c.name === 'update');
+  const toolWrites = (calls) => calls.filter((c) => c.table === 'tech_estimates' && c.name === 'update');
+
+  beforeEach(() => {
+    sendTool._private.clock.now = () => INSIDE;
+    senderSpy = jest.spyOn(sendRoutes, 'sendEstimateNow').mockImplementation(async () => sent());
+    ownerSpy = jest.spyOn(ownerAlerts, 'recordOwnerAlert').mockResolvedValue({ ok: true });
+    mockState.fresh = { status: 'sent', sent_at: '2026-03-10T15:00:01.000Z' };
+  });
+  afterEach(() => { sendTool._private.clock.now = () => new Date(); });
+
+  describe('refusals are decided from the stored row and send nothing', () => {
+    test('only his own tool estimate: the lookup is keyed to the login, and another login\'s estimate, an unknown id and a non-UUID are the same 404', async () => {
+      const calls = script(null);
+      const answers = [await send({}), await send({}, 'not-a-uuid')];
+      expect(answers.map((a) => a.status)).toEqual([404, 404]);
+      expect(new Set(answers.map((a) => JSON.stringify(a.body))).size).toBe(1);
+      expect(answers[0].body).toEqual({ error: 'Estimate not found' });
+      expect(calls.find((c) => c.name === 'where').args[0]).toEqual({ 't.estimate_id': ESTIMATE_ID, 't.technician_id': 'tech-1' });
+      expect(senderSpy).not.toHaveBeenCalled();
+    });
+
+    test('an archived estimate is a 404', async () => {
+      script(sendRow({ archived_at: '2026-03-01T00:00:00Z' }));
+      expect((await send()).status).toBe(404);
+      expect(senderSpy).not.toHaveBeenCalled();
+    });
+
+    test('a stored office-first reason is 409 office_first whatever the request says; the sender is never reached and nothing is claimed', async () => {
+      const calls = script(sendRow({ tool_reasons: ['changed_fact:homeSqFt'] }));
+      const res = await send({ askedForText: true, officeFirst: false, office_first_reasons: [], reasons: [] });
+      expect(res).toEqual({ status: 409, body: { error: 'The office checks this one first.', code: 'office_first' } });
+      expect(senderSpy).not.toHaveBeenCalled();
+      expect(claimWrites(calls)).toEqual([]);
+      expect(mockState.updates).toEqual([]);
+    });
+
+    test.each(['sent', 'scheduled', 'sending', 'viewed', 'accepted', 'declined', 'expired'])('a %s estimate is 409 already_sent', async (status) => {
+      script(sendRow({ status }));
+      expect(await send()).toEqual({ status: 409, body: { error: 'This estimate was already sent.', code: 'already_sent' } });
+      expect(senderSpy).not.toHaveBeenCalled();
+    });
+
+    test('a send the app parked (send_failed) is the office\'s: 409 office_sends', async () => {
+      script(sendRow({ status: 'send_failed' }));
+      expect(await send()).toEqual({ status: 409, body: { error: 'The text did not go. The office will send it.', code: 'office_sends' } });
+      expect(senderSpy).not.toHaveBeenCalled();
+    });
+
+    test.each([['no phone', null], ['an impossible number', '+10115550142']])('%s is 422 office_sends and the office hears of it', async (_label, phone) => {
+      script(sendRow({ customer_phone: phone }));
+      expect(await send()).toEqual({ status: 422, body: { error: 'This estimate has no mobile number. Ask the office to send it.', code: 'office_sends' } });
+      expect(senderSpy).not.toHaveBeenCalled();
+      expect(bellSpy).toHaveBeenCalledTimes(1);
+    });
+
+    test('a grouped, price-locked or unfinished-earlier-send estimate is the office\'s', async () => {
+      for (const over of [
+        { estimate_group_id: 'g-1' }, { price_locked_at: '2026-03-01T00:00:00Z' },
+        { estimate_data: { manualSendAttempts: [{ key: 'k', startedAt: '2026-03-01T00:00:00Z' }] } },
+      ]) {
+        script(sendRow(over));
+        expect((await send()).body.code).toBe('office_sends');
+      }
+      expect(senderSpy).not.toHaveBeenCalled();
+    });
+
+    test('outside 8 AM to 8 PM ET: 409 outside_hours, nothing claimed, nothing sent, the office not bothered', async () => {
+      sendTool._private.clock.now = () => OUTSIDE;
+      const calls = script(sendRow());
+      expect(await send()).toEqual({ status: 409, body: { error: 'Texts go out between 8 AM and 8 PM. Send it then, or ask the office.', code: 'outside_hours' } });
+      expect(senderSpy).not.toHaveBeenCalled();
+      expect(claimWrites(calls)).toEqual([]);
+      expect(bellSpy).not.toHaveBeenCalled();
+    });
+
+    test('a second tap that loses the claim to the first answers already_sent and never reaches the sender', async () => {
+      script(sendRow(), { claim: false });
+      expect((await send()).body).toEqual({ error: 'This estimate was already sent.', code: 'already_sent' });
+      expect(senderSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('what the sender is handed', () => {
+    test('a new person needs askedForText exactly true; anything else is 400 needs_text_request', async () => {
+      script(sendRow({ customer_id: null }));
+      for (const body of [{}, { askedForText: false }, { askedForText: 'true' }, { askedForText: 1 }, null]) {
+        expect(await send(body)).toEqual({ status: 400, body: { error: 'Confirm that the person asked for the estimate by text.', code: 'needs_text_request' } });
+      }
+      expect(senderSpy).not.toHaveBeenCalled();
+      expect(mockState.sendScript.calls.some((c) => c.name === 'update')).toBe(false);
+    });
+
+    test('a new person who confirmed: the stored time is the consent time the sender gets, and sms is the only channel', async () => {
+      const calls = script(sendRow({ customer_id: null }));
+      const res = await send({ askedForText: true, sendMethod: 'email', scheduledAt: '2030-01-01', acknowledgeEngineReview: true });
+      expect(res.status).toBe(200);
+      const [estimateArg, method, options] = senderSpy.mock.calls[0];
+      expect(method).toBe('sms');
+      expect(estimateArg.status).toBe('sending');
+      expect(Object.keys(options).sort()).toEqual(['now', 'techEstimateSend']);
+      expect(options.techEstimateSend).toEqual({ consentCapturedAt: INSIDE.toISOString() });
+      const [stored] = toolWrites(calls);
+      expect(stored.args[0]).toEqual({ text_request_confirmed_at: INSIDE });
+      // the claim happens before the stored time and before the sender
+      expect(calls.findIndex((c) => c.table === 'estimates' && c.name === 'update')).toBeLessThan(calls.indexOf(stored));
+    });
+
+    test('a customer on his route needs no confirmation (askedForText is ignored) and hands the sender no consent time', async () => {
+      const calls = script(sendRow());
+      expect((await send({ askedForText: false })).status).toBe(200);
+      expect((await send({})).status).toBe(200);
+      for (const [, method, options] of senderSpy.mock.calls) {
+        expect(method).toBe('sms');
+        expect(options.techEstimateSend).toEqual({});
+      }
+      expect(toolWrites(calls).filter((c) => 'text_request_confirmed_at' in c.args[0])).toEqual([]);
+    });
+
+    test('an admin login sends only its own tool estimate too', async () => {
+      mockCaller.role = 'admin';
+      const calls = script(sendRow());
+      await send();
+      expect(calls.find((c) => c.name === 'where').args[0]['t.technician_id']).toBe('tech-1');
+    });
+
+    test('the claim goes draft to sending as sms with the office send\'s hold predicates', async () => {
+      const calls = script(sendRow());
+      await send();
+      const claim = calls.filter((c) => c.table === 'estimates');
+      expect(claim.find((c) => c.name === 'where').args[0]).toEqual({ id: ESTIMATE_ID, status: 'draft' });
+      expect(claim.filter((c) => c.name === 'whereNull').map((c) => c.args[0]).sort()).toEqual(['archived_at', 'estimate_group_id', 'price_locked_at']);
+      expect(claim.filter((c) => c.name === 'whereRaw').length).toBeGreaterThanOrEqual(5);
+      expect(claim.find((c) => c.name === 'update').args[0]).toMatchObject({ status: 'sending', send_method: 'sms' });
+    });
+  });
+
+  describe('outcomes', () => {
+    test('sent: the answer is { id, status, sentAt } only, one audit event, one quiet owner line, and the stamp', async () => {
+      const calls = script(sendRow());
+      const res = await send({});
+      expect(res).toEqual({ status: 200, body: { id: ESTIMATE_ID, status: 'sent', sentAt: '2026-03-10T15:00:01.000Z' } });
+      expect(JSON.stringify(res.body)).not.toMatch(/token|http|941|monthly|annual|lines/i);
+      expect(auditSpy).toHaveBeenCalledTimes(1);
+      expect(auditSpy.mock.calls[0][0]).toMatchObject({
+        actor_type: 'technician', actor_id: 'tech-1', action: 'tech_estimate.sent', resource_type: 'estimates', resource_id: ESTIMATE_ID,
+        metadata: { estimate_id: ESTIMATE_ID, technician_id: 'tech-1', customer_id: CUSTOMER_ID, new_person: false },
+      });
+      expect(JSON.stringify(auditSpy.mock.calls[0][0])).not.toMatch(/941|secret-token|Casey/);
+      expect(toolWrites(calls).some((c) => c.args[0].sent_by_technician_at)).toBe(true);
+      expect(ownerSpy).toHaveBeenCalledTimes(1);
+      const [kind, fields] = ownerSpy.mock.calls[0];
+      expect(kind).toBe('tech-estimate-sent');
+      expect(fields.action).toMatch(/Taylor/);
+      expect(fields.action).toMatch(/Casey Sample/);
+      expect(JSON.stringify(fields)).not.toMatch(/9415550142|\(941\)|\$|secret-token/);
+      expect(bellSpy).not.toHaveBeenCalled();
+      expect(mockState.updates).toEqual([]);
+    });
+
+    test('held by the window at its edge: 409 outside_hours, the draft goes back, the office is not told', async () => {
+      script(sendRow());
+      senderSpy.mockResolvedValue({ sent: false, channels: { sms: { ok: false, code: 'QUIET_HOURS_HOLD', error: 'x' } }, sentChannels: [], failedChannels: ['sms'] });
+      const res = await send();
+      expect(res).toEqual({ status: 409, body: { error: 'Texts go out between 8 AM and 8 PM. Send it then, or ask the office.', code: 'outside_hours' } });
+      expect(mockState.updates).toEqual([{ table: 'estimates', where: { id: ESTIMATE_ID, status: 'sending' }, patch: expect.objectContaining({ status: 'draft', send_method: null }) }]);
+      expect(bellSpy).not.toHaveBeenCalled();
+      expect(auditSpy).not.toHaveBeenCalled();
+      expect(ownerSpy).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['a rule refused it (opt-out, landline)', { sent: false, channels: { sms: { ok: false, error: 'opted out' } }, sentChannels: [], failedChannels: ['sms'] }, null, 422, 'tech_send_not_sent'],
+      ['the provider outcome is uncertain', { sent: false, channels: { sms: { ok: false, uncertain: true, error: 'timeout' } }, sentChannels: [], failedChannels: ['sms'] }, null, 502, 'tech_send_uncertain'],
+      ['the sender refused before any handoff', null, Object.assign(new Error('County records could not confirm this house number'), { statusCode: 409 }), 422, 'tech_send_not_sent'],
+      ['the sender broke', null, new Error('boom'), 502, 'tech_send_uncertain'],
+    ])('%s: office_sends, parked for the office, the office bell rings once, nothing retried', async (_label, result, error, status, code) => {
+      script(sendRow());
+      if (error) senderSpy.mockRejectedValue(error); else senderSpy.mockResolvedValue(result);
+      const res = await send();
+      expect(res).toEqual({ status, body: { error: 'The text did not go. The office will send it.', code: 'office_sends' } });
+      expect(senderSpy).toHaveBeenCalledTimes(1);
+      expect(mockState.updates).toEqual([{ table: 'estimates', where: { id: ESTIMATE_ID, status: 'sending' }, patch: expect.objectContaining({ status: 'send_failed', last_send_error: code }) }]);
+      expect(bellSpy).toHaveBeenCalledTimes(1);
+      expect(bellSpy.mock.calls[0][0]).toBe('estimate');
+      expect(bellSpy.mock.calls[0][3]).toMatchObject({ bell: true, dedupeKey: `tech-estimate-office-first:${ESTIMATE_ID}` });
+      expect(auditSpy).not.toHaveBeenCalled();
+      expect(ownerSpy).not.toHaveBeenCalled();
+    });
+
+    test('a bookkeeping failure after the text went never turns the answer into an error', async () => {
+      script(sendRow());
+      auditSpy.mockRejectedValue(new Error('audit down'));
+      ownerSpy.mockRejectedValue(new Error('alert down'));
+      expect((await send()).status).toBe(200);
+    });
+  });
+
+  describe('his own reads show canSend', () => {
+    const ROW = {
+      id: ESTIMATE_ID, technician_id: 'tech-1', created_at: '2026-11-09T15:00:00.000Z', status: 'draft', sent_at: null, accepted_at: null,
+      who: 'Sample Person', address: '100 Sample St, Sampletown, FL 34202', monthly_total: '37.33', annual_total: '448.00', onetime_total: '0',
+      office_first_reasons: [], estimate_data: { result: { recurring: { services: [] }, oneTime: {} } },
+    };
+    test('true for his draft with no stored reason; false for a held draft or one already sent', async () => {
+      mockState.own = [
+        ROW, { ...ROW, id: '00000000-0000-4000-8000-0000000000e2', office_first_reasons: ['engine_review'] },
+        { ...ROW, id: '00000000-0000-4000-8000-0000000000e3', status: 'sent' },
+      ];
+      const list = await call('GET', '');
+      expect(list.body.estimates.map((e) => e.canSend)).toEqual([true, false, false]);
+      expect((await call('GET', `/${ESTIMATE_ID}`)).body.canSend).toBe(true);
+    });
+
+    test('needsTextRequest is true for a new person and false for a customer, and the customer id is never returned', async () => {
+      mockState.own = [ROW, { ...ROW, id: '00000000-0000-4000-8000-0000000000e2', customer_id: CUSTOMER_ID }];
+      const list = await call('GET', '');
+      expect(list.body.estimates.map((e) => e.needsTextRequest)).toEqual([true, false]);
+      expect(JSON.stringify(list.body)).not.toContain(CUSTOMER_ID);
+    });
   });
 });

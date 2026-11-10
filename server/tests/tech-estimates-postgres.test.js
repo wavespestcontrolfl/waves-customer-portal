@@ -30,6 +30,12 @@ jest.mock('../models/db', () => {
   return db;
 });
 
+// Step 4: the provider layer. Nothing leaves the machine: the text provider is a stub, the short link is a pass-through, and the
+// follow-up enrolment is a stub. The shared sender, claim, schema and bell are real.
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
+jest.mock('../services/short-url', () => ({ ...jest.requireActual('../services/short-url'), shortenOrPassthrough: jest.fn(async (url) => url) }));
+jest.mock('../services/automation-runner', () => ({ ...jest.requireActual('../services/automation-runner'), enrollCustomer: jest.fn(async () => null) }));
+
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 
@@ -76,10 +82,12 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
     enriched: { propertyType: 'single_family' },
   });
 
+  let customerSeq = 0;
   const customer = async (line1) => {
     const id = randomUUID();
     await trx('customers').insert({
-      id, first_name: 'Synthetic', last_name: 'Fixture', email: `${id}@example.invalid`, phone: `fixture-${id.slice(0, 8)}`,
+      id, first_name: 'Synthetic', last_name: 'Fixture', email: `${id}@example.invalid`,
+      phone: `+1941555${String(100 + (customerSeq += 1)).padStart(4, '0')}`,
       address_line1: line1, city: 'Test City', state: 'FL', zip: '00000', active: true, pipeline_stage: 'active_customer',
     });
     return id;
@@ -87,6 +95,7 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
 
   beforeEach(async () => {
     process.env.GATE_TECH_ESTIMATES = 'true';
+    customerSeq = 0;
     trx = await database.transaction();
     require('../models/db').connection = trx;
     const technicianId = randomUUID();
@@ -413,6 +422,20 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
       expect((await read('')).body.estimates[0]).toEqual(expect.objectContaining({ who: 'Sample Person', addressLine: '300 Test Lane' }));
     });
 
+    test('an estimate made from a visit carries the customer\'s name, mobile number and email, so it can be sent; the phone never sees them', async () => {
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
+      expect(saved.status).toBe(200);
+      const row = await estimateRow(saved.body.id);
+      expect(row).toMatchObject({ customer_id: ids.routeCustomer, customer_name: 'Synthetic Fixture', customer_phone: '+19415550101' });
+      expect(row.customer_email).toMatch(/@example\.invalid$/);
+      expect(JSON.stringify(saved.body)).not.toMatch(/5550101|example\.invalid/);
+      // A stored number the save would refuse is left off: the estimate still saves, with no phone.
+      await trx('customers').where({ id: ids.routeCustomer }).update({ phone: '(141) 555-0101' });
+      const second = await priceThenCreate({ visitId: ids.routeVisit, services: ['OT_PEST'] });
+      expect(second.saved.status).toBe(200);
+      expect((await estimateRow(second.saved.body.id)).customer_phone).toBeNull();
+    });
+
     test('an archived estimate is left out of his list', async () => {
       const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
       await trx('estimates').where({ id: saved.body.id }).update({ archived_at: new Date() });
@@ -491,6 +514,219 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
     });
   });
 
+  describe('send from the phone (the real shared sender, a stubbed provider)', () => {
+    const sendTool = require('../services/tech-estimate-send');
+    const ownerAlerts = require('../services/owner-alerts');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    const INSIDE = new Date('2026-03-10T15:00:00.000Z'); // 11:00 AM ET
+    const OUTSIDE = new Date('2026-03-10T03:00:00.000Z'); // 11:00 PM ET the evening before
+    // The number the save stores for the fixture customer (the send works on exactly what the save stored).
+    const CUSTOMER_PHONE = '+19415550101';
+    const bells = (estimateId) => trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`tech-estimate-office-first:${estimateId}`]);
+    const auditRows = (action) => trx('audit_log').where({ action });
+    let ownerSpy;
+
+    async function send(id, body = {}) {
+      const res = await fetch(`${baseUrl}/api/tech/estimates/${id}/send`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      return { status: res.status, body: await res.json().catch(() => ({})) };
+    }
+    // A saved clean draft, left exactly as the save stored it (a customer on his visit, or a new person he typed).
+    async function draft(body = { visitId: ids.routeVisit, services: ['PEST'] }) {
+      const { saved } = await priceThenCreate(body);
+      expect(saved.status).toBe(200);
+      return saved.body.id;
+    }
+
+    const IN_APP = ['GATE_OPS_DIGESTS_IN_APP', 'GATE_AGENT_ACTIVITY'];
+    const savedEnv = {};
+    beforeEach(() => {
+      // The quiet owner line is an Activity row: it needs the two gates that switch the Activity feed on.
+      for (const key of IN_APP) { savedEnv[key] = process.env[key]; process.env[key] = 'true'; }
+      sendTool._private.clock.now = () => INSIDE;
+      sendCustomerMessage.mockReset();
+      sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-synthetic-accepted' });
+      ownerSpy = jest.spyOn(ownerAlerts, 'recordOwnerAlert');
+    });
+    afterEach(() => {
+      sendTool._private.clock.now = () => new Date();
+      for (const key of IN_APP) { if (savedEnv[key] === undefined) delete process.env[key]; else process.env[key] = savedEnv[key]; }
+    });
+
+    test('a clean draft for a route customer goes out through the real shared sender: sent, stamped, one audit event, one owner line', async () => {
+      const id = await draft();
+      const before = await counts();
+      const res = await send(id);
+      expect(res.status).toBe(200);
+      const row = await estimateRow(id);
+      expect(res.body).toEqual({ id, status: 'sent', sentAt: row.sent_at.toISOString() });
+      expect(row.status).toBe('sent');
+      expect(JSON.stringify(res.body)).not.toMatch(new RegExp(`${row.token}|http|9415550\\d{3}`));
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({
+        to: CUSTOMER_PHONE, channel: 'sms', audience: 'customer', customerId: ids.routeCustomer, estimateId: id, entryPoint: 'tech_estimate_send',
+        metadata: { original_message_type: 'estimate_sent' },
+      });
+      expect(sendCustomerMessage.mock.calls[0][0].consentBasis).toBeUndefined();
+      const tool = await trx('tech_estimates').where({ estimate_id: id }).first();
+      expect(tool.sent_by_technician_at).toBeInstanceOf(Date);
+      expect(tool.text_request_confirmed_at).toBeNull();
+      const audits = await auditRows('tech_estimate.sent');
+      expect(audits).toHaveLength(1);
+      expect(JSON.stringify(audits[0])).not.toMatch(/9415550\d{3}/);
+      expect(ownerSpy).toHaveBeenCalledTimes(1);
+      expect(await ownerSpy.mock.results[0].value).toMatchObject({ ok: true });
+      const lines = await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'ownerAlert' = 'tech-estimate-sent'");
+      expect(lines).toHaveLength(1);
+      expect(lines[0].title).toBe('Estimates — look over the estimate to Synthetic Fixture');
+      expect(lines[0].body).toBe('Synthetic texted this estimate from the route.');
+      expect(JSON.stringify(lines[0])).not.toMatch(/9415550\d{3}|\$\d/);
+      expect((await counts()).audit_log).toBe(before.audit_log + 1);
+      expect(await bells(id)).toEqual([]);
+    });
+
+    test('the same estimate again is 409 already_sent and the provider was called once in total', async () => {
+      const id = await draft();
+      expect((await send(id)).status).toBe(200);
+      expect(await send(id)).toEqual({ status: 409, body: { error: 'This estimate was already sent.', code: 'already_sent' } });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(await auditRows('tech_estimate.sent')).toHaveLength(1);
+    });
+
+    test('a second tap while the first is still sending is 409 already_sent, and the provider is called once', async () => {
+      const id = await draft();
+      let second;
+      sendCustomerMessage.mockImplementation(async () => {
+        // The first request is inside the provider call: its claim (status sending) is committed.
+        expect((await estimateRow(id)).status).toBe('sending');
+        second = await send(id);
+        return { sent: true, providerMessageId: 'SM-synthetic-accepted' };
+      });
+      expect((await send(id)).status).toBe(200);
+      expect(second).toEqual({ status: 409, body: { error: 'This estimate was already sent.', code: 'already_sent' } });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('a held estimate is 409 office_first from the stored row: no claim, no provider call, still a draft', async () => {
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'], facts: { homeSqFt: 4200, stories: 2 } });
+      const res = await send(saved.body.id, { askedForText: true, office_first_reasons: [] });
+      expect(res).toEqual({ status: 409, body: { error: 'The office checks this one first.', code: 'office_first' } });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect((await estimateRow(saved.body.id)).status).toBe('draft');
+      expect((await read(`/${saved.body.id}`)).body.canSend).toBe(false);
+    });
+
+    test('another technician\'s estimate is a 404 and sends nothing', async () => {
+      const id = await draft();
+      const other = randomUUID();
+      await trx('technicians').insert({ id: other, name: 'Other Tech', email: `${other}@example.invalid`, role: 'technician', active: true, employment_status: 'active', can_create_estimates: true });
+      mockCaller.id = other;
+      expect(await send(id)).toEqual({ status: 404, body: { error: 'Estimate not found' } });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect((await estimateRow(id)).status).toBe('draft');
+    });
+
+    test('a new person: no confirmation is 400 and sends nothing; with it, the stored time is the consent time the provider layer got', async () => {
+      const id = await draft({ prospect: PROSPECT, services: ['PEST'] });
+      expect((await read(`/${id}`)).body).toMatchObject({ canSend: true, needsTextRequest: true });
+      expect((await estimateRow(id)).customer_id).toBeNull();
+      expect(await send(id, {})).toEqual({ status: 400, body: { error: 'Confirm that the person asked for the estimate by text.', code: 'needs_text_request' } });
+      expect(await send(id, { askedForText: 'yes' })).toMatchObject({ status: 400 });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect((await trx('tech_estimates').where({ estimate_id: id }).first()).text_request_confirmed_at).toBeNull();
+
+      expect((await send(id, { askedForText: true })).status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const input = sendCustomerMessage.mock.calls[0][0];
+      const tool = await trx('tech_estimates').where({ estimate_id: id }).first();
+      expect(input).toMatchObject({ audience: 'lead', entryPoint: 'tech_estimate_send', consentBasis: { status: 'transactional_allowed', source: 'tech_estimate_on_site_request' } });
+      expect(tool.text_request_confirmed_at.getTime()).toBe(INSIDE.getTime());
+      expect(new Date(input.consentBasis.capturedAt).getTime()).toBe(tool.text_request_confirmed_at.getTime());
+      expect(tool.sent_by_technician_at).toBeInstanceOf(Date);
+      expect((await auditRows('tech_estimate.sent'))[0].metadata).toEqual(expect.objectContaining({ new_person: true }));
+    });
+
+    test('outside 8 AM to 8 PM ET: 409 outside_hours, nothing sent or claimed, and the same draft sends inside the window', async () => {
+      const id = await draft();
+      sendTool._private.clock.now = () => OUTSIDE;
+      expect(await send(id)).toEqual({ status: 409, body: { error: 'Texts go out between 8 AM and 8 PM. Send it then, or ask the office.', code: 'outside_hours' } });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect((await estimateRow(id)).status).toBe('draft');
+      expect((await read(`/${id}`)).body.canSend).toBe(true);
+      // A visit's estimate has a customer: no text-request confirmation is asked for.
+      expect((await read(`/${id}`)).body.needsTextRequest).toBe(false);
+      sendTool._private.clock.now = () => INSIDE;
+      expect((await send(id)).status).toBe(200);
+    });
+
+    test('the window holding the text at its edge puts the draft back, still his to send', async () => {
+      const id = await draft();
+      sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'QUIET_HOURS_HOLD', reason: 'Automated SMS is limited to 8:00 AM-8:00 PM ET', retryable: true, deferred: true });
+      expect((await send(id)).body.code).toBe('outside_hours');
+      expect((await estimateRow(id)).status).toBe('draft');
+      expect(await bells(id)).toEqual([]);
+      expect((await send(id)).status).toBe(200);
+    });
+
+    test('a rule refused the text (opt-out): office_sends, parked as send_failed, ONE bell the sweep keeps open, never retried from the phone', async () => {
+      const id = await draft();
+      sendCustomerMessage.mockResolvedValue({ sent: false, code: 'SMS_OPTED_OUT', reason: 'Recipient opted out of SMS', terminal: true });
+      expect(await send(id)).toEqual({ status: 422, body: { error: 'The text did not go. The office will send it.', code: 'office_sends' } });
+      const row = await estimateRow(id);
+      expect(row.status).toBe('send_failed');
+      expect(row.last_send_error).toBe('tech_send_not_sent');
+      const rows = await bells(id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual(expect.objectContaining({ category: 'estimate', done_at: null, link: `/admin/estimates?estimateId=${id}` }));
+      expect(rows[0].metadata).toEqual(expect.objectContaining({ doneWhen: 'estimate_sent_or_closed', severity: 'needs-you' }));
+      // A second tap does not text again and does not ring again.
+      expect(await send(id)).toEqual({ status: 409, body: { error: 'The text did not go. The office will send it.', code: 'office_sends' } });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(await bells(id)).toHaveLength(1);
+      expect(await auditRows('tech_estimate.sent')).toHaveLength(0);
+      // The sweep leaves it open while the estimate is unsent, and closes it once the office sends it.
+      const { runAdminAlertRelevanceSweep } = require('../services/admin-alert-relevance');
+      await runAdminAlertRelevanceSweep();
+      expect((await bells(id))[0].done_at).toBeNull();
+      await trx('estimates').where({ id }).update({ status: 'sent', sent_at: new Date() });
+      await runAdminAlertRelevanceSweep();
+      expect((await bells(id))[0]).toEqual(expect.objectContaining({ done_by: 'relevance', resolution: 'Estimate was sent' }));
+    });
+
+    test('an uncertain provider outcome is a 502, parked, one bell, and no second text', async () => {
+      const id = await draft();
+      sendCustomerMessage.mockResolvedValue({ sent: false, code: 'PROVIDER_FAILURE', reason: 'timeout' });
+      expect(await send(id)).toEqual({ status: 502, body: { error: 'The text did not go. The office will send it.', code: 'office_sends' } });
+      expect((await estimateRow(id)).last_send_error).toBe('tech_send_uncertain');
+      expect(await bells(id)).toHaveLength(1);
+      expect((await send(id)).status).toBe(409);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('a draft with no mobile number is 422 office_sends: nothing claimed or sent, and the office is told once', async () => {
+      const id = await draft();
+      // On purpose: the save stored the customer's number, so clear it to test a draft that has none.
+      await trx('estimates').where({ id }).update({ customer_phone: null });
+      expect(await send(id)).toEqual({ status: 422, body: { error: 'This estimate has no mobile number. Ask the office to send it.', code: 'office_sends' } });
+      expect((await estimateRow(id)).status).toBe('draft');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      await send(id);
+      expect(await bells(id)).toHaveLength(1);
+    });
+
+    test('an engine-review (yellow) draft the office has not acknowledged is the office\'s: the sender\'s own gate, not skipped by the claim', async () => {
+      const id = await draft();
+      const row = await estimateRow(id);
+      const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : row.estimate_data;
+      await trx('estimates').where({ id }).update({ estimate_data: JSON.stringify({ ...data, estimatorEngine: { ...(data.estimatorEngine || {}), lane: 'yellow' } }) });
+      expect((await send(id)).body.code).toBe('office_sends');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect((await estimateRow(id)).status).toBe('draft');
+    });
+  });
+
   describe('the two migrations', () => {
     const techEstimates = require('../models/migrations/20261109130000_tech_estimates');
     const soldByCreator = require('../models/migrations/20261109130100_sold_by_creator');
@@ -508,6 +744,19 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
       expect(await trx.schema.hasTable('tech_estimates')).toBe(true);
       const { rows } = await trx.raw("SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_tech_estimates_technician_created'");
       expect(rows[0].indexdef).toMatch(/technician_id, created_at DESC/);
+    });
+
+    test('the send columns go down and up (both are guarded no-ops when repeated)', async () => {
+      const sendColumns = require('../models/migrations/20261109140000_tech_estimates_send');
+      const has = async () => [await trx.schema.hasColumn('tech_estimates', 'text_request_confirmed_at'), await trx.schema.hasColumn('tech_estimates', 'sent_by_technician_at')];
+      expect(await has()).toEqual([true, true]);
+      await sendColumns.up(trx);
+      await sendColumns.down(trx);
+      expect(await has()).toEqual([false, false]);
+      await sendColumns.down(trx);
+      await sendColumns.up(trx);
+      await sendColumns.up(trx);
+      expect(await has()).toEqual([true, true]);
     });
 
     test('the Sold by down refuses while a creator row exists, restores the old two checks without one, and up widens again', async () => {
