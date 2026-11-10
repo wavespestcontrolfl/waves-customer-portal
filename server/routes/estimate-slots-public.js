@@ -1495,4 +1495,4 @@ async function offerableEstimateSlots(estimateId, customerId, { fresh = false } 
 }
 
 module.exports = router;
-module.exports._internals = { offerableEstimateSlots, pageDefaultSlotSelection, lockedContactReviewRefusal, lockedAreaAddOnLimitRefusal, lockedAreaAddOnRuleRefusal, slotBlockingRefusal, postMintRefusal };
+module.exports._internals = { SLOT_ESTIMATE_COLUMNS, slotBrowseRefusal, resolveSlotServiceMode, offerableEstimateSlots, pageDefaultSlotSelection, lockedContactReviewRefusal, lockedAreaAddOnLimitRefusal, lockedAreaAddOnRuleRefusal, slotBlockingRefusal, postMintRefusal };
