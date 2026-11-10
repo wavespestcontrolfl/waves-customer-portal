@@ -79,7 +79,9 @@ const lookupOf = (record = countyRecord(), enriched = { propertyType: 'single_fa
 
 // A canned dry-run result, the shape createOrReuseAdminEstimate returns (extra keys prove nothing leaks).
 function prepared({ monthly = 37.33, annual = 448, oneTime = 99, authority = 'SERVER', lines, warning = null, result } = {}) {
-  const engineLines = lines || [{ service: 'pest_control', pricingConfidence: 'HIGH' }];
+  // Default: one clean engine line for each service the tool offers (judgePrepared wants a line per chosen service).
+  const engineLines = lines || ['pest_control', 'one_time_pest', 'mosquito', 'one_time_mosquito', 'rodent_bait', 'termite_bait']
+    .map((service) => ({ service, pricingConfidence: 'HIGH' }));
   return {
     dryRun: true,
     memberLinkageWarning: warning,
@@ -378,9 +380,8 @@ describe('POST /price: the answer and the office-first reasons', () => {
 
   test.each([
     ['a line that needs manual review', { service: 'pest_control', requiresManualReview: true }],
-    ['a quote-required line', { service: 'pest_control', requiresQuote: true }],
     ['a low-confidence line', { service: 'pest_control', pricingConfidence: 'LOW' }],
-    ['a heuristic-turf line', { service: 'mosquito', turfBasis: 'lotFallback' }],
+    ['a heuristic-turf line', { service: 'pest_control', turfBasis: 'lotFallback' }],
   ])('%s is office_review', async (_label, line) => {
     saveSpy.mockResolvedValueOnce(prepared({ lines: [line] }));
     expect(reasons(await price({ customerId: CUSTOMER_ID, services: ['PEST'] }))).toEqual(['office_review']);
@@ -415,9 +416,19 @@ describe('POST /price: refusals', () => {
   test.each([
     ['the price is not the server\'s', () => prepared({ authority: 'CLIENT_FALLBACK' })],
     ['there is no engine line', () => prepared({ lines: [] })],
+    ['the engine could not price a line (quote required)', () => prepared({ lines: [{ service: 'pest_control', quoteRequired: true }] })],
+    ['a line needs a quote', () => prepared({ lines: [{ service: 'pest_control', requiresQuote: true }] })],
   ])('%s: 422 office_prices', async (_label, make) => {
     saveSpy.mockResolvedValueOnce(make());
     expect(await price({ customerId: CUSTOMER_ID, services: ['PEST'] })).toEqual({ status: 422, body: OFFICE_REFUSAL });
+  });
+
+  test('never a partial quote: a chosen service with no engine line of its own is office_prices', async () => {
+    // Two services chosen, the engine answered with the pest line only.
+    saveSpy.mockResolvedValueOnce(prepared({ lines: [{ service: 'pest_control', pricingConfidence: 'HIGH' }] }));
+    expect(await price({ customerId: CUSTOMER_ID, services: ['PEST', 'MOSQUITO'] })).toEqual({ status: 422, body: OFFICE_REFUSAL });
+    saveSpy.mockResolvedValueOnce(prepared({ lines: [{ service: 'pest_control' }, { service: 'mosquito' }] }));
+    expect((await price({ customerId: CUSTOMER_ID, services: ['PEST', 'MOSQUITO'] })).status).toBe(200);
   });
 
   test('a 4xx from the save is office_prices and its own message is never echoed', async () => {

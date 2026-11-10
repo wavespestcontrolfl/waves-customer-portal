@@ -63,14 +63,17 @@ const deepFreeze = (value) => {
   Object.values(value).forEach((v) => { if (v && typeof v === 'object') deepFreeze(v); });
   return Object.freeze(value);
 };
+// `line` is the engine's own name for the priced line of that service (generateEstimate lineItems[].service);
+// judgePrepared reads it so a quote never shows fewer services than were chosen.
 const ENGINE_SERVICES = deepFreeze({
-  PEST: { form: 'svcPest', services: { pest: { frequency: 'quarterly', roachType: 'none' } } },
-  OT_PEST: { form: 'svcOnetimePest', services: { oneTimePest: { urgency: 'NONE', afterHours: false } } },
-  MOSQUITO: { form: 'svcMosquito', services: { mosquito: { tier: 'monthly12' } } },
-  OT_MOSQUITO: { form: 'svcOnetimeMosquito', services: { oneTimeMosquito: {} } },
-  RODENT_BAIT: { form: 'svcRodentBait', services: { rodentBait: {} } },
+  PEST: { form: 'svcPest', line: 'pest_control', services: { pest: { frequency: 'quarterly', roachType: 'none' } } },
+  OT_PEST: { form: 'svcOnetimePest', line: 'one_time_pest', services: { oneTimePest: { urgency: 'NONE', afterHours: false } } },
+  MOSQUITO: { form: 'svcMosquito', line: 'mosquito', services: { mosquito: { tier: 'monthly12' } } },
+  OT_MOSQUITO: { form: 'svcOnetimeMosquito', line: 'one_time_mosquito', services: { oneTimeMosquito: {} } },
+  RODENT_BAIT: { form: 'svcRodentBait', line: 'rodent_bait', services: { rodentBait: {} } },
   TERMITE_BAIT: {
     form: 'svcTermiteBait',
+    line: 'termite_bait',
     services: { termite: { system: 'trelona', monitoringTier: 'basic', scope: 'bait_monitoring_no_warranty', measurements: {} } },
   },
 });
@@ -280,13 +283,18 @@ function buildLines(mapped) {
 // The verdict, like moving-auto-estimate.js cleanPrice: server-priced, with an engine line, and which lines the office
 // must look at. The save's own member-address check joins the flagged lines under ONE code, so a technician never
 // learns that an address belongs to another customer.
-function judgePrepared(prepared) {
+function judgePrepared(prepared, keys) {
   const { lineRequiresReview, lineHasHeuristicTurf } = require('./estimator-engine/draft-builder');
   const estimate = prepared && prepared.estimate;
   const data = estimate && (typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data);
   const lines = (data && data.engineResult && data.engineResult.lineItems) || [];
-  if (!estimate || estimate.pricing_authority !== 'SERVER' || !data || lines.length === 0) throw officePrices();
-  const flagged = (line) => lineRequiresReview(line) || line.requiresQuote || lineHasHeuristicTurf(line)
+  if (!estimate || estimate.pricing_authority !== 'SERVER' || !data) throw officePrices();
+  // Never a partial quote: every chosen service must come back as its own engine line, and a line the engine
+  // could not price (quote required) has no number to show. The office prices the whole quote then.
+  const unpriced = (line) => line.quoteRequired || line.requiresQuote;
+  const missing = keys.some((key) => !lines.some((line) => line && line.service === ENGINE_SERVICES[key].line));
+  if (missing || lines.some(unpriced)) throw officePrices();
+  const flagged = (line) => lineRequiresReview(line) || lineHasHeuristicTurf(line)
     || String(line.pricingConfidence || '').toUpperCase() === 'LOW';
   return { data, estimate, review: lines.some(flagged) || Boolean(prepared.memberLinkageWarning) };
 }
@@ -307,7 +315,7 @@ async function priceQuote(req, body) {
     lookupEnriched: lookup.enriched,
   });
   const prepared = await dryRun(req, estimateBody({ subject, keys, facts: layered, engineInputs }));
-  const { data, estimate, review } = judgePrepared(prepared);
+  const { data, estimate, review } = judgePrepared(prepared, keys);
   const oneTimeTotal = roundMoney(estimate.onetime_total);
   const reasons = layered.changed.map((name) => `changed_fact:${name}`);
   if (oneTimeTotal > ONE_TIME_HOLD_DOLLARS) reasons.push('one_time_over_limit');

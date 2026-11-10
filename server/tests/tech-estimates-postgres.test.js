@@ -183,6 +183,20 @@ postgres('POST /api/tech/estimates/price (migrated PostgreSQL)', () => {
     expect(await counts()).toEqual(before);
   });
 
+  test('each of the six services comes back as its own priced engine line (an admin may quote all six)', async () => {
+    mockCaller.role = 'admin';
+    for (const key of ['PEST', 'OT_PEST', 'MOSQUITO', 'OT_MOSQUITO', 'RODENT_BAIT', 'TERMITE_BAIT']) {
+      const res = await price({ customerId: ids.routeCustomer, services: [key] });
+      expect([key, res.status]).toEqual([key, 200]);
+      expect(res.body.lines.length).toBeGreaterThan(0);
+      expect(res.body.monthlyTotal + res.body.oneTimeTotal).toBeGreaterThan(0);
+    }
+    // All six together: still one whole quote.
+    const all = await price({ customerId: ids.routeCustomer, services: ['PEST', 'OT_PEST', 'MOSQUITO', 'OT_MOSQUITO', 'RODENT_BAIT', 'TERMITE_BAIT'] });
+    expect(all.status).toBe(200);
+    expect(all.body.lines.length).toBeGreaterThanOrEqual(6);
+  });
+
   test('an off-route customer is a 404 and nothing is looked up', async () => {
     const res = await price({ customerId: ids.otherCustomer, services: ['PEST'] });
     expect(res).toEqual({ status: 404, body: { error: 'Customer not found' } });
