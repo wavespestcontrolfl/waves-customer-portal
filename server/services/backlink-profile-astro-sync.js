@@ -94,6 +94,9 @@ const SAMEAS_EXCLUDED_PAGES = new Set([
   'victordirectory.com/listings784135/waves-pest-control-venice', // same
   'kevsbest.com/listing/waves-pest-control', // 7057 Pinebay Blvd, Englewood: not an office
   'local-biz.directory/listing/waves-pest-control-sarasota', // 404
+  // Brand-wide handle, not one office's profile: the Sarasota and Parrish listings link it too, and every
+  // unscoped listing lands in the Bradenton bucket (astro #841). A corporate profile is hand-curated in astro.
+  'pinterest.com/wavespestcontrol',
 ]);
 
 function isExcludedHost(host) {
