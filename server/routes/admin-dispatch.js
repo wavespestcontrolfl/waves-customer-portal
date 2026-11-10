@@ -4550,10 +4550,10 @@ async function rearmRescheduleReminderWindows(guards, unguardedFallback) {
 // GET /api/admin/dispatch/:serviceId/reschedule-options
 router.get('/:serviceId/reschedule-options', async (req, res, next) => {
   try {
-    // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees why.
+    // A technician whose Team tab switch is off sees why.
     const refusal = await techMoveRefusal(req);
     if (refusal) return res.status(refusal.status).json(refusal.payload);
-    // GATE_ROUTE_CHECK_STAFF_LISTS: only an admin's list may buy Google road
+    // Route-checked day list: only an admin's list may buy Google road
     // times; a technician's stays on the estimate.
     const options = await SmartRebooker.findRescheduleOptions(req.params.serviceId, undefined, {
       caller: { isAdmin: req.techRole === 'admin', technicianId: req.technicianId },
@@ -4575,7 +4575,7 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
       .where({ id: req.params.serviceId })
       .first('id', 'scheduled_date', 'is_recurring');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees
+    // A technician whose Team tab switch is off sees
     // why, not move choices the commit would refuse (plus the customer-pick
     // offer while GATE_QUICKMOVE_CUSTOMER_PICK is on).
     {
@@ -4701,9 +4701,47 @@ router.post('/:serviceId/rain-out/target-check', async (req, res, next) => {
 // Warn-only + read-only: none of these surfaces disable saving on this
 // data. Always on — no gate. Validation (cap 25, YYYY-MM-DD dates, HH:MM
 // windows) lives in checkSlots; !ok maps to 400 here.
+//
+// GATE_TECH_LOGIN_PRIVACY on, technician caller: a target's serviceId must be
+// the caller's own visit and its technicianId the caller's own id (or absent),
+// else the arrival check would describe another route's stops (audit A12).
+// Refused like router.param('serviceId'): 404 for a missing visit, 403
+// service_not_assigned for one that is not the caller's. Window-only occupancy
+// (no ids) stays. Admin callers and the gate off: unchanged.
+const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+async function foreignSlotCheckRefusal(req) {
+  if (!isTechnicianRequest(req) || require('../config/feature-gates').techLoginPrivacyLive?.() !== true) return null;
+  const targets = Array.isArray(req.body?.targets) ? req.body.targets : [];
+  // Every id present anywhere in the body must be a canonical hyphenated UUID. checkSlots validates with Joi.guid(),
+  // which also takes braced and unhyphenated forms (and Postgres reads them), so an id in another form must never
+  // slip past the ownership check below: it is refused, not skipped.
+  const carriers = [req.body, ...targets];
+  const badId = carriers.some((c) => ['serviceId', 'technicianId'].some((key) => (
+    c != null && typeof c === 'object' && c[key] != null && !(typeof c[key] === 'string' && CANONICAL_UUID_RE.test(c[key]))
+  )));
+  if (badId) return { status: 400, body: { error: 'serviceId and technicianId must be plain UUIDs' } };
+  const notOwn = { status: 403, body: { error: 'Not assigned to this service', code: 'service_not_assigned' } };
+  if (carriers.some((c) => c?.technicianId != null && String(c.technicianId) !== String(req.technicianId))) return notOwn;
+  const ids = [...new Set(carriers.map((c) => c?.serviceId).filter((id) => typeof id === 'string'))];
+  if (!ids.length) return null;
+  const rows = await db('scheduled_services')
+    .whereIn('id', ids)
+    .select('id', 'technician_id', 'status', 'scheduled_date');
+  if (rows.length < ids.length) return { status: 404, body: { error: 'Service not found' } };
+  return rows.every((row) => technicianVisitRowInScope(req, row)) ? null : notOwn;
+}
+
 router.post('/slot-check', async (req, res, next) => {
   try {
+    // checkSlots' own 25-target cap, applied before the ownership scan reads a
+    // single id: an oversized array never reaches a query (same 400 as before).
     const RainOut = require('../services/rain-out');
+    if (Array.isArray(req.body?.targets) && req.body.targets.length > RainOut.SLOT_CHECK_TARGET_CAP) {
+      return res.status(400).json({ error: 'too_many_targets' });
+    }
+    const refusal = await foreignSlotCheckRefusal(req);
+    if (refusal) return res.status(refusal.status).json(refusal.body);
     const result = await RainOut.checkSlots({
       targets: req.body?.targets,
       caller: { isAdmin: req.techRole === 'admin', technicianId: req.technicianId },
@@ -4778,7 +4816,12 @@ router.get('/:reserviceAsksServiceId/reservice-asks', async (req, res, next) => 
     }
     req.params.serviceId = id;
     if (!(await assertRecapOwnership(req, res))) return;
-    const asks = await require('../services/reservice-asks').gatherReserviceAsks(req.params.serviceId);
+    // Owner ruling D1 A (2026-11-04): no call words on a technician screen, so the
+    // call channel is left out for a technician caller. Texts and emails stay.
+    const asks = await require('../services/reservice-asks').gatherReserviceAsks(
+      req.params.serviceId,
+      ...(req.techRole === 'admin' ? [] : [{ skipCalls: true }])
+    );
     if (!asks.ok) {
       const status = asks.reason === 'not_reservice' ? 409 : recapStatusForReason(asks.reason);
       return res.status(status).json({ error: asks.reason, code: asks.reason });
@@ -5195,7 +5238,7 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       });
       if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
     }
-    // GATE_TECH_MOVE_SWITCH: the commit is the enforcer.
+    // The commit is the enforcer.
     {
       const refusal = await techMoveRefusal(req);
       if (refusal) return res.status(refusal.status).json(refusal.payload);
@@ -5470,6 +5513,30 @@ function seriesNoticeIdentity({ result, newDate, startForText }) {
     messageType: placement ? 'appointment_recurring_placement_confirmed' : 'reschedule_series_confirmation',
     slotMeta: renderedSlotMs ? { rendered_slot_ms: renderedSlotMs } : {},
   };
+}
+
+// GATE_DAY_ONLY_PROMISE part B2: may this series notice promise only the first date (and say each arrival window comes the
+// day before)? The anchor's recorded/inferred intent decides (an office move or a system placement: day only; a time the
+// customer picked: its window). The date must change, the quoted start must be more than 24.25 h out, and a date-only move
+// (no start) keeps today's copy. Gate off: false, nothing read. Never throws.
+async function seriesNoticeDayOnly({ result, serviceId, customerId, newDate, startForText }) {
+  if (!startForText) return false;
+  return require('../services/day-only-move-notice').moveNoticeDayOnly({
+    serviceId,
+    customerId,
+    newStartAt: parseETDateTime(rescheduleReminderTime(String(newDate).split('T')[0], { start: startForText })),
+    oldDate: result.originalDate,
+    newDate: String(newDate).split('T')[0],
+  });
+}
+
+// The day-only series row's body, or null (then today's row renders). Resets `state` to the window copy when the row fails.
+async function renderSeriesDayBody({ state, templateKey, vars, serviceId }) {
+  const dayMove = require('../services/day-only-move-notice');
+  const key = state.dayOnly ? dayMove.seriesDayKey(templateKey) : null;
+  const body = key ? await dayMove.renderDayRow(key, vars, { workflow: 'dispatch_series_reschedule', entity_type: 'scheduled_service', entity_id: serviceId }) : null;
+  if (state.dayOnly && !body) dayMove.dayFellBack(state, state.keep);
+  return body;
 }
 
 async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, notify: notifyArg, actorId, reasonText, qualityDates = null }) {
@@ -5909,8 +5976,13 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           // label the reminders use; "visit" when the visit has no clean name.
           // The series-moved copy has no {service_name}, so it is not looked up.
           const nameVars = await seriesNoticeNameVars(notice.templateKey, serviceId, svc.service_type);
+          const dayState = { dayOnly: await seriesNoticeDayOnly({ result, serviceId, customerId: customer.id, newDate, startForText }), keep: {} };
           notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
+            const dayBody = await renderSeriesDayBody({
+              state: dayState, templateKey: notice.templateKey, serviceId, vars: { first_name: firstName, start_date: displayDate, ...nameVars },
+            });
+            if (dayBody) return dayBody;
             return renderRequiredTemplate(notice.templateKey, {
               first_name: firstName,
               start_date: displayDate,
@@ -5922,7 +5994,9 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
               entity_id: serviceId,
             });
           }, notice.messageType, 'appointment',
-          { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText, ...notice.slotMeta }, {
+          require('../services/day-only-move-notice').withDayMeta(
+            { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText, ...notice.slotMeta }, dayState, notice.slotMeta.rendered_slot_ms,
+          ), {
             // Authenticated staff explicitly asked to notify the customer of
             // the series move — exempt from the 8AM-8PM send window like the
             // neighboring rain-out and quick-move actions. A CUSTOMER-driven
@@ -6364,6 +6438,9 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   // a move may override a live visit, a reassignment may not.
   if (keepSlot) Object.assign(rescheduleOptions, { keepStatus: true, allowLive: false });
   rescheduleOptions.sourceSurface = sourceSurface;
+  // GATE_DAY_ONLY_PROMISE part B2/B3: the office's "customer asked for this time" (or day only) for the new slot. The rebooker writes it
+  // in the same UPDATE that moves each visit (per member of a grouped stop), so it belongs to this move alone. Gate off: no key.
+  if (require('../services/time-promise').dayOnlyPromiseOn()) rescheduleOptions.customerAskedTime = body?.customerAskedTime === true;
   rescheduleOptions.notifyRequested = notifyCustomer !== false;
   if (operationKey) rescheduleOptions.operationKey = operationKey;
   const expectVisit = body.expectVisit;
@@ -6371,7 +6448,7 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   if (shownStopRefusal) return shownStopRefusal;
   const disclosureRefusal = await planCollectiveDisclosure({ serviceId, newDate, observedForMove, body, actor, rescheduleOptions });
   if (disclosureRefusal) return disclosureRefusal;
-  return { plan: { rescheduleOptions, effectiveWindow, expectVisit, qualityDates } };
+  return { plan: { rescheduleOptions, effectiveWindow, expectVisit, qualityDates, customerAskedTime: body?.customerAskedTime === true } };
 }
 
 // Effects: the collective choke point widened this move to the series.
@@ -6467,7 +6544,7 @@ function partialVisitMoveReply(result, serviceId) {
 }
 
 // Effects: the one customer notice for a completed move.
-async function sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow }) {
+async function sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow, plan }) {
   // Shared notice path (recipient routing incl. appointment_notify_primary
   // and service contacts, arrival-window copy, terminal/slot recheck at
   // the provider handoff, guarded reminder close/re-arm) — replaces this
@@ -6488,7 +6565,9 @@ async function sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow
     // One notice for the WHOLE stop: recorded as stop-wide so the no-show
     // detector treats it as superseding every member's own promise rather
     // than only the tapped service's (codex P1, PR #4403 round 26).
-    { stopWideFor: result.visitMove?.visitId || null },
+    // previousDate / customerAskedTime: the day-only decision (GATE_DAY_ONLY_PROMISE part B2) judges the date change and
+    // the office's "customer asked for this time".
+    { stopWideFor: result.visitMove?.visitId || null, previousDate: result.originalDate, customerAskedTime: plan?.customerAskedTime },
   );
   return moveReply(200, { ...result, notificationSent: notice.sent, notificationError: notice.error });
 }
@@ -6527,7 +6606,7 @@ async function applyVisitMoveEffects({ result, plan, serviceId, newDate, notifyC
   if (partialVisitMove) return partialVisitMoveReply(result, serviceId);
   if (repeatNotice) return moveReply(200, { ...result, notificationSent: false, ...repeatNotice });
   if (notifyCustomer === false) return moveReply(200, result);
-  return sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow });
+  return sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow, plan });
 }
 
 // The staff single-visit move: plan, move (stage 2, the rebooker's own
@@ -6549,7 +6628,7 @@ async function runPlannedVisitMove({ plan, serviceId, newDate, reasonCode, reaso
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
-    // GATE_TECH_MOVE_SWITCH: the commit is the enforcer. First, so a refused
+    // The commit is the enforcer. First, so a refused
     // technician takes no row lock below.
     {
       const refusal = await techMoveRefusal(req);
@@ -6685,7 +6764,15 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
 });
 
 // GET /api/admin/dispatch/weather/tomorrow
-router.get('/weather/tomorrow', async (req, res, next) => {
+// GATE_TECH_LOGIN_PRIVACY on: office only. The analysis lists every visit booked
+// tomorrow with customer name, phone and tier, and no technician screen calls it
+// (audit A1). A technician gets requireAdmin's refusal; gate off: unchanged.
+router.get('/weather/tomorrow', (req, res, next) => {
+  if (req.techRole !== 'admin' && require('../config/feature-gates').techLoginPrivacyLive?.() === true) {
+    return requireAdmin(req, res, next);
+  }
+  return next();
+}, async (req, res, next) => {
   try {
     const analysis = await ForecastAnalyzer.analyzeTomorrow();
     res.json(analysis);
@@ -7407,7 +7494,7 @@ router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
       jobId: req.params.id,
       technicianId: req.body ? req.body.technicianId : undefined,
       actorId: req.technicianId,
-      place: true, // GATE_ROUTE_CHECK_ASSIGN_SAVES: the office board numbers the stop
+      place: true, // the office board numbers the stop
     });
     res.json({ job: result.job, ...(result.warnings ? { warnings: result.warnings } : {}) });
   } catch (err) {
@@ -7624,4 +7711,6 @@ module.exports._test = {
   reentryEditPlan,
   rearmRescheduleReminderWindows,
   captureReminderGuards,
+  seriesNoticeDayOnly,
+  renderSeriesDayBody,
 };

@@ -349,7 +349,6 @@ describe('runBidKitProductListSync', () => {
   let live;
   beforeEach(() => {
     jest.clearAllMocks();
-    process.env.GATE_BID_KIT = 'true';
     process.env.GATE_BID_KIT_PRODUCT_LIST_SYNC = 'true';
     live = { rows: [...rowsBefore], bought: [] };
     mockTables['service_products as sp'] = live.rows;
@@ -375,14 +374,11 @@ describe('runBidKitProductListSync', () => {
     episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'n1', rang: true });
     run = () => lib.runBidKitProductListSync({ now: NOW });
   });
-  afterEach(() => { delete process.env.GATE_BID_KIT; delete process.env.GATE_BID_KIT_PRODUCT_LIST_SYNC; });
+  afterEach(() => { delete process.env.GATE_BID_KIT_PRODUCT_LIST_SYNC; });
   const setList = (rows, purchased = []) => { mockTables['service_products as sp'] = rows; mockTables.purchase_receipt_lines = purchased.map((n) => ({ product_id: ID(n) })); };
 
-  test('either gate off = nothing is read', async () => {
+  test('gate off = nothing is read', async () => {
     delete process.env.GATE_BID_KIT_PRODUCT_LIST_SYNC;
-    expect(await run()).toEqual({ skipped: 'gate_off' });
-    process.env.GATE_BID_KIT_PRODUCT_LIST_SYNC = 'true';
-    delete process.env.GATE_BID_KIT;
     expect(await run()).toEqual({ skipped: 'gate_off' });
     expect(store.listItems).not.toHaveBeenCalled();
   });

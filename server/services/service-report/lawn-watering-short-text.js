@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * The short lawn watering text (GATE_LAWN_WATERING_SHORT_TEXT, owner 2026-10-23:
+ * The short lawn watering text (owner 2026-10-23:
  * "the watering text is a little wordy, needs to be more concise").
  *
  * The report's watering lines are written to stand alone on a page, so the

@@ -1150,8 +1150,9 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
     // Not a false green: the generic 30/15/7 loop really queried this
     // (live) schema. Codex #4921 r4 P1: with the termite pass skipped, its
     // 30-day query must NOT exclude termite terms — otherwise they would
-    // get no 30-day notice from either path.
-    expect(sql.some((q) => /notice_30_sent_at/.test(q) && /"term_end" = /.test(q))).toBe(true);
+    // get no 30-day notice from either path. The anchor match is `between`
+    // (gate off, the window is one day, the same match as `=`).
+    expect(sql.some((q) => /notice_30_sent_at/.test(q) && /"term_end" (=|between) /.test(q))).toBe(true);
     expect(sql.some((q) => /"annual_plan_version" is null/.test(q))).toBe(false);
     expect(sql.some((q) => /notice_7_sent_at/.test(q))).toBe(true);
     // …and the termite pass was skipped by the readiness gate, never run.

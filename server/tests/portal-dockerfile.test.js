@@ -72,6 +72,34 @@ describe('deploy/portal.Dockerfile', () => {
     expect(dockerfile).toMatch(/page\.pdf\(\)/);
   });
 
+  test('.dockerignore leaves out only unneeded context and keeps what the build reads', () => {
+    const lines = fs.readFileSync(path.join(ROOT, '.dockerignore'), 'utf8')
+      .split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+    expect(lines).toEqual(expect.arrayContaining(['.git', '**/node_modules', 'waves-customer-portal.tar.gz', '!.env.example']));
+    // Nothing the build or runtime reads may be excluded: no source tree, no
+    // lockfile, no deploy folder, no scripts the prebuild checks run.
+    const needed = ['server', 'client', 'shared', 'packages', 'scripts', 'deploy', 'docs', 'package.json', 'package-lock.json', 'nixpacks.toml', '.nvmrc', '.env.example'];
+    for (const entry of needed) {
+      const excluded = lines.filter((l) => !l.startsWith('!')).some((l) => l.replace(/^\*\*\//, '').replace(/\/$/, '') === entry);
+      expect(excluded).toBe(false);
+    }
+    // No tracked file may be excluded other than .git itself and the tarball.
+    const { execFileSync } = require('child_process');
+    const tracked = execFileSync('git', ['ls-files'], { cwd: ROOT, maxBuffer: 64 * 1024 * 1024 }).toString().split('\n').filter(Boolean);
+    const hits = tracked.filter((file) => file.split('/').some((seg) => seg === 'node_modules' || seg === 'coverage' || seg === '.idea' || seg === '.vscode' || /^\.env(\..+)?$/.test(seg) && file !== '.env.example' || /\.log$/.test(seg) || seg === '.DS_Store' || seg === '.nyc_output'));
+    expect(hits).toEqual([]);
+  });
+
+  test('stops on a Node older than the patched floor, before npm ci', () => {
+    // scripts/dev/runtime.js holds the floor (24.22.1, CVE-2026-111497); node:24-bookworm is a moving tag.
+    const check = instructions.findIndex((line) => line.includes("require('./scripts/dev/runtime').checkRuntime('/app')"));
+    expect(check).toBeGreaterThan(instructions.findIndex((line) => line.startsWith('COPY . .')));
+    expect(check).toBeLessThan(instructions.findIndex((line) => line.includes('npm ci --include=dev')));
+    // The major .nvmrc selects has a patched floor, not just any release of that major.
+    const selected = fs.readFileSync(path.join(ROOT, '.nvmrc'), 'utf8').trim();
+    expect(require('../../scripts/dev/runtime').minimumFor(selected)).not.toBe(`${selected}.0.0`);
+  });
+
   test('is not a root Dockerfile, which the seo-pipeline-worker would also pick up', () => {
     expect(fs.existsSync(path.join(ROOT, 'Dockerfile'))).toBe(false);
   });

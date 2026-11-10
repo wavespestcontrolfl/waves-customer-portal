@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Bid Desk checklist templates (GATE_BID_CHECKLIST). ONE place to edit the wording; the server copies these lines into a
+ * Bid Desk checklist templates. ONE place to edit the wording; the server copies these lines into a
  * bid's own checklist when the operator presses "Start checklist" (server/services/bid-desk/checklist.js), so a later
  * edit here never changes a list already started. "Add missing" adds only the lines a bid does not have yet, matched by
  * `key`.

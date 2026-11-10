@@ -1,4 +1,4 @@
-// GATE_ESTIMATE_EMAIL_PDF (owner ask 2026-10-19): the estimate PDF rides on
+// Estimate PDF copy on email (owner ask 2026-10-19): the estimate PDF rides on
 // open-estimate emails. Covers the attachment builder, the follow-up helper
 // and the follow-up send path (sendDualChannel) with the real allowlist.
 jest.mock('../models/db', () => {
@@ -61,7 +61,7 @@ const pdf = require('../services/pdf/estimate-doc-pdf');
 const { openEstimateEmailPdf, ESTIMATE_EMAIL_PDF_TEMPLATE_KEYS } = require('../services/estimate-email-pdf');
 const { _private } = require('../services/estimate-follow-up');
 
-const setGates = (on) => featureGates.isEnabled.mockImplementation((name) => on && (name === 'estimateEmailPdf' || name === 'estimateDocPdf'));
+const setGates = (on) => featureGates.isEnabled.mockImplementation((name) => on && name === 'estimateDocPdf');
 const ESTIMATE = { id: '8f1c2d3e-aaaa-bbbb-cccc-1234567890ab', token: 'tok_synthetic', estimate_slug: 'EST-2026-0512', customer_name: 'Synthetic Customer' };
 
 describe('buildEstimateEmailPdfAttachment', () => {
@@ -84,11 +84,8 @@ describe('buildEstimateEmailPdfAttachment', () => {
     expect(pdf.estimateEmailPdfFilename({})).toBe('Waves-Estimate-copy.pdf');
   });
 
-  test.each([
-    ['the email gate is off', (n) => n === 'estimateDocPdf'],
-    ['the browser document gate is off', (n) => n === 'estimateEmailPdf'],
-  ])('returns null without rendering when %s', async (_label, enabled) => {
-    featureGates.isEnabled.mockImplementation(enabled);
+  test('returns null without rendering when the browser document gate is off', async () => {
+    setGates(false);
     const render = jest.fn(async () => pdfBytes);
     expect(await pdf.buildEstimateEmailPdfAttachment(ESTIMATE, { render, sleep: noSleep })).toBeNull();
     expect(render).not.toHaveBeenCalled();

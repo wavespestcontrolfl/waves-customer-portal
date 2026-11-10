@@ -180,6 +180,20 @@ describe('recurring visit with no arrival time and no due date', () => {
     );
   });
 
+  // Dispatch audit Fix 1 (owner 2026-11-08): the words change once, 7 days before the visit, so a
+  // notice closed while the visit still has no time (a Done, or the 72-hour quiet close) rings one
+  // more time. A later visit keeps the old words byte for byte, so the deploy re-rings no standing notice.
+  test('a visit 7 days away or less gets the soon words; one 8 days away keeps the old words', async () => {
+    const soon = { ...windowless, id: 's7', scheduled_date: '2026-08-12' };
+    const later = { ...windowless, id: 's8', scheduled_date: '2026-08-13' };
+    query.select = jest.fn().mockResolvedValueOnce([soon, later]).mockResolvedValue([]);
+    notifications.notifyAdmin.mockResolvedValue({ id: 'noticeX' });
+    expect(await flagUnplacedVisits({ lockWindowDays: 14 }, now)).toBe(2);
+    const whyOf = (key) => notifications.notifyAdmin.mock.calls.find((call) => call[3].dedupeKey === key)[2];
+    expect(whyOf('recurring-no-window:s7:2026-08-12')).toBe('The Aug 12 visit, 7 days away or less, has no arrival time; set one in dispatch so it can be placed.');
+    expect(whyOf('recurring-no-window:s8:2026-08-13')).toBe('The Aug 13 visit has no arrival time; set one in dispatch so it can be placed.');
+  });
+
   test('re-checks the row under its lock: a visit given a time meanwhile raises nothing', async () => {
     scanFindsOnlyWindowless();
     query.first.mockResolvedValue(null);

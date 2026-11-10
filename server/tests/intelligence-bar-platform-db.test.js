@@ -738,7 +738,8 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     const result = await api('/query', input);
     expect(result.body.pendingActions).toHaveLength(1);
     expect(result.body.pendingActions[0].tool).toBe('update_customer');
-    expect(JSON.stringify(mockModel.mock.calls)).toContain('dependency_unresolved');
+    // Same customer, so the second card is refused (several cards in one answer need different records).
+    expect(JSON.stringify(mockModel.mock.calls)).toContain('same_record_card_open');
     const rows = await db('ib_pending_actions').where('task_id', result.body.taskId);
     expect(rows).toHaveLength(1);
     const Pending = require('../services/intelligence-bar/pending-actions');
@@ -753,7 +754,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(await db('ib_pending_actions').where('task_id', result.body.taskId).count('* as count').first()).toEqual({ count: '1' });
   }, 30000);
 
-  test('owner-direct: the owner login commits an internal edit in the same turn with no card; a non-owner admin keeps the card; notes over existing notes keep the card; two direct edits in one turn commit, a third same-tool edit cards', async () => {
+  test('owner-direct: the owner login commits an internal edit in the same turn with no card; a non-owner admin keeps the card; notes over existing notes keep the card; two direct edits in one turn commit, a sixth same-tool edit cards', async () => {
     // A second admin whose email is on the full-access list for this run only.
     const owner = crypto.randomUUID();
     const ownerEmail = `owner-${owner.slice(0, 8)}@synthetic.test`;
@@ -765,8 +766,10 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       const note = `Owner-direct fixture ${owner.slice(0, 8)}`;
       // A direct notes edit needs nothing to overwrite (owner-direct limits, 2026-10-02).
       await db('customers').where('id', customerA).update({ crm_notes: null });
+      // The message names the customer and nothing else: a note text after a colon, or other free words, would
+      // card the edit under the target rules.
       proposeNote(customerA, note);
-      const direct = await api('/query', request(`Add a note for ${nameA}: ${note}`, { session_id: crypto.randomUUID() }), ownerToken);
+      const direct = await api('/query', request(`Add a note for ${nameA}`, { session_id: crypto.randomUUID() }), ownerToken);
       expect(direct.status).toBe(200);
       expect(direct.body.pendingActions).toEqual([]);
       expect(direct.body.taskState).toBe('responded');
@@ -783,7 +786,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       // The tool_result content is itself a JSON string, so its quotes are escaped here.
       expect(JSON.stringify(mockModel.mock.calls)).toMatch(/executed\\?":true/);
 
-      // The same edit by the non-owner admin, gate still on, keeps its card.
+      // The same edit by the non-owner admin keeps its card.
       proposeNote(customerA, 'Non-owner fixture');
       const carded = await api('/query', request(`Add a note for ${nameA}: Non-owner fixture`, { session_id: crypto.randomUUID() }));
       expect(carded.body.pendingActions).toHaveLength(1);
@@ -793,7 +796,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       // The owner's notes edit over existing notes keeps its card: notes
       // replace crm_notes (gate codes, access details).
       proposeNote(customerA, `${note} replaced`);
-      const overwrite = await api('/query', request(`Add a note for ${nameA}: ${note} replaced`, { session_id: crypto.randomUUID() }), ownerToken);
+      const overwrite = await api('/query', request(`Add a note for ${nameA}`, { session_id: crypto.randomUUID() }), ownerToken);
       expect(overwrite.body.pendingActions).toHaveLength(1);
       // The card names the notes it deletes, hash-bound in the contract.
       expect(JSON.stringify(overwrite.body.pendingActions[0].contract)).toContain(`REPLACES the existing notes — deletes \\"${note}\\"`);
@@ -827,29 +830,28 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       expect(pair.body.pendingActions).toEqual([]);
       expect((await db('customers').where('id', customerA).first('lead_source')).lead_source).toBe('referral');
 
-      // Three same-tool edits in one model message: refused as a set with a
-      // pointer to the bulk tool (bulk cap, owner ruling 2026-10-02) — no
-      // direct commit and no stray cards; nothing is written.
-      // The model then does what the refusal says: the bulk tool, which gets
-      // its one card (nothing stored by the refusals blocks it).
+      // Six same-tool edits on the named customer in one model message: the first five
+      // commit directly, the sixth is refused with a pointer to the bulk tool (bulk cap,
+      // owner rulings 2026-10-02 and 2026-10-20). The model then does what the refusal
+      // says: the bulk tool, which gets its one card.
+      const sources = ['google', 'facebook', 'yelp', 'nextdoor', 'angi', 'thumbtack'];
       mockModel.mockClear();
       mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'bulk update customer fields' }, 'discover'))
-        .mockResolvedValueOnce({ content: [source('google', 'a'), source('facebook', 'b'), source('yelp', 'c')], usage: {} })
+        .mockResolvedValueOnce({ content: sources.map((value, i) => source(value, `s${i}`)), usage: {} })
         .mockResolvedValueOnce(tools('bulk_update_customers', { customer_ids: [customerA], updates: { lead_source: 'yelp' } }, 'bulk'))
         .mockResolvedValueOnce(answer('Tap Confirm.'));
-      const triple = await api('/query', request(`Change the lead source for ${nameA} three times`, { session_id: crypto.randomUUID() }), ownerToken);
+      const six = await api('/query', request(`Change the lead source for ${nameA}`, { session_id: crypto.randomUUID() }), ownerToken);
       const refused = JSON.stringify(mockModel.mock.calls[2][0].messages.at(-1));
-      expect(refused.match(/owner_direct_bulk_limit/g)).toHaveLength(3);
-      expect(triple.body.pendingActions).toHaveLength(1);
-      expect(triple.body.pendingActions[0].tool).toBe('bulk_update_customers');
-      expect((await db('customers').where('id', customerA).first('lead_source')).lead_source).toBe('referral');
-      // The refusals stored nothing: the bulk card is the task's only action.
-      expect(await db('ib_pending_actions').where('task_id', triple.body.taskId).count('* as count').first()).toEqual({ count: '1' });
-      await db('ib_pending_actions').where('id', triple.body.pendingActions[0].id).update({ status: 'cancelled' });
+      expect(refused.match(/owner_direct_bulk_limit/g)).toHaveLength(1);
+      expect(six.body.pendingActions).toHaveLength(1);
+      expect(six.body.pendingActions[0].tool).toBe('bulk_update_customers');
+      expect((await db('customers').where('id', customerA).first('lead_source')).lead_source).toBe('angi');
+      // The refusal stored nothing: the five direct edits are confirmed and the bulk card is the only open action.
+      expect(await db('ib_pending_actions').where({ task_id: six.body.taskId, status: 'pending' }).count('* as count').first()).toEqual({ count: '1' });
+      await db('ib_pending_actions').where('id', six.body.pendingActions[0].id).update({ status: 'cancelled' });
 
-      // A capped tool's call that the preview cards (notes over existing
-      // notes) still reaches its card; only the would-be-direct calls are
-      // refused (Codex r2 on #5675).
+      // A call that the preview cards (notes over existing notes) still reaches its card
+      // and uses none of the direct allowance (Codex r2 on #5675).
       const notesOver = { type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { notes: `${note} over` } }, id: 'n' };
       mockModel.mockClear();
       mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover'))
@@ -859,8 +861,8 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       expect(mixed.body.pendingActions).toHaveLength(1);
       expect(mixed.body.pendingActions[0].tool).toBe('update_customer');
       expect(JSON.stringify(mixed.body.pendingActions[0].contract)).toContain('REPLACES the existing notes');
-      expect(JSON.stringify(mockModel.mock.calls[2][0].messages.at(-1)).match(/owner_direct_bulk_limit/g)).toHaveLength(2);
-      expect(await db('customers').where('id', customerA).first('crm_notes', 'lead_source')).toEqual({ crm_notes: note, lead_source: 'referral' });
+      expect(JSON.stringify(mockModel.mock.calls[2][0].messages.at(-1))).not.toContain('owner_direct_bulk_limit');
+      expect(await db('customers').where('id', customerA).first('crm_notes', 'lead_source')).toEqual({ crm_notes: note, lead_source: 'yelp' });
       await db('ib_pending_actions').where('id', mixed.body.pendingActions[0].id).update({ status: 'cancelled' });
     } finally {
       delete process.env.IB_FULL_ACCESS_EMAILS;
@@ -868,14 +870,13 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     }
   }, 30000);
 
-  test('target rules v2: pasted text cards an edit the owner\'s typed words would commit direct, and the saved task keeps the flag', async () => {
+  test('target rules: pasted text cards an edit the owner\'s typed words would commit direct, and the saved task keeps the flag', async () => {
     const owner = crypto.randomUUID();
     const ownerEmail = `owner-${owner.slice(0, 8)}@synthetic.test`;
     await db('technicians').insert({ id: owner, name: 'Synthetic IB owner', email: ownerEmail, role: 'admin', active: true, auth_token_version: 1 });
     const ownerToken = require('jsonwebtoken').sign({ type: 'access', tokenVersion: 1, technicianId: owner }, process.env.JWT_SECRET, { expiresIn: '1h' });
     process.env.IB_FULL_ACCESS_EMAILS = ownerEmail;
     process.env.GATE_IB_OWNER_DIRECT = 'true';
-    process.env.GATE_IB_TARGET_RULES_V2 = 'true';
     try {
       // Typed: the customer the message names gets the note with no card.
       await db('customers').where('id', customerA).update({ crm_notes: null });
@@ -897,7 +898,6 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     } finally {
       delete process.env.IB_FULL_ACCESS_EMAILS;
       delete process.env.GATE_IB_OWNER_DIRECT;
-      delete process.env.GATE_IB_TARGET_RULES_V2;
     }
   }, 30000);
 

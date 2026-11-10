@@ -9,7 +9,6 @@ jest.mock('../services/truck-kit', () => {
   class TruckCheckError extends Error { constructor(code, message) { super(message); this.code = code; } }
   return {
     TruckCheckError,
-    truckKitEnabled: jest.fn(() => true),
     truckKitStatus: jest.fn(async () => ({
       truck: { id: 'v1', name: 'Truck 1', asset_tag: 'VEH-1' }, due: false, intervalDays: 7, lastCheck: null,
       kit: [{ id: 'e1', name: 'Duster', category: 'tool', kit_key: null, open_issue: null }], gaps: [],
@@ -19,7 +18,7 @@ jest.mock('../services/truck-kit', () => {
 const truckKit = require('../services/truck-kit');
 const { TECH_TOOLS, executeTechTool } = require('../services/intelligence-bar/tech-tools');
 
-beforeEach(() => { jest.clearAllMocks(); truckKit.truckKitEnabled.mockReturnValue(true); });
+beforeEach(() => { jest.clearAllMocks(); });
 
 test('the tool is offered to the tech bar and reads the login\'s truck', async () => {
   expect(TECH_TOOLS.map((t) => t.name)).toContain('get_my_truck_kit');
@@ -28,9 +27,7 @@ test('the tool is offered to the tech bar and reads the login\'s truck', async (
   expect(out).toEqual({ truck: { id: 'v1', name: 'Truck 1', asset_tag: 'VEH-1' }, due: false, interval_days: 7, last_check: null, items: [{ name: 'Duster', category: 'tool', kit_key: null, open_issue: null }], today_gaps: [] });
 });
 
-test('gate off, no login, no truck, ambiguous truck', async () => {
-  truckKit.truckKitEnabled.mockReturnValueOnce(false);
-  expect(await executeTechTool('get_my_truck_kit', {}, { techId: 't1' })).toEqual({ enabled: false, error: expect.stringMatching(/GATE_TRUCK_KIT/) });
+test('no login, no truck, ambiguous truck', async () => {
   expect(await executeTechTool('get_my_truck_kit', {}, {})).toEqual({ error: 'This read needs a technician login' });
   expect(truckKit.truckKitStatus).not.toHaveBeenCalled();
   truckKit.truckKitStatus.mockResolvedValueOnce({ truck: null, kit: [], gaps: [] });

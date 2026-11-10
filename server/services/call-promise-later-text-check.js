@@ -1,8 +1,7 @@
 'use strict';
 
 /**
- * The later-text check for a held AI close of a Waves call promise (owner 2026-10-25 "build it",
- * GATE_CALL_PROMISE_LATER_TEXT_CHECK).
+ * The later-text check for a held AI close of a Waves call promise (owner 2026-10-25 "build it").
  *
  * call-promise-ai-close.js holds a record proof the AI accepted whenever a human text came after it
  * (latestHumanTextAt: a customer's text, or one a person from Waves sent), and only the thread check's clear
@@ -134,7 +133,7 @@ async function checkLaterTexts(conn, { commitment, message, proof, readThrough, 
   const read = await readLaterTexts(conn, { commitment, message, proof, readThrough });
   if (read.hold) return { version: VERSION, verdict: 'unclear', reason: read.hold, evidence_hash: read.hash, retry_after: null };
   if (cache?.version === VERSION && cacheFresh(cache, read.hash, now)) return cache;
-  if (!mayCall()) return null;
+  if (!(await mayCall())) return null;
   const verdict = await askModel(commitment, proof, read.records);
   return { version: VERSION, ...verdict, evidence_hash: read.hash,
     retry_after: ['provider_failed', 'invalid_model_output'].includes(verdict.reason) ? new Date(now.getTime() + PROVIDER_RETRY_MS).toISOString() : null };

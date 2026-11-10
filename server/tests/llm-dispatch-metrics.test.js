@@ -329,6 +329,26 @@ describe('llm-dispatch-metrics', () => {
       expect(outDaily[0].detail).toMatch(/ZERO calls yesterday/);
     });
 
+    it('gives event-driven policies the quiet-days grace even after a near-daily week', () => {
+      // 2026-11-06: no blog hero image was made, so imageScreen (6 of 7 days,
+      // ~59 calls) and visionAnalysis read "ZERO calls yesterday"; both ran
+      // again on 11-07. A busy week must not turn them into near-daily lanes.
+      const { detectExceptions, EVENT_DRIVEN_POLICIES, DAILY_CADENCE_MIN_DAYS } = load();
+      expect([...EVENT_DRIVEN_POLICIES]).toEqual(expect.arrayContaining(['imageScreen', 'visionAnalysis']));
+      const live = [{ policy: 'report', total: 30, fallbacks: 0, failed: 0 }];
+      const priorWeek = [
+        { policy: 'imageScreen', total: 59, activeDays: DAILY_CADENCE_MIN_DAYS + 1 },
+        { policy: 'visionAnalysis', total: 43, activeDays: DAILY_CADENCE_MIN_DAYS + 1 },
+        { policy: 'report', total: 200, activeDays: 7 },
+      ];
+      // One zero day inside an active recent window: no alarm.
+      expect(detectExceptions(live, priorWeek, null, true, new Set(['imageScreen', 'visionAnalysis', 'report']))).toEqual([]);
+      // Silent for the whole recent window: both alarm, as bursty lanes.
+      const out = detectExceptions(live, priorWeek, null, true, new Set(['report']));
+      expect(out.map((e) => e.policy).sort()).toEqual(['imageScreen', 'visionAnalysis']);
+      for (const e of out) expect(e.detail).toMatch(/silent for \d\+ days/);
+    });
+
     it('never flags a retired policy as gone silent — its provider call was removed on purpose', () => {
       const { detectExceptions, RETIRED_POLICIES, DAILY_CADENCE_MIN_DAYS } = load();
       expect([...RETIRED_POLICIES]).toEqual(expect.arrayContaining(['visitBrief', 'jobCardParagraph']));
@@ -859,6 +879,37 @@ describe('llm-dispatch-metrics', () => {
       await expect(runLlmDispatchDigest()).rejects.toThrow(/digest email failed.*smtp down/);
       // Retention pruning is independent of delivery and must still have run.
       expect(prune.del).toHaveBeenCalled();
+    });
+  });
+  describe('served model for fast-speed Anthropic calls', () => {
+    const message = (usage) => ({ model: 'claude-opus-5-5', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 10, output_tokens: 5, ...usage } });
+
+    it('anthropicServedModel adds -fast only when usage.speed is "fast"', () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      const { anthropicServedModel } = load();
+      expect(anthropicServedModel(message({ speed: 'fast' }))).toBe('claude-opus-5-5-fast');
+      expect(anthropicServedModel(message({ speed: 'standard' }))).toBe('claude-opus-5-5');
+      expect(anthropicServedModel(message({}))).toBe('claude-opus-5-5');
+      expect(anthropicServedModel({ usage: { speed: 'fast' } })).toBeUndefined();
+      expect(anthropicServedModel(null)).toBeUndefined();
+    });
+
+    it.each([
+      [{ speed: 'fast' }, 'claude-opus-5-5-fast'],
+      [{ speed: 'standard' }, 'claude-opus-5-5'],
+      [{}, 'claude-opus-5-5'],
+    ])('ledgerCall files usage %j as served_model %s', async (usage, served) => {
+      process.env.GATE_LLM_CALL_LEDGER = 'true';
+      const { ledgerCall } = load();
+      await ledgerCall('anthropic', 'claude-opus-5-5', async () => message(usage));
+      expect(mockInsert.mock.calls[0][0]).toMatchObject({ served_model: served, requested_model: 'claude-opus-5-5' });
+    });
+
+    it('a non-Anthropic provider keeps its own model field', async () => {
+      process.env.GATE_LLM_CALL_LEDGER = 'true';
+      const { ledgerCall } = load();
+      await ledgerCall('openai', 'gpt-x', async () => ({ model: 'gpt-x', usage: { speed: 'fast' } }));
+      expect(mockInsert.mock.calls[0][0].served_model).toBe('gpt-x');
     });
   });
 });

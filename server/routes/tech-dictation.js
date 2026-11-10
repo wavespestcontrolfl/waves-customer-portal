@@ -1,7 +1,7 @@
 /**
  * Staff voice-to-text through our own transcriber (GATE_SERVER_DICTATION).
  *
- *   GET  /api/tech/dictation/availability  -> { available }
+ *   GET  /api/tech/dictation/availability  -> { available, everyBox, liveWords }
  *   POST /api/tech/dictation                -> { text }
  *        multipart: audio (the clip), duration_seconds; query: customer_id?, service_id?
  *
@@ -24,12 +24,16 @@
  * for a visit that was just reassigned, and the answer never says whether a
  * customer or visit exists. Admins are unrestricted.
  *
- * GATE_DICTATION_CUSTOMER_NAMES adds customer names to the word list and their surnames to the
- * transcriber's keyword hints (services/dictation-word-list.js buildDictationHints); off = as above.
+ * The word list carries customer names; the on-screen customer's first name and the surnames go to
+ * the transcriber's keyword hints (services/dictation-word-list.js buildDictationHints).
+ *
+ * One rewrite: a listed spelling of the on-screen customer's first name, in a greeting, gets the
+ * record's spelling ("Hi Sarah." becomes "Hi Sara." for a customer the record calls Sara), under the
+ * rules in utils/name-spelling.js. Nothing else in the transcript changes.
  *
  * GATE_DICTATION_MONEY_NORMALIZE reads dictated dollar amounts (utils/spoken-money.js) and adds
- * `money: { changes, ambiguous }` beside `text`. The text itself is returned exactly as heard: a parser can
- * misread a phrase, so it only suggests (changes) and flags (ambiguous), it never rewrites. Off = `{ text }`.
+ * `money: { changes, ambiguous }` beside `text`. Amounts are never rewritten: a parser can misread a
+ * phrase, so it only suggests (changes) and flags (ambiguous). Off = `{ text }`.
  *
  * Nothing is stored: no row, no S3 object. The audit line carries sizes and
  * counts only, never the audio or the words (audio has no ledger: lane-policies
@@ -45,6 +49,7 @@ const { dictationAudioUpload, dictationClipType, dictationLimiter } = require('.
 const featureGates = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { normalizeSpokenMoney } = require('../utils/spoken-money');
+const { respellRecordName } = require('../utils/name-spelling');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -52,26 +57,18 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // route (tech-track.js), so the two routes cannot each spend 40 clips.
 
 
-const { UUID_RE } = require('../services/dictation-word-list');
-const uuidOrNull = (value) => (UUID_RE.test(String(value || '')) ? String(value) : null);
-
-const db = require('../models/db');
-const { isTechnicianRequest, technicianServicesCustomer, technicianVisitRowInScope } = require('../services/technician-visit-scope');
+const { fenceDictationContext } = require('../services/dictation-context');
+const { isTechnicianRequest } = require('../services/technician-visit-scope');
 
 // The context ids the caller may steer the word list with, as a plain object on
-// req. Runs before the upload is buffered.
+// req (the fence is shared with the live words: services/dictation-context.js).
+// Runs before the upload is buffered.
 async function fenceContext(req, res, next) {
   try {
-    let customerId = uuidOrNull(req.query?.customer_id);
-    let serviceId = uuidOrNull(req.query?.service_id);
-    if (isTechnicianRequest(req)) {
-      if (serviceId) {
-        const svc = await db('scheduled_services').where({ id: serviceId }).first('id', 'technician_id', 'status', 'scheduled_date');
-        if (!svc || !technicianVisitRowInScope(req, svc)) serviceId = null;
-      }
-      if (customerId && !(await technicianServicesCustomer(req, customerId))) customerId = null;
-    }
-    req.dictationContext = { customerId, serviceId };
+    req.dictationContext = await fenceDictationContext(req, {
+      customerId: req.query?.customer_id,
+      serviceId: req.query?.service_id,
+    });
     return next();
   } catch (err) { return next(err); }
 }
@@ -80,7 +77,13 @@ const gateOn = () => featureGates.serverDictationLive() === true;
 const NOT_AVAILABLE = { error: 'Server dictation is not available' };
 
 router.get('/availability', (req, res) => {
-  res.json({ available: gateOn() && Boolean(process.env.OPENAI_API_KEY) });
+  const available = gateOn() && Boolean(process.env.OPENAI_API_KEY);
+  // everyBox: GATE_DICTATION_EVERY_BOX adds the staff-wide mic on text boxes that have none.
+  res.json({
+    available,
+    everyBox: available && featureGates.dictationEveryBoxLive() === true,
+    liveWords: available && featureGates.dictationLiveWordsLive() === true,
+  });
 });
 
 // Gate first, so a gate-off request never costs 15 MB of memory in multer.
@@ -93,23 +96,16 @@ router.post('/', (req, res, next) => (gateOn() ? next() : res.status(404).json(N
 
       // Ids only, already fenced. The prompt is built here from our own records;
       // nothing the client sends other than an id ever reaches the transcriber.
-      const { buildDictationPrompt, buildDictationHints } = require('../services/dictation-word-list');
+      const { buildDictationHints } = require('../services/dictation-word-list');
       const { customerId, serviceId } = req.dictationContext;
-      // GATE_DICTATION_CUSTOMER_NAMES: the customer-name section and surname keyword hints. A
-      // technician login's names come from its OWN stops only (the word list reads req's scope
-      // from the login, never from the client). Off = the call below is exactly as it was.
-      const namesOn = featureGates.dictationCustomerNamesLive() === true;
-      let prompt;
-      let keywords = null;
-      if (namesOn) {
-        ({ prompt, keywords } = await buildDictationHints({
-          customerId,
-          serviceId,
-          scope: isTechnicianRequest(req) ? { technicianId: req.technicianId } : {},
-        }));
-      } else {
-        prompt = await buildDictationPrompt({ customerId, serviceId });
-      }
+      // The customer-name section and surname keyword hints. A technician login's names come
+      // from its OWN stops only (the word list reads req's scope from the login, never from
+      // the client).
+      const { prompt, keywords, recordName } = await buildDictationHints({
+        customerId,
+        serviceId,
+        scope: isTechnicianRequest(req) ? { technicianId: req.technicianId } : {},
+      });
 
       const { transcribeWithOpenAI, isImplausibleTranscript } = require('../services/call-recording-processor');
       const voiceFill = require('../services/fast-complete-voice-fill');
@@ -122,18 +118,22 @@ router.post('/', (req, res, next) => (gateOn() ? next() : res.status(404).json(N
         // silence is an answer ({ text: '' }), not a provider failure
         emptyOk: true,
       });
-      const text = String(result?.text || '').trim();
+      const heard = String(result?.text || '').trim();
       const context = serviceId ? 'service' : customerId ? 'customer' : 'none';
-      logger.info(`[server-dictation] tech=${req.technicianId} bytes=${req.file.buffer.length} type=${baseType} context=${context} promptChars=${prompt.length} ok=${Boolean(result)} chars=${text.length}`);
+      logger.info(`[server-dictation] tech=${req.technicianId} bytes=${req.file.buffer.length} type=${baseType} context=${context} promptChars=${prompt.length} ok=${Boolean(result)} chars=${heard.length}`);
       if (!result) return res.status(502).json({ error: 'Transcription unavailable. Type instead.' });
       // Same hallucination guard as call recordings and field dictation: far
       // more characters than the clip's seconds can hold is a fabricated
       // transcript. The client reports the recorded seconds; unknown fails open.
       const durationSeconds = Number(req.body?.duration_seconds) || 0;
-      if (isImplausibleTranscript(text, durationSeconds)) {
-        logger.warn(`[server-dictation] implausible transcript rejected chars=${text.length} seconds=${durationSeconds}`);
+      if (isImplausibleTranscript(heard, durationSeconds)) {
+        logger.warn(`[server-dictation] implausible transcript rejected chars=${heard.length} seconds=${durationSeconds}`);
         return res.status(502).json({ error: 'Transcription looked unreliable. Try again or type.' });
       }
+      // The on-screen customer's first name in the record's spelling: "Hi Sarah." becomes "Hi Sara." for
+      // a customer the record calls Sara (owner 2026-11-06). The log carries the count, never the words.
+      const { text, fixes } = respellRecordName(heard, recordName || {});
+      if (fixes.length) logger.info(`[server-dictation] record name respelled count=${fixes.length}`);
       return res.json(dictationAnswer(text));
     } catch (err) { return next(err); }
   });

@@ -24,6 +24,7 @@ import {
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import ProductLabelReview from "../../components/admin/ProductLabelReview";
 import SiteOneEmailOrderDialog from "../../components/admin/SiteOneEmailOrderDialog";
+import VendorCancellationDialog from "../../components/admin/VendorCancellationDialog";
 import { etDateString } from "../../lib/timezone";
 import {
   ActionFeedback,
@@ -53,9 +54,15 @@ function adminFetch(path, options = {}) {
     },
     ...options,
   }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status });
     return r.json();
   });
+}
+// One key per Manual Adjustment draft: the server applies a draft once, so a
+// repeat send (a double tap, a retry after a lost reply) never adds stock twice.
+function newAdjustmentKey() {
+  return globalThis.crypto?.randomUUID?.()
+    ?? `adj-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 function safeExternalHref(value) {
   try {
@@ -2294,6 +2301,8 @@ export function ProductsTab({
   const loadSequence = useRef(0);
   const [editing, setEditing] = useState(null);
   const [editForm, setEditForm] = useState({});
+  // The values the open edit row started from (saveEdit sends only changes).
+  const editStart = useRef({});
   const [vendors, setVendors] = useState([]);
   const [newProduct, setNewProduct] = useState({
     name: "",
@@ -2378,8 +2387,7 @@ export function ProductsTab({
   };
   const startEdit = (p, e) => {
     e && e.stopPropagation();
-    setEditing(p.id);
-    setEditForm({
+    const form = {
       name: p.name || "",
       category: p.category || "",
       activeIngredient: p.activeIngredient || "",
@@ -2390,19 +2398,47 @@ export function ProductsTab({
       inventoryOnHand: p.inventoryOnHand ?? "",
       inventoryUnit: p.inventoryUnit || "",
       lowStockThreshold: p.lowStockThreshold ?? "",
-    });
+    };
+    editStart.current = form;
+    setEditing(p.id);
+    setEditForm(form);
   };
   const saveEdit = async (id) => {
+    // The row was filled from the list as it loaded, and a visit closeout
+    // since then may have used stock, so an untouched count sent back would
+    // undo that usage. Send only what changed; a changed count names the
+    // count it started from, and the server refuses it (409) if stock moved.
+    const start = editStart.current;
+    const changes = Object.fromEntries(
+      Object.entries(editForm).filter(
+        ([field, value]) => String(value ?? "") !== String(start[field] ?? ""),
+      ),
+    );
+    if (Object.keys(changes).length === 0) {
+      setEditing(null);
+      return;
+    }
+    if ("inventoryOnHand" in changes)
+      changes.inventoryOnHandBefore = start.inventoryOnHand;
     try {
       await adminFetch(`/admin/inventory/${id}`, {
         method: "PUT",
-        body: JSON.stringify(editForm),
+        body: JSON.stringify(changes),
       });
       showToast("Product updated");
       setEditing(null);
       load();
     } catch (e) {
-      showToast(`Failed: ${e.message}`);
+      const stockMoved = e.message === "HTTP 409";
+      showToast(
+        stockMoved
+          ? "Stock changed after you opened this product. Edit it again to see the current count."
+          : `Failed: ${e.message}`,
+      );
+      if (stockMoved) {
+        setEditing(null);
+        load();
+      }
     }
   };
   if (loadError)
@@ -3012,6 +3048,8 @@ function RestockRequestsTab({
   // preview dialog is open.
   const [emailOrderEnabled, setEmailOrderEnabled] = useState(false);
   const [emailOrderFor, setEmailOrderFor] = useState(null);
+  // The request whose "Record vendor cancellation" dialog is open.
+  const [vendorCancelFor, setVendorCancelFor] = useState(null);
   // requestId → { screenshots: [{ label, url }], expiresAt } once fetched. The
   // server presigns for 1 h; the cell drops the links a little before that
   // and offers Refresh, so a tab left open can always re-request fresh URLs.
@@ -3237,6 +3275,7 @@ function RestockRequestsTab({
                       receivingId={receivingId}
                       runAction={runAction}
                       canAuthor={canAuthor}
+                      onVendorCancel={setVendorCancelFor}
                     />
                   </TR>
                 );
@@ -3255,6 +3294,22 @@ function RestockRequestsTab({
               result.requestMarked === false
                 ? "Email sent to SiteOne, but the request was not marked ordered. Use Mark Ordered."
                 : "Order emailed to SiteOne",
+            );
+            await load();
+            onUpdate && onUpdate();
+          }}
+        />
+      )}
+      {vendorCancelFor && (
+        <VendorCancellationDialog
+          request={vendorCancelFor}
+          onClose={() => setVendorCancelFor(null)}
+          onRecorded={async (result) => {
+            setVendorCancelFor(null);
+            showToast(
+              result.requestStatus === "received"
+                ? "Vendor cancellation recorded. The request stays received."
+                : "Vendor cancellation recorded. The request is cancelled.",
             );
             await load();
             onUpdate && onUpdate();
@@ -3444,6 +3499,7 @@ function RestockActionCell({
   receivingId,
   runAction,
   canAuthor,
+  onVendorCancel,
 }) {
   const setDraft = (patch) =>
     setReceiveDrafts((prev) => ({
@@ -3507,7 +3563,7 @@ function RestockActionCell({
             placeholder="Unit"
           />
         </div>
-        <div className="flex gap-[6px]">
+        <div className="flex flex-wrap gap-[6px]">
           <Button
             onClick={() => runAction(request, "receive")}
             disabled={receivingId === request.id}
@@ -3515,14 +3571,13 @@ function RestockActionCell({
           >
             Receive
           </Button>
-          {lateOrderReceive ? (
-            <span className="text-ink-secondary text-ui-body self-center">
-              Late auto-order — receive it, or revoke
-            </span>
-          ) : orderOut ? (
-            <span className="text-ink-secondary text-ui-body self-center">
-              Order out — receive, or revoke first
-            </span>
+          {lateOrderReceive || orderOut ? (
+            <VendorCancelControls
+              request={request}
+              late={lateOrderReceive}
+              busy={receivingId === request.id}
+              onVendorCancel={onVendorCancel}
+            />
           ) : (
             <Button
               onClick={() => runAction(request, "cancel")}
@@ -3535,6 +3590,27 @@ function RestockActionCell({
         </div>
       </div>
     </TD>
+  );
+}
+
+// An automatic order that is out (or one that landed after the request was
+// received by hand) cannot be cancelled: the stock may be on its way. The
+// office receives it, or records the cancellation once the vendor has
+// cancelled it (VendorCancellationDialog; the server checks the same rules).
+function VendorCancelControls({ request, late, busy, onVendorCancel }) {
+  return (
+    <>
+      {request.order.id && (
+        <Button onClick={() => onVendorCancel(request)} disabled={busy} variant="secondary">
+          Record vendor cancellation
+        </Button>
+      )}
+      <span className="basis-full text-ink-secondary text-ui-body">
+        {late
+          ? "Late auto-order — receive it, or record a vendor cancellation."
+          : "Order out — receive it when it arrives, or record a vendor cancellation."}
+      </span>
+    </>
   );
 }
 
@@ -3858,14 +3934,17 @@ function ExpandedProduct({
   const [movements, setMovements] = useState([]);
   const [movementLoading, setMovementLoading] = useState(true);
   const movementSequence = useRef(0);
-  const [adjustForm, setAdjustForm] = useState({
+  const [adjustForm, setAdjustForm] = useState(() => ({
     movementType: "restock",
     quantity: "",
     unit: product.inventoryUnit || "oz",
     lotNumber: "",
     reason: "",
     note: "",
-  });
+    idempotencyKey: newAdjustmentKey(),
+  }));
+  const [adjusting, setAdjusting] = useState(false);
+  const adjustingRef = useRef(false);
   const loadMovements = useCallback(async () => {
     const sequence = ++movementSequence.current;
     // Movements are owner-only (rows carry costUsed; owner 2026-10-03,
@@ -3898,10 +3977,14 @@ function ExpandedProduct({
   }, [loadMovements, product.inventoryUnit, inventoryRefresh]);
 
   const submitAdjustment = async () => {
+    // One send at a time: a second tap while the first is saving does nothing.
+    if (adjustingRef.current) return;
     if (!adjustForm.quantity || !adjustForm.unit) {
       showToast?.("Amount and unit required");
       return;
     }
+    adjustingRef.current = true;
+    setAdjusting(true);
     try {
       await adminFetch(`/admin/inventory/${product.id}/adjust`, {
         method: "POST",
@@ -3917,11 +4000,25 @@ function ExpandedProduct({
         lotNumber: "",
         reason: "",
         note: "",
+        idempotencyKey: newAdjustmentKey(),
       }));
       await loadMovements();
       onInventoryChanged?.();
     } catch (e) {
-      showToast?.(`Failed: ${e.message}`);
+      // A failure keeps the draft's key, so sending it again cannot apply it
+      // twice. A 409 ends the draft (its key was already saved with other
+      // values, or the save did not verify): start a new one, show the history.
+      if (e.status === 409) {
+        showToast?.("Not applied. Check Movement History: an earlier send of this adjustment may already be saved.");
+        setAdjustForm((f) => ({ ...f, quantity: "", idempotencyKey: newAdjustmentKey() }));
+        await loadMovements();
+        onInventoryChanged?.();
+      } else {
+        showToast?.(`Failed: ${e.message}`);
+      }
+    } finally {
+      adjustingRef.current = false;
+      setAdjusting(false);
     }
   };
   const queueRefresh = async (vendorPricing) => {
@@ -4237,8 +4334,9 @@ function ExpandedProduct({
               onClick={submitAdjustment}
               variant="primary"
               className="mt-[8px] w-full"
+              disabled={adjusting}
             >
-              Apply Adjustment
+              {adjusting ? "Applying…" : "Apply Adjustment"}
             </Button>{" "}
           </Card>
         )}{" "}

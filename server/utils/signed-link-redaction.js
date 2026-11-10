@@ -440,7 +440,7 @@ function scrubFreeText(text, state) {
   return clean;
 }
 
-// RETURNED NOTES (GATE_IB_READ_NOTES, owner ruling 2026-10-13). A value the
+// RETURNED NOTES (owner ruling 2026-10-13). A value the
 // withholding rule above would hide comes back instead: every string in it goes
 // through the ONE fixed-format scrubber (note-secret-scrubber.js) and is cut at
 // 1,000 characters. The only other rule is the structural link redaction every

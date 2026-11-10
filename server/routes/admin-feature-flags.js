@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isValidFeatureFlagKey } = require('../services/feature-flags');
-const { bidDeskLive, bidKitLive, estimateCallListLive } = require('../config/feature-gates');
+const { bidDeskLive, estimateCallListLive, dayOnlyPromiseLive } = require('../config/feature-gates');
 const { soldByLive: commissionSoldByLive } = require('../services/estimate-sold-by');
 const {
   VISUAL_SERVICE_NOTES_FLAG,
@@ -28,15 +28,17 @@ router.get('/', async (req, res, next) => {
     // Bid Desk nav entry (GATE_BID_DESK): a deploy-wide gate, so a stray per-user row can never show it while the gate is off.
     if (bidDeskLive()) flags.bid_desk = true;
     else delete flags.bid_desk;
-    // Bid kit nav entry (GATE_BID_KIT), the same way.
-    if (bidKitLive()) flags.bid_kit = true;
-    else delete flags.bid_kit;
+    // Bid kit nav entry: always on.
+    flags.bid_kit = true;
     // Neighbor flag in the tech app (GATE_COMMISSION_SOLD_BY), the same way.
     if (commissionSoldByLive()) flags.commission_sold_by = true;
     else delete flags.commission_sold_by;
     // Call today / Pick reason on the estimates page (GATE_ESTIMATE_CALL_LIST), the same way.
     if (estimateCallListLive?.()) flags.estimate_call_list = true;
     else delete flags.estimate_call_list;
+    // "Customer asked for this time" box and the Told badge (GATE_DAY_ONLY_PROMISE), the same way.
+    if (dayOnlyPromiseLive?.()) flags.day_only_promise = true;
+    else delete flags.day_only_promise;
     res.json({ flags });
   } catch (err) {
     next(err);

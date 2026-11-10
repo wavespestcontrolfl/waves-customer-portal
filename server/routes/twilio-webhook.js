@@ -1196,7 +1196,7 @@ router.post('/sms', async (req, res) => {
     // A reschedule/away ask about an EXISTING visit must never be consumed
     // by the intake flow (codex #3232 r29) — consumption returns before
     // the durable reschedule flag below, silently dropping the guard.
-    // GATE_LEAD_CALL_TEXT_FOLLOWUP: a lead answering our "what time
+    // A lead answering our "what time
     // tomorrow" question is answering that, not the intake machine ("10 AM
     // works" reads as an address there); the follow-up below takes it.
     const pendingTimeAnswer = !!(customer && Body) && !isAiNumber && !TWILIO_NUMBERS.isTechLine(To)
@@ -1228,7 +1228,7 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
     }
 
-    // GATE_LEAD_CALL_REPLY_RING (owner 2026-10-24): a lead's bare CALL in
+    // Lead call-reply ring (owner 2026-10-24): a lead's bare CALL in
     // answer to our lead text rings Adam's cell with the press-1 bridge,
     // 8 AM-8 PM ET. Keyed on our sent text, not lead_intake_status, so a lead
     // whose intake state never seeded still counts. Post-ack, never awaited;
@@ -1241,7 +1241,7 @@ router.post('/sms', async (req, res) => {
       res.once('finish', () => {
         void require('../services/lead-call-reply-ring').ringForCallReply(ringInput)
           .catch((err) => logger.warn(`[lead-call-reply-ring] post-ack ring failed: ${err.code || err.name || 'error'}`));
-        // GATE_LEAD_CALL_TEXT_FOLLOWUP: the TEXT answer, the night CALL time
+        // Lead call/text follow-up: the TEXT answer, the night CALL time
         // ask and the time reply (services/lead-call-text-followup.js).
         void require('../services/lead-call-text-followup').handleLeadReply(ringInput)
           .catch((err) => logger.warn(`[lead-call-text-followup] post-ack follow-up failed: ${err.code || err.name || 'error'}`));
@@ -1585,6 +1585,14 @@ router.post('/status', async (req, res) => {
       } catch (bookkeepingErr) {
         logger.error(`[twilio-status] status bookkeeping failed (continuing to handlers): ${bookkeepingErr.message}`);
       }
+      // GATE_DEAD_NUMBER_ALERT (off = returns at once): a 2nd failed text (30003 / 30005) to a customer's number
+      // raises one bell naming the customer; a delivered text closes it. Isolated: neither a sync throw nor a
+      // rejection can reach the handlers below or the response.
+      await Promise.resolve()
+        .then(() => require('../services/dead-number-alert').handleDeadNumberCallback({
+          sid: MessageSid, status: MessageStatus, errorCode: ErrorCode, to: To,
+        }))
+        .catch((e) => logger.error(`[twilio-status] dead number alert failed: ${e.message}`));
       if (isFailureStatus(MessageStatus)) {
         notifyTwilioFailure({
           channel: 'sms',

@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Intelligence Bar model failure notice (GATE_IB_MODEL_FAILURE_NOTICE).
+ * Intelligence Bar model failure notice.
  *
  * When the AI model call itself fails (a provider 4xx/5xx, a timeout, an
  * overload such as the Anthropic monthly spend limit on 2026-10-19), the bar

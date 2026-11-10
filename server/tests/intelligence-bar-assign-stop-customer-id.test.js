@@ -1,7 +1,6 @@
 /**
- * GATE_IB_TARGET_RULES_V2: the assign_technician preview names each stop's customer by id, so
- * owner-direct can tell the customer the owner named from a same-name customer. Gate off, the
- * preview is byte-identical to today's (no customer_id on a stop).
+ * The assign_technician preview names each stop's customer by id, so owner-direct can tell the
+ * customer the owner named from a same-name customer.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -32,19 +31,11 @@ beforeEach(() => {
   db.mockReset().mockImplementation(table => (table === 'technicians' ? tech : services));
   db.raw = jest.fn(sql => sql);
 });
-afterEach(() => { delete process.env.GATE_IB_TARGET_RULES_V2; });
 
 const propose = () => require('../services/intelligence-bar/schedule-tools')
   .executeScheduleTool('assign_technician', { service_ids: ['svc-1'], technician_name: 'Luis' }, {});
 
-test('gate off: the stops preview is unchanged (no customer_id)', async () => {
-  const preview = await propose();
-  expect(preview.proposal).toBe(true);
-  expect(preview.stops[0]).not.toHaveProperty('customer_id');
-});
-
-test('gate on: the stop carries its customer id; a same-name twin is not the named customer', async () => {
-  process.env.GATE_IB_TARGET_RULES_V2 = 'true';
+test('the stop carries its customer id; a same-name twin is not the named customer', async () => {
   const preview = await propose();
   expect(preview.stops[0]).toMatchObject({ id: 'svc-1', customer: 'Pat Example', customer_id: CUSTOMER });
   const input = { service_ids: ['svc-1'], technician_name: 'Luis' };

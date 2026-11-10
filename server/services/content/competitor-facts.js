@@ -105,9 +105,13 @@ const COMPETITORS = [
     id: 'all-u-need-pest',
     name: 'All U Need Pest Control',
     aliases: ['all u need pest', 'all u need pest control', 'all "u" need pest control'],
+    // Case-sensitive bare brand: press releases and the AI-mention tracker
+    // write plain "All U Need". Capitalized (or ALL-CAPS) only, so ordinary
+    // lowercase prose ("all u need is...") is never read as a competitor.
+    aliasesCS: ['All U Need'],
     attributes: {
-      reach: { value: 'Multi-state (FL, SC, TX)', source: 'https://alluneedpest.com', asOf: '2026-06-22' },
-      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://alluneedpest.com', asOf: '2026-06-22' },
+      reach: { value: 'Multi-state (FL, SC, TX)', source: 'https://alluneedpest.com', asOf: '2026-11-05' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://alluneedpest.com', asOf: '2026-11-05' },
     },
   },
   {
@@ -217,6 +221,28 @@ const COMPETITORS = [
     },
   },
   {
+    // Added 2026-11-05 with the owner's approval of eight more companies.
+    // Verified on the company's own site that day: the home page says
+    // "Covering Manatee, Sarasota & Hillsborough Counties" and "Family-owned
+    // and operated since 2001"; /pest-control/ says "We offer one-time,
+    // monthly, and quarterly programs."
+    id: 'westfalls-lawn-pest',
+    name: "Westfall's Lawn and Pest Control",
+    // Full-name spellings only. NOT bare "Westfall" / "Westfall's": it is a
+    // common surname and a road name ("the Westfall family", "Westfall Road",
+    // "Westfall's Plumbing"), the same reason Hughes has no bare alias.
+    aliases: [
+      "westfall's lawn & pest control", "westfall's lawn and pest", "westfall's lawn & pest",
+      "westfall's pest control", 'westfalls lawn and pest control', 'westfalls lawn & pest control',
+      'westfalls lawn and pest', 'westfalls pest control', 'westfall pest control',
+      'westfall lawn and pest control',
+    ],
+    attributes: {
+      reach: { value: 'Regional (Southwest Florida — Manatee, Sarasota and Hillsborough counties, per the company)', source: 'https://www.westfallspestcontrol.com/', asOf: '2026-11-05' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.westfallspestcontrol.com/pest-control/', asOf: '2026-11-05' },
+    },
+  },
+  {
     // Promoted from COMPETITOR_BRAND_SIGNALS 2026-07-28 (owner GO on the
     // named-competitor lawn lane): the two TruGreen intercepts (B2/D1) died
     // on gates precisely because TruGreen had no curated record — no
@@ -260,14 +286,18 @@ const COMPETITORS = [
 // rulings 2026-09-27 D2 + 2026-09-28: comparison/alternatives blog posts may
 // name Orkin, Terminix, HomeTeam (also sold as TAEXX), Turner, Massey and
 // TruGreen and publish with no human sign-off; Aptive and Truly Nolen added
-// 2026-09-28 ~07:05Z). A draft naming ANY other
+// 2026-09-28 ~07:05Z; All U Need added 2026-11-05 (owner); Prodigy, Greenhouse,
+// Good News, Keller's, Arrow Environmental, Hughes, Farrow and Westfall's added
+// 2026-11-05 (owner)). A draft naming ANY other
 // business — including a COMPETITORS record not listed here, or a name only
 // an operator brief authorized — does not autopublish; naming anyone else
 // needs a new owner ruling. Ids, not display names, so every alias of an
 // approved record resolves through findCompetitor().
 const OWNER_APPROVED_AUTOPUBLISH_IDS = Object.freeze([
   'orkin', 'terminix', 'hometeam-pest-defense', 'turner-pest', 'massey-services', 'trugreen',
-  'aptive', 'truly-nolen',
+  'aptive', 'truly-nolen', 'all-u-need-pest',
+  'prodigy-pest', 'greenhouse-pest', 'good-news-pest', 'kellers-pest', 'arrow-environmental',
+  'hughes-exterminators', 'farrow-pest', 'westfalls-lawn-pest',
 ]);
 
 // Detection-only list of pest-control BUSINESS names that may plausibly appear

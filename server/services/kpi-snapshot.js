@@ -83,6 +83,45 @@ async function recordKpiSnapshot(snapshotDate, conn) {
 }
 
 /**
+ * True when `snapshotDate` (ET YYYY-MM-DD, default today ET) does not have its full
+ * set of rows yet. A partly written day (a restart mid-loop) counts as missing so the
+ * upsert fills it. THROWS when kpi_snapshots cannot be read: code under the job lock
+ * must use this form, because runExclusive records a resolved callback as a successful
+ * run and a read failure answered as "already recorded" would hide the gap.
+ */
+async function readSnapshotMissing(snapshotDate, conn) {
+  snapshotDate = snapshotDate || etDateString();
+  conn = conn || require('../models/db');
+  const row = await conn('kpi_snapshots').where({ snapshot_date: snapshotDate }).count({ n: '*' }).first();
+  return Number(row?.n || 0) < SNAPSHOT_METRICS.length;
+}
+
+/**
+ * Pre-lock form for the 23:55 catch-up tick: a read failure answers false (skip, take no
+ * lock, record nothing; the original tick or tomorrow's check decides).
+ */
+async function snapshotMissing(snapshotDate, conn) {
+  try {
+    return await readSnapshotMissing(snapshotDate, conn);
+  } catch (err) {
+    logger.warn(`[kpi-snapshot] catch-up check could not read kpi_snapshots: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Catch-up entry point: records the day's snapshot only when it is missing.
+ * Call it inside runExclusive('kpi-daily-snapshot'): it checks again under the lock,
+ * so a 23:45 run that finished while this one waited is not written twice. That read
+ * throws on failure, so the run is recorded as failed instead of as a no-op success.
+ */
+async function recordKpiSnapshotIfMissing(snapshotDate, conn) {
+  snapshotDate = snapshotDate || etDateString();
+  if (!(await readSnapshotMissing(snapshotDate, conn))) return { skipped: 'already_recorded', snapshot_date: snapshotDate };
+  return recordKpiSnapshot(snapshotDate, conn);
+}
+
+/**
  * Sparkline series for the dashboard KPI tiles: per-metric daily values from
  * kpi_snapshots over the trailing `days` ET window. Values are the cron's
  * month-to-date captures — the same basis the tiles' live numbers use.
@@ -123,4 +162,4 @@ async function getKpiHistory(days = 90, conn) {
   return { days: clamped, series };
 }
 
-module.exports = { recordKpiSnapshot, getKpiHistory, SNAPSHOT_METRICS, toFiniteOrNull };
+module.exports = { recordKpiSnapshot, recordKpiSnapshotIfMissing, snapshotMissing, getKpiHistory, SNAPSHOT_METRICS, toFiniteOrNull };

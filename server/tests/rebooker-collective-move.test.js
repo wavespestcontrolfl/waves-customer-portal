@@ -194,6 +194,9 @@ const seriesMoveRow = (seriesMovesInsert) => seriesMovesInsert.insert.mock.calls
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+  // A staff series move reads the closed days; no closed day unless a test sets one.
+  require('../services/scheduling/blackout-dates').getBlackoutLayers
+    .mockResolvedValue({ dates: new Set(), weeklyDaysOff: new Set(), closedHolidays: new Set() });
 });
 
 describe('reschedule() choke point', () => {
@@ -891,34 +894,25 @@ describe('rescheduleSeries — date-only sweep', () => {
 
   // Owner 2026-10-22 ("fix series edit"): a staff move of one plan visit
   // re-anchored the plan and put the next visit on Thanksgiving, a closed day
-  // nobody picked (GATE_SERIES_MOVE_SKIP_CLOSED_DAYS).
-  test('a staff move moves each visit it re-dates off a closed day and keeps the picked date; a customer move and the gate off keep the cadence date', async () => {
+  // nobody picked.
+  test('a staff move moves each visit it re-dates off a closed day and keeps the picked date; a customer move keeps the cadence date', async () => {
     const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
     // The picked date and the next visit's cadence date (TARGET + 7) are both closed.
     getBlackoutLayers.mockResolvedValue({ dates: new Set([TARGET, dayOffset(19)]), weeklyDaysOff: new Set(), closedHolidays: new Set() });
     const rows = () => [sib('svc-1', BASE), sib('svc-2', SIB1), sib('svc-3', SIB2)];
     const writtenDates = (updates) => updates.map((u) => u.update.mock.calls[0][0].scheduled_date);
-    process.env.GATE_SERIES_MOVE_SKIP_CLOSED_DAYS = 'true';
-    try {
-      const wired = wireSeriesMocks(rows());
-      let { updates } = wired;
-      await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '08:00', end: '10:00' }, 'admin', 'admin', ADMIN_OPTS);
-      expect(writtenDates(updates)).toEqual([TARGET, dayOffset(20), dayOffset(26)]);
-      // Re-read under the closure fence, taken SHARED inside the move's transaction.
-      const { lockClosureState } = require('../services/scheduling/blackout-dates');
-      expect(lockClosureState).toHaveBeenCalledWith(wired.trx);
-      expect(getBlackoutLayers).toHaveBeenLastCalledWith(expect.any(String), expect.any(String), wired.trx);
-      // A customer's move is unchanged (it refuses a closed projected date instead) and reads no closed days here.
-      getBlackoutLayers.mockClear();
-      ({ updates } = wireSeriesMocks(rows()));
-      await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve', {});
-      expect(writtenDates(updates)).toEqual([TARGET, dayOffset(19), dayOffset(26)]);
-      expect(getBlackoutLayers).not.toHaveBeenCalled();
-    } finally {
-      delete process.env.GATE_SERIES_MOVE_SKIP_CLOSED_DAYS;
-    }
-    const { updates } = wireSeriesMocks(rows());
+    const wired = wireSeriesMocks(rows());
+    let { updates } = wired;
     await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '08:00', end: '10:00' }, 'admin', 'admin', ADMIN_OPTS);
+    expect(writtenDates(updates)).toEqual([TARGET, dayOffset(20), dayOffset(26)]);
+    // Re-read under the closure fence, taken SHARED inside the move's transaction.
+    const { lockClosureState } = require('../services/scheduling/blackout-dates');
+    expect(lockClosureState).toHaveBeenCalledWith(wired.trx);
+    expect(getBlackoutLayers).toHaveBeenLastCalledWith(expect.any(String), expect.any(String), wired.trx);
+    // A customer's move is unchanged (it refuses a closed projected date instead) and reads no closed days here.
+    getBlackoutLayers.mockClear();
+    ({ updates } = wireSeriesMocks(rows()));
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve', {});
     expect(writtenDates(updates)).toEqual([TARGET, dayOffset(19), dayOffset(26)]);
     expect(getBlackoutLayers).not.toHaveBeenCalled();
   });
@@ -927,15 +921,10 @@ describe('rescheduleSeries — date-only sweep', () => {
     const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
     const layers = (dates) => ({ dates: new Set(dates), weeklyDaysOff: new Set(), closedHolidays: new Set() });
     getBlackoutLayers.mockResolvedValueOnce(layers([dayOffset(19)])).mockResolvedValueOnce(layers([dayOffset(19), dayOffset(26)]));
-    process.env.GATE_SERIES_MOVE_SKIP_CLOSED_DAYS = 'true';
-    try {
-      const { updates } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1), sib('svc-3', SIB2)]);
-      await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '08:00', end: '10:00' }, 'admin', 'admin', ADMIN_OPTS))
-        .rejects.toMatchObject({ statusCode: 409, code: 'SERIES_CHANGED' });
-      for (const u of updates) expect(u.update).not.toHaveBeenCalled();
-    } finally {
-      delete process.env.GATE_SERIES_MOVE_SKIP_CLOSED_DAYS;
-    }
+    const { updates } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1), sib('svc-3', SIB2)]);
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '08:00', end: '10:00' }, 'admin', 'admin', ADMIN_OPTS))
+      .rejects.toMatchObject({ statusCode: 409, code: 'SERIES_CHANGED' });
+    for (const u of updates) expect(u.update).not.toHaveBeenCalled();
   });
 
   test('a date exception shifts by the anchor delta and keeps its flag; one that lands on cadence rejoins (flag cleared)', async () => {
@@ -1662,7 +1651,7 @@ describe('previewSeriesMove', () => {
     expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({ date: dayOffset(28), excludeServiceIds: ['svc-1', 'svc-3', 'svc-4'] }));
   });
 
-  test('with GATE_SERIES_MOVE_SKIP_CLOSED_DAYS on, the staff preview discloses the closed-day dates the staff move writes; a failed read discloses the cadence dates', async () => {
+  test('the staff preview discloses the closed-day dates the staff move writes; a failed read discloses the cadence dates', async () => {
     const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
     getBlackoutLayers.mockResolvedValue({ dates: new Set([dayOffset(19)]), weeklyDaysOff: new Set(), closedHolidays: new Set() });
     const anchor = anchorRow();
@@ -1675,16 +1664,11 @@ describe('previewSeriesMove', () => {
         chain({ first: jest.fn().mockResolvedValue(anchor) }), chain({ select: jest.fn().mockResolvedValue(rows) })];
       db.mockImplementation((table) => table === 'scheduled_services' ? queries.shift() : chain({ first: jest.fn().mockResolvedValue(null) }));
     };
-    process.env.GATE_SERIES_MOVE_SKIP_CLOSED_DAYS = 'true';
-    try {
-      wire();
-      expect((await SmartRebooker.previewSeriesMove('svc-1', TARGET)).occurrences.map((o) => o.to_date)).toEqual([TARGET, dayOffset(20)]);
-      getBlackoutLayers.mockRejectedValueOnce(new Error('db down'));
-      wire();
-      expect((await SmartRebooker.previewSeriesMove('svc-1', TARGET)).occurrences.map((o) => o.to_date)).toEqual([TARGET, dayOffset(19)]);
-    } finally {
-      delete process.env.GATE_SERIES_MOVE_SKIP_CLOSED_DAYS;
-    }
+    wire();
+    expect((await SmartRebooker.previewSeriesMove('svc-1', TARGET)).occurrences.map((o) => o.to_date)).toEqual([TARGET, dayOffset(20)]);
+    getBlackoutLayers.mockRejectedValueOnce(new Error('db down'));
+    wire();
+    expect((await SmartRebooker.previewSeriesMove('svc-1', TARGET)).occurrences.map((o) => o.to_date)).toEqual([TARGET, dayOffset(19)]);
   });
 
   // Moving the Aug 22 2030 visit of a Feb-Oct plan to Aug 29 (a fifth
@@ -1703,18 +1687,13 @@ describe('previewSeriesMove', () => {
       db.mockImplementation((table) => table === 'scheduled_services' ? queries.shift() : chain({ first: jest.fn().mockResolvedValue(null) }));
       return (await SmartRebooker.previewSeriesMove('svc-1', '2030-08-29')).occurrences.map((o) => o.to_date);
     };
-    // Gate off: the exception, shifted by the same 7 days, lands on Oct 31 first;
+    // No closed day: the exception, shifted by the same 7 days, lands on Oct 31 first;
     // the cadence visit that owns Oct 31 walks back to Oct 30 (it used to stay on Oct 31 too).
     expect(await preview('2030-10-24')).toEqual(['2030-08-29', '2030-10-31', '2030-10-30']);
-    // Gate on, Oct 30 closed: the exception is nudged off Oct 30 onto Oct 31,
+    // Oct 30 closed: the exception is nudged off Oct 30 onto Oct 31,
     // and the cadence visit walks back past the closed Oct 30 to Oct 29.
     getBlackoutLayers.mockResolvedValue({ dates: new Set(['2030-10-30']), weeklyDaysOff: new Set(), closedHolidays: new Set() });
-    process.env.GATE_SERIES_MOVE_SKIP_CLOSED_DAYS = 'true';
-    try {
-      expect(await preview('2030-10-23')).toEqual(['2030-08-29', '2030-10-31', '2030-10-29']);
-    } finally {
-      delete process.env.GATE_SERIES_MOVE_SKIP_CLOSED_DAYS;
-    }
+    expect(await preview('2030-10-23')).toEqual(['2030-08-29', '2030-10-31', '2030-10-29']);
   });
 
   test('the disclosed anchor window retains its duration and applies after transport reorders object keys', async () => {

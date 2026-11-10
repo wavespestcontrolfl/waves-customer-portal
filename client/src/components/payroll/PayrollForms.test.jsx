@@ -109,6 +109,24 @@ describe('Tax forms section', () => {
     expect(document.body.textContent).not.toMatch(/\b\d{3}-\d{2}-\d{4}\b/);
   });
 
+  it('a SIMPLE IRA participant\'s W-2 shows box 12 S and box 13; a W-2 without them shows neither', async () => {
+    const withSimple = {
+      ...FIGURES,
+      w2: [
+        { ...FIGURES.w2[0], box1: 120000, box12S: 3456, box13RetirementPlan: true },
+        FIGURES.w2[1],
+      ],
+    };
+    render(<PayrollForms call={callWith(() => withSimple)} />);
+    await screen.findByRole('heading', { name: 'Tax forms' });
+    const alpha = within(screen.getByRole('table', { name: 'W-2 for Sample Alpha' }));
+    expect(alpha.getByText('Box 12 S').closest('tr')).toHaveTextContent('$34.56');
+    expect(alpha.getByText('Box 13').closest('tr')).toHaveTextContent('Check the box');
+    const beta = within(screen.getByRole('table', { name: 'W-2 for Sample Beta' }));
+    expect(beta.queryByText('Box 12 S')).toBeNull();
+    expect(beta.queryByText('Box 13')).toBeNull();
+  });
+
   it('lists the RT-6 employees with the SSN left to your records', async () => {
     render(<PayrollForms call={callWith(() => FIGURES)} />);
     await screen.findByRole('heading', { name: 'Tax forms' });

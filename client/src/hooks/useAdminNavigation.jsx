@@ -23,7 +23,7 @@ function readPreferences(accountId) {
   } catch { return defaults; }
 }
 
-export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, bidDeskEnabled = false, bidKitEnabled = false, children }) {
+export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, bidDeskEnabled = false, children }) {
   // The shell keys this provider by the verified account, so neither saved
   // preferences nor a rendered subview can flash from a previous login.
   const location = useLocation();
@@ -37,7 +37,7 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, b
     [autoOpen, preferences.groups],
   );
   const [renderedView, setRenderedView] = useState(null);
-  const groups = useMemo(() => getAdminWorkspaceGroups(user?.role, { agent_estimate: agentEstimateEnabled, bid_desk: bidDeskEnabled, bid_kit: bidKitEnabled }), [user?.role, agentEstimateEnabled, bidDeskEnabled, bidKitEnabled]);
+  const groups = useMemo(() => getAdminWorkspaceGroups(user?.role, { agent_estimate: agentEstimateEnabled, bid_desk: bidDeskEnabled }), [user?.role, agentEstimateEnabled, bidDeskEnabled]);
   const items = groups.flatMap((group) => group.items);
   const pinnedItems = preferences.pins.map((id) => items.find((item) => item.id === id)).filter(Boolean);
   const publishView = useCallback((pathname, tab) => {

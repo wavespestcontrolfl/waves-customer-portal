@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import NotificationBell, { _test } from './NotificationBell';
 import api from '../utils/api';
@@ -870,6 +870,19 @@ describe('NotificationBell admin "What to do" and the customer line (GATE_ALERT_
     expect(customerNameFor(booking, 'admin')).toBeNull();
     expect(customerNameFor(plain, 'admin')).toBeNull();
     expect(customerNameFor(plan, 'customer')).toBeNull();
+  });
+
+  it('a customer with no `explainable` mark (GATE_ALERT_CUSTOMER_LINE alone) shows the line and keeps "Show full text", with no "What to do"', async () => {
+    await withWidth(1280, async () => {
+      const { explainable: _a, ...plan } = rows()[0];
+      setup({ list: [plan] });
+      render(<NotificationBell type="admin" />);
+      open();
+      expect(await screen.findByRole('link', { name: 'Jane Doe' })).toHaveAttribute('href', `/admin/customers?customerId=${CUSTOMER_ID}`);
+      expect(screen.getByRole('button', { name: 'Show full text' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'What to do' })).toBeNull();
+      expect(explainCalls()).toHaveLength(0);
+    });
   });
 
   it.each([['desktop', 1280], ['phone', 390]])('shows the customer, then the summary from the server, without navigating or marking read (%s)', async (_label, width) => {
@@ -1847,6 +1860,138 @@ describe('NotificationBell admin "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE)', 
   });
 });
 
+describe('NotificationBell admin "Send a copy to Claude (read-only)" (GATE_ALERT_SEND_TO_CLAUDE_COPY)', () => {
+  const AT = '2026-11-04T15:00:00.000Z';
+  const COPY_ID = 'copy-1';
+  const rows = () => ([
+    // Step 1 refuses this one (customer contact): the server marks it for a copy.
+    { id: 'c1', category: 'inbound_sms', title: 'Text from a fixture sender', body: 'A fixture message.',
+      sendCopyToClaude: true, version: 'a'.repeat(32), created_at: new Date().toISOString(), read_at: null, link: '/admin/communications' },
+    { id: 'c2', category: 'system', title: 'Inventory sync is behind', body: 'The sync has not run today.', detail: 'Last run was yesterday.',
+      sendToClaude: true, version: 'b'.repeat(32), created_at: new Date().toISOString(), read_at: null, link: '/admin/inventory' },
+    // A row marked both: step 1 wins, the copy button never shows.
+    { id: 'c3', category: 'system', title: 'Marked for both', body: 'Both marks.', detail: 'More.',
+      sendToClaude: true, sendCopyToClaude: true, version: 'c'.repeat(32), created_at: new Date().toISOString(), read_at: null, link: '/admin/system' },
+    { id: 'c4', category: 'system', title: 'Backup check passed', body: 'All good.', version: 'd'.repeat(32),
+      created_at: new Date().toISOString(), read_at: null, link: '/admin/system' },
+  ]);
+  const setup = ({ send = () => jsonResponse({ sent: true, id: COPY_ID, at: AT, message: 'Copy sent to Claude.' }), cancel = () => jsonResponse({ cancelled: true }) } = {}) => {
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 4 });
+      if (String(url).includes('/cancel-copy')) return cancel();
+      if (String(url).includes('/send-copy-to-claude')) return send();
+      return jsonResponse({ notifications: rows() });
+    });
+  };
+  const open = () => fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+  const sendCalls = () => global.fetch.mock.calls.filter(([url]) => String(url).includes('/send-copy-to-claude'));
+  const cancelCalls = () => global.fetch.mock.calls.filter(([url]) => String(url).includes('/cancel-copy'));
+  const listCalls = () => global.fetch.mock.calls.filter(([url]) => /\/admin\/notifications\?/.test(String(url)));
+  const COPY = 'Send a copy to Claude (read-only)';
+  const openCopyPanel = async () => fireEvent.click(await screen.findByRole('button', { name: COPY }));
+
+  it('shows the copy button only on a row marked sendCopyToClaude that step 1 did not mark; step 1 keeps its own button', async () => {
+    setup();
+    render(<NotificationBell type="admin" />);
+    open();
+    expect(await screen.findAllByRole('button', { name: COPY })).toHaveLength(1);
+    expect(screen.getAllByRole('button', { name: 'Send to Claude' })).toHaveLength(2);
+  });
+
+  it('a tap opens the same note panel with the read-only hint; Cancel sends nothing', async () => {
+    setup();
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    expect(screen.getByLabelText('Note for Claude (optional)')).toBeInTheDocument();
+    expect(screen.getByText(/Your alert stays in your bell\./)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByLabelText('Note for Claude (optional)')).toBeNull();
+    expect(sendCalls()).toHaveLength(0);
+  });
+
+  it('Send posts the version and note to the copy route; the alert STAYS in the list and Undo shows', async () => {
+    setup();
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    fireEvent.change(screen.getByLabelText('Note for Claude (optional)'), { target: { value: '  Read the thread  ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText(/Copy sent to Claude\./)).toBeInTheDocument();
+    expect(sendCalls()).toHaveLength(1);
+    expect(sendCalls()[0][0]).toContain('/admin/notifications/c1/send-copy-to-claude');
+    expect(sendCalls()[0][1]).toEqual(expect.objectContaining({ method: 'POST', body: JSON.stringify({ version: 'a'.repeat(32), note: 'Read the thread' }) }));
+    expect(screen.getByText('Text from a fixture sender')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument();
+  });
+
+  it('Undo posts the COPY\'s id and the send\'s time, reads the list again and says the copy is cancelled', async () => {
+    setup();
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    const undo = await screen.findByRole('button', { name: 'Undo' });
+    const before = listCalls().length;
+    fireEvent.click(undo);
+    expect(await screen.findByText('Copy cancelled.')).toBeInTheDocument();
+    expect(cancelCalls()).toHaveLength(1);
+    expect(cancelCalls()[0][0]).toContain(`/admin/notifications/${COPY_ID}/cancel-copy`);
+    expect(cancelCalls()[0][1]).toEqual(expect.objectContaining({ method: 'POST', body: JSON.stringify({ at: AT }) }));
+    await waitFor(() => expect(listCalls().length).toBeGreaterThan(before));
+    expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull();
+  });
+
+  it('Undo after Claude started says so; another undo failure says it stays with Claude', async () => {
+    setup({ cancel: () => ({ ok: false, status: 409, json: async () => ({ error: 'started' }) }) });
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
+    expect(await screen.findByText('Claude already started on it.')).toBeInTheDocument();
+    cleanup();
+    setup({ cancel: () => ({ ok: false, status: 500, json: async () => ({}) }) });
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
+    expect(await screen.findByText("Couldn't undo. It stays with Claude.")).toBeInTheDocument();
+  });
+
+  it('a copy already with Claude says so and offers no Undo', async () => {
+    setup({ send: () => jsonResponse({ duplicate: true, id: COPY_ID }) });
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText('A copy of this alert is already with Claude.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull();
+    expect(screen.getByText('Text from a fixture sender')).toBeInTheDocument();
+  });
+
+  it('a changed alert re-reads the list with a note; any other failure keeps the panel with an error', async () => {
+    setup({ send: () => ({ ok: false, status: 409, json: async () => ({ error: 'changed' }) }) });
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    const before = listCalls().length;
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText('That alert changed \u2014 the list was refreshed.')).toBeInTheDocument();
+    await waitFor(() => expect(listCalls().length).toBeGreaterThan(before));
+    cleanup();
+    setup({ send: () => ({ ok: false, status: 500, json: async () => ({}) }) });
+    render(<NotificationBell type="admin" />);
+    open();
+    await openCopyPanel();
+    fireEvent.change(screen.getByLabelText('Note for Claude (optional)'), { target: { value: 'keep me' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText("Couldn't send it. Try again.")).toBeInTheDocument();
+    expect(screen.getByLabelText('Note for Claude (optional)')).toHaveValue('keep me');
+  });
+});
+
 // Owner 2026-11-04: "for voicemails, can we have a button where we can click on the voicemail and listen to it
 // within the admin section". The voicemail row plays its call's recording in the bell (AuthenticatedCallAudio).
 describe('NotificationBell voicemail Listen', () => {
@@ -1930,5 +2075,169 @@ describe('NotificationBell voicemail Listen', () => {
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
     await screen.findByText('Voicemail — Fixture Caller');
     expect(screen.queryByRole('button', { name: 'Listen' })).toBeNull();
+  });
+});
+
+// GATE_ALERT_BELL_ORDER (owner 2026-11-05, admin-bell plan D1): the server ranks the list (order: 'needs-you-first')
+// and names each row's Area (areaChip). The bell draws one Area chip per row that has one, and keeps the server's
+// order everywhere: first page, load more, Done, a refresh.
+describe('NotificationBell admin — ranked list with an Area chip', () => {
+  const DAY = 86400000;
+  const row = (id, title, ageDays, over = {}) => ({
+    id, category: 'alert', title, body: null, metadata: {}, read_at: null, link: null,
+    created_at: new Date(Date.now() - ageDays * DAY).toISOString(), ...over,
+  });
+  // Server order: an old needs-you row FIRST, then newer rows. By time it would sit last, under "Older".
+  const RANKED_PAGE_1 = [
+    row('r1', 'Old needs-you alert', 20, { areaChip: 'Billing', version: 'v1' }),
+    row('r2', 'Newer needs-you alert', 1, { areaChip: 'Comms', version: 'v2' }),
+    row('r3', 'Plain alert today', 0, { version: 'v3' }),
+  ];
+  const RANKED_PAGE_2 = [
+    row('r4', 'FYI today', 0, { areaChip: 'System', version: 'v4' }),
+    row('r5', 'FYI last week', 9, { version: 'v5' }),
+  ];
+  const titlesOnScreen = () => screen.getAllByText(/ alert|FYI /).map((el) => el.textContent);
+
+  function serve({ ranked = true, pages = [RANKED_PAGE_1, RANKED_PAGE_2] } = {}) {
+    const calls = [];
+    global.fetch = vi.fn(async (url, options) => {
+      const u = String(url);
+      if (u.includes('/unread-count')) return jsonResponse({ count: 3 });
+      if (options?.method === 'PUT') return jsonResponse({ success: true });
+      calls.push(u);
+      const second = u.includes('before=');
+      return jsonResponse({
+        notifications: second ? pages[1] : pages[0],
+        hasMore: !second && pages.length > 1,
+        next: !second && pages.length > 1 ? '0~2031-01-01%2012:00:00+00~x' : null,
+        ...(ranked ? { order: 'needs-you-first' } : {}),
+      });
+    });
+    return calls;
+  }
+  const open = async () => {
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText('Old needs-you alert');
+  };
+
+  it('areaChipLabel reads only a non-empty string', () => {
+    expect(_test.areaChipLabel({ areaChip: 'Billing' })).toBe('Billing');
+    expect(_test.areaChipLabel({ areaChip: '' })).toBeNull();
+    expect(_test.areaChipLabel({ areaChip: 7 })).toBeNull();
+    expect(_test.areaChipLabel({})).toBeNull();
+    expect(_test.areaChipLabel(null)).toBeNull();
+  });
+
+  it('desktop: shows the Area chip on a row that has one, none on a row without, and keeps the server order with no day bands', async () => {
+    serve({ pages: [RANKED_PAGE_1] });
+    await open();
+    const chips = screen.getAllByTestId('area-chip');
+    expect(chips.map((c) => c.textContent)).toEqual(['Billing', 'Comms']);
+    // the plain row has no chip: its row holds none
+    const plainRow = screen.getByText('Plain alert today').closest('div[style*="min-height"]');
+    expect(plainRow.querySelector('[data-testid="area-chip"]')).toBeNull();
+    expect(titlesOnScreen()).toEqual(['Old needs-you alert', 'Newer needs-you alert', 'Plain alert today']);
+    for (const band of ['Today', 'Yesterday', 'This Week', 'Older']) expect(screen.queryByText(band)).toBeNull();
+  });
+
+  it('desktop: the chip is 14px with a translucent grey tint, so it reads on a light or a dark panel', async () => {
+    serve({ pages: [RANKED_PAGE_1] });
+    await open();
+    const chip = screen.getAllByTestId('area-chip')[0];
+    expect(chip).toHaveStyle({ fontSize: '14px' });
+    expect(chip.style.background).toMatch(/rgba\(100, ?116, ?139/);
+    expect(chip.style.color).not.toBe('');
+  });
+
+  it('phone: shows the Area chip too', async () => {
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    try {
+      serve({ pages: [RANKED_PAGE_1] });
+      await open();
+      expect(screen.getAllByTestId('area-chip').map((c) => c.textContent)).toEqual(['Billing', 'Comms']);
+      expect(titlesOnScreen()).toEqual(['Old needs-you alert', 'Newer needs-you alert', 'Plain alert today']);
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
+    }
+  });
+
+  it('load more appends after the rows already shown, in the server order, and asks with the cursor', async () => {
+    const calls = serve();
+    await open();
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    await screen.findByText('FYI today');
+    expect(titlesOnScreen()).toEqual(['Old needs-you alert', 'Newer needs-you alert', 'Plain alert today', 'FYI today', 'FYI last week']);
+    expect(calls.some((u) => u.includes('before=0~'))).toBe(true);
+    expect(screen.getAllByTestId('area-chip').map((c) => c.textContent)).toEqual(['Billing', 'Comms', 'System']);
+    for (const band of ['Today', 'Yesterday', 'This Week', 'Older']) expect(screen.queryByText(band)).toBeNull();
+  });
+
+  it('Done removes only that row and the rest keep the server order', async () => {
+    serve();
+    await open();
+    const done = within(screen.getByText('Newer needs-you alert').closest('div[style*="min-height"]')).getByRole('button', { name: /done/i });
+    fireEvent.click(done);
+    await waitFor(() => expect(screen.queryByText('Newer needs-you alert')).toBeNull());
+    expect(titlesOnScreen()).toEqual(['Old needs-you alert', 'Plain alert today']);
+  });
+
+  it('a refresh (reopening the panel) shows the order the server sends now, not a time sort', async () => {
+    serve({ pages: [RANKED_PAGE_1] });
+    await open();
+    fireEvent.click(screen.getByRole('button', { name: /close notifications/i }));
+    // a new needs-you row arrives and sits at the top; an older plain row moved up
+    const refreshed = [row('r9', 'Fresh needs-you alert', 3, { areaChip: 'Leads' }), RANKED_PAGE_1[2], RANKED_PAGE_1[0]];
+    serve({ pages: [refreshed] });
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText('Fresh needs-you alert');
+    expect(titlesOnScreen()).toEqual(['Fresh needs-you alert', 'Plain alert today', 'Old needs-you alert']);
+    expect(screen.getAllByTestId('area-chip').map((c) => c.textContent)).toEqual(['Leads', 'Billing']);
+  });
+
+  it.each([
+    ['ranked list, gate then off', true, false],
+    ['chronological list, gate then on', false, true],
+  ])('load more answering restart: true replaces the list and switches the layout (%s)', async (_label, startRanked, endRanked) => {
+    const chrono = [row('c1', 'Plain alert today', 0), row('c2', 'Old needs-you alert', 20, { areaChip: 'Billing' })];
+    const ranked = [row('k1', 'Ranked needs-you alert', 20, { areaChip: 'Comms' }), row('k2', 'Ranked plain alert', 0)];
+    const first = startRanked ? ranked : chrono;
+    const restarted = endRanked ? ranked : chrono;
+    const calls = [];
+    global.fetch = vi.fn(async (url, options) => {
+      const u = String(url);
+      if (u.includes('/unread-count')) return jsonResponse({ count: 2 });
+      if (options?.method === 'PUT') return jsonResponse({ success: true });
+      calls.push(u);
+      if (u.includes('before=')) {
+        return jsonResponse({ notifications: restarted, hasMore: false, next: null, restart: true, page: 1, ...(endRanked ? { order: 'needs-you-first' } : {}) });
+      }
+      return jsonResponse({ notifications: first, hasMore: true, next: 'old-cursor', ...(startRanked ? { order: 'needs-you-first' } : {}) });
+    });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(calls.some((u) => u.includes('before=old-cursor'))).toBe(true));
+    await screen.findByText(restarted[0].title);
+    // replaced, not appended: only the served rows, each once
+    expect(titlesOnScreen()).toEqual(restarted.map((r) => r.title));
+    expect(screen.queryByText(first[0].title === restarted[0].title ? '__none__' : first[0].title)).toBeNull();
+    // layout follows the answer's order: day headings only for a chronological list
+    if (endRanked) for (const band of ['Today', 'Older']) expect(screen.queryByText(band)).toBeNull();
+    else { expect(screen.getByText('Today')).toBeInTheDocument(); expect(screen.getByText('Older')).toBeInTheDocument(); }
+    // the old cursor is gone and there is nothing more to load
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
+  });
+
+  it('gate off (no order field): day bands as before, and no chip when the server sends none', async () => {
+    const plain = [row('p1', 'Plain alert today', 0), row('p2', 'Last month alert', 40)];
+    serve({ ranked: false, pages: [plain] });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText('Today');
+    expect(screen.getByText('Older')).toBeInTheDocument();
+    expect(screen.queryAllByTestId('area-chip')).toHaveLength(0);
   });
 });

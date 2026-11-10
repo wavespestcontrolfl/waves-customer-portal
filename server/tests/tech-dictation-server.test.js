@@ -5,13 +5,14 @@
  * refused before audio is read); gate off -> availability false and POST 404 with
  * the transcriber never called; the transcriber's prompt is the one the SERVER
  * built, never client text; ids that are not UUIDs never reach the builder;
- * transcriber miss -> 502, silence -> { text: '' }; text only in the response.
+ * transcriber miss -> 502, silence -> { text: '' }; text only in the response; the
+ * greeted on-screen customer's name comes back in the record's spelling, and the log
+ * carries the count of re-spelled words, never the words.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const mockTranscribe = jest.fn();
 const mockImplausible = jest.fn(() => false);
-const mockBuild = jest.fn();
 const mockHints = jest.fn();
 
 const mockVisit = jest.fn();
@@ -34,7 +35,6 @@ jest.mock('../services/call-recording-processor', () => ({
 jest.mock('../services/fast-complete-voice-fill', () => ({ VOICE_FILL_TRANSCRIBE_MODEL: 'gpt-transcribe' }));
 jest.mock('../services/dictation-word-list', () => ({
   ...jest.requireActual('../services/dictation-word-list'),
-  buildDictationPrompt: (...args) => mockBuild(...args),
   buildDictationHints: (...args) => mockHints(...args),
 }));
 jest.mock('../middleware/admin-auth', () => ({
@@ -101,15 +101,14 @@ describe('server dictation endpoint', () => {
     mockVisit.mockResolvedValue({ id: SERVICE_ID, technician_id: 'tech-1', status: 'scheduled', scheduled_date: '2026-10-06' });
     mockVisitInScope.mockReturnValue(true);
     mockCustomerAllowed.mockResolvedValue(true);
-    mockBuild.mockResolvedValue('SERVER-BUILT WORD LIST');
-    mockHints.mockResolvedValue({ prompt: 'WORD LIST WITH NAMES', keywords: ['Examplesmith', 'Todayman'] });
-    delete process.env.GATE_DICTATION_CUSTOMER_NAMES;
+    mockHints.mockResolvedValue({ prompt: 'SERVER-BUILT WORD LIST', keywords: ['Examplesmith', 'Todayman'] });
     delete process.env.GATE_DICTATION_MONEY_NORMALIZE;
+    delete process.env.GATE_DICTATION_LIVE_WORDS;
     mockTranscribe.mockResolvedValue({ text: '  Treated the lanai for roaches. ' });
     mockImplausible.mockReturnValue(false);
   });
   afterAll(() => {
-    delete process.env.GATE_DICTATION_CUSTOMER_NAMES;
+    delete process.env.GATE_DICTATION_LIVE_WORDS;
     delete process.env.GATE_DICTATION_MONEY_NORMALIZE;
     if (originalGate === undefined) delete process.env.GATE_SERVER_DICTATION;
     else process.env.GATE_SERVER_DICTATION = originalGate;
@@ -133,10 +132,10 @@ describe('server dictation endpoint', () => {
     delete process.env.GATE_SERVER_DICTATION;
     await withServer(async (baseUrl) => {
       const avail = await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } });
-      expect(await avail.json()).toEqual({ available: false });
+      expect(await avail.json()).toEqual({ available: false, everyBox: false, liveWords: false });
       const res = await clip(baseUrl);
       expect(res.status).toBe(404);
-      expect(mockBuild).not.toHaveBeenCalled();
+      expect(mockHints).not.toHaveBeenCalled();
       expect(mockTranscribe).not.toHaveBeenCalled();
     });
   });
@@ -151,11 +150,42 @@ describe('server dictation endpoint', () => {
   test('gate on: availability needs the transcriber key', async () => {
     await withServer(async (baseUrl) => {
       const on = await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } });
-      expect(await on.json()).toEqual({ available: true });
+      expect(await on.json()).toEqual({ available: true, everyBox: false, liveWords: false });
+      process.env.GATE_DICTATION_LIVE_WORDS = 'true';
+      const live = await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } });
+      expect(await live.json()).toEqual({ available: true, everyBox: false, liveWords: true });
       delete process.env.OPENAI_API_KEY;
       const noKey = await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } });
-      expect(await noKey.json()).toEqual({ available: false });
+      expect(await noKey.json()).toEqual({ available: false, everyBox: false, liveWords: false });
     });
+  });
+
+  test('GATE_DICTATION_EVERY_BOX: everyBox needs the gate exactly "true" AND server dictation available', async () => {
+    const ask = async (baseUrl) => {
+      const { available, everyBox } = await (await fetch(`${baseUrl}/api/tech/dictation/availability`, { headers: { Authorization: 'Bearer tech' } })).json();
+      return { available, everyBox };
+    };
+    const originalEveryBox = process.env.GATE_DICTATION_EVERY_BOX;
+    try {
+      await withServer(async (baseUrl) => {
+        process.env.GATE_DICTATION_EVERY_BOX = 'true';
+        expect(await ask(baseUrl)).toEqual({ available: true, everyBox: true });
+        process.env.GATE_DICTATION_EVERY_BOX = '1';
+        expect(await ask(baseUrl)).toEqual({ available: true, everyBox: false });
+        delete process.env.GATE_DICTATION_EVERY_BOX;
+        expect(await ask(baseUrl)).toEqual({ available: true, everyBox: false });
+        // On, but the server mic itself is off or has no key: no every-box mic either.
+        process.env.GATE_DICTATION_EVERY_BOX = 'true';
+        delete process.env.OPENAI_API_KEY;
+        expect(await ask(baseUrl)).toEqual({ available: false, everyBox: false });
+        process.env.OPENAI_API_KEY = 'test-key';
+        delete process.env.GATE_SERVER_DICTATION;
+        expect(await ask(baseUrl)).toEqual({ available: false, everyBox: false });
+      });
+    } finally {
+      if (originalEveryBox === undefined) delete process.env.GATE_DICTATION_EVERY_BOX;
+      else process.env.GATE_DICTATION_EVERY_BOX = originalEveryBox;
+    }
   });
 
   test('hears the clip with the voice-fill model and the SERVER-built prompt; client prompt text is ignored', async () => {
@@ -167,7 +197,7 @@ describe('server dictation endpoint', () => {
       });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ text: 'Treated the lanai for roaches.' });
-      expect(mockBuild).toHaveBeenCalledWith({ customerId: CUSTOMER_ID, serviceId: SERVICE_ID });
+      expect(mockHints).toHaveBeenCalledWith({ customerId: CUSTOMER_ID, serviceId: SERVICE_ID, scope: {} });
       const [buffer, opts] = mockTranscribe.mock.calls[0];
       expect(buffer.toString()).toBe('opus-bytes');
       expect(opts.prompt).toBe('SERVER-BUILT WORD LIST');
@@ -180,33 +210,19 @@ describe('server dictation endpoint', () => {
     });
   });
 
-  describe('GATE_DICTATION_CUSTOMER_NAMES', () => {
-    test('off: the old builder runs and the transcriber gets no keywords', async () => {
-      await withServer(async (baseUrl) => {
-        await clip(baseUrl, { token: 'admin', query: { customer_id: CUSTOMER_ID } });
-        expect(mockHints).not.toHaveBeenCalled();
-        expect(mockBuild).toHaveBeenCalledWith({ customerId: CUSTOMER_ID, serviceId: null });
-        const opts = mockTranscribe.mock.calls[0][1];
-        expect(opts.prompt).toBe('SERVER-BUILT WORD LIST');
-        expect('keywords' in opts).toBe(false);
-      });
-    });
-
-    test('on, admin login: names prompt and surname keywords reach the transcriber; scope is empty', async () => {
-      process.env.GATE_DICTATION_CUSTOMER_NAMES = 'true';
+  describe('customer names', () => {
+    test('admin login: names prompt and name keywords reach the transcriber; scope is empty', async () => {
       await withServer(async (baseUrl) => {
         await clip(baseUrl, { token: 'admin', query: { customer_id: CUSTOMER_ID }, fields: { keywords: 'attacker' } });
-        expect(mockBuild).not.toHaveBeenCalled();
         expect(mockHints).toHaveBeenCalledWith({ customerId: CUSTOMER_ID, serviceId: null, scope: {} });
         const opts = mockTranscribe.mock.calls[0][1];
-        expect(opts.prompt).toBe('WORD LIST WITH NAMES');
+        expect(opts.prompt).toBe('SERVER-BUILT WORD LIST');
         expect(opts.keywords).toEqual(['Examplesmith', 'Todayman']);
         expect(JSON.stringify(opts)).not.toContain('attacker');
       });
     });
 
-    test('on, technician login: the scope is the login itself, and a failed fence still drops the id', async () => {
-      process.env.GATE_DICTATION_CUSTOMER_NAMES = 'true';
+    test('technician login: the scope is the login itself, and a failed fence still drops the id', async () => {
       mockCustomerAllowed.mockResolvedValue(false);
       await withServer(async (baseUrl) => {
         await clip(baseUrl, { token: 'tech', query: { customer_id: CUSTOMER_ID } });
@@ -214,12 +230,23 @@ describe('server dictation endpoint', () => {
       });
     });
 
-    test('only the exact value "true" turns it on', async () => {
-      process.env.GATE_DICTATION_CUSTOMER_NAMES = 'yes';
-      await withServer(async (baseUrl) => {
-        await clip(baseUrl, { token: 'admin' });
-        expect(mockHints).not.toHaveBeenCalled();
+    test("the greeted on-screen customer's name comes back in the record's spelling; the log has the count only", async () => {
+      const logger = require('../services/logger');
+      mockHints.mockResolvedValue({
+        prompt: 'SERVER-BUILT WORD LIST',
+        keywords: ['Sara', 'Exampleton'],
+        recordName: { firstName: 'Sara', lastName: 'Exampleton' },
       });
+      mockTranscribe.mockResolvedValue({ text: 'Hey Sarah. Sarah from the office will call.' });
+      await withServer(async (baseUrl) => {
+        const res = await clip(baseUrl, { token: 'admin', query: { customer_id: CUSTOMER_ID }, fields: { duration_seconds: '4' } });
+        // only the greeted name changes; the hallucination guard saw the words as heard
+        expect(await res.json()).toEqual({ text: 'Hey Sara. Sarah from the office will call.' });
+        expect(mockImplausible).toHaveBeenCalledWith('Hey Sarah. Sarah from the office will call.', 4);
+      });
+      const lines = logger.info.mock.calls.map(([line]) => line);
+      expect(lines).toContain('[server-dictation] record name respelled count=1');
+      expect(lines.join('\n')).not.toMatch(/Sara|Exampleton/);
     });
   });
 
@@ -234,14 +261,14 @@ describe('server dictation endpoint', () => {
   test('context ids that are not UUIDs never reach the word-list builder', async () => {
     await withServer(async (baseUrl) => {
       await clip(baseUrl, { token: 'admin', query: { customer_id: "x' OR 1=1 --", service_id: 'svc-1' } });
-      expect(mockBuild).toHaveBeenCalledWith({ customerId: null, serviceId: null });
+      expect(mockHints).toHaveBeenCalledWith({ customerId: null, serviceId: null, scope: {} });
     });
   });
 
   test('context ids in the body are not read: they ride the query so the fence runs before the upload is buffered', async () => {
     await withServer(async (baseUrl) => {
       await clip(baseUrl, { token: 'admin', fields: { customer_id: CUSTOMER_ID, service_id: SERVICE_ID } });
-      expect(mockBuild).toHaveBeenCalledWith({ customerId: null, serviceId: null });
+      expect(mockHints).toHaveBeenCalledWith({ customerId: null, serviceId: null, scope: {} });
     });
   });
 
@@ -249,7 +276,7 @@ describe('server dictation endpoint', () => {
     test('admin: ids pass through with no ownership lookup', async () => {
       await withServer(async (baseUrl) => {
         await clip(baseUrl, { token: 'admin', query: { customer_id: CUSTOMER_ID, service_id: SERVICE_ID } });
-        expect(mockBuild).toHaveBeenCalledWith({ customerId: CUSTOMER_ID, serviceId: SERVICE_ID });
+        expect(mockHints).toHaveBeenCalledWith({ customerId: CUSTOMER_ID, serviceId: SERVICE_ID, scope: {} });
         expect(mockVisit).not.toHaveBeenCalled();
         expect(mockCustomerAllowed).not.toHaveBeenCalled();
       });
@@ -259,7 +286,7 @@ describe('server dictation endpoint', () => {
       await withServer(async (baseUrl) => {
         const res = await clip(baseUrl, { query: { customer_id: CUSTOMER_ID, service_id: SERVICE_ID } });
         expect(res.status).toBe(200);
-        expect(mockBuild).toHaveBeenCalledWith({ customerId: CUSTOMER_ID, serviceId: SERVICE_ID });
+        expect(mockHints).toHaveBeenCalledWith({ customerId: CUSTOMER_ID, serviceId: SERVICE_ID, scope: { technicianId: 'tech-1' } });
       });
     });
 
@@ -270,7 +297,7 @@ describe('server dictation endpoint', () => {
         const res = await clip(baseUrl, { query: { customer_id: CUSTOMER_ID, service_id: SERVICE_ID } });
         expect(res.status).toBe(200);
         expect(await res.json()).toEqual({ text: 'Treated the lanai for roaches.' });
-        expect(mockBuild).toHaveBeenCalledWith({ customerId: null, serviceId: null });
+        expect(mockHints).toHaveBeenCalledWith({ customerId: null, serviceId: null, scope: { technicianId: 'tech-1' } });
       });
     });
 
@@ -279,7 +306,7 @@ describe('server dictation endpoint', () => {
       await withServer(async (baseUrl) => {
         const res = await clip(baseUrl, { query: { service_id: SERVICE_ID } });
         expect(res.status).toBe(200);
-        expect(mockBuild).toHaveBeenCalledWith({ customerId: null, serviceId: null });
+        expect(mockHints).toHaveBeenCalledWith({ customerId: null, serviceId: null, scope: { technicianId: 'tech-1' } });
       });
     });
 

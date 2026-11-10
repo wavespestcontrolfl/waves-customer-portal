@@ -500,15 +500,15 @@ export default function LedgerInboxTab() {
       .catch((e) => setCategoryError(e.message));
   }, [categoryAttempt]);
 
-  const enabled = status?.enabled;
+  const statusLoaded = !!status;
   // a view change shows nothing of the previous shelf while the new one loads
   useEffect(() => {
-    if (!enabled) return;
+    if (!statusLoaded) return;
     settledRef.current = new Map();
     setRows([]);
     setTotal(0);
     loadRows(view, 0);
-  }, [enabled, view, loadRows]);
+  }, [statusLoaded, view, loadRows]);
 
   const act = async (row, decision, { categoryId, always, touched }) => {
     if (decision === "expense" && !categoryId) {
@@ -587,9 +587,6 @@ export default function LedgerInboxTab() {
         {loadError ? <ActionFeedback error>{loadError}</ActionFeedback> : <div className="text-ink-secondary">Loading…</div>}
       </div>
     );
-  }
-  if (!status.enabled) {
-    return <div className="flex flex-col gap-3 text-sm"><div>The tax ledger is off (GATE_TAX_LEDGER).</div></div>;
   }
 
   return (

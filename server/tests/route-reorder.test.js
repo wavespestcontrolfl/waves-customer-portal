@@ -721,7 +721,7 @@ test('ledger pairs with that night\'s CRON auto-dispatch run, never a later manu
   };
   await runRouteReorder({ now: NOW });
   const runFilters = dbCalls.filter((c) => c.table === 'auto_dispatch_runs');
-  // 'catch_up' (the 5 AM catch-up, GATE_AUTO_DISPATCH_CATCH_UP) is the same night's run when 4:10 was cut off.
+  // 'catch_up' (the 5 AM catch-up) is the same night's run when 4:10 was cut off.
   expect(runFilters).toContainEqual(expect.objectContaining({ method: 'whereIn', args: ['triggered_by', ['cron', 'catch_up']] }));
   expect(runFilters).not.toContainEqual(expect.objectContaining({ method: 'whereIn', args: ['status', expect.anything()] }));
   const ledger = JSON.parse(ledgerInserts[0].result);

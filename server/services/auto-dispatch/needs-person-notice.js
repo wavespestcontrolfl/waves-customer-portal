@@ -32,19 +32,23 @@
  * it read the visit with the conflict read on and found none (closeResolved).
  * A run that could not look at the visit closes nothing.
  *
- * FAR CONFLICTS (GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET; owner 2026-10-22,
- * audit decision D1: "note double bookings more than 2 weeks away quietly;
- * alert when they are 2 weeks out"). Gate on, a conflict dated more than
- * FAR_DAYS ahead does not ring: it is a line on ONE standing Activity row
- * (an ops digest, audience fyi: the Agents Activity feed, never the bell,
- * outside the ring allowance) that lists every far conflict of the run and
- * retires on a run with none (ops-digest-fall-off.js). Within FAR_DAYS the
- * conflict rings as the notice above. The digest needs the in-app Activity
+ * FAR CONFLICTS (owner 2026-10-22, audit decision D1: "note double bookings
+ * more than 2 weeks away quietly; alert when they are 2 weeks out"). A
+ * conflict dated more than FAR_DAYS ahead does not ring: it is a line on ONE
+ * standing Activity row (an ops digest, audience fyi: the Agents Activity
+ * feed, never the bell, outside the ring allowance) that lists every far
+ * conflict of the run and retires on a run with none (ops-digest-fall-off.js).
+ * Within FAR_DAYS the conflict rings as the notice above. The digest needs the in-app Activity
  * feed (ops-digest.js inAppEnabled); without it far conflicts ring as before.
+ *
+ * SOON WORDS (owner 2026-11-08, "fix": dispatch audit, Fix 1). Inside the last
+ * audit.SOON_DAYS days before its visit the notice says so ("The Nov 15 visit,
+ * 7 days away or less, ..."). The words change once, so a notice closed while
+ * the conflict stands (a person's Done, or the 72-hour quiet close) rings one
+ * more time before the visit (audit.visitSubject).
  */
 const logger = require('../logger');
 const { toDateStr } = require('./dates');
-const { gateEnvValue } = require('../../config/feature-gates');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 const RESOLVED_TITLE = 'Visit placement alert resolved';
@@ -63,10 +67,8 @@ const REASON_KIND = {
 const noticeKey = (id, date) => `${KEY_PREFIX}${id}:${date}`;
 
 // Far conflicts (D1, header).
-const FAR_GATE = 'GATE_AUTO_DISPATCH_FAR_CONFLICT_QUIET';
 const FAR_DAYS = 14;
 const FAR_DIGEST_KEY = 'auto-dispatch-far-conflicts';
-const farGateOn = () => !!gateEnvValue(FAR_GATE);
 // The last date that rings; a conflict after it is far.
 const farCutoff = (nowDate) => etDateString(addETDays(nowDate, FAR_DAYS));
 
@@ -100,13 +102,14 @@ function collectUnmoved(bucket, service, reasonCode, conflict) {
 }
 
 
-function whyFor(item, spoken) {
+// `subject`: "The Nov 15 visit", with the soon words inside SOON_DAYS (audit.visitSubject).
+function whyFor(item, subject) {
   const [now, still] = PROBLEM[item.problem];
-  if (item.kind === 'move_limit') return `The ${spoken} visit used all its automatic moves and ${still}.`;
+  if (item.kind === 'move_limit') return `${subject} used all its automatic moves and ${still}.`;
   const reason = {
     no_near_slot: 'every open slot adds too much drive', no_slot: 'no open slot fits it',
   }[item.kind] || 'auto-dispatch did not move it';
-  return `The ${spoken} visit ${now}, and ${reason}.`;
+  return `${subject} ${now}, and ${reason}.`;
 }
 
 // [templates with the customer's name, generic wording] for the headline
@@ -121,12 +124,12 @@ function actionFor(item) {
   return [[(who) => `place ${who}'s visit; it overlaps a stop`, (who) => `place ${who}'s visit`], 'place a visit that overlaps another stop'];
 }
 
-async function raiseOne(item, raiseAdminAlert, shortDateET) {
+async function raiseOne(item, raiseAdminAlert, subject) {
   const [templates, generic] = actionFor(item);
   return raiseAdminAlert('schedule_conflict', {
     area: 'Schedule',
     action: await require('./audit').namedVisitAction(item.customer_id, templates, generic),
-    why: whyFor(item, shortDateET(`${item.date}T12:00:00Z`)),
+    why: whyFor(item, subject),
     severity: 'needs-you',
     link: `/admin/dispatch?tab=schedule&date=${item.date}&appointment=${encodeURIComponent(item.id)}`,
     subject: { type: 'visit', id: item.id },
@@ -184,12 +187,12 @@ async function standingVisitIds() {
 }
 
 // The run's conflicts that ring now, and the far ones the Activity row lists
-// instead (D1). Off, or with no in-app Activity feed, every conflict rings.
+// instead (D1). With no in-app Activity feed, every conflict rings.
 function splitFar(bucket, nowDate) {
   const items = [...bucket.values()];
   let farOn = false;
   try {
-    farOn = farGateOn() && require('../ops-digest').inAppEnabled() === true;
+    farOn = require('../ops-digest').inAppEnabled() === true;
   } catch (err) {
     logger.warn(`[auto-dispatch] far double-booking check failed (${err.message}); every conflict rings`);
   }
@@ -263,8 +266,8 @@ async function farListedVisitIds(conn = require('../../models/db')) {
 
 // The standing Activity row of the run's far conflicts (D1): one ops digest,
 // audience fyi (Activity only, never the bell; not a ring-allowance lane),
-// refreshed in place each run and retired on a run with none, or with the
-// lane off once every conflict on it has its notice (fall-off). The list is
+// refreshed in place each run and retired on a run with none, or with no
+// Activity feed once every conflict on it has its notice (fall-off). The list is
 // a snapshot, so it changes only after a COMPLETE conflict scan
 // (`scanComplete`: the run did not fail, conflict reads were on and none
 // failed); otherwise it stays as it is, the way a notice closes only on
@@ -281,7 +284,7 @@ async function reportFarConflicts({ far, waiting }, { enabled, scanComplete }) {
       await require('../ops-digest-fall-off').retireIfClean(FAR_DIGEST_KEY, { lockKey: `ops-digest:${FAR_DIGEST_KEY}` });
       return;
     }
-    // Gate off (or no Activity feed): never start a list; keep one that still
+    // No Activity feed: never start a list; keep one that still
     // stands, with the conflicts whose notice is not written yet.
     if (!enabled) {
       const standing = await module.exports.farListedVisitIds();
@@ -331,13 +334,14 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
   if (!bucket) return 0;
   await closeResolved(bucket, { nowDate, clearedIds });
   const { nearItems, farItems, farOn } = splitFar(bucket, nowDate);
-  const { rang, persisted } = await ringNear(nearItems);
+  const { rang, persisted } = await ringNear(nearItems, nowDate);
   // A conflict that just came within FAR_DAYS stays on the list until its
   // notice is persisted (allowance spent, a failed write): the list keeps it
   // tracked, and re-read by the next run (index.js conflictsToSettle), even
   // when the scan no longer loads its visit.
-  // Gate off, a list still standing keeps the same ones until their notice
-  // stands too, then retires (reportFarConflicts never starts a list then).
+  // With no Activity feed, a list still standing keeps the same ones until
+  // their notice stands too, then retires (reportFarConflicts never starts a
+  // list then).
   const waiting = nearItems.filter((item) => !persisted.has(item.key) && listable(item));
   await reportFarConflicts({ far: farItems, waiting }, { enabled: farOn, scanComplete });
   return rang;
@@ -345,14 +349,14 @@ async function raiseNotices(bucket, { nowDate = new Date(), clearedIds = new Set
 
 // The ordinary notices, soonest first inside the shared ring allowance.
 // Returns how many writes rang and the keys whose notice now stands. Never throws.
-async function ringNear(nearItems) {
+async function ringNear(nearItems, nowDate) {
   const persisted = new Set();
   let rang = 0;
   if (!nearItems.length) return { rang, persisted };
   try {
     const audit = require('./audit');
     const { raiseAdminAlert } = require('../admin-alert-compose');
-    const { shortDateET } = require('../admin-alert-names');
+    const soonEnd = audit.soonEndFor(nowDate);
     const standing = await audit.standingNoticeKeys(`${KEY_PREFIX}%`, RESOLVED_TITLE);
     for (const item of nearItems) if (standing.has(item.key)) persisted.add(item.key);
     // The allowance counts a key once (audit.recentBudgetKeys), so a key may
@@ -370,7 +374,7 @@ async function ringNear(nearItems) {
       // raiseMissingGeoNotices, Codex #6208 r13 to r16).
       if (left <= 0) break;
       try {
-        const written = await raiseOne(item, raiseAdminAlert, shortDateET);
+        const written = await raiseOne(item, raiseAdminAlert, audit.visitSubject(item.date, soonEnd));
         if (written) persisted.add(item.key);
         // Only a write that rang spends a slot.
         if (audit.noticeRang(written)) { left -= 1; rang += 1; }

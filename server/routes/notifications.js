@@ -6,7 +6,7 @@ const db = require('../models/db');
 const { accountPropertyIds, resolvePrimaryProfileId, appPropertyScopeEnabled, accountSavedProperties } = require('../services/account-properties');
 const PropertyTexts = require('../services/property-notification-prefs');
 const rateLimit = require('express-rate-limit');
-const { gateEnvValue, portalEmailResubscribeLive } = require('../config/feature-gates');
+const { gateEnvValue, appFirstAnyDeviceLive, portalEmailResubscribeLive } = require('../config/feature-gates');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
@@ -53,14 +53,6 @@ function serviceContactConsentUpdates(contacts = [], consentGiven = false) {
     service_contacts_consent_source: null,
     service_contacts_consent_text_version: null,
   };
-}
-
-// Whether the contact card mentions the report text: the gate alone. The
-// card's wording carries the condition itself ("when your own visit-complete
-// texts are on"), because whether that text goes out depends on the phone,
-// the per-property toggles and the delivery channel at each visit.
-function contactReportTextsOn() {
-  return require('../config/feature-gates').contactReportTextLive();
 }
 
 function serviceContactPayload(slot = {}) {
@@ -154,7 +146,7 @@ function appPreferencesAvailable(req) {
 // the column itself drops in a follow-up deploy.)
 const CHANNEL_DB_COLUMNS = [
   'appointment_confirmation_channel',
-  // Same rule for the confirmation channel's stamp (GATE_NEW_CLIENT_CONFIRM_EMAIL):
+  // Same rule for the confirmation channel's stamp:
   // the confirmation sender reads it from the owner-resolved row with the
   // channel it describes, so it routes to the account's primary profile too.
   'appointment_confirmation_channel_explicit',
@@ -167,9 +159,17 @@ const CHANNEL_DB_COLUMNS = [
   // owner's explicit Text choice.
   'service_reminder_72h_channel_explicit',
   'service_reminder_24h_channel',
+  // Explicit-Text markers for the routed notices (GATE_APP_FIRST_ANY_DEVICE,
+  // owner 2026-11-04). Like the 72 hour stamp they travel WITH their channel to
+  // the primary-profile row, where the routing reads both. The receipt marker
+  // is per charged row, like payment_receipt_channel, so it is not listed.
+  'service_reminder_24h_channel_explicit',
   'en_route_channel',
+  'en_route_channel_explicit',
   'tech_arrived_channel',
+  'tech_arrived_channel_explicit',
   'service_complete_channel',
+  'service_complete_channel_explicit',
   'push_enabled',
 ];
 
@@ -198,6 +198,18 @@ const PREF_SELECT = [
   'billing_channel',
   'payment_receipt_channel',
 ];
+
+// GATE_APP_FIRST_ANY_DEVICE (owner 2026-11-04): the routed notices go to a
+// customer's app unless the customer chose Text. A stored 'sms' is a choice only
+// when its marker is true; the seeded default is not. key -> [column, marker].
+const APP_FIRST_CHOICE_COLUMNS = {
+  serviceReminder72hChannel: ['service_reminder_72h_channel', 'service_reminder_72h_channel_explicit'],
+  serviceReminder24hChannel: ['service_reminder_24h_channel', 'service_reminder_24h_channel_explicit'],
+  enRouteChannel: ['en_route_channel', 'en_route_channel_explicit'],
+  techArrivedChannel: ['tech_arrived_channel', 'tech_arrived_channel_explicit'],
+  serviceCompleteChannel: ['service_complete_channel', 'service_complete_channel_explicit'],
+  paymentConfirmationChannel: ['payment_receipt_channel', 'payment_receipt_channel_explicit'],
+};
 
 function channelValue(value, appPreferences = false) {
   return value === 'push' && appPreferences ? 'push' : CHANNEL_VALUES.includes(value) ? value : 'sms';
@@ -264,7 +276,30 @@ function comparableEmail(value) {
   return String(value || '').trim().toLowerCase();
 }
 
-function notificationPrefsDbUpdates(updates = {}, existing = {}) {
+// What the settings page shows for a receipt channel: the stored value, or App
+// while the untouched Text default is displayed as App (appShown).
+function shownReceiptChannel(existing, appShown) {
+  const stored = channelValue(existing.payment_receipt_channel, true);
+  return appShown && stored === 'sms' && existing.payment_receipt_channel_explicit !== true ? 'push' : stored;
+}
+
+// Marks the routed notices a customer wrote as explicit choices, Text included
+// (GATE_APP_FIRST_ANY_DEVICE: only the customer switches back to text). The
+// receipt choice is per row and its legacy form is echoed by a full billing
+// save, so an echo of what the page showed is not a choice.
+function explicitChoiceStamps(updates, existing, opts) {
+  const stamps = {};
+  for (const key of ['serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel']) {
+    if (updates[key] !== undefined) stamps[APP_FIRST_CHOICE_COLUMNS[key][1]] = true;
+  }
+  if (updates.paymentConfirmationChannel !== undefined
+    && updates.paymentConfirmationChannel !== shownReceiptChannel(existing, opts?.appShown === true)) {
+    stamps.payment_receipt_channel_explicit = true;
+  }
+  return stamps;
+}
+
+function notificationPrefsDbUpdates(updates = {}, existing = {}, opts) {
   const dbUpdates = {};
   for (const [key, field] of Object.entries(DB_FIELD_BY_PREF)) {
     if (['seasonalTips', 'billingEmail', 'billingContactName'].includes(key) || updates[key] === undefined) continue;
@@ -302,7 +337,7 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
     // Explicit-choice stamp, same contract as the 72h one below: a customer
     // write of the confirmation channel is a deliberate delivery-method
     // choice, Text included — the new-client text + email promotion
-    // (GATE_NEW_CLIENT_CONFIRM_EMAIL) must never override it.
+    // must never override it.
     dbUpdates.appointment_confirmation_channel_explicit = true;
   }
   if (updates.serviceReminder72hChannel !== undefined) {
@@ -313,6 +348,7 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
     // flips is exactly the opt-out this exists to honor.
     dbUpdates.service_reminder_72h_channel_explicit = true;
   }
+  Object.assign(dbUpdates, explicitChoiceStamps(updates, existing, opts));
   // A full preference round trip may echo the default Email value. Only a
   // changed request channel proves a choice; unrelated saves keep provenance.
   if (updates.requestChannel !== undefined && updates.requestChannel !== (existing.request_channel || 'email')) {
@@ -483,6 +519,52 @@ async function ensurePrefs(customerId) {
 }
 
 
+// GATE_APP_FIRST_ANY_DEVICE (owner 2026-11-04): the settings page shows App for
+// a routed notice the customer never chose Text for, once the account holder
+// has the phone app, because that is where the notice goes. It shows only where
+// the page can render App (appPreferences), never to a contact session, and
+// fails closed: any doubt shows the stored value.
+async function appFirstDisplayActive(req) {
+  if (req.contactSession || !appFirstAnyDeviceLive() || !appPreferencesAvailable(req)
+    || !gateEnvValue('GATE_PUSH_CHANNEL_ROUTING')) return false;
+  try {
+    const status = await require('../services/push-notifications').customerStatus(req.customerId, db, { withReachable: true });
+    return status.enabled === true && status.reachable === true;
+  } catch {
+    return false;
+  }
+}
+
+function withAppFirstDisplay(payload, channelPrefs, prefs) {
+  const shown = { ...payload };
+  for (const [key, [column, marker]] of Object.entries(APP_FIRST_CHOICE_COLUMNS)) {
+    const owner = column === 'payment_receipt_channel' ? prefs : channelPrefs;
+    if (shown[key] === 'sms' && owner?.[marker] !== true) shown[key] = 'push';
+  }
+  return shown;
+}
+
+// Builds on appFirstDisplayActive: while the page shows App for an untouched
+// Text default, a save that echoes that App back is not a choice. Storing it
+// would also need a fresh device (409 for a phone last seen weeks ago) and would
+// pin the customer to App. The echoed key is dropped; the notice keeps routing
+// to the app by default. Returns whether the page was showing App for this save.
+async function settleShownAppChoices(req, updates, existing) {
+  const keys = Object.keys(APP_FIRST_CHOICE_COLUMNS).filter((key) => updates[key] !== undefined);
+  if (!keys.length || !(await appFirstDisplayActive(req))) return false;
+  const echoed = keys.filter((key) => updates[key] === 'push');
+  if (echoed.length) {
+    const primary = await resolvePrimaryProfileId(req);
+    const channelPrefs = String(primary) === String(req.customerId) ? existing : await ensurePrefs(primary);
+    for (const key of echoed) {
+      const [column, marker] = APP_FIRST_CHOICE_COLUMNS[key];
+      const owner = column === 'payment_receipt_channel' ? existing : channelPrefs;
+      if (channelValue(owner?.[column], true) === 'sms' && owner?.[marker] !== true) delete updates[key];
+    }
+  }
+  return true;
+}
+
 // GATE_PORTAL_EMAIL_RESUBSCRIBE: the holder's own address on file, for the "Turn emails
 // back on" flow. The app never releases an unsubscribe itself: it can only ask for one
 // confirmation email to this address (POST /email-resubscribe below). Contacts are out.
@@ -512,7 +594,7 @@ async function loadPreferencePayload(req) {
   const accountHasEmail = await accountEmailAvailable(req.customerId, primaryId);
   const billingHasEmail = await customerEmailAvailable(req.customerId) || deliverableEmail(prefs.billing_email);
   const emailResubscribe = await emailResubscribeField(req);
-  return {
+  const payload = {
     ...preferencePayload({
       ...prefs,
       appointment_confirmation_channel: channelPrefs.appointment_confirmation_channel,
@@ -531,6 +613,7 @@ async function loadPreferencePayload(req) {
     // Never changes emailEnabled; absent unless the holder's address carries a customer unsubscribe.
     ...(emailResubscribe ? { emailResubscribe } : {}),
   };
+  return await appFirstDisplayActive(req) ? withAppFirstDisplay(payload, channelPrefs, prefs) : payload;
 }
 
 function deliverableEmail(value) {
@@ -753,7 +836,6 @@ async function savedPropertyPreferences(req) {
       }),
       serviceContacts: serviceContactsPayload(profile),
       maxServiceContacts: MAX_SERVICE_CONTACTS,
-      contactReportTexts: contactReportTextsOn(),
     };
   });
 }
@@ -832,7 +914,6 @@ async function contactPreferencePayload(req) {
     accountOff,
     emailAvailable: !!emailOnFile,
     reportsWithheld,
-    contactReportTexts: contactReportTextsOn(),
     consentAttestedAt: own?.consent_attested_at || null,
     smsOptin: optin?.status || 'none',
     consentVersion: SERVICE_CONTACT_CONSENT_VERSION,
@@ -872,12 +953,6 @@ router.put('/contact-preferences', async (req, res, next) => {
     // session's snapshot: a holder who removed the address since must not
     // have an email-only choice restored right behind their save.
     const asksEmailOnly = Object.keys(CONTACT_CHANNEL_KEY_BY_COLUMN).some((col) => patch[col] === 'email');
-    // Text-only delivery of the service report needs the contact report text
-    // (GATE_CONTACT_REPORT_TEXT) to exist — otherwise "text" would only hold
-    // the email, and no report would reach them (codex #6363 r9 P2).
-    if (patch.service_complete_channel === 'sms' && !contactReportTextsOn()) {
-      return res.status(400).json({ error: 'Service reports are delivered by email for this property.', code: 'REPORT_TEXT_UNAVAILABLE' });
-    }
     // Turning texts on (any text-capable choice) requires the attestation
     // when none is on file yet — the same consent rail as the holder's save.
     // Only a save that OPENS a text path (a purpose that will now text this
@@ -998,7 +1073,6 @@ router.get('/property-preferences', async (req, res, next) => {
         }),
         serviceContacts: serviceContactsPayload(p),
         maxServiceContacts: MAX_SERVICE_CONTACTS,
-        contactReportTexts: contactReportTextsOn(),
       })),
     });
   } catch (err) {
@@ -1065,7 +1139,8 @@ router.put('/preferences', async (req, res, next) => {
     }
 
     const existing = await ensurePrefs(req.customerId);
-    const allDbUpdates = notificationPrefsDbUpdates(updates, existing || {});
+    const appShown = await settleShownAppChoices(req, updates, existing);
+    const allDbUpdates = notificationPrefsDbUpdates(updates, existing || {}, { appShown });
 
     // Delivery channels are account-level — persist them on the primary profile
     // so the choice is honored no matter which property the customer is viewing.
@@ -1275,6 +1350,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       const consentUpdates = serviceContactConsentUpdates(contacts, updates.serviceContactsConsent);
       let lockedBefore = beforeRow;
       let lockedAt = null;
+      let loginPrefs;
       await db.transaction(async (trx) => {
         // Row lock + re-read: the audit diff below must describe the actual
         // DB transition — a concurrent save may have moved the row since the
@@ -1291,9 +1367,14 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           optinClaims = await claimRecipientOptins({ ...optinArgs, trx });
         }
+        // Contact login (GATE_CONTACT_LOGIN_HOLDER_ONLY): this signed-in holder
+        // save is the only writer of the per-phone login attestation.
+        loginPrefs = require('../services/customer-contact')
+          .loginAttestedPrefs(lockedBefore, contacts.map((c) => c.phone), !!consentUpdates.service_contacts_consent_at);
         await trx('customers').where({ id: req.params.customerId }).update({
           ...slotUpdates,
           ...consentUpdates,
+          ...(loginPrefs ? { service_preferences: JSON.stringify(loginPrefs) } : {}),
           updated_at: new Date(),
         });
         // A removed contact's own notification choices and portal sessions
@@ -1377,9 +1458,23 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           legacyClaims = await claimRecipientOptins({ ...legacyOptinArgs, trx });
         }
+        // Per-phone login attestation (GATE_CONTACT_LOGIN_HOLDER_ONLY). This save
+        // submitted slot 1 only, so only slot 1 is newly attested; slots 2 and 3 keep
+        // an attestation they already hold and gain none (a phone the call pipeline
+        // filed meanwhile needs the holder's explicit full-list save).
+        const { loginAttestedPrefs, loginAttestedPhoneKeys, phoneKeyOf } = require('../services/customer-contact');
+        const alreadyAttested = loginAttestedPhoneKeys(legacyLockedBefore);
+        const legacyLoginPrefs = loginAttestedPrefs(
+          legacyLockedBefore,
+          [contact.phone, ...[2, 3]
+            .map((n) => legacyLockedBefore[`service_contact${n}_phone`])
+            .filter((phone) => alreadyAttested.has(phoneKeyOf(phone)))],
+          !!legacyConsentUpdates.service_contacts_consent_at,
+        );
         await trx('customers').where({ id: req.params.customerId }).update({
           ...legacySlot1Updates,
           ...legacyConsentUpdates,
+          ...(legacyLoginPrefs ? { service_preferences: JSON.stringify(legacyLoginPrefs) } : {}),
           updated_at: new Date(),
         });
         // Same prune as the list save: a replaced slot-1 person's own choices
@@ -1530,6 +1625,7 @@ router._private = {
   serviceContactsRequireConsent,
   normalizeContactInput,
   loadPreferencePayload,
+  settleShownAppChoices,
   accountEmailAvailable,
   customerEmailAvailable,
   CHANNEL_DB_COLUMNS,

@@ -290,24 +290,15 @@ describe('PUT /contact-preferences', () => {
     expect(res.body.preferences.techEnRoute).toBe(true);
   });
 
-  test('text-only delivery of the service report is refused while the contact report text is off (codex r9)', async () => {
-    delete process.env.GATE_CONTACT_REPORT_TEXT;
-    const res = await put({ serviceCompleteChannel: 'sms' });
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('REPORT_TEXT_UNAVAILABLE');
-    expect(tables.service_contact_notification_prefs).toEqual([]);
-    // Text + email (whatever the account sends) stays available.
+  test('text-only delivery of the service report is saved, and text + email stays available', async () => {
+    expect((await put({ serviceCompleteChannel: 'sms' })).status).toBe(200);
+    expect(tables.service_contact_notification_prefs[0].service_complete_channel).toBe('sms');
     expect((await put({ serviceCompleteChannel: 'both' })).status).toBe(200);
   });
 
-  test('a text-only report choice stored while the contact report text was on reads as the default once it is off (codex r10)', async () => {
+  test('a stored text-only report choice reads as text', async () => {
     tables.service_contact_notification_prefs.push({ customer_id: 'cust-1', phone_key: '9415550202', service_complete_channel: 'sms' });
-    process.env.GATE_CONTACT_REPORT_TEXT = 'true';
     expect((await get()).body.preferences.serviceCompleteChannel).toBe('sms');
-    delete process.env.GATE_CONTACT_REPORT_TEXT;
-    expect((await get()).body.preferences.serviceCompleteChannel).toBe('both');
-    // The stored row is left as it is: the choice returns with the gate.
-    expect(tables.service_contact_notification_prefs[0].service_complete_channel).toBe('sms');
   });
 
   test('email-only delivery is decided against the slot under the row lock: an address the holder removed since the token was issued refuses it (codex r11)', async () => {
@@ -415,5 +406,43 @@ describe('holder contact save prunes a removed contact\'s choices', () => {
     });
     expect(res.status).toBe(200);
     expect(tables.service_contact_notification_prefs.map((r) => r.phone_key)).toEqual(['9415550303']);
+  });
+
+  // GATE_CONTACT_LOGIN_HOLDER_ONLY: the signed-in holder's save is the only writer of
+  // the per-phone login attestation (service_preferences.login_attested_phone_keys).
+  test('a consented list save records exactly the saved phones as login-attested, keeping other preferences; an emptied list drops it', async () => {
+    tables.customers[0].service_preferences = JSON.stringify({ unconsented_slot_phone_keys: ['9415550999'] });
+    mockSession.current = { customer: tables.customers[0], customerId: 'cust-1', accountId: 'cust-1', contactSession: null };
+    const res = await call('PUT', '/api/notifications/property-preferences/cust-1', {
+      serviceContacts: [{ firstName: 'Terry', lastName: 'Tenant', phone: '+19415550303', email: '' }],
+      serviceContactsConsent: true,
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(tables.customers[0].service_preferences)).toEqual({
+      unconsented_slot_phone_keys: ['9415550999'], login_attested_phone_keys: ['9415550303'],
+    });
+    const cleared = await call('PUT', '/api/notifications/property-preferences/cust-1', { serviceContacts: [], serviceContactsConsent: true });
+    expect(cleared.status).toBe(200);
+    expect(JSON.parse(tables.customers[0].service_preferences)).toEqual({ unconsented_slot_phone_keys: ['9415550999'] });
+  });
+
+  test('the legacy single-contact save attests slot 1 only: a surviving phone keeps an attestation it had and a phone filed without one gains none', async () => {
+    tables.customers[0].service_preferences = JSON.stringify({ login_attested_phone_keys: ['9415550303', '9415550777'] });
+    mockSession.current = { customer: tables.customers[0], customerId: 'cust-1', accountId: 'cust-1', contactSession: null };
+    const res = await call('PUT', '/api/notifications/property-preferences/cust-1', {
+      serviceContact: { firstName: 'Nora', lastName: 'New', phone: '+19415550404', email: '' },
+      serviceContactsConsent: true,
+    });
+    expect(res.status).toBe(200);
+    // The surviving slot-2 phone stays attested; the old slot-1 phone (replaced) and an unlisted key are gone.
+    expect(JSON.parse(tables.customers[0].service_preferences).login_attested_phone_keys.sort()).toEqual(['9415550303', '9415550404']);
+
+    tables.customers[0].service_preferences = null;
+    const second = await call('PUT', '/api/notifications/property-preferences/cust-1', {
+      serviceContact: { firstName: 'Nora', lastName: 'New', phone: '+19415550404', email: '' },
+      serviceContactsConsent: true,
+    });
+    expect(second.status).toBe(200);
+    expect(JSON.parse(tables.customers[0].service_preferences).login_attested_phone_keys).toEqual(['9415550404']);
   });
 });

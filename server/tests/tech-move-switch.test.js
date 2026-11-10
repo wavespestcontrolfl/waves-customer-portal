@@ -1,8 +1,7 @@
 /**
- * GATE_TECH_MOVE_SWITCH (owner 2026-10-25): a per-technician "Can move visits"
- * switch (technicians.can_move_visits). With the gate on, a non-admin whose
- * switch is off is refused on every route that moves a visit or lists the moves
- * it would make; admins never are. Gate off: today's behavior, no query.
+ * The per-technician "Can move visits" switch (owner 2026-10-25, technicians.can_move_visits).
+ * A non-admin whose switch is off is refused on every route that moves a visit or lists the moves
+ * it would make; admins never are.
  *
  * Real requireTechOrAdmin runs; only adminAuthenticate is stubbed to inject the
  * caller. rain-out / rebooker are stubbed so reaching them is the observable
@@ -101,12 +100,10 @@ afterAll(() => new Promise((r) => server.close(r)));
 
 const etToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 const tomorrow = (() => { const d = new Date(`${etToday}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); })();
-const prevGate = process.env.GATE_TECH_MOVE_SWITCH;
 const PROPOSAL_ID = '00000000-0000-4000-8000-000000000001';
 const VISIT_UUID = '00000000-0000-4000-8000-000000000002';
 
 beforeEach(() => {
-  process.env.GATE_TECH_MOVE_SWITCH = 'true';
   mockCaller.id = 'tech-1';
   mockCaller.role = 'technician';
   db.__state.scheduledServices = [
@@ -126,10 +123,6 @@ beforeEach(() => {
   mockCustomerPickOffer.mockClear();
   mockHandOff.mockClear();
 });
-afterAll(() => {
-  if (prevGate === undefined) delete process.env.GATE_TECH_MOVE_SWITCH;
-  else process.env.GATE_TECH_MOVE_SWITCH = prevGate;
-});
 
 const moveBody = { reasonCode: 'weather_rain', scope: 'job', target: { date: tomorrow, window: { start: '09:00', end: '10:00' } } };
 async function call(method, path, body) {
@@ -142,17 +135,11 @@ async function call(method, path, body) {
 }
 
 describe('techMoveRefusal', () => {
-  test('gate off: allowed without reading the technician row', async () => {
-    delete process.env.GATE_TECH_MOVE_SWITCH;
-    expect(await techMoveRefusal({ techRole: 'technician', technicianId: 'tech-1' })).toBeNull();
-    expect(db.__state.queries).toEqual([]);
-  });
-
-  test('gate on: an admin is allowed whatever the row says', async () => {
+  test('an admin is allowed whatever the row says', async () => {
     expect(await techMoveRefusal({ techRole: 'admin', technicianId: 'admin-1' })).toBeNull();
   });
 
-  test('gate on: switch on is allowed; switch off, no row and no id are refused', async () => {
+  test('switch on is allowed; switch off, no row and no id are refused', async () => {
     expect(await techMoveRefusal({ techRole: 'technician', technicianId: 'tech-2' })).toBeNull();
     for (const req of [
       { techRole: 'technician', technicianId: 'tech-1' },
@@ -262,13 +249,6 @@ describe('the same technician moves as before when allowed', () => {
     expect(mockApplyProposal).toHaveBeenCalledTimes(1);
   });
 
-  test('gate off: switch off does not matter (today\'s behavior)', async () => {
-    delete process.env.GATE_TECH_MOVE_SWITCH;
-    const r = await call('POST', '/api/tech/services/svc-1/rain-out', moveBody);
-    expect(r.status).toBe(200);
-    expect(mockCommit).toHaveBeenCalledTimes(1);
-  });
-
   test('an admin with the switch off still moves from Dispatch', async () => {
     mockCaller.id = 'admin-1';
     mockCaller.role = 'admin';
@@ -278,7 +258,7 @@ describe('the same technician moves as before when allowed', () => {
   });
 });
 
-describe('the route check is told who is asking (GATE_ROUTE_CHECK_STAFF_LISTS: Google is staff-only)', () => {
+describe('the route check is told who is asking (the route-checked day list: Google is staff-only)', () => {
   beforeEach(() => {
     db.__state.technicians.find((t) => t.id === 'tech-1').can_move_visits = true;
   });

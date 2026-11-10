@@ -665,17 +665,14 @@ async function runPacketCompletionCredits(packetId, database) {
   const backfill = (member) => notesOf(member).backfill === true;
   const internalOnly = (member) => notesOf(member).internalOnlyCompletion === true
     || (notesOf(member).internalOnlyCompletion === undefined && notesOf(member).typedReportDelivery === 'disabled');
-  // A REAL completion outranks a quiet backfill for the card email (Codex
-  // #4311 r47 P2): window/id ordering could make a backfill the first
-  // eligible member, and the helper deliberately leaves email_sent_at empty
-  // in suppressed mode — so the real completion sitting in the same packet
-  // was skipped and the card email waited for some future visit.
+  // A REAL completion outranks a quiet backfill as the card's anchor visit
+  // (Codex #4311 r47 P2): window/id ordering could make a backfill the first
+  // eligible member.
   const cardEligible = recorded.filter((member) => performed(member) && !internalOnly(member));
   const cardMember = cardEligible.find((member) => !backfill(member)) || cardEligible[0];
   if (cardMember) {
     await require('./customer-card').ensureCardForCompletion({
       customerId: cardMember.customer_id, serviceRecordId: cardMember.record_id, scheduledServiceId: cardMember.id,
-      suppressIssuedEmail: backfill(cardMember),
       firstVisitAt: backfill(cardMember) ? parseETDateTime(`${dateOnly(cardMember.service_date)}T12:00`) : null,
     });
   }
@@ -1042,7 +1039,8 @@ async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId
   // A STANDALONE invoice (no packet, not a renewal) whose send claim is live is the same window (Codex #6117 r8 P1): the
   // Intelligence Bar's claim judges who owes the invoice and holds the customer row only until the claim commits, so from
   // then until the delivery finalizes the claim row itself is the fence. A stale claim (10 minutes without a write) is not
-  // in flight, so a stuck row never blocks a Bill-To change for good.
+  // in flight HERE; an invoice that rides no visit is still judged by the linked rules below, which fence any claim
+  // the change would move (stale-claim recovery parks a stuck row first, keeping its delivery review).
   const linkedFence = () => require('./visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(database, { customerId, scheduledServiceId, payerId }, { pending });
   // A visit-scoped change reaches no invoice that rides no visit, so only the visit-linked rules apply to it.
   if (scheduledServiceId) return linkedFence();

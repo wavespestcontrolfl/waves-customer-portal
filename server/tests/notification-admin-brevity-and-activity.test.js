@@ -39,6 +39,8 @@ jest.mock('../models/db', () => {
           conds.push((r) => metaOf(r).dedupeKey === key);
         } else if (/feed/.test(sql)) {
           conds.push((r) => metaOf(r).feed !== 'activity');
+        } else if (/ownerOnly/.test(sql)) {
+          conds.push((r) => String(metaOf(r).ownerOnly ?? '') !== 'true');
         } else {
           throw new Error(`unmocked whereRaw: ${sql}`);
         }
@@ -71,7 +73,7 @@ jest.mock('../models/db', () => {
   };
   const fn = jest.fn((table) => builder(table));
   fn.raw = jest.fn((sql) => sql);
-  fn.transaction = async (cb) => { const trx = jest.fn((table) => builder(table)); trx.raw = jest.fn(async () => {}); return cb(trx); };
+  fn.transaction = async (cb) => { const trx = jest.fn((table) => builder(table)); trx.raw = jest.fn((sql, bindings) => (String(sql).includes('jsonb_exists') ? bindings[0] : undefined)); return cb(trx); };
   return fn;
 });
 

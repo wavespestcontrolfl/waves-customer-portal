@@ -1125,7 +1125,7 @@ describe('advanceEnrollment', () => {
     const steps = [S('A', 0), S('B', 1), S('C', 2), S('D', 3)];
     // Sent A and B under the old index (current_step 2), now passes C.
     await advanceEnrollment({ id: 'enr-1', template_key: 'flea', current_step: 2, metadata: {} }, steps, steps[2]);
-    const cursor = JSON.parse(update.update.mock.calls[0][0].metadata.bindings[0]);
+    const cursor = JSON.parse(update.update.mock.calls[0][0].metadata.bindings[1]);
     expect(cursor).toEqual({ passed_step_order: 2, passed_step_id: 'C', passed_step_ids: ['A', 'B', 'C'] });
     // Moving A after D later never sends A again.
     const moved = [S('B', 1), S('C', 2), S('D', 3), S('A', 9)];
@@ -1146,8 +1146,11 @@ describe('advanceEnrollment', () => {
     expect(update.whereRaw).toHaveBeenCalledWith("COALESCE(metadata->>'passed_step_id', '') = ?", ['B']);
     const patch = update.update.mock.calls[0][0];
     expect(patch.current_step).toBe(2); // D, the next step, is index 2 of the enabled list
-    expect(patch.metadata.sql).toBe("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
-    expect(JSON.parse(patch.metadata.bindings[0])).toEqual({ passed_step_order: 2, passed_step_id: 'C', passed_step_ids: ['A', 'B', 'C'] });
+    // The cursor write also ends a call-spelling retry episode that re-queued THIS step (marker bound first), nothing else.
+    expect(patch.metadata.sql).toContain("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
+    expect(patch.metadata.sql).toContain("- 'spelling_retry_step'");
+    expect(patch.metadata.bindings[0]).toBe('C');
+    expect(JSON.parse(patch.metadata.bindings[1])).toEqual({ passed_step_order: 2, passed_step_id: 'C', passed_step_ids: ['A', 'B', 'C'] });
   });
 
   test('a manual prep settle (no step named) passes the step the enrolment was due to send', async () => {
@@ -1160,7 +1163,7 @@ describe('advanceEnrollment', () => {
     expect(update.whereRaw).toHaveBeenCalledWith("COALESCE(metadata->>'passed_step_id', '') = ?", ['']);
     const patch = update.update.mock.calls[0][0];
     expect(patch.current_step).toBe(1);
-    expect(JSON.parse(patch.metadata.bindings[0])).toEqual({ passed_step_order: 0, passed_step_id: 'A', passed_step_ids: ['A'] });
+    expect(JSON.parse(patch.metadata.bindings[1])).toEqual({ passed_step_order: 0, passed_step_id: 'A', passed_step_ids: ['A'] });
   });
 });
 

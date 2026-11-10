@@ -29,8 +29,30 @@ const config = require('./config');
 const logger = require('./services/logger');
 const { errorHandler, notFound } = require('./middleware/errors');
 const { initScheduledJobs, initBankingSync } = require('./services/scheduler');
+const { checkBootSecrets } = require('./utils/boot-secret-check');
 const { applySensitiveSpaHeaders } = require('./utils/sensitive-spa-headers');
 const { REDACTED_COMBINED_LOG, registerRedactedTokens } = require('./utils/request-log-format');
+
+// A placeholder or short JWT_SECRET refuses to start in production. A
+// placeholder TERMINAL_HANDOFF_SECRET or BOUNCIE_WEBHOOK_SECRET only logs a loud
+// error. Names only: never a secret value.
+function assertSecretStrength() {
+  const { fatal, warnings } = checkBootSecrets({ jwtSecret: config.jwt.secret, env: process.env });
+  for (const warning of warnings) {
+    if (config.nodeEnv === 'production') logger.error(`[startup] ${warning} — set a real value. Continuing.`);
+    else logger.warn(`[startup] ${warning} — continuing (non-production).`);
+  }
+  if (!fatal.length) return;
+  const message = `Weak secret(s): ${fatal.join('; ')}`;
+  if (config.nodeEnv === 'production') {
+    // Same reason as the missing-variable exit: the uncaughtException handler
+    // never exits, so a throw here would leave a zombie process.
+    console.error(`[startup] ${message} — refusing to start.`);
+    logger.error(`[startup] ${message} — refusing to start.`);
+    process.exit(1);
+  }
+  logger.warn(`[startup] ${message} — continuing (non-production).`);
+}
 
 // Fail closed on missing critical secrets in production. A missing JWT_SECRET
 // would otherwise let the app boot and then break auth at runtime — jwt.sign
@@ -53,7 +75,10 @@ function assertRequiredSecrets() {
   const missing = Object.entries(required)
     .filter(([, value]) => !value || !String(value).trim())
     .map(([name]) => name);
-  if (!missing.length) return;
+  if (!missing.length) {
+    assertSecretStrength();
+    return;
+  }
   const message = `Missing required environment variable(s): ${missing.join(', ')}`;
   if (config.nodeEnv === 'production') {
     // The global uncaughtException handler above deliberately never exits, so
@@ -1125,6 +1150,8 @@ app.use('/api/admin/notifications', require('./routes/admin-notifications'));
 app.use('/api/admin/claude-ideas', require('./routes/admin-claude-ideas'));
 app.use('/api/admin/needs-me', require('./routes/admin-needs-me'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
+// GATE_PORTAL_MESSAGES: the customer's Messages page (their portal thread with the office); 404 while dark.
+app.use('/api/portal-messages', require('./routes/portal-messages'));
 app.use('/api/billing/autopay', require('./routes/customer-autopay'));
 app.use('/api/admin/payments', require('./routes/admin-payments-reconcile'));
 app.use('/api/review', reviewPublicRoutes);
@@ -1153,7 +1180,7 @@ app.use('/api/admin/sms-templates', require('./routes/admin-sms-templates'));
 app.use('/api/admin/email', require('./routes/admin-email'));
 // Bid Desk (GATE_BID_DESK, dark): the router answers 404 for every path while the gate is off.
 app.use('/api/admin/bid-desk', require('./routes/admin-bid-desk'));
-// Bid kit (GATE_BID_KIT, dark): the router answers 404 for every path while the gate is off.
+// Bid kit (admin only).
 app.use('/api/admin/bid-kit', require('./routes/admin-bid-kit'));
 // Trip link summary (GATE_TRIP_LINK, dark): the router answers 404 for every path while the gate is off.
 app.use('/api/admin/trip-link', require('./routes/admin-trip-link'));
@@ -1444,6 +1471,8 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
   const mem = process.memoryUsage();
   logger.info(`Waves API running on port ${PORT} | RSS: ${Math.round(mem.rss/1024/1024)}MB | Heap: ${Math.round(mem.heapUsed/1024/1024)}MB`);
   logger.info(`   Environment: ${config.nodeEnv} | Client: ${config.clientUrl}`);
+  // The running Node release, so the deploy log shows it without a shell in the container.
+  logger.info(`[boot] node ${process.version}`);
 
   const dbUrl = process.env.DATABASE_URL || process.env.DATABASE_PRIVATE_URL || process.env.POSTGRES_URL;
   logger.info(`Database: ${dbUrl ? dbUrl.replace(/:[^:@]+@/, ':***@').substring(0, 60) + '...' : 'NOT SET'}`);
@@ -1793,11 +1822,7 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
         cron.schedule('*/15 * * * *', async () => {
           try {
             await runExclusive('recipient-optin-sweep', async () => {
-              const { sweepUndispatchedOptins, sweepOnSiteFollowUps } = require('./services/recipient-optin');
-              await sweepUndispatchedOptins();
-              // Caller demotion + booking-confirmation replays to on-site
-              // recipients that were held or failed after their YES.
-              await sweepOnSiteFollowUps();
+              await require('./services/recipient-optin').runRecipientOptinSweeps();
             });
           } catch (err) {
             logger.error(`[cron] recipient opt-in sweep failed: ${err.message}`);

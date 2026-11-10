@@ -12,6 +12,12 @@ const sendgrid = require('./sendgrid-mail');
 const { wrapEmail, plainText } = require('./email-template');
 const { buildContractPDFBuffer } = require('./pdf/contract-pdf');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const {
+  DOCUMENT_SIGNED_COPY_EMAIL,
+  documentEmailSuppression,
+  alertBlockedDocumentEmail,
+  suppressionReason,
+} = require('./document-email-suppression');
 
 function escapeHtml(value) {
   return String(value == null ? '' : value)
@@ -106,6 +112,24 @@ async function sendSignedContractCopy(contractId) {
   if (!to) return { ok: false, skipped: 'no_recipient_email' };
   if (!sendgrid.isConfigured()) return { ok: false, skipped: 'sendgrid_unconfigured' };
 
+  // Sweep #7765 B2: a do_not_email row or a known-dead address (bounce, spam
+  // complaint) in the local suppression list stops the signed copy too. A
+  // service unsubscribe does not (DOCUMENT_SIGNED_COPY_EMAIL). Nothing is
+  // sent when the list cannot be read.
+  let suppression;
+  try {
+    suppression = await documentEmailSuppression(DOCUMENT_SIGNED_COPY_EMAIL, to);
+  } catch (err) {
+    // Never err.message: a knex error carries the query with its bindings, the recipient address among them.
+    logger.warn(`[contract-signed-email] suppression check failed for contract ${contractId} (${err.code || err.name || 'error'})`);
+    return { ok: false, error: 'suppression_check_failed' };
+  }
+  if (suppression) {
+    await alertBlockedDocumentEmail(DOCUMENT_SIGNED_COPY_EMAIL, to, suppression);
+    logger.info(`[contract-signed-email] signed copy not sent for contract ${contractId}: recipient suppressed (${suppressionReason(suppression)})`);
+    return { ok: false, skipped: 'recipient_suppressed' };
+  }
+
   const payload = await buildSignedCopyEmail(contract, customer || {});
   try {
     const result = await sendgrid.sendOne({
@@ -120,7 +144,8 @@ async function sendSignedContractCopy(contractId) {
       // Transactional/required: the customer's record of a contract they just
       // signed. Must NOT be subject to the service ASM suppression group, or a
       // service-unsubscribed signer silently loses their only signed copy (the
-      // share token is already burned). asmGroupId 0 → no suppression block.
+      // share token is already burned). asmGroupId 0 → no ASM group block; the
+      // local check above still stops a do_not_email or dead address.
       asmGroupId: 0,
       attachments: payload.attachments,
       // A rejection for an invalid/suppressed recipient can echo the email

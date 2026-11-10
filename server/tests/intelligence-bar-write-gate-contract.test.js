@@ -83,11 +83,11 @@ beforeAll(() => {
   process.env.GATE_IB_ACCEPT_ESTIMATE = 'true';
   process.env.GATE_IB_LEAD_CONVERT = 'true';
   process.env.GATE_IB_VOID_INVOICE = 'true';
+  process.env.GATE_IB_PREPAY_SWITCH = 'true';
   process.env.GATE_IB_SCHEDULE_SMS = 'true';
   process.env.GATE_IB_INVOICE_EDITS = 'true';
   process.env.GATE_IB_INVOICE_REMINDERS = 'true';
   process.env.GATE_IB_PAYMENT_PLAN = 'true';
-  process.env.GATE_IB_CREATE_INVOICE = 'true';
   process.env.GATE_IB_COMPOSE_EMAIL = 'true';
   process.env.GATE_IB_SET_BILL_TO = 'true';
   process.env.GATE_IB_AGENT_REVIEW_DRAFTS = 'true';
@@ -108,11 +108,11 @@ afterAll(() => {
   delete process.env.GATE_IB_ACCEPT_ESTIMATE;
   delete process.env.GATE_IB_LEAD_CONVERT;
   delete process.env.GATE_IB_VOID_INVOICE;
+  delete process.env.GATE_IB_PREPAY_SWITCH;
   delete process.env.GATE_IB_SCHEDULE_SMS;
   delete process.env.GATE_IB_INVOICE_EDITS;
   delete process.env.GATE_IB_INVOICE_REMINDERS;
   delete process.env.GATE_IB_PAYMENT_PLAN;
-  delete process.env.GATE_IB_CREATE_INVOICE;
   delete process.env.GATE_IB_COMPOSE_EMAIL;
   delete process.env.GATE_IB_SET_BILL_TO;
   delete process.env.GATE_IB_AGENT_REVIEW_DRAFTS;
@@ -132,7 +132,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'model-failure.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js', 'tool-additions.js', 'multi-card.js', 'ib-openai-backup.js', 'openai-tool-adapter.js', 'admin-write-snapshots.js', 'record-payment-fences.js', 'model-context.js', 'series-move.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'model-failure.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js', 'tool-additions.js', 'multi-card.js', 'ib-openai-backup.js', 'openai-tool-adapter.js', 'admin-write-snapshots.js', 'record-payment-fences.js', 'model-context.js', 'series-move.js', 'fast-mode.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -206,6 +206,7 @@ const WRITE_TWO_STEP = [
   'send_invoice',
   'record_payment',
   'void_invoice',
+  'switch_visit_to_annual_prepay',
   'schedule_sms',
   'edit_invoice',
   'archive_invoice',
@@ -839,6 +840,12 @@ const UNCONFIRMED_CALLS = [
       customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
       payments: [], payment_plans: [], setup_fee_claims: [], annual_prepay_terms: [], scheduled_services: [],
     }],
+    // switch_visit_to_annual_prepay's preview reads the visit, the customer and the switch preview; it may not write
+    // without confirmed (intelligence-bar-prepay-switch.test.js covers the card itself).
+    ['prepay-switch-tools', 'executePrepaySwitchTool', 'switch_visit_to_annual_prepay', { appointment_id: '00000000-0000-0000-0000-00000000f321' }, {
+      scheduled_services: [{ id: '00000000-0000-0000-0000-00000000f321', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2099-02-03', service_type: 'Quarterly Pest Control' }],
+      customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester', billing_mode: 'per_application' }],
+    }],
     // schedule_sms's preview reads the customer and the send path's consent checks; it may not write or queue without confirmed
     // (intelligence-bar-schedule-sms.test.js covers the card itself).
     ['schedule-sms-tools', 'executeScheduleSmsTool', 'schedule_sms', { customer_id: '00000000-0000-0000-0000-00000000f311', message: 'Synthetic scheduled text.', send_date: '2099-02-03', send_time: '10:00' }, {
@@ -1142,6 +1149,13 @@ const UNCONFIRMED_CALLS = [
         jest.spyOn(require('../services/invoice'), 'previewInvoiceTotals').mockResolvedValue({ subtotal: 85, tax_rate: 0, tax_amount: 0, total: 85 }),
         jest.spyOn(require('../services/payer'), 'resolveForInvoice').mockResolvedValue({ payerId: null }),
       ] : [];
+    // switch_visit_to_annual_prepay prices through the Schedule switch's own preview (schedule-prepay-switch.test.js);
+    // this recorder has no series, so the preview answers an eligible year.
+    const prepaySwitchPreview = toolName === 'switch_visit_to_annual_prepay'
+      ? jest.spyOn(require('../routes/admin-schedule'), 'computeAnnualPrepayPreview').mockResolvedValue({
+        eligible: true, annualBase: 600, discountLabel: '10%', supersedes: [], setupFee: null,
+        mintPayload: { amount: 540, visitCount: 4, coverageCadence: 'quarterly', serviceType: 'Quarterly Pest Control', termStart: '2099-02-03' },
+      }) : null;
     const repriceCoverage = toolName === 'reprice_future_visits'
       ? jest.spyOn(require('../routes/admin-schedule'), 'findBillingCoveredVisits').mockResolvedValue(new Map()) : null;
     // accept_estimate's card is the accept run as a dry run (rolled back in its
@@ -1219,6 +1233,7 @@ const UNCONFIRMED_CALLS = [
       createInvoiceSpies.forEach((spy) => spy.mockRestore());
       dedupeReaders.forEach((spy) => spy.mockRestore());
       repriceCoverage?.mockRestore();
+      prepaySwitchPreview?.mockRestore();
       acceptDryRun?.mockRestore();
       if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
       if (outsideFixture) {
@@ -1366,6 +1381,7 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // confirmed run settles an invoice (it sends no receipt).
     // propose_admin_edit (_sideEffects): its confirmed run replays a PUT or PATCH to a reviewed admin endpoint.
     // void_invoice (_sideEffects): its confirmed run voids an invoice (live smoke must not).
+    // switch_visit_to_annual_prepay (_sideEffects): its confirmed run voids the per-application draft and mints a prepay invoice.
     // schedule_sms (_sideEffects): its confirmed run queues a customer text (live smoke must not).
     // The invoice edit cards (_sideEffects): their confirmed runs edit (title, notes, due date), archive, unarchive or unvoid an invoice.
     // create_invoice (_sideEffects): its confirmed run creates a draft invoice (live smoke must not).
@@ -1374,6 +1390,6 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // The Agent Review draft cards (_sideEffects): their confirmed runs text the customer (approve, revise) or record the draft ignored.
     // resolve_dispatch_alert / unblock_sender (_sideEffects): their confirmed runs resolve an Action Queue card / remove a blocklist entry and its Gmail filter.
     // The invoice reminder and payment-plan tools (_sideEffects): their confirmed runs change reminders, send, schedule or create a plan.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'schedule_sms', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'compose_email', 'set_customer_bill_to', 'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft', 'resolve_dispatch_alert', 'unblock_sender', 'propose_admin_edit']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'switch_visit_to_annual_prepay', 'schedule_sms', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'compose_email', 'set_customer_bill_to', 'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft', 'resolve_dispatch_alert', 'unblock_sender', 'propose_admin_edit']);
   });
 });

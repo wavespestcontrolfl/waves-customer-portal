@@ -1260,7 +1260,7 @@ async function ringBell(notifyAdmin, { lineId, emailId, status, action, why, don
 }
 
 // An equipment line's bell names the missing or damaged tool it can replace
-// and links to its Assets row (receipt-equipment-link.js, GATE_TRUCK_KIT).
+// and links to its Assets row (receipt-equipment-link.js).
 // The read runs in its own savepoint: a failed SQL read would otherwise
 // abort the settlement transaction, and the plain bell could not be written.
 // A failed read keeps the plain bell: the line is settled either way.

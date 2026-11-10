@@ -112,7 +112,7 @@ describeDb('Bid Desk (PostgreSQL)', () => {
   };
 
   test('the migrations are reversible', async () => {
-    // The checklist table (GATE_BID_CHECKLIST) references bid_opportunities, so it goes first and comes back last.
+    // The checklist table references bid_opportunities, so it goes first and comes back last.
     await checklistMigration.down(mockPg);
     await retryMigration.down(mockPg);
     expect(await mockPg.schema.hasColumn('bid_opportunity_emails', 'alert_kind')).toBe(false);

@@ -27,7 +27,7 @@
  *                             // cannot perform one is left out of `pickedByTech`
  *     quickMove?,             // Quick Move's picker: with GATE_PICKER_ROAD_CHECK on, the
  *                             // route check Edit appointment uses (arrivalWindows)
- *     openTimes?,             // summary mode, GATE_OPEN_TIMES_BOX or GATE_BOARD_OPEN_TIMES on: the open-times
+ *     openTimes?,             // summary mode: the open-times
  *                             // list (the box; the Dispatch grid's lit hours) instead (up to 28 days,
  *                             // every technician's hours, no picked verdict, no best-times rows);
  *                             // answers `summary.open_times`
@@ -348,10 +348,8 @@ router.post('/', trackRoadLimit, async (req, res) => {
     const startedAt = Date.now();
     // The open-times box (owner 2026-10-25, layout A): only open times, over
     // four weeks, on every technician's route. The Dispatch grid's lit hours
-    // (GATE_BOARD_OPEN_TIMES) ask the same search for the board's own days.
-    // Off = the strip's summary.
-    const openTimes = hint && summary === true && req.body?.openTimes === true
-      && (gateEnvValue('GATE_OPEN_TIMES_BOX') || gateEnvValue('GATE_BOARD_OPEN_TIMES'));
+    // ask the same search for the board's own days.
+    const openTimes = hint && summary === true && req.body?.openTimes === true;
     const plan = hintSearchPlan({
       hint, summary, openTimes,
       from, to, maxTo, today, pickedStart, pickedDate, slotStepMinutes,
@@ -374,12 +372,11 @@ router.post('/', trackRoadLimit, async (req, res) => {
     const pickerBudget = pickerRoadCheck ? createPickerBudget({ signal: closedSignal(res) }) : null;
     const routeCheck = arrivalWindows === true || (pickerRoadCheck && req.body?.quickMove === true);
     const useArrivalWindows = hint && serviceId && routeCheck && arrivalWindowRoutingEnabled();
-    // New Appointment has no visit yet (GATE_NEW_APPT_ROUTE_TIMES, owner
-    // 2026-10-26): its open-times box runs the same route check on a new stop
-    // at the searched address, as customer booking does (find-time.js
-    // findCapacitySlots). Off = the gap check, as before.
+    // New Appointment has no visit yet (owner 2026-10-26): its open-times box
+    // runs the same route check on a new stop at the searched address, as
+    // customer booking does (find-time.js findCapacitySlots).
     const newVisitRoute = !serviceId && arrivalWindows === true && plan.openTimes
-      && gateEnvValue('GATE_NEW_APPT_ROUTE_TIMES') && arrivalWindowRoutingEnabled();
+      && arrivalWindowRoutingEnabled();
     // Arrival checks load the saved appointment too. Request coordinates or
     // an address echo must not make its hint promise a different destination.
     const { target, pendingStamp } = await resolveFindTimeTarget(useArrivalWindows

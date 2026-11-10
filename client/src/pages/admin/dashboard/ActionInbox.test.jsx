@@ -152,4 +152,43 @@ describe("ActionInbox", () => {
     expect(screen.getByText(/refresh failed, showing last loaded/)).toBeInTheDocument();
     expect(screen.queryByText(/All clear/)).not.toBeInTheDocument();
   });
+
+  // The server fail-softs each check: a check that threw is missing from
+  // `alerts` and listed in `failures`, on an otherwise successful 200.
+  it("never claims all-clear when a check failed and nothing else is open", () => {
+    render(<ActionInbox alerts={[]} failures={[{ id: "ar_overdue_60" }]} />);
+    expect(screen.getByText("incomplete")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Nothing found in the checks that ran. 1 check couldn't run: invoices 60+ days overdue. Retrying automatically.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/All clear/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Nothing needs you right now.")).not.toBeInTheDocument();
+  });
+
+  it("keeps open items and names the checks that failed, counting unnamed ones", () => {
+    render(
+      <ActionInbox
+        alerts={[
+          { id: "a", kind: "action", severity: "warn", count: 1, label: "1 estimate expiring", href: "/admin/estimates" },
+        ]}
+        failures={[{ id: "payments_failed_today" }, { id: "check_added_later" }]}
+      />,
+    );
+    expect(screen.getByRole("link")).toHaveTextContent("1 estimate expiring");
+    expect(
+      screen.getByText(
+        "2 checks couldn't run: failed payments today and 1 more. This list may be missing items.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/All clear/)).not.toBeInTheDocument();
+  });
+
+  it("still says the load failed when the first fetch failed, whatever the flags", () => {
+    render(<ActionInbox alerts={null} stale failures={[{ id: "ar_overdue_60" }]} />);
+    expect(screen.getByText(/Alerts couldn't be loaded/)).toBeInTheDocument();
+    expect(screen.getByText("unavailable")).toBeInTheDocument();
+    expect(screen.queryByText(/All clear/)).not.toBeInTheDocument();
+  });
 });

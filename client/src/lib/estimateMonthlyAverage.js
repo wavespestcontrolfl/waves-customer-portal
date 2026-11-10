@@ -2,7 +2,7 @@ import { CONTEXT_LINE, monthlyText, buildMonthlyAverage, cadenceText, applicatio
 import { perApplicationBilledMonthly, perApplicationNetForFrequency, perApplicationVisitsForFrequency } from '../components/estimate/PriceCard';
 
 /**
- * GATE_ESTIMATE_MONTHLY_AVERAGE (owner 2026-10-20): the monthly average the
+ * Monthly average (owner 2026-10-20): the monthly average the
  * estimate page prints beside its per-application prices. Pure; the page
  * resolves its own state (selected cadences, combined frequency, mode) and
  * passes it in.
@@ -15,7 +15,7 @@ import { perApplicationBilledMonthly, perApplicationNetForFrequency, perApplicat
  * the gap), and then the page shows nothing new.
  *
  * @param {object} args
- * @param {boolean} args.enabled  server switch AND page-level eligibility
+ * @param {boolean} args.enabled  page-level eligibility
  *   (recurring mode, per-application billing, not commercial/quote-required,
  *   not the annual-prepay choice)
  * @param {Array} args.services  pricing.services (sections)
@@ -84,8 +84,7 @@ export function planCreditSource({ renderFlags, selectedCombo, combinedFrequency
 
 // An open, recurring, per-application plan: not one-time, commercial, billed
 // monthly, quote-required, accepted/declined, or the annual-prepay choice.
-export function pageAverageEligible({ data, serviceMode, estimate, billsMonthly, isCommercialEstimate, cta, paymentPreference }) {
-  if (data?.monthlyAverageEnabled !== true) return false;
+export function pageAverageEligible({ serviceMode, estimate, billsMonthly, isCommercialEstimate, cta, paymentPreference }) {
   if (serviceMode !== 'recurring' || estimate?.isOneTimeOnly === true) return false;
   if (billsMonthly || isCommercialEstimate) return false;
   return cta?.terminalState == null && cta?.quoteRequired !== true && paymentPreference !== 'prepay_annual';

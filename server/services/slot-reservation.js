@@ -2169,9 +2169,9 @@ async function commitReservation({
       .returning('*');
     await writeAcceptedAreaAddOns(client, updated, serviceProfile);
     if (capacityFit) await persistArrivalOrder(client, capacityFit, scheduledServiceId);
-    // GATE_ROUTE_CHECK_ACCEPT_SAVES: a hold nothing numbered gets its stop
+    // Route check on saves: a hold nothing numbered gets its stop
     // number in this same save (the dispatcher's placement, inside `client`,
-    // a transaction here). Gate off: touches nothing. Never throws.
+    // a transaction here). Arrival-window routing off: touches nothing. Never throws.
     else await require('./scheduling/staff-save-route-check').placeAcceptedVisit(client, { serviceId: scheduledServiceId });
     // Two-treatment package (cockroach / flea): graduating the hold IS the
     // booking, so visit 2 books here for both estimate-accept branches and
@@ -2264,7 +2264,8 @@ async function releaseEstimateHolds({ estimateId, database = null }) {
  *     re-picks, leaving the original reservation dangling
  *
  * Deletes the row outright (not a soft-delete) because reservations are
- * inherently ephemeral — no audit value in keeping them. The
+ * inherently ephemeral — no value in keeping the row; an estimate hold's end
+ * is recorded in audit_log instead (estimate-stuck-alert.js). The
  * idx_scheduled_services_reservation_cleanup partial index (only rows
  * where reservation_expires_at IS NOT NULL) makes this scan narrow.
  *
@@ -2393,12 +2394,16 @@ async function releaseExpiredReservations() {
   // clock running ahead would delete rows the DB — and therefore
   // commitReservation — still considers in-grace, racing the very accept the
   // grace exists to save.
-  const released = await db('scheduled_services')
+  const releasedRows = await db('scheduled_services')
     .whereRaw('reservation_expires_at < NOW() - make_interval(mins => ?)', [commitGraceMinutes()])
     .whereNull('customer_id')
-    .del();
+    .del(['id', 'source_estimate_id', 'scheduled_date', 'window_start', 'created_at']);
+  const released = releasedRows.length;
   if (released > 0) {
     logger.info(`[slot-reservation] released ${released} expired reservation(s)`);
+    // Each estimate hold's end is recorded, and a customer's unfinished pick tells the office
+    // (estimate-stuck-alert.js; never throws).
+    await require('./estimate-stuck-alert').noteExpiredHolds(releasedRows);
   }
   return { released, rescued };
 }

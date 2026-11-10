@@ -363,3 +363,15 @@ it("GATE_HOME_LINE: a recent-conversation answer locks the picker to that line (
   await waitFor(() => expect(screen.getByRole("combobox", { name: "Send from" })).toHaveValue(conversationLine));
   expect(screen.getByRole("combobox", { name: "Send from" })).toBeDisabled();
 });
+
+it("notes a greeting name that differs from the record and fixes it on tap without touching Send", async () => {
+  responses["/admin/communications/name-check"] = () => ({ fixes: [{ heard: "Sarah", spelled: "Sara" }], text: "Hi Sara, the gate is fixed." });
+  const { field } = setup();
+  fireEvent.change(field, { target: { value: "Hi Sarah, the gate is fixed." } });
+
+  expect(await screen.findByText("Record says Sara")).toBeInTheDocument();
+  expect(bodyOf("/admin/communications/name-check")).toEqual({ customer_id: "customer-a", text: "Hi Sarah, the gate is fixed." });
+  expect(field).toHaveValue("Hi Sarah, the gate is fixed.");
+  fireEvent.click(screen.getByRole("button", { name: "Change to Sara" }));
+  expect(field).toHaveValue("Hi Sara, the gate is fixed.");
+});

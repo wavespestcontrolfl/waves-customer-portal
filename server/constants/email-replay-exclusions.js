@@ -1,7 +1,7 @@
 'use strict';
 
 // Category stamped on an estimate follow-up email that carries the monthly average
-// (GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE). The stored copy of such an email goes stale
+// (estimate-follow-up.js applyMonthlyAverage). The stored copy of such an email goes stale
 // when the estimate's price changes, so neither stored-copy rail may re-send it:
 // transactional-email-provider-retry.js (scheduling, claim and retry) and
 // email-bounce-recovery.js (corrected-address replay) skip rows that carry it. The
@@ -22,12 +22,21 @@ const MOVE_NOTICE_CATEGORY = 'appointment_move_notice';
 // so a replay would quietly drop the copy: neither rail re-sends it.
 const CARBON_COPY_CATEGORY = 'email_cc';
 
+// Category stamped on the "Your Multi-Home Discount is on" email (GATE_MULTI_HOME_DISCOUNT_EMAIL,
+// multi-home-discount-email.js). Its copy is true only while both Multi-Home gates are on, the
+// family's targets are still discounted, the payer routing and the email preference still hold,
+// which the job proves at its own send. A stored copy re-sent later would skip that proof (and
+// unsetting the gate would not stop it), so neither stored-copy rail re-sends it: the job tries
+// a failed send again itself, after fresh checks, at most once a day.
+const MULTI_HOME_DISCOUNT_CATEGORY = 'multi_home_discount_on';
+
 // Every category whose stored copy is never re-sent, with the reason a stopped
 // provider retry records.
 const NO_STORED_COPY_REPLAY = new Map([
   [ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, 'Not re-sent from stored copy (monthly average may be stale).'],
   [MOVE_NOTICE_CATEGORY, 'Not re-sent from stored copy (the visit may have changed since).'],
   [CARBON_COPY_CATEGORY, 'Not re-sent from stored copy (it was copied to a second address).'],
+  [MULTI_HOME_DISCOUNT_CATEGORY, 'Not re-sent from stored copy (the family discount is checked again before any re-send).'],
 ]);
 
 // The stop reason for a message's categories (an array), or null when its stored copy may be re-sent.
@@ -36,4 +45,7 @@ function staleStoredCopyReason(categories) {
   return hit ? NO_STORED_COPY_REPLAY.get(hit) : null;
 }
 
-module.exports = { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, MOVE_NOTICE_CATEGORY, CARBON_COPY_CATEGORY, NO_STORED_COPY_REPLAY, staleStoredCopyReason };
+module.exports = {
+  ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, MOVE_NOTICE_CATEGORY, CARBON_COPY_CATEGORY, MULTI_HOME_DISCOUNT_CATEGORY,
+  NO_STORED_COPY_REPLAY, staleStoredCopyReason,
+};

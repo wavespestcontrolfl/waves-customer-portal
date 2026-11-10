@@ -29,7 +29,7 @@ const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
 // Sources whose gratitude-only texts take the gratitude path. Only 'live_webhook' drafts are send-eligible.
 const GRATITUDE_CLASSIFY_SOURCES = new Set(['live_webhook', 'mac_late']);
-const { gateEnvValue, multiTechTextTimesLive, smsVoiceProfilePinVersion, smsEditLearningLive, smsPromptB1Live } = require('../config/feature-gates');
+const { gateEnvValue, multiTechTextTimesLive, smsVoiceProfilePinVersion, smsPromptB1Live } = require('../config/feature-gates');
 const { phoneIdentityKey } = require('../utils/phone');
 const { renderCompanyFactsSection } = require('./sms-company-facts');
 const labelFactsLib = require('./sms-label-facts');
@@ -267,10 +267,10 @@ function realAnswersBaseVersion() {
   if (smsPromptB1Live()) return nextOfSeries ? B1_NEXT_OF_SERIES_PROMPT_VERSION : B1_PROMPT_VERSION;
   return nextOfSeries ? NEXT_OF_SERIES_PROMPT_VERSION : REAL_ANSWERS_PROMPT_VERSION;
 }
-// VOICE INPUT TAGS (owner 2026-10-24, GATE_SMS_VOICE_PROFILE_PIN + GATE_SMS_EDIT_LEARNING). Neither gate edits the
+// VOICE INPUT TAGS (owner 2026-10-24, GATE_SMS_VOICE_PROFILE_PIN + edit learning). Neither edits the
 // prompt text or the facts block; each changes WHICH voice text the draft receives, so each is a cohort of its own:
 //   'v' = a voice profile pin is set (the drafter reads that profile version, not the newest approved one),
-//   'e' = edit learning is on (the few-shot exemplars rank edited-suggestion and human_better replies first).
+//   'e' = edit learning (the few-shot exemplars rank edited-suggestion and human_better replies first).
 // They join the single-character '+' tag set the four hand-off categories already use (b c l m), sorted with them, so
 // the flip order never changes the identity: real-answers base (32 chars) + '+' + up to six tags = 39, under
 // PROMPT_VERSION_COLUMN_MAX (40), pinned by a test. The tag follows the INPUT, not just the env var: 'v' needs the
@@ -282,7 +282,7 @@ function realAnswersBaseVersion() {
 function voiceInputTags() {
   const tags = [];
   if (smsVoiceProfilePinVersion() !== null && VOICE_PROFILE_ENABLED) tags.push('v');
-  if (smsEditLearningLive() && FEWSHOT_ENABLED && VERIFY_ENABLED) tags.push('e');
+  if (FEWSHOT_ENABLED && VERIFY_ENABLED) tags.push('e');
   return tags;
 }
 function withVoiceInputTags(base, categoryTags = []) {
@@ -559,7 +559,7 @@ function openTimesDayLabel(d) {
 // that same engine whatever the gate says by then. A snapshot with no source is
 // the old finder's, and is rechecked there.
 const {
-  SCHEDULER_OFFER_SOURCE, ESTIMATE_OFFER_SOURCE, BOOK_OFFER_SOURCE, WEBSITE_OFFER_SOURCE, RESERVICE_OFFER_SOURCE, ROUTE_TIMES_OFFER_SOURCE,
+  SCHEDULER_OFFER_SOURCE, ESTIMATE_OFFER_SOURCE, BOOK_OFFER_SOURCE, WEBSITE_OFFER_SOURCE, RESERVICE_OFFER_SOURCE,
 } = require('./sms-offer-sources');
 const SCHEDULER_VISIT_REASONS = new Set(['single_upcoming', 'next_of_series', 'named_scheduled_visit']);
 // The picker chain (visit load, page eligibility, booking config, the
@@ -568,10 +568,6 @@ const SCHEDULER_VISIT_REASONS = new Set(['single_upcoming', 'next_of_series', 'n
 // (3s) was sized for, and the reschedule GET route runs it with no deadline.
 // Only the scheduler path uses this; the old finder keeps its 3000.
 const SCHEDULER_OPEN_TIMES_TIMEOUT_MS = 10000;
-// A quote built on the route list (GATE_ASSISTANT_ROUTE_TIMES=true) waits this
-// long for it before the old finder quotes instead; the send-time recheck of
-// such a quote uses SCHEDULER_OPEN_TIMES_TIMEOUT_MS.
-const ROUTE_TIMES_QUOTE_BUDGET_MS = 3000;
 
 // The same label the zone finder renders (availability.js fullDate):
 // "Tuesday, September 29", from the picker's YYYY-MM-DD day.
@@ -671,7 +667,6 @@ async function loadSchedulerDays(offer, customerId, { fresh = false } = {}) {
   if (offer.source === BOOK_OFFER_SOURCE) return loadBookDays({ customerId, serviceKey: offer.serviceKey });
   if (offer.source === WEBSITE_OFFER_SOURCE) return loadWebsiteEngineDays({ offer, customerId });
   if (offer.source === RESERVICE_OFFER_SOURCE) return loadReserviceDays({ customerId, serviceKey: offer.serviceKey });
-  if (offer.source === ROUTE_TIMES_OFFER_SOURCE) return loadRouteTimesDays({ offer, customerId, fresh });
   return null;
 }
 
@@ -759,58 +754,11 @@ async function websiteOfferFor({ serviceType, estimateId, city }) {
   return { source: WEBSITE_OFFER_SOURCE, serviceKey, city };
 }
 
-// GATE_ASSISTANT_ROUTE_TIMES: the customer pages' list for the customer's own
-// pin (services/scheduling/assistant-route-times.js). A fresh read, except the
-// list the quote itself just built, which rides on the offer.
-async function loadRouteTimesDays({ offer, customerId, fresh = false }) {
-  if (!fresh && offer.preloadedDays) return { days: offer.preloadedDays };
-  const routeTimes = require('./scheduling/assistant-route-times');
-  const loaded = await routeTimes.loadRouteDays({
-    customerId, estimateId: offer.estimateId || null, serviceKey: offer.serviceKey, budgetMs: SCHEDULER_OPEN_TIMES_TIMEOUT_MS,
-  });
-  return loaded.days ? { days: loaded.days } : null;
-}
-
-// GATE_ASSISTANT_ROUTE_TIMES=true: the offer for a customer with a stored pin
-// whose route list built, else null (the old finder quotes, and stamps nothing).
-// The returned offer's source is stamped on the snapshot, so the send-time recheck
-// asks this same list.
-async function routeTimesOfferFor({ serviceType, estimateId, city, customerId }) {
-  try {
-    const routeTimes = require('./scheduling/assistant-route-times');
-    if (routeTimes.assistantRouteTimesMode() !== 'on' || !customerId) return null;
-    const website = await websiteOfferFor({ serviceType, estimateId, city });
-    if (!website?.serviceKey) return null;
-    const loaded = await routeTimes.loadRouteDays({ customerId, estimateId, serviceKey: website.serviceKey, budgetMs: ROUTE_TIMES_QUOTE_BUDGET_MS });
-    if (!loaded.days) return null;
-    return { source: ROUTE_TIMES_OFFER_SOURCE, serviceKey: website.serviceKey, city, estimateId, preloadedDays: loaded.days };
-  } catch (err) {
-    logger.warn(`[sms-shadow] route-times quote failed (${err.message}); the by-city finder quotes`);
-    return null;
-  }
-}
-
 // Where the city-based fallback gets its times: the website engine under
-// GATE_MULTI_TECH_TEXT_TIMES, else the route list under
-// GATE_ASSISTANT_ROUTE_TIMES=true, else null (the old by-city finder).
-async function cityFallbackOfferFor({ eligible, serviceType, estimateId, city, context }) {
-  if (!eligible) return null;
-  if (multiTechTextTimesLive()) return websiteOfferFor({ serviceType, estimateId, city });
-  return routeTimesOfferFor({ serviceType, estimateId, city, customerId: context?.customer?.id || null });
-}
-
-// GATE_ASSISTANT_ROUTE_TIMES=shadow: after the old finder answered a draft,
-// build the route list for the same customer and log how it differs. Detached
-// by the caller; never throws.
-async function shadowRouteTimes({ city, customerId, estimateId, serviceType, oldResult }) {
-  try {
-    const routeTimes = require('./scheduling/assistant-route-times');
-    if (routeTimes.assistantRouteTimesMode() !== 'shadow' || !customerId) return;
-    const website = await websiteOfferFor({ serviceType, estimateId, city });
-    await routeTimes.shadowCompare({ surface: 'sms_drafter', customerId, estimateId, serviceKey: website?.serviceKey || '', oldDays: oldResult?.days });
-  } catch (err) {
-    logger.warn(`[sms-shadow] route-times shadow compare failed (${err.message})`);
-  }
+// GATE_MULTI_TECH_TEXT_TIMES, else null (the old by-city finder).
+async function cityFallbackOfferFor({ eligible, serviceType, estimateId, city }) {
+  if (!eligible || !multiTechTextTimesLive()) return null;
+  return websiteOfferFor({ serviceType, estimateId, city });
 }
 
 // Up to OPEN_TIMES_MAX_SLOTS_PER_DAY starts per day whose 2-hour arrival
@@ -912,7 +860,6 @@ async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimate
     // thread already resolved to a specific estimate, the offered slots
     // must reflect THAT estimate's service minutes, not a generic default.
     const result = await Promise.race([Availability.getAvailableSlots(city, estimateId, { customerId, ...(serviceType ? { serviceType } : {}) }), timeout]);
-    shadowRouteTimes({ city, customerId, estimateId, serviceType, oldResult: result });
     const lines = [];
     const days = [];
     for (const d of (result?.days || [])) {
@@ -4429,7 +4376,7 @@ function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customer
       ...(schedulerOffer ? {
         source: schedulerOffer.source,
         ...(schedulerOffer.scheduledServiceId ? { scheduledServiceId: schedulerOffer.scheduledServiceId } : {}),
-        ...([BOOK_OFFER_SOURCE, WEBSITE_OFFER_SOURCE, RESERVICE_OFFER_SOURCE, ROUTE_TIMES_OFFER_SOURCE].includes(schedulerOffer.source) ? { serviceKey: schedulerOffer.serviceKey } : {}),
+        ...([BOOK_OFFER_SOURCE, WEBSITE_OFFER_SOURCE, RESERVICE_OFFER_SOURCE].includes(schedulerOffer.source) ? { serviceKey: schedulerOffer.serviceKey } : {}),
       } : {}),
     },
     quotedWindows,
@@ -5421,7 +5368,8 @@ function buildFactsBlock(context, extras = {}) {
     ? upcoming
         .map((s) => {
           const parts = [`${s.type}${s.isToday ? ' TODAY' : ''} on ${formatEtDate(s.date)}`];
-          parts.push(s.window ? `window ${s.window}` : 'no arrival window set');
+          // GATE_DAY_ONLY_PROMISE (part D): a day-only visit carries the plain "do not state an hour" note, not a window.
+          parts.push(s.windowDayOnly ? `arrival window: ${s.window}` : (s.window ? `window ${s.window}` : 'no arrival window set'));
           parts.push(s.tech ? `tech ${s.tech}` : 'tech not yet assigned');
           const liveState = (gateEnvValue('GATE_SMS_REAL_ANSWERS') && s.trackState) ? s.trackState : s.status;
           if (s.isToday && liveState === 'en_route') {
@@ -5649,9 +5597,9 @@ ${lines}`;
  * Fail-safe: any error (or the kill switch, or no intent) → [] so drafting is
  * never blocked on the corpus.
  */
-// GATE_SMS_EDIT_LEARNING exemplar ranking (owner 2026-10-24). All three facts are read at FETCH time from the live
+// Edit-learning exemplar ranking (owner 2026-10-24). All three facts are read at FETCH time from the live
 // tables, never stamped on the corpus row at mine time: the corpus is insert-ignore (a row never changes after it is
-// mined), a judgment lands days after the reply, and rows mined before the gate went on would otherwise never rank.
+// mined), a judgment lands days after the reply, and rows mined before the ranking went on would otherwise never rank.
 //   the reply's send resolved a suggestion decision: sms_log.metadata.agent_decision_id -> agent_decisions.id (the link
 //     both send paths stamp; the nightly judge and the corrections view join the same way). The uuid cast sits behind a
 //     shape check so one malformed metadata value cannot fail the query.
@@ -5670,7 +5618,7 @@ const JUDGED_HUMAN_BETTER_SQL = `EXISTS (SELECT 1 FROM shadow_draft_judgments j
    WHERE j.human_reply_sms_id = voice_corpus_examples.source_id AND j.verdict = 'human_better')`;
 const OUTCOME_RANK_SQL = `CASE WHEN ${EDITED_SUGGESTION_SQL} OR ${JUDGED_HUMAN_BETTER_SQL} THEN 0 ELSE 1 END`;
 
-async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, excludeCustomerIds = [], throwOnError = false, outcomeRanked = false } = {}) {
+async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, excludeCustomerIds = [], throwOnError = false } = {}) {
   if (!FEWSHOT_ENABLED || !intent || limit <= 0) return [];
   try {
     const query = dbi('voice_corpus_examples')
@@ -5687,15 +5635,11 @@ async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, ex
       // "sealed" means never trained on, not merely not trained on today.
       // (source_id for sms_human_reply rows IS the reply's sms_log id.)
       .whereNotIn('source_id', dbi('sms_sealed_eval_items').select('human_reply_sms_id').whereNotNull('human_reply_sms_id'));
-    if (outcomeRanked) {
-      // Edit learning: never teach the drafter its own text (a suggestion sent unchanged), then edited-suggestion and
-      // human_better replies first, newest within each tier. Off, the query below is the original newest-first one.
-      query
-        .whereRaw(`NOT ${LINKED_DECISION_VERDICT_SQL('accepted')}`)
-        .orderByRaw(`${OUTCOME_RANK_SQL} ASC, occurred_at DESC`);
-    } else {
-      query.orderBy('occurred_at', 'desc');
-    }
+    // Edit learning: never teach the drafter its own text (a suggestion sent unchanged), then edited-suggestion and
+    // human_better replies first, newest within each tier.
+    query
+      .whereRaw(`NOT ${LINKED_DECISION_VERDICT_SQL('accepted')}`)
+      .orderByRaw(`${OUTCOME_RANK_SQL} ASC, occurred_at DESC`);
     query.limit(limit).select('inbound_text', 'reply_text');
     if (excludeCustomerIds.length) query.whereNotIn('customer_id', excludeCustomerIds);
     return await query;
@@ -5909,7 +5853,10 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
       // and thinking spends from this same maxTokens ahead of the ~270-token
       // real draft — 10 of 71 live calls were hitting 600 with the overflow
       // being thinking, not draft text.
-      { laneId, system, text: userContent, jsonMode: false, maxTokens: 2000, anthropicClient: client },
+      // cacheTtl '1h' (2026-11-06 prompt-cache check): the ~10k-token system
+      // prompt is fixed and shared, and 46 of 69 weekly cache rewrites came
+      // after a 5 to 60 minute gap, which a 5-minute cache cannot cover.
+      { laneId, system, text: userContent, jsonMode: false, maxTokens: 2000, anthropicClient: client, cacheTtl: '1h' },
       { validate: (result) => (parseShadowResponse(result.text || '') ? null : 'unparseable') },
     );
     if (routed.ok) return {
@@ -6174,12 +6121,10 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     ? await schedulerOfferFor(identity, pricingEstimateId) : null;
   // GATE_MULTI_TECH_TEXT_TIMES: with no scheduler picker for this text, the
   // city-based fallback asks the website engine (stamped on the snapshot).
-  // GATE_ASSISTANT_ROUTE_TIMES=true: a customer with a stored pin and no other
-  // picker gets the route list instead, stamped on the snapshot the same way.
   const schedulerOffer = schedulerPickerOffer
     || await cityFallbackOfferFor({
       eligible: willFetchOpenTimes && identityCertain && Boolean(city),
-      serviceType, estimateId: pricingEstimateId, city, context,
+      serviceType, estimateId: pricingEstimateId, city,
     });
   // A frozen replay validates offered_times against the OPEN TIMES it
   // actually saw (parsed back out of its own facts block); `block` stays
@@ -6240,7 +6185,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // Gratitude has fixed server-approved copy. Mutable corpus examples add no
   // value here and would change the examined prompt without a version change.
   const exemplars = VERIFY_ENABLED && intent?.intent !== GRATITUDE_INTENT
-    ? await fetchVoiceExemplars({ intent: intent?.intent, outcomeRanked: smsEditLearningLive() }) : [];
+    ? await fetchVoiceExemplars({ intent: intent?.intent }) : [];
   const exemplarBlock = formatExemplarBlock(exemplars);
   const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock, draftPromptHints({ context, reserviceLaneDecides, reserviceState, inboundMessage }));
 
@@ -7069,8 +7014,6 @@ module.exports = {
   computeOpenTimesSnapshot,
   websiteOfferFor,
   cityFallbackOfferFor,
-  routeTimesOfferFor,
-  shadowRouteTimes,
   WEBSITE_OFFER_SOURCE,
   openTimesStillOffered,
   SLA_PHRASES: followupSla.SLA_PHRASES,

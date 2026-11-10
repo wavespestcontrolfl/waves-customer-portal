@@ -17,6 +17,9 @@ const { explainAdminAlert, explainerLive, withExplainerFields } = require('../se
 const {
   sendAdminAlertToClaude, unsendAdminAlertFromClaude, withSendToClaudeFields, cleanNote, sendToClaudeLive,
 } = require('../services/admin-alert-send-to-claude');
+const {
+  copyLive, withSendCopyToClaudeFields, sendAlertCopyToClaude, cancelAlertCopy,
+} = require('../services/admin-alert-copy-to-claude');
 
 router.use(adminAuthenticate);
 
@@ -47,6 +50,9 @@ function notificationIssueLimit(value) {
 // exactly. A JS Date would round to the millisecond and skip or repeat rows
 // that share one. Without that field (a row from elsewhere) the ISO string of
 // the Date is the fallback.
+// GATE_ALERT_BELL_ORDER: the bell's cursor is "<rank>~<timestamp>~<id>" (rank 0, 1 or 2, see BELL_RANK_SQL in
+// services/notification-service.js). parseCursor reads both shapes; a two-part cursor has no `rank`. The list route
+// continues only a cursor of the current order; the other shape restarts at page 1 (`restart: true`).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // ISO-8601 or Postgres timestamptz text: date, 'T' or space, time, optional
 // fraction (up to microseconds), and a zone (never a naive time: it would be
@@ -58,15 +64,50 @@ function formatCursor(row, column = 'created_at', fullColumn = `${column}_cursor
   const at = new Date(row[column]);
   return Number.isNaN(at.getTime()) ? null : `${at.toISOString()}~${row.id}`;
 }
+// The ranked bell's cursor: the row's rank in front of the plain cursor. A row with no rank is rank 0 (never skips).
+function formatRankedCursor(row) {
+  const plain = formatCursor(row);
+  if (!plain) return null;
+  const rank = Number(row.bell_rank);
+  return `${rank === 1 || rank === 2 ? rank : 0}~${plain}`;
+}
 function parseCursor(raw) {
   if (typeof raw !== 'string' || !raw) return null;
-  const [at, id] = raw.split('~');
+  const parts = raw.split('~');
+  if (parts.length !== 2 && parts.length !== 3) return null;
+  const [rank, at, id] = parts.length === 3 ? parts : [null, ...parts];
   if (!id || !UUID_RE.test(id) || !TIMESTAMP_TEXT_RE.test(at) || Number.isNaN(new Date(at).getTime())) return null;
-  return { at, id };
+  if (rank === null) return { at, id };
+  return /^[012]$/.test(rank) ? { at, id, rank: Number(rank) } : null;
 }
-// Served rows carry the cursor text only to build `next`; the client never needs it.
-function withoutCursorFields({ created_at_cursor, ...row }) {  
+// Served rows carry the cursor text (and, ranked, the rank) only to build `next`; the client never needs them.
+function withoutCursorFields({ created_at_cursor, bell_rank, ...row }) {
   return row;
+}
+
+// GATE_ALERT_BELL_ORDER, read at call time. A test that mocks feature-gates without the reader reads it as off.
+function bellOrderOn() {
+  try {
+    const gates = require('../config/feature-gates');
+    return typeof gates.alertBellOrderLive === 'function' && gates.alertBellOrderLive() === true;
+  } catch { return false; }
+}
+// The row's Area when metadata.area is one of the nine Areas; nothing otherwise. Lazy require: only a ranked list needs it.
+function withAreaChips(rows) {
+  const { AREAS } = require('../services/admin-alert-compose');
+  return rows.map((row) => {
+    const area = parseMetadata(row.metadata).area;
+    return AREAS.includes(area) ? { ...row, areaChip: area } : row;
+  });
+}
+
+// Which cursor the list continues from. A cursor made in the other order (a ranked one while the gate is off, a
+// chronological one while it is on) is dropped and `restart` is true: the route serves page 1 of the current order.
+// `page` is the page number to serve and report: 1 on a restart.
+function resolveBellCursor(parsed, ranked, page) {
+  if (!parsed) return { restart: false, before: null, page };
+  const restart = ranked !== (parsed.rank !== undefined);
+  return { restart, before: restart ? null : parsed, page: restart ? 1 : page };
 }
 
 // GET /api/admin/notifications — list with pagination.
@@ -77,16 +118,23 @@ function withoutCursorFields({ created_at_cursor, ...row }) {
 // — escalation history (older counts) stays.
 router.get('/', async (req, res, next) => {
   try {
-    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const requestedPage = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
     // before: the `next` cursor a previous page returned. Rows leave the
     // feed between requests (Done here, another admin's Done, an auto-close),
     // so an offset would skip the rows that moved up; the cursor continues
     // strictly after the last row served. page stays for callers without one.
-    const before = parseCursor(req.query.before);
-    if (req.query.before && !before) return res.status(400).json({ error: 'Invalid cursor' });
-    const offset = before ? 0 : (page - 1) * limit;
-    const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole, technicianId: req.technicianId, before });
+    const ranked = bellOrderOn();
+    const parsed = parseCursor(req.query.before);
+    if (req.query.before && !parsed) return res.status(400).json({ error: 'Invalid cursor' });
+    // A cursor only continues the order it was made in. A three-part (ranked) cursor while the gate is off, or a
+    // two-part (chronological) cursor while it is on, belongs to the other order: continuing from it would skip rows
+    // the panel never got. Serve page 1 of the current order instead and say `restart: true`; the bell replaces its list.
+    const { restart, before, page } = resolveBellCursor(parsed, ranked, requestedPage);
+    const offset = before || restart ? 0 : (page - 1) * limit;
+    // fullAccess: an owner-only row (a Claude plan or copy) is listed for the owner login alone.
+    const fullAccess = ibFullAccess(req);
+    const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole, technicianId: req.technicianId, before, fullAccess, ...(ranked ? { ranked } : {}) });
     // Bell policy on: computed dashboard aggregates stay on the dashboard
     // banner (/admin/dashboard/alerts) but no longer merge into the bell.
     // Live overlay is ADMIN-ONLY regardless of policy: dashboard alerts
@@ -103,17 +151,26 @@ router.get('/', async (req, res, next) => {
     // An SMS review bell's source text rides as `source_text`, read now and never stored on the row. Added last:
     // the explainer reads the stored row by id, never this.
     const { withTextNoteSources } = require('../services/sms-operational-actions');
-    const marked = await withSendToClaudeFields(await withExplainerFields(served, { role: req.techRole }),
-      { role: req.techRole, fullAccess: ibFullAccess(req) });
-    const rows = await withTextNoteSources(marked, { role: req.techRole });
+    const sendable = await withSendToClaudeFields(await withExplainerFields(served, { role: req.techRole }),
+      { role: req.techRole, fullAccess });
+    // `sendCopyToClaude` marks a row step 1 refuses (customer contact, words our code did not write), owner login only.
+    const marked = withSendCopyToClaudeFields(sendable, { role: req.techRole, fullAccess });
+    const withSources = await withTextNoteSources(marked, { role: req.techRole });
+    // Ranked: one Area chip per row, from the stored label. The row's own metadata is read, never the customer's words.
+    const rows = ranked ? withAreaChips(withSources) : withSources;
     res.json({
       // A row's own buttons ride as `actions`, for the admin role only (docs/admin-notifications.md section 2, part 9).
       // The customer it names and its "What to do" summary ride as `customer`, `explainable` and `explainer`, for the
-      // admin role while GATE_ALERT_EXPLAINER is on. `sendToClaude` marks a row the "Send to Claude" button may move,
+      // admin role while GATE_ALERT_EXPLAINER is on. With that gate off, GATE_ALERT_CUSTOMER_LINE alone adds `customer`
+      // (a database read, no AI call). The done list (/done) carries neither. `sendToClaude` marks a row the "Send to Claude" button may move,
       // for the admin role while GATE_ALERT_SEND_TO_CLAUDE is on (no explainer needed).
       notifications: [...(page === 1 && !before ? liveCtx.live : []), ...rows],
       page, limit, hasMore: persisted.length > limit,
-      next: persisted.length > limit && lastServed ? formatCursor(lastServed) : null,
+      next: persisted.length > limit && lastServed ? (ranked ? formatRankedCursor(lastServed) : formatCursor(lastServed)) : null,
+      // The list is ranked (needs-you first, then newest first inside a rank): the bell keeps this order as served.
+      ...(ranked ? { order: 'needs-you-first' } : {}),
+      // The cursor sent belonged to the other order: this is page 1 of the current one and replaces the panel's list.
+      ...(restart ? { restart: true } : {}),
     });
   } catch (err) { next(err); }
 });
@@ -313,7 +370,7 @@ async function dismissLiveAlerts(adminUserId, alertIdFilter = null) {
 // zero (was lingering because live alerts have no persisted read_at).
 router.put('/read-all', async (req, res, next) => {
   try {
-    await NotificationService.markAllReadAdmin({ role: req.techRole, technicianId: req.technicianId });
+    await NotificationService.markAllReadAdmin({ role: req.techRole, technicianId: req.technicianId, fullAccess: ibFullAccess(req) });
     // Live-alert dismissal is admin-only: the overlay never renders for
     // other roles, and its helper also marks persisted dashboard_alert
     // rows read — rows the fail-closed feed hides from them (codex P1).
@@ -447,7 +504,7 @@ router.put('/:id/read', async (req, res, next) => {
       return res.json({ success: true, live: true, dismissed: recorded > 0 });
     }
     // Scoped to admin notifications — an admin can't clear a customer's row by id.
-    const updated = await NotificationService.markReadAdmin(id, { role: req.techRole, technicianId: req.technicianId });
+    const updated = await NotificationService.markReadAdmin(id, { role: req.techRole, technicianId: req.technicianId, fullAccess: ibFullAccess(req) });
     // No badge-ordering stamp — see /read-all.
     res.json({ success: true, updated });
   } catch (err) { next(err); }
@@ -497,6 +554,8 @@ router.post('/:id/actions/:actionId', requireAdmin, async (req, res, next) => {
   try {
     const id = String(req.params.id);
     if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid notification id' });
+    // An owner-only row answers any other login as an unknown row does.
+    if (await hiddenFromLogin(req, id)) return res.status(404).json({ error: 'not_found' });
     const version = req.body?.version;
     if (typeof version !== 'string' || !NOTIFICATION_VERSION_RE.test(version)) {
       return res.status(400).json({ error: 'version is required' });
@@ -571,6 +630,45 @@ router.post('/:id/unsend-from-claude', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/notifications/:id/send-copy-to-claude — the bell's "Send a copy to Claude (read-only)" button for a row
+// "Send to Claude" refuses (GATE_ALERT_SEND_TO_CLAUDE_COPY, owner login only, step 3). `version` (required): the content
+// version the bell served for the row. `note` (optional text, 500 characters). Writes ONE new owner-only row into Claude's
+// queue that names the alert by id and holds no customer words; the alert itself stays in the bell
+// (services/admin-alert-copy-to-claude.js). The answer carries the copy's `id` and `at`, for the undo. 409 when the row
+// changed since the bell read it or cannot be copied. Sends nothing to anyone. Gate off: 404, the same as an unknown route.
+router.post('/:id/send-copy-to-claude', requireAdmin, async (req, res, next) => {
+  try {
+    if (!copyLive()) return res.status(404).json({ error: 'Not found' });
+    if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.' });
+    const id = String(req.params.id);
+    if (!UUID_RE.test(id)) return res.status(404).json({ error: 'Not found' });
+    const version = req.body?.version;
+    if (typeof version !== 'string' || !NOTIFICATION_VERSION_RE.test(version)) {
+      return res.status(400).json({ error: 'version is required' });
+    }
+    const { status, body } = await sendAlertCopyToClaude(id, {
+      version: version.toLowerCase(), note: req.body?.note, by: req.technicianId, role: req.techRole, technicianId: req.technicianId,
+    });
+    res.status(status).json(body);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/notifications/:id/cancel-copy — the 10-second Undo after a copy, on the COPY's id (GATE_ALERT_SEND_TO_CLAUDE_COPY,
+// owner login only). `at` (required): the time the send answered with. Closes the copy while it is open, still that send and
+// no Mac tab has started on it; 409 `started`, `changed` or `done` otherwise. Gate off: 404.
+router.post('/:id/cancel-copy', requireAdmin, async (req, res, next) => {
+  try {
+    if (!copyLive()) return res.status(404).json({ error: 'Not found' });
+    if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.' });
+    const id = String(req.params.id);
+    if (!UUID_RE.test(id)) return res.status(404).json({ error: 'Not found' });
+    const at = req.body?.at;
+    if (typeof at !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(at)) return res.status(400).json({ error: 'at is required' });
+    const { status, body } = await cancelAlertCopy(id, { at, by: req.technicianId, role: req.techRole, technicianId: req.technicianId });
+    res.status(status).json(body);
+  } catch (err) { next(err); }
+});
+
 // PUT /api/admin/notifications/:id/reopen — put a done row back in the bell.
 // `doneAt` (required): the done_at_token the Recently-done list served for the
 // row. A stale list cannot clear a NEWER completion: a row that is still done
@@ -591,3 +689,5 @@ router.put('/:id/reopen', requireAdmin, async (req, res, next) => {
 });
 
 module.exports = router;
+// Test hooks (cursor shapes); not part of the router API.
+module.exports._cursor = { parseCursor, formatCursor, formatRankedCursor };

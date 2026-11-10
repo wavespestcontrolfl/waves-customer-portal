@@ -247,9 +247,14 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // Generic appointment texts also include links and preparation tips;
       // only a scheduling notice can replace the customer's promised window.
       // Legacy move notices without a saved time still count as unknown.
+      // GATE_DAY_ONLY_PROMISE: a day-only move notice is a purpose 'appointment' row with NO saved slot, so none of
+      // the other predicates fetch it. Left unread, the reader would fall back to an OLDER known window (the trap
+      // the LEGACY_SCHEDULING_MESSAGE_TYPES note describes) and keep enforcing a window the visit no longer holds.
+      // Only the day-only senders write the marker (services/time-promise.js DAY_PROMISE_META).
       .whereRaw(`(a.purpose = ANY(?::text[]) OR (a.purpose = 'appointment' AND
         (a.metadata->>'rendered_slot_ms' IS NOT NULL OR a.metadata->>'original_message_type' LIKE 'rain_out_moved%'
-          OR a.metadata->>'original_message_type' = ANY(?::text[]))))`, [NOTICE_PURPOSES, LEGACY_SCHEDULING_MESSAGE_TYPES])
+          OR a.metadata->>'original_message_type' = ANY(?::text[])
+          OR a.metadata->>'promise_level' = 'day')))`, [NOTICE_PURPOSES, LEGACY_SCHEDULING_MESSAGE_TYPES])
       .where('a.sent_at', '<=', now).whereNull('a.blocked_code').whereNull('a.provider_error')
       // Live delivery state comes from the sms_log row Twilio's status
       // callback updates. A LINKED row must currently read sent/delivered/
@@ -442,7 +447,10 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     () => conn('email_messages')
       .whereIn(conn.raw("split_part(idempotency_key, ':', 1)"), APPOINTMENT_EMAIL_EVENTS)
       .whereIn(conn.raw("split_part(idempotency_key, ':', 2)"), visitIds)
-      .whereRaw("split_part(idempotency_key, ':', 3) ~ '^[0-9]+$'")
+      // Segment 3 is the slot epoch, or (GATE_DAY_ONLY_PROMISE) `day-<YYYY-MM-DD>` for a day-only email, which quoted no
+      // hour: recovered as a DAY promise (level 'day', no slot) below, so the evidence survives a failed interaction
+      // insert. A numeric key behaves exactly as before.
+      .whereRaw("(split_part(idempotency_key, ':', 3) ~ '^[0-9]+$' OR split_part(idempotency_key, ':', 3) ~ '^day-[0-9]{4}-[0-9]{2}-[0-9]{2}$')")
       .whereIn('status', DELIVERED_EMAIL_STATUSES)
       .whereNotNull('sent_at').where('sent_at', '<=', now)
       .select('id', 'sent_at', conn.raw("split_part(idempotency_key, ':', 2) as visit_id"),
@@ -497,7 +505,10 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // seriesSupersessions/latestPromises dedupe by visit anyway.
       .select('em.id', 'em.sent_at', 'sv.id as visit_id', 'keyed.id as stop_id',
         conn.raw("split_part(em.idempotency_key, ':', 1) as tier"),
-        conn.raw("split_part(em.idempotency_key, ':', 5) as occurrence")),
+        conn.raw("split_part(em.idempotency_key, ':', 5) as occurrence"),
+        // A day-only grouped email (GATE_DAY_ONLY_PROMISE) ends its key with `:day` in segment 6 (a window email has the
+        // recipient token there), so the recovered unknown-window event can be read as a day promise.
+        conn.raw("split_part(em.idempotency_key, ':', 6) = 'day' as day_only")),
     // A call-created booking: the visit row itself carries source_call_log_id
     // (a FK written in the booking transaction), so the window the agent
     // committed on that call is derivable from durable state — no separate
@@ -570,7 +581,10 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .where((qb) => qb.whereRaw("fb.metadata->>'provider_sid' IS NULL").orWhereNull('fbs.id')
         .orWhereIn('fbs.status', DELIVERED_SMS_STATUSES))
       .whereRaw("sm.rows @> ANY (SELECT jsonb_build_array(jsonb_build_object('id', v)) FROM unnest(?::text[]) AS v)", [visitIds])
-      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'sm.result', conn.raw("(fb.metadata->>'communicated_at')::timestamptz as sent_at")),
+      // promise_level: the fallback row of a DAY-ONLY series notice carries the day marker (GATE_DAY_ONLY_PROMISE part B2),
+      // so the moved siblings read as a day promise, not an unknown window.
+      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'sm.result', conn.raw("(fb.metadata->>'communicated_at')::timestamptz as sent_at"),
+        conn.raw("fb.metadata->>'promise_level' as promise_level")),
     () => conn('series_moves as sm')
       // The move's own series text, joined by the series_move_id its metadata
       // carries, and held to the SAME delivery bar as any other promise
@@ -605,7 +619,8 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // limits) could abort the whole tick (codex P2 round 11). The GIN index
       // still serves each generated element.
       .whereRaw("sm.rows @> ANY (SELECT jsonb_build_array(jsonb_build_object('id', v)) FROM unnest(?::text[]) AS v)", [visitIds])
-      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'sm.result', 'a.sent_at'),
+      // promise_level: a DAY-ONLY series notice (GATE_DAY_ONLY_PROMISE part B2) tells the siblings the day, not an hour.
+      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'sm.result', 'a.sent_at', conn.raw("a.metadata->>'promise_level' as promise_level")),
   ];
   const results = [];
   if (conn.isTransaction) {
@@ -621,16 +636,22 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   // interaction insert fails the KNOWN window is already on the message side,
   // and a check that looked only at interaction rows let the later email row
   // survive as an unknown-window fallback and outrank it (codex P1 round 21).
+  // GATE_DAY_ONLY_PROMISE: a row whose metadata carries promise_level 'day' was a day-only promise (no hour was
+  // told). Its event gets level: 'day' and, having no slot, start_at null, so it behaves as an unknown window in
+  // latestPromises / stopPromise (newest wins, a tie goes to the known window). The alerting below treats a latest
+  // day promise like an unknown window: no no-show alert until the 24-hour text records the real window. An
+  // unmarked row gets no `level` key at all, so every existing event keeps its exact shape.
+  const levelOf = (metadata) => (metadata?.promise_level === 'day' ? { level: 'day' } : {});
   const noticeEvents = [
     ...messages.map((r) => ({ visit_id: r.appointment_id || r.metadata?.scheduled_service_id,
-      start_at: slotOf(r.metadata), tier: reminderTier(r.purpose || r.metadata?.original_message_type),
+      start_at: slotOf(r.metadata), ...levelOf(r.metadata), tier: reminderTier(r.purpose || r.metadata?.original_message_type),
       // notificationEventKey is the visit-effect claim the GROUPED send was
       // made under (appointment-reminders.js): it marks copy that speaks for
       // the whole stop, not just this member's own service.
       grouped: !!r.metadata?.notificationEventKey,
       communicated_at: r.sent_at, source: 'message', source_id: r.id })),
     ...emails.map((r) => ({ visit_id: r.metadata?.scheduled_service_id, start_at: slotOf(r.metadata),
-      tier: reminderTier(r.metadata?.event_type),
+      ...levelOf(r.metadata), tier: reminderTier(r.metadata?.event_type),
       grouped: String(r.em_key || '').includes(':visit:') || !!r.metadata?.notificationEventKey,
       // The retry's send time when there is one (see the select above), then
       // the interaction row's own snapshot, then its insert time. A promise
@@ -690,15 +711,19 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .map(sendKey));
     return groupedEmails
       .filter((r) => !recoveredSends.has(sendKey(r)))
-      .map((r) => ({ visit_id: r.visit_id, start_at: null, communicated_at: r.sent_at,
-        source: 'email', source_id: r.id }));
+      .map((r) => ({ visit_id: r.visit_id, start_at: null, ...(r.day_only === true ? { level: 'day' } : {}),
+        communicated_at: r.sent_at, source: 'email', source_id: r.id }));
   })();
-  const directEmailFallbacks = directEmails.map((r) => ({ visit_id: r.visit_id,
-    start_at: new Date(Number(r.slot_ms)).toISOString(), grouped: r.stop_wide === true, communicated_at: r.sent_at,
-    source: 'email', source_id: r.id }));
+  // A key whose segment 3 is `day-<date>` was a day-only email: a day promise, no slot (never an invented hour).
+  const directEmailFallbacks = directEmails.map((r) => (/^day-/.test(String(r.slot_ms))
+    ? { visit_id: r.visit_id, start_at: null, level: 'day', grouped: r.stop_wide === true, communicated_at: r.sent_at,
+      source: 'email', source_id: r.id }
+    : { visit_id: r.visit_id,
+      start_at: new Date(Number(r.slot_ms)).toISOString(), grouped: r.stop_wide === true, communicated_at: r.sent_at,
+      source: 'email', source_id: r.id }));
   return [
     ...noticeEvents,
-    ...calls.map((r) => ({ visit_id: r.resource_id, start_at: r.metadata?.start_at,
+    ...calls.map((r) => ({ visit_id: r.resource_id, start_at: r.metadata?.start_at, ...levelOf(r.metadata),
       grouped: r.metadata?.stop_wide === true,
       communicated_at: r.metadata?.communicated_at || r.created_at, source: 'call', source_id: r.id })),
 
@@ -807,6 +832,14 @@ function anchorStopStartAt(move) {
   return Number.isFinite(at.getTime()) ? at.toISOString() : null;
 }
 
+// What a series notice told one moved visit: its start (only an anchor-stop partner is told one) or, for a DAY-ONLY notice
+// (promise_level 'day', GATE_DAY_ONLY_PROMISE part B2: no start was quoted, every moved visit was told the DAY), start_at null
+// with level 'day'. An unmarked notice keeps its exact shape.
+function seriesTold(move, anchorStopPartner) {
+  if (move.promise_level === 'day') return { start_at: null, level: 'day' };
+  return { start_at: anchorStopPartner ? anchorStopStartAt(move) : null };
+}
+
 function seriesSupersessions(rows = [], candidates = new Set()) {
   // One row per DELIVERED recipient of the move's text (a fan-out to two
   // appointment contacts writes two audit rows), so keep the earliest
@@ -823,7 +856,7 @@ function seriesSupersessions(rows = [], candidates = new Set()) {
       if (prior && instant(prior.communicated_at) <= instant(move.sent_at)) continue;
       const anchorStopPartner = occurrence.partner === true
         && String(occurrence.forOccurrenceId || '') === String(move.anchor_service_id || '');
-      earliest.set(key, { visit_id: visitId, start_at: anchorStopPartner ? anchorStopStartAt(move) : null, communicated_at: move.sent_at, source: 'series_move', source_id: move.id });
+      earliest.set(key, { visit_id: visitId, ...seriesTold(move, anchorStopPartner), communicated_at: move.sent_at, source: 'series_move', source_id: move.id });
     }
   }
   return [...earliest.values()];
@@ -925,7 +958,7 @@ function agentCommittedStart(call) {
 // when the primary ledger failed, and its whole purpose is to still be there
 // whenever the feature is switched on. Best-effort itself — a send must
 // never fail because its bookkeeping did.
-async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = new Date(), providerSid = null, seriesMoveId = null, stopWide = false, windowUnknown = false } = {}) {
+async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = new Date(), providerSid = null, seriesMoveId = null, stopWide = false, windowUnknown = false, promiseLevel = null } = {}) {
   // null BEFORE the Number conversion: Number(null) is 0, a finite instant
   // (the epoch), so a bare isFinite check would stamp a 1970 window as the
   // promise — the same null-before-conversion trap `instant` guards above.
@@ -953,6 +986,8 @@ async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = n
         // so the promise it recovers supersedes every member's own rather
         // than reading as one service's (codex P1 round 26).
         ...(stopWide ? { stop_wide: true } : {}),
+        // GATE_DAY_ONLY_PROMISE: a day-only send is recorded as a day promise (read back as level 'day').
+        ...(promiseLevel === 'day' ? { promise_level: 'day' } : {}),
         fallback_reason: 'messaging_audit_unavailable' }, critical: true });
     return true;
   } catch (err) {

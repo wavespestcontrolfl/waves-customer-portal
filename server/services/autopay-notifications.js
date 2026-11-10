@@ -68,9 +68,15 @@ async function pendingPreChargeLegs(customerId) {
   return pending;
 }
 
+// One event per customer and charge date: every leg of one reminder, on any
+// day it is (re)tried, shares this key.
+function preChargeEventKey(customerId, target) {
+  return `autopay-pre-charge:${customerId}:${etDateString(target)}`;
+}
+
 async function sendPreChargeLegs({ customer, target, legs, sendInput, amountCents }) {
   const chargeDate = etDateString(target);
-  const eventKey = `autopay-pre-charge:${customer.id}:${chargeDate}`;
+  const eventKey = preChargeEventKey(customer.id, target);
   let delivered = 0;
   let settled = 0;
   let code = null;
@@ -122,6 +128,11 @@ async function sendPreChargeReminders() {
   // Email leg may have been refused on the first pass: the per-leg cooldown
   // keeps an accepted leg from repeating, so a refused leg is retried each
   // remaining day before the charge instead of waiting a whole cycle.
+  // GATE_MONEY_NOTICE_CATCHUP (owner 2026-11-06): those two days re-select a
+  // phone customer too, so a lost 9:00 tick is made up the next day instead
+  // of charging with no advance text. The customer-wide 25-day cooldown below
+  // keeps it to one reminder per charge.
+  const catchUp = require('../config/feature-gates').moneyNoticeCatchupLive();
   const today = new Date();
   const targets = [3, 2, 1].map((days) => addETDays(today, days));
   const dayOf = (date) => Number(etParts(date).day);
@@ -156,8 +167,9 @@ async function sendPreChargeReminders() {
     .whereRaw(MONTHLY_LANE_SQL)
     .where(function eligibleBillingDay() {
       this.where('billing_day', targetDay)
-        .orWhere(function noPhoneRetry() {
-          this.whereRaw("COALESCE(phone, '') = ''").whereIn('billing_day', retryDays);
+        .orWhere(function retryDay() {
+          if (!catchUp) this.whereRaw("COALESCE(phone, '') = ''");
+          this.whereIn('billing_day', retryDays);
         });
     })
     .whereNull('deleted_at')
@@ -169,8 +181,8 @@ async function sendPreChargeReminders() {
 
   for (const c of customers) {
     try {
-      // The charge date this row was selected for (T+3 for a phone
-      // customer; a retry day only re-selects a no-phone customer).
+      // The charge date this row was selected for (T+3, or a retry day: a
+      // no-phone customer, or any customer under the catch-up gate).
       const target = targets.find((date) => dayOf(date) === Number(c.billing_day)) || targets[0];
       // No phone: only an explicit App / Email choice can carry the
       // reminder, and each selected leg is dispatched on its own below
@@ -216,7 +228,14 @@ async function sendPreChargeReminders() {
         // member stamps 'monthly_membership', never a null the owner digest
         // would flag. The digest classifies against this stamp, not the
         // customer's lane at read time.
-        metadata: { original_message_type: 'autopay_pre_charge', billing_mode_at_send: 'monthly_membership' },
+        metadata: {
+          original_message_type: 'autopay_pre_charge',
+          billing_mode_at_send: 'monthly_membership',
+          // Catch-up gate: a phone send carries the per-charge event key the
+          // no-phone legs already use, so a retry day's send dedupes against an
+          // earlier accepted Email/Text/App leg for the same charge date.
+          ...(catchUp ? { notificationEventKey: preChargeEventKey(c.id, target) } : {}),
+        },
         // Fresh verdict at the wrapper's final abort point (codex #3607 r7
         // + r8): the lane filter ran once for the whole batch, and render +
         // validators are further awaits — a customer moved out of the

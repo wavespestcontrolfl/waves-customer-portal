@@ -1,8 +1,8 @@
 /**
- * GATE_ROUTE_CHECK_STAFF_LISTS (owner 2026-10-29, "Route Check Everywhere"
+ * Route-checked staff day lists (owner 2026-10-29, "Route Check Everywhere"
  * build 1): the staff day lists (SmartRebooker.findRescheduleOptions behind the
  * Reschedule window and the Quick Move day buttons) rank days by the
- * dispatcher's arrival-window route check. Off = today's list.
+ * dispatcher's arrival-window route check. Arrival-window routing off = today's list.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -61,7 +61,7 @@ const datesOf = (call) => {
   return out;
 };
 
-const ENV_KEYS = ['GATE_ROUTE_CHECK_STAFF_LISTS', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_PICKER_ROAD_CHECK', 'GATE_SCHEDULING_CAPACITY',
+const ENV_KEYS = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_PICKER_ROAD_CHECK', 'GATE_SCHEDULING_CAPACITY',
   'GATE_AUTO_DISPATCH_DAY_RULES'];
 let saved;
 beforeEach(() => {
@@ -76,27 +76,20 @@ afterEach(() => {
   ENV_KEYS.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; });
 });
 
-const gateOn = () => { process.env.GATE_ROUTE_CHECK_STAFF_LISTS = 'true'; process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; };
+const gateOn = () => { process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; };
 const ADMIN = { isAdmin: true, technicianId: 'staff-9' };
 
-describe('gate off', () => {
+describe('arrival-window routing off', () => {
   test('the route check is never asked, even with an admin caller', async () => {
-    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     const options = await SmartRebooker.findRescheduleOptions('svc-1', undefined, { caller: ADMIN });
     expect(findAvailableSlots).not.toHaveBeenCalled();
     expect(options).toHaveLength(3);
     expect(Object.keys(options[0]).sort()).toEqual(['currentLoad', 'date', 'dayOfWeek', 'displayDate', 'sameAreaServices', 'score', 'suggestedWindow']);
     expect(options.map((o) => o.score)).toEqual([...options.map((o) => o.score)].sort((a, b) => b - a));
   });
-
-  test('gate on without arrival-window routing is also today\'s list', async () => {
-    process.env.GATE_ROUTE_CHECK_STAFF_LISTS = 'true';
-    await SmartRebooker.findRescheduleOptions('svc-1', undefined, { caller: ADMIN });
-    expect(findAvailableSlots).not.toHaveBeenCalled();
-  });
 });
 
-describe('gate on', () => {
+describe('arrival-window routing on', () => {
   beforeEach(gateOn);
 
   test('admin caller: one search, Google through the staff spender and a request budget', async () => {
@@ -242,7 +235,7 @@ describe('gate on', () => {
 
   test('every day unverified: today\'s list, unchanged', async () => {
     const legacy = await (async () => {
-      delete process.env.GATE_ROUTE_CHECK_STAFF_LISTS;
+      delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
       const list = await SmartRebooker.findRescheduleOptions('svc-1', undefined, { caller: ADMIN });
       gateOn();
       return list;
@@ -259,7 +252,7 @@ describe('gate on', () => {
     ['throws', () => { throw new Error('boom'); }],
     ['returns an error', async () => ({ error: 'lat/lng required', slots: [] })],
   ])('a search that %s: today\'s list, unchanged', async (_name, impl) => {
-    delete process.env.GATE_ROUTE_CHECK_STAFF_LISTS;
+    delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
     const legacy = await SmartRebooker.findRescheduleOptions('svc-1', undefined, { caller: ADMIN });
     gateOn();
     findAvailableSlots.mockImplementation(impl);

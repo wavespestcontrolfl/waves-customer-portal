@@ -27,7 +27,7 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const DATE = etDateString(addETDays(new Date(), 10));
 const SERVICE = '0123456789abcdef-svc';
-const GATES = ['GATE_DRIVE_TIME_CALIBRATION', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_STAFF_ROUTE_INSERTION', 'GATE_SCHEDULING_CAPACITY'];
+const GATES = ['GATE_DRIVE_TIME_CALIBRATION', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY'];
 const saved = Object.fromEntries(GATES.map(key => [key, process.env[key]]));
 
 const saveRow = (over = {}) => ({ scheduled_date: DATE, technician_id: 'tech-1', window_start: '09:00:00', window_end: '10:00:00', ...over });
@@ -85,7 +85,6 @@ beforeEach(() => {
   mockDayRows = [];
   process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
-  process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
   delete process.env.GATE_SCHEDULING_CAPACITY;
   lockTechDays.mockImplementation(async () => []);
 });
@@ -143,11 +142,8 @@ describe('what stays as it was', () => {
     }));
   });
 
-  test('the gate-off, capacity-mode and not-in-a-transaction early returns log nothing', async () => {
+  test('the capacity-mode and not-in-a-transaction early returns log nothing', async () => {
     const trx = fakeTrx();
-    delete process.env.GATE_STAFF_ROUTE_INSERTION;
-    await expect(placeMovedVisit(trx, { serviceId: SERVICE })).resolves.toBeNull();
-    process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     await expect(placeMovedVisit(trx, { serviceId: SERVICE })).resolves.toBeNull();
     delete process.env.GATE_SCHEDULING_CAPACITY;

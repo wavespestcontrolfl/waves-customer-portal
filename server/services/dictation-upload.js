@@ -54,13 +54,39 @@ function dictationClipType(file) {
 // (the visit upload in tech-track.js and server dictation in tech-dictation.js),
 // so a stuck retry loop cannot bill unbounded by spreading clips across routes.
 // 40 clips in 15 minutes is far above one person's honest cadence.
+const { MemoryStore } = require('express-rate-limit');
+const DICTATION_WINDOW_MS = 15 * 60 * 1000;
+const DICTATION_MAX_CLIPS = 40;
+const dictationStore = new MemoryStore();
 const dictationLimiter = require('express-rate-limit')({
-  windowMs: 15 * 60 * 1000,
-  max: 40,
+  windowMs: DICTATION_WINDOW_MS,
+  max: DICTATION_MAX_CLIPS,
+  store: dictationStore,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
   message: { error: 'Too many dictation clips. Type for now.' },
 });
 
-module.exports = { DICTATION_AUDIO_TYPES, DICTATION_MAX_BYTES, DICTATION_TOO_LARGE, dictationBaseType, dictationAudioUpload, dictationClipType, dictationLimiter };
+// Live words (services/dictation-live.js) spend from the SAME bucket: one live session counts as one clip. A
+// session may start only while at most half the budget is used, so previews can never use up the clips that
+// make the final words. Returns false (no session) when the bucket is too full.
+const LIVE_SESSION_SHARE = DICTATION_MAX_CLIPS / 2;
+// Admissions run one at a time: a read followed by a write would let concurrent starts all see an empty bucket.
+let liveAdmissions = Promise.resolve();
+async function admitLiveSession(key) {
+  const used = await dictationStore.get(key);
+  // The store drops an expired window only on its sweep, so a count past its reset time is not a count.
+  const live = used && (!used.resetTime || used.resetTime.getTime() > Date.now()) ? used.totalHits : 0;
+  if (live >= LIVE_SESSION_SHARE) return false;
+  await dictationStore.increment(key);
+  return true;
+}
+function takeLiveSessionBudget(key) {
+  const admitted = liveAdmissions.then(() => admitLiveSession(key));
+  liveAdmissions = admitted.catch(() => {});
+  return admitted;
+}
+
+module.exports = {
+  takeLiveSessionBudget, DICTATION_AUDIO_TYPES, DICTATION_MAX_BYTES, DICTATION_TOO_LARGE, dictationBaseType, dictationAudioUpload, dictationClipType, dictationLimiter };

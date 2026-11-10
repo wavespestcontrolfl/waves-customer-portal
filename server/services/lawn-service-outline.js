@@ -205,7 +205,7 @@ function normalizeTurfTypeV13(value) {
   return coded || normalizeTurfType(value);
 }
 
-// GATE_LAWN_OUTLINE_V13: the composer's pick, else the grass the estimate records for its lawn plan,
+// The v13 outline: the composer's pick, else the grass the estimate records for its lawn plan,
 // read from the stored shapes the send path's bahia review reads (estimate-bahia-review.js). Never a
 // guess from the rest of the estimate: a scan of the whole estimate read the bermudaSuppression
 // add-on flag as Bermuda on most St. Augustine estimates, and a note can name a grass the lawn does
@@ -262,35 +262,13 @@ function protocolLines(text) {
     .filter(Boolean);
 }
 
-// The v13 program names exact products and rates on every line, which a customer
-// outline must never carry: each line becomes its treatment category, first match
-// wins, and a line no category covers is left out rather than quoted.
-const V13_OUTLINE_CATEGORIES = [
-  [/scout visit|inspect/i, 'Lawn inspection'],
-  [/stonewall 0\.43%|dimension 0\.21%/i, 'Pre-emergent weed control with fertilizer'],
-  [/stonewall|dimension/i, 'Pre-emergent weed control'],
-  [/nutra-tech/i, 'Micronutrients'],
-  [/\d{2}-\d-\d{2}/, 'Fertilizer and nutrition'],
-  [/tetrino|arena|talak|acelepryn|dylox/i, 'Insect control'],
-  [/artavia|velista|gravex/i, 'Disease control'],
-  [/celsius|certainty|blindside|dismiss/i, 'Weed spot treatment'],
-  [/dispatch|surfactant/i, 'Wetting agent'],
-];
-
-function v13OutlineBullets(visit) {
-  const lines = [...protocolLines(visit.primary), ...protocolLines(visit.secondary)];
-  const labels = lines.map((line) => V13_OUTLINE_CATEGORIES.find(([pattern]) => pattern.test(line))?.[1]).filter(Boolean);
-  return [...new Set(labels)].slice(0, 8)
-    .map((label) => `${label} may be relevant when turf condition, weather, label directions, and local rules allow.`);
-}
-
-// GATE_LAWN_OUTLINE_V13 (live only with GATE_LAWN_V13): every section of the outline
-// describes the v13 program. Off = the outline exactly as before.
+// With the v13 program live (GATE_LAWN_V13), every section of the outline describes the v13 program.
+// GATE_LAWN_V13 off = the old outline exactly as before.
 function outlineV13Live() {
-  return featureGates.lawnOutlineV13Live?.() === true;
+  return featureGates.lawnV13Live?.() === true;
 }
 
-// GATE_LAWN_OUTLINE_DETAIL (live only with GATE_LAWN_OUTLINE_V13): the v13 outline with the detail sections.
+// GATE_LAWN_OUTLINE_DETAIL (live only with the v13 program): the v13 outline with the detail sections.
 // Off = the v13 outline exactly.
 function outlineDetailLive() {
   return featureGates.lawnOutlineDetailLive?.() === true;
@@ -353,7 +331,6 @@ function v13MonthSteps(visit) {
 function customerProtocolBullets(visit) {
   if (!visit) return [];
   if (outlineV13Live()) return v13FullOutlineBullets(visit);
-  if (featureGates.lawnV13Live?.() === true) return v13OutlineBullets(visit);
   const lines = [...protocolLines(visit.primary), ...protocolLines(visit.secondary)];
   return lines
     .filter((line) => !/material|labor|cost/i.test(line))
@@ -367,7 +344,7 @@ function protocolVersion() {
   return featureGates.lawnV13Live?.() === true ? V13_PROTOCOL_VERSION : PROTOCOL_VERSION;
 }
 
-// The same for the outline's own words: the v13 outline (GATE_LAWN_OUTLINE_V13) and its detailed version
+// The same for the outline's own words: the v13 outline and its detailed version
 // (GATE_LAWN_OUTLINE_DETAIL, drawn in the new layout since 2026-11-01) each stamp their own content version, so a
 // flip shows outlines built before it as updated. The Estimates list's stale check reads it, so it reads the gates
 // and the constants only.
@@ -544,7 +521,7 @@ function buildTreatmentCategories({ turfType, visit, seasonBand }) {
   return base;
 }
 
-// GATE_LAWN_OUTLINE_V13 words. The month's "why now" text is the lawn report's own
+// v13 outline words. The month's "why now" text is the lawn report's own
 // (service-report/lawn-program-line.js, proven against the v13 recipe there); the year chart and
 // the month chips are drawn from the recipe lines (V13_FULL_OUTLINE_CATEGORIES); these are the rest.
 // Owner 2026-10-24: short and boxed ("pretty wordy ... have visuals"), one outline for every lawn,
@@ -1085,7 +1062,7 @@ function v13ProductsSection(productList) {
   return makeSection('products', V13_DETAIL_COPY.productsTitle, V13_DETAIL_COPY.productsBody, items.map((item) => `${item.label}: ${item.text}`), { type: 'categories', items });
 }
 
-// GATE_LAWN_OUTLINE_V13: the one v13 program for every lawn, every section boxed (owner 2026-10-24):
+// The v13 outline: the one v13 program for every lawn, every section boxed (owner 2026-10-24):
 // program tiles, month chips, a year chart, treatment cards that key its icons, the visit as four
 // steps, rule, safety and after-visit tiles, and the exclusions as tags. Nothing in it depends on the
 // grass: the grass only blocks a bahia lawn, which has no v13 program. Each drawn section keeps text
@@ -1156,8 +1133,8 @@ function applyVisualContent(content, visualPlan) {
   return visualPlan ? lawnOutlineVisual().applyVisualContent(content, visualPlan) : content;
 }
 
-// The two outlines, chosen once per build: the gate-off outline exactly as before, and the v13
-// one (GATE_LAWN_OUTLINE_V13).
+// The two outlines, chosen once per build: the old outline (GATE_LAWN_V13 off) exactly as before, and
+// the v13 one (GATE_LAWN_V13 on).
 const OUTLINES = Object.freeze({
   legacy: Object.freeze({
     resolveTurf,

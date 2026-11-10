@@ -740,17 +740,35 @@ async function newSequencePlanFor(trx, invoice, { adoption, steps }) {
 // Where a NEW sequence's cadence starts. Normally when the invoice went out: sent_at, then sms_sent_at, then created_at
 // (manual-only, email-only and older rows still schedule). A bill from a won commercial proposal that is due after the
 // day it went out (Net terms, proposal-win.js proposalTermsDueDate) starts on its due date instead (owner 2026-11-01):
-// it is not past due before then, and every step after the first says how many days past due it is. That start is
-// returned as `anchorAt` for the row's anchor_at, so later steps, a void re-arm (voidStopRearmAnchor) and the customer
-// schedule (sequenceAnchor) keep it. Throws when the proposal read fails.
+// it is not past due before then, and every step after the first says how many days past due it is. With
+// GATE_ESTIMATE_DUE_FIRST_VISIT on, so does an estimate-accept bill (owner 2026-11-06, due on its first visit's day:
+// estimateAcceptBill). That start is returned as `anchorAt` for the row's anchor_at, so later steps, a void
+// re-arm (voidStopRearmAnchor) and the customer schedule (sequenceAnchor) keep it. Throws when a read fails.
 async function newSequenceAnchor(conn, invoice) {
   const sentAnchor = invoice.sent_at || invoice.sms_sent_at || invoice.created_at;
   const dueDay = invoice.due_date ? etCalendarDayOf(invoice.due_date) : null;
   if (!dueDay || !sentAnchor || dueDay <= etDateString(new Date(sentAnchor))) return { anchor: sentAnchor, anchorAt: null };
-  if (!await require('./bill-by-invoice').wonProposalInvoice(conn, invoice)) return { anchor: sentAnchor, anchorAt: null };
+  const startsOnDueDay = await require('./bill-by-invoice').wonProposalInvoice(conn, invoice)
+    || (require('../config/feature-gates').estimateDueFirstVisitLive() && await estimateAcceptBill(conn, invoice));
+  if (!startsOnDueDay) return { anchor: sentAnchor, anchorAt: null };
   // Noon UTC is morning in New York, so the steps count from the due date's own calendar day (anchorTo10amNY).
   const anchorAt = new Date(`${dueDay}T12:00:00Z`);
   return { anchor: anchorAt, anchorAt };
+}
+
+// True for a bill an estimate accept minted: its notes start with the accept's stamp (invoice-notes.js
+// acceptMintEstimateId; invoices carry no estimate_id column) and that estimate is accepted. The due date the accept
+// set (estimate-public.js acceptInvoiceVisitDueDate) is frozen on the bill, so a visit moved after the accept keeps
+// this start. A stamped bill due on its send day (an annual prepay, a gate-off accept) never reaches here. An invoice
+// object without the notes column is read by id. Throws when a read fails.
+async function estimateAcceptBill(conn, invoice) {
+  const notes = invoice.notes !== undefined
+    ? invoice.notes
+    : (await conn('invoices').where({ id: invoice.id }).first('notes'))?.notes;
+  const estimateId = require('./invoice-notes').acceptMintEstimateId(notes);
+  if (!estimateId) return false;
+  const estimate = await conn('estimates').where({ id: estimateId }).first('status');
+  return estimate?.status === 'accepted';
 }
 
 async function insertSequence(trx, invoice, plan) {
@@ -1052,7 +1070,8 @@ async function adoptOrphanInvoices({ dryRun = false } = {}) {
 /**
  * Cron entry point — fires all due touches.
  */
-async function runPending() {
+// options.catchUp: the 1:16 PM same-day run (scheduler.js, GATE_MONEY_NOTICE_CATCHUP).
+async function runPending(options) {
   const now = new Date();
 
   // Only run during configured window (double-guard; cron also enforces this)
@@ -1125,6 +1144,15 @@ async function runPending() {
     // row keeps sending the verification nudge (the loop below decides, per
     // row, outside any lock). With no schedule rows this excludes nothing (pinned).
     .where(gates.divertMicrodepositDunning ? notOwnedOrMicrodepositCandidate : notOwnedByCustomerSchedule)
+    // The 1:16 PM catch-up never takes a row that still carries a touch claim.
+    // The claim clears when a send finishes, so a claim left on the row means
+    // the 10:16 run stopped mid-send (a deploy restart): that touch may have
+    // gone out, and the claim TTL has expired by 1:16. It is left to the next
+    // morning run, which passes it over as stale, exactly as without the
+    // catch-up — never a second text for one touch.
+    .where(function unclaimedOnCatchUp() {
+      if (options && options.catchUp) this.whereNull('s.touch_claimed_at');
+    })
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied', 'i.amount_paid', 'i.status as invoice_status',

@@ -90,7 +90,7 @@ describe('reminderDue', () => {
   });
 
   test('7 days and 2 days, each once', () => {
-    expect(reminderDue(due(8 * DAY), NOW)).toBeNull();
+    expect(reminderDue(due(15 * DAY), NOW)).toBeNull();
     expect(reminderDue(due(7 * DAY), NOW)).toBe('7d');
     expect(reminderDue(due(7 * DAY, { reminder_7d_sent_at: NOW }), NOW)).toBeNull();
     expect(reminderDue(due(5 * DAY, { reminder_7d_sent_at: NOW }), NOW)).toBeNull();

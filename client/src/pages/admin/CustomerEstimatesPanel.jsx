@@ -131,6 +131,7 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
 
   const prefillHref = c
     ? `/admin/estimates?${new URLSearchParams({
+        customerId: String(customerId),
         address:
           `${c.address_line1 || ""}${c.city ? ", " + c.city : ""}${c.state ? ", " + c.state : ""}${c.zip ? " " + c.zip : ""}`.trim(),
         customerName: `${c.first_name || ""} ${c.last_name || ""}`.trim(),

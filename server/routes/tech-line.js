@@ -5,11 +5,15 @@
  *                   { line: null } when the caller holds no line (gate off,
  *                   no assignment, not assignable) — the brief panel then
  *                   keeps its tel:/sms: links from the personal phone.
- *   POST /sms     → { scheduledServiceId, body } — texts the visit's customer
- *                   FROM the tech's line through sendCustomerMessage (every
- *                   guard applies: consent, suppression, quiet hours — an
- *                   operator entry point, so a human's tap is not fenced as
- *                   automation). The office sees the thread on the line.
+ *   POST /sms     → { scheduledServiceId, body, replyToNoticeId? } — texts the
+ *                   visit's customer FROM the tech's line through
+ *                   sendCustomerMessage (every guard applies: consent,
+ *                   suppression, quiet hours — an operator entry point, so a
+ *                   human's tap is not fenced as automation). The office sees
+ *                   the thread on the line. replyToNoticeId (Reply on a Today
+ *                   text card) must name the tech's own text card for this
+ *                   visit whose sender is still the phone on file (409
+ *                   REPLY_SENDER_CHANGED otherwise).
  *   POST /set-text → { scheduledServiceId, kind } — one of the fixed set texts
  *                   (services/tech-set-texts.js) to the visit's customer, the
  *                   same send path as /sms. Today's open visits only; one
@@ -40,7 +44,7 @@ const featureGates = require('../config/feature-gates');
 const { isEnabled } = featureGates;
 const { setTextOptions, setTextReply } = require('../services/tech-set-texts');
 const {
-  publicLine, visitCustomer, claimSend, releaseClaim, sendClaimedText, sendSetText,
+  publicLine, visitCustomer, replyNoticeRefusal, claimSend, releaseClaim, sendClaimedText, sendSetText,
 } = require('../services/tech-line-texts');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -94,6 +98,10 @@ router.post('/sms', async (req, res, next) => {
     if (!ctx) return res.status(409).json({ error: 'You have no tech line assigned', code: 'NO_TECH_LINE' });
     const target = await visitCustomer(req, req.body?.scheduledServiceId);
     if (target.error) return res.status(target.status).json({ error: target.error });
+    if (req.body?.replyToNoticeId != null) {
+      const refusal = await replyNoticeRefusal(req, req.body.replyToNoticeId, target);
+      if (refusal) return res.status(refusal.status).json({ error: refusal.error, ...(refusal.code ? { code: refusal.code } : {}) });
+    }
 
     // Two PWA instances submitting the same text near-simultaneously must
     // not both reach Twilio: a DURABLE claim on (customer, sent-body hash)

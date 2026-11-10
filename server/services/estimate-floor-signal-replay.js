@@ -172,6 +172,26 @@ function estimatePestFloorSignal(estData = {}) {
   return { armed, perVisit };
 }
 
+// ── lawn minimum per visit after discounts ──────────────────────
+
+// The lawn minimum (owner 2026-11-06) a saved quote was priced with, from the
+// engine's pricingMetadata stamp. Same shape as savedLawnCostPlusSignal: an
+// estimate that priced a lawn line (or had one opted out) with no stamp was
+// priced before the rule and pins 0, so a quote already sent never moves; an
+// estimate that never priced lawn pins nothing, so a lawn added later takes
+// the live minimum (new quotes only).
+function savedLawnMinimumAfterDiscountSignal(estData) {
+  const roots = [estData?.result, estData?.engineResult, estData].filter(Boolean);
+  const pricedLawn = roots.some((r) => [].concat(r.lineItems || []).some((li) => li?.service === 'lawn_care')
+    || [].concat(r.results?.lawn || []).length > 0)
+    || [].concat(estData?.serviceOptOut?.events || []).some((e) => e?.serviceKey === 'lawn_care');
+  if (!pricedLawn) return {};
+  const stamped = roots.flatMap((r) => [r.pricingMetadata, r.routingMetadata])
+    .map((m) => Number(m?.lawnMinimumPerVisitAfterDiscount))
+    .find((n) => Number.isFinite(n) && n >= 0);
+  return { lawnMinimumPerVisitAfterDiscount: stamped ?? 0 };
+}
+
 // ── the shared signal set ───────────────────────────────────────
 
 // Every saved floor signal this estimate carries, as engine INPUT-level keys.
@@ -201,6 +221,7 @@ function savedFloorReplaySignals(estData) {
   Object.assign(signals, savedLawnCostPlusSignal(estData));
   const minSignal = require('./estimate-converter').estimateLawnProgramMinimumSignal(estData);
   if (minSignal != null) signals.lawnProgramMinimumMonthly = minSignal;
+  Object.assign(signals, savedLawnMinimumAfterDiscountSignal(estData));
   const pest = estimatePestFloorSignal(estData);
   if (typeof pest.armed === 'boolean') signals.pestProgramFloorArmed = pest.armed;
   if (pest.perVisit != null) signals.pestProgramFloorPerVisit = pest.perVisit;
@@ -213,5 +234,6 @@ module.exports = {
   savedLawnCostPlusSignal,
   lawnRowsShowFloorEnforcement,
   estimatePestFloorSignal,
+  savedLawnMinimumAfterDiscountSignal,
   savedFloorReplaySignals,
 };

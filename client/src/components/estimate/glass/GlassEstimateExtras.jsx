@@ -7,6 +7,7 @@
  * scoped to html[data-glass-theme].
  */
 import { useEffect, useState } from 'react';
+import { approveSlotWhen } from '../../../lib/estimate-glass-slots';
 import './glass-components.css';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -189,7 +190,7 @@ export function GlassStickyBookBar({ show = false, slotMeta, onApprove }) {
   return (
     <div className="gc-mbb">
       <button type="button" className="gc-mbb-btn" style={{ flex: 1, width: '100%' }} onClick={onApprove}>
-        {slotMeta ? `Approve ${slotMeta.dow} ${slotMeta.time} →` : 'Approve my plan →'}
+        {slotMeta ? `Approve ${approveSlotWhen(slotMeta)} →` : 'Approve my plan →'}
       </button>
     </div>
   );

@@ -1110,6 +1110,9 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // post-discount and public-ladder margin-floor caps.
     constants.LAWN_PRICING_V2.programMinimumMonthly = 0;
     constants.LAWN_PRICING_V2.useLawnCostFloor = false;
+    // The lawn minimum after discounts rebases to its in-code default (55)
+    // the same way; an explicit DB value (0 disables) merges over it.
+    constants.LAWN_PRICING_V2.minimumPerVisitAfterDiscount = 55;
     // Cadence frequency-discount arm switch rebases to its in-code default
     // (ON) — only an explicit false on the row (written by migrate:down of
     // 20260807120000) disarms the -4%/-8% runtime caps, and deleting the

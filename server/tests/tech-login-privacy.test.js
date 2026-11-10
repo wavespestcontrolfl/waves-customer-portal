@@ -96,11 +96,12 @@ describe('M4: a customer-text alert reaches a technician only for that technicia
     expect(pushedIds()).toEqual([['admin-1']]);
   });
 
-  test('gate on: an alert with no customer keeps today\'s routing', async () => {
+  test('gate on: an alert with no customer is the office\'s: admins only (owner 2026-11-04)', async () => {
     process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
     await triggerNotification('sandy_transfer_no_context', { from: '+19415550100' });
     await triggerNotification('sms_reply', { twilioSid: 'SM-unknown', message: 'Who is this', fromPhone: '+19415550101' });
-    expect(pushedIds()).toEqual([['admin-1', 'tech-own', 'tech-other'], ['admin-1', 'tech-own', 'tech-other']]);
+    await triggerNotification('customer_voicemail_callback', { name: 'Test Caller', phone: '+19415550102', service: 'mosquito service', callLogId: 'call-1' });
+    expect(pushedIds()).toEqual([['admin-1'], ['admin-1'], ['admin-1']]);
     expect(scope.technicianServicesCustomer).not.toHaveBeenCalled();
   });
 

@@ -45,6 +45,9 @@ const PERSON_OR_OTHER_TABLE = {
     { includes: 'async markApplicantRepliesReadAdmin(', reason: 'a person opening an application reads its applicant-reply bells' },
     { includes: 'async markAllReadCustomer(', reason: 'a customer marking their own notifications read' },
   ],
+  'services/portal-messages.js': [
+    { includes: 'async function markRead(', reason: 'a customer reading their own portal thread marks the bells of the answers they saw read' },
+  ],
   'services/sms-operational-actions.js': [
     { includes: 'Any other staff update', reason: 'a staff edit or snooze leaves the promise open, so its bell is only read (dismiss and fulfill close it done)' },
   ],

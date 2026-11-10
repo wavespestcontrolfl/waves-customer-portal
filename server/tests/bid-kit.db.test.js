@@ -1,4 +1,4 @@
-// Bid kit (GATE_BID_KIT) through PostgreSQL: the migration (columns, check, index, up/down/up, credential link), the real
+// Bid kit through PostgreSQL: the migration (columns, check, index, up/down/up, credential link), the real
 // store behind the routes (create, fenced patch, sign-off clearing, file replace, archive, facts sheet), the daily
 // expiry job, and the public credentials feed staying unchanged. Every write runs in a transaction that is rolled back.
 // Synthetic data only. Skips without DATABASE_URL (CI runs it against the migrated database).
@@ -60,7 +60,6 @@ describeDb('Bid kit (PostgreSQL)', () => {
     if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } });
     mockPg = database;
-    process.env.GATE_BID_KIT = 'true';
     const app = express();
     app.use(express.json());
     app.use('/api/admin/bid-kit', require('../routes/admin-bid-kit'));
@@ -81,7 +80,6 @@ describeDb('Bid kit (PostgreSQL)', () => {
   });
   afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => {
-    delete process.env.GATE_BID_KIT;
     if (server) await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     if (database) await database.destroy();
   });
@@ -617,16 +615,6 @@ describeDb('Bid kit (PostgreSQL)', () => {
       expect(keys).toEqual([`bid-kit:expiry:${kept.id}`]);
     });
 
-    test('with the gate off it reads nothing', async () => {
-      await create({ item_key: 'business_tax_receipt', value: 'BTR-0001', expires_on: '2000-01-01' });
-      process.env.GATE_BID_KIT = 'false';
-      try {
-        expect(await runBidKitExpiryCheck()).toEqual({ skipped: 'gate_off' });
-        expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
-      } finally {
-        process.env.GATE_BID_KIT = 'true';
-      }
-    });
   });
 
   describe('the public credentials feed', () => {

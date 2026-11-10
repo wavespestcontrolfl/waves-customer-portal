@@ -40,6 +40,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/communications/link-library` | admin-communications |
 | GET | `/api/admin/communications/log` | admin-communications |
 | POST | `/api/admin/communications/messages/read` | admin-communications |
+| POST | `/api/admin/communications/name-check` | admin-communications |
 | POST | `/api/admin/communications/rewrite-sms` | admin-communications |
 | POST | `/api/admin/communications/send-prep` | admin-communications |
 | GET | `/api/admin/communications/sender` | admin-communications |
@@ -116,7 +117,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | POST | `/api/admin/dispatch/recap-preview` | admin-dispatch |
 | PUT | `/api/admin/dispatch/reorder/bulk` | admin-dispatch |
 | POST | `/api/admin/dispatch/slot-check` | admin-dispatch |
-| GET | `/api/admin/dispatch/weather/tomorrow` | admin-dispatch |
 | GET | `/api/admin/drafts/:id` | admin-drafts (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/drafts/stats` | admin-drafts (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/equipment-maintenance` | admin-equipment-maintenance |
@@ -158,6 +158,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/inventory/waveguard-forecast` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/waveguard-forecast/:productId/restock-request` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/invoices/:id` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
+| POST | `/api/admin/invoices/:id/charge-card` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/invoices/:id/charge-card-quote` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/invoices/stats` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/kb` | admin-kb |
@@ -413,6 +414,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/email/oauth/callback` | admin-email |
 | GET | `/api/admin/email/oauth/start` | admin-email |
 | GET | `/api/admin/email/oauth/status` | admin-email |
+| GET | `/api/admin/email/reclassify-options` | admin-email |
 | POST | `/api/admin/email/schedule` | admin-email |
 | POST | `/api/admin/email/schedule/reconcile` | admin-email |
 | GET | `/api/admin/email/scheduled` | admin-email |
@@ -518,6 +520,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/inventory/restock-requests/:id/order-evidence` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/restock-requests/:id/siteone-email` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/restock-requests/:id/siteone-email` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
+| POST | `/api/admin/inventory/restock-requests/:id/vendor-cancellation` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/scrape-jobs` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/scrape-jobs/:vendorId/trigger` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/service-usage` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |

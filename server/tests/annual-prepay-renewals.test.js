@@ -45,7 +45,7 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
-// GATE_ROUTE_CHECK_AUTO_SAVES (Route Check Everywhere 2b): the real gate reader,
+// Route check on saves (Route Check Everywhere 2b): the real reader,
 // a spy on the placement so no route query runs.
 jest.mock('../services/scheduling/arrival-route', () => ({
   ...jest.requireActual('../services/scheduling/arrival-route'),
@@ -117,6 +117,7 @@ function query({ first, returning, columnInfo, rows = [], updateCount = 1 } = {}
     'whereNull',
     'whereNot',
     'whereBetween',
+    'orWhereBetween',
     'whereNotIn',
     'orderBy',
     'select',
@@ -2314,10 +2315,10 @@ describe('annual prepay renewal helpers', () => {
     }));
   });
 
-  describe('GATE_ROUTE_CHECK_AUTO_SAVES (owner 2026-10-29, Route Check Everywhere 2b)', () => {
+  describe('route check on saves (owner 2026-10-29, Route Check Everywhere 2b)', () => {
     const { placeMovedVisit } = require('../services/scheduling/arrival-route');
     const seedCols = { scheduled_date: {}, service_type: {}, annual_prepay_term_id: {}, window_start: {}, window_end: {}, time_window: {}, window_display: {}, technician_id: {}, estimated_duration_minutes: {}, notes: {} };
-    const gateOn = () => { process.env.GATE_ROUTE_CHECK_AUTO_SAVES = 'true'; process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; };
+    const gateOn = () => { process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; };
     const TERM = {
       id: 'term-g', customer_id: 'customer-g', term_start: '2026-07-30', term_end: '2027-07-30',
       coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 2, coverage_cadence: 'quarterly',
@@ -2330,14 +2331,14 @@ describe('annual prepay renewal helpers', () => {
       return _private.ensureCoverageRowsForTerm(TERM, undefined, { today: '2026-07-31' });
     };
     beforeEach(() => placeMovedVisit.mockClear());
-    afterEach(() => { delete process.env.GATE_ROUTE_CHECK_AUTO_SAVES; delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS; });
+    afterEach(() => { delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS; });
 
-    test('gate off (unset): the timed first visit seeds with no placement', async () => {
+    test('arrival-window routing off (unset): the timed first visit seeds with no placement', async () => {
       await expect(seedTimed()).resolves.toMatchObject({ createdCount: 2 });
       expect(placeMovedVisit).not.toHaveBeenCalled();
     });
 
-    test('gate on: only the timed first visit is placed, once, inside the seeding transaction, with its source', async () => {
+    test('only the timed first visit is placed, once, inside the seeding transaction, with its source', async () => {
       gateOn();
       await expect(seedTimed()).resolves.toMatchObject({ createdCount: 2 });
       expect(placeMovedVisit).toHaveBeenCalledTimes(1);
@@ -2348,14 +2349,14 @@ describe('annual prepay renewal helpers', () => {
       expect(args).toEqual({ serviceId: 'svc-g1', staffSave: true, source: 'annual_prepay_renewal' });
     });
 
-    test('gate on, a throwing placement: the seed still succeeds', async () => {
+    test('a throwing placement: the seed still succeeds', async () => {
       gateOn();
       placeMovedVisit.mockRejectedValueOnce(new Error('route boom'));
       await expect(seedTimed()).resolves.toMatchObject({ createdCount: 2 });
       expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('route boom'));
     });
 
-    test('gate on: an adopted visit retimed to the promised window is placed after the update', async () => {
+    test('an adopted visit retimed to the promised window is placed after the update', async () => {
       gateOn();
       const adopted = {
         id: 'svc-adopted', customer_id: 'customer-g', scheduled_date: '2026-08-01', service_type: 'Quarterly Pest Control',
@@ -2413,7 +2414,6 @@ describe('annual prepay renewal helpers', () => {
     afterEach(() => {
       jest.restoreAllMocks();
       delete process.env.GATE_PREPAY_SEED_SERIES_SLOT;
-      delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF;
     });
 
     const queueQuarterly = (absences = []) => {
@@ -2434,10 +2434,8 @@ describe('annual prepay renewal helpers', () => {
     };
     const inserted = (i) => insertQueries[i].insert.mock.calls[0][0];
     const gateOn = () => { process.env.GATE_PREPAY_SEED_SERIES_SLOT = 'true'; };
-    const handoffGateOn = () => { process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true'; };
 
     test('gate off: seeds carry no technician and no time, and nothing extra is read', async () => {
-      handoffGateOn();
       await expect(seedQuarterly()).resolves.toMatchObject({ createdCount: 4 });
       expect(slotSpy).not.toHaveBeenCalled();
       const tables = db.mock.calls.map((c) => c[0]);
@@ -2451,7 +2449,6 @@ describe('annual prepay renewal helpers', () => {
 
     test('gate on with a source visit: every seed carries the technician and the time', async () => {
       gateOn();
-      handoffGateOn();
       jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
       await expect(seedQuarterly()).resolves.toMatchObject({ createdCount: 4 });
       expect(slotSpy).toHaveBeenCalledTimes(1);
@@ -2465,7 +2462,6 @@ describe('annual prepay renewal helpers', () => {
 
     test('gate on, the source technician is not assignable: seeds carry no technician', async () => {
       gateOn();
-      handoffGateOn();
       jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
       slotSpy.mockResolvedValue({ technicianId: null, windowStart: '09:00' });
       await seedQuarterly();
@@ -2476,7 +2472,6 @@ describe('annual prepay renewal helpers', () => {
 
     test('gate on, the technician is out on one date: only that seed has no technician', async () => {
       gateOn();
-      handoffGateOn();
       jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
       await seedQuarterly([{ technician_id: 'tech-1', absence_date: '2026-09-15' }]);
       expect(inserted(0).technician_id).toBe('tech-1');
@@ -2487,7 +2482,6 @@ describe('annual prepay renewal helpers', () => {
 
     test('gate on, one hour is taken: that seed is windowless with recurring_dispatch_due_date; the others keep the time', async () => {
       gateOn();
-      handoffGateOn();
       const probe = jest.spyOn(PlanTakenHour, 'takenHourHandoff')
         .mockImplementation(async (conn, row) => row.scheduled_date === '2026-12-15');
       await seedQuarterly();
@@ -2505,7 +2499,6 @@ describe('annual prepay renewal helpers', () => {
     // Pre-push audit P1: a copied time is a timed insert, fenced by the occupancy date lock like seedTimedFirstVisit.
     test('gate on, the occupancy date lock is busy: no copied time is written unfenced (seeds handed off)', async () => {
       gateOn();
-      handoffGateOn();
       const probe = jest.spyOn(PlanTakenHour, 'takenHourHandoff');
       jest.spyOn(require('../services/scheduling/occupancy'), 'tryAcquireOccupancyLock').mockResolvedValue(false);
       await expect(seedQuarterly()).resolves.toMatchObject({ createdCount: 4 });
@@ -2518,7 +2511,6 @@ describe('annual prepay renewal helpers', () => {
 
     test('gate on, the technician is offboarded after the slot read: the per-seed recheck leaves every seed unassigned', async () => {
       gateOn();
-      handoffGateOn();
       jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
       recheckSpy.mockResolvedValue(null);
       await expect(seedQuarterly()).resolves.toMatchObject({ createdCount: 4 });
@@ -2527,20 +2519,8 @@ describe('annual prepay renewal helpers', () => {
       for (let i = 0; i < 4; i += 1) expect(inserted(i)).toMatchObject({ technician_id: null, window_start: '09:00' });
     });
 
-    test('gate on, taken-hour hand-off gate off: technician only, no time and no probe', async () => {
-      gateOn();
-      const probe = jest.spyOn(PlanTakenHour, 'takenHourHandoff');
-      await seedQuarterly();
-      expect(probe).not.toHaveBeenCalled();
-      for (let i = 0; i < 4; i += 1) {
-        expect(inserted(i)).toMatchObject({ technician_id: 'tech-1', window_start: null, window_end: null });
-        expect(inserted(i)).not.toHaveProperty('recurring_dispatch_due_date');
-      }
-    });
-
     test('gate on, no source visit: seeds are as they were', async () => {
       gateOn();
-      handoffGateOn();
       slotSpy.mockResolvedValue(null);
       await seedQuarterly();
       const tables = db.mock.calls.map((c) => c[0]);
@@ -2552,7 +2532,6 @@ describe('annual prepay renewal helpers', () => {
 
     test('gate on: the slot is resolved once per term, not once per seeded visit', async () => {
       gateOn();
-      handoffGateOn();
       jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
       await seedQuarterly();
       expect(slotSpy).toHaveBeenCalledTimes(1);
@@ -2573,7 +2552,6 @@ describe('annual prepay renewal helpers', () => {
 
       test('keeps its promised window and gets the technician; the later visit gets the slot time', async () => {
         gateOn();
-        handoffGateOn();
         jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
         await expect(seedPromised()).resolves.toMatchObject({ createdCount: 2 });
         expect(inserted(0)).toMatchObject({ scheduled_date: '2026-08-01', technician_id: 'tech-1', window_start: '08:00', window_end: '09:00' });
@@ -2583,7 +2561,6 @@ describe('annual prepay renewal helpers', () => {
 
       test('on the technician\'s out day the promised visit keeps its window and has no technician', async () => {
         gateOn();
-        handoffGateOn();
         jest.spyOn(PlanTakenHour, 'takenHourHandoff').mockResolvedValue(false);
         await seedPromised([{ technician_id: 'tech-1', absence_date: '2026-08-01' }]);
         expect(inserted(0)).toMatchObject({ technician_id: null, window_start: '08:00' });
@@ -2739,6 +2716,55 @@ describe('annual prepay renewal helpers', () => {
     // follow inside refreshTermSnapshot.
     expect(term.term_end).toBe('2027-12-30');
     expect(inserts[3].insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-09-30' }));
+  });
+
+  test('a late payment never slides the window into a later term: it stops the day before (firstActivationTermEnd)', async () => {
+    const logger = require('../services/logger');
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {},
+        service_type: {},
+        annual_prepay_term_id: {},
+        window_start: {},
+        window_end: {},
+        time_window: {},
+        technician_id: {},
+        estimated_duration_minutes: {},
+        notes: {},
+      },
+    });
+    const inserts = [
+      query({ returning: [{ id: 'svc-c1', scheduled_date: '2026-12-30' }] }),
+      query({ returning: [{ id: 'svc-c2', scheduled_date: '2027-03-30' }] }),
+      query({ returning: [{ id: 'svc-c3', scheduled_date: '2027-06-30' }] }),
+      query({ returning: [{ id: 'svc-c4', scheduled_date: '2027-09-30' }] }),
+    ];
+    const termColsQuery = query({ columnInfo: { term_end: {}, first_visit_date: {} } });
+    // The customer already bought the next year, starting 2027-10-15: inside the 2027-12-30 slide.
+    const successorQuery = query({ first: { term_start: '2027-10-15' } });
+    const termSlideUpdate = query({});
+    setDbQueues({
+      scheduled_services: [columnQuery, query({ rows: [] }), query({ first: undefined }), query({ rows: [] }), ...inserts],
+      annual_prepay_terms: [termColsQuery, successorQuery, termSlideUpdate, query({})],
+    });
+
+    const term = {
+      id: 'term-c',
+      customer_id: 'customer-c',
+      term_start: '2026-07-30',
+      term_end: '2027-07-30',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 4,
+      coverage_cadence: 'quarterly',
+    };
+    await expect(_private.ensureCoverageRowsForTerm(term, undefined, { today: '2026-12-30' }))
+      .resolves.toMatchObject({ createdCount: 4, targetDates: ['2026-12-30', '2027-03-30', '2027-06-30', '2027-09-30'] });
+
+    expect(successorQuery.whereNot).toHaveBeenCalledWith({ id: 'term-c' });
+    expect(successorQuery.where).toHaveBeenCalledWith('term_start', '>', '2027-07-30');
+    expect(termSlideUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ term_end: '2027-10-14' }));
+    expect(term.term_end).toBe('2027-10-14');
+    expect(logger.warn).toHaveBeenCalledWith('[annual-prepay] term term-c window slide capped at 2027-10-14 — successor term starts 2027-10-15');
   });
 
   test('refreshing an already-activated term never slides the window again (idempotent)', async () => {
@@ -5325,9 +5351,35 @@ describe('annual prepay renewal helpers', () => {
     const missed = query({ rows: [] });
     setDbQueues({ annual_prepay_terms: [failingCandidates, late, undelivered, missed] });
     const allCols = new Proxy({}, { get: () => ({}) });
-    await expect(_private.runTermiteNoticePass('2026-09-26', allCols)).resolves.toBe(0);
+    const failedPasses = [];
+    await expect(_private.runTermiteNoticePass('2026-09-26', allCols, failedPasses)).resolves.toBe(0);
     expect(late.whereNotNull).toHaveBeenCalled();
     expect(missed.where).toHaveBeenCalled();
+    // The aborted pass is named so the renewal-reminders run can fail after every step ran.
+    expect(failedPasses).toContain('termite notice-obligation pass');
+  });
+
+  test('checkAndSend: an aborted termite pass is reported as failedPasses; the shared 30/15/7 loop still runs', async () => {
+    const failingCandidates = query();
+    failingCandidates.then = (resolve, reject) => Promise.reject(new Error('candidate query down')).then(resolve, reject);
+    const q30 = query({ rows: [] });
+    const q15 = query({ rows: [] });
+    const q7 = query({ rows: [] });
+    setDbQueues({
+      'annual_prepay_terms as t': [query({ rows: [] })],
+      annual_prepay_terms: [
+        query({ columnInfo: TERMITE_READY_COLS }),
+        failingCandidates,
+        query({ rows: [] }), query({ rows: [] }), query({ rows: [] }), query({ rows: [] }),
+        q30, q15, q7,
+      ],
+    });
+
+    await expect(AnnualPrepayRenewals.checkAndSend({ today: '2026-09-26' })).resolves.toEqual({
+      sent: 0,
+      failedPasses: ['termite notice-obligation pass'],
+    });
+    expect(q7.whereNull).toHaveBeenCalled();
   });
 
   // Codex #4921 r4 P1: a transient columnInfo() failure used to be cached as
@@ -9213,7 +9265,7 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
     expect(alreadyFiled.where.mock.calls.map((c) => c[0])).toContain('created_at');
   });
 
-  test('a failed term select or a missing table returns an empty summary and never throws', async () => {
+  test('a failed term select (named in failedPasses) or a missing table returns an empty summary and never throws', async () => {
     const failing = query({});
     failing.select = jest.fn(() => { throw new Error('connection terminated'); });
     setDbQueues({
@@ -9221,8 +9273,9 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
       scheduled_services: [query({ columnInfo: COLUMNS })],
     });
     const refresh = jest.fn();
+    // The failed select is named in failedPasses (the renewal-reminders run fails on it); nothing throws here.
     await expect(AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh }))
-      .resolves.toEqual({ scanned: 0, restamped: 0, held: 0, skipped: 0, failed: 0 });
+      .resolves.toEqual({ scanned: 0, restamped: 0, held: 0, skipped: 0, failed: 0, failedPasses: ['restamp query'] });
 
     _private.resetCachesForTests();
     db.schema = { hasTable: jest.fn().mockResolvedValue(false) };

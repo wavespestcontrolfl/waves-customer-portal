@@ -58,11 +58,9 @@ const AUTO_DISPATCH_ACTOR_TEXT = 'by auto-dispatch';
 // A burst from any other mover — an office script, many single moves in a
 // row — gets the same treatment (owner 2026-10-22: "the dispatch alerts need
 // to be bundled in one alert", after one script's 17 moves sent 17 pushes).
-// With this gate on, every other card is still written at once, but its push
-// is held, and the every-minute sweep (flushBundledPushes, scheduler.js)
-// sends ONE push per tech once their changes go quiet. Read at call time;
-// unset = one push per visit, as before.
-const BUNDLE_GATE = 'GATE_TECH_PUSH_BUNDLE';
+// Every other card is still written at once, but its push is held, and the
+// every-minute sweep (flushBundledPushes, scheduler.js) sends ONE push per
+// tech once their changes go quiet.
 // A tech's held pushes go out once no new card has landed for this long, or
 // once the oldest has waited the longer bound even while cards keep coming.
 const BUNDLE_QUIET_MS = 60 * 1000;
@@ -540,13 +538,12 @@ async function deliver(notices) {
   // decision is made once, before the write, and recorded on the row.
   const holdRun = currentAutoDispatchRun && gateEnvValue(SUMMARY_GATE) ? currentAutoDispatchRun : null;
   // Every other card's push waits for its tech's bundle (same once-only rule).
-  const bundle = !!gateEnvValue(BUNDLE_GATE);
   for (const raw of notices.filter((x) => x && x.ok)) {
     let n = raw;
     if (holdRun && raw.actorText === AUTO_DISPATCH_ACTOR_TEXT) n = { ...raw, holdForRun: holdRun };
     // An auto-dispatch move is never bundled: its run summary covers it, and
     // with that summary off it pushes on its own, as before (Codex #6459 r1).
-    else if (bundle && raw.actorText !== AUTO_DISPATCH_ACTOR_TEXT) n = { ...raw, holdForBundle: true };
+    else if (raw.actorText !== AUTO_DISPATCH_ACTOR_TEXT) n = { ...raw, holdForBundle: true };
     try {
       const card = await writeCard(n);
       if (card) written.push({ ...n, cardId: card.id || null });
@@ -1059,9 +1056,8 @@ async function sendBundle(technicianId, rows, token, { pastLongestWait }) {
  * sends ONE push (sendBundle). No lock is held across a push (owner ruling
  * 2026-09-30, #5421). A push to try again releases the claim for the next
  * tick; a card that has waited BUNDLE_GIVE_UP_MS is dropped instead, alone —
- * a newer card in the same bundle keeps its retries (Codex #6459 r1). It runs
- * with the gate off too, so cards held before a flip still go out; only the
- * notifications kill switch drops them. Best-effort; never throws.
+ * a newer card in the same bundle keeps its retries (Codex #6459 r1). Only
+ * the notifications kill switch drops held cards. Best-effort; never throws.
  */
 async function flushBundledPushes({ now = new Date() } = {}) {
   try {
@@ -1473,7 +1469,6 @@ module.exports = {
   beginAutoDispatchRun,
   SUMMARY_GATE,
   flushBundledPushes,
-  BUNDLE_GATE,
   BUNDLE_QUIET_MS,
   BUNDLE_MAX_WAIT_MS,
   BUNDLE_GIVE_UP_MS,

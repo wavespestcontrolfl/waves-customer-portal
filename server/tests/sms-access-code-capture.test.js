@@ -119,8 +119,8 @@ describe('access codes in the client\'s own wording (GATE_ACCESS_CODE_CAPTURE)',
   test('the prompt names the plain gate rule only with the gate on', () => {
     const context = { message: source('Gate code is 5550'), properties };
     delete process.env.GATE_ACCESS_CODE_CAPTURE;
-    expect(buildPrompt(context)).not.toContain('A plain "gate code"');
+    expect(buildPrompt(context).system).not.toContain('A plain "gate code"');
     process.env.GATE_ACCESS_CODE_CAPTURE = 'true';
-    expect(buildPrompt(context)).toContain('A plain "gate code" with no side, back or yard word is the neighborhood gate');
+    expect(buildPrompt(context).system).toContain('A plain "gate code" with no side, back or yard word is the neighborhood gate');
   });
 });

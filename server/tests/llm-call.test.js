@@ -232,6 +232,37 @@ describe('callAnthropic prompt caching', () => {
     }));
   });
 
+  test('cacheTtl 1h keeps the system block cached for an hour; any other value keeps the 5-minute default', async () => {
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    await callAnthropic({ model: FLAGSHIP, system: 'You are a test.', text: 'hi', cacheTtl: '1h' });
+    expect(mockAnthropicCreate.mock.calls[0][0].system).toEqual([
+      { type: 'text', text: 'You are a test.', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ]);
+    await callAnthropic({ model: FLAGSHIP, system: 'You are a test.', text: 'hi', cacheTtl: '24h' });
+    expect(mockAnthropicCreate.mock.calls[1][0].system[0].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  test('cacheTtl reaches the Anthropic leg through the fallback router, and the OpenAI leg ignores it', async () => {
+    const savedOpenAI = process.env.OPENAI_API_KEY;
+    const originalFetch = global.fetch;
+    try {
+      process.env.OPENAI_API_KEY = 'test-key';
+      mockAnthropicCreate.mockRejectedValue(new Error('unavailable'));
+      global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ output_text: '{"ok":true}' }) });
+      const result = await dispatchWithFallback({ primary: { provider: 'anthropic', model: FLAGSHIP }, fallback: { provider: 'openai', model: OPENAI_BEST } }, {
+        system: 'Rules.', text: 'Evidence.', cacheTtl: '1h', maxTokens: 256,
+      });
+      expect(result.ok).toBe(true);
+      expect(mockAnthropicCreate.mock.calls[0][0].system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+      const request = JSON.parse(global.fetch.mock.calls[0][1].body);
+      expect(request.instructions).toBe('Rules.');
+      expect(JSON.stringify(request)).not.toContain('ttl');
+    } finally {
+      global.fetch = originalFetch;
+      if (savedOpenAI === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = savedOpenAI;
+    }
+  });
+
   test('the json_schema sent to Anthropic carries no numeric bounds (a 400 on every call), and the caller\'s schema is untouched', async () => {
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"confidence":0.5,"items":[]}' }] });
     const schema = {

@@ -25,7 +25,7 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibCancelWithEffectsLive, ibAcceptEstimateLive, ibMultiCardLive, ibModelFailureNoticeLive, nameMatchV2Live, dictationMoneyNormalizeLive, ibOpenaiBackupLive, ibTargetRulesV2Live } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibCancelWithEffectsLive, ibAcceptEstimateLive, ibAnswerSendToClaudeLive, dictationMoneyNormalizeLive, ibOpenaiBackupLive } = require('../config/feature-gates');
 const ModelFailure = require('../services/intelligence-bar/model-failure');
 const { dictatedAmountsNote } = require('../utils/spoken-money');
 const IbOpenaiBackup = require('../services/intelligence-bar/ib-openai-backup');
@@ -97,7 +97,7 @@ const ModelContext = require('../services/intelligence-bar/model-context');
 const MultiCard = require('../services/intelligence-bar/multi-card');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
-const { gapReportPromptLine, createGapCollector } = require('../services/agent-gap-reports');
+const { gapReportPromptLine, createGapCollector, firstOpenGapId } = require('../services/agent-gap-reports');
 const ToolSearch = require('../services/intelligence-bar/tool-search');
 const ToolAdditions = require('../services/intelligence-bar/tool-additions');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
@@ -118,6 +118,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../services/llm/anthropic-wire');
+const { createIbMessage, ibRequestedEffort } = require('../services/intelligence-bar/fast-mode');
 const { ledgerCall, ledgerCallRejected } = require('../services/llm-dispatch-metrics');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -975,6 +976,10 @@ const PINNED_DISPLAY_BUILDERS = {
   void_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'void_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount: preview.amount, status: preview.status, sends_to_customer: 'nothing' }
     : null),
+  // switch_visit_to_annual_prepay: the card names the customer, the visit, the year's price and the invoice total; the lines ride the contract.
+  switch_visit_to_annual_prepay: (params, preview) => (preview?.preview === true && preview.tool === 'switch_visit_to_annual_prepay'
+    ? { customer: preview.customer_name || preview.customer_id, visit: `${preview.visit_date || ''} ${preview.service} (${preview.visit_status})`.trim(), billing: `${preview.billing_before} -> annual prepay once paid`, prepay: `${preview.prepay_amount} for ${preview.visits_covered} visits (${preview.cadence}), from ${preview.term_start}`, invoice_total: `${preview.invoice_total} (unpaid)`, voids: (preview.voids || []).map((v) => `${v.invoice_number || 'invoice'} ${v.amount}`).join(', ') || 'nothing', sends_to_customer: 'nothing' }
+    : null),
   // The invoice edit cards (GATE_IB_INVOICE_EDITS): the invoice, the customer and the headline; the lines ride the contract.
   edit_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'edit_invoice'
     ? { invoice: preview.invoice_number, customer: preview.customer_name, total: `${preview.amount} (unchanged)`, changes: (preview.changes || []).map((c) => `${c.field}: ${c.before} -> ${c.after}`), sends_to_customer: 'nothing' }
@@ -1075,6 +1080,8 @@ const VERIFIED_VERSION_PARAMS = {
   convert_lead: '_verified_lead_convert_version',
   // void_invoice binds the invoice state, credit, pay-page session and links the card showed.
   void_invoice: '_verified_invoice_void_version',
+  // switch_visit_to_annual_prepay binds the visit, the billing type and every figure the card showed (prepay-switch-tools.js _version).
+  switch_visit_to_annual_prepay: '_verified_prepay_switch_version',
   // schedule_sms binds the customer, the number, the From number, the text digest and the send time the card showed.
   schedule_sms: '_verified_schedule_sms_version',
   // The invoice edit cards bind the invoice version (and, per card, the body, credit balance or visit) they showed.
@@ -3884,13 +3891,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 - The card shows the exact effect set the operator is approving; a different target, amount, recipient, or effect is a NEW proposal — never assume an earlier approval carries over.
 - Re-query current records when asked about a confirmed write. Never infer execution from earlier assistant prose.`;
     }
-    if (platformEnabled && context !== 'tech' && ibMultiCardLive()) systemPrompt += MultiCard.PROMPT;
+    if (platformEnabled && context !== 'tech') systemPrompt += MultiCard.PROMPT;
     // Last, so every shared prefix above stays cacheable across logins. With
     // the platform off nothing commits directly, so the owner block must
     // stay card-aware (Codex r2 P1 on #5563).
     if (ownerDirectCommits) systemPrompt += OwnerDirect.ownerDirectPrompt();
     else if (ownerDirect) systemPrompt += OwnerDirect.OWNER_DIRECT_CARDED_PROMPT;
-    if (ownerDirectCommits && ibTargetRulesV2Live()) systemPrompt += OwnerDirect.OWNER_DIRECT_TARGET_RULES_PROMPT;
+    if (ownerDirectCommits) systemPrompt += OwnerDirect.OWNER_DIRECT_TARGET_RULES_PROMPT;
     // GATE_DICTATION_MONEY_NORMALIZE: a dictated message's amounts are read back (clear) or asked ($61.33 or $6,133).
     if (dictationMoneyNormalizeLive() && req.body.dictation_used === true) systemPrompt += dictatedAmountsNote(prompt);
     // Live page data (current date, schedule stats, etc.) is injected on the
@@ -3995,13 +4002,12 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // Owner-direct bulk cap: direct commits this task already made, by tool
     // (seeded so a resumed task keeps its count; Codex r1 on #5675).
     const directCommitsByTool = ownerDirectCommits ? await OwnerDirect.seedDirectCounts(activeTask) : new Map();
-    // Whom the message names and what the page shows (GATE_IB_TARGET_RULES_V2); null while the gate is off.
+    // Whom the message names and what the page shows (owner-direct target rules); null outside owner-direct mode.
     const directGrounding = ownerDirectCommits ? OwnerDirect.targetGrounding(taskContext) : null;
     let directOutcomeUncertain = false; // a direct commit whose outcome is unknown or whose receipt did not save
     let directOutcomePartial = false; // a direct commit that landed with a failed follow-on step (partially_completed)
     let writeFrontierBlocked = false;
-    // GATE_IB_MULTI_CARD: the request's open cards (tool + record keys), so a later independent write may mint its own card.
-    const multiCardOn = platformEnabled && ibMultiCardLive();
+    // Several confirm cards in one answer: the request's open cards (tool + record keys), so a later independent write may mint its own card.
     const openCards = [];
     // Gap reports (server/services/agent-gap-reports.js): what the bar could
     // not do this request, for the owner's weekly review. Platform mode gets
@@ -4046,9 +4052,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       stepLimitReached = finalRound;
       currentMessages = toolAdditions.beforeCall(currentMessages, finalRound);
       const requestMessages = withCacheBreakpoint(finalRound ? finalRoundMessages(currentMessages) : currentMessages);
-      const response = await modelCaller.call({ finalRound, ask: () => ledgerCall('anthropic', model, () => anthropic.messages.create({
+      const response = await modelCaller.call({ finalRound, ask: () => ledgerCall('anthropic', model, () => createIbMessage(anthropic, {
         model: model,
-        ...anthropicEffortConfig(model),
+        // INTELLIGENCE_BAR_EFFORT (IB only) wins over the global pin; unset or invalid = the pin.
+        ...anthropicEffortConfig(model, ibRequestedEffort()),
         max_tokens: anthropicMaxTokens(model, context === 'tech' ? 1024 : 4096),
         // 1h TTL on the tools+system prefix: operator queries routinely arrive
         // more than 5 minutes apart, so the default TTL expired between them
@@ -4072,7 +4079,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       logger.info(
         `[intelligence-bar] usage round=${round} in=${usage.input_tokens ?? 0} ` +
         `cache_write=${usage.cache_creation_input_tokens ?? 0} ` +
-        `cache_read=${usage.cache_read_input_tokens ?? 0} out=${usage.output_tokens ?? 0}`
+        `cache_read=${usage.cache_read_input_tokens ?? 0} out=${usage.output_tokens ?? 0} ` +
+        `speed=${usage.speed || 'standard'}`
       );
 
       const toolUses = response.content.filter(c => c.type === 'tool_use');
@@ -4187,7 +4195,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           // confirmation id goes to the client only.
           // A card closes the frontier under the platform only (set below);
           // an uncertain owner-direct commit closes it on either path.
-          const multiCardRefusal = !writeFrontierBlocked && multiCardOn && openCards.length ? MultiCard.admit(toolUse, openCards) : null;
+          const multiCardRefusal = !writeFrontierBlocked && platformEnabled && openCards.length ? MultiCard.admit(toolUse, openCards) : null;
           if (writeFrontierBlocked || multiCardRefusal) {
             result = multiCardRefusal || { error: 'The preceding write needs a successful recorded outcome before another write can be prepared.', code: 'dependency_unresolved' };
             failed = true;
@@ -4206,7 +4214,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               task: activeTask,
               taskContext,
               requestStartedAt,
-              ...(multiCardOn ? { siblingCardIds: pendingProposals.map(p => p.id) } : {}),
+              ...(platformEnabled ? { siblingCardIds: pendingProposals.map(p => p.id) } : {}),
               // Three or more same-tool edits that would run direct: refused
               // as a set, pointing at the bulk tool (one card). Judged on the
               // finished preview, so an edit the preview cards still reaches
@@ -4273,8 +4281,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               actorId: getAdminActorId(req), readCustomerIds: readWidened ? [] : taskContext?.targets?.map(target => target.customer_id) || [],
               isAdmin: req.techRole === 'admin', technicianId: req.technicianId,
               // Name matcher v2 ranks the customer on screen first. Route-derived
-              // (the page the operator is viewing), never model input; absent when dark.
-              ...(nameMatchV2Live() ? { pageCustomerId: TaskContext.pageIds(pageData || {}).customer_id || null } : {}),
+              // (the page the operator is viewing), never model input.
+              pageCustomerId: TaskContext.pageIds(pageData || {}).customer_id || null,
               // General admin read (owner ruling 2026-10-12): the request's own
               // login and bearer token, set here from the authenticated request,
               // never from model input; read_admin_data forwards the token on
@@ -4301,8 +4309,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // Only a card that exists blocks further writes; a proposal refused at
         // preflight left nothing to reconcile, so a corrected call may follow.
         if (platformEnabled && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name) && proposedCard) {
-          // GATE_IB_MULTI_CARD: an open edit on a named record leaves the frontier open for independent cards.
-          const openCard = multiCardOn ? MultiCard.record(toolUse.name, toolUse.input) : null;
+          // Several cards in one answer: an open edit on a named record leaves the frontier open for independent cards.
+          const openCard = platformEnabled ? MultiCard.record(toolUse.name, toolUse.input) : null;
           if (openCard) openCards.push(openCard);
           else writeFrontierBlocked = true;
         }
@@ -4375,7 +4383,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // discover_capabilities loop there to gather signals from); the admin
     // platform collector already searches first, so passing it there too is
     // inert on every request that already gathered a signal.
-    await gapCollector?.flush({ reply: finalResponse, ask: context === 'tech' ? prompt : undefined, stepLimitReached, noReply });
+    const savedGaps = await gapCollector?.flush({ reply: finalResponse, ask: context === 'tech' ? prompt : undefined, stepLimitReached, noReply });
 
     // Phantom-card guard (2026-09-25 production case): the model can write
     // "awaiting your Confirm on the card below" in plain prose with no tool
@@ -4529,6 +4537,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // none, and dropped when this turn made a card or committed a direct
       // edit: a button must never sit beside a Confirm control or a receipt.
       ...(offeredChoices && !pendingProposals.length && !directActionIds.length ? { choices: offeredChoices } : {}),
+      // GATE_IB_ANSWER_SEND_TO_CLAUDE: the bar searched its tools and changed nothing. Owner login on the admin platform
+      // only; the palette shows "Claude has this as gap #N." or a Send to Claude button. Absent otherwise.
+      ...(platformEnabled && ibAnswerSendToClaudeLive() && ibFullAccess(req) && gapCollector?.searched()
+        && !pendingProposals.length && !directActionIds.length
+        ? { answerClaude: { stuck: true, gapId: firstOpenGapId(savedGaps) } } : {}),
       // Return the structured data from the last tool call for UI rendering
       structuredData: toolResults.length > 0 ? toolResults[toolResults.length - 1].result : null,
       // Pending write proposals for the client confirmation card. This is the
@@ -4572,7 +4585,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // The request finished on a model answer: a standing "model not answering"
     // bell is cleared here, never after a middle round a later round may still fail.
     // Only a real model answer (not the too-many-steps or empty-reply fallback) clears it.
-    if (ibModelFailureNoticeLive() && !noReply) {
+    if (!noReply) {
       // Deliberate fire-and-forget: the answer never waits on the bell close.
       void ModelFailure.closeFailureBellOnRecovery({ lane: context === 'tech' ? 'tech' : 'admin', answeredSince: attemptStartedAt })
         .catch(closeErr => logger.error(`[intelligence-bar] model failure bell close failed (code=${closeErr?.code || closeErr?.name || 'error'})`));
@@ -4587,10 +4600,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     res.json(payload);
 
   } catch (err) {
-    // GATE_IB_MODEL_FAILURE_NOTICE (read at call time): a failed MODEL call (the
-    // tag is set only around messages.create) is answered plainly, recorded as a
-    // gap and rung once an hour. Anything else, or gate off, is today's path.
-    if (ibModelFailureNoticeLive() && ModelFailure.isModelCallError(err) && !res.headersSent
+    // A failed MODEL call (the tag is set only around messages.create) is
+    // answered plainly, recorded as a gap and rung once an hour. Anything else
+    // takes the ordinary error path.
+    if (ModelFailure.isModelCallError(err) && !res.headersSent
         && await answerModelFailure(req, res, { err, activeTask, pendingProposals: requestPendingProposals, failureTurn })) return;
     if (activeTask) {
       try { await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: 'outcome_unknown' }); }

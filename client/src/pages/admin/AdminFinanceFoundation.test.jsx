@@ -68,7 +68,6 @@ const defaults = {
     nextDeadlines: [],
   },
   "/api/admin/tax/bank-import/status": { enabled: false },
-  "/api/admin/tax/bank-import/ledger/status": { enabled: false },
   "/api/admin/tax/pnl": {},
   "/api/admin/tax/accounts-receivable": {
     summary: { total: 0, count: 0 },
@@ -714,29 +713,171 @@ describe("Finance workflow preservation", () => {
     expect(screen.queryByRole("button", { name: "Inbox", exact: true })).not.toBeInTheDocument();
     expect(requests.some((r) => r.key === "GET /api/admin/tax/bank-import/ledger/status")).toBe(false);
   });
-  // GATE_TAX_LEDGER fails closed: with bank import on, the Inbox leaf exists
-  // only when the ledger status says enabled; an off status or a failed read
-  // leaves the Tax navigation exactly as it is today.
-  it.each([
-    ["hides", { enabled: false }, 200],
-    ["hides", { error: "Read unavailable" }, 503],
-    ["shows", { enabled: true, rules: 0, inbox: 0, income: 0, bankImport: 0, unexamined: 0 }, 200],
-  ])("%s the Inbox leaf when the ledger status reads %j", async (verb, ledgerStatus, code) => {
+  // With bank import on, the Inbox leaf exists and opens the ledger.
+  it("shows the Inbox leaf when bank import is on", async () => {
     const key = "GET /api/admin/tax/bank-import/ledger/status";
     overrides.set("GET /api/admin/tax/bank-import/status", () => response({ enabled: true, counts: {} }));
-    overrides.set(key, () => response(ledgerStatus, code));
+    overrides.set(key, () => response({ rules: 0, inbox: 0, income: 0, bankImport: 0, unexamined: 0 }));
     overrides.set("GET /api/admin/tax/bank-import/ledger/inbox", () => response({ rows: [], total: 0 }));
     overrides.set("GET /api/admin/tax/bank-import/ledger/rules", () => response({ rules: [] }));
     open(TaxPage);
     await taxSection("Expenses");
     await screen.findByRole("button", { name: "Import", exact: true });
-    await waitFor(() => expect(requests.filter((r) => r.key === key)).toHaveLength(1));
-    if (verb === "hides") {
-      expect(screen.queryByRole("button", { name: "Inbox", exact: true })).not.toBeInTheDocument();
-      return;
-    }
     fireEvent.click(await screen.findByRole("button", { name: "Inbox", exact: true }));
     expect(await screen.findByRole("button", { name: "Apply rules now", exact: true })).toBeInTheDocument();
     expect(requests.some((r) => r.key === "GET /api/admin/tax/bank-import/ledger/inbox")).toBe(true);
+  });
+});
+
+describe("Banking: Cash today card (GATE_CASH_FORECAST)", () => {
+  const cashToday = {
+    fetched_at: "2026-11-05T15:00:00.000Z",
+    accounts: [
+      {
+        name: "Synthetic Checking", mask: "1111", account_label: "Synthetic Checking",
+        account_type: "bank", available: 1000, current: 1100, currency: "USD",
+        balance_as_of: "2026-11-05T13:30:00Z",
+      },
+      {
+        name: "Second Checking", mask: "2222", account_label: "Second Checking",
+        account_type: "bank", available: null, current: 250.5, currency: "USD",
+        balance_as_of: null,
+      },
+    ],
+    cards: [
+      {
+        name: "Synthetic Card", mask: "3333", account_label: "Synthetic Card",
+        account_type: "card", available: 5000, current: 400, currency: "USD",
+        balance_as_of: null,
+      },
+    ],
+    unavailable: [
+      { institution_name: "Synthetic Bank", reason: "login_required" },
+      { institution_name: "Other Bank", reason: "error" },
+    ],
+    in_transit: {
+      total: 300,
+      payouts: [{ amount: 300, arrival_day: "2026-11-06", status: "in_transit", bank_last_four: "9999" }],
+    },
+    totals: { bank_usd: 1250.5, owed_usd: 400, in_transit_usd: 300 },
+  };
+
+  it("shows balances, the Stripe parts, the total and the muted lines", async () => {
+    overrides.set("GET /api/admin/banking/cash-today", () => response(cashToday));
+    open(BankingPage);
+    expect(await screen.findByText("Cash today")).toBeInTheDocument();
+    expect(screen.getByText(/Synthetic Checking ••1111/)).toBeInTheDocument();
+    expect(screen.getByText(/as of Nov 5, 8:30 AM ET/)).toBeInTheDocument();
+    expect(screen.getByText("as of the last bank update")).toBeInTheDocument();
+    expect(screen.getByText("Stripe: available and pending")).toBeInTheDocument();
+    expect(screen.getByText("Stripe payouts on the way")).toBeInTheDocument();
+    expect(screen.getByText(/next arrives/)).toHaveTextContent("11/6/2026");
+    // 1250.50 + (1500 + 100) + 300
+    expect(screen.getByText("$3,150.50")).toBeInTheDocument();
+    expect(screen.getByText("Total")).toBeInTheDocument();
+    expect(screen.getByText("Owed on card ••3333: $400.00 (not counted)")).toBeInTheDocument();
+    expect(screen.getByText("Synthetic Bank needs a new sign-in: Tax page → Live bank feeds")).toBeInTheDocument();
+    expect(screen.getByText("Other Bank balance is unavailable right now")).toBeInTheDocument();
+  });
+
+  it("labels the total honestly when the Stripe balance failed", async () => {
+    overrides.set("GET /api/admin/banking/cash-today", () => response(cashToday));
+    overrides.set("GET /api/admin/banking/balance", () => response({ error: "down" }, 503));
+    open(BankingPage);
+    expect(await screen.findByText("Total without Stripe")).toBeInTheDocument();
+    expect(screen.queryByText("Stripe: available and pending")).not.toBeInTheDocument();
+  });
+
+  it("names an account the bank stopped sharing and shows a dash for a missing balance", async () => {
+    overrides.set("GET /api/admin/banking/cash-today", () =>
+      response({
+        ...cashToday,
+        accounts: [
+          { ...cashToday.accounts[0] },
+          { ...cashToday.accounts[1], available: null, current: null },
+        ],
+        cards: [{ ...cashToday.cards[0], current: null }],
+        unavailable: [
+          { institution_name: "Synthetic Bank", reason: "not_shared", mask: "4444", account_type: "bank" },
+          { institution_name: "Other Bank", reason: "needs_confirmation" },
+        ],
+      }),
+    );
+    open(BankingPage);
+    expect(await screen.findByText("Cash today")).toBeInTheDocument();
+    expect(
+      screen.getByText("Synthetic Bank no longer shares ••4444: Tax page → Live bank feeds → Add accounts (not counted)"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Other Bank reported a new or changed account: confirm it on Tax page → Live bank feeds"),
+    ).toBeInTheDocument();
+    // an unknown card balance is no proof the card owes nothing
+    expect(screen.getByText("Owed on card ••3333: balance unavailable (not counted)")).toBeInTheDocument();
+    expect(screen.getByText("—")).toBeInTheDocument();
+  });
+
+  it("reads the card again after a payout succeeds, so the new payout shows as on the way", async () => {
+    const cashKey = "GET /api/admin/banking/cash-today";
+    overrides.set(cashKey, () => response(cashToday));
+    overrides.set("POST /api/admin/banking/payouts/standard", () =>
+      response({ id: "po_example", amount: 100, status: "pending" }),
+    );
+    const dialog = await bankDialog();
+    await waitFor(() => expect(requests.filter((r) => r.key === cashKey)).toHaveLength(1));
+    fireEvent.change(dialog.getByLabelText("Payout Amount"), { target: { value: "100" } });
+    fireEvent.click(dialog.getByRole("button", { name: "Confirm Standard" }));
+    await waitFor(() => expect(requests.filter((r) => r.key === cashKey)).toHaveLength(2));
+  });
+
+  it.each([403, 404, 500])("renders nothing when the card read answers %i", async (status) => {
+    overrides.set("GET /api/admin/banking/cash-today", () => response({ error: "no" }, status));
+    open(BankingPage);
+    await waitFor(() =>
+      expect(requests.some((r) => r.key === "GET /api/admin/banking/cash-today")).toBe(true),
+    );
+    await screen.findByText("MTD Deposited");
+    expect(screen.queryByText("Cash today")).not.toBeInTheDocument();
+  });
+});
+
+describe("Banking: Cash forecast tab (GATE_CASH_FORECAST)", () => {
+  const nav = () => within(screen.getByRole("navigation", { name: "Banking section" }));
+  const inputsKey = "GET /api/admin/banking/cash-forecast/inputs";
+
+  it("lists the tab when the forecast inputs read answers, and opens it", async () => {
+    overrides.set(inputsKey, () => response({ items: [], settings: { floor_cents: null, last_year_receipts: {}, updated_at: null }, kinds: ["other"], cadences: ["once"] }));
+    overrides.set("GET /api/admin/banking/cash-forecast", () => response({
+      fetched_at: "2026-11-05T15:00:00.000Z", today: "2026-11-05", window_end: "2027-01-31",
+      opening: { bank_usd: 4321, partial: false, card_owed_usd: 0 }, expected_available: false, weeks: [],
+      lowest: { booked: null, expected: null, booked_with_hire: null, expected_with_hire: null }, method: {}, missing: [],
+    }));
+    open(BankingPage);
+    fireEvent.click(await nav().findByRole("button", { name: "Cash forecast" }));
+    expect(await screen.findByText("Cash today (both checking accounts)")).toBeInTheDocument();
+    expect(screen.getByText("$4,321")).toBeInTheDocument();
+  });
+
+  it("opens straight on the tab from the low-week bell's link (?tab=forecast)", async () => {
+    overrides.set(inputsKey, () => response({ items: [], settings: { floor_cents: null, last_year_receipts: {}, updated_at: null }, kinds: ["other"], cadences: ["once"] }));
+    overrides.set("GET /api/admin/banking/cash-forecast", () => response({
+      fetched_at: "2026-11-05T15:00:00.000Z", today: "2026-11-05", window_end: "2027-01-31",
+      opening: { bank_usd: 4321, partial: false, card_owed_usd: 0 }, expected_available: false, weeks: [],
+      lowest: { booked: null, expected: null, booked_with_hire: null, expected_with_hire: null }, method: {}, missing: [],
+    }));
+    window.history.pushState({}, "", "/admin/banking?tab=forecast");
+    try {
+      open(BankingPage);
+      expect(await screen.findByText("Cash today (both checking accounts)")).toBeInTheDocument();
+    } finally {
+      window.history.pushState({}, "", "/");
+    }
+  });
+
+  it.each([403, 404])("keeps the tab hidden when the inputs read answers %i", async (status) => {
+    overrides.set(inputsKey, () => response({ error: "no" }, status));
+    open(BankingPage);
+    await waitFor(() => expect(requests.some((r) => r.key === inputsKey)).toBe(true));
+    await screen.findByText("MTD Deposited");
+    expect(nav().queryByRole("button", { name: "Cash forecast" })).not.toBeInTheDocument();
   });
 });

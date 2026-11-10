@@ -631,8 +631,75 @@ async function auditVendorOrder({ vendor_order_id, restock_request_id, vendor_id
   });
 }
 
+/**
+ * A customer opened the link of an estimate that had expired. Called from GET
+ * /api/estimates/:token/data on the eligible-expired 404 branch. Fire-and-
+ * forget (never throws): it is a "customer came back" signal only. It lives in
+ * audit_log on purpose — estimate_checkout_events and estimate_views are read
+ * without a kind filter by customer-facing follow-up jobs, so a row there
+ * would start a message.
+ *
+ * metadata: { expires_at, extension_offered } — extension_offered is whether
+ * the page showed the reopen / ask-for-more-time button.
+ */
+async function auditEstimateExpiredOpen({ estimateId, expiresAt = null, extensionOffered = false, ipAddress = null, userAgent = null }) {
+  return recordAuditEvent({
+    actor_type: 'customer',
+    action: 'estimate_expired_open',
+    resource_type: 'estimate',
+    resource_id: estimateId,
+    metadata: { expires_at: expiresAt, extension_offered: extensionOffered === true },
+    ip_address: ipAddress,
+    user_agent: userAgent,
+  });
+}
+
+/**
+ * A booking step a customer took on an estimate page (owner 2026-11-05, "1, 2 and 3", estimate page audit fix 3),
+ * written by services/estimate-stuck-alert.js. Fire-and-forget like the rest of this file. Same audit_log home as
+ * estimate_expired_open, for the same reason (customer follow-up jobs read the estimate event tables unfiltered).
+ *
+ *   estimate_slot_search   { via: 'date' | 'ai', date, empty }   a date browse or a Waves AI search and its answer
+ *   estimate_hold_started  { scheduled_service_id, date, window_start, expires_at }
+ *   estimate_hold_ended    { scheduled_service_id, how: 'released' | 'expired', date, window_start }
+ */
+const ESTIMATE_BOOKING_STEPS = Object.freeze(['estimate_slot_search', 'estimate_hold_started', 'estimate_hold_ended']);
+
+async function auditEstimateBookingStep({ action, estimateId, customerId = null, metadata = {} }) {
+  if (!ESTIMATE_BOOKING_STEPS.includes(action)) return null;
+  return recordAuditEvent({
+    actor_type: 'customer',
+    actor_id: customerId,
+    action,
+    resource_type: 'estimate',
+    resource_id: estimateId,
+    metadata,
+  });
+}
+
+/**
+ * A saved card's expiry, brand, last four or funding was refreshed from
+ * Stripe (services/card-details-sync.js; Stripe's card account updater
+ * renews cards without telling us). Fire-and-forget: the payment_methods row
+ * is the record, this is forensics, so a lost audit row must not block the
+ * refresh. Metadata names the fields that changed and the old and new expiry
+ * as MM/YYYY; never a last four or a Stripe object.
+ */
+async function auditCardDetailsSynced({ payment_method_row_id, source, changed_fields, old_expiry, new_expiry }) {
+  return recordAuditEvent({
+    actor_type: 'system',
+    action: 'billing.payment_method.card_details_synced',
+    resource_type: 'payment_method',
+    resource_id: payment_method_row_id,
+    metadata: { source, changed_fields, old_expiry, new_expiry },
+  });
+}
+
 module.exports = {
   recordAuditEvent,
+  auditEstimateExpiredOpen,
+  auditEstimateBookingStep,
+  auditCardDetailsSynced,
   auditLawnSqftFromEstimate,
   auditVendorOrder,
   auditTerminalHandoffMint,

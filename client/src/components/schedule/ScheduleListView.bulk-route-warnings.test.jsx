@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// GATE_ROUTE_CHECK_STAFF_SAVES: a bulk reschedule's route-check results come back as
+// Route check on saves: a bulk reschedule's route-check results come back as
 // `routeWarnings` ([{ id, warning }]), apart from `overlapWarnings`. The list shows the
 // route text on its own line and never counts a route result as an overlap.
 import React from 'react';

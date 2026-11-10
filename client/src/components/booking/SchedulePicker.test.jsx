@@ -111,6 +111,33 @@ describe('PickerBestTimes ordering', () => {
   });
 });
 
+describe('PickerBestTimes copy', () => {
+  const renderStrip = (props = {}) => render(
+    <SchedulePicker
+      availability={{ days: [DAY] }}
+      rankedSlots={[{ date: DAY.date, start_time: '13:00' }]}
+      selectedDate={DAY.date}
+      onSelectDay={() => {}}
+      selectedSlot={null}
+      onSelectSlot={() => {}}
+      {...props}
+    />,
+  );
+
+  it('keeps the route-fit heading and intro when a caller leaves them out', () => {
+    renderStrip();
+    expect(screen.getByText('Our best times for you')).toBeInTheDocument();
+    expect(screen.getByText(/fit our route near you best/)).toBeInTheDocument();
+  });
+
+  it('hides the heading and intro on null but keeps the picks (the estimate look-ahead)', () => {
+    renderStrip({ bestTitle: null, bestIntro: null });
+    expect(screen.queryByText('Our best times for you')).not.toBeInTheDocument();
+    expect(screen.queryByText(/fit our route near you best/)).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /Pick/ })).toHaveLength(1);
+  });
+});
+
 describe('PickerBestTimes rain tier (GATE_CUSTOMER_RAIN_RANK)', () => {
   it('a recommendation with a display_tier sorts after the others, even when it is nearby with the best rank', () => {
     const slots = [

@@ -611,6 +611,8 @@ function mapV1ToLegacyShape(v1Result) {
         costFloorAnnual: t.costFloorAnnual ?? null,
         programMinimumApplied: !!t.programMinimumApplied,
         programMinimumMonthly: t.programMinimumMonthly ?? null,
+        // Lawn $55-after-discount minimum raised this list price (owner 2026-11-06).
+        minimumAfterDiscountPerVisit: t.minimumAfterDiscountApplied ? t.minimumAfterDiscountPerVisit : null,
         bermudaSuppressionPerApp: t.bermudaSuppressionPerApp ?? null,
         margin: t.costFloorDetails && Number(t.annual) > 0
           ? Math.round((1 - (t.costFloorDetails.annualCost + (Number(t.bermudaRemovalAnnualCost) || 0)) / t.annual) * 1000) / 1000
@@ -1336,9 +1338,13 @@ function mapV1ToLegacyShape(v1Result) {
   // it out, so no reader has to take it back out (#6438). Palm injection
   // rides outside services[] (recurring.palmInjectionMo); the public page's
   // recurringServicesWithSupplements counts it as a line, so it counts here.
+  // A solo mosquito plan has no pest line, so it reads the same setup price
+  // the engine puts on the pest line (PEST.initialFee, live pricing_config).
+  // The page shows that fee and the accept bills it, so the stored one-time
+  // and year-1 totals carry it too (they were $99 low before).
   const feeMixServices = palmMonthlyAfterCredits > 0 ? [...services, { service: 'palm_injection' }] : services;
   const membershipFee = require('../estimate-converter').recurringMixHasMembershipFeeService(feeMixServices)
-    ? (pestLI?.initialFee || 0)
+    ? (pestLI ? (pestLI.initialFee || 0) : (Number(require('./constants').PEST.initialFee) || 0))
     : 0;
 
   const oneTimeItemsMoney = v1OtItems.reduce((s, i) => s + (i.price || 0), 0);

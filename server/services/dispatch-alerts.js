@@ -17,7 +17,8 @@
  * or neither lands. Taking trx as an optional parameter today
  * means the call site stays clean tomorrow.
  *
- * dispatch:admins is the staff room (admin + technician). Customers
+ * dispatch:admins is the office room (admin sockets; technician
+ * sockets too while GATE_TECH_LOGIN_PRIVACY is off). Customers
  * never join it and never receive alerts — these are dispatcher
  * coordination signals, not customer-facing notifications.
  *

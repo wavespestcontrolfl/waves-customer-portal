@@ -21,7 +21,10 @@
 // property group, not drafted from a visit (that visit was the look), with a
 // customer account whose stored address is the estimate's property (the
 // consultation offer's sameProperty rule). A customer who already has an open
-// Waves Assessment gets the page's already_booked state.
+// Waves Assessment gets the page's already_booked state. One whose Waves
+// Assessment was COMPLETED on or after 30 days before the estimate was created
+// has had the look (it happened while the estimate was being prepared, though
+// the estimate is not linked to that visit): gone.
 //
 // Mounted in server/index.js on /api/public/estimate-assessment behind a
 // pre-guard (privacy headers, the dark gate's 404 and the token format check
@@ -33,6 +36,7 @@ const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { noStore } = require('../middleware/no-store');
+const { hadCompletedAssessmentLook } = require('../services/assessment-booking');
 const { rateLimitKey } = require('../middleware/rate-limit-key');
 const { estimateAssessmentFirstLive } = require('../config/feature-gates');
 
@@ -104,6 +108,7 @@ async function assessmentEligibility(estimate, data, conn = db) {
   // own check, inspection-public.js).
   const visit = await inspection().findOpenVisit(conn, customer.id, { assessmentOnly: true });
   if (visit) return { state: 'already_booked', customer, visit };
+  if (await hadCompletedAssessmentLook(conn, estimate)) return { state: 'gone' };
   return { state: 'ok', customer };
 }
 
@@ -265,7 +270,7 @@ async function sendSlotTaken(res, setup, error) {
 // row), under the per-estimate lock createSelfBooking takes (callbackVisit.estimateGuard): the estimate, share-locked,
 // still open and customer-viewable for the same customer; its call-side verdict held under lock; still eligible on
 // this transaction (not grouped or drafted from a visit, the customer's address still the estimate's property, no
-// open assessment: 'booked'); and the gate read last, after every lock wait. 'ok', 'booked' or 'ineligible'.
+// open assessment: 'booked'; no Waves Assessment completed while the estimate was prepared); and the gate read last, after every lock wait. 'ok', 'booked' or 'ineligible'.
 function estimateGuardFor(estimate, customerId) {
   return {
     estimateId: estimate.id,

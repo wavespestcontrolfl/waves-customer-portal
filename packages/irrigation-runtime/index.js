@@ -38,7 +38,7 @@ const HEAD_PRECIP_RATE_IN_PER_HR = Object.freeze({
 // SAME constant (OWNER_HEAD_RATE_IN_PER_HR, below), so the card and the banner cannot disagree. The package's own
 // table above stays the package default; a caller opts in with
 // deriveIrrigationInchesPerWeek(..., { rates: OWNER_HEAD_RATE_IN_PER_HR }), resolveApplicationRate(..., { rates }) or
-// buildWeekPlan({ rates }). The server picks the table behind GATE_IRRIGATION_OWNER_RATES (owner 2026-10-09: one table
+// buildWeekPlan({ rates }). The server picks the table (owner 2026-10-09: one table
 // for every reader; server/services/irrigation-rates.js); this package never reads the environment.
 const OWNER_MINUTES_PER_QUARTER_INCH = Object.freeze({ spray: 15, rotor: 40 });
 const OWNER_HEAD_RATE_IN_PER_HR = Object.freeze(Object.fromEntries(

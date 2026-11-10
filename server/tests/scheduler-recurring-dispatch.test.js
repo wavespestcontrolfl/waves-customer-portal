@@ -9,7 +9,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(), autoDispatchCatchUpLive: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn() }));
 jest.mock('../services/auto-dispatch/catch-up', () => ({ runCatchUp: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
@@ -25,7 +25,7 @@ jest.mock('../services/auto-dispatch/proofreader/nightly', () => ({ closeNotices
 jest.mock('../services/auto-dispatch/check-down-notice', () => ({ noteRun: jest.fn(async () => ({ action: 'none' })) }));
 
 const cron = require('../utils/scheduled-cron');
-const { isEnabled, autoDispatchCatchUpLive } = require('../config/feature-gates');
+const { isEnabled } = require('../config/feature-gates');
 const { runCatchUp } = require('../services/auto-dispatch/catch-up');
 const { runExclusive } = require('../utils/cron-lock');
 const { runAutoDispatch } = require('../services/auto-dispatch');
@@ -99,7 +99,7 @@ test('a gate-off alert failure reaches the job failure path', async () => {
 test('a gate-off night keeps the move-check-down notice by the same rule as a run; its failure reaches the job failure path (Codex #6465 r1)', async () => {
   const checkDown = require('../services/auto-dispatch/check-down-notice');
   await tick();
-  // No run state: only the notice's own gate or the check being off closes it.
+  // No run state: only the check being off closes it.
   expect(checkDown.noteRun).toHaveBeenCalledWith(null, { enabled: expect.any(Boolean), nowDate: expect.any(Date) });
   expect(logger.error).not.toHaveBeenCalled();
   checkDown.noteRun.mockResolvedValueOnce({ action: 'error' });
@@ -114,11 +114,11 @@ test('a gate-off pin-notice upkeep failure reaches the job failure path after th
   expect(logger.error).toHaveBeenCalledWith('Auto-Dispatch run failed: pin read failed');
 });
 
-// 5:00 AM catch-up (GATE_AUTO_DISPATCH_CATCH_UP, owner 2026-10-26).
+// 5:00 AM catch-up (owner 2026-10-26).
 function catchUpTick() {
   initScheduledJobs();
-  // Other jobs also run at 0 5 * * *; the catch-up is the one that reads its gate.
-  const registrations = cron.schedule.mock.calls.filter(([expression, fn]) => expression === '0 5 * * *' && String(fn).includes('autoDispatchCatchUpLive'));
+  // Other jobs also run at 0 5 * * *; the catch-up is the one that takes the catch-up lock.
+  const registrations = cron.schedule.mock.calls.filter(([expression, fn]) => expression === '0 5 * * *' && String(fn).includes('auto-dispatch-catch-up'));
   expect(registrations).toHaveLength(1);
   expect(registrations[0][2]).toEqual({ timezone: 'America/New_York' });
   // Registration reads the database for boundary upkeep; only the tick's own reads matter below.
@@ -129,18 +129,7 @@ function catchUpTick() {
 describe('5 AM auto-dispatch catch-up', () => {
   beforeEach(() => {
     isEnabled.mockImplementation((name) => ['cronJobs', 'autoDispatch'].includes(name));
-    autoDispatchCatchUpLive.mockReturnValue(true);
     runCatchUp.mockResolvedValue({ ran: true, reason: 'no night run started on 2026-10-26', settled: 0, result: { runId: 'run-9', status: 'completed', evaluated: 3, recommended: 1, changed: 1, skipped: 1, failed: 0 } });
-  });
-
-  test('gate off: returns at once, no lock, no read, no run', async () => {
-    autoDispatchCatchUpLive.mockReturnValue(false);
-    await catchUpTick();
-    expect(runExclusive).not.toHaveBeenCalled();
-    expect(runCatchUp).not.toHaveBeenCalled();
-    expect(runAutoDispatch).not.toHaveBeenCalled();
-    // (Registration-time upkeep may still touch other tables; the catch-up itself reads auto_dispatch_runs.)
-    expect(require('../models/db').mock.calls.map(([table]) => table)).not.toContain('auto_dispatch_runs');
   });
 
   test('cron jobs or auto-dispatch off: returns at once', async () => {
@@ -153,10 +142,10 @@ describe('5 AM auto-dispatch catch-up', () => {
   test('cron jobs off: the catch-up is not registered', () => {
     isEnabled.mockImplementation(() => false);
     initScheduledJobs();
-    expect(cron.schedule.mock.calls.filter(([, fn]) => String(fn).includes('autoDispatchCatchUpLive'))).toHaveLength(0);
+    expect(cron.schedule.mock.calls.filter(([, fn]) => String(fn).includes('auto-dispatch-catch-up'))).toHaveLength(0);
   });
 
-  test('gate on: borrows the 4:10 writer lock inside its own job and runs the catch-up', async () => {
+  test('borrows the 4:10 writer lock inside its own job and runs the catch-up', async () => {
     await catchUpTick();
     expect(runExclusive).toHaveBeenCalledWith('auto-dispatch-catch-up', expect.any(Function));
     expect(runExclusive).toHaveBeenCalledWith('auto-dispatch-recurring', expect.any(Function), { recordHealth: false });

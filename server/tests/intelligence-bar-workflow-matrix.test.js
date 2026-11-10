@@ -85,7 +85,12 @@ describe('execution-mode matrix on main', () => {
   });
 
   test('the conditions say what the policy does', () => {
-    const exec = (tool, input, preview) => ownerDirect.executesWithoutCard(tool, input, preview || null);
+    // The probe customer is the one the owner named (target rules): the conditions below are the other conditions.
+    const grounding = ownerDirect.targetGrounding({ targets: [{ customer_id: 'cust-x' }], page: { ids: {} } });
+    const exec = (tool, input, preview) => {
+      const pinned = preview && preview.pinned_appointment ? { ...preview, pinned_appointment: { ...preview.pinned_appointment, customer_id: 'cust-x' } } : preview || null;
+      return ownerDirect.executesWithoutCard(tool, { customer_id: 'cust-x', ...input }, pinned, null, grounding);
+    };
     expect(exec('update_lead_contact', { lead_id: 'lead-x', first_name: 'A' })).toBe(true);
     expect(exec('update_lead_contact', { lead_name: 'A', first_name: 'A' })).toBe(false);
     expect(exec('update_lead_contact', { lead_id: 'lead-x', lead_name: 'A', first_name: 'A' })).toBe(false);

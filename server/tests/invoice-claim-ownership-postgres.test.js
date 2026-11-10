@@ -291,6 +291,64 @@ postgres('invoice send episode ownership', () => {
     expect((await read()).send_claim_token).toMatch(/^[0-9a-f-]{36}$/);
   });
 
+  // Owner 2026-11-06 ("fix"): a bill's first delivery never carries a due date
+  // before the day it goes out (invoice-helpers.js firstDeliveryDueDate).
+  describe('first delivery due date', () => {
+    const { etDateString } = require('../utils/datetime-et');
+    const dueDay = async () => (await trx('invoices').where({ id: invoiceId }).first(trx.raw('due_date::text AS due'))).due;
+
+    test('a first Text after the due day carries the send day before the text is built; a resend keeps the day', async () => {
+      await trx('invoices').where({ id: invoiceId }).update({ due_date: '2026-01-02' });
+      const atHandoff = [];
+      const accept = async ({ withProviderHandoff }) => {
+        atHandoff.push(await dueDay());
+        return withProviderHandoff(async () => ({ sent: true, deliveryOutcome: 'provider_accepted' }));
+      };
+      sendCustomerMessage.mockImplementationOnce(accept).mockImplementationOnce(accept);
+
+      await Invoice.sendViaSMS(invoiceId);
+      const sendDay = etDateString();
+      expect(atHandoff).toEqual([sendDay]);
+      expect(await read()).toMatchObject({ status: 'sent', send_claim_token: null });
+      expect(await dueDay()).toBe(sendDay);
+
+      // A delivered bill keeps its due date on every later send.
+      await trx('invoices').where({ id: invoiceId }).update({ due_date: '2026-01-02' });
+      await Invoice.sendViaSMS(invoiceId);
+      expect(atHandoff[1]).toBe('2026-01-02');
+      expect(await dueDay()).toBe('2026-01-02');
+    });
+
+    test('a due date on or after the send day is never moved', async () => {
+      await trx('invoices').where({ id: invoiceId }).update({ due_date: '2040-01-02' });
+      sendCustomerMessage.mockImplementationOnce(({ withProviderHandoff }) => (
+        withProviderHandoff(async () => ({ sent: true, deliveryOutcome: 'provider_accepted' }))
+      ));
+      await Invoice.sendViaSMS(invoiceId);
+      expect(await dueDay()).toBe('2040-01-02');
+    });
+
+    test('a delivery stamp moves a stale due date to the Eastern day the bill was delivered', async () => {
+      // A claim taken before the move shipped: still 'sending', no stamp, the old due date.
+      await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: randomUUID(), due_date: '2026-01-02' });
+      // A deduped finalize keeps its original acceptance: 11:30 PM ET on Jan 9 (UTC reads Jan 10).
+      await Invoice.markDeliverySent(invoiceId, { sms: true, deduped: true, eventVisibleAt: '2026-01-10T04:30:00Z', source: 'completion_sms_with_invoice' });
+      expect(await read()).toMatchObject({ status: 'sent' });
+      expect(await dueDay()).toBe('2026-01-09');
+    });
+
+    test('an accepted visit summary text is the first delivery when nothing went before it', async () => {
+      await trx('invoices').where({ id: invoiceId }).update({ due_date: '2026-01-02' });
+      await Invoice.markSummaryTextAccepted(invoiceId);
+      expect(await dueDay()).toBe(etDateString());
+
+      // A bill another channel already delivered keeps its due date.
+      await trx('invoices').where({ id: invoiceId }).update({ due_date: '2026-01-02', sms_sent_at: null, email_sent_at: new Date('2026-01-03T15:00:00Z') });
+      await Invoice.markSummaryTextAccepted(invoiceId);
+      expect(await dueDay()).toBe('2026-01-02');
+    });
+  });
+
   test('legacy accepted-delivery finalization promotes a claimed row without erasing its episode token', async () => {
     const token = randomUUID();
     await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: token });

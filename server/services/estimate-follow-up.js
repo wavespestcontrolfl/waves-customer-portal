@@ -407,13 +407,13 @@ function moneySummary(est = {}) {
   return "";
 }
 
-// GATE_ESTIMATE_FOLLOWUP_MONTHLY_AVERAGE (owner 2026-10-21): the follow-up emails that
+// Monthly average (owner 2026-10-21): the follow-up emails that
 // render the price row (unviewed, viewed, final, expiring notice) show the same
 // average copy as the delivery email. `estimate_average_note` is the context sentence
 // (a paragraph block the templates carry, dropped when blank). Built from a row read
 // now by emailAverageParts, the delivery email's own resolver and eligibility
 // (commercial, quote-required, closed, prepay/monthly-billed, one-time-only all
-// withheld). Returns the payload UNCHANGED (same object) with the gate off, when no
+// withheld). Returns the payload UNCHANGED (same object) when no
 // average applies, or when the template's ACTIVE version cannot show the context
 // sentence, so those emails stay byte-identical. A template the migration skipped
 // (custom plain-text body, price block removed, publish race) would otherwise print
@@ -443,7 +443,6 @@ async function averageNoteVersionId(templateKey) {
 // averageText is the exact copy put in the email (the send-time check compares it).
 async function applyMonthlyAverage(payload, est, templateKey) {
   const unchanged = { payload, versionId: null, averageText: null };
-  if (!isEnabled("estimateFollowupMonthlyAverage")) return unchanged;
   try {
     const versionId = await averageNoteVersionId(templateKey);
     if (!versionId) return unchanged;
@@ -713,7 +712,7 @@ async function sendDualChannel(est, { sms, email }) {
       return false;
     }
   }
-  // GATE_ESTIMATE_EMAIL_PDF: a PDF-bearing email row (has_attachments) is NOT on
+  // A PDF-bearing email row (has_attachments) is NOT on
   // the provider-retry rail, as on main. That is safe here because a failed email
   // leg (SendGrid rejection, a thrown error, or the PDF fence aborting before the
   // request) leaves `attempted` false when no text went out, so every caller
@@ -735,8 +734,8 @@ async function sendDualChannel(est, { sms, email }) {
     const idempotencyKey = `estimate_followup_${email.stage}:${est.id}`
       + (email.idempotencySuffix ? `:${email.idempotencySuffix}` : "");
     try {
-      // GATE_ESTIMATE_EMAIL_PDF: an allowlisted open-estimate email also
-      // carries the PDF copy plus its one-line note. Empty (gate off, other
+      // An allowlisted open-estimate email also
+      // carries the PDF copy plus its one-line note. Empty (document gate off, other
       // template, estimate no longer open, render failed) = sent as before.
       const pdfCopy = await openEstimateEmailPdf({ estimateId: est.id, templateKey: email.templateKey, recipient: est.customer_email });
       const result = await EmailTemplateLibrary.sendTemplate({
@@ -1214,9 +1213,28 @@ async function checkPaymentStepAbandoned(now = new Date()) {
   return sent;
 }
 
+// A schema that predates a stage's columns or tables (a fresh environment)
+// stays quiet; any other whole-stage error is recorded for the tick's end.
+const MISSING_SCHEMA_CODES = new Set(["42703", "42P01"]);
+function throwIfStagesFailed(stageFailures, sent) {
+  if (stageFailures.length > 0) {
+    throw new Error(
+      `estimate-follow-up: ${stageFailures.length} stage(s) failed (${stageFailures.join(", ")}); ${sent} follow-up(s) sent`,
+    );
+  }
+}
+
+function noteStageFailure(stageFailures, stage, err) {
+  if (MISSING_SCHEMA_CODES.has(err?.code)) return;
+  // Code only: a driver message can carry SQL bindings or a customer's contact data.
+  logger.error(`[est-followup] ${stage} stage failed (${err?.code || err?.name || "error"})`);
+  stageFailures.push(stage);
+}
+
 const EstimateFollowUp = {
   async checkAll() {
     let sent = 0;
+    const stageFailures = [];
 
     // Heal lost counter bumps BEFORE any stage judges spacing/caps
     // (codex 2736 r15) — non-fatal: a failed heal just means this tick
@@ -1325,8 +1343,8 @@ const EstimateFollowUp = {
           }
         }
       }
-    } catch {
-      /* columns may not exist */
+    } catch (e) {
+      noteStageFailure(stageFailures, "unviewed", e);
     }
 
     // 2. Viewed but NOT accepted after 48 hours
@@ -1411,8 +1429,8 @@ const EstimateFollowUp = {
           }
         }
       }
-    } catch {
-      /* columns may not exist */
+    } catch (e) {
+      noteStageFailure(stageFailures, "viewed", e);
     }
 
     // 3. Viewed but NOT accepted after 5 days (final nudge)
@@ -1493,8 +1511,8 @@ const EstimateFollowUp = {
           }
         }
       }
-    } catch {
-      /* columns may not exist */
+    } catch (e) {
+      noteStageFailure(stageFailures, "final", e);
     }
 
     // 4. Expiring in 1-3 days
@@ -1615,19 +1633,23 @@ const EstimateFollowUp = {
           }
         }
       }
-    } catch {
-      /* columns may not exist */
+    } catch (e) {
+      noteStageFailure(stageFailures, "expiring", e);
     }
 
     // 6. Reached the save-a-card step but never accepted
     try {
       sent += await checkPaymentStepAbandoned();
-    } catch {
-      /* tables may not exist */
+    } catch (e) {
+      noteStageFailure(stageFailures, "payment_step", e);
     }
 
     if (sent > 0)
       logger.info(`[est-followup] Sent ${sent} follow-ups (SMS+email)`);
+    // Every stage has run. A whole-stage failure (a broken stage query, not
+    // one customer's send) must reach job_health: runExclusive records a
+    // failure only when the body throws.
+    throwIfStagesFailed(stageFailures, sent);
     return { sent };
   },
 };

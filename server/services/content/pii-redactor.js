@@ -197,7 +197,7 @@ const DOMAIN_TERM_PAIRS = new Set([
   'summer patch', 'summer heat',
 ]);
 
-function looksLikeFalsePositiveName(first, last) {
+function looksLikeFalsePositiveName(first, last, allowPairs) {
   if (!first || !last) return true;
   if (NAME_ALLOWLIST.has(first) || NAME_ALLOWLIST.has(last)) return true;
   // A capitalized pair that IS a service-area name ("Punta Gorda", or a
@@ -206,6 +206,9 @@ function looksLikeFalsePositiveName(first, last) {
   if (CITY_PAIR_ALLOWLIST.has(`${first} ${last}`.toLowerCase())) return true;
   // Title-cased lawn/pest domain terms are page furniture, not people.
   if (DOMAIN_TERM_PAIRS.has(`${first} ${last}`.toLowerCase())) return true;
+  // Caller-supplied public-entity bigrams (content quality gate: approved
+  // competitors and cited public bodies). Absent for every other caller.
+  if (allowPairs && allowPairs.has(`${first} ${last}`.toLowerCase())) return true;
   // All-caps single words are usually abbreviations, not names.
   if (first === first.toUpperCase() || last === last.toUpperCase()) return true;
   // Length sanity.
@@ -213,7 +216,7 @@ function looksLikeFalsePositiveName(first, last) {
   return false;
 }
 
-function redactNames(text, findings) {
+function redactNames(text, findings, allowPairs) {
   let out = text;
   let nameMatchCount = 0;
 
@@ -221,7 +224,7 @@ function redactNames(text, findings) {
   for (const re of NAME_SIGNAL_PREFIXES) {
     out = out.replace(re, (match, prefix, first, last) => {
       const lastClean = last ? last.trim() : '';
-      if (looksLikeFalsePositiveName(first, lastClean)) return match;
+      if (looksLikeFalsePositiveName(first, lastClean, allowPairs)) return match;
       nameMatchCount++;
       return `${prefix} [name]`;
     });
@@ -235,7 +238,7 @@ function redactNames(text, findings) {
   // [name] swap on a multi-cap noun phrase is far less harmful than
   // a real customer name reaching a published asset.
   out = out.replace(STANDALONE_NAME_PAIR, (match, first, last) => {
-    if (looksLikeFalsePositiveName(first, last)) return match;
+    if (looksLikeFalsePositiveName(first, last, allowPairs)) return match;
     nameMatchCount++;
     return '[name]';
   });
@@ -265,7 +268,7 @@ function redactNames(text, findings) {
   return out;
 }
 
-function redact(text) {
+function redact(text, { allowPairs } = {}) {
   if (text === null || text === undefined) return { text: '', confidence: 'high', findings: [] };
 
   let out = String(text);
@@ -281,7 +284,7 @@ function redact(text) {
   // Name heuristic last (highest false-positive risk).
   const nameHits = findings.filter((f) => f.type === 'name').length;
   const beforeNamePass = out;
-  out = redactNames(out, findings);
+  out = redactNames(out, findings, allowPairs);
   const nameTriggered = out !== beforeNamePass || nameHits > 0;
   const addressTriggered = findings.some((f) => f.type === 'address');
 
@@ -348,7 +351,7 @@ function suspiciousUnstructured(text) {
   // emoji + currency) — be cautious.
   // We allow common latin + emoji + standard punctuation; flag anything
   // odd by checking presence of unusual private-use / control chars.
-  // eslint-disable-next-line no-control-regex
+   
   if (/[---]/.test(text)) return true;
   return false;
 }

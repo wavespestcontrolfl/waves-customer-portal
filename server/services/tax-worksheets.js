@@ -1,6 +1,6 @@
 /**
- * Sales tax (Florida DR-15) and 1099-NEC worksheets for the Tax area,
- * GATE_TAX_WORKSHEETS (nested under GATE_BANK_IMPORT). Both read the books
+ * Sales tax (Florida DR-15) and 1099-NEC worksheets for the Tax area
+ * (nested under GATE_BANK_IMPORT). Both read the books
  * only; the one write on these screens is Mark filed, through the filing
  * calendar's own PUT /filings/:id.
  *

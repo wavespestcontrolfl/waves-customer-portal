@@ -9,7 +9,7 @@ import { DOC_EYEBROW, DOC_FONT, FS } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import DocumentActionBar from '../components/DocumentActionBar';
-import CustomerReportHeader, { sharedReportTemplateActive } from '../components/report/CustomerReportHeader';
+import CustomerReportHeader from '../components/report/CustomerReportHeader';
 import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -184,7 +184,8 @@ function formatAppointmentWindow(appt) {
   const end = endMins != null
     ? formatAppointmentTime(`${Math.floor(endMins / 60)}:${String(endMins % 60).padStart(2, '0')}`)
     : '';
-  const window = start && end ? `${start}-${end}` : start;
+  // GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour.
+  const window = start && end ? `${start}-${end}` : (start || (appt.day_only ? appt.arrival_note : ''));
   return [date, window].filter(Boolean).join(' ');
 }
 
@@ -388,8 +389,8 @@ export default function ProjectReportViewPage() {
   // PDF is a server-side artifact linked below, never rendered here.)
   const isCertificate = data?.projectType === 'pre_treatment_termite_certificate';
   const isPaperDocument = isCertificate || data?.projectType === 'wdo_inspection';
-  // GATE_REPORT_SHARED_TEMPLATE: the shared customer header and the stacked layout, never on a paper document.
-  const sharedTemplate = !isPaperDocument && sharedReportTemplateActive(data);
+  // The shared customer header and the stacked layout, never on a paper document (those keep their own header).
+  const sharedTemplate = !isPaperDocument;
   // The applicator is the tech who PERFORMED the linked visit, which can
   // differ from the project's creator (technicianName) — Codex r2 #5032.
   const applicatorLine = applicatorIdLine(data?.applicatorName || data?.technicianName, data?.applicatorFdacsId);
@@ -714,24 +715,23 @@ export default function ProjectReportViewPage() {
           </div>
         )}
 
-        {/* GATE_PRETREAT_STICKER_REPORT: the certificate mirrors the paper
-            Notice of Termite Protection label, with the certificate fields
-            the label has no blank for in a details block under it. */}
-        {isCertificate && data.pretreatStickerReport && (
-          <TermiteNoticeSticker
-            findings={findings}
-            technicianName={data.technicianName}
-            projectDateLabel={projectDateLabel}
-          />
-        )}
+        {/* The certificate mirrors the paper Notice of Termite Protection
+            label, with the certificate fields the label has no blank for in
+            a details block under it. */}
         {isCertificate && (
-          <CertificateOfCompliance
-            findings={findings}
-            customerName={data.customerName}
-            technicianName={data.technicianName}
-            projectDateLabel={projectDateLabel}
-            detailsOnly={Boolean(data.pretreatStickerReport)}
-          />
+          <>
+            <TermiteNoticeSticker
+              findings={findings}
+              technicianName={data.technicianName}
+              projectDateLabel={projectDateLabel}
+            />
+            <CertificateOfCompliance
+              findings={findings}
+              customerName={data.customerName}
+              technicianName={data.technicianName}
+              projectDateLabel={projectDateLabel}
+            />
+          </>
         )}
 
         {/* Primary visit photos */}
@@ -827,10 +827,10 @@ function AtAGlance({ rows }) {
  * TermiteNoticeSticker — the paper "Notice of Termite Protection" label
  * (Sticker Mule 5.45″ × 4″, form WV-001) as a document: same blanks in the
  * same order, filled from the certificate findings, set in the report's own
- * navy and type (GATE_PRETREAT_STICKER_REPORT). An empty blank prints as an
+ * navy and type. An empty blank prints as an
  * empty rule, as on paper. The label's "Date of WDO Inspection" blank is for
  * a later inspector and is left off the web copy. The certificate fields the
- * label has no blank for render under it (CertificateOfCompliance detailsOnly).
+ * label has no blank for render under it (CertificateOfCompliance).
  */
 function stickerDate(value) {
   const day = dateOnly(String(value || ''));
@@ -1051,16 +1051,13 @@ export function TermiteNoticeSticker({ findings, technicianName, projectDateLabe
 }
 
 /**
- * CertificateOfCompliance — Florida Building Code 1816.1 / R318.1 Certificate for
- * pre-construction subterranean termite soil treatment. The layout follows
- * the customer estimate visual language while preserving required certificate
- * fields and statutory language. Stamp ID: WV-002.
- *
- * Required content per FBC 1816.1 / R318.1: company name + phone, treatment address
- * or lot/block, method of treatment, the exact compliance statement, and an
- * authorized applicator signature. Additional fields (product/EPA/A.I./
- * concentration, sq ft, gallons, FDACS ID, warranty) satisfy FDACS Rule
- * 5E-14.106 treatment-record requirements simultaneously.
+ * CertificateOfCompliance — the treatment-record details block under the
+ * TermiteNoticeSticker (Florida Building Code 1816.1 / R318.1 certificate for
+ * pre-construction subterranean termite soil treatment). The sticker prints
+ * the lot, permit, builder, dates, address, organism, sq ft, gallons,
+ * concentration and renewal date; this block keeps the fields the label has
+ * no blank for, the compliance statement and the applicator signature.
+ * Stamp ID: WV-002.
  */
 // Per-application display lines (method / product / A.I. / coverage) —
 // computed identically for the flat primary-application keys and for each
@@ -1177,47 +1174,31 @@ function laterTreatmentsNote(f) {
   return `This signature covers the initial treatment only. The ${later.join(' and the ')} ${later.length > 1 ? 'are' : 'is'} recorded separately above.`;
 }
 
-// The certificate's field grid. Under the sticker (detailsOnly) it keeps
-// only what the label has no blank for; the label already prints lot,
-// permit, builder, dates, address, organism, sq ft, gallons, concentration
-// and renewal date.
-function certificateFields(f, { technicianName, projectDateLabel, detailsOnly }) {
+// The certificate's field grid under the sticker: only what the label has no
+// blank for; the label already prints lot, permit, builder, dates, address,
+// organism, sq ft, gallons, concentration and renewal date.
+function certificateFields(f, { technicianName }) {
   const applications = [
     certificateApplicationLines(f),
     ...certificateAdditionalApplications(f).map(certificateApplicationLines),
   ];
   const multiApplication = applications.length > 1;
-  const { method, productLine, aiLine, coverageLine } = applications[0];
+  const { method, productLine, coverageLine } = applications[0];
   // The certificate's "method of treatment" line lists every method on a
   // combined job (e.g. "Soil barrier (chemical) + Wood treatment (borate)");
   // the per-application blocks below carry each product's own record.
   const methodValue = multiApplication
     ? applications.map((app) => app.method).filter(Boolean).join(' + ')
     : method;
-  const treatmentDateValue = [
-    f.treatment_date ? formatReportDate(f.treatment_date) : projectDateLabel || '',
-    formatAppointmentTime(f.treatment_time),
-  ].filter(Boolean).join(' · ');
-  // The Treatment address line prints ONLY the recorded treatment address:
-  // the send gate allows lot/block-only certificates (pre-construction lots
-  // often have no street yet), and back-filling the customer's billing
-  // street here would fabricate a compliance field. The Lot/Block line
-  // below carries those certificates.
-  const addressValue = f.treatment_address || '';
-  const lotLine = [f.lot_block, f.subdivision].filter(Boolean).join(' · ');
   const applicatorLine = [
     f.applicator_name || technicianName || '',
     f.applicator_fdacs_id ? `FDACS ID ${f.applicator_fdacs_id}` : '',
   ].filter(Boolean).join(' · ');
-  const warrantyLine = [
-    f.warranty_type,
-    f.renewal_due ? `Renewal due ${f.renewal_due}` : '',
-  ].filter(Boolean).join(' · ');
 
-  // Single-application certificates keep the original one-grid layout; a
-  // combined job moves the per-product lines into the Application blocks
-  // below so each product prints its own chemistry and coverage.
-  const fields = detailsOnly ? [
+  // Single-application certificates keep the product lines in this grid; a
+  // combined job moves them into the Application blocks below so each
+  // product prints its own chemistry and coverage.
+  const fields = [
     ['Time of treatment', formatAppointmentTime(f.treatment_time)],
     ['Method of treatment', methodValue],
     ...(multiApplication ? [] : [
@@ -1228,29 +1209,11 @@ function certificateFields(f, { technicianName, projectDateLabel, detailsOnly })
     ['Warranty / retreatment bond', f.warranty_type],
     ...(finalExteriorLine(f) ? [['Final exterior treatment', finalExteriorLine(f)]] : []),
     ...(borateRecordLine(f) ? [['Bora-Care record', borateRecordLine(f)]] : []),
-  ] : [
-    ['Treatment address', addressValue],
-    ['Lot / Block / Subdivision', lotLine],
-    ['Building permit #', f.permit_number],
-    ['Builder / General contractor', f.builder_contractor],
-    ['Date & time of treatment', treatmentDateValue],
-    ['Method of treatment', methodValue],
-    ['Wood-destroying organism treated for', f.wdo_target],
-    ...(multiApplication ? [] : [
-      ['Product used', productLine],
-      ['Active ingredient & concentration', aiLine],
-      ['Coverage', coverageLine],
-    ]),
-    ['Applicator', applicatorLine],
-    ['Warranty / retreatment bond', warrantyLine],
-    // The staff send validates this record on both layouts, so both print it.
-    ...(finalExteriorLine(f) ? [['Final exterior treatment', finalExteriorLine(f)]] : []),
-    ...(borateRecordLine(f) ? [['Bora-Care record', borateRecordLine(f)]] : []),
   ];
   return { fields, applications, multiApplication };
 }
 
-function CertificateHeader({ detailsOnly }) {
+function CertificateHeader() {
   return (
     <div style={{
       background: B.white,
@@ -1277,20 +1240,9 @@ function CertificateHeader({ detailsOnly }) {
           lineHeight: 1.2,
           letterSpacing: 0,
         }}>
-          {detailsOnly ? 'Treatment Record Details' : 'Pre-Construction Termite Protection'}
+          Treatment Record Details
         </div>
-        {!detailsOnly && (
-          <div style={{
-            fontSize: 14,
-            color: ESTIMATE_BODY,
-            marginTop: 8,
-            lineHeight: 1.35,
-          }}>
-            Required by FL Building Code 1816.1 / R318.1 • FDACS LIC. {WAVES_FDACS_LICENSE_NUMBER}
-          </div>
-        )}
       </div>
-      {!detailsOnly && <img src="/waves-logo.png" alt="Waves" style={{ height: 32, flexShrink: 0 }} />}
     </div>
   );
 }
@@ -1298,63 +1250,13 @@ function CertificateHeader({ detailsOnly }) {
 // Staff recorded that no warranty applies: the legacy "No warranty" choice
 // or an addition to an existing building (Rule 5E-14.105(3)(d)). A blank
 // warranty is missing data, not "no contract", so it gets neither the
-// no-contract sentence nor a hidden gate-off footer.
+// no-contract sentence nor the warranty call to action.
 function certificateHasNoWarranty(f) {
   const warranty = String(f?.warranty_type || '').trim();
   return /^no warranty$/i.test(warranty) || /^addition to an existing building/i.test(warranty);
 }
 
-function CertificateWarrantyFooter() {
-  return (
-    <div style={{
-      margin: '16px 24px 24px',
-      background: ESTIMATE_BUTTON_BG,
-      borderRadius: 12,
-      padding: '16px 16px',
-      textAlign: 'center',
-    }}>
-      <div style={{
-        fontFamily: FONT_BODY,
-        fontSize: 16,
-        fontWeight: 700,
-        color: B.white,
-        textTransform: 'uppercase',
-        letterSpacing: 0.5,
-      }}>
-        Activate Your Termite Warranty
-      </div>
-      <div style={{
-        fontSize: 14,
-        color: B.white,
-        opacity: 0.94,
-        marginTop: 4,
-        letterSpacing: 0.3,
-      }}>
-        <a href={`tel:${WAVES_PHONE_TEL}`} style={{
-          color: 'inherit',
-          textDecoration: 'none',
-          whiteSpace: 'nowrap',
-        }}>{WAVES_PHONE_DISPLAY}</a>
-        {' • '}
-        <a href="https://www.wavespestcontrol.com/register" target="_blank" rel="noopener noreferrer" style={{
-          color: 'inherit',
-          textDecoration: 'none',
-          whiteSpace: 'nowrap',
-        }}>wavespestcontrol.com/register</a>
-      </div>
-      <div style={{
-        fontSize: FS.body,
-        color: B.white,
-        opacity: 0.85,
-        marginTop: 8,
-      }}>
-        Waves Pest Control, LLC • 13649 Luxe Ave #110, Bradenton, FL 34211
-      </div>
-    </div>
-  );
-}
-
-function CertificateSignature({ f, technicianName, projectDateLabel, detailsOnly }) {
+function CertificateSignature({ f, technicianName, projectDateLabel }) {
   return (
     <div style={{
       margin: '16px 24px 0',
@@ -1404,9 +1306,9 @@ function CertificateSignature({ f, technicianName, projectDateLabel, detailsOnly
   );
 }
 
-export function CertificateOfCompliance({ findings, customerName, technicianName, projectDateLabel, detailsOnly = false }) {
+export function CertificateOfCompliance({ findings, customerName, technicianName, projectDateLabel }) {
   const f = findings || {};
-  const { fields, applications, multiApplication } = certificateFields(f, { technicianName, projectDateLabel, detailsOnly });
+  const { fields, applications, multiApplication } = certificateFields(f, { technicianName });
 
   return (
     <div style={{
@@ -1417,7 +1319,7 @@ export function CertificateOfCompliance({ findings, customerName, technicianName
       overflow: 'hidden',
       position: 'relative',
     }}>
-      <CertificateHeader detailsOnly={detailsOnly} />
+      <CertificateHeader />
 
       {/* Property + customer header */}
       <div style={{ padding: '16px 24px 0', display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -1515,11 +1417,11 @@ export function CertificateOfCompliance({ findings, customerName, technicianName
           name + FDACS ID + treatment date together constitute an electronic
           signature accepted by Florida building departments. */}
       {f.applicator_attestation && (f.applicator_name || technicianName) && (
-        <CertificateSignature f={f} technicianName={technicianName} projectDateLabel={projectDateLabel} detailsOnly={detailsOnly} />
+        <CertificateSignature f={f} technicianName={technicianName} projectDateLabel={projectDateLabel} />
       )}
 
       {/* The sticker above already carries the warranty footer. */}
-      {detailsOnly || certificateHasNoWarranty(f) ? <div style={{ height: 24 }} /> : <CertificateWarrantyFooter />}
+      <div style={{ height: 24 }} />
 
       {/* Form-ID stamp — bottom right, matches v10 "WV-001" treatment */}
       <div style={{

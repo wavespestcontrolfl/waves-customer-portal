@@ -61,6 +61,10 @@ async function openPage(browser, server, viewport, touch, report) {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== server.baseUrl || url.pathname.startsWith("/socket.io")) return route.abort();
     if (!url.pathname.startsWith("/api/")) return route.continue();
+    // Cash today card (GATE_CASH_FORECAST, dark): gate off answers 404 and the card renders nothing.
+    if (request.method() === "GET" && url.pathname === "/api/admin/banking/cash-today") return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "Not found" }) });
+    // Cash forecast tab (same gate): the page asks once whether to list it; gate off answers 404.
+    if (request.method() === "GET" && url.pathname === "/api/admin/banking/cash-forecast/inputs") return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "Not found" }) });
     const body = fixtures(url, request.method());
     if (body === undefined) report.unmatched.push(`${request.method()} ${url.pathname}`);
     return route.fulfill({ status: body === undefined ? 404 : 200, contentType: "application/json", body: JSON.stringify(body ?? { error: "Unexpected synthetic request" }) });

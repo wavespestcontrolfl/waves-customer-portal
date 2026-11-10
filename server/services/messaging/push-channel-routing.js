@@ -40,11 +40,39 @@
  * informational types are push-first; anything unlisted is sms_only by
  * omission (fail-safe default). Changing a template's channel is a
  * one-line edit here.
+ *
+ * OWNER RULING 2026-11-04 (GATE_APP_FIRST_ANY_DEVICE, default OFF; Twilio
+ * raises US-to-Verizon text prices on 2027-01-01): "if anyone has the app,
+ * we would want to prefer to send notifications in the app, rather than
+ * text". With that gate on, the matrix above changes in three ways and
+ * nothing else:
+ *   a. APP_FIRST_ANY_DEVICE_POLICY (below) moves appointment_reminder,
+ *      reminder_72h, tech_arrived, lawn_watering_instruction and the
+ *      invoice-free service_complete* / service_report_v1 completion
+ *      notices to push_first, next to tech_en_route, receipt and
+ *      deposit_receipt. Billing, payment-failure, autopay and ACH types stay
+ *      push_and_sms; service_complete_with_invoice and
+ *      service_report_v1_with_invoice carry a bill to pay and stay SMS;
+ *      review_request, invoice, payment_link, manual, ai_assistant, the
+ *      staff-initiated appointment_confirmation / appointment_cancelled and
+ *      a completion text that bundles a review invite stay SMS too.
+ *   b. A customer is reachable once the account HOLDER has any active app
+ *      device. The "checked in within 72 hours" rule and the fan-out's
+ *      heartbeat floor are dropped for these sends (a device the app
+ *      released, or a provider-rejected token, is already inactive). The
+ *      fallback is unchanged: when no device accepts the push, the text goes.
+ *   c. Only the customer switches back to text: a stored 'sms' vetoes the app
+ *      notice when the customer saved it (the *_channel_explicit marker the
+ *      notifications route stamps); the seeded default 'sms' does not. Email
+ *      and Both veto as before.
+ * Gate off = the matrix and the 72 hour rule above, byte for byte. A
+ * customer's explicit App choice keeps its own path (explicitPushOnly) and
+ * is not touched by this gate.
  */
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { gateEnvValue } = require('../../config/feature-gates');
+const { gateEnvValue, appFirstAnyDeviceLive } = require('../../config/feature-gates');
 const { BILLING_MESSAGE_CATEGORIES } = require('./billing-channel-routing');
 const { explicitBillingChannels } = require('../billing-delivery-channels');
 
@@ -89,6 +117,34 @@ const PUSH_ROUTING_POLICY = {
   bank_verification_incomplete: 'push_and_sms',
   bank_verification_failed: 'push_and_sms',
 };
+
+// OWNER RULING 2026-11-04 (GATE_APP_FIRST_ANY_DEVICE): these types go in the
+// app instead of a text for a customer with an active app device. Layered
+// over PUSH_ROUTING_POLICY at call time; gate off leaves it unused. Every key
+// needs a PREF_CHANNEL_COLUMN entry (test-enforced), so a saved Email / Both
+// choice still vetoes. Deliberately ABSENT: service_complete_with_invoice and
+// service_report_v1_with_invoice (they carry a bill to pay), every billing /
+// payment-failure / autopay / ACH type, review_request, invoice, payment_link,
+// manual, ai_assistant, appointment_confirmation and appointment_cancelled.
+const APP_FIRST_ANY_DEVICE_POLICY = {
+  appointment_reminder: 'push_first',
+  reminder_72h: 'push_first',
+  tech_arrived: 'push_first',
+  service_complete: 'push_first',
+  service_complete_paid_receipt: 'push_first',
+  service_complete_prepaid: 'push_first',
+  service_complete_annual_prepay: 'push_first',
+  service_complete_annual_prepay_after_first_visit: 'push_first',
+  service_report_v1: 'push_first',
+  lawn_watering_instruction: 'push_first',
+};
+
+function routingPolicyFor(messageType) {
+  if (appFirstAnyDeviceLive() && Object.prototype.hasOwnProperty.call(APP_FIRST_ANY_DEVICE_POLICY, messageType)) {
+    return APP_FIRST_ANY_DEVICE_POLICY[messageType];
+  }
+  return PUSH_ROUTING_POLICY[messageType] || 'sms_only';
+}
 
 // Lock-screen presentation per message family. Titles are plain Waves
 // voice — no emoji. Links are portal routes the native handler opens on
@@ -202,17 +258,26 @@ async function resolvePushDestination(presentation, messageType, { customerId, a
  * Pure routing decision — unit-tested. Everything that must force SMS is
  * decided here; subscription presence and delivery proof are runtime.
  */
-function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAuthored, operatorInitiated, adminAttributed }) {
+function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAuthored, operatorInitiated, adminAttributed, bundledReview, useCustomerChannel }) {
   if (!gateOn) return 'sms_only';
   if (!customerId) return 'sms_only';
   if (hasMedia) return 'sms_only'; // push carries no MMS media
   if (humanAuthored) return 'sms_only'; // operator-typed → reply-able SMS
-  if (operatorInitiated) return 'sms_only'; // operator chose SMS explicitly
+  // A staff tap that only TRIGGERS an automated notice (a technician's "On my
+  // way") is marked by its sender with useCustomerChannel: the notice keeps the
+  // customer's channel, the rule wantsAppFirst already applies to an explicit
+  // App choice. Under GATE_APP_FIRST_ANY_DEVICE that mark lifts the operator
+  // SMS lock; gate off, operator provenance still forces SMS.
+  const customerChannel = useCustomerChannel === true && appFirstAnyDeviceLive();
+  if (operatorInitiated && !customerChannel) return 'sms_only'; // operator chose SMS explicitly
   // Admin attribution = operator provenance even when the entry point never
   // learned the operatorInitiated flag (IB send_sms, comms composer both
   // stamp adminUserId) — staff-triggered sends stay on the channel staff chose.
-  if (adminAttributed) return 'sms_only';
-  return PUSH_ROUTING_POLICY[messageType] || 'sms_only';
+  if (adminAttributed && !customerChannel) return 'sms_only';
+  // A completion text that bundles the review invite keeps its tappable link:
+  // a push would count the review ask as delivered without a link to tap.
+  if (bundledReview) return 'sms_only';
+  return routingPolicyFor(messageType);
 }
 
 // push_first additionally requires a FRESH device heartbeat. Provider
@@ -227,18 +292,19 @@ function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAutho
 // push_and_sms is exempt: its SMS goes regardless.
 const { PUSH_HEARTBEAT_HOURS } = require('../push-notifications');
 
-async function hasFreshPushDevice(customerId, knex = db) {
+// anyDevice (GATE_APP_FIRST_ANY_DEVICE): the holder counts as reachable with
+// any active device on a configured provider, however long ago it checked in.
+async function hasFreshPushDevice(customerId, knex = db, { anyDevice = false } = {}) {
   if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) {
-    const status = await require('../push-notifications').customerStatus(customerId);
-    return status.enabled && status.fresh;
+    const status = await require('../push-notifications').customerStatus(customerId, undefined, anyDevice ? { withReachable: true } : undefined);
+    return status.enabled && (anyDevice ? status.reachable === true : status.fresh);
   }
-  const row = await knex('push_subscriptions')
+  const query = knex('push_subscriptions')
     .where({ customer_id: customerId, active: true })
     // A contact's device (contact login) is never proof the HOLDER has the app.
-    .whereNull('contact_phone_key')
-    .where('updated_at', '>=', heartbeatCutoff())
-    .first('id')
-    .catch(() => null);
+    .whereNull('contact_phone_key');
+  if (!anyDevice) query.where('updated_at', '>=', heartbeatCutoff());
+  const row = await query.first('id').catch(() => null);
   return Boolean(row);
 }
 
@@ -297,6 +363,35 @@ const PRIMARY_SCOPED_COLUMNS = new Set([
   'service_reminder_72h_channel',
 ]);
 
+// GATE_APP_FIRST_ANY_DEVICE (owner 2026-11-04: "only the customer can change
+// back to text, if they prefer"): the seeded 'sms' default is not a choice, so
+// a stored 'sms' vetoes the app only when its explicit-choice marker is true.
+// The notifications route stamps the marker on a customer's write of the
+// channel. Channels without a marker here keep the rules above.
+const EXPLICIT_TEXT_MARKER = {
+  service_reminder_24h_channel: 'service_reminder_24h_channel_explicit',
+  service_reminder_72h_channel: 'service_reminder_72h_channel_explicit',
+  en_route_channel: 'en_route_channel_explicit',
+  tech_arrived_channel: 'tech_arrived_channel_explicit',
+  service_complete_channel: 'service_complete_channel_explicit',
+  payment_receipt_channel: 'payment_receipt_channel_explicit',
+};
+
+// The marker column to read with the channel, only while the gate is on.
+function textMarkerColumns(col) {
+  const marker = EXPLICIT_TEXT_MARKER[col];
+  return marker && appFirstAnyDeviceLive() ? [marker] : [];
+}
+
+// A new explicit Text choice vetoes companion push, as does (gate on) the
+// customer's own Text on a routed notice channel; null retains legacy behavior.
+function explicitTextChosen(col, prefs) {
+  if (String(prefs?.[col] || '').toLowerCase() !== 'sms') return false;
+  if (col === 'payment_issue_channel') return true;
+  const [marker] = textMarkerColumns(col);
+  return Boolean(marker) && prefs[marker] === true;
+}
+
 function normalizeDigits(phone) {
   return String(phone || '').replace(/\D+/g, '').slice(-10);
 }
@@ -347,11 +442,11 @@ async function readChannelPreference(customerId, messageType, knex = db, custome
     : customerId;
   const columns = col === 'payment_issue_channel' ? [col, 'billing_channel'] : [col];
   if (category) columns.push(`${category === 'payment_receipt' ? 'payment_receipt' : category}_channels`);
+  if (pushEligibility) columns.push(...textMarkerColumns(col));
   const prefs = await knex('notification_prefs').where({ customer_id: ownerId }).first(...columns);
   const explicit = explicitBillingChannels(prefs, category);
   if (explicit !== null) return explicit.includes('push') ? 'push' : (pushEligibility ? null : 'email');
-  // A new explicit Text choice vetoes companion push; null retains legacy behavior.
-  if (pushEligibility && col === 'payment_issue_channel' && prefs?.[col] === 'sms') return null;
+  if (pushEligibility && explicitTextChosen(col, prefs)) return null;
   // Preserve legacy Email/Both vetoes for companion push until explicitly edited.
   return String(prefs?.[col] || (col === 'payment_issue_channel' && prefs?.billing_channel) || 'sms').toLowerCase();
 }
@@ -394,20 +489,70 @@ async function wantsAppFirst(input) {
 // token fetch + request, web-push request), so the whole sequential
 // fan-out is bounded by construction and the caller simply awaits it: no
 // leg can still be running when the SMS fallback decision is made.
-async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, appointmentId = null, invoiceId = null } = {}) {
-  const { title, link, category } = await resolvePushDestination(pushPresentation(messageType), messageType, { customerId, appointmentId, invoiceId });
+async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, nativeOnly, signedInOnly = false, appointmentId = null, invoiceId = null, eventKey = null } = {}) {
+  // signedInOnly (GATE_APP_FIRST_ANY_DEVICE): the tap opens the signed-in app tab, never a report / receipt bearer page.
+  const presentation = pushPresentation(messageType);
+  const { title, link, category } = signedInOnly ? presentation : await resolvePushDestination(presentation, messageType, { customerId, appointmentId, invoiceId });
   const PushService = require('../push-notifications');
   const stats = await PushService.sendToCustomer(customerId, {
     title,
     body,
     url: link,
     category,
-    tag: `push-routed:${messageType}`,
+    tag: pushTag(messageType, { appointmentId, invoiceId, eventKey }),
     // The visit this message is about — the push sink resolves its saved
     // property so the app opens that house (GATE_APP_PROPERTY_SCOPE).
     ...(appointmentId ? { appointmentId } : {}),
-  }, { shouldContinue, minUpdatedAt, messageType });
+  }, { shouldContinue, minUpdatedAt, messageType, ...(nativeOnly ? { nativeOnly: true } : {}) });
   return { stats, delivered: Number(stats && stats.sent) > 0 };
+}
+
+// The push's collapse tag (APNs apns-collapse-id, hashed when long; the Android
+// notification tag): a resend of the same notice replaces its own banner. With
+// GATE_APP_FIRST_ANY_DEVICE on, the tag also names the visit (else the invoice,
+// else the notice event), so two visits' reminders never replace each other on
+// the phone: each push skips its own text, and a replaced banner would leave the
+// customer with only the last one. Gate off: the type-wide tag, as before.
+function pushTag(messageType, { appointmentId = null, invoiceId = null, eventKey = null } = {}) {
+  const scope = appFirstAnyDeviceLive() ? (appointmentId || invoiceId || eventKey) : null;
+  return scope ? `push-routed:${messageType}:${scope}` : `push-routed:${messageType}`;
+}
+
+// GATE_APP_FIRST_ANY_DEVICE sends reach a device that may not have checked in for
+// weeks (Codex security #7581): logout cleanup is best-effort, so a former phone can
+// keep an active row. Such a push carries no bearer link: the body is the text's
+// first paragraph with any link removed (every routed template leads with the
+// greeting and the notice; its links sit on later lines, e.g. "Receipt: <link>"),
+// and the tap opens the signed-in app tab (sendPush signedInOnly). A line that lost
+// its link ends with a period instead of a colon. Gate off: the text as is.
+const LINK_IN_TEXT = /\s*\b(?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}\/\S*/gi;
+function linkFreeBody(text) {
+  const first = String(text || '').split(/\n[ \t]*\n/)[0];
+  const lines = first.split('\n').map((line) => {
+    const stripped = line.replace(LINK_IN_TEXT, '');
+    if (stripped === line) return line;
+    const words = stripped.replace(/[\s:]+$/, '');
+    return /[.!?]$/.test(words) ? words : `${words}.`;
+  }).filter((line) => line.replace(/[\s.]/g, ''));
+  return lines.join('\n').trim() || 'Open the Waves app for the details.';
+}
+
+function pushBodyFor(anyDevice, body) {
+  return anyDevice ? linkFreeBody(body) : body;
+}
+
+// GATE_APP_FIRST_ANY_DEVICE applies to routed push_first sends only; a customer's
+// explicit App choice keeps its own path and the 72 hour rule.
+function anyDeviceSend(explicitPushOnly) {
+  return !explicitPushOnly && appFirstAnyDeviceLive();
+}
+
+// Which devices the push_first fan-out may count as delivery. Any-device sends
+// drop the heartbeat floor but stay on phone apps (customerStatus.reachable
+// counts phone apps only): a stale browser subscription that accepts must never
+// stand in for delivery and skip the text. Otherwise: the 72 hour floor.
+function fanOutReach(anyDevice) {
+  return anyDevice ? { nativeOnly: true } : { minUpdatedAt: heartbeatCutoff() };
 }
 
 function heartbeatCutoff() {
@@ -551,7 +696,12 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
   try {
     if (explicitPushOnly && !gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return { delivered: false, reason: 'app_gate_off' };
     if (!(await pushEligibleRuntime(customerId, to, messageType, db, { requireExplicit: explicitPushOnly, billingDeliveryCategory }))) return { delivered: false, reason: 'preference_changed' };
-    const fresh = await hasFreshPushDevice(customerId);
+    // GATE_APP_FIRST_ANY_DEVICE: a push_first send to the holder needs only an
+    // active device, not a recent check-in. A customer's explicit App choice
+    // keeps its own path and the 72 hour rule.
+    const anyDevice = anyDeviceSend(explicitPushOnly);
+    const routedBody = pushBodyFor(anyDevice, body);
+    const fresh = await hasFreshPushDevice(customerId, db, { anyDevice });
     // The visit and its send-time property, kept on the proof row and on the
     // stored notification, so a repaired proof restores the delivered scope
     // (Codex #4816 r49).
@@ -636,11 +786,13 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     deliveryOutcome = 'uncertain';
     const { delivered } = explicitPushOnly
       ? { delivered: Number(appNotification?.push?.accepted) > 0 }
-      : await sendPush(customerId, messageType, body, {
+      : await sendPush(customerId, messageType, routedBody, {
         shouldContinue: windowGuardFrom(preSendCheck),
-        minUpdatedAt: heartbeatCutoff(),
+        ...fanOutReach(anyDevice),
+        signedInOnly: anyDevice,
         appointmentId,
         invoiceId,
+        eventKey: notificationEventKey,
       });
     if (!delivered) {
       // These App notices have durable replay owners. Other App-first
@@ -661,7 +813,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       direction: 'outbound',
       from_phone: 'push',
       to_phone: String(to || '').slice(0, 20),
-      message_body: body,
+      message_body: routedBody,
       twilio_sid: null,
       status: 'sent',
       created_at: acceptedAt,
@@ -842,7 +994,8 @@ module.exports = {
   bellPushAllowed,
   sendCompanionPush,
   PUSH_ROUTING_POLICY,
+  APP_FIRST_ANY_DEVICE_POLICY,
   gatePushRoutingOn: () => gateEnvValue('GATE_PUSH_CHANNEL_ROUTING'),
   // exported for tests
-  _test: { pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
+  _test: { pushTag, linkFreeBody, pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
 };

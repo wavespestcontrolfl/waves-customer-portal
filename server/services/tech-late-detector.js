@@ -121,8 +121,31 @@ async function resolveAlertsForHeldVisits() {
   }
 }
 
+// An open late card whose visit has since ended (on_site, completed, cancelled, skipped, no_show) is moot.
+// Only transitionJobStatus closes the cards on a status change; the other writers that cancel or complete
+// a visit skip autoResolveOverdueAlertsForJob, and the scan above covers only yesterday and today, so those
+// cards never close. Sweep them on the detector's own tick, whatever the no-show gate says. auto: true
+// stamps payload.superseded_at, so a visit whose status is later reversed can still raise a fresh card.
+// Best-effort: a failure here must never stop the scan.
+async function resolveAlertsForEndedVisits() {
+  try {
+    const { OVERDUE_ALERT_TYPES, OVERDUE_ALERT_AUTO_RESOLVE_STATUSES, resolveAlert } = require('./dispatch-alerts');
+    const open = await db('dispatch_alerts as a')
+      .join('scheduled_services as s', 's.id', 'a.job_id')
+      .whereIn('a.type', OVERDUE_ALERT_TYPES)
+      .whereNull('a.resolved_at')
+      .whereIn('s.status', [...OVERDUE_ALERT_AUTO_RESOLVE_STATUSES])
+      .select('a.id');
+    for (const { id } of open) await resolveAlert({ id, auto: true });
+    if (open.length) logger.info(`[tech-late-detector] resolved ${open.length} late alert(s) for visits that have already ended`);
+  } catch (err) {
+    logger.warn(`[tech-late-detector] ended-visit alert resolve failed: ${err.message}`);
+  }
+}
+
 async function runInner() {
   await resolveAlertsForHeldVisits();
+  await resolveAlertsForEndedVisits();
   // The same cron and dispatch-alert lifecycle use communication evidence
   // under the new gate; there is no competing overdue scan while enabled.
   const tracking = require('./no-show-detector');
@@ -279,6 +302,7 @@ async function runInner() {
 module.exports = {
   runTechLateCheck,
   resolveAlertsForHeldVisits,
+  resolveAlertsForEndedVisits,
   TECH_LATE_GRACE_MINUTES,
   TECH_LATE_CRITICAL_MINUTES,
   TECH_LATE_MAX_DELAY_MINUTES,

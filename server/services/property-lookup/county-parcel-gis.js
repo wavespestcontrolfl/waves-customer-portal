@@ -956,7 +956,7 @@ async function lookupCountyParcelAttributesById(county, parcelId, options = {}) 
 // The roll's lots at one house number on one street: every parcel whose situs
 // starts with the number and holds the street word ("104 %SAMPLE%"), parsed
 // as a point lookup's parcel (county set, no geometry). For the neighborhood
-// naming when a stored pin sits on another lot (GATE_NEIGHBORHOOD_ADDRESS_LOOKUP);
+// naming when a stored pin sits on another lot;
 // the caller proves which lot is the home. One LIKE and no AND/OR (Manatee's
 // WAF rejects both, live 10-02); the number is digits only and the word
 // [A-Z0-9] only, so no quoting is reachable. Resolves to [] for no lot, or for

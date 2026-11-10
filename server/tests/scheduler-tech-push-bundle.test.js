@@ -1,9 +1,8 @@
 /**
  * The every-minute bundled tech push sweep's cron registration
- * (GATE_TECH_PUSH_BUNDLE, server/services/scheduler.js). The sweep itself is
+ * (server/services/scheduler.js). The sweep itself is
  * unit-tested in tech-visit-notifications.test.js; this file proves it is
- * registered even with GATE_CRON_JOBS off: with the bundle gate on, deliver()
- * holds pushes whether or not cron jobs run, and only this sweep sends them
+ * registered even with GATE_CRON_JOBS off: deliver() holds pushes whether or not cron jobs run, and only this sweep sends them
  * (Codex #6459 r2). Same mock shape as scheduler-consultation-outcome-reconcile.test.js.
  */
 jest.mock('../utils/scheduled-cron', () => ({

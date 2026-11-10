@@ -23,14 +23,13 @@ const OFFICE_ENDPOINTS = ['/admin/dispatch/alerts', '/admin/email-templates', '/
 const owner = (extra = {}) => ({ fullAccess: true, isAdmin: true, staffAuthorization: AUTH, ...extra });
 const office = (extra = {}) => ({ fullAccess: false, isAdmin: true, staffAuthorization: AUTH, ...extra });
 const json = (body) => ({ status: 200, headers: { get: (k) => ({ 'content-type': 'application/json' })[String(k).toLowerCase()] ?? null }, text: async () => JSON.stringify(body) });
-const ENV = ['GATE_IB_PLATFORM', 'GATE_IB_GENERAL_READ', 'GATE_IB_GENERAL_READ_OFFICE', 'GATE_IB_READ_NOTES', 'GATE_IB_OWNER_DIRECT'];
+const ENV = ['GATE_IB_PLATFORM', 'GATE_IB_GENERAL_READ', 'GATE_IB_GENERAL_READ_OFFICE', 'GATE_IB_OWNER_DIRECT'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(ENV.map((k) => [k, process.env[k]]));
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_GENERAL_READ = 'true';
   process.env.GATE_IB_GENERAL_READ_OFFICE = 'true';
-  delete process.env.GATE_IB_READ_NOTES;
   global.fetch = jest.fn(async () => json({ ok: true }));
 });
 afterEach(() => { for (const k of ENV) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
@@ -100,8 +99,7 @@ describe('the office login', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  test('notes are withheld on her login even with GATE_IB_READ_NOTES on; the owner login gets them scrubbed as before', async () => {
-    process.env.GATE_IB_READ_NOTES = 'true';
+  test('notes are withheld on her login; the owner login gets them scrubbed', async () => {
     global.fetch = jest.fn(async () => json({ blackout_dates: [{ id: 1, date: '2026-11-26', reason: 'Closed for Thanksgiving, gate code 4455' }] }));
     const hers = await read({ endpoint: '/admin/schedule/blackout-dates' }, office());
     expect(hers.notes_withheld).toBeGreaterThan(0);
@@ -112,12 +110,6 @@ describe('the office login', () => {
     expect(owners.notes_returned).toBeGreaterThan(0);
     expect(JSON.stringify(owners.data)).toContain('Thanksgiving');
     expect(owners).not.toHaveProperty('notes_withheld');
-  });
-
-  test('without GATE_IB_READ_NOTES her login and the owner login both withhold (today\'s behavior)', async () => {
-    global.fetch = jest.fn(async () => json({ blackout_dates: [{ id: 1, date: '2026-11-26', reason: 'Closed' }] }));
-    expect((await read({ endpoint: '/admin/schedule/blackout-dates' }, office())).notes_withheld).toBeGreaterThan(0);
-    expect((await read({ endpoint: '/admin/schedule/blackout-dates' }, owner())).notes_withheld).toBeGreaterThan(0);
   });
 });
 

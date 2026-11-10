@@ -33,6 +33,8 @@ function brandStyle(brand) {
   return { bg: "#FFFFFF", fg: "#111111", border: "#E5E5E5" };
 }
 
+const isSavedCard = (c) => String(c?.method_type || "").toLowerCase() === "card";
+
 function brandLabel(c) {
   const b = (c.brand || "Card").toString();
   return b.toUpperCase();
@@ -156,7 +158,10 @@ export default function MobileCardOnFileSheet({
         r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)),
       )
       .then((d) => {
-        if (!cancelled) setCards(Array.isArray(d.cards) ? d.cards : []);
+        // A technician charges saved cards only (owner 2026-11-04, D4 A:
+        // card only at the visit); the server refuses a bank account too.
+        const list = Array.isArray(d.cards) ? d.cards : [];
+        if (!cancelled) setCards(getAdminUser()?.role === "admin" ? list : list.filter(isSavedCard));
       })
       .catch(() => {
         if (!cancelled) {

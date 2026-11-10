@@ -2,8 +2,6 @@
  * Intelligence Bar — truck kit reads (docs/tool-inventory-tracker-scope.md
  * PR 3). Read-only: what rides on a truck, what a truck check found, which
  * tool alerts are open. No write tool; Equipment → Assets is the write path.
- * Live only with GATE_TRUCK_KIT (read at call time); off, every call answers
- * integration_disabled.
  */
 const db = require('../../models/db');
 const truckKit = require('../truck-kit');
@@ -26,10 +24,7 @@ Use for: "what tools are missing right now?", "any damaged tools?", "what did th
   },
 ];
 
-const DISABLED = { error: 'Truck kit reads are off (GATE_TRUCK_KIT)', code: 'integration_disabled' };
-
 async function executeTruckKitTool(name, input = {}) {
-  if (!truckKit.truckKitEnabled()) return DISABLED;
   if (name === 'get_truck_kit') return getTruckKit(input.technician_name);
   if (name === 'get_tool_issues') return getToolIssues();
   return { error: 'Unknown truck kit read' };

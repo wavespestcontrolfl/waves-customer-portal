@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Bid Desk checklist section (GATE_BID_CHECKLIST): shown only when the server says the gate is on; the list chip, the
+// Bid Desk checklist section: the list chip, the
 // details form, the estimate link, the documents, the checklist and the submission record. Synthetic data only.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
@@ -23,7 +23,7 @@ const bid = (over = {}) => ({
 });
 const item = (n, over = {}) => ({ id: `i${n}`, bid_id: "b1", position: n, section: "base", label: `Line ${n}`, source_text: null, required: true, checked_at: null, notes: null, ...over });
 const detail = (over = {}) => ({
-  bid: bid(), emails: [], checklist_live: true, checklist: [], checklist_progress: { checked: 0, required: 0, total: 0 }, estimate: null, documents: [], ...over,
+  bid: bid(), emails: [], checklist: [], checklist_progress: { checked: 0, required: 0, total: 0 }, estimate: null, documents: [], ...over,
 });
 
 function route(handlers) {
@@ -34,23 +34,13 @@ function route(handlers) {
     return handler(options);
   });
 }
-const LIST_ON = () => reply({ checklist_live: true, bids: [bid()] });
+const LIST_ON = () => reply({ bids: [bid()] });
 const renderPage = (url = "/?bid=b1") => render(<MemoryRouter initialEntries={[url]}><BidDeskPage /></MemoryRouter>);
 
 beforeEach(() => adminFetch.mockReset());
 afterEach(() => cleanup());
 
-it("shows none of the new sections while the gate is off", async () => {
-  route({ "GET /admin/bid-desk/": () => reply({ bids: [bid()] }), "GET /admin/bid-desk/b1": () => reply({ bid: bid(), emails: [] }) });
-  renderPage();
-  await screen.findByLabelText("Due date (Eastern time)");
-  expect(screen.queryByTestId("bid-checklist-panel")).toBeNull();
-  expect(screen.queryByText("Start checklist")).toBeNull();
-  expect(screen.queryByText("7/12")).toBeNull();
-  expect(screen.getByText(/7 and 2 days before a confirmed date/)).toBeInTheDocument();
-});
-
-it("shows a progress chip in the list when the gate is on", async () => {
+it("shows a progress chip in the list", async () => {
   route({ "GET /admin/bid-desk/": LIST_ON });
   renderPage("/");
   expect(await screen.findByText("7/12")).toBeInTheDocument();
@@ -231,7 +221,7 @@ it("ticking a checklist line moves the chip in the list row at once", async () =
   let progress = { checked: 0, required: 2, total: 2 };
   const tick = vi.fn(() => { progress = { checked: 1, required: 2, total: 2 }; return reply({ ok: true }); });
   route({
-    "GET /admin/bid-desk/": () => reply({ checklist_live: true, bids: [bid({ checklist_progress: { checked: 0, required: 2 } })] }),
+    "GET /admin/bid-desk/": () => reply({ bids: [bid({ checklist_progress: { checked: 0, required: 2 } })] }),
     "GET /admin/bid-desk/b1": () => reply(detail({ checklist: [item(1), item(2)], checklist_progress: progress })),
     "PATCH /admin/bid-desk/b1/checklist/i1": tick,
   });

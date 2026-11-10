@@ -698,13 +698,14 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
 }
 
 // ── Pay-page FAQ (GATE_PAY_PAGE_FAQ, 2026-09-03) ───────────────────
-// Three or four questions directly under the Pay button, above "Other ways
-// to pay". Every answer restates a fact this page already carries (the
+// Three or four questions at the end of the pay card, below the invoice
+// details and above "Other ways to pay" (the card form moved above the
+// details on 2026-11-06). Every answer restates a fact this page already carries (the
 // method tiles, the consent copy, the bank-processing / verification
 // states, the Zelle panel) — nothing here is a new business rule, and the
 // surcharge percent is DERIVED from the same rate the tile shows, never a
 // typed string. Native <details> so there is no state to fence; rendered
-// only inside the payment panel, so it leaves with the panel on success /
+// only inside a payment panel, so it leaves with the panel on success /
 // bank-processing. Renders nothing unless the server sent `payFaq` (gate).
 const FAQ_SUMMARY = {
   listStyle: 'none',
@@ -2787,6 +2788,64 @@ export default function PayPageV2() {
           {/* Amount-due hero removed (owner 2026-08-31: the figure already
               shows in the line items and on the Pay button). */}
 
+            {/* Card form sits above the invoice details so it is near the top on a
+                phone (owner 2026-11-06); the DocumentActionBar stays first. The FAQ
+                and "Other ways to pay" stay below the details, in the second panel.
+                waves-no-print: the payment inputs, consent and Pay button stay off the invoice printout. */}
+            <div className="waves-pay-payment-panel waves-no-print" style={{ marginBottom: SP.xl }}>
+            {/* "Pay securely / amount / status" header removed (owner
+                2026-08-31: the Pay button already states the charge); the
+                Secure badge went with every other status chip (owner
+                2026-09-04). */}
+
+            {paymentError && (
+              <div role="alert" style={{
+                background: 'rgba(200,16,46,0.06)',
+                border: `1px solid ${DOC.danger}`,
+                borderRadius: RADIUS.input,
+                padding: '12px 16px',
+                fontSize: FS.body,
+                color: DOC.danger,
+                marginBottom: SP.md,
+                lineHeight: LH.body,
+              }}>
+                {paymentError}
+              </div>
+            )}
+            {paymentState === 'ready' && stripeSetup ? (
+              <PaymentForm
+                key={stripeSetup.paymentIntentId}
+                initialMethod={stripeSetup.initialMethod || 'card'}
+                publishableKey={stripeSetup.publishableKey}
+                clientSecret={stripeSetup.clientSecret}
+                amount={stripeSetup.baseAmount}
+                paymentIntentId={stripeSetup.paymentIntentId}
+                token={token}
+                cardSurchargeRate={stripeSetup.cardSurchargeRate}
+                onSuccess={handlePaymentSuccess}
+                onBankVerificationPending={(md) => {
+                  setMicrodepositDetail(microdepositDetailFromNextAction(md));
+                  setMicrodepositVerifying(true);
+                  setBankProcessing(true);
+                  setPaymentState('idle');
+                }}
+                onError={(msg) => setPaymentError(msg)}
+                saveCard={payer ? false : saveCard}
+                saveCardLocked={!payer && saveCardRequired}
+                onSaveCardChange={setSaveCard}
+                thirdPartyBilled={!!payer}
+                customerName={payer ? payer.name : [customer.firstName, customer.lastName].filter(Boolean).join(' ')}
+                customerEmail={payer ? (payer.email || '') : customer.email}
+                onPaymentIntentReplaced={handlePaymentIntentReplaced}
+                onCombinedUpdate={handleCombinedUpdate}
+              />
+            ) : paymentState === 'error' ? null : (
+              <div style={{ padding: '24px 0', textAlign: 'center', color: DOC.muted, fontSize: FS.body }}>
+                Loading payment form…
+              </div>
+            )}
+            </div>
+
             {prepayCalloutText && (
               <div style={{
                 display: 'flex',
@@ -3063,59 +3122,8 @@ export default function PayPageV2() {
               </div>
             )}
 
-            {/* waves-no-print: the payment inputs, consent and Pay button stay off the invoice printout. */}
+            {/* Second panel (same print-hidden panel class as the card form's) keeps the FAQ and other ways to pay at the end of the card. */}
             <div className="waves-pay-payment-panel waves-no-print">
-            {/* "Pay securely / amount / status" header removed (owner
-                2026-08-31: the Pay button already states the charge); the
-                Secure badge went with every other status chip (owner
-                2026-09-04). */}
-
-            {paymentError && (
-              <div role="alert" style={{
-                background: 'rgba(200,16,46,0.06)',
-                border: `1px solid ${DOC.danger}`,
-                borderRadius: RADIUS.input,
-                padding: '12px 16px',
-                fontSize: FS.body,
-                color: DOC.danger,
-                marginBottom: SP.md,
-                lineHeight: LH.body,
-              }}>
-                {paymentError}
-              </div>
-            )}
-            {paymentState === 'ready' && stripeSetup ? (
-              <PaymentForm
-                key={stripeSetup.paymentIntentId}
-                initialMethod={stripeSetup.initialMethod || 'card'}
-                publishableKey={stripeSetup.publishableKey}
-                clientSecret={stripeSetup.clientSecret}
-                amount={stripeSetup.baseAmount}
-                paymentIntentId={stripeSetup.paymentIntentId}
-                token={token}
-                cardSurchargeRate={stripeSetup.cardSurchargeRate}
-                onSuccess={handlePaymentSuccess}
-                onBankVerificationPending={(md) => {
-                  setMicrodepositDetail(microdepositDetailFromNextAction(md));
-                  setMicrodepositVerifying(true);
-                  setBankProcessing(true);
-                  setPaymentState('idle');
-                }}
-                onError={(msg) => setPaymentError(msg)}
-                saveCard={payer ? false : saveCard}
-                saveCardLocked={!payer && saveCardRequired}
-                onSaveCardChange={setSaveCard}
-                thirdPartyBilled={!!payer}
-                customerName={payer ? payer.name : [customer.firstName, customer.lastName].filter(Boolean).join(' ')}
-                customerEmail={payer ? (payer.email || '') : customer.email}
-                onPaymentIntentReplaced={handlePaymentIntentReplaced}
-                onCombinedUpdate={handleCombinedUpdate}
-              />
-            ) : paymentState === 'error' ? null : (
-              <div style={{ padding: '24px 0', textAlign: 'center', color: DOC.muted, fontSize: FS.body }}>
-                Loading payment form…
-              </div>
-            )}
             <PayFaq
               enabled={!!data.payFaq}
               cardSurchargeRate={stripeSetup?.cardSurchargeRate}

@@ -1,8 +1,8 @@
 'use strict';
 
 /**
- * GATE_ROUTE_CHECK_STAFF_SAVES (owner 2026-10-29, Route Check Everywhere
- * build 2a). The staff saves that checked only for an overlap run the
+ * Route check on saves (owner 2026-10-29, Route Check Everywhere builds 2a and
+ * 2b). The staff saves that checked only for an overlap run the
  * dispatcher's arrival-window route check on the SAVED visit too, and show its
  * warning, the way Edit's save does (routes/admin-schedule.js update-details).
  *
@@ -15,20 +15,17 @@
  *    overlap SQL, so the route check is a SECOND, advisory probe: a writer that
  *    refuses a real overlap (the Intelligence Bar's pinned "no overlap" card)
  *    keeps doing so on its own probe, and a route result can never refuse.
- *  - Gate off (unset): every function here returns nothing and touches nothing.
+ *  - Arrival-window routing off (arrival-route.js arrivalWindowRoutingEnabled):
+ *    every function here returns nothing and touches nothing.
  */
 
 const logger = require('../logger');
 
+// The route check on a save runs whenever the arrival-window route check itself
+// does (the check Edit's save runs).
 function routeCheckLive() {
-  const { routeCheckStaffSavesLive } = require('./arrival-route');
-  return typeof routeCheckStaffSavesLive === 'function' && routeCheckStaffSavesLive() === true;
-}
-
-// GATE_ROUTE_CHECK_AUTO_SAVES (build 2b): same read, for the automatic writers.
-function routeCheckAutoLive() {
-  const { routeCheckAutoSavesLive } = require('./arrival-route');
-  return typeof routeCheckAutoSavesLive === 'function' && routeCheckAutoSavesLive() === true;
+  const { arrivalWindowRoutingEnabled } = require('./arrival-route');
+  return typeof arrivalWindowRoutingEnabled === 'function' && arrivalWindowRoutingEnabled() === true;
 }
 
 /** The `arrivalWindow` argument findConflictingVisits takes for a saved visit. */
@@ -39,8 +36,8 @@ function routeCheckArrivalWindow(serviceId) {
 /**
  * Route warnings for a visit already written on `conn` (inside the save's
  * transaction), in its final place: date, start, end and technician. Read under a
- * savepoint, so a failed read cannot poison the save. Returns [] when the gate
- * is off, the visit has no window or technician, or the route fits.
+ * savepoint, so a failed read cannot poison the save. Returns [] when arrival
+ * routing is off, the visit has no window or technician, or the route fits.
  */
 async function staffSaveRouteWarnings(conn, { serviceId, date, windowStart, windowEnd, technicianId } = {}) {
   // An unassigned visit has no route to verify: skipping it keeps "could not
@@ -71,8 +68,7 @@ async function staffSaveRouteWarnings(conn, { serviceId, date, windowStart, wind
 /**
  * Number the visit's technician day in the order the route check certified
  * (placeMovedVisit, staff save). Call INSIDE the write transaction after the
- * insert or update: outside one it is a silent no-op. Never throws, and a no-op
- * unless GATE_STAFF_ROUTE_INSERTION is on as well.
+ * insert or update: outside one it is a silent no-op. Never throws.
  */
 async function placeStaffSavedVisit(conn, { serviceId, source } = {}) {
   if (!conn || !serviceId) return null;
@@ -81,17 +77,17 @@ async function placeStaffSavedVisit(conn, { serviceId, source } = {}) {
 }
 
 /**
- * GATE_ROUTE_CHECK_AUTO_SAVES (build 2b): the same numbering for an automatic
+ * The same numbering for an automatic
  * writer (completion and package follow-ups, annual prepay renewals, call
  * bookings). Call INSIDE the writer's transaction after the insert or update;
  * pass the written row as `visit` or its id as `serviceId`. Silent by design:
  * no warning, no notification, no message. Reads only the road times already
  * bought (`staffSave: true`). A failure is logged on one line and returns null:
- * it never fails or rolls back the booking. Gate off (unset): touches nothing.
- * `live` = the gate reader to ask (default: GATE_ROUTE_CHECK_AUTO_SAVES), so the
- * accept and assign callers share this one placement function.
+ * it never fails or rolls back the booking. Arrival routing off: touches nothing.
+ * `live` = the reader to ask (default: routeCheckLive), so the accept, assign
+ * and booking callers share this one placement function.
  */
-async function placeAutoSavedVisit(conn, { serviceId, visit, source, live = routeCheckAutoLive } = {}) {
+async function placeAutoSavedVisit(conn, { serviceId, visit, source, live = routeCheckLive } = {}) {
   const id = serviceId || (visit && visit.id);
   if (!conn || !id) return null;
   try {
@@ -103,18 +99,6 @@ async function placeAutoSavedVisit(conn, { serviceId, visit, source, live = rout
   }
 }
 
-// GATE_ROUTE_CHECK_ACCEPT_SAVES: an accepted estimate's visit (source 'estimate_accept').
-function routeCheckAcceptLive() {
-  const { routeCheckAcceptSavesLive } = require('./arrival-route');
-  return typeof routeCheckAcceptSavesLive === 'function' && routeCheckAcceptSavesLive() === true;
-}
-
-// GATE_ROUTE_CHECK_ASSIGN_SAVES: an office board assign (source 'dispatch_assign').
-function routeCheckAssignLive() {
-  const { routeCheckAssignSavesLive } = require('./arrival-route');
-  return typeof routeCheckAssignSavesLive === 'function' && routeCheckAssignSavesLive() === true;
-}
-
 // GATE_ROUTE_CHECK_BOOKING_SAVES: a customer-booked visit (self booking, customer reschedule,
 // voice agent booking, new-caller visit).
 function routeCheckBookingLive() {
@@ -124,12 +108,12 @@ function routeCheckBookingLive() {
 
 /** Number an accepted estimate's visit inside the accept transaction. Never throws. */
 function placeAcceptedVisit(conn, { serviceId, visit } = {}) {
-  return placeAutoSavedVisit(conn, { serviceId, visit, source: 'estimate_accept', live: routeCheckAcceptLive });
+  return placeAutoSavedVisit(conn, { serviceId, visit, source: 'estimate_accept' });
 }
 
 /** Number a board-assigned visit inside the assign transaction. Never throws. */
 function placeAssignedVisit(conn, { serviceId, visit } = {}) {
-  return placeAutoSavedVisit(conn, { serviceId, visit, source: 'dispatch_assign', live: routeCheckAssignLive });
+  return placeAutoSavedVisit(conn, { serviceId, visit, source: 'dispatch_assign' });
 }
 
 /** Number a newly booked visit inside the booking transaction. Never throws. */
@@ -138,7 +122,7 @@ function placeBookingSavedVisit(conn, { serviceId, visit, source } = {}) {
 }
 
 module.exports = {
-  routeCheckLive, routeCheckAutoLive, routeCheckAcceptLive, routeCheckAssignLive, routeCheckArrivalWindow, staffSaveRouteWarnings,
+  routeCheckLive, routeCheckArrivalWindow, staffSaveRouteWarnings,
   placeStaffSavedVisit, placeAutoSavedVisit, placeAcceptedVisit, placeAssignedVisit,
   routeCheckBookingLive, placeBookingSavedVisit,
 };

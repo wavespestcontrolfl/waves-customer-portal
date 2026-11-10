@@ -28,7 +28,7 @@ describe('dispatch readiness', () => {
     expect(button.title).toContain('Company stock is not a truck count');
   });
 
-  // Truck kit (GATE_TRUCK_KIT): the tools exception from services/truck-kit.js
+  // Truck kit: the tools exception from services/truck-kit.js
   // is a hold like stock or weather; the strip derives its state from the
   // issue list alone, so an appended hold reads as a hold.
   it('shows a missing truck tool as a hold', () => {

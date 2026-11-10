@@ -3,7 +3,6 @@ const MODELS = require('../config/models');
 const logger = require('./logger');
 const { savepointRead } = require('../utils/savepoint-read');
 const { dispatchWithFallback } = require('./llm/call');
-const { completionTextPlainLive } = require('../config/feature-gates');
 
 // Outcomes that always skip the AI path. These are customer-sensitive
 // situations where generated wording could go off-tone or contradict the
@@ -124,24 +123,15 @@ function deterministicRecap(input = {}) {
     ]);
   }
 
-  if (completionTextPlainLive()) {
-    // GATE_COMPLETION_TEXT_PLAIN: say what was done, and only that. A station
-    // check treated nothing, and the generic "normal activity" sentence is
-    // gone. No "reply to this message" line: the recap is the web report's
-    // summary when the visit has no written report (report-data.js
-    // visitSummary), and a service_report_v1 completion text never carries it.
-    if (isStationCheck(serviceType)) return `Today we completed your ${serviceType} and checked your stations.`;
-    return sentenceJoin([
-      `Today we completed your ${serviceType}.`,
-      areas.length ? `We treated ${areas.join(', ')}.` : '',
-    ]);
-  }
-
+  // Say what was done, and only that. A station check treated nothing, and
+  // there is no generic "normal activity" sentence. No "reply to this message"
+  // line: the recap is the web report's summary when the visit has no written
+  // report (report-data.js visitSummary), and a service_report_v1 completion
+  // text never carries it.
+  if (isStationCheck(serviceType)) return `Today we completed your ${serviceType} and checked your stations.`;
   return sentenceJoin([
     `Today we completed your ${serviceType}.`,
-    areas.length ? `We treated ${areas.join(', ')}.` : 'We treated the accessible service areas.',
-    'You may continue to see normal activity for a short period as the service takes effect.',
-    'Reply to this message if anything needs attention before your next visit.',
+    areas.length ? `We treated ${areas.join(', ')}.` : '',
   ]);
 }
 
@@ -430,9 +420,9 @@ async function generateRecap(input = {}) {
     return { recap: sanitizeRecap(deterministicRecap(input)), source: 'deterministic' };
   }
 
-  // GATE_COMPLETION_TEXT_PLAIN: nothing visit-specific recorded, so the AI
-  // would only write seasonal filler. Send the short fixed text, no AI call.
-  if (outcome === 'completed' && completionTextPlainLive() && !hasVisitSpecificRecord(input)) {
+  // Nothing visit-specific recorded, so the AI would only write seasonal
+  // filler. Send the short fixed text, no AI call.
+  if (outcome === 'completed' && !hasVisitSpecificRecord(input)) {
     return { recap: sanitizeRecap(deterministicRecap(input)), source: 'deterministic' };
   }
 

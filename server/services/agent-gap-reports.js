@@ -114,6 +114,9 @@ const REFUSAL_NOTES = {
 // the default list; a recurrence reopens `fixed` (and rings the bell again).
 const GAP_STATUSES = Object.freeze(['new', 'building', 'fixed', 'by_design', 'dismissed']);
 const CLOSED_STATUSES = Object.freeze(['fixed', 'by_design', 'dismissed']);
+// A row Claude still has to build. A sighting reopens a fixed row to new, but by_design and dismissed rows stay
+// closed, so the bar's stuck-answer line ("Claude has this as gap #N") must never name one of those.
+const OPEN_STATUSES = Object.freeze(GAP_STATUSES.filter((status) => !CLOSED_STATUSES.includes(status)));
 const MAX_TEXT = 300;
 const TOOL_NAME_RE = /^[a-z0-9_]{1,64}$/;
 const KNOWN_DOMAINS = new Set(Object.values(policy).map((entry) => entry?.domain).filter(Boolean));
@@ -141,6 +144,12 @@ const DECLINE_RE = new RegExp([
   // "can't / couldn't / unable to …" only when the sentence ties it to the bar
   String.raw`\b(?:can(?:not|['’]t)|could(?: not|n['’]t)|unable to|not able to)\b[^.!?\n]{0,80}?\b(?:from here|(?:from|in|through|with) (?:the|this) bar|directly)\b`,
   String.raw`\b(?:isn['’]t|not) (?:available|possible) (?:from here|(?:from|in|through) (?:the|this) bar)\b`,
+  // The bar naming its own limit (owner prepay ask 2026-11-05: "I couldn't make this change. The bar can only switch
+  // billing to ... It has no manual prepay option." recorded no row). A change it could not make is a decline unless
+  // the sentence asks for missing information ("... without the new address").
+  String.raw`\b(?:the|this) bar (?:can|could) only\b`,
+  String.raw`\b(?:the bar|this bar|it) (?:has|have) no\b[^.!?\n]{0,40}?\b(?:options?|tools?|way)\b`,
+  String.raw`\b(?:can(?:not|['’]t)|could(?: not|n['’]t)|unable to|not able to) (?:make|apply|save) (?:this|that|the|these|those) changes?\b(?![^.!?\n]{0,80}\bwithout\b)`,
 ].join('|'), 'i');
 
 // The tech-bar `ask` fallback has no search behind it, so it needs a refusal
@@ -734,9 +743,11 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
       attempted: 'The bar declined; no capability search ran' }] : [];
   }
 
+  // The rows flush() saved, as writeGapRows returns them ([] when nothing was written, the kill switch is off or the
+  // write failed). The caller shows the first row's id ("Claude has this as gap #N").
   async function flush({ reply, ask, stepLimitReached, noReply } = {}) {
     try {
-      if (!gapReportsEnabled()) return;
+      if (!gapReportsEnabled()) return [];
       const declined = DECLINE_RE.test(String(reply || ''));
       const blocked = blockedSignals({ stepLimitReached, noReply });
       // Out of steps is ONE record: when the exhaustion row is written, a prose
@@ -745,13 +756,23 @@ function createGapCollector({ source, isRegisteredTool = () => false, recordBloc
       // record stays (pre-push P1s).
       const exhaustionRecorded = blocked.some((signal) => signal.code === LOOP_EXHAUSTED_CODE);
       const signals = [...blocked, ...(declined && !exhaustionRecorded ? declinedSignals({ reply, ask }) : [])];
-      if (signals.length) await writeGapRows(signals);
+      return signals.length ? await writeGapRows(signals) : [];
     } catch (err) {
       logger.warn(`[agent-gap-reports] collector flush failed (${err.code || err.name || 'error'})`);
+      return [];
     }
   }
 
-  return { discovery, toolResult, flush };
+  // True when this request ran any capability search (discover_capabilities or the API tool search).
+  const searched = () => searches.length > 0;
+
+  return { discovery, toolResult, flush, searched };
+}
+
+// The id of the first saved row that is still open (new or building), or null. Takes flush()'s return value.
+function firstOpenGapId(rows) {
+  const open = (Array.isArray(rows) ? rows : []).find((row) => row && OPEN_STATUSES.includes(row.status));
+  return open ? open.id : null;
 }
 
 module.exports = {
@@ -764,5 +785,6 @@ module.exports = {
   listRecentGaps,
   setGapStatus,
   createGapCollector,
+  firstOpenGapId,
   _private: { prepareGapRow, recordableRefusalCode, RECORDED_REFUSAL_CODES, BY_DESIGN_REFUSAL_CODES, UNRECORDED_DECLINE_CODES, gapWindowCutoff, gapBellText, ringGapBell, SOURCE_LABELS, DECLINE_RE, BAR_DECLINE_RE },
 };

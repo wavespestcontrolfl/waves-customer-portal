@@ -72,3 +72,32 @@ test('an unknown or malformed technician id is a 404 before any PIN write', asyn
   expect((await invoke({ params: { id: 'not-a-uuid' }, body: { pin: '4512' } })).statusCode).toBe(404);
   expect(setTechVoicePin).not.toHaveBeenCalled();
 });
+
+describe('the owner (full-access) row PIN is owner-only', () => {
+  const OWNER_ROW = { id: TECH_ID, email: 'owner@example.test' };
+  beforeEach(() => { process.env.IB_FULL_ACCESS_EMAILS = 'owner@example.test'; });
+  afterAll(() => { delete process.env.IB_FULL_ACCESS_EMAILS; });
+
+  test('a non-owner admin cannot set the owner row PIN', async () => {
+    technicianLookup(OWNER_ROW);
+    const res = await invoke({ body: { pin: '4512' }, techRole: 'admin', technician: { id: 'admin-2', email: 'staff-admin@example.test' } });
+    expect(res.statusCode).toBe(403);
+    expect(setTechVoicePin).not.toHaveBeenCalled();
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('the owner can set the owner row PIN', async () => {
+    technicianLookup(OWNER_ROW);
+    setTechVoicePin.mockResolvedValueOnce({ ok: true });
+    const res = await invoke({ body: { pin: '4512' }, techRole: 'admin', technician: { id: 'admin-1', email: 'owner@example.test' } });
+    expect(res.statusCode).toBe(200);
+    expect(setTechVoicePin).toHaveBeenCalled();
+  });
+
+  test('a non-owner admin can still set another row PIN', async () => {
+    technicianLookup({ id: TECH_ID, email: 'tech@example.test' });
+    setTechVoicePin.mockResolvedValueOnce({ ok: true });
+    const res = await invoke({ body: { pin: '4512' }, techRole: 'admin', technician: { id: 'admin-2', email: 'staff-admin@example.test' } });
+    expect(res.statusCode).toBe(200);
+  });
+});

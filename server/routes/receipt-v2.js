@@ -14,6 +14,7 @@ const { generateReceiptPDF } = require('../services/pdf/invoice-pdf');
 // actions, so customers may retrieve them months later for bookkeeping.
 
 const { loadPaymentForInvoice } = require('../services/receipt-payment');
+const { customerVisibleInvoiceNotes } = require('../services/invoice-notes');
 
 // =========================================================================
 // GET /api/receipt/:token — Receipt view data (paid invoice record)
@@ -74,7 +75,7 @@ router.get('/:token', async (req, res, next) => {
         paymentMethod: data.payment_method,
         cardBrand: data.card_brand,
         cardLastFour: data.card_last_four,
-        notes: data.notes,
+        notes: customerVisibleInvoiceNotes(data.notes),
         creditMemo: creditMemo || null,
       },
       service: {

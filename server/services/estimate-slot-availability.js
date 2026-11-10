@@ -1681,6 +1681,22 @@ function selectCustomerFacingSlots(slots, limit, { routeFirst = false, rainTierO
 // page could report no times at all and leave a still-live reservation
 // unconfirmable, and the React page forced a needless re-pick. Another
 // estimate's hold still blocks, exactly as before.
+// This estimate's service mix as the rows technician-capabilities reads (one service type per requested service).
+function capabilityRowsFor(serviceMix) {
+  return serviceMix.services.map((key) => ({ service_type: key.replace(/_/g, ' ') }));
+}
+
+// filterCollidingSlots' rows with each visit the caller moves at its new time (booking-make-room.js: the stops that
+// give up an hour move later the same day). Every rule in the filter then reads the day as it would be.
+function shiftMovedRows(rows, shiftedServiceMinutes) {
+  if (!shiftedServiceMinutes?.size) return rows;
+  return rows.map((row) => {
+    const minutes = shiftedServiceMinutes.get(String(row.id));
+    if (!minutes) return row;
+    return { ...row, window_start: addMinutesToHHMM(row.window_start, minutes), window_end: row.window_end ? addMinutesToHHMM(row.window_end, minutes) : row.window_end };
+  });
+}
+
 async function filterCollidingSlots(slots, {
   dateFrom, dateTo, estimateZone = null, coords = null, serviceMix = null, ownEstimateId = null,
   // This estimate's own catalog expected-service minutes (owner ruling
@@ -1691,14 +1707,16 @@ async function filterCollidingSlots(slots, {
   // Visits that are being MOVED by the caller: their own rows are not
   // collisions for the slot they are moving to (day-agreement shadow).
   excludeServiceIds = [],
+  // Visits the caller moves LATER the same day (booking make-room): a Map of
+  // scheduled_services id -> minutes. Each row counts at its own window shifted
+  // by those minutes (shiftMovedRows).
+  shiftedServiceMinutes,
 } = {}) {
   if (!Array.isArray(slots) || slots.length === 0) return slots;
   let inactiveTechs = new Set();
   if (serviceMix) {
     const ids = [...new Set(slots.map((slot) => slot.techId).filter(Boolean))];
-    const inactive = await require('./technician-capabilities').inactiveCapabilitiesForServices(
-      db, ids, serviceMix.services.map((key) => ({ service_type: key.replace(/_/g, ' ') })),
-    );
+    const inactive = await require('./technician-capabilities').inactiveCapabilitiesForServices(db, ids, capabilityRowsFor(serviceMix));
     inactiveTechs = new Set(inactive.map((row) => String(row.technician_id)));
   }
   if (capacityEnabled()) {
@@ -1729,8 +1747,9 @@ async function filterCollidingSlots(slots, {
       });
     });
   }
-  const rows = await collisionQuery
+  const rows = shiftMovedRows(await collisionQuery
     .select(
+      'scheduled_services.id',
       'scheduled_services.technician_id',
       'scheduled_services.scheduled_date',
       'scheduled_services.window_start',
@@ -1746,7 +1765,7 @@ async function filterCollidingSlots(slots, {
       ...(travelGapEnabled()
         ? [...guardedCoordSelects(db), 'scheduled_services.service_type', 'scheduled_services.service_key_snapshot']
         : []),
-    );
+    ), shiftedServiceMinutes);
   const candidatePin = { lat: coords?.lat ?? null, lng: coords?.lng ?? null };
   if (travelGapEnabled()) await ensureCatalogLoaded(db);
 
@@ -2077,6 +2096,61 @@ async function routeCheckedPool(pool, { coords, estimateId, durationMinutes, mod
   } catch (err) {
     logger.warn(`[customer-route-check] estimate check failed, serving the unfiltered list: ${err.message}`);
     return pool;
+  }
+}
+
+// Make room at booking (GATE_BOOKING_MAKE_ROOM, scheduling/booking-make-room.js). OFFER LISTS ONLY, like the route
+// check above: every other caller gets 'off'. Off: the module is never loaded. Any error reads as off.
+function makeRoomModeFor(userOpts) {
+  if (userOpts.offer !== true) return 'off';
+  try {
+    return require('./scheduling/booking-make-room').bookingMakeRoomMode();
+  } catch {
+    return 'off';
+  }
+}
+
+// The zone-day funnel as the page resolved it (applyZoneDayFunnel): its cluster days, plus the one seed day when it
+// seeded one. funnelDays null = no funnel.
+function funnelAllows(funnelDays, funnel, date) {
+  return !funnelDays || funnelDays.has(date) || (funnel?.mode === 'seeded' && funnel.seedDate === date);
+}
+
+// This page's own offer rules for one window the make-room check tries: the request's dates and weekends, the
+// customer grid and close, the zone days, the time of day, the notice and the season.
+function makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnel = null }) {
+  return (slot) => {
+    if (!slot?.date || slot.date < dateFrom || slot.date > dateTo) return false;
+    if (!enumerateETDateStrings(slot.date, slot.date, { includeWeekends: opts.includeWeekends }).length) return false;
+    if (!slotWindowFitsDay(slot.windowStart, slot.windowEnd)) return false;
+    if (!funnelAllows(funnelDays, funnel, slot.date)) return false;
+    const kept = filterPastSlotsForToday(filterTimeOfDay([slot], opts.timeOfDay), { minimumLeadMinutes: opts.minimumLeadMinutes });
+    return filterSeasonalSlots(kept, serviceProfile).length === 1;
+  };
+}
+
+// GATE_BOOKING_MAKE_ROOM: records which taken hours this customer could have, over the final pool. Not awaited:
+// the list never waits for it, and it never changes the list.
+// The page's own placement rules for one make-room hour (booking-make-room.js), on the day with the moved stops at
+// their new times: filterCollidingSlots with the classified pool's arguments (overlaps, live holds, zone limits,
+// capability, the day fit, and the travel gap with this estimate's expected minutes), then the service-line rule.
+// Resolves true, or the reason the page would not offer the hour.
+function makeRoomPlacement({ estimateZone, coords, serviceMix, candidateExpectedMinutes, estimateId, lineRanking }) {
+  return async (slot, shiftedServiceMinutes) => {
+    const kept = await filterCollidingSlots([slot], {
+      dateFrom: slot.date, dateTo: slot.date, estimateZone, coords, serviceMix, candidateExpectedMinutes, ownEstimateId: estimateId, shiftedServiceMinutes,
+    });
+    if (!kept.length) return 'page_collision';
+    return applyLineOfferRule(kept, lineRanking).length ? true : 'service_line';
+  };
+}
+
+function startMakeRoomCheck(mode, args) {
+  if (mode === 'off') return;
+  try {
+    Promise.resolve(require('./scheduling/booking-make-room').startBackgroundCheck({ ...args, mode, surface: 'estimate' })).catch(() => {});
+  } catch (err) {
+    logger.warn(`[booking-make-room] check not started: ${err.message}`);
   }
 }
 
@@ -2510,6 +2584,16 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const routeChecked = await routeCheckedPool(funneledEligible, {
     coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode,
   });
+  // GATE_BOOKING_MAKE_ROOM: the taken hours this customer could have, measured against this same final pool.
+  startMakeRoomCheck(makeRoomModeFor(userOpts), {
+    estimateId, pool: routeChecked, coords, durationMinutes: serviceProfile.durationMinutes, dateFrom, dateTo,
+    // The page's capability rule (filterCollidingSlots) for the technician whose stop would move.
+    capabilityRows: serviceProfile.reservationServiceMix ? capabilityRowsFor(serviceProfile.reservationServiceMix) : null,
+    // The zone the page passes find-time, for the self-serve drive cap's route-day lift.
+    zoneSlug: routeDaySlug,
+    admit: makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnel }),
+    placement: makeRoomPlacement({ estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, estimateId, lineRanking }),
+  });
   // The scarcity count below reads `bookable` when no funnel is active: leave out what the check removed.
   let countedBookable = bookable;
   if (routeChecked !== funneledEligible) {
@@ -2831,5 +2915,7 @@ module.exports = {
     heldVisitLines,
     clearCaches() { wrapperCache.clear(); geocodeCache.clear(); require('./scheduling/expected-service-minutes').clearExpectedServiceMinutesCache(); },
     stopDatesInRange,
+    makeRoomAdmit,
+    makeRoomPlacement,
   },
 };

@@ -47,13 +47,18 @@
 
 const crypto = require('crypto');
 const logger = require('./logger');
-const { isEnabled, promiseEvidenceCloseLive, callPromiseAiCloseLive, callPromiseLaterTextCheckLive } = require('../config/feature-gates');
+const { isEnabled, promiseEvidenceCloseLive, callPromiseAiCloseLive } = require('../config/feature-gates');
+// GATE_CALL_PROMISE_AI_NO_CUSTOMER, read at call time and guarded like the other late-added readers: a test that mocks
+// feature-gates without it reads off.
+const callPromiseAiNoCustomerLive = () => require('../config/feature-gates').callPromiseAiNoCustomerLive?.() === true;
 const { etDateString } = require('../utils/datetime-et');
 const commitments = require('./call-commitments');
 const { loadSmsFulfillmentEvidence, admissibleWitness, verifySmsFulfillment, fulfillmentFingerprint, revalidateSmsFulfillment } = require('./sms-commitment-fulfillment');
 const { verifyThreadCompletion, loadThreadMessages, latestHumanTextAt, THREAD_LIMIT, BASIS: THREAD_BASIS } = require('./sms-commitment-thread-close');
 const { stringifySmsEvidence } = require('./sms-operational-extractor');
 const laterTexts = require('./call-promise-later-text-check');
+const phoneEvidence = require('./call-promise-phone-evidence');
+const { phoneIdentityOf, sharedPhoneReason, NO_CUSTOMER_DAILY_MODEL_CALLS } = phoneEvidence;
 
 const { associationFrom, evidenceBoundary, storedProof, refreshableVerdictSql, staleAiRowSql, speakerTurns, normalizeForMatch } = commitments;
 
@@ -70,6 +75,8 @@ const AGENT = 'ai-check';
 const MAX_MODEL_CALLS = 60;
 const QUEUE_MODEL_CALLS = 5;
 const CANDIDATE_LIMIT = 200;
+// Promises on calls with no customer read per run (newest call first); the daily model-call cap bounds the cost.
+const NO_CUSTOMER_CANDIDATE_LIMIT = 50;
 // No new candidate starts after this long: a stalled provider never pins the watchdog's lock for the whole backlog.
 const MAX_RUN_MS = 20 * 60 * 1000;
 // verifyThreadCompletion needs a message to anchor on; a call has no sms row.
@@ -105,23 +112,70 @@ const parsed = (value) => (typeof value === 'string' ? JSON.parse(value) : value
 
 // ── Candidates ──────────────────────────────────────────────────────────────
 
-function listCandidates(conn, { callIds = null, limit = CANDIDATE_LIMIT, cursor = null } = {}) {
+// The open, untouched, non-stale Waves promises on calls that are not the sandbox, with the call's fields the judgment
+// reads. The customer path and the no-customer path below differ only in which calls they take and in what order.
+function candidateBase(conn, callIds) {
   return conn('call_commitments as cc')
     .join('call_log as cl', 'cl.id', 'cc.call_log_id')
     .where({ 'cc.party': 'waves', 'cc.status': 'open' })
     .whereNull('cc.human_state')
     .whereRaw(`NOT ${staleAiRowSql('cc')}`)
-    .whereNotNull('cl.customer_id')
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b, 'cl.source'))
     .modify((b) => { if (callIds) b.whereIn('cc.call_log_id', callIds); })
+    .select('cc.*', 'cl.customer_id as call_customer_id', 'cl.from_phone as call_from_phone', 'cl.to_phone as call_to_phone',
+      'cl.twilio_call_sid as call_twilio_call_sid', ...CALL_TIMING.map((c) => `cl.${c} as call_${c}`), conn.raw('cl.created_at::text as cursor_at'));
+}
+
+function listCandidates(conn, { callIds = null, limit = CANDIDATE_LIMIT, cursor = null } = {}) {
+  return candidateBase(conn, callIds)
+    .whereNotNull('cl.customer_id')
     // The page after the last row read (its call start as text keeps microseconds, so a boundary never skips a row).
     .modify((b) => { if (cursor) b.whereRaw('(cl.created_at, cc.id) > (?::timestamptz, ?::uuid)', [cursor.at, cursor.id]); })
     .orderBy([{ column: 'cl.created_at', order: 'asc' }, { column: 'cc.id', order: 'asc' }])
-    .limit(limit)
-    .select('cc.*', 'cl.customer_id as call_customer_id', 'cl.from_phone as call_from_phone', 'cl.to_phone as call_to_phone',
-      ...CALL_TIMING.map((c) => `cl.${c} as call_${c}`), conn.raw('cl.created_at::text as cursor_at'));
+    .limit(limit);
 }
 
+// The promises on calls with NO customer record (GATE_CALL_PROMISE_AI_NO_CUSTOMER): nothing at all, and no query, while
+// that gate is off. Newest call first, a page at a time: the page after `cursor` ({ at, id }, the last row read) is
+// the rows strictly older on (call start, id), so a promise nothing has changed for never hides an older one.
+function listNoCustomerCandidates(conn, { callIds = null, limit = NO_CUSTOMER_CANDIDATE_LIMIT, cursor = null } = {}) {
+  return callPromiseAiNoCustomerLive()
+    ? candidateBase(conn, callIds).whereNull('cl.customer_id')
+      .modify((b) => { if (cursor) b.whereRaw('(cl.created_at, cc.id) < (?::timestamptz, ?::uuid)', [cursor.at, cursor.id]); })
+      .orderBy([{ column: 'cl.created_at', order: 'desc' }, { column: 'cc.id', order: 'desc' }]).limit(limit)
+    : Promise.resolve([]);
+}
+
+// The call's phone fields as a candidate row carries them (phone-evidence reads direction, from_phone, to_phone).
+const phoneCallOf = (row) => ({ direction: row.call_direction, from_phone: row.call_from_phone, to_phone: row.call_to_phone });
+// What differs between a promise judged for a customer and one judged by the caller's phone (a call with no customer
+// record), as a table so no judgment path gains a branch: the active properties that scope a witness, what marks the
+// promise and its stand-in message, what a close is read back against, and who may spend model calls.
+const IDENTITY = {
+  true: {
+    properties: async () => [],
+    context: () => ({ phone_keyed: true }),
+    message: (row) => ({ any_customer_phone: false, phone_identity: phoneIdentityOf(phoneCallOf(row)), source_call_id: row.call_log_id, source_call_sid: row.call_twilio_call_sid }),
+    proof: { identity: 'phone' },
+    // Readable (witnessState): only while its gate is on and the number could not be anyone's.
+    readable: async (conn, call) => !!call && callPromiseAiNoCustomerLive() && !(await sharedPhoneReason(conn, call)),
+    // A close stands (aiCloseStands): the call still has no customer, and the gate is on.
+    stands: (prior) => prior.identity === 'phone' && prior.judged_customer_id == null && callPromiseAiNoCustomerLive(),
+    // A model call is reserved against the day's cap BEFORE it is made (reserveNoCustomerCall).
+    reserve: (cap) => cap.reserve(),
+  },
+  false: {
+    // The customer's only active property scopes a visit or estimate witness, as at an SMS ask's intake.
+    properties: (conn, customerId) => conn('customer_properties').where({ customer_id: customerId, active: true }).limit(2).pluck('id'),
+    context: () => ({}),
+    message: () => ({ any_customer_phone: true }),
+    proof: {},
+    readable: async () => true,
+    stands: (prior, call) => prior.identity !== 'phone' && prior.judged_customer_id === call.customer_id,
+    reserve: async () => true,
+  },
+};
+const identityOf = (customerId) => IDENTITY[!customerId];
 const callOf = (row) => ({ id: row.call_log_id, customer_id: row.call_customer_id,
   ...Object.fromEntries(CALL_TIMING.map((c) => [c, row[`call_${c}`]])) });
 
@@ -131,19 +185,19 @@ const callOf = (row) => ({ id: row.call_log_id, customer_id: row.call_customer_i
 // of the call, about the customer the call has now.
 async function subjectOf(conn, row, from, cache) {
   const customerId = row.call_customer_id;
-  // The customer's only active property scopes a visit or estimate witness, as
-  // at an SMS ask's intake; with two or more it stays unscoped (ambiguous).
-  const ids = await conn('customer_properties').where({ customer_id: customerId, active: true }).limit(2).pluck('id');
+  const who = identityOf(customerId);
+  // With two or more active properties it stays unscoped (ambiguous).
+  const ids = await who.properties(conn, customerId);
   const propertyId = ids.length === 1 ? ids[0] : null;
   const named = row.due_at && row.due_basis === 'stated' ? etDateString(new Date(row.due_at)) : null;
   const current = { id: row.id, party: row.party, kind: row.kind, description: row.description, evidence: row.evidence, due_at: row.due_at,
     sms_context: { basis: 'promise', made_on: 'phone_call', customer_id: customerId, source_at: from.toISOString(),
-      property_id: propertyId, property_ambiguous: !propertyId, ...(named ? { due_date: named } : {}),
+      property_id: propertyId, property_ambiguous: !propertyId, ...(named ? { due_date: named } : {}), ...who.context(),
       ...(cache?.fulfillment_check ? { fulfillment_check: cache.fulfillment_check } : {}),
       ...(cache?.thread_check ? { thread_check: cache.thread_check } : {}) } };
   const outbound = String(row.call_direction || '').startsWith('outbound');
   const message = { id: NO_MESSAGE_ID, customer_id: customerId, created_at: from, direction: outbound ? 'outbound' : 'inbound',
-    from_phone: row.call_from_phone, to_phone: row.call_to_phone, any_customer_phone: true };
+    from_phone: row.call_from_phone, to_phone: row.call_to_phone, ...who.message(row) };
   return { current, message };
 }
 
@@ -171,7 +225,7 @@ function cachedAiClose(row) {
   return prior?.version === VERSION ? prior : null;
 }
 
-// GATE_CALL_PROMISE_LATER_TEXT_CHECK helpers. A held proof (HELD_BY_LATER_TEXT) stands without a new model call
+// Later-text check helpers. A held proof (HELD_BY_LATER_TEXT) stands without a new model call
 // only while the later-text check has already answered for this proof, this newest human message and these later
 // texts; otherwise its cached verdict is dropped so the record check runs again (a hold cached before the check
 // existed carries no proof to test, so it is judged again once).
@@ -196,7 +250,7 @@ async function laterTextsAllowClose(conn, result, { verdict, cache, now, mayCall
 // Judges one open promise; writes nothing. `budget.left` caps model calls (a
 // cached verdict costs none). Returns { outcome, ... }: skipped | deferred |
 // judged, with the verdict, the cache to store and the objects a close needs.
-async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfillment, verifyThread = verifyThreadCompletion }) {
+async function judgeCandidate(conn, row, { now, budget, cap, verify = verifySmsFulfillment, verifyThread = verifyThreadCompletion }) {
   const call = callOf(row);
   const after = await evidenceBoundary(conn, row, call, { endOf: callEnd });
   if (!after) return { outcome: 'skipped', reason: 'no_call_time' };
@@ -204,19 +258,25 @@ async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfil
   if (from.getTime() >= now.getTime()) return { outcome: 'skipped', reason: 'not_yet' };
   const cache = cachedAiClose(row) || {};
   const { current, message } = await subjectOf(conn, row, from, cache);
-  // GATE_CALL_PROMISE_LATER_TEXT_CHECK: a held proof is judged again unless the later-text check already
-  // answered for exactly these later texts (a hold cached before the check existed carries no proof to test).
-  const laterLive = callPromiseLaterTextCheckLive();
-  if (laterLive) await dropUnansweredHold(conn, current, message, cache, now);
+  // A held proof is judged again unless the later-text check already answered for exactly these later texts
+  // (a hold cached before the check existed carries no proof to test).
+  await dropUnansweredHold(conn, current, message, cache, now);
   const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
   let model = 0;
-  // One model call from the run's budget; false when it is spent.
-  const take = () => (budget.left > 0 ? ((budget.left -= 1), (model += 1), true) : false);
+  // One model call from the run's budget; false when it is spent. A no-customer promise also reserves the call against
+  // the day's cap for those promises (`cap`) first, and a call is made only when that reservation committed.
+  const who = identityOf(row.call_customer_id);
+  const take = async () => {
+    if (budget.left <= 0 || !(await who.reserve(cap))) return false;
+    budget.left -= 1;
+    model += 1;
+    return true;
+  };
   let checked = null;
   let verdict = { verdict: 'open', reason: 'no_witness' };
   if (evidence.records.some((record) => admissibleWitness(record, current, evidence.records))) {
     const { evidenceHash } = fulfillmentFingerprint(current, evidence);
-    if (!laterTexts.cacheFresh(current.sms_context.fulfillment_check, evidenceHash, now) && !take()) return { outcome: 'deferred', reason: 'budget' };
+    if (!laterTexts.cacheFresh(current.sms_context.fulfillment_check, evidenceHash, now) && !(await take())) return { outcome: 'deferred', reason: 'budget' };
     checked = await verify(current, evidence, { now, requireModel: true });
     verdict = sayWavesWords(checked, evidence);
     // A fulfilled verdict the speaker check downgraded is cached as the downgrade, with its evidence hash: the same
@@ -231,13 +291,12 @@ async function judgeCandidate(conn, row, { now, budget, verify = verifySmsFulfil
     // quote, same evidence hash) so it is not re-judged, and let the later conversation decide below.
     result.readThrough = await latestHumanMessage(conn, message);
     if (!laterThan(result.readThrough, verdict.matched_at)) return result;
-    // GATE_CALL_PROMISE_LATER_TEXT_CHECK: only a clear "no later text says this promise was not kept" lets the
-    // record close it.
-    if (laterLive && await laterTextsAllowClose(conn, result, { verdict, cache, now, mayCall: take })) {
+    // Only a clear "no later text says this promise was not kept" lets the record close it.
+    if (await laterTextsAllowClose(conn, result, { verdict, cache, now, mayCall: take })) {
       return { ...result, model, laterTextChecked: true };
     }
     // With the record the hold rests on (never its quote), so the later-text check can tell whether it already
-    // answered. Bookkeeping only: nothing reads these fields while that check is off.
+    // answered.
     result.cache.fulfillment_check = { verdict: 'uncertain', reason: HELD_BY_LATER_TEXT, evidence_hash: checked.evidence_hash, retry_after: null,
       record_type: verdict.record_type, record_id: verdict.record_id, matched_at: verdict.matched_at };
     result.verdict = { verdict: 'uncertain', reason: HELD_BY_LATER_TEXT };
@@ -282,9 +341,9 @@ function witnessFingerprint(record) {
 // { fingerprint } when the record is still an admissible witness, { missing: true } when it is not, { unknown:
 // true } when a truncated source may be hiding it. A source that failed outright throws (nothing is decided on it).
 async function witnessState(conn, row, { ref, thread = false, now = new Date() }) {
-  const call = await conn('call_log').where({ id: row.call_log_id }).first('id', 'customer_id', 'from_phone', 'to_phone', ...CALL_TIMING);
-  if (!call?.customer_id) return { missing: true };
-  const joined = { ...row, call_customer_id: call.customer_id, call_from_phone: call.from_phone, call_to_phone: call.to_phone,
+  const call = await conn('call_log').where({ id: row.call_log_id }).first('id', 'customer_id', 'from_phone', 'to_phone', 'twilio_call_sid', ...CALL_TIMING);
+  if (!await identityOf(call?.customer_id).readable(conn, call)) return { missing: true };
+  const joined = { ...row, call_customer_id: call.customer_id, call_from_phone: call.from_phone, call_to_phone: call.to_phone, call_twilio_call_sid: call.twilio_call_sid,
     ...Object.fromEntries(CALL_TIMING.map((c) => [`call_${c}`, call[c]])) };
   const after = await evidenceBoundary(conn, joined, callOf(joined), { endOf: callEnd });
   if (!after) return { missing: true };
@@ -317,6 +376,7 @@ function proofOf(row, verdict, witnessFp, readThrough, laterTextChecked = false)
   return storedProof({ strength: 'association', kind: AI_CHECK_KIND, basis: AI_CHECK_BASIS, closed_agent: AGENT,
     record_type: recordType, record_id: verdict.record_id, label: RECORD_LABEL[recordType] || 'record', matched_at: matchedAt,
     check: verdict.basis === THREAD_BASIS ? THREAD_BASIS : 'record', ...(verdict.witness ? { witness: verdict.witness } : {}),
+    ...identityOf(row.call_customer_id).proof,
     promise_md5: promiseMd5(row), witness_fp: witnessFp, read_through: readThrough ? iso(readThrough) : null, evidence_hash: verdict.evidence_hash, extractor_version: VERSION,
     // Closed over later human texts that the later-text check found say nothing against it.
     ...(laterTextChecked ? { later_text_check: laterTexts.VERSION } : {}) }, row.call_customer_id);
@@ -368,7 +428,9 @@ async function closeOnVerdict(conn, row, judged, { now }) {
 // close; one that failed throws, and the caller leaves the row as it is.
 async function aiCloseStands(conn, commitment, call, prior) {
   if (prior?.basis !== AI_CHECK_BASIS || commitment.party !== 'waves' || commitment.human_state) return false;
-  if (prior.promise_md5 !== promiseMd5(commitment) || !call?.customer_id || prior.judged_customer_id !== call.customer_id) return false;
+  // A close judged for a customer stands only while the call still has that customer; one judged by phone, only while
+  // the call still has no customer and its gate is on.
+  if (prior.promise_md5 !== promiseMd5(commitment) || !identityOf(call?.customer_id).stands(prior, call)) return false;
   const checkerType = prior.check === THREAD_BASIS ? 'sms' : CHECKER_TYPE[prior.record_type];
   if (!checkerType || !UUID_RE.test(String(prior.record_id))) return false;
   const state = await witnessState(conn, commitment, { ref: refOf(checkerType, prior.record_id), thread: prior.check === THREAD_BASIS });
@@ -414,7 +476,7 @@ async function storeCache(conn, row, cache, now) {
   // fulfilled verdict is not cached at all (it closes the promise in the same run; a lost race asks again).
   const bare = (v) => (v && v.verdict !== 'fulfilled' ? Object.fromEntries(Object.entries(v).filter(([k]) => k !== 'quote')) : null);
   const next = { version: VERSION, fulfillment_check: bare(cache.fulfillment_check), thread_check: bare(cache.thread_check),
-    // Only when there is a later-text verdict (GATE_CALL_PROMISE_LATER_TEXT_CHECK): with the check off, no key.
+    // Only when there is a later-text verdict.
     ...(cache.later_text_check != null ? { later_text_check: bare(cache.later_text_check) } : {}), checked_at: now.toISOString() };
   const prior = cachedAiClose(row);
   // record_id: a held proof that gains the record it rests on is written once, so the later-text check can test it.
@@ -442,14 +504,73 @@ async function runCallPromiseAiClose({ conn = require('../models/db'), now = new
     const last = rows[rows.length - 1];
     cursor = { at: last.cursor_at, id: last.id };
   }
+  // Promises on calls with no customer record, judged by phone: its own gate, newest first, and its own daily cap.
+  await runNoCustomerPass(conn, { now, budget, stopAt, tally, callIds, verify, verifyThread });
   logger.info(`[call-promise-ai-close] run: ${JSON.stringify(tally)}`);
   return tally;
 }
 
-async function checkRow(conn, row, { now, budget, stopAt, tally, verify, verifyThread }) {
+// The cap is logged once per Eastern day per process when it stops the pass.
+let capLoggedFor = null;
+const logCapSpent = (etDay) => {
+  if (capLoggedFor === etDay) return;
+  capLoggedFor = etDay;
+  logger.info(`[call-promise-ai-close] no-customer promises: the daily cap of ${NO_CUSTOMER_DAILY_MODEL_CALLS} model calls is spent; the rest wait until the next Eastern day`);
+};
+
+// Where the no-customer walk stopped, so the next run continues from there (like admin-alert-relevance.js
+// rearmResumeAfter): { at, id } of the last promise fully judged, or null to start from the newest. In-process; a restart
+// starts over. Only the full walk (no callIds) uses it: the Owed-queue read judges just the rows it shows.
+let noCustomerResume = null;
+const resetNoCustomerResume = () => { noCustomerResume = null; };
+
+// Promises on calls with no customer record, newest first, a page at a time inside the run's time and model budgets.
+// A promise nothing has changed for (a cached "open", no witness, an unusable number) costs only reads, so the walk goes
+// on past it to the older ones. It stops, keeping its place, when time or the run's model budget is out, a promise had to
+// wait (deferred), or the day's cap refused a reservation; a walk that reaches the end starts from the newest next time.
+async function runNoCustomerPass(conn, { now, budget, stopAt, tally, callIds, verify, verifyThread }) {
+  if (!callPromiseAiNoCustomerLive()) return;
+  const etDay = etDateString(now);
+  if (await phoneEvidence.noCustomerCallsToday(conn, etDay) >= NO_CUSTOMER_DAILY_MODEL_CALLS) { logCapSpent(etDay); return; }
+  tally.no_customer_candidates = 0;
+  tally.no_customer_model_calls = 0;
+  const refused = { spent: false };
+  let cursor = callIds ? null : noCustomerResume;
+  let stopped = false;
+  while (!stopped) {
+    const rows = await listNoCustomerCandidates(conn, { callIds, cursor });
+    tally.no_customer_candidates += rows.length;
+    for (const row of rows) {
+      if (Date.now() > stopAt || budget.left <= 0) { stopped = true; break; }
+      // Never on a number that could be anyone's (one of ours, a carrier sentinel, or on more than one customer record).
+      const shared = await sharedPhoneReason(conn, phoneCallOf(row));
+      if (shared) {
+        logger.info(`[call-promise-ai-close] skipped no-customer promise ${row.id}: ${shared}`);
+        tally.skipped += 1;
+      } else {
+        const waited = tally.deferred;
+        const cap = { reserve: async () => {
+          const ok = await phoneEvidence.reserveNoCustomerCall(conn, row.id, etDay);
+          if (ok) tally.no_customer_model_calls += 1; else refused.spent = true;
+          return ok;
+        } };
+        tally.candidates += 1;
+        await checkRow(conn, row, { now, budget, cap, stopAt, tally, verify, verifyThread });
+        stopped = refused.spent || tally.deferred > waited;
+        if (stopped) break;
+      }
+      cursor = { at: row.cursor_at, id: row.id };
+    }
+    if (rows.length < NO_CUSTOMER_CANDIDATE_LIMIT) break;
+  }
+  if (!callIds) noCustomerResume = stopped ? cursor : null;
+  if (refused.spent) logCapSpent(etDay);
+}
+
+async function checkRow(conn, row, { now, budget, cap, stopAt, tally, verify, verifyThread }) {
   if (Date.now() > stopAt) { tally.deferred += 1; return; }
   try {
-    const judged = await judgeCandidate(conn, row, { now, budget, verify, verifyThread });
+    const judged = await judgeCandidate(conn, row, { now, budget, cap, verify, verifyThread });
     if (judged.outcome === 'deferred') { tally.deferred += 1; return; }
     if (judged.outcome === 'skipped') { tally.skipped += 1; return; }
     tally.model_calls += judged.model;
@@ -475,5 +596,5 @@ function runInBackground({ conn, callIds }) {
   return backgroundRun;
 }
 
-module.exports = { runCallPromiseAiClose, runInBackground, listRecheckCallIds, witnessFingerprint, judgeCandidate, listCandidates, closeOnVerdict, aiCloseStands, promiseMd5,
-  VERSION, CANDIDATE_LIMIT, AI_CHECK_KIND, AI_CHECK_BASIS, AGENT, MAX_MODEL_CALLS, QUEUE_MODEL_CALLS };
+module.exports = { runCallPromiseAiClose, runInBackground, listRecheckCallIds, witnessFingerprint, judgeCandidate, listCandidates, listNoCustomerCandidates, resetNoCustomerResume, closeOnVerdict, aiCloseStands, promiseMd5,
+  VERSION, CANDIDATE_LIMIT, NO_CUSTOMER_CANDIDATE_LIMIT, NO_CUSTOMER_DAILY_MODEL_CALLS, AI_CHECK_KIND, AI_CHECK_BASIS, AGENT, MAX_MODEL_CALLS, QUEUE_MODEL_CALLS };

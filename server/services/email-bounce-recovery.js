@@ -24,7 +24,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const emailLib = require('./email-template-library');
-const { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, MOVE_NOTICE_CATEGORY, CARBON_COPY_CATEGORY } = require('../constants/email-replay-exclusions');
+const { ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY, MOVE_NOTICE_CATEGORY, CARBON_COPY_CATEGORY, staleStoredCopyReason } = require('../constants/email-replay-exclusions');
 const billingReplay = require('./billing-email-provider-replay');
 const { isSenderRenderedEmail, alertFinalNoticeMissed } = require('./billing-email-no-replay');
 const NotificationService = require('./notification-service');
@@ -185,7 +185,8 @@ function recoveryIdFromMessage(message) {
  */
 function decideRecoveryAction({
   candidate, suppressed, ownedByOther, hasAttachments,
-  addressOnFile = true, senderRendered = false, averageCopy = false, moveNoticeCopy = false, carbonCopy = false, min = 'high',
+  addressOnFile = true, senderRendered = false, averageCopy = false, moveNoticeCopy = false, carbonCopy = false,
+  storedCopyRefused = false, min = 'high',
 }) {
   if (!candidate) return { action: 'skip', status: 'no_candidate' };
   if (!meetsConfidence(candidate.confidence, min)) {
@@ -216,6 +217,9 @@ function decideRecoveryAction({
   if (moveNoticeCopy) return { action: 'skip', status: 'move_notice_not_replayed' };
   // A message copied to a second address: a replay to one corrected address would drop the copy.
   if (carbonCopy) return { action: 'skip', status: 'cc_not_replayed' };
+  // Any other category in the shared no-replay map (constants/email-replay-exclusions.js NO_STORED_COPY_REPLAY), e.g.
+  // the Multi-Home Discount email: its sender proves its facts again before any send, which a replay would skip.
+  if (storedCopyRefused) return { action: 'skip', status: 'stored_copy_not_replayed' };
   return { action: 'send', status: 'resent' };
 }
 
@@ -791,6 +795,13 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
   }
 }
 
+// Is this message's stored copy never re-sent? The shared no-replay categories, or a day-only appointment email the
+// delayed-send chokepoint no longer clears (time-promise.js dayOnlyStoredCopyStale): same skip, same status, nothing re-sent.
+async function storedCopyRefusedFor(bouncedMessage) {
+  if (staleStoredCopyReason(parseJsonArray(bouncedMessage.categories))) return true;
+  return require('./time-promise').dayOnlyStoredCopyStale(bouncedMessage);
+}
+
 /**
  * Everything after the one-shot ledger row exists: decide, stage the recovery row, send. Shared by
  * the bounce webhook (attemptRecovery) and the held-recovery sweep (retryHeldRecoveries), so a
@@ -819,6 +830,7 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     averageCopy: parseJsonArray(bouncedMessage.categories).includes(ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY),
     moveNoticeCopy: parseJsonArray(bouncedMessage.categories).includes(MOVE_NOTICE_CATEGORY),
     carbonCopy: parseJsonArray(bouncedMessage.categories).includes(CARBON_COPY_CATEGORY),
+    storedCopyRefused: await storedCopyRefusedFor(bouncedMessage),
     min: minConfidence(),
   });
 
@@ -844,7 +856,8 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     // when we have one, e.g. a medium-confidence typo below the auto-send bar).
     if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other',
       'has_attachments', 'address_no_longer_on_file', 'billing_replay_reauthorization_required',
-      'sender_rendered_not_replayed', 'monthly_average_not_replayed', 'move_notice_not_replayed', 'cc_not_replayed'].includes(decision.status)) {
+      'sender_rendered_not_replayed', 'monthly_average_not_replayed', 'move_notice_not_replayed', 'cc_not_replayed',
+      'stored_copy_not_replayed'].includes(decision.status)) {
       await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status, candidate });
       // Audio re-verification lane (gated, best-effort): the domain
       // corrector can't touch LOCAL-PART errors ("apitz" vs the spelled
@@ -1457,6 +1470,7 @@ const UNRECOVERABLE_REASONS = {
   monthly_average_not_replayed: 'estimate follow-ups with a monthly average are not re-sent from their old copy',
   move_notice_not_replayed: 'reschedule and cancellation notices are not re-sent from their old copy',
   cc_not_replayed: 'it was copied (CC) to a second address, so it is not re-sent from its old copy',
+  stored_copy_not_replayed: 'it is not re-sent from its old copy (its details are checked again before any send)',
   skipped_low_confidence: 'the likely correction was not confident enough to send automatically',
   no_candidate: 'no safe address correction was possible',
 };
@@ -1473,7 +1487,7 @@ async function alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customer
   // Surface the suggested address only when proposing it is actionable (i.e. it
   // wasn't itself suppressed).
   const suggestion = candidate?.corrected
-    && ['skipped_low_confidence', 'send_failed', 'has_attachments', 'sender_rendered_not_replayed', 'monthly_average_not_replayed', 'move_notice_not_replayed', 'cc_not_replayed'].includes(status)
+    && ['skipped_low_confidence', 'send_failed', 'has_attachments', 'sender_rendered_not_replayed', 'monthly_average_not_replayed', 'move_notice_not_replayed', 'cc_not_replayed', 'stored_copy_not_replayed'].includes(status)
     ? ` Suggested correction: ${candidate.corrected} (${candidate.confidence}).`
     : '';
   await adminAlertDeduped({

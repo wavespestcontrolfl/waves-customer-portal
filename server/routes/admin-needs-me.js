@@ -9,7 +9,8 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 // GET /api/admin/needs-me?who=claude|person|either&area=<Area>&limit=<n>
 // Everything open, in the shape of docs/admin-notifications.md section 2. Scoped to the
-// caller's role exactly as the bell list is (a technician sees tech-visible rows only).
+// caller's role exactly as the bell list is (a technician sees tech-visible rows only, and
+// with GATE_TECH_LOGIN_PRIVACY only its own customers' rows: the bell's technician id rule).
 router.get('/', async (req, res, next) => {
   try {
     const { who, area, limit } = req.query;
@@ -19,7 +20,7 @@ router.get('/', async (req, res, next) => {
     if (who !== undefined && !WHO.includes(who)) return res.status(400).json({ error: `who must be one of: ${WHO.join(', ')}` });
     if (area !== undefined && !AREAS.includes(area)) return res.status(400).json({ error: `area must be one of: ${AREAS.join(', ')}` });
     res.set('Cache-Control', 'no-store');
-    res.json(await listNeedsMe({ who, area, limit, after, role: req.techRole }));
+    res.json(await listNeedsMe({ who, area, limit, after, role: req.techRole, technicianId: req.technicianId }));
   } catch (err) { next(err); }
 });
 

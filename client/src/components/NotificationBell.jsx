@@ -113,6 +113,21 @@ function digestKindChip(n) {
   return null;
 }
 
+// GATE_ALERT_BELL_ORDER: the server names a row's Area (`areaChip`, one of the nine Areas) only while the list is
+// ranked. One small neutral chip, so it never competes with the Needs you / Broken chip beside it.
+function areaChipLabel(n) {
+  return n && typeof n.areaChip === 'string' && n.areaChip ? n.areaChip : null;
+}
+function AreaChip({ label, color }) {
+  if (!label) return null;
+  return (
+    <span data-testid="area-chip" style={{
+      fontSize: 14, fontWeight: 600, padding: '1px 6px', borderRadius: 4, flexShrink: 0,
+      color, background: 'rgba(100,116,139,0.16)',
+    }}>{label}</span>
+  );
+}
+
 // An ops_digest row whose link is the shared Activity feed gets `&focus=<id>`
 // appended on click, so AgentActivityTab can expand and scroll straight to
 // this row's item instead of landing on the top of a long feed.
@@ -369,7 +384,9 @@ function FullText({ text, color, marginTop }) {
   );
 }
 
-// The customer an admin row is about (GATE_ALERT_EXPLAINER; the server reads it from the record behind the alert).
+// The customer an admin row is about (GATE_ALERT_EXPLAINER, or GATE_ALERT_CUSTOMER_LINE alone; the server reads it from the
+// record behind the alert). Only `explainable` turns on "What to do", so a row with a customer and no `explainable` keeps
+// "Show full text".
 // Shown under the title unless the title already carries the whole name.
 function customerNameFor(n, type) {
   const name = type === 'admin' && typeof n?.customer?.name === 'string' ? n.customer.name.trim() : '';
@@ -385,7 +402,12 @@ function customerNameFor(n, type) {
 // closing the whole bell).
 const NOTE_MAX = 500;
 const SENT_NOTE = 'Sent to Claude.';
-function SendToClaude({ n, color, marginTop, onSend }) {
+// "Send a copy to Claude (read-only)" (GATE_ALERT_SEND_TO_CLAUDE_COPY, owner login only, step 3): the same two-step panel on a
+// row step 1 refuses (customer contact, words our own code did not write). The alert STAYS in the bell.
+const COPY_SENT_NOTE = 'Copy sent to Claude.';
+const COPY_LABEL = 'Send a copy to Claude (read-only)';
+const COPY_HINT = 'Your alert stays in your bell. A locked Claude tab reads a copy and writes a plan for you. It changes nothing.';
+function SendToClaude({ n, color, marginTop, onSend, copy = false }) {
   const [panel, setPanel] = useState(false);
   const [note, setNote] = useState('');
   const [state, setState] = useState(null); // null | 'sending' | 'failed'
@@ -406,7 +428,7 @@ function SendToClaude({ n, color, marginTop, onSend }) {
   return (
     <div onClick={(e) => e.stopPropagation()} onKeyDown={onKeyDown} data-modal-escape-owned="true" style={{ marginTop: marginTop ?? 8 }}>
       {!panel ? (
-        <button type="button" onClick={() => setPanel(true)} style={{ ...button, cursor: 'pointer' }}>Send to Claude</button>
+        <button type="button" onClick={() => setPanel(true)} style={{ ...button, cursor: 'pointer' }}>{copy ? COPY_LABEL : 'Send to Claude'}</button>
       ) : (
         <div>
           <label htmlFor={noteId} style={{ ...text, fontWeight: 600, display: 'block' }}>Note for Claude (optional)</label>
@@ -420,7 +442,7 @@ function SendToClaude({ n, color, marginTop, onSend }) {
             </button>
             <button type="button" onClick={close} disabled={state === 'sending'} style={{ ...button, cursor: 'pointer' }}>Cancel</button>
           </div>
-          <div style={{ ...text, marginTop: 4 }}>Moves it out of your bell. A Claude tab opens on the Mac within about 10 minutes.</div>
+          <div style={{ ...text, marginTop: 4 }}>{copy ? COPY_HINT : 'Moves it out of your bell. A Claude tab opens on the Mac within about 10 minutes.'}</div>
           {state === 'failed' && <div role="alert" style={{ ...text, marginTop: 4 }}>Couldn&apos;t send it. Try again.</div>}
         </div>
       )}
@@ -517,17 +539,19 @@ function CustomerLine({ n, type, color, marginTop }) {
 // detail (fullTextFor), else nothing. Below it, "Send to Claude" on a row the server marked `sendToClaude`.
 // The panel is keyed on the row's content version: an alert whose text changed (a refreshed list) starts a fresh panel,
 // so a summary of the old text never stays on screen.
-function MoreText({ n, type, color, marginTop, onExplain, onSend }) {
+function MoreText({ n, type, color, marginTop, onExplain, onSend, onSendCopy }) {
   const explainable = type === 'admin' && n.explainable;
   const fullText = explainable ? null : fullTextFor(n, type);
   const more = explainable
     ? <WhatToDo key={n.version} n={n} marginTop={marginTop} color={color} onExplain={onExplain} />
     : (fullText ? <FullText text={fullText} marginTop={marginTop} color={color} /> : null);
-  if (!(type === 'admin' && n.sendToClaude && onSend)) return more;
+  const copy = type === 'admin' && !n.sendToClaude && n.sendCopyToClaude && onSendCopy;
+  if (!(type === 'admin' && ((n.sendToClaude && onSend) || copy))) return more;
   return (
     <>
       {more}
-      <SendToClaude key={`send-${n.version}`} n={n} color={color} marginTop={more ? 6 : marginTop} onSend={onSend} />
+      <SendToClaude key={`send-${n.version}`} n={n} color={color} marginTop={more ? 6 : marginTop}
+        onSend={copy ? onSendCopy : onSend} copy={Boolean(copy)} />
     </>
   );
 }
@@ -547,6 +571,9 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
   // The server's keyset cursor for the next page: rows can leave the feed
   // between requests (Done, an auto-close), so paging never uses offsets.
   const [nextCursor, setNextCursor] = useState(null);
+  // True while the server says the list is ranked (order: 'needs-you-first' on the first page): keep its order, no day groups.
+  // Load more appends in the server's order and never changes it, unless the server answers restart: true (see loadMore).
+  const [serverRanked, setServerRanked] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreFailed, setMoreFailed] = useState(false);
@@ -789,6 +816,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
       const d = await requestJson(`${basePath}?limit=30`);
       if (seq !== loadSeqRef.current) return;
       setNotifications(d.notifications || []);
+      setServerRanked(d.order === 'needs-you-first');
       setPage(1);
       setNextCursor(d.next || null);
       setHasMore(type === 'admin' && d.hasMore === true);
@@ -808,11 +836,20 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
       if (seq !== loadSeqRef.current) return;
       // New alerts can shift offset pages between requests. Keep each row
       // once while preserving the read state already confirmed in this panel.
-      setNotifications(current => {
-        const ids = new Set(current.map(n => n.id));
-        return [...current, ...(d.notifications || []).filter(n => !ids.has(n.id))];
-      });
-      setPage(page + 1);
+      if (d.restart === true) {
+        // GATE_ALERT_BELL_ORDER flipped under this panel: the cursor belonged to the other order, so the server served
+        // page 1 of the current one. Replace the list (an append would leave rows the panel never got) and take the
+        // layout from the answer.
+        setNotifications(d.notifications || []);
+        setServerRanked(d.order === 'needs-you-first');
+        setPage(1);
+      } else {
+        setNotifications(current => {
+          const ids = new Set(current.map(n => n.id));
+          return [...current, ...(d.notifications || []).filter(n => !ids.has(n.id))];
+        });
+        setPage(page + 1);
+      }
       setNextCursor(d.next || null);
       setHasMore(d.hasMore === true);
     } catch {
@@ -947,21 +984,50 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
     return 'sent';
   };
 
-  // The Undo beside "Sent to Claude.": puts the row back while no Claude tab has started on it. The offer ends after
-  // 10 seconds (the effect below) or on any other note.
+  // "Send a copy to Claude (read-only)" (SendToClaude with `copy`): same content fence, plus the optional note. Success keeps
+  // the row in the bell (a reply may be owed), says "Copy sent to Claude." and offers Undo for 10 seconds on the COPY's id
+  // (undoSend); a copy already with Claude says so; a row that changed or can no longer be copied re-reads the list with a
+  // note; any other failure keeps the panel with an inline error. Resolves 'sent' | 'refreshed' | 'failed'.
+  const sendRowCopyToClaude = async (n, note) => {
+    setActionNote(null);
+    setUndoOffer(null);
+    let d;
+    try {
+      d = await requestJson(`${basePath}/${encodeURIComponent(n.id)}/send-copy-to-claude`, {
+        method: 'POST', body: JSON.stringify({ version: n.version, ...(note ? { note } : {}) }),
+      });
+    } catch (err) {
+      if (err?.status !== 409 && err?.status !== 422 && err?.status !== 404) return 'failed';
+      loadNotifications();
+      setActionNote(err.data?.error === 'changed' ? CHANGED_NOTE : 'That alert was already handled or can\u2019t be copied to Claude.');
+      return 'refreshed';
+    }
+    if (d?.duplicate === true) {
+      setActionNote('A copy of this alert is already with Claude.');
+      return 'sent';
+    }
+    if (d?.sent !== true) return 'failed';
+    setActionNote(COPY_SENT_NOTE);
+    if (typeof d.at === 'string' && d.at && typeof d.id === 'string' && d.id) setUndoOffer({ id: d.id, at: d.at, copy: true });
+    return 'sent';
+  };
+
+  // The Undo beside "Sent to Claude." / "Copy sent to Claude.": puts the row back (a send) or cancels the copy (a copy) while
+  // no Claude tab has started on it. The offer ends after 10 seconds (the effect above) or on any other note.
   const undoSend = async () => {
     const offer = undoOffer;
     if (!offer) return;
     setUndoOffer(null);
+    const path = offer.copy ? 'cancel-copy' : 'unsend-from-claude';
     try {
-      await requestJson(`${basePath}/${encodeURIComponent(offer.id)}/unsend-from-claude`, { method: 'POST', body: JSON.stringify({ at: offer.at }) });
+      await requestJson(`${basePath}/${encodeURIComponent(offer.id)}/${path}`, { method: 'POST', body: JSON.stringify({ at: offer.at }) });
     } catch (err) {
       setActionNote(err?.status === 409 && err.data?.error === 'started' ? 'Claude already started on it.' : 'Couldn\'t undo. It stays with Claude.');
       return;
     }
     loadNotifications();
     fetchCount();
-    setActionNote('Back in your bell.');
+    setActionNote(offer.copy ? 'Copy cancelled.' : 'Back in your bell.');
   };
 
   // A row button the server set on this row (RowActions): same content fence
@@ -1132,6 +1198,8 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
 
   // Group by time: Today, Yesterday, This Week, Older
   const groupByTime = (notifs) => {
+    // A ranked list keeps the server's order as served: one group with no day heading.
+    if (serverRanked) return notifs.length ? [[null, notifs]] : [];
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const yesterday = new Date(today.getTime() - 86400000);
@@ -1170,7 +1238,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
   const actionNoteEl = type === 'admin' && actionNote && (
     <div role="status" style={{ padding: '10px 20px', fontSize: 14, lineHeight: 1.4, color: colors.text, borderBottom: `1px solid ${colors.border}` }}>
       {actionNote}
-      {undoOffer && actionNote === SENT_NOTE && (
+      {undoOffer && (actionNote === SENT_NOTE || actionNote === COPY_SENT_NOTE) && (
         <>
           {' '}
           <button type="button" onClick={undoSend}
@@ -1447,6 +1515,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                           background: chip.label === 'Broken' ? 'rgba(192,57,43,0.12)' : 'rgba(10,126,194,0.12)',
                         }}>{chip.label}</span>
                       )}
+                      <AreaChip label={areaChipLabel(n)} color={colors.text} />
                     </div>
                     <SourceText n={n} type={type} style={{ fontSize: 14, color: isDark ? '#18181B' : CUSTOMER_SURFACE.text, marginTop: 4, lineHeight: 1.4 }} />
                     {n.body && (
@@ -1471,7 +1540,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                           color: isDark ? '#18181B' : CUSTOMER_SURFACE.text,
                         }}>Full report</button>
                     )}
-                    <MoreText n={n} type={type} marginTop={6} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} onExplain={explainRow} onSend={sendRowToClaude} />
+                    <MoreText n={n} type={type} marginTop={6} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} onExplain={explainRow} onSend={sendRowToClaude} onSendCopy={sendRowCopyToClaude} />
                     {voicemail && <VoicemailListen tall recordingId={voicemail} marginTop={8} />}
                     {actions.length > 0 && <RowActions tall marginTop={8} actions={actions} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} onRun={(e, a) => runAction(e, n, a)} />}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
@@ -1566,15 +1635,15 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                 </div>
               )}
               {!loading && !loadFailed && groupByTime(notifications).map(([group, items]) => (
-                <div key={group}>
+                <div key={group || 'ranked'}>
                   {/* The office panel is white: a light gray band with 14px text
                       (admin minimum), not the old dark one. */}
-                  <div style={{
+                  {group && <div style={{
                     padding: '8px 20px', fontSize: isDark ? 14 : 11, fontWeight: 700, color: isDark ? colors.text : colors.muted,
                     textTransform: 'uppercase', letterSpacing: 0.5,
                     background: isDark ? '#F1F5F9' : 'rgba(255,255,255,0.75)', position: 'sticky', top: 0,
                     backdropFilter: isDark ? 'none' : 'blur(8px)', WebkitBackdropFilter: isDark ? 'none' : 'blur(8px)',
-                  }}>{group}</div>
+                  }}>{group}</div>}
                   {items.map(n => {
                     const href = linkFor(n);
                     const chip = digestKindChip(n);
@@ -1622,6 +1691,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                               background: chip.label === 'Broken' ? 'rgba(192,57,43,0.12)' : 'rgba(10,126,194,0.12)',
                             }}>{chip.label}</span>
                           )}
+                          <AreaChip label={areaChipLabel(n)} color={colors.text} />
                         </div>
                         <SourceText n={n} type={type} style={{
                           fontSize: 14, color: colors.text, marginTop: 2, lineHeight: 1.4,
@@ -1645,7 +1715,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                               fontSize: 14, fontWeight: 600, textDecoration: 'underline', color: colors.teal,
                             }}>Full report</button>
                         )}
-                        <MoreText n={n} type={type} marginTop={4} color={colors.text} onExplain={explainRow} onSend={sendRowToClaude} />
+                        <MoreText n={n} type={type} marginTop={4} color={colors.text} onExplain={explainRow} onSend={sendRowToClaude} onSendCopy={sendRowCopyToClaude} />
                         {voicemail && <VoicemailListen recordingId={voicemail} marginTop={6} />}
                         {actions.length > 0 && <RowActions marginTop={6} actions={actions} color={colors.text} onRun={(e, a) => runAction(e, n, a)} />}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
@@ -1725,4 +1795,4 @@ function PushEnableStrip({ admin, enabling, error, onClick }) {
 
 // Pure helpers, exported for focused unit tests (avoids a full component
 // render just to pin the prefix strip / chip / focus-link logic).
-export const _test = { displayTitle, digestKindChip, linkFor, reportLinkFor, fullTextFor, actionsFor, customerNameFor, voicemailRecordingFor };
+export const _test = { displayTitle, digestKindChip, areaChipLabel, linkFor, reportLinkFor, fullTextFor, actionsFor, customerNameFor, voicemailRecordingFor };

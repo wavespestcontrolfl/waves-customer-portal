@@ -6,6 +6,11 @@ const { requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const logger = require('../services/logger');
 const StripeBanking = require('../services/stripe-banking');
 const BankingExport = require('../services/banking-export');
+const plaidSync = require('../services/plaid-sync');
+const CashForecastInputs = require('../services/cash-forecast/inputs');
+const { loadForecastInput } = require('../services/cash-forecast/load');
+const { computeForecast } = require('../services/cash-forecast/engine');
+const featureGates = require('../config/feature-gates');
 const { parseETDateTime, etWeekStart, etMonthStart, etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -416,5 +421,133 @@ router.get('/stats', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════
+// GET /cash-today — owner-only Cash today card (GATE_CASH_FORECAST)
+// ═══════════════════════════════════════════════════════════════
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const isUsd = (currency) => String(currency || 'USD').toUpperCase() === 'USD';
+
+// Bank cash is the available balance, else the current one; a card's balance
+// is money owed. Entries in another currency stay listed but never total.
+function bankCash(entry) {
+  return entry.available != null ? entry.available : entry.current;
+}
+
+function sumUsd(entries, pick) {
+  return round2(entries.reduce((sum, e) => (
+    isUsd(e.currency) ? sum + (Number(pick(e)) || 0) : sum
+  ), 0));
+}
+
+// Stripe payouts still on the way. arrival_date is a midnight-UTC calendar-day
+// marker (see applyArrivalDayRange), so arrival_day is its UTC day, never an
+// Eastern-time conversion. A failed read answers { error } and the rest of the
+// card still returns.
+async function readInTransit() {
+  try {
+    const rows = await db('stripe_payouts')
+      .whereIn('status', ['pending', 'in_transit'])
+      .select('amount', 'currency', 'status', 'arrival_date', 'bank_last_four')
+      .orderBy('arrival_date', 'asc');
+    const payouts = rows.map((r) => ({
+      amount: round2(r.amount),
+      arrival_day: r.arrival_date ? new Date(r.arrival_date).toISOString().slice(0, 10) : null,
+      status: r.status,
+      bank_last_four: r.bank_last_four || null,
+      currency: String(r.currency || 'usd').toUpperCase(),
+    }));
+    return { total: sumUsd(payouts, (p) => p.amount), payouts };
+  } catch (err) {
+    logger.error('[banking] Cash today in-transit read failed:', err);
+    return { error: 'unavailable' };
+  }
+}
+
+router.get('/cash-today', requireFullAccess, async (req, res) => {
+  if (!featureGates.cashForecastLive()) return res.status(404).json({ error: 'Not found' });
+  try {
+    const { accounts, cards, unavailable } = await plaidSync.readCashBalances();
+    const inTransit = await readInTransit();
+    const bankEntries = accounts.map((a) => ({ ...a, cash: bankCash(a) }));
+    res.json({
+      fetched_at: new Date().toISOString(),
+      accounts,
+      cards,
+      unavailable,
+      in_transit: inTransit,
+      totals: {
+        bank_usd: sumUsd(bankEntries, (a) => a.cash),
+        owed_usd: sumUsd(cards, (c) => c.current),
+        in_transit_usd: inTransit.error ? 0 : inTransit.total,
+      },
+    });
+  } catch (err) {
+    logger.error('[banking] Cash today failed:', err);
+    res.status(500).json({ error: 'the cash read failed' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// /cash-forecast — owner-only 13-week cash forecast (GATE_CASH_FORECAST, step 2)
+// ═══════════════════════════════════════════════════════════════
+// Owner 2026-11-04 "A A A A" (Banking decision page). The read works only from data the portal already
+// has (services/cash-forecast/load.js reads; engine.js computes; the free Plaid /accounts/get and
+// Stripe's balance read). The input routes store what the owner types: planned items, the settings
+// (floor, last year's receipts by month) and the business/household mark of each repeating bill (step
+// 2c; a label only). Owner only; 404 while the gate is off.
+function cashForecastGate(req, res, next) {
+  if (!featureGates.cashForecastLive()) return res.status(404).json({ error: 'Not found' });
+  return next();
+}
+
+router.get('/cash-forecast', requireFullAccess, cashForecastGate, async (req, res) => {
+  try {
+    const input = await loadForecastInput();
+    res.json({ fetched_at: new Date().toISOString(), ...computeForecast(input) });
+  } catch (err) {
+    logger.error('[banking] Cash forecast failed:', err);
+    res.status(500).json({ error: 'the forecast read failed' });
+  }
+});
+
+router.get('/cash-forecast/inputs', requireFullAccess, cashForecastGate, async (req, res) => {
+  try {
+    const [items, settings] = await Promise.all([CashForecastInputs.listItems(db), CashForecastInputs.getSettings(db)]);
+    res.json({ items, settings, kinds: CashForecastInputs.KINDS, cadences: CashForecastInputs.CADENCES });
+  } catch (err) {
+    logger.error('[banking] Cash forecast inputs read failed:', err);
+    res.status(500).json({ error: 'the forecast inputs read failed' });
+  }
+});
+
+// A plain 400 for input the owner can fix, 404 for an unknown item, else a plain 500 (no SQL text).
+function cashForecastWrite(handler, { created = false } = {}) {
+  return async (req, res) => {
+    try {
+      const out = await handler(req);
+      if (out === null) return res.status(404).json({ error: 'No planned item has that id' });
+      return res.status(created ? 201 : 200).json(out);
+    } catch (err) {
+      if (err.status === 400) return res.status(400).json({ error: err.message });
+      logger.error('[banking] Cash forecast input write failed:', err);
+      return res.status(500).json({ error: 'the forecast inputs write failed' });
+    }
+  };
+}
+
+router.post('/cash-forecast/items', requireFullAccess, cashForecastGate,
+  cashForecastWrite((req) => CashForecastInputs.createItem(db, req.body, req.technicianId), { created: true }));
+router.patch('/cash-forecast/items/:id', requireFullAccess, cashForecastGate,
+  cashForecastWrite((req) => CashForecastInputs.updateItem(db, req.params.id, req.body, req.technicianId)));
+router.delete('/cash-forecast/items/:id', requireFullAccess, cashForecastGate,
+  cashForecastWrite((req) => CashForecastInputs.deactivateItem(db, req.params.id, req.technicianId)));
+router.put('/cash-forecast/settings', requireFullAccess, cashForecastGate,
+  cashForecastWrite((req) => CashForecastInputs.saveSettings(db, req.body, req.technicianId)));
+// :key is a repeating bill's merchant key from the forecast, URL-encoded ("ACME%20CLOUD").
+router.put('/cash-forecast/marks/:key', requireFullAccess, cashForecastGate,
+  cashForecastWrite((req) => CashForecastInputs.saveMark(db, req.params.key, req.body, req.technicianId)));
+router.delete('/cash-forecast/marks/:key', requireFullAccess, cashForecastGate,
+  cashForecastWrite((req) => CashForecastInputs.clearMark(db, req.params.key)));
 
 module.exports = router;

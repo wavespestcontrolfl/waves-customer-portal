@@ -853,4 +853,81 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
     expect(await rowOf(marked.id)).toMatchObject({ status: 'failed', provider_retry_next_at: null });
     expect((await rowOf(plain.id)).provider_retry_next_at).toBeInstanceOf(Date);
   });
+
+  // Sweep #7765 B3: a first-attempt send abandoned between the `started` marker and SendGrid's answer.
+  describe('abandoned first-attempt sends', () => {
+    const MINUTE = 60 * 1000;
+    const stuck = (overrides = {}) => {
+      const token = randomUUID();
+      return scheduled(randomUUID(), {
+        status: 'queued', provider_retry_next_at: null, provider_handoff_phase: 'started',
+        send_attempt_token: token, provider_handoff_attempt_token: token,
+        queued_at: new Date(Date.now() - 30 * MINUTE), updated_at: new Date(Date.now() - 30 * MINUTE),
+        ...overrides,
+      });
+    };
+    // alertExhausted reads the admin notifications for its dedupe key.
+    beforeAll(async () => {
+      if (!(await mockDatabase.schema.hasTable('notifications'))) {
+        await mockDatabase.schema.createTable('notifications', (table) => {
+          table.uuid('id').primary().defaultTo(mockDatabase.raw('gen_random_uuid()'));
+          table.string('recipient_type'); table.jsonb('metadata');
+        });
+      }
+    });
+    beforeEach(() => { sendgrid.REQUEST_TIMEOUT_MS = 120000; });
+    afterEach(() => { delete sendgrid.REQUEST_TIMEOUT_MS; });
+
+    test('settles only the abandoned row, keeps its started phase, alerts once, never calls the provider', async () => {
+      const abandoned = stuck();
+      const fresh = stuck({ queued_at: new Date(), updated_at: new Date() });
+      const markedLongAgo = stuck({ updated_at: new Date() }); // marker written just now: a live request
+      const retried = stuck({ provider_retry_count: 1 });
+      const accepted = stuck({ provider_message_id: 'provider-1' });
+      const stamped = stuck({ sent_at: new Date() });
+      const staleMarker = stuck({ provider_handoff_attempt_token: randomUUID() });
+      const pending = stuck({ provider_handoff_phase: 'pending' });
+      const scheduledRetry = stuck({ provider_retry_next_at: new Date() });
+      const seen = stuck();
+      const otherAttempt = stuck();
+      const noKey = stuck({ send_attempt_token: null, provider_handoff_attempt_token: null });
+      await mockDatabase('email_messages').insert([abandoned, fresh, markedLongAgo, retried, accepted, stamped, staleMarker,
+        pending, scheduledRetry, seen, otherAttempt, noKey]);
+      // A webhook event for the current attempt proves the provider took it; one for an older attempt does not.
+      await mockDatabase('email_message_events').insert([
+        { email_message_id: seen.id, event_type: 'processed', raw_event: JSON.stringify({ send_attempt_token: seen.send_attempt_token }) },
+        { email_message_id: otherAttempt.id, event_type: 'bounce', raw_event: JSON.stringify({ send_attempt_token: randomUUID() }) },
+      ]);
+      const untouched = [fresh, markedLongAgo, retried, accepted, stamped, staleMarker, pending, scheduledRetry, seen, noKey];
+      const before = Object.fromEntries(await Promise.all(untouched.map(async (r) => [r.id, JSON.stringify(await rowOf(r.id))])));
+
+      await expect(retry.settleStuckFirstAttempts()).resolves.toBe(2);
+
+      for (const settled of [abandoned, otherAttempt]) {
+        const row = await rowOf(settled.id);
+        expect(row).toMatchObject({ status: 'failed', provider_retry_next_at: null, provider_handoff_phase: 'started',
+          provider_handoff_attempt_token: settled.send_attempt_token, provider_message_id: null, sent_at: null });
+        expect(row.error_message).toMatch(/^Provider outcome unknown: /);
+        expect(row.provider_retry_exhausted_at).toBeInstanceOf(Date);
+        // Still held: the library refuses a direct re-send of a started attempt, exhausted or not.
+        expect(require('../services/email-template-library').providerRetryHoldErrorForExistingMessage(row))
+          .toMatchObject({ code: 'EMAIL_PROVIDER_RETRY_HELD', reason: 'provider_retry_exhausted' });
+      }
+      for (const r of untouched) expect(JSON.stringify(await rowOf(r.id))).toBe(before[r.id]);
+      expect(require('../services/notification-service').notifyAdmin).toHaveBeenCalledTimes(2);
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+
+      // Idempotent: a settled row is not selected again and raises no second alert.
+      await expect(retry.settleStuckFirstAttempts()).resolves.toBe(0);
+      expect(require('../services/notification-service').notifyAdmin).toHaveBeenCalledTimes(2);
+      // And the retry rail never claims it (it has no schedule).
+      await expect(retry.claimDueRetries(50)).resolves.toEqual([]);
+    });
+
+    test('the sweep is bounded to the claim limit per run', async () => {
+      await mockDatabase('email_messages').insert(Array.from({ length: 12 }, () => stuck()));
+      await expect(retry.settleStuckFirstAttempts()).resolves.toBe(10);
+      await expect(retry.settleStuckFirstAttempts()).resolves.toBe(2);
+    });
+  });
 });

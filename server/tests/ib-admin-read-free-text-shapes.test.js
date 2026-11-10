@@ -19,7 +19,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const catalog = require('../services/intelligence-bar/admin-read-catalog.json');
-const { executeAdminReadTool } = require('../services/intelligence-bar/admin-read-tools');
+const { shapeResponse } = require('../services/intelligence-bar/admin-read-tools');
 
 const AUTH = 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJ0ZXN0IjoidG9rZW4ifQ.c2lnbmF0dXJl';
 const UUID = '10000000-0000-4000-8000-00000000000a';
@@ -577,10 +577,9 @@ function markerPaths(value, prefix = '') {
   return Object.entries(value).flatMap(([key, item]) => markerPaths(item, prefix ? `${prefix}.${key}` : key));
 }
 
-const READER = { fullAccess: true, isAdmin: true, staffAuthorization: AUTH };
-const readOf = (endpoint, shape) => executeAdminReadTool('read_admin_data', {
-  endpoint, ...(shape.params ? { params: shape.params } : {}), ...(shape.query ? { query: shape.query } : {}),
-}, READER);
+// The answer the OFFICE login gets: free-text notes are withheld for any catalog row (the owner login returns them
+// scrubbed; ib-admin-read-returned-notes.test.js covers that). The mocked fetch supplies the endpoint's response.
+const readOf = async (endpoint) => shapeResponse(await global.fetch(), catalog.entries.find(entry => entry.endpoint === endpoint), AUTH, { office: true });
 
 // Keep mode (Codex #6366 rounds 1 to 3): a row that returns a whole table row or a broad object lists the keys it
 // KEEPS. Every key Codex named, and two invented future columns, is added to EVERY object of the fixture; none may
@@ -769,7 +768,7 @@ describe('the default withholds a name-matched key that no row declared', () => 
   const contentKey = Object.keys(CONTENT_ENTRY.freeText).find(key => CONTENT_ENTRY.freeText[key] === 'content');
   const run = async (entry, body) => {
     global.fetch = jest.fn(async () => jsonResponse(body));
-    return executeAdminReadTool('read_admin_data', { endpoint: entry.endpoint }, READER);
+    return readOf(entry.endpoint);
   };
 
   test.each(['notes', 'adminNotes', 'special_instructions', 'Reason', 'details', 'message', 'description', 'body', 'summary', 'textColor'])('an undeclared "%s" on a row with no freeText is withheld', async (key) => {

@@ -1,7 +1,7 @@
 /**
- * GATE_CALL_SPELLING_COLLAPSE_TRIGGER: a spelling the primary transcript collapsed
- * ("Serov, Serov") still buys the spelling-preserving second pass and the decoder. Dark by
- * default. Synthetic names only.
+ * Collapsed-spelling trigger: a spelling the primary transcript collapsed
+ * ("Serov, Serov") still buys the spelling-preserving second pass and the decoder.
+ * Synthetic names only.
  */
 
 jest.mock('../models/db', () => {
@@ -50,12 +50,10 @@ const {
 
 const { contactPassTrigger, contactPassTriggerLogged, contactDecoderGate, persistLateContactPass, settleLateContactPass } = _test;
 const collapsed = (t, ctx) => spellingCollapseSignals(t, ctx).any;
-const GATE = 'GATE_CALL_SPELLING_COLLAPSE_TRIGGER';
 const COLLAPSED = 'Agent: Can I get your last name?\nCaller: Serov, Serov.\nAgent: Thanks, and the best number to reach you?';
 const SPELLED_SECOND_PASS = 'Agent: Can I get your last name?\nCaller: Serov, S-E-R-O-V.\nAgent: Thanks, and the best number to reach you?';
 
 afterEach(() => {
-  delete process.env[GATE];
   delete process.env.CONTACT_DICTATION_ENABLED;
   jest.clearAllMocks();
   db.__state.customer = null;
@@ -163,37 +161,22 @@ describe('spellingCollapseSignals', () => {
 });
 
 describe('contactPassTrigger (the gate for the second pass)', () => {
-  test('dark by default: a collapsed transcript buys nothing', () => {
-    expect(contactPassTrigger(COLLAPSED)).toBeNull();
-  });
-
-  test('gate on: the collapsed transcript buys the pass and says which signal', () => {
-    process.env[GATE] = 'true';
+  test('the collapsed transcript buys the pass and says which signal', () => {
     expect(contactPassTrigger(COLLAPSED)).toBe('collapse:repeated');
   });
 
-  test('gate on: only the exact string true turns it on', () => {
-    process.env[GATE] = '1';
-    expect(contactPassTrigger(COLLAPSED)).toBeNull();
-  });
-
-  test('the old detector keeps its own label and wins even with the gate on', () => {
-    process.env[GATE] = 'true';
-    expect(contactPassTrigger('Caller: my email is jay at gmail dot com')).toBe('signals');
-    process.env[GATE] = 'false';
+  test('the old detector keeps its own label and wins', () => {
     expect(contactPassTrigger('Caller: my email is jay at gmail dot com')).toBe('signals');
   });
 
-  test('gate on, nothing suspicious: no pass', () => {
-    process.env[GATE] = 'true';
+  test('nothing suspicious: no pass', () => {
     expect(contactPassTrigger('Caller: I have ants in the kitchen.')).toBeNull();
     expect(contactPassTrigger('')).toBeNull();
   });
 });
 
 describe('the log line names the signal and masks the call sid', () => {
-  test('logs only when the new trigger is what buys the pass', () => {
-    process.env[GATE] = 'true';
+  test('logs only when the collapse trigger is what buys the pass', () => {
     const call = { twilio_call_sid: 'CAabcdef0123456789abcdef0123456789' };
     expect(contactPassTriggerLogged(COLLAPSED, call, 'second_pass')).toBe(true);
     expect(logger.info).toHaveBeenCalledTimes(1);
@@ -224,22 +207,19 @@ describe('contactDecoderGate', () => {
   });
   afterEach(() => { global.fetch = realFetch; });
 
-  test('unchanged paths: a second-pass transcript or a dictation signal runs the decoder with the gate off', async () => {
+  test('a second-pass transcript or a dictation signal runs the decoder with no late pass', async () => {
     expect(await contactDecoderGate({ ...base(), transcription: COLLAPSED, contactPassTranscript: 'second' })).toEqual({ ...OFF, run: true });
     expect(await contactDecoderGate({ ...base(), transcription: 'my email is jay at gmail dot com' })).toEqual({ ...OFF, run: true });
-    expect(await contactDecoderGate({ ...base(), transcription: COLLAPSED })).toEqual(OFF);
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  test('gate on, no recording left: fails open to no decoder', async () => {
-    process.env[GATE] = 'true';
+  test('no recording left: fails open to no decoder', async () => {
     const input = base();
     input.call.recording_url = null;
     expect(await contactDecoderGate(input)).toEqual(OFF);
   });
 
-  test('gate on, near miss: one late pass runs and its scrubbed text feeds the decoder', async () => {
-    process.env[GATE] = 'true';
+  test('near miss: one late pass runs and its scrubbed text feeds the decoder', async () => {
     global.fetch.mockResolvedValueOnce(audio).mockResolvedValueOnce(asr('Caller: my last name is Serov, S-E-R-O-V.'));
     const out = await contactDecoderGate(base());
     expect(out).toMatchObject({ run: true, lateContactPass: 'Caller: my last name is Serov, S-E-R-O-V.', panCount: 0 });
@@ -248,7 +228,6 @@ describe('contactDecoderGate', () => {
   });
 
   test('extracted first name only: the repeated-name signal reaches the late pass without a last name', async () => {
-    process.env[GATE] = 'true';
     global.fetch.mockResolvedValueOnce(audio).mockResolvedValueOnce(asr('Caller: Zuri, Z-U-R-I.'));
     const input = base();
     input.extracted = { first_name: 'Zuri' };
@@ -259,7 +238,6 @@ describe('contactDecoderGate', () => {
   });
 
   test('outbound: a collapsed signal buys no download and no pass (decoder gate and second-pass gate)', async () => {
-    process.env[GATE] = 'true';
     const input = base();
     input.call.direction = 'outbound-api';
     expect(await contactDecoderGate(input)).toEqual(OFF);
@@ -270,7 +248,6 @@ describe('contactDecoderGate', () => {
   });
 
   test('the wrapper already tried (and got nothing): the late gate repeats it only for a near miss', async () => {
-    process.env[GATE] = 'true';
     const repeatOnly = { ...base(), transcription: 'Caller: My last name is Serov, Serov.', contactPassAttempted: true, extracted: { first_name: 'Ann', last_name: 'Serov' } };
     expect(await contactDecoderGate(repeatOnly)).toEqual(OFF);
     expect(global.fetch).not.toHaveBeenCalled();
@@ -290,7 +267,6 @@ describe('contactDecoderGate', () => {
   });
 
   test('a short CDN read inside the propagation window is not transcribed (same check as the primary download)', async () => {
-    process.env[GATE] = 'true';
     global.fetch.mockResolvedValueOnce(audio); // 8 bytes for a 600 s recording
     const input = base();
     input.call.created_at = new Date();
@@ -301,7 +277,6 @@ describe('contactDecoderGate', () => {
   });
 
   test('an old recording is outside the window: no length check, the pass runs', async () => {
-    process.env[GATE] = 'true';
     global.fetch.mockResolvedValueOnce(audio).mockResolvedValueOnce(asr('Caller: Serov, S-E-R-O-V.'));
     const input = base();
     input.call.created_at = new Date(Date.now() - 3 * 24 * 3600 * 1000);
@@ -330,7 +305,6 @@ describe('contactDecoderGate', () => {
   });
 
   test('kill switch: CONTACT_DICTATION_ENABLED=false means no download, no paid pass, no lookup', async () => {
-    process.env[GATE] = 'true';
     process.env.CONTACT_DICTATION_ENABLED = 'false';
     expect(await contactDecoderGate(base())).toEqual(OFF);
     expect(global.fetch).not.toHaveBeenCalled();
@@ -338,7 +312,6 @@ describe('contactDecoderGate', () => {
   });
 
   test('a late pass that is the first to hear a card number quarantines the recording and decodes nothing', async () => {
-    process.env[GATE] = 'true';
     global.fetch.mockResolvedValueOnce(audio).mockResolvedValueOnce(asr('Caller: sure, my card is 4111 1111 1111 1111 and Serov.'));
     const input = base();
     const out = await contactDecoderGate(input);

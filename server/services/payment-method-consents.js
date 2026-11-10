@@ -208,20 +208,26 @@ async function hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, {
 // P1) — the default pool handle nested inside a caller's transaction is a
 // second pool checkout per request, and a wave of such transactions can
 // occupy every connection and deadlock the pool until timeouts.
-async function findConsentedChargeableCard(customerId, { dbh = db } = {}) {
-  if (!customerId) return null;
-  // A prior Auto Pay OPT-OUT is sacred (Codex #2681 r6 P1): disabling
-  // keeps the saved card rows, and an old consent row must not silently
-  // re-enroll the customer with no fresh checkbox. The discriminator is
-  // the LATEST enable/disable toggle in autopay_log — never-enrolled
-  // customers have no toggle history and still auto-satisfy. Lookup
-  // errors bubble: every caller fails toward asking for the card.
+// A prior Auto Pay OPT-OUT is sacred (Codex #2681 r6 P1): disabling keeps
+// the saved card rows, and an old consent row must not silently re-enroll
+// the customer, or let staff charge the card off-session, with no fresh
+// checkbox. The discriminator is the LATEST enable/disable toggle in
+// autopay_log — never-enrolled customers have no toggle history. Lookup
+// errors bubble: every caller fails toward refusing.
+async function autopayOptedOut(customerId, { dbh = db } = {}) {
   const lastToggle = await dbh('autopay_log')
     .where({ customer_id: customerId })
     .whereIn('event_type', ['autopay_enabled', 'autopay_disabled'])
     .orderBy('created_at', 'desc')
     .first('event_type');
-  if (lastToggle?.event_type === 'autopay_disabled') return null;
+  return lastToggle?.event_type === 'autopay_disabled';
+}
+
+async function findConsentedChargeableCard(customerId, { dbh = db } = {}) {
+  if (!customerId) return null;
+  // Never-enrolled customers still auto-satisfy; every caller fails toward
+  // asking for the card when the toggle lookup throws.
+  if (await autopayOptedOut(customerId, { dbh })) return null;
   const rows = await dbh('payment_methods')
     .where({ customer_id: customerId, processor: 'stripe', method_type: 'card' })
     .whereNotNull('stripe_payment_method_id')
@@ -354,6 +360,7 @@ module.exports = {
   hasConsentFor,
   hasEnrollmentScopedConsent,
   consentVersionQualifiesForEnrollment,
+  autopayOptedOut,
   findConsentedChargeableCard,
   linkPaymentMethodId,
   sweepOrphanConsents,

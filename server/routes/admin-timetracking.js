@@ -98,7 +98,7 @@ const ADMIN_TECH_RESPONSE_FIELDS = [
   'bouncie_imei', 'bouncie_vin', 'vehicle_name',
   // Start-of-day point (home address is staff PII: admin-only, never logged).
   'start_address', 'start_lat', 'start_lng',
-  // Team tab "Can move visits" switch (GATE_TECH_MOVE_SWITCH).
+  // Team tab "Can move visits" switch.
   'can_move_visits',
   // Hired button state (GATE_HIRED_PACKET); present only while the gate is on.
   // Derived flags only: the token, its hash and the password hash never ship.
@@ -976,6 +976,15 @@ async function technicianHasHistory(conn, technicianId) {
   return false;
 }
 
+// Owner-only lifecycle (owner ruling 2026-09-28): a non-owner admin must not
+// change, delete or re-credential the full-access (owner) row. assertMayChangeFullAccessEmail
+// covers the email field only; this covers the rest of the row's lifecycle.
+function ownerRowRefusal(req, target) {
+  return isFullAccessEmail(target.email) && !ibFullAccess(req)
+    ? { error: 'Only the owner account can change this staff account.' }
+    : null;
+}
+
 async function deactivationBlocker(trx, target, actorId) {
   if (!target.active) return null;
   if (target.id === actorId) return 'You cannot deactivate your own staff account';
@@ -1169,6 +1178,10 @@ async function updateTechnician(req, res, next) {
         .forUpdate()
         .first();
       if (!target) return { notFound: true };
+      const currentStatus = target.employment_status || (target.active ? 'active' : 'inactive');
+      const activeChanged = requestedStatus !== undefined && requestedStatus !== currentStatus;
+      const ownerRowGuard = activeChanged ? ownerRowRefusal(req, target) : null;
+      if (ownerRowGuard) return { ownerRowGuard };
       if (await techLineHeldByAnother(trx, techLine.patch.twilio_number, target.id)) return { lineTaken: true };
 
       const storedEmail = canonicalStaffEmail(target.email);
@@ -1213,8 +1226,6 @@ async function updateTechnician(req, res, next) {
       // Any transition that leaves `active` (→ inactive OR → prospective)
       // revokes sessions; entering active from prospective also rotates so a
       // token minted under the old state cannot carry over.
-      const currentStatus = target.employment_status || (target.active ? 'active' : 'inactive');
-      const activeChanged = requestedStatus !== undefined && requestedStatus !== currentStatus;
       const emailChanged = email !== undefined && normalizedEmail.value !== storedEmail;
       // Owner-only access model (owner ruling 2026-09-28): gated on an
       // ACTUAL change (emailChanged), never on the edit form simply
@@ -1266,6 +1277,7 @@ async function updateTechnician(req, res, next) {
 
     if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
     if (outcome.fullAccessEmailGuard) return res.status(403).json(outcome.fullAccessEmailGuard);
+    if (outcome.ownerRowGuard) return res.status(403).json(outcome.ownerRowGuard);
     if (outcome.missingEmail) {
       return res.status(400).json({ error: 'An active technician requires a valid staff email' });
     }
@@ -1475,6 +1487,8 @@ async function hireTechnician(req, res, next) {
         .first();
       if (!target) return { notFound: true };
       if (target.employment_status !== 'prospective') return { notProspective: true };
+      const ownerRowGuard = ownerRowRefusal(req, target);
+      if (ownerRowGuard) return { ownerRowGuard };
 
       const storedEmail = canonicalStaffEmail(target.email);
       if (parsed.email !== storedEmail) {
@@ -1525,6 +1539,7 @@ async function hireTechnician(req, res, next) {
 
     if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
     if (outcome.notProspective) return res.status(409).json({ error: 'Only a prospective row can be hired.' });
+    if (outcome.ownerRowGuard) return res.status(403).json(outcome.ownerRowGuard);
     if (outcome.fullAccessEmailGuard) return res.status(403).json(outcome.fullAccessEmailGuard);
     if (outcome.conflict) return res.status(409).json(EMAIL_IN_USE);
     if (outcome.renameLocked) return res.status(409).json(HIRE_RENAME_LOCKED);
@@ -1677,8 +1692,10 @@ const VOICE_PIN_TECH_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[
 async function putTechnicianVoicePin(req, res, next) {
   try {
     if (!VOICE_PIN_TECH_ID_RE.test(String(req.params.id || ''))) return res.status(404).json({ error: 'Technician not found' });
-    const target = await db('technicians').where({ id: req.params.id }).first('id');
+    const target = await db('technicians').where({ id: req.params.id }).first('id', 'email');
     if (!target) return res.status(404).json({ error: 'Technician not found' });
+    const ownerRowGuard = ownerRowRefusal(req, target);
+    if (ownerRowGuard) return res.status(403).json(ownerRowGuard);
     const { setTechVoicePin } = require('../services/tech-voice-pin');
     const out = await setTechVoicePin(db, { technicianId: target.id, pin: req.body?.pin });
     if (!out.ok) return res.status(400).json({ error: 'The PIN must be 4 to 6 digits', code: 'PIN_FORMAT' });
@@ -1760,6 +1777,29 @@ router.get('/service-lines', requireAdmin, async (req, res, next) => {
   }
 });
 
+const COVER_LINE_LABELS = { general: 'General pest', mosquito: 'Mosquito', rodent: 'Rodent', termite: 'Termite / WDO' };
+
+// The card as it will read after this save (stored rows with the request's entries laid over), and the refusal
+// text when a territory technician (a technician who owns ZIPs) would have no cover on a territory line; null
+// when every one has a cover or nobody owns a ZIP (territory.lacksCoverLines). The error names the lines, not ids.
+async function territoryCoverRefusal(trx, entries, stored) {
+  const territory = require('../services/territory');
+  const owners = await territory.territoryTechnicianIds(trx);
+  if (!owners.length) return null;
+  const after = new Map(stored);
+  for (const entry of entries) after.set(entry.service_category, entry);
+  const rows = [...after.values()];
+  for (const ownerId of owners) {
+    const lacking = await territory.lacksCoverLines(trx, ownerId, rows);
+    if (!lacking.length) continue;
+    const owner = await trx('technicians').where({ id: ownerId }).first('name');
+    const lines = lacking.map((line) => COVER_LINE_LABELS[line] || line);
+    const list = lines.length > 1 ? `${lines.slice(0, -1).join(', ')} and ${lines[lines.length - 1]}` : lines[0];
+    return `${list} ${lines.length > 1 ? 'need' : 'needs'} a cover technician besides ${(owner && owner.name) || 'the territory technician'}: set a home or gap technician`;
+  }
+  return null;
+}
+
 router.put('/service-lines', requireAdmin, async (req, res, next) => {
   try {
     if (serviceLinesOff(res)) return undefined;
@@ -1785,6 +1825,9 @@ router.put('/service-lines', requireAdmin, async (req, res, next) => {
           if (tech.employment_status === 'inactive' && !unchanged) return { error: 'That technician is no longer active' };
         }
       }
+      // GATE_TERRITORY_ROUTING (owner 2026-10-30): a technician who owns ZIPs needs a cover on every territory line.
+      const coverError = await territoryCoverRefusal(trx, entries, stored);
+      if (coverError) return { error: coverError };
       for (const entry of entries) {
         await trx('service_line_techs')
           .insert({ ...entry, updated_by: req.technicianId || null, updated_at: trx.fn.now() })
@@ -2070,6 +2113,8 @@ async function deactivateTechnician(req, res, next) {
         .forUpdate()
         .first();
       if (!target) return { notFound: true };
+      const ownerRowGuard = ownerRowRefusal(req, target);
+      if (ownerRowGuard) return { ownerRowGuard };
 
       const blocker = await deactivationBlocker(trx, target, req.technicianId);
       if (blocker) return { blocker };
@@ -2103,6 +2148,7 @@ async function deactivateTechnician(req, res, next) {
     });
 
     if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
+    if (outcome.ownerRowGuard) return res.status(403).json(outcome.ownerRowGuard);
     if (outcome.blocker) return res.status(409).json({ error: outcome.blocker });
     if (outcome.activeTimer) {
       return res.status(409).json({
@@ -2171,6 +2217,8 @@ async function ensureDocTable() {
 //   category=<one of DOC_CATEGORIES> | 'all'
 //   technicianId=<uuid> — docs bound to that tech
 //   technicianId='company' — only company-wide docs (technician_id IS NULL)
+//   archived=only — the archived docs instead of the active ones, so an
+//     admin can find one and restore it (POST /documents/:id/restore)
 // requireAdmin: documents now hold per-tech HR records (W-4, I-9,
 // license, cert expirations). Tech-role tokens must not be able to
 // list/read/upload/edit those, even their own — pre-existing tech
@@ -2178,10 +2226,10 @@ async function ensureDocTable() {
 router.get('/documents', requireAdmin, async (req, res, next) => {
   try {
     await ensureDocTable();
-    const { category, technicianId } = req.query;
+    const { category, technicianId, archived } = req.query;
     let query = db('company_documents')
       .leftJoin('technicians', 'company_documents.technician_id', 'technicians.id')
-      .where('company_documents.is_archived', false)
+      .where('company_documents.is_archived', archived === 'only')
       .select('company_documents.*', 'technicians.name as technician_name')
       .orderBy('company_documents.created_at', 'desc');
     if (category && category !== 'all') query = query.where('company_documents.category', category);
@@ -2274,6 +2322,25 @@ router.delete('/documents/:id', requireAdmin, async (req, res, next) => {
     await db('company_documents').where({ id: req.params.id }).update({ is_archived: true, updated_at: new Date() });
     logger.info(`[docs] Archived document: ${req.params.id}`);
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// POST /documents/:id/restore — undo an archive. Only the flag changes: the
+// stored file (s3_key) and every metadata field stay as they were. A document
+// that is not archived is returned unchanged.
+router.post('/documents/:id/restore', requireAdmin, async (req, res, next) => {
+  try {
+    const [restored] = await db('company_documents')
+      .where({ id: req.params.id, is_archived: true })
+      .update({ is_archived: false, updated_at: new Date() })
+      .returning('*');
+    if (restored) {
+      logger.info(`[docs] Restored document: ${req.params.id}`);
+      return res.json(restored);
+    }
+    const doc = await db('company_documents').where({ id: req.params.id }).first();
+    if (!doc) return res.status(404).json({ error: 'Document not found' });
+    res.json(doc);
   } catch (err) { next(err); }
 });
 

@@ -300,11 +300,11 @@ function serviceTechnicianId(service) {
 
 import { serviceWindowLabel, groupServicesIntoStops, currentStopOf, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
 
-// The Tools tile for the truck check (GATE_TRUCK_KIT): present only while the
-// kit answered enabled. Kept out of the page component's decision count.
+// The Tools tile for the truck check: present once the kit has been read.
+// Kept out of the page component's decision count.
 const toolGapsOf = (kit) => (kit ? kit.gaps : undefined);
 function truckCheckTool(kit, onClick) {
-  if (!kit?.enabled) return [];
+  if (!kit) return [];
   return [{ label: 'Truck check', description: 'Confirm what is on your truck', icon: 'truck', onClick }];
 }
 
@@ -422,8 +422,8 @@ export default function TechHomePage({ section = 'today' }) {
   const [stopDetail, setStopDetail] = useState({});
   const visualServiceNotesEnabled = useFeatureFlag('visual_service_notes_enabled', false);
   const socialPostEnabled = useFeatureFlag('tech_social_enabled', false);
-  // Truck check (GATE_TRUCK_KIT): the Tools tile and the Today card read this
-  // one status; gate off or unreadable, neither renders.
+  // Truck check: the Tools tile and the Today card read this one status;
+  // until it has been read, neither renders.
   const truckKit = useTruckKit();
   const recapCaptureEnabled = useFeatureFlag('pest-recap-v1', false);
   // The tech's station map: a station visit opens the sheet only once the
@@ -608,10 +608,13 @@ export default function TechHomePage({ section = 'today' }) {
     }
   }, [fetchSchedule, onSiteState.pendingId, clearBannerLater]);
 
-  // Live updates via Socket.io. Tech JWTs auth into the same
-  // dispatch:admins room as admins (server/sockets/index.js), so the
-  // dispatch:job_update broadcast fired post-commit by every status
-  // write (PRs #328 / #329 / #330 / #335) reaches us here. On any
+  // Live updates via Socket.io. With GATE_TECH_LOGIN_PRIVACY on, a tech JWT
+  // joins a room of its own (tech:<id>, server/sockets/index.js), not the
+  // office-wide dispatch:admins room. The server sends that room a
+  // dispatch:job_update ping, ids and status only, for this tech's own visits
+  // (a reassignment pings the old and the new tech), and a payload-free ping
+  // when it cannot tell whose visit changed. Gate off: the old shared room
+  // and full payload. We read neither payload. On any
   // event we refetch the schedule — refresh shape is simpler than
   // merging a narrow broadcast payload into our full row shape, and
   // a same-tab "Mark En Route" tap doesn't double-render because
@@ -733,9 +736,11 @@ export default function TechHomePage({ section = 'today' }) {
   // lock timer before it could release (codex #4072 r19 P2). No header
   // moves the accordion until the action settles.
   const [busyStopId, setBusyStopId] = useState(null);
+  // A Reply sending from a Today text card (TechNoticeFeed) holds navigation the same way.
+  const [noticeReplySending, setNoticeReplySending] = useState(false);
   const navigationBusy = Boolean(
     busyStopId || enRouteState.pendingId || onSiteState.pendingId
-      || createProjectHasPendingPhotos || projectEditorDirty
+      || createProjectHasPendingPhotos || projectEditorDirty || noticeReplySending
   );
   useLayoutEffect(() => {
     setNavigationBusy?.(navigationBusy);
@@ -899,6 +904,10 @@ export default function TechHomePage({ section = 'today' }) {
         inlineScheduleChanges={section === 'today' && !selectedVisitKey && scheduleFeedReady}
         placement={section === 'today' && !selectedVisitKey ? 'page' : 'elsewhere'}
         navigationBusy={navigationBusy}
+        // A text card's Reply sends from the tech's own line; a send in flight holds navigation.
+        techLine={techLine}
+        request={techRequest}
+        onReplySending={setNoticeReplySending}
         onStormReview={(payload) => {
           // Storm-watch nudge → open the Quick Move sheet for that job.
           // Prefer the live row from today's schedule; fall back to a
@@ -1063,7 +1072,7 @@ export default function TechHomePage({ section = 'today' }) {
           service={{
             // What the Wrap-up reads: billing facts, the customer, the check-in time.
             ...wrapUpSheetFields(fastCompleteService),
-            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            // The stop's gate and access codes for the sheet header.
             ...accessSheetFields(fastCompleteService),
             id: fastCompleteService.id,
             customerName: fastCompleteService.customer_name || fastCompleteService.customerName,
@@ -1148,7 +1157,7 @@ export default function TechHomePage({ section = 'today' }) {
             customerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
             onSiteAt: onSiteTimeOf(treeShrubFastService) || null,
             ...completionBillingFacts(treeShrubFastService),
-            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            // The stop's gate and access codes for the sheet header.
             ...accessSheetFields(treeShrubFastService),
             // The visit the tech tapped, checked against the live context
             // (same fields the pest sheet routes with).
@@ -1184,7 +1193,7 @@ export default function TechHomePage({ section = 'today' }) {
           service={{
             // What the Wrap-up reads: billing facts, the customer, the check-in time.
             ...wrapUpSheetFields(lawnReserviceFastService),
-            // The stop's gate and access codes for the sheet header (GATE_SCHEDULE_ACCESS_CODES).
+            // The stop's gate and access codes for the sheet header.
             ...accessSheetFields(lawnReserviceFastService),
             id: lawnReserviceFastService.id,
             customerName: lawnReserviceFastService.customer_name || lawnReserviceFastService.customerName,
@@ -1239,7 +1248,7 @@ export default function TechHomePage({ section = 'today' }) {
           onCancelled={() => { closeFastSheetsBehindDetails(); setDetailService(null); fetchSchedule(); }}
           onRescheduled={() => { closeFastSheetsBehindDetails(); fetchSchedule(); }}
           onBillingChanged={() => { closeFastSheetsBehindDetails(); setDetailService(null); fetchSchedule(); }}
-          // GATE_SCHEDULE_ACCESS_CODES: after Wrong code or Add gate code in
+          // After Wrong code or Add gate code in
           // Details → Access, reload the route and hand the section this
           // visit's fresh row (null when the reload did not bring it back).
           onAccessChanged={async () => {

@@ -1,10 +1,10 @@
 /**
- * recurring-appointment-seeder — taken-hour hand-off (GATE_PLAN_TAKEN_HOUR_HANDOFF;
- * owner 2026-10-22, auto-dispatch audit D4: "If the automatic visit plan lands on
- * a taken time, leave the visit without a time so the tool picks a free one").
+ * recurring-appointment-seeder — taken-hour hand-off (owner 2026-10-22,
+ * auto-dispatch audit D4: "If the automatic visit plan lands on a taken time,
+ * leave the visit without a time so the tool picks a free one").
  * A follow-up whose hour another customer's live visit holds, four or more days
  * out, is seeded WINDOWLESS with its date as recurring_dispatch_due_date; every
- * other follow-up keeps the plan's hour. Gate off: no probe, rows unchanged.
+ * other follow-up keeps the plan's hour.
  * Harness mirrors recurring-seeder-tech-absence.test.js.
  */
 jest.mock('../models/db', () => jest.fn());
@@ -92,7 +92,7 @@ function holdOn(takenDays) {
 }
 
 // The dates the plan itself gives `parent` (its pattern walk), read from a
-// gate-off pass, so each test can hold the hour on one of them.
+// pass with no hour held, so each test can hold the hour on one of them.
 async function planDates(parent) {
   const { conn, inserted } = makeConn();
   await seedFollowUpsForParent(conn, parent);
@@ -101,15 +101,13 @@ async function planDates(parent) {
 
 describe('follow-up seeding hands a taken hour to auto-dispatch', () => {
   afterEach(() => {
-    delete process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF;
     findConflictingVisits.mockReset().mockImplementation(async () => []);
   });
 
-  test('gate on: the taken day is seeded with no time and its date as the due date; the free days keep 10:00', async () => {
+  test('the taken day is seeded with no time and its date as the due date; the free days keep 10:00', async () => {
     const dates = await planDates(PARENT);
     expect(dates.length).toBeGreaterThanOrEqual(3);
     const taken = dates[1];
-    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
     holdOn([taken]);
     const { conn, inserted } = makeConn();
     const result = await seedFollowUpsForParent(conn, PARENT);
@@ -132,7 +130,7 @@ describe('follow-up seeding hands a taken hour to auto-dispatch', () => {
     expect(findConflictingVisits.mock.calls.every(([args]) => args.excludeCustomerId === undefined)).toBe(true);
   });
 
-  test('gate on: a follow-up under four days out keeps its hour (the night tool cannot move it); nothing is probed for it', async () => {
+  test('a follow-up under four days out keeps its hour (the night tool cannot move it); nothing is probed for it', async () => {
     // A weekly plan whose first visit was five days ago: its next follow-up is two days out.
     const weekly = { ...PARENT, scheduled_date: day(-5), recurring_pattern: 'weekly' };
     const dates = await planDates(weekly);
@@ -140,7 +138,7 @@ describe('follow-up seeding hands a taken hour to auto-dispatch', () => {
     const far = dates.filter((d) => d >= day(4));
     expect(near.length).toBeGreaterThan(0);
     expect(far.length).toBeGreaterThan(0);
-    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+    findConflictingVisits.mockClear();
     holdOn(dates);
     const { conn, inserted } = makeConn();
     await seedFollowUpsForParent(conn, weekly);
@@ -150,18 +148,7 @@ describe('follow-up seeding hands a taken hour to auto-dispatch', () => {
     expect(findConflictingVisits.mock.calls.map(([args]) => args.date)).toEqual(far);
   });
 
-  test('gate off: no probe, every follow-up keeps the plan hour (unchanged)', async () => {
-    const dates = await planDates(PARENT);
-    holdOn(dates);
-    const { conn, inserted } = makeConn();
-    await seedFollowUpsForParent(conn, PARENT);
-    expect(findConflictingVisits).not.toHaveBeenCalled();
-    expect(inserted.length).toBe(dates.length);
-    expect(inserted.every((r) => r.window_start === '10:00')).toBe(true);
-  });
-
-  test('gate on: a windowless plan has nothing to probe', async () => {
-    process.env.GATE_PLAN_TAKEN_HOUR_HANDOFF = 'true';
+  test('a windowless plan has nothing to probe', async () => {
     const { conn, inserted } = makeConn();
     await seedFollowUpsForParent(conn, { ...PARENT, window_start: null, window_end: null });
     expect(findConflictingVisits).not.toHaveBeenCalled();

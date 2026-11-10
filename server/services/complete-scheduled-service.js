@@ -14240,8 +14240,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
     // Digital business card: mint the customer's card off their first
     // completed visit, tied to the tech on record (services/customer-card.js).
-    // Fire-and-forget — a mint failure never blocks the completion, and the
-    // card.issued email inside is dark behind GATE_DIGITAL_BUSINESS_CARD.
+    // Fire-and-forget — a mint failure never blocks the completion.
     // Internal-only completion profiles (e.g. Waves Assessment) suppress all
     // customer comms/public tokens above, so they must not mint a
     // customer-facing card either (Codex P1 on PR #2588). Non-performed
@@ -14250,14 +14249,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // return early in this handler — it records the alert and continues — so
     // it belongs here too, matching the referral-credit non-performed guard
     // (Codex P2 #2588 r2 + r5).
-    // Backfill closeouts stay on the quiet path here too: the mint still runs
-    // (pure data setup — card row / promoter enroll / short link), but
-    // suppressIssuedEmail keeps the card.issued email from firing off a
-    // days-old visit; it sends on the next real completion instead.
+    // Backfill closeouts still mint (pure data setup — card row / promoter
+    // enroll / short link; no customer contact).
     // An issued-invoice closeout borrows the internal-only DELIVERY posture
     // (no report, no customer comms) but the service itself was performed
     // (GitHub r12 P2 #4127): it takes the silent backfill mint path — card
-    // row / promoter enroll / short link, issued email suppressed, first
+    // row / promoter enroll / short link, first
     // visit dated to the record's service day — so a first visit closed out
     // this way still anchors the customer's card.
     const cardMintOutcomePerformed = !['inspection_only', 'customer_declined', 'incomplete'].includes(visitOutcome);
@@ -14268,7 +14265,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
           customerId: svc.customer_id,
           serviceRecordId: record.id,
           scheduledServiceId: svc.id,
-          suppressIssuedEmail: isBackfillCompletion,
           // The card's public "First visit" date must show the day the visit
           // happened — for a backfill or a late form that's the backdated
           // service day the record already carries, not the closeout instant.
@@ -15075,7 +15071,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // (GitHub Codex r3 P1).
       let completionSmsProviderAccepted = false;
       // On-location contacts get a plain report text when this completion
-      // text goes out (GATE_CONTACT_REPORT_TEXT, contact-report-text.js). Set
+      // text goes out (contact-report-text.js). Set
       // only when the text carries a real report link. Called on every path
       // that records the text as sent or queued, the accepted-send recovery
       // included; a repeat for the same record queues nothing. Never throws.

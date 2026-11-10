@@ -1,4 +1,4 @@
-// Bid kit routes (GATE_BID_KIT): gate off = 404, create / patch / attest / archive, the sign-off clearing rule, file
+// Bid kit routes: create / patch / attest / archive, the sign-off clearing rule, file
 // upload checks with S3 mocked, signed links, the facts sheet, and the public credentials feed staying unchanged.
 // The store is an in-memory stand-in (the SQL runs in bid-kit.db.test.js, CI only); synthetic data only.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -184,7 +184,6 @@ beforeEach(() => {
   mockSent.length = 0;
   getSignedUrl.mockClear();
   jest.clearAllMocks();
-  process.env.GATE_BID_KIT = 'true';
   mockDb.mockReset();
   mockDb.mockImplementation(() => {
     const chain = {
@@ -195,16 +194,8 @@ beforeEach(() => {
   });
   mockCredentialRows = [];
 });
-afterEach(() => { delete process.env.GATE_BID_KIT; });
-
-describe('gate off', () => {
-  test.each(['', 'false', 'TRUE', '1', 'true '])('only the exact string "true" turns it on (%j)', async (value) => {
-    process.env.GATE_BID_KIT = value;
-    expect((await call('GET', '/api/admin/bid-kit')).status).toBe(404);
-  });
-
-  test('every route answers 404 for an admin, touches no data, and still refuses everyone else first', async () => {
-    delete process.env.GATE_BID_KIT;
+describe('access', () => {
+  test('every route refuses a signed-out caller (401) and a technician (403), and touches no data', async () => {
     const id = '11111111-2222-4333-8444-555555555555';
     for (const [method, url, body] of [
       ['GET', '/api/admin/bid-kit'], ['GET', '/api/admin/bid-kit/facts-sheet'], ['POST', '/api/admin/bid-kit', { kind: 'fact', item_key: 'phone' }],
@@ -212,43 +203,15 @@ describe('gate off', () => {
       ['POST', `/api/admin/bid-kit/${id}/attest`, { expected_updated_at: '2026-10-23T12:00:00.000Z' }],
       ['GET', `/api/admin/bid-kit/${id}/file`], ['DELETE', `/api/admin/bid-kit/${id}`],
     ]) {
-      expect((await call(method, url, body)).status).toBe(404);
       expect((await call(method, url, body, { 'Content-Type': 'application/json' })).status).toBe(401);
       expect((await call(method, url, body, { Authorization: 'Bearer tech', 'Content-Type': 'application/json' })).status).toBe(403);
     }
-    const res = await fetch(`${baseUrl}/api/admin/bid-kit/${id}/file`, { method: 'POST', headers: { Authorization: 'Bearer admin' }, body: new FormData() });
-    expect(res.status).toBe(404);
     for (const name of ['listItems', 'getItem', 'createItem', 'updateItem', 'replaceFile', 'archiveItem', 'fileInfo']) expect(store[name]).not.toHaveBeenCalled();
     expect(mockSent).toHaveLength(0);
   });
 
-  test('the nav flag is on only while the gate is on', async () => {
-    mockDb.mockImplementation(() => ({ where: () => ({ select: async () => [{ flag_key: 'bid_kit', enabled: true }] }) }));
-    expect((await call('GET', '/api/admin/feature-flags')).body.flags.bid_kit).toBe(true);
-    delete process.env.GATE_BID_KIT;
-    expect((await call('GET', '/api/admin/feature-flags')).body.flags.bid_kit).toBeUndefined(); // even a stray per-user row cannot show it
-  });
-
-  test('every signed-in answer carries no-store, the dark-gate 404 included; sign-in is checked first', async () => {
-    delete process.env.GATE_BID_KIT;
-    const id = '11111111-2222-4333-8444-555555555555';
-    for (const [method, url] of [['GET', '/api/admin/bid-kit'], ['GET', '/api/admin/bid-kit/facts-sheet'], ['PATCH', `/api/admin/bid-kit/${id}`], ['GET', `/api/admin/bid-kit/${id}/file`]]) {
-      const off = await call(method, url, method === 'PATCH' ? {} : undefined);
-      expect(off.status).toBe(404);
-      expect(off.headers.get('cache-control')).toBe('no-store');
-      const anonymous = await call(method, url, method === 'PATCH' ? {} : undefined, { 'Content-Type': 'application/json' });
-      expect(anonymous.status).toBe(401); // the shared admin guard answers before anything of the bid kit runs
-      const tech = await call(method, url, method === 'PATCH' ? {} : undefined, { Authorization: 'Bearer tech', 'Content-Type': 'application/json' });
-      expect(tech.status).toBe(403);
-    }
-    process.env.GATE_BID_KIT = 'true';
+  test('a signed-in answer carries no-store', async () => {
     expect((await call('GET', '/api/admin/bid-kit')).headers.get('cache-control')).toBe('no-store');
-  });
-
-  test('the daily job does nothing', async () => {
-    delete process.env.GATE_BID_KIT;
-    expect(await require('../services/bid-kit-expiry').runBidKitExpiryCheck()).toEqual({ skipped: 'gate_off' });
-    expect(store.listItems).not.toHaveBeenCalled();
   });
 });
 

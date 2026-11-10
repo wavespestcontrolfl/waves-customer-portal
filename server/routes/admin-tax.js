@@ -845,9 +845,8 @@ router.put('/filings/:id', async (req, res, next) => {
       if (update.status === 'paid' && update.paid_date === undefined && !current.paid_date) update.paid_date = etDateString();
     }
     await db('tax_filing_calendar').where({ id: req.params.id }).update(update);
-    // GATE_TAX_DEADLINE_BELLS: a marked row's reminder bells are done. The typeof guard keeps a suite
-    // that mocks feature-gates without the reader working: off.
-    if (movesToDone && typeof featureGates.taxDeadlineBellsLive === 'function' && featureGates.taxDeadlineBellsLive()) {
+    // A marked row's reminder bells are done.
+    if (movesToDone) {
       await require('../services/tax-deadline-reminders').closeBellsForFiling(req.params.id);
     }
     res.json({ success: true });
@@ -1905,11 +1904,11 @@ router.get('/export/tax-package', async (req, res, next) => {
     // and full-year unprorated depreciation.)
     const pnlData = await buildPnlReport(db, sd, ed);
 
-    // Shared bills + home office (GATE_TAX_SHARED_BILLS): two extra files, read
+    // Shared bills + home office (nested under GATE_BANK_IMPORT): two extra files, read
     // before the ZIP starts so a failure is an error response, not a cut stream
     let homeOffice = null;
     let sharedBillRows = null;
-    if (sharedBills.isOn()) {
+    if (gateEnvValue('GATE_BANK_IMPORT')) {
       try {
         if (/^\d{4}$/.test(String(year))) homeOffice = await sharedBills.getHomeOffice(year).catch(e => (e?.status === 400 ? null : Promise.reject(e)));
         sharedBillRows = await sharedBills.listBills();
@@ -1960,7 +1959,7 @@ const sharedBills = require('../services/tax-shared-bills');
 const taxYears = require('../services/tax-years');
 const returnEngine = require('../services/tax-return-engine');
 const { hasYearConstants, YEARS: TAX_YEAR_CONSTANTS } = require('../services/tax-year-constants');
-const { gateEnvValue, taxReturnEngineLive, taxWorksheetsLive, taxPackageW2LaborLive, pnlPayRunWagesLive, payrollTimeOffLive } = require('../config/feature-gates');
+const { gateEnvValue, taxPackageW2LaborLive, pnlPayRunWagesLive, payrollTimeOffLive } = require('../config/feature-gates');
 const taxPackageW2 = require('../services/tax-package-w2');
 const worksheets = require('../services/tax-worksheets');
 
@@ -2449,13 +2448,11 @@ router.get('/bank-import/transactions', async (req, res, next) => {
       q = q.whereRaw("to_char(txn_date, 'YYYY-MM') = ?", [String(month)]);
     }
     const rows = await q.select('*');
-    // with GATE_TAX_LEDGER off, nothing a ledger rule wrote reaches this tab
     const payrollOn = payrollBankMatchOn();
     const shown = rows.slice(0, limit).map((raw) => {
       // the payroll link columns exist only for the gate: off, a row has exactly today's keys
       const { matched_payroll_check_id: _check, matched_tax_filing_id: _filing, ...rest } = raw;
-      const r = payrollOn ? raw : withoutPayrollSuggestion(rest);
-      return r.suggestion && r.suggestion.rule ? { ...r, suggestion: taxLedgerRules.visibleSuggestion(r.suggestion) } : r;
+      return payrollOn ? raw : withoutPayrollSuggestion(rest);
     });
     res.json({ transactions: shown, hasMore: rows.length > limit, offset, limit });
   } catch (err) { next(err); }
@@ -2477,35 +2474,14 @@ router.post('/bank-import/match', async (req, res, next) => {
 // LOOKING AT (same principle as /expenses/auto-categorize's scoped ids —
 // a global oldest-first pass can report "20 processed" while changing
 // nothing on screen); without ids it falls back to oldest-first.
-// With the ledger gate off a row the AI pass admits may carry a transfer
-// RULE's flag (the kill switch hides it): the model's category replaces
-// that reading, so the flag and its reason go with the rule's keys. Left
-// behind, the flag would read as the matcher's own and Bank Import would
-// show "internal transfer?" over the new category. The write repeats the
-// case it read: a flag that appeared, or a rule that went, during the
-// model call makes it miss instead.
-// With the gate off, every key the row's rule wrote goes with the rule,
-// its reason included: "personal per ledger rule" must not resurface next
-// to the model's category when the gate comes back on (no rule pass would
-// clear it: the pass only stamps a row no rule matches).
-// A row the owner shelved (decision: later) keeps its examination evidence:
-// an owner rule may have replaced the matcher's flag with 'examined' as the
-// row's only evidence, and the matcher never re-flags a decided row, so
-// dropping it would leave the Inbox refusing the row as unexamined for good
-// once the ledger is on again.
-function aiWriteFlagState(sug, ledgerOn) {
-  const ruleOwned = !ledgerOn && !!(sug && sug.rule);
-  const ruleFlag = ruleOwned && !!sug.ignore && sug.rule.kind === 'transfer';
+// The model's category replaces a rule's reading, so every key the row's
+// rule wrote goes with it. A row the owner shelved (decision: later) keeps
+// its examination evidence: an owner rule may have replaced the matcher's
+// flag with 'examined' as the row's only evidence, and the matcher never
+// re-flags a decided row, so dropping it would leave the Inbox refusing the
+// row as unexamined for good.
+function aiWriteFlagState(sug) {
   const ruleKeys = sug && sug.decision ? bankImport.LEDGER_RULE_KEYS.filter((k) => k !== 'examined') : bankImport.LEDGER_RULE_KEYS;
-  if (ruleFlag) {
-    return {
-      flagState: "coalesce(suggestion->>'ignore','') = 'true' and (suggestion->'rule'->>'kind') = 'transfer' and (suggestion->>'decision') is null",
-      dropKeys: [...ruleKeys, 'ignore', 'reason'],
-    };
-  }
-  if (ruleOwned) {
-    return { flagState: "coalesce(suggestion->>'ignore','') <> 'true' and (suggestion->'rule') is not null", dropKeys: [...ruleKeys, 'reason'] };
-  }
   return { flagState: "coalesce(suggestion->>'ignore','') <> 'true'", dropKeys: ruleKeys };
 }
 
@@ -2516,24 +2492,14 @@ router.post('/bank-import/suggest', async (req, res, next) => {
     const ids = Array.isArray(req.body?.ids)
       ? req.body.ids.filter(x => typeof x === 'string').slice(0, 50)
       : null;
-    // Eligibility reads the suggestion the way the tab sees it: with
-    // GATE_TAX_LEDGER off, a category a ledger rule wrote and a transfer
-    // flag a ledger rule wrote do not count (visibleSuggestion hides them);
-    // the matcher's own flag and an owner decision still do.
-    const ledgerOn = taxLedgerRules.isOn();
-    const noCategory = ledgerOn
-      ? "(suggestion is null or (suggestion->>'categoryId') is null)"
-      : "(suggestion is null or (suggestion->>'categoryId') is null or (suggestion->>'categorySource') = 'rule')";
+    const noCategory = "(suggestion is null or (suggestion->>'categoryId') is null)";
     // A debit a personal rule classified is not an expense to categorize
     // either (an AI category on top of it would read "personal · category");
-    // the owner overrides the rule first. With the gate off that key is
-    // hidden too, so it does not count there.
+    // the owner overrides the rule first.
     // nor a row a review rule reserved for the owner (card interest, a
     // dues-or-education split): the model's category would replace the
     // warning. The write repeats this predicate.
-    const notIgnored = ledgerOn
-      ? "coalesce(suggestion->>'ignore','') <> 'true' and coalesce(suggestion->>'personal','') <> 'true' and coalesce(suggestion->>'review','') <> 'true'"
-      : "(coalesce(suggestion->>'ignore','') <> 'true' or ((suggestion->'rule'->>'kind') = 'transfer' and (suggestion->>'decision') is null))";
+    const notIgnored = "coalesce(suggestion->>'ignore','') <> 'true' and coalesce(suggestion->>'personal','') <> 'true' and coalesce(suggestion->>'review','') <> 'true'";
     let q = db('bank_transactions')
       .where({ status: 'unmatched', direction: 'debit' })
       .whereRaw(noCategory)
@@ -2544,7 +2510,7 @@ router.post('/bank-import/suggest', async (req, res, next) => {
     if (ids && ids.length) q = q.whereIn('id', ids);
     const rows = await q;
     const results = [];
-    for (const row of rows) results.push(await aiSuggestRow(row, { noCategory, notIgnored, ledgerOn }));
+    for (const row of rows) results.push(await aiSuggestRow(row, { noCategory, notIgnored }));
     res.json({ success: true, processed: results.length, results });
   } catch (err) { next(err); }
 });
@@ -2556,17 +2522,15 @@ router.post('/bank-import/suggest', async (req, res, next) => {
 // path applies). The eligibility is repeated at the write: a ledger pass
 // can mark the row personal or a transfer during the model call, and an AI
 // category on top of that would recreate the contradiction.
-async function aiSuggestRow(row, { noCategory, notIgnored, ledgerOn }) {
+async function aiSuggestRow(row, { noCategory, notIgnored }) {
   try {
     const ai = await autoCategorizeExpense(null, row.description, row.amount);
     if (!ai?.categoryId) return { id: row.id, applied: false, error: 'no matching category' };
-    const { flagState, dropKeys } = aiWriteFlagState(row.suggestion, ledgerOn);
+    const { flagState, dropKeys } = aiWriteFlagState(row.suggestion);
     const landed = await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(noCategory).whereRaw(notIgnored).whereRaw(flagState).update({
       // provenance moves to the model: a category a ledger rule wrote
-      // before is replaced, and the kill switch no longer owns it. The
-      // rule's own keys go with it (rule, its stamp, personal/review
-      // notes, the override marker): a dormant rule must not resurface
-      // next to the model's category when the gate comes back on
+      // before is replaced. The rule's own keys go with it (rule, its stamp,
+      // personal/review notes, the override marker)
       suggestion: bankImport.suggestionMerge({ categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning, categorySource: 'ai', irsLine: null }, dropKeys),
       updated_at: new Date(),
     });
@@ -2606,8 +2570,6 @@ const SUGGESTION_CHANGED = 'the suggested category changed while you were decidi
 function ledgerCreateExpenseGuard(req, row, categoryId, suggested) {
   const fromLedger = !!req.body?.fromLedger;
   if (!fromLedger) return { fromLedger, ownerRule: null };
-  // dark ledger = invisible ledger, this entry point included
-  if (!taxLedgerRules.isOn()) return { error: [404, 'not found'] };
   const block = taxLedgerRules.inboxBlock(row);
   if (block) return { error: [409, block] };
   let expectedCategoryId;
@@ -2622,12 +2584,11 @@ function ledgerCreateExpenseGuard(req, row, categoryId, suggested) {
   return { fromLedger, ownerRule, expectedCategoryId };
 }
 
-// The category for a staged debit: the operator's pick, else the visible
-// suggestion (a ledger rule's counts only while the ledger gate is on). The
-// verify note is for a category a model (or an unknown source) suggested,
+// The category for a staged debit: the operator's pick, else the
+// suggestion. The verify note is for a category a model (or an unknown source) suggested,
 // never for a deterministic ledger rule's.
 function effectiveCreateExpenseCategory(req, row) {
-  const visible = taxLedgerRules.visibleSuggestion(row.suggestion);
+  const visible = row.suggestion;
   const suggested = visible?.categoryId || null;
   return { visible, suggested, categoryId: req.body?.categoryId || suggested };
 }
@@ -2635,10 +2596,10 @@ async function resolveCreateExpenseCategory(req, row) {
   const { visible, suggested, categoryId } = effectiveCreateExpenseCategory(req, row);
   // the verify note is for a model's category: not a deterministic rule's, and not one the ledger import carried (the owner's own books)
   const usedAi = !req.body?.categoryId && !!suggested && !['rule', 'ledger'].includes(visible?.categorySource);
-  // a shared bill (GATE_TAX_SHARED_BILLS) fills in a category only when the
+  // a shared bill fills in a category only when the
   // operator and the suggestion left none, and cuts the deductible to its
   // business share after the category's own partial rule
-  const bill = sharedBills.isOn() ? sharedBills.matchBill(row.description, await sharedBills.loadEnabledBills()) : null;
+  const bill = sharedBills.matchBill(row.description, await sharedBills.loadEnabledBills());
   const finalCategoryId = categoryId || bill?.category_id || null;
   let deductible = parseFloat(row.amount);
   if (finalCategoryId) {
@@ -3068,14 +3029,13 @@ const INBOX_TAKES_ROW_SQL = () => `(${taxLedgerRules.ON_INCOME_SHELF_SQL} and ${
 router.post('/bank-import/:id/ignore', async (req, res, next) => {
   try {
     // a receipt on the ledger's Income shelf (an Income decision, or an
-    // income rule's pre-fill) is not ignored from here while the ledger is
-    // on: the shelf exists so that nothing leaves it uncounted
-    const ledgerOn = taxLedgerRules.isOn();
-    let q = db('bank_transactions').where({ id: req.params.id }).whereIn('status', ['unmatched']);
-    if (ledgerOn) q = q.whereRaw(`not ${INBOX_TAKES_ROW_SQL()}`);
+    // income rule's pre-fill) is not ignored from here: the shelf exists so
+    // that nothing leaves it uncounted
+    const q = db('bank_transactions').where({ id: req.params.id }).whereIn('status', ['unmatched'])
+      .whereRaw(`not ${INBOX_TAKES_ROW_SQL()}`);
     const changed = await q.update({ status: 'ignored', updated_at: new Date() });
     if (!changed) {
-      const row = ledgerOn ? await db('bank_transactions').where({ id: req.params.id }).first('status', 'suggestion') : null;
+      const row = await db('bank_transactions').where({ id: req.params.id }).first('status', 'suggestion');
       if (row && row.status === 'unmatched' && String(row.suggestion?.income) === 'true' && !taxLedgerRules.hasLiveCandidates(row)) return res.status(409).json({ error: INCOME_SHELF_IGNORE });
       return res.status(409).json({ error: 'only unmatched rows can be ignored' });
     }
@@ -3420,17 +3380,12 @@ router.get('/bank-import/coverage', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// ── Tax ledger rules + inbox (GATE_TAX_LEDGER, nested under GATE_BANK_IMPORT) ──
+// ── Tax ledger rules + inbox (nested under GATE_BANK_IMPORT) ──
 // Suggestion-only payee rules and the Inbox's one-tap decisions; the
 // expense itself is still made by /bank-import/:id/create-expense above.
-// /ledger/status answers {enabled:false} when the ledger gate is off (the
-// bank-import gate above already 404s the whole prefix when IT is off);
-// every other ledger route 404s when dark.
-function taxLedgerOn() { return taxLedgerRules.isOn(); }
-
+// The bank-import gate above 404s the whole prefix when it is off.
 router.get('/bank-import/ledger/status', async (req, res, next) => {
   try {
-    if (!taxLedgerOn()) return res.json({ enabled: false });
     // like every Bank Import snapshot: an expense deleted while the page is
     // open leaves its row linked to nothing until this heal reopens it
     await healBankImportSnapshot();
@@ -3446,15 +3401,10 @@ router.get('/bank-import/ledger/status', async (req, res, next) => {
     // rows the matcher has not examined yet (next sync): not shown until it has
     const unexamined = await openRows().whereRaw(taxLedgerRules.VIEW_SQL.unexamined).count('* as n').first();
     res.json({
-      enabled: true, rules: parseInt(rules?.n, 10) || 0, inbox: parseInt(inbox?.n, 10) || 0, income: parseInt(income?.n, 10) || 0,
+      rules: parseInt(rules?.n, 10) || 0, inbox: parseInt(inbox?.n, 10) || 0, income: parseInt(income?.n, 10) || 0,
       bankImport: parseInt(inBankImport?.n, 10) || 0, unexamined: parseInt(unexamined?.n, 10) || 0,
     });
   } catch (err) { next(err); }
-});
-
-router.use('/bank-import/ledger', (req, res, next) => {
-  if (!taxLedgerOn()) return res.status(404).json({ error: 'not found' });
-  next();
 });
 
 // view=open (to decide) | later | income (receipts outside the processor:
@@ -3539,21 +3489,17 @@ router.put('/bank-import/ledger/rules/:id', async (req, res, next) => {
   }
 });
 
-// ── Shared bills + home office (GATE_TAX_SHARED_BILLS, nested under GATE_BANK_IMPORT) ──
-// Part-business bills book at their business share in create-expense above;
-// the home office is the simplified method, one row per tax year. /status
-// answers {enabled:false} when dark; every other route here 404s when dark.
-router.get('/shared-bills/status', (req, res) => {
-  // actual_method: the home office may use the actual method (needs the return engine too)
-  res.json({ enabled: !!sharedBills.isOn(), actual_method: !!(sharedBills.isOn() && taxReturnEngineLive()) });
-});
-
-function sharedBillsDark(req, res, next) {
-  if (!sharedBills.isOn()) return res.status(404).json({ error: 'not found' });
+// Shared bills + home office, tax years and return engine, and worksheets
+// (sales tax, 1099) all sit under GATE_BANK_IMPORT: 404 when it is off.
+function bankImportDark(req, res, next) {
+  if (!gateEnvValue('GATE_BANK_IMPORT')) return res.status(404).json({ error: 'not found' });
   next();
 }
-router.use('/shared-bills', sharedBillsDark);
-router.use('/home-office', sharedBillsDark);
+router.use(['/shared-bills', '/home-office', '/tax-years', '/worksheets'], bankImportDark);
+
+// ── Shared bills + home office ──
+// Part-business bills book at their business share in create-expense above;
+// the home office is one row per tax year, simplified or actual method.
 
 function sharedBillsError(err, res, next) {
   if (err.status) return res.status(err.status).json({ error: err.message });
@@ -3599,19 +3545,8 @@ router.delete('/home-office/:year', async (req, res, next) => {
   } catch (err) { sharedBillsError(err, res, next); }
 });
 
-// ── Tax return engine (GATE_TAX_RETURN_ENGINE, nested under GATE_BANK_IMPORT) ──
-// Tax-year records and the federal return computed from the books. /status
-// answers {enabled:false} when dark; every other route here 404s when dark.
-router.get('/return-engine/status', (req, res) => {
-  res.json({ enabled: !!taxReturnEngineLive() });
-});
-
-function returnEngineDark(req, res, next) {
-  if (!taxReturnEngineLive()) return res.status(404).json({ error: 'not found' });
-  next();
-}
-router.use('/tax-years', returnEngineDark);
-router.use('/return-engine', returnEngineDark);
+// ── Tax return engine ──
+// Tax-year records and the federal return computed from the books.
 
 function yearDetail(detail) {
   return { ...detail, constants_loaded: hasYearConstants(detail.year) };
@@ -3652,17 +3587,8 @@ router.get('/tax-years/:year/return', async (req, res, next) => {
   try { res.json(await returnEngine.computeYear(req.params.year)); } catch (err) { sharedBillsError(err, res, next); }
 });
 
-// ── Tax worksheets (GATE_TAX_WORKSHEETS, nested under GATE_BANK_IMPORT) ──
-// Sales tax (DR-15) and the 1099-NEC list, read-only. /status answers
-// {enabled:false} when dark; the rest 404 when dark.
-router.get('/worksheets/status', (req, res) => {
-  res.json({ enabled: !!taxWorksheetsLive() });
-});
-
-router.use('/worksheets', (req, res, next) => {
-  if (!taxWorksheetsLive()) return res.status(404).json({ error: 'not found' });
-  next();
-});
+// ── Tax worksheets ──
+// Sales tax (DR-15) and the 1099-NEC list, read-only.
 
 router.get('/worksheets/sales-tax', async (req, res, next) => {
   try { res.json(await worksheets.salesTaxSheet(req.query)); } catch (err) { sharedBillsError(err, res, next); }

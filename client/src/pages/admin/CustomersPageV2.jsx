@@ -237,6 +237,12 @@ function formatCustomerAddress(address) {
   return "";
 }
 
+// A search can match one of a customer's other homes. The server then sends
+// that home as matchedHomeAddress; show (and map) it instead of the main address.
+function directoryAddress(customer) {
+  return formatCustomerAddress(customer.matchedHomeAddress || customer.address);
+}
+
 // A technician's SMS link names the customer: the server refuses a technician's text with no customer.
 // An admin's link is unchanged.
 function messagesHref(c, isAdmin) {
@@ -1328,7 +1334,7 @@ function CustomerDirectoryView({
           <CustomerDirectoryTable
             customers={filteredSorted.map((customer) => ({
               ...customer,
-              address: formatCustomerAddress(customer.address),
+              address: directoryAddress(customer),
             }))}
             onOpen={onOpenCustomerProfile}
             onEdit={startEdit}
@@ -1350,7 +1356,7 @@ function CustomerDirectoryView({
                 {isApproximateRow(c) && !isApproximateRow(filteredSorted[at - 1]) && <DidYouMean className="mb-2" />}
                 {isMobile ? (
                   (() => {
-                    const addr = formatCustomerAddress(c.address);
+                    const addr = directoryAddress(c);
                     return (
                       <div
                         data-customer-id={c.id}
@@ -1439,7 +1445,7 @@ function CustomerDirectoryView({
                     </div>{" "}
                     <div className="text-ui-label text-ink-secondary truncate text-center">
                       {(() => {
-                        const full = formatCustomerAddress(c.address);
+                        const full = directoryAddress(c);
                         if (!full)
                           return <span className="text-ink-tertiary">—</span>;
                         return (

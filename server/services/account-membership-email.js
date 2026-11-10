@@ -7,6 +7,7 @@ const { getPrimaryContact } = require('./customer-contact');
 const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
 const { billingEmailRecipient, billingEmailSendOutcome, billingEmailSendFailure } = require('./billing-email-sender');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
+const { qualifyNotificationLink } = require('./notification-links');
 const { formatDisplayDate } = require('../utils/date-only');
 const { propertyDisplayLabel } = require('../utils/property-display');
 const { currency } = require('./email-template');
@@ -935,6 +936,24 @@ async function sendMovingLink({ customerId, moveId, movingUrl, actorId = null, n
   });
 }
 
+// GATE_PORTAL_MESSAGES: the office's answer from the Portal tab, by email, for a customer whose Waves app
+// did not take the push (services/portal-messages.js). A staff member pressed Send on this exact text; the
+// email carries the whole answer and a link to the portal's Messages page. One email per answer.
+async function sendPortalReply({ customerId, messageId, body } = {}) {
+  if (!messageId || !clean(body)) return { ok: false, skipped: true, reason: 'missing_message' };
+  return sendTemplate({
+    customerId,
+    templateKey: 'portal_reply',
+    eventType: 'portal.reply',
+    // The link names the customer row the thread belongs to, so an account with several profiles opens this one
+    // (App.jsx resolveNotificationTarget reads the same hint a push link carries).
+    payload: { reply_body: clean(body), messages_url: buildPortalUrl(qualifyNotificationLink('/?tab=messages', customerId)) },
+    idempotencyKey: `portal_reply:${messageId}`,
+    categories: ['portal_reply'],
+    metadata: { portal_message_id: messageId },
+  });
+}
+
 // The rate-change sentence for every case EXCEPT "billed monthly before and
 // after": it never states a previous monthly figure, and off the monthly lane
 // it states no monthly figure at all. Shared by membership.updated and
@@ -1151,9 +1170,14 @@ async function sendMembershipRenewalReminder({
   lastServiceDate = null,
   idempotencyKey,
   termitePlan = false,
+  // A catch-up notice (GATE_MONEY_NOTICE_CATCHUP) can go out after its rung's
+  // day. The email then states the days actually left; daysOut (the rung)
+  // still keys the idempotency key and the metadata.
+  noticeDaysLeft = null,
 } = {}) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+  const shownDays = noticeDaysLeft ?? daysOut;
   // An annual prepay term notice (owner 2026-10-29): the customer pays 12
   // months up front, so the email must not read "Billing cadence: monthly"
   // or print the monthly rate. An empty monthlyRate drops the rate row (the
@@ -1172,8 +1196,8 @@ async function sendMembershipRenewalReminder({
         membershipStatus: 'Active',
         ...prepaidYear,
       }),
-      renewal_days_out: clean(daysOut),
-      renewal_notice_window: daysOut ? `${daysOut} days` : '',
+      renewal_days_out: clean(shownDays),
+      renewal_notice_window: shownDays ? `${shownDays} days` : '',
       last_service_date: displayDate(lastServiceDate),
     },
     idempotencyKey: idempotencyKey || `membership.renewal_reminder:${termId || customerId}:${daysOut || 'notice'}:${stableEventKey(renewalDate)}`,
@@ -1364,6 +1388,7 @@ module.exports = {
   buildMembershipStartedSection,
   sendAppIntro,
   sendMovingLink,
+  sendPortalReply,
   sendMembershipUpdated,
   sendMembershipTierUpgraded,
   sendMembershipRenewalReminder,

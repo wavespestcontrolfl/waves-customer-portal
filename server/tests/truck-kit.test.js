@@ -1,5 +1,5 @@
 /**
- * services/truck-kit.js — the truck check (GATE_TRUCK_KIT): a technician's
+ * services/truck-kit.js — the truck check: a technician's
  * truck is the vehicle row assigned to them, its kit is the rows on that
  * truck, a check writes one equipment_checks row, missing or damaged items
  * open tool alerts (deduped on the open one), present items close their own,
@@ -14,7 +14,7 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ truckKitLive: jest.fn(() => true), gateEnvValue: jest.fn(() => false), isEnabled: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => false), isEnabled: jest.fn(() => false) }));
 jest.mock('../models/db', () => {
   const state = { equipment: [], maintenance_alerts: [], equipment_checks: [], technicians: [], equipment_checklists: [], scheduled_services: [], scheduled_service_addons: [] };
   const norm = (col) => String(col).split('.').pop();
@@ -562,10 +562,7 @@ describe('tool gaps by kit key', () => {
     expect((await truckKit.truckKitStatus(TECH, { now: NOW })).gaps).toEqual([{ serviceId: 'v1', serviceType: 'Quarterly Pest Control', missing: ['Moisture meter', 'Foam drill kit'] }]);
   });
 
-  test('readinessToolIssue: nothing while dark, the hold when lit, null (never a throw) on a failed read', async () => {
-    const gates = require('../config/feature-gates');
-    gates.truckKitLive.mockReturnValueOnce(false);
-    expect(await truckKit.readinessToolIssue({ technicianId: TECH, serviceType: 'Termite Inspection' })).toBeNull();
+  test('readinessToolIssue: the hold, null (never a throw) on a failed read', async () => {
     db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
     expect(await truckKit.readinessToolIssue({ serviceId: 'v1', technicianId: TECH, serviceType: 'Termite Inspection' })).toEqual(expect.objectContaining({ kind: 'tools', label: 'Truck lacks Moisture meter' }));
     const spy = jest.spyOn(truckKit, 'toolGapIssue').mockRejectedValueOnce(new Error('kit_key column missing'));
@@ -613,7 +610,7 @@ describe('tool gaps by kit key', () => {
     expect((await truckKit.truckKitStatus(TECH, { now: NOW })).gaps).toEqual([{ serviceId: 'v1', serviceType: 'Termite Inspection', missing: ['Moisture meter'] }]);
   });
 
-  test('toolGapIssue is a hold with a readable label, and nothing behind the gate or without a truck', async () => {
+  test('toolGapIssue is a hold with a readable label, and nothing without a truck', async () => {
     db.__state.equipment.find((e) => e.id === SPRAYER).kit_key = 'bg_sprayer';
     expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'termite' })).toEqual({ kind: 'tools', status: 'hold', label: 'Truck lacks Moisture meter', tools: ['moisture_meter'] });
     db.__state.equipment_checklists.push(CHECKLIST('termite', [{ item: 'Hammer drill', required: true, kit_key: 'hammer_drill' }]));
@@ -623,9 +620,6 @@ describe('tool gaps by kit key', () => {
     expect((await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'pest' })).label).toBe('Truck lacks Flashlight');
     expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'lawn' })).toBeNull();
     seed({ truckAssigned: false });
-    expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'termite' })).toBeNull();
-    const gates = require('../config/feature-gates');
-    gates.truckKitLive.mockReturnValueOnce(false);
     expect(await truckKit.toolGapIssue({ technicianId: TECH, serviceLine: 'termite' })).toBeNull();
   });
 

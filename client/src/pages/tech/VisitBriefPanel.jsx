@@ -127,7 +127,7 @@ const gateBtnStyle = {
 const passButtonStyle = { ...gateBtnStyle, display: 'inline-flex', alignItems: 'center', textDecoration: 'none', margin: '0 2px' };
 const passLinks = (text) => withPassLinks(text, { style: passButtonStyle });
 
-// Neighborhood gate codes from the visit (GATE_NEIGHBORHOOD_TECH_ACTIONS).
+// Neighborhood gate codes from the visit.
 // `gate` ({ visitId, request, onChanged }) is set when this stop's
 // neighborhood can take them: a neighborhood code alert then offers "Wrong
 // code" (the office checks it; it is never removed here) and the section
@@ -274,7 +274,7 @@ function AccessSection({ alerts, access, gate = null }) {
 // Access codes the customer gave (access codes section, read only): the
 // active standing codes plus one-visit codes tied to a visit of this stop.
 // Read per visit (owner 2026-10-05: a technician sees the codes of a visit
-// assigned to them); a section that is off answers 404 and the block hides.
+// assigned to them); a 404 or 403 hides the block.
 const ACCESS_KIND_LABELS = {
   neighborhood_gate: 'Neighborhood gate', property_gate: 'Property gate', door: 'Door or lock',
   lockbox: 'Lockbox', garage: 'Garage', call_box: 'Call box', pass: 'Visitor pass', other: 'Access code',
@@ -294,7 +294,7 @@ function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
     let cancelled = false;
     const ids = visitKey ? visitKey.split(',') : [];
     setFailed(false);
-    // Off (404) or not this technician's visit (403) hides the block; any
+    // Not found (404) or not this technician's visit (403) hides the block; any
     // other failure says so, so a technician never takes "no codes" for an
     // outage and can try again.
     Promise.all(ids.map((id) => request(`/admin/access-codes/visits/${encodeURIComponent(id)}`)
@@ -963,15 +963,16 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
   );
 }
 
-// "Text from my line": a compose box under the action row. The server
-// texts the VISIT's customer (never a number the client picks) from the
-// tech's line; the office sees the thread in /admin/communications.
+// "Text from my line": a compose box under the action row (and under Reply on
+// Today's text card, TechNoticeFeed). The server texts the VISIT's customer
+// (never a number the client picks) from the tech's line; the office sees the
+// thread in /admin/communications.
 const LINE_TEXT_MAX = 600;
 // While a send is in flight the compose cannot be closed (nor collapsed
 // from the Text toggle — onBusyChange tells the panel): unmounting it
 // would drop the pending state and invite a second POST on a slow
 // connection, and the server has no idempotency key (codex #4072 r5 P2).
-function LineTextCompose({ line, onSend, onClose, onBusyChange }) {
+export function LineTextCompose({ line, onSend, onClose, onBusyChange }) {
   const [body, setBody] = useState('');
   const [state, setState] = useState({ busy: false, error: '', sent: false });
   async function send() {

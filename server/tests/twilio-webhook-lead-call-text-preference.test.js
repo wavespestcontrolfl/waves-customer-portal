@@ -166,7 +166,7 @@ test('a failure inside the preference step is swallowed and the bell still rings
   expect(ringSmsReplyBell.mock.calls[0][0].leadPreference).toBeUndefined();
 });
 
-// GATE_LEAD_CALL_REPLY_RING plumbing: the webhook hands every unconsumed text
+// Call-reply ring plumbing: the webhook hands every unconsumed text
 // to the ring service after the ack; the service owns every rule.
 test('an unconsumed reply goes to the ring service only after the ack', async () => {
   mockIntake.mockResolvedValue({ handled: false });

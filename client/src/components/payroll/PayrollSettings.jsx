@@ -15,6 +15,7 @@ import { etDateString } from '../../lib/timezone';
 import { dayLabel, dollars } from './payrollFormat';
 import PayRuns from './PayRuns';
 import PayrollForms from './PayrollForms';
+import { SimpleIraButton, SimpleSummary } from './SimpleIra';
 
 // Staff page, Payroll tab (owner 2026-10-25, basic payroll layer 1b-2a). An admin
 // types the W-4 elections from the signed PAPER form and records how each W-2
@@ -433,7 +434,7 @@ export default function PayrollSettings() {
     {technicians && technicians.length > 0 && <Card>
       <Table aria-label="W-2 employees">
         <THead><TR>
-          <TH>Employee</TH><TH>Pay rate</TH><TH>Pay method</TH><TH>Current W-4</TH>
+          <TH>Employee</TH><TH>Pay rate</TH><TH>Pay method</TH><TH>Current W-4</TH><TH>SIMPLE IRA</TH>
           {showAllowance && <TH>Paid time off hours per year</TH>}
           {showCoverage && <TH>Federal overtime law covers</TH>}
           {showFamily && <TH>Family employee</TH>}
@@ -446,6 +447,7 @@ export default function PayrollSettings() {
             <TD nums>{tech.payRate != null ? `${dollars(tech.payRate)}/hr` : 'Not set'}</TD>
             <TD>{payMethodLabel(tech)}</TD>
             <TD><W4Summary w4={tech.currentW4} /></TD>
+            <TD><SimpleSummary election={tech.currentSimple} /></TD>
             {showAllowance && <TD><AllowanceCell key={`${tech.id}:${tech.ptoHoursPerYear}`} technician={tech} onSaved={saved} /></TD>}
             {showCoverage && <TD><CoverageCell key={`${tech.id}:${tech.flsaOvertimeCovered}`} technician={tech} onSaved={saved} /></TD>}
             {showFamily && <TD><FamilyCell key={`${tech.id}:${JSON.stringify(tech.familyEmployment)}`} technician={tech} onSaved={saved} /></TD>}
@@ -454,6 +456,7 @@ export default function PayrollSettings() {
               <div className="flex flex-wrap gap-2">
                 <Button onClick={() => setDialog({ kind: 'w4', tech })}>Enter W-4</Button>
                 <Button variant="secondary" onClick={() => setDialog({ kind: 'history', tech })}>History</Button>
+                <SimpleIraButton call={call} technician={tech} onSaved={saved} />
                 <Button variant="secondary" onClick={() => setDialog({ kind: 'pay', tech })}>Pay method</Button>
               </div>
             </TD>

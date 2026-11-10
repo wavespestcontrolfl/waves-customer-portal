@@ -35,7 +35,7 @@
  * email. reschedule_appointment and assign_technician post tech-facing
  * notices only.
  */
-const { gateEnvValue, ibTargetRulesV2Live } = require('../../config/feature-gates');
+const { gateEnvValue } = require('../../config/feature-gates');
 const { changesAddress } = require('./address-tools');
 const { ibFullAccess } = require('./ib-access');
 const { executionOutcome } = require('./outcomes');
@@ -112,7 +112,7 @@ function ownerDirectLive(req) {
 
 const sameName = (a, b) => Boolean(a && b) && String(a).trim().toLowerCase().replace(/\s+/g, ' ') === String(b).trim().toLowerCase().replace(/\s+/g, ' ');
 
-// TARGET RULES (GATE_IB_TARGET_RULES_V2; owner ruling 2026-10-12 decision 3). A
+// TARGET RULES (owner ruling 2026-10-12 decision 3). A
 // card-free edit on a customer keeps its card when the message did not name that
 // customer and that customer is not the one on screen. "Named" is decided from
 // server facts only, never from the model's input: the customers the task
@@ -124,10 +124,9 @@ const sameName = (a, b) => Boolean(a && b) && String(a).trim().toLowerCase().rep
 // toggle_estimate_v2_view (no customer is edited).
 const CUSTOMER_ID_EDIT_TOOLS = new Set(['update_customer', 'update_customer_property', 'set_primary_property', 'update_property_access']);
 
-// Built once per request from the finished task context. null while the gate
-// is off. With the gate on and no grounding passed, every subject edit is carded.
+// Built once per request from the finished task context. With no grounding
+// passed, every subject edit is carded.
 function targetGrounding(taskContext) {
-  if (!ibTargetRulesV2Live()) return null;
   const ids = new Set();
   const add = id => { if (id) ids.add(String(id).toLowerCase()); };
   // Direct (no-card) authority from typed evidence comes ONLY from groundedCustomerIds: exactly
@@ -153,16 +152,15 @@ const groundedCustomerId = (id, grounding) => Boolean(id) && Boolean(grounding?.
 
 // Preview-free half: only the tools that carry the customer id in their input.
 function customerNamedOrOnScreenPossible(toolName, input, grounding) {
-  return !ibTargetRulesV2Live() || !CUSTOMER_ID_EDIT_TOOLS.has(toolName) || groundedCustomerId(input?.customer_id, grounding);
+  return !CUSTOMER_ID_EDIT_TOOLS.has(toolName) || groundedCustomerId(input?.customer_id, grounding);
 }
 
 // Full half, on the finished preview: reschedule_appointment pins its
 // appointment's customer id; assign_technician's stop carries its customer id.
 function customerNamedOrOnScreen(toolName, input, preview, grounding) {
-  if (!ibTargetRulesV2Live()) return true;
   if (CUSTOMER_ID_EDIT_TOOLS.has(toolName)) return groundedCustomerId(input?.customer_id, grounding);
   if (toolName === 'reschedule_appointment') return groundedCustomerId(preview?.pinned_appointment?.customer_id, grounding);
-  // The stop's customer id comes from the proposal's own read (the stops preview, gate on);
+  // The stop's customer id comes from the proposal's own read (the stops preview);
   // a preview without it (or a name) cannot show whose stop it is, so it keeps its card.
   if (toolName === 'assign_technician') return groundedCustomerId(preview?.stops?.[0]?.customer_id, grounding);
   return true;
@@ -249,12 +247,12 @@ const DIRECT_EDIT_STAGES = [directScopeStage, directToolStage, directGroundingSt
 // object the route creates once per request (seeded from the saved history, so
 // a resumed task keeps it) and passes to the three decision functions. Scope:
 // this covers the general read, because its catalog is broad and grows by
-// review, and (GATE_IB_TARGET_RULES_V2) every read outside TRUSTED_READS below.
+// review, and every read outside TRUSTED_READS below.
 const GENERAL_READ_TOOL = 'read_admin_data';
 // needs_me returns open alerts' why and detail, and those carry customer-written
 // text (the latest text on an "SMS from" row, a customer's request or email), so
-// it taints like the general read and leaves the same thread marker, gate on or
-// off (Codex #7466 r1).
+// it taints like the general read and leaves the same thread marker
+// (Codex #7466 r1).
 const ALWAYS_TAINTING_READS = new Set([GENERAL_READ_TOOL, 'needs_me']);
 
 // A general-read result that carries data: a 2xx answer with a `data` field.
@@ -264,13 +262,12 @@ function isDataAnswer(result) {
     && Number.isInteger(result.status) && result.status >= 200 && result.status < 300 && result.data !== undefined;
 }
 
-// GATE_IB_TARGET_RULES_V2 (Codex #6369 r9): the rule is inverted. With the gate on,
-// ANY successful read result taints the request, except the tools in TRUSTED_READS.
+// Codex #6369 r9: the rule is inverted. ANY successful read result taints the request, except the tools in TRUSTED_READS.
 // Message bodies, lead and web-form text, call transcripts, emails, reviews and
 // outside notes are all reads that can carry a stranger's instructions, and a new
 // read tool is untrusted until someone reads its result shape and lists it here.
 // A write tool's result is not a read, so it taints only when it shows a prior value as text (r45;
-// known write kinds only; a tool the policy does not know taints). Gate off: only ALWAYS_TAINTING_READS taint.
+// known write kinds only; a tool the policy does not know taints).
 //
 // TRUSTED_READS lists only tools whose results carry NO customer-entered string:
 // pure numbers and aggregates by service line or period, the pricing config the team
@@ -295,7 +292,7 @@ const actionPolicy = require('./action-policy.json');
 // A read the policy knows as a read, or a tool it does not know at all.
 const isReadTool = toolName => !actionPolicy[toolName] || actionPolicy[toolName].kind === 'read';
 const readTaints = toolName => (ALWAYS_TAINTING_READS.has(toolName)
-  || (ibTargetRulesV2Live() && isReadTool(toolName) && !TRUSTED_READS.has(toolName)));
+  || (isReadTool(toolName) && !TRUSTED_READS.has(toolName)));
 
 // A read that returned rows: an object without an error or a refusal code.
 const isReadAnswer = result => Boolean(result) && typeof result === 'object' && !result.error && !result.code;
@@ -313,7 +310,7 @@ function carriesPriorText(value, depth = 0, underPriorKey = false) {
 }
 
 function noteUntrustedRead(taint, toolName, result) {
-  if (taint && ibTargetRulesV2Live() && !isReadTool(toolName) && isReadAnswer(result) && carriesPriorText(result)) {
+  if (taint && !isReadTool(toolName) && isReadAnswer(result) && carriesPriorText(result)) {
     taint.untrustedRead = true;
     taint.untrustedV2 = true;
     return;
@@ -321,20 +318,20 @@ function noteUntrustedRead(taint, toolName, result) {
   if (!taint || !readTaints(toolName)) return;
   if (!(toolName === GENERAL_READ_TOOL ? isDataAnswer(result) : isReadAnswer(result))) return;
   taint.untrustedRead = true;
-  // Which marker the reply leaves on the thread: the reads that taint with the gate off too
-  // (read_admin_data, needs_me) keep the old one, every v2-only tainting read gets the v2
+  // Which marker the reply leaves on the thread: the always-tainting reads
+  // (read_admin_data, needs_me) keep the old one, every other tainting read gets the v2
   // marker (Codex #6369 r19).
   if (ALWAYS_TAINTING_READS.has(toolName)) taint.untrustedGeneral = true;
   else taint.untrustedV2 = true;
 }
 
-// PASTED TEXT (GATE_IB_TARGET_RULES_V2). A message the bar marks as holding text pasted or
+// PASTED TEXT. A message the bar marks as holding text pasted or
 // dropped into it (a customer's email or text, say) is not all the owner's own words, yet a
 // full name inside it reads as the owner naming that customer (targetGrounding), so an
 // instruction in the pasted part could run a card-free edit. It taints the request like an
 // untrusted read: every write shows its card, and the reply's v2 marker keeps the thread carded.
 function notePastedText(taint) {
-  if (!taint || !ibTargetRulesV2Live()) return;
+  if (!taint) return;
   taint.untrustedRead = true;
   taint.untrustedV2 = true;
 }
@@ -353,7 +350,7 @@ function untrustedReadKindsInHistory(messages) {
   };
   const returnedReads = reads.filter(returned);
   // A write whose saved result showed prior text taints a resume the same way (r45).
-  const priorTextWrite = ibTargetRulesV2Live() && blocks.some((block) => {
+  const priorTextWrite = blocks.some((block) => {
     if (block?.type !== 'tool_use' || isReadTool(block.name)) return false;
     const answer = answers.get(block.id);
     if (!answer) return false;
@@ -413,9 +410,8 @@ async function loadUntrustedTaint({ history, threadId, actorId, needed = true, f
   if (taint.untrustedRead || !needed) return taint;
   const verdict = await threadTaintVerdict(actorId, threadId);
   if (verdict !== null) {
-    // The v2 marker counts only while the v2 gate is on (Codex #6369 r19).
     taint.untrustedGeneral = verdict;
-    taint.untrustedV2 = !verdict && ibTargetRulesV2Live() && await threadTaintVerdict(actorId, threadId, IbThreads.UNTRUSTED_READ_V2_MARKER) === true;
+    taint.untrustedV2 = !verdict && await threadTaintVerdict(actorId, threadId, IbThreads.UNTRUSTED_READ_V2_MARKER) === true;
     taint.untrustedRead = taint.untrustedGeneral || taint.untrustedV2;
     return taint;
   }
@@ -438,18 +434,18 @@ async function loadUntrustedTaint({ history, threadId, actorId, needed = true, f
 // stop) still reaches its card (Codex r2). A preview-dependent call counts
 // in the message plan, so the cap errs toward the bulk card.
 const DIRECT_CAP = 3;
-// GATE_IB_TARGET_RULES_V2: one request may make 5 direct edits with the same
-// tool; the 6th (and a message that plans a 6th) gets the bulk card. Off, the
-// cap above holds: the 3rd is the first refused.
+// One request may make 5 direct edits with the same tool; the 6th (and a
+// message that plans a 6th) gets the bulk card, except for the tools that keep
+// the cap above (the 3rd is the first refused).
 const DIRECT_EDITS_V2 = 5;
 // Lead edits are not grounded to a named customer and lead text can come from
 // the public lead form (a prompt-injection path), so they keep the old cap
-// even with the gate on (Codex #6369 security P2).
+// (Codex #6369 security P2).
 // Only a tool whose target is proven named or on screen (rule 1) gets the
 // five-edit limit; every other direct tool (lead edits, create_customer) keeps
 // the old cap, so text the model read cannot steer more writes (Codex security r6).
 const isGroundedCapTool = (toolName) => CUSTOMER_ID_EDIT_TOOLS.has(toolName) || toolName === 'reschedule_appointment' || toolName === 'assign_technician';
-const directCapThreshold = (toolName) => (ibTargetRulesV2Live() && isGroundedCapTool(toolName) ? DIRECT_EDITS_V2 + 1 : DIRECT_CAP);
+const directCapThreshold = (toolName) => (isGroundedCapTool(toolName) ? DIRECT_EDITS_V2 + 1 : DIRECT_CAP);
 const DID_NOT_RUN = new Set(['failed', 'blocked', 'awaiting_approval']);
 const SEED_FAILED = Symbol('seed_failed');
 
@@ -484,7 +480,7 @@ function mayExecuteWithoutCard(toolName, input = {}, taint = null, grounding = n
   return cardsEveryWrite(taint) ? false : directEditPossible(toolName, input, grounding);
 }
 
-// GATE_IB_TARGET_RULES_V2 (Codex #6369 r14, r20): a request whose context carries more than
+// Codex #6369 r14, r20: a request whose context carries more than
 // one customer row (same-name candidates) keeps a card on every write, including the
 // on-screen same-name pick. A separate flag from untrustedRead, so it is never written
 // to the thread's marker and does not taint later requests on the thread. Every card-free
@@ -492,7 +488,7 @@ function mayExecuteWithoutCard(toolName, input = {}, taint = null, grounding = n
 // or mayExecuteWithoutCard, so this flag cards them all (Codex #6369 r15).
 function noteSameNameContext(taint, taskContext) {
   // Only an owner-direct context: with owner-direct off the flag and the marker mean nothing (Codex #6369 r31).
-  if (taint && ibTargetRulesV2Live() && taskContext?.ownerDirect === true
+  if (taint && taskContext?.ownerDirect === true
     && ((taskContext?.candidates?.length || 0) > 1 || taskContext?.sameNameOverflow === true)) {
     taint.sameNameCandidates = true;
     // The reply is then followed by a text-only "yes" as readily as a button tap, whatever the
@@ -511,17 +507,16 @@ function markSameNameChoices(taint, taskContext, offeredChoices, suppressingActi
   // A card or a direct action in the same reply suppresses the buttons.
   const shownChoices = suppressingActions > 0 ? null : offeredChoices;
   const labels = new Set((taskContext?.candidates || []).map(candidate => candidate?.choice_label).filter(Boolean));
-  if (taint && ibTargetRulesV2Live() && Array.isArray(shownChoices) && shownChoices.some(choice => labels.has(choice))) taint.sameNameEmitted = true;
+  if (taint && Array.isArray(shownChoices) && shownChoices.some(choice => labels.has(choice))) taint.sameNameEmitted = true;
 }
 
 // Does this request's reply leave a pending same-name choice on the thread? Only what THIS
 // request showed counts, never what it consumed.
-const sameNameMarkerNeeded = taint => Boolean(taint?.sameNameEmitted) && ibTargetRulesV2Live();
+const sameNameMarkerNeeded = taint => Boolean(taint?.sameNameEmitted);
 
 // The marker check for a new request: a pending same-name choice cards every write in it.
 // An unreadable thread fails closed.
 async function sameNameChoicePending({ actorId, threadId, conversationHistory, prompt }) {
-  if (!ibTargetRulesV2Live()) return false;
   // Choice buttons stay tappable long after the 30-minute marker window, so a message shaped like a
   // choice reply ("Full Name, City" / "First L., City") is carded whatever the marker's age or the
   // thread says (Codex #6369 r30).
@@ -577,13 +572,13 @@ async function seedDirectCounts(task, dbh = null) {
   return counts;
 }
 
-// GATE_IB_TARGET_RULES_V2 (Codex #6369 r19, r21, r26): every grounded customer tool (the customer
+// Codex #6369 r19, r21, r26: every grounded customer tool (the customer
 // edits, reschedule_appointment, assign_technician) is counted SEQUENTIALLY, as it commits
 // (dynamicCapReached), never from a whole-message plan made before the calls run. A plan would
 // refuse all six of six grounded name edits, and both of two proposed beside four committed;
 // counting as they commit lets five run and refuses only the sixth (four committed + two
 // proposed: one runs, one is refused). Carded calls never use the allowance.
-const countsAsTheyCommit = toolName => ibTargetRulesV2Live() && isGroundedCapTool(toolName);
+const countsAsTheyCommit = toolName => isGroundedCapTool(toolName);
 
 function messageDirectPlan(toolUses, isValid = () => true, taint = null, grounding = null) {
   const plan = new Map();
@@ -605,7 +600,7 @@ function cappedTools(committed, plan) {
   return capped;
 }
 
-// The preview-time half of the cap for the preview-decided tools (gate on): refuse
+// The preview-time half of the cap for the preview-decided tools: refuse
 // once this request has already made its 5 direct edits with the tool.
 function dynamicCapReached(committed, toolName) {
   if (!countsAsTheyCommit(toolName)) return false;
@@ -627,10 +622,10 @@ const BULK_LIMIT_RESULT_V2 = Object.freeze({
   error: `More than ${DIRECT_EDITS_V2} edits with the same tool in one request need one bulk confirmation card. This call changed nothing.`,
 });
 // The wording follows the threshold that tool is held to: a lead edit keeps the
-// old cap of three even with the gate on (Codex #6369 r3).
-// No tool named: the gate-wide wording, as before; a named tool gets its own limit.
+// old cap of three (Codex #6369 r3).
+// No tool named: the five-edit wording; a named tool gets its own limit.
 const bulkLimitResult = (toolName) => {
-  const v2 = toolName === undefined ? ibTargetRulesV2Live() : directCapThreshold(toolName) === DIRECT_EDITS_V2 + 1;
+  const v2 = toolName === undefined ? true : directCapThreshold(toolName) === DIRECT_EDITS_V2 + 1;
   return v2 ? BULK_LIMIT_RESULT_V2 : BULK_LIMIT_RESULT;
 };
 
@@ -690,7 +685,7 @@ function directModelResult(committed) {
     note: 'This did NOT complete and nothing is awaiting approval. Say what happened in one short line; do not claim it is done.' };
 }
 
-// Appended after OWNER_DIRECT_PROMPT while GATE_IB_TARGET_RULES_V2 is on.
+// Appended after OWNER_DIRECT_PROMPT.
 const OWNER_DIRECT_TARGET_RULES_PROMPT = `
 
 CUSTOMER NAMED OR ON SCREEN:
@@ -709,17 +704,17 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-// The owner prompt states exactly one direct-edit limit: today's (three or more
-// refused) while GATE_IB_TARGET_RULES_V2 is off, the new one (more than 5) while on.
-const LIMIT_SENTENCE_OFF = 'Three or more edits with the same tool in one request are refused as a set: for three or more records use the bulk tool, which shows one card.';
-// The tools that keep the three-edit cap with the gate on are derived from
+// The owner prompt states exactly one direct-edit limit: more than 5 (the base text's
+// three-or-more sentence is replaced).
+const LIMIT_SENTENCE_BASE = 'Three or more edits with the same tool in one request are refused as a set: for three or more records use the bulk tool, which shows one card.';
+// The tools that keep the three-edit cap are derived from
 // directCapThreshold, so the sentence cannot drift from the cap (Codex #6369 r8).
 const limitSentenceOn = () => {
   const stricter = [...OWNER_DIRECT_TOOL_NAMES].filter(name => directCapThreshold(name) === DIRECT_CAP);
   return `More than ${DIRECT_EDITS_V2} edits with the same tool in one request are refused as a set: for more than ${DIRECT_EDITS_V2} records use the bulk tool, which shows one card. These tools keep the stricter limit, three or more in one request are refused: ${stricter.join(', ')}.`;
 };
 function ownerDirectPrompt() {
-  return ibTargetRulesV2Live() ? OWNER_DIRECT_PROMPT.replace(LIMIT_SENTENCE_OFF, limitSentenceOn()) : OWNER_DIRECT_PROMPT;
+  return OWNER_DIRECT_PROMPT.replace(LIMIT_SENTENCE_BASE, limitSentenceOn());
 }
 
 // The owner login with the gate on but GATE_IB_PLATFORM off: nothing commits

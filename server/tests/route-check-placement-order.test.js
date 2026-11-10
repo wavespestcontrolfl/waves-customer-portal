@@ -1,5 +1,5 @@
 /**
- * GATE_ROUTE_CHECK_STAFF_SAVES: placement first, then the route warning
+ * Route check on saves: placement first, then the route warning
  * (Codex P1 on 9837f0c3d4). Uses the REAL arrival evaluator on an in-memory
  * route (helpers/in-memory-route.js): a visit read where it is saved can miss a
  * promise that the staff placement then fixes, so a warning collected before
@@ -24,18 +24,14 @@ const trx = Object.assign(jest.fn(), { isTransaction: true });
 
 beforeEach(() => {
   jest.clearAllMocks();
-  process.env.GATE_ROUTE_CHECK_STAFF_SAVES = 'true';
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
-  process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
   route = createRoute();
   occupancy.findConflictingVisits.mockImplementation(async () => route.conflictRows());
   placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockImplementation(async () => route.place());
 });
 afterEach(() => {
   placeSpy.mockRestore();
-  delete process.env.GATE_ROUTE_CHECK_STAFF_SAVES;
   delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
-  delete process.env.GATE_STAFF_ROUTE_INSERTION;
 });
 
 test('premise (real evaluator): read where it is saved the visit misses a promise; placement puts it first and the day fits', () => {

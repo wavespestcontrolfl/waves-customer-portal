@@ -76,6 +76,12 @@ registry header.
 
 The adapter and the DEEP helper both put an ephemeral breakpoint on the
 system prompt, so repeat calls inside five minutes read it back at ~0.1x.
+A `dispatch` payload may pass `cacheTtl: '1h'` (Anthropic legs only) to keep
+the entry an hour: the write costs 2x instead of 1.25x, so use it only for a
+fixed system prompt whose calls often come 5 to 60 minutes apart (the SMS
+drafter, the SMS extractor, the commitment check). Only fixed text belongs in
+`system`; a date, a gate flag or evidence goes in `text`, or every call
+rewrites the cache.
 Minimum cacheable prefix: 512 tokens on Opus 5 / 5.5 / Fable, 1024 on Opus 4.8
 and Sonnet 5, 2048 on Opus 4.7, 4096 on Opus 4.5 / 4.6 and Haiku 4.5 — a
 shorter prompt never caches, whatever the TTL (the previsit brief's ~450-token

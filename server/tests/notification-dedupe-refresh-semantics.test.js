@@ -25,7 +25,7 @@ jest.mock('../models/db', () => {
   db.raw = jest.fn(async () => ({}));
   db.transaction = jest.fn(async (fn) => {
     const trx = jest.fn(() => builder());
-    trx.raw = jest.fn(async () => ({}));
+    trx.raw = jest.fn((sql, bindings) => (String(sql).includes('jsonb_exists') ? bindings[0] : undefined));
     return fn(trx);
   });
   return db;

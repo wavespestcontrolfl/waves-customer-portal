@@ -178,6 +178,11 @@ async function sendViaTwilioOnce(input, {
       // Push channel routing (services/twilio.js) treats operator-initiated
       // sends as sms_only — the operator explicitly chose the SMS channel.
       operatorInitiated: input.operatorInitiated === true,
+      // …unless the sender marked the notice to keep the customer's channel
+      // (metadata.useCustomerChannel, e.g. a technician's On-my-way tap): with
+      // GATE_APP_FIRST_ANY_DEVICE on, push routing then decides as for an
+      // automated send. Gate off, the operator lock stands.
+      useCustomerChannel: input.metadata?.useCustomerChannel === true,
       fromNumber: internalProviderReservation?.context?.fromNumber
         || (input.metadata && input.metadata.fromNumber),
       mediaUrls: providerMediaUrls(input),
@@ -206,6 +211,9 @@ async function sendViaTwilioOnce(input, {
       // whose template carries no review link (the private check-ins)
       // is still provable — a body-fragment search can never find one.
       reviewRequestId: input.metadata && input.metadata.review_request_id,
+      // A completion text that bundles the review invite: push routing keeps it
+      // as a text (GATE_APP_FIRST_ANY_DEVICE) so the review link stays tappable.
+      bundledReviewRequestId: input.metadata && input.metadata.bundled_review_request_id,
       agentDraft: input.metadata && input.metadata.agentDraft,
       suggestedReply: input.metadata && input.metadata.suggestedReply,
       // Preserve admin attribution. services/twilio.js writes

@@ -96,5 +96,5 @@ describe('recordPromiseEvidenceFallback (delivered, but the audit row failed)', 
 
 test('the reschedule notice flags window_unknown only when the visit is windowless', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'appointment-reminders.js'), 'utf8');
-  expect(src).toMatch(/'appointment_rescheduled', 'appointment_confirmation', \{\s*scheduled_service_id: scheduledServiceId,\s*rendered_slot_ms: newApptTime\.getTime\(\),[\s\S]{0,200}\.\.\.\(resolved\?\.windowless \? \{ window_unknown: true \} : \{\}\)/);
+  expect(src).toMatch(/'appointment_rescheduled', 'appointment_confirmation', (?:dayMove\.withDayMeta\()?\{\s*scheduled_service_id: scheduledServiceId,\s*rendered_slot_ms: newApptTime\.getTime\(\),[\s\S]{0,200}\.\.\.\(resolved\?\.windowless \? \{ window_unknown: true \} : \{\}\)/);
 });

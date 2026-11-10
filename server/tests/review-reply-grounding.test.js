@@ -29,6 +29,7 @@ jest.mock('../models/db', () => {
 });
 
 const G = require('../services/review-reply/grounding');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const NOW = new Date('2026-08-27T12:00:00Z');
 
@@ -153,10 +154,12 @@ describe('buildReplyGrounding', () => {
   });
 
   test('tenure never falls back to customers.created_at (lead intake): member_since, else first completed visit, else null', async () => {
-    // An old lead who converted this month and just had a first visit.
+    // An old lead who converted this month and just had a first visit. buildReplyGrounding reads the real
+    // clock, so the visit is dated from it (10 ET days ago): a fixed date aged past the 90-day 'new' bucket.
+    const firstVisit = etDateString(addETDays(new Date(), -10));
     mockState.customers = [{ id: 'cust-1', city: 'Sarasota', member_since: null, created_at: '2023-01-15' }];
     mockState.scheduled_services = [
-      { customer_id: 'cust-1', status: 'completed', service_type: 'pest_control', scheduled_date: '2026-08-10' },
+      { customer_id: 'cust-1', status: 'completed', service_type: 'pest_control', scheduled_date: firstVisit },
     ];
     let g = await G.buildReplyGrounding(review);
     expect(g.account.relationship).toBe('first_visit');

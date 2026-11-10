@@ -4,7 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { readContext, availablePort, childEnvironment, identity } = require('./context');
-const { checkRuntime } = require('./runtime');
+const { checkRuntime, minimumFor } = require('./runtime');
 
 async function doctor(context, { frontend = false, ports = true, remote = false } = {}) {
   if (frontend && remote) throw new Error('Use --frontend or --remote, not both.');
@@ -25,12 +25,13 @@ async function doctor(context, { frontend = false, ports = true, remote = false 
     // Print only the scoped command, never the database URL returned by preflight.
     const runtimeCommand = ['railway', ...args, '--', 'env', '-u', 'NODE_OPTIONS', nodePath, '--version']
       .map((arg) => "'" + arg.replaceAll("'", "'\\''") + "'").join(' ');
+    const selectedNode = fs.readFileSync(path.join(context.root, '.nvmrc'), 'utf8').trim();
     return { ...identity(context), nodeVersion, remote: {
       configuration: 'verified', environment: target.environmentName, deploymentId: target.deploymentId,
       database: 'worktree name and service endpoint verified; connectivity and migrations not checked',
       sshAndRuntime: 'not checked',
       nextSteps: ['railway ssh keys list',
-        `Run ${runtimeCommand}; confirm Node ${fs.readFileSync(path.join(context.root, '.nvmrc'), 'utf8').trim()} (minimum 20.9). If needed, select an installed matching binary with nodePath in .tmp/dev/remote.json.`,
+        `Run ${runtimeCommand}; confirm Node ${selectedNode} (minimum ${minimumFor(selectedNode)}). If needed, select an installed matching binary with nodePath in .tmp/dev/remote.json.`,
         'npm run dev:migrate -- --remote', 'npm run dev:doctor'],
     } };
   }

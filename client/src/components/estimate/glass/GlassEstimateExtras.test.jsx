@@ -23,6 +23,17 @@ describe('GlassStickyBookBar', () => {
     expect(screen.getByRole('button', { name: 'Approve Tue 9 AM →' })).toBeInTheDocument();
   });
 
+  it('adds the date for a slot more than 6 days out, like the main Approve button (owner 2026-11-06)', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-06T15:00:00Z')); // Fri 10:00 ET
+    try {
+      render(<GlassStickyBookBar show slotMeta={{ dow: 'Mon', time: '9:00 AM', date: '2026-11-23' }} onApprove={vi.fn()} />);
+      expect(screen.getByRole('button', { name: 'Approve Mon, Nov 23, 9:00 AM →' })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('renders nothing for unpriced selections (quote-required / ranged)', () => {
     const { container } = render(<GlassStickyBookBar show={false} slotMeta={null} onApprove={vi.fn()} />);
     expect(container).toBeEmptyDOMElement();

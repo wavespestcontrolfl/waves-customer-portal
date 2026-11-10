@@ -122,6 +122,32 @@ function sanitizeBuiltNotification(built = {}, trigger = {}) {
   };
 }
 
+// A technician's copy of a tech-visible alert whose trigger names `techOmit` payload keys (call content a technician
+// never sees): the trigger is built again from its payload without those keys. The push to a technician and the bell
+// list a technician reads both use it; an admin's copy is unchanged. Null = the trigger names no techOmit keys.
+function technicianCopy(triggerKey, payload) {
+  const trigger = TRIGGER_REGISTRY[triggerKey];
+  if (!trigger?.techOmit?.length) return null;
+  const techPayload = { ...(payload || {}) };
+  for (const key of trigger.techOmit) delete techPayload[key];
+  const built = sanitizeBuiltNotification(trigger.build(techPayload), trigger);
+  return { title: built.title, body: built.body, payload: techPayload };
+}
+
+// The stored bell row as a technician reads it (NotificationService.getAdminNotifications). A row whose trigger
+// names techOmit keys is rebuilt from its stored payload; one with no stored payload keeps its title and loses its
+// body (fail closed). Every other row is returned as stored.
+function technicianRowCopy(row) {
+  let meta = row?.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  if (!TRIGGER_REGISTRY[meta?.triggerKey]?.techOmit?.length) return row;
+  if (!meta.payload) return { ...row, body: null };
+  const copy = technicianCopy(meta.triggerKey, meta.payload);
+  return { ...row, title: copy.title, body: copy.body, metadata: { ...meta, payload: copy.payload } };
+}
+
 // A call alert opens the call it is about: the Calls tab reads
 // #tab=calls&call=<call_log id> (CallLogTabV2 pins a call outside its loaded
 // window). No id in the payload keeps the bare tab.
@@ -494,6 +520,25 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/email',
     }),
   },
+  // The reminder banner for a lead's call request (GATE_LEAD_CALL_REMINDER, owner 2026-11-05, "remind"). A missed
+  // press-1 ring ("Missed call request") and a night call-back bell reach only the portal bell; one still open after
+  // one business hour, with nobody reaching the lead since, sends this ONE banner (services/lead-call-reminder.js,
+  // run by the alert-relevance sweep). pushOnly: the bell row already exists and is not rewritten, so `rule` is the
+  // retention expiry. `build` takes the bell row's own words as alertTitle/alertBody/alertLink. Admin-only like the
+  // lead bell; the owner can switch it off in Push Settings.
+  lead_call_reminder: {
+    label: 'Reminder: a lead still waits for a call',
+    category: 'lead',
+    priority: 'high',
+    group: 'Leads & Sales',
+    rule: { area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'Leads — call a lead back',
+      body: ['Reminder: nobody has reached this lead yet.', p.alertBody].filter(Boolean).join(' '),
+      link: p.alertLink || '/admin/leads',
+    }),
+  },
   // Sandy PR 2A: a live transfer went to the office WITHOUT its summary
   // (the handoff packet write failed or timed out). The staff member who
   // pressed 1 heard the generic whisper; this is the only record that a
@@ -507,7 +552,8 @@ const TRIGGER_REGISTRY = {
     priority: 'high',
     group: 'Communication',
     rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30, contact: true },
-    techVisible: true, // the calls tab is staff-wide; whoever pressed 1 must see it
+    // Not tech-visible: technicians get no calls (owner 2026-10-02), so the Calls tab this links to is admin
+    // only, and the row names no customer (technician visibility audit C19, owner 2026-11-04 "ok go for all").
     build: (p) => ({
       title: `${agentName()} transfer without context`,
       body: `A caller${p.from ? ` from ${maskPhone(p.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,
@@ -557,6 +603,9 @@ const TRIGGER_REGISTRY = {
   customer_voicemail_callback: {
     // Tech-visible: links to a day-to-day surface (comms) a field tech works in.
     techVisible: true,
+    // What the caller asked about is call content: a technician's copy leaves it out (owner 2026-11-04, technician
+    // visibility D1 A: no call words on technician screens). See technicianCopy.
+    techOmit: ['service'],
     label: 'Voicemail needs callback',
     category: 'voicemail_callback',
     priority: 'high',
@@ -810,7 +859,7 @@ const TRIGGER_REGISTRY = {
     rule: { area: 'System', severity: 'broken', who: 'claude', expiryDays: 30 },
     build: (p) => ({
       title: 'Service report link unavailable — completion text withheld',
-      body: `${p.customerName || 'A customer'}'s service report link could not be created${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.errorMessage ? ` — ${p.errorMessage}` : ''}. No "report ready" text was sent; the closeout is held for retry — retry it from the tech portal.`,
+      body: `${p.customerName || 'A customer'}'s service report link could not be created${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.errorMessage ? ` — ${p.errorMessage}` : ''}. No "report ready" text was sent; the closeout is held for retry — retry it from the visit on Today.`,
       link: p.link || '/admin/dispatch',
     }),
   },
@@ -830,7 +879,7 @@ const TRIGGER_REGISTRY = {
       title: 'Completion text not delivered',
       body: `${p.customerName || 'A customer'} did not receive their completion text${p.serviceLabel ? ` (${p.serviceLabel})` : ''}${p.smsType ? ` [${p.smsType}]` : ''}${p.errorClass ? ` — ${p.errorClass}` : ''}${p.errorMessage ? `: ${p.errorMessage}` : ''}. ${p.resumable === false
         ? 'The closeout finalized without it; retrying the closeout will not re-send — fix the cause first (a bad number on file, an inactive template).'
-        : 'Nothing retries it automatically; the closeout is held for retry — retry it from the tech portal.'}`,
+        : 'Nothing retries it automatically; the closeout is held for retry — retry it from the visit on Today.'}`,
       link: p.link || '/admin/dispatch',
     }),
   },
@@ -1001,6 +1050,23 @@ const TRIGGER_REGISTRY = {
         link: p.estimateId ? `/admin/estimates?estimateId=${p.estimateId}` : '/admin/estimates',
       };
     },
+  },
+  // The phone banner for a customer stuck booking from an estimate, or back on an expired one (owner 2026-11-05,
+  // "1, 2 and 3": the estimate page audit's fix 3). estimate-stuck-alert.js writes the bell row (one standing row per
+  // estimate, rung once per Eastern day) and closes it once the estimate is accepted, declined or archived; this
+  // entry is the banner bell-banners.js sends for a write that rang, so `build` takes the row's own words.
+  estimate_stuck: {
+    label: 'Customer stuck booking an estimate',
+    category: 'estimate_stuck',
+    priority: 'high',
+    group: 'Leads & Sales',
+    rule: { area: 'Estimates', severity: 'needs-you', who: 'person', doneWhen: 'estimate_booked_or_closed', closedBy: 'server/services/estimate-stuck-alert.js' },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'A customer is stuck booking an estimate',
+      body: p.alertBody || 'Open the estimate to see where they stopped.',
+      link: p.alertLink || '/admin/estimates',
+    }),
   },
   bundle_quote_requested: {
     label: 'Bundle quote requested',
@@ -1373,6 +1439,19 @@ function pushTagFor(triggerKey, payload = {}) {
   return `waves-${triggerKey}`;
 }
 
+// GATE_ALERT_REGISTRY_LABELS (owner 2026-11-05, admin-alert plan S1): the labels a registry type's rule already declares,
+// in the shape a composed alert stores (area, severity, who, doneWhen, contact or promise), each kept only when the
+// composer would accept it. Never a subject: a rule names no record. {} while the gate is off, or when the reader is
+// missing (a test that mocks feature-gates) or anything throws, so the row is written exactly as before.
+function registryLabels(trigger) {
+  try {
+    const gates = require('../config/feature-gates');
+    if (!(typeof gates.alertRegistryLabelsLive === 'function' && gates.alertRegistryLabelsLive())) return {};
+    const { area, severity, who, doneWhen, contact, promise } = trigger?.rule || {};
+    return require('./admin-alert-compose').validStructuredFields({ area, severity, who, doneWhen, contact, promise });
+  } catch { return {}; }
+}
+
 /**
  * Fire a notification event. Non-blocking — never throws.
  *
@@ -1454,9 +1533,12 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       }
       // GATE_TECH_LOGIN_PRIVACY: a technician login gets a customer's alert only
       // for a customer on its own route (technicianServicesCustomer, the rule the
-      // Communications routes use). No customer on the event = today's routing.
+      // Communications routes use). An event with no customer is the office's
+      // (owner 2026-11-04; the bell's scopeAdminFeedToRole rule): no technician.
       const scopeCid = demoCid || payload?.scopeCustomerId;
-      if (require('../config/feature-gates').techLoginPrivacyLive?.() && scopeCid && activeAdmins.some((u) => u.role === 'technician')) {
+      if (require('../config/feature-gates').techLoginPrivacyLive?.() && !scopeCid) {
+        activeAdmins = activeAdmins.filter((u) => u.role !== 'technician');
+      } else if (require('../config/feature-gates').techLoginPrivacyLive?.() && activeAdmins.some((u) => u.role === 'technician')) {
         const { technicianServicesCustomer } = require('./technician-visit-scope');
         const own = await Promise.all(activeAdmins.map(async (u) => {
           if (u.role !== 'technician') return true;
@@ -1527,7 +1609,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     }
     // The one bell write, shared by a ring (the loop below) and a rescued Claude fault (writeRescuedFault): the
     // registry's built row under the given metadata, with the caller's dedupe and refresh options.
-    const bellMetadata = { ...(built.alert || {}), triggerKey, priority: trigger.priority, payload: safePayload };
+    // GATE_ALERT_REGISTRY_LABELS: the labels the type's rule declares sit under the built alert's own fields (which win).
+    const bellMetadata = { ...registryLabels(trigger), ...(built.alert || {}), triggerKey, priority: trigger.priority, payload: safePayload };
     const writeBell = (metadata) => NotificationService.notifyAdmin(
       trigger.category,
       built.title,
@@ -1715,14 +1798,17 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           })
           : null;
         const adminRoleIds = new Set(activeAdmins.filter((u) => u.role === 'admin').map((u) => u.id));
+        const techCopy = technicianCopy(triggerKey, payload);
         stats.push = await PushService.sendToAdminUsers(
           enabledUserIds,
           (adminUserId) => {
             const wantsSound = wantsSoundByUser.get(adminUserId);
             const badgeInfo = badgeByUser.get(adminUserId);
+            // A technician recipient gets its own copy when the trigger names techOmit keys.
+            const shown = techCopy && !adminRoleIds.has(adminUserId) ? techCopy : built;
             return {
-              title: built.title,
-              body: built.body,
+              title: shown.title,
+              body: shown.body,
               url: built.link || '/admin',
               // promise_chaser: the push tag IS the bell's own dedupeKey
               // (already 'waves-promise_chaser-<commitment>-<ET day>') so a
@@ -1782,12 +1868,15 @@ module.exports = {
   listTriggers,
   defaultPreference,
   TRIGGER_REGISTRY,
+  technicianCopy,
+  technicianRowCopy,
   __private: {
     maskEmail,
     maskPhone,
     pushTagFor,
     PRIORITY_VIBRATE,
     redactSensitiveText,
+    registryLabels,
     sanitizeBuiltNotification,
     sanitizeNotificationPayload,
   },
