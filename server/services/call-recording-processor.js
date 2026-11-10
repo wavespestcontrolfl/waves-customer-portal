@@ -10371,8 +10371,117 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   });
 }
 
+// ── Lead synopsis: the gate sentence and the record facts ──
+// ONE constant for the prompt's Step 0 refusal, the current-customer skip and
+// the call site's gate-refusal test, so the three cannot drift. A gate refusal
+// is written to call_log and never to the lead (the call site below).
+const LEAD_SYNOPSIS_GATE_SENTENCE = 'Not a new lead — no analysis needed.';
+const LEAD_SYNOPSIS_GATE_REFUSAL_RE = /^\s*\**\s*not a new lead/i;
+
+// A fact value that may reach the prompt: short, plain words only. An email,
+// a phone-like digit run or a street-style string is dropped, so the facts add
+// state to the prompt and never more personal data (the transcript already
+// carries what was said).
+const LEAD_SYNOPSIS_STREET_RE = /\b\d{1,5}\s+[A-Za-z]+(?:\s+[A-Za-z]+)?\s+(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|way|blvd|boulevard|court|ct|circle|cir|place|pl|terrace|ter)\b/i;
+function leadSynopsisSafeWords(value) {
+  const text = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  if (!text || text.length > 80) return null;
+  if (text.includes('@') || /\d[\d\s().-]{5,}\d/.test(text) || LEAD_SYNOPSIS_STREET_RE.test(text)) return null;
+  return /^[A-Za-z0-9 :,.&()'/+-]+$/.test(text) ? text : null;
+}
+
+// The "Record facts" block for the synopsis prompt. Pure. Each known fact is
+// one short line; an unknown fact (undefined) is left out, never guessed; an
+// empty object renders no block at all. Booleans and states only, no name,
+// email, phone or address. Ends with a blank line when it is not empty, so it
+// slots in ahead of "Step 0".
+function leadSynopsisFactsBlock(facts) {
+  const f = facts && typeof facts === 'object' ? facts : {};
+  const lines = [];
+  if (typeof f.callerOnFile === 'boolean') {
+    lines.push(`- Caller on file before this call: ${f.callerOnFile ? 'yes (a prospect or past account)' : 'no'}`);
+  }
+  if (f.visit && typeof f.visit === 'object') {
+    if (f.visit.booked === true) {
+      const detail = [leadSynopsisSafeWords(f.visit.when), leadSynopsisSafeWords(f.visit.service)].filter(Boolean).join(', ');
+      lines.push(`- A visit was booked on this call: ${detail || 'yes (day and time not available here)'}`);
+    } else if (f.visit.booked === false) {
+      lines.push('- A visit was booked on this call: none');
+    }
+  }
+  if (typeof f.quotePromised === 'boolean') lines.push(`- A quote was promised on this call: ${f.quotePromised ? 'yes' : 'no'}`);
+  if (typeof f.nameOnRecord === 'boolean') lines.push(`- The customer's name is on the record: ${f.nameOnRecord ? 'yes' : 'no'}`);
+  if (f.email === 'yes' || f.email === 'held' || f.email === 'no') {
+    lines.push(`- An email is on the record: ${f.email === 'held' ? 'held for review' : f.email}`);
+  }
+  if (!lines.length) return '';
+  return `Record facts (from our system):
+${lines.join('\n')}
+These record facts come from our system and outrank the transcript.
+- Do not tell the office to capture, confirm or verify anything the record facts show as on the record.
+- Do not describe how a name or an email is spelled.
+- When a visit is booked, the office follow-up (Step 3C) is about that visit, not about booking one.
+
+`;
+}
+
+// The facts object, from values the call pass already holds. Pure. An unknown
+// value stays undefined (and so is left out of the block):
+//  - callerOnFile: an explicit boolean wins; else the pre-lookup read (an object
+//    = on file, null = no match, undefined or a thrown lookup = unknown).
+//  - visit: booked only when the booking result carries a schedule row id (the
+//    test the rest of the pass uses); the day and start come from the same
+//    result. appointmentResult undefined = unknown (no line); null = none booked.
+//  - quotePromised / nameOnRecord / emailOnRecord: booleans when the caller knows them.
+//  - emailHeld: the pass put the email under read-back review.
+function buildLeadSynopsisFacts({ knownCaller, lookupFailed = false, callerOnFile, appointmentResult, quotePromised, nameOnRecord, emailOnRecord, emailHeld = false } = {}) {
+  const facts = {};
+  if (typeof callerOnFile === 'boolean') facts.callerOnFile = callerOnFile;
+  else if (knownCaller) facts.callerOnFile = true;
+  else if (knownCaller === null && !lookupFailed) facts.callerOnFile = false;
+  if (appointmentResult !== undefined) {
+    facts.visit = appointmentResult?.scheduledServiceId
+      ? {
+        booked: true,
+        when: spokenVisitWhen(appointmentResult.scheduledDate, appointmentResult.windowStart) || null,
+        service: typeof appointmentResult.service === 'string' ? appointmentResult.service : null,
+      }
+      : { booked: false };
+  }
+  if (typeof quotePromised === 'boolean') facts.quotePromised = quotePromised;
+  if (typeof nameOnRecord === 'boolean') facts.nameOnRecord = nameOnRecord;
+  if (emailHeld === true) facts.email = 'held';
+  else if (typeof emailOnRecord === 'boolean') facts.email = emailOnRecord ? 'yes' : 'no';
+  return facts;
+}
+
+// Whether the customer record holds a name and an email. The pass writes the
+// record in many branches, so this is one small read of the final row (not
+// derivable from the extraction alone). Fails to {} (both facts left out) on a
+// missing id or any read error.
+async function readLeadSynopsisRecordState(customerId) {
+  if (!customerId) return {};
+  try {
+    const row = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('first_name', 'last_name', 'email');
+    if (!row) return {};
+    const has = (v) => String(v || '').trim().length > 0;
+    return { nameOnRecord: has(row.first_name) || has(row.last_name), emailOnRecord: has(row.email) };
+  } catch {
+    return {};
+  }
+}
+
+// The synopsis for one call. A CURRENT customer is never a new lead, so the
+// model is not called: the prompt's own gate sentence is the synopsis and the
+// call site's gate-refusal path handles it as it does a model refusal. Everyone
+// else gets the model, with the record facts.
+async function resolveLeadSynopsis(transcription, { currentCustomer = false, facts = {} } = {}) {
+  if (currentCustomer === true) return LEAD_SYNOPSIS_GATE_SENTENCE;
+  return generateLeadSynopsis(transcription, facts);
+}
+
 // ── Lead Synopsis via Claude (Sales Strategist prompt) ──
-async function generateLeadSynopsis(transcription) {
+async function generateLeadSynopsis(transcription, facts = {}) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -10396,9 +10505,9 @@ You are a Sales Strategist and Customer Experience Analyst for Waves Pest Contro
 Analyze the following lead interaction (call transcription or SMS thread):
 ${transcription}
 
-Step 0 — Qualify the Lead (Gate Check):
+${leadSynopsisFactsBlock(facts)}Step 0 — Qualify the Lead (Gate Check):
 Before any analysis, determine whether this interaction is a new inbound lead — someone reaching out for the first time via website, phone, or text requesting services or information.
-If the interaction is any of the following, respond with only: "Not a new lead — no analysis needed." and stop.
+If the interaction is any of the following, respond with only: "${LEAD_SYNOPSIS_GATE_SENTENCE}" and stop.
 - An existing customer calling about a scheduled service, billing, or account issue
 - A vendor, solicitor, robocall, or spam
 - An internal team conversation
@@ -24014,7 +24123,18 @@ const CallRecordingProcessor = {
     let synopsis = null;
     if (transcription && !extracted.is_spam && !extracted.is_voicemail) {
       try {
-        synopsis = await generateLeadSynopsis(transcription);
+        // A CURRENT customer (this pass's pre-lookup) skips the model and gets
+        // the gate sentence; everyone else gets the model plus the record
+        // facts this pass already holds (customer name / email: one small
+        // read of the final row, since the pass writes it in many branches).
+        const synopsisRecord = knownCaller?.isExistingCustomer === true ? {} : await readLeadSynopsisRecordState(customerId);
+        synopsis = await resolveLeadSynopsis(transcription, {
+          currentCustomer: knownCaller?.isExistingCustomer === true,
+          facts: buildLeadSynopsisFacts({
+            knownCaller, lookupFailed: knownCallerLookupFailed, appointmentResult, quotePromised: callQuotePromised,
+            ...synopsisRecord, emailHeld: emailReviewHeldThisRun,
+          }),
+        });
         if (synopsis) {
           // generateLeadSynopsis's Step 0 gate answers with the literal
           // "Not a new lead — no analysis needed." for, among others, "a
@@ -24024,7 +24144,7 @@ const CallRecordingProcessor = {
           // lead destroyed the strategist analysis the substantive call
           // produced (2026-08-31). The column sits outside
           // STAMPED_LEAD_RESTORE_FIELDS, so that loss is not even rollback-able.
-          const synopsisIsGateRefusal = /^\s*\**\s*not a new lead/i.test(synopsis);
+          const synopsisIsGateRefusal = LEAD_SYNOPSIS_GATE_REFUSAL_RE.test(synopsis);
           // The gate above ran BEFORE this provider await, so ownership can
           // have moved while the synopsis was generating. The write itself is
           // TOKEN-FENCED rather than preceded by a check: a check-then-write
@@ -25679,7 +25799,19 @@ const CallRecordingProcessor = {
     if (!call) throw new Error(`Call not found: ${callSid}`);
     if (!call.transcription) throw new Error('No transcription available');
 
-    const synopsis = await generateLeadSynopsis(call.transcription);
+    // Pass-time truth, not a fresh lookup: the known_caller stamp the pass wrote
+    // on the stored extraction (a customer who converted since must not turn an
+    // old lead note into a gate refusal). No stamp or a failed lookup = unknown:
+    // the model runs, with no on-file fact. Name / email come from the call's customer.
+    let stamp = null;
+    try { stamp = (typeof call.ai_extraction === 'string' ? JSON.parse(call.ai_extraction) : call.ai_extraction)?.known_caller || null; } catch { /* unreadable = unknown */ }
+    const synopsis = await resolveLeadSynopsis(call.transcription, {
+      currentCustomer: stamp === 'current_customer',
+      facts: buildLeadSynopsisFacts({
+        callerOnFile: { not_on_file: false, other_account: true }[stamp],
+        ...(await readLeadSynopsisRecordState(call.customer_id)),
+      }),
+    });
     if (synopsis) {
       await db('call_log').where({ id: call.id }).update({ lead_synopsis: synopsis }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
     }
@@ -26102,6 +26234,12 @@ CallRecordingProcessor._test = {
   transcribeRecording,
   extractCallData,
   extractCallDataV2,
+  generateLeadSynopsis,
+  resolveLeadSynopsis,
+  leadSynopsisFactsBlock,
+  buildLeadSynopsisFacts,
+  LEAD_SYNOPSIS_GATE_SENTENCE,
+  LEAD_SYNOPSIS_GATE_REFUSAL_RE,
   CALL_EXTRACTION_V1_BACKUP_ROUTE,
   callTimeETString,
   CALL_EXTRACTION_ROUTE,
