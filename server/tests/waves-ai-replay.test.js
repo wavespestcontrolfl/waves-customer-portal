@@ -7,7 +7,8 @@ jest.mock('../models/db', () => { const db = () => ({}); db.raw = () => ({}); re
 
 const path = require('path');
 const os = require('os');
-const { summarize, caseOf } = require('../services/eval/waves-ai-replay');
+const fs = require('fs');
+const { summarize, caseOf, actionLabel, ACTION_TYPES } = require('../services/eval/waves-ai-replay');
 const ops = require('../../ops/agents/waves-ai-replay');
 
 const draft = (overrides = {}) => ({
@@ -60,6 +61,37 @@ describe('summarize', () => {
   test('groups by intent and drafter version', () => {
     expect(s.by_intent.find((g) => g.key === 'CANCEL_REQUEST').drafts).toBe(1);
     expect(s.by_prompt_version).toEqual([expect.objectContaining({ key: 'v9', drafts: 6 })]);
+  });
+});
+
+describe('actionLabel', () => {
+  // An escalation note is model-written free text, so no part of it may reach stdout or the case export.
+  const NOTE = 'Call Marigold Pennywhistle back at 941-555-0134 or marigold@example.com about the gate';
+
+  test('a note that is not a known kind is counted as other, with or without a colon', () => {
+    expect(actionLabel({ type: 'escalate', note: NOTE })).toBe('escalate:other');
+    expect(actionLabel({ type: 'escalate', note: `Marigold Pennywhistle 941-555-0134: wants a call` })).toBe('escalate:other');
+    expect(actionLabel({ type: 'escalate', note: 'followup_promised: Marigold, Tue 9-11' })).toBe('escalate:followup_promised');
+    expect(actionLabel({ type: 'escalate', note: null })).toBe('escalate');
+  });
+
+  test('an action type the drafter does not store is counted as other', () => {
+    expect(actionLabel({ type: 'text Marigold at 941-555-0134', note: null })).toBe('other');
+    expect(actionLabel({ type: 'send_payment_link', note: NOTE })).toBe('send_payment_link');
+  });
+
+  test('a free-text note reaches neither the summary nor the case export', () => {
+    const row = draft({ intended_actions: { actions: [{ type: 'escalate', note: NOTE }, { type: 'text Marigold at 941-555-0134' }] } });
+    const summary = summarize([row]);
+    expect(summary.actions.map((a) => a.action).sort()).toEqual(['escalate:other', 'other']);
+    const text = JSON.stringify(summary) + JSON.stringify(caseOf(row));
+    expect(text).not.toMatch(/Marigold|Pennywhistle|555-0134|example\.com/);
+  });
+
+  test('the type list matches the drafter', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'services', 'sms-shadow-drafter.js'), 'utf8');
+    const list = source.match(/const INTENDED_ACTION_TYPES = \[([^\]]+)\]/)[1];
+    expect(list.match(/'([a-z_]+)'/g).map((q) => q.slice(1, -1))).toEqual(ACTION_TYPES);
   });
 });
 

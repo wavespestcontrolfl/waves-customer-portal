@@ -41,11 +41,20 @@ function actionsOf(intendedActions) {
   return list.filter((a) => a && typeof a.type === 'string').map((a) => ({ type: a.type, note: typeof a.note === 'string' ? a.note : null }));
 }
 
-// An escalation note is "<kind>" or "<kind>: <detail>"; only the kind is counted (the detail can carry
-// offered times or customer specifics).
+// Action types the drafter stores (sms-shadow-drafter INTENDED_ACTION_TYPES; a test keeps the two lists
+// equal). Rows from before that filter can hold any string, so an unknown type counts as "other".
+const ACTION_TYPES = ['none', 'escalate', 'book_appointment', 'send_payment_link', 'send_portal_link', 'send_estimate_link'];
+// The escalation kinds the drafter's prompts name. A note is model-written free text (any string up to
+// 200 characters, with or without a "<kind>: <detail>" shape), so it can hold a name, a phone number or
+// an email address. No part of a note is ever printed or exported: a note that does not open with one of
+// these kinds counts as "escalate:other".
+const ESCALATION_KINDS = ['send_reservice_link', 'followup_promised', 'cancel_request'];
+
 function actionLabel(action) {
-  if (action.type !== 'escalate' || !action.note) return action.type;
-  return `escalate:${action.note.split(':')[0].trim().slice(0, 40)}`;
+  const type = ACTION_TYPES.includes(action.type) ? action.type : 'other';
+  if (type !== 'escalate' || !action.note) return type;
+  const kind = action.note.split(':')[0].trim();
+  return `escalate:${ESCALATION_KINDS.includes(kind) ? kind : 'other'}`;
 }
 
 function isRestricted(row, actions) {
@@ -144,4 +153,4 @@ function caseOf(row) {
   };
 }
 
-module.exports = { summarize, caseOf, actionsOf, actionLabel, isRestricted, SMALL_SAMPLE };
+module.exports = { summarize, caseOf, actionsOf, actionLabel, isRestricted, SMALL_SAMPLE, ACTION_TYPES, ESCALATION_KINDS };
