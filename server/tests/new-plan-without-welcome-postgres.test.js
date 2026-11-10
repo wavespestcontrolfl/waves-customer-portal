@@ -153,16 +153,22 @@ const dateOnly = (d) => d.toISOString().slice(0, 10);
     expect(ids).toContain(recent);
   });
 
-  test('an old service record clears the customer unless it was cancelled', async () => {
+  test('an old service record clears the customer unless it was cancelled or has no status, as in the welcome rule', async () => {
     const served = await newCustomer();
     await newPlan(served);
     await trx('service_records').insert({ customer_id: served, service_date: dateOnly(daysAgo(150)), service_type: 'Pest Control Service', status: 'completed' });
     const cancelled = await newCustomer();
     await newPlan(cancelled);
     await trx('service_records').insert({ customer_id: cancelled, service_date: dateOnly(daysAgo(150)), service_type: 'Pest Control Service', status: 'cancelled' });
+    // isNewRecurringSignupCandidate reads whereNot('status', 'cancelled'): a NULL status does not match, so that
+    // customer is still new to the rule and a missing welcome must still be listed.
+    const noStatus = await newCustomer();
+    await newPlan(noStatus);
+    await trx('service_records').insert({ customer_id: noStatus, service_date: dateOnly(daysAgo(150)), service_type: 'Pest Control Service', status: null });
     const ids = await found();
     expect(ids).not.toContain(served);
     expect(ids).toContain(cancelled);
+    expect(ids).toContain(noStatus);
   });
 
   test('a Mark Won estimate linked to the plan root clears the customer', async () => {

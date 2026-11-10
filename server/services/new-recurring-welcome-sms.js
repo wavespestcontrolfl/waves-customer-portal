@@ -667,6 +667,12 @@ async function processDueWelcomes() {
 // customer holds an auto label-only tier (appointment-tagger.js keeps that
 // stamp comms-silent; one such plan in the three months traced).
 //
+// The history and contact tests copy the send path's own predicates exactly,
+// NULLs included: a service_records row with a NULL status is not history for
+// whereNot('status', 'cancelled'), so `<> 'cancelled'` (not IS DISTINCT FROM)
+// keeps it out here too; and the contact test is sendNewRecurringWelcome's
+// (any non-empty phone, else a non-blank email).
+//
 // A plan is judged from WELCOME_AUDIT_GRACE_HOURS after its start (the welcome
 // is queued at booking and sent 60 min later) for WELCOME_AUDIT_WINDOW_DAYS.
 const WELCOME_AUDIT_WINDOW_DAYS = 14;
@@ -699,7 +705,7 @@ const FIRST_PLANS_WITHOUT_WELCOME_SQL = `
    WHERE p.plan_start >= ? AND p.plan_start <= ?
      AND p.root_status IS DISTINCT FROM 'cancelled'
      AND c.deleted_at IS NULL
-     AND (COALESCE(BTRIM(c.phone), '') <> '' OR COALESCE(BTRIM(c.email), '') <> '')
+     AND (COALESCE(c.phone, '') <> '' OR COALESCE(BTRIM(c.email), '') <> '')
      AND c.waveguard_tier IS DISTINCT FROM 'Commercial'
      AND NOT EXISTS (
        SELECT 1 FROM sms_sequences q WHERE q.customer_id = p.customer_id AND q.sequence_type = ?
@@ -711,7 +717,7 @@ const FIRST_PLANS_WITHOUT_WELCOME_SQL = `
      )
      AND NOT EXISTS (
        SELECT 1 FROM service_records sr
-        WHERE sr.customer_id = p.customer_id AND sr.status IS DISTINCT FROM 'cancelled'
+        WHERE sr.customer_id = p.customer_id AND sr.status <> 'cancelled'
           AND sr.service_date < (p.plan_start AT TIME ZONE 'America/New_York')::date - ?::int
      )
      AND NOT EXISTS (
