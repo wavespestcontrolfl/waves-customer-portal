@@ -1,5 +1,5 @@
 /**
- * Portal items past their one business hour (GATE_PORTAL_LATE_RERING, owner 2026-11-01).
+ * Portal items past their one business hour (owner 2026-11-01).
  *
  * The portal tells a customer to expect a reply "usually within one business hour between 8 AM and
  * 8 PM". Nothing rang when that hour passed. An OPEN admin bell for a portal item whose ask is past its
@@ -18,7 +18,7 @@
  *   person placed or answered, a person's Gmail send), after the bell's latest event, plus an estimate
  *   handed to the customer for an add-service ask. Judged here whatever the close gates say: a bell that
  *   nobody closed because a close gate is off must still not ring "still waiting" over a reply.
- * - Only asks of the last 24 hours, so turning the gate on cannot burst old items.
+ * - Only asks of the last 24 hours, so the sweep cannot burst old items.
  * - The ask time stays the boundary after the re-ring: the row is stamped metadata.askedAt (the ask's time)
  *   before its created_at is bumped, and every close and contact check reads askedAt when present
  *   (admin-alert-relevance.js askedAtOf), so a reply that landed between the ask and the re-ring still answers it.
@@ -183,7 +183,6 @@ async function pushStillWaiting({ row, meta }) {
 }
 
 async function runPortalLateRering({ now = new Date(), pageSize = PAGE_SIZE } = {}) {
-  if (!require('../config/feature-gates').portalLateReringLive?.()) return { skipped: true, reason: 'gate_off' };
   const since = new Date(now.getTime() - WINDOW_MS);
   let cursor = null;
   const total = { due: 0, rung: 0 };
@@ -209,7 +208,7 @@ async function runPortalLateRering({ now = new Date(), pageSize = PAGE_SIZE } = 
 
 
 // ---------------------------------------------------------------------------------------------------------
-// The owed-estimate re-ring (GATE_PORTAL_ESTIMATE_RERING, owner 2026-11-02, "remind").
+// The owed-estimate re-ring (owner 2026-11-02, "remind").
 //
 // The first-reply re-ring above asks "has a person reached the customer?" and goes quiet at the first
 // "we're working on it". An add-service request is owed an ESTIMATE, which a text does not deliver. An OPEN
@@ -221,7 +220,7 @@ async function runPortalLateRering({ now = new Date(), pageSize = PAGE_SIZE } = 
 // - Two business days is 24 hours of the follow-up SLA's clock (8 AM to 8 PM ET, no weekday carve-out):
 //   followUpDueAt(askedAt, OPEN_CALENDAR, 1440). The ask time is the relevance bellEventAt, as the
 //   first-reply pass reads it, never a created_at an earlier re-ring bumped.
-// - Only asks of the last 14 days (the Portal tab's window), so turning the gate on cannot burst the backlog.
+// - Only asks of the last 14 days (the Portal tab's window), so the sweep cannot burst the backlog.
 // - The ring rewrites the row like ringAgain: unread, DONE_CLEARED, created_at bumped, metadata.askedAt
 //   stamped first, metadata.estimateReRungAt, contact: true. estimateReRungAt makes it one per bell, ever. A bell
 //   the first-reply pass already rang (lateReRungAt) still gets this one; its "Still waiting" line is replaced.
@@ -334,7 +333,6 @@ async function runEstimatePage(rows, now) {
 }
 
 async function runPortalEstimateRering({ now = new Date(), pageSize = PAGE_SIZE } = {}) {
-  if (!require('../config/feature-gates').portalEstimateReringLive?.()) return { skipped: true, reason: 'gate_off' };
   const since = new Date(now.getTime() - ESTIMATE_WINDOW_MS);
   let cursor = null;
   const total = { due: 0, rung: 0 };

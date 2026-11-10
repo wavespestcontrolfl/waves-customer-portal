@@ -58,7 +58,7 @@ function handledStatus(item, res) {
 
 // Mark handled uses the existing update routes: chat -> the escalation PUT,
 // request -> the request PATCH, booking -> the bell's own Done. `quiet` asks that PATCH not to email the customer "Resolved"
-// (the server honors it only while GATE_PORTAL_ITEM_CLOSE is on; Customer 360 keeps its email).
+// (the server honors it for admins only; Customer 360 keeps its email).
 function markHandled(item) {
   if (item.kind === "message") {
     // Through the newest customer message this screen showed, so a newer one keeps the item open.
