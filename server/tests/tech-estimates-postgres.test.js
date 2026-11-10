@@ -500,6 +500,10 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
       // Still a draft: the sweep leaves it open.
       await runAdminAlertRelevanceSweep();
       expect((await bells(saved.body.id))[0].done_at).toBeNull();
+      // Queued to send, not gone yet: still open, because the close is final.
+      await trx('estimates').where({ id: saved.body.id }).update({ status: 'scheduled', scheduled_at: new Date(Date.now() + 3600e3) });
+      await runAdminAlertRelevanceSweep();
+      expect((await bells(saved.body.id))[0].done_at).toBeNull();
       await trx('estimates').where({ id: saved.body.id }).update(patch);
       await runAdminAlertRelevanceSweep();
       const [row] = await bells(saved.body.id);
