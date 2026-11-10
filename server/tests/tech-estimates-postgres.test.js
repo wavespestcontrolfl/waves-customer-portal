@@ -630,6 +630,7 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
 
     test('a new person: no confirmation is 400 and sends nothing; with it, the stored time is the consent time the provider layer got', async () => {
       const id = await draft({ prospect: PROSPECT, services: ['PEST'] });
+      expect((await read(`/${id}`)).body).toMatchObject({ canSend: true, needsTextRequest: true });
       expect((await estimateRow(id)).customer_id).toBeNull();
       expect(await send(id, {})).toEqual({ status: 400, body: { error: 'Confirm that the person asked for the estimate by text.', code: 'needs_text_request' } });
       expect(await send(id, { askedForText: 'yes' })).toMatchObject({ status: 400 });
@@ -654,6 +655,8 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect((await estimateRow(id)).status).toBe('draft');
       expect((await read(`/${id}`)).body.canSend).toBe(true);
+      // A visit's estimate has a customer: no text-request confirmation is asked for.
+      expect((await read(`/${id}`)).body.needsTextRequest).toBe(false);
       sendTool._private.clock.now = () => INSIDE;
       expect((await send(id)).status).toBe(200);
     });

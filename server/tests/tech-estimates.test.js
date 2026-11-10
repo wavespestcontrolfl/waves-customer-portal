@@ -954,6 +954,7 @@ describe('GET /api/tech/estimates and /:id', () => {
     who: 'Sample Person', addressLine: '100 Sample St', monthlyTotal: 37.33, annualTotal: 448, oneTimeTotal: 99,
     officeFirst: { required: true, reasons: ['changed_fact:stories', 'office_review'] },
     canSend: false,
+    needsTextRequest: true,
   };
 
   test('the list holds his rows only, in the fixed shape, with no token, phone, data or detailed reason', async () => {
@@ -1265,6 +1266,13 @@ describe('POST /api/tech/estimates/:id/send', () => {
       const list = await call('GET', '');
       expect(list.body.estimates.map((e) => e.canSend)).toEqual([true, false, false]);
       expect((await call('GET', `/${ESTIMATE_ID}`)).body.canSend).toBe(true);
+    });
+
+    test('needsTextRequest is true for a new person and false for a customer, and the customer id is never returned', async () => {
+      mockState.own = [ROW, { ...ROW, id: '00000000-0000-4000-8000-0000000000e2', customer_id: CUSTOMER_ID }];
+      const list = await call('GET', '');
+      expect(list.body.estimates.map((e) => e.needsTextRequest)).toEqual([true, false]);
+      expect(JSON.stringify(list.body)).not.toContain(CUSTOMER_ID);
     });
   });
 });

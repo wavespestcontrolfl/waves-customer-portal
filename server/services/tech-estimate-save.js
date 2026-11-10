@@ -133,6 +133,8 @@ async function createQuote(req, body) {
 const OWN_COLUMNS = [
   'e.id', 't.created_at', 'e.status', 'e.sent_at', 'e.accepted_at', 'e.address',
   'e.monthly_total', 'e.annual_total', 'e.onetime_total', 't.office_first_reasons',
+  // Read to answer needsTextRequest only; the id itself is never returned.
+  'e.customer_id',
 ];
 const ownQuery = (req) => db('tech_estimates as t')
   .join('estimates as e', 'e.id', 't.estimate_id')
@@ -158,6 +160,8 @@ function ownShape(row) {
     officeFirst: { required: reasons.length > 0, reasons },
     // Step 4: the Send button shows for his draft only when no stored reason holds it for the office.
     canSend: row.status === 'draft' && stored.length === 0,
+    // A new person (no customer on the estimate): the send needs his confirmation that the person asked for the text.
+    needsTextRequest: !row.customer_id,
   };
 }
 
