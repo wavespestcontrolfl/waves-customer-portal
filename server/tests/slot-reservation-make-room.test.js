@@ -19,7 +19,7 @@ jest.mock('../services/scheduling/booking-make-room', () => ({ bookingMakeRoomMo
  * GATE_BOOKING_MAKE_ROOM on (owner 2026-11-09 "YES"), reserveSlot: the hold of the page's one make-room hour. The hour is
  * the one a regular stop (visit-b) holds. With mode on, a capacity-off hour-mode reserve, and the make-room signature,
  * the transaction rebuilds the chain under its locks and the hold's own overlap probes skip the chain's moved stops.
- * Nothing moves a visit: accepting such a hold fails closed (commitReservation below).
+ * Nothing moves a visit at reserve; the accept moves the stops (slot-reservation-make-room-accept.test.js).
  */
 const db = require('../models/db');
 const estimateSlotAvailability = require('../services/estimate-slot-availability');
@@ -633,53 +633,5 @@ describe('a hold revived by a refresh must not sit on another make-room hold\'s 
     const { queue } = harness([liveHolds([ordinary]), globalProbe([]), update]);
     await slotReservation.reserveSlot({ estimateId: EST, slotId: slotId({}) });
     expect(queue).toHaveLength(0);
-  });
-});
-
-describe('commitReservation — a make-room hold is refused at accept until the accept change moves the stops', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    delete process.env.GATE_SCHEDULING_CAPACITY;
-    makeRoom.bookingMakeRoomMode.mockReturnValue('on');
-    db.mockImplementation((table) => (table === 'booking_config' ? { first: jest.fn().mockResolvedValue(undefined) } : undefined));
-  });
-  afterEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
-
-  const heldRow = {
-    id: 'hold-1', source_estimate_id: EST, scheduled_date: DATE, window_start: '09:00:00', window_end: '10:00:00', technician_id: 'tech-1',
-    reservation_expires_at: '2027-05-20T13:15:00.000Z', make_room_moves: PAYLOAD,
-  };
-
-  // Only the date read and the locked hold row: any later read (a probe, the capacity check, a write) throws.
-  function commitTrx() {
-    const dateProbe = chain({ first: jest.fn().mockResolvedValue({ scheduled_date: DATE, technician_id: 'tech-1' }) });
-    const reservation = chain({ first: jest.fn().mockResolvedValue(heldRow) });
-    const queue = [dateProbe, reservation];
-    const trx = jest.fn((table) => {
-      if (table === 'scheduled_services' && queue.length) return queue.shift();
-      throw new Error(`unexpected read of ${table}`);
-    });
-    trx.raw = jest.fn((sql) => ({ raw: sql }));
-    trx.isTransaction = true;
-    return { trx, queue };
-  }
-
-  const accept = (trx) => slotReservation.commitReservation({
-    scheduledServiceId: 'hold-1', customerId: 'customer-1', estimate: { id: EST, service_interest: 'Pest Control' }, serviceMode: 'recurring', selectedFrequency: 'quarterly', trx,
-  });
-
-  // Codex #7796 P2 (round 4): explicit, before any probe. In capacity mode the overlap probes that used to refuse it do
-  // not run, and the arrival-capacity check alone could accept it without moving the stops.
-  test.each([
-    ['hour mode, gate on', 'on', null],
-    ['capacity mode, gate on', 'on', 'true'],
-    ['hour mode, gate shadow', 'shadow', null],
-  ])('%s: the taken-slot answer, nothing written, no probe', async (_label, mode, capacity) => {
-    makeRoom.bookingMakeRoomMode.mockReturnValue(mode);
-    if (capacity) process.env.GATE_SCHEDULING_CAPACITY = capacity;
-    const { trx, queue } = commitTrx();
-    await expect(accept(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: `${DATE}_09-00_tech-1` });
-    expect(queue).toHaveLength(0);
-    expect(trx.mock.calls.map(([table]) => table)).toEqual(['scheduled_services', 'scheduled_services']);
   });
 });

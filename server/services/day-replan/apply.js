@@ -245,7 +245,7 @@ const WRITE_COLUMNS = ['id', 'customer_id', 'visit_id', 'scheduled_date', 'windo
  * Writes every moved visit and its reschedule_log row. The columns are the rebooker's for a same-day, same-technician
  * window change by a night writer; the CAS is the row as it was read under the locks.
  */
-async function writeMoves(trx, deps, { dateStr, moves }) {
+async function writeMoves(trx, deps, { dateStr, moves, initiator = INITIATOR, reasonCode = REASON_CODE }) {
   const rows = await trx('scheduled_services').whereIn('id', moves.map((m) => m.id)).select(...WRITE_COLUMNS);
   const byId = new Map(rows.map((r) => [String(r.id), r]));
   const written = [];
@@ -271,8 +271,8 @@ async function writeMoves(trx, deps, { dateStr, moves }) {
       customer_id: row.customer_id ?? null,
       original_date: dateStr,
       new_date: dateStr,
-      reason_code: REASON_CODE,
-      initiated_by: INITIATOR,
+      reason_code: reasonCode,
+      initiated_by: initiator,
       original_window: row.window_start ? `${row.window_start}${row.window_end ? `-${row.window_end}` : ''}` : null,
       new_window: end ? `${start}-${end}` : start,
       occurrence_service_type: row.service_type || null,

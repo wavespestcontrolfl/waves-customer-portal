@@ -1976,6 +1976,21 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 15 MIN — make-room move repair (GATE_BOOKING_MAKE_ROOM = true, owner 2026-11-09). The accept's moves commit
+  // first; the moved customers' reminders and records follow right after (services/scheduling/booking-make-room-accept.js).
+  // This pass finishes any that a restart cut off. Reads the committed rows, writes only what differs, sends nothing, no
+  // paid call. Mode not on: returns at once.
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      if (require('./scheduling/booking-make-room').bookingMakeRoomMode() !== 'on') return;
+      await runExclusive('booking-make-room-repair', async () => {
+        await require('./scheduling/booking-make-room-accept').reconcileMakeRoomMoves(db, { today: etDateString(new Date()) });
+      });
+    } catch (err) {
+      logger.error(`[booking-make-room] repair tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 4:40AM — Day RE-PLAN (GATE_DAY_REPLAN, dark; owner ruling
   // 2026-11-03). After the 4:20 reorder pass it plans each
