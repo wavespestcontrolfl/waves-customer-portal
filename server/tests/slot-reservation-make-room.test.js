@@ -380,6 +380,43 @@ describe('makeRoomDestinationClash — the occupancy technician scope (Codex pre
     expect(builder.orWhere).not.toHaveBeenCalled();
     expect(builder.whereNot).toHaveBeenCalledWith('id', 'hold-own');
   });
+
+  test('no estimate to leave out: no estimate predicate (the reserve, refresh and extend callers)', async () => {
+    const builder = await probe({ excludeId: 'hold-own' });
+    expect(builder.whereRaw).not.toHaveBeenCalledWith(expect.stringContaining('source_estimate_id'), expect.anything());
+  });
+});
+
+// Codex pre-push P1 (#7796): the page's offer runs the same chain check, leaving out every hold of its own estimate (the
+// reserve releases them before it runs the check).
+describe('makeRoomChainClash — the page\'s offer leaves out its own estimate\'s holds', () => {
+  const run = (builders, extra = {}) => {
+    const queue = [...builders];
+    const trx = jest.fn(() => queue.shift());
+    return slotReservation._internals.makeRoomChainClash(trx, { payload: PAYLOAD, ...extra }).then((taken) => ({ taken, queue }));
+  };
+
+  test('every probe (each destination and the shared stop) leaves out the estimate\'s holds', async () => {
+    const probes = chainProbes();
+    const { taken, queue } = await run(probes, { excludeEstimateId: EST });
+    expect(taken).toBe(false);
+    expect(queue).toHaveLength(0);
+    for (const probe of probes) {
+      expect(probe.whereRaw).toHaveBeenCalledWith('source_estimate_id IS DISTINCT FROM ?', [EST]);
+      expect(probe.whereNot).not.toHaveBeenCalled();
+    }
+  });
+
+  test('another estimate\'s chain still clashes: a shared stop is taken', async () => {
+    const { taken } = await run(chainProbes({ shared: { id: 'hold-other' } }), { excludeEstimateId: EST });
+    expect(taken).toBe(true);
+  });
+
+  test('a destination hit stops at the first probe', async () => {
+    const { taken, queue } = await run(chainProbes({ first: { id: 'hold-other' } }), { excludeEstimateId: EST });
+    expect(taken).toBe(true);
+    expect(queue).toHaveLength(2);
+  });
 });
 
 describe('a hold revived by a refresh must not sit on another make-room hold\'s destination (Codex pre-push P1)', () => {

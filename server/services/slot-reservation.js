@@ -866,8 +866,9 @@ async function proveMakeRoomHour(trx, { estimate, serviceProfile = null, service
 // overlaps one is taken (the estimate page's filterCollidingSlots draws the same line). Mode on only. Technician scope
 // is the occupancy probes' own (findConflictingVisits): with multi-tech confirm on, that technician's rows and the
 // unassigned ones; off, every technician. `excludeId` is the caller's own hold, which never blocks itself.
-async function makeRoomDestinationClash(trx, { date, techId, windowStart, windowEnd, excludeId = null }) {
-  return liveMakeRoomHolds(trx, { date, techId, excludeId })
+// `excludeEstimateId` (the page's offer only) leaves out every hold of that estimate: its reserve releases them first.
+async function makeRoomDestinationClash(trx, { date, techId, windowStart, windowEnd, excludeId = null, excludeEstimateId = null }) {
+  return liveMakeRoomHolds(trx, { date, techId, excludeId, excludeEstimateId })
     .whereRaw(
       "EXISTS (SELECT 1 FROM jsonb_array_elements(make_room_moves->'moves') AS m WHERE (m->>'to')::time < ?::time AND ((m->>'to')::time + ((m->>'widthMin') || ' minutes')::interval) > ?::time)",
       [windowEnd, windowStart],
@@ -876,7 +877,7 @@ async function makeRoomDestinationClash(trx, { date, techId, windowStart, window
 }
 
 // Other live make-room holds on the date, in the occupancy probes' technician scope, the caller's own hold left out.
-function liveMakeRoomHolds(trx, { date, techId, excludeId = null }) {
+function liveMakeRoomHolds(trx, { date, techId, excludeId = null, excludeEstimateId = null }) {
   return trx('scheduled_services')
     .where({ scheduled_date: date })
     .whereNull('customer_id')
@@ -886,19 +887,21 @@ function liveMakeRoomHolds(trx, { date, techId, excludeId = null }) {
     .modify((q) => {
       if (techId && techScopedConfirmActive()) applyTechScope(q, 'technician_id', techId);
       if (excludeId) q.whereNot('id', excludeId);
+      if (excludeEstimateId) q.whereRaw('source_estimate_id IS DISTINCT FROM ?', [excludeEstimateId]);
     });
 }
 
 // A new or re-proven chain may not take what another live make-room hold's chain takes: a moved stop's new hour on that
 // chain's destination, or a stop that chain also moves. The proof reads each stop where it is today, so it cannot see
 // either. Same live-hold rule and technician scope as makeRoomDestinationClash; `excludeId` is the caller's own hold.
-async function makeRoomChainClash(trx, { payload, excludeId = null }) {
+// The page's offer (booking-make-room.js) runs it too, with `excludeEstimateId`, so it never offers a chain the reserve refuses.
+async function makeRoomChainClash(trx, { payload, excludeId = null, excludeEstimateId = null }) {
   const { date, techId, moves } = payload;
   for (const move of moves) {
-    const window = { date, techId, windowStart: move.to, windowEnd: addMinutesToTime(move.to, move.widthMin), excludeId };
+    const window = { date, techId, windowStart: move.to, windowEnd: addMinutesToTime(move.to, move.widthMin), excludeId, excludeEstimateId };
     if (await makeRoomDestinationClash(trx, window)) return true;
   }
-  const sharedStop = await liveMakeRoomHolds(trx, { date, techId, excludeId })
+  const sharedStop = await liveMakeRoomHolds(trx, { date, techId, excludeId, excludeEstimateId })
     .whereRaw(
       "EXISTS (SELECT 1 FROM jsonb_array_elements(make_room_moves->'moves') AS m WHERE (m->>'id') = ANY(?::text[]))",
       [moves.map((move) => String(move.id))],

@@ -497,7 +497,19 @@ async function fullCheck(candidate, ctx) {
     const why = await moveBlockedReason(move, { conn, env, day, techId: candidate.techId, budget });
     if (why) return why;
   }
-  return null;
+  return otherHoldTakesChain(candidate, ctx);
+}
+
+// The page's offer only (request.otherChains): another customer's live make-room hold already moves one of this chain's
+// stops, or holds a moved stop's new hour (slot-reservation makeRoomChainClash, this estimate's own holds left out).
+// The reserve would refuse that hour, so the page does not offer it. The proof never asks: the reserve and the extend
+// run the same check under their locks.
+async function otherHoldTakesChain(candidate, { conn, env, request, budget }) {
+  if (!request.otherChains || typeof env.otherChainClash !== 'function') return null;
+  if (budget.spent()) return TIMED_OUT;
+  const moves = candidate.moves.map((m) => ({ id: m.row.id, to: hhmm(m.toMin), widthMin: m.widthMin }));
+  const taken = await env.otherChainClash(conn, { date: candidate.dateStr, techId: candidate.techId, moves, estimateId: request.estimateId });
+  return taken ? 'other_hold_chain' : null;
 }
 
 function raceBudget(promise, deadline) {
@@ -629,6 +641,9 @@ function defaultDeps() {
     closeMin: require('../auto-dispatch/candidate-slots').DAY_CLOSE,
     ownHoldIds,
     // Stops make-room already moved: a stop moves at most once.
+    // The page's offer: another live make-room hold's chain takes this chain's stop or destination (see otherHoldTakesChain).
+    otherChainClash: (conn, { date, techId, moves, estimateId }) => require('../slot-reservation')._internals
+      .makeRoomChainClash(conn, { payload: { date, techId, moves }, excludeEstimateId: estimateId }),
     makeRoomMovedIds: async (conn, ids) => {
       const list = ids.filter(Boolean);
       if (!list.length) return new Set();
@@ -794,7 +809,8 @@ async function findMakeRoom(report, { conn, pool, point, durationMin, candidateE
   const { env, dayRows, open, caps } = facts;
   const bestFree = bestFreeTime(pool, { dayRows, homeOf: env.homeOf, point, legMin: env.legMin });
   report.free = { count: pool.length, best: bestFree };
-  const request = { point, durationMin, admit, placement, now, bestFree, estimateId, detourCap: caps.detourCap, candidateExpectedMinutes };
+  // otherChains: the page's offer also skips a chain another live make-room hold takes (otherHoldTakesChain).
+  const request = { point, durationMin, admit, placement, now, bestFree, estimateId, detourCap: caps.detourCap, candidateExpectedMinutes, otherChains: offerOnly };
   // Both passes share what the reads return. The saving pass (the approved offer rule) runs first and unchanged; the
   // log-only sooner pass gets what is left of the budget.
   const caches = { blocks: new Map(), routes: new Map(), days: new Map(), moved: new Map() };
