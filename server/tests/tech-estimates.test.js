@@ -115,6 +115,7 @@ const visitRow = (id, over = {}) => ({
   id, technician_id: 'tech-1', customer_id: CUSTOMER_ID,
   service_address_line1: null, service_address_line2: null, service_address_city: null, service_address_state: null, service_address_zip: null,
   customer_address_line1: '100 Sample St', customer_address_line2: null, customer_city: 'Sampletown', customer_state: 'FL', customer_zip: '34202',
+  customer_first_name: 'Casey', customer_last_name: 'Sample', customer_phone: '(941) 555-0111', customer_email: 'casey.sample@example.invalid',
   ...over,
 });
 const PROSPECT = { firstName: 'Sample', lastName: 'Person', phone: '(941) 555-0142', address: '200 Example Ave', city: 'Sampletown', zip: '34202' };
@@ -448,8 +449,10 @@ describe('POST /price: the body the tool builds for the save', () => {
     expect(arg.dryRun).toBe(true);
     expect(arg.requireLivePricing).toBe(true);
     expect(arg.technicianId).toBe('tech-1');
-    expect(Object.keys(arg.body).sort()).toEqual(['address', 'billByInvoice', 'customerId', 'estimateData', 'showOneTimeOption']);
+    expect(Object.keys(arg.body).sort()).toEqual(['address', 'billByInvoice', 'customerEmail', 'customerId', 'customerName', 'customerPhone', 'estimateData', 'showOneTimeOption']);
     expect(arg.body).toEqual(expect.objectContaining({ customerId: CUSTOMER_ID, address: '100 Sample St, Sampletown, FL 34202', showOneTimeOption: false, billByInvoice: false }));
+    // The contact on the estimate is the visit's customer, read on the server: never what the phone sent.
+    expect(arg.body).toEqual(expect.objectContaining({ customerName: 'Casey Sample', customerPhone: '(941) 555-0111', customerEmail: 'casey.sample@example.invalid' }));
     expect(Object.keys(arg.body.estimateData).sort()).toEqual(['engineInputs', 'inputs']);
     expect(Object.keys(arg.body.estimateData.inputs).sort()).toEqual([
       'address', 'customerId', 'homeSqFt', 'lotSqFt', 'pestFreq', 'propertyType', 'stories', 'svcMosquito', 'svcPest',
@@ -459,6 +462,12 @@ describe('POST /price: the body the tool builds for the save', () => {
     expect(savedInputs().services).toEqual({ pest: { frequency: 'quarterly', roachType: 'none' }, mosquito: { tier: 'monthly12' } });
     expect(savedInputs()).toEqual(expect.objectContaining({ homeSqFt: 1850, lotSqFt: 9200, isCommercial: false, category: 'RESIDENTIAL' }));
     expect(res.body.officeFirst).toEqual({ required: false, reasons: [] });
+  });
+
+  test('a customer with no usable contact: a number the save would refuse, or a blank name or email, is left off', async () => {
+    mockState.visits[0] = visitRow(VISIT_ID, { customer_first_name: ' ', customer_last_name: null, customer_phone: '(141) 555-0111', customer_email: '' });
+    expect((await price({ visitId: VISIT_ID, services: ['PEST'] })).status).toBe(200);
+    expect(Object.keys(savedBody()).sort()).toEqual(['address', 'billByInvoice', 'customerId', 'estimateData', 'showOneTimeOption']);
   });
 
   test('a new person: name and phone from the typed person only', async () => {
@@ -636,7 +645,7 @@ describe('POST /api/tech/estimates: what the create hands the shared save', () =
     expect(arg.technicianId).toBe('tech-1');
     expect(arg.database).toBe(mockState.trx);
     // The preview's body plus the retry key, and nothing else: no forged key reaches the save.
-    expect(Object.keys(arg.body).sort()).toEqual(['address', 'billByInvoice', 'clientDraftId', 'customerId', 'estimateData', 'showOneTimeOption']);
+    expect(Object.keys(arg.body).sort()).toEqual(['address', 'billByInvoice', 'clientDraftId', 'customerEmail', 'customerId', 'customerName', 'customerPhone', 'estimateData', 'showOneTimeOption']);
     expect(arg.body.clientDraftId).toBe(DRAFT_ID);
     expect({ ...arg.body, clientDraftId: undefined }).toEqual({ ...saveSpy.mock.calls[0][0].body, clientDraftId: undefined });
     expect(JSON.stringify(arg.body)).not.toMatch(new RegExp(`${SENTINEL}|manualDiscount|linePriceOverrides|serviceSpecific|operatorPriceAdjustment|moveId|waiveSetupFee|leadId|groupWithEstimateId`, 'i'));

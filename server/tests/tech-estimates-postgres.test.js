@@ -76,10 +76,12 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
     enriched: { propertyType: 'single_family' },
   });
 
+  let customerSeq = 0;
   const customer = async (line1) => {
     const id = randomUUID();
     await trx('customers').insert({
-      id, first_name: 'Synthetic', last_name: 'Fixture', email: `${id}@example.invalid`, phone: `fixture-${id.slice(0, 8)}`,
+      id, first_name: 'Synthetic', last_name: 'Fixture', email: `${id}@example.invalid`,
+      phone: `+1941555${String(100 + (customerSeq += 1)).padStart(4, '0')}`,
       address_line1: line1, city: 'Test City', state: 'FL', zip: '00000', active: true, pipeline_stage: 'active_customer',
     });
     return id;
@@ -87,6 +89,7 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
 
   beforeEach(async () => {
     process.env.GATE_TECH_ESTIMATES = 'true';
+    customerSeq = 0;
     trx = await database.transaction();
     require('../models/db').connection = trx;
     const technicianId = randomUUID();
@@ -411,6 +414,20 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
       // A new person's own list row names him.
       mockCaller.id = otherId;
       expect((await read('')).body.estimates[0]).toEqual(expect.objectContaining({ who: 'Sample Person', addressLine: '300 Test Lane' }));
+    });
+
+    test('an estimate made from a visit carries the customer\'s name, mobile number and email, so it can be sent; the phone never sees them', async () => {
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
+      expect(saved.status).toBe(200);
+      const row = await estimateRow(saved.body.id);
+      expect(row).toMatchObject({ customer_id: ids.routeCustomer, customer_name: 'Synthetic Fixture', customer_phone: '+19415550101' });
+      expect(row.customer_email).toMatch(/@example\.invalid$/);
+      expect(JSON.stringify(saved.body)).not.toMatch(/5550101|example\.invalid/);
+      // A stored number the save would refuse is left off: the estimate still saves, with no phone.
+      await trx('customers').where({ id: ids.routeCustomer }).update({ phone: '(141) 555-0101' });
+      const second = await priceThenCreate({ visitId: ids.routeVisit, services: ['OT_PEST'] });
+      expect(second.saved.status).toBe(200);
+      expect((await estimateRow(second.saved.body.id)).customer_phone).toBeNull();
     });
 
     test('an archived estimate is left out of his list', async () => {

@@ -145,7 +145,26 @@ function ownVisit(req, visitId) {
       'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
       'scheduled_services.service_address_city', 'scheduled_services.service_address_state', 'scheduled_services.service_address_zip',
       'c.address_line1 as customer_address_line1', 'c.address_line2 as customer_address_line2',
-      'c.city as customer_city', 'c.state as customer_state', 'c.zip as customer_zip');
+      'c.city as customer_city', 'c.state as customer_state', 'c.zip as customer_zip',
+      // Who the estimate is for, as the office builder stores it on the estimate (never shown to the phone).
+      'c.first_name as customer_first_name', 'c.last_name as customer_last_name', 'c.phone as customer_phone', 'c.email as customer_email');
+}
+
+// The customer's name, mobile number and email for the estimate row, read on the server from the visit's customer. The
+// office builder sends the same three with a customer id; without them the estimate could not be texted or emailed by
+// anyone. A stored number the shared save would refuse (US-shaped but not a real number) is left off, so the save
+// never fails on a number the technician cannot correct.
+function visitContact(visit) {
+  const { nanpPhoneProblem } = require('../utils/phone');
+  const text = (value) => String(value || '').trim();
+  const name = [text(visit.customer_first_name), text(visit.customer_last_name)].filter(Boolean).join(' ');
+  const phone = text(visit.customer_phone);
+  const email = text(visit.customer_email);
+  return {
+    ...(name ? { customerName: name } : {}),
+    ...(phone && !nanpPhoneProblem(phone) ? { customerPhone: phone } : {}),
+    ...(email ? { customerEmail: email } : {}),
+  };
 }
 
 // Who is being quoted: { customerId, visitId, address } or { prospect, address }.
@@ -171,6 +190,7 @@ async function resolveSubject(req, body) {
   return {
     customerId: String(visit.customer_id),
     visitId,
+    contact: visitContact(visit),
     address: joinAddress([place.address, place.unit, place.city, `${state} ${place.zip || ''}`]),
   };
 }
@@ -277,7 +297,7 @@ function estimateBody({ subject, keys, facts: layered, engineInputs }) {
   };
   const who = subject.prospect
     ? { customerName: [subject.prospect.firstName, subject.prospect.lastName].filter(Boolean).join(' '), customerPhone: subject.prospect.phone }
-    : { customerId: subject.customerId };
+    : { customerId: subject.customerId, ...subject.contact };
   return { ...who, address: subject.address, showOneTimeOption: false, billByInvoice: false, estimateData: { engineInputs, inputs } };
 }
 
