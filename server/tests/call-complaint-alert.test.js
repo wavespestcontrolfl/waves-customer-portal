@@ -26,9 +26,13 @@ const CALL_ID = '11111111-2222-4333-8444-555555555555';
 const CUSTOMER_ID = '99999999-2222-4333-8444-555555555555';
 const minutesAgo = (m) => new Date(NOW.getTime() - m * 60 * 1000);
 const callRow = (over = {}) => ({ id: CALL_ID, customer_id: CUSTOMER_ID, direction: 'inbound', source: null, duration_seconds: 120, created_at: minutesAgo(30), ...over });
-const EXTRACTED = { first_name: 'Someone Else', pain_points: ['The technician never showed up'], call_summary: 'Customer says nobody came on Tuesday.' };
+// The validated V2 extraction the composer reads: meta.call_summary and sentiment_and_lead.objections_raised.
+const v2 = (objections, summary) => ({ meta: { call_summary: summary }, sentiment_and_lead: { objections_raised: objections } });
+const V2 = v2(['The technician never showed up'], 'Customer says nobody came on Tuesday.');
+// The V1 flat view of the same call, disagreeing with V2: the composer must never read it.
+const V1_TEXT = { first_name: 'Someone Else', pain_points: 'Old V1 pain point about billing', call_summary: 'Old V1 summary about an invoice.' };
 const GENERATION = 3;
-const args = (over = {}) => ({ written: true, disposition: 'complaint_escalated', call: callRow(), callSid: 'CA1', customerId: CUSTOMER_ID, extracted: EXTRACTED, procGeneration: GENERATION, now: NOW, ...over });
+const args = (over = {}) => ({ written: true, disposition: 'complaint_escalated', call: callRow(), callSid: 'CA1', customerId: CUSTOMER_ID, v2Extraction: V2, procGeneration: GENERATION, now: NOW, ...over });
 
 // customers: the name lookup (`.first().catch()`); call_log: the generation fence. `owned` = the row the fence finds.
 let fenceWheres;
@@ -52,7 +56,7 @@ beforeEach(() => {
 });
 
 describe('buildComplaintCallAlert', () => {
-  const build = (over = {}) => buildComplaintCallAlert({ call: callRow(), customerId: CUSTOMER_ID, name: 'Pat Sample', extracted: EXTRACTED, now: NOW, ...over });
+  const build = (over = {}) => buildComplaintCallAlert({ call: callRow(), customerId: CUSTOMER_ID, name: 'Pat Sample', v2Extraction: V2, now: NOW, ...over });
 
   test('passes the composer rules, names the customer on file, quotes the complaint and carries the Call button', () => {
     const alert = build();
@@ -70,7 +74,7 @@ describe('buildComplaintCallAlert', () => {
       bell: true, dedupeKey: `call-complaint:${CALL_ID}`, metadata: { callLogId: CALL_ID, customerId: CUSTOMER_ID, source: 'call_complaint' },
     });
     expect(alert.opts.detail).toMatch(/^The call at \d{1,2}:\d{2} (AM|PM) ET was labeled a complaint/);
-    expect(alert.opts.detail).toContain('Pain points: The technician never showed up');
+    expect(alert.opts.detail).toContain('Objections raised: The technician never showed up');
     expect(alert.opts.detail).toContain('Summary: Customer says nobody came on Tuesday.');
   });
 
@@ -91,8 +95,7 @@ describe('buildComplaintCallAlert', () => {
   });
 
   test('a phone number or street address in the complaint is masked, in the why and the detail', () => {
-    const extracted = { pain_points: ['Call me at 941-555-0123 about 123 Main Street'], call_summary: 'Phone 941-555-0123 and 123 Main Street.' };
-    const alert = build({ extracted });
+    const alert = build({ v2Extraction: v2(['Call me at 941-555-0123 about 123 Main Street'], 'Phone 941-555-0123 and 123 Main Street.') });
     const composed = composeAdminAlert(alert.spec);
     expect(composed.why).not.toContain('555-0123');
     expect(alert.opts.detail).not.toContain('555-0123');
@@ -100,19 +103,17 @@ describe('buildComplaintCallAlert', () => {
   });
 
   test('with no pain points the call summary is the quote; a long quote is cut inside 110 characters', () => {
-    const extracted = { call_summary: `Customer is upset ${'because the service was missed again and again '.repeat(5)}.` };
-    const composed = composeAdminAlert(build({ extracted }).spec);
+    const composed = composeAdminAlert(build({ v2Extraction: v2([], `Customer is upset ${'because the service was missed again and again '.repeat(5)}.`) }).spec);
     expect(composed.why).toContain('“Customer is upset');
     expect(composed.why.length).toBeLessThanOrEqual(110);
   });
 
   test('words that would break the copy rules stay out of the why (kept in the detail); no words at all still composes', () => {
-    const shouting = { pain_points: ['This is ridiculous!'], call_summary: 'Angry caller.' };
-    const alert = build({ extracted: shouting });
+    const alert = build({ v2Extraction: v2(['This is ridiculous!'], 'Angry caller.') });
     expect(composeAdminAlert(alert.spec).why).toBe('Complained on today\'s call.');
     expect(alert.opts.detail).toContain('This is ridiculous!');
-    expect(composeAdminAlert(build({ extracted: {} }).spec).why).toMatch(/call\.$/);
-    expect(composeAdminAlert(build({ extracted: null }).spec).headline).toBe('Comms — call Pat Sample about a complaint');
+    expect(composeAdminAlert(build({ v2Extraction: {} }).spec).why).toMatch(/call\.$/);
+    expect(composeAdminAlert(build({ v2Extraction: null }).spec).headline).toBe('Comms — call Pat Sample about a complaint');
   });
 
   test('the why never carries a clock time: today\'s call, else the short date; the exact ET time is in the detail', () => {
@@ -124,6 +125,25 @@ describe('buildComplaintCallAlert', () => {
     expect(yesterday.spec.why).not.toMatch(/\d:\d{2}/);
     expect(yesterday.opts.detail).toMatch(/^The call at \d{1,2}:\d{2} (AM|PM) ET was labeled/);
     expect(yesterday.opts.detail).toContain('at 1:00 PM ET');
+  });
+
+  test('V1 and V2 disagree: the alert follows V2 and carries nothing from the V1 flat view', async () => {
+    const alert = buildComplaintCallAlert({ call: callRow(), customerId: CUSTOMER_ID, name: 'Pat Sample', v2Extraction: V2, extracted: V1_TEXT, now: NOW });
+    const text = JSON.stringify([alert.spec, alert.opts]);
+    for (const old of [V1_TEXT.pain_points, V1_TEXT.call_summary, V1_TEXT.first_name]) expect(text).not.toContain(old);
+    expect(alert.spec.why).toContain('The technician never showed up');
+    // Through the helper too, even if a V1 view were handed over.
+    await keepComplaintCallAlert(args({ extracted: V1_TEXT }));
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(raiseAdminAlert.mock.calls)).not.toContain('Old V1');
+  });
+
+  test('no valid V2 (the label came from the V1 fallback rules): no quote, no V1 text, the detail points at the call record', () => {
+    const alert = buildComplaintCallAlert({ call: callRow(), customerId: CUSTOMER_ID, name: 'Pat Sample', v2Extraction: null, extracted: V1_TEXT, now: NOW });
+    expect(composeAdminAlert(alert.spec).why).toBe('Complained on today\'s call.');
+    expect(alert.opts.detail).toContain('The summary is on the call record.');
+    expect(JSON.stringify([alert.spec, alert.opts])).not.toContain('Old V1');
+    expect(alert.spec.why).not.toContain('“');
   });
 
   test('a call id that is not a record id leaves the Call button off and still composes', () => {
@@ -172,7 +192,7 @@ describe('keepComplaintCallAlert', () => {
   });
 
   test('a voicemail is not skipped: its own callback bell does not always ring', async () => {
-    expect(await rings({ extracted: { ...EXTRACTED, is_voicemail: true } })).toBe(1);
+    expect(await rings({ v2Extraction: { ...V2, meta: { ...V2.meta, is_voicemail: true } } })).toBe(1);
   });
 
   test('a reprocess raises the same key again with no open-only option, so the bell table keeps one row', async () => {
@@ -230,7 +250,7 @@ describe('wiring', () => {
     const write = src.indexOf('const written = await writeCallDisposition({ callId: call.id, disposition, reason, callSid });');
     expect(write).toBeGreaterThan(0);
     const next = src.slice(write, write + 400).split('\n')[1].trim();
-    expect(next).toBe('await keepComplaintCallAlert({ written, disposition, call, callSid, customerId, extracted, procGeneration });');
+    expect(next).toBe('await keepComplaintCallAlert({ written, disposition, call, callSid, customerId, v2Extraction: v2ForDisposition, procGeneration });');
   });
 
   test('both call sites pass the pass\'s procGeneration to applyZeroTriageLayers', () => {

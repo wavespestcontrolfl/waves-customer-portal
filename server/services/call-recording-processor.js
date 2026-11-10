@@ -10566,7 +10566,7 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
         thirdPartyNatureDefault: callApplicantHandlingLive(),
       });
       const written = await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
-      await keepComplaintCallAlert({ written, disposition, call, callSid, customerId, extracted, procGeneration });
+      await keepComplaintCallAlert({ written, disposition, call, callSid, customerId, v2Extraction: v2ForDisposition, procGeneration });
       // ...and once more after the write: a confirm that landed between the read
       // and the write found nothing to flip, so flip it now (compare-and-swap on
       // the pending value we just wrote).
@@ -11034,18 +11034,29 @@ async function keepOutOfAreaHoldRecords({ call, callSid, transcription, extracte
   } catch (err) { failed('alert', err); }
 }
 
+// The complaint's words from a validated V2 extraction: its objections and its call summary (empty strings without).
+function complaintWordsFromV2(v2Extraction) {
+  const objections = v2Extraction?.sentiment_and_lead?.objections_raised;
+  const summary = v2Extraction?.meta?.call_summary;
+  return {
+    points: (Array.isArray(objections) ? objections : []).filter((p) => typeof p === 'string' && p.trim()).join('; '),
+    summary: typeof summary === 'string' ? summary : '',
+  };
+}
+
 // The one Comms alert for a call whose final label is complaint_escalated (the label alone rang nothing). The
-// customer's name is the one on file: the extraction's caller name is sometimes the staff member's. The quote is
-// the extractor's pain points, else its call summary, masked like every bell body; a quote that would break the
-// copy rules is left out of the why and stays in the detail. The why carries no clock time (docs/admin-notifications.md
+// customer's name is the one on file: the extraction's caller name is sometimes the staff member's. Composed from the
+// validated V2 extraction only (never the V1 flat view): the quote is V2's sentiment_and_lead.objections_raised, else
+// its meta.call_summary, masked like every bell body; a quote that would break the copy rules is left out of the why
+// and stays in the detail. No valid V2 (the label came from the V1 fallback rules) means no quote and no V1 text. The
+// raw transcript is kept out: telling the caller's turns from the agent's needs speaker parsing this file has no
+// safe helper for. The why carries no clock time (docs/admin-notifications.md
 // section 3): "today's call", else the short date a person would say; the exact ET time rides in the detail.
-function buildComplaintCallAlert({ call, customerId, name = null, extracted, now = new Date() }) {
+function buildComplaintCallAlert({ call, customerId, name = null, v2Extraction = null, now = new Date() }) {
   const { fitAction, redactedWords, whyWithQuote, shortDateET } = require('./admin-alert-names');
   const { firstSentence, breaksAlertRules } = require('./admin-alert-compose');
   const who = name || 'the customer';
-  const points = (Array.isArray(extracted?.pain_points) ? extracted.pain_points : [extracted?.pain_points])
-    .filter((p) => typeof p === 'string' && p.trim()).join('; ');
-  const summary = typeof extracted?.call_summary === 'string' ? extracted.call_summary : '';
+  const { points, summary } = complaintWordsFromV2(v2Extraction);
   const said = redactedWords(firstSentence(points || summary)).replace(/[.\s]+$/u, '');
   const startedAt = callStartedAt(call);
   const day = startedAt && etDateString(startedAt) !== etDateString(now) ? `the ${shortDateET(startedAt)}` : 'today\'s';
@@ -11074,8 +11085,9 @@ function buildComplaintCallAlert({ call, customerId, name = null, extracted, now
       dedupeKey: `call-complaint:${call.id}`,
       detail: [
         `The call${clock ? ` at ${clock} ET` : ''} was labeled a complaint from a known customer. Call them back. Nothing was sent to the customer.`,
-        points && `Pain points: ${redactedWords(points)}`,
+        points && `Objections raised: ${redactedWords(points)}`,
         summary && `Summary: ${redactedWords(summary)}`,
+        !points && !summary && 'The summary is on the call record.',
       ].filter(Boolean).join('\n'),
       metadata: { callLogId: call.id, customerId: String(customerId), source: 'call_complaint' },
     },
@@ -11089,7 +11101,7 @@ function buildComplaintCallAlert({ call, customerId, name = null, extracted, now
 // read, right before the raise, finds the call at this pass's processing_generation with the label still
 // complaint_escalated (a newer force-reprocess, or no generation known, rings nothing). One bell per call ever: dedupeKey with no dedupeOpenOnly, so a reprocess neither rings again nor re-opens a closed
 // bell. A failure is logged by code and never fails the call. Sends nothing to the customer.
-async function keepComplaintCallAlert({ written, disposition, call, callSid, customerId, extracted, procGeneration, now = new Date() }) {
+async function keepComplaintCallAlert({ written, disposition, call, callSid, customerId, v2Extraction, procGeneration, now = new Date() }) {
   if (written !== true || disposition !== 'complaint_escalated') return null;
   try {
     const id = customerId || call.customer_id;
@@ -11099,7 +11111,7 @@ async function keepComplaintCallAlert({ written, disposition, call, callSid, cus
     const endedAt = require('../utils/call-timeline').callEndedAt(call);
     if (!endedAt || Number.isNaN(endedAt.getTime()) || now.getTime() - endedAt.getTime() > 24 * 60 * 60 * 1000) return null;
     const customer = await db('customers').where({ id }).first('first_name', 'last_name').catch(() => null);
-    const alert = buildComplaintCallAlert({ call, customerId: id, name: require('./admin-alert-names').realName(customer), extracted, now });
+    const alert = buildComplaintCallAlert({ call, customerId: id, name: require('./admin-alert-names').realName(customer), v2Extraction, now });
     const stillOurs = await db('call_log').where({ id: call.id, processing_generation: procGeneration, disposition: 'complaint_escalated' }).first('id');
     if (!stillOurs) return null;
     return await require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, alert.opts);
