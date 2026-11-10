@@ -64,6 +64,36 @@
  *   DISMISS (informational card aged out unactioned):
  *   - spam_or_wrong_number after SPAM_AGE_DAYS
  *   - listed informational flags after ADVISORY_AGE_DAYS
+ *   - quiet_aged (owner 2026-11-09): a card nobody touched for QUIET_AGE_DAYS
+ *     (created_at AND updated_at both that old, status 'open' — never
+ *     'in_progress') and whose code is on QUIET_AGE_CODES, at ANY severity.
+ *     Evaluated LAST, so every evidence rule above still wins for the same
+ *     card. Why: production held 1,172 open cards (717 older than 30 days);
+ *     the agent files about 18 a day and people close under 1 a day. The
+ *     queue is a park for exceptions, not a landfill.
+ *     The list is fail-closed and reader-based: a code may be on it ONLY if
+ *     no code path reads cards of that code as state outside the filing site,
+ *     this sweep, the admin triage UI routes and tests (2026-11-09 audit).
+ *     The codes that DO carry state stay off it and never age out here:
+ *     email_unverified / email_invalid (lead-first-touch-resume holds the
+ *     first-touch email while one is live and treats a dismissed one as
+ *     'email_review_dismissed'), missing_unit_number (estimate-clarify-asks,
+ *     the processor's unit waiver), property_role_confirm and
+ *     secondary_contact_captured (recipient-optin), the booking and street-
+ *     level hold cards (outbound_booking_review,
+ *     attached_booking_followup_unbooked, on_file_house_number_conflict:
+ *     street-level-hold, outbound-review-confirm), the reschedule family
+ *     (reschedule_or_cancel, existing_appointment_coordination: call-
+ *     reschedule-proposals / -apply / call-held-visits), cancellation_request
+ *     (call-cancel-guard), callback_number_needed / text_number_differs
+ *     (disclaimed-number-holds), call_prepay_choice, customer_creation_failed,
+ *     email_bounce_reverify, family_account_candidates,
+ *     reschedule_link_promise, do_not_contact_requested, after_hours_emergency,
+ *     and the spam / extraction-failure cards other rules own.
+ *     An age-out dismissal is NOT an evidence close: nothing proves the owed
+ *     ask was answered. Cards keep their payload; a recurrence files a fresh
+ *     card (the open-unique index frees on a terminal status). Roll back with
+ *     scripts/reopen-quiet-aged-cards.js.
  *   Dismissed — not resolved — deliberately: knowledge-index
  *   resolution-sync builds learning artifacts from RESOLVED cards only, and
  *   an aged-out card carries no resolution knowledge.
@@ -86,12 +116,16 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { lockTriageCall } = require('../utils/triage-locks');
+const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 const { v2PrimaryLabelForCategory, composeWordsForV2Category } = require('../utils/lead-service-interest');
 
 const SPAM_AGE_DAYS = 7;
 const ADVISORY_AGE_DAYS = 30;
+// quiet_aged (owner 2026-11-09): days a card must sit with no create AND no
+// update before it falls off, the same idea as admin alerts that fall off
+// after 3 quiet days.
+const QUIET_AGE_DAYS = 7;
 // not_confirmed's bare-ask fallback (bookingCoversRequest below): how soon
 // after the CARD a live booking must be created to count as the call
 // finally getting scheduled. A booking weeks later is not evidence this
@@ -172,6 +206,45 @@ const ADVISORY_AGE_CODES = new Set([
   'voicemail',
 ]);
 
+// quiet_aged allowlist (owner 2026-11-09). FAIL-CLOSED and reader-based: a
+// code is listed only when nothing outside (a) the site that files the card,
+// (b) this sweep, (c) the admin triage UI routes and (d) tests/docs reads
+// cards of that code as state. Audit 2026-11-09 of every triage_items reader
+// in server/. Status-agnostic readers that look at ANY code and so cannot be
+// avoided by a list (they treat an auto-closed card as not-an-office-decision,
+// or only as a pending-work signal): call-booking-miss-watchdog
+// officeClosedCall, call-held-visits, sms-gratitude-context pending work.
+// An unknown or new code is NEVER swept; add a code here only after the same
+// search (the literal, constants that hold it, and triage_items reads with a
+// category, a reason_code IN list or no reason filter).
+const QUIET_AGE_CODES = new Set([
+  // Owed-ask and note cards whose only readers are filing, this sweep, the
+  // UI and the callback-spam repair scans (those scans only CLOSE open cards
+  // of CALLBACK_SPAM_MOOT_CODES; a dismissed card has nothing left to close).
+  'quote_promised', 'not_confirmed',
+  'missing_service_address', 'missing_last_name',
+  'address_unverified', 'address_unverifiable',
+  'ambiguous_pest_or_service', 'ambiguous_scheduling',
+  'low_extraction_confidence',
+  // Customer email NOT captured: only resolvers read it (customer-email-fanout
+  // closes an open card when a valid email lands). It never holds a send:
+  // only email_unverified / email_invalid do.
+  'customer_email_missing',
+  // Identity, access and property notes for the office.
+  'caller_not_authorized', 'name_email_mismatch', 'name_spelling_differs',
+  'rental_or_tenant_occupied', 'second_service_address', 'multi_property_call',
+  'caller_phone_not_on_file',
+  // Address read-back notes. The replay and readiness scripts read
+  // address_recovered with NO status filter, so a dismissal changes nothing.
+  'address_recovered', 'address_readback',
+  // Commercial, HOA, complaint, area and competing-quote notes.
+  'prior_complaint_unresolved', 'commercial_requires_quote',
+  'hoa_common_area_requires_approval', 'out_of_service_area',
+  'competing_quotes_active',
+  // Voicemail marker.
+  'voicemail',
+]);
+
 const RULE_NOTES = {
   address_moot: 'Auto-resolved: customer record now has a service address on file (street + zip); address flag is moot.',
   name_moot: 'Auto-resolved: customer record now has a last name; flag is moot.',
@@ -194,6 +267,7 @@ const RULE_NOTES = {
   callback_spam: 'Auto-resolved: the office called this voicemail back and reached a solicitor; the ask is moot.',
   spam_aged: `Auto-dismissed: spam/wrong-number advisory unactioned after ${SPAM_AGE_DAYS} days.`,
   advisory_aged: `Auto-dismissed: informational flag unactioned after ${ADVISORY_AGE_DAYS} days.`,
+  quiet_aged: `Auto-dismissed: no one acted on this card for ${QUIET_AGE_DAYS} days (owner 2026-11-09).`,
   visit_passed: 'Auto-resolved: the visit this call booked was completed, or its day has passed; the overlap / out-of-hours note is moot.',
   house_number_adopted: 'Auto-resolved: the customer record now carries the house number the caller stated; the disagreement is settled.',
 };
@@ -1175,6 +1249,12 @@ const CLASSIFY_RULES = [
   { rule: 'spam_aged', action: 'dismiss', when: (item, ev, now) => item.reason_code === 'spam_or_wrong_number' && ageDays(item.created_at, now) >= SPAM_AGE_DAYS },
   { rule: 'advisory_aged', action: 'dismiss',
     when: (item, ev, now) => ADVISORY_AGE_CODES.has(item.reason_code) && item.severity === 'advisory' && ageDays(item.created_at, now) >= ADVISORY_AGE_DAYS },
+  // LAST: every moot / evidence / age rule above still wins for the same card.
+  // Any severity; both clocks must be old (a card a person or a recurrence
+  // touched restarts it). A missing updated_at reads as age 0: fail closed.
+  { rule: 'quiet_aged', action: 'dismiss',
+    when: (item, ev, now) => QUIET_AGE_CODES.has(item.reason_code)
+      && ageDays(item.created_at, now) >= QUIET_AGE_DAYS && ageDays(item.updated_at, now) >= QUIET_AGE_DAYS },
 ];
 
 // Pure classifier, exported for tests. `item` is a triage_items row joined
@@ -1228,7 +1308,7 @@ function loadCandidateItems(conn, itemIds = null) {
     .where('t.status', 'open')
     .select(
       't.id', 't.call_log_id', 't.reason_code', 't.status', 't.severity',
-      't.created_at', 't.payload',
+      't.created_at', 't.updated_at', 't.payload',
       'cl.created_at as call_created_at',
       'cl.ai_extraction_enriched as call_extraction',
       'cl.ai_extraction as call_extraction_v1',
@@ -2745,6 +2825,115 @@ async function loadEvidence(conn, items, { ignoreGate = false, now = new Date() 
   return evidence;
 }
 
+// The per-run cap (MAX_TRANSITIONS_PER_RUN), spent on the moot / evidence /
+// age rules first: a large quiet_aged backlog drains over several nights and
+// never crowds out a card an evidence rule can close. Order inside each group
+// is kept.
+function capDecisions(decisions, cap = MAX_TRANSITIONS_PER_RUN) {
+  const ordered = [
+    ...decisions.filter((d) => d.rule !== 'quiet_aged'),
+    ...decisions.filter((d) => d.rule === 'quiet_aged'),
+  ];
+  return { applied: ordered.slice(0, cap), deferred: Math.max(0, ordered.length - cap) };
+}
+
+// Dry run for the quiet_aged rule. Reads the same candidate rows and runs the
+// same classifier as the nightly sweep, so an evidence rule that would win for
+// a card is honored; writes NOTHING. Returns counts by reason code and
+// severity, the total, and how many the next run would apply under the cap.
+// `ignoreGate` evaluates the evidence rules even when
+// GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE is off in this process (the stricter view:
+// fewer cards left for quiet_aged).
+async function planQuietAged({ now = new Date(), ignoreGate = false } = {}) {
+  const items = await loadCandidateItems(db);
+  const evidence = await loadEvidence(db, items, { now, ignoreGate });
+  const byReason = {};
+  let total = 0;
+  let otherRules = 0;
+  for (const item of items) {
+    const decision = classifyTriageItem(item, { evidence }, { now });
+    if (!decision) continue;
+    if (decision.rule !== 'quiet_aged') { otherRules += 1; continue; }
+    total += 1;
+    const bucket = byReason[item.reason_code] || (byReason[item.reason_code] = { total: 0, bySeverity: {} });
+    bucket.total += 1;
+    bucket.bySeverity[item.severity] = (bucket.bySeverity[item.severity] || 0) + 1;
+  }
+  return {
+    scanned: items.length, total, otherRulesPending: otherRules, byReason,
+    wouldApplyNextRun: Math.max(0, Math.min(total, MAX_TRANSITIONS_PER_RUN - otherRules)),
+  };
+}
+
+// Rollback support. Which of the dismissed quiet_aged rows can go back to
+// 'open': never two rows for one (call, reason) (the open-unique index allows
+// one), and never one whose call already holds a live card of that reason (a
+// reprocess filed a fresh one after the dismissal). Newest dismissal wins.
+// Pure; `rows` are { id, call_log_id, reason_code, resolved_at }, `liveTwins` the
+// open / in_progress { call_log_id, reason_code } pairs.
+function planQuietAgedReopen(rows, liveTwins = []) {
+  const key = (r) => `${r.call_log_id}|${r.reason_code}`;
+  const live = new Set(liveTwins.map(key));
+  const picked = new Map();
+  let skippedHasLiveCard = 0;
+  const stamp = (r) => (r.resolved_at ? new Date(r.resolved_at).getTime() : 0);
+  const newestFirst = [...rows].sort((a, b) => stamp(b) - stamp(a));
+  for (const row of newestFirst) {
+    if (live.has(key(row))) { skippedHasLiveCard += 1; continue; }
+    if (!picked.has(key(row))) picked.set(key(row), row);
+  }
+  const reopen = [...picked.values()];
+  return { reopen, skippedHasLiveCard, skippedDuplicate: rows.length - skippedHasLiveCard - reopen.length };
+}
+
+async function readQuietAgedReopenPlan(conn, since) {
+  const rows = await conn('triage_items')
+    .where({ status: 'dismissed', resolution_rule: 'quiet_aged' })
+    .where('resolved_at', '>=', since)
+    .select('id', 'call_log_id', 'reason_code', 'resolved_at');
+  const callIds = [...new Set(rows.map((r) => r.call_log_id).filter(Boolean))];
+  const liveTwins = callIds.length
+    ? await conn('triage_items').whereIn('call_log_id', callIds).whereIn('status', ['open', 'in_progress']).select('call_log_id', 'reason_code')
+    : [];
+  return { rows, ...planQuietAgedReopen(rows.filter((r) => r.call_log_id), liveTwins) };
+}
+
+// Undo the quiet_aged dismissals closed at or after `since`: status back to
+// 'open', resolution fields cleared, call_log.review_status re-synced under
+// the same per-call lock and helper the card writers share. A row a person
+// closed since (no longer dismissed + quiet_aged) is left alone. Dry run by
+// default. Reopened cards restart the 7-day clock (updated_at = now), so turn
+// the rule off or expect them to fall off again in a week.
+async function reopenQuietAged({ since, apply = false, now = new Date(), conn = db } = {}) {
+  const sinceDate = new Date(since);
+  if (!since || Number.isNaN(sinceDate.getTime())) throw new Error('reopenQuietAged needs a valid since time');
+  const plan = await readQuietAgedReopenPlan(conn, sinceDate);
+  const byReason = {};
+  for (const row of plan.reopen) byReason[row.reason_code] = (byReason[row.reason_code] || 0) + 1;
+  const result = {
+    found: plan.reopen.length + plan.skippedHasLiveCard + plan.skippedDuplicate,
+    reopenable: plan.reopen.length, skippedHasLiveCard: plan.skippedHasLiveCard, skippedDuplicate: plan.skippedDuplicate,
+    byReason, reopened: 0,
+  };
+  if (!apply || !plan.reopen.length) return result;
+  result.reopened = await conn.transaction(async (trx) => {
+    const callIds = [...new Set(plan.reopen.map((r) => r.call_log_id))].sort();
+    for (const callId of callIds) await lockTriageCall(trx, callId);
+    // Re-plan under the locks: a card filed since the first read must still win.
+    const fresh = await readQuietAgedReopenPlan(trx, sinceDate);
+    const ids = fresh.reopen.map((r) => r.id);
+    if (!ids.length) return 0;
+    const updated = await trx('triage_items')
+      .whereIn('id', ids)
+      .where({ status: 'dismissed', resolution_rule: 'quiet_aged' })
+      .update({ status: 'open', resolution_note: null, resolution_source: null, resolution_rule: null, resolved_at: null, updated_at: now })
+      .returning('call_log_id');
+    for (const callId of new Set(updated.map((r) => r.call_log_id ?? r))) await syncCallReviewStatus(trx, callId, 'resolved');
+    return updated.length;
+  });
+  return result;
+}
+
 async function sweep({ now = new Date(), only = null } = {}) {
   const items = await loadCandidateItems(db);
   const evidence = await loadEvidence(db, items, { now });
@@ -2754,8 +2943,7 @@ async function sweep({ now = new Date(), only = null } = {}) {
     const decision = classifyTriageItem(item, { evidence }, { now });
     if (decision && (!only || decision.rule === only)) decisions.push({ item, ...decision });
   }
-  const applied = decisions.slice(0, MAX_TRANSITIONS_PER_RUN);
-  const deferred = decisions.length - applied.length;
+  const { applied, deferred } = capDecisions(decisions);
 
   // Apply per rule in batched CAS updates (status='open' re-checked at write
   // time — an operator or event-driven resolver may have raced us). Touched
@@ -2889,6 +3077,10 @@ module.exports = {
   unambiguousDictationTarget,
   loadUnambiguousEmailEvidence,
   runTriageAutoResolve,
+  planQuietAged,
+  reopenQuietAged,
+  planQuietAgedReopen,
+  capDecisions,
   classifyTriageItem,
   hasNewAddressEvidence,
   callSuppliedAddress,
@@ -2920,6 +3112,8 @@ module.exports = {
   HUMAN_CONTACT_SOURCES,
   ADDRESS_MOOT_CODES,
   ADVISORY_AGE_CODES,
+  QUIET_AGE_CODES,
+  QUIET_AGE_DAYS,
   RULE_NOTES,
   SPAM_AGE_DAYS,
   ADVISORY_AGE_DAYS,

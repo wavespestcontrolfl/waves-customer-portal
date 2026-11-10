@@ -22,6 +22,11 @@ const {
   RULE_NOTES,
   SPAM_AGE_DAYS,
   ADVISORY_AGE_DAYS,
+  QUIET_AGE_DAYS,
+  QUIET_AGE_CODES,
+  MAX_TRANSITIONS_PER_RUN,
+  capDecisions,
+  planQuietAgedReopen,
 } = require('../services/triage-auto-resolve');
 const { resolveRescheduleCards } = require('../services/call-reschedule-apply');
 
@@ -394,31 +399,125 @@ describe('age-based dismissals', () => {
   });
 });
 
-describe('fail-closed allowlist — owed work is NEVER swept', () => {
-  const owedCodes = [
-    'quote_promised', 'cancellation_request', 'after_hours_emergency',
-    'prior_complaint_unresolved', 'commercial_requires_quote',
+describe('quiet_aged (owner 2026-11-09) — 7 quiet days drop a listed card', () => {
+  const DAY = 24 * 3600 * 1000;
+  const ago = (days) => new Date(NOW.getTime() - days * DAY).toISOString();
+  const quiet = (over) => item({ created_at: ago(8), updated_at: ago(8), ...over });
+  const rule = (it, ctx = noBookings) => classifyTriageItem(it, ctx, { now: NOW });
+
+  test('QUIET_AGE_DAYS is 7', () => {
+    expect(QUIET_AGE_DAYS).toBe(7);
+  });
+
+  test.each([...QUIET_AGE_CODES])('%s ages out at 7 days and not at 6', (code) => {
+    // advisory_aged owns 'voicemail' etc. after 30 days; at 8 days only quiet_aged fires.
+    expect(rule(quiet({ reason_code: code, customer_address_line1: null }))).toEqual({ action: 'dismiss', rule: 'quiet_aged' });
+    expect(rule(item({ reason_code: code, created_at: ago(6), updated_at: ago(6) }))).toBeNull();
+    expect(rule(item({ reason_code: code, created_at: ago(7.01), updated_at: ago(7.01) }))).toEqual({ action: 'dismiss', rule: 'quiet_aged' });
+  });
+
+  test('a BLOCKING card of a listed code ages out too', () => {
+    expect(rule(quiet({ reason_code: 'not_confirmed', severity: 'blocking' }))).toEqual({ action: 'dismiss', rule: 'quiet_aged' });
+    expect(rule(quiet({ reason_code: 'quote_promised', severity: 'blocking' }))).toEqual({ action: 'dismiss', rule: 'quiet_aged' });
+  });
+
+  test('an in_progress (claimed) card never ages out', () => {
+    expect(rule(quiet({ reason_code: 'not_confirmed', status: 'in_progress' }))).toBeNull();
+  });
+
+  test('a recent updated_at (a person or a recurrence touched it) never ages out', () => {
+    expect(rule(item({ reason_code: 'not_confirmed', created_at: ago(40), updated_at: ago(2) }))).toBeNull();
+    expect(rule(item({ reason_code: 'not_confirmed', created_at: ago(40), updated_at: null }))).toBeNull();
+    expect(rule(item({ reason_code: 'not_confirmed', created_at: ago(40), updated_at: undefined }))).toBeNull();
+  });
+
+  test.each(['email_unverified', 'reschedule_or_cancel', 'missing_unit_number'])('%s (state-bearing) never ages out', (code) => {
+    expect(rule(quiet({ reason_code: code }))).toBeNull();
+    expect(rule(quiet({ reason_code: code, severity: 'blocking' }))).toBeNull();
+  });
+
+  test('a reschedule proposal or link promise payload is untouchable even on a listed code', () => {
+    expect(rule(quiet({ reason_code: 'not_confirmed', payload: { reschedule_proposal: { id: 'p1' } } }))).toBeNull();
+    expect(rule(quiet({ reason_code: 'not_confirmed', payload: { reschedule_link_promise: true } }))).toBeNull();
+  });
+
+  test('an evidence rule still wins over quiet_aged for the same card', () => {
+    const it = quiet({ reason_code: 'not_confirmed', id: 'nc1' });
+    const ev = { evidence: new Map([['nc1', { booking_after_card: true }]]) };
+    const decision = rule(it, ev);
+    expect(decision.rule).not.toBe('quiet_aged');
+    expect(decision.action).toBe('resolve');
+    // A moot-condition resolve wins too: the surname is now on file.
+    const moot = rule(quiet({ reason_code: 'missing_last_name', customer_last_name: 'Sample', ...heardV1('Pat', null) }));
+    expect(moot.rule).toBe('name_moot');
+  });
+
+  test('the 30-day advisory rule still wins over quiet_aged for an advisory voicemail card', () => {
+    expect(rule(item({ reason_code: 'voicemail', created_at: OLD_31D, updated_at: OLD_31D }))).toEqual({ action: 'dismiss', rule: 'advisory_aged' });
+  });
+
+  test('the note is stable and within the column limit', () => {
+    expect(RULE_NOTES.quiet_aged).toBe('Auto-dismissed: no one acted on this card for 7 days (owner 2026-11-09).');
+  });
+
+  test('the per-run cap holds and spends on the other rules first', () => {
+    const other = Array.from({ length: 3 }, (_, i) => ({ rule: 'name_moot', item: { id: `o${i}` } }));
+    const quietRows = Array.from({ length: MAX_TRANSITIONS_PER_RUN + 40 }, (_, i) => ({ rule: 'quiet_aged', item: { id: `q${i}` } }));
+    const { applied, deferred } = capDecisions([...quietRows.slice(0, 10), ...other, ...quietRows.slice(10)]);
+    expect(applied).toHaveLength(MAX_TRANSITIONS_PER_RUN);
+    expect(applied.slice(0, 3).map((d) => d.item.id)).toEqual(['o0', 'o1', 'o2']);
+    expect(deferred).toBe(quietRows.length + other.length - MAX_TRANSITIONS_PER_RUN);
+    expect(capDecisions(other)).toEqual({ applied: other, deferred: 0 });
+  });
+});
+
+describe('quiet_aged reopen plan', () => {
+  const row = (id, call, code, at) => ({ id, call_log_id: call, reason_code: code, resolved_at: at });
+
+  test('reopens each (call, reason) once, newest dismissal wins, skips a call with a live twin', () => {
+    const rows = [
+      row('a', 'c1', 'not_confirmed', '2026-11-01T00:00:00Z'),
+      row('b', 'c1', 'not_confirmed', '2026-11-05T00:00:00Z'),
+      row('c', 'c2', 'voicemail', '2026-11-02T00:00:00Z'),
+      row('d', 'c3', 'quote_promised', '2026-11-03T00:00:00Z'),
+    ];
+    const plan = planQuietAgedReopen(rows, [{ call_log_id: 'c3', reason_code: 'quote_promised' }]);
+    expect(plan.reopen.map((r) => r.id).sort()).toEqual(['b', 'c']);
+    expect(plan.skippedHasLiveCard).toBe(1);
+    expect(plan.skippedDuplicate).toBe(1);
+  });
+
+  test('nothing to reopen is an empty plan', () => {
+    expect(planQuietAgedReopen([], [])).toEqual({ reopen: [], skippedHasLiveCard: 0, skippedDuplicate: 0 });
+  });
+});
+
+describe('fail-closed allowlist — cards other code reads as state are NEVER swept', () => {
+  // Even ancient AND long-quiet: none of these is on QUIET_AGE_CODES (see the
+  // 2026-11-09 reader audit in triage-auto-resolve.js).
+  const stateCodes = [
+    'cancellation_request', 'after_hours_emergency',
     'auto_booking_skipped_after_approval', 'existing_appointment_same_date',
     'ambiguous_existing_appointment', 'outbound_booking_review',
+    'attached_booking_followup_unbooked', 'on_file_house_number_conflict',
     'unassigned_auto_booking', 'booking_time_conflict',
     'extraction_failed_permanent',
-    'v2_extraction_invalid', 'shared_phone_ambiguous', 'out_of_service_area',
-    'do_not_contact_requested', 'hoa_common_area_requires_approval',
+    'v2_extraction_invalid', 'shared_phone_ambiguous',
+    'do_not_contact_requested',
     'implied_consent_non_ani_recipient',
-    // Advisory-by-design cards carrying OWED office confirmations — never
-    // age out (the read-back/identity/access check stands until performed).
-    'address_recovered', 'address_readback', 'caller_phone_not_on_file',
-    'email_unverified', 'email_invalid', 'caller_not_authorized',
-    'rental_or_tenant_occupied', 'second_service_address',
-    'secondary_contact_captured', 'name_email_mismatch',
-    'not_confirmed', 'confirmed_without_start_time', 'ambiguous_scheduling',
-    'ambiguous_pest_or_service',
+    'email_unverified', 'email_invalid', 'missing_unit_number',
+    'secondary_contact_captured', 'property_role_confirm',
+    'reschedule_or_cancel', 'existing_appointment_coordination',
+    'callback_number_needed', 'text_number_differs', 'call_prepay_choice',
+    'customer_creation_failed', 'family_account_candidates', 'reschedule_link_promise',
+    'confirmed_without_start_time',
     'some_future_unknown_code',
   ];
-  // missing_last_name never AGE-dismisses (owed identity task) — but the
-  // moot rule still closes it on independent surname evidence, so it is
-  // asserted separately from the codes above.
-  test('missing_last_name aged 31d with NO surname stays open (identity task owed)', () => {
+  // missing_last_name is never swept by the 30-day advisory rule (owed identity
+  // task); only the moot rule (independent surname evidence) or, when nobody
+  // touched it for 7 days, quiet_aged closes it. An untouched-clock-less row
+  // (no updated_at) stays open.
+  test('missing_last_name aged 31d with NO surname and no quiet clock stays open', () => {
     expect(classifyTriageItem(
       item({ reason_code: 'missing_last_name', customer_last_name: null, created_at: OLD_31D }),
       noBookings, { now: NOW },
@@ -432,8 +531,10 @@ describe('fail-closed allowlist — owed work is NEVER swept', () => {
       payload: { flag: 'email_bounce_reverify', bounced_email: 'm.sample@example.net', customer_id: 'cust-1' },
     }), noBookings, { now: NOW })).toBeNull();
   });
-  test.each(owedCodes)('%s stays open even when ancient', (code) => {
-    expect(classifyTriageItem(item({ reason_code: code, created_at: OLD_31D }), noBookings, { now: NOW })).toBeNull();
+  test.each(stateCodes)('%s stays open even when ancient and quiet', (code) => {
+    expect(QUIET_AGE_CODES.has(code)).toBe(false);
+    expect(classifyTriageItem(item({ reason_code: code, created_at: OLD_31D, updated_at: OLD_31D }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({ reason_code: code, severity: 'blocking', created_at: OLD_31D, updated_at: OLD_31D }), noBookings, { now: NOW })).toBeNull();
   });
 
   test('a created booking does NOT clear cancellation/coordination transition requests', () => {
@@ -442,10 +543,10 @@ describe('fail-closed allowlist — owed work is NEVER swept', () => {
     expect(classifyTriageItem(item({ reason_code: 'existing_appointment_coordination' }), booked, { now: NOW })).toBeNull();
   });
 
-  test('low_extraction_confidence never auto-clears (no booking rule, no age rule)', () => {
+  test('low_extraction_confidence has no booking rule and no 30-day rule', () => {
     const booked = bookedCtx();
     expect(classifyTriageItem(item({ reason_code: 'low_extraction_confidence' }), booked, { now: NOW })).toBeNull();
-    // Nor does age: the office owes confirming the doubted fields.
+    // No updated_at: the quiet clock cannot be read, so it stays open.
     expect(classifyTriageItem(item({ reason_code: 'low_extraction_confidence', created_at: OLD_31D }), noBookings, { now: NOW })).toBeNull();
   });
 
