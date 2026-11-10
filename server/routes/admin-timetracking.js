@@ -100,6 +100,8 @@ const ADMIN_TECH_RESPONSE_FIELDS = [
   'start_address', 'start_lat', 'start_lng',
   // Team tab "Can move visits" switch.
   'can_move_visits',
+  // Team tab "Can create estimates" switch (GATE_TECH_ESTIMATES).
+  'can_create_estimates',
   // Hired button state (GATE_HIRED_PACKET); present only while the gate is on.
   // Derived flags only: the token, its hash and the password hash never ship.
   'hire_action', 'hire_password_unset', 'hire_link_pending', 'hire_link_expires_at',
@@ -1042,6 +1044,13 @@ function uniqueViolationBody(err) {
   return err.constraint === 'technicians_twilio_number_unique' ? TECH_LINE_TAKEN : EMAIL_IN_USE;
 }
 
+// Team tab "Can create estimates" switch (GATE_TECH_ESTIMATES): a boolean, off for every new row.
+function canCreateEstimatesInput(body) {
+  if (body.canCreateEstimates === undefined) return { patch: {} };
+  if (typeof body.canCreateEstimates !== 'boolean') return { error: 'canCreateEstimates must be a boolean' };
+  return { patch: { can_create_estimates: body.canCreateEstimates } };
+}
+
 async function createTechnician(req, res, next) {
   try {
     const body = req.body || {};
@@ -1150,6 +1159,8 @@ async function updateTechnician(req, res, next) {
     if (canMoveVisits !== undefined && typeof canMoveVisits !== 'boolean') {
       return res.status(400).json({ error: 'canMoveVisits must be a boolean' });
     }
+    const estimateSwitch = canCreateEstimatesInput(body);
+    if (estimateSwitch.error) return res.status(400).json({ error: estimateSwitch.error });
     // Legacy `active` boolean input maps onto employment status; an explicit
     // employmentStatus wins when both are sent.
     const requestedStatus = employmentStatus !== undefined
@@ -1219,6 +1230,7 @@ async function updateTechnician(req, res, next) {
       if (requestedStatus !== undefined) Object.assign(updates, employmentPatch(requestedStatus));
       if (fieldDispatchable !== undefined) updates.field_dispatchable = fieldDispatchable;
       if (canMoveVisits !== undefined) updates.can_move_visits = canMoveVisits;
+      Object.assign(updates, estimateSwitch.patch);
       Object.assign(updates, techLine.patch);
       Object.assign(updates, startPoint.patch);
       Object.assign(updates, workDays.patch);
