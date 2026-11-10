@@ -469,3 +469,20 @@ describe('My estimates', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Save estimate' })).toBeVisible());
   });
 });
+
+// The tool's calls use the client's one API base (VITE_API_URL || '/api'), like the other staff calls. A base that
+// already ends in /api must not get a second /api: the setup read would fail and the whole tool would hide.
+describe('the API base', () => {
+  afterEach(() => { vi.unstubAllEnvs(); vi.resetModules(); });
+
+  it.each([
+    ['not set', undefined, '/api/tech/estimates/setup'],
+    ['another origin with /api', 'https://backend.example.invalid/api', 'https://backend.example.invalid/api/tech/estimates/setup'],
+  ])('with VITE_API_URL %s', async (_label, base, expected) => {
+    vi.resetModules();
+    if (base) vi.stubEnv('VITE_API_URL', base);
+    const { techEstimateRequest } = await import('./useTechEstimates');
+    await techEstimateRequest('/setup');
+    expect(globalThis.fetch.mock.calls.at(-1)[0]).toBe(expected);
+  });
+});

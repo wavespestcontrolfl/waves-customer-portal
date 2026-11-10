@@ -1,12 +1,13 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 
-const API = import.meta.env.VITE_API_URL || '';
+// The client's API base (utils/admin-fetch.js, utils/api.js, FieldLeadModal.jsx): it already ends in /api.
+const API = import.meta.env.VITE_API_URL || '/api';
 
 // One call to the technician estimate tool (/api/tech/estimates). A refusal throws an Error that carries the
 // server's own message plus `status` and `code`; a 404 `{ enabled: false }` has no message.
 export async function techEstimateRequest(path, { method = 'GET', body } = {}) {
-  const res = await fetch(`${API}/api/tech/estimates${path}`, {
+  const res = await fetch(`${API}/tech/estimates${path}`, {
     method,
     headers: { Authorization: `Bearer ${getAdminAuthToken()}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}),
