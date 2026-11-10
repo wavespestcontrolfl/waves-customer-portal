@@ -746,6 +746,52 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
       .toEqual(['commercial_requires_quote']);
     expect(dropUnneededCallCards(['missing_unit_number'], ext).flags).toEqual(['missing_unit_number']);
   });
+
+  // 2026-11-09 audit: the record already has a last name, so missing_last_name files no CARD.
+  test('the card filter drops only missing_last_name when told the customer already has a last name on file', () => {
+    const ext = { scheduling: { status: 'requested' }, caller: {}, service_request: { service_intent: 'preventative_one_time' } };
+    const flags = ['missing_last_name', 'commercial_requires_quote', 'missing_unit_number'];
+    const r = dropUnneededCallCards(flags, ext, { lastNameOnFile: true });
+    expect(r.flags).toEqual(['commercial_requires_quote', 'missing_unit_number']);
+    expect(r.dropped).toEqual(['missing_last_name']);
+    for (const options of [{ lastNameOnFile: false }, {}, undefined, { lastNameOnFile: 'yes' }]) {
+      expect(dropUnneededCallCards(flags, ext, options).flags).toEqual(flags);
+    }
+    expect(dropUnneededCallCards(['commercial_requires_quote'], ext, { lastNameOnFile: true }).flags).toEqual(['commercial_requires_quote']);
+  });
+
+  describe('lastNameOnFileBeforeCall (the processor decides the option)', () => {
+    const { lastNameOnFileBeforeCall } = require('../services/call-recording-processor')._test;
+    const before = '2026-11-09T15:00:00Z';
+    const known = { id: 'cust-1', createdAt: '2026-01-05T12:00:00Z' };
+    const base = { call: { customer_id: null }, knownCaller: known, callMeta: {}, before, lastNameOnFile: true };
+
+    test('a customer older than the call with a real last name qualifies, with or without a pre-link', () => {
+      expect(lastNameOnFileBeforeCall(base)).toBe(true);
+      expect(lastNameOnFileBeforeCall({ ...base, call: { customer_id: 'cust-1' } })).toBe(true);
+    });
+    test('keeps the card for a customer this call created, one made after it, or a failed or empty name read', () => {
+      expect(lastNameOnFileBeforeCall({ ...base, callMeta: { created_customer_id: 'cust-1' } })).toBe(false);
+      expect(lastNameOnFileBeforeCall({ ...base, knownCaller: { id: 'cust-1', createdAt: '2026-11-09T15:30:00Z' } })).toBe(false);
+      expect(lastNameOnFileBeforeCall({ ...base, knownCaller: { id: 'cust-1' } })).toBe(false);
+      expect(lastNameOnFileBeforeCall({ ...base, lastNameOnFile: false })).toBe(false);
+      expect(lastNameOnFileBeforeCall({ ...base, knownCaller: null })).toBe(false);
+      expect(lastNameOnFileBeforeCall({})).toBe(false);
+    });
+    test('a call already linked to a different customer than the one read keeps the card', () => {
+      expect(lastNameOnFileBeforeCall({ ...base, call: { customer_id: 'cust-2' } })).toBe(false);
+    });
+    test('a reprocess answers the same as the first pass', () => {
+      const first = lastNameOnFileBeforeCall(base);
+      const reprocess = lastNameOnFileBeforeCall({ ...base, call: { customer_id: 'cust-1' }, callMeta: { other: 1 } });
+      expect(reprocess).toBe(first);
+    });
+    test('the card filter passes the option, and only for the card (finalFlags is not filtered)', () => {
+      const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+      expect(src).toContain("lastNameOnFile: finalFlags.includes('missing_last_name') && lastNameOnFileBeforeCall({");
+      expect(src).not.toMatch(/finalFlags\s*=\s*[^;]*lastNameOnFile/);
+    });
+  });
 });
 
 describe('enforce path wiring (source pin; codex #6289 r1)', () => {

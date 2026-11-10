@@ -119,7 +119,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, spelledLettersSettleEmailDisagreement, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards, thirdPartyCustomerOnlyCards, thirdPartyCallMakesNoServiceAsk } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, spelledLettersSettleEmailDisagreement, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards, callEndedWithNothingToDo, thirdPartyCustomerOnlyCards, thirdPartyCallMakesNoServiceAsk } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -1621,6 +1621,20 @@ function outboundPriorContactCustomerId({ call, knownCaller, callMeta, before, c
     return knownCaller.id;
   }
   return null;
+}
+
+// missing_last_name files no CARD when the call's customer was on file BEFORE this call and
+// already has a real last name (2026-11-09 audit: the office had nothing to do on 24 of 57
+// cards). "Before this call" reuses outboundPriorContactCustomerId's proof on the phone
+// pre-lookup customer: not the customer this call's own earlier pass created
+// (metadata.created_customer_id) and a row older than the call, so a reprocess answers the same
+// as the first pass. A call whose row is already linked to a DIFFERENT customer than the one the
+// lookup read keeps the card (the last name read is not that customer's). `lastNameOnFile` is the
+// pre-lookup row's non-placeholder last name, false on a failed read (fail closed).
+function lastNameOnFileBeforeCall({ call, knownCaller, callMeta, before, lastNameOnFile } = {}) {
+  if (lastNameOnFile !== true || !knownCaller?.id) return false;
+  if (call?.customer_id && String(call.customer_id) !== String(knownCaller.id)) return false;
+  return outboundPriorContactCustomerId({ call: {}, knownCaller, callMeta, before }) === knownCaller.id;
 }
 
 function phoneDigits(value) {
@@ -10949,6 +10963,9 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
 // No customer, lead, appointment, estimate, automation, text or email is written or
 // sent. Any other blocker (spam_or_wrong_number, do_not_contact_requested), alone or
 // beside out_of_service_area, keeps today's silent return.
+// The disposition: no_action_needed when the call ended with nothing to do and nobody asked for
+// or was promised a callback or quote (outOfAreaHoldDisposition), else callback_task_created for a
+// lead, a hot or warm caller, a quote ask or a Waves promise.
 const OUT_OF_AREA_HOLD_REASON = 'out_of_service_area_hold';
 
 function isOutOfAreaOnlyHold(finalFlags) {
@@ -10958,9 +10975,19 @@ function isOutOfAreaOnlyHold(finalFlags) {
 
 const isHotOrWarm = (extracted) => extracted?.lead_quality === 'hot' || extracted?.lead_quality === 'warm';
 
-// A lead or a quote/callback ask gets callback_task_created, anything else no_action_needed.
+// callback_task_created reads as "a callback is owed". A call the model itself closed as
+// no_action_needed, with no open thread (callEndedWithNothingToDo: no agreed time, no follow-up,
+// no promised quote, not a voicemail), and with no quote asked or promised and no recorded Waves
+// promise, owes nothing, even though is_lead is true (2026-11-09: two callers were told on the
+// call that Waves does not go there). Otherwise a lead, a hot or warm caller, a quote ask or a
+// Waves promise gets callback_task_created, anything else no_action_needed. With no valid V2
+// extraction the old rule stands. The alert for a hot or warm caller is not changed.
 function outOfAreaHoldDisposition({ extracted, v2Extraction = null, wavesPromiseRecorded = false }) {
   const { quoteRequested, quotePromised } = resolveCallQuoteSignals(extracted || {}, v2Extraction);
+  const askedNothing = wavesPromiseRecorded !== true && !quoteRequested && !quotePromised;
+  if (askedNothing && callEndedWithNothingToDo(v2Extraction)) {
+    return { disposition: 'no_action_needed', reason: OUT_OF_AREA_HOLD_REASON };
+  }
   const callbackOwed = extracted?.is_lead === true || isHotOrWarm(extracted)
     || quoteRequested || quotePromised || wavesPromiseRecorded === true;
   return { disposition: callbackOwed ? 'callback_task_created' : 'no_action_needed', reason: OUT_OF_AREA_HOLD_REASON };
@@ -12168,6 +12195,9 @@ const CallRecordingProcessor = {
     // coordinating a visit, complaining, or asking about billing.
     let knownCaller = null;
     let knownCallerLookupFailed = false;
+    // The pre-lookup row's last name is a real one (read here once, no new query): feeds
+    // lastNameOnFileBeforeCall at the card filter. False until proven, so a failed read keeps the card.
+    let knownCallerLastNameOnFile = false;
     try {
       // The operator's link outranks the phone lookup here too (Codex #3764
       // r2 P1): a relink exists because the phone identity was wrong or
@@ -12180,6 +12210,8 @@ const CallRecordingProcessor = {
           : null)
         : await findCustomerForCallContact(contactPhone, {});
       knownCaller = summarizeKnownCaller(knownCustomer);
+      knownCallerLastNameOnFile = !!knownCustomer
+        && !require('./call-commitments').isMissingName(knownCustomer.last_name);
     } catch (e) {
       knownCallerLookupFailed = true;
       logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);
@@ -13727,6 +13759,11 @@ const CallRecordingProcessor = {
                 extracted, preAdoptionExtracted, v2Extraction, transcription, v2Valid,
                 services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
               }),
+            // The record already has a last name: no "missing last name" card (card only).
+            lastNameOnFile: finalFlags.includes('missing_last_name') && lastNameOnFileBeforeCall({
+              call, knownCaller, lastNameOnFile: knownCallerLastNameOnFile,
+              callMeta: parseJsonObjectSafe(call.metadata), before: callStartedAt(call) || call.created_at,
+            }),
           }).dropped);
           // A call that ended with nothing to do files no booking-hold card
           // (2026-10-10 audit). Codes, not flags: not_confirmed is the
@@ -25997,6 +26034,7 @@ CallRecordingProcessor._test = {
   isTechFollowUpCall,
   finalizeTechFollowUpCall,
   isOutOfAreaOnlyHold,
+  lastNameOnFileBeforeCall,
   outOfAreaHoldDisposition,
   buildOutOfAreaHoldAlert,
   keepOutOfAreaHoldRecords,
