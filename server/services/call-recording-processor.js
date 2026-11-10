@@ -10536,7 +10536,7 @@ async function writeCallDisposition({ callId, disposition, reason, callSid, prio
 // disposition layer stamps the terminal enum on call_log.disposition; the
 // enrichment writer persists gate codes / pets / internal color. Order
 // matters: the classifier verdict feeds the disposition decision.
-async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult = null, customerId = null, transcript = null }) {
+async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult = null, customerId = null, transcript = null, procGeneration }) {
   try {
     const v2ForDisposition = v2Result?.status === 'valid' ? v2Result.extraction : null;
     let spamVerdictResult = null;
@@ -10579,7 +10579,8 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
         },
         thirdPartyNatureDefault: callApplicantHandlingLive(),
       });
-      await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
+      const written = await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
+      await keepComplaintCallAlert({ written, disposition, call, callSid, customerId, v2Extraction: v2ForDisposition, procGeneration });
       // ...and once more after the write: a confirm that landed between the read
       // and the write found nothing to flip, so flip it now (compare-and-swap on
       // the pending value we just wrote).
@@ -11068,6 +11069,102 @@ async function keepOutOfAreaHoldRecords({ call, callSid, transcription, extracte
       await require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, alert.opts);
     }
   } catch (err) { failed('alert', err); }
+}
+
+// The complaint's words from a validated V2 extraction: its objections and its call summary (empty strings without).
+function complaintWordsFromV2(v2Extraction) {
+  const objections = v2Extraction?.sentiment_and_lead?.objections_raised;
+  const summary = v2Extraction?.meta?.call_summary;
+  return {
+    points: (Array.isArray(objections) ? objections : []).filter((p) => typeof p === 'string' && p.trim()).join('; '),
+    summary: typeof summary === 'string' ? summary : '',
+  };
+}
+
+// The one Comms alert for a call whose final label is complaint_escalated (the label alone rang nothing). The
+// customer's name is the one on file: the extraction's caller name is sometimes the staff member's. Composed from the
+// validated V2 extraction only (never the V1 flat view): the quote is V2's sentiment_and_lead.objections_raised, else
+// its meta.call_summary, masked like every bell body; a quote that would break the copy rules is left out of the why
+// and stays in the detail. No valid V2 (the label came from the V1 fallback rules) means no quote and no V1 text. The
+// raw transcript is kept out: telling the caller's turns from the agent's needs speaker parsing this file has no
+// safe helper for. The why carries no clock time (docs/admin-notifications.md
+// section 3): "today's call", else the short date a person would say; the exact ET time rides in the detail.
+function buildComplaintCallAlert({ call, customerId, name = null, v2Extraction = null, now = new Date() }) {
+  const { fitAction, redactedWords, whyWithQuote, shortDateET } = require('./admin-alert-names');
+  const { firstSentence, breaksAlertRules } = require('./admin-alert-compose');
+  const who = name || 'the customer';
+  const { points, summary } = complaintWordsFromV2(v2Extraction);
+  const said = redactedWords(firstSentence(points || summary)).replace(/[.\s]+$/u, '');
+  const startedAt = callStartedAt(call);
+  const day = startedAt && etDateString(startedAt) !== etDateString(now) ? `the ${shortDateET(startedAt)}` : 'today\'s';
+  const clock = callTimeETString(startedAt)?.replace(/\s/g, ' ');
+  const lead = `Complained on ${day} call: `;
+  const why = said && !breaksAlertRules(said)
+    ? whyWithQuote({ lead, quote: said, tail: '.' })
+    : `Complained on ${day} call.`;
+  const buttons = require('./alert-call-button').callButtons({ callLogId: call.id });
+  return {
+    category: 'customer',
+    spec: {
+      area: 'Comms',
+      action: fitAction('Comms', who, [(n) => `call ${n} about a complaint`, (n) => `call ${n}`]),
+      why,
+      severity: 'needs-you',
+      link: `/admin/communications#tab=calls&call=${encodeURIComponent(call.id)}`,
+      subject: { type: 'call', id: String(call.id) },
+      doneWhen: 'complaint_answered',
+      who: 'person',
+      contact: true,
+      ...(buttons ? { buttons } : {}),
+    },
+    opts: {
+      bell: true,
+      dedupeKey: `call-complaint:${call.id}`,
+      detail: [
+        `The call${clock ? ` at ${clock} ET` : ''} was labeled a complaint from a known customer. Call them back. Nothing was sent to the customer.`,
+        points && `Objections raised: ${redactedWords(points)}`,
+        summary && `Summary: ${redactedWords(summary)}`,
+        !points && !summary && 'The summary is on the call record.',
+      ].filter(Boolean).join('\n'),
+      metadata: { callLogId: call.id, customerId: String(customerId), source: 'call_complaint' },
+    },
+  };
+}
+
+// Raise it once per call, right after the label is written. All of these must hold, or nothing rings: this pass
+// wrote complaint_escalated, a customer is known and is not a test customer, the call is not a voice-relay
+// sandbox or tech-line call, it ended in the last 24 hours by the call timeline's own end time (a row inserted
+// after the call with no stamped end has none, so it never rings), and this pass still owns the call: one
+// locked read, in the same transaction as the bell's insert, finds the call at this pass's processing_generation with
+// the label still complaint_escalated (a newer force-reprocess, or no generation known, rings nothing). One bell per call ever: dedupeKey with no dedupeOpenOnly, so a reprocess neither rings again nor re-opens a closed
+// bell. A failure is logged by code and never fails the call. Sends nothing to the customer.
+async function keepComplaintCallAlert({ written, disposition, call, callSid, customerId, v2Extraction, procGeneration, now = new Date() }) {
+  if (written !== true || disposition !== 'complaint_escalated') return null;
+  try {
+    const id = customerId || call.customer_id;
+    if (!id || require('./internal-test-customers').isInternalTestCustomerId(id)) return null;
+    if (require('./voice-agent/relay-protocol').isInternalCallSource(call.source)) return null;
+    if (procGeneration == null) return null;
+    const endedAt = require('../utils/call-timeline').callEndedAt(call);
+    if (!endedAt || Number.isNaN(endedAt.getTime()) || now.getTime() - endedAt.getTime() > 24 * 60 * 60 * 1000) return null;
+    const customer = await db('customers').where({ id }).first('first_name', 'last_name').catch(() => null);
+    const alert = buildComplaintCallAlert({ call, customerId: id, name: require('./admin-alert-names').realName(customer), v2Extraction, now });
+    // The ownership check and the bell are ONE transaction: the call row is locked and re-read at this pass's generation
+    // and label, and the notification is written on the same transaction (opts.trx: its dedupe lock, read and insert),
+    // so a force-reprocess cannot change the call between the check and the bell. Short and last: the name read and the
+    // alert build above stay outside it. Locks the call row, then the alert key's advisory lock (the order notifyAdmin's
+    // own relay path uses); nothing else takes that key while holding a call row.
+    return await db.transaction(async (trx) => {
+      await trx.raw("SET LOCAL statement_timeout = '3s'");
+      await trx.raw("SET LOCAL idle_in_transaction_session_timeout = '5s'");
+      const stillOurs = await trx('call_log').where({ id: call.id, processing_generation: procGeneration, disposition: 'complaint_escalated' }).forUpdate().first('id');
+      if (!stillOurs) return null;
+      return require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, { ...alert.opts, trx });
+    });
+  } catch (err) {
+    logger.warn(`[call-proc] complaint call alert failed for ${maskSid(callSid)}: ${err?.code || err?.name || 'error'}`);
+    return null;
+  }
 }
 
 const CallRecordingProcessor = {
@@ -12958,7 +13055,7 @@ const CallRecordingProcessor = {
       // verdicts + terminal dispositions — it's the population the live
       // accrual exists to measure. Customer resolution hasn't run on this
       // path; enrichment keys on the webhook's pre-linked customer if any.
-      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, customerId: call.customer_id || null, transcript: transcription });
+      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, customerId: call.customer_id || null, transcript: transcription, procGeneration });
 
       // GATE_CALL_APPLICANT_HANDLING: an applicant's voicemail (name + callback
       // number, no service ask) ends on this path too; the step skips spam and
@@ -25006,7 +25103,7 @@ const CallRecordingProcessor = {
     // peer reclaimed the processing_token — this attempt's extraction is
     // stale and must not record verdicts, stamp a disposition, or enrich.
     if (finalized > 0) {
-      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId, transcript: transcription });
+      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId, transcript: transcription, procGeneration });
 
       // Commitments (recordCommitmentsStep): after finalization, generation-fenced, never blocking.
       await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
@@ -26060,6 +26157,8 @@ CallRecordingProcessor._test = {
   outOfAreaHoldDisposition,
   buildOutOfAreaHoldAlert,
   keepOutOfAreaHoldRecords,
+  buildComplaintCallAlert,
+  keepComplaintCallAlert,
   recordCommitmentsStep,
   fileApplicantCareersRowStep,
   applyCallRescheduleStep,
