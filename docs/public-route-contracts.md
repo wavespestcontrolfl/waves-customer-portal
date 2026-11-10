@@ -1805,9 +1805,14 @@ destinations stay busy for every other offer, reserve, same-slot refresh,
 inside the commit grace or lengthened by the accepted service is refused too),
 in hour mode and in capacity mode, under the occupancy technician scope (that
 technician's rows plus unassigned rows when multi-tech confirm is on, every
-technician when it is off); a hold's own row never blocks itself. `/extend` re-proves a make-room
-hold's hour, or supersedes the hold through the existing
-`SLOT_UNAVAILABLE` path. Accepting a make-room hold (the accept routes'
+technician when it is off); a hold's own row never blocks itself. The other
+booking surfaces read the same destinations through the shared occupancy
+module, so `/book`, the zone-engine confirm and the other booking writers
+neither offer nor take them (a writer moving one of the chain's own stops is
+not blocked by that chain). `/extend` re-proves a make-room hold's hour, or
+supersedes the hold through the existing `SLOT_UNAVAILABLE` path; with the
+gate not on, or in capacity mode, nothing can prove its hour, so it is
+superseded the same way. Accepting a make-room hold (the accept routes'
 `commitReservation`, gate read inside the transaction) moves the stops: it
 takes the tech-day locks after the date lock, locks the moved stops' rows
 (`FOR UPDATE`, in id order, held to the end), proves the chain again with the

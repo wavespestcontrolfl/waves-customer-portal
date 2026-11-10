@@ -529,22 +529,24 @@ postgres('hold grace + extend (real Postgres)', () => {
       process.env.RESERVATION_COMMIT_GRACE_MINUTES = '10';
       await withHold({ expiresInSeconds, windowStart, windowEnd }, async (ctx) => {
         const rivalEstimate = randomUUID();
+        const rivalHoldId = randomUUID();
+        const rivalStopId = randomUUID();
         await ctx.trx('estimates').insert({
           id: rivalEstimate, token: randomUUID().replace(/-/g, ''), status: 'sent',
           customer_name: 'Rival Hold', address: '2 Test Way, Parrish, FL 34219',
           expires_at: ctx.trx.raw("NOW() + INTERVAL '7 days'"),
         });
         await ctx.trx('scheduled_services').insert({
-          id: randomUUID(), source_estimate_id: rivalEstimate, customer_id: null,
+          id: rivalHoldId, source_estimate_id: rivalEstimate, customer_id: null,
           scheduled_date: ctx.date, window_start: rival.start, window_end: rival.end,
           estimated_duration_minutes: 60, service_type: 'Lawn Care', status: 'pending',
           reservation_expires_at: ctx.trx.raw("NOW() + INTERVAL '10 minutes'"),
           make_room_moves: {
             v: 1, date: ctx.date, techId: null, shiftMin: rival.shiftMin,
-            moves: [{ id: randomUUID(), from: rival.from, to: '13:00', widthMin: 60 }],
+            moves: [{ id: rivalStopId, from: rival.from, to: '13:00', widthMin: 60 }],
           },
         });
-        await run(ctx);
+        await run({ ...ctx, rivalHoldId, rivalStopId });
       });
     }
     const acceptWith = (durationMinutes) => estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
@@ -581,6 +583,34 @@ postgres('hold grace + extend (real Postgres)', () => {
         const row = await holdRow(trx, holdId);
         expect(row.customer_id).toBe(customerId);
         expect(row.reservation_expires_at).toBeNull();
+      });
+    });
+
+    // Codex #7796 P2: the other booking writers (/book, availability confirm, the voice agent, the rebooker, ...) and
+    // the offer side read occupancy through the shared module; the rival chain's 13:00-14:00 destination is taken there.
+    test('the shared occupancy reads count a live chain\'s destination, on real rows (Codex #7796 P2)', async () => {
+      const { findConflictingVisits, listOccupiedWindows } = require('../services/scheduling/occupancy');
+      await withRivalChainOver({ expiresInSeconds: 300, windowStart: '09:00:00', windowEnd: '10:00:00' }, async ({ trx, date, rivalHoldId, rivalStopId }) => {
+        const at = (windowStart, windowEnd, extra = {}) => findConflictingVisits({ db: trx, date, windowStart, windowEnd, ...extra });
+        expect(await at('13:30', '14:30')).toEqual([expect.objectContaining({
+          id: rivalHoldId, customer_id: null, window_start: '13:00:00', window_end: '14:00:00', conflict_reason: 'make_room_destination',
+        })]);
+        // Half-open: a window that only touches the destination is free.
+        expect(await at('14:00', '15:00')).toEqual([]);
+        // The rival's own hold row at noon counts as before; its destination row comes after it.
+        expect((await at('12:30', '13:30')).map((row) => row.id)).toEqual([rivalHoldId, rivalHoldId]);
+        // A caller moving the chain's own stop is not blocked by that chain.
+        expect(await at('13:00', '14:00', { excludeServiceIds: [rivalStopId] })).toEqual([]);
+        // The reservation probes leave holds out and run their own destination checks.
+        expect(await at('13:00', '14:00', { includeHolds: false })).toEqual([]);
+        // The offer side: the destination is an occupied window, with no pin, read as a hold.
+        const occupied = await listOccupiedWindows({ db: trx, dateFrom: date, dateTo: date, withCoords: true });
+        expect(occupied).toEqual(expect.arrayContaining([expect.objectContaining({
+          id: rivalHoldId, date, startMin: 13 * 60, endMin: 14 * 60, lat: null, lng: null, hold: true, conflict_reason: 'make_room_destination',
+        })]));
+        process.env.GATE_BOOKING_MAKE_ROOM = 'shadow';
+        expect(await at('13:30', '14:30')).toEqual([]);
+        expect((await listOccupiedWindows({ db: trx, dateFrom: date, dateTo: date })).some((row) => row.conflict_reason)).toBe(false);
       });
     });
 

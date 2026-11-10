@@ -463,11 +463,14 @@ describe('the destination guards in capacity mode (Codex #7796 P2)', () => {
     expect(estimateSlotAvailability.verifyMakeRoomOffer).not.toHaveBeenCalled();
   });
 
-  test('extend, no hit: a make-room hold made in hour mode gets the ordinary probe (no proof in capacity mode)', async () => {
+  // Codex #7796 P2 (round 3): capacity mode proves no make-room hour, and a capacity hold's extend runs no occupancy
+  // probe, so a make-room hold made in hour mode is refused outright, never extended unproven.
+  test.each([false, true])('extend: a make-room hold made in hour mode is refused in capacity mode (rowUnderCapacity %s); no read, no proof', async (rowUnderCapacity) => {
     const trx = jest.fn(() => destinationProbe(null));
     const row = { id: 'hold-1', technician_id: 'tech-1', make_room_moves: PAYLOAD };
-    await expect(extendMakeRoomState(trx, { row, estimate: { id: EST }, rowUnderCapacity: false, scheduledDate: DATE, windowStart: '09:00:00', windowEnd: '10:00:00' }))
-      .resolves.toEqual({ makeRoom: null, refused: false });
+    await expect(extendMakeRoomState(trx, { row, estimate: { id: EST }, rowUnderCapacity, scheduledDate: DATE, windowStart: '09:00:00', windowEnd: '10:00:00' }))
+      .resolves.toEqual({ makeRoom: null, refused: true });
+    expect(trx).not.toHaveBeenCalled();
     expect(estimateSlotAvailability.verifyMakeRoomOffer).not.toHaveBeenCalled();
   });
 });
