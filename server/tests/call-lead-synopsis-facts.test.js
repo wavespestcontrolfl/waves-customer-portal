@@ -13,17 +13,19 @@ jest.mock('../services/llm-dispatch-metrics', () => ({
   recordedPolicyLabel: jest.fn(() => null),
   ledgerCall: jest.fn((_provider, _model, fn) => fn()),
 }));
+jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
 
+const db = require('../models/db');
 const fs = require('fs');
 const path = require('path');
 const { _test } = require('../services/call-recording-processor');
 
 const {
   generateLeadSynopsis, resolveLeadSynopsis, leadSynopsisFactsBlock, buildLeadSynopsisFacts,
-  LEAD_SYNOPSIS_GATE_SENTENCE, LEAD_SYNOPSIS_GATE_REFUSAL_RE, summarizeKnownCaller,
+  LEAD_SYNOPSIS_GATE_SENTENCE, LEAD_SYNOPSIS_GATE_REFUSAL_RE, summarizeKnownCaller, leadSynopsisCallerState,
 } = _test;
 
 const TRANSCRIPT = 'Agent: Waves, how can I help?\nCaller: I have ants in the kitchen.';
@@ -41,7 +43,7 @@ describe('leadSynopsisFactsBlock', () => {
     callerOnFile: true,
     visit: { booked: true, when: 'Tue Nov 10, 9 AM', service: 'General Pest Control' },
     quotePromised: false,
-    nameOnRecord: true,
+    name: 'complete',
     email: 'held',
   };
 
@@ -50,16 +52,18 @@ describe('leadSynopsisFactsBlock', () => {
     expect(block).toContain('- Caller on file before this call: yes (a prospect or past account)');
     expect(block).toContain('- A visit was booked on this call: Tue Nov 10, 9 AM, General Pest Control');
     expect(block).toContain('- A quote was promised on this call: no');
-    expect(block).toContain("- The customer's name is on the record: yes");
+    expect(block).toContain("- The customer's name on the record: complete");
     expect(block).toContain('- An email is on the record: held for review');
   });
 
   test('the other states render', () => {
-    const block = leadSynopsisFactsBlock({ callerOnFile: false, visit: { booked: false }, quotePromised: true, nameOnRecord: false, email: 'no' });
+    const block = leadSynopsisFactsBlock({ callerOnFile: false, visit: { booked: false }, quotePromised: true, name: 'none', email: 'no' });
     expect(block).toContain('Caller on file before this call: no');
     expect(block).toContain('A visit was booked on this call: none');
     expect(block).toContain('A quote was promised on this call: yes');
-    expect(block).toContain("name is on the record: no");
+    expect(block).toContain("name on the record: none");
+    expect(leadSynopsisFactsBlock({ name: 'first' })).toContain("name on the record: first name only");
+    expect(leadSynopsisFactsBlock({ name: 'last' })).toContain("name on the record: last name only");
     expect(block).toContain('An email is on the record: no');
     expect(leadSynopsisFactsBlock({ email: 'yes' })).toContain('An email is on the record: yes');
   });
@@ -69,8 +73,8 @@ describe('leadSynopsisFactsBlock', () => {
   });
 
   test('unknown facts are left out', () => {
-    const block = leadSynopsisFactsBlock({ nameOnRecord: true });
-    expect(block).toContain("name is on the record: yes");
+    const block = leadSynopsisFactsBlock({ name: 'complete' });
+    expect(block).toContain("name on the record: complete");
     expect(block).not.toMatch(/Caller on file|A visit|A quote|An email/);
     expect(leadSynopsisFactsBlock({ visit: {} })).toBe('');
   });
@@ -85,7 +89,7 @@ describe('leadSynopsisFactsBlock', () => {
   test('the block carries the instruction lines, and ends with a blank line', () => {
     const block = leadSynopsisFactsBlock(full);
     expect(block).toContain('These record facts come from our system and outrank the transcript.');
-    expect(block).toContain('Do not tell the office to capture, confirm or verify anything the record facts show as on the record.');
+    expect(block).toContain('Do not tell the office to capture, confirm or verify a detail the record facts show as complete or on the record.');
     expect(block).toContain('Do not describe how a name or an email is spelled.');
     expect(block).toContain('the office follow-up (Step 3C) is about that visit, not about booking one.');
     expect(block.endsWith('\n\n')).toBe(true);
@@ -94,8 +98,9 @@ describe('leadSynopsisFactsBlock', () => {
   test('hostile input never puts an email, phone or street in the block', () => {
     const block = leadSynopsisFactsBlock({
       callerOnFile: true,
-      name: 'Pat Example', email_address: 'pat-example@example.test', phone: '+19415550123', address: '12 Example Way, Bradenton',
-      nameOnRecord: 'Pat Example',
+      full_name: 'Pat Example', email_address: 'pat-example@example.test', phone: '+19415550123', address: '12 Example Way, Bradenton',
+      name: 'Pat Example',
+      nameOnRecord: true,
       email: 'pat-example@example.test',
       visit: { booked: true, when: 'pat-example@example.test', service: '12 Example Way', name: 'Pat', phone: '941-555-0123' },
       quotePromised: '941-555-0123',
@@ -105,7 +110,7 @@ describe('leadSynopsisFactsBlock', () => {
     expect(block).not.toMatch(/Example Way|Pat|Bradenton/);
     expect(block).toContain('A visit was booked on this call: yes (day and time not available here)');
     // The unexpected fields did not produce lines of their own.
-    expect(block).not.toMatch(/name is on the record|An email is on the record|A quote/);
+    expect(block).not.toMatch(/name on the record|An email is on the record|A quote/);
   });
 
   test('hostile phone and street text inside the allowed visit fields is dropped', () => {
@@ -149,8 +154,12 @@ describe('buildLeadSynopsisFacts', () => {
     expect(buildLeadSynopsisFacts({ quotePromised: true }).quotePromised).toBe(true);
     expect(buildLeadSynopsisFacts({ quotePromised: false }).quotePromised).toBe(false);
     expect(buildLeadSynopsisFacts({})).not.toHaveProperty('quotePromised');
-    expect(buildLeadSynopsisFacts({ nameOnRecord: true, emailOnRecord: true })).toMatchObject({ nameOnRecord: true, email: 'yes' });
-    expect(buildLeadSynopsisFacts({ nameOnRecord: false, emailOnRecord: false })).toMatchObject({ nameOnRecord: false, email: 'no' });
+    expect(buildLeadSynopsisFacts({ nameState: 'complete', emailOnRecord: true })).toMatchObject({ name: 'complete', email: 'yes' });
+    expect(buildLeadSynopsisFacts({ nameState: 'first', emailOnRecord: false })).toMatchObject({ name: 'first', email: 'no' });
+    expect(buildLeadSynopsisFacts({ nameState: 'last' })).toMatchObject({ name: 'last' });
+    expect(buildLeadSynopsisFacts({ nameState: 'none' })).toMatchObject({ name: 'none' });
+    expect(buildLeadSynopsisFacts({ nameState: 'Pat Example' })).not.toHaveProperty('name');
+    expect(buildLeadSynopsisFacts({})).not.toHaveProperty('name');
     expect(buildLeadSynopsisFacts({})).not.toHaveProperty('email');
   });
 
@@ -162,7 +171,7 @@ describe('buildLeadSynopsisFacts', () => {
   test('the facts hold states only, never a name, email, phone or address', () => {
     const facts = buildLeadSynopsisFacts({
       knownCaller: customer('new_lead'), appointmentResult: { scheduledServiceId: 'v1', service: 'General Pest Control', scheduledDate: '2026-11-10', windowStart: '09:00' },
-      quotePromised: true, nameOnRecord: true, emailOnRecord: true,
+      quotePromised: true, nameState: 'complete', emailOnRecord: true,
     });
     expect(JSON.stringify(facts)).not.toMatch(/Pat|Example|@/);
   });
@@ -197,7 +206,7 @@ describe('resolveLeadSynopsis', () => {
   test('a prospect on file reaches the provider with the facts block in the prompt', async () => {
     const known = summarizeKnownCaller({ id: 'c2', first_name: 'Sam', last_name: 'Sample', pipeline_stage: 'new_lead', created_at: new Date() });
     expect(known.isExistingCustomer).toBe(false);
-    const facts = buildLeadSynopsisFacts({ knownCaller: known, appointmentResult: null, quotePromised: true, nameOnRecord: true, emailOnRecord: false });
+    const facts = buildLeadSynopsisFacts({ knownCaller: known, appointmentResult: null, quotePromised: true, nameState: 'complete', emailOnRecord: false });
     const out = await resolveLeadSynopsis(TRANSCRIPT, { currentCustomer: known.isExistingCustomer === true, facts });
     expect(out).toBe('## Lead notes');
     expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
@@ -212,7 +221,7 @@ describe('resolveLeadSynopsis', () => {
   });
 
   test('a caller not on file reaches the provider with the facts block', async () => {
-    const facts = buildLeadSynopsisFacts({ knownCaller: null, appointmentResult: { scheduledServiceId: 'v1', service: 'General Pest Control', scheduledDate: '2026-11-10', windowStart: '09:00' }, nameOnRecord: true, emailOnRecord: true });
+    const facts = buildLeadSynopsisFacts({ knownCaller: null, appointmentResult: { scheduledServiceId: 'v1', service: 'General Pest Control', scheduledDate: '2026-11-10', windowStart: '09:00' }, nameState: 'complete', emailOnRecord: true });
     await resolveLeadSynopsis(TRANSCRIPT, { currentCustomer: false, facts });
     expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
     const prompt = promptSent();
@@ -243,15 +252,87 @@ describe('resolveLeadSynopsis', () => {
   });
 });
 
+describe('leadSynopsisCallerState (the skip follows the resolved caller)', () => {
+  const known = (id, stage) => summarizeKnownCaller({ id, first_name: 'Pat', last_name: 'Example', pipeline_stage: stage, created_at: new Date() });
+
+  test('same customer and a current customer: skip, on file', () => {
+    expect(leadSynopsisCallerState({ knownCaller: known('c1', 'active_customer'), customerId: 'c1' })).toEqual({ currentCustomer: true, callerOnFile: true });
+    // ids compare as text (uuid string vs. a driver's value)
+    expect(leadSynopsisCallerState({ knownCaller: known(7, 'active_customer'), customerId: '7' }).currentCustomer).toBe(true);
+  });
+
+  test('a different resolved customer (shared household number): no skip, no on-file fact', () => {
+    expect(leadSynopsisCallerState({ knownCaller: known('c1', 'active_customer'), customerId: 'c2' })).toEqual({ currentCustomer: false, callerOnFile: undefined });
+  });
+
+  test('no resolved customer: no skip, no on-file fact', () => {
+    expect(leadSynopsisCallerState({ knownCaller: known('c1', 'active_customer'), customerId: null })).toEqual({ currentCustomer: false, callerOnFile: undefined });
+    expect(leadSynopsisCallerState({ knownCaller: known('c1', 'active_customer') }).currentCustomer).toBe(false);
+  });
+
+  test('same customer but not a current customer (a prospect): no skip, on file yes', () => {
+    expect(leadSynopsisCallerState({ knownCaller: known('c2', 'new_lead'), customerId: 'c2' })).toEqual({ currentCustomer: false, callerOnFile: true });
+  });
+
+  test('no pre-lookup match: not on file, no skip (a customer made during this pass is not pre-existing)', () => {
+    expect(leadSynopsisCallerState({ knownCaller: null, customerId: 'c9' })).toEqual({ currentCustomer: false, callerOnFile: false });
+  });
+
+  test('lookup failed or unknown: unknown, no skip', () => {
+    expect(leadSynopsisCallerState({ knownCaller: null, customerId: 'c1', lookupFailed: true })).toEqual({ currentCustomer: false, callerOnFile: undefined });
+    expect(leadSynopsisCallerState({ knownCaller: known('c1', 'active_customer'), customerId: 'c1', lookupFailed: true }).currentCustomer).toBe(false);
+    expect(leadSynopsisCallerState({})).toEqual({ currentCustomer: false, callerOnFile: undefined });
+  });
+
+  test('a shared-number prospect resolved by the pass still gets the model', async () => {
+    const state = leadSynopsisCallerState({ knownCaller: known('c1', 'active_customer'), customerId: 'c2' });
+    await resolveLeadSynopsis(TRANSCRIPT, { currentCustomer: state.currentCustomer, facts: buildLeadSynopsisFacts({ callerOnFile: state.callerOnFile }) });
+    expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
+    expect(promptSent()).not.toContain('Caller on file before this call');
+  });
+});
+
+describe('readLeadSynopsisRecordState (name is complete, partial or none)', () => {
+  const rowIs = (row) => db.mockImplementation(() => ({ where: () => ({ whereNull: () => ({ first: async () => row }) }) }));
+  const read = () => _test.readLeadSynopsisRecordState('c1');
+
+  test.each([
+    [{ first_name: 'Pat', last_name: 'Example', email: 'pat-example@example.test' }, { nameState: 'complete', emailOnRecord: true }],
+    [{ first_name: 'Pat', last_name: '', email: null }, { nameState: 'first', emailOnRecord: false }],
+    [{ first_name: null, last_name: 'Example', email: '' }, { nameState: 'last', emailOnRecord: false }],
+    [{ first_name: '', last_name: ' ', email: '  ' }, { nameState: 'none', emailOnRecord: false }],
+    // intake placeholders are not real name parts
+    [{ first_name: 'Pat', last_name: 'Unknown', email: 'a@example.test' }, { nameState: 'first', emailOnRecord: true }],
+    [{ first_name: 'Unknown', last_name: 'Caller', email: null }, { nameState: 'none', emailOnRecord: false }],
+  ])('%j', async (row, expected) => {
+    rowIs(row);
+    expect(await read()).toEqual(expected);
+  });
+
+  test('no id, no row or a failed read leaves both facts out', async () => {
+    expect(await _test.readLeadSynopsisRecordState(null)).toEqual({});
+    rowIs(undefined);
+    expect(await read()).toEqual({});
+    db.mockImplementation(() => { throw new Error('db down'); });
+    expect(await read()).toEqual({});
+  });
+
+  test('the state never carries the name or the email itself', async () => {
+    rowIs({ first_name: 'Pat', last_name: 'Example', email: 'pat-example@example.test' });
+    expect(JSON.stringify(await read())).not.toMatch(/Pat|Example|@/);
+  });
+});
+
 describe('call sites (source pins)', () => {
   const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
 
   test('the main pass passes its known-caller signal and the facts', () => {
-    expect(src).toContain('currentCustomer: knownCaller?.isExistingCustomer === true,');
+    expect(src).toContain('leadSynopsisCallerState({ knownCaller, customerId, lookupFailed: knownCallerLookupFailed })');
+    expect(src).toContain('currentCustomer: synopsisCaller.currentCustomer,');
     const site = src.slice(src.indexOf('synopsis = await resolveLeadSynopsis(transcription, {'));
     const call = site.slice(0, site.indexOf('if (synopsis) {'));
     expect(call).toContain('buildLeadSynopsisFacts({');
-    expect(call).toContain('knownCaller, lookupFailed: knownCallerLookupFailed');
+    expect(call).toContain('callerOnFile: synopsisCaller.callerOnFile');
     expect(call).toContain('appointmentResult');
     expect(call).toContain('quotePromised: callQuotePromised');
     expect(call).toContain('emailHeld: emailReviewHeldThisRun');

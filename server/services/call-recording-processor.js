@@ -10404,6 +10404,11 @@ function leadSynopsisSafeWords(value) {
   return /^[A-Za-z0-9 :,.&()'/+-]+$/.test(text) ? text : null;
 }
 
+// The name fact has three states: a partial name still leaves something for the
+// office to complete (the booking path files missing_first_name / missing_last_name
+// cards for it), so only a complete name may suppress name follow-up.
+const LEAD_SYNOPSIS_NAME_LINES = Object.freeze({ complete: 'complete', first: 'first name only', last: 'last name only', none: 'none' });
+
 // The "Record facts" block for the synopsis prompt. Pure. Each known fact is
 // one short line; an unknown fact (undefined) is left out, never guessed; an
 // empty object renders no block at all. Booleans and states only, no name,
@@ -10424,7 +10429,7 @@ function leadSynopsisFactsBlock(facts) {
     }
   }
   if (typeof f.quotePromised === 'boolean') lines.push(`- A quote was promised on this call: ${f.quotePromised ? 'yes' : 'no'}`);
-  if (typeof f.nameOnRecord === 'boolean') lines.push(`- The customer's name is on the record: ${f.nameOnRecord ? 'yes' : 'no'}`);
+  if (LEAD_SYNOPSIS_NAME_LINES[f.name]) lines.push(`- The customer's name on the record: ${LEAD_SYNOPSIS_NAME_LINES[f.name]}`);
   if (f.email === 'yes' || f.email === 'held' || f.email === 'no') {
     lines.push(`- An email is on the record: ${f.email === 'held' ? 'held for review' : f.email}`);
   }
@@ -10432,7 +10437,7 @@ function leadSynopsisFactsBlock(facts) {
   return `Record facts (from our system):
 ${lines.join('\n')}
 These record facts come from our system and outrank the transcript.
-- Do not tell the office to capture, confirm or verify anything the record facts show as on the record.
+- Do not tell the office to capture, confirm or verify a detail the record facts show as complete or on the record.
 - Do not describe how a name or an email is spelled.
 - When a visit is booked, the office follow-up (Step 3C) is about that visit, not about booking one.
 
@@ -10446,9 +10451,10 @@ These record facts come from our system and outrank the transcript.
 //  - visit: booked only when the booking result carries a schedule row id (the
 //    test the rest of the pass uses); the day and start come from the same
 //    result. appointmentResult undefined = unknown (no line); null = none booked.
-//  - quotePromised / nameOnRecord / emailOnRecord: booleans when the caller knows them.
+//  - quotePromised / emailOnRecord: booleans when the caller knows them; nameState is
+//    'complete' | 'first' | 'last' | 'none' (see readLeadSynopsisRecordState).
 //  - emailHeld: the pass put the email under read-back review.
-function buildLeadSynopsisFacts({ knownCaller, lookupFailed = false, callerOnFile, appointmentResult, quotePromised, nameOnRecord, emailOnRecord, emailHeld = false } = {}) {
+function buildLeadSynopsisFacts({ knownCaller, lookupFailed = false, callerOnFile, appointmentResult, quotePromised, nameState, emailOnRecord, emailHeld = false } = {}) {
   const facts = {};
   if (typeof callerOnFile === 'boolean') facts.callerOnFile = callerOnFile;
   else if (knownCaller) facts.callerOnFile = true;
@@ -10463,13 +10469,13 @@ function buildLeadSynopsisFacts({ knownCaller, lookupFailed = false, callerOnFil
       : { booked: false };
   }
   if (typeof quotePromised === 'boolean') facts.quotePromised = quotePromised;
-  if (typeof nameOnRecord === 'boolean') facts.nameOnRecord = nameOnRecord;
+  if (Object.hasOwn(LEAD_SYNOPSIS_NAME_LINES, nameState)) facts.name = nameState;
   if (emailHeld === true) facts.email = 'held';
   else if (typeof emailOnRecord === 'boolean') facts.email = emailOnRecord ? 'yes' : 'no';
   return facts;
 }
 
-// Whether the customer record holds a name and an email. The pass writes the
+// Whether the customer record holds a complete name (first AND last), a partial one or none, and an email. The pass writes the
 // record in many branches, so this is one small read of the final row (not
 // derivable from the extraction alone). Fails to {} (both facts left out) on a
 // missing id or any read error.
@@ -10478,11 +10484,33 @@ async function readLeadSynopsisRecordState(customerId) {
   try {
     const row = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('first_name', 'last_name', 'email');
     if (!row) return {};
-    const has = (v) => String(v || '').trim().length > 0;
-    return { nameOnRecord: has(row.first_name) || has(row.last_name), emailOnRecord: has(row.email) };
+    // A real name part: not blank and not an intake placeholder ("Unknown",
+    // "Caller", ...), the same test the rest of the call lane uses.
+    const { isMissingName } = require('./call-commitments');
+    const first = !isMissingName(row.first_name);
+    const last = !isMissingName(row.last_name);
+    return {
+      nameState: first && last ? 'complete' : first ? 'first' : last ? 'last' : 'none',
+      emailOnRecord: String(row.email || '').trim().length > 0,
+    };
   } catch {
     return {};
   }
+}
+
+// What this pass knew about the caller BEFORE the call, bound to the account the
+// pass finally resolved. The pre-lookup is phone-only; on a shared household
+// number it can pick one person while Step 3's name-aware resolution lands on
+// another. So the skip and the "on file before this call" fact hold only when the
+// pre-lookup customer IS the resolved customer. A different (or no) resolved
+// customer is unknown, never a guess: the model runs. Pure.
+//  - knownCaller: summarizeKnownCaller result, null = no match, undefined = unknown.
+function leadSynopsisCallerState({ knownCaller, customerId, lookupFailed = false } = {}) {
+  if (lookupFailed || knownCaller === undefined) return { currentCustomer: false, callerOnFile: undefined };
+  if (knownCaller === null) return { currentCustomer: false, callerOnFile: false };
+  const sameCustomer = !!customerId && String(knownCaller.id) === String(customerId);
+  if (!sameCustomer) return { currentCustomer: false, callerOnFile: undefined };
+  return { currentCustomer: knownCaller.isExistingCustomer === true, callerOnFile: true };
 }
 
 // The synopsis for one call. A CURRENT customer is never a new lead, so the
@@ -24177,15 +24205,16 @@ const CallRecordingProcessor = {
     let synopsis = null;
     if (transcription && !extracted.is_spam && !extracted.is_voicemail) {
       try {
-        // A CURRENT customer (this pass's pre-lookup) skips the model and gets
-        // the gate sentence; everyone else gets the model plus the record
+        // A CURRENT customer (this pass's pre-lookup, and the SAME customer the
+        // pass resolved) skips the model and gets the gate sentence; everyone else gets the model plus the record
         // facts this pass already holds (customer name / email: one small
         // read of the final row, since the pass writes it in many branches).
-        const synopsisRecord = knownCaller?.isExistingCustomer === true ? {} : await readLeadSynopsisRecordState(customerId);
+        const synopsisCaller = leadSynopsisCallerState({ knownCaller, customerId, lookupFailed: knownCallerLookupFailed });
+        const synopsisRecord = synopsisCaller.currentCustomer ? {} : await readLeadSynopsisRecordState(customerId);
         synopsis = await resolveLeadSynopsis(transcription, {
-          currentCustomer: knownCaller?.isExistingCustomer === true,
+          currentCustomer: synopsisCaller.currentCustomer,
           facts: buildLeadSynopsisFacts({
-            knownCaller, lookupFailed: knownCallerLookupFailed, appointmentResult, quotePromised: callQuotePromised,
+            callerOnFile: synopsisCaller.callerOnFile, appointmentResult, quotePromised: callQuotePromised,
             ...synopsisRecord, emailHeld: emailReviewHeldThisRun,
           }),
         });
@@ -26298,6 +26327,8 @@ CallRecordingProcessor._test = {
   resolveLeadSynopsis,
   leadSynopsisFactsBlock,
   buildLeadSynopsisFacts,
+  leadSynopsisCallerState,
+  readLeadSynopsisRecordState,
   LEAD_SYNOPSIS_GATE_SENTENCE,
   LEAD_SYNOPSIS_GATE_REFUSAL_RE,
   CALL_EXTRACTION_V1_BACKUP_ROUTE,
