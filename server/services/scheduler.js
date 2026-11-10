@@ -1627,6 +1627,22 @@ function initScheduledJobs() {
   };
   cron.schedule('41 7 * * 1', () => runPermitSyncTick(), { timezone: 'America/New_York' });
   registerDeployKillRetry('permit-sync', () => runPermitSyncTick({ afterKill: true }));
+  // Catch-up on the six other days, same 7:41 AM slot: when Monday's report
+  // step did not commit (2026-11-09: the county refused both downloads with
+  // HTTP 403 and the tables stayed a week old), run the report step again.
+  // Freshness is read before the lease, so a normal week takes no lock and
+  // writes no job_health row. Report step only (about 3 minutes); a deploy
+  // kill goes through the retry registered above.
+  const runPermitReportCatchUpTick = async () => {
+    try {
+      const permitRun = require('./property-lookup/permit-sync-run');
+      if (!(await permitRun.reportCatchUpDue())) return;
+      await runExclusive('permit-sync', () => permitRun.runPermitReportCatchUp());
+    } catch (err) {
+      logger.error(`Permit sync catch-up lease failed: ${err.message}`);
+    }
+  };
+  cron.schedule('41 7 * * 0,2-6', () => runPermitReportCatchUpTick(), { timezone: 'America/New_York' });
 
   // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural

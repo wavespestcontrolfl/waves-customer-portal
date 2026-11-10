@@ -107,6 +107,11 @@
  * customer kind's witnesses) and a visit for that customer was completed (visitsCompletedAfterBell, by customer
  * id, any Eastern day).
  *
+ * A complaint-call bell (`call_complaint`; a known customer's call got the final label complaint_escalated, dedupeKey
+ * `call-complaint:<call id>`) closes under GATE_ALERT_CONTACT_CLOSE alone once a person reached that customer after
+ * the bell: a call back, an answered call, a text or an email (personContactReason). A booked visit or a sent estimate
+ * alone never closes it.
+ *
  * Three more rules carry their OWN three-state gate (owner 2026-10-29, "Stuck
  * Alert Fixes"; the third 2026-10-31), so they can run in shadow while GATE_ALERT_CONTACT_CLOSE is
  * `true`. A class (`gate`) is not offered at all while its gate is off, except
@@ -1293,6 +1298,13 @@ const CLASSES = [
   },
   { // call-recording-processor.js — one bell per voicemail, no dedupe key
     key: 'voicemail_callback', categories: ['voicemail_callback'], triggerKey: 'customer_voicemail_callback', contactOnly: true, contact: 'voice', contactRule: voicemailAnswered,
+  },
+  { // call-recording-processor.js keepComplaintCallAlert: a known customer's call got the final label complaint_escalated
+    // (dedupeKey call-complaint:<call id>, one bell per call, never refreshed, so created_at is its boundary). Closes once a
+    // person reached that customer after the bell (customerQuoteFormAnswered: personContactReason, the customer kind's
+    // witnesses). A booked visit or a sent estimate alone never closes it. Behind GATE_ALERT_CONTACT_CLOSE (`contactOnly`).
+    key: 'call_complaint', categories: ['customer'], prefix: 'call-complaint:', contactOnly: true, contact: 'customer',
+    contactRule: customerQuoteFormAnswered,
   },
   // Missed calls (customer_missed_call) are NOT here: missed-call-bell.js owns them
   // (retireCalledBackMissedCalls, every 2 minutes, one owner), and it judges the
