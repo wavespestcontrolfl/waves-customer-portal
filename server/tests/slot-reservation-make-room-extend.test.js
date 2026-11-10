@@ -140,6 +140,16 @@ describe('extendReservation — a make-room hold\'s re-proven chain against othe
     expect(update.update).not.toHaveBeenCalled();
   });
 
+  test('the gate turns off while the proof runs: the make-room hold is superseded, never extended (Codex pre-push P1)', async () => {
+    makeRoom.bookingMakeRoomMode.mockReturnValueOnce('on').mockReturnValue('off');
+    const checks = [probeOf(), probeOf(), probeOf()];
+    const { dead, update } = harness({ hold: MAKE_ROOM_HOLD, chainProbes: checks, superseded: true });
+    await expect(extend()).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+    expect(estimateSlotAvailability.verifyMakeRoomOffer).toHaveBeenCalledTimes(1);
+    expect(dead.del).toHaveBeenCalled();
+    expect(update.update).not.toHaveBeenCalled();
+  });
+
   test('no other chain takes its stops or their new hours: the make-room hold extends', async () => {
     const checks = [probeOf(), probeOf(), probeOf()];
     const { update } = harness({ hold: MAKE_ROOM_HOLD, chainProbes: checks });

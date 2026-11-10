@@ -2897,7 +2897,10 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
         expectedMinutes: await candidateExpectedMinutesFromRow(trx, row, extendWindowMinutes),
       },
     });
-    if (clash.length || makeRoomRefused) {
+    // The gate read again right before the writes (Codex pre-push P1): a make-room hold whose gate went off while its
+    // proof ran is superseded like one that no longer proves (its probes above skipped the stops it would move).
+    const makeRoomGateOff = !!makeRoom && !makeRoomHoldsOn();
+    if (clash.length || makeRoomRefused || makeRoomGateOff) {
       // Supersede — same narrow still-uncommitted predicate releaseReservation
       // uses — rather than leave a hold extending is guaranteed to lose at
       // commit occupying the window until it eventually expires.
