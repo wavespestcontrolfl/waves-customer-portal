@@ -339,12 +339,53 @@ describe('call sites (source pins)', () => {
     expect(src).not.toContain('synopsis = await generateLeadSynopsis(transcription);');
   });
 
-  test('the manual regenerate path skips a stamped current customer and passes facts', () => {
+  test('the manual regenerate path always runs the model and reads only its own customer row', () => {
     const start = src.indexOf('async generateSynopsis(callSid) {');
-    const body = src.slice(start, src.indexOf('return { success: true, synopsis };', start));
-    expect(body).toContain("currentCustomer: stamp === 'current_customer'");
-    expect(body).toContain('buildLeadSynopsisFacts({');
-    expect(body).toContain('readLeadSynopsisRecordState(call.customer_id)');
-    expect(body).not.toContain('generateLeadSynopsis(');
+    const body = src.slice(start, src.indexOf('return { success: true, synopsis };', start)).replace(/^\s*\/\/.*$/gm, '');
+    expect(body).toContain('generateLeadSynopsis(');
+    expect(body).toContain('buildLeadSynopsisFacts(await readLeadSynopsisRecordState(call.customer_id))');
+    expect(body).not.toContain('resolveLeadSynopsis(');
+    expect(body).not.toContain('known_caller');
+    expect(body).not.toContain('current_customer');
+  });
+});
+
+describe('generateSynopsis (manual regenerate)', () => {
+  const { CallRecordingProcessor } = (() => ({ CallRecordingProcessor: require('../services/call-recording-processor') }))();
+  const stubDb = ({ stamp, customerRow }) => {
+    const updates = [];
+    db.mockImplementation((table) => {
+      if (table === 'call_log') {
+        return {
+          where: () => ({
+            first: async () => ({ id: 'cl1', customer_id: 'c1', transcription: TRANSCRIPT, ai_extraction: JSON.stringify({ known_caller: stamp }) }),
+            update: (patch) => { updates.push(patch); return Promise.resolve(1); },
+          }),
+        };
+      }
+      return { where: () => ({ whereNull: () => ({ first: async () => customerRow }) }) };
+    });
+    return updates;
+  };
+
+  test.each(['current_customer', 'other_account', 'not_on_file', 'lookup_failed', undefined])('a stored stamp of %s never skips the model or states the on-file fact', async (stamp) => {
+    const updates = stubDb({ stamp, customerRow: { first_name: 'Pat', last_name: '', email: 'pat-example@example.test' } });
+    const out = await CallRecordingProcessor.generateSynopsis('CA_x');
+    expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
+    expect(out).toEqual({ success: true, synopsis: '## Lead notes' });
+    expect(updates).toEqual([{ lead_synopsis: '## Lead notes' }]);
+    const prompt = promptSent();
+    expect(prompt).not.toContain('Caller on file');
+    expect(prompt).toContain("- The customer's name on the record: first name only");
+    expect(prompt).toContain('- An email is on the record: yes');
+    expect(prompt).not.toMatch(/Pat|@/);
+    // No pass state here: no visit or quote line either.
+    expect(prompt).not.toMatch(/A visit was booked|A quote was promised/);
+  });
+
+  test('a customer row that cannot be read leaves the facts block out', async () => {
+    stubDb({ stamp: 'current_customer', customerRow: undefined });
+    await CallRecordingProcessor.generateSynopsis('CA_x');
+    expect(promptSent()).not.toContain('Record facts');
   });
 });

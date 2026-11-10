@@ -25887,19 +25887,15 @@ const CallRecordingProcessor = {
     if (!call) throw new Error(`Call not found: ${callSid}`);
     if (!call.transcription) throw new Error('No transcription available');
 
-    // Pass-time truth, not a fresh lookup: the known_caller stamp the pass wrote
-    // on the stored extraction (a customer who converted since must not turn an
-    // old lead note into a gate refusal). No stamp or a failed lookup = unknown:
-    // the model runs, with no on-file fact. Name / email come from the call's customer.
-    let stamp = null;
-    try { stamp = (typeof call.ai_extraction === 'string' ? JSON.parse(call.ai_extraction) : call.ai_extraction)?.known_caller || null; } catch { /* unreadable = unknown */ }
-    const synopsis = await resolveLeadSynopsis(call.transcription, {
-      currentCustomer: stamp === 'current_customer',
-      facts: buildLeadSynopsisFacts({
-        callerOnFile: { not_on_file: false, other_account: true }[stamp],
-        ...(await readLeadSynopsisRecordState(call.customer_id)),
-      }),
-    });
+    // An explicit staff action: the model always runs. The stored known_caller
+    // stamp is the phone-only pre-lookup, not the customer the pass resolved (on a
+    // shared number it can name a different person), and it carries no customer id
+    // to check, so it decides nothing here: no skip and no on-file fact. The facts
+    // are only what the call's own customer row says (name and email state).
+    const synopsis = await generateLeadSynopsis(
+      call.transcription,
+      buildLeadSynopsisFacts(await readLeadSynopsisRecordState(call.customer_id)),
+    );
     if (synopsis) {
       await db('call_log').where({ id: call.id }).update({ lead_synopsis: synopsis }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
     }
