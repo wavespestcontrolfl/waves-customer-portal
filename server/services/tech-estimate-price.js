@@ -5,9 +5,15 @@
  * it prices and saves nothing, sends nothing.
  *
  * The phone sends WHO (a customer on his route, or a new person he typed), WHICH pest services, and edits to a
- * few measured facts. The SERVER does the rest: the property lookup, the pricing request, the price
- * (serverRecomputeFromEstimateData, the office save's own re-pricing) and the answer, built field by field.
- * Nothing that moves a price (discount, credit, override, waiver, adjustment, move) is read from the phone.
+ * few measured facts. The SERVER does the rest, on the path that already makes estimates with no office user
+ * (services/moving-auto-estimate.js): the property lookup, the county-confirmed sizes (lead-draft-measurements
+ * countyMeasurements), the arbitrated facts (estimator-engine/source-arbitration), the engine input
+ * (estimator-engine/draft-builder buildEngineInput) and the price as a DRY RUN of the shared estimate save
+ * (admin-estimate-persistence createOrReuseAdminEstimate). Nothing that moves a price (discount, credit,
+ * override, waiver, adjustment, move) is read from the phone, and nothing is saved.
+ *
+ * A home the county has not confirmed (unit address, condo, townhome, new build, commercial) is never priced
+ * here: the answer is 422 office_prices, the same bar the move estimates use.
  *
  * Services: the pest lines the engine prices from the property alone (general pest, mosquito, rodent, termite
  * bait). Lines that need job facts the first release does not collect stay with the office: roach, flea, bed
@@ -21,6 +27,7 @@ const logger = require('./logger');
 const { classifyServiceCategory } = require('./auto-dispatch/service-category');
 const { listCapabilities } = require('./technician-capabilities');
 const { normalizeProspect } = require('./field-lead-gps');
+const { SQFT_SOURCES } = require('./estimator-engine/source-arbitration');
 const { roundMoney } = require('./billing-cadence');
 
 const ONE_TIME_HOLD_DOLLARS = 1000;
@@ -48,15 +55,26 @@ const FACT_LIMITS = Object.freeze({
 });
 const FACT_NAMES = Object.keys(FACT_LIMITS);
 
-// What a list-price quote of these lines needs, as the office tool's own defaults send it.
-const LIST_PRICE_OPTION_DEFAULTS = Object.freeze({
-  pestFreq: 4,
-  mosquitoProgram: 'monthly12',
-  termiteBaitSystem: 'trelona',
-  termiteMonitoringTier: 'basic',
-  termiteScope: 'bait_monitoring_no_warranty',
-  termiteOwnership: 'own',
+// Each key as the engine's own service object, and the estimator form's switch for it. These mirror what
+// routes/property-lookup-v2.js translateV2CallToV1Input emits for the key with the office tool's defaults
+// (routes/property-lookup-v2.js:5497 pest frequency 4 -> quarterly, :5580 pest, :5745 mosquito, :5752 termite,
+// :5777 rodent bait, :5781 one-time pest at NONE urgency, :5793 one-time mosquito); tech-estimates.test.js pins every entry against the translator.
+const deepFreeze = (value) => {
+  Object.values(value).forEach((v) => { if (v && typeof v === 'object') deepFreeze(v); });
+  return Object.freeze(value);
+};
+const ENGINE_SERVICES = deepFreeze({
+  PEST: { form: 'svcPest', services: { pest: { frequency: 'quarterly', roachType: 'none' } } },
+  OT_PEST: { form: 'svcOnetimePest', services: { oneTimePest: { urgency: 'NONE', afterHours: false } } },
+  MOSQUITO: { form: 'svcMosquito', services: { mosquito: { tier: 'monthly12' } } },
+  OT_MOSQUITO: { form: 'svcOnetimeMosquito', services: { oneTimeMosquito: {} } },
+  RODENT_BAIT: { form: 'svcRodentBait', services: { rodentBait: {} } },
+  TERMITE_BAIT: {
+    form: 'svcTermiteBait',
+    services: { termite: { system: 'trelona', monitoringTier: 'basic', scope: 'bait_monitoring_no_warranty', measurements: {} } },
+  },
 });
+const PEST_FREQUENCY_FORM_VALUE = '4';
 
 class PriceRefusal extends Error {
   constructor(status, message, extra = {}) {
@@ -134,92 +152,12 @@ async function resolveSubject(req, body) {
 }
 
 // ---------------------------------------------------------------------------
-// The profile: the lookup's, scoped and corrected the way the office tool builds it
+// The county-confirmed home, the technician's facts laid over it, and the engine input
 
-// The condo development's parcel: its lot and area reads describe the wrong thing (client lib/lookupPrefill.js).
-const UNIT_PARCEL_AREA_READS = ['estimatedTurfSf', 'turfSource', 'turfCappedToParcel', 'turfFallbackPreviewSf',
-  'imperviousSurfacePercent', 'imperviosSurfacePercent', 'estimatedBedAreaSf', 'estimatedBedAreaPercent',
-  'bedAreaSource', 'estimatedHedgeLinearFt'];
+const OFFICE_PRICES = Object.freeze({ error: 'The office needs to price this one.', code: 'office_prices' });
+const officePrices = () => new PriceRefusal(422, OFFICE_PRICES.error, { code: OFFICE_PRICES.code });
 
-function lookupValues(profile) {
-  const perimeter = profile.perimeterSource === 'computed_from_footprint' ? undefined : profile.perimeter;
-  return {
-    homeSqFt: numberOrNull(profile.homeSqFt) || null,
-    lotSqFt: numberOrNull(profile.lotSqFt) || null,
-    stories: numberOrNull(profile.stories) || null,
-    perimeterLF: numberOrNull(profile.perimeterLF ?? profile.perimeterLf ?? perimeter) || null,
-  };
-}
-
-// The tool's form defaults for what the lookup leaves blank (EstimateToolViewV2 buildTurfRequestProfile).
-function withFormDefaults(ep) {
-  const profile = { ...ep };
-  delete profile.squareFootage;
-  if (Array.isArray(profile.fieldVerifyFlags) && profile.fieldVerifyFlags.some((f) => f && f.field === 'lotSize' && f.scope === 'unit_parcel')) {
-    for (const key of UNIT_PARCEL_AREA_READS) delete profile[key];
-  }
-  const pool = ep.pool === 'YES';
-  const cage = pool && ep.poolCage === 'YES';
-  Object.assign(profile, {
-    pool: pool ? 'YES' : 'NO',
-    poolCage: cage ? 'YES' : 'NO',
-    poolCageSize: cage ? (ep.poolCageSize && ep.poolCageSize !== 'NONE' ? ep.poolCageSize : 'MEDIUM') : 'NONE',
-    shrubDensity: ep.shrubDensity || 'MODERATE',
-    treeDensity: ep.treeDensity || 'MODERATE',
-    landscapeComplexity: ep.landscapeComplexity || 'MODERATE',
-    nearWater: ep.nearWater && ep.nearWater !== 'NONE' ? 'YES' : 'NO',
-    homeSqFt: numberOrNull(ep.homeSqFt) || 0,
-    lotSqFt: numberOrNull(ep.lotSqFt) || 0,
-    stories: numberOrNull(ep.stories) || 1,
-  });
-  return profile;
-}
-
-const EDIT_STAMPS = {
-  homeSqFt: (p) => { p._homeSqFtManuallyEdited = true; },
-  stories: (p) => { p.storiesSource = 'manual'; },
-  perimeterLF: (p) => { p.perimeterSource = 'manual'; },
-  lotSqFt: () => {},
-};
-
-// Turf derived from the lookup's lot or building is stale once either is corrected (the tool's lookupTurfIsStale).
-function dropStaleTurf(profile, changed) {
-  const lot = changed.includes('lotSqFt');
-  const building = changed.includes('homeSqFt') || changed.includes('stories');
-  const stale = profile.turfSource === 'county_prior' ? (lot || building) : (profile.turfCappedToParcel === true && lot);
-  if (!stale) return;
-  for (const key of ['estimatedTurfSf', 'turfSource', 'turfCappedToParcel', 'countyTurfPriorSf']) delete profile[key];
-}
-
-// The pest footprint follows Home Sq Ft and Stories, exactly as the tool re-derives it on every price.
-function deriveFootprint(profile, changed) {
-  if (changed.includes('stories') && profile.footprintUnknown === true) profile.footprintUnknown = false;
-  if (profile.footprintUnknown === true) return;
-  profile.footprint = profile.homeSqFt ? Math.round(profile.homeSqFt / (profile.stories || 1)) : 0;
-}
-
-function buildProfile(lookupProfile, facts) {
-  const base = withFormDefaults(lookupProfile);
-  const fromLookup = lookupValues(lookupProfile);
-  const changed = FACT_NAMES.filter((name) => facts[name] !== undefined && facts[name] !== fromLookup[name]);
-  for (const name of changed) {
-    base[name] = facts[name];
-    EDIT_STAMPS[name](base);
-  }
-  dropStaleTurf(base, changed);
-  deriveFootprint(base, changed);
-  const shown = {};
-  for (const name of FACT_NAMES) {
-    const value = changed.includes(name) ? facts[name] : fromLookup[name];
-    if (value) shown[name] = { value, source: changed.includes(name) ? 'technician' : 'lookup' };
-  }
-  return { profile: base, changed, shown };
-}
-
-// ---------------------------------------------------------------------------
-// The lookup and the pricing request
-
-async function lookupProfile(address) {
+async function lookupFor(address) {
   const { performPropertyLookup } = require('../routes/property-lookup-v2');
   const { lookupOptionsFor } = require('./property-lookup/lookup-callers');
   let lookup;
@@ -229,51 +167,87 @@ async function lookupProfile(address) {
     logger.warn(`[tech-estimates] property lookup failed: ${err.code || err.name}`);
     throw new PriceRefusal(502, 'The property lookup is not available right now. Try again, or ask the office.');
   }
-  if (!lookup || !lookup.enriched) throw new PriceRefusal(422, 'The property could not be looked up. Ask the office to price this one.');
-  return lookup.enriched;
+  return lookup;
 }
 
-// The whole pricing request, built here. `options` holds only the matched customer and the list-price defaults.
-function buildEngineRequest({ profile, services, subject }) {
-  return {
-    profile,
-    selectedServices: services,
-    options: {
-      ...LIST_PRICE_OPTION_DEFAULTS,
-      address: subject.address,
-      ...(subject.customerId ? { existingCustomerId: subject.customerId } : {}),
-    },
+// Only a county-confirmed single-family home at an address with no unit is priced here (the move estimates' own bar).
+function assertCountyConfirmedHome(lookup, address) {
+  const { countyMeasurements, wholeHomeAddress } = require('./lead-draft-measurements')._private;
+  const { isCommercialProfile } = require('../routes/property-lookup-v2')._private;
+  if (!lookup || !lookup.enriched || isCommercialProfile(lookup.enriched)) throw officePrices();
+  if (!wholeHomeAddress(address) || !countyMeasurements(lookup)) throw officePrices();
+}
+
+// The arbitrated facts with the technician's numbers laid over them. A typed number that differs from the
+// arbitrated one is a changed fact. A stories count a person saw is not an AI estimate, so its evidence goes.
+function layerFacts(lookup, facts, keys) {
+  const { resolvePropertyFacts } = require('./estimator-engine/source-arbitration');
+  const resolved = resolvePropertyFacts({ extraction: null, propertyRecord: lookup.propertyRecord, customer: null, isCommercial: false });
+  const propertyFacts = { ...resolved, propertyType: resolved.propertyType || 'single_family' };
+  const shown = {
+    homeSqFt: Math.round(Number(propertyFacts.home && propertyFacts.home.value)) || null,
+    lotSqFt: Math.round(Number(propertyFacts.lot && propertyFacts.lot.value)) || null,
+    stories: Number(propertyFacts.stories) || null,
   };
+  const changed = [];
+  const typed = (name) => facts[name] !== undefined && facts[name] !== shown[name];
+  if (typed('homeSqFt')) propertyFacts.home = { ...propertyFacts.home, value: facts.homeSqFt, source: SQFT_SOURCES.CALLER_STATED };
+  if (typed('lotSqFt')) propertyFacts.lot = { ...propertyFacts.lot, value: facts.lotSqFt, source: SQFT_SOURCES.CALLER_STATED };
+  if (typed('stories')) { propertyFacts.stories = facts.stories; propertyFacts.storiesEvidence = null; }
+  for (const name of ['homeSqFt', 'lotSqFt', 'stories']) if (typed(name)) { changed.push(name); shown[name] = facts[name]; }
+  // The measured termite perimeter has no arbitrated value to compare with: a typed one is always a change.
+  const perimeterLF = keys.includes('TERMITE_BAIT') ? facts.perimeterLF : undefined;
+  if (perimeterLF !== undefined) { changed.push('perimeterLF'); shown.perimeterLF = perimeterLF; }
+  const source = (name) => (changed.includes(name) ? 'technician' : 'lookup');
+  const out = {};
+  for (const name of Object.keys(shown)) if (shown[name]) out[name] = { value: shown[name], source: source(name) };
+  return { propertyFacts, changed, shown: out, perimeterLF };
 }
 
-// The customer evidence the office save derives on the server: tier services, setup-waiver services, active plan.
-async function customerEvidence(subject) {
-  if (!subject.customerId) return {};
-  const { resolveCustomerQualifyingEvidence, isActivePlanCustomer } = require('./waveguard-existing-services');
-  try {
-    const evidence = await resolveCustomerQualifyingEvidence(db, { customerId: subject.customerId, address: subject.address, logger });
-    return {
-      priorQualifyingServices: evidence.tierKeys,
-      setupWaiverPriorQualifyingServices: evidence.setupWaiverKeys,
-      recurringCustomer: await isActivePlanCustomer(db, subject.customerId),
-    };
-  } catch (err) {
-    logger.warn(`[tech-estimates] customer evidence unavailable: ${err.message}`);
-    throw new PriceRefusal(503, 'Could not confirm this customer\'s services. Try again in a moment.');
-  }
+// The engine's own service objects for the chosen keys (copies; the table is frozen).
+function engineServices(keys, perimeterLF) {
+  const services = {};
+  for (const key of keys) Object.assign(services, structuredClone(ENGINE_SERVICES[key].services));
+  if (perimeterLF !== undefined) services.termite.measurements = { perimeterLF };
+  return services;
 }
 
-async function recompute(engineRequest, deps) {
-  const { serverRecomputeFromEstimateData } = require('./admin-estimate-persistence');
-  let result;
+// The save's own body, as moving-auto-estimate.js estimateBody builds one. The estimator form's keys in
+// `inputs` let the office reopen the draft; the phone supplies none of them directly.
+function estimateBody({ subject, keys, facts: layered, engineInputs }) {
+  const { shown } = layered;
+  const edited = (name) => (layered.changed.includes(name) ? { [`_${name}Edited`]: true } : {});
+  const inputs = {
+    ...(subject.customerId ? { customerId: subject.customerId } : {}),
+    address: subject.address,
+    propertyType: 'Single Family',
+    homeSqFt: String((shown.homeSqFt && shown.homeSqFt.value) || engineInputs.homeSqFt || ''),
+    lotSqFt: String((shown.lotSqFt && shown.lotSqFt.value) || engineInputs.lotSqFt || ''),
+    stories: String(engineInputs.stories || 1),
+    ...Object.fromEntries(keys.map((key) => [ENGINE_SERVICES[key].form, true])),
+    ...(keys.includes('PEST') ? { pestFreq: PEST_FREQUENCY_FORM_VALUE } : {}),
+    ...(layered.perimeterLF !== undefined ? { termitePerimeterLF: String(layered.perimeterLF) } : {}),
+    ...edited('homeSqFt'), ...edited('lotSqFt'), ...edited('stories'),
+  };
+  const who = subject.prospect
+    ? { customerName: [subject.prospect.firstName, subject.prospect.lastName].filter(Boolean).join(' '), customerPhone: subject.prospect.phone }
+    : { customerId: subject.customerId };
+  return { ...who, address: subject.address, showOneTimeOption: false, billByInvoice: false, estimateData: { engineInputs, inputs } };
+}
+
+// The dry run of the shared save. A refusal under 500 is "the office prices this one", never echoed; a bad phone is the
+// technician's own typo, so its message stands. A 5xx stays a server error.
+async function dryRun(req, body) {
   try {
-    result = await serverRecomputeFromEstimateData({ engineRequest }, deps);
+    return await require('./admin-estimate-persistence').createOrReuseAdminEstimate({
+      database: db, body, technicianId: req.technicianId, technician: req.technician, dryRun: true, requireLivePricing: true,
+    });
   } catch (err) {
-    if (!err || err.failClosed !== true) throw err;
-    throw new PriceRefusal(422, 'The office needs to price this one.');
+    const status = Number(err && (err.statusCode || err.status));
+    if (err && err.code === 'INVALID_PHONE') throw new PriceRefusal(400, err.message);
+    if (status >= 400 && status < 500) throw officePrices();
+    throw err;
   }
-  if (!result || result.recomputed !== true) throw new PriceRefusal(422, 'The price could not be worked out. Ask the office to price this one.');
-  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -303,60 +277,48 @@ function buildLines(mapped) {
   return lines;
 }
 
-// A line the engine parked for the office: a custom quote, a manager approval or a manual review.
-function needsOfficePricing(result, profile, services) {
-  const { isCommercialProfile } = require('../routes/property-lookup-v2')._private;
-  const { needsTurfManualConfirmation } = require('../routes/property-lookup-v2');
-  if (isCommercialProfile(profile)) return true;
-  if (needsTurfManualConfirmation(profile, services, {})) return true;
-  if (result.serverResult && result.serverResult.quoteRequired === true) return true;
-  const raw = (result.rawEngineResult && result.rawEngineResult.lineItems) || [];
-  return raw.some((li) => li && (li.quoteRequired || li.requiresCustomQuote || li.autoQuoteRequiresAdminApproval || li.requiresManualReview));
-}
-
-// A typed address that belongs to a customer who is not on his route goes to the office (the message never says why).
-async function addressBelongsToOffRouteCustomer(req, subject) {
-  if (!subject.prospect || req.techRole === 'admin') return false;
-  const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey } = require('./estimate-property-linkage');
-  const { technicianServicesCustomer } = require('./technician-visit-scope');
-  const typed = normalizedEstimateStreet(subject.address);
-  const houseNumber = (/^\s*(\d+)/.exec(subject.prospect.address) || [])[1];
-  if (!typed || !houseNumber) return false;
-  const rows = await db('customers').where({ zip: subject.prospect.zip.slice(0, 5) }).where('address_line1', 'ilike', `${houseNumber} %`)
-    .select('id', 'address_line1', 'address_line2', 'city', 'zip').limit(25);
-  for (const row of rows) {
-    const same = sameScopeKey(typed, normalizedStampedStreet(row.address_line1, row.address_line2, row.city, row.zip));
-    if (same && !(await technicianServicesCustomer(req, row.id))) return true;
-  }
-  return false;
-}
-
-async function officeFirstVerdict({ req, subject, result, profile, services, changed, oneTimeTotal }) {
-  const reasons = changed.map((name) => `changed_fact:${name}`);
-  if (oneTimeTotal > ONE_TIME_HOLD_DOLLARS) reasons.push('one_time_over_limit');
-  if (needsOfficePricing(result, profile, services)) reasons.push('needs_office_pricing');
-  if (await addressBelongsToOffRouteCustomer(req, subject)) reasons.push('office_review_address');
-  return { required: reasons.length > 0, reasons };
+// The verdict, like moving-auto-estimate.js cleanPrice: server-priced, with an engine line, and which lines the office
+// must look at. The save's own member-address check joins the flagged lines under ONE code, so a technician never
+// learns that an address belongs to another customer.
+function judgePrepared(prepared) {
+  const { lineRequiresReview, lineHasHeuristicTurf } = require('./estimator-engine/draft-builder');
+  const estimate = prepared && prepared.estimate;
+  const data = estimate && (typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data);
+  const lines = (data && data.engineResult && data.engineResult.lineItems) || [];
+  if (!estimate || estimate.pricing_authority !== 'SERVER' || !data || lines.length === 0) throw officePrices();
+  const flagged = (line) => lineRequiresReview(line) || line.requiresQuote || lineHasHeuristicTurf(line)
+    || String(line.pricingConfidence || '').toUpperCase() === 'LOW';
+  return { data, estimate, review: lines.some(flagged) || Boolean(prepared.memberLinkageWarning) };
 }
 
 async function priceQuote(req, body) {
   const allowed = await servicesFor(req);
-  const services = normalizeServices(body.services, allowed);
+  const keys = normalizeServices(body.services, allowed);
   const facts = normalizeFacts(body.facts);
   const subject = await resolveSubject(req, body);
-  const { profile, changed, shown } = buildProfile(await lookupProfile(subject.address), facts);
-  const engineRequest = buildEngineRequest({ profile, services, subject });
-  const deps = await customerEvidence(subject);
-  const result = await recompute(engineRequest, deps);
-  const totals = result.serverTotals || {};
-  const oneTimeTotal = roundMoney(totals.onetimeTotal || 0);
+  const lookup = await lookupFor(subject.address);
+  assertCountyConfirmedHome(lookup, subject.address);
+  const layered = layerFacts(lookup, facts, keys);
+  const { buildEngineInput } = require('./estimator-engine/draft-builder');
+  const engineInputs = buildEngineInput({
+    intent: { services: engineServices(keys, layered.perimeterLF), is_commercial: false, category: 'RESIDENTIAL' },
+    propertyFacts: layered.propertyFacts,
+    context: {},
+    lookupEnriched: lookup.enriched,
+  });
+  const prepared = await dryRun(req, estimateBody({ subject, keys, facts: layered, engineInputs }));
+  const { data, estimate, review } = judgePrepared(prepared);
+  const oneTimeTotal = roundMoney(estimate.onetime_total);
+  const reasons = layered.changed.map((name) => `changed_fact:${name}`);
+  if (oneTimeTotal > ONE_TIME_HOLD_DOLLARS) reasons.push('one_time_over_limit');
+  if (review) reasons.push('office_review');
   return {
-    lines: buildLines(result.serverResult),
-    monthlyTotal: roundMoney(totals.monthlyTotal || 0),
-    annualTotal: roundMoney(totals.annualTotal || 0),
+    lines: buildLines(data.result || {}),
+    monthlyTotal: roundMoney(estimate.monthly_total),
+    annualTotal: roundMoney(estimate.annual_total),
     oneTimeTotal,
-    facts: shown,
-    officeFirst: await officeFirstVerdict({ req, subject, result, profile, services, changed, oneTimeTotal }),
+    facts: layered.shown,
+    officeFirst: { required: reasons.length > 0, reasons },
   };
 }
 
@@ -366,5 +328,5 @@ module.exports = {
   PEST_SERVICES,
   setupFor,
   priceQuote,
-  _private: { buildEngineRequest, buildProfile, normalizeFacts },
+  _private: { ENGINE_SERVICES, layerFacts, engineServices, estimateBody, normalizeFacts },
 };
