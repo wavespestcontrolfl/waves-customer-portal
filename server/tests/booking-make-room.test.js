@@ -973,3 +973,231 @@ describe('the sooner-day pass (log only)', () => {
     expect(line).toContain('sooner_detour=5');
   });
 });
+
+/**
+ * Mode on (owner 2026-11-09 "YES"): the sooner rule is the offer rule. findMakeRoomOffers runs the sooner pass now,
+ * for the page; verifyMakeRoomHour proves one hour again inside the hold's transaction; a stop moves at most once.
+ */
+describe('findMakeRoomOffers (the page awaits it, mode on)', () => {
+  const { findMakeRoomOffers } = require('../services/scheduling/booking-make-room');
+  const { resetBackgroundChecks, MAX_OFFERS_IN_FLIGHT } = _internals;
+  const LATER = '2097-06-11';
+  const LATER_POOL = [{ date: LATER, windowStart: '12:00', techId: TECH }];
+  beforeEach(() => resetBackgroundChecks());
+
+  async function offers({ deps = makeDeps(), pool = LATER_POOL, ...extra } = {}) {
+    const { conn, inserted } = fakeConn();
+    const found = await findMakeRoomOffers({
+      estimateId: 'est-1', pool, coords: NEW_PIN, durationMinutes: 60, dateFrom: DAY, dateTo: LATER,
+      admit: (slot) => slot.date === DAY, placement: PAGE_PLACES, now: NOW, conn, deps, ...extra,
+    });
+    return { ...found, inserted, deps };
+  }
+
+  test('returns the earliest passing hour on a day before the list\'s first free day, and stops at the first pass', async () => {
+    const { hours, report, deps } = await offers();
+    expect(hours.map((h) => `${h.date} ${h.start}`)).toEqual([`${DAY} 09:00`]);
+    expect(hours[0]).toMatchObject({ techId: TECH, shiftMin: 60 });
+    // 8 AM (stop A, confirmed) fails its full check; 9 AM passes: the walk ends there and never checks 10 AM or later.
+    expect(report.sooner.checked).toBe(2);
+    expect(report.mode).toBe('on');
+  });
+
+  test('the saving pass does not run, and no travel-gap screen is asked', async () => {
+    const deps = makeDeps({ travelGap: true });
+    const { report } = await offers({ deps });
+    expect(report).toMatchObject({ offerOnly: true, candidates: 0, checked: 0, tried: 0 });
+    expect(report.sooner.screenOn).toBe(false);
+    expect(deps.travelGapConflicts).not.toHaveBeenCalled();
+  });
+
+  test('records the one booking_make_room_checks row, showing the offered hour', async () => {
+    const { inserted, hours } = await offers();
+    await until(() => inserted.length === 1);
+    expect(inserted[0]).toMatchObject({ mode: 'on', surface: 'estimate', estimate_id: 'est-1', fired: true, moved_count: hours.length ? 3 : 0 });
+    expect(JSON.parse(inserted[0].report).sooner.passed).toHaveLength(1);
+  });
+
+  test('does not wait for the log row', async () => {
+    const insertGate = new Promise(() => {});
+    const conn = jest.fn(() => ({ insert: jest.fn(() => insertGate) }));
+    const started = Date.now();
+    const found = await findMakeRoomOffers({
+      estimateId: 'est-1', pool: LATER_POOL, coords: NEW_PIN, durationMinutes: 60, dateFrom: DAY, dateTo: LATER,
+      admit: (slot) => slot.date === DAY, placement: PAGE_PLACES, now: NOW, conn, deps: makeDeps(),
+    });
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(found.hours).toHaveLength(1);
+  });
+
+  test('no hour passes: no hours, and the row is still recorded', async () => {
+    const { hours, inserted } = await offers({ deps: makeDeps({ feasible: false }) });
+    expect(hours).toEqual([]);
+    await until(() => inserted.length === 1);
+    expect(inserted[0].fired).toBe(false);
+  });
+
+  test('a time-out before a pass serves no hour', async () => {
+    const deps = makeDeps();
+    deps.ownHoldIds = jest.fn(() => new Promise(() => {}));
+    const started = Date.now();
+    const { hours, report } = await offers({ deps, budgetMs: 40, lingerMs: 40 });
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(hours).toEqual([]);
+    expect(report.timedOut).toBe(true);
+  });
+
+  test('an error serves no hour and never throws', async () => {
+    const deps = makeDeps();
+    deps.loadDayStops = jest.fn(async () => { throw new Error('read failed'); });
+    const { hours, report } = await offers({ deps });
+    expect(hours).toEqual([]);
+    expect(report.error).toBe('read failed');
+  });
+
+  test('no pin: no hour', async () => {
+    const { hours, report } = await offers({ coords: null });
+    expect(hours).toEqual([]);
+    expect(report.skipped).toBe('no_pin');
+  });
+
+  test('past MAX_OFFERS_IN_FLIGHT passes at once the page serves the free list', async () => {
+    const held = Array.from({ length: MAX_OFFERS_IN_FLIGHT }, () => {
+      const deps = makeDeps();
+      deps.loadTechStartPoints = jest.fn(() => new Promise(() => {}));
+      return offers({ deps, budgetMs: 300, lingerMs: 50 });
+    });
+    await sleep(20);
+    const extra = await offers();
+    expect(extra.hours).toEqual([]);
+    expect(extra.report).toBeNull();
+    await Promise.all(held);
+  });
+
+  test('the drive cap decides: 9 AM adds 5 drive minutes, over a cap of 4', async () => {
+    const deps = Object.assign(makeDeps(), { customerMaxDetourMinutes: jest.fn(() => 4) });
+    const { hours, report } = await offers({ deps });
+    expect(hours).toEqual([]);
+    expect(report.sooner.byReason.over_drive_cap).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('verifyMakeRoomHour (the hold\'s proof, inside the reserve transaction)', () => {
+  const { verifyMakeRoomHour } = require('../services/scheduling/booking-make-room');
+  const prove = (extra = {}) => verifyMakeRoomHour({
+    conn: jest.fn(), date: DAY, startMin: 9 * 60, techId: TECH, durationMinutes: 60, point: NEW_PIN, estimateId: 'est-1',
+    admit: (slot) => slot.date === DAY, placement: PAGE_PLACES, now: NOW, deps: makeDeps(), ...extra,
+  });
+
+  test('rebuilds the chain for that exact hour: B, C and D move 1 hour, with their widths', async () => {
+    const proof = await prove();
+    expect(proof.shiftMin).toBe(60);
+    expect(proof.moves).toEqual([
+      { id: 'visit-b', from: '09:00', to: '10:00', widthMin: 60 },
+      { id: 'visit-c', from: '10:00', to: '11:00', widthMin: 60 },
+      { id: 'visit-d', from: '11:00', to: '12:00', widthMin: 60 },
+    ]);
+  });
+
+  test('the sooner rule\'s drive cap applies', async () => {
+    const proof = await prove({ deps: Object.assign(makeDeps(), { customerMaxDetourMinutes: jest.fn(() => 4) }) });
+    expect(proof).toEqual({ reason: 'over_drive_cap' });
+  });
+
+  test('applies no saving bar: an hour that saves nothing over the free list still proves', async () => {
+    expect(await prove()).toHaveProperty('moves');
+  });
+
+  test('an hour no stop starts on any more is refused', async () => {
+    expect(await prove({ startMin: 12 * 60 })).toEqual({ reason: 'hour_free' });
+    expect(await prove({ startMin: 9 * 60 + 15 })).toEqual({ reason: 'earlier_stop_overlaps' });
+  });
+
+  test('a stop that was locked since the offer refuses it', async () => {
+    const told = await prove({ deps: makeDeps({ told: ['visit-e', 'visit-c'] }) });
+    expect(told.reason).toBe('fixed_time_told');
+    const confirmed = await prove({ startMin: 8 * 60 });
+    expect(confirmed.reason).toBe('fixed_customer_confirmed');
+  });
+
+  test('a stop whose customer turned reminder texts off since the offer refuses it', async () => {
+    expect(await prove({ deps: makeDeps({ prefs: { 'cust-c': { ...TEXTS, smsEnabled: false } } }) })).toEqual({ reason: 'reminders_off' });
+  });
+
+  test('the page\'s placement rules run on the moved day, with every moved stop shifted', async () => {
+    const placement = jest.fn(async () => true);
+    await prove({ placement });
+    const [slot, shifted] = placement.mock.calls[0];
+    expect(slot).toMatchObject({ date: DAY, windowStart: '09:00', techId: TECH });
+    expect([...shifted.entries()]).toEqual([['visit-b', 60], ['visit-c', 60], ['visit-d', 60]]);
+    expect(await prove({ placement: async () => 'page_collision' })).toEqual({ reason: 'page_collision' });
+  });
+
+  test('a closed technician-day, an unreadable day and no technician refuse', async () => {
+    expect(await prove({ deps: makeDeps({ absent: [`${TECH}:${DAY}`] }) })).toEqual({ reason: 'tech_day_closed' });
+    expect(await prove({ techId: null })).toEqual({ reason: 'no_hour' });
+    const deps = makeDeps();
+    deps.loadDayStops = jest.fn(async () => { throw new Error('read failed'); });
+    expect(await prove({ deps })).toEqual({ reason: 'error' });
+  });
+
+  test('a read that never answers refuses at its budget', async () => {
+    const deps = makeDeps();
+    deps.loadBlocks = jest.fn(() => new Promise(() => {}));
+    expect(await prove({ deps, budgetMs: 40 })).toEqual({ reason: 'timed_out' });
+  });
+
+  test('this estimate\'s own hold is not a stop', async () => {
+    const rows = [...exampleDay(), stop('hold', 9, 25, { id: 'visit-hold', customer_id: null, reservation_expires_at: '2097-06-10T01:00:00Z' })];
+    const proof = await prove({ deps: makeDeps({ rows, holdIds: ['visit-hold'] }) });
+    expect(proof.moves.map((m) => m.id)).toEqual(['visit-b', 'visit-c', 'visit-d']);
+  });
+});
+
+describe('one move per stop (owner 2026-11-09)', () => {
+  const { verifyMakeRoomHour } = require('../services/scheduling/booking-make-room');
+  const withMoved = (ids) => Object.assign(makeDeps(), { makeRoomMovedIds: jest.fn(async () => new Set(ids)) });
+
+  test('a stop make-room already moved is fixed: the hour whose chain holds it is refused', async () => {
+    const deps = withMoved(['visit-c']);
+    const proof = await verifyMakeRoomHour({
+      conn: jest.fn(), date: DAY, startMin: 9 * 60, techId: TECH, durationMinutes: 60, point: NEW_PIN,
+      admit: (slot) => slot.date === DAY, placement: PAGE_PLACES, now: NOW, deps,
+    });
+    expect(proof).toEqual({ reason: 'fixed_make_room_moved' });
+  });
+
+  test('the finder counts it with the same reason, reads once per day and not per stop', async () => {
+    const deps = withMoved(['visit-c']);
+    const { report } = await check({ deps, pool: [{ date: '2097-06-11', windowStart: '12:00', techId: TECH }], dateTo: '2097-06-11' });
+    expect(report.sooner.byReason.fixed_make_room_moved).toBeGreaterThanOrEqual(1);
+    const days = deps.makeRoomMovedIds.mock.calls.length;
+    expect(days).toBe(1);
+    expect(deps.makeRoomMovedIds.mock.calls[0][1]).toEqual(expect.arrayContaining(['visit-a', 'visit-b', 'visit-f']));
+  });
+
+  test('a moved stop is not retried with a 2-hour shift (same for any shift)', async () => {
+    const deps = withMoved(['visit-b']);
+    const { report } = await check({ deps });
+    expect(report.twoHourTried).toBe(0);
+  });
+
+  test('the default reader asks reschedule_log once for the ids, by initiated_by', async () => {
+    const calls = [];
+    const builder = {
+      whereIn: jest.fn((...args) => { calls.push(['whereIn', ...args]); return builder; }),
+      where: jest.fn((...args) => { calls.push(['where', ...args]); return builder; }),
+      distinct: jest.fn(async (...args) => { calls.push(['distinct', ...args]); return [{ scheduled_service_id: 'visit-c' }]; }),
+    };
+    const conn = jest.fn((table) => { calls.push(['table', table]); return builder; });
+    const ids = await _internals.defaultDeps().makeRoomMovedIds(conn, ['visit-b', 'visit-c']);
+    expect([...ids]).toEqual(['visit-c']);
+    expect(calls).toEqual([
+      ['table', 'reschedule_log'],
+      ['whereIn', 'scheduled_service_id', ['visit-b', 'visit-c']],
+      ['where', { initiated_by: 'booking_make_room' }],
+      ['distinct', 'scheduled_service_id'],
+    ]);
+    expect([...(await _internals.defaultDeps().makeRoomMovedIds(conn, []))]).toEqual([]);
+  });
+});

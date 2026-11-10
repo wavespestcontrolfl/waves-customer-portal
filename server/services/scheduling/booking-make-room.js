@@ -51,8 +51,13 @@
  * Modes (bookingMakeRoomMode, read at CALL time):
  *   off     unset or any other value. Callers never reach this module.
  *   shadow  find and record one booking_make_room_checks row per checked list. The customer's list does not change.
- *   on      GATE_BOOKING_MAKE_ROOM=true. Reserved for the offer, hold and move (a later change); today it records
- *           exactly like shadow.
+ *   on      GATE_BOOKING_MAKE_ROOM=true (owner 2026-11-09 "YES"): the sooner rule is THE offer rule. The page awaits
+ *           findMakeRoomOffers (budget OFFER_BUDGET_MS, sooner pass only) and offers the earliest passing hour; the
+ *           hold re-proves that one hour with verifyMakeRoomHour. Nothing here moves a visit. In capacity mode the page
+ *           offers nothing and the hold path is never taken (hour mode only), so `on` records like shadow there.
+ *
+ * A stop moves at most once by make-room (owner 2026-11-09): one that already has a reschedule_log row with
+ * initiated_by 'booking_make_room' is fixed (fixed_make_room_moved), read with one query per day.
  *
  * Never throws, spends nothing, sends nothing, and writes only its own log row. The estimate page starts it through
  * startBackgroundCheck: at most MAX_IN_FLIGHT checks at once and one per estimate per DEDUPE_MS, extra requests dropped.
@@ -68,6 +73,12 @@ const MAX_DATES = 21;
 const MAX_FULL_CHECKS = 6;
 // The sooner pass is log-only, so it may look at more hours than the offer rule's six.
 const MAX_SOONER_CHECKS = 24;
+// The page waits for the offer pass (mode on), so it gets less time than the background check; the hold's proof of one
+// hour runs inside the reserve transaction, so it is bounded too.
+const OFFER_BUDGET_MS = 1500;
+const VERIFY_BUDGET_MS = 3000;
+// reschedule_log.initiated_by of a make-room move (written by the later accept change). One move per stop.
+const MOVED_BY = 'booking_make_room';
 const TABLE = 'booking_make_room_checks';
 const TIMED_OUT = Symbol('timed_out');
 // A budget that never runs out, for a direct call of one step (tests).
@@ -76,6 +87,9 @@ const NO_LIMIT = { spent: () => false };
 // already sent, so the number of checks is bounded here instead. A check that ran out of time keeps its slot until
 // the reads it already sent answer, for at most LINGER_MS (makeBudget).
 const MAX_IN_FLIGHT = 2;
+// The inline offer passes the page waits for (mode on): a link holder asking for many lists in a row cannot hold more
+// than this many; past it the page serves the free list.
+const MAX_OFFERS_IN_FLIGHT = 4;
 const DEDUPE_MS = 10 * 60 * 1000;
 const LINGER_MS = 30 * 1000;
 
@@ -265,18 +279,24 @@ function tally(report, reason) {
   report.byReason[reason] = (report.byReason[reason] || 0) + 1;
 }
 
-// Every hour a stop starts on one technician-day.
-function dayCandidates({ dateStr, rows, techId, env, request, report }) {
+// One technician-day's facts for the chain walk: { day }, or { reason } when the day is left alone.
+function dayFacts({ dateStr, rows, techId, env, request }) {
   const skip = env.skipReason(rows.filter((row) => sameTech(row, techId)));
   // One stop is enough to make room before; any other reason (untimed, no pin, under way) leaves the day alone.
-  if (skip && skip !== 'FEWER_THAN_2_STOPS') {
-    tally(report, `day_${String(skip).toLowerCase()}`);
+  if (skip && skip !== 'FEWER_THAN_2_STOPS') return { reason: `day_${String(skip).toLowerCase()}` };
+  const own = ownStops(rows, techId);
+  return { day: { dateStr, techId, own, home: env.homeOf(techId), quick: quickDayContext(dateStr, rows, request.now), taken: takenByOthers(rows, techId, env.techBlind) } };
+}
+
+// Every hour a stop starts on one technician-day.
+function dayCandidates({ dateStr, rows, techId, env, request, report }) {
+  const { day, reason: dayReason } = dayFacts({ dateStr, rows, techId, env, request });
+  if (!day) {
+    tally(report, dayReason);
     return [];
   }
-  const own = ownStops(rows, techId);
-  const day = { dateStr, techId, own, home: env.homeOf(techId), quick: quickDayContext(dateStr, rows, request.now), taken: takenByOthers(rows, techId, env.techBlind) };
   const found = [];
-  for (const startMin of new Set(own.map((row) => bookedRange(row).startMin))) {
+  for (const startMin of new Set(day.own.map((row) => bookedRange(row).startMin))) {
     report.tried += 1;
     const { candidate, reason } = tryHour({ day, startMin, env, request });
     if (candidate) found.push(candidate);
@@ -467,7 +487,11 @@ async function fullCheck(candidate, ctx) {
   if (route !== true) return route;
   if (budget.spent()) return TIMED_OUT;
   const day = await cached(caches.days, candidate.dateStr, () => env.loadDayContext(conn, candidate.dateStr, request.now));
+  // One read per day, not per stop.
+  const movedIds = await cached(caches.moved, candidate.dateStr, () => (env.makeRoomMovedIds ? env.makeRoomMovedIds(conn, (day?.allRows || []).map((r) => r.id)) : new Set()));
   for (const move of candidate.moves) {
+    // One move per stop (owner 2026-11-09): a stop make-room already moved stays where it is.
+    if (movedIds.has(String(move.row.id))) return 'fixed_make_room_moved';
     const why = await moveBlockedReason(move, { conn, env, day, techId: candidate.techId, budget });
     if (why) return why;
   }
@@ -602,6 +626,13 @@ function defaultDeps() {
     techBlind: () => !occupancy.techScopedConfirmActive(),
     closeMin: require('../auto-dispatch/candidate-slots').DAY_CLOSE,
     ownHoldIds,
+    // Stops make-room already moved: a stop moves at most once.
+    makeRoomMovedIds: async (conn, ids) => {
+      const list = ids.filter(Boolean);
+      if (!list.length) return new Set();
+      const rows = await conn('reschedule_log').whereIn('scheduled_service_id', list).where({ initiated_by: MOVED_BY }).distinct('scheduled_service_id');
+      return new Set(rows.map((row) => String(row.scheduled_service_id)));
+    },
     // The sooner pass's travel-gap screen (the page's own rule and entities).
     travelGapEnabled: require('./travel-gap').travelGapEnabled,
     travelGapConflicts: require('./travel-gap').travelGapConflicts,
@@ -635,16 +666,22 @@ async function checkOne(candidate, ctx) {
 // The candidates that need reads, best first (`order`, by default the best saving), at most `limit`, within the budget.
 // An hour whose 1-hour move fails is checked again with its 2-hour move (owner 2026-11-07 "B"); the hour counts once,
 // with the last reason or the passing move. `onChecked` hears each hour that was fully checked.
-async function checkCandidates(candidates, { conn, env, request, budget, report, caches, order = bySaving, limit = MAX_FULL_CHECKS, onChecked }) {
+async function checkHour(candidate, ctx, report) {
+  let checkedMove = candidate;
+  let why = await checkOne(candidate, ctx);
+  if (why && why !== TIMED_OUT && candidate.later && !SAME_FOR_ANY_SHIFT.test(why)) {
+    report.twoHourTried += 1;
+    checkedMove = candidate.later;
+    why = await checkOne(checkedMove, ctx);
+  }
+  return { why, checkedMove };
+}
+
+// `stopAfterPass` ends the walk at the first passing hour (the page's offer: candidates are in earliest order).
+async function checkCandidates(candidates, { conn, env, request, budget, report, caches, order = bySaving, limit = MAX_FULL_CHECKS, onChecked, stopAfterPass = false }) {
   const ctx = { conn, env, request, budget, caches };
   for (const candidate of candidates.sort(order).slice(0, limit)) {
-    let checkedMove = candidate;
-    let why = await checkOne(candidate, ctx);
-    if (why && why !== TIMED_OUT && candidate.later && !SAME_FOR_ANY_SHIFT.test(why)) {
-      report.twoHourTried += 1;
-      checkedMove = candidate.later;
-      why = await checkOne(checkedMove, ctx);
-    }
+    const { why, checkedMove } = await checkHour(candidate, ctx, report);
     if (why === TIMED_OUT) {
       report.timedOut = true;
       return;
@@ -653,6 +690,7 @@ async function checkCandidates(candidates, { conn, env, request, budget, report,
     if (why) tally(report, why);
     else report.passed.push(summaryOf(checkedMove));
     if (onChecked) onChecked(candidate, why);
+    if (stopAfterPass && !why) return;
   }
 }
 
@@ -677,7 +715,9 @@ function collectCandidates(days, { open, env, request, report }) {
 // The sooner-day measurement (log only): the hours on days before the first day of the customer's list that the same
 // rules would give, with the saving bar swapped for the drive cap. Never throws: it must not cost the saving pass its
 // turn. It fills report.sooner.
-async function runSoonerPass(report, { dayRows, pool, open, soonerCap, request, conn, env, budget, caches }) {
+// `offerOnly` (the page's offer, mode on): no travel-gap screen, the earliest hour first, and the walk ends at the first
+// hour that passes, which is then the earliest one.
+async function runSoonerPass(report, { dayRows, pool, open, soonerCap, request, conn, env, budget, caches, offerOnly = false }) {
   const firstFreeDay = pool.map((slot) => slot?.date).filter(Boolean).sort()[0] ?? null;
   const days = [...dayRows].filter(([dateStr]) => firstFreeDay == null || dateStr < firstFreeDay);
   const sooner = {
@@ -691,7 +731,7 @@ async function runSoonerPass(report, { dayRows, pool, open, soonerCap, request, 
     const found = collectCandidates(days, { open, env, request: soonerRequest, report: sooner });
     sooner.candidates = found.length;
     // filterCollidingSlots returns before its travel rule in capacity mode, so the screen is off there too.
-    sooner.screenOn = typeof env.travelGapEnabled === 'function' && !!env.travelGapEnabled() && !env.capacityOn();
+    sooner.screenOn = !offerOnly && typeof env.travelGapEnabled === 'function' && !!env.travelGapEnabled() && !env.capacityOn();
     if (sooner.screenOn && found.length) {
       // The page loads the catalog before its own travel-gap rule; the expected minutes of a stop read it.
       if (await budget.race(() => Promise.resolve(env.ensureCatalogLoaded?.(conn)).catch(() => {})) === TIMED_OUT) {
@@ -709,39 +749,60 @@ async function runSoonerPass(report, { dayRows, pool, open, soonerCap, request, 
       if (candidate.screen === null && why) sooner.screenWrong.saidPass_failed += 1;
       if (candidate.screen !== null && !why) sooner.screenWrong.saidFail_passed += 1;
     };
-    await checkCandidates(found, { conn, env, request: soonerRequest, budget, report: sooner, caches, order: bySooner, limit: MAX_SOONER_CHECKS, onChecked });
+    await checkCandidates(found, { conn, env, request: soonerRequest, budget, report: sooner, caches, order: bySooner, limit: MAX_SOONER_CHECKS, onChecked, stopAfterPass: offerOnly });
   } catch (err) {
     sooner.error = err?.message || String(err);
   }
   sooner.passed = sooner.passed.map((hour) => ({ ...hour, daysGained: daysBetween(hour.date, firstFreeDay) }));
 }
 
-async function findMakeRoom(report, { conn, pool, point, durationMin, candidateExpectedMinutes, estimateId, capabilityRows, zoneSlug, dateFrom, dateTo, admit, placement, now, budget, deps }) {
+// The new visit's minutes: the caller's whole minutes, or 60 when it gives none.
+function plannedMinutes(durationMinutes) {
+  return Number(durationMinutes) > 0 ? Math.round(Number(durationMinutes)) : 60;
+}
+
+// The reads the finder and the hold's proof both start from, under one budget: { env, dayRows, open, caps }, or null when
+// the budget ran out (report.timedOut) or a day read failed (loadDays records it).
+async function loadCheckFacts(conn, deps, { dates, estimateId, capabilityRows, zoneSlug, budget, report }) {
   const base = deps || defaultDeps();
-  // The setup reads run under the same budget as every later read.
   const homes = await budget.race(() => base.loadTechStartPoints(conn));
   const holdIds = homes === TIMED_OUT ? TIMED_OUT : await budget.race(() => base.ownHoldIds(conn, estimateId));
   if (holdIds === TIMED_OUT) {
     report.timedOut = true;
-    return;
+    return null;
   }
   const env = { ...base, homeOf: (techId) => base.homeFromMap(homes, techId), techBlind: base.techBlind() };
-  const dates = datesFor({ dateFrom, dateTo, pool });
-  report.dates = dates.length;
   const dayRows = await loadDays(conn, env, { dates, holdIds, budget, report });
-  if (!dayRows) return;
-  const bestFree = bestFreeTime(pool, { dayRows, homeOf: env.homeOf, point, legMin: env.legMin });
-  report.free = { count: pool.length, best: bestFree };
+  if (!dayRows) return null;
   const open = await budget.race(() => loadOpenTechDays(conn, env, { dates, capabilityRows, budget }));
   const caps = open === TIMED_OUT ? TIMED_OUT : await budget.race(() => loadDetourCaps(conn, env, zoneSlug));
   if (caps === TIMED_OUT) {
     report.timedOut = true;
-    return;
+    return null;
   }
+  return { env, dayRows, open, caps };
+}
+
+async function findMakeRoom(report, { conn, pool, point, durationMin, candidateExpectedMinutes, estimateId, capabilityRows, zoneSlug, dateFrom, dateTo, admit, placement, now, budget, deps, offerOnly = false }) {
+  const dates = datesFor({ dateFrom, dateTo, pool });
+  report.dates = dates.length;
+  // The setup reads run under the same budget as every later read.
+  const facts = await loadCheckFacts(conn, deps, { dates, estimateId, capabilityRows, zoneSlug, budget, report });
+  if (!facts) return;
+  const { env, dayRows, open, caps } = facts;
+  const bestFree = bestFreeTime(pool, { dayRows, homeOf: env.homeOf, point, legMin: env.legMin });
+  report.free = { count: pool.length, best: bestFree };
   const request = { point, durationMin, admit, placement, now, bestFree, estimateId, detourCap: caps.detourCap, candidateExpectedMinutes };
   // Both passes share what the reads return. The saving pass (the approved offer rule) runs first and unchanged; the
   // log-only sooner pass gets what is left of the budget.
-  const caches = { blocks: new Map(), routes: new Map(), days: new Map() };
+  const caches = { blocks: new Map(), routes: new Map(), days: new Map(), moved: new Map() };
+  if (offerOnly) {
+    // Mode on: the sooner rule is the offer rule; the saving pass is not needed. The row records the offer's hours.
+    report.offerOnly = true;
+    await runSoonerPass(report, { dayRows, pool, open, soonerCap: caps.soonerCap, request, conn, env, budget, caches, offerOnly });
+    report.passed = report.sooner.passed;
+    return;
+  }
   const candidates = collectCandidates(dayRows, { open, env, request, report });
   report.candidates = candidates.length;
   await checkCandidates(candidates, { conn, env, request, budget, report, caches });
@@ -803,30 +864,36 @@ function checkRow(report) {
  * @param {number} [args.lingerMs]      how long a check that ran out of time waits for the reads it already sent
  * @returns {Promise<object>} the report, once the check's own reads have answered (at most lingerMs after it ended)
  */
-async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = null, pool, coords, durationMinutes, candidateExpectedMinutes, capabilityRows, zoneSlug,
-  dateFrom, dateTo, admit, placement, now = new Date(), conn, deps, budgetMs = DEFAULT_BUDGET_MS, lingerMs = LINGER_MS } = {}) {
+async function recordMakeRoomCheck(args = {}) {
+  const run = await runCheck(args);
+  await finishCheck(run.knex, run.report, { budget: run.budget, lingerMs: args.lingerMs ?? LINGER_MS });
+  return run.report;
+}
+
+// The check itself, without its log row: { report, knex, budget }.
+async function runCheck({ mode, surface = 'estimate', estimateId = null, pool, coords, durationMinutes, candidateExpectedMinutes, capabilityRows, zoneSlug,
+  dateFrom, dateTo, admit, placement, now = new Date(), conn, deps, budgetMs = DEFAULT_BUDGET_MS, offerOnly = false } = {}) {
   const startedAt = Date.now();
   const budget = makeBudget(startedAt + budgetMs);
   const report = { mode, surface, estimateId, durationMin: null, free: null, dates: 0, tried: 0, candidates: 0, checked: 0, twoHourTried: 0, passed: [], byReason: {}, timedOut: false, skipped: null, error: null, ms: 0, sooner: null };
   const knex = conn || require('../../models/db');
   try {
     const point = pointOf(coords);
-    report.durationMin = Number(durationMinutes) > 0 ? Math.round(Number(durationMinutes)) : 60;
+    report.durationMin = plannedMinutes(durationMinutes);
     if (!point) report.skipped = 'no_pin';
     else if (typeof admit !== 'function' || typeof placement !== 'function' || !dateFrom || !dateTo) report.skipped = 'no_request';
     else {
       await findMakeRoom(report, {
         conn: knex, pool: Array.isArray(pool) ? pool : [], point, durationMin: report.durationMin, candidateExpectedMinutes, estimateId,
         capabilityRows, zoneSlug,
-        dateFrom, dateTo, admit, placement, now, budget, deps,
+        dateFrom, dateTo, admit, placement, now, budget, deps, offerOnly,
       });
     }
   } catch (err) {
     report.error = err?.message || String(err);
   }
   report.ms = Date.now() - startedAt;
-  await finishCheck(knex, report, { budget, lingerMs });
-  return report;
+  return { report, knex, budget };
 }
 
 // Logs and records the report, then waits for the reads a timed-out check already sent: the caller, and so the
@@ -845,6 +912,7 @@ async function finishCheck(knex, report, { budget, lingerMs }) {
 
 const inFlight = new Set();
 const lastStarted = new Map();
+const offersInFlight = new Set();
 
 /**
  * Starts one check in the background, or drops the request: at most MAX_IN_FLIGHT checks at once, and one estimate
@@ -865,11 +933,83 @@ function startBackgroundCheck(args, { nowMs = Date.now() } = {}) {
 function resetBackgroundChecks() {
   inFlight.clear();
   lastStarted.clear();
+  offersInFlight.clear();
+}
+
+/**
+ * The page's offer (mode on): the sooner pass run now, within OFFER_BUDGET_MS, by the same finder and the same checks as
+ * the background check (the saving pass is skipped). Takes the background check's arguments and returns
+ * { hours, report }: `hours` are the passing hours, earliest first (at most one today: the walk ends at the first pass),
+ * each { date, start, techId, shiftMin, detourMin, moves }. On any error, a time-out before a pass, or too many offer
+ * passes at once, `hours` is [] and the page serves its free list. Records the one booking_make_room_checks row, but
+ * the caller never waits for the row or for the reads a timed-out pass left behind. Never throws; writes no visit.
+ */
+async function findMakeRoomOffers(args = {}) {
+  if (offersInFlight.size >= MAX_OFFERS_IN_FLIGHT) return { hours: [], report: null };
+  const token = Symbol('offer');
+  offersInFlight.add(token);
+  try {
+    const run = await runCheck({ ...args, mode: 'on', surface: 'estimate', offerOnly: true, budgetMs: args.budgetMs ?? OFFER_BUDGET_MS });
+    finishCheck(run.knex, run.report, { budget: run.budget, lingerMs: args.lingerMs ?? LINGER_MS })
+      .catch(() => {})
+      .finally(() => offersInFlight.delete(token));
+    const { report } = run;
+    const hours = report.error || report.skipped ? [] : [...(report.sooner?.passed || [])]
+      .sort((a, b) => a.date.localeCompare(b.date) || a.start.localeCompare(b.start));
+    return { hours, report };
+  } catch {
+    offersInFlight.delete(token);
+    return { hours: [], report: null };
+  }
+}
+
+/**
+ * The hold's proof of one make-room hour, run inside the reserve transaction (and again at an extend) after the date and
+ * technician-day locks: the same quick checks and the same full check the finder runs for that hour, on the data as it
+ * is now, with the sooner rule's drive cap in place of the saving bar. The chain is rebuilt from the day's stops, so a
+ * stop that moved, was locked or was taken since the offer fails it.
+ * @param {object} args  conn (the reserve transaction), date, startMin, techId, durationMinutes, point, estimateId,
+ *   candidateExpectedMinutes, capabilityRows, zoneSlug, admit, placement (the same two functions the offer used)
+ * @returns {Promise<{ shiftMin, moves: Array<{ id, from, to, widthMin }> } | { reason }>} never throws
+ */
+async function verifyMakeRoomHour({ conn, date, startMin, techId, durationMinutes, point, estimateId = null, candidateExpectedMinutes, capabilityRows, zoneSlug,
+  admit, placement, now = new Date(), deps, budgetMs = VERIFY_BUDGET_MS } = {}) {
+  const budget = makeBudget(Date.now() + budgetMs);
+  const timedOut = { reason: 'timed_out' };
+  try {
+    const pin = pointOf(point);
+    if (!pin) return { reason: 'no_pin' };
+    if (!techId || !date || !Number.isFinite(startMin)) return { reason: 'no_hour' };
+    if (typeof admit !== 'function' || typeof placement !== 'function') return { reason: 'no_request' };
+    const scratch = { byReason: {}, timedOut: false, twoHourTried: 0 };
+    const facts = await loadCheckFacts(conn, deps, { dates: [date], estimateId, capabilityRows, zoneSlug, budget, report: scratch });
+    if (!facts) return timedOut;
+    const { env, dayRows, open, caps } = facts;
+    if (!open(date, techId)) return { reason: 'tech_day_closed' };
+    const request = { point: pin, durationMin: plannedMinutes(durationMinutes), admit, placement, now, bestFree: null, estimateId, detourCap: caps.detourCap, soonerCap: caps.soonerCap, candidateExpectedMinutes };
+    const { day, reason: dayReason } = dayFacts({ dateStr: date, rows: dayRows.get(date), techId, env, request });
+    if (!day) return { reason: dayReason };
+    const hour = tryHour({ day, startMin, env, request });
+    if (!hour.candidate) return { reason: hour.reason };
+    const caches = { blocks: new Map(), routes: new Map(), days: new Map(), moved: new Map() };
+    const { why, checkedMove } = await checkHour(hour.candidate, { conn, env, request, budget, caches }, scratch);
+    if (why === TIMED_OUT) return timedOut;
+    if (why) return { reason: why };
+    return {
+      shiftMin: checkedMove.shiftMin,
+      moves: checkedMove.moves.map((m) => ({ id: m.row.id, from: hhmm(m.fromMin), to: hhmm(m.toMin), widthMin: m.widthMin })),
+    };
+  } catch (err) {
+    logger.warn(`[booking-make-room] could not verify the hour: ${err?.message || err}`);
+    return { reason: 'error' };
+  }
 }
 
 module.exports = {
   bookingMakeRoomMode,
   startBackgroundCheck,
   recordMakeRoomCheck,
-  _internals: { buildChain, shiftsFor, MAX_SHIFT_MIN, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, remindersByText, moveBlockedReason, datesFor, bySaving, bySooner, daysBetween, defaultDeps, resetBackgroundChecks, makeBudget, TIMED_OUT, MIN_SAVING_MIN, MAX_FULL_CHECKS, MAX_SOONER_CHECKS, MAX_IN_FLIGHT, DEDUPE_MS, LINGER_MS },
+  findMakeRoomOffers,
+  verifyMakeRoomHour,
+  _internals: { buildChain, shiftsFor, MAX_SHIFT_MIN, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, remindersByText, moveBlockedReason, datesFor, bySaving, bySooner, daysBetween, defaultDeps, resetBackgroundChecks, makeBudget, TIMED_OUT, MIN_SAVING_MIN, MAX_FULL_CHECKS, MAX_SOONER_CHECKS, MAX_IN_FLIGHT, MAX_OFFERS_IN_FLIGHT, OFFER_BUDGET_MS, DEDUPE_MS, LINGER_MS, MOVED_BY },
 };

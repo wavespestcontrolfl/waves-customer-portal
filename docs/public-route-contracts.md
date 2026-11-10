@@ -1779,6 +1779,35 @@ limits, the hours offered, signed offers and every commit check are
 unchanged; only which slots the lists hold can differ. With the gate off
 (the default, exactly `true` turns it on, read at call time) the payload is
 byte-identical to today's.
+**Estimate picker, one make-room hour (`GATE_BOOKING_MAKE_ROOM=true`, owner
+2026-11-09 "YES"; hour mode only; `shadow`, off and capacity mode leave every
+route byte-identical).** `GET /api/public/estimates/:token/available-slots`
+and `/find-slots` may carry ONE extra slot, first in the list: the earliest
+hour on a day before the list's first free day that a regular stop holds and
+can give up by moving later the same day (the sooner rule, at most the
+self-serve drive cap in added drive). It has the same payload shape as every
+other slot (`slotId`, `date`, `windowStart`, `windowEnd`, `durationMinutes`,
+`techId`, `techFirstName`, `routeOptimal`, `nearbyJob`); the `slotId` format is
+unchanged and the make-room marker never reaches the client. It is signed
+under its own policy (`MAKE_ROOM_OFFER_POLICY`), so a normal or hand-made
+`slotId` can never reach the make-room path. The page waits at most 2.5
+seconds for it and serves the plain free list on a time-out or any error; the
+free list's counts and `metadata.firstDayAvailability` are unchanged, and the
+last free card drops out when the list was full. `/reserve` takes the
+make-room path only for that signature, with the gate read inside the
+transaction, and re-proves the hour from current data under the date,
+tech-day and zone locks; any failure is the ordinary `SLOT_UNAVAILABLE` and
+no hold is written. The hold stores the stops that would move in
+`scheduled_services.make_room_moves`. While that hold is live its moves'
+destinations stay busy for every other offer, reserve, same-slot refresh and
+`/extend`, under the occupancy technician scope (that technician's rows plus
+unassigned rows when multi-tech confirm is on, every technician when it is
+off); a hold's own row never blocks itself. `/extend` re-proves a make-room
+hold's hour, or supersedes the hold through the existing
+`SLOT_UNAVAILABLE` path. Nothing moves a visit yet: accepting a make-room
+hold fails closed through the existing taken-slot answer ("That slot was just
+taken") until the accept change ships. Auth, token rules, rate limits and
+every other check are unchanged.
 **Estimate picker, service-line map live (`GATE_SERVICE_LINE_MAP=live`, roadmap
 build 4, owner 2026-10-30; ships dark: `shadow`, the prod value, and every other
 value leave these routes byte-identical, with no extra query).**

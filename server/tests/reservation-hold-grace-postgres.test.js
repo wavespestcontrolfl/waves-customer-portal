@@ -30,6 +30,7 @@ jest.mock('../services/estimate-slot-availability', () => ({
     serviceLabel: 'Lawn Care',
     services: [{ service: 'lawn_care', visitsPerYear: 9 }],
   })),
+  verifyMakeRoomOffer: jest.fn(),
   SLOT_DAY_START_MINUTES: 8 * 60,
   SLOT_DAY_END_MINUTES: 17 * 60,
   MAX_SLOT_HORIZON_DAYS: 90,
@@ -373,4 +374,141 @@ postgres('hold grace + extend (real Postgres)', () => {
       });
     });
   });
+
+  // GATE_BOOKING_MAKE_ROOM on (owner 2026-11-09): the hold of a make-room hour sits OVER a regular stop (the visit that
+  // would move later). The chain proof (booking-make-room verifyMakeRoomHour) is the page module's own and has its own
+  // suites; here it is stubbed so the SQL around it is proven on real rows: the probes, the stored chain, the extend,
+  // the destination probe, and that the accept fails closed because nothing moves the stop yet.
+  describe('a make-room hold (mode on)', () => {
+    const estimateSlotAvailability = require('../services/estimate-slot-availability');
+    const savedGate = process.env.GATE_BOOKING_MAKE_ROOM;
+    beforeEach(() => {
+      process.env.GATE_BOOKING_MAKE_ROOM = 'true';
+      estimateSlotAvailability.verifyMakeRoomOffer.mockReset();
+    });
+    afterEach(() => {
+      if (savedGate === undefined) delete process.env.GATE_BOOKING_MAKE_ROOM;
+      else process.env.GATE_BOOKING_MAKE_ROOM = savedGate;
+    });
+
+    // The hold is 13:00-14:00 (withHold's default); the regular stop holds the same hour.
+    async function withStopOverHold(run) {
+      await withHold({ expiresInSeconds: 300 }, async (ctx) => {
+        const stopId = randomUUID();
+        const stopCustomer = randomUUID();
+        await ctx.trx('customers').insert({
+          id: stopCustomer, first_name: 'Synthetic', last_name: 'Stop', email: `${stopCustomer}@example.invalid`, phone: '+19415550112', active: true,
+        });
+        await ctx.trx('scheduled_services').insert({
+          id: stopId, customer_id: stopCustomer, scheduled_date: ctx.date, window_start: '13:00:00', window_end: '14:00:00',
+          estimated_duration_minutes: 60, service_type: 'Quarterly Pest Control Service', status: 'confirmed', reservation_expires_at: null,
+        });
+        const chain = (shiftMin = 60) => ({ v: 1, date: ctx.date, techId: null, shiftMin, moves: [{ id: stopId, from: '13:00', to: '14:00', widthMin: 60 }] });
+        await ctx.trx('scheduled_services').where({ id: ctx.holdId }).update({ make_room_moves: chain() });
+        await run({ ...ctx, stopId, chain });
+      });
+    }
+    const movesOf = async (trx, holdId) => (await trx('scheduled_services').where({ id: holdId }).first('make_room_moves'))?.make_room_moves;
+
+    test('extend: the hour still proves, so the hold lives (the probe skips the moved stop) and its chain is refreshed', async () => {
+      await withStopOverHold(async ({ trx, estimateId, holdId, stopId, chain }) => {
+        estimateSlotAvailability.verifyMakeRoomOffer.mockResolvedValue({ shiftMin: 120, moves: [{ id: stopId, from: '13:00', to: '15:00', widthMin: 60 }] });
+        const before = (await holdRow(trx, holdId)).reservation_expires_at;
+        const { expiresAt } = await slotReservation.extendReservation({ estimateId, scheduledServiceId: holdId });
+        expect(new Date(expiresAt).getTime()).toBeGreaterThan(new Date(before).getTime());
+        expect(await movesOf(trx, holdId)).toEqual({ ...chain(120), moves: [{ id: stopId, from: '13:00', to: '15:00', widthMin: 60 }] });
+        expect(estimateSlotAvailability.verifyMakeRoomOffer).toHaveBeenCalledWith(expect.objectContaining({ windowStart: '13:00:00', durationMinutes: 60 }));
+      });
+    });
+
+    test('extend: the hour no longer proves, so the hold is superseded (gone) and the answer is the taken-slot error', async () => {
+      await withStopOverHold(async ({ trx, estimateId, holdId }) => {
+        estimateSlotAvailability.verifyMakeRoomOffer.mockResolvedValue({ reason: 'fixed_time_told' });
+        await expect(slotReservation.extendReservation({ estimateId, scheduledServiceId: holdId })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        expect(await holdRow(trx, holdId)).toBeUndefined();
+      });
+    });
+
+    test('extend: a proved chain excludes ONLY its moved stops; another visit in the hour still supersedes the hold', async () => {
+      await withStopOverHold(async ({ trx, estimateId, holdId, stopId, date }) => {
+        const other = randomUUID();
+        await trx('customers').insert({ id: other, first_name: 'Synthetic', last_name: 'Other', email: `${other}@example.invalid`, phone: '+19415550113', active: true });
+        await trx('scheduled_services').insert({
+          id: randomUUID(), customer_id: other, scheduled_date: date, window_start: '13:00:00', window_end: '14:00:00',
+          estimated_duration_minutes: 60, service_type: 'Quarterly Pest Control Service', status: 'confirmed', reservation_expires_at: null,
+        });
+        estimateSlotAvailability.verifyMakeRoomOffer.mockResolvedValue({ shiftMin: 60, moves: [{ id: stopId, from: '13:00', to: '14:00', widthMin: 60 }] });
+        await expect(slotReservation.extendReservation({ estimateId, scheduledServiceId: holdId })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        expect(await holdRow(trx, holdId)).toBeUndefined();
+      });
+    });
+
+    test.each(['shadow', 'off'])('extend with the gate %s: the proof is never asked and the stop in the held hour supersedes the hold (fails closed)', async (mode) => {
+      if (mode === 'off') delete process.env.GATE_BOOKING_MAKE_ROOM; else process.env.GATE_BOOKING_MAKE_ROOM = mode;
+      await withStopOverHold(async ({ trx, estimateId, holdId }) => {
+        await expect(slotReservation.extendReservation({ estimateId, scheduledServiceId: holdId })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        expect(estimateSlotAvailability.verifyMakeRoomOffer).not.toHaveBeenCalled();
+        expect(await holdRow(trx, holdId)).toBeUndefined();
+      });
+    });
+
+    test('accept (commitReservation) fails closed: nothing moves the stop in this change, so its probe sees it and the hold is not graduated', async () => {
+      await withStopOverHold(async ({ trx, holdId, customerId, stopId }) => {
+        await expect(slotReservation.commitReservation({ scheduledServiceId: holdId, customerId, trx }))
+          .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        expect(estimateSlotAvailability.verifyMakeRoomOffer).not.toHaveBeenCalled();
+        const row = await holdRow(trx, holdId);
+        expect(row.customer_id).toBeNull();
+        expect(row.reservation_expires_at).not.toBeNull();
+        // And the stop never moved, and no move was logged.
+        expect((await trx('scheduled_services').where({ id: stopId }).first('window_start')).window_start).toBe('13:00:00');
+        expect(await trx('reschedule_log').where({ scheduled_service_id: stopId })).toHaveLength(0);
+      });
+    });
+
+    test('the destination probe reads real rows: a window over a live chain\'s destination is a hit; the old hour, a later window and an expired hold are not', async () => {
+      await withHold({ expiresInSeconds: 300 }, async ({ trx, holdId, date }) => {
+        await trx('scheduled_services').where({ id: holdId }).update({
+          make_room_moves: { v: 1, date, techId: null, shiftMin: 60, moves: [{ id: randomUUID(), from: '13:00', to: '14:00', widthMin: 60 }] },
+        });
+        const { makeRoomDestinationClash } = slotReservation._internals;
+        const probe = (windowStart, windowEnd, techId = null) => makeRoomDestinationClash(trx, { date, techId, windowStart, windowEnd });
+        expect(await probe('14:30:00', '15:30:00')).toMatchObject({ id: holdId });
+        expect(await probe('13:30:00', '14:15:00')).toMatchObject({ id: holdId });
+        expect(await probe('15:00:00', '16:00:00')).toBeUndefined();
+        expect(await probe('12:00:00', '14:00:00')).toBeUndefined();
+        await trx('scheduled_services').where({ id: holdId }).update({ reservation_expires_at: trx.raw("NOW() - INTERVAL '1 minute'") });
+        expect(await probe('14:30:00', '15:30:00')).toBeUndefined();
+      });
+    });
+
+    test('extend: an ORDINARY hold whose hour is another live make-room hold\'s destination is superseded, never revived beside it (Codex pre-push P1)', async () => {
+      await withHold({ expiresInSeconds: 120 }, async ({ trx, estimateId, holdId, date }) => {
+        const rivalEstimate = randomUUID();
+        await trx('estimates').insert({
+          id: rivalEstimate, token: randomUUID().replace(/-/g, ''), status: 'sent',
+          customer_name: 'Rival Hold', address: '2 Test Way, Parrish, FL 34219',
+          expires_at: trx.raw("NOW() + INTERVAL '7 days'"),
+        });
+        // The rival's make-room hold is at 12:00; its stop moves into 13:00-14:00, this hold's hour.
+        await trx('scheduled_services').insert({
+          id: randomUUID(), source_estimate_id: rivalEstimate, customer_id: null,
+          scheduled_date: date, window_start: '12:00:00', window_end: '13:00:00',
+          estimated_duration_minutes: 60, service_type: 'Lawn Care', status: 'pending',
+          reservation_expires_at: trx.raw("NOW() + INTERVAL '10 minutes'"),
+          make_room_moves: { v: 1, date, techId: null, shiftMin: 60, moves: [{ id: randomUUID(), from: '12:00', to: '13:00', widthMin: 60 }] },
+        });
+        await expect(slotReservation.extendReservation({ estimateId, scheduledServiceId: holdId })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        expect(await holdRow(trx, holdId)).toBeUndefined();
+        expect(estimateSlotAvailability.verifyMakeRoomOffer).not.toHaveBeenCalled();
+      });
+    });
+
+    test('the column is nullable jsonb and stays NULL on every ordinary hold', async () => {
+      await withHold({ expiresInSeconds: 300 }, async ({ trx, holdId }) => {
+        expect(await movesOf(trx, holdId)).toBeNull();
+      });
+    });
+  });
 });
+

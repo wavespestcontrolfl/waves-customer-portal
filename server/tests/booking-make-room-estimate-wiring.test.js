@@ -27,6 +27,8 @@ jest.mock('../services/scheduling/customer-route-check', () => ({
 jest.mock('../services/scheduling/booking-make-room', () => ({
   bookingMakeRoomMode: jest.fn(() => 'off'),
   startBackgroundCheck: jest.fn(async () => ({})),
+  findMakeRoomOffers: jest.fn(async () => ({ hours: [], report: null })),
+  verifyMakeRoomHour: jest.fn(async () => ({ shiftMin: 60, moves: [] })),
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
@@ -103,6 +105,7 @@ describe('getAvailableSlots — make-room check wiring (GATE_BOOKING_MAKE_ROOM)'
     jest.setSystemTime(new Date('2027-05-14T15:00:00Z'));
     makeRoom.bookingMakeRoomMode.mockReturnValue('off');
     makeRoom.startBackgroundCheck.mockImplementation(async () => ({}));
+    makeRoom.findMakeRoomOffers.mockImplementation(async () => ({ hours: [], report: null }));
   });
   afterEach(() => { jest.useRealTimers(); });
 
@@ -157,6 +160,179 @@ describe('getAvailableSlots — make-room check wiring (GATE_BOOKING_MAKE_ROOM)'
     estimateSlotAvailability._internals.clearCaches();
     makeRoom.startBackgroundCheck.mockImplementation(() => new Promise(() => {}));
     expect(keys(await getAvailableSlots('est-room-1', OFFER))).toEqual(baseline);
+  });
+});
+
+/**
+ * Mode on (owner 2026-11-09 "YES"), hour mode: the page awaits the sooner pass and adds the earliest passing make-room
+ * hour as its first card, signed under its own policy. Off and shadow never reach findMakeRoomOffers.
+ */
+describe('getAvailableSlots — the make-room offer (GATE_BOOKING_MAKE_ROOM on)', () => {
+  const { verifySlotOffer, splitSignedSlotId, CAPACITY_OFFER_POLICY, MAKE_ROOM_OFFER_POLICY } = require('../utils/slot-offer-token');
+  const HOUR = { date: '2027-05-19', start: '09:00', techId: 'tech-1', shiftMin: 60, detourMin: 6, moves: [] };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    mockDb();
+    db.raw = jest.fn((sql) => sql);
+    estimateSlotAvailability._internals.clearCaches();
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-14T15:00:00Z'));
+    makeRoom.bookingMakeRoomMode.mockReturnValue('on');
+    makeRoom.findMakeRoomOffers.mockImplementation(async () => ({ hours: [HOUR], report: {} }));
+  });
+  afterEach(() => { jest.useRealTimers(); });
+
+  const verifies = (slot, policy) => {
+    const signed = splitSignedSlotId(slot.slotId);
+    const [h, m] = slot.windowStart.split(':').map(Number);
+    return verifySlotOffer({
+      surface: 'estimate', scopeId: 'est-room-1', date: slot.date, startMinutes: h * 60 + m, technicianId: slot.techId,
+      durationMinutes: slot.durationMinutes, exp: signed.exp, policy, arrivalGrace: signed.arrivalGrace,
+    }, signed.sig);
+  };
+
+  test('awaits the offer pass with the page\'s own arguments, and not the background check', async () => {
+    await getAvailableSlots('est-room-1', OFFER);
+    expect(makeRoom.findMakeRoomOffers).toHaveBeenCalledTimes(1);
+    expect(makeRoom.startBackgroundCheck).not.toHaveBeenCalled();
+    const [arg] = makeRoom.findMakeRoomOffers.mock.calls[0];
+    expect(arg).toMatchObject({ estimateId: 'est-room-1', coords: { lat: 27.3364, lng: -82.5307 }, dateFrom: '2027-05-20', dateTo: '2027-05-20' });
+    expect(typeof arg.admit).toBe('function');
+    expect(typeof arg.placement).toBe('function');
+    expect(arg.pool.length).toBeGreaterThan(0);
+  });
+
+  test('the earliest passing hour is ONE extra slot, first in the list, in the shape of the page\'s other slots', async () => {
+    makeRoom.bookingMakeRoomMode.mockReturnValue('off');
+    const free = await getAvailableSlots('est-room-1', OFFER);
+    estimateSlotAvailability._internals.clearCaches();
+    makeRoom.bookingMakeRoomMode.mockReturnValue('on');
+    const result = await getAvailableSlots('est-room-1', OFFER);
+    const all = [...result.primary, ...result.expander];
+    // The list was full (the page's total): the hour goes first and the last free card makes room.
+    expect(keys(result)).toEqual(['2027-05-19 09:00', ...keys(free)].slice(0, keys(free).length));
+    const [room] = all;
+    const [freeSlot] = [...free.primary, ...free.expander];
+    expect(Object.keys(room).sort()).toEqual(Object.keys(freeSlot).sort());
+    expect(room).toMatchObject({ date: '2027-05-19', windowStart: '09:00', windowEnd: '10:00', durationMinutes: expect.any(Number), techId: 'tech-1', routeOptimal: false, nearbyJob: null });
+    expect(room.slotId).toMatch(/^2027-05-19_09-00_tech-1\./);
+    expect(room).not.toHaveProperty('makeRoom');
+  });
+
+  test('the make-room slot is signed with its own policy: it verifies under it and under no other', async () => {
+    const result = await getAvailableSlots('est-room-1', OFFER);
+    const [room, ...rest] = [...result.primary, ...result.expander];
+    expect(verifies(room, MAKE_ROOM_OFFER_POLICY)).toBe(true);
+    expect(verifies(room, undefined)).toBe(false);
+    expect(verifies(room, CAPACITY_OFFER_POLICY)).toBe(false);
+    // The free slots keep their normal signature and fail the make-room policy.
+    expect(rest.length).toBeGreaterThan(0);
+    for (const slot of rest) {
+      expect(verifies(slot, undefined)).toBe(true);
+      expect(verifies(slot, MAKE_ROOM_OFFER_POLICY)).toBe(false);
+    }
+  });
+
+  test('the free list\'s counts and scarcity badge are unchanged', async () => {
+    makeRoom.bookingMakeRoomMode.mockReturnValue('off');
+    const free = await getAvailableSlots('est-room-1', OFFER);
+    estimateSlotAvailability._internals.clearCaches();
+    makeRoom.bookingMakeRoomMode.mockReturnValue('on');
+    const result = await getAvailableSlots('est-room-1', OFFER);
+    expect(result.metadata.firstDayAvailability).toEqual(free.metadata.firstDayAvailability);
+  });
+
+  test('never more than the list\'s own total: the last card makes room', async () => {
+    const result = await getAvailableSlots('est-room-1', { ...OFFER, maxResults: 1, expanderMaxResults: 1 });
+    expect(keys(result)).toHaveLength(2);
+    expect(keys(result)[0]).toBe('2027-05-19 09:00');
+  });
+
+  test.each([
+    ['no passing hour', async () => ({ hours: [], report: {} })],
+    ['an error', async () => { throw new Error('boom'); }],
+    ['a rejected pass', () => Promise.reject(new Error('boom'))],
+    ['a pass that never answers', () => new Promise(() => {})],
+  ])('%s: the free list is served exactly as without the gate', async (_label, impl) => {
+    makeRoom.bookingMakeRoomMode.mockReturnValue('off');
+    const baseline = keys(await getAvailableSlots('est-room-1', OFFER));
+    estimateSlotAvailability._internals.clearCaches();
+    makeRoom.bookingMakeRoomMode.mockReturnValue('on');
+    makeRoom.findMakeRoomOffers.mockImplementation(impl);
+    const pending = getAvailableSlots('est-room-1', OFFER);
+    await jest.advanceTimersByTimeAsync(3000);
+    expect(keys(await pending)).toEqual(baseline);
+  });
+
+  test('capacity mode offers nothing: no offer pass, the background check runs as before', async () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    await getAvailableSlots('est-room-1', OFFER);
+    expect(makeRoom.findMakeRoomOffers).not.toHaveBeenCalled();
+    expect(makeRoom.startBackgroundCheck).toHaveBeenCalledTimes(1);
+    expect(makeRoom.startBackgroundCheck.mock.calls[0][0].mode).toBe('on');
+  });
+
+  test('shadow and off never reach the offer pass', async () => {
+    for (const mode of ['off', 'shadow']) {
+      estimateSlotAvailability._internals.clearCaches();
+      makeRoom.bookingMakeRoomMode.mockReturnValue(mode);
+      await getAvailableSlots('est-room-1', OFFER);
+    }
+    expect(makeRoom.findMakeRoomOffers).not.toHaveBeenCalled();
+  });
+
+  test('a caller that did not ask for an offer list never gets the hour', async () => {
+    const result = await getAvailableSlots('est-room-1', OPTS);
+    expect(keys(result)).not.toContain('2027-05-19 09:00');
+    expect(makeRoom.findMakeRoomOffers).not.toHaveBeenCalled();
+  });
+
+  test('a list built with the hour is never served from, or to, another mode\'s cache entry', async () => {
+    await getAvailableSlots('est-room-1', OFFER);
+    makeRoom.bookingMakeRoomMode.mockReturnValue('shadow');
+    const shadow = await getAvailableSlots('est-room-1', OFFER);
+    expect(shadow.metadata.cacheHit).toBe(false);
+    expect(keys(shadow)).not.toContain('2027-05-19 09:00');
+    makeRoom.bookingMakeRoomMode.mockReturnValue('on');
+    const again = await getAvailableSlots('est-room-1', OFFER);
+    expect(again.metadata.cacheHit).toBe(true);
+    expect(keys(again)).toContain('2027-05-19 09:00');
+    expect(makeRoom.findMakeRoomOffers).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('verifyMakeRoomOffer — the hold\'s proof is the finder\'s own check for one hour', () => {
+  const { verifyMakeRoomOffer } = estimateSlotAvailability;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-14T15:00:00Z'));
+  });
+  afterEach(() => { jest.useRealTimers(); });
+  const args = (extra = {}) => ({
+    conn: 'trx', estimate: { id: 'est-room-1' }, serviceProfile: null, serviceMix: { services: ['pest_control'] }, estimateZone: null,
+    coords: { lat: 27.3, lng: -82.5 }, date: '2027-05-20', windowStart: '09:00:00', techId: 'tech-1', durationMinutes: 60, candidateExpectedMinutes: 50, ...extra,
+  });
+
+  test('hands booking-make-room the one hour, this estimate\'s capability rows and the page\'s own admit and placement rules', async () => {
+    const result = await verifyMakeRoomOffer(args());
+    expect(result).toEqual({ shiftMin: 60, moves: [] });
+    const [call] = makeRoom.verifyMakeRoomHour.mock.calls[0];
+    expect(call).toMatchObject({
+      conn: 'trx', date: '2027-05-20', startMin: 540, techId: 'tech-1', durationMinutes: 60, estimateId: 'est-room-1',
+      point: { lat: 27.3, lng: -82.5 }, candidateExpectedMinutes: 50, capabilityRows: [{ service_type: 'pest control' }],
+    });
+    expect(call.admit({ date: '2027-05-20', windowStart: '09:00', windowEnd: '10:00', durationMinutes: 60, techId: 'tech-1' })).toBe(true);
+    expect(call.admit({ date: '2027-05-21', windowStart: '09:00', windowEnd: '10:00', durationMinutes: 60, techId: 'tech-1' })).toBe(false);
+    expect(typeof call.placement).toBe('function');
+  });
+
+  test('no pin, or an error anywhere, is a refusal and never a throw', async () => {
+    expect(await verifyMakeRoomOffer(args({ coords: null }))).toEqual({ reason: 'no_pin' });
+    makeRoom.verifyMakeRoomHour.mockRejectedValueOnce(new Error('boom'));
+    expect(await verifyMakeRoomOffer(args())).toEqual({ reason: 'error' });
   });
 });
 
