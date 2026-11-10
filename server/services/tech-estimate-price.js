@@ -418,7 +418,8 @@ function phoneReasons(detailed) {
   return [...new Set(shown)];
 }
 
-// The answer, field by field, from an estimate row (a dry run, the saved row or a stored one) and its parsed data.
+// The answer, field by field, from an estimate row (a dry run, the saved row or a stored one) and its parsed data. The
+// preview also shows the measured facts it priced; a saved estimate answers from its stored row, which holds none.
 function quoteAnswer(estimate, data, { facts, detailed }) {
   const reasons = phoneReasons(detailed);
   return {
@@ -426,7 +427,7 @@ function quoteAnswer(estimate, data, { facts, detailed }) {
     monthlyTotal: roundMoney(estimate.monthly_total),
     annualTotal: roundMoney(estimate.annual_total),
     oneTimeTotal: roundMoney(estimate.onetime_total),
-    facts,
+    ...(facts ? { facts } : {}),
     officeFirst: { required: reasons.length > 0, reasons },
   };
 }
@@ -447,6 +448,7 @@ module.exports = {
   PriceRefusal,
   ONE_TIME_HOLD_DOLLARS,
   PEST_SERVICES,
+  FACT_NAMES,
   setupFor,
   priceQuote,
   officePrices,

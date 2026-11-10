@@ -37,7 +37,7 @@ jest.mock('../models/db', () => {
         if (args[0] && typeof args[0] === 'object' && args[0].id) builder._id = args[0].id;
         else if (args[0] === 'scheduled_services.id') builder._id = args[1];
         if (args[0] === 't.technician_id') filters.technician = args[1];
-        if (args[0] === 'e.id') filters.id = args[1];
+        if (args[0] === 'e.id' || args[0] === 't.estimate_id') filters.id = args[1];
         return builder;
       },
       select() { return builder; },
@@ -120,6 +120,7 @@ const visitRow = (id, over = {}) => ({
 });
 const PROSPECT = { firstName: 'Sample', lastName: 'Person', phone: '(941) 555-0142', address: '200 Example Ave', city: 'Sampletown', zip: '34202' };
 const OFFICE_REFUSAL = { error: 'The office needs to price this one.', code: 'office_prices' };
+const ALREADY_SAVED = { error: 'This estimate was already saved. Find it in My estimates.', code: 'already_saved' };
 const SENTINEL = 'PHONE_SENTINEL';
 const ESTIMATE_ID = '00000000-0000-4000-8000-0000000000e1';
 const DRAFT_ID = '3f2b8c1e-5d4a-4b6f-8a21-0c9d7e6f5a43';
@@ -624,6 +625,8 @@ describe('POST /price: refusals', () => {
 // Step 2a: save the draft
 
 const create = (body) => call('POST', '', { ...body, clientDraftId: DRAFT_ID, digest: DIGEST });
+// The fingerprint the save stores for a request sent through `create`.
+const fingerprintOf = (body) => require('../services/tech-estimate-save')._private.requestFingerprint(body, DIGEST);
 const realSaves = () => saveSpy.mock.calls.filter(([arg]) => !arg.dryRun);
 const realSave = () => realSaves()[0][0];
 const nothingWritten = () => {
@@ -739,10 +742,9 @@ describe('POST /api/tech/estimates: the answer and what is recorded', () => {
       monthlyTotal: 37.33,
       annualTotal: 448,
       oneTimeTotal: 99,
-      facts: expect.any(Object),
       officeFirst: { required: false, reasons: [] },
     });
-    expect(JSON.stringify(res.body)).not.toMatch(/token|viewurl|view_url|estimate-secret|estimate_data|margin|cost|drift|client_preview|digest/i);
+    expect(JSON.stringify(res.body)).not.toMatch(/token|viewurl|view_url|estimate-secret|estimate_data|margin|cost|drift|client_preview|digest|fingerprint/i);
   });
 
   test('one tool row with the detailed reasons, one credit, one audit event with ids only', async () => {
@@ -750,7 +752,10 @@ describe('POST /api/tech/estimates: the answer and what is recorded', () => {
     expect(mockState.inserts).toHaveLength(1);
     expect(mockState.inserts[0]).toEqual({
       table: 'tech_estimates',
-      row: { estimate_id: ESTIMATE_ID, technician_id: 'tech-1', office_first_reasons: JSON.stringify(['changed_fact:homeSqFt']) },
+      row: {
+        estimate_id: ESTIMATE_ID, technician_id: 'tech-1', office_first_reasons: JSON.stringify(['changed_fact:homeSqFt']),
+        request_fingerprint: fingerprintOf({ visitId: VISIT_ID, services: ['PEST'], facts: { homeSqFt: 2600 } }),
+      },
     });
     expect(typeof mockState.inserts[0].row.office_first_reasons).toBe('string');
     expect(creditSpy).toHaveBeenCalledTimes(1);
@@ -804,10 +809,17 @@ describe('POST /api/tech/estimates: the answer and what is recorded', () => {
 
   test('a retry: the same estimate and the stored reasons, no second tool row, credit or audit event', async () => {
     saveSpy.mockImplementation(async (arg) => (arg.dryRun ? prepared() : saved({ reused: true })));
-    mockState.toolRow = { office_first_reasons: ['one_time_over_limit', 'member_address'] };
+    mockState.toolRow = { office_first_reasons: ['one_time_over_limit', 'member_address'], request_fingerprint: fingerprintOf({ visitId: VISIT_ID, services: ['PEST'] }) };
     const res = await create({ visitId: VISIT_ID, services: ['PEST'] });
     expect(res.body.id).toBe(ESTIMATE_ID);
     expect(res.body.officeFirst).toEqual({ required: true, reasons: ['one_time_over_limit', 'office_review'] });
+    nothingWritten();
+  });
+
+  test('a retry beside the first attempt with ANOTHER request is 409 already_saved', async () => {
+    saveSpy.mockImplementation(async (arg) => (arg.dryRun ? prepared() : saved({ reused: true })));
+    mockState.toolRow = { office_first_reasons: [], request_fingerprint: fingerprintOf({ visitId: VISIT_ID, services: ['PEST', 'MOSQUITO'] }) };
+    expect(await create({ visitId: VISIT_ID, services: ['PEST'] })).toEqual({ status: 409, body: ALREADY_SAVED });
     nothingWritten();
   });
 
@@ -820,11 +832,146 @@ describe('POST /api/tech/estimates: the answer and what is recorded', () => {
 
   test('a lost insert race answers from the winner\'s row', async () => {
     mockState.conflict = true;
-    mockState.toolRow = { office_first_reasons: [] };
+    mockState.toolRow = { office_first_reasons: [], request_fingerprint: fingerprintOf({ visitId: VISIT_ID, services: ['PEST'] }) };
     const res = await create({ visitId: VISIT_ID, services: ['PEST'] });
     expect(res.status).toBe(200);
     expect(creditSpy).not.toHaveBeenCalled();
     expect(auditSpy).not.toHaveBeenCalled();
+  });
+});
+
+// A create that already committed (the phone lost the first answer) is answered from the stored rows, before anything is
+// looked up, priced or saved again.
+describe('POST /api/tech/estimates: a retry of a saved create', () => {
+  const BODY = { visitId: VISIT_ID, services: ['PEST'] };
+  // His stored tool estimate under the draft id, as the join returns it (pg numerics as strings).
+  const storedRow = (over = {}) => ({
+    id: DRAFT_ID, technician_id: 'tech-1', status: 'draft', monthly_total: '37.33', annual_total: '448.00', onetime_total: '99.00',
+    estimate_data: saved().estimate.estimate_data, token: 'secret-token',
+    office_first_reasons: ['one_time_over_limit', 'member_address'], request_fingerprint: fingerprintOf(BODY), ...over,
+  });
+  const rebuiltNothing = () => {
+    expect(lookupSpy).not.toHaveBeenCalled();
+    expect(saveSpy).not.toHaveBeenCalled();
+    expect(phoneSpy).not.toHaveBeenCalled();
+    expect(bellSpy).not.toHaveBeenCalled();
+    nothingWritten();
+  };
+
+  test('the stored estimate is the answer, field by field, and nothing is looked up, priced, saved or rung', async () => {
+    mockState.own = [storedRow()];
+    const res = await create(BODY);
+    expect(res).toEqual({
+      status: 200,
+      body: {
+        id: DRAFT_ID,
+        status: 'draft',
+        lines: [{ label: 'Pest Control', monthly: 37.33, annual: 448 }, { label: 'WaveGuard setup fee', oneTime: 99 }],
+        monthlyTotal: 37.33,
+        annualTotal: 448,
+        oneTimeTotal: 99,
+        officeFirst: { required: true, reasons: ['one_time_over_limit', 'office_review'] },
+      },
+    });
+    expect(mockState.wheres).toContainEqual(['tech_estimates as t', 't.estimate_id', DRAFT_ID]);
+    expect(mockState.wheres).toContainEqual(['tech_estimates as t', 't.technician_id', 'tech-1']);
+    rebuiltNothing();
+  });
+
+  test('it answers even when the quote could not be rebuilt now (the visit left his route, the service closed to him)', async () => {
+    mockState.own = [storedRow({ request_fingerprint: fingerprintOf({ visitId: OTHER_TECH_VISIT_ID, services: ['PEST'] }) })];
+    expect((await create({ visitId: OTHER_TECH_VISIT_ID, services: ['PEST'] })).status).toBe(200);
+    mockState.caps = [];
+    mockState.own = [storedRow()];
+    expect((await create(BODY)).status).toBe(200);
+    rebuiltNothing();
+  });
+
+  test.each([
+    ['other services', { ...BODY, services: ['PEST', 'MOSQUITO'] }],
+    ['a typed fact', { ...BODY, facts: { homeSqFt: 2600 } }],
+    ['another visit', { ...BODY, visitId: OTHER_TECH_VISIT_ID }],
+    ['a new person', { prospect: PROSPECT, services: ['PEST'] }],
+  ])('the same draft id with %s is 409 already_saved, before any lookup', async (_label, body) => {
+    mockState.own = [storedRow()];
+    expect(await create(body)).toEqual({ status: 409, body: ALREADY_SAVED });
+    rebuiltNothing();
+  });
+
+  test('another price digest is another request', async () => {
+    mockState.own = [storedRow()];
+    expect(await call('POST', '', { ...BODY, clientDraftId: DRAFT_ID, digest: 'b'.repeat(64) })).toEqual({ status: 409, body: ALREADY_SAVED });
+    rebuiltNothing();
+  });
+
+  test('a stored row without a fingerprint matches no request', async () => {
+    mockState.own = [storedRow({ request_fingerprint: null })];
+    expect(await create(BODY)).toEqual({ status: 409, body: ALREADY_SAVED });
+    rebuiltNothing();
+  });
+
+  test('another login\'s estimate under that id is not his retry: the create goes on to the save, which decides', async () => {
+    mockState.own = [storedRow({ technician_id: 'tech-2' })];
+    expect((await create(BODY)).status).toBe(200);
+    expect(realSaves()).toHaveLength(1);
+  });
+
+  test('the first attempt commits while this one is working: a refusal from the rebuild or the save becomes the stored answer', async () => {
+    // The save refuses with a changed price, but by then his estimate is stored.
+    saveSpy.mockImplementation(async (arg) => {
+      if (arg.dryRun) return prepared();
+      mockState.own = [storedRow()];
+      throw Object.assign(new Error('The estimate price or options changed. Review a fresh estimate before saving.'), { statusCode: 409 });
+    });
+    const res = await create(BODY);
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe(DRAFT_ID);
+    expect(bellSpy).not.toHaveBeenCalled();
+    nothingWritten();
+  });
+
+  test('a server error is never turned into a stored answer', async () => {
+    saveSpy.mockImplementation(async (arg) => {
+      if (arg.dryRun) return prepared();
+      mockState.own = [storedRow()];
+      throw Object.assign(new Error('Live pricing configuration is unavailable.'), { statusCode: 503 });
+    });
+    expect((await create(BODY)).status).toBeGreaterThanOrEqual(500);
+  });
+});
+
+describe('the request fingerprint', () => {
+  const { requestFingerprint } = require('../services/tech-estimate-save')._private;
+  const of = (body, digest = DIGEST) => requestFingerprint(body, digest);
+  const BASE = { visitId: VISIT_ID, services: ['PEST', 'MOSQUITO'], facts: { homeSqFt: 2600 } };
+
+  test('the same request gives the same 64-character hash; order, case, spacing and keys the tool does not read change nothing', () => {
+    expect(of(BASE)).toMatch(/^[0-9a-f]{64}$/);
+    expect(of({ facts: { homeSqFt: '2600 ' }, services: ['MOSQUITO', 'PEST', 'PEST'], visitId: VISIT_ID.toUpperCase(), ...FORGED_KEYS, clientDraftId: 'x' })).toBe(of(BASE));
+    expect(of({ prospect: { ...PROSPECT, [SENTINEL]: 1 }, services: ['PEST'] })).toBe(of({ prospect: PROSPECT, services: ['PEST'] }));
+  });
+
+  test.each([
+    ['another visit', { ...BASE, visitId: OTHER_TECH_VISIT_ID }],
+    ['another service list', { ...BASE, services: ['PEST'] }],
+    ['another fact value', { ...BASE, facts: { homeSqFt: 2601 } }],
+    ['another fact', { ...BASE, facts: { lotSqFt: 2600 } }],
+    ['no facts', { ...BASE, facts: undefined }],
+    ['a new person', { prospect: PROSPECT, services: BASE.services, facts: BASE.facts }],
+  ])('%s is another request', (_label, body) => {
+    expect(of(body)).not.toBe(of(BASE));
+  });
+
+  test('each typed field of a new person counts, and so does the digest', () => {
+    const person = (over) => of({ prospect: { ...PROSPECT, ...over }, services: ['PEST'] });
+    for (const key of ['firstName', 'lastName', 'phone', 'address', 'city', 'zip']) expect(person({ [key]: 'other' })).not.toBe(person({}));
+    expect(of(BASE, 'b'.repeat(64))).not.toBe(of(BASE));
+  });
+
+  test('a malformed body never throws', () => {
+    for (const body of [{}, { services: 'PEST', facts: [1], prospect: 'x', visitId: { a: 1 } }, { services: [{}, null, 5], facts: { homeSqFt: {} }, prospect: [] }]) {
+      expect(of(body)).toMatch(/^[0-9a-f]{64}$/);
+    }
   });
 });
 
@@ -893,7 +1040,7 @@ describe('POST /api/tech/estimates: the office bell for a held estimate', () => 
 
   test('a retry rings nothing', async () => {
     saveSpy.mockImplementation(async (arg) => (arg.dryRun ? prepared() : saved({ reused: true })));
-    mockState.toolRow = { office_first_reasons: ['changed_fact:homeSqFt'] };
+    mockState.toolRow = { office_first_reasons: ['changed_fact:homeSqFt'], request_fingerprint: fingerprintOf(HELD) };
     const res = await create(HELD);
     expect(res.status).toBe(200);
     expect(res.body.officeFirst.required).toBe(true);
@@ -902,7 +1049,7 @@ describe('POST /api/tech/estimates: the office bell for a held estimate', () => 
 
   test('a lost insert race rings nothing (the winner rings)', async () => {
     mockState.conflict = true;
-    mockState.toolRow = { office_first_reasons: ['changed_fact:homeSqFt'] };
+    mockState.toolRow = { office_first_reasons: ['changed_fact:homeSqFt'], request_fingerprint: fingerprintOf(HELD) };
     expect((await create(HELD)).status).toBe(200);
     expect(bellSpy).not.toHaveBeenCalled();
   });

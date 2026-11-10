@@ -14,10 +14,14 @@
  * makes a concurrent retry wait for the first answer).
  *
  * A retry with the same clientDraftId by the same technician answers the same estimate and writes nothing more
- * (no second tool row, credit or audit event). Responses are built field by field: never the public token, a
- * view URL, the stored estimate data, costs or margins.
+ * (no second tool row, credit or audit event). A retry of a create that already committed (the first answer was lost)
+ * is answered from the stored rows BEFORE anything is rebuilt, so a price, a lookup or a contact that changed since
+ * cannot refuse a quote that is saved. The tool row keeps a fingerprint of the request: the same draft id with another
+ * request is refused (one draft id is one quote). Responses are built field by field: never the public token, a view
+ * URL, the stored estimate data, costs or margins.
  */
 
+const crypto = require('node:crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const Price = require('./tech-estimate-price');
@@ -38,6 +42,45 @@ function createKeys(body) {
   return { clientDraftId, digest: digest.toLowerCase() };
 }
 
+// The request as one stable string, hashed: the keys the tool reads from the phone, in a fixed order, plus the price
+// digest. It only tells one quote from another (the phone makes one draft id for each priced quote and resends a retry
+// unchanged); it judges nothing, prepareQuote does that. It never throws on a malformed body.
+const PROSPECT_KEYS = ['firstName', 'lastName', 'phone', 'address', 'city', 'zip'];
+function requestFingerprint(body, digest) {
+  const text = (value) => (typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '');
+  const record = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : null);
+  const prospect = record(body.prospect);
+  const facts = record(body.facts) || {};
+  const canonical = [
+    text(body.visitId).toLowerCase(),
+    prospect ? PROSPECT_KEYS.map((key) => text(prospect[key])) : null,
+    Array.isArray(body.services) ? [...new Set(body.services.map(text))].sort() : [],
+    Price.FACT_NAMES.map((name) => text(facts[name])),
+    digest,
+  ];
+  return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+const alreadySaved = () => new PriceRefusal(409, 'This estimate was already saved. Find it in My estimates.', { code: 'already_saved' });
+
+// The create's answer: the stored row is the truth, so the first answer and a retry say the same thing.
+function savedAnswer(estimate, detailed) {
+  return { id: estimate.id, status: estimate.status, ...Price.quoteAnswer(estimate, Price.parseEstimateData(estimate), { detailed }) };
+}
+
+// His stored estimate for this draft id, answered as the create answers it; nothing when the id is not a tool estimate of
+// his. The same draft id with another request is refused.
+async function storedAnswer(req, clientDraftId, fingerprint) {
+  const row = await db('tech_estimates as t')
+    .join('estimates as e', 'e.id', 't.estimate_id')
+    .where('t.estimate_id', clientDraftId)
+    .where('t.technician_id', req.technicianId)
+    .first('e.id', 'e.status', 'e.estimate_data', 'e.monthly_total', 'e.annual_total', 'e.onetime_total', 't.office_first_reasons', 't.request_fingerprint');
+  if (!row) return null;
+  if (row.request_fingerprint !== fingerprint) throw alreadySaved();
+  return savedAnswer(row, row.office_first_reasons || []);
+}
+
 // The save's refusals as the tool answers them. A message from the save is never echoed, except a bad typed phone.
 function saveRefusal(err) {
   const status = Number(err && (err.statusCode || err.status));
@@ -50,18 +93,20 @@ function saveRefusal(err) {
 }
 
 // The tool row, the Sold by credit and the audit event for a NEW estimate; a retry only reads its stored reasons.
-async function recordToolEstimate(trx, req, saved, detailed) {
+async function recordToolEstimate(trx, req, saved, { detailed, fingerprint }) {
   const { estimate } = saved;
   const where = { estimate_id: estimate.id, technician_id: req.technicianId };
-  const stored = () => trx('tech_estimates').where(where).first('office_first_reasons');
+  const stored = () => trx('tech_estimates').where(where).first('office_first_reasons', 'request_fingerprint');
   const inserted = saved.reused ? [] : await trx('tech_estimates')
-    .insert({ ...where, office_first_reasons: JSON.stringify(detailed) })
+    .insert({ ...where, office_first_reasons: JSON.stringify(detailed), request_fingerprint: fingerprint })
     .onConflict('estimate_id').ignore()
     .returning('estimate_id');
   if (inserted.length === 0) {
-    // A retry. An id that is not his tool estimate (an office estimate, or another login's) is refused.
+    // A retry that ran beside the first attempt. An id that is not his tool estimate (an office estimate, or another
+    // login's) is refused, and so is his own draft id with another request.
     const row = await stored();
     if (!row) throw Price.officePrices();
+    if (row.request_fingerprint !== fingerprint) throw alreadySaved();
     return { estimate, detailed: row.office_first_reasons || [], created: false };
   }
   // Sold by = the creator, for a W-2 technician only: an admin login is never credited.
@@ -80,7 +125,7 @@ async function recordToolEstimate(trx, req, saved, detailed) {
   return { estimate: credited, detailed, created: true };
 }
 
-async function saveDraft(req, { prep, clientDraftId, digest, detailed }) {
+async function saveDraft(req, { prep, clientDraftId, digest, detailed, fingerprint }) {
   try {
     return await db.transaction(async (trx) => {
       const saved = await require('./admin-estimate-persistence').createOrReuseAdminEstimate({
@@ -91,10 +136,10 @@ async function saveDraft(req, { prep, clientDraftId, digest, detailed }) {
         requireLivePricing: true,
         expectedEngineResultDigest: digest,
       });
-      return recordToolEstimate(trx, req, saved, detailed);
+      return recordToolEstimate(trx, req, saved, { detailed, fingerprint });
     });
   } catch (err) {
-    throw saveRefusal(err);
+    throw err instanceof PriceRefusal ? err : saveRefusal(err);
   }
 }
 
@@ -112,17 +157,24 @@ async function ringIfHeld(req, saved) {
 
 async function createQuote(req, body) {
   const { clientDraftId, digest } = createKeys(body);
-  const prep = await Price.prepareQuote(req, body);
-  const judged = await Price.judgeQuote(req, prep);
-  const phoneMatch = await Price.phoneMatchesCustomer(prep.subject);
-  const saved = await saveDraft(req, { prep, clientDraftId, digest, detailed: Price.detailedReasons(prep, judged, { phoneMatch }) });
+  const fingerprint = requestFingerprint(body, digest);
+  // A retry of a create that already committed: answer the stored estimate before anything is looked up or priced again.
+  const stored = await storedAnswer(req, clientDraftId, fingerprint);
+  if (stored) return stored;
+  let saved;
+  try {
+    const prep = await Price.prepareQuote(req, body);
+    const judged = await Price.judgeQuote(req, prep);
+    const phoneMatch = await Price.phoneMatchesCustomer(prep.subject);
+    saved = await saveDraft(req, { prep, clientDraftId, digest, fingerprint, detailed: Price.detailedReasons(prep, judged, { phoneMatch }) });
+  } catch (err) {
+    // The first attempt can commit while this one is still working: then this one answers what was saved, too.
+    const late = err instanceof PriceRefusal ? await storedAnswer(req, clientDraftId, fingerprint) : null;
+    if (late) return late;
+    throw err;
+  }
   await ringIfHeld(req, saved);
-  return {
-    id: saved.estimate.id,
-    status: saved.estimate.status,
-    // The stored row is the truth (a retry answers what was saved), shaped like the preview.
-    ...Price.quoteAnswer(saved.estimate, Price.parseEstimateData(saved.estimate), { facts: prep.layered.shown, detailed: saved.detailed }),
-  };
+  return savedAnswer(saved.estimate, saved.detailed);
 }
 
 // ---------------------------------------------------------------------------
@@ -172,4 +224,4 @@ async function readOwn(req, id) {
   return { ...ownShape(row), lines: Price.buildLines((Price.parseEstimateData(row) || {}).result || {}) };
 }
 
-module.exports = { createQuote, listOwn, readOwn, _private: { createKeys, saveRefusal } };
+module.exports = { createQuote, listOwn, readOwn, _private: { createKeys, saveRefusal, requestFingerprint } };
