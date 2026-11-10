@@ -87,6 +87,9 @@
   "engines": {
     "node": ">=20.9"
   },
+  "overrides": {
+    "axios": "1.21.0"
+  },
   "devDependencies": {
     "@babel/parser": "^7.29.8",
     "acorn": "^8.18.0",
