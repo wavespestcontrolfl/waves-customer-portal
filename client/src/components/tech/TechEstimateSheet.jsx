@@ -116,8 +116,11 @@ function Problem({ problem, onHandOff }) {
 }
 
 // Why a call failed, as words for the technician. The server's own message stands except for the two fixed answers.
-function problemOf(err) {
+// `visit` is true for a quote through a visit: a 404 then means the visit left his route. `final` hides the actions.
+function problemOf(err, visit = false) {
   if (err.status === 422 && err.code === 'office_prices') return { office: true, text: 'The office needs to price this one.' };
+  if (err.status === 429 && err.code === 'daily_limit') return { office: true, final: true, text: err.message };
+  if (err.status === 404 && visit && err.enabled !== false) return { final: true, text: 'This visit is no longer on your route.' };
   if (err.status === 502) return { text: 'The property lookup is not available right now. Try again.' };
   return { text: err.status && err.message ? err.message : RETRY };
 }
@@ -149,7 +152,7 @@ function NewEstimate({ setup, customer, service, onHandOff, onMine }) {
       setPriced({ body, answer, draftId: crypto.randomUUID() });
       setEdits({});
       setNotice(note);
-    } catch (err) { setProblem(problemOf(err)); }
+    } catch (err) { setProblem(problemOf(err, Boolean(customer))); }
   });
 
   const getPrice = () => {
@@ -159,7 +162,7 @@ function NewEstimate({ setup, customer, service, onHandOff, onMine }) {
     }
     if (keys.length === 0) { setProblem({ text: 'Pick at least one service.' }); return; }
     reset();
-    price({ ...(customer ? { customerId: customer.id } : { prospect: typed }), services: keys });
+    price({ ...(customer ? { visitId: customer.visitId } : { prospect: typed }), services: keys });
   };
   const update = (pending) => {
     const facts = { ...(priced.body.facts || {}), ...Object.fromEntries(pending.map(([name, v]) => [name, Number(v)])) };
@@ -177,10 +180,10 @@ function NewEstimate({ setup, customer, service, onHandOff, onMine }) {
           setPriced({ body: priced.body, answer, draftId: crypto.randomUUID() });
           setEdits({});
           setNotice(PRICE_CHANGED);
-        } catch (again) { setProblem(problemOf(again)); }
+        } catch (again) { setProblem(problemOf(again, Boolean(customer))); }
         return;
       }
-      setProblem(problemOf(err));
+      setProblem(problemOf(err, Boolean(customer)));
     }
   });
 
@@ -222,7 +225,7 @@ function NewEstimate({ setup, customer, service, onHandOff, onMine }) {
       </fieldset>
       {notice && <div role="status" style={s.notice}>{notice}</div>}
       <Problem problem={problem} onHandOff={canHandOff ? () => onHandOff({ service, prospect: customer ? null : typed }) : null} />
-      {priced ? (
+      {problem?.final ? null : priced ? (
         <Quote priced={priced} setup={setup} keys={priced.body.services} edits={edits} busy={busy} onSave={save} onUpdate={update}
           onEdit={(name, value) => setEdits((e) => ({ ...e, [name]: value }))} />
       ) : (
@@ -240,7 +243,7 @@ export default function TechEstimateSheet({ setup, service = null, onClose, onHa
   const [tab, setTab] = useState('new');
   const customerId = service && (service.customer_id || service.customerId);
   const customer = customerId
-    ? { id: customerId, name: service.customerName || service.customer_name || 'Customer', address: service.address || '' }
+    ? { visitId: service.id, name: service.customerName || service.customer_name || 'Customer', address: service.address || '' }
     : null;
   return createPortal(
     <div ref={dialogRef} className={fieldPortalClass || undefined} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Estimate" style={{

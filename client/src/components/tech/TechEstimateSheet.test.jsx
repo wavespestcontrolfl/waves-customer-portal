@@ -81,13 +81,14 @@ describe('who and which services', () => {
 });
 
 describe('the price request and the save request', () => {
-  it('prices a customer with exactly customerId and services', async () => {
+  it('prices a visit quote with exactly visitId and services, never a customerId', async () => {
     reply('POST /price', 200, READY);
     open();
     pick('Recurring pest control');
     getPrice();
     await screen.findByText('This estimate is ready. Save it.');
-    expect(priceCalls()).toEqual([{ method: 'POST', path: '/price', body: { customerId: 'customer-1', services: ['PEST'] } }]);
+    expect(priceCalls()).toEqual([{ method: 'POST', path: '/price', body: { visitId: 'visit-1', services: ['PEST'] } }]);
+    expect(JSON.stringify(calls)).not.toMatch(/customerId|customer-1/);
   });
 
   it('prices a new person with exactly prospect and services', async () => {
@@ -118,8 +119,8 @@ describe('the price request and the save request', () => {
     await screen.findByText('Saved. Sending from the phone comes next; for now the office sends it.');
     const saves = calls.filter((c) => c.method === 'POST' && c.path === '/');
     expect(saves).toHaveLength(2);
-    expect(Object.keys(saves[0].body).sort()).toEqual(['clientDraftId', 'customerId', 'digest', 'services']);
-    expect(saves[0].body).toMatchObject({ customerId: 'customer-1', services: ['PEST'], digest: DIGEST });
+    expect(Object.keys(saves[0].body).sort()).toEqual(['clientDraftId', 'digest', 'services', 'visitId']);
+    expect(saves[0].body).toMatchObject({ visitId: 'visit-1', services: ['PEST'], digest: DIGEST });
     expect(saves[1].body.clientDraftId).toBe(saves[0].body.clientDraftId);
   });
 
@@ -135,7 +136,7 @@ describe('the price request and the save request', () => {
     fireEvent.change(screen.getByLabelText('New home size'), { target: { value: '2000' } });
     fireEvent.click(screen.getByRole('button', { name: 'Update price' }));
     await screen.findByText('The office checks this one first.');
-    expect(priceCalls()[1].body).toEqual({ customerId: 'customer-1', services: ['PEST'], facts: { homeSqFt: 2000 } });
+    expect(priceCalls()[1].body).toEqual({ visitId: 'visit-1', services: ['PEST'], facts: { homeSqFt: 2000 } });
     fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }));
     await screen.findByText('Saved. The office checks it and sends it.');
     const save = calls.find((c) => c.method === 'POST' && c.path === '/');
@@ -232,6 +233,43 @@ describe('refusals', () => {
     pick('Recurring pest control');
     getPrice();
     expect(await screen.findByText('The property lookup is not available right now. Try again.')).toBeInTheDocument();
+  });
+
+  it('429 daily_limit shows the server message, offers the office hand-off and no retry', async () => {
+    const message = "You reached today's limit of new address lookups. Ask the office to price this one.";
+    reply('POST /price', 429, { error: message, code: 'daily_limit' });
+    const onHandOff = vi.fn();
+    open({ onHandOff });
+    pick('Recurring pest control');
+    getPrice();
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Get price' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Flag it for the office' }));
+    expect(onHandOff).toHaveBeenCalledWith({ service: VISIT, prospect: null });
+  });
+
+  it('404 on a visit says it left his route and closes the actions', async () => {
+    reply('POST /price', 404, { error: 'Visit not found' });
+    open();
+    pick('Recurring pest control');
+    getPrice();
+    expect(await screen.findByText('This visit is no longer on your route.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Get price' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save estimate' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Flag it for the office' })).not.toBeInTheDocument();
+  });
+
+  it('a 404 enabled:false (his switch went off) is not read as a visit that left his route', async () => {
+    reply('POST /price', 404, { enabled: false });
+    open();
+    pick('Recurring pest control');
+    getPrice();
+    expect(await screen.findByText('Something went wrong. Try again.')).toBeInTheDocument();
+  });
+
+  it('the card shows the address the visit itself carries (a second home)', () => {
+    open({ service: { ...VISIT, address: '200 Second Home Way' } });
+    expect(screen.getByText('200 Second Home Way')).toBeInTheDocument();
   });
 
   it('400 shows the server message', async () => {
