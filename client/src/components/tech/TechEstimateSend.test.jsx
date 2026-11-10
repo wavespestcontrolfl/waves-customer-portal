@@ -13,6 +13,7 @@ vi.mock('../../hooks/useIsMobile', () => ({ default: () => true }));
 vi.mock('../../lib/adminAuth', () => ({ getAdminAuthToken: () => 'token' }));
 
 import TechEstimateSheet from './TechEstimateSheet';
+import { clearSendLocks } from './useTechEstimates';
 
 const SETUP = { oneTimeHoldDollars: 1000, services: [{ key: 'PEST', label: 'Recurring pest control', category: 'pest' }] };
 const VISIT = { id: 'visit-1', customer_id: 'customer-1', customerName: 'Sample Customer', address: '100 Sample St' };
@@ -43,7 +44,7 @@ beforeEach(() => {
     return { ok: next.status < 400, status: next.status, json: async () => next.body };
   }));
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); clearSendLocks(); });
 
 const open = (props = {}) => render(<TechEstimateSheet setup={SETUP} service={VISIT} onClose={() => {}} onHandOff={() => {}} {...props} />);
 const openDetail = async (row = ROW, detail = row) => {
@@ -239,6 +240,72 @@ describe('what each answer shows', () => {
     await screen.findByRole('button', { name: /Sample Customer/ });
     expect(screen.queryByText('Ready to send')).not.toBeInTheDocument();
     expect(sendCalls()).toHaveLength(1);
+  });
+
+  // "Do not send it again" must hold on every view of the sheet, whatever he taps next. The server still says draft
+  // and canSend here (the request never got an answer), so only the lock keeps the button away.
+  describe('the do-not-resend lock holds across the sheet', () => {
+    const words = 'The app cannot tell if the text went. Do not send it again. Ask the office to check.';
+    const dropSendFromDetail = async () => {
+      await openDetail();
+      replies['POST /est-1/send'] = [{ drop: true }];
+      tapSend();
+      confirmSend();
+      await screen.findByText(words);
+    };
+    const expectNoSendAnywhere = async () => {
+      // The tab at the top (the saved screen has a second button with the same name).
+      fireEvent.click(screen.getAllByRole('button', { name: 'My estimates' })[0]);
+      const row = await screen.findByRole('button', { name: /Sample Customer/ });
+      expect(screen.queryByText('Ready to send')).not.toBeInTheDocument();
+      fireEvent.click(row);
+      await screen.findByRole('button', { name: 'Back' });
+      // The detail has loaded (its heading is the customer's name), and the server said canSend.
+      await screen.findByRole('heading', { name: 'Sample Customer' });
+      expect(screen.queryByRole('button', { name: 'Send to customer' })).not.toBeInTheDocument();
+    };
+
+    it('after a change to New estimate and back', async () => {
+      await dropSendFromDetail();
+      fireEvent.click(screen.getByRole('button', { name: 'New estimate' }));
+      await expectNoSendAnywhere();
+      expect(sendCalls()).toHaveLength(1);
+    });
+
+    it('after the sheet is closed and opened again', async () => {
+      await dropSendFromDetail();
+      cleanup();
+      open({ service: null });
+      await expectNoSendAnywhere();
+      expect(sendCalls()).toHaveLength(1);
+    });
+
+    it('from the saved screen to My estimates', async () => {
+      reply('POST /price', 200, READY);
+      reply('POST /', 200, { id: 'est-1', status: 'draft', lines: READY.lines, monthlyTotal: 45, annualTotal: 540, oneTimeTotal: 0, officeFirst: READY.officeFirst });
+      reply('GET /', 200, { estimates: [ROW] });
+      reply('GET /est-1', 200, { ...ROW, lines: READY.lines });
+      replies['POST /est-1/send'] = [{ drop: true }];
+      open();
+      fireEvent.click(screen.getByLabelText('Recurring pest control'));
+      fireEvent.click(screen.getByRole('button', { name: 'Get price' }));
+      await screen.findByText('This estimate is ready. Save it.');
+      fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }));
+      await screen.findByText('Saved. Send it now, or later from My estimates.');
+      tapSend();
+      confirmSend();
+      await screen.findByText(words);
+      expect(screen.queryByRole('button', { name: 'Send to customer' })).not.toBeInTheDocument();
+      await expectNoSendAnywhere();
+      expect(sendCalls()).toHaveLength(1);
+    });
+
+    it('another estimate is not locked', async () => {
+      await dropSendFromDetail();
+      cleanup();
+      await openDetail(NEW_PERSON_ROW);
+      expect(screen.getByRole('button', { name: 'Send to customer' })).toBeInTheDocument();
+    });
   });
 
   it('after a ready save, a sent text shows "Sent to <who>." and no more Send button', async () => {

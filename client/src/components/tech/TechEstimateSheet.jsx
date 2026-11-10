@@ -4,7 +4,7 @@ import { useFieldPortalClass } from './fieldPortal';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
-import { techEstimateRequest } from './useTechEstimates';
+import { lockSend, techEstimateRequest } from './useTechEstimates';
 import TechMyEstimates from './TechMyEstimates';
 import TechEstimateSend from './TechEstimateSend';
 import { INK, LineList, s, Totals } from './techEstimateParts';
@@ -115,7 +115,8 @@ function Saved({ saved, who, needsTextRequest, onMine, onAnother }) {
   const ready = !saved.officeFirst?.required;
   const [note, setNote] = useState(null);
   const [showSend, setShowSend] = useState(ready);
-  const outcome = (result) => { setNote(result); if (!result.keep) setShowSend(false); };
+  // A text whose result the app cannot see is locked for every view (useTechEstimates.js), not only for this screen.
+  const outcome = (result) => { if (result.lock) lockSend(saved.id); setNote(result); if (!result.keep) setShowSend(false); };
   return (
     <div>
       <p role="status" style={{ ...s.card, fontWeight: 500 }}>

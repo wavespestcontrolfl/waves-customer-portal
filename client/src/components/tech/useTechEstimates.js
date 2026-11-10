@@ -17,6 +17,15 @@ export async function techEstimateRequest(path, { method = 'GET', body } = {}) {
   return data;
 }
 
+// Estimates whose text may have gone although the app saw no answer (a dropped connection, a server error). The screen
+// said "Do not send it again", so the Send button stays off for them in every view of the sheet (the saved screen, the
+// list, the detail), also after a tab change or after the sheet is closed and opened again, until the page loads again.
+// By then the server knows what happened, and its own status decides.
+const uncertainSends = new Set();
+export const lockSend = (id) => { uncertainSends.add(String(id)); };
+export const sendLocked = (id) => uncertainSends.has(String(id));
+export const clearSendLocks = () => { uncertainSends.clear(); };
+
 // GET /api/tech/estimates/setup, once for the field workspace. The server answers { enabled: false } (a plain 200, so
 // the browser logs no failed request) while the gate or this technician's switch is off; then (and on any failure) the
 // answer is null and nothing of the tool shows. A setup with no service he may quote also reads as off.

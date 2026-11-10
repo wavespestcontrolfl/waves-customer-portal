@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { techEstimateRequest } from './useTechEstimates';
+import { lockSend, sendLocked, techEstimateRequest } from './useTechEstimates';
 import TechEstimateSend from './TechEstimateSend';
 import { INK, LineList, MUTED, s, statusWords, Totals, totalsWords } from './techEstimateParts';
 
@@ -7,11 +7,11 @@ const LOAD_ERROR = 'Could not load your estimates. Try again.';
 
 // One of his estimates with its lines. The Send button shows only while the server says canSend. A send outcome is read
 // back from the server; after a text whose result the app cannot see, the button never comes back for that estimate.
-function Detail({ id, onBack, locked, onLock, onGone }) {
+function Detail({ id, onBack, onGone }) {
   const [quote, setQuote] = useState(null);
   const [error, setError] = useState('');
   const [note, setNote] = useState(null);
-  const [lockedHere, setLockedHere] = useState(locked);
+  const [lockedHere, setLockedHere] = useState(() => sendLocked(id));
   const goneRef = useRef(onGone);
   goneRef.current = onGone;
   const read = useCallback(() => techEstimateRequest(`/${encodeURIComponent(id)}`)
@@ -20,7 +20,7 @@ function Detail({ id, onBack, locked, onLock, onGone }) {
   useEffect(() => { void read(); }, [read]);
   const outcome = (result) => {
     if (result.gone) { onGone(); return; }
-    if (result.lock) { onLock(id); setLockedHere(true); }
+    if (result.lock) { lockSend(id); setLockedHere(true); }
     setNote(result);
     if (result.reread) void read();
   };
@@ -52,7 +52,6 @@ export default function TechMyEstimates() {
   const [openId, setOpenId] = useState(null);
   const [listNote, setListNote] = useState('');
   const [version, setVersion] = useState(0);
-  const locked = useRef(new Set());
   useEffect(() => {
     let live = true;
     techEstimateRequest('')
@@ -63,10 +62,7 @@ export default function TechMyEstimates() {
   const close = (note = '') => { setOpenId(null); setListNote(note); setVersion((v) => v + 1); };
   if (openId) {
     return (
-      <Detail
-        id={openId} locked={locked.current.has(openId)} onLock={(id) => locked.current.add(id)}
-        onBack={() => close()} onGone={() => close('This estimate is no longer in your list.')}
-      />
+      <Detail id={openId} onBack={() => close()} onGone={() => close('This estimate is no longer in your list.')} />
     );
   }
   if (error) return <div role="alert" style={s.error}>{error}</div>;
@@ -86,7 +82,7 @@ export default function TechMyEstimates() {
             {statusWords(row.status)} · {totalsWords(row)}
           </span>
           {row.officeFirst?.required && <span style={{ ...s.muted, color: '#854d0e', display: 'block' }}>Office checks first</span>}
-          {row.canSend && !locked.current.has(row.id) && (
+          {row.canSend && !sendLocked(row.id) && (
             <span style={{ display: 'inline-block', marginTop: 6, padding: '2px 8px', borderRadius: 3, background: '#e7e5e4', color: INK, fontSize: 14 }}>Ready to send</span>
           )}
         </button>
