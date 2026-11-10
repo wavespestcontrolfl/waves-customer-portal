@@ -8,6 +8,7 @@ const { recordSuppression, clearSuppression } = require('../services/messaging/v
 const { detectSmsOptCommand } = require('../services/messaging/opt-out-detector');
 const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
 const { updateByTwilioSid } = require('../services/conversations');
+const { onlyIfNotBehind } = require('../services/sms-delivery-status-order');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
 const {
@@ -1580,8 +1581,12 @@ router.post('/status', async (req, res) => {
       // the webhook answers 200 regardless, so Twilio would never redeliver
       // and a bounce would be lost (codex P2).
       try {
-        await db('sms_log').where({ twilio_sid: MessageSid }).update({ status: MessageStatus });
-        await updateByTwilioSid(MessageSid, { delivery_status: MessageStatus, updated_at: new Date() });
+        // Callbacks can arrive out of order: a late `sent` must not undo `delivered`, so each UPDATE
+        // carries the guard itself (services/sms-delivery-status-order.js).
+        await onlyIfNotBehind(db('sms_log').where({ twilio_sid: MessageSid }), 'status', MessageStatus)
+          .update({ status: MessageStatus });
+        await updateByTwilioSid(MessageSid, { delivery_status: MessageStatus, updated_at: new Date() },
+          (query) => onlyIfNotBehind(query, 'delivery_status', MessageStatus));
       } catch (bookkeepingErr) {
         logger.error(`[twilio-status] status bookkeeping failed (continuing to handlers): ${bookkeepingErr.message}`);
       }
