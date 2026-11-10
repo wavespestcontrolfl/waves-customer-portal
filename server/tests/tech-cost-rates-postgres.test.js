@@ -356,6 +356,26 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
       expect(after.labor_cost).toBe(38.15); // $27.25 x 84 minutes
     });
 
+    it('a card with no wage of its own: a pay rate step applied later does not re-cost an earlier visit', async () => {
+      await addTechCard(); // made before cards kept a wage: it reads the technician's pay rate
+      await addVehicleCard();
+      process.env[GATE] = 'true';
+      const before = await jobCosting.calculateJobCost(visitId, trx);
+      // The step of Monday 2026-11-02, one week after the visit, applied: $21.00 becomes $25.00.
+      await trx('payroll_rate_steps').insert({
+        technician_id: techId, effective_on: '2026-11-02', hourly_rate: '25.00', previous_rate: '21.00', applied_at: new Date(), created_by: techId,
+      });
+      await trx('technicians').where({ id: techId }).update({ pay_rate: '25.00' });
+      const after = await jobCosting.calculateJobCost(visitId, trx);
+      expect(after.labor_cost).toBe(before.labor_cost);
+      expect(after.labor_cost).toBe(38.15); // $27.25 x 84 minutes, the $21.00 rate
+      // The rates screen reads the same history: the earlier wage up to the Sunday, the new one from the Monday.
+      const { loadRatesForDate } = require('../services/tech-cost-rates');
+      const wageOn = async (day) => (await loadRatesForDate(trx, day)).technicians.find((t) => t.technicianId === techId).hourlyWageCents;
+      expect(await wageOn('2026-11-01')).toBe(2100);
+      expect(await wageOn('2026-11-02')).toBe(2500);
+    });
+
     it('two technicians who drive one vehicle share its yearly fixed cost', async () => {
       await addTechCard();
       await addVehicleCard();

@@ -1,5 +1,9 @@
 // L11a (GATE_TECH_COST_RATES): the pure rate math in services/tech-cost-rates.js.
 // Pinned to the "Tech Cost per Hour" decision page. Synthetic numbers only.
+// tech-cost-rates reads pay rate steps through payroll-rate-steps.js; its database and audit modules are never used here.
+jest.mock('../models/db', () => ({}));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn() }));
+
 const {
   computeTechnicianRate, computeVehicleRate, cardInEffect, loadVisitRates, dateString,
 } = require('../services/tech-cost-rates');
@@ -209,6 +213,10 @@ function fakeCardDb(tables) {
         else wheres.push((r) => r[a] === op);
         return chain;
       },
+      // The pay rate step read (payroll-rate-steps.js withWeekRates): whole rows of the open or applied steps.
+      whereIn: (col, values) => { wheres.push((r) => values.includes(r[col])); return chain; },
+      whereNull: (col) => { wheres.push((r) => r[col] == null); return chain; },
+      select: () => Promise.resolve((tables[table] || []).filter((r) => wheres.every((w) => w(r)))),
       orderBy: (spec) => { orderSpec = spec; return chain; },
       distinct: (col) => {
         const values = [...new Set((tables[table] || []).filter((r) => wheres.every((w) => w(r))).map((r) => r[col]))];
@@ -236,6 +244,7 @@ function fakeCardDb(tables) {
     };
     return chain;
   };
+  db.raw = (sql) => sql;
   return db;
 }
 
@@ -316,6 +325,30 @@ describe('loadVisitRates', () => {
   test('a visit before the first card, or a W-2 card with no pay rate, gives null', async () => {
     expect(await loadVisitRates(fakeCardDb(tables()), 't1', '2025-12-31')).toBeNull();
     expect(await loadVisitRates(fakeCardDb(tables({ technicians: [{ id: 't1', pay_rate: null }] })), 't1', '2026-10-26')).toBeNull();
+  });
+
+  test('a card with no wage of its own prices a visit at the pay rate of the visit\'s own pay week', async () => {
+    // $21.00 until the step of Monday 2026-10-05, then $25.00 (the profile rate today).
+    const stepped = (step) => fakeCardDb(tables({
+      technicians: [{ id: 't1', pay_rate: '25.00' }],
+      payroll_rate_steps: [{ technician_id: 't1', effective_on: '2026-10-05', hourly_rate: '25.00', previous_rate: '21.00', applied_at: '2026-10-05T04:07:00Z', cancelled_at: null, ...step }],
+    }));
+    const labor = async (conn, day) => (await loadVisitRates(conn, 't1', day)).laborPerWorkedHourCents;
+    const at25 = computeTechnicianRate(PINNED, '25.00').laborPerWorkedHourCents;
+    expect(at25).toBeGreaterThan(2725);
+    // Sunday 2026-10-04 is the last day of the earlier week; the step's Monday is the first day at the new rate.
+    expect(await labor(stepped(), '2026-10-04')).toBe(2725);
+    expect(await labor(stepped(), '2026-10-05')).toBe(at25);
+    expect(await labor(stepped(), '2026-10-26')).toBe(at25);
+    // A cancelled step never changed the rate: every date reads the profile rate.
+    expect(await labor(stepped({ applied_at: null, previous_rate: null, cancelled_at: '2026-10-01T15:00:00Z' }), '2026-10-04')).toBe(at25);
+    // A card that keeps its own wage never reads the steps (a read here would throw and give no rate).
+    const cards = fakeCardDb(tables({ technician_cost_cards: [{ ...techCard, hourly_wage: '21.00' }] }));
+    const noStepRead = (table) => {
+      if (table === 'payroll_rate_steps') throw new Error('steps read');
+      return cards(table);
+    };
+    expect(await labor(noStepRead, '2026-10-26')).toBe(2725);
   });
 
   test('a read failure is "no rate", never a throw', async () => {
