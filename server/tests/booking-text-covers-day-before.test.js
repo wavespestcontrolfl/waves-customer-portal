@@ -16,11 +16,6 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn() }));
-jest.mock('../utils/customer-comms-lock', () => ({
-  // The real helper opens a transaction and takes the advisory lock; here it just runs the callback and records the id.
-  withCustomerCommsLock: jest.fn(async (_db, customerId, fn) => fn({ customerId })),
-  lockCustomerComms: jest.fn(),
-}));
 jest.mock('../services/recipient-optin', () => ({ filterRecipientsByOptin: jest.fn(async (contacts) => contacts) }));
 jest.mock('../services/contact-notification-prefs', () => ({ filterContactsByOwnPrefs: jest.fn(async (contacts) => contacts) }));
 jest.mock('../services/property-notification-prefs', () => ({ prefsForVisit: jest.fn(async (prefs) => prefs) }));
@@ -47,13 +42,12 @@ jest.mock('../config/feature-gates', () => ({
 
 const db = require('../models/db');
 const CustomerContact = require('../services/customer-contact');
-const CommsLock = require('../utils/customer-comms-lock');
 const AppointmentEmail = require('../services/appointment-email');
 const gates = require('../config/feature-gates');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 
-const { deliverConfirmation } = AppointmentReminders._test;
+const { deliverConfirmation, holdFreshCallBookedRow, FRESH_CALL_BOOKED_ROW_MS } = AppointmentReminders._test;
 const { closeDayBeforeForBookingText } = AppointmentReminders;
 
 const tomorrowNoonET = () => parseETDateTime(`${etDateString(addETDays(new Date(), 1))}T12:00`);
@@ -258,125 +252,78 @@ describe('call pipeline: closeDayBeforeAfterBookingText hands the booked slot to
     await expect(callProc.closeDayBeforeAfterBookingText({ scheduledServiceId: 'ss1', scheduledDate: '2026-11-10', windowStart: '09:00' })).resolves.toBe(false);
   });
 
-  test('the close runs only inside the fence around the send; the held branch and the sent branch never call it directly', () => {
+  test('the pass calls it only after the primary text was delivered, never in the blocked or held branch; no lock in the processor', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    // The old direct call in the "Appointment SMS sent" branch is gone.
-    expect(src).not.toContain('await closeDayBeforeAfterBookingText(');
-    const fence = 'sendBookingTextUnderReminderFence({';
-    expect(src.split(`await ${fence}`)).toHaveLength(2);
-    const at = src.indexOf(`await ${fence}`);
-    // The held branch (nothing is sent) is the other arm of the same ternary, before the fence.
-    const heldAt = src.lastIndexOf("code: holdImpliedSmsLeg ? 'implied_consent_non_ani_recipient'", at);
-    expect(heldAt).toBeGreaterThan(-1);
-    expect(at - heldAt).toBeLessThan(400);
-    const arm = src.slice(at, at + 1200);
-    expect(arm).toContain('close: () => closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog, customerId, recipientPhone: smsRecipient })');
-    expect(arm).toContain('send: async () => sendCustomerMessage({');
-    // primaryOk and the fence share one "really sent" test.
-    expect(src).toContain('const primaryOk = bookingTextWasSent(sendResult);');
+    const call = 'await closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog, customerId, recipientPhone: smsRecipient });';
+    expect(src.split(call)).toHaveLength(2);
+    const at = src.indexOf(call);
+    const sentLog = src.lastIndexOf('Appointment SMS sent to customer', at);
+    const blockedLog = src.lastIndexOf('Appointment SMS blocked for customer', at);
+    expect(sentLog).toBeGreaterThan(blockedLog);
+    expect(at - sentLog).toBeLessThan(200);
+    // The send is called directly (no fence around it) and the lock helper is not used by the day-before close.
+    expect(src).not.toContain('sendBookingTextUnderReminderFence');
+    expect(src).toContain('const primaryOk = !(sendResult.blocked || sendResult.sent === false);');
+    expect(src.slice(src.indexOf('function closeDayBeforeAfterBookingText') - 40, src.indexOf('async function registerScheduleSideEffects'))).not.toMatch(/comms-lock|CommsLock/);
   });
 });
 
-describe('call pipeline: sendBookingTextUnderReminderFence (the text and the close under one customer-comms lock)', () => {
-  let fence;
-  let order;
-  beforeAll(() => { fence = require('../services/call-recording-processor')._test.sendBookingTextUnderReminderFence; });
-  beforeEach(() => {
-    order = [];
-    CommsLock.withCustomerCommsLock.mockImplementation(async (_db, customerId, fn) => {
-      order.push(`lock:${customerId}`);
-      const out = await fn({ customerId });
-      order.push('unlock');
-      return out;
-    });
-  });
-  const make = (result = { sent: true }) => ({
-    send: jest.fn(async () => { order.push('send'); return result; }),
-    close: jest.fn(async () => { order.push('close'); return true; }),
+describe('24-hour pass: holdFreshCallBookedRow (a call-booked row is left alone for its first 10 minutes, gate on)', () => {
+  const now = new Date('2026-11-10T15:00:00.000Z');
+  const rowAged = (minutes, source = 'call_recording') => ({ source, created_at: new Date(now.getTime() - minutes * 60000).toISOString() });
+
+  test('the window is 10 minutes: longer than the pipeline needs, shorter than the 15-minute tick', () => {
+    expect(FRESH_CALL_BOOKED_ROW_MS).toBe(10 * 60 * 1000);
   });
 
-  test('gate off: send once, the lock is never taken, no close', async () => {
-    const { send, close } = make();
-    await expect(fence({ customerId: 'c1', send, close })).resolves.toEqual({ sent: true });
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(close).not.toHaveBeenCalled();
-    expect(CommsLock.withCustomerCommsLock).not.toHaveBeenCalled();
+  test('gate on, call_recording row 2 minutes old: held (not selected for the 24h send)', () => {
+    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+    expect(holdFreshCallBookedRow(rowAged(2), now)).toBe(true);
   });
 
-  test('a gate reader missing from a bare feature-gates mock reads as off', async () => {
+  test('gate on, the same row 11 minutes old: selected (and exactly 10 minutes: selected)', () => {
+    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+    expect(holdFreshCallBookedRow(rowAged(11), now)).toBe(false);
+    expect(holdFreshCallBookedRow(rowAged(10), now)).toBe(false);
+  });
+
+  test.each(['admin_manual', 'booking_new', 'cron_selfheal', 'inspection_link', null])('gate on, source %p 2 minutes old: selected', (source) => {
+    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+    expect(holdFreshCallBookedRow(rowAged(2, source), now)).toBe(false);
+  });
+
+  test('gate off (or the gate reader missing): never held, the scan is unchanged', () => {
+    expect(holdFreshCallBookedRow(rowAged(2), now)).toBe(false);
+    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
     const original = gates.bookingTextCoversDayBeforeLive;
     delete gates.bookingTextCoversDayBeforeLive;
-    const { send, close } = make();
     try {
-      await fence({ customerId: 'c1', send, close });
+      expect(holdFreshCallBookedRow(rowAged(2), now)).toBe(false);
     } finally {
       gates.bookingTextCoversDayBeforeLive = original;
     }
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(CommsLock.withCustomerCommsLock).not.toHaveBeenCalled();
   });
 
-  test('gate on, text sent: lock taken with the customer id, send then close inside it, in that order', async () => {
+  test('an unreadable created_at or a missing row is never held (the reminder is not held on unknowns)', () => {
     gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
-    const { send, close } = make();
-    await expect(fence({ customerId: 'c1', send, close })).resolves.toEqual({ sent: true });
-    expect(CommsLock.withCustomerCommsLock).toHaveBeenCalledTimes(1);
-    expect(CommsLock.withCustomerCommsLock.mock.calls[0][1]).toBe('c1');
-    expect(order).toEqual(['lock:c1', 'send', 'close', 'unlock']);
+    expect(holdFreshCallBookedRow({ source: 'call_recording', created_at: null }, now)).toBe(false);
+    expect(holdFreshCallBookedRow({ source: 'call_recording', created_at: 'nope' }, now)).toBe(false);
+    expect(holdFreshCallBookedRow(null, now)).toBe(false);
   });
 
-  test.each([{ sent: false }, { blocked: true, sent: false, code: 'QUIET_HOURS_HOLD' }, { blocked: true }])(
-    'gate on, text not sent (%j): no close, the result passes through',
-    async (result) => {
-      gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
-      const { send, close } = make(result);
-      await expect(fence({ customerId: 'c1', send, close })).resolves.toBe(result);
-      expect(send).toHaveBeenCalledTimes(1);
-      expect(close).not.toHaveBeenCalled();
-    },
-  );
-
-  test('gate on, no customer id: unfenced send, no close', async () => {
+  test('a row created in the future of now (clock skew) counts as fresh, never as stale-and-sendable early', () => {
     gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
-    const { send, close } = make();
-    await fence({ customerId: null, send, close });
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(close).not.toHaveBeenCalled();
-    expect(CommsLock.withCustomerCommsLock).not.toHaveBeenCalled();
+    expect(holdFreshCallBookedRow(rowAged(-1), now)).toBe(true);
   });
 
-  test('gate on, the lock cannot be taken before send ran: the confirmation still goes out once, unfenced, with no close', async () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
-    CommsLock.withCustomerCommsLock.mockRejectedValue(Object.assign(new Error('pool exhausted'), { code: 'ECONNRESET' }));
-    const { send, close } = make();
-    await expect(fence({ customerId: 'c1', send, close })).resolves.toEqual({ sent: true });
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(close).not.toHaveBeenCalled();
-  });
-
-  test('gate on, send throws inside the lock: the error surfaces and send is not retried', async () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
-    const { send, close } = make();
-    send.mockRejectedValue(new Error('provider down'));
-    await expect(fence({ customerId: 'c1', send, close })).rejects.toThrow('provider down');
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(close).not.toHaveBeenCalled();
-  });
-
-  test('gate on, the close throws: swallowed, the send result still returns', async () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
-    const { send, close } = make();
-    close.mockRejectedValue(new Error('db down'));
-    await expect(fence({ customerId: 'c1', send, close })).resolves.toEqual({ sent: true });
-    expect(send).toHaveBeenCalledTimes(1);
-  });
-
-  test('gate on, releasing the lock fails after the text went out: the send result stands, no second send', async () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
-    CommsLock.withCustomerCommsLock.mockImplementation(async (_db, _id, fn) => { await fn({}); throw new Error('commit lost'); });
-    const { send, close } = make();
-    await expect(fence({ customerId: 'c1', send, close })).resolves.toEqual({ sent: true });
-    expect(send).toHaveBeenCalledTimes(1);
+  test('source check: the 24-hour branch applies it, the 72-hour branch does not', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/appointment-reminders.js'), 'utf8');
+    const line = 'if (!r.reminder_24h_sent && hoursUntil > 0 && hoursUntil <= 24.25 && !holdFreshCallBookedRow(r, now)) {';
+    expect(src.split(line)).toHaveLength(2);
+    expect(src.split('holdFreshCallBookedRow(')).toHaveLength(3); // the definition and the one call in the 24h branch
+    const at72 = src.indexOf('// ── 72-hour reminder ──');
+    const at24 = src.indexOf('// ── 24-hour reminder ──');
+    expect(src.slice(at72, at24)).not.toContain('holdFreshCallBookedRow');
   });
 });
 
