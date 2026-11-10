@@ -634,6 +634,27 @@ postgres('SMS operations on PostgreSQL', () => {
     expect((await mockPg('sms_log').first()).operational_analysis).not.toHaveProperty('replay');
   });
 
+  test('a sweep that fails to the retry limit rings one manual-review bell that carries the bell labels', async () => {
+    const extract = jest.fn().mockRejectedValue(new Error('provider unavailable'));
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      expect(await runSmsOperationalActions({ conn: mockPg, extract })).toMatchObject({ processed: 0, failed: 1 });
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(attempt < 3 ? 0 : 1);
+    }
+    const [category, title, , opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect([category, title]).toEqual(['alert', 'An SMS needs a manual review']);
+    expect(opts).toMatchObject({ bell: true, dedupeKey: `sms-operations-failed:${message.id}` });
+    // Written directly, not through the trigger registry, so the row carries its own labels. Never the text-note
+    // done-when: the text-note close rule must not match the failure bell.
+    expect(opts.metadata).toEqual({
+      triggerKey: 'sms_operational_exception', customerId: message.customer_id, sms_log_id: message.id,
+      area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'message_reviewed',
+      subject: { type: 'customer', id: message.customer_id },
+    });
+    // A fourth sweep never retries the terminal receipt and never rings again.
+    await runSmsOperationalActions({ conn: mockPg, extract });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
   test('replay gates reject unprocessed, out-of-window and disabled sources before calling a provider', async () => {
     const extract = jest.fn();
     const args = { conn: mockPg, smsLogId: message.id, execute: true, previewHash: await replayPreviewHash(), extract };

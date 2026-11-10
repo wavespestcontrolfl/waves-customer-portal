@@ -377,7 +377,7 @@ async function closeRequestAlertsOnResolve(request, statusChanged, actor) {
   return closeAlertsWhenHandled('requestId', request.id, actor);
 }
 
-// A request whose admin bell was settled by the alert-relevance sweep (GATE_PORTAL_ITEM_CLOSE: a person
+// A request whose admin bell was settled by the alert-relevance sweep (a person
 // answered the customer, or an estimate went out) is resolved to match, quietly: the same write as
 // closeRequestsOlder for one row, and NO customer email. Only a request still open, and only the
 // customer's own. `note` goes on the request as an admin note. Returns the number of rows resolved.

@@ -1134,6 +1134,7 @@ describe('internal-link candidate sweep', () => {
   const saved = {};
   beforeEach(() => { for (const k of keys) { saved[k] = process.env[k]; delete process.env[k]; } });
   afterEach(() => { for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
+  afterEach(() => db.mockImplementation(() => undefined));
 
   test('does nothing while add_internal_links is in shadow mode or the kill switch is off', async () => {
     const instance = new InternalLinkPrExecutor();
@@ -1156,6 +1157,87 @@ describe('internal-link candidate sweep', () => {
     expect(await instance.runCandidateSweep()).toEqual({ status: 'pr_open', count: 2 });
     expect(order).toEqual(['verify', 'batch']);
     expect(instance.runPrBatch).toHaveBeenCalledWith({ limit: 2, scanLimit: 15 });
+  });
+
+  // 2026-11-04: two tasks requeued from the review queue stayed `queued` for five daily sweeps. Nothing dry-runs a
+  // requeued task, and runPrBatch loads `patch_candidate` only.
+  test('dry-runs requeued tasks nothing else validates, before the batch, and a failure there never stops the batch', async () => {
+    process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
+    const instance = new InternalLinkPrExecutor();
+    instance._replanUnplannedPublishes = jest.fn(async () => 0);
+    const order = [];
+    instance.runPostMergeVerification = jest.fn(async () => { order.push('verify'); return { count: 0, results: [] }; });
+    instance._validateStrandedQueued = jest.fn(async () => { order.push('stranded'); return { count: 2, results: [] }; });
+    instance.runPrBatch = jest.fn(async () => { order.push('batch'); return { status: 'pr_open', count: 1 }; });
+    expect(await instance.runCandidateSweep()).toEqual({ status: 'pr_open', count: 1 });
+    expect(order).toEqual(['verify', 'stranded', 'batch']);
+    expect(instance._validateStrandedQueued).toHaveBeenCalledWith({ limit: 15 });
+
+    instance._validateStrandedQueued = jest.fn(async () => { throw new Error('github down'); });
+    expect(await instance.runCandidateSweep()).toEqual({ status: 'pr_open', count: 1 });
+    expect(instance.runPrBatch).toHaveBeenCalledTimes(2);
+  });
+
+  test('the stranded pass reads only pending or queued rows idle for an hour and writes only while the row is still one', async () => {
+    const now = new Date('2026-11-10T15:30:00Z');
+    const stranded = [{ id: 'task-requeued', status: 'queued' }, { id: 'task-throws', status: 'pending' }, { id: 'task-outage', status: 'queued' }];
+    const calls = [];
+    const updates = [];
+    db.mockImplementation(() => {
+      const q = { wheres: [] };
+      const chain = {
+        whereIn: (col, vals) => { q.wheres.push(['in', col, vals]); return chain; },
+        where: (...args) => { q.wheres.push(['where', ...args]); return chain; },
+        orderByRaw: () => chain,
+        orderBy: () => chain,
+        limit: (n) => { q.limit = n; return chain; },
+        select: async () => { calls.push(q); return stranded; },
+        update: async (patch) => { updates.push({ wheres: q.wheres, patch }); return 1; },
+      };
+      return chain;
+    });
+    const instance = new InternalLinkPrExecutor();
+    instance.dryRunTask = jest.fn(async (task) => {
+      if (task.id === 'task-throws') throw new Error('source_file_not_found:src/content/blog/gone.mdx');
+      if (task.id === 'task-outage') throw new Error('GitHub API 503');
+      return { task_id: task.id, status: 'patch_candidate' };
+    });
+    const out = await instance._validateStrandedQueued({ limit: 15, now });
+    expect(out.count).toBe(3);
+    // An outage writes nothing: no caller owns a stranded row, so nothing would recover it from `failed`.
+    expect(out.results[2]).toEqual({ task_id: 'task-outage', status: 'queued', transient: true });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].limit).toBe(15);
+    expect(calls[0].wheres).toEqual([
+      ['in', 'status', ['pending', 'queued']],
+      ['where', 'updated_at', '<', new Date('2026-11-10T14:30:00Z')],
+    ]);
+    expect(updates.map((u) => [u.wheres, u.patch.status, u.patch.failure_reason])).toEqual([
+      [[['where', { id: 'task-requeued' }], ['in', 'status', ['pending', 'queued']]], 'patch_candidate', null],
+      [[['where', { id: 'task-throws' }], ['in', 'status', ['pending', 'queued']]], 'failed', 'source_file_not_found:src/content/blog/gone.mdx'],
+    ]);
+  });
+
+  test('a dry run its own caller asked for still writes with no status fence, and stores an outage as failed', async () => {
+    const updates = [];
+    db.mockImplementation(() => {
+      const wheres = [];
+      const chain = {
+        whereIn: (col, vals) => { wheres.push(['in', col, vals]); return chain; },
+        where: (...args) => { wheres.push(['where', ...args]); return chain; },
+        update: async (patch) => { updates.push({ wheres, status: patch.status }); return 1; },
+      };
+      return chain;
+    });
+    const instance = new InternalLinkPrExecutor();
+    instance._loadQueuedTasks = jest.fn(async () => [{ id: 'task-own', status: 'queued' }]);
+    instance.dryRunTask = jest.fn(async (task) => ({ task_id: task.id, status: 'patch_candidate' }));
+    expect(await instance.runDryRun({ taskIds: ['task-own'], limit: 1 })).toMatchObject({ count: 1 });
+    expect(updates).toEqual([{ wheres: [['where', { id: 'task-own' }]], status: 'patch_candidate' }]);
+    // The owning callers recover a transient `failed` themselves (isTransientLoadFailure), so that write stays.
+    instance.dryRunTask = jest.fn(async () => { throw new Error('GitHub API 503'); });
+    await instance.runDryRun({ taskIds: ['task-own'], limit: 1 });
+    expect(updates[1]).toEqual({ wheres: [['where', { id: 'task-own' }]], status: 'failed' });
   });
 });
 

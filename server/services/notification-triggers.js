@@ -165,10 +165,10 @@ function shownPhone(phone) {
   return digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : phone;
 }
 
-// bundle_quote_requested's `alert` (GATE_PORTAL_ITEM_CLOSE): the request row and its customer at the top of the
-// bell's metadata. Gate off, or a bell with no request row (a self-applied bundle): nothing, as before.
+// bundle_quote_requested's `alert`: the request row and its customer at the top of the
+// bell's metadata. A bell with no request row (a self-applied bundle): nothing.
 function bundleRequestAlert(p) {
-  if (!p.requestId || !p.customerId || !require('../config/feature-gates').portalItemCloseLive?.()) return {};
+  if (!p.requestId || !p.customerId) return {};
   return { alert: { requestId: String(p.requestId), customerId: String(p.customerId) } };
 }
 
@@ -1100,7 +1100,7 @@ const TRIGGER_REGISTRY = {
         : p.estimateId
           ? `/admin/estimates?estimateId=${encodeURIComponent(p.estimateId)}`
           : '/admin/estimates',
-      // GATE_PORTAL_ITEM_CLOSE: the request row and its customer at the TOP of the bell's metadata (the
+      // The request row and its customer at the TOP of the bell's metadata (the
       // payload nests under `payload`), so the Portal tab's Mark handled and the relevance sweep find this bell
       // by metadata->>'requestId'. A bell with no request row (a self-applied bundle) carries neither.
       ...bundleRequestAlert(p),

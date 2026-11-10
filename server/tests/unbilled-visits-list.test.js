@@ -5,7 +5,6 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
-  unbilledVisitsListLive: jest.fn(() => true),
   alertEpisodesLive: jest.fn(() => true),
 }));
 jest.mock('../services/admin-alert-episodes', () => ({
@@ -49,7 +48,6 @@ const pageList = ({ leaks = [], needsReview = [] } = {}) => ({ window_days: WIND
 
 beforeEach(() => {
   jest.clearAllMocks();
-  gates.unbilledVisitsListLive.mockReturnValue(true);
   gates.alertEpisodesLive.mockReturnValue(true);
 });
 
@@ -190,15 +188,6 @@ describe('ringing', () => {
 
 describe('runUnbilledVisitsList', () => {
   const database = jest.fn();
-
-  test('gate off: no read, no bell', async () => {
-    gates.unbilledVisitsListLive.mockReturnValue(false);
-    const loadList = jest.fn();
-    await expect(Unbilled.runUnbilledVisitsList({ database, loadList })).resolves.toEqual({ skipped: 'disabled' });
-    expect(loadList).not.toHaveBeenCalled();
-    expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
-    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
-  });
 
   test('the default list is the Billing recovery page\'s own, over the last 30 days', async () => {
     BillingRecovery.listUninvoicedLeaks.mockResolvedValueOnce(pageList());

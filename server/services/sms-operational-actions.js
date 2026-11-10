@@ -10,7 +10,7 @@ const numbers = require('../config/twilio-numbers');
 const { runExclusive } = require('../utils/cron-lock');
 const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
-const { raiseAdminAlert, cutAtWord, breaksAlertRules, MAX_WHY_CHARS } = require('./admin-alert-compose');
+const { raiseAdminAlert, validStructuredFields, cutAtWord, breaksAlertRules, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { validate: isUuid } = require('uuid');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
@@ -848,7 +848,12 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
             'The SMS agent could not finish processing this conversation after its retries. Open the customer profile to check the requested work.',
             { trx, bell: true, dedupeKey: `sms-operations-failed:${message.id}`,
               link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
-              metadata: { triggerKey: 'sms_operational_exception', customerId: message.customer_id, sms_log_id: message.id } });
+              // The bell labels (area, severity, who, done-when, subject). This row is written here, not through the
+              // trigger registry, so no registry rule supplies them. No `text_note_checked`: the text-note close rule
+              // (admin-alert-relevance.js) must never match the failure bell.
+              metadata: { triggerKey: 'sms_operational_exception', customerId: message.customer_id, sms_log_id: message.id,
+                ...validStructuredFields({ area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'message_reviewed',
+                  subject: { type: 'customer', id: String(message.customer_id || '') } }) } });
           if (!notification?.id) throw new Error('sms_operations_bell_not_persisted');
         });
         logger.warn(`[sms-operations] extraction failed for sms_log ${message.id}`);
