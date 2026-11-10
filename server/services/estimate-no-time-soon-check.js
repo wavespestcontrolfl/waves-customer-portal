@@ -8,9 +8,11 @@
 // Each run (7:35 AM ET):
 //   1. READ: every open estimate (sent, not archived, not accepted/declined/expired/void, not expired by date, not an
 //      internal test customer) gets the list its page's first read gets: getAvailableSlots with offer: true,
-//      windowDays 14 and the route's default service mode. An estimate the page shows no booking for (a refusal, a
-//      parked, commercial or invoice-only answer) is not judged. "No time soon" = the first open day, the earlier of
-//      metadata.firstDayAvailability and the earliest listed slot, is missing or after ET today + SOON_DAYS.
+//      windowDays 14, and the page picker's own service mode and default selection (estimate-slots-public.js
+//      pageSlotPicker, the same resolution the texting AI reads). An estimate the page shows no picker for (a
+//      refusal; a parked, commercial, invoice-only or quote-required answer; a linked existing appointment) is not
+//      judged. "No time soon" = the first open day, the earlier of metadata.firstDayAvailability and the earliest
+//      listed slot, is missing or after ET today + SOON_DAYS.
 //   2. CLOSE: every open bell whose estimate settled, left the open set, shows a time within 7 days, became a
 //      no-booking answer, or whose category the owner silenced, closes with a one-line resolution (per-key advisory
 //      lock, as closeSettledStuckAlerts). A lookup that throws fails CLOSED for that row (no raise, no close).
@@ -70,16 +72,19 @@ const firstOpenDay = (result) => {
 async function judge(row, { now }) {
   const route = require('../routes/estimate-slots-public')._internals;
   const { getAvailableSlots } = require('./estimate-slot-availability');
-  const refusal = await route.slotBrowseRefusal(row);
-  if (refusal) return { kind: 'no_booking' };
+  if (await route.slotBrowseRefusal(row)) return { kind: 'no_booking' };
+  // The page's own picker: its acceptance contract and its first fetch's default selection.
+  const picker = await route.pageSlotPicker(row.id);
+  if (!picker) return { kind: 'no_booking' };
   let result;
   try {
     result = await getAvailableSlots(row.id, {
       offer: true, bypassCache: true, paidCalls: false, windowDays: WINDOW_DAYS,
-      serviceMode: route.resolveSlotServiceMode(row, ''),
+      serviceMode: picker.serviceMode, ...picker.selection,
     });
   } catch (err) {
     if (err?.code === 'COORDS_NEED_GEOCODE') return { kind: 'coords' };
+    if (route.SETTLED_SLOT_CODES.includes(err?.code)) return { kind: 'no_booking' };
     throw err;
   }
   if (NO_BOOKING_FLAGS.some((flag) => result?.[flag])) return { kind: 'no_booking' };

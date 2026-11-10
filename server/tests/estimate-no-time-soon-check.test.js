@@ -28,7 +28,9 @@ jest.mock('../routes/estimate-slots-public', () => ({
   _internals: {
     SLOT_ESTIMATE_COLUMNS: ['id', 'status', 'expires_at', 'archived_at', 'customer_id', 'customer_name'],
     slotBrowseRefusal: jest.fn(async () => null),
-    resolveSlotServiceMode: jest.fn(() => 'recurring'),
+    // The page picker's own resolution (acceptance contract + first-fetch default selection).
+    pageSlotPicker: jest.fn(),
+    SETTLED_SLOT_CODES: ['ESTIMATE_NOT_FOUND', 'ESTIMATE_EXPIRED', 'ESTIMATE_TERMINAL'],
   },
 }));
 
@@ -38,7 +40,7 @@ const episodes = require('../services/admin-alert-episodes');
 const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const bellPolicy = require('../services/notification-bell-policy');
 const { getAvailableSlots } = require('../services/estimate-slot-availability');
-const { slotBrowseRefusal } = require('../routes/estimate-slots-public')._internals;
+const { slotBrowseRefusal, pageSlotPicker } = require('../routes/estimate-slots-public')._internals;
 const check = require('../services/estimate-no-time-soon-check');
 
 // 2026-11-09 is 07:35 ET; the 7-day horizon ends 2026-11-16 (inclusive).
@@ -107,6 +109,7 @@ beforeEach(() => {
   bellPolicy.isBellPolicyEnabled.mockReturnValue(true);
   bellPolicy.bellAllowed.mockResolvedValue(true);
   slotBrowseRefusal.mockResolvedValue(null);
+  pageSlotPicker.mockResolvedValue({ serviceMode: 'recurring', selection: { selectedFrequency: 'bi_monthly', serviceCadences: { lawn_care: 'every_6_weeks' } } });
   episodes.openAdminAlertKeys.mockResolvedValue([]);
   episodes.closeAdminAlertKeys.mockResolvedValue(1);
   getAvailableSlots.mockResolvedValue(answer('2026-11-21'));
@@ -115,7 +118,12 @@ beforeEach(() => {
 describe('raising', () => {
   test('a first open day after day 7 rings one estimate_stuck bell with its own key, link and first-day words', async () => {
     const out = await run();
-    expect(getAvailableSlots).toHaveBeenCalledWith(A, { offer: true, bypassCache: true, paidCalls: false, windowDays: 14, serviceMode: 'recurring' });
+    // The page's own default selection, as the picker's first fetch sends it (not frequencies[0]).
+    expect(pageSlotPicker).toHaveBeenCalledWith(A);
+    expect(getAvailableSlots).toHaveBeenCalledWith(A, {
+      offer: true, bypassCache: true, paidCalls: false, windowDays: 14,
+      serviceMode: 'recurring', selectedFrequency: 'bi_monthly', serviceCadences: { lawn_care: 'every_6_weeks' },
+    });
     const [bell] = raised();
     expect(bell.category).toBe('estimate_stuck');
     expect(bell.headline).toBe('Estimates — Pat Tester has no open time in the next 7 days');
@@ -192,6 +200,25 @@ describe('skips', () => {
     expect(closedKeys()).toEqual([{ keys: [keyOf(A)], reason: 'the estimate page offers no booking', resolution: 'The estimate page offers no booking' }]);
   });
 
+  // The page renders no picker (a linked existing appointment, quote-required, invoice-only) or cannot rebuild its
+  // default selection: nothing the customer could pick, so not judged.
+  test('no picker on the page is not judged and closes its standing bell', async () => {
+    pageSlotPicker.mockResolvedValue(null);
+    episodes.openAdminAlertKeys.mockResolvedValue([keyOf(A)]);
+    const out = await run();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(raised()).toEqual([]);
+    expect(closedKeys()).toEqual([{ keys: [keyOf(A)], reason: 'the estimate page offers no booking', resolution: 'The estimate page offers no booking' }]);
+    expect(out.failed).toBe(0);
+  });
+
+  test('the slot read saying the estimate settled (expired, terminal, gone) is not judged and is no failure', async () => {
+    getAvailableSlots.mockRejectedValue(Object.assign(new Error('expired'), { code: 'ESTIMATE_EXPIRED' }));
+    const out = await run();
+    expect(raised()).toEqual([]);
+    expect(out.failed).toBe(0);
+  });
+
   test('a list answer carrying a no-booking flag is skipped too', async () => {
     getAvailableSlots.mockResolvedValue({ ...answer(null, []), invoiceOnlyAcceptance: true });
     await run();
@@ -265,6 +292,15 @@ describe('a lookup that throws', () => {
     episodes.openAdminAlertKeys.mockResolvedValue([keyOf(A)]);
     await expect(run()).rejects.toThrow('1 estimate no-time-soon check failed');
     expect(raised().map((r) => r.opts.dedupeKey)).toEqual([keyOf(B)]);
+    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+  });
+
+  test('a page-contract lookup that throws fails closed the same way', async () => {
+    pageSlotPicker.mockRejectedValue(new Error('pricing down'));
+    episodes.openAdminAlertKeys.mockResolvedValue([keyOf(A)]);
+    await expect(run()).rejects.toThrow('1 estimate no-time-soon check failed');
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(raised()).toEqual([]);
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 });
