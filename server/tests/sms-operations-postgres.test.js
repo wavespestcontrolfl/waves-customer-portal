@@ -1349,8 +1349,6 @@ postgres('SMS operations on PostgreSQL', () => {
     const STAFF = '00000000-0000-4000-8000-000000000201';
     const { runAlertButton, withAlertButtons } = require('../services/admin-alert-buttons');
     const { etDateString } = require('../utils/datetime-et');
-    beforeEach(() => { process.env.GATE_ALERT_CLOSE_BUTTONS = 'true'; });
-    afterEach(() => { delete process.env.GATE_ALERT_CLOSE_BUTTONS; });
 
     // The text arrives, the reader holds one fact back, and the real notifier raises the bell.
     async function raiseBell(body, fact, prefs = null) {

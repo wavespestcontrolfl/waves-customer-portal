@@ -478,7 +478,7 @@ const TRIGGER_REGISTRY = {
       link: p.threadId
         ? `/admin/communications?thread=${p.threadId}${p.twilioSid ? `&message=${encodeURIComponent(p.twilioSid)}` : ''}`
         : (p.twilioSid ? `/admin/communications?message=${encodeURIComponent(p.twilioSid)}` : '/admin/communications'),
-      // Handled: the bell's own Done with that note (admin-alert-buttons.js, GATE_ALERT_CLOSE_BUTTONS). No reply.
+      // Handled: the bell's own Done with that note (admin-alert-buttons.js). No reply.
       // A lead's bare CALL reply also gets Call first, for the text that carried it: the next text's emission sets
       // the row's buttons again (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
       alert: { buttons: p.leadPreference === 'call' && p.threadId
@@ -670,7 +670,7 @@ const TRIGGER_REGISTRY = {
       // SMS conversation instead (same destination as the voicemail bell).
       link: callLink(p),
       // Call: the Call Log's own "Call back" for this call (alert-call-button.js, GATE_ALERT_CALL_BUTTON). Called back:
-      // the bell's own Done with that note (admin-alert-buttons.js, GATE_ALERT_CLOSE_BUTTONS); it places no call.
+      // the bell's own Done with that note (admin-alert-buttons.js); it places no call.
       alert: { buttons: require('./alert-call-button').callButtons({ callLogId: p.callLogId, close: 'called_back' }) },
     }),
   },

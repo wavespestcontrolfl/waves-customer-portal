@@ -1308,7 +1308,7 @@ function overdueBellCopy({ row, message, verdict, customerName, channelWord, pro
       subject: { type: 'customer', id: message.customer_id },
       doneWhen: 'promise_fulfilled',
       who: 'person',
-      // Called back on a text call-back promise only (admin-alert-buttons.js, GATE_ALERT_CLOSE_BUTTONS): the bell's
+      // Called back on a text call-back promise only (admin-alert-buttons.js): the bell's
       // own Done with that note, which also settles the follow-up. It places no call. An email follow-up gets
       // none: Done's settle step settles text follow-ups only, so the email promise would ring again. Call comes
       // first: the customer page's own Call (alert-call-button.js, GATE_ALERT_CALL_BUTTON).

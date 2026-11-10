@@ -1,8 +1,6 @@
 /**
- * GATE_REFERRAL_INBOUND_CONFIRM on the admin referral routes: dark by default.
- * Off, the inbound list answers enabled:false and both actions are 404 with
- * no service call. On, ids are checked before the service runs, the admin's
- * id is recorded, and a service refusal keeps its status and code.
+ * The inbound referral routes: ids are checked before the service runs, the
+ * admin's id is recorded, and a service refusal keeps its status and code.
  * services/referral-inbound.js itself runs against Postgres in
  * referral-inbound-postgres.test.js.
  */
@@ -33,7 +31,6 @@ const router = require('../routes/admin-referrals-v2');
 
 const CUSTOMER = '22222222-2222-4222-8222-222222222222';
 const REFERRER = '33333333-3333-4333-8333-333333333333';
-const original = process.env.GATE_REFERRAL_INBOUND_CONFIRM;
 
 async function withServer(fn) {
   const app = express();
@@ -54,29 +51,8 @@ const post = (url, body) => fetch(url, {
 });
 
 beforeEach(() => jest.clearAllMocks());
-afterAll(() => {
-  if (original === undefined) delete process.env.GATE_REFERRAL_INBOUND_CONFIRM;
-  else process.env.GATE_REFERRAL_INBOUND_CONFIRM = original;
-});
 
-test.each([undefined, 'false', '1'])('gate %p: no list, both actions 404, the service never runs', async (value) => {
-  if (value === undefined) delete process.env.GATE_REFERRAL_INBOUND_CONFIRM;
-  else process.env.GATE_REFERRAL_INBOUND_CONFIRM = value;
-  await withServer(async (base) => {
-    const list = await fetch(`${base}/inbound`);
-    expect(list.status).toBe(200);
-    expect(await list.json()).toEqual({ enabled: false, items: [] });
-    expect((await post(`${base}/inbound/${CUSTOMER}/confirm`, { referrerCustomerId: REFERRER })).status).toBe(404);
-    expect((await post(`${base}/inbound/${CUSTOMER}/dismiss`)).status).toBe(404);
-  });
-  expect(inbound.listInboundReferrals).not.toHaveBeenCalled();
-  expect(inbound.confirmInboundReferral).not.toHaveBeenCalled();
-  expect(inbound.dismissInboundReferral).not.toHaveBeenCalled();
-});
-
-describe('gate on', () => {
-  beforeEach(() => { process.env.GATE_REFERRAL_INBOUND_CONFIRM = 'true'; });
-
+describe('inbound referral routes', () => {
   test('lists through the service', async () => {
     inbound.listInboundReferrals.mockResolvedValue([{ customerId: CUSTOMER }]);
     await withServer(async (base) => {

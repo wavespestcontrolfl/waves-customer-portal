@@ -12474,7 +12474,7 @@ export function CompletionPanel({
   // identically.
   const [offerInspectionCredit, setOfferInspectionCredit] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
-  // First review ask (GATE_REVIEW_FIRST_ASK_LOCK): the server's read that this visit's customer was
+  // First review ask: the server's read that this visit's customer was
   // never asked, and the reason the tech confirmed for turning the box off.
   const [reviewFirstAsk, setReviewFirstAsk] = useState(false);
   const [reviewOptOutReason, setReviewOptOutReason] = useState(null);
@@ -14305,7 +14305,7 @@ export function CompletionPanel({
       // as fail-closed; re-enabling the controls re-fetches.
       setReviewSendPreview(null);
       if (oneTimeRecapOnly) return undefined;
-      // One read still names the first ask (GATE_REVIEW_FIRST_ASK_LOCK), so a box restored off from a
+      // One read still names the first ask, so a box restored off from a
       // draft knows the server will keep that ask on. No poll, and the timing preview stays unknown.
       let gone = false;
       fetchReviewSendPreview().then((data) => {
@@ -15386,7 +15386,7 @@ export function CompletionPanel({
         sendSms,
         includePayLink,
         requestReview,
-        // The confirmed "Complaint on site" reason (GATE_REVIEW_FIRST_ASK_LOCK): without it a restored
+        // The confirmed "Complaint on site" reason: without it a restored
         // draft's box re-arms on.
         reviewOptOutReason,
         clientPestRating,

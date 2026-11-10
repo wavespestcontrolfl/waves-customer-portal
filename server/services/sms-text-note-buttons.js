@@ -2,7 +2,7 @@
 
 // The bell's Save to profile / One visit only buttons on the SMS reader's review bell ("Comms — check <name>'s
 // text note", sms-operational-actions.js; owner 2026-11-02 "C": one tap saves the note or closes the alert;
-// docs/admin-notifications.md section 2, part 9, kind text_note). Rides GATE_ALERT_CLOSE_BUTTONS with the close-only
+// docs/admin-notifications.md section 2, part 9, kind text_note). Rides with the close-only
 // buttons. Save re-reads the held-back facts of the bell's source text and writes each one through the SMS lane's
 // shared compare-and-set writer (data-hygiene/property-preferences.js), under the property-preferences lock the
 // reader and Customer 360 take, then closes the bell on the version the tap claimed: a long-text note gets the text as
@@ -224,7 +224,7 @@ async function run({ row, item, technicianId, claimedVersion }) {
 }
 
 const buttonHandler = {
-  live: () => require('../config/feature-gates').alertCloseButtonsLive(),
+  live: () => true,
   visibleItems,
   run,
 };
