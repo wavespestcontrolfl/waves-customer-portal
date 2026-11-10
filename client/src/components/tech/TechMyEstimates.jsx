@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { lockSend, sendLocked, techEstimateRequest } from './useTechEstimates';
+import { sendLocked, techEstimateRequest, useSendLocks } from './useTechEstimates';
 import TechEstimateSend from './TechEstimateSend';
 import { INK, LineList, MUTED, s, statusWords, Totals, totalsWords } from './techEstimateParts';
 
 const LOAD_ERROR = 'Could not load your estimates. Try again.';
 
-// One of his estimates with its lines. The Send button shows only while the server says canSend. A send outcome is read
-// back from the server; after a text whose result the app cannot see, the button never comes back for that estimate.
+// One of his estimates with its lines. The Send button is offered while the server says canSend; the button itself stays
+// away once the page holds a lock for the estimate (the office has it, or the app cannot tell if a text went). A send
+// outcome is read back from the server.
 function Detail({ id, onBack, onGone }) {
   const [quote, setQuote] = useState(null);
   const [error, setError] = useState('');
   const [note, setNote] = useState(null);
-  const [lockedHere, setLockedHere] = useState(() => sendLocked(id));
   const goneRef = useRef(onGone);
   goneRef.current = onGone;
   const read = useCallback(() => techEstimateRequest(`/${encodeURIComponent(id)}`)
@@ -20,7 +20,6 @@ function Detail({ id, onBack, onGone }) {
   useEffect(() => { void read(); }, [read]);
   const outcome = (result) => {
     if (result.gone) { onGone(); return; }
-    if (result.lock) { lockSend(id); setLockedHere(true); }
     setNote(result);
     if (result.reread) void read();
   };
@@ -39,7 +38,7 @@ function Detail({ id, onBack, onGone }) {
             <Totals quote={quote} />
           </div>
           {note && <div role="status" style={note.ok ? s.card : s.notice}>{note.text}</div>}
-          {quote.canSend && !lockedHere && <TechEstimateSend id={id} who={quote.who} needsTextRequest={quote.needsTextRequest} onOutcome={outcome} />}
+          {quote.canSend && <TechEstimateSend id={id} who={quote.who} needsTextRequest={quote.needsTextRequest} onOutcome={outcome} />}
         </div>
       )}
     </div>
@@ -52,6 +51,7 @@ export default function TechMyEstimates() {
   const [openId, setOpenId] = useState(null);
   const [listNote, setListNote] = useState('');
   const [version, setVersion] = useState(0);
+  useSendLocks();
   useEffect(() => {
     let live = true;
     techEstimateRequest('')

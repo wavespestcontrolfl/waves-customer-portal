@@ -4,7 +4,7 @@ import { useFieldPortalClass } from './fieldPortal';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
-import { lockSend, techEstimateRequest } from './useTechEstimates';
+import { sendLocked, techEstimateRequest, useSendLocks } from './useTechEstimates';
 import TechMyEstimates from './TechMyEstimates';
 import TechEstimateSend from './TechEstimateSend';
 import { INK, LineList, s, Totals } from './techEstimateParts';
@@ -114,16 +114,17 @@ function Quote({ priced, setup, keys, edits, onEdit, onUpdate, onSave, busy }) {
 function Saved({ saved, who, needsTextRequest, onMine, onAnother }) {
   const ready = !saved.officeFirst?.required;
   const [note, setNote] = useState(null);
-  const [showSend, setShowSend] = useState(ready);
-  // A text whose result the app cannot see is locked for every view (useTechEstimates.js), not only for this screen.
-  const outcome = (result) => { if (result.lock) lockSend(saved.id); setNote(result); if (!result.keep) setShowSend(false); };
+  // The Send button hides itself once the page holds a lock for this estimate (useTechEstimates.js), from this screen
+  // or from My estimates. This screen follows the same lock for its own layout.
+  useSendLocks();
+  const showSend = ready && !sendLocked(saved.id);
   return (
     <div>
       <p role="status" style={{ ...s.card, fontWeight: 500 }}>
         {ready ? 'Saved. Send it now, or later from My estimates.' : 'Saved. The office checks it and sends it.'}
       </p>
       {note && <div role="status" style={note.ok ? s.card : s.notice}>{note.text}</div>}
-      {showSend && <TechEstimateSend id={saved.id} who={who} needsTextRequest={needsTextRequest} onOutcome={outcome} />}
+      {ready && <TechEstimateSend id={saved.id} who={who} needsTextRequest={needsTextRequest} onOutcome={setNote} />}
       <button type="button" style={showSend ? s.secondary : s.primary} onClick={onMine}>My estimates</button>
       <button type="button" style={s.secondary} onClick={onAnother}>Another estimate</button>
     </div>

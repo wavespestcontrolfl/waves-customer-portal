@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -17,14 +17,21 @@ export async function techEstimateRequest(path, { method = 'GET', body } = {}) {
   return data;
 }
 
-// Estimates whose text may have gone although the app saw no answer (a dropped connection, a server error). The screen
-// said "Do not send it again", so the Send button stays off for them in every view of the sheet (the saved screen, the
-// list, the detail), also after a tab change or after the sheet is closed and opened again, until the page loads again.
-// By then the server knows what happened, and its own status decides.
-const uncertainSends = new Set();
-export const lockSend = (id) => { uncertainSends.add(String(id)); };
-export const sendLocked = (id) => uncertainSends.has(String(id));
-export const clearSendLocks = () => { uncertainSends.clear(); };
+// Estimates that are no longer his to send from this page: the text went, the office has it (an office-only refusal), or
+// the app cannot tell whether the text went. The Send button (TechEstimateSend.jsx) sets the lock and hides itself while
+// it holds, so every view of the sheet agrees (the saved screen, the list, the detail), also a view that stayed mounted
+// in the other tab, and also after the sheet is closed and opened again. The server can still say "draft" for such an
+// estimate, so its answer alone is not enough. The lock lasts until the page loads again.
+const sendLocks = new Set();
+const lockListeners = new Set();
+let lockVersion = 0;
+const lockChanged = () => { lockVersion += 1; lockListeners.forEach((listener) => listener()); };
+export const lockSend = (id) => { if (!sendLocks.has(String(id))) { sendLocks.add(String(id)); lockChanged(); } };
+export const sendLocked = (id) => sendLocks.has(String(id));
+export const clearSendLocks = () => { sendLocks.clear(); lockChanged(); };
+const subscribeLocks = (listener) => { lockListeners.add(listener); return () => lockListeners.delete(listener); };
+// Draws the caller again when a lock changes; read the lock itself with sendLocked(id).
+export const useSendLocks = () => useSyncExternalStore(subscribeLocks, () => lockVersion);
 
 // GET /api/tech/estimates/setup, once for the field workspace. The server answers { enabled: false } (a plain 200, so
 // the browser logs no failed request) while the gate or this technician's switch is off; then (and on any failure) the

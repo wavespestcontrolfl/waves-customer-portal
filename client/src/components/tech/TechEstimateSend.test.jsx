@@ -300,6 +300,62 @@ describe('what each answer shows', () => {
       expect(sendCalls()).toHaveLength(1);
     });
 
+    it('back on the saved screen after a dropped send from My estimates (the saved screen stayed mounted)', async () => {
+      reply('POST /price', 200, READY);
+      reply('POST /', 200, { id: 'est-1', status: 'draft', lines: READY.lines, monthlyTotal: 45, annualTotal: 540, oneTimeTotal: 0, officeFirst: READY.officeFirst });
+      reply('GET /', 200, { estimates: [ROW] });
+      reply('GET /est-1', 200, { ...ROW, lines: READY.lines });
+      replies['POST /est-1/send'] = [{ drop: true }];
+      open();
+      fireEvent.click(screen.getByLabelText('Recurring pest control'));
+      fireEvent.click(screen.getByRole('button', { name: 'Get price' }));
+      await screen.findByText('This estimate is ready. Save it.');
+      fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }));
+      await screen.findByText('Saved. Send it now, or later from My estimates.');
+      // The saved screen offers Send. He goes to My estimates and sends from there; the connection drops.
+      fireEvent.click(screen.getAllByRole('button', { name: 'My estimates' })[0]);
+      fireEvent.click(await screen.findByRole('button', { name: /Sample Customer/ }));
+      await screen.findByRole('heading', { name: 'Sample Customer' });
+      tapSend();
+      confirmSend();
+      await screen.findByText(words);
+      // Back on the saved screen: no Send there either.
+      fireEvent.click(screen.getByRole('button', { name: 'New estimate' }));
+      expect(screen.getByText('Saved. Send it now, or later from My estimates.')).toBeVisible();
+      expect(screen.queryByRole('button', { name: 'Send to customer' })).not.toBeInTheDocument();
+      expect(sendCalls()).toHaveLength(1);
+    });
+
+    // The office has it. The server can keep the row a draft with canSend true (no mobile number, a price lock, a
+    // failed sendability check), so the re-read alone would bring the button back beside "The office will send it."
+    it.each([
+      ['an office-only refusal', 422, { error: 'The text did not go. The office will send it.', code: 'office_sends' }],
+      ['an office-first refusal', 409, { error: 'The office checks this one first.', code: 'office_first' }],
+      ['an already-sent answer', 409, { error: 'This estimate was already sent.', code: 'already_sent' }],
+    ])('%s takes Send away although the re-read still says canSend', async (_label, status, body) => {
+      await openDetail();
+      reply('POST /est-1/send', status, body);
+      tapSend();
+      confirmSend();
+      expect(await screen.findByText(body.error)).toBeInTheDocument();
+      await waitForNoSend();
+      // The re-read answered a sendable draft (the canned detail), and the button stays away.
+      expect(calls.filter((c) => c.method === 'GET' && c.path === '/est-1').length).toBeGreaterThanOrEqual(2);
+      fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+      await screen.findByRole('button', { name: /Sample Customer/ });
+      expect(screen.queryByText('Ready to send')).not.toBeInTheDocument();
+      expect(sendCalls()).toHaveLength(1);
+    });
+
+    it('an answer that leaves it his to send keeps the button (outside the text hours)', async () => {
+      await openDetail();
+      reply('POST /est-1/send', 409, { error: 'Texts go out between 8 AM and 8 PM. Send it then, or ask the office.', code: 'outside_hours' });
+      tapSend();
+      confirmSend();
+      await screen.findByText('Texts go out between 8 AM and 8 PM. Send it then, or ask the office.');
+      expect(screen.getByRole('button', { name: 'Send to customer' })).toBeInTheDocument();
+    });
+
     it('another estimate is not locked', async () => {
       await dropSendFromDetail();
       cleanup();
