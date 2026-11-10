@@ -1,0 +1,608 @@
+/**
+ * Technician estimate tool, steps 1 and 2a, against migrated PostgreSQL (GATE_TECH_ESTIMATES): the real route, the real
+ * shared estimate save (dry run for the preview, a real save for the create) and the real pricing engine. Only the paid property lookup is mocked, with
+ * a county-confirmed fixture. Every test runs in a transaction that is rolled back. Synthetic names only.
+ *
+ * Run: DATABASE_URL=postgres://localhost:5432/<migrated disposable db> \
+ *   ~/.claude/bin/jest-slot --runInBand server/tests/tech-estimates-postgres.test.js
+ */
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+jest.setTimeout(60000);
+
+const mockCaller = { id: null, role: 'technician' };
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../middleware/admin-auth', () => ({
+  ...jest.requireActual('../middleware/admin-auth'),
+  adminAuthenticate: (req, _res, next) => {
+    req.technician = { id: mockCaller.id, role: mockCaller.role, name: 'Synthetic Tech' };
+    req.technicianId = mockCaller.id;
+    req.techRole = mockCaller.role;
+    return next();
+  },
+}));
+// The route's `db` is the disposable connection of the running test (a rolled-back transaction).
+jest.mock('../models/db', () => {
+  const db = (...args) => db.connection(...args);
+  db.raw = (...args) => db.connection.raw(...args);
+  db.transaction = (...args) => db.connection.transaction(...args);
+  Object.defineProperty(db, 'schema', { get: () => db.connection.schema });
+  Object.defineProperty(db, 'fn', { get: () => db.connection.fn });
+  return db;
+});
+
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
+
+postgres('the technician estimate tool (migrated PostgreSQL)', () => {
+  const { randomUUID } = require('node:crypto');
+  const express = require('express');
+  const lookupRoutes = require('../routes/property-lookup-v2');
+  const { etDateString } = require('../utils/datetime-et');
+  const router = require('../routes/tech-estimates');
+
+  let database; let trx; let server; let baseUrl; let ids; let lookupSpy;
+
+  beforeAll(async () => {
+    const url = new URL(process.env.DATABASE_URL);
+    const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
+    database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+    const app = express();
+    app.use(express.json());
+    app.use('/api/tech/estimates', router);
+    app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+    await new Promise((resolve) => {
+      server = app.listen(0, () => { baseUrl = `http://127.0.0.1:${server.address().port}`; resolve(); });
+    });
+  });
+  afterAll(async () => {
+    await new Promise((r) => server.close(r));
+    await database?.destroy();
+  });
+
+  // A county-confirmed single-family home (synthetic), the shape the lookup cache stores.
+  const countyLookup = () => ({
+    propertyRecord: {
+      propertyType: 'Single Family',
+      squareFootage: 1850,
+      yearBuilt: 1998,
+      stories: 1,
+      _source: 'county',
+      _parcel: { county: 'Sarasota', parcelId: '0000000001', lotSqft: 9200, landUseDescription: 'SINGLE FAMILY DETACHED' },
+      _fieldEvidence: { squareFootage: { sourceType: 'county' } },
+    },
+    enriched: { propertyType: 'single_family' },
+  });
+
+  let customerSeq = 0;
+  const customer = async (line1) => {
+    const id = randomUUID();
+    await trx('customers').insert({
+      id, first_name: 'Synthetic', last_name: 'Fixture', email: `${id}@example.invalid`,
+      phone: `+1941555${String(100 + (customerSeq += 1)).padStart(4, '0')}`,
+      address_line1: line1, city: 'Test City', state: 'FL', zip: '00000', active: true, pipeline_stage: 'active_customer',
+    });
+    return id;
+  };
+
+  beforeEach(async () => {
+    process.env.GATE_TECH_ESTIMATES = 'true';
+    customerSeq = 0;
+    trx = await database.transaction();
+    require('../models/db').connection = trx;
+    const technicianId = randomUUID();
+    await trx('technicians').insert({
+      id: technicianId, name: 'Synthetic Tech', email: `${technicianId}@example.invalid`, role: 'technician',
+      active: true, employment_status: 'active', can_create_estimates: true,
+    });
+    await trx('technician_capabilities').insert({
+      technician_id: technicianId, service_category: 'general', capability_level: 'qualified', active: true, source: 'admin',
+    });
+    const routeCustomer = await customer('100 Test Lane');
+    const otherCustomer = await customer('200 Test Lane');
+    const otherTechnician = randomUUID();
+    await trx('technicians').insert({
+      id: otherTechnician, name: 'Other Synthetic Tech', email: `${otherTechnician}@example.invalid`, role: 'technician',
+      active: true, employment_status: 'active',
+    });
+    const visit = async (customerId, tech, over = {}) => {
+      const id = randomUUID();
+      await trx('scheduled_services').insert({
+        id, customer_id: customerId, technician_id: tech, service_type: 'Quarterly Pest Control',
+        status: 'pending', scheduled_date: etDateString(new Date()), window_start: '09:00', window_end: '10:00',
+        estimated_duration_minutes: 30, ...over,
+      });
+      return id;
+    };
+    ids = {
+      technicianId, routeCustomer, otherCustomer,
+      routeVisit: await visit(routeCustomer, technicianId),
+      // The same customer's second home: the visit carries its own service address.
+      secondHomeVisit: await visit(routeCustomer, technicianId, {
+        service_address_line1: '900 Second Home Rd', service_address_city: 'Test City', service_address_state: 'FL', service_address_zip: '00000',
+      }),
+      otherVisit: await visit(otherCustomer, otherTechnician),
+    };
+    mockCaller.id = technicianId;
+    mockCaller.role = 'technician';
+    lookupSpy = jest.spyOn(lookupRoutes, 'performPropertyLookup').mockImplementation(async () => countyLookup());
+  });
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    delete process.env.GATE_TECH_ESTIMATES;
+    require('../models/db').connection = undefined;
+    if (trx) await trx.rollback();
+  });
+
+  async function price(body) {
+    const res = await fetch(`${baseUrl}/api/tech/estimates/price`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  }
+  async function create(body) {
+    const res = await fetch(`${baseUrl}/api/tech/estimates`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  }
+  async function read(path) {
+    const res = await fetch(`${baseUrl}/api/tech/estimates${path}`);
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  }
+  // The phone's two steps: price it, then save that price with a retry key.
+  async function priceThenCreate(body, over = {}) {
+    const preview = await price(body);
+    const saved = await create({ ...body, clientDraftId: randomUUID(), digest: preview.body.digest, ...over });
+    return { preview, saved };
+  }
+  const PROSPECT = { firstName: 'Sample', lastName: 'Person', phone: '(941) 555-0142', address: '300 Test Lane', city: 'Test City', zip: '00000' };
+  const estimateRow = (id) => trx('estimates').where({ id }).first();
+  // What a price preview must not change: every table the estimate save or its follow-ups could touch.
+  const counts = async () => Object.fromEntries(await Promise.all(
+    ['estimates', 'tech_estimates', 'audit_log', 'activity_log', 'leads', 'customers', 'scheduled_services'].map(async (t) => [t, Number((await trx(t).count('* as n').first()).n)]),
+  ));
+
+  test('a technician with the switch on and a qualified general capability prices PEST for a customer on his route, and nothing is saved', async () => {
+    const before = await counts();
+    const res = await price({ visitId: ids.routeVisit, services: ['PEST'] });
+    expect(res.status).toBe(200);
+    expect(res.body.monthlyTotal).toBeGreaterThan(0);
+    expect(res.body.annualTotal).toBeGreaterThan(0);
+    expect(res.body.lines.length).toBeGreaterThan(0);
+    expect(res.body.facts.homeSqFt).toEqual({ value: 1850, source: 'lookup' });
+    expect(JSON.stringify(res.body)).not.toMatch(/token|viewurl|estimate_?id|estimate_data|margin/i);
+    expect(lookupSpy).toHaveBeenCalledTimes(1);
+    expect(await counts()).toEqual(before);
+  });
+
+  test('every forged pricing key from the phone changes no number', async () => {
+    const clean = await price({ visitId: ids.routeVisit, services: ['PEST'] });
+    const forged = await price({
+      visitId: ids.routeVisit,
+      services: ['PEST'],
+      manualDiscount: { type: 'PERCENT', value: 50, internalReason: 'x' },
+      linePriceOverrides: { PEST: 1 },
+      serviceSpecificDiscounts: [{ key: 'x', value: 10 }],
+      operatorPriceAdjustment: { type: 'FIXED', value: 100, waiveSetupFee: true },
+      moveId: randomUUID(),
+      profile: { homeSqFt: 400, lotSqFt: 600 },
+      options: { manualDiscount: { type: 'FIXED', value: 99 }, recurringCustomer: true, pestFreq: 12 },
+      estimateData: { engineInputs: { services: { lawn: { tier: 'enhanced' } } }, inputs: { svcLawn: true } },
+      engineInputs: { homeSqFt: 400 },
+      customerEmail: 'forged@example.invalid',
+      clientDraftId: randomUUID(),
+      leadId: randomUUID(),
+      groupWithEstimateId: randomUUID(),
+      monthlyTotal: 1,
+    });
+    expect(forged).toEqual(clean);
+    expect(clean.body.monthlyTotal).toBeGreaterThan(30);
+  });
+
+  test('a typed home size changes the price and sends the quote to the office first', async () => {
+    const base = await price({ visitId: ids.routeVisit, services: ['PEST'] });
+    const edited = await price({ visitId: ids.routeVisit, services: ['PEST'], facts: { homeSqFt: 4200, stories: 2 } });
+    expect(edited.status).toBe(200);
+    expect(edited.body.officeFirst.reasons).toEqual(expect.arrayContaining(['changed_fact:homeSqFt', 'changed_fact:stories']));
+    expect(edited.body.annualTotal).not.toBe(base.body.annualTotal);
+  });
+
+  test('a new person is priced on the typed address (no customer row is read or written)', async () => {
+    const before = await counts();
+    const res = await price({
+      prospect: { firstName: 'Sample', lastName: 'Person', phone: '(941) 555-0142', address: '300 Test Lane', city: 'Test City', zip: '00000' },
+      services: ['PEST'],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.monthlyTotal).toBeGreaterThan(0);
+    expect(await counts()).toEqual(before);
+  });
+
+  test('each of the six services comes back as its own priced engine line (an admin may quote all six)', async () => {
+    mockCaller.role = 'admin';
+    for (const key of ['PEST', 'OT_PEST', 'MOSQUITO', 'OT_MOSQUITO', 'RODENT_BAIT', 'TERMITE_BAIT']) {
+      const res = await price({ visitId: ids.routeVisit, services: [key] });
+      expect([key, res.status]).toEqual([key, 200]);
+      expect(res.body.lines.length).toBeGreaterThan(0);
+      expect(res.body.monthlyTotal + res.body.oneTimeTotal).toBeGreaterThan(0);
+    }
+    // All six together: still one whole quote.
+    const all = await price({ visitId: ids.routeVisit, services: ['PEST', 'OT_PEST', 'MOSQUITO', 'OT_MOSQUITO', 'RODENT_BAIT', 'TERMITE_BAIT'] });
+    expect(all.status).toBe(200);
+    expect(all.body.lines.length).toBeGreaterThanOrEqual(6);
+  });
+
+  test('another technician\'s visit is a 404 and nothing is looked up; so is his own visit once it is cancelled or old', async () => {
+    expect(await price({ visitId: ids.otherVisit, services: ['PEST'] })).toEqual({ status: 404, body: { error: 'Visit not found' } });
+    await trx('scheduled_services').where({ id: ids.routeVisit }).update({ status: 'cancelled' });
+    expect((await price({ visitId: ids.routeVisit, services: ['PEST'] })).status).toBe(404);
+    await trx('scheduled_services').where({ id: ids.routeVisit }).update({ status: 'completed', scheduled_date: '2020-01-06' });
+    expect((await price({ visitId: ids.routeVisit, services: ['PEST'] })).status).toBe(404);
+    expect(lookupSpy).not.toHaveBeenCalled();
+  });
+
+  test('a visit at the customer\'s second home looks up and prices that house, not the primary address', async () => {
+    const res = await price({ visitId: ids.secondHomeVisit, services: ['PEST'] });
+    expect(res.status).toBe(200);
+    expect(lookupSpy.mock.calls[0][0]).toBe('900 Second Home Rd, Test City, FL 00000');
+    const primary = await price({ visitId: ids.routeVisit, services: ['PEST'] });
+    expect(lookupSpy.mock.calls[1][0]).toBe('100 Test Lane, Test City, FL 00000');
+    expect(primary.status).toBe(200);
+  });
+
+  test('the paid lookup budget is per technician and per day, kept in the shared counter: a miss counts, a cached address does not, and over the budget is 429', async () => {
+    const bucket = `tech-estimate-lookup:${ids.technicianId}`;
+    const used = async () => Number((await trx('public_llm_daily_usage').where({ bucket }).first('count'))?.count || 0);
+    // A cached address (the default mock answers the cache read): nothing is counted.
+    expect((await price({ visitId: ids.routeVisit, services: ['PEST'] })).status).toBe(200);
+    expect(await used()).toBe(0);
+    // A miss: one unit, then the live lookup.
+    lookupSpy.mockImplementation(async (_address, options) => (options.cacheOnly ? null : countyLookup()));
+    expect((await price({ visitId: ids.routeVisit, services: ['PEST'] })).status).toBe(200);
+    expect(await used()).toBe(1);
+    // The day's budget is spent: the next miss is refused before the paid call.
+    await trx('public_llm_daily_usage').where({ bucket }).update({ count: 30 });
+    lookupSpy.mockClear();
+    const refused = await price({ visitId: ids.routeVisit, services: ['PEST'] });
+    expect(refused.status).toBe(429);
+    expect(refused.body.code).toBe('daily_limit');
+    expect(lookupSpy.mock.calls.map((call) => call[1])).toEqual([{ cacheOnly: true, persist: false }]);
+    // Another technician's budget is untouched.
+    expect(await trx('public_llm_daily_usage').whereNot({ bucket }).where('bucket', 'like', 'tech-estimate-lookup:%').first()).toBeUndefined();
+  });
+
+  test('gate off, and the technician\'s switch off, are both 404 {enabled:false}', async () => {
+    delete process.env.GATE_TECH_ESTIMATES;
+    expect(await price({ visitId: ids.routeVisit, services: ['PEST'] })).toEqual({ status: 404, body: { enabled: false } });
+    process.env.GATE_TECH_ESTIMATES = 'true';
+    await trx('technicians').where({ id: ids.technicianId }).update({ can_create_estimates: false });
+    expect(await price({ visitId: ids.routeVisit, services: ['PEST'] })).toEqual({ status: 404, body: { enabled: false } });
+    expect(lookupSpy).not.toHaveBeenCalled();
+  });
+
+  describe('save a draft and read his own', () => {
+    test('price, then create with the digest: one draft, one tool row, one audit event, at the previewed price', async () => {
+      const before = await counts();
+      const { preview, saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
+      expect(preview.body.digest).toMatch(/^[0-9a-f]{64}$/);
+      expect(saved.status).toBe(200);
+      const after = await counts();
+      expect(after.estimates).toBe(before.estimates + 1);
+      expect(after.tech_estimates).toBe(before.tech_estimates + 1);
+      expect(after.audit_log).toBe(before.audit_log + 1);
+      expect(after.leads).toBe(before.leads);
+      expect(after.customers).toBe(before.customers);
+      expect(after.scheduled_services).toBe(before.scheduled_services);
+      const row = await estimateRow(saved.body.id);
+      expect(row).toEqual(expect.objectContaining({
+        status: 'draft', created_by_technician_id: ids.technicianId, pricing_authority: 'SERVER', customer_id: ids.routeCustomer,
+      }));
+      expect(Number(row.monthly_total)).toBe(preview.body.monthlyTotal);
+      expect(Number(row.annual_total)).toBe(preview.body.annualTotal);
+      expect(Number(row.onetime_total)).toBe(preview.body.oneTimeTotal);
+      // The saved answer is the stored row: the preview's lines and totals, and no measured facts (the row holds none).
+      expect(saved.body).toEqual({
+        id: row.id, status: 'draft', lines: preview.body.lines, monthlyTotal: preview.body.monthlyTotal, annualTotal: preview.body.annualTotal,
+        oneTimeTotal: preview.body.oneTimeTotal, officeFirst: preview.body.officeFirst,
+      });
+      expect(JSON.stringify(saved.body)).not.toContain(row.token);
+      expect(await trx('tech_estimates').where({ estimate_id: row.id }).first()).toEqual(expect.objectContaining({
+        technician_id: ids.technicianId, office_first_reasons: [], request_fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+      }));
+      const events = await trx('audit_log').where({ action: 'tech_estimate.created', resource_id: row.id });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toEqual(expect.objectContaining({ actor_type: 'technician', actor_id: ids.technicianId, resource_type: 'estimates' }));
+      expect(Object.keys(events[0].metadata).sort()).toEqual(['customer_id', 'estimate_id', 'office_first', 'technician_id']);
+    });
+
+    test('a create from the second-home visit stores the second home\'s address, and a bare customer id saves nothing', async () => {
+      const { saved } = await priceThenCreate({ visitId: ids.secondHomeVisit, services: ['PEST'] });
+      expect(saved.status).toBe(200);
+      const row = await estimateRow(saved.body.id);
+      expect(row.address).toBe('900 Second Home Rd, Test City, FL 00000');
+      expect(row.customer_id).toBe(ids.routeCustomer);
+      const before = await counts();
+      const bare = await create({ customerId: ids.routeCustomer, services: ['PEST'], clientDraftId: randomUUID(), digest: 'a'.repeat(64) });
+      expect(bare.status).toBe(400);
+      expect(await counts()).toEqual(before);
+    });
+
+    test('a retry with the same draft id writes nothing more and answers the same estimate, before any lookup', async () => {
+      const body = { visitId: ids.routeVisit, services: ['PEST'] };
+      const { preview, saved } = await priceThenCreate(body);
+      const afterFirst = await counts();
+      lookupSpy.mockClear();
+      const again = await create({ ...body, clientDraftId: saved.body.id, digest: preview.body.digest });
+      expect(again.status).toBe(200);
+      expect(again.body).toEqual(saved.body);
+      expect(lookupSpy).not.toHaveBeenCalled();
+      expect(await counts()).toEqual(afterFirst);
+    });
+
+    // The first answer was lost on the way to the phone, then something the quote is built from changed. The retry must
+    // still answer the saved estimate: a refusal here makes the technician save the same quote a second time.
+    test.each([
+      ['the price moved (the county now sizes the home larger)', async () => {
+        lookupSpy.mockImplementation(async () => {
+          const lookup = countyLookup();
+          lookup.propertyRecord.squareFootage = 4200;
+          return lookup;
+        });
+      }],
+      ['the customer\'s phone changed', async () => {
+        await trx('customers').where({ id: ids.routeCustomer }).update({ phone: '+19415550177' });
+      }],
+      ['the visit left his route', async () => {
+        await trx('scheduled_services').where({ id: ids.routeVisit }).update({ technician_id: null });
+      }],
+    ])('a retry after the first answer was lost still answers the saved estimate when %s', async (_label, change) => {
+      const body = { visitId: ids.routeVisit, services: ['PEST'] };
+      const { preview, saved } = await priceThenCreate(body);
+      expect(saved.status).toBe(200);
+      const afterFirst = await counts();
+      await change();
+      const again = await create({ ...body, clientDraftId: saved.body.id, digest: preview.body.digest });
+      expect(again).toEqual({ status: 200, body: saved.body });
+      expect(await counts()).toEqual(afterFirst);
+    });
+
+    test('the same draft id with another request is 409 already_saved and writes nothing', async () => {
+      const body = { visitId: ids.routeVisit, services: ['PEST'] };
+      const { preview, saved } = await priceThenCreate(body);
+      const afterFirst = await counts();
+      const refusal = { status: 409, body: { error: 'This estimate was already saved. Find it in My estimates.', code: 'already_saved' } };
+      const retry = { ...body, clientDraftId: saved.body.id, digest: preview.body.digest };
+      expect(await create({ ...retry, facts: { homeSqFt: 4200 } })).toEqual(refusal);
+      expect(await create({ ...retry, visitId: ids.secondHomeVisit })).toEqual(refusal);
+      expect(await create({ ...retry, digest: 'c'.repeat(64) })).toEqual(refusal);
+      expect(await counts()).toEqual(afterFirst);
+      const [row] = await trx('estimates').where({ id: saved.body.id });
+      expect(Number(row.monthly_total)).toBe(preview.body.monthlyTotal);
+    });
+
+    test('the same draft id from another login is refused and writes nothing', async () => {
+      const body = { visitId: ids.routeVisit, services: ['PEST'] };
+      const { preview, saved } = await priceThenCreate(body);
+      const afterFirst = await counts();
+      const otherId = randomUUID();
+      await trx('technicians').insert({ id: otherId, name: 'Synthetic Other', email: `${otherId}@example.invalid`, role: 'technician', active: true, employment_status: 'active', can_create_estimates: true });
+      mockCaller.id = otherId;
+      mockCaller.role = 'admin';
+      const stolen = await create({ ...body, clientDraftId: saved.body.id, digest: preview.body.digest });
+      expect(stolen).toEqual({ status: 422, body: { error: 'The office needs to price this one.', code: 'office_prices' } });
+      expect(await counts()).toEqual(afterFirst);
+    });
+
+    test('a digest that is not the current price is 409 price_changed and writes nothing', async () => {
+      const before = await counts();
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] }, { digest: 'b'.repeat(64) });
+      expect(saved).toEqual({ status: 409, body: { error: 'The price changed. Price it again.', code: 'price_changed' } });
+      expect(await counts()).toEqual(before);
+    });
+
+    test('a typed fact is priced, stored as a detailed reason, and shown to the phone as the same code', async () => {
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'], facts: { homeSqFt: 4200, stories: 2 } });
+      expect(saved.status).toBe(200);
+      expect(saved.body.officeFirst).toEqual({ required: true, reasons: ['changed_fact:homeSqFt', 'changed_fact:stories'] });
+      expect((await trx('tech_estimates').where({ estimate_id: saved.body.id }).first()).office_first_reasons)
+        .toEqual(['changed_fact:homeSqFt', 'changed_fact:stories']);
+    });
+
+    test('Sold by = the creator for an active W-2 technician', async () => {
+      await trx('technicians').where({ id: ids.technicianId }).update({ employment_type: 'w2' });
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
+      const row = await estimateRow(saved.body.id);
+      expect(row).toEqual(expect.objectContaining({ sold_by_technician_id: ids.technicianId, sold_by_source: 'creator', sold_by_lead_id: null }));
+      expect(row.sold_by_set_at).toBeInstanceOf(Date);
+    });
+
+    test.each([
+      ['a 1099 technician', { employment_type: '1099' }, 'technician'],
+      ['an inactive W-2 technician', { employment_type: 'w2', active: false }, 'technician'],
+      ['a technician with no employment type', {}, 'technician'],
+      ['an admin login, even on a W-2 technician row', { employment_type: 'w2' }, 'admin'],
+    ])('%s gets no Sold by', async (_label, patch, role) => {
+      if (Object.keys(patch).length) await trx('technicians').where({ id: ids.technicianId }).update(patch);
+      mockCaller.role = role;
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
+      expect(saved.status).toBe(200);
+      expect(await estimateRow(saved.body.id)).toEqual(expect.objectContaining({ sold_by_technician_id: null, sold_by_source: null }));
+    });
+
+    test('the list and the read show his own estimates only', async () => {
+      const mine = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
+      const otherId = randomUUID();
+      await trx('technicians').insert({ id: otherId, name: 'Synthetic Other', email: `${otherId}@example.invalid`, role: 'technician', active: true, employment_status: 'active', can_create_estimates: true });
+      await trx('technician_capabilities').insert({ technician_id: otherId, service_category: 'general', capability_level: 'qualified', active: true, source: 'admin' });
+      mockCaller.id = otherId;
+      const theirs = await priceThenCreate({ prospect: PROSPECT, services: ['PEST'] });
+      expect(theirs.saved.status).toBe(200);
+      mockCaller.id = ids.technicianId;
+
+      const list = await read('');
+      expect(list.status).toBe(200);
+      expect(list.body.estimates.map((e) => e.id)).toEqual([mine.saved.body.id]);
+      expect(list.body.estimates[0]).toEqual(expect.objectContaining({
+        status: 'draft', sentAt: null, acceptedAt: null, who: 'Synthetic Fixture', addressLine: '100 Test Lane',
+        monthlyTotal: mine.saved.body.monthlyTotal, officeFirst: { required: false, reasons: [] },
+      }));
+      expect(JSON.stringify(list.body)).not.toMatch(/token|estimate_data|margin/i);
+
+      const one = await read(`/${mine.saved.body.id}`);
+      expect(one.body.lines).toEqual(mine.saved.body.lines);
+      expect(await read(`/${theirs.saved.body.id}`)).toEqual(await read(`/${randomUUID()}`));
+      expect((await read(`/${theirs.saved.body.id}`)).status).toBe(404);
+      // A new person's own list row names him.
+      mockCaller.id = otherId;
+      expect((await read('')).body.estimates[0]).toEqual(expect.objectContaining({ who: 'Sample Person', addressLine: '300 Test Lane' }));
+    });
+
+    test('an estimate made from a visit carries the customer\'s name, mobile number and email, so it can be sent; the phone never sees them', async () => {
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
+      expect(saved.status).toBe(200);
+      const row = await estimateRow(saved.body.id);
+      expect(row).toMatchObject({ customer_id: ids.routeCustomer, customer_name: 'Synthetic Fixture', customer_phone: '+19415550101' });
+      expect(row.customer_email).toMatch(/@example\.invalid$/);
+      expect(JSON.stringify(saved.body)).not.toMatch(/5550101|example\.invalid/);
+      // A stored number the save would refuse is left off: the estimate still saves, with no phone.
+      await trx('customers').where({ id: ids.routeCustomer }).update({ phone: '(141) 555-0101' });
+      const second = await priceThenCreate({ visitId: ids.routeVisit, services: ['OT_PEST'] });
+      expect(second.saved.status).toBe(200);
+      expect((await estimateRow(second.saved.body.id)).customer_phone).toBeNull();
+    });
+
+    test('an archived estimate is left out of his list', async () => {
+      const { saved } = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
+      await trx('estimates').where({ id: saved.body.id }).update({ archived_at: new Date() });
+      expect((await read('')).body.estimates).toEqual([]);
+      expect((await read(`/${saved.body.id}`)).status).toBe(404);
+    });
+
+    test('a new person whose phone is a customer\'s goes to the office first, and the phone sees only office_review', async () => {
+      await trx('customers').where({ id: ids.otherCustomer }).update({ phone: '+19415550142' });
+      const { preview, saved } = await priceThenCreate({ prospect: PROSPECT, services: ['PEST'] });
+      // The preview already shows the verdict the save stores.
+      expect(preview.body.officeFirst).toEqual({ required: true, reasons: ['office_review'] });
+      expect(saved.body.officeFirst).toEqual({ required: true, reasons: ['office_review'] });
+      expect((await trx('tech_estimates').where({ estimate_id: saved.body.id }).first()).office_first_reasons).toEqual(['phone_matches_customer']);
+    });
+  });
+
+  describe('the office bell for a held estimate', () => {
+    const bells = (estimateId) => trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`tech-estimate-office-first:${estimateId}`]);
+    const HELD = () => ({ visitId: ids.routeVisit, services: ['PEST'], facts: { homeSqFt: 4200, stories: 2 } });
+
+    test('a held create writes one open bell row for the estimate; a quote he may send himself writes none', async () => {
+      const clean = await priceThenCreate({ visitId: ids.routeVisit, services: ['PEST'] });
+      expect(clean.saved.body.officeFirst.required).toBe(false);
+      expect(await bells(clean.saved.body.id)).toEqual([]);
+
+      const { saved } = await priceThenCreate(HELD());
+      expect(saved.status).toBe(200);
+      const rows = await bells(saved.body.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual(expect.objectContaining({
+        category: 'estimate', title: 'Estimates — check Synthetic\'s estimate for Synthetic Fixture',
+        body: 'The technician changed the home size, so it waits for your check before it goes.',
+        link: `/admin/estimates?estimateId=${saved.body.id}`, done_at: null,
+      }));
+      expect(rows[0].metadata).toEqual(expect.objectContaining({
+        area: 'Estimates', severity: 'needs-you', who: 'person', doneWhen: 'estimate_sent_or_closed', estimateId: saved.body.id,
+        subject: { type: 'estimate', id: saved.body.id }, technicianId: ids.technicianId,
+      }));
+      expect(JSON.stringify(saved.body)).not.toMatch(/waits for your check|notification/i);
+    });
+
+    test('a retry, and a second raise for the same estimate, add no row (even after the row is closed)', async () => {
+      const body = HELD();
+      const { preview, saved } = await priceThenCreate(body);
+      const again = await create({ ...body, clientDraftId: saved.body.id, digest: preview.body.digest });
+      expect(again.status).toBe(200);
+      expect(await bells(saved.body.id)).toHaveLength(1);
+
+      const { ringOfficeFirst } = require('../services/tech-estimate-office-bell');
+      const estimate = await estimateRow(saved.body.id);
+      const raise = () => ringOfficeFirst({ estimate, detailed: ['changed_fact:homeSqFt'], technician: { id: ids.technicianId, name: 'Synthetic Tech' } });
+      await raise();
+      expect(await bells(saved.body.id)).toHaveLength(1);
+      // A closed row still holds the key: the estimate never rings twice.
+      await bells(saved.body.id).update({ done_at: new Date(), done_by: 'test', resolution: 'done' });
+      await raise();
+      expect(await bells(saved.body.id)).toHaveLength(1);
+    });
+
+    test.each([
+      ['sent', { status: 'sent', sent_at: new Date() }, 'Estimate was sent'],
+      ['archived', { archived_at: new Date() }, 'Estimate was archived'],
+    ])('the row closes itself when the estimate is %s (the real sweep, the real predicate)', async (_label, patch, resolution) => {
+      const { saved } = await priceThenCreate(HELD());
+      const { runAdminAlertRelevanceSweep } = require('../services/admin-alert-relevance');
+      // Still a draft: the sweep leaves it open.
+      await runAdminAlertRelevanceSweep();
+      expect((await bells(saved.body.id))[0].done_at).toBeNull();
+      // Queued to send, not gone yet: still open, because the close is final.
+      await trx('estimates').where({ id: saved.body.id }).update({ status: 'scheduled', scheduled_at: new Date(Date.now() + 3600e3) });
+      await runAdminAlertRelevanceSweep();
+      expect((await bells(saved.body.id))[0].done_at).toBeNull();
+      await trx('estimates').where({ id: saved.body.id }).update(patch);
+      await runAdminAlertRelevanceSweep();
+      const [row] = await bells(saved.body.id);
+      expect(row).toEqual(expect.objectContaining({ done_by: 'relevance', resolution }));
+      expect(row.done_at).toBeInstanceOf(Date);
+    });
+  });
+
+  describe('the three migrations', () => {
+    const techEstimates = require('../models/migrations/20261109130000_tech_estimates');
+    const soldByCreator = require('../models/migrations/20261109130100_sold_by_creator');
+    const fingerprint = require('../models/migrations/20261109130200_tech_estimates_request_fingerprint');
+    // A refused statement aborts a transaction: run it in a savepoint and report whether it was refused.
+    const refused = async (work) => {
+      try { await trx.transaction(work); return false; } catch { return true; }
+    };
+
+    test('tech_estimates goes down and up (both are guarded no-ops when repeated)', async () => {
+      await techEstimates.up(trx);
+      await techEstimates.down(trx);
+      expect(await trx.schema.hasTable('tech_estimates')).toBe(false);
+      await techEstimates.down(trx);
+      await techEstimates.up(trx);
+      expect(await trx.schema.hasTable('tech_estimates')).toBe(true);
+      const { rows } = await trx.raw("SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_tech_estimates_technician_created'");
+      expect(rows[0].indexdef).toMatch(/technician_id, created_at DESC/);
+    });
+
+    test('request_fingerprint goes down and up (both are guarded no-ops when repeated)', async () => {
+      const has = () => trx.schema.hasColumn('tech_estimates', 'request_fingerprint');
+      await fingerprint.up(trx);
+      expect(await has()).toBe(true);
+      await fingerprint.down(trx);
+      expect(await has()).toBe(false);
+      await fingerprint.down(trx);
+      await fingerprint.up(trx);
+      expect(await has()).toBe(true);
+    });
+
+    test('the Sold by down refuses while a creator row exists, restores the old two checks without one, and up widens again', async () => {
+      const estimateId = randomUUID();
+      await trx('estimates').insert({ id: estimateId, token: randomUUID().replaceAll('-', ''), customer_name: 'Synthetic Fixture', status: 'draft', sold_by_technician_id: ids.technicianId, sold_by_source: 'creator' });
+      await expect(soldByCreator.down(trx)).rejects.toThrow(/Sold by = creator/);
+      await trx('estimates').where({ id: estimateId }).update({ sold_by_technician_id: null, sold_by_source: null });
+      await soldByCreator.down(trx);
+      expect(await refused((sp) => sp('estimates').where({ id: estimateId }).update({ sold_by_technician_id: ids.technicianId, sold_by_source: 'creator' }))).toBe(true);
+      expect(await refused((sp) => sp('estimates').where({ id: estimateId }).update({ sold_by_technician_id: ids.technicianId, sold_by_source: 'office' }))).toBe(false);
+      await trx('estimates').where({ id: estimateId }).update({ sold_by_technician_id: null, sold_by_source: null });
+      await soldByCreator.up(trx);
+      await soldByCreator.up(trx);
+      expect(await refused((sp) => sp('estimates').where({ id: estimateId }).update({ sold_by_technician_id: ids.technicianId, sold_by_source: 'creator' }))).toBe(false);
+      // creator needs a seller; the other values keep their rules
+      expect(await refused((sp) => sp('estimates').where({ id: estimateId }).update({ sold_by_technician_id: null, sold_by_source: 'creator' }))).toBe(true);
+      expect(await refused((sp) => sp('estimates').where({ id: estimateId }).update({ sold_by_technician_id: ids.technicianId, sold_by_source: 'cleared' }))).toBe(true);
+      expect(await refused((sp) => sp('estimates').where({ id: estimateId }).update({ sold_by_technician_id: ids.technicianId, sold_by_source: 'nobody' }))).toBe(true);
+    });
+  });
+});
