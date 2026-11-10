@@ -250,6 +250,49 @@ postgres('payroll pay rate steps', () => {
       expect(await checkRate(run)).toBe('25.00');
     });
 
+    // finalizeRun takes the payroll lock and then its run row. A recompute or draft that applies a due step
+    // needs the same lock, so it must take it in the same order or the two can deadlock.
+    const lockOrder = async (work) => {
+      const seen = [];
+      const record = (query) => seen.push(query);
+      database.on('query', record);
+      try { await work(); } finally { database.removeListener('query', record); }
+      return {
+        lockAt: seen.findIndex((q) => /pg_advisory_xact_lock\(/.test(q.sql) && (q.bindings || []).includes('payroll.mutation')),
+        runRowAt: seen.findIndex((q) => /from "payroll_runs"[\s\S]*for update/i.test(q.sql)),
+      };
+    };
+
+    it('with a due step, a recompute takes the payroll lock before it locks its own run row', async () => {
+      const id = await technician();
+      await approvedWeek(id, W2);
+      const run = await draft(W2);
+      await step(id);
+      const { lockAt, runRowAt } = await lockOrder(() => api('POST', `/runs/${run.id}/recompute`));
+      expect(lockAt).toBeGreaterThanOrEqual(0);
+      expect(runRowAt).toBeGreaterThan(lockAt);
+      expect(await checkRate(run)).toBe('25.00');
+    });
+
+    it('with a due step, a draft takes the payroll lock before it reads the week\'s run rows', async () => {
+      const id = await technician();
+      await approvedWeek(id, W2);
+      await step(id);
+      const { lockAt, runRowAt } = await lockOrder(() => draft(W2));
+      expect(lockAt).toBeGreaterThanOrEqual(0);
+      expect(runRowAt).toBeGreaterThan(lockAt);
+    });
+
+    it('with no step due, a recompute takes no payroll lock (as before)', async () => {
+      const id = await technician();
+      await approvedWeek(id, W2);
+      const run = await draft(W2);
+      await step(id, { effective_on: addStaffWorkDays(staffWeekStartForWorkDate(etDateString()), 7) });
+      const { lockAt, runRowAt } = await lockOrder(() => api('POST', `/runs/${run.id}/recompute`));
+      expect(lockAt).toBe(-1);
+      expect(runRowAt).toBeGreaterThanOrEqual(0);
+    });
+
     it('a manual pay rate edit after the step wins for later weeks and never reprices the week before', async () => {
       const id = await technician();
       await step(id);

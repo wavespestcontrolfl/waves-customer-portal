@@ -107,14 +107,22 @@ async function withWeekRates(conn, rows, weekStart) {
   });
 }
 
+// Steps waiting to be applied on `today` (Eastern date).
+const openDue = (conn, today) => conn('payroll_rate_steps').whereNull('applied_at').whereNull('cancelled_at').where('effective_on', '<=', today);
+
+// True when a step is due. A pay run asks BEFORE it locks its own run row, so it can take the payroll lock
+// first: the order finalizeRun uses (the lock, then the run row). Lock in the other order and a recompute
+// that applies a step can deadlock with a finalize of the same run.
+const hasDueSteps = async (conn, today = etDateString()) => Boolean(await openDue(conn, today).first('id'));
+
 /**
  * Applies every step that is due on `today` (Eastern date), oldest first, inside the caller's
  * transaction. Idempotent: an applied step is never read again. Takes the payroll lock only when
  * something is due, so a pay run with nothing due waits for nothing.
  */
 async function applyDueSteps(trx, { today = etDateString() } = {}) {
-  const open = () => trx('payroll_rate_steps').whereNull('applied_at').whereNull('cancelled_at').where('effective_on', '<=', today);
-  if (!(await open().first('id'))) return [];
+  const open = () => openDue(trx, today);
+  if (!(await hasDueSteps(trx, today))) return [];
   await lockPayrollMutations(trx);
   const due = await open().orderBy([{ column: 'effective_on' }, { column: 'created_at' }, { column: 'id' }]).forUpdate().select('id', 'technician_id', 'hourly_rate');
   const applied = [];
@@ -221,5 +229,5 @@ async function cancelStep(stepId, actor, conn = db) {
 }
 
 module.exports = {
-  rateForWeek, withWeekRates, applyDueSteps, applyDueStepsDaily, suggestedDay90Monday, listSteps, createStep, cancelStep,
+  rateForWeek, withWeekRates, hasDueSteps, applyDueSteps, applyDueStepsDaily, suggestedDay90Monday, listSteps, createStep, cancelStep,
 };
