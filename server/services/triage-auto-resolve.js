@@ -126,6 +126,9 @@ const ADVISORY_AGE_DAYS = 30;
 // update before it falls off, the same idea as admin alerts that fall off
 // after 3 quiet days.
 const QUIET_AGE_DAYS = 7;
+// The resolution_rule the quiet_aged sweep stamps on a card it dismisses. One
+// name for the rule table, the reopen code and the office-closed readers.
+const QUIET_AGED_RULE = 'quiet_aged';
 // not_confirmed's bare-ask fallback (bookingCoversRequest below): how soon
 // after the CARD a live booking must be created to count as the call
 // finally getting scheduled. A booking weeks later is not evidence this
@@ -211,9 +214,10 @@ const ADVISORY_AGE_CODES = new Set([
 // (b) this sweep, (c) the admin triage UI routes and (d) tests/docs reads
 // cards of that code as state. Audit 2026-11-09 of every triage_items reader
 // in server/. Status-agnostic readers that look at ANY code and so cannot be
-// avoided by a list (they treat an auto-closed card as not-an-office-decision,
-// or only as a pending-work signal): call-booking-miss-watchdog
-// officeClosedCall, call-held-visits, sms-gratitude-context pending work.
+// avoided by a list: call-booking-miss-watchdog officeClosedCall (also used by
+// call-held-visits) now counts a quiet_aged dismissal as still OPEN, so the
+// sweep never turns "one human-closed card + one quiet card" into an office
+// close; sms-gratitude-context pending work reads it as not-an-office-decision.
 // An unknown or new code is NEVER swept; add a code here only after the same
 // search (the literal, constants that hold it, and triage_items reads with a
 // category, a reason_code IN list or no reason filter).
@@ -267,7 +271,7 @@ const RULE_NOTES = {
   callback_spam: 'Auto-resolved: the office called this voicemail back and reached a solicitor; the ask is moot.',
   spam_aged: `Auto-dismissed: spam/wrong-number advisory unactioned after ${SPAM_AGE_DAYS} days.`,
   advisory_aged: `Auto-dismissed: informational flag unactioned after ${ADVISORY_AGE_DAYS} days.`,
-  quiet_aged: `Auto-dismissed: no one acted on this card for ${QUIET_AGE_DAYS} days (owner 2026-11-09).`,
+  [QUIET_AGED_RULE]: `Auto-dismissed: no one acted on this card for ${QUIET_AGE_DAYS} days (owner 2026-11-09).`,
   visit_passed: 'Auto-resolved: the visit this call booked was completed, or its day has passed; the overlap / out-of-hours note is moot.',
   house_number_adopted: 'Auto-resolved: the customer record now carries the house number the caller stated; the disagreement is settled.',
 };
@@ -1252,7 +1256,7 @@ const CLASSIFY_RULES = [
   // LAST: every moot / evidence / age rule above still wins for the same card.
   // Any severity; both clocks must be old (a card a person or a recurrence
   // touched restarts it). A missing updated_at reads as age 0: fail closed.
-  { rule: 'quiet_aged', action: 'dismiss',
+  { rule: QUIET_AGED_RULE, action: 'dismiss',
     when: (item, ev, now) => QUIET_AGE_CODES.has(item.reason_code)
       && ageDays(item.created_at, now) >= QUIET_AGE_DAYS && ageDays(item.updated_at, now) >= QUIET_AGE_DAYS },
 ];
@@ -2831,8 +2835,8 @@ async function loadEvidence(conn, items, { ignoreGate = false, now = new Date() 
 // is kept.
 function capDecisions(decisions, cap = MAX_TRANSITIONS_PER_RUN) {
   const ordered = [
-    ...decisions.filter((d) => d.rule !== 'quiet_aged'),
-    ...decisions.filter((d) => d.rule === 'quiet_aged'),
+    ...decisions.filter((d) => d.rule !== QUIET_AGED_RULE),
+    ...decisions.filter((d) => d.rule === QUIET_AGED_RULE),
   ];
   return { applied: ordered.slice(0, cap), deferred: Math.max(0, ordered.length - cap) };
 }
@@ -2853,7 +2857,7 @@ async function planQuietAged({ now = new Date(), ignoreGate = false } = {}) {
   for (const item of items) {
     const decision = classifyTriageItem(item, { evidence }, { now });
     if (!decision) continue;
-    if (decision.rule !== 'quiet_aged') { otherRules += 1; continue; }
+    if (decision.rule !== QUIET_AGED_RULE) { otherRules += 1; continue; }
     total += 1;
     const bucket = byReason[item.reason_code] || (byReason[item.reason_code] = { total: 0, bySeverity: {} });
     bucket.total += 1;
@@ -2890,7 +2894,7 @@ function planQuietAgedReopen(rows, liveTwins = []) {
 // locks must not touch a call whose lock it does not hold.
 async function readQuietAgedReopenPlan(conn, since, onlyCallIds = null) {
   const query = conn('triage_items')
-    .where({ status: 'dismissed', resolution_rule: 'quiet_aged' })
+    .where({ status: 'dismissed', resolution_rule: QUIET_AGED_RULE })
     .where('resolved_at', '>=', since);
   if (onlyCallIds) query.whereIn('call_log_id', onlyCallIds);
   const rows = await query.select('id', 'call_log_id', 'reason_code', 'resolved_at');
@@ -2929,7 +2933,7 @@ async function reopenQuietAged({ since, apply = false, now = new Date(), conn = 
     if (!ids.length) return 0;
     const updated = await trx('triage_items')
       .whereIn('id', ids)
-      .where({ status: 'dismissed', resolution_rule: 'quiet_aged' })
+      .where({ status: 'dismissed', resolution_rule: QUIET_AGED_RULE })
       .update({ status: 'open', resolution_note: null, resolution_source: null, resolution_rule: null, resolved_at: null, updated_at: now })
       .returning('call_log_id');
     for (const callId of new Set(updated.map((r) => r.call_log_id ?? r))) await syncCallReviewStatus(trx, callId, 'resolved');
@@ -3118,6 +3122,7 @@ module.exports = {
   ADVISORY_AGE_CODES,
   QUIET_AGE_CODES,
   QUIET_AGE_DAYS,
+  QUIET_AGED_RULE,
   RULE_NOTES,
   SPAM_AGE_DAYS,
   ADVISORY_AGE_DAYS,

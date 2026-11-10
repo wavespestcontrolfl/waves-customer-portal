@@ -241,6 +241,13 @@ describe('clearing rules', () => {
     expect(run([call()], [], [{ call_log_id: 'call-2', status: 'dismissed', resolution_source: 'human' }])).toHaveLength(1);
   });
 
+  it('stays listed when a human-closed card sits beside a quiet_aged dismissal (the sweep proves nothing)', () => {
+    const closed = { call_log_id: 'call-1', status: 'dismissed', resolution_source: 'human', resolution_rule: null };
+    const quiet = { call_log_id: 'call-1', status: 'dismissed', resolution_source: 'auto', resolution_rule: 'quiet_aged' };
+    expect(run([call()], [], [closed, quiet])).toHaveLength(1);
+    expect(run([call()], [], [closed, { ...quiet, resolution_rule: 'advisory_aged' }])).toEqual([]);
+  });
+
   // Owner 2026-11-01: Dismiss on the row means the office will not book it.
   it('clears for good when the office dismissed the row on Dispatch', () => {
     expect(run([call({ held_visit_dismissed_at: '2026-10-12T15:30:00.000Z' })])).toEqual([]);

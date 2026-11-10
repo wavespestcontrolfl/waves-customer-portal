@@ -531,4 +531,26 @@ describe('officeClosedCall', () => {
   test('any open or in-progress card keeps it open', () => {
     expect(officeClosedCall([{ status: 'dismissed', resolution_source: 'human' }, { status: 'in_progress' }])).toBe(false);
   });
+  // The quiet_aged sweep proves nothing: its dismissal counts as still open.
+  test('a human-closed card plus a quiet_aged dismissal is not closed', () => {
+    expect(officeClosedCall([
+      { status: 'dismissed', resolution_source: 'human', resolution_rule: null },
+      { status: 'dismissed', resolution_source: 'auto', resolution_rule: 'quiet_aged' },
+    ])).toBe(false);
+  });
+  test('only quiet_aged dismissals is not closed', () => {
+    expect(officeClosedCall([
+      { status: 'dismissed', resolution_source: 'auto', resolution_rule: 'quiet_aged' },
+      { status: 'dismissed', resolution_source: 'auto', resolution_rule: 'quiet_aged' },
+    ])).toBe(false);
+  });
+  test('a human-closed card plus an advisory_aged dismissal is still closed', () => {
+    expect(officeClosedCall([
+      { status: 'dismissed', resolution_source: 'human', resolution_rule: null },
+      { status: 'dismissed', resolution_source: 'auto', resolution_rule: 'advisory_aged' },
+    ])).toBe(true);
+  });
+  test('the rule name is the one the sweep stamps', () => {
+    expect(require('../services/triage-auto-resolve').QUIET_AGED_RULE).toBe('quiet_aged');
+  });
 });
