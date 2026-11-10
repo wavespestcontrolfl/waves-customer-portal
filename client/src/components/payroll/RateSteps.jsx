@@ -21,6 +21,10 @@ const STATUS = {
 
 const blankForm = () => ({ hourlyRate: '', effectiveOn: '', note: '' });
 const firstScheduled = steps => (steps || []).find(step => step.status === 'scheduled') || null;
+// The day-90 Monday is offered only while nothing is scheduled and the date is still ahead: the server
+// refuses a start date that is not after today, so a long-serving technician gets an empty date box.
+const day90Offer = data => (data && !firstScheduled(data.steps) && data.suggestedDay90Monday > etDateString(new Date())
+  ? data.suggestedDay90Monday : '');
 
 export function RateStepSummary({ step }) {
   if (!step) return null;
@@ -91,8 +95,8 @@ function useRateSteps({ call, technician, onChange, onSaved }) {
     const next = await call(`/technicians/${technician.id}/rate-steps`);
     setData(next);
     onChange(firstScheduled(next.steps));
-    // The day-90 Monday is offered only while nothing is scheduled.
-    if (!firstScheduled(next.steps) && next.suggestedDay90Monday) setForm(prev => ({ ...prev, effectiveOn: prev.effectiveOn || next.suggestedDay90Monday }));
+    const offer = day90Offer(next);
+    if (offer) setForm(prev => ({ ...prev, effectiveOn: prev.effectiveOn || offer }));
   }, [call, technician.id, onChange]);
 
   useEffect(() => { load().catch(failure => setError(failure.message)); }, [load]);
@@ -123,7 +127,7 @@ function useRateSteps({ call, technician, onChange, onSaved }) {
 export function RateStepsDialog({ call, technician, onClose, onChange, onSaved }) {
   const { data, form, setForm, busy, error, add, cancel } = useRateSteps({ call, technician, onChange, onSaved });
   const steps = data ? data.steps : [];
-  const helper = !firstScheduled(steps) && data && data.suggestedDay90Monday && form.effectiveOn === data.suggestedDay90Monday
+  const helper = day90Offer(data) && form.effectiveOn === day90Offer(data)
     ? 'The first full pay week after day 90. Must be a Monday after today.' : '';
 
   return <Dialog open onClose={onClose} size="lg">

@@ -79,6 +79,13 @@ describe('Pay rate changes', () => {
     expect(within(dialog).getByLabelText(/First pay week/)).toHaveValue('');
   });
 
+  it('leaves the date empty when the day-90 Monday is already past (the server would refuse it)', async () => {
+    suggested = '2020-04-06';
+    const dialog = await openDialog();
+    expect(within(dialog).getByLabelText(/First pay week/)).toHaveValue('');
+    expect(within(dialog).getByText('Must be a Monday after today.')).toBeInTheDocument();
+  });
+
   it('posts the typed rate, date and note, then reloads the list and the row', async () => {
     const dialog = await openDialog();
     const view = within(dialog);
