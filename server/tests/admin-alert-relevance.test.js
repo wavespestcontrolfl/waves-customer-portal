@@ -2377,6 +2377,56 @@ describe('customer-contact classes', () => {
       });
     });
 
+    describe('a technician\'s held estimate closes once the estimate leaves the office\'s check (tech-estimate-office-bell.js)', () => {
+      const TECH_EST = uid(76);
+      const heldBell = (over = {}) => note({
+        category: 'estimate', link: `/admin/estimates?estimateId=${TECH_EST}`,
+        metadata: { area: 'Estimates', doneWhen: 'estimate_sent_or_closed', dedupeKey: `tech-estimate-office-first:${TECH_EST}`, estimateId: TECH_EST, ...over },
+      });
+      const held = (over = {}) => ({ id: TECH_EST, status: 'draft', sent_at: null, accepted_at: null, archived_at: null, ...over });
+
+      test('the prefix repeated here is the emitter\'s own, and only that bell is in the class', () => {
+        expect(require('../services/tech-estimate-office-bell').KEY_PREFIX).toBe('tech-estimate-office-first:');
+        expect(require('../services/tech-estimate-office-bell').DONE_WHEN).toBe('estimate_sent_or_closed');
+        expect(classify(heldBell()).key).toBe('tech_estimate_office_first');
+        expect(classify(heldBell({ dedupeKey: `manual-accept-consumer-notice:${TECH_EST}` }))).toBeNull();
+        expect(classify(heldBell({ doneWhen: 'something_else' }))).toBeNull();
+      });
+
+      test.each([
+        ['a draft the office has not touched', held(), null],
+        ['a send that failed', held({ status: 'send_failed' }), null],
+        ['a send that is only queued', held({ status: 'scheduled' }), null],
+        ['a send in flight', held({ status: 'sending' }), null],
+        ['sent', held({ status: 'sent', sent_at: at(30) }), 'Estimate was sent'],
+        ['viewed', held({ status: 'viewed' }), 'Estimate was sent'],
+        ['sent once, then a later send failed', held({ status: 'send_failed', sent_at: at(30) }), 'Estimate was sent'],
+        ['accepted', held({ status: 'accepted', accepted_at: at(30) }), 'Estimate was accepted'],
+        ['declined', held({ status: 'declined' }), 'Estimate was declined'],
+        ['expired', held({ status: 'expired' }), 'Estimate expired'],
+        ['archived', held({ archived_at: at(30) }), 'Estimate was archived'],
+      ])('%s', async (_label, estimate, reason) => {
+        mockTables.estimates = [estimate];
+        expect(await judged(heldBell(), null)).toMatchObject({ cls: 'tech_estimate_office_first', reason, would: null });
+      });
+
+      test('an estimate that is gone closes it; a bell with no estimate id closes nothing', async () => {
+        mockTables.estimates = [];
+        expect(await judged(heldBell(), null)).toMatchObject({ reason: 'Estimate was removed' });
+        expect(await judged({ ...heldBell({ estimateId: undefined }), link: '/admin/estimates' }, null)).toMatchObject({ reason: null });
+      });
+
+      test('the real sweep closes it with the reason and leaves a draft\'s bell open', async () => {
+        const sent = heldBell();
+        const draft = heldBell({ dedupeKey: 'tech-estimate-office-first:other', estimateId: uid(77) });
+        mockTables.notifications = [sent, draft];
+        mockTables.estimates = [held({ status: 'sent', sent_at: at(30) }), held({ id: uid(77) })];
+        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ retired: 1, byClass: { tech_estimate_office_first: 1 } });
+        expect(sent).toMatchObject({ done_by: 'relevance', resolution: 'Estimate was sent' });
+        expect(draft.done_at ?? null).toBeNull();
+      });
+    });
+
     describe('text-note bells close once answered AND a visit is done (owner 2026-11-02, option B)', () => {
       // The bell sms-operational-actions.js recordMessageOperations raises: category alert, dedupeKey
       // sms-property-instructions:<sms_log id>, doneWhen text_note_checked, customerId in metadata.

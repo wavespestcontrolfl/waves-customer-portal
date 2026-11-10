@@ -34,6 +34,7 @@ function shortDate(value) {
 export function soldByDetail(soldBy) {
   if (!soldBy?.source || !soldBy.technicianId) return "";
   if (soldBy.source === "office") return "set by the office";
+  if (soldBy.source === "creator") return "made the estimate in the technician tool";
   const who = soldBy.name || "the technician";
   const truck = Number.isFinite(soldBy.gpsDistanceM)
     ? `truck ${soldBy.gpsDistanceM} m away`
