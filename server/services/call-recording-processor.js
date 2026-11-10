@@ -5170,12 +5170,13 @@ async function callbackSpokenNumberSuggested({ call, extracted, customerLinkOver
 // GATE_BOOKING_TEXT_COVERS_DAY_BEFORE: this pipeline registers the reminder row with the confirmation already marked
 // (sendConfirmation:false) and sends its own text afterwards, so a delivered text for a visit booked for today or tomorrow
 // left the 24-hour "is tomorrow" reminder armed (it went out 3 to 12 minutes later). Called only after the primary text was
-// delivered; the shared rule and the fenced write live in appointment-reminders. Best-effort: never throws into the pass.
-async function closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate, windowStart }) {
+// delivered, with the number it went to (smsRecipient: the caller's number when implied consent redirected it); the shared
+// rule, the recipient check and the fenced write live in appointment-reminders. Best-effort: never throws into the pass.
+async function closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate, windowStart, customerId = null, recipientPhone = null }) {
   try {
     if (!scheduledServiceId || !scheduledDate) return false;
     const apptTime = parseETDateTime(`${String(scheduledDate).slice(0, 10)}T${windowStart ? String(windowStart).slice(0, 5) : '08:00'}`);
-    return await require('./appointment-reminders').closeDayBeforeForBookingText({ scheduledServiceId, apptTime, sent: true, dayOnly: false });
+    return await require('./appointment-reminders').closeDayBeforeForBookingText({ scheduledServiceId, apptTime, sent: true, dayOnly: false, customerId, recipientPhone });
   } catch (err) {
     logger.warn(`[call-proc] day-before close after the booking text failed for visit ${scheduledServiceId}: ${err.code || err.name || 'error'}`);
     return false;
@@ -23182,7 +23183,7 @@ const CallRecordingProcessor = {
                     };
                   } else {
                     logger.info(`[call-proc] Appointment SMS sent to customer ${customerId}`);
-                    await closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog });
+                    await closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog, customerId, recipientPhone: smsRecipient });
                     appointmentResult = { smsSent: true, scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog };
                   }
                   // Gated fan-out to the OTHER appointment contacts: the same

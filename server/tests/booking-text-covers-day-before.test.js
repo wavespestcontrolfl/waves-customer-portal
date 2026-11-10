@@ -16,6 +16,9 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn() }));
+jest.mock('../services/recipient-optin', () => ({ filterRecipientsByOptin: jest.fn(async (contacts) => contacts) }));
+jest.mock('../services/contact-notification-prefs', () => ({ filterContactsByOwnPrefs: jest.fn(async (contacts) => contacts) }));
+jest.mock('../services/property-notification-prefs', () => ({ prefsForVisit: jest.fn(async (prefs) => prefs) }));
 jest.mock('../services/customer-contact', () => ({
   getAppointmentContacts: jest.fn(() => []),
   isServiceContactRole: jest.fn(() => false),
@@ -38,6 +41,7 @@ jest.mock('../config/feature-gates', () => ({
 }));
 
 const db = require('../models/db');
+const CustomerContact = require('../services/customer-contact');
 const AppointmentEmail = require('../services/appointment-email');
 const gates = require('../config/feature-gates');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -49,17 +53,20 @@ const { closeDayBeforeForBookingText } = AppointmentReminders;
 const tomorrowNoonET = () => parseETDateTime(`${etDateString(addETDays(new Date(), 1))}T12:00`);
 const inDaysNoonET = (n) => parseETDateTime(`${etDateString(addETDays(new Date(), n))}T12:00`);
 
+const SAVED_PHONE = '+19415550101'; // the customer's saved number (the 24h reminder's recipient)
+const OTHER_PHONE = '+19415550199'; // a different caller number (the implied-consent redirect target)
+
 /** A knex-style chain that records every appointment_reminders write: { where, patch }. */
-function recordingDb() {
+function recordingDb({ updated = 1 } = {}) {
   const writes = [];
   db.mockImplementation((table) => {
     const q = { _where: [] };
     ['whereIn', 'whereRaw', 'whereNotNull', 'orderBy', 'select', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
     q.where = jest.fn((cond) => { q._where.push(cond); if (cond === 'member_since') q.memberSince = true; return q; });
-    q.update = jest.fn(async (patch) => { if (table === 'appointment_reminders') writes.push({ where: q._where, patch }); return 1; });
+    q.update = jest.fn(async (patch) => { if (table === 'appointment_reminders') writes.push({ where: q._where, patch }); return updated; });
     const rows = {
       notification_prefs: { appointment_confirmation_channel: 'email' },
-      customers: { id: 'c1', account_id: 'acct-1', is_primary_profile: true, first_name: 'Sample', email: 'sample@example.com' },
+      customers: { id: 'c1', account_id: 'acct-1', is_primary_profile: true, first_name: 'Sample', email: 'sample@example.com', phone: SAVED_PHONE },
       scheduled_services: { id: 'done-1' },
     };
     q.first = jest.fn(async () => (q.memberSince ? null : rows[table] ?? null));
@@ -71,11 +78,14 @@ function recordingDb() {
 beforeEach(() => {
   jest.clearAllMocks();
   gates.bookingTextCoversDayBeforeLive.mockReturnValue(false);
+  CustomerContact.getAppointmentContacts.mockImplementation(() => [{ phone: SAVED_PHONE, name: 'Sample Customer', role: 'primary' }]);
   AppointmentEmail.sendAppointmentConfirmationEmail.mockResolvedValue({ ok: true });
 });
 
 describe('call pipeline: closeDayBeforeForBookingText (the shared rule, gated)', () => {
-  const close = (over = {}) => closeDayBeforeForBookingText({ scheduledServiceId: 'ss1', apptTime: tomorrowNoonET(), sent: true, ...over });
+  const close = (over = {}) => closeDayBeforeForBookingText({
+    scheduledServiceId: 'ss1', apptTime: tomorrowNoonET(), sent: true, customerId: 'c1', recipientPhone: SAVED_PHONE, ...over,
+  });
 
   test('gate off: nothing is read or written, the 24h reminder stays armed', async () => {
     const writes = recordingDb();
@@ -115,6 +125,58 @@ describe('call pipeline: closeDayBeforeForBookingText (the shared rule, gated)',
     expect(writes).toHaveLength(1);
   });
 
+  test('gate on, confirmation delivered to the reminder number in another format: closed (digits compare, not raw strings)', async () => {
+    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+    const writes = recordingDb();
+    await expect(close({ recipientPhone: '(941) 555-0101' })).resolves.toBe(true);
+    expect(writes).toHaveLength(1);
+  });
+
+  test('gate on, ANI-only confirmation (implied consent redirected to a different number): not stamped, nothing written', async () => {
+    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+    const writes = recordingDb();
+    await expect(close({ recipientPhone: OTHER_PHONE })).resolves.toBe(false);
+    expect(writes).toHaveLength(0);
+  });
+
+  test('gate on, redirected number that is a reminder contact but not the primary recipient: not stamped (decided by the primary)', async () => {
+    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+    CustomerContact.getAppointmentContacts.mockImplementation(() => [
+      { phone: OTHER_PHONE, name: 'Sample Contact', role: 'spouse' },
+      { phone: SAVED_PHONE, name: 'Sample Customer', role: 'primary' },
+    ]);
+    const writes = recordingDb();
+    await expect(close({ recipientPhone: OTHER_PHONE })).resolves.toBe(false);
+    expect(writes).toHaveLength(0);
+    await expect(close({ recipientPhone: SAVED_PHONE })).resolves.toBe(true);
+    expect(writes).toHaveLength(1);
+  });
+
+  test.each([null, '', 'no digits'])('gate on, recipient unknown (%p): not stamped, nothing read or written', async (recipientPhone) => {
+    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+    const writes = recordingDb();
+    await expect(close({ recipientPhone })).resolves.toBe(false);
+    expect(writes).toHaveLength(0);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('gate on, the reminder recipient cannot be determined (no customer id, no contacts, unreadable prefs): not stamped', async () => {
+    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+    let writes = recordingDb();
+    await expect(close({ customerId: null })).resolves.toBe(false);
+    CustomerContact.getAppointmentContacts.mockImplementation(() => []);
+    await expect(close()).resolves.toBe(false);
+    CustomerContact.getAppointmentContacts.mockImplementation(() => [{ phone: SAVED_PHONE, role: 'primary' }]);
+    require('../services/property-notification-prefs').prefsForVisit.mockRejectedValueOnce(new Error('prefs down'));
+    await expect(close()).resolves.toBe(false);
+    expect(writes).toHaveLength(0);
+    // an unreadable customer row
+    writes = recordingDb();
+    db.mockImplementationOnce(() => ({ where: () => ({ first: async () => null }) }));
+    await expect(close()).resolves.toBe(false);
+    expect(writes).toHaveLength(0);
+  });
+
   test('gate on, send failed, blocked or held (sent false): not stamped', async () => {
     gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
     const writes = recordingDb();
@@ -138,20 +200,16 @@ describe('call pipeline: closeDayBeforeForBookingText (the shared rule, gated)',
 
   test('gate on: a row that moved under the text (fence misses) reports false and stays armed', async () => {
     gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
-    db.mockImplementation(() => {
-      const q = {};
-      q.where = jest.fn(() => q);
-      q.update = jest.fn(async () => 0);
-      return q;
-    });
+    const writes = recordingDb({ updated: 0 });
     await expect(close()).resolves.toBe(false);
+    expect(writes).toHaveLength(1); // the fenced write ran and matched no row
   });
 
   test('a missing id or an invalid time never reaches the database', async () => {
     gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
     recordingDb();
-    await expect(closeDayBeforeForBookingText({ scheduledServiceId: null, apptTime: tomorrowNoonET(), sent: true })).resolves.toBe(false);
-    await expect(closeDayBeforeForBookingText({ scheduledServiceId: 'ss1', apptTime: new Date('nope'), sent: true })).resolves.toBe(false);
+    await expect(closeDayBeforeForBookingText({ scheduledServiceId: null, apptTime: tomorrowNoonET(), sent: true, customerId: 'c1', recipientPhone: SAVED_PHONE })).resolves.toBe(false);
+    await expect(closeDayBeforeForBookingText({ scheduledServiceId: 'ss1', apptTime: new Date('nope'), sent: true, customerId: 'c1', recipientPhone: SAVED_PHONE })).resolves.toBe(false);
     expect(db).not.toHaveBeenCalled();
   });
 });
@@ -167,11 +225,13 @@ describe('call pipeline: closeDayBeforeAfterBookingText hands the booked slot to
   });
   afterEach(() => spy.mockRestore());
 
-  test('the booked date and window become the fenced time; the text counts as sent and not day-only', async () => {
+  test('the booked date and window become the fenced time; the text counts as sent and not day-only; the recipient rides along', async () => {
     const date = etDateString(addETDays(new Date(), 1));
-    await expect(callProc.closeDayBeforeAfterBookingText({ scheduledServiceId: 'ss1', scheduledDate: `${date}T00:00:00.000Z`, windowStart: '09:00:00' })).resolves.toBe(true);
+    await expect(callProc.closeDayBeforeAfterBookingText({
+      scheduledServiceId: 'ss1', scheduledDate: `${date}T00:00:00.000Z`, windowStart: '09:00:00', customerId: 'c1', recipientPhone: OTHER_PHONE,
+    })).resolves.toBe(true);
     expect(spy).toHaveBeenCalledWith({
-      scheduledServiceId: 'ss1', apptTime: parseETDateTime(`${date}T09:00`), sent: true, dayOnly: false,
+      scheduledServiceId: 'ss1', apptTime: parseETDateTime(`${date}T09:00`), sent: true, dayOnly: false, customerId: 'c1', recipientPhone: OTHER_PHONE,
     });
   });
 
@@ -194,7 +254,7 @@ describe('call pipeline: closeDayBeforeAfterBookingText hands the booked slot to
 
   test('the pass calls it only after the primary text was delivered, never in the blocked or held branch', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    const call = 'await closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog });';
+    const call = 'await closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog, customerId, recipientPhone: smsRecipient });';
     expect(src.split(call)).toHaveLength(2);
     const at = src.indexOf(call);
     const sentLog = src.lastIndexOf('Appointment SMS sent to customer', at);

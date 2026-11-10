@@ -1317,16 +1317,42 @@ function confirmationCoversDayBefore({ sent, dayOnly, apptTime }) {
   return Boolean(sent) && dayOnly !== true && etDateString(apptTime) <= etDateString(addETDays(new Date(), 1));
 }
 
+/** The number the 24-hour reminder texts FIRST for a visit: the same recipient set the cron send resolves
+ *  (getReminderPrefs -> resolveNoticeContacts), account holder first, as safeSendAppointment orders it. The 24-hour flag is
+ *  one flag for the whole visit, so this primary recipient decides whether a booking text covers it. Null when it cannot be
+ *  determined (customer or preferences unreadable, no contact): callers fail closed and leave the reminder armed. */
+async function reminderPrimaryRecipientPhone(customerId, scheduledServiceId) {
+  if (!customerId) return null;
+  const { customer } = await getCustomerAndTech(customerId, null);
+  if (!customer) return null;
+  const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
+  if (prefs.unavailable) return null;
+  const { allowedContacts } = await resolveNoticeContacts(customer, prefs.raw, 'appointment_reminder', 'appointment_reminder_24h');
+  const holder = lastTenDigits(customer.phone);
+  const first = [...allowedContacts].sort((a, b) => Number(lastTenDigits(b.phone) === holder) - Number(lastTenDigits(a.phone) === holder))[0];
+  return lastTenDigits(first?.phone) ? first.phone : null;
+}
+
 /** GATE_BOOKING_TEXT_COVERS_DAY_BEFORE (owner 2026-11-09). A booking path that sends its own confirmation text after the
  *  reminder row was registered with the confirmation already marked (the call pipeline) cannot stamp the 24-hour flag in
  *  the confirmation's own write, so it calls this once the text is known delivered. The SAME rule as deliverConfirmation
  *  (confirmationCoversDayBefore), one fenced write: the row must still hold the time the text quoted, still be live, and
  *  still have the 24-hour text unsent. A failed, blocked or held send passes sent false and leaves the reminder armed.
+ *  The text must also have reached the number the 24-hour reminder would text (reminderPrimaryRecipientPhone): an
+ *  implied-consent text redirected to the caller's number, when that is not the reminder's recipient, leaves the saved
+ *  number without any notice, so the reminder stays armed. An unknown recipient (either side) never closes.
  *  Gate off (or a gate reader missing): nothing is read or written. Returns true when a row was closed. */
-async function closeDayBeforeForBookingText({ scheduledServiceId, apptTime, sent, dayOnly = false }) {
+async function closeDayBeforeForBookingText({ scheduledServiceId, apptTime, sent, dayOnly = false, customerId = null, recipientPhone = null }) {
   if (!scheduledServiceId || !(apptTime instanceof Date) || Number.isNaN(apptTime.getTime())) return false;
   if (!require('../config/feature-gates').bookingTextCoversDayBeforeLive?.()) return false;
   if (!confirmationCoversDayBefore({ sent, dayOnly, apptTime })) return false;
+  const reached = lastTenDigits(recipientPhone);
+  if (!reached) return false;
+  const reminderPhone = lastTenDigits(await reminderPrimaryRecipientPhone(customerId, scheduledServiceId));
+  if (!reminderPhone || reminderPhone !== reached) {
+    logger.info(`[appt-remind] Booking text for ${scheduledServiceId} did not reach the 24h reminder's recipient - 24h reminder stays armed`);
+    return false;
+  }
   const closed = await db('appointment_reminders')
     .where({ scheduled_service_id: scheduledServiceId, appointment_time: apptTime, cancelled: false, reminder_24h_sent: false })
     .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date(), updated_at: new Date() });
