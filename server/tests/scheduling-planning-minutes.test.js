@@ -376,3 +376,41 @@ describe('placement fit with the placed visit planned (capacity mode)', () => {
     expect(fit().feasible).toBe(false);
   });
 });
+
+describe('newVisitMinutes (the visit a customer books online; owner 2026-11-09)', () => {
+  const { newVisitMinutes } = require('../services/scheduling/planning-minutes');
+
+  test('every service the table names plans at the one-time 45, whatever its cadence', () => {
+    expect(newVisitMinutes('Pest Control', 60)).toBe(45);
+    expect(newVisitMinutes('Quarterly Pest Control Service', 60)).toBe(45);
+    expect(newVisitMinutes('pest_control', 60)).toBe(45);
+    expect(newVisitMinutes('Monthly Lawn Care Service', 60)).toBe(45);
+    expect(newVisitMinutes('Rodent Inspection Service', 60)).toBe(45);
+    expect(newVisitMinutes('termite_bait', 60)).toBe(45);
+    expect(newVisitMinutes('Pest Control', 30)).toBe(30);
+  });
+
+  // The page's label, a combined hold's mix key and a bare row name read
+  // alike: a cadence word in one and not the other never splits offer and check.
+  test('the family decides, not the cadence words: every lawn name a page or hold can carry reads alike', () => {
+    expect(newVisitMinutes('Lawn Care (Every 6 weeks)', 60)).toBe(45);
+    expect(newVisitMinutes('Lawn Care', 60)).toBe(45);
+    expect(newVisitMinutes('lawn_care', 60)).toBe(45);
+    expect(newVisitMinutes('One-Time Lawn Treatment', 60)).toBeNull();
+    expect(newVisitMinutes('one_time_lawn', 60)).toBeNull();
+    expect(newVisitMinutes('one_time_pest_control', 60)).toBe(45);
+  });
+
+  test('null keeps the caller\'s catalog: a service the table does not name, a long allowance, or the table off', () => {
+    expect(newVisitMinutes('Mosquito', 60)).toBeNull();
+    expect(newVisitMinutes('tree_shrub', 60)).toBeNull();
+    expect(newVisitMinutes('Pest & Lawn', 60)).toBeNull();
+    expect(newVisitMinutes(null, 60)).toBeNull();
+    expect(newVisitMinutes('Pest Control', 61)).toBeNull();
+    expect(newVisitMinutes('Pest Control', 0)).toBeNull();
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    expect(newVisitMinutes('Pest Control', 60)).toBeNull();
+    process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    expect(newVisitMinutes('Pest Control', 60)).toBe(45);
+  });
+});

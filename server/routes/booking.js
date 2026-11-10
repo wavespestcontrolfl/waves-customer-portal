@@ -152,7 +152,9 @@ async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, service
       category: BOOKING_FUNNEL_SERVICE_CATEGORIES[key] || null,
       label: BOOKING_FUNNEL_SERVICE_LABELS[key] || key,
     }));
-    return expectedMinutesForServices(conn, services, durationMinutes);
+    // A funnel selection is the visit a customer is booking now (offer and
+    // confirm both land here): the new-visit planning minutes apply.
+    return expectedMinutesForServices(conn, services, durationMinutes, { newVisit: true });
   }
   if (serviceIdentity && (serviceIdentity.catalogServiceKey || serviceIdentity.serviceType)) {
     return expectedMinutesForServices(conn, [{

@@ -31,6 +31,8 @@ jest.mock('../config/feature-gates', () => ({
   gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
   // The same-hour technician scope (GATE_MULTI_TECH_CONFIRM) reads the real call-time reader.
   multiTechConfirmLive: jest.requireActual('../config/feature-gates').multiTechConfirmLive,
+  // The new visit's planning minutes (planning-minutes.js planningTableLive) read the real plan-mode reader.
+  schedulingPlanMinutesOnly: jest.requireActual('../config/feature-gates').schedulingPlanMinutesOnly,
 }));
 
 const db = require('../models/db');

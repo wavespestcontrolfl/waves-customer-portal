@@ -295,3 +295,55 @@ describe('ambiguous catalog names (Codex #4664 r2 P1)', () => {
     expect(expectedMinutesSync({ serviceType: 'pest', windowMinutes: 60 })).toBe(45);
   });
 });
+
+// Owner 2026-11-09 (picker audit option A): while the planning table is live
+// (GATE_SCHEDULING_CAPACITY=plan or true) a booked stop credits the router's
+// minutes and the visit being booked plans at 45; the catalog stays the rule
+// for everything the table does not name, and for every read with it off.
+describe('router minutes while the planning table is live', () => {
+  const { stopExpectedMinutesSync, expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
+  const conn = () => fakeConn([
+    { service_key: 'pest_general_quarterly', name: 'Quarterly Pest Control Service', category: 'pest_control', min_duration_minutes: 30, max_duration_minutes: 60 },
+    { service_key: 'pest_general_monthly', name: 'Monthly Pest Control Service', category: 'pest_control', min_duration_minutes: 20, max_duration_minutes: 45 },
+    { service_key: 'one_time_pest_control', name: 'One-Time Pest Control Service', category: 'pest_control', min_duration_minutes: 60, max_duration_minutes: 120 },
+    { service_key: 'mosquito_monthly', name: 'Monthly Mosquito Control Service', category: 'mosquito', min_duration_minutes: 20, max_duration_minutes: 45 },
+  ]);
+  const stop = (service_type, extra = {}) => ({ service_type, service_key_snapshot: null, estimated_duration_minutes: 60, ...extra });
+  const saved = process.env.GATE_SCHEDULING_CAPACITY;
+  beforeEach(async () => { process.env.GATE_SCHEDULING_CAPACITY = 'plan'; await ensureCatalogLoaded(conn()); });
+  afterAll(() => { if (saved === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = saved; });
+
+  test.each([
+    ['a quarterly stop credits 35, not the catalog 45', stop('Quarterly Pest Control Service', { is_recurring: true }), 60, 35],
+    ['a monthly stop credits 35, not the catalog 32.5', stop('Monthly Pest Control Service', { is_recurring: true }), 60, 35],
+    ['a re-service (is_callback) credits 15', stop('Quarterly Pest Control Service', { is_callback: true }), 60, 15],
+    ['a long stored estimate is kept, clamped to its window', stop('Quarterly Pest + Termite Bait Station Service', { estimated_duration_minutes: 120 }), 120, 120],
+    ['a service the table does not name keeps the catalog', stop('Monthly Mosquito Control Service'), 60, 32.5],
+    ['an unnamed, unmatched stop keeps the window (no credit)', stop('Bed Bug Treatment Service'), 60, 60],
+  ])('%s', (_label, row, windowMinutes, minutes) => {
+    expect(stopExpectedMinutesSync(row, windowMinutes)).toBe(minutes);
+  });
+
+  test('the visit being booked plans at 45 for any service the table names, whatever its cadence', async () => {
+    expect(expectedMinutesSync({ serviceType: 'Pest Control', category: 'pest_control', windowMinutes: 60, newVisit: true })).toBe(45);
+    expect(expectedMinutesSync({ serviceType: 'Quarterly Pest Control Service', windowMinutes: 60, newVisit: true })).toBe(45);
+    // The estimate profile and a combined hold's category mix read the same 45.
+    expect(await expectedMinutesForServices(conn(), [{ label: 'Pest Control', service: 'pest_control' }], 60, { newVisit: true })).toBe(45);
+    expect(await expectedMinutesForServices(conn(), [{ category: 'pest_control', durationMinutes: 60 }], 60, { newVisit: true })).toBe(45);
+    // A 30-minute window never plans more than its window.
+    expect(expectedMinutesSync({ serviceType: 'Pest Control', windowMinutes: 30, newVisit: true })).toBe(30);
+  });
+
+  test('the visit being booked keeps the catalog above the hour, for a service the table does not name, and without newVisit', () => {
+    expect(expectedMinutesSync({ serviceKey: 'one_time_pest_control', serviceType: 'Pest Control', windowMinutes: 90, newVisit: true })).toBe(90);
+    expect(expectedMinutesSync({ serviceType: 'Monthly Mosquito Control Service', windowMinutes: 60, newVisit: true })).toBe(32.5);
+    expect(expectedMinutesSync({ serviceType: 'Quarterly Pest Control Service', windowMinutes: 60 })).toBe(45);
+  });
+
+  test('the table off: every read is the catalog, byte for byte', () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    expect(stopExpectedMinutesSync(stop('Quarterly Pest Control Service', { is_recurring: true, service_key_snapshot: 'pest_general_quarterly' }), 60)).toBe(45);
+    expect(stopExpectedMinutesSync(stop('Quarterly Pest Control Service', { is_callback: true }), 60)).toBe(45);
+    expect(expectedMinutesSync({ serviceType: 'Pest Control', category: 'pest_control', windowMinutes: 60, newVisit: true })).toBeCloseTo((45 + 32.5 + 60) / 3, 5);
+  });
+});

@@ -176,3 +176,39 @@ describe('a make-room hour on the moved day (makeRoomPlacement)', () => {
     await expect(placement({ lineRanking })(candidateSlot(), MOVED)).resolves.toBe('service_line');
   });
 });
+
+// Owner 2026-11-09 (picker audit option A): the picker's own collision filter
+// credits a booked stop with the same per-stop rule as the booking check. A
+// recurring 12:00 stop plans 35 minutes while the planning table is live, so the
+// 13:00 hour 19 modeled minutes away is kept; with the table off it is refused.
+describe('router minutes in the picker filter', () => {
+  const NEAR = { lat: 27.445, lng: -82.545 };
+  const recurringNoon = () => neighbourRow({
+    window_start: '12:00:00', window_end: '13:00:00', service_type: 'Quarterly Pest Control Service',
+    service_key_snapshot: null, is_recurring: true, is_callback: false, ...NEAR,
+  });
+  const onePm = () => candidateSlot({ slotId: `${DATE}_13-00_tech-1`, windowStart: '13:00', windowEnd: '14:00' });
+  const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+  afterEach(() => {
+    if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+    else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+  });
+
+  test('plan mode: the stop credits 35, the 13:00 hour is kept, and the planning inputs are selected', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    wireRows([recurringNoon()]);
+    const out = await filterCollidingSlots([onePm()], { ...RANGE, coords: PALMETTO, candidateExpectedMinutes: 45 });
+    expect(out.map((s) => s.windowStart)).toEqual(['13:00']);
+    expect(lastChain.select.mock.calls[0]).toEqual(expect.arrayContaining([
+      'scheduled_services.is_recurring', 'scheduled_services.is_callback', 'scheduled_services.estimated_duration_minutes',
+    ]));
+  });
+
+  test('the table off: no credit for the stop, so the same hour is refused', async () => {
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    wireRows([recurringNoon()]);
+    expect(await filterCollidingSlots([onePm()], { ...RANGE, coords: PALMETTO, candidateExpectedMinutes: 45 })).toHaveLength(0);
+  });
+});

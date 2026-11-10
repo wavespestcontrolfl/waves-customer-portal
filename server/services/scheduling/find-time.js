@@ -1320,6 +1320,10 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
       'scheduled_services.service_type',
       'scheduled_services.service_key_snapshot',
       'scheduled_services.estimated_duration_minutes',
+      // Planning-minute inputs: stopCreditResolver credits a stop the owner
+      // table names at the router's minutes, as the booking check does.
+      'scheduled_services.is_recurring',
+      'scheduled_services.is_callback',
       // Version-2 combined allocations (visit-capacity.js's occupiedRows,
       // the same expansion occupancy.js's shared anchor loader runs) need
       // this to know a row is one member of a summed allocation — without

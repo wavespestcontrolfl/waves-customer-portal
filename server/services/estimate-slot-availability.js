@@ -36,7 +36,7 @@ const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
 } = require('./scheduling/travel-gap');
-const { ensureCatalogLoaded, expectedServiceMinutes, expectedMinutesSync, expectedMinutesForServices } = require('./scheduling/expected-service-minutes');
+const { ensureCatalogLoaded, expectedServiceMinutes, stopExpectedMinutesSync, expectedMinutesForServices } = require('./scheduling/expected-service-minutes');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
@@ -1763,7 +1763,9 @@ async function filterCollidingSlots(slots, {
       // travel-gap check (expected-minutes padding, owner ruling 2026-09-23).
       // Hold identity above also serves the unconditional global overlap check.
       ...(travelGapEnabled()
-        ? [...guardedCoordSelects(db), 'scheduled_services.service_type', 'scheduled_services.service_key_snapshot']
+        ? [...guardedCoordSelects(db), 'scheduled_services.service_type', 'scheduled_services.service_key_snapshot',
+          // Planning-minute inputs (stopExpectedMinutesSync), as the booking check's reader selects them.
+          'scheduled_services.is_recurring', 'scheduled_services.is_callback']
         : []),
     ), shiftedServiceMinutes);
   const candidatePin = { lat: coords?.lat ?? null, lng: coords?.lng ?? null };
@@ -1803,15 +1805,12 @@ async function filterCollidingSlots(slots, {
       lng: row.lng ?? null,
       hold: row.reservation_expires_at != null && row.customer_id == null,
       // Expected-minutes padding credit for THIS row (owner ruling
-      // 2026-09-23) — only resolved when the travel-gap check runs; no
-      // service_key_snapshot/service_type match falls back to the window
-      // length (zero padding, legacy gap).
+      // 2026-09-23) — only resolved when the travel-gap check runs; the
+      // same per-stop rule the booking check credits (planning table while
+      // live, else the catalog; no match falls back to the window length).
       ...(travelGapEnabled() && startMin != null && busyEndMin != null ? {
         windowMinutes: busyEndMin - startMin,
-        expectedMinutes: expectedMinutesSync({
-          serviceKey: row.service_key_snapshot, serviceType: row.service_type,
-          windowMinutes: busyEndMin - startMin,
-        }),
+        expectedMinutes: stopExpectedMinutesSync(row, busyEndMin - startMin),
       } : {}),
     };
     const key = `${row.technician_id || 'unassigned'}|${date}`;
@@ -2459,7 +2458,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // duration), never services[0] alone against the whole combined window
   // (push-audit P1) — the same rule slot-reservation applies at commit.
   const candidateExpectedMinutes = travelGapEnabled()
-    ? await expectedMinutesForServices(db, serviceProfile.services, serviceProfile.durationMinutes)
+    ? await expectedMinutesForServices(db, serviceProfile.services, serviceProfile.durationMinutes, { newVisit: true })
     : serviceProfile.durationMinutes;
 
   // Pull a generous topN so we can split customer-facing slots post-hoc
