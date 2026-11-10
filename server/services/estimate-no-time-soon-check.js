@@ -30,6 +30,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { alertEpisodesLive } = require('../config/feature-gates');
 const { etDateString, addETDays, formatETDayDate } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 const { composeAdminAlert, raiseAdminAlert } = require('./admin-alert-compose');
 const { fitAction } = require('./admin-alert-names');
 const { SOON_DAYS } = require('./scheduling/customer-move-limits');
@@ -42,7 +43,6 @@ const AREA = 'Estimates';
 // The page's first read (client SlotPicker.jsx windowDays=14).
 const WINDOW_DAYS = 14;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DONE_STATES = new Set(['accepted', 'declined', 'expired', 'void']);
 // Answers that book nothing by design (client slotLookahead.js NO_BOOKING_FLAGS).
 const NO_BOOKING_FLAGS = ['reviewBeforeBooking', 'commercialManualScheduling', 'invoiceOnlyAcceptance'];
@@ -63,7 +63,7 @@ function settledReason(row, now) {
 const firstOpenDay = (result) => {
   const days = [result?.metadata?.firstDayAvailability?.date,
     ...['primary', 'expander'].flatMap((list) => (Array.isArray(result?.[list]) ? result[list] : []).map((slot) => slot?.date))]
-    .map((day) => String(day || '').slice(0, 10)).filter((day) => YMD_RE.test(day));
+    .map((day) => dateOnlyString(day)).filter(Boolean);
   return days.length ? days.sort()[0] : null;
 };
 
