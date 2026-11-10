@@ -215,9 +215,10 @@ const ADVISORY_AGE_CODES = new Set([
 // cards of that code as state. Audit 2026-11-09 of every triage_items reader
 // in server/. Status-agnostic readers that look at ANY code and so cannot be
 // avoided by a list: call-booking-miss-watchdog officeClosedCall (also used by
-// call-held-visits) now counts a quiet_aged dismissal as still OPEN, so the
-// sweep never turns "one human-closed card + one quiet card" into an office
-// close; sms-gratitude-context pending work reads it as not-an-office-decision.
+// call-held-visits) and the sms-gratitude-context pending-work guard. All of
+// them now treat a quiet_aged dismissal (QUIET_AGED_RULE) as still OPEN, so
+// the sweep never turns "one human-closed card + one quiet card" into an
+// office close and never clears a courtesy-reply guard.
 // An unknown or new code is NEVER swept; add a code here only after the same
 // search (the literal, constants that hold it, and triage_items reads with a
 // category, a reason_code IN list or no reason filter).

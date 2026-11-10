@@ -12,6 +12,7 @@ const {
 } = require('./sms-gratitude');
 const { phoneIdentitySql } = require('./sms-response-policy');
 const { phoneIdentityKey, phoneMatchDigits } = require('../utils/phone');
+const { QUIET_AGED_RULE } = require('./triage-auto-resolve');
 
 const SAFE_ACTION = 'none';
 
@@ -148,7 +149,14 @@ function pendingWorkQueries(dbh, { customerId, threadKey, excludeDecisionId = nu
   const triage = dbh('triage_items as ti')
     .leftJoin('call_log as ti_call', 'ti.call_log_id', 'ti_call.id')
     .leftJoin('sms_log as ti_sms', 'ti.sms_log_id', 'ti_sms.id')
-    .whereIn('ti.status', ['open', 'in_progress'])
+    // A card the quiet_aged sweep dismissed proves nothing: it still counts as
+    // pending work. A card a person or another rule closed does not.
+    .where(function pendingCard() {
+      this.whereIn('ti.status', ['open', 'in_progress'])
+        .orWhere(function quietAgedDismissal() {
+          this.where('ti.status', 'dismissed').where('ti.resolution_rule', QUIET_AGED_RULE);
+        });
+    })
     .where(function sameCustomerOrThread() {
       this.where('ti.related_customer_id', customerId)
         .orWhere('ti_call.customer_id', customerId)
