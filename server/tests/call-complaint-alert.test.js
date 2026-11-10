@@ -34,20 +34,42 @@ const V1_TEXT = { first_name: 'Someone Else', pain_points: 'Old V1 pain point ab
 const GENERATION = 3;
 const args = (over = {}) => ({ written: true, disposition: 'complaint_escalated', call: callRow(), callSid: 'CA1', customerId: CUSTOMER_ID, v2Extraction: V2, procGeneration: GENERATION, now: NOW, ...over });
 
-// customers: the name lookup (`.first().catch()`); call_log: the generation fence. `owned` = the row the fence finds.
-let fenceWheres;
-function primeDb({ customer = { first_name: 'Pat', last_name: 'Sample' }, owned = { id: CALL_ID }, fenceFails = false } = {}) {
-  fenceWheres = [];
-  db.mockImplementation((table) => {
+// customers: the name lookup, on the plain connection (`.first().catch()`). call_log: the ownership check, which must run
+// ONLY on the transaction, with a row lock, against `callState` (the row as it stands at the moment of the locked read;
+// null = no row). `beforeLock` runs after the pre-transaction reads and before the transaction opens: a force-reprocess
+// landing in that gap changes `callState` there. A where object filters the state like Postgres would.
+let callState;
+let fenceQueries;
+let outsideCallLogReads;
+let fakeTrx;
+function primeDb({ customer = { first_name: 'Pat', last_name: 'Sample' }, fenceFails = false, beforeLock = null } = {}) {
+  callState = { id: CALL_ID, processing_generation: GENERATION, disposition: 'complaint_escalated' };
+  fenceQueries = [];
+  outsideCallLogReads = 0;
+  const builder = (table, onFirst) => {
+    const q = { table, wheres: [], locked: false };
     const b = {
-      where: jest.fn((w) => { if (table === 'call_log') fenceWheres.push(w); return b; }),
-      first: jest.fn(() => {
-        if (table === 'call_log') return fenceFails ? Promise.reject(new Error('db down')) : Promise.resolve(owned);
-        return { catch: () => Promise.resolve(customer) };
-      }),
+      where: jest.fn((w) => { q.wheres.push(w); return b; }),
+      forUpdate: jest.fn(() => { q.locked = true; return b; }),
+      first: jest.fn(() => onFirst(q)),
     };
     return b;
-  });
+  };
+  fakeTrx = Object.assign(
+    jest.fn((table) => builder(table, (q) => {
+      fenceQueries.push(q);
+      if (fenceFails) return Promise.reject(new Error('db down'));
+      const matches = callState && q.wheres.every((w) => Object.entries(w).every(([k, v]) => callState[k] === v));
+      return Promise.resolve(matches ? { id: callState.id } : undefined);
+    })),
+    { raw: jest.fn(async () => ({})) },
+  );
+  db.transaction = jest.fn(async (cb) => cb(fakeTrx));
+  db.mockImplementation((table) => builder(table, () => {
+    if (table === 'call_log') { outsideCallLogReads += 1; return Promise.resolve(undefined); }
+    if (beforeLock) beforeLock();
+    return { catch: () => Promise.resolve(customer) };
+  }));
 }
 
 beforeEach(() => {
@@ -207,19 +229,55 @@ describe('keepComplaintCallAlert', () => {
 
   test('the generation fence: this pass must still own the call at its generation with the label still complaint_escalated', async () => {
     expect(await rings()).toBe(1);
-    expect(fenceWheres).toEqual([{ id: CALL_ID, processing_generation: GENERATION, disposition: 'complaint_escalated' }]);
-    // A newer force-reprocess took the call (or relabeled it): the read finds no row, so nothing rings.
-    primeDb({ owned: null });
+    expect(fenceQueries).toHaveLength(1);
+    expect(fenceQueries[0].table).toBe('call_log');
+    expect(fenceQueries[0].wheres).toEqual([{ id: CALL_ID, processing_generation: GENERATION, disposition: 'complaint_escalated' }]);
+    // A newer force-reprocess took the call (a newer generation) or relabeled it: nothing rings.
+    primeDb();
+    callState.processing_generation = GENERATION + 1;
+    expect(await rings()).toBe(0);
+    primeDb();
+    callState.disposition = 'existing_customer_routed';
+    expect(await rings()).toBe(0);
+    primeDb();
+    callState = null;
     expect(await rings()).toBe(0);
     // No generation known: nothing rings, and nothing is read.
     primeDb();
     expect(await rings({ procGeneration: null })).toBe(0);
     expect(await rings({ procGeneration: undefined })).toBe(0);
-    expect(fenceWheres).toEqual([]);
-    // The fence read fails: no alert, a code-only log.
+    expect(fenceQueries).toEqual([]);
+    expect(db.transaction).not.toHaveBeenCalled();
+    // The locked read fails: no alert, a code-only log.
     primeDb({ fenceFails: true });
     expect(await rings()).toBe(0);
     expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  test('the ownership check and the bell are one transaction: a row lock on the call, and the same trx handed to the raise', async () => {
+    expect(await rings()).toBe(1);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(fenceQueries).toHaveLength(1);
+    expect(fenceQueries[0].locked).toBe(true);
+    expect(raiseAdminAlert.mock.calls[0][2].trx).toBe(fakeTrx);
+    expect(raiseAdminAlert.mock.calls[0][2]).toMatchObject({ dedupeKey: `call-complaint:${CALL_ID}`, bell: true });
+    // The call row is never read outside the transaction.
+    expect(outsideCallLogReads).toBe(0);
+    // The statement timeouts keep the lock short.
+    expect(fakeTrx.raw.mock.calls.map((c) => c[0]).join(' ')).toMatch(/statement_timeout[\s\S]*idle_in_transaction_session_timeout/);
+  });
+
+  test('ownership changing during emission: a reprocess that lands after the name read and before the lock rings nothing', async () => {
+    primeDb({ beforeLock: () => { callState.processing_generation = GENERATION + 1; } });
+    expect(await rings()).toBe(0);
+    expect(fenceQueries).toHaveLength(1);
+    expect(fenceQueries[0].locked).toBe(true);
+    // Same race, label changed instead of the generation.
+    primeDb({ beforeLock: () => { callState.disposition = 'booked'; } });
+    expect(await rings()).toBe(0);
+    // No race: the same flow rings.
+    primeDb({ beforeLock: () => {} });
+    expect(await rings()).toBe(1);
   });
 
   test('the 24-hour cutoff uses the call timeline\'s end: a row inserted after the call with no Twilio end stamp never rings', async () => {

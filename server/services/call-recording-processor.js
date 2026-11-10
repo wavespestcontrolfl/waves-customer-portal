@@ -11135,8 +11135,8 @@ function buildComplaintCallAlert({ call, customerId, name = null, v2Extraction =
 // wrote complaint_escalated, a customer is known and is not a test customer, the call is not a voice-relay
 // sandbox or tech-line call, it ended in the last 24 hours by the call timeline's own end time (a row inserted
 // after the call with no stamped end has none, so it never rings), and this pass still owns the call: one
-// read, right before the raise, finds the call at this pass's processing_generation with the label still
-// complaint_escalated (a newer force-reprocess, or no generation known, rings nothing). One bell per call ever: dedupeKey with no dedupeOpenOnly, so a reprocess neither rings again nor re-opens a closed
+// locked read, in the same transaction as the bell's insert, finds the call at this pass's processing_generation with
+// the label still complaint_escalated (a newer force-reprocess, or no generation known, rings nothing). One bell per call ever: dedupeKey with no dedupeOpenOnly, so a reprocess neither rings again nor re-opens a closed
 // bell. A failure is logged by code and never fails the call. Sends nothing to the customer.
 async function keepComplaintCallAlert({ written, disposition, call, callSid, customerId, v2Extraction, procGeneration, now = new Date() }) {
   if (written !== true || disposition !== 'complaint_escalated') return null;
@@ -11149,9 +11149,18 @@ async function keepComplaintCallAlert({ written, disposition, call, callSid, cus
     if (!endedAt || Number.isNaN(endedAt.getTime()) || now.getTime() - endedAt.getTime() > 24 * 60 * 60 * 1000) return null;
     const customer = await db('customers').where({ id }).first('first_name', 'last_name').catch(() => null);
     const alert = buildComplaintCallAlert({ call, customerId: id, name: require('./admin-alert-names').realName(customer), v2Extraction, now });
-    const stillOurs = await db('call_log').where({ id: call.id, processing_generation: procGeneration, disposition: 'complaint_escalated' }).first('id');
-    if (!stillOurs) return null;
-    return await require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, alert.opts);
+    // The ownership check and the bell are ONE transaction: the call row is locked and re-read at this pass's generation
+    // and label, and the notification is written on the same transaction (opts.trx: its dedupe lock, read and insert),
+    // so a force-reprocess cannot change the call between the check and the bell. Short and last: the name read and the
+    // alert build above stay outside it. Locks the call row, then the alert key's advisory lock (the order notifyAdmin's
+    // own relay path uses); nothing else takes that key while holding a call row.
+    return await db.transaction(async (trx) => {
+      await trx.raw("SET LOCAL statement_timeout = '3s'");
+      await trx.raw("SET LOCAL idle_in_transaction_session_timeout = '5s'");
+      const stillOurs = await trx('call_log').where({ id: call.id, processing_generation: procGeneration, disposition: 'complaint_escalated' }).forUpdate().first('id');
+      if (!stillOurs) return null;
+      return require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, { ...alert.opts, trx });
+    });
   } catch (err) {
     logger.warn(`[call-proc] complaint call alert failed for ${maskSid(callSid)}: ${err?.code || err?.name || 'error'}`);
     return null;
