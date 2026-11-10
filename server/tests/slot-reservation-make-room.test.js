@@ -419,6 +419,59 @@ describe('makeRoomChainClash — the page\'s offer leaves out its own estimate\'
   });
 });
 
+// Codex #7796 P2: a chain made in hour mode keeps its destinations for its whole life, even after capacity mode turns on.
+// New make-room holds stay hour-mode only; the guards follow the gate alone.
+describe('the destination guards in capacity mode (Codex #7796 P2)', () => {
+  const { makeRoomGuardsOn, destinationHitUnderGate, extendMakeRoomState } = slotReservation._internals;
+  const window = { date: DATE, techId: 'tech-1', windowStart: '10:00:00', windowEnd: '11:00:00' };
+  beforeEach(() => {
+    jest.clearAllMocks();
+    makeRoom.bookingMakeRoomMode.mockReturnValue('on');
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  });
+  afterEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
+
+  test('the guards follow the gate alone: on in capacity mode, off in shadow and off', () => {
+    expect(makeRoomGuardsOn()).toBe(true);
+    for (const mode of ['shadow', 'off']) {
+      makeRoom.bookingMakeRoomMode.mockReturnValue(mode);
+      expect(makeRoomGuardsOn()).toBe(false);
+    }
+  });
+
+  test('reserve: an ordinary capacity hold on a live chain\'s destination is a hit', async () => {
+    const probe = destinationProbe({ id: 'hold-other' });
+    const trx = jest.fn(() => probe);
+    await expect(destinationHitUnderGate(trx, null, 'slot-1', window)).resolves.toBe(true);
+    expect(probe.whereRaw).toHaveBeenCalledWith(expect.stringContaining("make_room_moves->'moves'"), ['11:00:00', '10:00:00']);
+  });
+
+  test('reserve, gate shadow: no probe', async () => {
+    makeRoom.bookingMakeRoomMode.mockReturnValue('shadow');
+    const trx = jest.fn();
+    await expect(destinationHitUnderGate(trx, null, 'slot-1', window)).resolves.toBe(false);
+    expect(trx).not.toHaveBeenCalled();
+  });
+
+  test('extend: a capacity hold on a live chain\'s destination is refused (its own row left out); no proof runs', async () => {
+    const probe = destinationProbe({ id: 'hold-other' });
+    const trx = jest.fn(() => probe);
+    const row = { id: 'hold-cap', technician_id: 'tech-1', make_room_moves: null };
+    await expect(extendMakeRoomState(trx, { row, estimate: { id: EST }, rowUnderCapacity: true, scheduledDate: DATE, windowStart: '10:00:00', windowEnd: '11:00:00' }))
+      .resolves.toEqual({ makeRoom: null, refused: true });
+    expect(probe.whereNot).toHaveBeenCalledWith('id', 'hold-cap');
+    expect(estimateSlotAvailability.verifyMakeRoomOffer).not.toHaveBeenCalled();
+  });
+
+  test('extend, no hit: a make-room hold made in hour mode gets the ordinary probe (no proof in capacity mode)', async () => {
+    const trx = jest.fn(() => destinationProbe(null));
+    const row = { id: 'hold-1', technician_id: 'tech-1', make_room_moves: PAYLOAD };
+    await expect(extendMakeRoomState(trx, { row, estimate: { id: EST }, rowUnderCapacity: false, scheduledDate: DATE, windowStart: '09:00:00', windowEnd: '10:00:00' }))
+      .resolves.toEqual({ makeRoom: null, refused: false });
+    expect(estimateSlotAvailability.verifyMakeRoomOffer).not.toHaveBeenCalled();
+  });
+});
+
 // Codex pre-push P1 (#7796): a hold that lapsed lost its place in every chain proof, so a live chain may since have
 // taken its hour as a moved stop's destination; a commit inside the grace must yield to that chain.
 describe('commitReservation inside the grace — another live make-room hold\'s destination', () => {
@@ -427,7 +480,7 @@ describe('commitReservation inside the grace — another live make-room hold\'s 
     id: 'hold-1', source_estimate_id: EST, scheduled_date: DATE, window_start: '13:00:00', window_end: '14:00:00', technician_id: 'tech-1',
     estimated_duration_minutes: 60, reservation_expires_at: '2027-05-20T13:15:00.000Z', make_room_moves: null, _lapsed: true,
   };
-  const args = (extra = {}) => ({ row: lapsedRow, useCapacity: false, date: DATE, windowStart: '13:00:00', windowEnd: '14:00:00', ...extra });
+  const args = (extra = {}) => ({ row: lapsedRow, date: DATE, windowStart: '13:00:00', windowEnd: '14:00:00', ...extra });
   beforeEach(() => {
     jest.clearAllMocks();
     delete process.env.GATE_SCHEDULING_CAPACITY;
@@ -449,13 +502,20 @@ describe('commitReservation inside the grace — another live make-room hold\'s 
     await expect(lapsedHoldOnMakeRoomDestination(trx, args())).resolves.toBe(false);
   });
 
-  test.each([
-    ['a hold that never lapsed (every chain proof saw it as a stop)', { row: { ...lapsedRow, _lapsed: false } }],
-    ['capacity mode', { useCapacity: true }],
-  ])('%s is not asked', async (_label, extra) => {
+  test('a hold that never lapsed is not asked (every chain proof saw it as a stop)', async () => {
     const trx = jest.fn();
-    await expect(lapsedHoldOnMakeRoomDestination(trx, args(extra))).resolves.toBe(false);
+    await expect(lapsedHoldOnMakeRoomDestination(trx, args({ row: { ...lapsedRow, _lapsed: false } }))).resolves.toBe(false);
     expect(trx).not.toHaveBeenCalled();
+  });
+
+  test('capacity mode is asked too: a chain made in hour mode keeps its destinations (Codex #7796 P2)', async () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      const trx = jest.fn(() => destinationProbe({ id: 'hold-other' }));
+      await expect(lapsedHoldOnMakeRoomDestination(trx, args())).resolves.toBe(true);
+    } finally {
+      delete process.env.GATE_SCHEDULING_CAPACITY;
+    }
   });
 
   test.each(['shadow', 'off'])('mode %s: not asked', async (mode) => {

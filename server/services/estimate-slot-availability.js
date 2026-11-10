@@ -1731,8 +1731,9 @@ async function filterCollidingSlots(slots, {
   if (capacityEnabled()) {
     // The complete route already includes its technician's work and unassigned
     // blockers. A global fixed-window pass would erase certified flexibility.
-    return slots.filter(slot => slot.routeMode === 'arrival_windows' && slot.techId
-      && !inactiveTechs.has(String(slot.techId)) && slotWindowFitsDay(slot.windowStart, slot.windowEnd));
+    return dropLiveMakeRoomDestinations(slots.filter(slot => slot.routeMode === 'arrival_windows' && slot.techId
+      && !inactiveTechs.has(String(slot.techId)) && slotWindowFitsDay(slot.windowStart, slot.windowEnd)),
+    { conn, dateFrom, dateTo, ownEstimateId });
   }
   let collisionQuery = conn('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -1902,6 +1903,39 @@ async function filterCollidingSlots(slots, {
       },
       dayRows,
     );
+  });
+}
+
+// GATE_BOOKING_MAKE_ROOM on, capacity mode (Codex #7796 P2): a make-room hold made in hour mode keeps its moved stops'
+// new hours for its whole life, even after capacity mode turns on. The capacity route knows only real rows, so a window
+// over one of those hours is dropped here; the reserve refuses it too (slot-reservation makeRoomDestinationClash). The
+// technician scope is the hour-mode check's (scopeToTechnician); this estimate's own holds are left out (its reserve
+// releases them first). Off and shadow read nothing.
+async function dropLiveMakeRoomDestinations(slots, { conn, dateFrom, dateTo, ownEstimateId = null }) {
+  if (!slots.length || !dateFrom || !dateTo || makeRoomModeNow() !== 'on') return slots;
+  const holds = await conn('scheduled_services')
+    .where('scheduled_date', '>=', dateFrom)
+    .where('scheduled_date', '<=', dateTo)
+    .whereNull('customer_id')
+    .whereNotNull('reservation_expires_at')
+    .whereRaw('reservation_expires_at > NOW()')
+    .whereNotNull('make_room_moves')
+    .modify((q) => { if (ownEstimateId) q.whereRaw('source_estimate_id IS DISTINCT FROM ?', [ownEstimateId]); })
+    .select('technician_id', 'scheduled_date', 'make_room_moves');
+  const taken = (holds || []).flatMap((hold) => {
+    const date = (typeof hold.scheduled_date === 'string' ? hold.scheduled_date : hold.scheduled_date.toISOString()).slice(0, 10);
+    return makeRoomMovesOf(hold).map((move) => {
+      const startMin = timeToMinutes(String(move.to || '').slice(0, 5));
+      return { date, technicianId: hold.technician_id, startMin, endMin: startMin == null ? null : startMin + Number(move.widthMin) };
+    });
+  }).filter((busy) => busy.startMin != null && Number.isFinite(busy.endMin));
+  if (!taken.length) return slots;
+  return slots.filter((slot) => {
+    const start = timeToMinutes(slot.windowStart);
+    const end = timeToMinutes(slot.windowEnd);
+    if (start == null || end == null) return true;
+    const sameDay = taken.filter((busy) => busy.date === slot.date);
+    return !scopeToTechnician(sameDay, slot.techId).some((busy) => start < busy.endMin && end > busy.startMin);
   });
 }
 

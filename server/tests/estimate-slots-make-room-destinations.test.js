@@ -58,15 +58,64 @@ describe('filterCollidingSlots — a live make-room hold also holds each move\'s
     expect(selected).not.toContain('scheduled_services.make_room_moves');
   });
 
-  test('capacity mode never reads it either', async () => {
-    process.env.GATE_SCHEDULING_CAPACITY = 'true';
-    try {
-      rowsReturn([]);
-      await filterCollidingSlots([{ ...slot('10:00'), routeMode: 'arrival_windows' }], { dateFrom: DATE, dateTo: DATE });
-      expect(db).not.toHaveBeenCalled();
-    } finally {
-      delete process.env.GATE_SCHEDULING_CAPACITY;
+  // Codex #7796 P2: a chain made in hour mode keeps its destinations for its whole life, even after capacity mode turns on.
+  describe('capacity mode', () => {
+    let calls;
+    const capSlot = (start, techId = 'tech-1') => ({ ...slot(start), techId, routeMode: 'arrival_windows' });
+    function holdsReturn(rows) {
+      calls = [];
+      const builder = {};
+      for (const name of ['where', 'whereNull', 'whereNotNull', 'whereRaw']) {
+        builder[name] = jest.fn((...args) => { calls.push([name, ...args]); return builder; });
+      }
+      builder.modify = jest.fn((callback) => { callback(builder); return builder; });
+      builder.select = jest.fn(async () => rows);
+      db.mockImplementation((table) => {
+        if (table === 'scheduled_services') return builder;
+        throw new Error(`unexpected table ${table}`);
+      });
+      return builder;
     }
+    const liveHold = (extra = {}) => ({ technician_id: 'tech-1', scheduled_date: DATE, make_room_moves: MOVES, ...extra });
+    beforeEach(() => { process.env.GATE_SCHEDULING_CAPACITY = 'true'; });
+    afterEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; delete process.env.GATE_MULTI_TECH_CONFIRM; });
+
+    test('mode on: a capacity window over a live chain\'s destination is dropped; the others stay', async () => {
+      holdsReturn([liveHold()]);
+      const kept = await filterCollidingSlots([capSlot('09:00'), capSlot('10:00'), capSlot('11:00')], { dateFrom: DATE, dateTo: DATE });
+      expect(kept.map((s) => s.windowStart)).toEqual(['09:00', '11:00']);
+      expect(calls).toEqual(expect.arrayContaining([
+        ['whereNull', 'customer_id'], ['whereNotNull', 'reservation_expires_at'], ['whereRaw', 'reservation_expires_at > NOW()'],
+        ['whereNotNull', 'make_room_moves'], ['where', 'scheduled_date', '>=', DATE], ['where', 'scheduled_date', '<=', DATE],
+      ]));
+    });
+
+    test('this estimate\'s own holds are left out of the read', async () => {
+      holdsReturn([]);
+      const kept = await filterCollidingSlots([capSlot('10:00')], { dateFrom: DATE, dateTo: DATE, ownEstimateId: 'est-1' });
+      expect(kept).toHaveLength(1);
+      expect(calls).toContainEqual(['whereRaw', 'source_estimate_id IS DISTINCT FROM ?', ['est-1']]);
+    });
+
+    test('technicians scoped: another technician\'s window at the destination stays; blind: it is dropped too', async () => {
+      holdsReturn([liveHold()]);
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      expect((await filterCollidingSlots([capSlot('10:00', 'tech-2'), capSlot('10:00')], { dateFrom: DATE, dateTo: DATE })).map((s) => s.techId)).toEqual(['tech-2']);
+      delete process.env.GATE_MULTI_TECH_CONFIRM;
+      expect(await filterCollidingSlots([capSlot('10:00', 'tech-2'), capSlot('10:00')], { dateFrom: DATE, dateTo: DATE })).toEqual([]);
+    });
+
+    test('a damaged chain drops nothing', async () => {
+      holdsReturn([liveHold({ make_room_moves: '{not json' })]);
+      expect(await filterCollidingSlots([capSlot('10:00')], { dateFrom: DATE, dateTo: DATE })).toHaveLength(1);
+    });
+
+    test.each(['shadow', 'off'])('mode %s reads nothing', async (mode) => {
+      makeRoom.bookingMakeRoomMode.mockReturnValue(mode);
+      holdsReturn([liveHold()]);
+      expect(await filterCollidingSlots([capSlot('10:00')], { dateFrom: DATE, dateTo: DATE })).toHaveLength(1);
+      expect(db).not.toHaveBeenCalled();
+    });
   });
 
   test('only a hold carries destinations: a committed row with a stray chain adds none', async () => {
