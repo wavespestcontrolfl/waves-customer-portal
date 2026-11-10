@@ -167,6 +167,20 @@ describe('commitReservation — a make-room hold moves the stops at accept (mode
     expect(lock.forUpdate).toHaveBeenCalled();
   });
 
+  // Codex pre-push P1 on PR 4: the gate is the kill switch; it is read again right before the writes.
+  test('the gate turns off while the proof runs: the ordinary slot-taken answer, nothing written', async () => {
+    estimateSlotAvailability.verifyMakeRoomOffer.mockImplementation(async () => {
+      makeRoom.bookingMakeRoomMode.mockReturnValue('shadow');
+      return PROOF;
+    });
+    const { trx, update } = commitTrx();
+    await expect(accept(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: `${DATE}_09-00_tech-1` });
+    expect(events).toContain('lock-moved');
+    expect(apply._internals.recheckVisit).not.toHaveBeenCalled();
+    expect(apply._internals.writeMoves).not.toHaveBeenCalled();
+    expect(update.update).not.toHaveBeenCalled();
+  });
+
   test('the tech-day locks are two (this technician, the unassigned day) and follow rung 1', async () => {
     const { trx } = commitTrx();
     await accept(trx);

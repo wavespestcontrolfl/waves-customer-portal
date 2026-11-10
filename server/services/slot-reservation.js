@@ -1053,7 +1053,7 @@ async function writeChainOrRefuse(client, { row, scheduledDate }) {
  * profile resolved and BEFORE the narrow and global overlap probes, which then see the stops at their new hours; any
  * refusal there rolls the moves back with the rest. Order: the gate (read in the transaction), the moved stops' rows
  * locked (FOR UPDATE, id order), the chain proven again and equal to the stored one, no clash with another live chain,
- * then the writes. Every failure is the ordinary
+ * the gate read again, then the writes. Every failure is the ordinary
  * slot-taken answer with nothing written. Returns the written visits ([] when the hold has no chain).
  */
 async function moveMakeRoomStops(client, { row, estimate, serviceProfile, effectiveDurationMinutes, scheduledDate, useCapacity }) {
@@ -1065,6 +1065,9 @@ async function moveMakeRoomStops(client, { row, estimate, serviceProfile, effect
   if (!proof.moves) throw refuseMakeRoomAccept(row, scheduledDate, `proof_${proof.reason}`);
   if (!sameMakeRoomChain(proof.payload, row.make_room_moves)) throw refuseMakeRoomAccept(row, scheduledDate, 'chain_changed');
   if (await makeRoomChainClash(client, { payload: proof.payload, excludeId: row.id })) throw refuseMakeRoomAccept(row, scheduledDate, 'chain_clash');
+  // The gate again, right before the writes: the row locks may have waited and the proof awaited many reads, and a gate
+  // turned off by then moves nothing (the kill switch; reserve and extend read it again before their writes too).
+  if (!makeRoomHoldsOn()) throw refuseMakeRoomAccept(row, scheduledDate, 'mode_off_before_write');
   return writeChainOrRefuse(client, { row, scheduledDate });
 }
 
