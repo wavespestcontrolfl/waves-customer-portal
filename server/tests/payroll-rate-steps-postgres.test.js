@@ -35,6 +35,7 @@ const express = require('express');
 const router = require('../routes/admin-payroll');
 const steps = require('../services/payroll-rate-steps');
 const migration = require('../models/migrations/20261109120000_payroll_rate_steps');
+const systemCancel = require('../models/migrations/20261109120100_payroll_rate_steps_system_cancel');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { staffWeekStartForWorkDate, addStaffWorkDays } = require('../utils/staff-time-work-date');
 
@@ -146,12 +147,31 @@ postgres('payroll pay rate steps', () => {
     it('rolls back and forward; a rollback is refused while an applied step exists', async () => {
       const id = await technician();
       await step(id);
+      await systemCancel.down(trx);
       await migration.down(trx);
       expect((await trx.raw("SELECT to_regclass('payroll_rate_steps') AS t")).rows[0].t).toBeNull();
+      // Both files stand alone when the table is not there.
+      await systemCancel.down(trx);
+      await systemCancel.up(trx);
       await migration.up(trx);
+      await systemCancel.up(trx);
       expect((await trx.raw("SELECT to_regclass('payroll_rate_steps') AS t")).rows[0].t).toBe('payroll_rate_steps');
       await step(id, { applied_at: new Date(), previous_rate: '23.00' });
       await expect(migration.down(trx)).rejects.toThrow(/applied steps/);
+    });
+
+    it('the second file lets the portal cancel a step with no name; its rollback brings the first rule back, and is refused while such a step exists', async () => {
+      const id = await technician();
+      const cancelDef = async () => (await trx.raw("SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'payroll_rate_steps_cancelled_by_check'")).rows[0].d;
+      expect(await cancelDef()).toBe('CHECK (((cancelled_by IS NULL) OR (cancelled_at IS NOT NULL)))');
+      await systemCancel.up(trx); // running it again changes nothing
+      expect(await cancelDef()).toBe('CHECK (((cancelled_by IS NULL) OR (cancelled_at IS NOT NULL)))');
+      await systemCancel.down(trx);
+      expect(await cancelDef()).toBe('CHECK (((cancelled_at IS NULL) = (cancelled_by IS NULL)))');
+      expect(await refused(() => step(id, { cancelled_at: new Date() }))).toBeTruthy();
+      await systemCancel.up(trx);
+      await step(id, { cancelled_at: new Date() });
+      await expect(systemCancel.down(trx)).rejects.toThrow(/cancelled itself/);
     });
   });
 
