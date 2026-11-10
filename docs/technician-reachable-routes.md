@@ -297,6 +297,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/tech/estimates` | tech-estimates |
 | POST | `/api/tech/estimates` | tech-estimates |
 | GET | `/api/tech/estimates/:id` | tech-estimates |
+| POST | `/api/tech/estimates/:id/send` | tech-estimates |
 | POST | `/api/tech/estimates/price` | tech-estimates |
 | GET | `/api/tech/estimates/setup` | tech-estimates |
 | POST | `/api/tech/field-lead` | tech-field-lead |
