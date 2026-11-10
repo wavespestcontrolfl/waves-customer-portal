@@ -112,6 +112,17 @@ const accept = (trx, extra = {}) => slotReservation.commitReservation({
 
 const WRITTEN = [{ id: 'visit-b', customer_id: 'c-b', visit_id: null, start: '10:00', end: '11:00' }, { id: 'visit-c', customer_id: 'c-c', visit_id: null, start: '11:00', end: '12:00' }];
 
+// The fixtures sit on DATE (2027-05-20). Only Date is frozen, well before it, so the accept's booking-notice check never
+// reaches them whatever day the suite runs (Codex #7799 P1). The suite's setImmediate flushes and every timer stay real.
+beforeAll(() => {
+  jest.useFakeTimers({
+    now: new Date('2027-05-01T15:00:00Z'),
+    doNotFake: ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval',
+      'setTimeout', 'clearTimeout', 'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback', 'cancelIdleCallback'],
+  });
+});
+afterAll(() => { jest.useRealTimers(); });
+
 // The booking-window config cache starts unknown; one read through the pool warms it (the commit then reads nothing).
 beforeAll(async () => {
   db.mockImplementation((table) => (table === 'booking_config' ? { first: jest.fn().mockResolvedValue(undefined) } : undefined));
@@ -282,6 +293,21 @@ describe('commitReservation — a make-room hold moves the stops at accept (mode
     const { trx } = commitTrx({ pre: plain, locked: plain, skipChain: true });
     await expect(accept(trx)).resolves.toMatchObject({ id: 'hold-1' });
     expect(events.filter((name) => name.startsWith('lock:tech-day'))).toHaveLength(0);
+    expect(estimateSlotAvailability.verifyMakeRoomOffer).not.toHaveBeenCalled();
+    expect(apply._internals.writeMoves).not.toHaveBeenCalled();
+  });
+});
+
+// Codex #7796 round 4: in capacity mode the overlap probes do not run and the arrival-capacity check alone could accept a
+// make-room hold, so the move step itself refuses it before any lock, proof or write.
+describe('moveMakeRoomStops — capacity mode refuses a make-room hold', () => {
+  test('the ordinary slot-taken answer, with no read, proof or write', async () => {
+    const trx = jest.fn(() => { throw new Error('no read expected'); });
+    const { moveMakeRoomStops } = slotReservation._internals;
+    await expect(moveMakeRoomStops(trx, {
+      row: heldRow(), estimate: { id: EST }, serviceProfile: null, effectiveDurationMinutes: 60, scheduledDate: DATE, useCapacity: true,
+    })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: `${DATE}_09-00_tech-1` });
+    expect(trx).not.toHaveBeenCalled();
     expect(estimateSlotAvailability.verifyMakeRoomOffer).not.toHaveBeenCalled();
     expect(apply._internals.writeMoves).not.toHaveBeenCalled();
   });

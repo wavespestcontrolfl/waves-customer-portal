@@ -3162,5 +3162,6 @@ module.exports = {
     makeRoomGuardsOn,
     destinationHitUnderGate,
     extendMakeRoomState,
+    moveMakeRoomStops,
   },
 };
