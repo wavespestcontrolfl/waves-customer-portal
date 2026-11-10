@@ -2214,14 +2214,21 @@ const MAKE_ROOM_OFFER_WAIT_MS = 2500;
 async function makeRoomOfferSlot(args, { durationMinutes }) {
   let timer;
   try {
-    const found = await Promise.race([
-      require('./scheduling/booking-make-room').findMakeRoomOffers(args),
+    // The finder and the card's technician name, both inside the page's one wait.
+    const build = async () => {
+      const found = await require('./scheduling/booking-make-room').findMakeRoomOffers(args);
+      const earliest = found?.hours?.[0];
+      if (!earliest) return null;
+      let name = null;
+      try { name = earliest.techId ? (await db('technicians').where({ id: earliest.techId }).first('name'))?.name || null : null; } catch { /* the card names no one */ }
+      return { hour: earliest, techName: name };
+    };
+    const built = await Promise.race([
+      build(),
       new Promise((resolve) => { timer = setTimeout(() => resolve(null), MAKE_ROOM_OFFER_WAIT_MS); }),
     ]);
-    const hour = found?.hours?.[0];
-    if (!hour) return null;
-    let techName = null;
-    try { techName = hour.techId ? (await db('technicians').where({ id: hour.techId }).first('name'))?.name || null : null; } catch { /* the card names no one */ }
+    if (!built) return null;
+    const { hour, techName } = built;
     const windowStart = hour.start;
     return {
       slotId: dateWithTimeSlotId(hour.date, windowStart, hour.techId),

@@ -228,7 +228,9 @@ describe('the rules a moved customer adds', () => {
     const prefs = { 'cust-c': { ...TEXTS, reminder72hChannel: 'both', reminder24hChannel: 'both', reminder72hChannelExplicit: true, emailEnabled: true } };
     const { report, deps } = await check({ deps: makeDeps({ prefs }) });
     expect(starts(report)).toContain('09:00');
-    expect(deps.resolve72hChannel).toHaveBeenCalledWith('both', 'visit-c', { prefsUnavailable: undefined, explicitChoice: true, emailEnabled: true });
+    expect(deps.resolve72hChannel).toHaveBeenCalledWith('both', 'visit-c', { prefsUnavailable: undefined, explicitChoice: true, emailEnabled: true, conn: expect.anything() });
+    // The prefs read rides the check's own connection (a hold's transaction inside reserve or extend).
+    expect(deps.getReminderPrefs).toHaveBeenCalledWith('cust-c', { scheduledServiceId: 'visit-c', conn: expect.anything() });
     // 'both' always keeps a text leg, so the app device is never read for it.
     expect(deps.appDeviceStatus).not.toHaveBeenCalledWith('cust-c', expect.anything());
   });

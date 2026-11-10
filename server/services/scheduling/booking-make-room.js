@@ -440,6 +440,7 @@ async function remindersByText(prefs, row, env, conn, budget = NO_LIMIT) {
     prefsUnavailable: prefs.unavailable,
     explicitChoice: prefs.reminder72hChannelExplicit,
     emailEnabled: prefs.emailEnabled,
+    conn,
   });
   if (!TEXT_CHANNELS.has(channel72) || !TEXT_CHANNELS.has(prefs.reminder24hChannel)) return false;
   // 'both' adds an email leg the app never replaces; only a text-only leg can turn into an app message.
@@ -459,7 +460,8 @@ async function moveBlockedReason(move, { conn, env, day, techId, budget = NO_LIM
   let pref;
   try {
     if (budget.spent()) return TIMED_OUT;
-    prefs = await env.getReminderPrefs(row.customer_id, { scheduledServiceId: row.id });
+    // On the caller's connection: inside a reserve or extend that is the hold's transaction, never a second pool read.
+    prefs = await env.getReminderPrefs(row.customer_id, { scheduledServiceId: row.id, conn });
     if (!remindersOn(prefs)) return 'reminders_off';
     // true, false, or TIMED_OUT (passed on as it is).
     const byText = await remindersByText(prefs, row, env, conn, budget);

@@ -266,6 +266,31 @@ describe('getAvailableSlots — the make-room offer (GATE_BOOKING_MAKE_ROOM on)'
     expect(keys(await pending)).toEqual(baseline);
   });
 
+  test('a technician-name read that never answers is inside the same wait: the free list is served (Codex pre-push P1)', async () => {
+    makeRoom.bookingMakeRoomMode.mockReturnValue('off');
+    const baseline = keys(await getAvailableSlots('est-room-1', OFFER));
+    estimateSlotAvailability._internals.clearCaches();
+    makeRoom.bookingMakeRoomMode.mockReturnValue('on');
+    const base = db.getMockImplementation();
+    const hangs = jest.fn(() => new Promise(() => {}));
+    db.mockImplementation((table) => (table === 'technicians'
+      ? { where: jest.fn().mockReturnThis(), select: jest.fn().mockResolvedValue([{ id: 'tech-1', name: 'Synthetic Tech' }]), first: hangs }
+      : base(table)));
+    const pending = getAvailableSlots('est-room-1', OFFER);
+    await jest.advanceTimersByTimeAsync(3000);
+    expect(keys(await pending)).toEqual(baseline);
+    expect(hangs).toHaveBeenCalled();
+  });
+
+  test('the technician-name read answers in time: the card names the technician', async () => {
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'technicians'
+      ? { where: jest.fn().mockReturnThis(), select: jest.fn().mockResolvedValue([{ id: 'tech-1', name: 'Synthetic Tech' }]), first: jest.fn().mockResolvedValue({ name: 'Synthetic Tech' }) }
+      : base(table)));
+    const result = await getAvailableSlots('est-room-1', OFFER);
+    expect([...result.primary, ...result.expander][0]).toMatchObject({ date: '2027-05-19', windowStart: '09:00', techFirstName: 'Synthetic' });
+  });
+
   test('capacity mode offers nothing: no offer pass, the background check runs as before', async () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     await getAvailableSlots('est-room-1', OFFER);
