@@ -731,17 +731,45 @@ describe('POST /api/tech/estimates: refusals from the save', () => {
     nothingWritten();
   });
 
-  test('a database error is logged by its code and the technician id, never by its message (it can hold the save\'s SQL)', async () => {
+  // The portal's REAL error handler (middleware/errors.js) logs the message and the stack of whatever a route forwards,
+  // and a database error's message holds the SQL of the save with its values. The tool forwards a copy without them.
+  test('a database error reaches the portal\'s error handler with its code, the technician id and the stack frames, and no value of the save', async () => {
     const logger = require('../services/logger');
-    logger.error.mockClear();
-    realSaveRejects(Object.assign(
-      new Error('insert into "estimates" ("customer_name", "customer_phone", "address") values (\'Sample Person\', \'+19415550142\', \'200 Example Ave\') - duplicate key'),
-      { code: '23505' },
-    ));
-    expect((await create({ prospect: PROSPECT, services: ['PEST'] })).status).toBeGreaterThanOrEqual(500);
-    const logged = logger.error.mock.calls.map((args) => args.join(' ')).join('\n');
-    expect(logged).toContain('[tech-estimates] create failed for technician tech-1: 23505');
-    expect(logged).not.toMatch(/Sample|5550142|Example Ave|insert into/);
+    const app = express();
+    app.use(express.json());
+    app.use('/api/tech/estimates', router);
+    app.use(require('../middleware/errors').errorHandler);
+    const real = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
+    try {
+      const dbError = Object.assign(
+        new Error('insert into "estimates" ("customer_name", "customer_phone", "address") values (\'Sample Person\', \'+19415550142\', \'200 Example Ave\') - duplicate key'),
+        { code: '23505' },
+      );
+      realSaveRejects(dbError);
+      logger.error.mockClear();
+      const res = await fetch(`http://127.0.0.1:${real.address().port}/api/tech/estimates`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prospect: PROSPECT, services: ['PEST'], clientDraftId: DRAFT_ID, digest: DIGEST }),
+      });
+      expect(res.status).toBe(500);
+      expect(JSON.stringify(await res.json())).not.toMatch(/Sample|5550142|Example Ave|insert into/);
+      expect(logger.error).toHaveBeenCalledTimes(1);
+      const logged = JSON.stringify(logger.error.mock.calls[0]);
+      expect(logged).toContain('[tech-estimates] create failed for technician tech-1 (23505)');
+      expect(logged).toMatch(/\\n\s+at /);
+      expect(logged).not.toMatch(/Sample|5550142|Example Ave|insert into|duplicate key/);
+    } finally {
+      await new Promise((r) => real.close(r));
+    }
+  });
+
+  test('an error with no code is named by its class', async () => {
+    const logger = require('../services/logger');
+    realSaveRejects(new TypeError('Cannot read properties of undefined (reading \'Sample Person\')'));
+    const res = await create({ visitId: VISIT_ID, services: ['PEST'] });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('[tech-estimates] create failed for technician tech-1 (TypeError)');
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('Sample Person');
   });
 });
 

@@ -3,7 +3,6 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate } = require('../middleware/admin-auth');
 const featureGates = require('../config/feature-gates');
-const logger = require('../services/logger');
 
 // The technician estimate tool (steps 1 and 2a of 4): setup, a price preview, saving the quote as a draft and reading his
 // own drafts. Nothing is sent. GATE_TECH_ESTIMATES (owner 2026-11-09): the later steps text customers and the preview
@@ -23,17 +22,25 @@ router.use(async (req, res, next) => {
   } catch (err) { return next(err); }
 });
 
-// Every route answers a refusal the same way: its status, a short message and, for some, a code. Any other error is
-// logged by its code or class and the caller's id only: a database error's message can carry the SQL of the estimate
-// save, and with it a name, a phone or an address.
+// Any error that is not a refusal goes to the portal's error handler (middleware/errors.js), which logs an error's
+// message and stack, and on to error monitoring. A database error's message holds the SQL of the estimate save with its
+// values (a name, a phone, an address). So the handler gets a copy that keeps the error's code or class, the caller's id
+// and the stack frames, and nothing else.
+function safeError(err, req, label) {
+  const safe = new Error(`[tech-estimates] ${label} failed for technician ${req.technicianId} (${String(err?.code || err?.name || 'error').slice(0, 40)})`);
+  const frames = String(err?.stack || '').split('\n').filter((line) => /^\s+at /.test(line));
+  safe.stack = [safe.message, ...frames].join('\n');
+  return safe;
+}
+
+// Every route answers a refusal the same way: its status, a short message and, for some, a code.
 async function answer(req, res, next, label, work) {
   const { PriceRefusal } = require('../services/tech-estimate-price');
   try {
     res.json(await work());
   } catch (err) {
     if (err instanceof PriceRefusal) return res.status(err.status).json({ error: err.message, ...err.extra });
-    logger.error(`[tech-estimates] ${label} failed for technician ${req.technicianId}: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
-    return next(err);
+    return next(safeError(err, req, label));
   }
 }
 const price = () => require('../services/tech-estimate-price');
