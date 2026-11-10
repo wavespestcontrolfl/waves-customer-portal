@@ -3933,20 +3933,83 @@ const CSR_ROLE_LABELS = new Set(['office manager', 'waves', 'unknown']);
 // record. Known limit: a real contact who shares the first name of the person
 // who answered loses the name on the slot until the office adds it.
 function withoutAnsweringStaffName(contacts = [], call = {}) {
-  if (isOutboundCall(call)) return contacts;
+  const staff = answeringStaffFirstName(call);
+  if (!staff) return contacts;
+  return contacts
+    .map((c) => (firstNameToken(c.first_name) === staff ? { ...c, first_name: null, last_name: null } : c))
+    .filter((c) => c.first_name || c.last_name || c.phone || c.email);
+}
+
+const firstNameToken = (v) => String(v || '').trim().toLowerCase().split(/\s+/)[0] || null;
+
+// The answering staff member's first name (lower case), or null. ONE read of the
+// forward-acceptance record for every guard below. Inbound only: an outbound call
+// has no acceptance record. A role label is not a person's name: the webhook
+// writes one for a number that WAVES_CSR_NUMBER_MAP does not name (its env
+// fallbacks). No name is known then, so nothing is filtered; map the number to a
+// first name there for the guards to cover it.
+function answeringStaffFirstName(call = {}) {
+  if (isOutboundCall(call)) return null;
   let meta = call.metadata;
   if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-  const first = (v) => String(v || '').trim().toLowerCase().split(/\s+/)[0];
   const csrName = meta?.forward_acceptance?.accepted === true ? String(meta.forward_acceptance.csr_name || '').trim() : '';
-  // A role label is not a person's name: the webhook writes one for a number
-  // that WAVES_CSR_NUMBER_MAP does not name (its env fallbacks). No name is
-  // known then, so nothing is filtered; map the number to a first name there
-  // for this guard to cover it.
-  if (!csrName || CSR_ROLE_LABELS.has(csrName.toLowerCase())) return contacts;
-  const staff = first(csrName);
-  return contacts
-    .map((c) => (first(c.first_name) === staff ? { ...c, first_name: null, last_name: null } : c))
-    .filter((c) => c.first_name || c.last_name || c.phone || c.email);
+  if (!csrName || CSR_ROLE_LABELS.has(csrName.toLowerCase())) return null;
+  return firstNameToken(csrName);
+}
+
+// The same mistake on the PRIMARY caller (production, 8 inbound calls in 60 days):
+// the speaker labels swap at the greeting ("Waves, this is Adam") and the staff
+// member's first name is saved as the caller's. Every such call carried a first
+// name only, and every caller was a customer already on file. When the caller's
+// first name is the answering staff member's AND no last name came with it (a real
+// caller named "Adam Smith" keeps the name), the name counts as not captured:
+// cleared in the V1 canonical object and in the V2 caller, so the call takes the
+// existing no-name path (the customer keeps the name on file). Pure: returns new
+// objects. `dropped` is true only when something was cleared.
+// ONLY for a caller on file before the call (`callerOnFile: true`, see
+// callerWasOnFileBeforeCall). For a caller not on file a dropped name means no
+// customer is created and a nameless lead is written, so a real new caller who
+// shares the staff member's first name would lose the booking path: that pipeline
+// stays exactly as it was. Known limit: an on-file caller who shares the first name
+// of the person who answered loses the name on this call until the office adds it.
+function withoutAnsweringStaffNameAsCaller(extracted, v2Extraction, call = {}, opts = {}) {
+  const staff = opts.callerOnFile === true && answeringStaffFirstName(call);
+  const v1 = extracted || {};
+  const v2c = v2Extraction?.caller || {};
+  const words = (v) => String(v || '').trim().split(/\s+/).filter(Boolean).length;
+  const v1Hit = firstNameToken(v1.first_name) === staff;
+  const v2Hit = firstNameToken(v2c.first_name) === staff;
+  // A last name anywhere, or a surname hidden in a longer first_name / name_full, keeps the name.
+  const hasSurname = words(v1.last_name) + words(v2c.last_name) > 0
+    || [v1.first_name, v2c.first_name, v2c.name_full].some((v) => words(v) > 1);
+  if (!staff || hasSurname || !(v1Hit || v2Hit)) return { extracted, v2Extraction, dropped: false };
+  const cleared = { first_name: null, last_name: null };
+  return {
+    extracted: v1Hit ? { ...extracted, ...cleared } : extracted,
+    v2Extraction: v2Hit
+      ? { ...v2Extraction, caller: { ...v2c, ...cleared, ...(firstNameToken(v2c.name_full) === staff ? { name_full: null } : {}) } }
+      : v2Extraction,
+    dropped: true,
+  };
+}
+
+// Was the caller a customer on file BEFORE this call? Same proof as the outbound prior-contact
+// check (outboundPriorContactCustomerId): the customer the call row carried at ring time, or the
+// phone pre-lookup, counts only when this call's own earlier pass did not create it
+// (metadata.created_customer_id) and its row predates the call start. A reprocess therefore gives
+// the same answer as the first pass. Fails closed: an unreadable row or start time is "not on file".
+async function callerWasOnFileBeforeCall(call = {}, knownCaller = null) {
+  let callMeta = call.metadata;
+  if (typeof callMeta === 'string') { try { callMeta = JSON.parse(callMeta); } catch { callMeta = {}; } }
+  let callCustomerCreatedAt = null;
+  if (call.customer_id) {
+    callCustomerCreatedAt = String(call.customer_id) === String(knownCaller?.id || '')
+      ? knownCaller.createdAt
+      : (await db('customers').where({ id: call.customer_id }).whereNull('deleted_at').first('created_at').catch(() => null))?.created_at || null;
+  }
+  return !!outboundPriorContactCustomerId({
+    call, knownCaller, callMeta, callCustomerCreatedAt, before: callStartedAt(call) || call.created_at || null,
+  });
 }
 
 // Third-party payer (Bill-To) linkage from a call (GATE_CALL_PAYER_LINKING):
@@ -10900,12 +10963,21 @@ async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v
   }
 }
 
+// The heartbeat beat matched no row. That is a LOST claim only while this pass still owned
+// the work: the pass's own terminal write clears processing_token on a normal finish, and the
+// steps after it (commitments, alerts) run with the timer still on. `claimReleased` is set by
+// each of the pass's own token-clearing writes, so a beat after a normal finish stays quiet and
+// a beat that misses before any terminal write (a peer reclaimed the call) still warns.
+function shouldWarnOwnershipLost(rows, claimReleased) {
+  return rows === 0 && !claimReleased;
+}
+
 // Terminal write for a tech follow-up call: the transcript is already
 // stored; this lands the extraction, summary and sentiment the Calls tab
 // reads, marks the call processed and releases the claim in one
 // token-fenced statement, then records commitments. No lead, booking,
 // automation, SMS, interaction or CSR write ever runs for the call.
-async function finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result }) {
+async function finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result, onClaimReleased = null }) {
   const written = await db('call_log')
     .where({ id: call.id })
     .where('processing_token', procToken)
@@ -10934,6 +11006,7 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
     logger.warn(`[call-proc] Skipped tech follow-up terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
     return { success: false, skipped: true, reason: 'terminal_write_ownership_lost', callSid };
   }
+  if (onClaimReleased) onClaimReleased();
   await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
   logger.info(`[call-proc] Completed tech follow-up processing for ${maskSid(callSid)}: customer=${call.customer_id || null}`);
   return { success: true, callSid, customerId: call.customer_id || null, extracted, techFollowUp: true };
@@ -11117,6 +11190,8 @@ const CallRecordingProcessor = {
     // every 60s while the pass runs, token-fenced so a pass that lost its
     // claim beats into 0 rows. Cleared in the outer finally on every exit.
     let heartbeatTimer = null;
+    // Set by each of THIS pass's own token-clearing writes (see shouldWarnOwnershipLost).
+    let claimReleased = false;
     // This pass's MONOTONIC generation — assigned by the claim write below
     // (processing_generation + 1). The token is the claim MUTEX; the
     // generation is the pass IDENTITY that survives finalization: a cleared
@@ -11402,7 +11477,7 @@ const CallRecordingProcessor = {
           // dead. Say so loudly: every terminal write from here is
           // token-fenced and will no-op, so the pass finishes into nothing,
           // and this line is the only trace of why.
-          if (rows === 0) {
+          if (shouldWarnOwnershipLost(rows, claimReleased)) {
             logger.warn(`[call-proc] ownership LOST mid-pass for ${maskSid(callSid)} — a peer reclaimed the claim; this pass's terminal writes will no-op`);
           }
         })
@@ -11823,7 +11898,7 @@ const CallRecordingProcessor = {
       // (processAllPending skips both), so it goes back to pending instead
       // (Codex #3736 r13 P2).
       const preClaimStatus = (call.processing_status === 'processing' || recordingChangedBeforeClaim) ? null : (call.processing_status || null);
-      await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+      const deferredRows = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
         processing_status: preClaimStatus,
         // The claim cleared the verdict time; a restored terminal status gets
         // its own stamp back, a NULL / pending status none (Codex #6269 r2).
@@ -11831,6 +11906,7 @@ const CallRecordingProcessor = {
         processing_token: null,
         updated_at: new Date(),
       });
+      if (deferredRows) claimReleased = true;
       logger.info(`[call-proc] Deferred ${maskSid(callSid)} — recording not fully propagated yet (status restored to ${preClaimStatus || 'pending'})`);
       return { success: false, skipped: true, reason: 'recording_not_ready' };
     }
@@ -12149,6 +12225,7 @@ const CallRecordingProcessor = {
         // (codex P1).
         return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      claimReleased = true;
       // At the cap the lane has ended: the call produced no lead, customer or
       // routing decision and no pass will try again, so the same permanent
       // processing-failure card the extraction lane files is owed here
@@ -12294,6 +12371,7 @@ const CallRecordingProcessor = {
           updated_at: new Date(),
         }).returning(['extraction_attempts']);
       if (failedRow) {
+        claimReleased = true;
         const attempts = Number(failedRow?.extraction_attempts) || 0;
         await fileExtractionExhaustedTriage(call.id, attempts, err, callSid);
       } else {
@@ -12516,6 +12594,29 @@ const CallRecordingProcessor = {
       if (assessmentLaneActive) extracted = { ...extracted, pre_adoption_price_fields: preAdoptionPriceFields(preAdoptionExtracted) };
     }
 
+    // The answering staff member's first name is never an ON-FILE caller's. Cleared ONCE, here:
+    // after V2 adoption (so neither extractor's name can come back) and before the triage
+    // flags, the customer / lead writes and every text or alert read the name. A caller not on
+    // file before the call is left exactly as extracted (callerWasOnFileBeforeCall).
+    {
+      const staffNameGuard = withoutAnsweringStaffNameAsCaller(
+        extracted, v2Result?.status === 'valid' ? v2Result.extraction : null, call,
+        { callerOnFile: await callerWasOnFileBeforeCall(call, knownCaller) },
+      );
+      if (staffNameGuard.dropped) {
+        extracted = { ...staffNameGuard.extracted, caller_name_dropped: 'answering_staff_name' };
+        logger.info(`[call-proc] answering staff first name dropped from the caller name for ${maskSid(callSid)}`);
+        if (staffNameGuard.v2Extraction !== v2Result?.extraction) {
+          v2Result.extraction = staffNameGuard.v2Extraction;
+          // The enriched blob was serialized before this (right after extraction): re-persist
+          // it so offline readers see the same caller name. Best-effort, token-fenced.
+          await db('call_log').where({ id: call.id }).where('processing_token', procToken)
+            .update({ ai_extraction_enriched: JSON.stringify(v2Result.extraction) })
+            .catch((e) => logger.warn(`[call-proc-v2] enriched-blob re-persist after staff-name guard failed: ${e.code || e.name || 'db_error'}`));
+        }
+      }
+    }
+
     // (Hold helpers live above the tech follow-up and voicemail returns: both arm the hold too; codex #6112 r10/r12 P2.)
     // Codex round 7 P1 (PR #4807): the NUMBER-keyed hold is persisted AT
     // the decision point — the same statement that flips the boolean above
@@ -12677,7 +12778,7 @@ const CallRecordingProcessor = {
         noTextHoldArming = true;
         if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Result.extraction }))) return abandonToPeer('the disclaimed-number hold write');
       }
-      return finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result });
+      return finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result, onClaimReleased: () => { claimReleased = true; } });
     }
 
     // ── Voicemail routing ──
@@ -12842,6 +12943,7 @@ const CallRecordingProcessor = {
           lost.fenceLost = true;
           throw lost;
         }
+        claimReleased = true;
         return true;
       }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!terminalSettled) {
@@ -14585,6 +14687,7 @@ const CallRecordingProcessor = {
           lost.fenceLost = true;
           throw lost;
         }
+        claimReleased = true;
         return true;
       }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!vetoSettled) {
@@ -24602,6 +24705,10 @@ const CallRecordingProcessor = {
           ),
           updated_at: new Date(),
         });
+      // The token is cleared in this transaction: from here the heartbeat's missed beat is this
+      // pass's own finish, not a lost claim. Set before commit so a beat that waited on the row
+      // lock and then matched nothing finds the flag already up.
+      if (written > 0) claimReleased = true;
       // codex #4815 r5 P1: the durable price-agreed quarantine-retry
       // marker commits ATOMICALLY with the terminal status it protects —
       // either both land or neither does. Fenced on `written > 0`: if this
@@ -25200,6 +25307,7 @@ const CallRecordingProcessor = {
         if (!releasedRows.length) {
           logger.warn(`[call-proc] Skipped lock release for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
         } else {
+          claimReleased = true;
           const attempts = Number(releasedRows[0]?.extraction_attempts) || 0;
           await fileExtractionExhaustedTriage(call.id, attempts, procErr, callSid);
         }
@@ -26132,7 +26240,11 @@ CallRecordingProcessor._test = {
   resolveCallSecondaryContact,
   resolveCallSecondaryContacts,
   withoutAnsweringStaffName,
+  answeringStaffFirstName,
+  withoutAnsweringStaffNameAsCaller,
+  callerWasOnFileBeforeCall,
   isFreshInboundCall,
+  shouldWarnOwnershipLost,
   resolveCallBillingPayer,
   persistCallSecondaryContact,
   onSiteOptinAskTrigger,
