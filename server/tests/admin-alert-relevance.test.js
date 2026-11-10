@@ -738,6 +738,95 @@ describe('class rules', () => {
     expect((await reasonFor(customerOnly())).reason).toBe('Lead was contacted');
   });
 
+  // Estimator call bells (owner 2026-11-09). The fake cannot run the handoff witness SQL (handedOffWithin and its
+  // ownership fence), so these tests prove what the module asks and which call time it asks from; the SQL itself
+  // (sent_at alone, a quote before the call, another customer's quote) is proved in admin-alert-relevance-db.test.js.
+  describe('estimator call bells', () => {
+    const SID = 'CA00000000000000000000000000000001';
+    // note() bells ring at 2026-09-27T12:00Z. The call started 11:50Z; BETWEEN is after the call, before the bell.
+    const CALL_START = new Date('2026-09-27T11:50:00Z');
+    const BETWEEN = new Date('2026-09-27T11:55:00Z');
+    const BEFORE_CALL = new Date('2026-09-27T11:40:00Z');
+    const callBell = (over = {}) => note({
+      category: 'lead', link: `/admin/estimates?estimateId=${EST}`,
+      metadata: { callSid: SID, estimator_engine: true, quote_promised: true, lane: 'residential', estimateId: EST, promise: true, ...over },
+    });
+    const callRow = (over = {}) => ({ twilio_call_sid: SID, customer_id: CUST, started_at: CALL_START, ...over });
+    const callTable = 'call_log as cl';
+    const asked = (table) => mockQueries.filter((q) => q.table === table);
+    // The handoff witness reads estimates through raw SQL; the batch's own estimate load by id does not.
+    const witnessQueries = () => asked('estimates').filter((q) => q.calls.some(([method]) => method === 'whereRaw'));
+
+    test('the class is a Leads bell the estimator wrote for a call: a text-origin bell, another Leads bell or a blank sid is not in it', () => {
+      expect(classify(callBell())?.key).toBe('call_quote_sent');
+      expect(classify(callBell({ quote_promised: false, contact: true, promise: undefined }))?.key).toBe('call_quote_sent');
+      for (const other of [
+        callBell({ callSid: undefined, smsThreadKey: 'sms-thread:+15555550100' }),
+        callBell({ callSid: '  ' }), callBell({ callSid: 42 }), callBell({ estimator_engine: false }), callBell({ estimator_engine: 'true' }),
+        { ...callBell(), category: 'alert' },
+      ]) expect(classify(other)).toBeNull();
+    });
+
+    test('a quote handed off after the call started closes it, even one handed off BEFORE the bell was written; the witness is asked from the call start', async () => {
+      const row = callBell();
+      mockTables[callTable] = [callRow()];
+      expect(await reasonFor(row)).toEqual({ cls: 'call_quote_sent', reason: null });
+      mockTables.estimates = [{ id: uid(533), customer_id: CUST }];
+      const witness = jest.spyOn(require('../services/call-commitments'), 'handedOffWithin');
+      try {
+        expect((await reasonFor(row)).reason).toBe('Estimate was sent');
+        // Asked from the call's start (11:50Z), never the bell's created_at (12:00Z), for the call's customer.
+        expect(witness.mock.calls.map(([, after]) => after.toISOString())).toEqual([CALL_START.toISOString()]);
+        expect(JSON.stringify(witnessQueries().pop().calls)).toContain(CUST);
+      } finally {
+        witness.mockRestore();
+      }
+    });
+
+    test('a visit booked after the call started closes it; one booked before the call, or for another customer, does not; a closed read stays open', async () => {
+      const row = callBell();
+      mockTables[callTable] = [callRow()];
+      mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: BEFORE_CALL }, { customer_id: uid(99), latest_created_at: BETWEEN }];
+      expect((await reasonFor(row)).reason).toBeNull();
+      mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: BETWEEN }];
+      expect((await reasonFor(row)).reason).toBe('A visit was booked');
+      // The predicate is the new-lead rule's: live and top-level.
+      expect(JSON.stringify(asked('scheduled_services').pop().calls)).toContain('recurring_parent_id');
+    });
+
+    test('the subject is the call\'s customer and the lead\'s customer; a deleted lead, no call row, or nobody to judge leaves the bell open', async () => {
+      const OTHER = uid(98);
+      const withLead = callBell({ leadId: LEAD });
+      mockTables.scheduled_services = [{ customer_id: OTHER, latest_created_at: BETWEEN }];
+      // No call row: nothing to measure from, whatever else exists.
+      mockTables.estimates = [{ id: uid(533), customer_id: CUST }];
+      mockTables.leads = [lead({ customer_id: OTHER })];
+      expect((await reasonFor(withLead)).reason).toBeNull();
+      // The call has no customer, the lead does: the lead's customer is judged.
+      mockTables[callTable] = [callRow({ customer_id: null })];
+      expect((await reasonFor(withLead)).reason).toBe('A visit was booked');
+      // A deleted lead is not a subject.
+      mockTables.leads = [lead({ customer_id: OTHER, deleted_at: AFTER_BELL })];
+      expect((await reasonFor(withLead)).reason).toBeNull();
+      // No customer and no lead: not judged, and no estimate is asked about.
+      mockQueries = [];
+      expect((await reasonFor(callBell())).reason).toBeNull();
+      expect(witnessQueries()).toEqual([]);
+    });
+
+    test('the call row is read once for a batch, by sid, from the call start helper; a read that fails is no verdict and leaves the bell open', async () => {
+      mockTables[callTable] = [callRow()];
+      mockTables.estimates = [{ id: uid(533), customer_id: CUST }];
+      await loadSubjects([callBell(), callBell({ estimateId: null }), leadNote()]);
+      expect(asked(callTable)).toHaveLength(1);
+      expect(JSON.stringify(asked(callTable)[0].calls)).toContain(SID);
+      mockFailTable = callTable;
+      const data = await loadSubjects([callBell()]);
+      expect(subjectFor(callBell(), data, TODAY)).toMatchObject({ callQuoteReason: null, callQuoteUnknown: true });
+      expect(judge(classify(callBell()), subjectFor(callBell(), data, TODAY))).toEqual({ reason: null, would: null });
+    });
+  });
+
   test('with the contact gate off, customer-contact bells and money-owed alerts are never in the table, whatever their metadata says', () => {
     const lookalike = { customerId: CUST, invoiceId: INV, scheduled_service_id: VISIT, alertKind: 'diverged', seriesMoveId: 'm', estimateId: EST, payload: { leadId: LEAD } };
     for (const category of ['inbound_sms', 'inbound_email', 'missed_call', 'voicemail_callback', 'review', 'payment', 'payment_failed', 'refund', 'dispute', 'system']) {
@@ -1054,6 +1143,26 @@ describe('re-arm: a retirement holds only while its rule does', () => {
     mockTables.customers[0].email = 'm.sample@example.net';
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 1, retired: 0 });
     expect([row.read_at, row.done_at, row.done_by, row.resolution]).toEqual([null, null, null, null]);
+  });
+
+  test('an estimator call bell is retired once the quote is handed off, and put back (unread) if the witness is gone; a failed read does not put it back', async () => {
+    const SID = 'CA00000000000000000000000000000002';
+    const row = note({ category: 'lead', link: `/admin/estimates?estimateId=${EST}`, metadata: { callSid: SID, estimator_engine: true, quote_promised: true, estimateId: EST, promise: true } });
+    mockTables['call_log as cl'] = [{ twilio_call_sid: SID, customer_id: CUST, started_at: new Date('2026-09-27T11:50:00Z') }];
+    mockTables.estimates = [{ id: uid(533), customer_id: CUST }];
+    mockTables.notifications = [row];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 1, byClass: { call_quote_sent: 1 } });
+    expect(row).toMatchObject({ done_at: NOW, done_by: 'relevance', resolution: 'Estimate was sent' });
+    // The call table cannot be read this run: no verdict, so the retirement stands.
+    mockFailTable = 'call_log as cl';
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 0, retired: 0 });
+    expect(row.done_by).toBe('relevance');
+    mockFailTable = null;
+    // The witness is gone (the estimate no longer counts): the rule stops holding and the bell comes back.
+    mockTables.estimates = [];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 1, retired: 0 });
+    expect([row.read_at, row.done_at, row.done_by, row.resolution]).toEqual([null, null, null, null]);
+    expect(JSON.parse(row.metadata).retired).toBeUndefined();
   });
 
   test('a promise-chaser retirement is final: the promise reopened later does not put the bell back (its emitter\'s own close is final too)', async () => {

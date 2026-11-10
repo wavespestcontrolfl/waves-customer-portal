@@ -140,6 +140,14 @@
  *     contacted the customer after the drop-off (the portal request class's contact rule; an estimate with no
  *     customer on file is matched by the phone in the bell), or the estimate was accepted, declined or
  *     archived, or a visit was booked for the customer after the drop-off. Sends nothing to a customer.
+ *
+ * The estimator's call bells (owner 2026-11-09; estimator-engine notify: "Quote promised on call", "AI estimate draft
+ * needs review", the commercial scaffold; category `lead`, `estimator_engine`, a `callSid`) close once a quote reached
+ * the call's customer or lead (handedOffWithin, never sent_at), or a live top-level visit was booked for them, after
+ * the CALL STARTED (callStartedAtSql over the call's call_log row, not the bell's created_at: a quote can go out between
+ * the call and the bell). No call row, or a call with no customer and no lead, leaves the bell open. A text-origin bell
+ * (`smsThreadKey`, no callSid) is not in the class. No gate: it is an internal alert change, and the sweep's own kill
+ * switch covers it.
  */
 
 const db = require('../models/db');
@@ -266,7 +274,7 @@ function resolveRefs(row, data) {
   return { refs, visit, lead, estimate, customer };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), quoteHandedOff: new Set(), bookingMovedOn: new Map(), promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map(), contact: new Map(), noteVisits: new Map(), bounceRecords: new Map(), contactMode: 'off', contactFailed: false, assumeContact: false });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), quoteHandedOff: new Set(), bookingMovedOn: new Map(), callQuoteMovedOn: new Map(), callQuoteFailed: false, promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map(), contact: new Map(), noteVisits: new Map(), bounceRecords: new Map(), contactMode: 'off', contactFailed: false, assumeContact: false });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The latest valid time per customer across rows (a bad time is skipped).
@@ -563,6 +571,63 @@ async function loadLeadHandoffs(rows, data, conn) {
   }
 }
 
+// An estimator-engine call bell (estimator-engine/index.js notify: "Quote promised on call", "AI estimate draft needs
+// review", the commercial scaffold): category lead, `estimator_engine`, and the call's Twilio sid. A text-origin bell
+// (smsThreadKey, no callSid) is not this class. The class match and the loader both use this test.
+const CALL_QUOTE_CLASS = 'call_quote_sent';
+function isCallQuoteBell(meta, row) {
+  return row.category === 'lead' && meta.estimator_engine === true && typeof meta.callSid === 'string' && meta.callSid.trim() !== '';
+}
+
+// Each estimator call bell (owner 2026-11-09): did a quote reach the call's customer or lead, or a visit get booked for
+// them, AFTER THE CALL STARTED? The boundary is the call's real start (callStartedAtSql over its call_log row), never the
+// bell's created_at: a quote can go out between the call and the bell. The quote is the promise lane's witness
+// (handedOffWithin inside the ownership fence, never sent_at), the visit the new-lead rule's (bookedVisitsByCustomer:
+// live, top-level). The subject is the call's customer and the bell's lead's customer. No call row, no customer: no
+// verdict. Loaded into data.callQuoteMovedOn (bell id -> the reason in words), after the leads are loaded. A failed read
+// is no verdict: it leaves the bell open and keeps the re-arm pass from putting one back (callQuoteFailed).
+function callQuoteSubject(row, calls, data) {
+  const meta = parseMeta(row.metadata);
+  const call = calls.get(meta.callSid);
+  const startedAt = call?.started_at ? new Date(call.started_at) : null;
+  if (!startedAt || Number.isNaN(startedAt.getTime())) return null;
+  const lead = data.leads.get(refsFromRow(row).leadId);
+  const customerIds = [...new Set([call.customer_id, lead && !lead.deleted_at ? lead.customer_id : null]
+    .map((id) => (id ? uuidOrNull(String(id)) : null)).filter(Boolean))];
+  return customerIds.length ? { startedAt, customerIds } : null;
+}
+
+async function loadCallQuoteMovedOn(rows, data, conn) {
+  const bells = rows.filter((row) => isCallQuoteBell(parseMeta(row.metadata), row));
+  if (!bells.length) return;
+  try {
+    const { callStartedAtSql } = require('./sms-pending-conversations');
+    const sids = [...new Set(bells.map((row) => parseMeta(row.metadata).callSid))];
+    const found = await conn('call_log as cl').whereIn('cl.twilio_call_sid', sids)
+      .select('cl.twilio_call_sid', 'cl.customer_id', conn.raw(`${callStartedAtSql('cl')} as started_at`));
+    const calls = new Map(found.map((call) => [call.twilio_call_sid, call]));
+    const subjects = new Map(bells.map((row) => [String(row.id), callQuoteSubject(row, calls, data)]).filter(([, subject]) => subject));
+    const booked = await bookedVisitsByCustomer(conn, [...new Set([...subjects.values()].flatMap((s) => s.customerIds))]);
+    const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
+    for (const [id, { startedAt, customerIds }] of subjects) {
+      if (customerIds.some((c) => booked.get(c) && new Date(booked.get(c)).getTime() > startedAt.getTime())) {
+        data.callQuoteMovedOn.set(id, 'A visit was booked');
+        continue;
+      }
+      for (const customerId of customerIds) {
+        if (await whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), startedAt), customerId).first('estimates.id')) {
+          data.callQuoteMovedOn.set(id, 'Estimate was sent');
+          break;
+        }
+      }
+    }
+  } catch (err) {
+    data.callQuoteMovedOn.clear();
+    data.callQuoteFailed = true;
+    logger.warn(`[alert-relevance] estimator call-bell witnesses failed to load: ${errSummary(err)}`);
+  }
+}
+
 // The address a bounced-email alert is about, its owner and the field it bounced from, from the
 // alert's own metadata (email-bounce-rescue.js bounceAlertMetadata), else null. Only that class
 // names one, so no other bell loads an email.
@@ -646,6 +711,7 @@ async function loadSubjects(rows, conn = db, { judgeContact = false } = {}) {
   if (data.contactMode !== 'off' || leadContactedCloseMode() !== 'off') await loadContact(rows, data, conn);
   await loadNoteVisits(rows, data, conn);
   await loadLeadHandoffs(rows, data, conn);
+  await loadCallQuoteMovedOn(rows, data, conn);
   // The stale-consent bells' customers: when did each last record a consent
   // at a CURRENT recurring-card text version — the base text or the
   // after-visit variant's (local max-effort review on #5434: an after-visit
@@ -723,6 +789,9 @@ function subjectFor(row, data, todayET) {
     // An estimate was handed off to the bell's customer after the bell
     // (loaded for add-a-service portal chat bells, repeat-form alerts and lead_contacted bells only).
     quoteHandedOff: data.quoteHandedOff.has(String(row.id)),
+    // Why an estimator call bell's quote is out or a visit is booked, after the call started (those bells only), else null.
+    callQuoteReason: data.callQuoteMovedOn.get(String(row.id)) || null,
+    callQuoteUnknown: data.callQuoteFailed,
     // Why an unfinished-booking bell's booking is finished (loaded for those bells only), else null.
     bookingMovedOn: data.bookingMovedOn.get(String(row.id)) || null,
     // The latest staff text that reached the bell's customer (loaded for
@@ -1158,6 +1227,11 @@ function leadContactedMovedOn(s) {
   return s.quoteHandedOff ? 'Estimate was sent' : null;
 }
 
+// An estimator call bell (CALL_QUOTE_CLASS): settled once a quote reached the call's customer or lead, or a live visit
+// was booked for them, after the call started (loadCallQuoteMovedOn). Nothing else: not read_at, not a call row, not a
+// lead's status.
+const callQuoteSettled = (s) => (s.callQuoteUnknown ? null : s.callQuoteReason);
+
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
 // rule returning null while the alert is still relevant, else a short reason.
 const CLASSES = [
@@ -1227,6 +1301,12 @@ const CLASSES = [
     // Only the bell that promises an answer to the customer: the class's doneWhen, checked like the request class's.
     match: (meta) => meta.doneWhen === 'customer_answered',
     gate: portalBookingGate, rule: unfinishedBookingSettled, contact: 'customer', contactRule: portalItemAnswered,
+  },
+  { // estimator-engine/index.js notify — the call's quote bells ("Quote promised on call", "AI estimate draft needs
+    // review", the commercial scaffold), one per call. Nothing closed them when the quote went out (owner 2026-11-09).
+    // Judged from the call's start; `narrow` keeps the candidate query off the other Leads bells.
+    key: CALL_QUOTE_CLASS, categories: ['lead'], match: isCallQuoteBell, rule: callQuoteSettled,
+    narrow: (cq) => cq.whereRaw("metadata->>'estimator_engine' = 'true'").whereRaw("COALESCE(metadata->>'callSid', '') <> ''"),
   },
   { // lead-webhook.js ringRepeatFormAlert — it dedupes on OPEN rows only, so a
     // retirement ends the episode and the lead's next form rings a fresh row.
@@ -1361,6 +1441,7 @@ function candidateQuery(cursor) {
           if (c.doneWhen) cq.whereRaw("metadata->>'doneWhen' = ?", [c.doneWhen]);
           if (c.prefix) cq.whereRaw("left(COALESCE(metadata->>'dedupeKey', ''), ?) = ?", [c.prefix.length, c.prefix]);
           if (c.triggerKey) cq.whereRaw("metadata->>'triggerKey' = ?", [c.triggerKey]);
+          if (c.narrow) c.narrow(cq);
         });
       }
     })
@@ -1550,6 +1631,7 @@ async function rearmRelevantAgain(now, todayET) {
         const subject = subjectFor(bell, data, todayET);
         // Witnesses that failed to load are no verdict: leave the row as it is.
         if (cls.contact && subject.contactUnknown) continue;
+        if (cls.key === CALL_QUOTE_CLASS && subject.callQuoteUnknown) continue;
         if (judge(cls, subject).reason) continue;
         rearmed += await putBack(row);
       } catch (err) {

@@ -214,6 +214,75 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     expect([closed.done_by, closed.resolution]).toEqual(['relevance', 'Estimate was sent']);
   });
 
+  test('an estimator call bell closes on a real handoff or a live booking after the CALL STARTED (even before the bell), never on sent_at alone, a quote from before the call or another customer\'s; a text-origin bell is left; it comes back when the witness goes (owner 2026-11-09)', async () => {
+    const now = new Date();
+    const hour = 60 * 60 * 1000;
+    const callAt = new Date(now.getTime() - 3 * hour);
+    const quoteAt = new Date(callAt.getTime() + 10 * 60 * 1000);
+    const bellAt = new Date(callAt.getTime() + 20 * 60 * 1000);
+    const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
+    const customer = await insert('customers', { first_name: 'Callquote', phone: '+15555557021' });
+    const other = await insert('customers', { first_name: 'Elsewhere', phone: '+15555557022' });
+    let n = 0;
+    const call = (who, over = {}) => {
+      n += 1;
+      const sid = `CAQ${String(Date.now()).slice(-8)}${n}${Math.random().toString(36).slice(2, 10)}`;
+      return insert('call_log', { direction: 'inbound', from_phone: '+15555557021', to_phone: '+19415550100', customer_id: who?.id || null, status: 'completed',
+        twilio_call_sid: sid, created_at: callAt, ...over }).then((row) => ({ row, sid }));
+    };
+    const callBell = (sid, over = {}) => bell({ category: 'lead', created_at: bellAt, link: '/admin/leads',
+      metadata: { callSid: sid, estimator_engine: true, quote_promised: true, lane: 'residential', promise: true, ...over } });
+    const verdicts = async (...bells) => {
+      await relevance.runAdminAlertRelevanceSweep({ now });
+      return Promise.all(bells.map((b) => get(b.id)));
+    };
+
+    const quoted = await call(customer);
+    const suppressed = await call(customer);
+    const earlier = await call(customer);
+    const stranger = await call(other);
+    const noCall = await callBell(`CAQ-no-call-${Math.random().toString(36).slice(2, 10)}`);
+    const quotedBell = await callBell(quoted.sid);
+    const suppressedBell = await callBell(suppressed.sid);
+    const textBell = await bell({ category: 'lead', created_at: bellAt, link: '/admin/leads',
+      metadata: { smsThreadKey: `sms-thread:${customer.id}`, estimator_engine: true, quote_promised: true } });
+    // Another customer's call (their own quote, below, is theirs), and a call whose customer has only a pre-call delivery.
+    const strangerBell = await callBell(stranger.sid);
+    const earlierBell = await callBell(earlier.sid);
+
+    // sent_at alone (a suppressed send) and a delivery from before the call: still open. Another customer's quote too.
+    await insert('estimates', { status: 'sent', customer_id: customer.id, sent_at: quoteAt });
+    await insert('estimates', { status: 'sent', customer_id: customer.id, sent_at: new Date(callAt.getTime() - hour), estimate_data: delivered(new Date(callAt.getTime() - hour)) });
+    // (The other customer's delivered quote is theirs: it closes the other customer's bell, below.)
+    await insert('estimates', { status: 'sent', customer_id: other.id, sent_at: quoteAt, estimate_data: delivered(quoteAt) });
+    let rows = await verdicts(noCall, quotedBell, suppressedBell, textBell, strangerBell, earlierBell);
+    expect(rows.map((r) => r.done_at != null)).toEqual([false, false, false, false, true, false]);
+    expect([rows[4].done_by, rows[4].resolution]).toEqual(['relevance', 'Estimate was sent']);
+
+    // A real delivery after the call started, written before the bell: closes the first customer's bells (same call
+    // start rule), and the call-less and text-origin bells stay open.
+    const delivery = await insert('estimates', { status: 'sent', customer_id: customer.id, sent_at: quoteAt, estimate_data: delivered(quoteAt) });
+    rows = await verdicts(noCall, quotedBell, suppressedBell, textBell, earlierBell);
+    expect(rows.map((r) => r.done_at != null)).toEqual([false, true, true, false, true]);
+    expect(rows[1].resolution).toBe('Estimate was sent');
+
+    // The witness goes (the delivery is wiped): the bells come back unread.
+    await db('estimates').where({ id: delivery.id }).update({ estimate_data: JSON.stringify({}) });
+    rows = await verdicts(quotedBell, suppressedBell);
+    expect(rows.map((r) => [r.done_at, r.metadata.retired])).toEqual([[null, undefined], [null, undefined]]);
+
+    // A live top-level visit booked after the call started closes it; a cancelled one does not.
+    const visitCustomer = await insert('customers', { first_name: 'Visitquote', phone: '+15555557023' });
+    const visitCall = await call(visitCustomer);
+    const visitBell = await callBell(visitCall.sid);
+    const bookedDay = etDateString(new Date(now.getTime() + 3 * DAY));
+    const visit = await insert('scheduled_services', { customer_id: visitCustomer.id, scheduled_date: bookedDay, service_type: 'General Pest Control', status: 'cancelled', created_at: quoteAt });
+    expect((await verdicts(visitBell))[0].done_at).toBeNull();
+    await db('scheduled_services').where({ id: visit.id }).update({ status: 'confirmed' });
+    const [closedByVisit] = await verdicts(visitBell);
+    expect([closedByVisit.done_by, closedByVisit.resolution]).toEqual(['relevance', 'A visit was booked']);
+  });
+
   test('a quote sent to the lead\'s customer after the bell keeps its bell retired when a newer draft takes over the lead\'s estimate pointer', async () => {
     const now = new Date();
     const bellAt = new Date(now.getTime() - 3 * 60 * 60 * 1000);

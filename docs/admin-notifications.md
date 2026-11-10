@@ -302,6 +302,13 @@ customer's message by this rule.
    closes by itself under `GATE_ALERT_CONTACT_CLOSE` alone (owner 2026-11-02), once both hold after the
    bell: a person answered that customer (a text that reached them, a call a person made or took, or a
    person's email) and a visit of that customer was completed, on any day. Either alone leaves it open.
+   The estimator's call bells (category `lead`, `estimator_engine`, a `callSid`: "Quote promised on call",
+   "AI estimate draft needs review", the commercial scaffold) close by themselves, with no gate (owner
+   2026-11-09), once a quote was handed off to the call's customer or lead (`handedOffWithin`, never
+   `sent_at`) or a live top-level visit was booked for them, after the CALL STARTED (`callStartedAtSql` over
+   the call's `call_log` row, not the bell's `created_at`: a quote can go out between the call and the bell).
+   No call row, or a call with no customer and no lead, leaves the bell open. A text-origin bell (a
+   `smsThreadKey`, no `callSid`) is not in the class. Re-armed like every class if the evidence goes.
    A new text from the same sender rings a fresh bell: the thread row is rewritten, rung and
    re-opened. The sweep never contacts a customer.
 3. **Budget.** Rows that are not a customer reaching out should ring at most 10 times a
