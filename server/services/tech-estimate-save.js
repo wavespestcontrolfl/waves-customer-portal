@@ -142,7 +142,8 @@ const ownQuery = (req) => db('tech_estimates as t')
 const whoColumn = () => db.raw("COALESCE(NULLIF(e.customer_name, ''), NULLIF(trim(concat_ws(' ', c.first_name, c.last_name)), '')) as who");
 
 function ownShape(row) {
-  const reasons = Price.phoneReasons(Array.isArray(row.office_first_reasons) ? row.office_first_reasons : []);
+  const stored = Array.isArray(row.office_first_reasons) ? row.office_first_reasons : [];
+  const reasons = Price.phoneReasons(stored);
   return {
     id: row.id,
     createdAt: row.created_at,
@@ -155,6 +156,8 @@ function ownShape(row) {
     annualTotal: roundMoney(row.annual_total),
     oneTimeTotal: roundMoney(row.onetime_total),
     officeFirst: { required: reasons.length > 0, reasons },
+    // Step 4: the Send button shows for his draft only when no stored reason holds it for the office.
+    canSend: row.status === 'draft' && stored.length === 0,
   };
 }
 

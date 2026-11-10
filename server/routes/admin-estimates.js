@@ -3275,6 +3275,12 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             // is automation, not an office click: its entry point keeps the text
             // inside 8 AM to 8 PM ET (validators/send-window.js).
             ...(options.movingAutoSend === true ? { entryPoint: 'moving_auto_send' } : {}),
+            // A technician's send from the phone (services/tech-estimate-send.js): its own entry point, fenced to
+            // 8 AM to 8 PM ET like the one above. A new person's consent is the technician's on-site confirmation.
+            ...(options.techEstimateSend ? {
+              entryPoint: 'tech_estimate_send',
+              ...(estimate.customer_id ? {} : { consentBasis: { status: 'transactional_allowed', source: 'tech_estimate_on_site_request', capturedAt: options.techEstimateSend.consentCapturedAt } }),
+            } : {}),
             metadata: {
               original_message_type: smsTemplateKey,
             },

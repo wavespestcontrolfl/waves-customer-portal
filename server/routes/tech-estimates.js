@@ -5,9 +5,9 @@ const { adminAuthenticate } = require('../middleware/admin-auth');
 const featureGates = require('../config/feature-gates');
 const logger = require('../services/logger');
 
-// The technician estimate tool (steps 1 and 2a of 4): setup, a price preview, saving the quote as a draft and reading his
-// own drafts. Nothing is sent. GATE_TECH_ESTIMATES (owner 2026-11-09): the later steps text customers and the preview
-// runs the paid property lookup.
+// The technician estimate tool (steps 1, 2a and 4): setup, a price preview, saving the quote as a draft, reading his own
+// drafts and texting his own clean draft through the office's estimate send. GATE_TECH_ESTIMATES (owner 2026-11-09): the
+// send texts customers and the preview runs the paid property lookup.
 router.use(adminAuthenticate);
 
 const OFF = { enabled: false };
@@ -48,6 +48,9 @@ router.post('/', (req, res, next) => answer(res, next, 'create', () => save().cr
 
 /* GET / — his own estimates, newest first */
 router.get('/', (req, res, next) => answer(res, next, 'list', () => save().listOwn(req)));
+
+/* POST /:id/send — text his own draft through the office's estimate send (409 office_first for a held one) */
+router.post('/:id/send', (req, res, next) => answer(res, next, 'send', () => require('../services/tech-estimate-send').sendOwn(req, req.params.id, req.body)));
 
 /* GET /:id — one of his own estimates (404 for any other id) */
 router.get('/:id', (req, res, next) => answer(res, next, 'read', () => save().readOwn(req, req.params.id)));
