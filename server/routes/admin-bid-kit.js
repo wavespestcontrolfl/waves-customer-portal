@@ -7,6 +7,7 @@ const store = require('../services/bid-kit-store');
 const files = require('../services/bid-kit-files');
 const expiry = require('../services/bid-kit-expiry');
 const { scrubError, errorTag } = require('../services/bid-kit-log');
+const { isUploadHangUp } = require('../middleware/errors');
 const catalog = require('../../shared/bid-kit-catalog.cjs');
 const { validCalendarDate } = require('../utils/datetime-et');
 
@@ -269,6 +270,9 @@ function receiveFile(req, res, next) {
     if (!err) return next();
     if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'The file is larger than 15 MB' });
     if (err.code === 'LIMIT_UNEXPECTED_FILE' || err.code === 'LIMIT_FILE_COUNT') return res.status(400).json({ error: 'Send one file in the "file" field' });
+    // A client that hung up mid-upload: multer's own fixed message, no data in it to scrub. It goes on unchanged so the
+    // app's hang-up guard (middleware/errors.js) knows it and keeps it out of the error log and Sentry.
+    if (isUploadHangUp(err, req)) return next(err);
     return next(scrubError(err));
   });
 }

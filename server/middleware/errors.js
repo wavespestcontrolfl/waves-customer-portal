@@ -92,6 +92,8 @@ function loggedErrorText(err, req) {
 // passes the error on would log a server error and raise a Sentry issue for a dropped phone
 // connection. Nobody is waiting for a reply and nothing failed here: one info line, and the
 // error goes no further. Mounted BEFORE the Sentry handler. Every other error passes through.
+// The test reads multer's own message, so a route that rewrites errors before it passes them on
+// must hand a hang-up over unchanged (isUploadHangUp; admin-bid-kit.js receiveFile does).
 const UPLOAD_HANG_UP_MESSAGES = new Set(['Request aborted', 'Request closed']);
 function isUploadHangUp(err, req) {
   return !!err && !err.code && UPLOAD_HANG_UP_MESSAGES.has(err.message)
@@ -152,4 +154,4 @@ function notFound(req, res) {
   res.status(404).json(notFoundBody(req));
 }
 
-module.exports = { errorHandler, uploadHangUp, notFound, notFoundBody, redactSensitiveBody };
+module.exports = { errorHandler, uploadHangUp, isUploadHangUp, notFound, notFoundBody, redactSensitiveBody };
