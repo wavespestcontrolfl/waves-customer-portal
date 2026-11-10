@@ -13,15 +13,14 @@
  *   4. closes that notification once staff mark the notice sent (the existing
  *      Customer 360 "Notice" button) or the warranty is cancelled.
  *
- * Commercial Pest Service Agreement (GATE_AGREEMENT_RENEWAL_REMINDER): the
+ * Commercial Pest Service Agreement: the
  * same four steps for every signed commercial agreement, whose template fixes
  * a 12-month term from the start date shown that renews for 12-month terms
  * unless either party gives written notice at least 30 days before the term
  * ends. Its renewal date is the term anchor plus 12 months: the start date
  * staff typed when they issued it, else the customer's first visit on or after
  * signing (the proposal path prints "Set when we schedule your first visit"),
- * else, 180 days after signing with still no visit, the signing date. Dark =
- * warranties only, as before.
+ * else, 180 days after signing with still no visit, the signing date.
  *
  * It sends nothing to a customer and charges nothing. A cancelled agreement
  * stops it.
@@ -52,7 +51,6 @@ const AWAITING_FIRST_VISIT = Symbol('awaiting-first-visit');
 const KINDS = Object.freeze({
   [NEW_CONSTRUCTION_WARRANTY_KEY]: Object.freeze({
     alertPrefix: 'warranty-renewal',
-    live: () => true,
     renewalDate: async (_conn, row) => isoFromUs(snapshotOf(row).warranty?.renewal_due),
     spec: (row) => {
       const name = fullName(row) || 'the owner';
@@ -72,7 +70,6 @@ const KINDS = Object.freeze({
   }),
   [COMMERCIAL_AGREEMENT_KEY]: Object.freeze({
     alertPrefix: 'agreement-renewal',
-    live: () => require('../config/feature-gates').agreementRenewalReminderLive(),
     renewalDate: commercialRenewalDate,
     spec: (row) => {
       // A commercial account is often a business with no first/last name on the row.
@@ -93,7 +90,7 @@ const KINDS = Object.freeze({
 });
 
 function liveKeys() {
-  return Object.keys(KINDS).filter((key) => KINDS[key].live());
+  return Object.keys(KINDS);
 }
 
 function alertKey(contractId, renewalDay, templateKey = NEW_CONSTRUCTION_WARRANTY_KEY) {
