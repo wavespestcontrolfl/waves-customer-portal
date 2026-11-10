@@ -951,15 +951,18 @@ async function proveHoldOrRefuse(trx, slotId, args) {
   return { payload: proof.payload, moveIds: proof.moves.map((move) => move.id) };
 }
 
-// extendReservation, gate on (read fresh), in hour or capacity mode: any hold on another live make-room hold's destination
-// is refused (its own row never blocks it), and in hour mode a make-room hold must still prove its hour. { makeRoom, refused }.
+// extendReservation: { makeRoom, refused }. A make-room hold is kept only while its hour proves again, which needs the
+// gate on and hour mode. With the gate not on, or in capacity mode (where the row may read as a capacity hold, whose
+// extend runs no occupancy probe), nothing proves its chain, so it is refused and superseded, never extended unproven
+// (Codex #7796 P2). With the gate on (read fresh), any hold on another live make-room hold's destination is refused too,
+// in either scheduling mode; its own row never blocks it.
 async function extendMakeRoomState(trx, { row, estimate, rowUnderCapacity, scheduledDate, windowStart, windowEnd }) {
-  if (!makeRoomGuardsOn()) return { makeRoom: null, refused: false };
+  const guardsOn = makeRoomGuardsOn();
+  if (row.make_room_moves && (!guardsOn || rowUnderCapacity || capacityEnabled())) return { makeRoom: null, refused: true };
+  if (!guardsOn) return { makeRoom: null, refused: false };
   const window = { date: scheduledDate, techId: row.technician_id, windowStart, windowEnd, excludeId: row.id };
   if (await makeRoomDestinationClash(trx, window)) return { makeRoom: null, refused: true };
-  // Capacity mode proves no make-room hour (makeRoomHoldsOn is hour mode only; the gate was read just above): such a hold
-  // gets the ordinary probe, which sees the stop and supersedes it.
-  if (rowUnderCapacity || !row.make_room_moves || capacityEnabled()) return { makeRoom: null, refused: false };
+  if (!row.make_room_moves) return { makeRoom: null, refused: false };
   const { parseHHMM } = require('./scheduling/window-rules');
   const heldMinutes = parseHHMM(windowEnd) - parseHHMM(windowStart);
   let extendZone = null;
@@ -2905,10 +2908,10 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
     const { parseHHMM } = require('./scheduling/window-rules');
     const extendWindowMinutes = parseHHMM(windowEnd) - parseHHMM(windowStart);
     // A make-room hold (mode on, hour mode) is kept only while its hour still proves out: the same proof reserveSlot ran,
-    // again under this transaction's date lock, and its chain is refreshed. A hold that no longer proves, or any
-    // make-room hold when the gate is not on, goes through the ordinary probe below, which sees the stop in the held
-    // hour and supersedes it (fails closed). An extend is how a customer keeps a hold while paying, so refusing every
-    // extend would drop the hold at the page's first refresh.
+    // again under this transaction's date lock, and its chain is refreshed. A hold that no longer proves, and any
+    // make-room hold when the gate is not on or in capacity mode, is refused by extendMakeRoomState and superseded
+    // below (fails closed). An extend is how a customer keeps a hold while paying, so refusing every extend would drop
+    // the hold at the page's first refresh.
     const { makeRoom, refused: makeRoomRefused } = await extendMakeRoomState(trx, { row, estimate, rowUnderCapacity, scheduledDate, windowStart, windowEnd });
     const clash = rowUnderCapacity ? [] : await findConflictingVisits({
       db: trx,
