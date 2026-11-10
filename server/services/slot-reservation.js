@@ -833,6 +833,17 @@ function makeRoomHoldsOn() {
   }
 }
 
+// The destination guards (Codex #7796 P2): GATE_BOOKING_MAKE_ROOM on, in hour mode AND in capacity mode. A make-room hold
+// made in hour mode keeps its moved stops' destinations for its whole life, even if capacity mode turns on meanwhile
+// (no new make-room hold is made then: makeRoomHoldsOn). Off or shadow: the gate is the kill switch and guards nothing.
+function makeRoomGuardsOn() {
+  try {
+    return require('./scheduling/booking-make-room').bookingMakeRoomMode() === 'on';
+  } catch {
+    return false;
+  }
+}
+
 function slotTaken(slotId) {
   const err = new Error('slot no longer available');
   err.code = 'SLOT_UNAVAILABLE';
@@ -915,18 +926,19 @@ async function makeRoomChainClash(trx, { payload, excludeId = null, excludeEstim
 // destination, or when this hold's own chain clashes with another live chain (makeRoomChainClash). A make-room hold
 // whose gate went off throws the ordinary slot-taken answer (nothing is written).
 async function destinationHitUnderGate(trx, makeRoom, slotId, window) {
-  if (!requireMakeRoomStillOn(makeRoom, slotId)) return false;
+  requireMakeRoomStillOn(makeRoom, slotId);
+  if (!makeRoomGuardsOn()) return false;
   if (await makeRoomDestinationClash(trx, window)) return true;
   return !!makeRoom && makeRoomChainClash(trx, { payload: makeRoom.payload, excludeId: window.excludeId || null });
 }
 
-// commitReservation: a hold graduating inside the commit grace (row._lapsed) yields to another customer's live make-room
-// hold whose moved stop now holds this window (Codex pre-push P1, #7796). Once this hold's expiry passed, that chain's
-// proof no longer saw it as a stop, and the commit probes see each hold at its own window only. Mode on, hour mode only;
-// the committing hold never blocks itself. A hold that never lapsed is not asked: it was a stop in every chain proof
-// (the same line the commit probe draws with includeHolds).
-async function lapsedHoldOnMakeRoomDestination(client, { row, useCapacity, date, windowStart, windowEnd }) {
-  if (!row._lapsed || useCapacity || !makeRoomHoldsOn()) return false;
+// commitReservation: the accepted window yields to another customer's live make-room hold whose moved stop now holds any
+// part of it (Codex pre-push P1s, #7796). The commit probes see each hold at its own window only, and no chain proof saw
+// this window as it is now in two cases: a hold whose expiry passed inside the grace, and an accept that lengthens the
+// held window (the service profile is resolved again). So every accept is asked, with the final window. Mode on, hour
+// or capacity mode (makeRoomGuardsOn); the committing hold never blocks itself.
+async function acceptedWindowOnMakeRoomDestination(client, { row, date, windowStart, windowEnd }) {
+  if (!makeRoomGuardsOn()) return false;
   return !!(await makeRoomDestinationClash(client, { date, techId: row.technician_id || null, windowStart, windowEnd, excludeId: row.id }));
 }
 
@@ -940,13 +952,15 @@ async function proveHoldOrRefuse(trx, slotId, args) {
   return { payload: proof.payload, moveIds: proof.moves.map((move) => move.id) };
 }
 
-// extendReservation, gate on (read fresh): any hold on another live make-room hold's destination is refused (its own row
-// never blocks it), and a make-room hold must still prove its hour. { makeRoom, refused }.
+// extendReservation, gate on (read fresh), in hour or capacity mode: any hold on another live make-room hold's destination
+// is refused (its own row never blocks it), and in hour mode a make-room hold must still prove its hour. { makeRoom, refused }.
 async function extendMakeRoomState(trx, { row, estimate, rowUnderCapacity, scheduledDate, windowStart, windowEnd }) {
-  if (rowUnderCapacity || !makeRoomHoldsOn()) return { makeRoom: null, refused: false };
+  if (!makeRoomGuardsOn()) return { makeRoom: null, refused: false };
   const window = { date: scheduledDate, techId: row.technician_id, windowStart, windowEnd, excludeId: row.id };
   if (await makeRoomDestinationClash(trx, window)) return { makeRoom: null, refused: true };
-  if (!row.make_room_moves) return { makeRoom: null, refused: false };
+  // Capacity mode proves no make-room hour (makeRoomHoldsOn is hour mode only; the gate was read just above): such a hold
+  // gets the ordinary probe, which sees the stop and supersedes it.
+  if (rowUnderCapacity || !row.make_room_moves || capacityEnabled()) return { makeRoom: null, refused: false };
   const { parseHHMM } = require('./scheduling/window-rules');
   const heldMinutes = parseHHMM(windowEnd) - parseHHMM(windowStart);
   let extendZone = null;
@@ -2400,7 +2414,7 @@ async function commitReservation({
         ? await findInterviewConflicts({ db: client, date: scheduledDate, windowStart, windowEnd: probeWindowEnd })
         : [];
       const destinationClash = !committedClash.length && !interviewClash.length
-        && await lapsedHoldOnMakeRoomDestination(client, { row, useCapacity, date: scheduledDate, windowStart, windowEnd: probeWindowEnd });
+        && await acceptedWindowOnMakeRoomDestination(client, { row, date: scheduledDate, windowStart, windowEnd: probeWindowEnd });
       if (committedClash.length || interviewClash.length || destinationClash) {
         const err = new Error('slot no longer available');
         err.code = 'SLOT_UNAVAILABLE';
@@ -3141,6 +3155,9 @@ module.exports = {
     refuseGracedOfferOnRivalHoldConflict,
     makeRoomDestinationClash,
     makeRoomChainClash,
-    lapsedHoldOnMakeRoomDestination,
+    acceptedWindowOnMakeRoomDestination,
+    makeRoomGuardsOn,
+    destinationHitUnderGate,
+    extendMakeRoomState,
   },
 };
