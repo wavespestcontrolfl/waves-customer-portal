@@ -50,7 +50,7 @@ function Verdict({ officeFirst, holdDollars }) {
   );
 }
 
-// One measured fact with a Change control. An edit is only held here until "Update price".
+// One measured fact with a Change control. An edit is only held here until "Update price"; Cancel drops it.
 function FactRow({ name, label, unit, fact, edit, onEdit, disabled }) {
   const shown = fact ? `${Number(fact.value).toLocaleString('en-US')}${unit ? ` ${unit}` : ''}` : 'Not set';
   return (
@@ -60,18 +60,28 @@ function FactRow({ name, label, unit, fact, edit, onEdit, disabled }) {
         {edit === undefined && <button type="button" style={s.small} disabled={disabled} aria-label={`Change ${label.toLowerCase()}`} onClick={() => onEdit(name, fact ? String(fact.value) : '')}>Change</button>}
       </div>
       {edit !== undefined && (
-        <input
-          aria-label={`New ${label.toLowerCase()}`} inputMode="numeric" style={{ ...s.input, marginBottom: 0 }}
-          value={edit} onChange={(e) => onEdit(name, e.target.value)}
-        />
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input
+            aria-label={`New ${label.toLowerCase()}`} inputMode="numeric" style={{ ...s.input, marginBottom: 0, flex: 1, minWidth: 0 }}
+            value={edit} onChange={(e) => onEdit(name, e.target.value)}
+          />
+          <button type="button" style={s.small} disabled={disabled} aria-label={`Cancel the change to ${label.toLowerCase()}`} onClick={() => onEdit(name, undefined)}>Cancel</button>
+        </div>
       )}
     </div>
   );
 }
 
+const NUMBER = /^\d+(\.\d+)?$/;
+
 function Quote({ priced, setup, keys, edits, onEdit, onUpdate, onSave, busy }) {
   const { answer } = priced;
-  const pending = Object.entries(edits).filter(([name, v]) => /^\d+(\.\d+)?$/.test(v.trim()) && Number(v) !== Number(answer.facts?.[name]?.value));
+  // An open change that is not the value this quote was priced with. While one is open the estimate cannot be saved: the
+  // save would keep the old value and say nothing, and the office would not get its check. He updates the price with the
+  // change, or cancels it. A field that is not a number cannot be priced, so it blocks the update too.
+  const unapplied = Object.entries(edits).filter(([name, v]) => !(NUMBER.test(v.trim()) && Number(v) === Number(answer.facts?.[name]?.value)));
+  const invalid = unapplied.some(([, v]) => !NUMBER.test(v.trim()));
+  const blocked = unapplied.length > 0;
   return (
     <div>
       <div style={s.card}>
@@ -84,10 +94,18 @@ function Quote({ priced, setup, keys, edits, onEdit, onUpdate, onSave, busy }) {
           <FactRow key={name} name={name} label={label} unit={unit} fact={answer.facts?.[name]} edit={edits[name]} onEdit={onEdit} disabled={busy} />
         ))}
         <p style={s.muted}>If you change a measured fact, the office checks the estimate before it goes.</p>
-        {pending.length > 0 && <button type="button" style={{ ...s.secondary, marginTop: 10, marginBottom: 0 }} disabled={busy} onClick={() => onUpdate(pending)}>Update price</button>}
+        {blocked && (
+          <>
+            <button type="button" style={{ ...s.secondary, marginTop: 10, marginBottom: 0, opacity: busy || invalid ? 0.5 : 1 }} disabled={busy || invalid} onClick={() => onUpdate(unapplied)}>Update price</button>
+            <p role="status" style={s.muted}>
+              {invalid ? 'Type a number in each changed field, or cancel the change.' : 'Update the price to use your change, or cancel it. Then you can save.'}
+            </p>
+          </>
+        )}
       </div>
-      <Verdict officeFirst={answer.officeFirst} holdDollars={setup.oneTimeHoldDollars} />
-      <button type="button" style={{ ...s.primary, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={onSave}>{busy ? 'Working…' : 'Save estimate'}</button>
+      {/* The verdict is about the priced quote. With a change waiting it would say "ready, save it" over a Save that is off. */}
+      {!blocked && <Verdict officeFirst={answer.officeFirst} holdDollars={setup.oneTimeHoldDollars} />}
+      <button type="button" style={{ ...s.primary, opacity: busy || blocked ? 0.6 : 1 }} disabled={busy || blocked} onClick={onSave}>{busy ? 'Working…' : 'Save estimate'}</button>
     </div>
   );
 }
@@ -233,7 +251,7 @@ function NewEstimate({ setup, customer, service, onHandOff, onMine }) {
       <Problem problem={problem} onHandOff={canHandOff ? () => onHandOff({ service, prospect: customer ? null : typed }) : null} />
       {problem?.final ? null : priced ? (
         <Quote priced={priced} setup={setup} keys={priced.body.services} edits={edits} busy={busy} onSave={save} onUpdate={update}
-          onEdit={(name, value) => setEdits((e) => ({ ...e, [name]: value }))} />
+          onEdit={(name, value) => setEdits(({ [name]: _dropped, ...rest }) => (value === undefined ? rest : { ...rest, [name]: value }))} />
       ) : (
         <button type="button" style={{ ...s.primary, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={getPrice}>{busy ? 'Getting the price…' : 'Get price'}</button>
       )}

@@ -30,7 +30,9 @@ const READY = {
   officeFirst: { required: false, reasons: [] },
   digest: DIGEST,
 };
-const SAVED = { id: 'est-1', status: 'draft', ...READY };
+// The save answers the stored row: lines, totals and the verdict, without the preview's facts and digest.
+const { facts: _previewFacts, digest: _previewDigest, ...STORED } = READY;
+const SAVED = { id: 'est-1', status: 'draft', ...STORED };
 
 let calls; // [{ method, path, body }]
 let replies; // path key -> queue of { status, body }
@@ -142,6 +144,83 @@ describe('the price request and the save request', () => {
     const save = calls.find((c) => c.method === 'POST' && c.path === '/');
     expect(save.body.clientDraftId).toBe('00000000-0000-4000-8000-000000000002');
     expect(save.body.facts).toEqual({ homeSqFt: 2000 });
+  });
+
+  // A typed change is only on the screen until "Update price". Saving then would keep the looked-up value and say
+  // nothing, and the office would not get its check. So the save waits for the update or for Cancel.
+  describe('a changed fact that is not applied yet', () => {
+    const priceThenChange = async (value) => {
+      reply('POST /price', 200, READY);
+      open();
+      pick('Recurring pest control');
+      getPrice();
+      await screen.findByText('This estimate is ready. Save it.');
+      fireEvent.click(screen.getByRole('button', { name: 'Change home size' }));
+      fireEvent.change(screen.getByLabelText('New home size'), { target: { value } });
+    };
+    const saveButton = () => screen.getByRole('button', { name: 'Save estimate' });
+    const saves = () => calls.filter((c) => c.method === 'POST' && c.path === '/');
+
+    it('turns Save off and says what to do; a tap on Save sends nothing', async () => {
+      await priceThenChange('2000');
+      expect(saveButton()).toBeDisabled();
+      expect(screen.getByText('Update the price to use your change, or cancel it. Then you can save.')).toBeInTheDocument();
+      // The "ready, save it" line is about the old quote: it is not shown over a Save that is off.
+      expect(screen.queryByText('This estimate is ready. Save it.')).not.toBeInTheDocument();
+      fireEvent.click(saveButton());
+      expect(saves()).toEqual([]);
+    });
+
+    it('Cancel drops the change: Save is on again and the save carries no facts', async () => {
+      await priceThenChange('2000');
+      reply('POST /', 200, SAVED);
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel the change to home size' }));
+      expect(screen.queryByLabelText('New home size')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Update price' })).not.toBeInTheDocument();
+      expect(screen.getByText('This estimate is ready. Save it.')).toBeInTheDocument();
+      expect(saveButton()).toBeEnabled();
+      fireEvent.click(saveButton());
+      await screen.findByText('Saved. Send it now, or later from My estimates.');
+      expect(saves()[0].body).toEqual({ visitId: 'visit-1', services: ['PEST'], clientDraftId: '00000000-0000-4000-8000-000000000001', digest: DIGEST });
+      expect(priceCalls()).toHaveLength(1);
+    });
+
+    it.each([['letters', '2o00'], ['nothing', '']])('an entry of %s cannot be priced: Update price and Save are both off', async (_label, value) => {
+      await priceThenChange(value);
+      expect(screen.getByRole('button', { name: 'Update price' })).toBeDisabled();
+      expect(saveButton()).toBeDisabled();
+      expect(screen.getByText('Type a number in each changed field, or cancel the change.')).toBeInTheDocument();
+      expect(priceCalls()).toHaveLength(1);
+    });
+
+    it('a field opened and left at the looked-up value blocks nothing', async () => {
+      await priceThenChange('1800');
+      expect(screen.queryByRole('button', { name: 'Update price' })).not.toBeInTheDocument();
+      expect(saveButton()).toBeEnabled();
+    });
+
+    it('an update that fails keeps the change and keeps Save off: the old quote cannot be saved by mistake', async () => {
+      await priceThenChange('2000');
+      reply('POST /price', 400, { error: 'homeSqFt must be a whole number from 300 to 20000.' });
+      fireEvent.click(screen.getByRole('button', { name: 'Update price' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent('homeSqFt must be a whole number from 300 to 20000.');
+      expect(screen.getByLabelText('New home size')).toHaveValue('2000');
+      expect(saveButton()).toBeDisabled();
+      fireEvent.click(saveButton());
+      expect(saves()).toEqual([]);
+    });
+
+    it('two changes go in one update; one bad field holds both back', async () => {
+      await priceThenChange('2000');
+      fireEvent.click(screen.getByRole('button', { name: 'Change lot size' }));
+      fireEvent.change(screen.getByLabelText('New lot size'), { target: { value: 'big' } });
+      expect(screen.getByRole('button', { name: 'Update price' })).toBeDisabled();
+      fireEvent.change(screen.getByLabelText('New lot size'), { target: { value: '12000' } });
+      reply('POST /price', 200, READY);
+      fireEvent.click(screen.getByRole('button', { name: 'Update price' }));
+      await waitFor(() => expect(priceCalls()).toHaveLength(2));
+      expect(priceCalls()[1].body.facts).toEqual({ homeSqFt: 2000, lotSqFt: 12000 });
+    });
   });
 
   it('shows the termite perimeter only when the termite line is chosen', async () => {
