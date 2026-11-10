@@ -9,7 +9,9 @@ jest.setTimeout(30000);
 
 const mockCaller = { id: 'tech-1', role: 'technician' };
 const mockState = {
-  switchOn: true, queries: [], writes: [], customers: [], onRoute: new Set(), caps: [],
+  switchOn: true, queries: [], writes: [], visits: [], caps: [],
+  // `customers` answers the bell's name lookup (lookupCustomerName) and nothing on the price path.
+  customers: [],
   // step 2a: his tool rows, the transaction's writes, and the wheres the own-reads ran
   own: [], inserts: [], toolRow: null, conflict: false, wheres: [], trx: null,
 };
@@ -18,7 +20,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../middleware/admin-auth', () => ({
   ...jest.requireActual('../middleware/admin-auth'),
   adminAuthenticate: (req, _res, next) => {
-    req.technician = { id: mockCaller.id, role: mockCaller.role };
+    req.technician = { id: mockCaller.id, role: mockCaller.role, name: 'Taylor Example' };
     req.technicianId = mockCaller.id;
     req.techRole = mockCaller.role;
     return next();
@@ -33,6 +35,7 @@ jest.mock('../models/db', () => {
       where(...args) {
         mockState.wheres.push([table, ...args]);
         if (args[0] && typeof args[0] === 'object' && args[0].id) builder._id = args[0].id;
+        else if (args[0] === 'scheduled_services.id') builder._id = args[1];
         if (args[0] === 't.technician_id') filters.technician = args[1];
         if (args[0] === 'e.id') filters.id = args[1];
         return builder;
@@ -48,6 +51,8 @@ jest.mock('../models/db', () => {
         if (table === 'technicians') return { can_create_estimates: mockState.switchOn };
         if (table === 'customers') return mockState.customers.find((c) => c.id === builder._id);
         if (table === 'tech_estimates as t') return builder.rows()[0];
+        // The visit read: the row for that id, and only inside the caller's scope (see the visit-scope mock below).
+        if (table === 'scheduled_services') return mockState.visits.find((v) => v.id === builder._id && (!builder._tech || v.technician_id === builder._tech));
         return undefined;
       },
       then(resolve, reject) {
@@ -78,8 +83,9 @@ jest.mock('../models/db', () => {
   };
   return dbFn;
 });
+// The portal's own read scope for a technician, reduced to what it decides here: his assignment only (an admin is unscoped).
 jest.mock('../services/technician-visit-scope', () => ({
-  technicianServicesCustomer: jest.fn(async (req, id) => req.techRole === 'admin' || mockState.onRoute.has(id)),
+  technicianCurrentVisitFilter: jest.fn((req, q) => { q._tech = req.techRole === 'admin' ? null : req.technicianId; return q; }),
 }));
 jest.mock('../services/technician-capabilities', () => ({
   ...jest.requireActual('../services/technician-capabilities'),
@@ -91,13 +97,26 @@ const lookupRoutes = require('../routes/property-lookup-v2');
 const persistence = require('../services/admin-estimate-persistence');
 const soldBy = require('../services/estimate-sold-by');
 const auditLog = require('../services/audit-log');
+const NotificationService = require('../services/notification-service');
 const knownCaller = require('../utils/known-caller-phone');
 const { technicianMayReach } = require('../middleware/technician-scope');
 const { PEST_SERVICES, _private: { ENGINE_SERVICES } } = require('../services/tech-estimate-price');
 const router = require('../routes/tech-estimates');
 
+const sharedCap = require('../middleware/public-llm-shared-cap');
 const CUSTOMER_ID = '00000000-0000-4000-8000-0000000000c1';
-const UNIT_CUSTOMER_ID = '00000000-0000-4000-8000-0000000000c3';
+const VISIT_ID = '00000000-0000-4000-8000-0000000000a1';
+const UNIT_VISIT_ID = '00000000-0000-4000-8000-0000000000a3';
+const SECOND_HOME_VISIT_ID = '00000000-0000-4000-8000-0000000000a4';
+const OTHER_TECH_VISIT_ID = '00000000-0000-4000-8000-0000000000a5';
+// A visit row as the tool reads it: the customer's primary address, and a stamped service address when the visit is
+// at another of the customer's properties.
+const visitRow = (id, over = {}) => ({
+  id, technician_id: 'tech-1', customer_id: CUSTOMER_ID,
+  service_address_line1: null, service_address_line2: null, service_address_city: null, service_address_state: null, service_address_zip: null,
+  customer_address_line1: '100 Sample St', customer_address_line2: null, customer_city: 'Sampletown', customer_state: 'FL', customer_zip: '34202',
+  ...over,
+});
 const PROSPECT = { firstName: 'Sample', lastName: 'Person', phone: '(941) 555-0142', address: '200 Example Ave', city: 'Sampletown', zip: '34202' };
 const OFFICE_REFUSAL = { error: 'The office needs to price this one.', code: 'office_prices' };
 const SENTINEL = 'PHONE_SENTINEL';
@@ -146,16 +165,16 @@ function prepared({ monthly = 37.33, annual = 448, oneTime = 99, authority = 'SE
 
 // What the real (not dry) save returns: the stored row (numeric columns as pg gives them) with its token, and the
 // flags. Extra keys prove nothing leaks.
-function saved({ reused = false, status = 'draft', warning = null } = {}) {
+function saved({ reused = false, status = 'draft', warning = null, customerName = null } = {}) {
   const base = prepared({ monthly: 37.33, annual: 448, oneTime: 99 }).estimate;
   return {
     reused,
     memberLinkageWarning: warning,
-    estimate: { ...base, id: ESTIMATE_ID, status, customer_id: CUSTOMER_ID, monthly_total: '37.33', annual_total: '448.00', onetime_total: '99.00', estimate_data: JSON.parse(base.estimate_data) },
+    estimate: { ...base, id: ESTIMATE_ID, status, customer_id: CUSTOMER_ID, customer_name: customerName, monthly_total: '37.33', annual_total: '448.00', onetime_total: '99.00', estimate_data: JSON.parse(base.estimate_data) },
   };
 }
 
-let server; let baseUrl; let lookupSpy; let saveSpy; let creditSpy; let auditSpy; let phoneSpy;
+let server; let baseUrl; let lookupSpy; let saveSpy; let capSpy; let creditSpy; let auditSpy; let phoneSpy; let bellSpy;
 beforeAll(() => new Promise((resolve) => {
   const app = express();
   app.use(express.json());
@@ -178,22 +197,31 @@ beforeEach(() => {
     conflict: false,
     wheres: [],
     trx: null,
-    onRoute: new Set([CUSTOMER_ID, UNIT_CUSTOMER_ID]),
     caps: [
       { service_category: 'general', state: 'qualified' }, { service_category: 'mosquito', state: 'qualified' },
       { service_category: 'rodent', state: 'review_required' }, { service_category: 'termite', state: 'off' },
       { service_category: 'lawn', state: 'qualified' },
     ],
     customers: [
-      { id: CUSTOMER_ID, address_line1: '100 Sample St', address_line2: null, city: 'Sampletown', state: 'FL', zip: '34202' },
-      { id: UNIT_CUSTOMER_ID, address_line1: '300 Sample St', address_line2: 'Apt 4', city: 'Sampletown', state: 'FL', zip: '34202' },
+      { id: CUSTOMER_ID, first_name: 'Casey', last_name: 'Sample' },
+    ],
+    visits: [
+      visitRow(VISIT_ID),
+      visitRow(UNIT_VISIT_ID, { customer_address_line1: '300 Sample St', customer_address_line2: 'Apt 4' }),
+      visitRow(SECOND_HOME_VISIT_ID, {
+        service_address_line1: '900 Second Home Rd', service_address_city: 'Othertown', service_address_state: 'FL', service_address_zip: '34203',
+      }),
+      visitRow(OTHER_TECH_VISIT_ID, { technician_id: 'tech-2' }),
     ],
   });
   lookupSpy = jest.spyOn(lookupRoutes, 'performPropertyLookup').mockImplementation(async () => lookupOf());
+  capSpy = jest.spyOn(sharedCap, 'consumeSharedDailyCap').mockResolvedValue({ allowed: true });
   saveSpy = jest.spyOn(persistence, 'createOrReuseAdminEstimate').mockImplementation(async (arg) => (arg.dryRun ? prepared() : saved()));
   creditSpy = jest.spyOn(soldBy, 'creditCreator').mockImplementation(async (_trx, estimate) => ({ ...estimate, sold_by_source: 'creator' }));
   auditSpy = jest.spyOn(auditLog, 'recordAuditEvent').mockResolvedValue(null);
   phoneSpy = jest.spyOn(knownCaller, 'findKnownCallerCustomer').mockResolvedValue(null);
+  // The bell: the real compose rules run (they throw under test); only the write behind them is stubbed.
+  bellSpy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'bell-1' });
 });
 afterEach(() => {
   jest.restoreAllMocks();
@@ -217,7 +245,7 @@ describe('the guard', () => {
   const GUARDED = [['GET', '/setup'], ['POST', '/price'], ['POST', ''], ['GET', ''], ['GET', `/${ESTIMATE_ID}`]];
   test.each(GUARDED)('gate off: %s %s answers 404 {enabled:false} before any read', async (method, path) => {
     delete process.env.GATE_TECH_ESTIMATES;
-    const res = await call(method, path, method === 'POST' ? { customerId: CUSTOMER_ID, services: ['PEST'] } : undefined);
+    const res = await call(method, path, method === 'POST' ? { visitId: VISIT_ID, services: ['PEST'] } : undefined);
     expect(res).toEqual({ status: 404, body: { enabled: false } });
     expect(mockState.queries).toEqual([]);
     expect(lookupSpy).not.toHaveBeenCalled();
@@ -225,7 +253,7 @@ describe('the guard', () => {
 
   test.each(GUARDED)('technician switch off: %s %s answers 404 before any customer read', async (method, path) => {
     mockState.switchOn = false;
-    const res = await call(method, path, method === 'POST' ? { customerId: CUSTOMER_ID, services: ['PEST'] } : undefined);
+    const res = await call(method, path, method === 'POST' ? { visitId: VISIT_ID, services: ['PEST'] } : undefined);
     expect(res).toEqual({ status: 404, body: { enabled: false } });
     expect(mockState.queries).toEqual(['technicians']);
     expect(lookupSpy).not.toHaveBeenCalled();
@@ -279,25 +307,43 @@ describe('the engine service table', () => {
 });
 
 describe('POST /price: who, which services, and the county-confirmed home', () => {
-  test('a customer who is not on his route is a 404, the same as an unknown id, and nothing is looked up', async () => {
-    for (const customerId of ['00000000-0000-4000-8000-0000000000c2', '00000000-0000-4000-8000-0000000000ff']) {
-      const res = await price({ customerId, services: ['PEST'] });
-      expect(res).toEqual({ status: 404, body: { error: 'Customer not found' } });
+  test('a visit that is not his is a 404, the same as an unknown id or a bad id, and nothing is looked up', async () => {
+    for (const visitId of [OTHER_TECH_VISIT_ID, '00000000-0000-4000-8000-0000000000ff', 'not-an-id']) {
+      const res = await price({ visitId, services: ['PEST'] });
+      expect(res).toEqual({ status: 404, body: { error: 'Visit not found' } });
     }
     expect(lookupSpy).not.toHaveBeenCalled();
     expect(saveSpy).not.toHaveBeenCalled();
   });
 
+  test('a bare customer id is not a way in: a customer is quoted through a visit of his', async () => {
+    expect((await price({ customerId: CUSTOMER_ID, services: ['PEST'] })).status).toBe(400);
+    expect(lookupSpy).not.toHaveBeenCalled();
+  });
+
+  test('a visit at the customer\'s second home prices THAT house: the stamped service address is looked up and saved', async () => {
+    const res = await price({ visitId: SECOND_HOME_VISIT_ID, services: ['PEST'] });
+    expect(res.status).toBe(200);
+    expect(lookupSpy.mock.calls[0][0]).toBe('900 Second Home Rd, Othertown, FL 34203');
+    expect(savedBody()).toEqual(expect.objectContaining({ customerId: CUSTOMER_ID, address: '900 Second Home Rd, Othertown, FL 34203' }));
+    expect(savedBody().estimateData.inputs.address).toBe('900 Second Home Rd, Othertown, FL 34203');
+  });
+
+  test('an admin may quote any visit', async () => {
+    mockCaller.role = 'admin';
+    expect((await price({ visitId: OTHER_TECH_VISIT_ID, services: ['PEST'] })).status).toBe(200);
+  });
+
   test('a service outside his Qualified categories is refused before the paid lookup', async () => {
     for (const key of ['RODENT_BAIT', 'TERMITE_BAIT', 'LAWN', 'TRENCHING']) {
-      expect((await price({ customerId: CUSTOMER_ID, services: ['PEST', key] })).status).toBe(400);
+      expect((await price({ visitId: VISIT_ID, services: ['PEST', key] })).status).toBe(400);
     }
     expect(lookupSpy).not.toHaveBeenCalled();
   });
 
-  test('exactly one of customerId and prospect; a prospect needs name, phone, address and ZIP', async () => {
+  test('exactly one of a visit and a new person; a new person needs name, phone, address and ZIP', async () => {
     expect((await price({ services: ['PEST'] })).status).toBe(400);
-    expect((await price({ customerId: CUSTOMER_ID, prospect: PROSPECT, services: ['PEST'] })).status).toBe(400);
+    expect((await price({ visitId: VISIT_ID, prospect: PROSPECT, services: ['PEST'] })).status).toBe(400);
     expect((await price({ prospect: { ...PROSPECT, zip: '' }, services: ['PEST'] })).status).toBe(400);
     expect(lookupSpy).not.toHaveBeenCalled();
   });
@@ -306,7 +352,9 @@ describe('POST /price: who, which services, and the county-confirmed home', () =
     const res = await price({ prospect: PROSPECT, services: ['PEST'] });
     expect(res.status).toBe(200);
     expect(lookupSpy.mock.calls[0][0]).toBe('200 Example Ave, Sampletown, FL 34202');
-    expect(lookupSpy.mock.calls[0][1]).toEqual({ prioritizeAccuracy: true });
+    // The free cache read comes first; here it answers, so there is no second call.
+    expect(lookupSpy.mock.calls[0][1]).toEqual({ cacheOnly: true, persist: false });
+    expect(lookupSpy).toHaveBeenCalledTimes(1);
   });
 
   test.each([
@@ -317,13 +365,13 @@ describe('POST /price: who, which services, and the county-confirmed home', () =
     ['no profile at all', () => ({ propertyRecord: countyRecord() })],
   ])('%s: 422 office_prices, no number, nothing priced', async (_label, make) => {
     lookupSpy.mockImplementation(async () => make());
-    const res = await price({ customerId: CUSTOMER_ID, services: ['PEST'] });
+    const res = await price({ visitId: VISIT_ID, services: ['PEST'] });
     expect(res).toEqual({ status: 422, body: OFFICE_REFUSAL });
     expect(saveSpy).not.toHaveBeenCalled();
   });
 
   test('a unit address: 422 office_prices before the save', async () => {
-    const res = await price({ customerId: UNIT_CUSTOMER_ID, services: ['PEST'] });
+    const res = await price({ visitId: UNIT_VISIT_ID, services: ['PEST'] });
     expect(res).toEqual({ status: 422, body: OFFICE_REFUSAL });
     expect(saveSpy).not.toHaveBeenCalled();
     const typed = await price({ prospect: { ...PROSPECT, address: '200 Example Ave #5' }, services: ['PEST'] });
@@ -352,11 +400,47 @@ const FORGED_KEYS = {
   monthlyTotal: 1,
 };
 
+describe('POST /price: the paid lookup budget', () => {
+  // A cache miss, then the live answer.
+  const missThenLive = () => lookupSpy.mockImplementation(async (_address, options) => (options.cacheOnly ? null : lookupOf()));
+
+  test('an address in the cache is free: no budget is spent and no live lookup runs', async () => {
+    expect((await price({ visitId: VISIT_ID, services: ['PEST'] })).status).toBe(200);
+    expect(capSpy).not.toHaveBeenCalled();
+    expect(lookupSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('a cache miss spends ONE unit of this technician\'s own daily budget, then looks the address up live', async () => {
+    missThenLive();
+    expect((await price({ visitId: VISIT_ID, services: ['PEST'] })).status).toBe(200);
+    expect(capSpy).toHaveBeenCalledTimes(1);
+    expect(capSpy).toHaveBeenCalledWith({ bucket: 'tech-estimate-lookup:tech-1', defaultMax: 30, failClosed: true });
+    expect(lookupSpy.mock.calls.map((call) => call[1])).toEqual([{ cacheOnly: true, persist: false }, { prioritizeAccuracy: true }]);
+  });
+
+  test('over the budget: 429 daily_limit, no live lookup, nothing priced', async () => {
+    missThenLive();
+    capSpy.mockResolvedValueOnce({ allowed: false });
+    const res = await price({ visitId: VISIT_ID, services: ['PEST'] });
+    expect(res.status).toBe(429);
+    expect(res.body.code).toBe('daily_limit');
+    expect(lookupSpy).toHaveBeenCalledTimes(1);
+    expect(saveSpy).not.toHaveBeenCalled();
+  });
+
+  test('a refused request never spends budget: a visit that is not his, a service he may not quote', async () => {
+    missThenLive();
+    await price({ visitId: OTHER_TECH_VISIT_ID, services: ['PEST'] });
+    await price({ visitId: VISIT_ID, services: ['TERMITE_BAIT'] });
+    expect(capSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('POST /price: the body the tool builds for the save', () => {
   const FORGED = FORGED_KEYS;
 
   test('a route customer: exactly the expected keys, nothing from the phone, dry run on live pricing', async () => {
-    const res = await price({ customerId: CUSTOMER_ID, services: ['PEST', 'MOSQUITO'], ...FORGED });
+    const res = await price({ visitId: VISIT_ID, services: ['PEST', 'MOSQUITO'], ...FORGED });
     expect(res.status).toBe(200);
     expect(saveSpy).toHaveBeenCalledTimes(1);
     const arg = saveSpy.mock.calls[0][0];
@@ -388,7 +472,7 @@ describe('POST /price: the body the tool builds for the save', () => {
 
 describe('POST /price: measured facts', () => {
   test('a fact equal to the county figure is not a change; unknown fact keys are ignored', async () => {
-    const res = await price({ customerId: CUSTOMER_ID, services: ['PEST'], facts: { homeSqFt: 1850, color: 'red', discount: 5 } });
+    const res = await price({ visitId: VISIT_ID, services: ['PEST'], facts: { homeSqFt: 1850, color: 'red', discount: 5 } });
     expect(res.body.officeFirst).toEqual({ required: false, reasons: [] });
     expect(res.body.facts).toEqual({
       homeSqFt: { value: 1850, source: 'lookup' }, lotSqFt: { value: 9200, source: 'lookup' }, stories: { value: 1, source: 'lookup' },
@@ -397,7 +481,7 @@ describe('POST /price: measured facts', () => {
   });
 
   test('a changed fact is priced on the typed value, marked as typed by a person, and sent to the office first', async () => {
-    const res = await price({ customerId: CUSTOMER_ID, services: ['PEST'], facts: { homeSqFt: 2600, lotSqFt: 12000, stories: 2 } });
+    const res = await price({ visitId: VISIT_ID, services: ['PEST'], facts: { homeSqFt: 2600, lotSqFt: 12000, stories: 2 } });
     expect(reasons(res)).toEqual(['changed_fact:homeSqFt', 'changed_fact:lotSqFt', 'changed_fact:stories']);
     expect(res.body.officeFirst.required).toBe(true);
     expect(res.body.facts.homeSqFt).toEqual({ value: 2600, source: 'technician' });
@@ -410,28 +494,28 @@ describe('POST /price: measured facts', () => {
   test('a stories count a person typed replaces the AI estimate and its evidence', async () => {
     const guess = countyRecord({ stories: 2, _storiesEvidence: { basis: 'inferred', confidence: 'low', sourceUrl: 'x', sourceType: 'listing' } });
     lookupSpy.mockImplementation(async () => lookupOf(guess));
-    await price({ customerId: CUSTOMER_ID, services: ['PEST'] });
+    await price({ visitId: VISIT_ID, services: ['PEST'] });
     expect(savedInputs().storiesSource).toBe('estimated');
-    await price({ customerId: CUSTOMER_ID, services: ['PEST'], facts: { stories: 1 } });
+    await price({ visitId: VISIT_ID, services: ['PEST'], facts: { stories: 1 } });
     expect(saveSpy.mock.calls[1][0].body.estimateData.engineInputs).toEqual(expect.objectContaining({ stories: 1, storiesSource: 'lookup' }));
   });
 
   test('a termite perimeter rides services.termite.measurements, only with the termite line', async () => {
     mockState.caps = ['general', 'termite'].map((c) => ({ service_category: c, state: 'qualified' }));
-    const res = await price({ customerId: CUSTOMER_ID, services: ['TERMITE_BAIT'], facts: { perimeterLF: 220 } });
+    const res = await price({ visitId: VISIT_ID, services: ['TERMITE_BAIT'], facts: { perimeterLF: 220 } });
     expect(savedInputs().services.termite).toEqual(expect.objectContaining({ measurements: { perimeterLF: 220 } }));
     expect(reasons(res)).toEqual(['changed_fact:perimeterLF']);
     expect(res.body.facts.perimeterLF).toEqual({ value: 220, source: 'technician' });
     expect(savedBody().estimateData.inputs.termitePerimeterLF).toBe('220');
     saveSpy.mockClear();
-    const without = await price({ customerId: CUSTOMER_ID, services: ['PEST'], facts: { perimeterLF: 220 } });
+    const without = await price({ visitId: VISIT_ID, services: ['PEST'], facts: { perimeterLF: 220 } });
     expect(reasons(without)).toEqual([]);
     expect(savedInputs().services.termite).toBeUndefined();
   });
 
   test('a fact outside sane bounds is a 400', async () => {
     for (const facts of [{ homeSqFt: -5 }, { homeSqFt: 'big' }, { stories: 9 }, { lotSqFt: 12.5 }, { perimeterLF: 5 }]) {
-      expect((await price({ customerId: CUSTOMER_ID, services: ['PEST'], facts })).status).toBe(400);
+      expect((await price({ visitId: VISIT_ID, services: ['PEST'], facts })).status).toBe(400);
     }
     expect(saveSpy).not.toHaveBeenCalled();
   });
@@ -440,9 +524,9 @@ describe('POST /price: measured facts', () => {
 describe('POST /price: the answer and the office-first reasons', () => {
   test('one-time over $1,000 holds; exactly $1,000 does not', async () => {
     saveSpy.mockResolvedValueOnce(prepared({ oneTime: 1000.01 }));
-    expect(reasons(await price({ customerId: CUSTOMER_ID, services: ['PEST'] }))).toEqual(['one_time_over_limit']);
+    expect(reasons(await price({ visitId: VISIT_ID, services: ['PEST'] }))).toEqual(['one_time_over_limit']);
     saveSpy.mockResolvedValueOnce(prepared({ oneTime: 1000 }));
-    expect(reasons(await price({ customerId: CUSTOMER_ID, services: ['PEST'] }))).toEqual([]);
+    expect(reasons(await price({ visitId: VISIT_ID, services: ['PEST'] }))).toEqual([]);
   });
 
   test.each([
@@ -451,7 +535,7 @@ describe('POST /price: the answer and the office-first reasons', () => {
     ['a heuristic-turf line', { service: 'pest_control', turfBasis: 'lotFallback' }],
   ])('%s is office_review', async (_label, line) => {
     saveSpy.mockResolvedValueOnce(prepared({ lines: [line] }));
-    expect(reasons(await price({ customerId: CUSTOMER_ID, services: ['PEST'] }))).toEqual(['office_review']);
+    expect(reasons(await price({ visitId: VISIT_ID, services: ['PEST'] }))).toEqual(['office_review']);
   });
 
   test('an address that belongs to an unlinked member is office_review and says nothing else', async () => {
@@ -468,7 +552,7 @@ describe('POST /price: the answer and the office-first reasons', () => {
   });
 
   test('the totals are the prepared estimate\'s own columns, with a digest of the engine result; nothing from the row leaks; nothing is written', async () => {
-    const res = await price({ customerId: CUSTOMER_ID, services: ['PEST'] });
+    const res = await price({ visitId: VISIT_ID, services: ['PEST'] });
     expect(res.body).toEqual({
       lines: [{ label: 'Pest Control', monthly: 37.33, annual: 448 }, { label: 'WaveGuard setup fee', oneTime: 99 }],
       monthlyTotal: 37.33, annualTotal: 448, oneTimeTotal: 99,
@@ -488,20 +572,20 @@ describe('POST /price: refusals', () => {
     ['a line needs a quote', () => prepared({ lines: [{ service: 'pest_control', requiresQuote: true }] })],
   ])('%s: 422 office_prices', async (_label, make) => {
     saveSpy.mockResolvedValueOnce(make());
-    expect(await price({ customerId: CUSTOMER_ID, services: ['PEST'] })).toEqual({ status: 422, body: OFFICE_REFUSAL });
+    expect(await price({ visitId: VISIT_ID, services: ['PEST'] })).toEqual({ status: 422, body: OFFICE_REFUSAL });
   });
 
   test('never a partial quote: a chosen service with no engine line of its own is office_prices', async () => {
     // Two services chosen, the engine answered with the pest line only.
     saveSpy.mockResolvedValueOnce(prepared({ lines: [{ service: 'pest_control', pricingConfidence: 'HIGH' }] }));
-    expect(await price({ customerId: CUSTOMER_ID, services: ['PEST', 'MOSQUITO'] })).toEqual({ status: 422, body: OFFICE_REFUSAL });
+    expect(await price({ visitId: VISIT_ID, services: ['PEST', 'MOSQUITO'] })).toEqual({ status: 422, body: OFFICE_REFUSAL });
     saveSpy.mockResolvedValueOnce(prepared({ lines: [{ service: 'pest_control' }, { service: 'mosquito' }] }));
-    expect((await price({ customerId: CUSTOMER_ID, services: ['PEST', 'MOSQUITO'] })).status).toBe(200);
+    expect((await price({ visitId: VISIT_ID, services: ['PEST', 'MOSQUITO'] })).status).toBe(200);
   });
 
   test('a 4xx from the save is office_prices and its own message is never echoed', async () => {
     saveSpy.mockRejectedValueOnce(Object.assign(new Error('Customer 123 has an open move'), { statusCode: 409 }));
-    const res = await price({ customerId: CUSTOMER_ID, services: ['PEST'] });
+    const res = await price({ visitId: VISIT_ID, services: ['PEST'] });
     expect(res).toEqual({ status: 422, body: OFFICE_REFUSAL });
   });
 
@@ -514,14 +598,14 @@ describe('POST /price: refusals', () => {
 
   test('a server error from the save stays a server error', async () => {
     saveSpy.mockRejectedValueOnce(Object.assign(new Error('Live pricing configuration is unavailable.'), { statusCode: 503 }));
-    const res = await price({ customerId: CUSTOMER_ID, services: ['PEST'] });
+    const res = await price({ visitId: VISIT_ID, services: ['PEST'] });
     expect(res.status).toBeGreaterThanOrEqual(500);
     expect(res.body.code).toBeUndefined();
   });
 
   test('a failed lookup answers 502 without a price', async () => {
     lookupSpy.mockRejectedValueOnce(new Error('provider down'));
-    const res = await price({ customerId: CUSTOMER_ID, services: ['PEST'] });
+    const res = await price({ visitId: VISIT_ID, services: ['PEST'] });
     expect(res.status).toBe(502);
     expect(saveSpy).not.toHaveBeenCalled();
   });
@@ -541,7 +625,7 @@ const nothingWritten = () => {
 
 describe('POST /api/tech/estimates: what the create hands the shared save', () => {
   test('the same save as the preview, not a dry run, on live pricing, tied to the phone\'s digest, inside our transaction', async () => {
-    const res = await create({ customerId: CUSTOMER_ID, services: ['PEST', 'MOSQUITO'], ...FORGED_KEYS });
+    const res = await create({ visitId: VISIT_ID, services: ['PEST', 'MOSQUITO'], ...FORGED_KEYS });
     expect(res.status).toBe(200);
     expect(saveSpy).toHaveBeenCalledTimes(2);
     expect(saveSpy.mock.calls[0][0].dryRun).toBe(true);
@@ -576,18 +660,26 @@ describe('POST /api/tech/estimates: what the create hands the shared save', () =
     ['a digest with a non-hex letter', { digest: `${'a'.repeat(63)}z` }],
     ['a digest that is a list', { digest: [DIGEST] }],
   ])('%s: 400 before any lookup or save', async (_label, over) => {
-    const res = await call('POST', '', { customerId: CUSTOMER_ID, services: ['PEST'], clientDraftId: DRAFT_ID, digest: DIGEST, ...over });
+    const res = await call('POST', '', { visitId: VISIT_ID, services: ['PEST'], clientDraftId: DRAFT_ID, digest: DIGEST, ...over });
     expect(res.status).toBe(400);
     expect(lookupSpy).not.toHaveBeenCalled();
     expect(saveSpy).not.toHaveBeenCalled();
     nothingWritten();
   });
 
-  test('the same guards as the preview run first: off-route customer 404, unit address 422, no draft written', async () => {
-    expect((await create({ customerId: '00000000-0000-4000-8000-0000000000ff', services: ['PEST'] })).status).toBe(404);
-    expect(await create({ customerId: UNIT_CUSTOMER_ID, services: ['PEST'] })).toEqual({ status: 422, body: OFFICE_REFUSAL });
+  test('a bare customer id is a 400 and nothing is saved: a customer is saved through a visit of his', async () => {
+    const res = await create({ customerId: CUSTOMER_ID, services: ['PEST'] });
+    expect(res.status).toBe(400);
+    expect(lookupSpy).not.toHaveBeenCalled();
+    expect(saveSpy).not.toHaveBeenCalled();
+    nothingWritten();
+  });
+
+  test('the same guards as the preview run first: a visit that is not his 404, unit address 422, no draft written', async () => {
+    expect((await create({ visitId: OTHER_TECH_VISIT_ID, services: ['PEST'] })).status).toBe(404);
+    expect(await create({ visitId: UNIT_VISIT_ID, services: ['PEST'] })).toEqual({ status: 422, body: OFFICE_REFUSAL });
     saveSpy.mockImplementationOnce(async () => prepared({ lines: [] }));
-    expect(await create({ customerId: CUSTOMER_ID, services: ['PEST'] })).toEqual({ status: 422, body: OFFICE_REFUSAL });
+    expect(await create({ visitId: VISIT_ID, services: ['PEST'] })).toEqual({ status: 422, body: OFFICE_REFUSAL });
     expect(realSaves()).toEqual([]);
     nothingWritten();
   });
@@ -598,7 +690,7 @@ describe('POST /api/tech/estimates: refusals from the save', () => {
 
   test('a changed price is 409 price_changed, and nothing is credited, audited or stored', async () => {
     realSaveRejects(Object.assign(new Error('The estimate price or options changed. Review a fresh estimate before saving.'), { statusCode: 409 }));
-    expect(await create({ customerId: CUSTOMER_ID, services: ['PEST'] })).toEqual({
+    expect(await create({ visitId: VISIT_ID, services: ['PEST'] })).toEqual({
       status: 409, body: { error: 'The price changed. Price it again.', code: 'price_changed' },
     });
     nothingWritten();
@@ -606,7 +698,7 @@ describe('POST /api/tech/estimates: refusals from the save', () => {
 
   test('any other 4xx from the save is office_prices and its message is never echoed (same id from another login included)', async () => {
     realSaveRejects(Object.assign(new Error('This draft was already saved with different inputs. Customer 123.'), { statusCode: 409 }));
-    const res = await create({ customerId: CUSTOMER_ID, services: ['PEST'] });
+    const res = await create({ visitId: VISIT_ID, services: ['PEST'] });
     expect(res).toEqual({ status: 422, body: OFFICE_REFUSAL });
     expect(JSON.stringify(res.body)).not.toMatch(/draft|123/);
     nothingWritten();
@@ -621,7 +713,7 @@ describe('POST /api/tech/estimates: refusals from the save', () => {
 
   test('a server error stays a server error', async () => {
     realSaveRejects(Object.assign(new Error('Live pricing configuration is unavailable.'), { statusCode: 503 }));
-    const res = await create({ customerId: CUSTOMER_ID, services: ['PEST'] });
+    const res = await create({ visitId: VISIT_ID, services: ['PEST'] });
     expect(res.status).toBeGreaterThanOrEqual(500);
     expect(res.body.code).toBeUndefined();
     nothingWritten();
@@ -630,7 +722,7 @@ describe('POST /api/tech/estimates: refusals from the save', () => {
 
 describe('POST /api/tech/estimates: the answer and what is recorded', () => {
   test('the answer is field by field from the stored row: no token, view URL, estimate data or costs', async () => {
-    const res = await create({ customerId: CUSTOMER_ID, services: ['PEST'] });
+    const res = await create({ visitId: VISIT_ID, services: ['PEST'] });
     expect(res.body).toEqual({
       id: ESTIMATE_ID,
       status: 'draft',
@@ -645,7 +737,7 @@ describe('POST /api/tech/estimates: the answer and what is recorded', () => {
   });
 
   test('one tool row with the detailed reasons, one credit, one audit event with ids only', async () => {
-    await create({ customerId: CUSTOMER_ID, services: ['PEST'], facts: { homeSqFt: 2600 } });
+    await create({ visitId: VISIT_ID, services: ['PEST'], facts: { homeSqFt: 2600 } });
     expect(mockState.inserts).toHaveLength(1);
     expect(mockState.inserts[0]).toEqual({
       table: 'tech_estimates',
@@ -689,13 +781,13 @@ describe('POST /api/tech/estimates: the answer and what is recorded', () => {
     const res = await create({ prospect: PROSPECT, services: ['PEST'] });
     expect(res.body.officeFirst).toEqual({ required: true, reasons: ['office_review'] });
     phoneSpy.mockClear();
-    await create({ customerId: CUSTOMER_ID, services: ['PEST'] });
+    await create({ visitId: VISIT_ID, services: ['PEST'] });
     expect(phoneSpy).not.toHaveBeenCalled();
   });
 
   test('an admin login is saved and audited but never credited as the seller', async () => {
     mockCaller.role = 'admin';
-    const res = await create({ customerId: CUSTOMER_ID, services: ['PEST'] });
+    const res = await create({ visitId: VISIT_ID, services: ['PEST'] });
     expect(res.status).toBe(200);
     expect(creditSpy).not.toHaveBeenCalled();
     expect(auditSpy).toHaveBeenCalledTimes(1);
@@ -704,7 +796,7 @@ describe('POST /api/tech/estimates: the answer and what is recorded', () => {
   test('a retry: the same estimate and the stored reasons, no second tool row, credit or audit event', async () => {
     saveSpy.mockImplementation(async (arg) => (arg.dryRun ? prepared() : saved({ reused: true })));
     mockState.toolRow = { office_first_reasons: ['one_time_over_limit', 'member_address'] };
-    const res = await create({ customerId: CUSTOMER_ID, services: ['PEST'] });
+    const res = await create({ visitId: VISIT_ID, services: ['PEST'] });
     expect(res.body.id).toBe(ESTIMATE_ID);
     expect(res.body.officeFirst).toEqual({ required: true, reasons: ['one_time_over_limit', 'office_review'] });
     nothingWritten();
@@ -713,17 +805,118 @@ describe('POST /api/tech/estimates: the answer and what is recorded', () => {
   test('an id that is not his tool estimate (reused, but no tool row of his) is refused', async () => {
     saveSpy.mockImplementation(async (arg) => (arg.dryRun ? prepared() : saved({ reused: true })));
     mockState.toolRow = null;
-    expect(await create({ customerId: CUSTOMER_ID, services: ['PEST'] })).toEqual({ status: 422, body: OFFICE_REFUSAL });
+    expect(await create({ visitId: VISIT_ID, services: ['PEST'] })).toEqual({ status: 422, body: OFFICE_REFUSAL });
     nothingWritten();
   });
 
   test('a lost insert race answers from the winner\'s row', async () => {
     mockState.conflict = true;
     mockState.toolRow = { office_first_reasons: [] };
-    const res = await create({ customerId: CUSTOMER_ID, services: ['PEST'] });
+    const res = await create({ visitId: VISIT_ID, services: ['PEST'] });
     expect(res.status).toBe(200);
     expect(creditSpy).not.toHaveBeenCalled();
     expect(auditSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 2b: one bell for a held estimate
+
+describe('POST /api/tech/estimates: the office bell for a held estimate', () => {
+  const HELD = { visitId: VISIT_ID, services: ['PEST'], facts: { homeSqFt: 2600 } };
+  const ring = () => bellSpy.mock.calls.map(([category, headline, why, opts]) => ({ category, headline, why, opts }));
+
+  test('a held create rings ONE bell with the eight parts, after the transaction', async () => {
+    const res = await create(HELD);
+    expect(res.status).toBe(200);
+    expect(bellSpy).toHaveBeenCalledTimes(1);
+    const [{ category, headline, why, opts }] = ring();
+    expect(category).toBe('estimate');
+    expect(headline).toBe('Estimates — check Taylor\'s estimate for Casey Sample');
+    expect(headline.length).toBeLessThanOrEqual(60);
+    expect(why).toBe('The technician changed the home size, so it waits for your check before it goes.');
+    expect(why.length).toBeLessThanOrEqual(110);
+    expect(opts).toMatchObject({
+      bell: true,
+      dedupeKey: `tech-estimate-office-first:${ESTIMATE_ID}`,
+      link: `/admin/estimates?estimateId=${ESTIMATE_ID}`,
+      metadata: { area: 'Estimates', severity: 'needs-you', who: 'person', doneWhen: 'estimate_sent_or_closed', subject: { type: 'estimate', id: ESTIMATE_ID }, estimateId: ESTIMATE_ID },
+    });
+    expect(opts.dedupeOpenOnly).toBeUndefined();
+    expect(opts.detail).toMatch(/home size/);
+    // The transaction had already returned: the bell is not part of it.
+    expect(bellSpy.mock.invocationCallOrder[0]).toBeGreaterThan(auditSpy.mock.invocationCallOrder[0]);
+  });
+
+  test('nothing from the bell reaches the technician\'s answer', async () => {
+    const res = await create(HELD);
+    expect(JSON.stringify(res.body)).not.toMatch(/waits for your check|check Taylor|estimateId=|tech-estimate-office-first|bell/i);
+  });
+
+  test.each([
+    ['a changed fact', ['changed_fact:lotSqFt', 'one_time_over_limit', 'engine_review'], 'The technician changed the lot size, so it waits for your check before it goes.'],
+    ['the first changed fact in the tool\'s order', ['changed_fact:stories', 'changed_fact:homeSqFt'], 'The technician changed the home size, so it waits for your check before it goes.'],
+    ['a one-time job over the limit', ['one_time_over_limit', 'engine_review', 'member_address'], 'A one-time job over $1,000 waits for your check before it goes.'],
+    ['an engine line to review', ['engine_review', 'member_address'], 'The price needs your check before it goes.'],
+    ['a member address', ['member_address'], 'This may be a current customer, so check who it is before it goes.'],
+    ['a phone that matches a customer', ['phone_matches_customer'], 'This may be a current customer, so check who it is before it goes.'],
+  ])('why for %s', async (_label, detailed, expected) => {
+    const ringOffice = require('../services/tech-estimate-office-bell').ringOfficeFirst;
+    await ringOffice({ estimate: saved().estimate, detailed, technician: { id: 'tech-1', name: 'Taylor Example' } });
+    expect(ring()[0].why).toBe(expected);
+    expect(expected.length).toBeLessThanOrEqual(110);
+    // The full list is in the detail, in words.
+    expect(ring()[0].opts.detail).not.toMatch(/_/);
+  });
+
+  test('a long name still fits the 60-character headline', async () => {
+    saveSpy.mockImplementation(async (arg) => (arg.dryRun ? prepared() : saved({ customerName: 'Bartholomew Montgomery-Featherstonehaugh III' })));
+    await create(HELD);
+    expect(ring()[0].headline.length).toBeLessThanOrEqual(60);
+    expect(ring()[0].headline).toMatch(/^Estimates — check Taylor's estimate for Bartholomew/);
+  });
+
+  test('a quote the technician may send himself rings nothing', async () => {
+    const res = await create({ visitId: VISIT_ID, services: ['PEST'] });
+    expect(res.body.officeFirst.required).toBe(false);
+    expect(bellSpy).not.toHaveBeenCalled();
+  });
+
+  test('a retry rings nothing', async () => {
+    saveSpy.mockImplementation(async (arg) => (arg.dryRun ? prepared() : saved({ reused: true })));
+    mockState.toolRow = { office_first_reasons: ['changed_fact:homeSqFt'] };
+    const res = await create(HELD);
+    expect(res.status).toBe(200);
+    expect(res.body.officeFirst.required).toBe(true);
+    expect(bellSpy).not.toHaveBeenCalled();
+  });
+
+  test('a lost insert race rings nothing (the winner rings)', async () => {
+    mockState.conflict = true;
+    mockState.toolRow = { office_first_reasons: ['changed_fact:homeSqFt'] };
+    expect((await create(HELD)).status).toBe(200);
+    expect(bellSpy).not.toHaveBeenCalled();
+  });
+
+  test('a save the office refuses rings nothing', async () => {
+    saveSpy.mockImplementation(async (arg) => { if (arg.dryRun) return prepared(); throw Object.assign(new Error('x'), { statusCode: 409 }); });
+    expect((await create(HELD)).status).toBe(422);
+    expect(bellSpy).not.toHaveBeenCalled();
+  });
+
+  test('a bell that cannot be raised never fails the create: 200, the same answer, one log line with ids only', async () => {
+    const quiet = await create(HELD);
+    bellSpy.mockClear();
+    bellSpy.mockRejectedValue(Object.assign(new Error('db down for Casey Sample 941-555-0142'), { code: 'ECONNRESET' }));
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    const res = await create(HELD);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(quiet.body);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const line = logger.warn.mock.calls[0][0];
+    expect(line).toContain(ESTIMATE_ID);
+    expect(line).not.toMatch(/Casey|941|db down/);
   });
 });
 

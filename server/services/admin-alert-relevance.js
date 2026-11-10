@@ -181,6 +181,9 @@ const UNFINISHED_BOOKING_PREFIX = 'portal-unfinished-';
 // notification_prefs). Repeated, not imported: that module pulls in the transcript rescue. A test
 // pins them together.
 const BOUNCE_DONE_WHEN = 'bounced_email_replaced';
+// The dedupeKey prefix of a technician's held estimate (tech-estimate-office-bell.js KEY_PREFIX). Repeated, not imported:
+// that module pulls in the pricing stack. A test pins the two together.
+const TECH_ESTIMATE_PREFIX = 'tech-estimate-office-first:';
 const BOUNCE_CUSTOMER_FIELDS = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email'];
 
 const RETIRED_BY = 'alert-relevance';
@@ -684,7 +687,7 @@ async function loadSubjects(rows, conn = db, { judgeContact = false } = {}) {
   const estimateIds = [...new Set(resolved.flatMap((r) => [r.refs.estimateId, r.lead?.estimate_id && String(r.lead.estimate_id)]).filter(Boolean))];
   const leadCustomerIds = [...new Set([...[...data.leads.values()].map((l) => l.customer_id && String(l.customer_id)), ...contactCustomerIds].filter(Boolean))];
   if (estimateIds.length) {
-    data.estimates = byId(await conn('estimates').whereIn('id', estimateIds).select('id', 'sent_at'));
+    data.estimates = byId(await conn('estimates').whereIn('id', estimateIds).select('id', 'sent_at', 'status', 'accepted_at', 'archived_at'));
   }
   if (leadCustomerIds.length) {
     data.leadVisits = await bookedVisitsByCustomer(conn, leadCustomerIds);
@@ -1158,6 +1161,22 @@ function leadContactedMovedOn(s) {
   return s.quoteHandedOff ? 'Estimate was sent' : null;
 }
 
+// A technician's held estimate (tech-estimate-office-bell.js, doneWhen `estimate_sent_or_closed`): the office had to check it
+// before it went out. It is done once the estimate is no longer a draft: sent (or queued to send), accepted, declined,
+// expired, archived, or gone. A failed send stays open: it was never delivered.
+const SENT_STATUSES = new Set(['scheduled', 'sending', 'sent', 'viewed', 'open']);
+function techEstimateChecked(s) {
+  if (!s.refs.estimateId) return null;
+  const e = s.estimate;
+  if (!e) return 'Estimate was removed';
+  const status = String(e.status || '').toLowerCase();
+  if (e.archived_at) return 'Estimate was archived';
+  if (e.accepted_at || status === 'accepted') return 'Estimate was accepted';
+  if (status === 'declined') return 'Estimate was declined';
+  if (status === 'expired') return 'Estimate expired';
+  return e.sent_at || SENT_STATUSES.has(status) ? 'Estimate was sent' : null;
+}
+
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
 // rule returning null while the alert is still relevant, else a short reason.
 const CLASSES = [
@@ -1193,6 +1212,11 @@ const CLASSES = [
   },
   { // call-last-name-lookup.js — one suggestion per customer
     key: 'call_last_name_suggestion', categories: ['customer'], prefix: SUGGESTION_KEY_PREFIX, rule: lastNameSaved,
+  },
+  { // tech-estimate-office-bell.js — one bell per technician estimate held for the office; the bell dedupes on the key
+    // for good (no dedupeOpenOnly), so a retirement is final and the estimate never rings again.
+    key: 'tech_estimate_office_first', categories: ['estimate'], prefix: TECH_ESTIMATE_PREFIX, doneWhen: 'estimate_sent_or_closed',
+    match: (meta) => meta.doneWhen === 'estimate_sent_or_closed', rule: techEstimateChecked, rearm: false,
   },
   { // email-bounce-rescue.js sendSuggestionEmail — a fresh row per examined bounce, never refreshed on a key.
     // Its fallback bell (suggestionFallbackBell) keeps a stable dedupeKey, so that one stays a person's to close.
