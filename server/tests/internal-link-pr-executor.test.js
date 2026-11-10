@@ -1180,7 +1180,7 @@ describe('internal-link candidate sweep', () => {
 
   test('the stranded pass reads only pending or queued rows idle for an hour and writes only while the row is still one', async () => {
     const now = new Date('2026-11-10T15:30:00Z');
-    const stranded = [{ id: 'task-requeued', status: 'queued' }, { id: 'task-throws', status: 'pending' }];
+    const stranded = [{ id: 'task-requeued', status: 'queued' }, { id: 'task-throws', status: 'pending' }, { id: 'task-outage', status: 'queued' }];
     const calls = [];
     const updates = [];
     db.mockImplementation(() => {
@@ -1199,10 +1199,13 @@ describe('internal-link candidate sweep', () => {
     const instance = new InternalLinkPrExecutor();
     instance.dryRunTask = jest.fn(async (task) => {
       if (task.id === 'task-throws') throw new Error('source_file_not_found:src/content/blog/gone.mdx');
+      if (task.id === 'task-outage') throw new Error('GitHub API 503');
       return { task_id: task.id, status: 'patch_candidate' };
     });
     const out = await instance._validateStrandedQueued({ limit: 15, now });
-    expect(out.count).toBe(2);
+    expect(out.count).toBe(3);
+    // An outage writes nothing: no caller owns a stranded row, so nothing would recover it from `failed`.
+    expect(out.results[2]).toEqual({ task_id: 'task-outage', status: 'queued', transient: true });
     expect(calls).toHaveLength(1);
     expect(calls[0].limit).toBe(15);
     expect(calls[0].wheres).toEqual([
@@ -1215,7 +1218,7 @@ describe('internal-link candidate sweep', () => {
     ]);
   });
 
-  test('a dry run its own caller asked for still writes with no status fence', async () => {
+  test('a dry run its own caller asked for still writes with no status fence, and stores an outage as failed', async () => {
     const updates = [];
     db.mockImplementation(() => {
       const wheres = [];
@@ -1231,6 +1234,10 @@ describe('internal-link candidate sweep', () => {
     instance.dryRunTask = jest.fn(async (task) => ({ task_id: task.id, status: 'patch_candidate' }));
     expect(await instance.runDryRun({ taskIds: ['task-own'], limit: 1 })).toMatchObject({ count: 1 });
     expect(updates).toEqual([{ wheres: [['where', { id: 'task-own' }]], status: 'patch_candidate' }]);
+    // The owning callers recover a transient `failed` themselves (isTransientLoadFailure), so that write stays.
+    instance.dryRunTask = jest.fn(async () => { throw new Error('GitHub API 503'); });
+    await instance.runDryRun({ taskIds: ['task-own'], limit: 1 });
+    expect(updates[1]).toEqual({ wheres: [['where', { id: 'task-own' }]], status: 'failed' });
   });
 });
 

@@ -422,13 +422,22 @@ class InternalLinkPrExecutor {
 
   // Dry-run each task and store its verdict. `onlyStatuses` fences the write: the row is updated only while it is
   // still in one of them (a caller that does not own the task must not overwrite a status another caller set).
-  async _dryRunAndPersist(tasks, { onlyStatuses = null } = {}) {
+  // `keepTransient`: a load failure that is not a confirmed-missing file (a GitHub rate limit, a network error, a 5xx)
+  // writes nothing, so the task keeps its status and the next pass tries it again (the PR batch's own rule,
+  // loadPagesStage). Without it every failure is stored as `failed`, which the callers that own their tasks recover
+  // themselves (isTransientLoadFailure).
+  async _dryRunAndPersist(tasks, { onlyStatuses = null, keepTransient = false } = {}) {
     const results = [];
     for (const task of tasks) {
       let result;
       try {
         result = await this.dryRunTask(task);
       } catch (err) {
+        if (keepTransient && !MISSING_FILE_RE.test(String(err?.message || err))) {
+          logger.warn(`[internal-link-pr-executor] transient dry-run failure for ${task.id} (retry next sweep): ${err.message}`);
+          results.push({ task_id: task.id, status: task.status, transient: true });
+          continue;
+        }
         logger.warn(`[internal-link-pr-executor] dry-run failed for ${task.id}: ${err.message}`);
         result = {
           task_id: task.id,
@@ -448,7 +457,8 @@ class InternalLinkPrExecutor {
   // "requeue" sets `queued` and calls nothing, so a requeued task waited for good (two tasks requeued 2026-11-04 were
   // still queued on 11-09 while the daily sweep ran every day). The sweep dry-runs them here, so each one joins the
   // candidates or gets its terminal verdict. Only rows idle for STRANDED_QUEUED_MS: a younger row may belong to a
-  // run that is about to dry-run it.
+  // run that is about to dry-run it. No caller owns these rows, so nothing would recover one stored as `failed` by
+  // an outage: a transient load failure leaves the row as it is for the next sweep.
   async _validateStrandedQueued({ limit, now = new Date() } = {}) {
     const tasks = await db(TABLE)
       .whereIn('status', STRANDED_STATUSES)
@@ -458,7 +468,7 @@ class InternalLinkPrExecutor {
       .limit(limit)
       .select('*');
     if (!tasks.length) return { count: 0, results: [] };
-    return this._dryRunAndPersist(tasks, { onlyStatuses: STRANDED_STATUSES });
+    return this._dryRunAndPersist(tasks, { onlyStatuses: STRANDED_STATUSES, keepTransient: true });
   }
 
   async dryRunTask(task, { sourcePage = null, targetPage = null } = {}) {
