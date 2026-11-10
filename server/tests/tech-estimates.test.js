@@ -730,6 +730,19 @@ describe('POST /api/tech/estimates: refusals from the save', () => {
     expect(res.body.code).toBeUndefined();
     nothingWritten();
   });
+
+  test('a database error is logged by its code and the technician id, never by its message (it can hold the save\'s SQL)', async () => {
+    const logger = require('../services/logger');
+    logger.error.mockClear();
+    realSaveRejects(Object.assign(
+      new Error('insert into "estimates" ("customer_name", "customer_phone", "address") values (\'Sample Person\', \'+19415550142\', \'200 Example Ave\') - duplicate key'),
+      { code: '23505' },
+    ));
+    expect((await create({ prospect: PROSPECT, services: ['PEST'] })).status).toBeGreaterThanOrEqual(500);
+    const logged = logger.error.mock.calls.map((args) => args.join(' ')).join('\n');
+    expect(logged).toContain('[tech-estimates] create failed for technician tech-1: 23505');
+    expect(logged).not.toMatch(/Sample|5550142|Example Ave|insert into/);
+  });
 });
 
 describe('POST /api/tech/estimates: the answer and what is recorded', () => {

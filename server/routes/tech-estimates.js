@@ -23,14 +23,16 @@ router.use(async (req, res, next) => {
   } catch (err) { return next(err); }
 });
 
-// Every route answers a refusal the same way: its status, a short message and, for some, a code.
-async function answer(res, next, label, work) {
+// Every route answers a refusal the same way: its status, a short message and, for some, a code. Any other error is
+// logged by its code or class and the caller's id only: a database error's message can carry the SQL of the estimate
+// save, and with it a name, a phone or an address.
+async function answer(req, res, next, label, work) {
   const { PriceRefusal } = require('../services/tech-estimate-price');
   try {
     res.json(await work());
   } catch (err) {
     if (err instanceof PriceRefusal) return res.status(err.status).json({ error: err.message, ...err.extra });
-    logger.error(`[tech-estimates] ${label} failed: ${err.message}`);
+    logger.error(`[tech-estimates] ${label} failed for technician ${req.technicianId}: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
     return next(err);
   }
 }
@@ -38,18 +40,18 @@ const price = () => require('../services/tech-estimate-price');
 const save = () => require('../services/tech-estimate-save');
 
 /* GET /setup — the services this login may quote */
-router.get('/setup', (req, res, next) => answer(res, next, 'setup', () => price().setupFor(req)));
+router.get('/setup', (req, res, next) => answer(req, res, next, 'setup', () => price().setupFor(req)));
 
 /* POST /price — price a quote at list price; saves nothing. Answers a digest the create sends back. */
-router.post('/price', (req, res, next) => answer(res, next, 'price', () => price().priceQuote(req, req.body || {})));
+router.post('/price', (req, res, next) => answer(req, res, next, 'price', () => price().priceQuote(req, req.body || {})));
 
 /* POST / — save the quote as a draft estimate (retry key clientDraftId; the price is tied to /price by digest) */
-router.post('/', (req, res, next) => answer(res, next, 'create', () => save().createQuote(req, req.body || {})));
+router.post('/', (req, res, next) => answer(req, res, next, 'create', () => save().createQuote(req, req.body || {})));
 
 /* GET / — his own estimates, newest first */
-router.get('/', (req, res, next) => answer(res, next, 'list', () => save().listOwn(req)));
+router.get('/', (req, res, next) => answer(req, res, next, 'list', () => save().listOwn(req)));
 
 /* GET /:id — one of his own estimates (404 for any other id) */
-router.get('/:id', (req, res, next) => answer(res, next, 'read', () => save().readOwn(req, req.params.id)));
+router.get('/:id', (req, res, next) => answer(req, res, next, 'read', () => save().readOwn(req, req.params.id)));
 
 module.exports = router;
