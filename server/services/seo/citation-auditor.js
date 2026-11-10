@@ -142,6 +142,40 @@ function parseAddress(str) {
 }
 const streetOfAddress = (address) => parseAddress(address).street;
 
+// A directory template prints a placeholder where it holds no value ("N/A"). A placeholder states nothing: the part
+// is read as absent, so it is neither a match nor a mismatch and the rest of the listing decides. First audit of real
+// listing pages, 2026-11-09: 36 of the 46 "mismatched" rows had only placeholders, or one field carrying the rest of
+// the address (below), where the listing itself was right.
+const PLACEHOLDER_RE = /^(?:n\s*\/?\s*a|none|null|undefined|unknown|not\s+(?:available|provided|applicable)|-+|\.+)$/i;
+const isPlaceholder = (v) => typeof v === 'string' && PLACEHOLDER_RE.test(v.trim());
+const statedPart = (v) => (v == null || isPlaceholder(v) ? null : v);
+
+// A trailing country ("..., FL 34240 USA") is no part of an office address: drop it before the ZIP is read.
+const withoutCountry = (str) => String(str || '').replace(/[\s,]+(?:u\.?\s?s\.?\s?a\.?|u\.?\s?s\.?|united\s+states(?:\s+of\s+america)?)\s*$/i, '');
+
+// One JSON-LD field that carries the office's WHOLE address ("1978 S Tamiami Trl #10 Venice, FL 34293" given as the
+// street or as the locality). True only when the street EQUALS the office's and every other part the string gives
+// (city, state, ZIP) equals the office's too, so it can excuse a field, never confirm a different address.
+function isWholeOfficeAddress(str, office) {
+  if (typeof str !== 'string' || !/\d/.test(str)) return false;
+  const p = parseAddress(withoutCountry(str));
+  return p.street === office.street
+    && (!p.city || office.cities.includes(p.city))
+    && (!p.region || p.region === office.region)
+    && (!p.postal || p.postal === office.postal);
+}
+
+// A locality that carries the state and ZIP after the city ("Sarasota, FL 34240 USA"). True only when the city is the
+// office's and the state and ZIP it gives, if any, are the office's.
+function isOfficeLocality(str, office) {
+  if (typeof str !== 'string') return false;
+  const tokens = normalizeStreet(withoutCountry(str)).split(' ').filter(Boolean);
+  if (tokens.length > 1 && /^\d{4}$/.test(tokens[tokens.length - 1]) && /^\d{5}$/.test(tokens[tokens.length - 2])) tokens.pop(); // ZIP+4
+  const postal = /^\d{5}$/.test(tokens[tokens.length - 1] || '') ? tokens.pop() : null;
+  const region = /^[a-z]{2}$/.test(tokens[tokens.length - 1] || '') && tokens.length > 1 ? tokens.pop() : null;
+  return office.cities.includes(tokens.join(' ')) && (!region || region === office.region) && (!postal || postal === office.postal);
+}
+
 // An office's accepted cities come from locations.js only: the postal city parsed from its
 // address, plus its display name (the bradenton office is "Lakewood Ranch"; for the others the
 // name equals the city, so it adds nothing).
@@ -321,7 +355,7 @@ function objectAddressStrings(address) {
     const none = { street: null, city: null, region: null, postal: null };
     return { parsed: none, raw: none, display: `JSON-LD address ${address['@id']} (not on the page)`, unresolved: true };
   }
-  const raw = { street: address.streetAddress || null, city: address.addressLocality || null, region: address.addressRegion || null, postal: address.postalCode || null };
+  const raw = { street: statedPart(address.streetAddress) || null, city: statedPart(address.addressLocality) || null, region: statedPart(address.addressRegion) || null, postal: statedPart(address.postalCode) || null };
   const parsed = {
     street: normalizeStreet(raw.street) || null,
     city: normalizeStreet(raw.city) || null,
@@ -361,7 +395,8 @@ function extractNap(html, candidates = []) {
   const node = wavesEntity(html, candidates);
   // "Stated" is tracked apart from "parsed": a field the entity gives but we cannot read is a
   // stated field that fails, never an unstated one that page text may fill in.
-  const rawPhones = [].concat(node ? node.telephone ?? [] : []).map((p) => String(p).trim()).filter(Boolean);
+  // A placeholder telephone ("N/A") states no phone: the page text is read instead.
+  const rawPhones = [].concat(node ? node.telephone ?? [] : []).map((p) => String(p).trim()).filter((p) => p && !isPlaceholder(p));
   const entity = node && {
     name: statedText(node.name),
     rawPhones,
@@ -427,16 +462,20 @@ const isStated = (v) => v != null && String(v).trim() !== ''; // stated, even if
 
 // The Waves entity's stated address: each stated part must match the office. null when it states
 // no street and no mismatching part, so the visible text is consulted instead.
+// Some directories put more than one part in one field: the whole address as the street or as the locality, or the
+// state and ZIP after the city. Such a field is right only when every part it carries equals the office's
+// (isWholeOfficeAddress, isOfficeLocality); a locality that is the whole address also stands in for a missing street.
 function judgeEntityAddress({ parsed, raw, display }, office) {
+  const wholeInLocality = isWholeOfficeAddress(raw.city, office);
   const parts = [
-    { field: 'address', raw: raw.street, ok: parsed.street === office.street, expected: office.address, seen: display },
-    { field: 'city', raw: raw.city, ok: office.cities.includes(parsed.city), expected: office.cityLabel, seen: raw.city },
+    { field: 'address', raw: raw.street, ok: parsed.street === office.street || isWholeOfficeAddress(raw.street, office), expected: office.address, seen: display },
+    { field: 'city', raw: raw.city, ok: office.cities.includes(parsed.city) || wholeInLocality || isOfficeLocality(raw.city, office), expected: office.cityLabel, seen: raw.city },
     { field: 'postal_code', raw: raw.postal, ok: parsed.postal === office.postal, expected: office.postal, seen: raw.postal },
     { field: 'region', raw: raw.region, ok: parsed.region === office.region, expected: 'FL', seen: raw.region },
   ];
   const mismatches = parts.filter((p) => isStated(p.raw) && !p.ok).map(({ field, expected, seen }) => ({ field, expected, seen }));
   if (mismatches.length) return { confirmed: false, checked: true, mismatches, unconfirmed: null, observed: display };
-  if (isStated(raw.street)) return { confirmed: true, checked: true, mismatches, unconfirmed: null, observed: display };
+  if (isStated(raw.street) || wholeInLocality) return { confirmed: true, checked: true, mismatches, unconfirmed: null, observed: display };
   return null;
 }
 
