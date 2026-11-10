@@ -35,14 +35,15 @@ const logger = require('./logger');
 const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
 const estimateSlotAvailability = require('./estimate-slot-availability');
 const { addETDays, etDateString } = require('../utils/datetime-et');
-const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
+const { dateOnlyString } = require('../utils/date-only');
+const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate, CAPACITY_OFFER_POLICY, MAKE_ROOM_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { violatesSelfServeNotice, visitInsideNoticeWindow } = require('./scheduling/self-serve-notice');
 // Rung 1 of the global scheduling lock order — see the ORDERING CONTRACT in
 // scheduling/occupancy.js for why both write paths here take it first, and
 // why each also runs the tech-blind global probe (findConflictingVisits)
 // under it before committing.
-const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts } = require('./scheduling/occupancy');
+const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts, techScopedConfirmActive, applyTechScope } = require('./scheduling/occupancy');
 const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
 
 // Technician scope for this module's hour-mode global overlap probes (findConflictingVisits).
@@ -822,6 +823,272 @@ async function refuseGracedOfferOnRivalHoldConflict(trx, {
   }
 }
 
+// GATE_BOOKING_MAKE_ROOM on, hour mode only: a hold may take an hour a regular stop holds when that stop can move later.
+// Read at call time; any error reads as off. Capacity mode never takes the make-room path.
+function makeRoomHoldsOn() {
+  try {
+    return !capacityEnabled() && require('./scheduling/booking-make-room').bookingMakeRoomMode() === 'on';
+  } catch {
+    return false;
+  }
+}
+
+// The destination guards (Codex #7796 P2): GATE_BOOKING_MAKE_ROOM on, in hour mode AND in capacity mode. A make-room hold
+// made in hour mode keeps its moved stops' destinations for its whole life, even if capacity mode turns on meanwhile
+// (no new make-room hold is made then: makeRoomHoldsOn). Off or shadow: the gate is the kill switch and guards nothing.
+function makeRoomGuardsOn() {
+  try {
+    return require('./scheduling/booking-make-room').bookingMakeRoomMode() === 'on';
+  } catch {
+    return false;
+  }
+}
+
+function slotTaken(slotId) {
+  const err = new Error('slot no longer available');
+  err.code = 'SLOT_UNAVAILABLE';
+  if (slotId) err.slotId = slotId;
+  return err;
+}
+
+// A fresh gate read right before a write. A make-room hold whose gate went off while the locks were waited on is the
+// ordinary slot-taken answer and writes nothing. Returns the live mode for the destination probe.
+function requireMakeRoomStillOn(makeRoom, slotId) {
+  const on = makeRoomHoldsOn();
+  if (makeRoom && !on) throw slotTaken(slotId);
+  return on;
+}
+
+function makeRoomMovesPayload({ date, techId, shiftMin, moves }) {
+  return { v: 1, date, techId: techId || null, shiftMin, moves: moves.map(({ id, from, to, widthMin }) => ({ id, from, to, widthMin })) };
+}
+
+// The hold's proof of its make-room hour on the data as it is now, under the caller's locks: { moves, payload }, or
+// { reason }. Never throws.
+async function proveMakeRoomHour(trx, { estimate, serviceProfile = null, serviceMix = null, estimateZone, coords, date, windowStart, techId, durationMinutes, candidateExpectedMinutes }) {
+  if (typeof estimateSlotAvailability.verifyMakeRoomOffer !== 'function') return { reason: 'unavailable' };
+  const proof = await estimateSlotAvailability.verifyMakeRoomOffer({
+    conn: trx, estimate, serviceProfile, serviceMix, estimateZone, coords, date, windowStart, techId, durationMinutes, candidateExpectedMinutes,
+  });
+  if (!proof || !Array.isArray(proof.moves) || !proof.moves.length) return { reason: proof?.reason || 'unproven' };
+  return { moves: proof.moves, payload: makeRoomMovesPayload({ date, techId, shiftMin: proof.shiftMin, moves: proof.moves }) };
+}
+
+// Another customer's live make-room hold keeps the destinations of its moved stops: a window on that technician-day that
+// overlaps one is taken (the estimate page's filterCollidingSlots draws the same line). Mode on only. Technician scope
+// is the occupancy probes' own (findConflictingVisits): with multi-tech confirm on, that technician's rows and the
+// unassigned ones; off, every technician. `excludeId` is the caller's own hold, which never blocks itself.
+// `excludeEstimateId` (the page's offer only) leaves out every hold of that estimate: its reserve releases them first.
+async function makeRoomDestinationClash(trx, { date, techId, windowStart, windowEnd, excludeId = null, excludeEstimateId = null }) {
+  return liveMakeRoomHolds(trx, { date, techId, excludeId, excludeEstimateId })
+    .whereRaw(
+      "EXISTS (SELECT 1 FROM jsonb_array_elements(make_room_moves->'moves') AS m WHERE (m->>'to')::time < ?::time AND ((m->>'to')::time + ((m->>'widthMin') || ' minutes')::interval) > ?::time)",
+      [windowEnd, windowStart],
+    )
+    .first('id');
+}
+
+// Other live make-room holds on the date, in the occupancy probes' technician scope, the caller's own hold left out.
+function liveMakeRoomHolds(trx, { date, techId, excludeId = null, excludeEstimateId = null }) {
+  return trx('scheduled_services')
+    .where({ scheduled_date: date })
+    .whereNull('customer_id')
+    .whereNotNull('reservation_expires_at')
+    .whereRaw('reservation_expires_at > NOW()')
+    .whereNotNull('make_room_moves')
+    .modify((q) => {
+      if (techId && techScopedConfirmActive()) applyTechScope(q, 'technician_id', techId);
+      if (excludeId) q.whereNot('id', excludeId);
+      if (excludeEstimateId) q.whereRaw('source_estimate_id IS DISTINCT FROM ?', [excludeEstimateId]);
+    });
+}
+
+// A new or re-proven chain may not take what another live make-room hold's chain takes: a moved stop's new hour on that
+// chain's destination, or a stop that chain also moves. The proof reads each stop where it is today, so it cannot see
+// either. Same live-hold rule and technician scope as makeRoomDestinationClash; `excludeId` is the caller's own hold.
+// The page's offer (booking-make-room.js) runs it too, with `excludeEstimateId`, so it never offers a chain the reserve refuses.
+async function makeRoomChainClash(trx, { payload, excludeId = null, excludeEstimateId = null }) {
+  const { date, techId, moves } = payload;
+  for (const move of moves) {
+    const window = { date, techId, windowStart: move.to, windowEnd: addMinutesToTime(move.to, move.widthMin), excludeId, excludeEstimateId };
+    if (await makeRoomDestinationClash(trx, window)) return true;
+  }
+  const sharedStop = await liveMakeRoomHolds(trx, { date, techId, excludeId, excludeEstimateId })
+    .whereRaw(
+      "EXISTS (SELECT 1 FROM jsonb_array_elements(make_room_moves->'moves') AS m WHERE (m->>'id') = ANY(?::text[]))",
+      [moves.map((move) => String(move.id))],
+    )
+    .first('id');
+  return !!sharedStop;
+}
+
+// The gate read fresh, then the destination probes: true when this window sits on another live make-room hold's move
+// destination, or when this hold's own chain clashes with another live chain (makeRoomChainClash). A make-room hold
+// whose gate went off throws the ordinary slot-taken answer (nothing is written).
+async function destinationHitUnderGate(trx, makeRoom, slotId, window) {
+  requireMakeRoomStillOn(makeRoom, slotId);
+  if (!makeRoomGuardsOn()) return false;
+  if (await makeRoomDestinationClash(trx, window)) return true;
+  return !!makeRoom && makeRoomChainClash(trx, { payload: makeRoom.payload, excludeId: window.excludeId || null });
+}
+
+// commitReservation: the accepted window yields to another customer's live make-room hold whose moved stop now holds any
+// part of it (Codex pre-push P1s, #7796). The commit probes see each hold at its own window only, and no chain proof saw
+// this window as it is now in two cases: a hold whose expiry passed inside the grace, and an accept that lengthens the
+// held window (the service profile is resolved again). So every accept is asked, with the final window. Mode on, hour
+// or capacity mode (makeRoomGuardsOn); the committing hold never blocks itself.
+async function acceptedWindowOnMakeRoomDestination(client, { row, date, windowStart, windowEnd }) {
+  if (!makeRoomGuardsOn()) return false;
+  return !!(await makeRoomDestinationClash(client, { date, techId: row.technician_id || null, windowStart, windowEnd, excludeId: row.id }));
+}
+
+// The make-room hold's proof inside the reserve transaction: { payload, moveIds }, or the ordinary slot-taken throw.
+async function proveHoldOrRefuse(trx, slotId, args) {
+  const proof = await proveMakeRoomHour(trx, args);
+  if (!proof.moves) {
+    logger.info('[slot-reservation] make-room hour refused', { estimateId: args.estimate.id, slotId, reason: proof.reason });
+    throw slotTaken(slotId);
+  }
+  return { payload: proof.payload, moveIds: proof.moves.map((move) => move.id) };
+}
+
+// extendReservation: { makeRoom, refused }. A make-room hold is kept only while its hour proves again, which needs the
+// gate on and hour mode. With the gate not on, or in capacity mode (where the row may read as a capacity hold, whose
+// extend runs no occupancy probe), nothing proves its chain, so it is refused and superseded, never extended unproven
+// (Codex #7796 P2). With the gate on (read fresh), any hold on another live make-room hold's destination is refused too,
+// in either scheduling mode; its own row never blocks it.
+async function extendMakeRoomState(trx, { row, estimate, rowUnderCapacity, scheduledDate, windowStart, windowEnd }) {
+  const guardsOn = makeRoomGuardsOn();
+  if (row.make_room_moves && (!guardsOn || rowUnderCapacity || capacityEnabled())) return { makeRoom: null, refused: true };
+  if (!guardsOn) return { makeRoom: null, refused: false };
+  const window = { date: scheduledDate, techId: row.technician_id, windowStart, windowEnd, excludeId: row.id };
+  if (await makeRoomDestinationClash(trx, window)) return { makeRoom: null, refused: true };
+  if (!row.make_room_moves) return { makeRoom: null, refused: false };
+  const { parseHHMM } = require('./scheduling/window-rules');
+  const heldMinutes = parseHHMM(windowEnd) - parseHHMM(windowStart);
+  let extendZone = null;
+  try { extendZone = await resolveEstimateZone(trx, estimate); } catch { /* the proof reads no zone rule it cannot do without */ }
+  const proof = await proveMakeRoomHour(trx, {
+    estimate, serviceMix: row.reservation_service_mix || null, estimateZone: extendZone,
+    coords: row.lat != null && row.lng != null ? { lat: Number(row.lat), lng: Number(row.lng) } : null,
+    date: scheduledDate, windowStart, techId: row.technician_id, durationMinutes: heldMinutes,
+    candidateExpectedMinutes: await candidateExpectedMinutesFromRow(trx, row, heldMinutes),
+  });
+  if (!proof.moves || await makeRoomChainClash(trx, { payload: proof.payload, excludeId: row.id })) return { makeRoom: null, refused: true };
+  return { makeRoom: { payload: proof.payload, moveIds: proof.moves.map((move) => move.id) }, refused: false };
+}
+
+// ---- commitReservation: the accept moves the make-room hold's stops (GATE_BOOKING_MAKE_ROOM, owner 2026-11-09 "YES") ----
+
+const makeRoomSlotId = (row, scheduledDate) => `${scheduledDate}_${String(row.window_start).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`;
+
+// The stored chain and a fresh proof's chain, normalized: the same date, technician, shift and moves (id, from, to, width) in order.
+function normalizedMakeRoomChain(payload) {
+  if (!payload || !Array.isArray(payload.moves)) return null;
+  return {
+    date: dateOnlyString(payload.date),
+    techId: payload.techId == null ? null : String(payload.techId),
+    shiftMin: Number(payload.shiftMin),
+    moves: payload.moves.map((move) => ({ id: String(move.id), from: String(move.from).slice(0, 5), to: String(move.to).slice(0, 5), widthMin: Number(move.widthMin) })),
+  };
+}
+
+const sameMakeRoomChain = (a, b) => require('node:util').isDeepStrictEqual(normalizedMakeRoomChain(a), normalizedMakeRoomChain(b));
+
+// A make-room hold (hour mode) moves other visits at accept: it takes the tech-day locks (rung 3) too. Safe after the
+// caller's row locks: occupancy.js ORDERING CONTRACT, "Later rungs MAY follow row locks ... once a writer holds rung 1 no
+// other txn can hold any other rung for that date" - rung 1 is held by now (reentrant when the caller took it).
+async function lockMakeRoomTechDays(client, preRow, lockedDate) {
+  if (!preRow.make_room_moves || !lockedDate) return;
+  await lockTechDays(client, [{ techId: preRow.technician_id, date: lockedDate }, { techId: null, date: lockedDate }]);
+}
+
+// The chain and technician were read before the locks; a hold refreshed or re-assigned in between has a chain these locks
+// do not cover (the capacity technician check's twin).
+function requireMakeRoomUnchanged(row, preRow, preparedCapacity) {
+  if (!row.make_room_moves || preparedCapacity) return;
+  if ((row.technician_id || null) === (preRow.technician_id || null) && sameMakeRoomChain(row.make_room_moves, preRow.make_room_moves)) return;
+  const err = new Error('reservation changed under the lock');
+  err.code = 'RESERVATION_EXPIRED';
+  throw err;
+}
+
+// Silent reminder and record syncs once the accept's transaction has committed. With a caller transaction they follow its
+// commit hook; standalone, the caller runs the returned work after its own transaction resolves.
+function queueMakeRoomSync(trx, { dateStr, written }) {
+  if (!written.length) return null;
+  if (!trx) return { dateStr, written };
+  require('./scheduling/booking-make-room-accept').scheduleMakeRoomAfterCommit(trx, { dateStr, written });
+  return null;
+}
+
+function refuseMakeRoomAccept(row, scheduledDate, reason) {
+  logger.info('[slot-reservation] make-room accept refused', { scheduledServiceId: row.id, reason });
+  return slotTaken(makeRoomSlotId(row, scheduledDate));
+}
+
+// The hold's estimate for the re-proof: the caller's when it is the hold's own, else the stored row. Null when there is none.
+async function makeRoomProofEstimate(client, row, estimate) {
+  if (estimate && String(estimate.id) === String(row.source_estimate_id)) return estimate;
+  return row.source_estimate_id ? client('estimates').where({ id: row.source_estimate_id }).first() : null;
+}
+
+// The chain proven again on the data as it is under the accept's locks, with the accepted service profile. Returns the
+// proof payload, or { reason }. Never throws.
+async function reproveMakeRoomChain(client, { row, estimate, serviceProfile, effectiveDurationMinutes, scheduledDate }) {
+  const holdEstimate = await makeRoomProofEstimate(client, row, estimate);
+  if (!holdEstimate) return { reason: 'no_estimate' };
+  const { parseHHMM } = require('./scheduling/window-rules');
+  const heldMinutes = row.window_end ? parseHHMM(row.window_end) - parseHHMM(row.window_start) : null;
+  const durationMinutes = effectiveDurationMinutes || heldMinutes;
+  if (!(durationMinutes > 0)) return { reason: 'no_duration' };
+  let estimateZone = null;
+  try { estimateZone = await resolveEstimateZone(client, holdEstimate); } catch { /* the proof reads no zone rule it cannot do without */ }
+  const proof = await proveMakeRoomHour(client, {
+    estimate: holdEstimate, serviceProfile, serviceMix: serviceProfile?.reservationServiceMix || null, estimateZone,
+    coords: row.lat != null && row.lng != null ? { lat: Number(row.lat), lng: Number(row.lng) } : null,
+    date: scheduledDate, windowStart: row.window_start, techId: row.technician_id, durationMinutes,
+    candidateExpectedMinutes: (await candidateExpectedMinutesFromProfile(client, serviceProfile, durationMinutes))
+      ?? (await candidateExpectedMinutesFromRow(client, row, durationMinutes)),
+  });
+  return proof.moves ? proof : { reason: proof.reason || 'unproven' };
+}
+
+// The write step: the apply.js refusals (a stop no longer movable, changed, or overlapping) are the ordinary slot-taken answer.
+async function writeChainOrRefuse(client, { row, scheduledDate }) {
+  const accept = require('./scheduling/booking-make-room-accept');
+  try {
+    return await accept.writeMakeRoomMoves(client, { dateStr: scheduledDate, techId: row.technician_id, payload: row.make_room_moves });
+  } catch (err) {
+    if (!accept.isRefusalCode(err.code)) throw err;
+    throw refuseMakeRoomAccept(row, scheduledDate, `move_${err.code}`);
+  }
+}
+
+/**
+ * commitReservation, a make-room hold (row.make_room_moves): the accept moves the regular stops later, inside the accept
+ * transaction. Runs under the locks commitReservation holds (rung 1, the tech-days, the hold's row), after the service
+ * profile resolved and BEFORE the narrow and global overlap probes, which then see the stops at their new hours; any
+ * refusal there rolls the moves back with the rest. Order: the gate (read in the transaction), the moved stops' rows
+ * locked (FOR UPDATE, id order), the chain proven again and equal to the stored one, no clash with another live chain,
+ * the gate read again, then the writes. Every failure is the ordinary
+ * slot-taken answer with nothing written. Returns the written visits ([] when the hold has no chain).
+ */
+async function moveMakeRoomStops(client, { row, estimate, serviceProfile, effectiveDurationMinutes, scheduledDate, useCapacity }) {
+  if (!row.make_room_moves) return [];
+  if (useCapacity || !makeRoomHoldsOn()) throw refuseMakeRoomAccept(row, scheduledDate, 'mode_not_on');
+  // The moved stops' rows first, in id order, held to the end: nothing changes them between the proof and the writes.
+  await require('./scheduling/booking-make-room-accept').lockMakeRoomStops(client, row.make_room_moves);
+  const proof = await reproveMakeRoomChain(client, { row, estimate, serviceProfile, effectiveDurationMinutes, scheduledDate });
+  if (!proof.moves) throw refuseMakeRoomAccept(row, scheduledDate, `proof_${proof.reason}`);
+  if (!sameMakeRoomChain(proof.payload, row.make_room_moves)) throw refuseMakeRoomAccept(row, scheduledDate, 'chain_changed');
+  if (await makeRoomChainClash(client, { payload: proof.payload, excludeId: row.id })) throw refuseMakeRoomAccept(row, scheduledDate, 'chain_clash');
+  // The gate again, right before the writes: the row locks may have waited and the proof awaited many reads, and a gate
+  // turned off by then moves nothing (the kill switch; reserve and extend read it again before their writes too).
+  if (!makeRoomHoldsOn()) throw refuseMakeRoomAccept(row, scheduledDate, 'mode_off_before_write');
+  return writeChainOrRefuse(client, { row, scheduledDate });
+}
+
 async function reserveSlot({
   estimateId,
   slotId,
@@ -1199,7 +1466,7 @@ async function reserveSlot({
       // unassigned id died at the presence gate above. Recheck the locked
       // profile here even after capacity mode authenticated before traffic;
       // the coarse policy checks below stay as defense-in-depth.
-      if (!verifySlotOffer({
+      const offerPayload = {
         surface: 'estimate',
         scopeId: String(estimateId),
         date,
@@ -1211,11 +1478,19 @@ async function reserveSlot({
         // The token's own embedded grace (owner ruling 2026-09-28, Codex
         // round 2 #5314) — never a live re-read; see the pre-txn check above.
         arrivalGrace: offerArrivalGrace,
-      }, offerSig)) {
-        const err = new Error('slot was not offered for this estimate');
-        err.code = 'SLOT_UNAVAILABLE';
-        err.slotId = slotId;
-        throw err;
+      };
+      // GATE_BOOKING_MAKE_ROOM on (hour mode): an offer signed as the page's make-room hour takes the make-room path
+      // below; only that signature does, never a normal or hand-made slotId.
+      let makeRoomOffer = false;
+      if (!verifySlotOffer(offerPayload, offerSig)) {
+        // The gate is read here, after the locks were waited on, not before the transaction.
+        makeRoomOffer = makeRoomHoldsOn() && verifySlotOffer({ ...offerPayload, policy: MAKE_ROOM_OFFER_POLICY }, offerSig);
+        if (!makeRoomOffer) {
+          const err = new Error('slot was not offered for this estimate');
+          err.code = 'SLOT_UNAVAILABLE';
+          err.slotId = slotId;
+          throw err;
+        }
       }
 
       // Working-day end: every legitimate offer ends by currentDayEndMinutes()
@@ -1327,6 +1602,18 @@ async function reserveSlot({
         ['slot-reserve', `zone:${reserveZone?.id || 'unknown'}:${date}`],
       );
 
+      // Make-room hour: rebuild the chain for this exact hour from current data, under the date and tech-day locks held
+      // above (booking-make-room's own rules, plus the sooner rule's drive cap). Any failure is the ordinary
+      // slot-taken answer. On success the hold's own overlap probes below skip the chain's moved stops (the proof
+      // already judged the new visit against the day with those stops at their new hours).
+      let makeRoom = null;
+      if (makeRoomOffer) {
+        makeRoom = await proveHoldOrRefuse(trx, slotId, {
+          estimate, serviceProfile, serviceMix: serviceProfile?.reservationServiceMix || null, estimateZone: reserveZone, coords: holdPin,
+          date, windowStart, techId, durationMinutes: effectiveDurationMinutes, candidateExpectedMinutes,
+        });
+      }
+
       // (service profile / duration / day-end / signature were all resolved
       // and verified ABOVE, right after the estimate row's state checks.)
 
@@ -1384,7 +1671,7 @@ async function reserveSlot({
           date,
           windowStart,
           windowEnd,
-          excludeServiceIds: [sameSlotHold.id],
+          excludeServiceIds: [sameSlotHold.id, ...(makeRoom?.moveIds || [])],
           includeHolds: false,
           technicianId: hourProbeTechnicianId(techId),
           // Travel gap (GATE_SLOT_TRAVEL_GAP): the same pin the fresh reserve
@@ -1402,7 +1689,9 @@ async function reserveSlot({
               ?? await candidateExpectedMinutesFromRow(trx, sameSlotHold, effectiveDurationMinutes),
           },
         });
-        if (refreshClash.length) {
+        // Mode on: this hold's hour may have become another customer's make-room destination while it lapsed.
+        const refreshDestinationHit = await destinationHitUnderGate(trx, makeRoom, slotId, { date, techId, windowStart, windowEnd, excludeId: sameSlotHold.id });
+        if (refreshClash.length || refreshDestinationHit) {
           // Do NOT refresh a doomed hold — supersede it (same narrow
           // still-uncommitted predicate releaseReservation uses) so the
           // window frees beyond the committed visit's own footprint. The
@@ -1432,6 +1721,7 @@ async function reserveSlot({
         // catalogLink/catalogServiceId/serviceType were resolved above from
         // the SAME serviceProfile the fresh-create path below stamps a new
         // row with — reused here, not re-queried.
+        requireMakeRoomStillOn(makeRoom, slotId);
         const [refreshed] = await trx('scheduled_services')
           .where({ id: sameSlotHold.id })
           .update({
@@ -1442,6 +1732,8 @@ async function reserveSlot({
             service_id: catalogServiceId,
             service_key_snapshot: catalogLink?.service_key || null,
             service_type: serviceType,
+            // A make-room hold's chain is the one just proven; a hold that no longer needs one drops it.
+            ...(makeRoom || sameSlotHold.make_room_moves ? { make_room_moves: makeRoom ? makeRoom.payload : null } : {}),
           })
           .returning(['id', 'reservation_expires_at']);
         const refreshedExpiresAt = refreshed?.reservation_expires_at || null;
@@ -1485,6 +1777,7 @@ async function reserveSlot({
           q.whereNull('reservation_expires_at')
             .orWhereRaw('reservation_expires_at > NOW()');
         })
+        .modify((q) => { if (makeRoom) q.whereNotIn('id', makeRoom.moveIds); })
         .modify((q) => applyWindowOverlapFilter(q, windowStart, windowEnd))
         .first('id');
 
@@ -1511,6 +1804,7 @@ async function reserveSlot({
             q.whereNull('scheduled_services.reservation_expires_at')
               .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
           })
+          .modify((q) => { if (makeRoom) q.whereNotIn('scheduled_services.id', makeRoom.moveIds); })
           .where((q) => {
             if (zoneSlug) q.orWhere('scheduled_services.zone', zoneSlug);
             if (zoneCities.length) {
@@ -1562,6 +1856,7 @@ async function reserveSlot({
         windowEnd,
         includeHolds: false,
         technicianId: hourProbeTechnicianId(techId),
+        ...(makeRoom ? { excludeServiceIds: makeRoom.moveIds } : {}),
         // Travel gap (GATE_SLOT_TRAVEL_GAP): the hold's own pin, resolved
         // above; null → buffer-only, never a skipped check. Same
         // expected-minutes credit find-time/filterCollidingSlots resolved
@@ -1573,6 +1868,11 @@ async function reserveSlot({
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = slotId;
         throw err;
+      }
+      // Mode on: another customer's live make-room hold keeps its moved stops' destinations (see the helper).
+      // The gate is read again here, right before the hold row is written.
+      if (await destinationHitUnderGate(trx, makeRoom, slotId, { date, techId, windowStart, windowEnd })) {
+        throw slotTaken(slotId);
       }
 
       // service_type stays canonical for protocol/default lookups; notes
@@ -1612,6 +1912,8 @@ async function reserveSlot({
         ...(useCapacity ? { reservation_policy_version: 2 } : {}),
         ...(serviceProfile?.reservationServiceMix
           ? { reservation_service_mix: serviceProfile.reservationServiceMix } : {}),
+        // The make-room hold's chain (GATE_BOOKING_MAKE_ROOM on). Nothing moves from it yet.
+        ...(makeRoom ? { make_room_moves: makeRoom.payload } : {}),
         notes,
         ...(catalogServiceId ? { service_id: catalogServiceId } : {}),
         // Durable identity evidence: the completion resolver checks
@@ -1718,6 +2020,8 @@ async function commitReservation({
   if (!trx && !preparedCapacity) preparedCapacity = await prepareReservationCommit(scheduledServiceId, {
     estimate, serviceMode, selectedFrequency, serviceCadences, durationMinutes,
   });
+  // Set by the standalone path's run() when a make-room accept moved stops: the after-commit steps follow its transaction.
+  let standaloneMakeRoom = null;
   // Body is shared between the "caller already has a txn" path (use it) and
   // the "no caller txn" path (open our own). Either way the SELECT runs
   // FOR UPDATE so a concurrent commit/release/expiry-cleanup can't race
@@ -1785,6 +2089,8 @@ async function commitReservation({
     // before its own row locks. Standalone commits acquire it here.
     if (preparedCapacity) await lockTechDays(client, [{ techId: preRow.technician_id, date: lockedDate },
       { techId: null, date: lockedDate }]);
+    // A make-room hold (hour mode) takes the tech-day locks here too (lockMakeRoomTechDays).
+    else await lockMakeRoomTechDays(client, preRow, lockedDate);
     // Catalog SHARE lock BEFORE this row's FOR UPDATE (codex #4369 r3 P1):
     // catalog migrations lock `services` first and then update
     // scheduled_services rows (20260902000010), so reaching the catalog
@@ -1859,6 +2165,8 @@ async function commitReservation({
       // than throw; a double-click on accept shouldn't fail.
       return row;
     }
+    // A make-room hold refreshed or re-assigned since the pre-read: same recoverable code as the capacity technician check.
+    requireMakeRoomUnchanged(row, preRow, preparedCapacity);
     if (row._expired) {
       const err = new Error('reservation expired');
       err.code = 'RESERVATION_EXPIRED';
@@ -2023,6 +2331,9 @@ async function commitReservation({
       serviceTypes: serviceProfile?.services.map(service => service.label || service.service),
     }) : null;
 
+    // GATE_BOOKING_MAKE_ROOM: a make-room hold moves its chain now, so the probes below see the stops at their new hours.
+    const makeRoomWritten = await moveMakeRoomStops(client, { row, estimate, serviceProfile, effectiveDurationMinutes, scheduledDate, useCapacity });
+
     if (windowEnd && !useCapacity) {
       const conflict = await client('scheduled_services')
         .where({ scheduled_date: scheduledDate })
@@ -2105,7 +2416,9 @@ async function commitReservation({
       const interviewClash = useCapacity
         ? await findInterviewConflicts({ db: client, date: scheduledDate, windowStart, windowEnd: probeWindowEnd })
         : [];
-      if (committedClash.length || interviewClash.length) {
+      const destinationClash = !committedClash.length && !interviewClash.length
+        && await acceptedWindowOnMakeRoomDestination(client, { row, date: scheduledDate, windowStart, windowEnd: probeWindowEnd });
+      if (committedClash.length || interviewClash.length || destinationClash) {
         const err = new Error('slot no longer available');
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`;
@@ -2204,6 +2517,9 @@ async function commitReservation({
       source: 'estimate_accept',
     });
 
+    // Silent reminder and record syncs once the accept's transaction has committed (booking-make-room-accept.js).
+    standaloneMakeRoom = queueMakeRoomSync(trx, { dateStr: scheduledDate, written: makeRoomWritten });
+
     logger.info('[slot-reservation] committed', {
       scheduledServiceId,
       customerId,
@@ -2215,7 +2531,10 @@ async function commitReservation({
     return updated;
   };
 
-  return trx ? run(trx) : db.transaction(run);
+  if (trx) return run(trx);
+  const committed = await db.transaction(run);
+  if (standaloneMakeRoom) await require('./scheduling/booking-make-room-accept').makeRoomAfterCommit(standaloneMakeRoom);
+  return committed;
 }
 
 /**
@@ -2715,13 +3034,19 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
     // refresh branch holds before probing.
     const { parseHHMM } = require('./scheduling/window-rules');
     const extendWindowMinutes = parseHHMM(windowEnd) - parseHHMM(windowStart);
+    // A make-room hold (mode on, hour mode) is kept only while its hour still proves out: the same proof reserveSlot ran,
+    // again under this transaction's date lock, and its chain is refreshed. A hold that no longer proves, and any
+    // make-room hold when the gate is not on or in capacity mode, is refused by extendMakeRoomState and superseded
+    // below (fails closed). An extend is how a customer keeps a hold while paying, so refusing every extend would drop
+    // the hold at the page's first refresh.
+    const { makeRoom, refused: makeRoomRefused } = await extendMakeRoomState(trx, { row, estimate, rowUnderCapacity, scheduledDate, windowStart, windowEnd });
     const clash = rowUnderCapacity ? [] : await findConflictingVisits({
       db: trx,
         includeInterviews: true,
       date: scheduledDate,
       windowStart,
       windowEnd,
-      excludeServiceIds: [row.id],
+      excludeServiceIds: [row.id, ...(makeRoom?.moveIds || [])],
       includeHolds: alreadyLapsed,
       technicianId: hourProbeTechnicianId(row.technician_id),
       // Same expected-minutes credit find-time/filterCollidingSlots
@@ -2731,7 +3056,10 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
         expectedMinutes: await candidateExpectedMinutesFromRow(trx, row, extendWindowMinutes),
       },
     });
-    if (clash.length) {
+    // The gate read again right before the writes (Codex pre-push P1): a make-room hold whose gate went off while its
+    // proof ran is superseded like one that no longer proves (its probes above skipped the stops it would move).
+    const makeRoomGateOff = !!makeRoom && !makeRoomHoldsOn();
+    if (clash.length || makeRoomRefused || makeRoomGateOff) {
       // Supersede — same narrow still-uncommitted predicate releaseReservation
       // uses — rather than leave a hold extending is guaranteed to lose at
       // commit occupying the window until it eventually expires.
@@ -2748,6 +3076,11 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
         staleHoldSuperseded: true,
         slotId: `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`,
       };
+    }
+
+    // A make-room hold keeps the chain just proven, whether or not the expiry moves.
+    if (makeRoom && !require('node:util').isDeepStrictEqual(row.make_room_moves, makeRoom.payload)) {
+      await trx('scheduled_services').where({ id: row.id }).update({ make_room_moves: makeRoom.payload });
     }
 
     // The capped no-op returns HERE, after the probe (codex r4 P2): a hold
@@ -2823,5 +3156,12 @@ module.exports = {
     catalogLinkForProfile,
     candidateExpectedMinutesFromRow,
     refuseGracedOfferOnRivalHoldConflict,
+    makeRoomDestinationClash,
+    makeRoomChainClash,
+    acceptedWindowOnMakeRoomDestination,
+    makeRoomGuardsOn,
+    destinationHitUnderGate,
+    extendMakeRoomState,
+    moveMakeRoomStops,
   },
 };

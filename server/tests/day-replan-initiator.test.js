@@ -87,6 +87,23 @@ describe('the initiator', () => {
   });
 });
 
+describe('booking_make_room (the make-room accept, owner 2026-11-09) is an automatic mover too', () => {
+  test('a visit it moved is not person-placed', async () => {
+    const visit = { id: 's1', scheduled_date: '2026-11-04', window_start: '10:00:00' };
+    const log = [{
+      id: 'l1', scheduled_service_id: 's1', series_move_id: null, original_date: '2026-11-04', new_date: '2026-11-04',
+      original_window: '09:00-10:00', new_window: '10:00-11:00', initiated_by: 'booking_make_room', created_at: T1,
+    }];
+    expect(await isPersonPlacedVisit(visit, personPlacedDb(log))).toEqual({ placed: false });
+  });
+
+  test('the funnel\'s automatic-mover list and the proofreader\'s program list name it', () => {
+    const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+    expect(read('services/sms-scheduling-funnel.js')).toMatch(/AUTOMATIC_MOVE_INITIATORS = Object\.freeze\(\[[^\]]*'booking_make_room'/);
+    expect(read('services/auto-dispatch/proofreader/record.js')).toMatch(/PROGRAM_RESCHEDULERS = \[[^\]]*'booking_make_room'/);
+  });
+});
+
 describe('every place that classifies a mover knows day_replan', () => {
   // These lists are not exported; the static guard keeps the three in step with eligibility.js.
   const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
