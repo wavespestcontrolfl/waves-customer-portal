@@ -72,7 +72,9 @@ const MATURITY = Object.freeze({
   M5: 'auto_eval_gated',
 });
 
-const WORKLOAD = Object.freeze(['live', 'replay', 'sealed', 'backfill']);
+// max_runner: portal code run off-box by the Max-plan runner (~/max-runner) with
+// every paid AI key removed; set process-wide via AGENT_CONTEXT_WORKLOAD.
+const WORKLOAD = Object.freeze(['live', 'replay', 'sealed', 'backfill', 'max_runner']);
 const ROW_KIND = Object.freeze(['chain', 'call', 'session', 'heartbeat']);
 
 // interactive: cross-provider fallback + hard timeout + deterministic safe
