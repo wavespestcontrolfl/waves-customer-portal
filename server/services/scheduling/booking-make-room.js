@@ -32,10 +32,20 @@
  *   4. The route keeps every arrival window with the new visit in it: arrival-route.js evaluateArrivalPlacement on
  *      the moved day, the check the estimate page runs today. In capacity mode its added drive also stays under the
  *      picker's self-serve cap (find-time findCapacitySlots: customerMaxDetourMinutes, with the zone route-day lift).
- *   5. The new visit adds at least MIN_SAVING_MIN fewer drive minutes than the best free time in the list.
+ *   5. The new visit adds at least MIN_SAVING_MIN fewer drive minutes than the best free time in the list. This is
+ *      the approved offer rule.
  * Drive minutes on both sides use the re-plan's straight-line leg (legMin) from the technician's start point: the
  * drive the new visit adds between the stop before it and the stop after it. The moved stops keep their order, so
  * they add no drive. $0: no Google, no AI.
+ *
+ * The report also carries a log-only measurement of the rule the owner is being asked about (owner 2026-11-09, "get it
+ * live"): a "sooner day" pass (report.sooner). It looks only at days before the first day in the customer's list, and
+ * swaps rule 5 for a drive cap: the self-serve cap (customerMaxDetourMinutes, with the zone route-day lift, read
+ * whatever the capacity mode is). Every other rule above holds. It runs first, with its own MAX_SOONER_CHECKS full
+ * checks under the same budget and caches, and the saving pass runs as before. When the travel-gap gate is on, a
+ * screen predicts for each sooner candidate whether the page's travel rule passes on the moved day. The screen only
+ * puts the likely passes first; it never drops a candidate, and the full check still decides. Nothing in the sooner
+ * pass reaches a customer or changes the offer rule.
  *
  * Modes (bookingMakeRoomMode, read at CALL time):
  *   off     unset or any other value. Callers never reach this module.
@@ -55,6 +65,8 @@ const MIN_SAVING_MIN = 10;
 const DEFAULT_BUDGET_MS = 4000;
 const MAX_DATES = 21;
 const MAX_FULL_CHECKS = 6;
+// The sooner pass is log-only, so it may look at more hours than the offer rule's six.
+const MAX_SOONER_CHECKS = 24;
 const TABLE = 'booking_make_room_checks';
 const TIMED_OUT = Symbol('timed_out');
 // A budget that never runs out, for a direct call of one step (tests).
@@ -226,7 +238,10 @@ function chainCandidate({ day, startMin, env, request, slot, shiftMin }) {
   const { prev } = neighbours(day.own, startMin, day.home);
   candidate.detourMin = addedDrive(env.legMin, prev, request.point, pointOf(chain.moves[0].row));
   candidate.savingMin = request.bestFree ? request.bestFree.detourMin - candidate.detourMin : null;
-  if (candidate.savingMin != null && candidate.savingMin < MIN_SAVING_MIN) return { reason: 'saving_below_bar' };
+  // The sooner pass (request.soonerCap) swaps the saving bar for the self-serve drive cap; the saving is still logged.
+  if (request.soonerCap) {
+    if (candidate.detourMin > request.soonerCap(day.dateStr, day.techId)) return { reason: 'over_drive_cap' };
+  } else if (candidate.savingMin != null && candidate.savingMin < MIN_SAVING_MIN) return { reason: 'saving_below_bar' };
   return { candidate };
 }
 
@@ -279,6 +294,64 @@ function bySaving(a, b) {
   return saving(b) - saving(a) || a.dateStr.localeCompare(b.dateStr) || a.startMin - b.startMin;
 }
 
+// The sooner pass: hours the travel-gap screen expects to pass first (no screen counts as a pass), then the earliest
+// date, the earliest hour and the technician.
+function bySooner(a, b) {
+  return (a.screen ? 1 : 0) - (b.screen ? 1 : 0) || a.dateStr.localeCompare(b.dateStr) || a.startMin - b.startMin
+    || String(a.techId ?? '').localeCompare(String(b.techId ?? ''));
+}
+
+// The estimate page's own entity for one day row (filterCollidingSlots' `busy`), `shiftMin` minutes later.
+function screenStop(row, env, shiftMin = 0) {
+  const start = minutesOf(row.window_start);
+  const explicitEnd = minutesOf(row.window_end);
+  const length = Number(row.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : 60;
+  const end = explicitEnd ?? (start != null ? start + length : null);
+  const known = start != null && end != null;
+  return {
+    startMin: start == null ? null : start + shiftMin,
+    endMin: end == null ? null : end + shiftMin,
+    technicianId: row.technician_id,
+    lat: row.lat ?? null,
+    lng: row.lng ?? null,
+    hold: row.reservation_expires_at != null && row.customer_id == null,
+    ...(known ? { windowMinutes: end - start, expectedMinutes: env.stopExpectedMinutesSync(row, end - start) } : {}),
+  };
+}
+
+// The page's travel rule for one shift of one candidate on the moved day: null for a predicted pass, else the first
+// conflict as overlap, gap_before or gap_after.
+function screenShift(candidate, rows, { env, request }) {
+  const moved = new Map(candidate.moves.map((m) => [String(m.row.id), m.toMin - m.fromMin]));
+  // filterCollidingSlots' scopeToTechnician: one technician's rows and the unassigned ones with multi-tech confirm on.
+  const scoped = candidate.techId && env.multiTechConfirmLive()
+    ? rows.filter((row) => row.technician_id == null || String(row.technician_id) === String(candidate.techId))
+    : rows;
+  const stops = scoped.map((row) => screenStop(row, env, moved.get(String(row.id)) || 0));
+  const { durationMin } = candidate;
+  const expected = request.candidateExpectedMinutes;
+  const entity = {
+    startMin: candidate.startMin, endMin: candidate.startMin + durationMin, lat: request.point.lat, lng: request.point.lng,
+    windowMinutes: durationMin,
+    expectedMinutes: Number.isFinite(expected) ? Math.min(expected, durationMin) : durationMin,
+  };
+  const [first] = env.travelGapConflicts(entity, stops);
+  if (!first) return null;
+  if (first.reason === 'overlap') return 'overlap';
+  return first.stop.endMin <= entity.startMin ? 'gap_before' : 'gap_after';
+}
+
+// The hour passes when either of its shifts is expected to; otherwise the 1-hour shift's first conflict.
+function screenCandidate(candidate, rows, ctx) {
+  let firstReason;
+  for (const shift of [candidate, candidate.later].filter(Boolean)) {
+    const reason = screenShift(shift, rows, ctx);
+    if (reason === null) return null;
+    if (firstReason === undefined) firstReason = reason;
+  }
+  return firstReason;
+}
+
 async function cached(map, key, load) {
   if (!map.has(key)) map.set(key, Promise.resolve().then(load));
   return map.get(key);
@@ -308,12 +381,13 @@ async function routeKeepsWindows(candidate, { conn, env, request, caches }) {
   return true;
 }
 
-// The picker's self-serve drive cap (find-time findCapacitySlots, capacity mode only), with the zone route-day lift
-// for the request's zone. Null while capacity mode is off: the page's free times have no cap then either.
-async function loadDetourCap(conn, env, zoneSlug) {
-  if (!env.capacityOn()) return null;
+// The picker's self-serve drive cap (find-time findCapacitySlots), with the zone route-day lift for the request's zone.
+// `detourCap` is null while capacity mode is off: the page's free times have no cap then either. `soonerCap` is the
+// same cap whatever the mode is, for the sooner pass. The zone route days are read once for both.
+async function loadDetourCaps(conn, env, zoneSlug) {
   const zoneRouteDays = zoneSlug && env.zoneRouteDaysLive() ? await env.readZoneRouteDays(conn) : null;
-  return (date, technicianId) => env.customerMaxDetourMinutes(zoneRouteDays ? { date, technicianId, zoneSlug, zoneRouteDays } : undefined);
+  const soonerCap = (date, technicianId) => env.customerMaxDetourMinutes(zoneRouteDays ? { date, technicianId, zoneSlug, zoneRouteDays } : undefined);
+  return { detourCap: env.capacityOn() ? soonerCap : null, soonerCap };
 }
 
 // The moved customer hears the new time only from the 72-hour and 24-hour texts, so both must be on and readable.
@@ -527,6 +601,12 @@ function defaultDeps() {
     techBlind: () => !occupancy.techScopedConfirmActive(),
     closeMin: require('../auto-dispatch/candidate-slots').DAY_CLOSE,
     ownHoldIds,
+    // The sooner pass's travel-gap screen (the page's own rule and entities).
+    travelGapEnabled: require('./travel-gap').travelGapEnabled,
+    travelGapConflicts: require('./travel-gap').travelGapConflicts,
+    stopExpectedMinutesSync: require('./expected-service-minutes').stopExpectedMinutesSync,
+    ensureCatalogLoaded: require('./expected-service-minutes').ensureCatalogLoaded,
+    multiTechConfirmLive: require('../../config/feature-gates').multiTechConfirmLive,
   };
 }
 
@@ -551,11 +631,12 @@ async function checkOne(candidate, ctx) {
   }
 }
 
-// The candidates that need reads, best saving first, within the budget. An hour whose 1-hour move fails is checked
-// again with its 2-hour move (owner 2026-11-07 "B"); the hour counts once, with the last reason or the passing move.
-async function checkCandidates(candidates, { conn, env, request, budget, report }) {
-  const ctx = { conn, env, request, budget, caches: { blocks: new Map(), routes: new Map(), days: new Map() } };
-  for (const candidate of candidates.sort(bySaving).slice(0, MAX_FULL_CHECKS)) {
+// The candidates that need reads, best first (`order`, by default the best saving), at most `limit`, within the budget.
+// An hour whose 1-hour move fails is checked again with its 2-hour move (owner 2026-11-07 "B"); the hour counts once,
+// with the last reason or the passing move. `onChecked` hears each hour that was fully checked.
+async function checkCandidates(candidates, { conn, env, request, budget, report, caches, order = bySaving, limit = MAX_FULL_CHECKS, onChecked }) {
+  const ctx = { conn, env, request, budget, caches };
+  for (const candidate of candidates.sort(order).slice(0, limit)) {
     let checkedMove = candidate;
     let why = await checkOne(candidate, ctx);
     if (why && why !== TIMED_OUT && candidate.later && !SAME_FOR_ANY_SHIFT.test(why)) {
@@ -570,10 +651,70 @@ async function checkCandidates(candidates, { conn, env, request, budget, report 
     report.checked += 1;
     if (why) tally(report, why);
     else report.passed.push(summaryOf(checkedMove));
+    if (onChecked) onChecked(candidate, why);
   }
 }
 
-async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId, capabilityRows, zoneSlug, dateFrom, dateTo, admit, placement, now, budget, deps }) {
+// Whole days from `dateStr` to `laterDateStr` (both ET dates), or null.
+function daysBetween(dateStr, laterDateStr) {
+  if (!dateStr || !laterDateStr) return null;
+  return Math.round((Date.parse(`${laterDateStr}T12:00:00Z`) - Date.parse(`${dateStr}T12:00:00Z`)) / 86400000);
+}
+
+// Every hour a stop starts on the given days, for the technicians the finder would use.
+function collectCandidates(days, { open, env, request, report }) {
+  const found = [];
+  for (const [dateStr, rows] of days) {
+    for (const techId of techIdsOf(rows)) {
+      if (open(dateStr, techId)) found.push(...dayCandidates({ dateStr, rows, techId, env, request, report }));
+      else tally(report, 'tech_day_closed');
+    }
+  }
+  return found;
+}
+
+// The sooner-day measurement (log only): the hours on days before the first day of the customer's list that the same
+// rules would give, with the saving bar swapped for the drive cap. Never throws: it must not cost the saving pass its
+// turn. It fills report.sooner.
+async function runSoonerPass(report, { dayRows, pool, open, soonerCap, request, conn, env, budget, caches }) {
+  const firstFreeDay = pool.map((slot) => slot?.date).filter(Boolean).sort()[0] ?? null;
+  const days = [...dayRows].filter(([dateStr]) => firstFreeDay == null || dateStr < firstFreeDay);
+  const sooner = {
+    firstFreeDay, daysBefore: days.length, capMin: env.customerMaxDetourMinutes(), tried: 0, candidates: 0, checked: 0,
+    twoHourTried: 0, passed: [], byReason: {}, screenOn: false,
+    screen: { pass: 0, overlap: 0, gap_before: 0, gap_after: 0 }, screenWrong: { saidPass_failed: 0, saidFail_passed: 0 }, timedOut: false,
+  };
+  report.sooner = sooner;
+  try {
+    const soonerRequest = { ...request, soonerCap };
+    const found = collectCandidates(days, { open, env, request: soonerRequest, report: sooner });
+    sooner.candidates = found.length;
+    sooner.screenOn = typeof env.travelGapEnabled === 'function' && !!env.travelGapEnabled();
+    if (sooner.screenOn && found.length) {
+      // The page loads the catalog before its own travel-gap rule; the expected minutes of a stop read it.
+      if (await budget.race(() => Promise.resolve(env.ensureCatalogLoaded?.(conn)).catch(() => {})) === TIMED_OUT) {
+        sooner.timedOut = true;
+        return;
+      }
+      for (const candidate of found) {
+        candidate.screen = screenCandidate(candidate, dayRows.get(candidate.dateStr) || [], { env, request: soonerRequest });
+        sooner.screen[candidate.screen === null ? 'pass' : candidate.screen] += 1;
+      }
+    }
+    // How often the screen's guess matched the full check.
+    const onChecked = (candidate, why) => {
+      if (!sooner.screenOn) return;
+      if (candidate.screen === null && why) sooner.screenWrong.saidPass_failed += 1;
+      if (candidate.screen !== null && !why) sooner.screenWrong.saidFail_passed += 1;
+    };
+    await checkCandidates(found, { conn, env, request: soonerRequest, budget, report: sooner, caches, order: bySooner, limit: MAX_SOONER_CHECKS, onChecked });
+  } catch (err) {
+    sooner.error = err?.message || String(err);
+  }
+  sooner.passed = sooner.passed.map((hour) => ({ ...hour, daysGained: daysBetween(hour.date, firstFreeDay) }));
+}
+
+async function findMakeRoom(report, { conn, pool, point, durationMin, candidateExpectedMinutes, estimateId, capabilityRows, zoneSlug, dateFrom, dateTo, admit, placement, now, budget, deps }) {
   const base = deps || defaultDeps();
   // The setup reads run under the same budget as every later read.
   const homes = await budget.race(() => base.loadTechStartPoints(conn));
@@ -590,21 +731,27 @@ async function findMakeRoom(report, { conn, pool, point, durationMin, estimateId
   const bestFree = bestFreeTime(pool, { dayRows, homeOf: env.homeOf, point, legMin: env.legMin });
   report.free = { count: pool.length, best: bestFree };
   const open = await budget.race(() => loadOpenTechDays(conn, env, { dates, capabilityRows, budget }));
-  const detourCap = open === TIMED_OUT ? TIMED_OUT : await budget.race(() => loadDetourCap(conn, env, zoneSlug));
-  if (detourCap === TIMED_OUT) {
+  const caps = open === TIMED_OUT ? TIMED_OUT : await budget.race(() => loadDetourCaps(conn, env, zoneSlug));
+  if (caps === TIMED_OUT) {
     report.timedOut = true;
     return;
   }
-  const request = { point, durationMin, admit, placement, now, bestFree, estimateId, detourCap };
-  const candidates = [];
-  for (const [dateStr, rows] of dayRows) {
-    for (const techId of techIdsOf(rows)) {
-      if (open(dateStr, techId)) candidates.push(...dayCandidates({ dateStr, rows, techId, env, request, report }));
-      else tally(report, 'tech_day_closed');
-    }
-  }
+  const request = { point, durationMin, admit, placement, now, bestFree, estimateId, detourCap: caps.detourCap, candidateExpectedMinutes };
+  // Both passes share what the reads return.
+  const caches = { blocks: new Map(), routes: new Map(), days: new Map() };
+  await runSoonerPass(report, { dayRows, pool, open, soonerCap: caps.soonerCap, request, conn, env, budget, caches });
+  const candidates = collectCandidates(dayRows, { open, env, request, report });
   report.candidates = candidates.length;
-  await checkCandidates(candidates, { conn, env, request, budget, report });
+  await checkCandidates(candidates, { conn, env, request, budget, report, caches });
+}
+
+// The sooner pass's line items: its best hour is the earliest day that passed.
+function soonerLog(sooner) {
+  if (!sooner) return '';
+  const best = [...sooner.passed].sort((a, b) => a.date.localeCompare(b.date) || a.start.localeCompare(b.start))[0];
+  return ` sooner_first_free=${sooner.firstFreeDay ?? '-'} sooner_checked=${sooner.checked} sooner_passed=${sooner.passed.length}`
+    + ` sooner_best=${best ? `${best.date} ${best.start} +${best.shiftMin}` : '-'} sooner_days_gained=${best ? best.daysGained ?? '-' : '-'}`
+    + ` sooner_detour=${best ? best.detourMin : '-'}`;
 }
 
 function logReport(report) {
@@ -614,6 +761,7 @@ function logReport(report) {
     + ` best_free=${report.free?.best ? report.free.best.detourMin : '-'} dates=${report.dates} tried=${report.tried}`
     + ` candidates=${report.candidates} checked=${report.checked} two_hour_tried=${report.twoHourTried} passed=${report.passed.length}`
     + ` best_saving=${saving} best_shift=${best ? best.shiftMin : '-'} moved=${best ? best.moves.length : '-'} timed_out=${report.timedOut} ms=${report.ms}`
+    + soonerLog(report.sooner)
     + (report.skipped ? ` skipped=${report.skipped}` : '') + (report.error ? ` error=${String(report.error).slice(0, 120)}` : ''));
 }
 
@@ -640,6 +788,7 @@ function checkRow(report) {
  * @param {Array}  args.pool            the final free list ({ date, windowStart, techId })
  * @param {object} args.coords          the new customer's pin { lat, lng }
  * @param {number} args.durationMinutes the new visit's length
+ * @param {number} [args.candidateExpectedMinutes] the new visit's expected service minutes (the page's travel-gap credit)
  * @param {string} args.dateFrom        the request's first and last ET dates
  * @param {string} args.dateTo
  * @param {Function} args.admit         slot -> true when the page could offer it
@@ -651,11 +800,11 @@ function checkRow(report) {
  * @param {number} [args.lingerMs]      how long a check that ran out of time waits for the reads it already sent
  * @returns {Promise<object>} the report, once the check's own reads have answered (at most lingerMs after it ended)
  */
-async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = null, pool, coords, durationMinutes, capabilityRows, zoneSlug,
+async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = null, pool, coords, durationMinutes, candidateExpectedMinutes, capabilityRows, zoneSlug,
   dateFrom, dateTo, admit, placement, now = new Date(), conn, deps, budgetMs = DEFAULT_BUDGET_MS, lingerMs = LINGER_MS } = {}) {
   const startedAt = Date.now();
   const budget = makeBudget(startedAt + budgetMs);
-  const report = { mode, surface, estimateId, durationMin: null, free: null, dates: 0, tried: 0, candidates: 0, checked: 0, twoHourTried: 0, passed: [], byReason: {}, timedOut: false, skipped: null, error: null, ms: 0 };
+  const report = { mode, surface, estimateId, durationMin: null, free: null, dates: 0, tried: 0, candidates: 0, checked: 0, twoHourTried: 0, passed: [], byReason: {}, timedOut: false, skipped: null, error: null, ms: 0, sooner: null };
   const knex = conn || require('../../models/db');
   try {
     const point = pointOf(coords);
@@ -664,7 +813,7 @@ async function recordMakeRoomCheck({ mode, surface = 'estimate', estimateId = nu
     else if (typeof admit !== 'function' || typeof placement !== 'function' || !dateFrom || !dateTo) report.skipped = 'no_request';
     else {
       await findMakeRoom(report, {
-        conn: knex, pool: Array.isArray(pool) ? pool : [], point, durationMin: report.durationMin, estimateId,
+        conn: knex, pool: Array.isArray(pool) ? pool : [], point, durationMin: report.durationMin, candidateExpectedMinutes, estimateId,
         capabilityRows, zoneSlug,
         dateFrom, dateTo, admit, placement, now, budget, deps,
       });
@@ -719,5 +868,5 @@ module.exports = {
   bookingMakeRoomMode,
   startBackgroundCheck,
   recordMakeRoomCheck,
-  _internals: { buildChain, shiftsFor, MAX_SHIFT_MIN, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, remindersByText, moveBlockedReason, datesFor, bySaving, defaultDeps, resetBackgroundChecks, makeBudget, TIMED_OUT, MIN_SAVING_MIN, MAX_FULL_CHECKS, MAX_IN_FLIGHT, DEDUPE_MS, LINGER_MS },
+  _internals: { buildChain, shiftsFor, MAX_SHIFT_MIN, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, remindersByText, moveBlockedReason, datesFor, bySaving, bySooner, daysBetween, defaultDeps, resetBackgroundChecks, makeBudget, TIMED_OUT, MIN_SAVING_MIN, MAX_FULL_CHECKS, MAX_SOONER_CHECKS, MAX_IN_FLIGHT, DEDUPE_MS, LINGER_MS },
 };

@@ -10,6 +10,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
  */
 const { recordMakeRoomCheck, bookingMakeRoomMode, _internals } = require('../services/scheduling/booking-make-room');
 const { fixedReason, skipReason } = require('../services/day-replan')._internals;
+const { travelGapConflicts } = require('../services/scheduling/travel-gap');
+const { stopExpectedMinutesSync } = require('../services/scheduling/expected-service-minutes');
 
 const DAY = '2097-06-10';
 const NOW = new Date('2097-06-09T05:00:00Z'); // 01:00 ET: every stop on DAY starts more than 24 hours away
@@ -50,6 +52,7 @@ const TEXTS = { smsEnabled: true, serviceReminder72h: true, serviceReminder24h: 
 function makeDeps({
   rows = exampleDay(), told = ['visit-e'], prefs = {}, pref = {}, feasible = true, blocks = [], holdIds = [], techBlind = true,
   channel72 = {}, assignable = [TECH], absent = [], blackout = [], inactive = [], pushRoute = 'push_and_sms', device = null,
+  travelGap = false, multiTech = false,
 } = {}) {
   const evaluated = [];
   return {
@@ -92,6 +95,12 @@ function makeDeps({
     techBlind: () => techBlind,
     closeMin: 17 * 60,
     ownHoldIds: jest.fn(async () => new Set(holdIds)),
+    // The sooner pass's travel-gap screen: the page's own gate, rule and expected minutes (the real functions).
+    travelGapEnabled: () => travelGap,
+    travelGapConflicts: jest.fn(travelGapConflicts),
+    stopExpectedMinutesSync: jest.fn(stopExpectedMinutesSync),
+    ensureCatalogLoaded: jest.fn(async () => {}),
+    multiTechConfirmLive: () => multiTech,
   };
 }
 
@@ -298,7 +307,8 @@ describe('the day and the route', () => {
     deps.customerMaxDetourMinutes = jest.fn(() => ROUTE_DETOUR_MIN - 1);
     const { report } = await check({ deps });
     expect(starts(report)).toContain('09:00');
-    expect(deps.customerMaxDetourMinutes).not.toHaveBeenCalled();
+    // No cap is applied to a candidate; the only call is the sooner pass's log of the base cap, with no arguments.
+    expect(deps.customerMaxDetourMinutes.mock.calls.every((args) => args.length === 0)).toBe(true);
   });
 
   test('the blackout list is read strictly: an unreadable one stops the check', async () => {
@@ -681,5 +691,274 @@ describe('startBackgroundCheck (backpressure for the detached check)', () => {
     await expect(startBackgroundCheck(args('est-1', makeDeps()), { nowMs: t0 })).resolves.toMatchObject({ mode: 'shadow' });
     await expect(startBackgroundCheck(args('est-1', makeDeps()), { nowMs: t0 + 1000 })).resolves.toBeNull();
     await expect(startBackgroundCheck(args('est-1', makeDeps()), { nowMs: t0 + DEDUPE_MS })).resolves.toMatchObject({ mode: 'shadow' });
+  });
+});
+
+/**
+ * The sooner-day pass (report.sooner, log only): the same hours on days BEFORE the first day of the customer's list,
+ * with the saving bar swapped for the self-serve drive cap. The example day (DAY) is the sooner day; the list's only
+ * free time is the day after.
+ */
+describe('the sooner-day pass (log only)', () => {
+  const LATER = '2097-06-11';
+  const LATER_POOL = [{ date: LATER, windowStart: '12:00', techId: TECH }];
+  const sooner = (opts = {}) => check({ pool: LATER_POOL, dateTo: LATER, ...opts });
+  const soonerStarts = (report) => report.sooner.passed.map((p) => `${p.date} ${p.start}`);
+  // The hours the page's placement rules were asked about, first asked first.
+  const askedHours = (placement) => [...new Set(placement.mock.calls.map(([slot]) => `${slot.date} ${slot.windowStart}`))];
+  // A second sooner day: two stops, at 9 AM and 12 PM.
+  const daySoon = (date, tag) => [stop(`p${tag}`, 9, 20, { scheduled_date: date }), stop(`q${tag}`, 12, 30, { scheduled_date: date })];
+
+  test('firstFreeDay is the earliest date in the list; only days loaded before it are scanned', async () => {
+    const deps = makeDeps();
+    const { report } = await sooner({ deps });
+    expect(report.sooner).toMatchObject({ firstFreeDay: LATER, daysBefore: 1, capMin: 30, timedOut: false });
+    expect(soonerStarts(report)).toContain(`${DAY} 09:00`);
+    // Only the request's dates and the list's dates were read: no extra day.
+    expect(deps.loadDayStops.mock.calls.map(([, date]) => date).sort()).toEqual([DAY, LATER]);
+    expect(report.sooner.candidates).toBeGreaterThan(0);
+  });
+
+  test('a free time on the first loaded day leaves no day before it: the pass finds nothing', async () => {
+    const { report } = await check({ pool: [...FREE, ...LATER_POOL], dateTo: LATER });
+    expect(report.sooner).toMatchObject({ firstFreeDay: DAY, daysBefore: 0, tried: 0, candidates: 0, checked: 0, passed: [] });
+  });
+
+  test('an empty list scans every loaded day, and daysGained is null', async () => {
+    const { report } = await check({ pool: [], dateTo: LATER });
+    expect(report.sooner).toMatchObject({ firstFreeDay: null, daysBefore: 2 });
+    expect(report.sooner.passed.length).toBeGreaterThan(0);
+    expect(report.sooner.passed.every((p) => p.daysGained === null)).toBe(true);
+  });
+
+  test('daysGained is the whole days from the hour to the first free day', async () => {
+    const { report } = await check({ pool: [{ date: '2097-06-13', windowStart: '12:00', techId: TECH }], dateTo: '2097-06-13' });
+    expect(report.sooner.firstFreeDay).toBe('2097-06-13');
+    expect(report.sooner.daysBefore).toBe(3);
+    expect(report.sooner.passed.find((p) => p.date === DAY && p.start === '09:00')).toMatchObject({ daysGained: 3, shiftMin: 60 });
+    const { report: next } = await sooner();
+    expect(next.sooner.passed.find((p) => p.start === '09:00').daysGained).toBe(1);
+  });
+
+  test('an hour that adds more drive than the self-serve cap is over_drive_cap; the saving bar does not apply', async () => {
+    const capped = await sooner({ deps: Object.assign(makeDeps(), { customerMaxDetourMinutes: jest.fn(() => 4) }) });
+    expect(capped.report.sooner.passed).toEqual([]);
+    expect(capped.report.sooner.byReason.over_drive_cap).toBeGreaterThanOrEqual(1);
+    // 9 AM adds 5 drive minutes: over a cap of 4, under a cap of 5. Its saving over the best free time is only logged.
+    const open = await sooner({ deps: Object.assign(makeDeps(), { customerMaxDetourMinutes: jest.fn(() => 5) }) });
+    expect(open.report.sooner.passed.find((p) => p.start === '09:00')).toMatchObject({ detourMin: 5 });
+    expect(open.report.sooner.passed.every((p) => p.savingMin != null)).toBe(true);
+    expect(open.report.sooner.byReason.saving_below_bar).toBeUndefined();
+  });
+
+  test('the cap is loaded with capacity mode off, while the offer rule\'s own cap stays off', async () => {
+    const deps = makeDeps();
+    deps.zoneRouteDaysLive = () => true;
+    const { report } = await sooner({ deps, zoneSlug: 'venice' });
+    // The sooner pass used the cap, with the zone lift, and read the zone route days once.
+    expect(deps.customerMaxDetourMinutes).toHaveBeenCalledWith({ date: DAY, technicianId: TECH, zoneSlug: 'venice', zoneRouteDays: { synthetic: true } });
+    expect(deps.readZoneRouteDays).toHaveBeenCalledTimes(1);
+    // The route check still has no cap (its detour of 20 is over the cap of 15 below) because capacity mode is off.
+    const off = makeDeps();
+    off.customerMaxDetourMinutes = jest.fn(() => 15);
+    const free = await sooner({ deps: off });
+    expect(soonerStarts(free.report)).toContain(`${DAY} 09:00`);
+    expect(free.report.sooner.byReason.detour_cap).toBeUndefined();
+    // Capacity mode on: the same cap also refuses the route's 20 drive minutes, and the zone days are still read once.
+    const on = makeDeps();
+    on.capacityOn = () => true;
+    on.customerMaxDetourMinutes = jest.fn(() => 15);
+    const capped = await sooner({ deps: on });
+    expect(soonerStarts(capped.report)).not.toContain(`${DAY} 09:00`);
+    expect(capped.report.sooner.byReason.detour_cap).toBeGreaterThanOrEqual(1);
+    expect(report.sooner.passed.length).toBeGreaterThan(0);
+  });
+
+  test('capacity mode on with the zone lift reads the zone route days once for both passes', async () => {
+    const deps = makeDeps();
+    deps.capacityOn = () => true;
+    deps.zoneRouteDaysLive = () => true;
+    await sooner({ deps, zoneSlug: 'venice' });
+    expect(deps.readZoneRouteDays).toHaveBeenCalledTimes(1);
+  });
+
+  describe('the travel-gap screen', () => {
+    // A scripted travel rule, by the candidate's start hour: the mapping from a conflict to overlap / gap_before /
+    // gap_after is what is tested, not the drive model.
+    const script = (byStart) => jest.fn((candidate, stops) => {
+      const verdict = byStart[candidate.startMin / 60];
+      if (!verdict) return [];
+      const before = { startMin: candidate.startMin - 120, endMin: candidate.startMin - 60 };
+      const after = { startMin: candidate.endMin + 30, endMin: candidate.endMin + 90 };
+      if (verdict === 'overlap') return [{ stop: stops[0], reason: 'overlap' }];
+      return [{ stop: verdict === 'gap_before' ? before : after, reason: 'travel_gap' }];
+    });
+    const screened = (byStart, extra = {}) => {
+      const deps = makeDeps({ travelGap: true });
+      deps.travelGapConflicts = script(byStart);
+      return sooner({ deps, ...extra });
+    };
+
+    test('each candidate gets a predicted pass, overlap, gap_before or gap_after, counted in the report', async () => {
+      const { report } = await screened({ 9: 'overlap', 10: 'gap_before', 11: 'gap_after' });
+      expect(report.sooner.screenOn).toBe(true);
+      expect(report.sooner.screen).toMatchObject({ overlap: 1, gap_before: 1, gap_after: 1 });
+      expect(report.sooner.screen.pass).toBe(report.sooner.candidates - 3);
+    });
+
+    test('hours expected to pass are checked first, then the earliest date and hour; the screen never drops a candidate', async () => {
+      const rows = [...exampleDay(), ...daySoon(LATER, 'x')];
+      const placement = jest.fn(PAGE_PLACES);
+      const deps = makeDeps({ rows, travelGap: true });
+      // 9 AM is expected to fail on both days; every other hour passes the screen.
+      deps.travelGapConflicts = script({ 9: 'overlap' });
+      const { report } = await check({ deps, placement, admit: () => true, pool: [{ date: '2097-06-12', windowStart: '12:00', techId: TECH }], dateTo: '2097-06-12' });
+      const order = askedHours(placement).slice(0, report.sooner.checked);
+      // Expected passes first, the earliest date and hour first (DAY's 8 AM, 10 AM, ..., then LATER's 12 PM), then the
+      // expected failures in the same order.
+      expect(order[0]).toBe(`${DAY} 08:00`);
+      expect(order.slice(-3)).toEqual([`${LATER} 12:00`, `${DAY} 09:00`, `${LATER} 09:00`]);
+      expect(order.slice(0, -3).every((h) => h.startsWith(DAY))).toBe(true);
+      expect(report.sooner.checked).toBe(report.sooner.candidates);
+      expect(soonerStarts(report)).toContain(`${DAY} 09:00`);
+    });
+
+    test('when every hour is expected to fail, all are still checked and the misses are counted', async () => {
+      const everyHour = Object.fromEntries([8, 9, 10, 11, 12, 13, 14, 15].map((h) => [h, 'gap_after']));
+      const { report } = await screened(everyHour);
+      expect(report.sooner.screen.pass).toBe(0);
+      expect(report.sooner.checked).toBe(Math.min(report.sooner.candidates, 24));
+      expect(report.sooner.passed.length).toBeGreaterThan(0);
+      expect(report.sooner.screenWrong.saidFail_passed).toBe(report.sooner.passed.length);
+      expect(report.sooner.screenWrong.saidPass_failed).toBe(0);
+    });
+
+    test('an hour expected to pass that fails its full check is counted as saidPass_failed', async () => {
+      const deps = makeDeps({ travelGap: true });
+      deps.travelGapConflicts = script({});
+      const { report } = await sooner({ deps, placement: async (slot) => (slot.date === DAY && slot.windowStart === '09:00' ? 'page_collision' : true) });
+      expect(report.sooner.byReason.page_collision).toBe(1);
+      // Every checked hour that did not pass was expected to.
+      expect(report.sooner.screenWrong).toEqual({ saidPass_failed: report.sooner.checked - report.sooner.passed.length, saidFail_passed: 0 });
+      expect(report.sooner.screenWrong.saidPass_failed).toBeGreaterThanOrEqual(1);
+    });
+
+    test('an hour passes the screen when either its 1-hour or its 2-hour shift does', async () => {
+      const rows = [stop('a', 8, 10, { customer_confirmed: true }), stop('b', 9, 20), stop('c', 10, 30), stop('e', 14, 50), stop('f', 15, 60)];
+      const deps = makeDeps({ rows, told: [], travelGap: true });
+      // 9 AM: the 1-hour shift (B to 10, C to 11) is expected to fail; the 2-hour shift (C to 12) is expected to pass.
+      deps.travelGapConflicts = jest.fn((candidate, stops) => {
+        const twoHour = stops.some((s) => s.startMin === 12 * 60);
+        return candidate.startMin === 9 * 60 && !twoHour ? [{ stop: stops[0], reason: 'overlap' }] : [];
+      });
+      const { report } = await sooner({ deps });
+      const calls = deps.travelGapConflicts.mock.calls.filter(([candidate]) => candidate.startMin === 9 * 60);
+      expect(calls).toHaveLength(2);
+      expect(report.sooner.screen.overlap).toBe(0);
+    });
+
+    test('the page\'s stop entities: moved stops at their new times, holds, expected minutes, the new visit\'s own credit', async () => {
+      const rows = [...exampleDay(), stop('h', 15, 70, { id: 'live-hold', customer_id: null, reservation_expires_at: new Date('2097-06-09T05:15:00Z') })];
+      const deps = makeDeps({ rows, travelGap: true });
+      deps.stopExpectedMinutesSync = jest.fn(() => 25);
+      const { report } = await sooner({ deps, candidateExpectedMinutes: 40 });
+      expect(report.sooner.screenOn).toBe(true);
+      const [candidate, stops] = deps.travelGapConflicts.mock.calls.find(([c]) => c.startMin === 9 * 60);
+      expect(candidate).toEqual({ startMin: 540, endMin: 600, lat: NEW_PIN.lat, lng: NEW_PIN.lng, windowMinutes: 60, expectedMinutes: 40 });
+      const byId = (id) => stops.find((s) => s.lat === 10 && s.technicianId === TECH && rows.find((r) => r.id === id).lng === s.lng);
+      // B, C and D moved 1 hour; A, E and F stayed.
+      expect([byId('visit-a'), byId('visit-b'), byId('visit-c'), byId('visit-d'), byId('visit-e')].map((s) => [s.startMin / 60, s.endMin / 60]))
+        .toEqual([[8, 9], [10, 11], [11, 12], [12, 13], [13, 14]]);
+      expect(byId('visit-b')).toMatchObject({ windowMinutes: 60, expectedMinutes: 25, hold: false });
+      expect(stops.find((s) => s.lng === 70)).toMatchObject({ hold: true });
+      // Without an expected minutes figure, the new visit credits nothing.
+      await sooner({ deps, candidateExpectedMinutes: null });
+      const last = deps.travelGapConflicts.mock.calls.filter(([c]) => c.startMin === 9 * 60).pop()[0];
+      expect(last.expectedMinutes).toBe(60);
+    });
+
+    test('with multi-tech confirm on, only the candidate technician\'s rows and the unassigned ones count; off, every row', async () => {
+      const rows = [...exampleDay(), stop('o', 15, 80, { technician_id: 'tech-2' }), stop('u', 16, 90, { technician_id: null })];
+      const lngsSeen = async (multiTech) => {
+        const deps = makeDeps({ rows, travelGap: true, multiTech });
+        await sooner({ deps });
+        return deps.travelGapConflicts.mock.calls[0][1].map((s) => s.lng).sort((a, b) => a - b);
+      };
+      expect(await lngsSeen(false)).toContain(80);
+      const scoped = await lngsSeen(true);
+      expect(scoped).not.toContain(80);
+      expect(scoped).toContain(90);
+    });
+
+    test('the catalog is loaded before the screen reads expected minutes', async () => {
+      const deps = makeDeps({ travelGap: true });
+      await sooner({ deps });
+      expect(deps.ensureCatalogLoaded).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('with the travel-gap gate off there is no screen: nothing is asked, the counts stay zero', async () => {
+    const deps = makeDeps({ travelGap: false });
+    const { report } = await sooner({ deps });
+    expect(deps.travelGapConflicts).not.toHaveBeenCalled();
+    expect(deps.ensureCatalogLoaded).not.toHaveBeenCalled();
+    expect(report.sooner).toMatchObject({ screenOn: false, screen: { pass: 0, overlap: 0, gap_before: 0, gap_after: 0 }, screenWrong: { saidPass_failed: 0, saidFail_passed: 0 } });
+    expect(report.sooner.passed.length).toBeGreaterThan(0);
+  });
+
+  test('at most MAX_SOONER_CHECKS sooner hours get a full check', async () => {
+    const { MAX_SOONER_CHECKS } = _internals;
+    expect(MAX_SOONER_CHECKS).toBe(24);
+    // 13 days with two stops each: 26 hours.
+    const dates = Array.from({ length: 13 }, (_, i) => `2097-06-${String(10 + i).padStart(2, '0')}`);
+    const rows = dates.flatMap((date, i) => daySoon(date, i));
+    const { report } = await check({
+      deps: makeDeps({ rows, told: [] }), pool: [{ date: '2097-06-23', windowStart: '12:00', techId: TECH }], dateTo: '2097-06-23', admit: () => true,
+    });
+    expect(report.sooner.candidates).toBe(26);
+    expect(report.sooner.checked).toBe(MAX_SOONER_CHECKS);
+    expect(report.sooner.passed).toHaveLength(MAX_SOONER_CHECKS);
+    // The offer rule's own limit is unchanged.
+    expect(report.checked).toBeLessThanOrEqual(_internals.MAX_FULL_CHECKS);
+  });
+
+  test('the offer rule\'s report is the same with or without the sooner pass finding hours', async () => {
+    const strip = ({ sooner: _sooner, ms: _ms, ...rest }) => rest;
+    const withHours = await sooner({ deps: makeDeps() });
+    const without = await sooner({ deps: Object.assign(makeDeps(), { customerMaxDetourMinutes: jest.fn(() => -1) }) });
+    expect(withHours.report.sooner.passed.length).toBeGreaterThan(0);
+    expect(without.report.sooner.passed).toEqual([]);
+    expect(without.report.sooner.byReason.over_drive_cap).toBeGreaterThanOrEqual(1);
+    expect(strip(withHours.report)).toEqual(strip(without.report));
+    expect(withHours.inserted[0]).toMatchObject({ fired: without.inserted[0].fired, best_saving_min: without.inserted[0].best_saving_min, moved_count: without.inserted[0].moved_count });
+  });
+
+  test('both passes share the reads: a day or a block read for the sooner pass is not read again', async () => {
+    const deps = makeDeps();
+    await check({ deps, pool: [], dateTo: DAY });
+    // Every candidate of the sooner pass is also one of the offer rule's, on one day and one technician.
+    expect(deps.loadBlocks).toHaveBeenCalledTimes(1);
+    expect(deps.loadDayContext).toHaveBeenCalledTimes(1);
+  });
+
+  test('a sooner pass that runs out of time says so; the check still records its row', async () => {
+    const { report, inserted } = await sooner({ placement: () => new Promise(() => {}), budgetMs: 60, lingerMs: 20 });
+    expect(report.sooner.timedOut).toBe(true);
+    expect(report.sooner.checked).toBe(0);
+    expect(report.timedOut).toBe(true);
+    expect(inserted).toHaveLength(1);
+    expect(JSON.parse(inserted[0].report).sooner.timedOut).toBe(true);
+  });
+
+  test('the sooner part of the log line: first free day, checked, passed, best hour, days gained and detour', async () => {
+    const logger = require('../services/logger');
+    logger.info.mockClear();
+    await sooner();
+    const line = logger.info.mock.calls.map(([text]) => text).find((text) => text.includes('[booking-make-room]'));
+    expect(line).toContain(`sooner_first_free=${LATER}`);
+    expect(line).toMatch(/sooner_checked=\d+ sooner_passed=[1-9]\d*/);
+    expect(line).toContain(`sooner_best=${DAY} 08:00`.replace('08:00', '09:00') + ' +60');
+    expect(line).toContain('sooner_days_gained=1');
+    expect(line).toContain('sooner_detour=5');
   });
 });
