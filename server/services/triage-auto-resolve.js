@@ -91,7 +91,18 @@
  *     reschedule_link_promise, do_not_contact_requested, after_hours_emergency,
  *     and the spam / extraction-failure cards other rules own.
  *     An age-out dismissal is NOT an evidence close: nothing proves the owed
- *     ask was answered. Cards keep their payload; a recurrence files a fresh
+ *     ask was answered. Contract: a quiet_aged dismissal means the office
+ *     stopped tracking the card. It is not an office decision and not
+ *     evidence. So: (1) a reader that asks "did the office decide this call?"
+ *     must not read it as a decision: officeClosedCall (call-booking-miss-
+ *     watchdog, call-held-visits) counts it as still open. (2) a reader that
+ *     asks "is tracked work pending for this customer?" reads it as not
+ *     pending: the SMS courtesy-reply guard (sms-gratitude-context, a lane
+ *     that is off: GATE_SMS_GRATITUDE_REPLIES) is held by the customer's open
+ *     promises, service requests, inbox items and still-open cards, not by a
+ *     card the office no longer tracks. Codes that hold a booking, an email,
+ *     a text or a number are never on the list.
+ *     Cards keep their payload; a recurrence files a fresh
  *     card (the open-unique index frees on a terminal status). Roll back with
  *     scripts/reopen-quiet-aged-cards.js.
  *   Dismissed — not resolved — deliberately: knowledge-index
@@ -214,11 +225,16 @@ const ADVISORY_AGE_CODES = new Set([
 // (b) this sweep, (c) the admin triage UI routes and (d) tests/docs reads
 // cards of that code as state. Audit 2026-11-09 of every triage_items reader
 // in server/. Status-agnostic readers that look at ANY code and so cannot be
-// avoided by a list: call-booking-miss-watchdog officeClosedCall (also used by
-// call-held-visits) and the sms-gratitude-context pending-work guard. All of
-// them now treat a quiet_aged dismissal (QUIET_AGED_RULE) as still OPEN, so
-// the sweep never turns "one human-closed card + one quiet card" into an
-// office close and never clears a courtesy-reply guard.
+// avoided by a list. Contract: a quiet_aged dismissal means the office stopped
+// tracking the card. It is not an office decision and not evidence. So: (1) a
+// reader that asks "did the office decide this call?" must not read it as a
+// decision: officeClosedCall (call-booking-miss-watchdog, call-held-visits)
+// counts it as still open. (2) a reader that asks "is tracked work pending for
+// this customer?" reads it as not pending: the SMS courtesy-reply guard
+// (sms-gratitude-context, a lane that is off: GATE_SMS_GRATITUDE_REPLIES) is
+// held by the customer's open promises, service requests, inbox items and
+// still-open cards, not by a card the office no longer tracks. Codes that hold
+// a booking, an email, a text or a number are never on the list.
 // An unknown or new code is NEVER swept; add a code here only after the same
 // search (the literal, constants that hold it, and triage_items reads with a
 // category, a reason_code IN list or no reason filter).
