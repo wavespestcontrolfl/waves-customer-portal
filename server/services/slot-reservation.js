@@ -867,6 +867,16 @@ async function proveMakeRoomHour(trx, { estimate, serviceProfile = null, service
 // is the occupancy probes' own (findConflictingVisits): with multi-tech confirm on, that technician's rows and the
 // unassigned ones; off, every technician. `excludeId` is the caller's own hold, which never blocks itself.
 async function makeRoomDestinationClash(trx, { date, techId, windowStart, windowEnd, excludeId = null }) {
+  return liveMakeRoomHolds(trx, { date, techId, excludeId })
+    .whereRaw(
+      "EXISTS (SELECT 1 FROM jsonb_array_elements(make_room_moves->'moves') AS m WHERE (m->>'to')::time < ?::time AND ((m->>'to')::time + ((m->>'widthMin') || ' minutes')::interval) > ?::time)",
+      [windowEnd, windowStart],
+    )
+    .first('id');
+}
+
+// Other live make-room holds on the date, in the occupancy probes' technician scope, the caller's own hold left out.
+function liveMakeRoomHolds(trx, { date, techId, excludeId = null }) {
   return trx('scheduled_services')
     .where({ scheduled_date: date })
     .whereNull('customer_id')
@@ -876,18 +886,34 @@ async function makeRoomDestinationClash(trx, { date, techId, windowStart, window
     .modify((q) => {
       if (techId && techScopedConfirmActive()) applyTechScope(q, 'technician_id', techId);
       if (excludeId) q.whereNot('id', excludeId);
-    })
-    .whereRaw(
-      "EXISTS (SELECT 1 FROM jsonb_array_elements(make_room_moves->'moves') AS m WHERE (m->>'to')::time < ?::time AND ((m->>'to')::time + ((m->>'widthMin') || ' minutes')::interval) > ?::time)",
-      [windowEnd, windowStart],
-    )
-    .first('id');
+    });
 }
 
-// The gate read fresh, then the destination probe: true when this window sits on another live make-room hold's move
-// destination. A make-room hold whose gate went off throws the ordinary slot-taken answer (nothing is written).
+// A new or re-proven chain may not take what another live make-room hold's chain takes: a moved stop's new hour on that
+// chain's destination, or a stop that chain also moves. The proof reads each stop where it is today, so it cannot see
+// either. Same live-hold rule and technician scope as makeRoomDestinationClash; `excludeId` is the caller's own hold.
+async function makeRoomChainClash(trx, { payload, excludeId = null }) {
+  const { date, techId, moves } = payload;
+  for (const move of moves) {
+    const window = { date, techId, windowStart: move.to, windowEnd: addMinutesToTime(move.to, move.widthMin), excludeId };
+    if (await makeRoomDestinationClash(trx, window)) return true;
+  }
+  const sharedStop = await liveMakeRoomHolds(trx, { date, techId, excludeId })
+    .whereRaw(
+      "EXISTS (SELECT 1 FROM jsonb_array_elements(make_room_moves->'moves') AS m WHERE (m->>'id') = ANY(?::text[]))",
+      [moves.map((move) => String(move.id))],
+    )
+    .first('id');
+  return !!sharedStop;
+}
+
+// The gate read fresh, then the destination probes: true when this window sits on another live make-room hold's move
+// destination, or when this hold's own chain clashes with another live chain (makeRoomChainClash). A make-room hold
+// whose gate went off throws the ordinary slot-taken answer (nothing is written).
 async function destinationHitUnderGate(trx, makeRoom, slotId, window) {
-  return requireMakeRoomStillOn(makeRoom, slotId) && !!(await makeRoomDestinationClash(trx, window));
+  if (!requireMakeRoomStillOn(makeRoom, slotId)) return false;
+  if (await makeRoomDestinationClash(trx, window)) return true;
+  return !!makeRoom && makeRoomChainClash(trx, { payload: makeRoom.payload, excludeId: window.excludeId || null });
 }
 
 // The make-room hold's proof inside the reserve transaction: { payload, moveIds }, or the ordinary slot-taken throw.
@@ -917,7 +943,8 @@ async function extendMakeRoomState(trx, { row, estimate, rowUnderCapacity, sched
     date: scheduledDate, windowStart, techId: row.technician_id, durationMinutes: heldMinutes,
     candidateExpectedMinutes: await candidateExpectedMinutesFromRow(trx, row, heldMinutes),
   });
-  return proof.moves ? { makeRoom: { payload: proof.payload, moveIds: proof.moves.map((move) => move.id) }, refused: false } : { makeRoom: null, refused: true };
+  if (!proof.moves || await makeRoomChainClash(trx, { payload: proof.payload, excludeId: row.id })) return { makeRoom: null, refused: true };
+  return { makeRoom: { payload: proof.payload, moveIds: proof.moves.map((move) => move.id) }, refused: false };
 }
 
 async function reserveSlot({
@@ -2968,5 +2995,6 @@ module.exports = {
     candidateExpectedMinutesFromRow,
     refuseGracedOfferOnRivalHoldConflict,
     makeRoomDestinationClash,
+    makeRoomChainClash,
   },
 };

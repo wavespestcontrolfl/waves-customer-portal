@@ -58,6 +58,8 @@ const liveHolds = (rows = []) => chain({ select: jest.fn().mockResolvedValue(row
 const conflictProbe = (result = null) => chain({ first: jest.fn().mockResolvedValue(result) });
 const globalProbe = (rows = []) => chain({ orderBy: jest.fn(() => Promise.resolve(rows)) });
 const destinationProbe = (result = null) => chain({ first: jest.fn().mockResolvedValue(result) });
+// makeRoomChainClash on PROOF's chain: visit-b's new hour, visit-c's new hour, then the shared-stop probe.
+const chainProbes = ({ first = null, second = null, shared = null } = {}) => [destinationProbe(first), destinationProbe(second), destinationProbe(shared)];
 const inserter = () => chain({ returning: jest.fn().mockResolvedValue([{ id: 'hold-1', reservation_expires_at: '2027-05-20T13:15:00.000Z' }]) });
 const updater = () => chain({ returning: jest.fn().mockResolvedValue([{ id: 'hold-1', reservation_expires_at: '2027-05-20T13:15:00.000Z' }]) });
 
@@ -102,7 +104,7 @@ describe('reserveSlot — the make-room hold', () => {
     const probe = globalProbe([]);
     const destination = destinationProbe(null);
     const insert = inserter();
-    const { trx } = harness([holds, conflict, probe, destination, insert]);
+    const { trx } = harness([holds, conflict, probe, destination, ...chainProbes(), insert]);
 
     await expect(slotReservation.reserveSlot({ estimateId: EST, slotId: roomSlot() })).resolves.toEqual({
       scheduledServiceId: 'hold-1', expiresAt: '2027-05-20T13:15:00.000Z',
@@ -126,7 +128,7 @@ describe('reserveSlot — the make-room hold', () => {
   test('the hold\'s own probes skip ONLY the chain\'s moved stops; every probe still runs', async () => {
     const conflict = conflictProbe(null);
     const probe = globalProbe([]);
-    const { queue } = harness([liveHolds(), conflict, probe, destinationProbe(null), inserter()]);
+    const { queue } = harness([liveHolds(), conflict, probe, destinationProbe(null), ...chainProbes(), inserter()]);
     await slotReservation.reserveSlot({ estimateId: EST, slotId: roomSlot() });
     expect(queue).toHaveLength(0);
     // Tech-scoped overlap probe: the tech and the window still apply, minus the moved stops.
@@ -225,6 +227,35 @@ describe('reserveSlot — the make-room hold', () => {
     expect(destination.whereRaw).toHaveBeenCalledWith(expect.stringContaining('jsonb_array_elements(make_room_moves->'), ['11:00:00', '10:00:00']);
   });
 
+  test('competing chains (Codex pre-push P1): a moved stop\'s new hour on another live chain\'s destination is taken; no hold', async () => {
+    const [first, second, shared] = chainProbes({ first: { id: 'hold-other' } });
+    const insert = inserter();
+    harness([liveHolds(), conflictProbe(null), globalProbe([]), destinationProbe(null), first, second, shared, insert]);
+    await expect(slotReservation.reserveSlot({ estimateId: EST, slotId: roomSlot() })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+    expect(insert.insert).not.toHaveBeenCalled();
+    // visit-b's new hour (10:00 for 60 minutes), against live holds that carry a chain.
+    expect(first.whereNotNull).toHaveBeenCalledWith('make_room_moves');
+    expect(first.whereRaw).toHaveBeenCalledWith(expect.stringContaining("(m->>'to')::time"), ['11:00:00', '10:00']);
+    expect(second.first).not.toHaveBeenCalled();
+  });
+
+  test('competing chains: a stop another live chain also moves is taken; every new hour is checked first', async () => {
+    const [first, second, shared] = chainProbes({ shared: { id: 'hold-other' } });
+    const insert = inserter();
+    harness([liveHolds(), conflictProbe(null), globalProbe([]), destinationProbe(null), first, second, shared, insert]);
+    await expect(slotReservation.reserveSlot({ estimateId: EST, slotId: roomSlot() })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+    expect(insert.insert).not.toHaveBeenCalled();
+    expect(second.whereRaw).toHaveBeenCalledWith(expect.stringContaining("(m->>'to')::time"), ['12:00:00', '11:00']);
+    expect(shared.whereNotNull).toHaveBeenCalledWith('make_room_moves');
+    expect(shared.whereRaw).toHaveBeenCalledWith(expect.stringContaining("(m->>'id') = ANY"), [['visit-b', 'visit-c']]);
+  });
+
+  test('an ordinary hold runs no chain probe (it has no chain)', async () => {
+    const { queue } = harness([liveHolds(), conflictProbe(null), globalProbe([]), destinationProbe(null), inserter()]);
+    await slotReservation.reserveSlot({ estimateId: EST, slotId: slotId({}) });
+    expect(queue).toHaveLength(0);
+  });
+
   test('mode off or shadow runs no destination probe (the reserve path is as before)', async () => {
     makeRoom.bookingMakeRoomMode.mockReturnValue('shadow');
     const insert = inserter();
@@ -241,10 +272,13 @@ describe('reserveSlot — the make-room hold', () => {
     };
     const probe = globalProbe([]);
     const update = updater();
-    harness([liveHolds([existing]), probe, destinationProbe(null), update]);
+    const chainChecks = chainProbes();
+    harness([liveHolds([existing]), probe, destinationProbe(null), ...chainChecks, update]);
     await expect(slotReservation.reserveSlot({ estimateId: EST, slotId: roomSlot() })).resolves.toMatchObject({ scheduledServiceId: 'hold-1' });
     expect(probe.whereNotIn).toHaveBeenCalledWith('id', ['hold-1', 'visit-b', 'visit-c']);
     expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ make_room_moves: PAYLOAD }));
+    // The hold's own (older) chain never counts against its new one.
+    for (const check of chainChecks) expect(check.whereNot).toHaveBeenCalledWith('id', 'hold-1');
   });
 
   test('re-reserving a hold that no longer needs a chain (a normal offer) drops it', async () => {

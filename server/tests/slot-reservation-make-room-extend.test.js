@@ -46,14 +46,14 @@ const HOLD = {
   make_room_moves: null, lat: null, lng: null, reservation_service_mix: null, reservation_policy_version: null,
 };
 
-function harness({ hold = HOLD, destinationHit = null, probeRows = [], destinationProbe = true, superseded = false } = {}) {
+function harness({ hold = HOLD, destinationHit = null, probeRows = [], destinationProbe = true, superseded = false, chainProbes = [] } = {}) {
   const pre = chain({ first: jest.fn().mockResolvedValue({ id: hold.id, scheduled_date: DATE }) });
   const locked = chain({ first: jest.fn().mockResolvedValue(hold) });
   const destination = chain({ first: jest.fn().mockResolvedValue(destinationHit) });
   const probe = chain({ orderBy: jest.fn(() => Promise.resolve(probeRows)) });
   const dead = chain({});
   const update = chain({ returning: jest.fn().mockResolvedValue([{ id: hold.id, reservation_expires_at: '2027-05-20T13:40:00.000Z' }]) });
-  const queue = [pre, locked, ...(destinationProbe ? [destination] : []), probe, ...(superseded ? [dead] : []), update];
+  const queue = [pre, locked, ...(destinationProbe ? [destination] : []), ...chainProbes, probe, ...(superseded ? [dead] : []), update];
   const estimates = chain({ first: jest.fn().mockResolvedValue({ id: EST, status: 'sent', _expired: false }) });
   const trx = jest.fn((table) => {
     if (table === 'estimates') return estimates;
@@ -103,5 +103,48 @@ describe('extendReservation — another make-room hold\'s destinations', () => {
     await expect(extend()).resolves.toMatchObject({ scheduledServiceId: 'hold-1' });
     expect(destination.first).not.toHaveBeenCalled();
     expect(update.update).toHaveBeenCalled();
+  });
+});
+
+describe('extendReservation — a make-room hold\'s re-proven chain against other live chains (Codex pre-push P1)', () => {
+  const PROOF = {
+    shiftMin: 60,
+    moves: [{ id: 'visit-b', from: '09:00', to: '10:00', widthMin: 60 }, { id: 'visit-c', from: '10:00', to: '11:00', widthMin: 60 }],
+  };
+  // technician_id null keeps this harness off the technician read; the chain itself is what is under test.
+  const MAKE_ROOM_HOLD = { ...HOLD, lat: 27.33, lng: -82.53, make_room_moves: { v: 1, date: DATE, techId: null, shiftMin: 60, moves: PROOF.moves } };
+  const probeOf = (result = null) => chain({ first: jest.fn().mockResolvedValue(result) });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    makeRoom.bookingMakeRoomMode.mockReturnValue('on');
+    estimateSlotAvailability.verifyMakeRoomOffer.mockResolvedValue(PROOF);
+    db.mockImplementation((table) => (table === 'booking_config' ? { first: jest.fn().mockResolvedValue(undefined) } : undefined));
+  });
+  afterEach(() => { jest.useRealTimers(); });
+
+  const extend = () => slotReservation.extendReservation({ estimateId: EST, scheduledServiceId: 'hold-1' });
+
+  test('the proof passes but a moved stop\'s new hour is another live chain\'s destination: superseded, never extended', async () => {
+    const first = probeOf({ id: 'hold-other' });
+    const { dead, update } = harness({ hold: MAKE_ROOM_HOLD, chainProbes: [first], superseded: true });
+    await expect(extend()).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+    expect(estimateSlotAvailability.verifyMakeRoomOffer).toHaveBeenCalledTimes(1);
+    expect(first.whereRaw).toHaveBeenCalledWith(expect.stringContaining("(m->>'to')::time"), ['11:00:00', '10:00']);
+    // The hold's own chain never blocks itself.
+    expect(first.whereNot).toHaveBeenCalledWith('id', 'hold-1');
+    expect(dead.del).toHaveBeenCalled();
+    expect(update.update).not.toHaveBeenCalled();
+  });
+
+  test('no other chain takes its stops or their new hours: the make-room hold extends', async () => {
+    const checks = [probeOf(), probeOf(), probeOf()];
+    const { update } = harness({ hold: MAKE_ROOM_HOLD, chainProbes: checks });
+    await expect(extend()).resolves.toMatchObject({ scheduledServiceId: 'hold-1' });
+    expect(checks[2].whereRaw).toHaveBeenCalledWith(expect.stringContaining("(m->>'id') = ANY"), [['visit-b', 'visit-c']]);
+    expect(update.update).toHaveBeenCalledWith({ reservation_expires_at: '2027-05-20T13:40:00.000Z' });
   });
 });

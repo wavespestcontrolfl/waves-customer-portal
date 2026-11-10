@@ -1318,7 +1318,7 @@ function lineMapOfferLive() {
  * program of a combined capacity hold, whose single window needs a technician on
  * every line. Line = catalog category first, then name (serviceLineFor).
  */
-async function heldVisitLines(serviceProfile) {
+async function heldVisitLines(serviceProfile, conn = db) {
   const { primaryProfileService } = require('./area-addon-visit-rows');
   const { serviceLineFor } = require('./scheduling/line-technician');
   const held = serviceProfile.reservationServiceMix
@@ -1326,7 +1326,7 @@ async function heldVisitLines(serviceProfile) {
     : [primaryProfileService(serviceProfile)].filter(Boolean);
   const lines = [];
   for (const service of held) {
-    const { line } = await serviceLineFor(db, {
+    const { line } = await serviceLineFor(conn, {
       serviceKey: service.resolvedServiceKey || service.catalogServiceKey || null,
       serviceType: service.label || service.service,
     });
@@ -1339,13 +1339,13 @@ async function heldVisitLines(serviceProfile) {
 // or the map is unreadable: getting the customer on the calendar beats withholding times).
 // The territory place is the ZIP typed in the QUOTED address only: a multi-property
 // estimate keeps the customer_id while quoting another property (see resolveEstimateCoords).
-async function lineOfferRankingFor(serviceProfile, estimate = null) {
+async function lineOfferRankingFor(serviceProfile, estimate = null, conn = db) {
   if (!lineMapOfferLive()) return null;
   try {
     const { lineOfferRanking } = require('./scheduling/line-technician');
     const { parseRawAddress } = require('../utils/address-normalizer');
     const zip = estimate && estimate.address ? parseRawAddress(estimate.address).zip || null : null;
-    return await lineOfferRanking(db, { lines: await heldVisitLines(serviceProfile), place: zip ? { zip } : null });
+    return await lineOfferRanking(conn, { lines: await heldVisitLines(serviceProfile, conn), place: zip ? { zip } : null });
   } catch (err) {
     logger.warn(`[estimate-slots] service-line map unreadable, offering today's list: ${err.message}`);
     return null;
@@ -1719,12 +1719,13 @@ async function filterCollidingSlots(slots, {
   // scheduled_services id -> minutes. Each row counts at its own window shifted
   // by those minutes (shiftMovedRows).
   shiftedServiceMinutes,
+  conn = db,
 } = {}) {
   if (!Array.isArray(slots) || slots.length === 0) return slots;
   let inactiveTechs = new Set();
   if (serviceMix) {
     const ids = [...new Set(slots.map((slot) => slot.techId).filter(Boolean))];
-    const inactive = await require('./technician-capabilities').inactiveCapabilitiesForServices(db, ids, capabilityRowsFor(serviceMix));
+    const inactive = await require('./technician-capabilities').inactiveCapabilitiesForServices(conn, ids, capabilityRowsFor(serviceMix));
     inactiveTechs = new Set(inactive.map((row) => String(row.technician_id)));
   }
   if (capacityEnabled()) {
@@ -1733,7 +1734,7 @@ async function filterCollidingSlots(slots, {
     return slots.filter(slot => slot.routeMode === 'arrival_windows' && slot.techId
       && !inactiveTechs.has(String(slot.techId)) && slotWindowFitsDay(slot.windowStart, slot.windowEnd));
   }
-  let collisionQuery = db('scheduled_services')
+  let collisionQuery = conn('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
@@ -1774,13 +1775,13 @@ async function filterCollidingSlots(slots, {
       // travel-gap check (expected-minutes padding, owner ruling 2026-09-23).
       // Hold identity above also serves the unconditional global overlap check.
       ...(travelGapEnabled()
-        ? [...guardedCoordSelects(db), 'scheduled_services.service_type', 'scheduled_services.service_key_snapshot',
+        ? [...guardedCoordSelects(conn), 'scheduled_services.service_type', 'scheduled_services.service_key_snapshot',
           // Planning-minute inputs (stopExpectedMinutesSync), as the booking check's reader selects them.
           'scheduled_services.is_recurring', 'scheduled_services.is_callback']
         : []),
     ), shiftedServiceMinutes);
   const candidatePin = { lat: coords?.lat ?? null, lng: coords?.lng ?? null };
-  if (travelGapEnabled()) await ensureCatalogLoaded(db);
+  if (travelGapEnabled()) await ensureCatalogLoaded(conn);
 
   const zoneSlug = zoneSlugOf(estimateZone);
   const zoneCities = new Set(
@@ -2188,10 +2189,11 @@ function makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, fun
 // their new times: filterCollidingSlots with the classified pool's arguments (overlaps, live holds, zone limits,
 // capability, the day fit, and the travel gap with this estimate's expected minutes), then the service-line rule.
 // Resolves true, or the reason the page would not offer the hour.
-function makeRoomPlacement({ estimateZone, coords, serviceMix, candidateExpectedMinutes, estimateId, lineRanking }) {
+// `conn`: the hold's transaction when the proof runs inside reserve or extend (no second pool connection under its locks).
+function makeRoomPlacement({ estimateZone, coords, serviceMix, candidateExpectedMinutes, estimateId, lineRanking, conn = db }) {
   return async (slot, shiftedServiceMinutes) => {
     const kept = await filterCollidingSlots([slot], {
-      dateFrom: slot.date, dateTo: slot.date, estimateZone, coords, serviceMix, candidateExpectedMinutes, ownEstimateId: estimateId, shiftedServiceMinutes,
+      dateFrom: slot.date, dateTo: slot.date, estimateZone, coords, serviceMix, candidateExpectedMinutes, ownEstimateId: estimateId, shiftedServiceMinutes, conn,
     });
     if (!kept.length) return 'page_collision';
     return applyLineOfferRule(kept, lineRanking).length ? true : 'service_line';
@@ -2250,7 +2252,7 @@ async function verifyMakeRoomOffer({ conn, estimate, serviceProfile = null, serv
   try {
     if (!coords) return { reason: 'no_pin' };
     const startMin = timeToMinutes(windowStart);
-    const lineRanking = serviceProfile ? await lineOfferRankingFor(serviceProfile, estimate) : null;
+    const lineRanking = serviceProfile ? await lineOfferRankingFor(serviceProfile, estimate, conn) : null;
     const routeDaySlug = await resolveZoneRouteDaySlug({ lat: coords.lat, lng: coords.lng, estimateZone, conn });
     const opts = { ...DEFAULT_OPTS, includeWeekends: true, timeOfDay: 'any', minimumLeadMinutes: selfServeNoticeMinutes() };
     return await require('./scheduling/booking-make-room').verifyMakeRoomHour({
@@ -2259,7 +2261,7 @@ async function verifyMakeRoomOffer({ conn, estimate, serviceProfile = null, serv
       zoneSlug: routeDaySlug,
       // The offer was signed for this exact hour, so the request's own window and zone days were proven then.
       admit: makeRoomAdmit({ opts, serviceProfile: serviceProfile || {}, dateFrom: date, dateTo: date, funnelDays: null }),
-      placement: makeRoomPlacement({ estimateZone, coords, serviceMix, candidateExpectedMinutes, estimateId: estimate.id, lineRanking }),
+      placement: makeRoomPlacement({ estimateZone, coords, serviceMix, candidateExpectedMinutes, estimateId: estimate.id, lineRanking, conn }),
     });
   } catch (err) {
     logger.warn(`[booking-make-room] hold proof failed: ${err.message}`);
