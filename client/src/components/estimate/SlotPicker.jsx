@@ -114,7 +114,8 @@ function NoTimeSoonNote({ blocked, searching, answer, slots }) {
   if (blocked || searching || !noTimeSoon(answer, slots)) return null;
   const link = { color: W.blueDeeper };
   return (
-    <div data-testid="no-time-soon-note" style={{ fontSize: 14, color: W.textBody, marginBottom: 12 }}>
+    // 16px, as the reschedule page's line: guidance the customer acts on, not fine print.
+    <div data-testid="no-time-soon-note" style={{ fontSize: 16, lineHeight: 1.55, color: W.textBody, marginBottom: 12 }}>
       Nothing is open in the next 7 days. If you need a sooner visit, text or call the office and we&apos;ll find a time.{' '}
       <a href="sms:+19412975749" style={link}>Text (941) 297-5749</a>
       {' · '}

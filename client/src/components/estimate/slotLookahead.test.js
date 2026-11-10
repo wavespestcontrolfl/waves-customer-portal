@@ -20,6 +20,12 @@ describe('noTimeSoon (estimate page text-or-call line)', () => {
     expect(noTimeSoon(body({ metadata: { firstDayAvailability: { date: '2099-10-03' } } }), [at('2099-10-12')], NOW)).toBe(false);
   });
 
+  it('does not count a first day of today: it names no time, and its opening can pass the booking lead', () => {
+    expect(noTimeSoon(body({ metadata: { firstDayAvailability: { date: '2099-10-01' } } }), [at('2099-10-12')], NOW)).toBe(true);
+    // A today slot still on screen counts.
+    expect(noTimeSoon(body({ metadata: { firstDayAvailability: { date: '2099-10-01' } } }), [at('2099-10-01'), at('2099-10-12')], NOW)).toBe(false);
+  });
+
   it('is false with nothing on screen', () => {
     expect(noTimeSoon(body(), [], NOW)).toBe(false);
   });

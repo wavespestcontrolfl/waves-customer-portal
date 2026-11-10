@@ -37,12 +37,16 @@ export const isEmptyBrowsable = (body) => isBrowsable(body) && bodySlots(body).l
 // True when the page has times to show but none within SOON_DAYS: the cue to tell the
 // customer to text or call. `answer` is the 14-day list body, `slots` what is on screen.
 // The API list is capped and route-ordered, so firstDayAvailability can name an earlier
-// open day the list left out; that counts as open soon.
+// open day the list left out; that counts as open soon. It names a day, not a time, so a
+// first day of today does not count: its opening can pass the 2-hour booking lead while the
+// page stays open (the glass picker then drops that slot). A today slot that is still on
+// screen counts through `slots`.
 export function noTimeSoon(answer, slots, now = new Date()) {
   if (!isBrowsable(answer) || !slots.length) return false;
+  const today = etDateString(now);
   const horizon = etDateString(addETDays(now, SOON_DAYS));
   const firstDay = answer.metadata?.firstDayAvailability?.date;
-  return !slots.some((slot) => slot.date <= horizon) && !(firstDay && firstDay <= horizon);
+  return !slots.some((slot) => slot.date <= horizon) && !(firstDay && firstDay > today && firstDay <= horizon);
 }
 
 // Date, then start time; one entry per slotId.

@@ -720,8 +720,24 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
       renderPicker();
       await screen.findAllByText(/Arrival window|Pick/);
       expect(screen.getByTestId(NOTE).textContent).toMatch(LINE);
+      // Customer guidance, not fine print: the reschedule page's 16px.
+      expect(screen.getByTestId(NOTE)).toHaveStyle({ fontSize: '16px' });
       expect(screen.getByRole('link', { name: 'Text (941) 297-5749' })).toHaveAttribute('href', 'sms:+19412975749');
       expect(screen.getAllByRole('link', { name: 'Call (941) 297-5749' })[0]).toHaveAttribute('href', 'tel:+19412975749');
+    });
+
+    // 08:00 ET: today's 09:00 opening is inside the 2-hour booking lead, so the glass picker drops it;
+    // the answer's first day (today) must not hide the line.
+    it('shows the line when the only opening inside 7 days is a today slot the glass picker dropped as stale', async () => {
+      setGlassDefault(true);
+      try {
+        stubFetch({ list: { primary: [OPEN('today', '2099-10-01'), OPEN('late', '2099-10-12')], expander: [], metadata: { firstDayAvailability: { date: '2099-10-01', openCount: 1 } } } });
+        renderPicker();
+        await screen.findByTestId(NOTE);
+        expect(screen.getByTestId(NOTE).textContent).toMatch(LINE);
+      } finally {
+        setGlassDefault(false);
+      }
     });
 
     it('shows the line on the look-ahead list (14-day list empty, first opening after Nov 21)', async () => {
