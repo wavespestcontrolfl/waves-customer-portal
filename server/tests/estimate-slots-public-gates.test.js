@@ -1455,6 +1455,20 @@ describe('offerableEstimateSlots — the page\'s default selection axes', () => 
     expect(getAvailableSlots.mock.calls[0][1]).not.toHaveProperty('serviceCadences');
   });
 
+  // The daily no-time-soon check reads the page through the same helper (estimate-no-time-soon-check.js judge).
+  test('pageSlotPicker: the page picker\'s mode and default selection; null when the page shows no picker', async () => {
+    const { pageSlotPicker } = require('../routes/estimate-slots-public')._internals;
+    const { resolveEstimateAcceptance } = require('../routes/estimate-public');
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [freq('monthly'), freq('quarterly', { recommended: true })],
+      services: [{ key: 'pest_control', isRecurring: true, defaultFrequencyKey: 'quarterly', frequencies: [freq('monthly'), freq('quarterly')] }],
+    });
+    await expect(pageSlotPicker('est-1')).resolves.toEqual({ serviceMode: 'recurring', selection: { selectedFrequency: 'quarterly' } });
+    resolveEstimateAcceptance.mockResolvedValueOnce({ acceptance: { mode: 'existing_appointment' } });
+    await expect(pageSlotPicker('est-1')).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
   test('a section default the combined list does not offer falls back to frequencies[0], exactly as the page does', async () => {
     buildPricingBundle.mockResolvedValue({
       frequencies: [freq('monthly'), freq('quarterly')],

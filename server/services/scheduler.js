@@ -5509,6 +5509,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 7:35AM — Estimate no-time-soon check (owner 2026-11-09, option C). One
+  // Estimates bell per open estimate whose booking page shows no time within 7
+  // days; it closes itself when the problem is gone. Read-only: no paid call
+  // (paidCalls: false), nothing sent to a customer, writes only admin
+  // notification rows. No GATE_* (owner rule 2026-11-05).
+  // =========================================================================
+  cron.schedule('35 7 * * *', async () => {
+    try {
+      await runExclusive('estimate-no-time-soon-check', async () => {
+        const result = await require('./estimate-no-time-soon-check').runEstimateNoTimeSoonCheck();
+        logger.info(`Estimate no-time-soon check: ${result.candidates} open, ${result.raised} raised, ${result.closed} closed`);
+      });
+    } catch (err) {
+      logger.error(`Estimate no-time-soon check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // MONDAYS 9:20AM — Monday review bell (GATE_MONDAY_REVIEW_BELL; returns before
   // any read when off). Owner 2026-11-02 ("build all", B2): one needs-you bell a
   // week for the work that sits: needs-you alerts unread 14+ days, overdue
@@ -7468,6 +7486,8 @@ function initScheduledJobs() {
       }
       // The same for the stuck-booking alerts of estimates that settled (estimate-stuck-alert.js; never throws).
       await require('./estimate-stuck-alert').closeSettledStuckAlerts();
+      // And the no-time-soon bells (estimate-no-time-soon-check.js; no picker run, never throws).
+      await require('./estimate-no-time-soon-check').closeSettledNoTimeSoonAlerts();
     } catch (err) {
       logger.error(`[est-engage] cron failed: ${err.message}`);
     }

@@ -1442,57 +1442,65 @@ async function estimateBelongsToCustomer(estimate, customerId) {
   return last10Digits(customer?.phone) === estimatePhone;
 }
 
-async function offerableEstimateSlots(estimateId, customerId, { fresh = false } = {}) {
-  const estimate = await db('estimates').where({ id: estimateId }).first(...SLOT_ESTIMATE_COLUMNS);
-  if (!estimate || !(await estimateBelongsToCustomer(estimate, customerId))) return null;
-  // Fail closed: a refusal, or a verdict that cannot be read (the park lookup), offers no times.
-  if (await slotBrowseRefusal(estimate).catch(() => true)) return null;
-  // The page's /data resolution for this estimate: its acceptance contract
-  // decides whether the slot picker renders at all (quote-required, linked
-  // existing appointment, invoice-only, commercial site-confirmation → no
-  // picker, so no time the customer could pick), and its pricing bundle is
-  // what the picker's first fetch derives the default selection from.
-  // /data reconciles a stale frozen membership snapshot (in memory, never
-  // persisted) before building either, so this does too: a lapsed plan can
-  // reprice the default selection or make the estimate quote-required.
-  let pricing;
-  let full;
-  try {
-    full = await db('estimates').where({ id: estimate.id }).first();
-    if (!full) return null;
-    await reconcileFrozenMembershipSnapshot(full);
-    pricing = await buildPricingBundle(full, { monthlyBilled: await estimateRendersMonthlyBilling(full) });
-    const { acceptance } = await resolveEstimateAcceptance(full, parseEstimateData(full), pricing);
-    if (acceptance?.mode !== 'standard_slot_pick') return null;
-  } catch (err) {
-    logger.warn(`[estimate-slots-public:offerable] page contract lookup failed (${err.message}); estimate times withheld`);
-    return null;
-  }
+// getAvailableSlots codes for an estimate that is gone or settled: no time to offer, not a failure.
+const SETTLED_SLOT_CODES = ['ESTIMATE_NOT_FOUND', 'ESTIMATE_EXPIRED', 'ESTIMATE_TERMINAL'];
+
+// The page's slot picker for an estimate, as its /data resolution decides it: { serviceMode, selection } when the
+// picker renders (acceptance contract standard_slot_pick), with the default selection its first fetch sends; null
+// when the page shows no picker (quote-required, a linked existing appointment, invoice-only, commercial
+// site-confirmation) or cannot rebuild that default (accept would refuse it too). A lookup that fails throws.
+// /data reconciles a stale frozen membership snapshot (in memory, never persisted) before building either, so this
+// does too: a lapsed plan can reprice the default selection or make the estimate quote-required.
+// Shared by the texting AI (offerableEstimateSlots) and the daily no-time-soon check.
+async function pageSlotPicker(estimateId) {
+  const full = await db('estimates').where({ id: estimateId }).first();
+  if (!full) return null;
+  await reconcileFrozenMembershipSnapshot(full);
+  const pricing = await buildPricingBundle(full, { monthlyBilled: await estimateRendersMonthlyBilling(full) });
+  const { acceptance } = await resolveEstimateAcceptance(full, parseEstimateData(full), pricing);
+  if (acceptance?.mode !== 'standard_slot_pick') return null;
   const serviceMode = resolveSlotServiceMode(full, '');
   // The page's own first fetch (SlotPicker.jsx) always carries the default
   // selectedFrequency / serviceCadences of a recurring estimate — without them
   // the picker sizes the visit from frequencies[0] and unmodified companion
   // rows, a different duration / service mix than the customer's default.
-  let selection = {};
-  if (serviceMode !== 'one_time' && !hasSavedCustomerSelection(full)) {
-    const derived = pageDefaultSlotSelection(pricing);
-    if (!derived) return null;
-    selection = {
+  if (serviceMode === 'one_time' || hasSavedCustomerSelection(full)) return { serviceMode, selection: {} };
+  const derived = pageDefaultSlotSelection(pricing);
+  if (!derived) return null;
+  return {
+    serviceMode,
+    selection: {
       ...(derived.selectedFrequency ? { selectedFrequency: derived.selectedFrequency } : {}),
       ...(derived.serviceCadences ? { serviceCadences: derived.serviceCadences } : {}),
-    };
+    },
+  };
+}
+
+async function offerableEstimateSlots(estimateId, customerId, { fresh = false } = {}) {
+  const estimate = await db('estimates').where({ id: estimateId }).first(...SLOT_ESTIMATE_COLUMNS);
+  if (!estimate || !(await estimateBelongsToCustomer(estimate, customerId))) return null;
+  // Fail closed: a refusal, or a verdict that cannot be read (the park lookup), offers no times.
+  if (await slotBrowseRefusal(estimate).catch(() => true)) return null;
+  // No picker on the page, so no time the customer could pick; a lookup that fails withholds too.
+  let picker;
+  try {
+    picker = await pageSlotPicker(estimate.id);
+  } catch (err) {
+    logger.warn(`[estimate-slots-public:offerable] page contract lookup failed (${err.message}); estimate times withheld`);
+    return null;
   }
+  if (!picker) return null;
   try {
     return await getAvailableSlots(estimate.id, {
-      serviceMode,
-      ...selection,
+      serviceMode: picker.serviceMode,
+      ...picker.selection,
       ...(fresh ? { bypassCache: true, maxResults: FRESH_MAX_SLOTS, expanderMaxResults: 0 } : {}),
     });
   } catch (err) {
-    if (['ESTIMATE_NOT_FOUND', 'ESTIMATE_EXPIRED', 'ESTIMATE_TERMINAL'].includes(err.code)) return null;
+    if (SETTLED_SLOT_CODES.includes(err.code)) return null;
     throw err;
   }
 }
 
 module.exports = router;
-module.exports._internals = { offerableEstimateSlots, pageDefaultSlotSelection, lockedContactReviewRefusal, lockedAreaAddOnLimitRefusal, lockedAreaAddOnRuleRefusal, slotBlockingRefusal, postMintRefusal };
+module.exports._internals = { SLOT_ESTIMATE_COLUMNS, SETTLED_SLOT_CODES, slotBrowseRefusal, pageSlotPicker, offerableEstimateSlots, pageDefaultSlotSelection, lockedContactReviewRefusal, lockedAreaAddOnLimitRefusal, lockedAreaAddOnRuleRefusal, slotBlockingRefusal, postMintRefusal };

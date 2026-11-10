@@ -1100,7 +1100,9 @@ async function fallbackZoneCenter(city) {
   return null;
 }
 
-async function resolveEstimateCoords(estimate) {
+// `opts.paidCalls === false` (the daily no-time-soon check): never geocode and never fall back to a zone center;
+// stored customer coords that cannot be used throw COORDS_NEED_GEOCODE for the caller to skip the estimate.
+async function resolveEstimateCoords(estimate, opts = {}) {
   let customerAddress = '';
   let customerCity = '';
   let estimateAddressIsCustomerAddress = true;
@@ -1134,6 +1136,12 @@ async function resolveEstimateCoords(estimate) {
     } catch (err) {
       logger.warn(`[estimate-slots] customer coord lookup failed: ${err.message}`);
     }
+  }
+
+  if (opts.paidCalls === false) {
+    const err = new Error('estimate coordinates need a geocode');
+    err.code = 'COORDS_NEED_GEOCODE';
+    throw err;
   }
 
   // Fallback: geocode the exact estimate address (plus the customer address
@@ -2101,7 +2109,8 @@ async function routeCheckedPool(pool, { coords, estimateId, durationMinutes, mod
 // Make room at booking (GATE_BOOKING_MAKE_ROOM, scheduling/booking-make-room.js). OFFER LISTS ONLY, like the route
 // check above: every other caller gets 'off'. Off: the module is never loaded. Any error reads as off.
 function makeRoomModeFor(userOpts) {
-  if (userOpts.offer !== true) return 'off';
+  // paidCalls: false (the read-only daily check) writes no make-room row.
+  if (userOpts.offer !== true || userOpts.paidCalls === false) return 'off';
   try {
     return require('./scheduling/booking-make-room').bookingMakeRoomMode();
   } catch {
@@ -2277,6 +2286,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // estimate's booking never invalidated, and never writes its own
   // (uncapped) result over the page's.
   const bypassCache = userOpts.bypassCache === true;
+  // opts.paidCalls === false (explicit, off by default; the read-only daily check): no geocode and no Google road
+  // estimate, and no make-room row written. Everything else answers as the page does.
+  const paidCalls = userOpts.paidCalls !== false;
   // A ranked list is never cached: a map edit must show at once.
   const cached = bypassCache || routeDayPolicyKey == null || lineRanking ? undefined : wrapperCache.get(cacheKey);
   if (cached && !serviceProfile.reservationServiceMix) {
@@ -2372,7 +2384,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // today's caching untouched.
   const skipResultCache = !!serviceProfile.reservationServiceMix || !!lineRanking
     || (isEnabled('southZoneDayFunnel') && (zoneResolutionFailed || funnelLookupFailed));
-  const coords = await resolveEstimateCoords(estimate);
+  const coords = await resolveEstimateCoords(estimate, { paidCalls });
   // Zone route days (GATE_ZONE_ROUTE_DAYS, owner ruling 2026-09-29): the
   // picker's find-time call lifts the detour cap on the zone's route day so
   // an empty Friday can be offered (and seeded by the funnel below). Zone
@@ -2492,6 +2504,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // The resolved whole-visit credit (above) — find-time must not
       // re-derive it from one service key.
       expectedMinutes: candidateExpectedMinutes,
+      // false = the conservative drive model, none of the Google allowance (find-time travelAllowance).
+      providerTravel: paidCalls,
       // Customer-facing day close (scheduling/customer-windows.js) — find-time's
       // own DAY_END_HOUR default (17) stays untouched for staff/optimizer
       // callers that don't pass this. currentDayEndMinutes() honors a
