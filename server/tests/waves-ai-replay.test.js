@@ -47,7 +47,10 @@ describe('summarize', () => {
   });
 
   test('cancel, refund and charge requests are counted, with and without a hand-off', () => {
-    expect(s.restricted).toEqual({ requests: 3, escalated: 2, not_escalated: 1, mentions_only: 0 });
+    expect(s.restricted).toEqual({
+      requests: { texts: 3, escalated: 2, not_escalated: 1 },
+      other_wording: { texts: 0, escalated: 0, not_escalated: 0 },
+    });
   });
 
   test('the summary carries no message text', () => {
@@ -131,6 +134,8 @@ describe('restricted requests', () => {
     'Thanks for the refund, please cancel my plan', 'Thanks for the refund, cancel my plan too',
     'Thank you for cancelling that visit and please refund me', 'Thanks for the refund but you charged me twice again',
     'Thanks for fixing the double charge and I was overcharged in May too',
+    'Thanks for the refund and cancel my plan', 'Thanks for the refund, also cancel my plan',
+    'Thanks for fixing the charge and refund me the late fee too',
   ])('asks for it: %s', (text) => {
     expect(kind(text)).toBe('request');
   });
@@ -139,7 +144,7 @@ describe('restricted requests', () => {
     'Thanks for the refund yesterday', 'Thank you for cancelling that visit', 'Thanks for fixing the double charge',
     'I got the refund, thank you', 'Refund received, thanks', 'Charge went through, thanks',
     'Thanks for the credit and for fixing the double charge', 'I got it, thanks for the refund',
-    'Thanks so much for the refund and the quick reply',
+    'Thanks so much for the refund and the quick reply', 'Did you refund me and cancel my plan?',
     'Has my plan been cancelled?', 'Did you cancel my visit?', 'Was my card charged yet?', 'When will I be charged?',
     'When will you charge my card?', 'Can you tell me if my refund went through?', 'Can I get an update on my refund?',
     'I need the refund confirmation number', 'What is your cancellation policy?', 'Is there a cancellation fee?',
@@ -164,18 +169,26 @@ describe('restricted requests', () => {
     expect(kind('We are done with the service after this month', [{ type: 'escalate', note: 'wants to cancel' }])).toBeNull();
   });
 
-  test('mentions are counted apart from requests and from the hand-off numbers', () => {
+  // Wording rules cannot read every request. Each reading keeps its own hand-off counts, so a request the
+  // rules file under other wording still shows as not handed over there.
+  test('request wording and other wording each carry their own hand-off counts', () => {
     const s = summarize([
       draft({ inbound_message: 'Thanks for the refund yesterday' }),
       draft({ id: 'd2', inbound_message: 'Has my plan been cancelled?', intended_actions: { actions: [{ type: 'escalate', note: 'followup_promised' }] } }),
       draft({ id: 'd3', inbound_message: 'I want a refund' }),
       // A request after a thank-you that the draft did not hand over is a missed hand-off, not a mention.
       draft({ id: 'd4', inbound_message: 'Thanks for the refund, please cancel my plan' }),
+      draft({ id: 'd5', inbound_message: 'Thanks for the refund and cancel my plan', intended_actions: { actions: [{ type: 'escalate', note: 'cancel_request' }] } }),
+      draft({ id: 'd6', inbound_message: 'When is my next visit?' }),
     ]);
-    expect(s.restricted).toEqual({ requests: 2, escalated: 0, not_escalated: 2, mentions_only: 2 });
+    expect(s.restricted).toEqual({
+      requests: { texts: 3, escalated: 1, not_escalated: 2 },
+      other_wording: { texts: 2, escalated: 1, not_escalated: 1 },
+    });
     const report = ops.formatReport(s, { days: 30, truncated: false });
-    expect(report).toContain('Cancel / refund / charge requests: 2  handed to the office: 0  not handed over: 2');
-    expect(report).toContain('2 more texts only name one of these');
+    expect(report).toContain('Cancel / refund / charge (only the office does these): 5 texts name one');
+    expect(report).toMatch(/asked in plain words\s+3 {3}handed to the office: 1 {3}not handed over: 2/);
+    expect(report).toMatch(/other wording\s+2 {3}handed to the office: 1 {3}not handed over: 1/);
   });
 });
 
@@ -330,7 +343,7 @@ describe('ops/agents/waves-ai-replay', () => {
       const printed = [];
       const summary = await ops.run({ dbi, argv: [`--out=${dir}`], now: new Date('2026-11-05T12:00:00Z'), log: (text) => printed.push(text) });
       expect(seen.cols).toContain('j.judge_version');
-      expect(summary).toMatchObject({ judge_version: 'j2', restricted: { requests: 1, escalated: 0, not_escalated: 1, mentions_only: 0 } });
+      expect(summary).toMatchObject({ judge_version: 'j2', restricted: { requests: { texts: 1, escalated: 0, not_escalated: 1 }, other_wording: { texts: 0 } } });
       expect(summary.overall).toMatchObject({ drafts: 2, graded: 1, unsafe: 1 });
       const cases = fs.readFileSync(path.join(dir, 'cases.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
       expect(cases.map((c) => [c.judge_version, c.restricted])).toEqual([['j2', 'request'], [FIRST_JUDGE, null]]);

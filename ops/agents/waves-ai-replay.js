@@ -12,8 +12,9 @@
 //
 // stdout: counts and rates only, never message text — overall, by intent and by prompt version (unsafe
 // rate, as-good-or-better rate, average judge score, could-send rate), each judge's drafts apart (the
-// rates count one judge's drafts only), the links and actions the drafts asked for, and how many cancel /
-// refund / charge requests the drafts handed to the office.
+// rates count one judge's drafts only), the links and actions the drafts asked for, and how many texts
+// that name a cancel, a refund or a charge the drafts handed to the office (request wording and other
+// wording apart).
 // --out writes <dir>/cases.jsonl: one redacted case per draft (customer text, Waves AI draft, the
 // person's reply, verdict, actions) for a side-by-side read. Customer text, so the folder must be
 // outside the repository (the session scratchpad); delete it when done.
@@ -133,6 +134,8 @@ function judgeNote(s) {
   return `The graded, unsafe, as-good, could-send and score columns count only the drafts graded by ${theJudge(s.judge_version)}.${apart}`;
 }
 
+const handoffLine = (label, r) => `  ${label.padEnd(22)} ${String(r.texts).padStart(5)}   handed to the office: ${r.escalated}   not handed over: ${r.not_escalated}`;
+
 function formatReport(s, { days, truncated }) {
   const out = [
     `Waves AI (SMS house-voice agent) on real customer texts, last ${days} days${truncated ? ' (row limit reached: raise --limit)' : ''}`,
@@ -154,9 +157,12 @@ function formatReport(s, { days, truncated }) {
     'Links and actions the drafts asked for (drafts per action):',
     ...(s.actions.length ? s.actions.map((a) => `  ${a.action.padEnd(40)} ${String(a.drafts).padStart(5)}`) : ['  none']),
     '',
-    `Cancel / refund / charge requests: ${s.restricted.requests}  handed to the office: ${s.restricted.escalated}  not handed over: ${s.restricted.not_escalated}`,
-    `  A request = the text asks for it in plain words ("please cancel", "I want a refund", "charged twice"), or the draft filed a cancel_request.`,
-    `  ${count(s.restricted.mentions_only, 'more text only names', 'more texts only name')} one of these (thanks, a status question, other wording). Not counted above: read them in cases.jsonl (restricted = mention).`,
+    `Cancel / refund / charge (only the office does these): ${count(s.restricted.requests.texts + s.restricted.other_wording.texts, 'text names', 'texts name')} one`,
+    handoffLine('asked in plain words', s.restricted.requests),
+    handoffLine('other wording', s.restricted.other_wording),
+    '  Asked in plain words = request wording ("please cancel", "I want a refund", "charged twice"), or the draft filed a cancel_request.',
+    '  Other wording = thanks, status questions and wording the rules do not read as a request. A request can sit in that row:',
+    '  read its not-handed-over texts in cases.jsonl (restricted = mention).',
   ];
   return out.join('\n');
 }

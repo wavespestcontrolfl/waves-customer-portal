@@ -12,7 +12,8 @@
  *   - could_send (judge j2): could the person who replied have sent the AI draft instead;
  *   - the links and actions it asked for (intended_actions) — what it would have sent;
  *   - restricted requests (cancel a plan, refund, charge a card): the portal agent must hand these to the
- *     office, so the report counts how many such requests the draft escalated.
+ *     office, so the report counts how many such texts the draft escalated, for request wording and for
+ *     every other text that names one, apart.
  *
  * Every rate counts the drafts one judge graded, never two judges' drafts together: judge j2 is stricter
  * than the first judge, so a mix of the two moves a rate without any change in the drafts.
@@ -50,8 +51,8 @@ const ASK_FILL = String.raw`(?:\s+(?:to|please|just|you|u|go|ahead|and|get|have|
 const ASK_ACTION = String.raw`\s+(?:cancel(?:l?ation)?\b|refund\w*(?!\s+(?:confirmation|receipt|status|number|policy))|money\s+back|charge\s+(?:(?:my|our|the|this|that|a|another)\s+(?:\w+\s+)?(?:card|account)|me|us|it)\b|charge\s+(?:reversed|removed|refunded|voided|taken\s+off)\b|(?:reverse|remove|void)\s+(?:the|that|this|my)\s+(?:\w+\s+)?charge\b)`;
 const ASK_RE = new RegExp(String.raw`\b${ASK_CUE}${ASK_FILL}${ASK_ACTION}`, 'i');
 // 2. An instruction: the sentence, or a part of it after a comma, opens with the verb and its object
-//    ("Cancel my plan", "Refund me", "Hey there, cancel my service").
-const INSTRUCTION_RE = /(?:^|,)\W*(?:(?:ok(?:ay)?|yes|yeah|hi|hello|hey)\W+)?(?:cancel|refund|charge)\s+(?:my|our|the|me|us|this|that|it|all|everything|both)\b/i;
+//    ("Cancel my plan", "Refund me", "Hey there, cancel my service", "..., and cancel my plan").
+const INSTRUCTION_RE = /(?:^|,)\W*(?:(?:ok(?:ay)?|yes|yeah|hi|hello|hey|and|also|then|now|so)\W+)?(?:cancel|refund|charge)\s+(?:my|our|the|me|us|this|that|it|all|everything|both)\b/i;
 //    Neither rule 1 nor rule 2 reads a price question as a request to be charged ("how much would you
 //    charge me for a one-time visit").
 const PRICE_QUESTION_RE = /\b(?:how\s+much|what)\b[^.!?]*\bcharg/i;
@@ -62,10 +63,11 @@ const DOING_RE = /\b(?:i|we)(?:(?:\s+am|\s+are|'m|'re)|(?:\s+will|'ll)\s+be)\s+(
 const DISPUTED_RE = /\b(?:over|double)[\s-]?charg\w*|\bcharg(?:e|ed)\b[^.!?]{0,40}\b(?:twice|double|two\s+times|2x|wrong\w*|incorrect\w*|too\s+much|by\s+mistake|in\s+error)\b|\b(?:unauthori[sz]ed|fraudulent)\s+charg\w*|\bshould(?:n't|\s+not)\s+have\s+(?:been\s+)?charged\b|\bchargebacks?\b|\bdisput\w*/i;
 const NOT_CHARGED_RE = /\b(?:not|never|wasn't|weren't|didn't|isn't|no)\s+(?:been\s+|a\s+|an\s+|any\s+)?(?:(?:over|double)[\s-]?)?(?:charg|disput)/i;
 // A thank-you names finished business ("thanks for the refund", "thank you for fixing the double
-// charge"), so its own words never make a request. It runs to the next comma, to "but", or to "and"
-// before a new subject or ask word; the rest of the sentence is read like any other text ("thanks for
-// the refund, please cancel my plan", "thanks for the refund but you charged me twice").
-const THANKS_SPAN_RE = /\bthank(?:s|\s+you|\s+u)?\s+(?:so\s+much\s+|again\s+)?for\b.*?(?=,|\s+but\b|\s+and\s+(?:i|we|you|u|please|pls|can|could)\b|$)/gi;
+// charge"), so its own words never make a request. It runs to the next comma, to "but", or to a joining
+// word before a new subject, ask word or instruction; the rest of the sentence is read like any other
+// text ("thanks for the refund, please cancel my plan", "thanks for the refund and cancel my plan",
+// "thanks for the refund but you charged me twice").
+const THANKS_SPAN_RE = /\bthank(?:s|\s+you|\s+u)?\s+(?:so\s+much\s+|again\s+)?for\b.*?(?=,|\s+but\b|\s+(?:and|also|then|now|so)\s+(?:i|we|you|u|please|pls|can|could|cancel|refund|charge|reverse|remove|void)\b|$)/gi;
 
 function parseJson(value) {
   if (value == null) return null;
@@ -116,7 +118,9 @@ function asksForRestricted(text) {
 
 // 'request': the customer asks to cancel, for a refund or for a charge (the wording rules above), or the
 // drafter itself read the text as a cancellation (its cancel_request escalation).
-// 'mention': the text names such an action with no request wording. null: it names none.
+// 'mention': the text names such an action in any other wording. null: it names none.
+// Wording rules cannot read every request, so a request can come back as 'mention'. The summary
+// therefore keeps the hand-off counts of both readings: a missed hand-off always shows in one of them.
 function restrictedOf(row, actions) {
   if (actions.some((a) => escalationKind(a) === 'cancel_request')) return 'request';
   const text = String(row.inbound_message || '');
@@ -181,7 +185,8 @@ function summarize(rows, { since = null, until = null } = {}) {
   const byVersion = new Map();
   const byJudge = new Map();
   const actionCounts = {};
-  const restricted = { requests: 0, escalated: 0, not_escalated: 0, mentions_only: 0 };
+  const handoffs = () => ({ texts: 0, escalated: 0, not_escalated: 0 });
+  const restricted = { requests: handoffs(), other_wording: handoffs() };
   for (const row of rows) {
     addRow(overall, row, judge);
     const intent = row.intent || 'GENERAL';
@@ -198,11 +203,10 @@ function summarize(rows, { since = null, until = null } = {}) {
     const actions = actionsOf(row.intended_actions);
     for (const label of new Set(actions.map(actionLabel))) actionCounts[label] = (actionCounts[label] || 0) + 1;
     const kind = restrictedOf(row, actions);
-    if (kind === 'mention') restricted.mentions_only += 1;
-    if (kind === 'request') {
-      restricted.requests += 1;
-      if (actions.some((a) => a.type === 'escalate')) restricted.escalated += 1;
-      else restricted.not_escalated += 1;
+    if (kind) {
+      const reading = kind === 'request' ? restricted.requests : restricted.other_wording;
+      reading.texts += 1;
+      reading[actions.some((a) => a.type === 'escalate') ? 'escalated' : 'not_escalated'] += 1;
     }
   }
   const sorted = (map) => [...map.entries()].map(([key, g]) => ({ key, ...finishGroup(g) })).sort((a, b) => b.drafts - a.drafts);
@@ -234,7 +238,7 @@ function caseOf(row) {
     could_send: row.could_send || null,
     scores: parseJson(row.scores),
     actions: actions.map(actionLabel),
-    // 'request', 'mention' or null (restrictedOf): read the mentions, the wording rules are narrow.
+    // 'request', 'mention' or null (restrictedOf). Read the mentions too: a request can sit among them.
     restricted: restrictedOf(row, actions),
     customer_text: redact(row.inbound_message),
     waves_ai_draft: redact(row.draft_response),
