@@ -23,9 +23,9 @@ router.use(async (req, res, next) => {
 });
 
 // Any error that is not a refusal goes to the portal's error handler (middleware/errors.js), which logs an error's
-// message and stack, and on to error monitoring. A database error's message holds the SQL of the estimate save with its
-// values (a name, a phone, an address). So the handler gets a copy that keeps the error's code or class, the caller's id
-// and the stack frames, and nothing else.
+// message and stack, and on to error monitoring. A database error's message holds the text of the failed statement, and
+// the database's own words can repeat a value it refused; the estimate save writes a name, a phone and an address. So
+// the handler gets a copy that keeps the error's code or class, the caller's id and the stack frames, and nothing else.
 function safeError(err, req, label) {
   const safe = new Error(`[tech-estimates] ${label} failed for technician ${req.technicianId} (${String(err?.code || err?.name || 'error').slice(0, 40)})`);
   const frames = String(err?.stack || '').split('\n').filter((line) => /^\s+at /.test(line));
