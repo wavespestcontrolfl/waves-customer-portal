@@ -380,6 +380,128 @@ describe('makeRoomDestinationClash — the occupancy technician scope (Codex pre
     expect(builder.orWhere).not.toHaveBeenCalled();
     expect(builder.whereNot).toHaveBeenCalledWith('id', 'hold-own');
   });
+
+  test('no estimate to leave out: no estimate predicate (the reserve, refresh and extend callers)', async () => {
+    const builder = await probe({ excludeId: 'hold-own' });
+    expect(builder.whereRaw).not.toHaveBeenCalledWith(expect.stringContaining('source_estimate_id'), expect.anything());
+  });
+});
+
+// Codex pre-push P1 (#7796): the page's offer runs the same chain check, leaving out every hold of its own estimate (the
+// reserve releases them before it runs the check).
+describe('makeRoomChainClash — the page\'s offer leaves out its own estimate\'s holds', () => {
+  const run = (builders, extra = {}) => {
+    const queue = [...builders];
+    const trx = jest.fn(() => queue.shift());
+    return slotReservation._internals.makeRoomChainClash(trx, { payload: PAYLOAD, ...extra }).then((taken) => ({ taken, queue }));
+  };
+
+  test('every probe (each destination and the shared stop) leaves out the estimate\'s holds', async () => {
+    const probes = chainProbes();
+    const { taken, queue } = await run(probes, { excludeEstimateId: EST });
+    expect(taken).toBe(false);
+    expect(queue).toHaveLength(0);
+    for (const probe of probes) {
+      expect(probe.whereRaw).toHaveBeenCalledWith('source_estimate_id IS DISTINCT FROM ?', [EST]);
+      expect(probe.whereNot).not.toHaveBeenCalled();
+    }
+  });
+
+  test('another estimate\'s chain still clashes: a shared stop is taken', async () => {
+    const { taken } = await run(chainProbes({ shared: { id: 'hold-other' } }), { excludeEstimateId: EST });
+    expect(taken).toBe(true);
+  });
+
+  test('a destination hit stops at the first probe', async () => {
+    const { taken, queue } = await run(chainProbes({ first: { id: 'hold-other' } }), { excludeEstimateId: EST });
+    expect(taken).toBe(true);
+    expect(queue).toHaveLength(2);
+  });
+});
+
+// Codex pre-push P1 (#7796): a hold that lapsed lost its place in every chain proof, so a live chain may since have
+// taken its hour as a moved stop's destination; a commit inside the grace must yield to that chain.
+describe('commitReservation inside the grace — another live make-room hold\'s destination', () => {
+  const { lapsedHoldOnMakeRoomDestination } = slotReservation._internals;
+  const lapsedRow = {
+    id: 'hold-1', source_estimate_id: EST, scheduled_date: DATE, window_start: '13:00:00', window_end: '14:00:00', technician_id: 'tech-1',
+    estimated_duration_minutes: 60, reservation_expires_at: '2027-05-20T13:15:00.000Z', make_room_moves: null, _lapsed: true,
+  };
+  const args = (extra = {}) => ({ row: lapsedRow, useCapacity: false, date: DATE, windowStart: '13:00:00', windowEnd: '14:00:00', ...extra });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    makeRoom.bookingMakeRoomMode.mockReturnValue('on');
+    db.mockImplementation((table) => (table === 'booking_config' ? { first: jest.fn().mockResolvedValue(undefined) } : undefined));
+  });
+
+  test('lapsed, mode on: a destination hit is a clash, and the probe leaves the committing hold out', async () => {
+    const builder = destinationProbe({ id: 'hold-other' });
+    const trx = jest.fn(() => builder);
+    await expect(lapsedHoldOnMakeRoomDestination(trx, args())).resolves.toBe(true);
+    expect(builder.where).toHaveBeenCalledWith({ scheduled_date: DATE });
+    expect(builder.whereNot).toHaveBeenCalledWith('id', 'hold-1');
+    expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining("make_room_moves->'moves'"), ['14:00:00', '13:00:00']);
+  });
+
+  test('no hit: no clash', async () => {
+    const trx = jest.fn(() => destinationProbe(null));
+    await expect(lapsedHoldOnMakeRoomDestination(trx, args())).resolves.toBe(false);
+  });
+
+  test.each([
+    ['a hold that never lapsed (every chain proof saw it as a stop)', { row: { ...lapsedRow, _lapsed: false } }],
+    ['capacity mode', { useCapacity: true }],
+  ])('%s is not asked', async (_label, extra) => {
+    const trx = jest.fn();
+    await expect(lapsedHoldOnMakeRoomDestination(trx, args(extra))).resolves.toBe(false);
+    expect(trx).not.toHaveBeenCalled();
+  });
+
+  test.each(['shadow', 'off'])('mode %s: not asked', async (mode) => {
+    makeRoom.bookingMakeRoomMode.mockReturnValue(mode);
+    const trx = jest.fn();
+    await expect(lapsedHoldOnMakeRoomDestination(trx, args())).resolves.toBe(false);
+    expect(trx).not.toHaveBeenCalled();
+  });
+
+  function commitTrx({ destination }) {
+    const dateProbe = chain({ first: jest.fn().mockResolvedValue({ scheduled_date: DATE, technician_id: 'tech-1' }) });
+    const reservation = chain({ first: jest.fn().mockResolvedValue(lapsedRow) });
+    const rivalLiveHold = chain({ first: jest.fn().mockResolvedValue(null) });
+    const conflict = chain({ whereNot: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
+    const probe = globalProbe([]);
+    const update = updater();
+    const queue = [dateProbe, reservation, rivalLiveHold, conflict, probe, destination, update];
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services') return queue.shift();
+      if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 'tech-1', employment_status: 'active', field_dispatchable: true }), forShare: jest.fn().mockReturnThis() });
+      if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
+      throw new Error(`unexpected table ${table}`);
+    });
+    trx.raw = jest.fn((sql) => ({ raw: sql }));
+    return { trx, update, queue };
+  }
+  const accept = (trx) => slotReservation.commitReservation({
+    scheduledServiceId: 'hold-1', customerId: 'customer-1', estimate: { id: EST, service_interest: 'Pest Control' }, serviceMode: 'recurring', selectedFrequency: 'quarterly', trx,
+  });
+
+  test('the accept answers the taken-slot path and writes nothing', async () => {
+    const destination = destinationProbe({ id: 'hold-other' });
+    const { trx, update } = commitTrx({ destination });
+    await expect(accept(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: `${DATE}_13-00_tech-1` });
+    // The hit came from the destination probe itself (the narrow and global probes found nothing).
+    expect(destination.whereRaw).toHaveBeenCalledWith(expect.stringContaining("make_room_moves->'moves'"), ['14:00:00', '13:00:00']);
+    expect(destination.whereNot).toHaveBeenCalledWith('id', 'hold-1');
+    expect(update.update).not.toHaveBeenCalled();
+  });
+
+  test('no hit: the hold graduates', async () => {
+    const { trx, update, queue } = commitTrx({ destination: destinationProbe(null) });
+    await accept(trx);
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'customer-1', reservation_expires_at: null }));
+    expect(queue).toHaveLength(0);
+  });
 });
 
 describe('a hold revived by a refresh must not sit on another make-room hold\'s destination (Codex pre-push P1)', () => {

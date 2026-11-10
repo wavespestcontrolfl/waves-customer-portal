@@ -519,6 +519,48 @@ postgres('hold grace + extend (real Postgres)', () => {
       });
     });
 
+    // Codex pre-push P1 (#7796): a hold that lapsed lost its place in every chain proof, so a live chain may since
+    // have taken its hour as a moved stop's destination. Graduating inside the grace would break that chain.
+    async function withRivalChainOver(lapsedSeconds, run) {
+      process.env.RESERVATION_COMMIT_GRACE_MINUTES = '10';
+      await withHold({ expiresInSeconds: lapsedSeconds }, async (ctx) => {
+        const rivalEstimate = randomUUID();
+        await ctx.trx('estimates').insert({
+          id: rivalEstimate, token: randomUUID().replace(/-/g, ''), status: 'sent',
+          customer_name: 'Rival Hold', address: '2 Test Way, Parrish, FL 34219',
+          expires_at: ctx.trx.raw("NOW() + INTERVAL '7 days'"),
+        });
+        // The rival's make-room hold is at 12:00; its stop moves into 13:00-14:00, this hold's hour.
+        await ctx.trx('scheduled_services').insert({
+          id: randomUUID(), source_estimate_id: rivalEstimate, customer_id: null,
+          scheduled_date: ctx.date, window_start: '12:00:00', window_end: '13:00:00',
+          estimated_duration_minutes: 60, service_type: 'Lawn Care', status: 'pending',
+          reservation_expires_at: ctx.trx.raw("NOW() + INTERVAL '10 minutes'"),
+          make_room_moves: { v: 1, date: ctx.date, techId: null, shiftMin: 60, moves: [{ id: randomUUID(), from: '12:00', to: '13:00', widthMin: 60 }] },
+        });
+        await run(ctx);
+      });
+    }
+
+    test('commit inside the grace: an ORDINARY hold whose hour is a live chain\'s destination is not graduated (Codex pre-push P1)', async () => {
+      await withRivalChainOver(-30, async ({ trx, holdId, customerId }) => {
+        await expect(slotReservation.commitReservation({ scheduledServiceId: holdId, customerId, trx }))
+          .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        const row = await holdRow(trx, holdId);
+        expect(row.customer_id).toBeNull();
+        expect(row.reservation_expires_at).not.toBeNull();
+      });
+    });
+
+    test('a punctual commit (the hold never lapsed) is not asked: every chain proof saw it as a stop, so it graduates', async () => {
+      await withRivalChainOver(300, async ({ trx, holdId, customerId }) => {
+        await slotReservation.commitReservation({ scheduledServiceId: holdId, customerId, trx });
+        const row = await holdRow(trx, holdId);
+        expect(row.customer_id).toBe(customerId);
+        expect(row.reservation_expires_at).toBeNull();
+      });
+    });
+
     test('the column is nullable jsonb and stays NULL on every ordinary hold', async () => {
       await withHold({ expiresInSeconds: 300 }, async ({ trx, holdId }) => {
         expect(await movesOf(trx, holdId)).toBeNull();

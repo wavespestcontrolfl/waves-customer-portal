@@ -866,8 +866,9 @@ async function proveMakeRoomHour(trx, { estimate, serviceProfile = null, service
 // overlaps one is taken (the estimate page's filterCollidingSlots draws the same line). Mode on only. Technician scope
 // is the occupancy probes' own (findConflictingVisits): with multi-tech confirm on, that technician's rows and the
 // unassigned ones; off, every technician. `excludeId` is the caller's own hold, which never blocks itself.
-async function makeRoomDestinationClash(trx, { date, techId, windowStart, windowEnd, excludeId = null }) {
-  return liveMakeRoomHolds(trx, { date, techId, excludeId })
+// `excludeEstimateId` (the page's offer only) leaves out every hold of that estimate: its reserve releases them first.
+async function makeRoomDestinationClash(trx, { date, techId, windowStart, windowEnd, excludeId = null, excludeEstimateId = null }) {
+  return liveMakeRoomHolds(trx, { date, techId, excludeId, excludeEstimateId })
     .whereRaw(
       "EXISTS (SELECT 1 FROM jsonb_array_elements(make_room_moves->'moves') AS m WHERE (m->>'to')::time < ?::time AND ((m->>'to')::time + ((m->>'widthMin') || ' minutes')::interval) > ?::time)",
       [windowEnd, windowStart],
@@ -876,7 +877,7 @@ async function makeRoomDestinationClash(trx, { date, techId, windowStart, window
 }
 
 // Other live make-room holds on the date, in the occupancy probes' technician scope, the caller's own hold left out.
-function liveMakeRoomHolds(trx, { date, techId, excludeId = null }) {
+function liveMakeRoomHolds(trx, { date, techId, excludeId = null, excludeEstimateId = null }) {
   return trx('scheduled_services')
     .where({ scheduled_date: date })
     .whereNull('customer_id')
@@ -886,19 +887,21 @@ function liveMakeRoomHolds(trx, { date, techId, excludeId = null }) {
     .modify((q) => {
       if (techId && techScopedConfirmActive()) applyTechScope(q, 'technician_id', techId);
       if (excludeId) q.whereNot('id', excludeId);
+      if (excludeEstimateId) q.whereRaw('source_estimate_id IS DISTINCT FROM ?', [excludeEstimateId]);
     });
 }
 
 // A new or re-proven chain may not take what another live make-room hold's chain takes: a moved stop's new hour on that
 // chain's destination, or a stop that chain also moves. The proof reads each stop where it is today, so it cannot see
 // either. Same live-hold rule and technician scope as makeRoomDestinationClash; `excludeId` is the caller's own hold.
-async function makeRoomChainClash(trx, { payload, excludeId = null }) {
+// The page's offer (booking-make-room.js) runs it too, with `excludeEstimateId`, so it never offers a chain the reserve refuses.
+async function makeRoomChainClash(trx, { payload, excludeId = null, excludeEstimateId = null }) {
   const { date, techId, moves } = payload;
   for (const move of moves) {
-    const window = { date, techId, windowStart: move.to, windowEnd: addMinutesToTime(move.to, move.widthMin), excludeId };
+    const window = { date, techId, windowStart: move.to, windowEnd: addMinutesToTime(move.to, move.widthMin), excludeId, excludeEstimateId };
     if (await makeRoomDestinationClash(trx, window)) return true;
   }
-  const sharedStop = await liveMakeRoomHolds(trx, { date, techId, excludeId })
+  const sharedStop = await liveMakeRoomHolds(trx, { date, techId, excludeId, excludeEstimateId })
     .whereRaw(
       "EXISTS (SELECT 1 FROM jsonb_array_elements(make_room_moves->'moves') AS m WHERE (m->>'id') = ANY(?::text[]))",
       [moves.map((move) => String(move.id))],
@@ -914,6 +917,16 @@ async function destinationHitUnderGate(trx, makeRoom, slotId, window) {
   if (!requireMakeRoomStillOn(makeRoom, slotId)) return false;
   if (await makeRoomDestinationClash(trx, window)) return true;
   return !!makeRoom && makeRoomChainClash(trx, { payload: makeRoom.payload, excludeId: window.excludeId || null });
+}
+
+// commitReservation: a hold graduating inside the commit grace (row._lapsed) yields to another customer's live make-room
+// hold whose moved stop now holds this window (Codex pre-push P1, #7796). Once this hold's expiry passed, that chain's
+// proof no longer saw it as a stop, and the commit probes see each hold at its own window only. Mode on, hour mode only;
+// the committing hold never blocks itself. A hold that never lapsed is not asked: it was a stop in every chain proof
+// (the same line the commit probe draws with includeHolds).
+async function lapsedHoldOnMakeRoomDestination(client, { row, useCapacity, date, windowStart, windowEnd }) {
+  if (!row._lapsed || useCapacity || !makeRoomHoldsOn()) return false;
+  return !!(await makeRoomDestinationClash(client, { date, techId: row.technician_id || null, windowStart, windowEnd, excludeId: row.id }));
 }
 
 // The make-room hold's proof inside the reserve transaction: { payload, moveIds }, or the ordinary slot-taken throw.
@@ -2379,7 +2392,9 @@ async function commitReservation({
       const interviewClash = useCapacity
         ? await findInterviewConflicts({ db: client, date: scheduledDate, windowStart, windowEnd: probeWindowEnd })
         : [];
-      if (committedClash.length || interviewClash.length) {
+      const destinationClash = !committedClash.length && !interviewClash.length
+        && await lapsedHoldOnMakeRoomDestination(client, { row, useCapacity, date: scheduledDate, windowStart, windowEnd: probeWindowEnd });
+      if (committedClash.length || interviewClash.length || destinationClash) {
         const err = new Error('slot no longer available');
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`;
@@ -3119,5 +3134,6 @@ module.exports = {
     refuseGracedOfferOnRivalHoldConflict,
     makeRoomDestinationClash,
     makeRoomChainClash,
+    lapsedHoldOnMakeRoomDestination,
   },
 };

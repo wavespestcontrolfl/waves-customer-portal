@@ -1082,6 +1082,85 @@ describe('findMakeRoomOffers (the page awaits it, mode on)', () => {
     expect(hours).toEqual([]);
     expect(report.sooner.byReason.over_drive_cap).toBeGreaterThanOrEqual(1);
   });
+
+  // Codex pre-push P1 (#7796): the reserve refuses a chain another live make-room hold takes (makeRoomChainClash), so the
+  // page must not offer it.
+  describe('another customer\'s live make-room hold', () => {
+    test('a chain that hold takes is not offered: the walk goes on, and the chain is asked with this estimate left out', async () => {
+      const deps = makeDeps();
+      let asked = 0;
+      deps.otherChainClash = jest.fn(async () => { asked += 1; return asked === 1; });
+      const { hours, report } = await offers({ deps });
+      const [conn, first] = deps.otherChainClash.mock.calls[0];
+      expect(typeof conn).toBe('function');
+      expect(first).toEqual({
+        date: DAY, techId: TECH, estimateId: 'est-1',
+        moves: [
+          { id: 'visit-b', to: '10:00', widthMin: expect.any(Number) },
+          { id: 'visit-c', to: expect.any(String), widthMin: expect.any(Number) },
+          { id: 'visit-d', to: expect.any(String), widthMin: expect.any(Number) },
+        ],
+      });
+      // 9 AM's 1-hour chain is taken, and its 2-hour chain holds the told stop E; 10 AM's 1-hour chain is offered.
+      expect(deps.otherChainClash).toHaveBeenCalledTimes(2);
+      expect(report.sooner.twoHourTried).toBe(1);
+      expect(hours.map((h) => `${h.date} ${h.start} ${h.shiftMin}`)).toEqual([`${DAY} 10:00 60`]);
+      expect(hours[0].moves.map((m) => m.id)).toEqual(['visit-c', 'visit-d']);
+    });
+
+    test('every chain taken: no hour, and the page serves its free list', async () => {
+      const deps = makeDeps();
+      deps.otherChainClash = jest.fn(async () => true);
+      const { hours, report } = await offers({ deps });
+      expect(hours).toEqual([]);
+      expect(report.sooner.passed).toEqual([]);
+      // 8 AM fails before the ask; 9, 10 and 11 AM are each asked once (each 2-hour chain holds the told stop E).
+      expect(report.sooner.checked).toBe(4);
+      expect(deps.otherChainClash).toHaveBeenCalledTimes(3);
+    });
+
+    test('asked only for an hour that passed every other check, once per checked chain', async () => {
+      const deps = makeDeps();
+      deps.otherChainClash = jest.fn(async () => false);
+      const { report } = await offers({ deps });
+      // 8 AM fails before the ask; 9 AM passes and is asked once.
+      expect(report.sooner.checked).toBe(2);
+      expect(deps.otherChainClash).toHaveBeenCalledTimes(1);
+    });
+
+    test('the background check (shadow) never asks', async () => {
+      const deps = makeDeps();
+      deps.otherChainClash = jest.fn(async () => true);
+      const { report } = await check({ deps, pool: LATER_POOL, dateTo: LATER });
+      expect(deps.otherChainClash).not.toHaveBeenCalled();
+      expect(report.sooner.passed.length).toBeGreaterThan(0);
+    });
+
+    test('the hold\'s proof never asks (the reserve and the extend run the same check under their locks)', async () => {
+      const { verifyMakeRoomHour } = require('../services/scheduling/booking-make-room');
+      const deps = makeDeps();
+      deps.otherChainClash = jest.fn(async () => true);
+      const proof = await verifyMakeRoomHour({
+        conn: jest.fn(), date: DAY, startMin: 9 * 60, techId: TECH, durationMinutes: 60, point: NEW_PIN, estimateId: 'est-1',
+        admit: (slot) => slot.date === DAY, placement: PAGE_PLACES, now: NOW, deps,
+      });
+      expect(proof.moves).toHaveLength(3);
+      expect(deps.otherChainClash).not.toHaveBeenCalled();
+    });
+
+    test('the default reader is slot-reservation makeRoomChainClash, with every hold of this estimate left out', async () => {
+      const slotReservation = require('../services/slot-reservation');
+      const spy = jest.spyOn(slotReservation._internals, 'makeRoomChainClash').mockResolvedValue(true);
+      try {
+        const conn = jest.fn();
+        const moves = [{ id: 'visit-b', to: '10:00', widthMin: 60 }];
+        await expect(_internals.defaultDeps().otherChainClash(conn, { date: DAY, techId: TECH, moves, estimateId: 'est-1' })).resolves.toBe(true);
+        expect(spy).toHaveBeenCalledWith(conn, { payload: { date: DAY, techId: TECH, moves }, excludeEstimateId: 'est-1' });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
 });
 
 describe('verifyMakeRoomHour (the hold\'s proof, inside the reserve transaction)', () => {
