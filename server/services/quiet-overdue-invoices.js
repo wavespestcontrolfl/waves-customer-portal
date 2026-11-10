@@ -34,13 +34,10 @@
 //   - or any other quiet state once it is 14+ days past due.
 // Not quiet: an active sequence with a next touch, or a pause whose end date
 // is still ahead (staff chose that wait).
-//
-// GATE_QUIET_OVERDUE_LIST (strict 'true', read at call time). Off = the
-// weekday cron returns before any read.
 
 const db = require('../models/db');
 const { invoiceAmountDue } = require('./invoice-helpers');
-const { quietOverdueListLive, alertEpisodesLive } = require('../config/feature-gates');
+const { alertEpisodesLive } = require('../config/feature-gates');
 const { OPEN_STATUSES: OPEN_CUSTOMER_SCHEDULE_STATUSES } = require('./customer-dunning/constants');
 const { MAX_WHY_CHARS, breaksAlertRules, composeAdminAlert, raiseAdminAlert } = require('./admin-alert-compose');
 
@@ -265,14 +262,12 @@ async function closeList(database, dedupeKey) {
 }
 
 /**
- * Weekday cron entry point. Returns { skipped } when the gate is off,
- * otherwise { count, outcome }: raised | refreshed |
+ * Weekday cron entry point. Returns { count, outcome }: raised | refreshed |
  * unchanged | suppressed | closed | clear. A read failure throws
  * (runExclusive records it in job_health) and never closes the row.
  * `loadRows` is the row source and `dedupeKey` the row's key (tests set both).
  */
-async function runQuietOverdueList({ now = new Date(), database = db, gateEnabled, loadRows = candidatesQuery, dedupeKey = DEDUPE_KEY } = {}) {
-  if (!(gateEnabled ?? quietOverdueListLive())) return { skipped: 'disabled' };
+async function runQuietOverdueList({ now = new Date(), database = db, loadRows = candidatesQuery, dedupeKey = DEDUPE_KEY } = {}) {
   const items = listItems(await loadRows(now, database), now);
   if (!items.length) {
     const closed = Number(await closeList(database, dedupeKey)) || 0;

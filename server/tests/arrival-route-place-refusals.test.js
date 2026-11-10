@@ -92,14 +92,13 @@ afterAll(() => {
   GATES.forEach(key => { if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key]; });
 });
 
-describe('each refusal is one info line and no write', () => {
+describe('each refusal that the time fallback does not number is one info line and no write', () => {
   test.each([
     ['unassigned', { row: saveRow({ technician_id: null }) }, DATE],
     ['untimed', { row: saveRow({ window_start: null }) }, DATE],
     ['no_context', { row: null }, '-'],
     ['no_context', { stored: null }, DATE],
     ['grouped', { stored: storedRow({ visit_id: 'v1' }), sibling: { id: 'other' } }, DATE],
-    ['route_unverified', { stored: storedRow({ lat: null, lng: null }) }, DATE],
   ])('%s', async (reason, fixtures, date) => {
     const trx = fakeTrx(fixtures);
     await expect(placeMovedVisit(trx, { serviceId: SERVICE, source: 'estimate_accept' })).resolves.toBeNull();
@@ -113,19 +112,6 @@ describe('each refusal is one info line and no write', () => {
     const trx = fakeTrx();
     await expect(placeMovedVisit(trx, { serviceId: SERVICE, source: 'dispatch_assign' })).resolves.toBeNull();
     expect(refusalLines()).toEqual([line('lock_busy', 'dispatch_assign')]);
-    expect(trx.writes).toEqual([]);
-  });
-
-  test('the fit\'s own reason (two hours of work at 8 AM leaves a later stop under its margin)', async () => {
-    const other = (id, start, lat, order) => storedRow({ id, customer_id: `c-${id}`, window_start: start,
-      window_end: `${String(Number(start.slice(0, 2)) + 1).padStart(2, '0')}:00:00`, lat, route_order: order });
-    mockDayRows = [other('north', '08:00:00', 27.55, 1), other('south', '10:00:00', 27.45, 2)];
-    const trx = fakeTrx({
-      row: saveRow({ window_start: '08:00:00', window_end: '10:00:00' }),
-      stored: storedRow({ window_start: '08:00:00', window_end: '10:00:00', estimated_duration_minutes: 120, lat: 27.545 }),
-    });
-    await expect(placeMovedVisit(trx, { serviceId: SERVICE })).resolves.toBeNull();
-    expect(refusalLines()).toEqual([line('arrival_margin', '-')]);
     expect(trx.writes).toEqual([]);
   });
 });
@@ -162,9 +148,9 @@ describe('what stays as it was', () => {
   });
 });
 
-// GATE_ROUTE_ORDER_TIME_FALLBACK (owner 2026-11-01, dispatch lane F1): a refused check numbers the visit by its
+// Route order time fallback (owner 2026-11-01, dispatch lane F1): a refused check numbers the visit by its
 // arrival time among the technician's numbered stops, inside the same savepoint. Ordering only.
-describe('GATE_ROUTE_ORDER_TIME_FALLBACK', () => {
+describe('route order time fallback', () => {
   const timed = (id, start, order, over = {}) => storedRow({ id, customer_id: `c-${id}`, window_start: `${start}:00`,
     window_end: `${String(Number(start.slice(0, 2)) + 1).padStart(2, '0')}:00:00`, route_order: order,
     created_at: '2020-01-01T12:00:00Z', ...over });
@@ -177,21 +163,7 @@ describe('GATE_ROUTE_ORDER_TIME_FALLBACK', () => {
   // No pin: the check can not verify the route (route_unverified).
   const unpinned = (over = {}) => storedRow({ lat: null, lng: null, ...over });
 
-  beforeEach(() => { delete process.env.GATE_ROUTE_ORDER_TIME_FALLBACK; });
-  afterAll(() => { delete process.env.GATE_ROUTE_ORDER_TIME_FALLBACK; });
-
-  test('gate off: a refused check writes nothing, as before', async () => {
-    mockDayRows = dayRows();
-    const trx = fakeTrx({ stored: unpinned(), current });
-    await expect(placeMovedVisit(trx, { serviceId: SERVICE, source: 'estimate_accept' })).resolves.toBeNull();
-    expect(refusalLines()).toEqual([line('route_unverified')]);
-    expect(placedLines()).toEqual([]);
-    expect(trx.writes).toEqual([]);
-    expect(audit.recordAuditEvent).not.toHaveBeenCalled();
-  });
-
-  test('gate on, route_unverified: the visit takes its time slot and later stops shift by one', async () => {
-    process.env.GATE_ROUTE_ORDER_TIME_FALLBACK = 'true';
+  test('route_unverified: the visit takes its time slot and later stops shift by one', async () => {
     mockDayRows = dayRows();
     const trx = fakeTrx({ stored: unpinned(), current });
     await expect(placeMovedVisit(trx, { serviceId: SERVICE, source: 'estimate_accept' })).resolves.toEqual(['s1', SERVICE, 's2', 's3']);
@@ -208,8 +180,7 @@ describe('GATE_ROUTE_ORDER_TIME_FALLBACK', () => {
     }));
   });
 
-  test('gate on: a visit before every numbered stop goes first, one after all of them goes last', async () => {
-    process.env.GATE_ROUTE_ORDER_TIME_FALLBACK = 'true';
+  test('a visit before every numbered stop goes first, one after all of them goes last', async () => {
     mockDayRows = dayRows();
     const first = fakeTrx({ row: saveRow({ window_start: '07:00:00' }), stored: unpinned({ window_start: '07:00:00' }), current });
     await expect(placeMovedVisit(first, { serviceId: SERVICE })).resolves.toEqual([SERVICE, 's1', 's2', 's3']);
@@ -219,24 +190,21 @@ describe('GATE_ROUTE_ORDER_TIME_FALLBACK', () => {
     expect(numbers(last)).toEqual({ [SERVICE]: 4 });
   });
 
-  test('gate on: a stale number on the visit is dropped and the visit moves to its time slot', async () => {
-    process.env.GATE_ROUTE_ORDER_TIME_FALLBACK = 'true';
+  test('a stale number on the visit is dropped and the visit moves to its time slot', async () => {
     mockDayRows = dayRows();
     const trx = fakeTrx({ stored: unpinned({ route_order: 5 }), current: { ...current, [SERVICE]: 5 } });
     await expect(placeMovedVisit(trx, { serviceId: SERVICE })).resolves.toEqual(['s1', SERVICE, 's2', 's3']);
     expect(numbers(trx)).toEqual({ [SERVICE]: 2, s2: 3, s3: 4 });
   });
 
-  test('gate on: a day already in time order with the visit in place rewrites no row', async () => {
-    process.env.GATE_ROUTE_ORDER_TIME_FALLBACK = 'true';
+  test('a day already in time order with the visit in place rewrites no row', async () => {
     mockDayRows = dayRows();
     const trx = fakeTrx({ stored: unpinned({ route_order: 2 }), current: { s1: 1, [SERVICE]: 2, s2: 3, s3: 4 } });
     await expect(placeMovedVisit(trx, { serviceId: SERVICE })).resolves.toEqual(['s1', SERVICE, 's2', 's3']);
     expect(trx.writes).toEqual([]);
   });
 
-  test('gate on: existing stops keep their running order even when it is not time order', async () => {
-    process.env.GATE_ROUTE_ORDER_TIME_FALLBACK = 'true';
+  test('existing stops keep their running order even when it is not time order', async () => {
     mockDayRows = [timed('s1', '13:00', 1), timed('s2', '08:00', 2)];
     const trx = fakeTrx({ stored: unpinned({ window_start: '09:00:00' }), current: { s1: 1, s2: 2 } });
     // 13:00 is the first stop that starts later than 09:00, so the visit goes ahead of it; s2 stays behind s1.
@@ -244,8 +212,7 @@ describe('GATE_ROUTE_ORDER_TIME_FALLBACK', () => {
     expect(numbers(trx)).toEqual({ [SERVICE]: 1, s1: 2, s2: 3 });
   });
 
-  test('gate on: the visit never goes ahead of a completed stop or the stop under way', async () => {
-    process.env.GATE_ROUTE_ORDER_TIME_FALLBACK = 'true';
+  test('the visit never goes ahead of a completed stop or the stop under way', async () => {
     // The technician finished 8 AM and is on site at 10 AM; a 9 AM visit saved now goes after the 10 AM stop,
     // so the customer "stops away" count still counts the stop under way (stops-ahead.js).
     mockDayRows = [timed('s1', '08:00', 1, { status: 'completed', actual_end_time: `${DATE}T12:30:00Z` }),
@@ -263,8 +230,7 @@ describe('GATE_ROUTE_ORDER_TIME_FALLBACK', () => {
     expect(numbers(late)).toEqual({ [SERVICE]: 3, s3: 4 });
   });
 
-  test('gate on: a visit that is itself under way keeps its number', async () => {
-    process.env.GATE_ROUTE_ORDER_TIME_FALLBACK = 'true';
+  test('a visit that is itself under way keeps its number', async () => {
     mockDayRows = dayRows();
     const trx = fakeTrx({ stored: unpinned({ status: 'on_site', route_order: 3 }), current: { ...current, [SERVICE]: 3 } });
     await expect(placeMovedVisit(trx, { serviceId: SERVICE })).resolves.toBeNull();
@@ -273,8 +239,7 @@ describe('GATE_ROUTE_ORDER_TIME_FALLBACK', () => {
     expect(audit.recordAuditEvent).not.toHaveBeenCalled();
   });
 
-  test('gate on: untimed, unassigned, no_context, lock_busy and grouped refusals still write nothing', async () => {
-    process.env.GATE_ROUTE_ORDER_TIME_FALLBACK = 'true';
+  test('untimed, unassigned, no_context, lock_busy and grouped refusals still write nothing', async () => {
     mockDayRows = dayRows();
     const cases = [
       { row: saveRow({ window_start: null }) },
@@ -296,8 +261,7 @@ describe('GATE_ROUTE_ORDER_TIME_FALLBACK', () => {
     expect(audit.recordAuditEvent).not.toHaveBeenCalled();
   });
 
-  test('gate on: a placed visit (the check passed) is written by the check, not by the fallback', async () => {
-    process.env.GATE_ROUTE_ORDER_TIME_FALLBACK = 'true';
+  test('a placed visit (the check passed) is written by the check, not by the fallback', async () => {
     const trx = fakeTrx();
     await expect(placeMovedVisit(trx, { serviceId: SERVICE })).resolves.toEqual([SERVICE]);
     expect(placedLines()).toEqual([]);
@@ -305,8 +269,7 @@ describe('GATE_ROUTE_ORDER_TIME_FALLBACK', () => {
       metadata: expect.objectContaining({ policy: 'staff_route_insertion_2026_10_25' }) }));
   });
 
-  test('gate on, arrival_margin refusal (the check ran and refused): the same time-slot rule', async () => {
-    process.env.GATE_ROUTE_ORDER_TIME_FALLBACK = 'true';
+  test('arrival_margin refusal (the check ran and refused): the same time-slot rule', async () => {
     // Two hours of work at 8 AM leaves the 10 AM stop under its margin (the refusal above), so the check refuses.
     const other = (id, start, lat, order) => timed(id, start, order, { lat });
     mockDayRows = [other('north', '08:00', 27.55, 1), other('south', '10:00', 27.45, 2)];
@@ -321,8 +284,7 @@ describe('GATE_ROUTE_ORDER_TIME_FALLBACK', () => {
     expect(numbers(trx)).toEqual({ [SERVICE]: 2, south: 3 });
   });
 
-  test('gate on: a same-customer, same-window, same-pin sibling takes the visit right after it', async () => {
-    process.env.GATE_ROUTE_ORDER_TIME_FALLBACK = 'true';
+  test('a same-customer, same-window, same-pin sibling takes the visit right after it', async () => {
     // Two stops at 8 AM at opposite ends of the county cannot both keep their promise: the check refuses.
     mockDayRows = [timed('far-n', '08:00', 1, { lat: 28.2 }), timed('far-s', '08:00', 2, { lat: 26.9 }),
       timed('sib', '10:00', 3, { customer_id: 'c1', lat: 27.5, service_address_line1: '100 Test Way', service_address_zip: '34201' }), timed('after', '10:00', 4, { lat: 27.5 })];
@@ -334,8 +296,7 @@ describe('GATE_ROUTE_ORDER_TIME_FALLBACK', () => {
     expect(numbers(trx)).toEqual({ [SERVICE]: 4, after: 5 });
   });
 
-  test('gate on: a same-window stop of another customer is not a sibling, so the visit goes ahead of the first later stop', async () => {
-    process.env.GATE_ROUTE_ORDER_TIME_FALLBACK = 'true';
+  test('a same-window stop of another customer is not a sibling, so the visit goes ahead of the first later stop', async () => {
     mockDayRows = [timed('far-n', '08:00', 1, { lat: 28.2 }), timed('far-s', '08:00', 2, { lat: 26.9 }),
       timed('other', '10:00', 3, { lat: 27.5 }), timed('after', '11:00', 4, { lat: 27.5 })];
     const trx = fakeTrx({ row: saveRow({ window_start: '10:00:00', window_end: '11:00:00' }),

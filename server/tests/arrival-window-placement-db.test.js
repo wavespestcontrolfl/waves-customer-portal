@@ -259,12 +259,16 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
         .toEqual({ metadata: { policy: 'staff_route_insertion_2026_10_25', route_order: [NORTH, TARGET, SOUTH], source: 'new_appointment' } });
     });
 
-    test('a save past its warning keeps the day as it was', async () => {
+    // The route check refuses this save (a 4-hour visit runs past the next stop). A refused check still numbers the
+    // visit, by arrival time, so it never lists last on the phone with no stop number.
+    test('a save past its warning is numbered by arrival time', async () => {
       await mockConn('scheduled_services').where({ id: TARGET })
         .update({ scheduled_date: DAY, estimated_duration_minutes: 240, window_end: '13:00' });
-      await expect(placeMovedVisit(mockConn, { serviceId: TARGET })).resolves.toBeNull();
-      expect(await dayOrder()).toEqual([NORTH, SOUTH, TARGET]);
-      expect(await routeNumber(TARGET)).toBeNull();
+      await expect(placeMovedVisit(mockConn, { serviceId: TARGET })).resolves.toEqual([NORTH, TARGET, SOUTH]);
+      expect(await dayOrder()).toEqual([NORTH, TARGET, SOUTH]);
+      expect(await routeNumber(TARGET)).toBe(2);
+      const audit = await mockConn('audit_log').where({ action: 'schedule.route_order_placed', resource_id: TARGET }).first('metadata');
+      expect(audit.metadata.policy).toBe('route_order_time_fallback_2026_11_01');
     });
 
     test('the save numbers the day from the office, the place its save probe checked from', async () => {

@@ -1,6 +1,6 @@
 /**
  * Quiet overdue invoices in its own weekday 11:47 ET cron (server/services/scheduler.js, '47 11 * * 1-5'):
- * gate off reads nothing; on, the list runs under runExclusive, so a deploy overlap never raises it twice,
+ * the list runs under runExclusive, so a deploy overlap never raises it twice,
  * and a failed run is logged, never thrown out of the tick.
  *
  * Mock baseline copied from scheduler-bid-kit-expiry-cron.test.js.
@@ -18,7 +18,7 @@ jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
-  recurringSeriesTopUpLive: jest.fn(() => false), quietOverdueListLive: jest.fn(() => false),
+  recurringSeriesTopUpLive: jest.fn(() => false),
 }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
@@ -35,7 +35,7 @@ jest.mock('../services/quiet-overdue-invoices', () => ({ runQuietOverdueList: je
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
-const { isEnabled, quietOverdueListLive } = require('../config/feature-gates');
+const { isEnabled } = require('../config/feature-gates');
 const { runQuietOverdueList } = require('../services/quiet-overdue-invoices');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
@@ -51,17 +51,9 @@ function quietListTick() {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  quietOverdueListLive.mockReturnValue(false);
 });
 
-test('gate off: the tick returns before the lock or any read', async () => {
-  await quietListTick();
-  expect(runExclusive).not.toHaveBeenCalledWith('quiet-overdue-invoices', expect.any(Function));
-  expect(runQuietOverdueList).not.toHaveBeenCalled();
-});
-
-test('gate on: the list runs once inside runExclusive and its outcome is logged', async () => {
-  quietOverdueListLive.mockReturnValue(true);
+test('the list runs once inside runExclusive and its outcome is logged', async () => {
   await quietListTick();
   expect(runExclusive).toHaveBeenCalledWith('quiet-overdue-invoices', expect.any(Function));
   expect(runQuietOverdueList).toHaveBeenCalledTimes(1);
@@ -69,7 +61,6 @@ test('gate on: the list runs once inside runExclusive and its outcome is logged'
 });
 
 test('a failed run is logged, never thrown out of the tick', async () => {
-  quietOverdueListLive.mockReturnValue(true);
   runQuietOverdueList.mockRejectedValueOnce(new Error('connection reset'));
   await expect(quietListTick()).resolves.toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith('Quiet overdue invoices failed: connection reset');

@@ -205,7 +205,7 @@ describe('review request', () => {
   });
 });
 
-describe('first review ask (GATE_REVIEW_FIRST_ASK_LOCK)', () => {
+describe('first review ask', () => {
   const FIRST = { ...PREVIEW, firstReviewAsk: true };
   const showFirst = async (preview = FIRST) => {
     const request = makeRequest({ previews: [preview] });

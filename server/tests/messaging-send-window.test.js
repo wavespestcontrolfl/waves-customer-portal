@@ -187,7 +187,8 @@ describe('checkSendWindow validator', () => {
 
   test('booking side-effect and automation entry points stay fenced', () => {
     // moving_auto_send: the app's own send of a new-home estimate (services/moving-auto-send.js).
-    for (const entryPoint of ['admin_recurring_appointment_created', 'appointment_reminder_cron', 'invoice_followup_sequence', 'moving_auto_send']) {
+    // tech_estimate_send: a technician's estimate text from the phone (services/tech-estimate-send.js); held to the same window.
+    for (const entryPoint of ['admin_recurring_appointment_created', 'appointment_reminder_cron', 'invoice_followup_sequence', 'moving_auto_send', 'tech_estimate_send']) {
       const res = checkSendWindow({ ...SMS, entryPoint }, null, null, EVENING_ET);
       expect(res.ok).toBe(false);
       expect(res.code).toBe('QUIET_HOURS_HOLD');

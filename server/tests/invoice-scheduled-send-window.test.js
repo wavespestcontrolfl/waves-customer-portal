@@ -34,7 +34,7 @@ jest.mock('../services/invoice-email', () => ({
 jest.mock('../config/twilio-numbers', () => ({
   getOutboundNumber: jest.fn(() => '+19413180000'),
 }));
-jest.mock('../services/review-request', () => ({
+jest.mock('../services/review-request', () => ({firstAskLockVisit: jest.fn(async () => null), 
   enrollForPaidInvoice: jest.fn(async () => ({ enrolled: true, recorded: true })),
 }));
 // #4131 slice 4 round-5: settleZeroDueBeforeSend's own packet fence

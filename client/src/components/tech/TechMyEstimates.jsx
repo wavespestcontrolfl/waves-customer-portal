@@ -1,0 +1,96 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { sendLocked, sendLockNote, techEstimateRequest, useSendLocks } from './useTechEstimates';
+import TechEstimateSend from './TechEstimateSend';
+import { INK, LineList, MUTED, s, statusWords, Totals, totalsWords } from './techEstimateParts';
+
+const LOAD_ERROR = 'Could not load your estimates. Try again.';
+
+// One of his estimates with its lines. The Send button is offered while the server says canSend; the button itself stays
+// away once the page holds a lock for the estimate (the office has it, or the app cannot tell if a text went). A send
+// outcome is read back from the server.
+function Detail({ id, onBack, onGone }) {
+  const [quote, setQuote] = useState(null);
+  const [error, setError] = useState('');
+  const [note, setNote] = useState(null);
+  const goneRef = useRef(onGone);
+  goneRef.current = onGone;
+  const read = useCallback(() => techEstimateRequest(`/${encodeURIComponent(id)}`)
+    .then((data) => { setQuote(data); setError(''); })
+    .catch((err) => { if (err.status === 404) goneRef.current(); else setError(LOAD_ERROR); }), [id]);
+  useEffect(() => { void read(); }, [read]);
+  const outcome = (result) => {
+    if (result.gone) { onGone(); return; }
+    setNote(result);
+    if (result.reread) void read();
+  };
+  // Why there is no Send button, when the answer came after he left the view that sent it: the words kept with the lock.
+  // Only while the server still calls it sendable; once it is sent or the office's, the status line says it.
+  useSendLocks();
+  const shown = note || (quote?.canSend ? sendLockNote(id) : null);
+  return (
+    <div>
+      <button type="button" style={{ ...s.small, marginBottom: 12 }} onClick={onBack}>Back</button>
+      {error && <div role="alert" style={s.error}>{error}</div>}
+      {!quote && !error && <p role="status" style={s.muted}>Loading estimate…</p>}
+      {quote && (
+        <div>
+          <h3 style={{ margin: 0, fontSize: 18, color: INK }}>{quote.who || 'No name'}</h3>
+          <p style={s.muted}>{quote.addressLine} · {statusWords(quote.status)}</p>
+          {quote.officeFirst?.required && <p style={{ ...s.notice, marginTop: 10 }}>Office checks first</p>}
+          <div style={{ ...s.card, marginTop: 12 }}>
+            <LineList lines={quote.lines} />
+            <Totals quote={quote} />
+          </div>
+          {shown && <div role="status" style={shown.ok ? s.card : s.notice}>{shown.text}</div>}
+          {quote.canSend && <TechEstimateSend id={id} who={quote.who} needsTextRequest={quote.needsTextRequest} onOutcome={outcome} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function TechMyEstimates() {
+  const [rows, setRows] = useState(null);
+  const [error, setError] = useState('');
+  const [openId, setOpenId] = useState(null);
+  const [listNote, setListNote] = useState('');
+  const [version, setVersion] = useState(0);
+  useSendLocks();
+  useEffect(() => {
+    let live = true;
+    techEstimateRequest('')
+      .then((data) => { if (live) { setRows(Array.isArray(data?.estimates) ? data.estimates : []); setError(''); } })
+      .catch(() => { if (live) setError(LOAD_ERROR); });
+    return () => { live = false; };
+  }, [version]);
+  const close = (note = '') => { setOpenId(null); setListNote(note); setVersion((v) => v + 1); };
+  if (openId) {
+    return (
+      <Detail id={openId} onBack={() => close()} onGone={() => close('This estimate is no longer in your list.')} />
+    );
+  }
+  if (error) return <div role="alert" style={s.error}>{error}</div>;
+  if (!rows) return <p role="status" style={s.muted}>Loading your estimates…</p>;
+  return (
+    <div>
+      {listNote && <div role="status" style={s.notice}>{listNote}</div>}
+      {rows.length === 0 && <p style={s.muted}>You have not saved an estimate yet.</p>}
+      {rows.map((row) => (
+        <button
+          key={row.id} type="button" onClick={() => { setListNote(''); setOpenId(row.id); }}
+          style={{ ...s.card, display: 'block', width: '100%', textAlign: 'left', cursor: 'pointer', font: 'inherit', marginBottom: 10 }}
+        >
+          <strong style={{ fontSize: 16, color: INK }}>{row.who || 'No name'}</strong>
+          <span style={{ ...s.muted, display: 'block' }}>{row.addressLine}</span>
+          <span style={{ ...s.muted, display: 'block', color: MUTED }}>
+            {statusWords(row.status)} · {totalsWords(row)}
+          </span>
+          {row.officeFirst?.required && <span style={{ ...s.muted, color: '#854d0e', display: 'block' }}>Office checks first</span>}
+          {row.canSend && !sendLocked(row.id) && (
+            <span style={{ display: 'inline-block', marginTop: 6, padding: '2px 8px', borderRadius: 3, background: '#e7e5e4', color: INK, fontSize: 14 }}>Ready to send</span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+}

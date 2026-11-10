@@ -5,7 +5,6 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   alertCallButtonLive: jest.fn(() => true),
-  alertCloseButtonsLive: jest.fn(() => true),
 }));
 jest.mock('../routes/admin-communications', () => ({ placeCallFromAlert: jest.fn() }));
 jest.mock('../services/admin-alert-buttons', () => ({
@@ -62,7 +61,6 @@ beforeEach(() => {
   mockTables.sms_log = [{ twilio_sid: SMS_SID, direction: 'inbound', from_phone: OTHER, customer_id: null }];
   mockTables.notifications = [];
   gates.alertCallButtonLive.mockReturnValue(true);
-  gates.alertCloseButtonsLive.mockReturnValue(true);
   placeCallFromAlert.mockResolvedValue({ status: 200, json: { success: true, callSid: 'CAx', callLogId: 'cl-new' } });
 });
 
@@ -102,17 +100,14 @@ describe('visibleItems: each stored button follows its own gate', () => {
   ];
 
   test.each([
-    [true, true, ['call', 'called_back'], ['call']],
-    [false, true, ['called_back'], []],
-    [true, false, ['call'], ['call']],
-    [false, false, [], []],
-  ])('Call gate %s, close gate %s', (callOn, closeOn, first, second) => {
+    [true, ['call', 'called_back'], ['call']],
+    [false, ['called_back'], []],
+  ])('Call gate %s: the close button is always served', (callOn, first, second) => {
     gates.alertCallButtonLive.mockReturnValue(callOn);
-    gates.alertCloseButtonsLive.mockReturnValue(closeOn);
     const allowed = buttonHandler.visibleItems(rows);
     expect(allowed.get('n1')).toEqual(first);
     expect(allowed.get('n2')).toEqual(second);
-    expect(buttonHandler.live()).toBe(callOn || closeOn);
+    expect(buttonHandler.live()).toBe(true);
     expect(mockQueries).toEqual([]);
   });
 });
@@ -210,19 +205,13 @@ describe('a Call tap: the linked page\'s own Call step, the row left open', () =
   });
 });
 
-describe('a close button on a Call row: the close_note step itself, under its own gate', () => {
+describe('a close button on a Call row: the close_note step itself', () => {
   test('runs the close step and places no call', async () => {
     closeNoteHandler.run.mockResolvedValueOnce({ ok: true, closed: true, message: 'Marked called back.', resolution: 'Called back' });
     const result = await tap(null, 'called_back');
     expect(closeNoteHandler.run).toHaveBeenCalledWith(expect.objectContaining({ item: { id: 'called_back' }, technicianId: 't-admin', claimedVersion: 'v' }));
     expect(result).toEqual({ ok: true, closed: true, message: 'Marked called back.', resolution: 'Called back' });
     expect(placeCallFromAlert).not.toHaveBeenCalled();
-  });
-
-  test('with the close gate off it refuses, even while Call is on', async () => {
-    gates.alertCloseButtonsLive.mockReturnValue(false);
-    expect(await tap(null, 'handled')).toEqual({ ok: false, code: 'off', message: 'These buttons are turned off. Open the alert to act on it.' });
-    expect(closeNoteHandler.run).not.toHaveBeenCalled();
   });
 });
 

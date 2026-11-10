@@ -57,7 +57,7 @@ describe('the review timing a completion posts', () => {
   });
 });
 
-describe('the first review ask box (GATE_REVIEW_FIRST_ASK_LOCK)', () => {
+describe('the first review ask box', () => {
   test('the label: suppressed and included wordings win; a first ask reads "First review ask"; else today\'s', () => {
     expect(reviewBoxLabel({ reviewSuppressionReason: 'customer_concern', firstAsk: true })).toBe('Review request suppressed');
     expect(reviewBoxLabel({ oneTimeRecapOnly: true, firstAsk: true })).toBe('Review request included');
