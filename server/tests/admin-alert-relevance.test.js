@@ -2368,9 +2368,11 @@ describe('customer-contact classes', () => {
       test.each([
         ['a draft the office has not touched', held(), null],
         ['a send that failed', held({ status: 'send_failed' }), null],
+        ['a send that is only queued', held({ status: 'scheduled' }), null],
+        ['a send in flight', held({ status: 'sending' }), null],
         ['sent', held({ status: 'sent', sent_at: at(30) }), 'Estimate was sent'],
-        ['queued to send', held({ status: 'scheduled' }), 'Estimate was sent'],
         ['viewed', held({ status: 'viewed' }), 'Estimate was sent'],
+        ['sent once, then a later send failed', held({ status: 'send_failed', sent_at: at(30) }), 'Estimate was sent'],
         ['accepted', held({ status: 'accepted', accepted_at: at(30) }), 'Estimate was accepted'],
         ['declined', held({ status: 'declined' }), 'Estimate was declined'],
         ['expired', held({ status: 'expired' }), 'Estimate expired'],

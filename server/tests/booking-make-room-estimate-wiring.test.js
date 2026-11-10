@@ -125,6 +125,8 @@ describe('getAvailableSlots — make-room check wiring (GATE_BOOKING_MAKE_ROOM)'
       dateFrom: '2027-05-20', dateTo: '2027-05-20',
     });
     expect(arg.durationMinutes).toBeGreaterThan(0);
+    // The page's travel-gap credit for the new visit, for the sooner pass's screen.
+    expect(Number.isFinite(arg.candidateExpectedMinutes)).toBe(true);
     expect(typeof arg.admit).toBe('function');
     expect(typeof arg.placement).toBe('function');
     // The pool holds every time the page served.

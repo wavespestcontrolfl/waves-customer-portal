@@ -1162,9 +1162,12 @@ function leadContactedMovedOn(s) {
 }
 
 // A technician's held estimate (tech-estimate-office-bell.js, doneWhen `estimate_sent_or_closed`): the office had to check it
-// before it went out. It is done once the estimate is no longer a draft: sent (or queued to send), accepted, declined,
-// expired, archived, or gone. A failed send stays open: it was never delivered.
-const SENT_STATUSES = new Set(['scheduled', 'sending', 'sent', 'viewed', 'open']);
+// before it went out. The fact judged is the office's release, not delivery: the tool never sends a held estimate and no
+// automatic sender selects a tool draft, so only an office send finishes one. Done = that send finished (`sent_at`, or the
+// status it settles on), or the estimate is closed: accepted, declined, expired, archived, or gone. A send that is only
+// queued (`scheduled`), in flight (`sending`) or failed (`send_failed`) keeps the bell: the retirement is final, and the
+// estimate has not gone.
+const RELEASED_STATUSES = new Set(['sent', 'viewed']);
 function techEstimateChecked(s) {
   if (!s.refs.estimateId) return null;
   const e = s.estimate;
@@ -1174,7 +1177,7 @@ function techEstimateChecked(s) {
   if (e.accepted_at || status === 'accepted') return 'Estimate was accepted';
   if (status === 'declined') return 'Estimate was declined';
   if (status === 'expired') return 'Estimate expired';
-  return e.sent_at || SENT_STATUSES.has(status) ? 'Estimate was sent' : null;
+  return e.sent_at || RELEASED_STATUSES.has(status) ? 'Estimate was sent' : null;
 }
 
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a

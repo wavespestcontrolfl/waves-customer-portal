@@ -2,8 +2,8 @@
 
 /**
  * tech_estimates: which estimates the technician estimate tool made (GATE_TECH_ESTIMATES, owner
- * 2026-11-09, "GO, FOR ALL"). One row per tool estimate, written by routes/tech-estimates.js in the same
- * transaction as the estimate. `estimates` gets no new column and the office save never writes this table.
+ * 2026-11-09, "GO, FOR ALL"). One row per tool estimate, written by services/tech-estimate-save.js in the
+ * same transaction as the estimate. `estimates` gets no new column and the office save never writes this table.
  * office_first_reasons holds the server's detailed reasons the quote needs the office before it is sent
  * (changed_fact:<name>, one_time_over_limit, engine_review, member_address, phone_matches_customer); the
  * phone is only ever shown a shorter set of codes. Additive and idempotent (hasTable guards both ways).

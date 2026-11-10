@@ -11,8 +11,8 @@
  * so the estimate can never ring a second time (no RERING entry is owed; that registry is for open-only dedupe).
  *
  * Done-when `estimate_sent_or_closed`: the relevance sweep (admin-alert-relevance.js, class tech_estimate_office_first)
- * closes the row once the estimate is sent, accepted, declined, expired or archived, or gone. The sweep, not this file, owns
- * clearing it.
+ * closes the row once the estimate is sent, accepted, declined, expired or archived, or gone (a queued, in-flight or failed
+ * send keeps it open). The sweep, not this file, owns clearing it.
  */
 
 const db = require('../models/db');

@@ -961,3 +961,30 @@ describe('new recurring welcome SMS', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 });
+
+describe('findFirstPlansWithoutWelcome (read-only audit)', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const service = require('../services/new-recurring-welcome-sms');
+  const audit = (now, rows = []) => {
+    const conn = { raw: jest.fn().mockResolvedValue({ rows }) };
+    return service.findFirstPlansWithoutWelcome(now, conn).then((ids) => ({ ids, sql: conn.raw.mock.calls[0][0], bindings: conn.raw.mock.calls[0][1] }));
+  };
+
+  test('binds the 14-day window, the 3-hour grace, the welcome type and the 90-day history, and returns customer ids only', async () => {
+    const now = new Date('2026-12-20T15:00:00Z');
+    const { ids, sql, bindings } = await audit(now, [{ customer_id: 'cust-1' }, { customer_id: 'cust-2' }]);
+    expect(ids).toEqual(['cust-1', 'cust-2']);
+    expect(sql).toContain('sms_sequences');
+    expect(sql).not.toMatch(/\b(insert|update|delete)\b/i);
+    expect(bindings).toEqual([
+      new Date(now.getTime() - 14 * DAY), new Date(now.getTime() - 3 * 60 * 60 * 1000),
+      service.SEQUENCE_TYPE, service.NEW_CUSTOMER_HISTORY_DAYS, service.NEW_CUSTOMER_HISTORY_DAYS, 7, 7,
+    ]);
+  });
+
+  test('never looks back past the audit start date: the traced backlog stays out', async () => {
+    const now = new Date(service.WELCOME_AUDIT_STARTS_AT.getTime() + 5 * DAY);
+    const { bindings } = await audit(now);
+    expect(bindings[0]).toEqual(service.WELCOME_AUDIT_STARTS_AT);
+  });
+});

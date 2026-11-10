@@ -309,13 +309,14 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
       expect(Number(row.monthly_total)).toBe(preview.body.monthlyTotal);
       expect(Number(row.annual_total)).toBe(preview.body.annualTotal);
       expect(Number(row.onetime_total)).toBe(preview.body.oneTimeTotal);
+      // The saved answer is the stored row: the preview's lines and totals, and no measured facts (the row holds none).
       expect(saved.body).toEqual({
         id: row.id, status: 'draft', lines: preview.body.lines, monthlyTotal: preview.body.monthlyTotal, annualTotal: preview.body.annualTotal,
-        oneTimeTotal: preview.body.oneTimeTotal, facts: preview.body.facts, officeFirst: preview.body.officeFirst,
+        oneTimeTotal: preview.body.oneTimeTotal, officeFirst: preview.body.officeFirst,
       });
       expect(JSON.stringify(saved.body)).not.toContain(row.token);
       expect(await trx('tech_estimates').where({ estimate_id: row.id }).first()).toEqual(expect.objectContaining({
-        technician_id: ids.technicianId, office_first_reasons: [],
+        technician_id: ids.technicianId, office_first_reasons: [], request_fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
       }));
       const events = await trx('audit_log').where({ action: 'tech_estimate.created', resource_id: row.id });
       expect(events).toHaveLength(1);
@@ -335,14 +336,57 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
       expect(await counts()).toEqual(before);
     });
 
-    test('a retry with the same draft id writes nothing more and answers the same estimate', async () => {
+    test('a retry with the same draft id writes nothing more and answers the same estimate, before any lookup', async () => {
       const body = { visitId: ids.routeVisit, services: ['PEST'] };
       const { preview, saved } = await priceThenCreate(body);
       const afterFirst = await counts();
+      lookupSpy.mockClear();
       const again = await create({ ...body, clientDraftId: saved.body.id, digest: preview.body.digest });
       expect(again.status).toBe(200);
       expect(again.body).toEqual(saved.body);
+      expect(lookupSpy).not.toHaveBeenCalled();
       expect(await counts()).toEqual(afterFirst);
+    });
+
+    // The first answer was lost on the way to the phone, then something the quote is built from changed. The retry must
+    // still answer the saved estimate: a refusal here makes the technician save the same quote a second time.
+    test.each([
+      ['the price moved (the county now sizes the home larger)', async () => {
+        lookupSpy.mockImplementation(async () => {
+          const lookup = countyLookup();
+          lookup.propertyRecord.squareFootage = 4200;
+          return lookup;
+        });
+      }],
+      ['the customer\'s phone changed', async () => {
+        await trx('customers').where({ id: ids.routeCustomer }).update({ phone: '+19415550177' });
+      }],
+      ['the visit left his route', async () => {
+        await trx('scheduled_services').where({ id: ids.routeVisit }).update({ technician_id: null });
+      }],
+    ])('a retry after the first answer was lost still answers the saved estimate when %s', async (_label, change) => {
+      const body = { visitId: ids.routeVisit, services: ['PEST'] };
+      const { preview, saved } = await priceThenCreate(body);
+      expect(saved.status).toBe(200);
+      const afterFirst = await counts();
+      await change();
+      const again = await create({ ...body, clientDraftId: saved.body.id, digest: preview.body.digest });
+      expect(again).toEqual({ status: 200, body: saved.body });
+      expect(await counts()).toEqual(afterFirst);
+    });
+
+    test('the same draft id with another request is 409 already_saved and writes nothing', async () => {
+      const body = { visitId: ids.routeVisit, services: ['PEST'] };
+      const { preview, saved } = await priceThenCreate(body);
+      const afterFirst = await counts();
+      const refusal = { status: 409, body: { error: 'This estimate was already saved. Find it in My estimates.', code: 'already_saved' } };
+      const retry = { ...body, clientDraftId: saved.body.id, digest: preview.body.digest };
+      expect(await create({ ...retry, facts: { homeSqFt: 4200 } })).toEqual(refusal);
+      expect(await create({ ...retry, visitId: ids.secondHomeVisit })).toEqual(refusal);
+      expect(await create({ ...retry, digest: 'c'.repeat(64) })).toEqual(refusal);
+      expect(await counts()).toEqual(afterFirst);
+      const [row] = await trx('estimates').where({ id: saved.body.id });
+      expect(Number(row.monthly_total)).toBe(preview.body.monthlyTotal);
     });
 
     test('the same draft id from another login is refused and writes nothing', async () => {
@@ -504,6 +548,10 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
       const { saved } = await priceThenCreate(HELD());
       const { runAdminAlertRelevanceSweep } = require('../services/admin-alert-relevance');
       // Still a draft: the sweep leaves it open.
+      await runAdminAlertRelevanceSweep();
+      expect((await bells(saved.body.id))[0].done_at).toBeNull();
+      // Queued to send, not gone yet: still open, because the close is final.
+      await trx('estimates').where({ id: saved.body.id }).update({ status: 'scheduled', scheduled_at: new Date(Date.now() + 3600e3) });
       await runAdminAlertRelevanceSweep();
       expect((await bells(saved.body.id))[0].done_at).toBeNull();
       await trx('estimates').where({ id: saved.body.id }).update(patch);
@@ -727,9 +775,10 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
     });
   });
 
-  describe('the two migrations', () => {
+  describe('the migrations', () => {
     const techEstimates = require('../models/migrations/20261109130000_tech_estimates');
     const soldByCreator = require('../models/migrations/20261109130100_sold_by_creator');
+    const fingerprint = require('../models/migrations/20261109130200_tech_estimates_request_fingerprint');
     // A refused statement aborts a transaction: run it in a savepoint and report whether it was refused.
     const refused = async (work) => {
       try { await trx.transaction(work); return false; } catch { return true; }
@@ -757,6 +806,17 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
       await sendColumns.up(trx);
       await sendColumns.up(trx);
       expect(await has()).toEqual([true, true]);
+    });
+
+    test('request_fingerprint goes down and up (both are guarded no-ops when repeated)', async () => {
+      const has = () => trx.schema.hasColumn('tech_estimates', 'request_fingerprint');
+      await fingerprint.up(trx);
+      expect(await has()).toBe(true);
+      await fingerprint.down(trx);
+      expect(await has()).toBe(false);
+      await fingerprint.down(trx);
+      await fingerprint.up(trx);
+      expect(await has()).toBe(true);
     });
 
     test('the Sold by down refuses while a creator row exists, restores the old two checks without one, and up widens again', async () => {
