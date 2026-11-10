@@ -299,7 +299,7 @@ customer's message by this rule.
    for a known customer (never a test customer or a sandbox call) and only for a call that ended in the last 24 hours.
    It closes by itself under `GATE_ALERT_CONTACT_CLOSE` alone, once a person reached that customer after the bell: a call
    back, an answered call, a text or an email. A booked visit or a sent estimate alone leaves it open. A reprocess of the
-   same call never rings it again or re-opens it.
+   same call never rings it again or re-opens it, and only the pass that still owns the call's generation may ring it.
    A staff action also answers a text (`GATE_SMS_STAFF_ACTION_ANSWERS`, off / `shadow` / `true`,
    rollback = unset): a visit a person booked in the admin, or a payment a person recorded,
    for the text's customer (by customer id) within 24 hours after the text. In `true` the Messages

@@ -27,29 +27,39 @@ const CUSTOMER_ID = '99999999-2222-4333-8444-555555555555';
 const minutesAgo = (m) => new Date(NOW.getTime() - m * 60 * 1000);
 const callRow = (over = {}) => ({ id: CALL_ID, customer_id: CUSTOMER_ID, direction: 'inbound', source: null, duration_seconds: 120, created_at: minutesAgo(30), ...over });
 const EXTRACTED = { first_name: 'Someone Else', pain_points: ['The technician never showed up'], call_summary: 'Customer says nobody came on Tuesday.' };
-const args = (over = {}) => ({ written: true, disposition: 'complaint_escalated', call: callRow(), callSid: 'CA1', customerId: CUSTOMER_ID, extracted: EXTRACTED, now: NOW, ...over });
+const GENERATION = 3;
+const args = (over = {}) => ({ written: true, disposition: 'complaint_escalated', call: callRow(), callSid: 'CA1', customerId: CUSTOMER_ID, extracted: EXTRACTED, procGeneration: GENERATION, now: NOW, ...over });
 
-function primeCustomer(row = { first_name: 'Pat', last_name: 'Sample' }) {
-  db.mockImplementation(() => {
-    const b = { where: jest.fn(() => b), first: jest.fn(() => ({ catch: () => Promise.resolve(row) })) };
+// customers: the name lookup (`.first().catch()`); call_log: the generation fence. `owned` = the row the fence finds.
+let fenceWheres;
+function primeDb({ customer = { first_name: 'Pat', last_name: 'Sample' }, owned = { id: CALL_ID }, fenceFails = false } = {}) {
+  fenceWheres = [];
+  db.mockImplementation((table) => {
+    const b = {
+      where: jest.fn((w) => { if (table === 'call_log') fenceWheres.push(w); return b; }),
+      first: jest.fn(() => {
+        if (table === 'call_log') return fenceFails ? Promise.reject(new Error('db down')) : Promise.resolve(owned);
+        return { catch: () => Promise.resolve(customer) };
+      }),
+    };
     return b;
   });
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
-  primeCustomer();
+  primeDb();
 });
 
 describe('buildComplaintCallAlert', () => {
-  const build = (over = {}) => buildComplaintCallAlert({ call: callRow(), customerId: CUSTOMER_ID, name: 'Pat Sample', extracted: EXTRACTED, ...over });
+  const build = (over = {}) => buildComplaintCallAlert({ call: callRow(), customerId: CUSTOMER_ID, name: 'Pat Sample', extracted: EXTRACTED, now: NOW, ...over });
 
   test('passes the composer rules, names the customer on file, quotes the complaint and carries the Call button', () => {
     const alert = build();
     const composed = composeAdminAlert(alert.spec);
     expect(alert.category).toBe('customer');
     expect(composed.headline).toBe('Comms — call Pat Sample about a complaint');
-    expect(composed.why).toMatch(/^Complained on the \d{1,2}:\d{2} (AM|PM) call: “The technician never showed up”\.$/);
+    expect(composed.why).toBe('Complained on today\'s call: “The technician never showed up”.');
     expect(composed.why.length).toBeLessThanOrEqual(110);
     expect(composed.link).toBe(`/admin/communications#tab=calls&call=${CALL_ID}`);
     expect(composed.metadata).toMatchObject({
@@ -59,6 +69,7 @@ describe('buildComplaintCallAlert', () => {
     expect(alert.opts).toMatchObject({
       bell: true, dedupeKey: `call-complaint:${CALL_ID}`, metadata: { callLogId: CALL_ID, customerId: CUSTOMER_ID, source: 'call_complaint' },
     });
+    expect(alert.opts.detail).toMatch(/^The call at \d{1,2}:\d{2} (AM|PM) ET was labeled a complaint/);
     expect(alert.opts.detail).toContain('Pain points: The technician never showed up');
     expect(alert.opts.detail).toContain('Summary: Customer says nobody came on Tuesday.');
   });
@@ -98,10 +109,21 @@ describe('buildComplaintCallAlert', () => {
   test('words that would break the copy rules stay out of the why (kept in the detail); no words at all still composes', () => {
     const shouting = { pain_points: ['This is ridiculous!'], call_summary: 'Angry caller.' };
     const alert = build({ extracted: shouting });
-    expect(composeAdminAlert(alert.spec).why).toMatch(/^Complained on the [\d:]+ [AP]M call\.$/);
+    expect(composeAdminAlert(alert.spec).why).toBe('Complained on today\'s call.');
     expect(alert.opts.detail).toContain('This is ridiculous!');
     expect(composeAdminAlert(build({ extracted: {} }).spec).why).toMatch(/call\.$/);
     expect(composeAdminAlert(build({ extracted: null }).spec).headline).toBe('Comms — call Pat Sample about a complaint');
+  });
+
+  test('the why never carries a clock time: today\'s call, else the short date; the exact ET time is in the detail', () => {
+    const today = build({ now: NOW });
+    expect(today.spec.why).not.toMatch(/\d:\d{2}/);
+    // The same call read the next ET day is named by its short date.
+    const yesterday = build({ now: new Date(NOW.getTime() + 20 * 60 * 60 * 1000) });
+    expect(composeAdminAlert(yesterday.spec).why).toBe('Complained on the Nov 9 call: “The technician never showed up”.');
+    expect(yesterday.spec.why).not.toMatch(/\d:\d{2}/);
+    expect(yesterday.opts.detail).toMatch(/^The call at \d{1,2}:\d{2} (AM|PM) ET was labeled/);
+    expect(yesterday.opts.detail).toContain('at 1:00 PM ET');
   });
 
   test('a call id that is not a record id leaves the Call button off and still composes', () => {
@@ -163,11 +185,34 @@ describe('keepComplaintCallAlert', () => {
     expect(second.refreshOnDedupe).toBeUndefined();
   });
 
+  test('the generation fence: this pass must still own the call at its generation with the label still complaint_escalated', async () => {
+    expect(await rings()).toBe(1);
+    expect(fenceWheres).toEqual([{ id: CALL_ID, processing_generation: GENERATION, disposition: 'complaint_escalated' }]);
+    // A newer force-reprocess took the call (or relabeled it): the read finds no row, so nothing rings.
+    primeDb({ owned: null });
+    expect(await rings()).toBe(0);
+    // No generation known: nothing rings, and nothing is read.
+    primeDb();
+    expect(await rings({ procGeneration: null })).toBe(0);
+    expect(await rings({ procGeneration: undefined })).toBe(0);
+    expect(fenceWheres).toEqual([]);
+    // The fence read fails: no alert, a code-only log.
+    primeDb({ fenceFails: true });
+    expect(await rings()).toBe(0);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  test('the 24-hour cutoff uses the call timeline\'s end: a row inserted after the call with no Twilio end stamp never rings', async () => {
+    const postCall = (over = {}) => callRow({ created_at: minutesAgo(30), metadata: { source: 'status_callback', inserted_on_status: 'completed', ...over } });
+    expect(await rings({ call: postCall() })).toBe(0);
+    expect(await rings({ call: postCall({ source: 'twilio_recording_status_recovered' }) })).toBe(0);
+    // With Twilio's own end stamp the row is judged by it: recent rings, older than 24 h does not.
+    expect(await rings({ call: postCall({ ended_at: minutesAgo(20).toISOString() }) })).toBe(1);
+    expect(await rings({ call: postCall({ ended_at: minutesAgo(25 * 60).toISOString() }) })).toBe(0);
+  });
+
   test('a failed name lookup keeps the alert; a failed raise never throws and logs a code only', async () => {
-    db.mockImplementation(() => {
-      const b = { where: jest.fn(() => b), first: jest.fn(() => ({ catch: (fn) => Promise.resolve(fn(new Error('db down'))) })) };
-      return b;
-    });
+    primeDb({ customer: null });
     expect(await rings()).toBe(1);
     expect(raiseAdminAlert.mock.calls[0][1].action).toBe('call the customer about a complaint');
     raiseAdminAlert.mockRejectedValueOnce(Object.assign(new Error('bell down for +19415550123'), { code: 'ECONNRESET' }));
@@ -181,11 +226,17 @@ describe('keepComplaintCallAlert', () => {
 describe('wiring', () => {
   const src = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
-  test('applyZeroTriageLayers hands the written flag and the label to the alert right after the label write, no new branch', () => {
+  test('applyZeroTriageLayers hands the written flag, the label and the pass generation to the alert right after the label write, no new branch', () => {
     const write = src.indexOf('const written = await writeCallDisposition({ callId: call.id, disposition, reason, callSid });');
     expect(write).toBeGreaterThan(0);
     const next = src.slice(write, write + 400).split('\n')[1].trim();
-    expect(next).toBe('await keepComplaintCallAlert({ written, disposition, call, callSid, customerId, extracted });');
+    expect(next).toBe('await keepComplaintCallAlert({ written, disposition, call, callSid, customerId, extracted, procGeneration });');
+  });
+
+  test('both call sites pass the pass\'s procGeneration to applyZeroTriageLayers', () => {
+    const calls = src.split('\n').filter((l) => l.includes('await applyZeroTriageLayers({'));
+    expect(calls).toHaveLength(2);
+    for (const line of calls) expect(line).toContain('procGeneration });');
   });
 
   test('the alert sends nothing to a customer and has no gate of its own', () => {

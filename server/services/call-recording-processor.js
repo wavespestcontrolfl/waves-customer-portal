@@ -10522,7 +10522,7 @@ async function writeCallDisposition({ callId, disposition, reason, callSid, prio
 // disposition layer stamps the terminal enum on call_log.disposition; the
 // enrichment writer persists gate codes / pets / internal color. Order
 // matters: the classifier verdict feeds the disposition decision.
-async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult = null, customerId = null, transcript = null }) {
+async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult = null, customerId = null, transcript = null, procGeneration }) {
   try {
     const v2ForDisposition = v2Result?.status === 'valid' ? v2Result.extraction : null;
     let spamVerdictResult = null;
@@ -10566,7 +10566,7 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
         thirdPartyNatureDefault: callApplicantHandlingLive(),
       });
       const written = await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
-      await keepComplaintCallAlert({ written, disposition, call, callSid, customerId, extracted });
+      await keepComplaintCallAlert({ written, disposition, call, callSid, customerId, extracted, procGeneration });
       // ...and once more after the write: a confirm that landed between the read
       // and the write found nothing to flip, so flip it now (compare-and-swap on
       // the pending value we just wrote).
@@ -11037,20 +11037,23 @@ async function keepOutOfAreaHoldRecords({ call, callSid, transcription, extracte
 // The one Comms alert for a call whose final label is complaint_escalated (the label alone rang nothing). The
 // customer's name is the one on file: the extraction's caller name is sometimes the staff member's. The quote is
 // the extractor's pain points, else its call summary, masked like every bell body; a quote that would break the
-// copy rules is left out of the why and stays in the detail.
-function buildComplaintCallAlert({ call, customerId, name = null, extracted }) {
-  const { fitAction, redactedWords, whyWithQuote } = require('./admin-alert-names');
+// copy rules is left out of the why and stays in the detail. The why carries no clock time (docs/admin-notifications.md
+// section 3): "today's call", else the short date a person would say; the exact ET time rides in the detail.
+function buildComplaintCallAlert({ call, customerId, name = null, extracted, now = new Date() }) {
+  const { fitAction, redactedWords, whyWithQuote, shortDateET } = require('./admin-alert-names');
   const { firstSentence, breaksAlertRules } = require('./admin-alert-compose');
   const who = name || 'the customer';
   const points = (Array.isArray(extracted?.pain_points) ? extracted.pain_points : [extracted?.pain_points])
     .filter((p) => typeof p === 'string' && p.trim()).join('; ');
   const summary = typeof extracted?.call_summary === 'string' ? extracted.call_summary : '';
   const said = redactedWords(firstSentence(points || summary)).replace(/[.\s]+$/u, '');
-  const when = callTimeETString(callStartedAt(call))?.replace(/\s/g, ' ');
-  const lead = when ? `Complained on the ${when} call: ` : 'Complained on this call: ';
+  const startedAt = callStartedAt(call);
+  const day = startedAt && etDateString(startedAt) !== etDateString(now) ? `the ${shortDateET(startedAt)}` : 'today\'s';
+  const clock = callTimeETString(startedAt)?.replace(/\s/g, ' ');
+  const lead = `Complained on ${day} call: `;
   const why = said && !breaksAlertRules(said)
     ? whyWithQuote({ lead, quote: said, tail: '.' })
-    : `Complained on ${when ? `the ${when}` : 'this'} call.`;
+    : `Complained on ${day} call.`;
   const buttons = require('./alert-call-button').callButtons({ callLogId: call.id });
   return {
     category: 'customer',
@@ -11070,7 +11073,7 @@ function buildComplaintCallAlert({ call, customerId, name = null, extracted }) {
       bell: true,
       dedupeKey: `call-complaint:${call.id}`,
       detail: [
-        `The call was labeled a complaint from a known customer${when ? ` (${when})` : ''}. Call them back. Nothing was sent to the customer.`,
+        `The call${clock ? ` at ${clock} ET` : ''} was labeled a complaint from a known customer. Call them back. Nothing was sent to the customer.`,
         points && `Pain points: ${redactedWords(points)}`,
         summary && `Summary: ${redactedWords(summary)}`,
       ].filter(Boolean).join('\n'),
@@ -11081,19 +11084,24 @@ function buildComplaintCallAlert({ call, customerId, name = null, extracted }) {
 
 // Raise it once per call, right after the label is written. All of these must hold, or nothing rings: this pass
 // wrote complaint_escalated, a customer is known and is not a test customer, the call is not a voice-relay
-// sandbox or tech-line call, and it ended in the last 24 hours (a reprocess of an old call stays quiet). One
-// bell per call ever: dedupeKey with no dedupeOpenOnly, so a reprocess neither rings again nor re-opens a closed
+// sandbox or tech-line call, it ended in the last 24 hours by the call timeline's own end time (a row inserted
+// after the call with no stamped end has none, so it never rings), and this pass still owns the call: one
+// read, right before the raise, finds the call at this pass's processing_generation with the label still
+// complaint_escalated (a newer force-reprocess, or no generation known, rings nothing). One bell per call ever: dedupeKey with no dedupeOpenOnly, so a reprocess neither rings again nor re-opens a closed
 // bell. A failure is logged by code and never fails the call. Sends nothing to the customer.
-async function keepComplaintCallAlert({ written, disposition, call, callSid, customerId = null, extracted = null, now = new Date() }) {
+async function keepComplaintCallAlert({ written, disposition, call, callSid, customerId, extracted, procGeneration, now = new Date() }) {
   if (written !== true || disposition !== 'complaint_escalated') return null;
   try {
     const id = customerId || call.customer_id;
     if (!id || require('./internal-test-customers').isInternalTestCustomerId(id)) return null;
     if (require('./voice-agent/relay-protocol').isInternalCallSource(call.source)) return null;
-    const endedAt = require('./call-commitments').callEndedAt(call) || (call.created_at ? new Date(call.created_at) : null);
+    if (procGeneration == null) return null;
+    const endedAt = require('../utils/call-timeline').callEndedAt(call);
     if (!endedAt || Number.isNaN(endedAt.getTime()) || now.getTime() - endedAt.getTime() > 24 * 60 * 60 * 1000) return null;
     const customer = await db('customers').where({ id }).first('first_name', 'last_name').catch(() => null);
-    const alert = buildComplaintCallAlert({ call, customerId: id, name: require('./admin-alert-names').realName(customer), extracted });
+    const alert = buildComplaintCallAlert({ call, customerId: id, name: require('./admin-alert-names').realName(customer), extracted, now });
+    const stillOurs = await db('call_log').where({ id: call.id, processing_generation: procGeneration, disposition: 'complaint_escalated' }).first('id');
+    if (!stillOurs) return null;
     return await require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, alert.opts);
   } catch (err) {
     logger.warn(`[call-proc] complaint call alert failed for ${maskSid(callSid)}: ${err?.code || err?.name || 'error'}`);
@@ -12978,7 +12986,7 @@ const CallRecordingProcessor = {
       // verdicts + terminal dispositions — it's the population the live
       // accrual exists to measure. Customer resolution hasn't run on this
       // path; enrichment keys on the webhook's pre-linked customer if any.
-      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, customerId: call.customer_id || null, transcript: transcription });
+      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, customerId: call.customer_id || null, transcript: transcription, procGeneration });
 
       // GATE_CALL_APPLICANT_HANDLING: an applicant's voicemail (name + callback
       // number, no service ask) ends on this path too; the step skips spam and
@@ -25016,7 +25024,7 @@ const CallRecordingProcessor = {
     // peer reclaimed the processing_token — this attempt's extraction is
     // stale and must not record verdicts, stamp a disposition, or enrich.
     if (finalized > 0) {
-      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId, transcript: transcription });
+      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId, transcript: transcription, procGeneration });
 
       // Commitments (recordCommitmentsStep): after finalization, generation-fenced, never blocking.
       await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
