@@ -433,6 +433,18 @@ describe('POST /api/public/appointment/:token/photos', () => {
     });
   });
 
+  test('photos sent under a wrong field name: multer 400 "Could not read", nothing stored', async () => {
+    await withServer(async (baseUrl) => {
+      const form = new FormData();
+      form.append('image', new Blob([JPEG_BYTES], { type: 'image/jpeg' }), 'photo.jpg');
+      const res = await fetch(`${baseUrl}/api/public/appointment/${TOKEN}/photos`, { method: 'POST', body: form });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'Could not read the uploaded photos.' });
+      expect(mockUploadFunnelPhotoToS3).not.toHaveBeenCalled();
+      expect(dbState.inserted.submissions).toHaveLength(0);
+    });
+  });
+
   test('declared mimetype outside the allowlist: 400 PREP_INVALID_PHOTO', async () => {
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/gif' }] });

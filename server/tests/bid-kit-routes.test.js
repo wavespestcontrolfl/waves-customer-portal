@@ -780,6 +780,17 @@ describe('files', () => {
     expect((await upload(item.id, { bytes: exact })).status).toBe(200);
   });
 
+  test('a file one byte over 15 MB is refused with the same 413 line, and nothing is stored', async () => {
+    const item = await create();
+    const oneOver = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(15 * 1024 * 1024 - 9 + 1)]);
+    expect(oneOver.length).toBe(15 * 1024 * 1024 + 1);
+    const res = await upload(item.id, { bytes: oneOver });
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ error: 'The file is larger than 15 MB' });
+    expect(mockSent).toHaveLength(0);
+    expect(store.rows.get(item.id).file_s3_key).toBeNull();
+  });
+
   test('an upload with no file storage configured is refused before anything is stored, and says so', async () => {
     const config = require('../config');
     const item = await create();

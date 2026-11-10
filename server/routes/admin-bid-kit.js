@@ -261,8 +261,9 @@ router.post('/:id/attest', async (req, res, next) => {
   }
 });
 
-// multer stops reading one byte past the cap; the exact 15 MB rule is files.validateFile's (a file of exactly 15 MB passes).
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: files.MAX_FILE_BYTES + 1, files: 1 } });
+// multer 2 refuses a file only once it is OVER limits.fileSize, so the cap is the limit itself (a file of exactly 15 MB passes;
+// one byte more is refused here with the 413 line below). files.validateFile keeps the same rule for anything that skips multer.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: files.MAX_FILE_BYTES, files: 1 } });
 function receiveFile(req, res, next) {
   upload.single('file')(req, res, (err) => {
     if (!err) return next();
