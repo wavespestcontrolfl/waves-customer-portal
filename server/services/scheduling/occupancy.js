@@ -558,6 +558,8 @@ async function findConflictingVisits({
   const excludeIds = (excludeServiceIds || []).filter(Boolean).map(String);
   const scopeTechId = technicianId != null && technicianId !== '' && techScopedConfirmActive()
     ? String(technicianId) : null;
+  // Every branch's tail: live make-room destinations (mode on) count like the hold rows they belong to.
+  const destinations = { db, date, windowStart, windowEnd, excludeIds, excludeStatuses, scopeTechId, includeHolds };
 
   // Only staff callers explicitly opt into this advisory placement check.
   // Public booking/reservation and customer reschedule contracts stay on
@@ -579,21 +581,21 @@ async function findConflictingVisits({
       logRouteWarning(fit, arrivalWindow, date);
       // Interviews merge into this branch too (Codex r4 P2): an admin move
       // whose window overlaps a booked interview gets the conflict row.
-      return withInterviewConflicts(fit.feasible ? [] : [{
+      return withMakeRoomDestinations(await withInterviewConflicts(fit.feasible ? [] : [{
         ...fit.target, id: arrivalWindow.serviceId,
         window_start: windowStart, window_end: windowEnd,
         conflict_reason: fit.reason, warning: fit.warning,
         // GATE_ROUTE_WARNING_DETAIL: the sentence a staff save shows is worded with the stop and
         // minutes; `base_warning` keeps the unchanged one for any snapshot that compares warnings.
         ...baseWarningField(fit),
-      }], { db, date, windowStart, windowEnd, includeInterviews });
+      }], { db, date, windowStart, windowEnd, includeInterviews }), destinations);
     }
   }
 
   if (travel !== undefined && travelGapEnabled()) {
-    return withInterviewConflicts(await findConflictingVisitsWithTravel({
+    return withMakeRoomDestinations(await withInterviewConflicts(await findConflictingVisitsWithTravel({
       db, date, windowStart, windowEnd, excludeIds, excludeCustomerId, excludeStatuses, includeHolds, travel, scopeTechId,
-    }), { db, date, windowStart, windowEnd, includeInterviews });
+    }), { db, date, windowStart, windowEnd, includeInterviews }), destinations);
   }
 
   const query = db('scheduled_services')
@@ -636,7 +638,7 @@ async function findConflictingVisits({
   const visits = rows.filter((row, index) => row.reservation_service_mix?.version !== 2
     || (occupied[index].startMin != null && windowsOverlap(timeToMinutes(windowStart), timeToMinutes(windowEnd),
       occupied[index].startMin, occupied[index].endMin)));
-  return withInterviewConflicts(visits, { db, date, windowStart, windowEnd, includeInterviews });
+  return withMakeRoomDestinations(await withInterviewConflicts(visits, { db, date, windowStart, windowEnd, includeInterviews }), destinations);
 }
 
 // ---- recruiting interviews as occupancy ------------------------------------
@@ -750,6 +752,77 @@ async function bookedInterviewConflictRows(db, dateStr, startMin, endMin) {
     });
   }
   return out;
+}
+
+// ---- live make-room destinations as occupancy (GATE_BOOKING_MAKE_ROOM on) ---
+// A live make-room hold (scheduling/booking-make-room.js, slot-reservation.js) keeps its own window, which every
+// reader here already counts as a hold, AND the new hour of each regular stop its chain moves when the estimate
+// customer accepts (`make_room_moves.moves[]`: `to`, `widthMin` long). Every reader that counts holds counts those
+// destinations too: the offer side (listOccupiedWindows) and the commit side (findConflictingVisits, includeHolds,
+// the default). So no other booking surface (/book, availability confirm, the voice agent, the rebooker, the call
+// and follow-up writers; staff saves as their advisory warning) offers or takes an hour a live chain still needs
+// (Codex #7796 P2). A destination comes back as the hold's row at that hour: the hold's own id, technician, status
+// and expiry, the destination as its window, `conflict_reason: 'make_room_destination'` (never waivable, never a
+// seeded placeholder). Left out: a hold the caller excludes by id, and a hold whose chain moves a visit the caller
+// excludes (the caller is moving that stop, so the chain no longer stands; its accept re-proves and refuses). The
+// status filter and technician scope are the hold row's own. Mode not on (off, shadow), or a connection with no raw
+// SQL (unit-test doubles): no read, every result byte-identical. One parameterized raw read, in a savepoint inside a
+// caller's transaction (the interview read's reasons). A failed read propagates: the commit-side callers are guards.
+const MAKE_ROOM_DESTINATION_SQL = `SELECT id, technician_id, status, service_type, reservation_expires_at, source_estimate_id,
+    to_char(scheduled_date, 'YYYY-MM-DD') AS date_key, make_room_moves
+  FROM scheduled_services
+  WHERE scheduled_date BETWEEN ?::date AND ?::date
+    AND customer_id IS NULL AND reservation_expires_at > NOW() AND make_room_moves IS NOT NULL
+    AND status::text <> ALL(?::text[])
+    AND id::text <> ALL(?::text[])
+    AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(make_room_moves->'moves') AS own WHERE own->>'id' = ANY(?::text[]))
+    AND (?::text IS NULL OR technician_id IS NULL OR technician_id::text = ?::text)
+  ORDER BY scheduled_date, id`;
+
+function makeRoomDestinationsOn() {
+  try { return require('./booking-make-room').bookingMakeRoomMode() === 'on'; } catch { return false; }
+}
+
+// Every destination of every live make-room hold in [dateFrom, dateTo]: [{ row, date, startMin, endMin }], one per move.
+async function liveMakeRoomDestinations(db, { dateFrom, dateTo, excludeIds = [], excludeStatuses = [], scopeTechId = null }) {
+  if (!db || typeof db.raw !== 'function' || !makeRoomDestinationsOn()) return [];
+  const bindings = [dateFrom, dateTo, (excludeStatuses || []).map(String), excludeIds, excludeIds, scopeTechId, scopeTechId];
+  const res = (db.isTransaction && typeof db.transaction === 'function')
+    ? await db.transaction((sp) => sp.raw(MAKE_ROOM_DESTINATION_SQL, bindings))
+    : await db.raw(MAKE_ROOM_DESTINATION_SQL, bindings);
+  const clock = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}:00`;
+  const holds = Array.isArray(res?.rows) ? res.rows : [];
+  return holds.flatMap((hold) => (Array.isArray(hold.make_room_moves?.moves) ? hold.make_room_moves.moves : []).map((move) => {
+    const startMin = timeToMinutes(move.to);
+    const endMin = startMin + Number(move.widthMin);
+    if (startMin == null || !(endMin > startMin)) return null;
+    return {
+      date: hold.date_key,
+      startMin,
+      endMin,
+      row: {
+        id: hold.id, customer_id: null, technician_id: hold.technician_id, scheduled_date: hold.date_key,
+        window_start: clock(startMin), window_end: clock(endMin), status: hold.status, service_type: hold.service_type,
+        service_key_snapshot: null, estimated_duration_minutes: endMin - startMin,
+        reservation_expires_at: hold.reservation_expires_at, source_estimate_id: hold.source_estimate_id,
+        reservation_service_mix: null, is_recurring: false, recurring_parent_id: null, customer_confirmed: false,
+        is_callback: false, conflict_reason: 'make_room_destination',
+      },
+    };
+  }).filter(Boolean));
+}
+
+// findConflictingVisits' tail: the live destinations that overlap the window, one row per hold.
+async function withMakeRoomDestinations(visits, { db, date, windowStart, windowEnd, excludeIds, excludeStatuses, scopeTechId, includeHolds }) {
+  if (includeHolds === false) return visits;
+  const dateStr = String(date).split('T')[0];
+  const startMin = timeToMinutes(windowStart);
+  const endMin = timeToMinutes(windowEnd);
+  const rows = [];
+  for (const dest of await liveMakeRoomDestinations(db, { dateFrom: dateStr, dateTo: dateStr, excludeIds, excludeStatuses, scopeTechId })) {
+    if (windowsOverlap(startMin, endMin, dest.startMin, dest.endMin) && !rows.some((row) => row.id === dest.row.id)) rows.push(dest.row);
+  }
+  return rows.length ? [...visits, ...rows] : visits;
 }
 
 // Expected-minutes credit for EXISTING stops (owner ruling 2026-09-23): one
@@ -947,6 +1020,18 @@ async function listOccupiedWindows({
         // A live hold never shadows a committed neighbour (travel-gap.js).
         hold: row.reservation_expires_at != null && row.customer_id == null,
       } : {}),
+    });
+  }
+  // Live make-room destinations (mode on), the offer side of the commit probe's rule: an hour a live chain still needs
+  // is never offered only for its commit to refuse it. Coordless, so the travel rule gives them its fixed buffer only.
+  for (const dest of await liveMakeRoomDestinations(db, { dateFrom, dateTo, excludeIds, excludeStatuses })) {
+    const minutes = dest.endMin - dest.startMin;
+    out.push({
+      ...dest.row,
+      date: dest.date,
+      startMin: dest.startMin,
+      endMin: dest.endMin,
+      ...(withCoords ? { lat: null, lng: null, windowMinutes: minutes, expectedMinutes: minutes, hold: true } : {}),
     });
   }
   return out;
