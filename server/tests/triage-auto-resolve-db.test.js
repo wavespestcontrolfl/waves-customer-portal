@@ -543,12 +543,15 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
   }
 
   test('quiet_aged: a listed card quiet for 7 days is dismissed (blocking too), review_status follows; everything else stays open', async () => {
-    const blocking = await seedQuietCard('not_confirmed', { severity: 'blocking' });
+    const blocking = await seedQuietCard('rental_or_tenant_occupied', { severity: 'blocking' });
     const advisory = await seedQuietCard('customer_email_missing');
-    const sixDays = await seedQuietCard('not_confirmed', { ageDays: 6 });
-    const claimed = await seedQuietCard('not_confirmed', { status: 'in_progress' });
-    const touched = await seedQuietCard('not_confirmed', { ageDays: 20, updatedAgeDays: 1 });
+    const sixDays = await seedQuietCard('rental_or_tenant_occupied', { ageDays: 6 });
+    const claimed = await seedQuietCard('rental_or_tenant_occupied', { status: 'in_progress' });
+    const touched = await seedQuietCard('rental_or_tenant_occupied', { ageDays: 20, updatedAgeDays: 1 });
     const stateful = [
+      await seedQuietCard('name_email_mismatch', { ageDays: 40 }),
+      await seedQuietCard('quote_promised', { ageDays: 40 }),
+      await seedQuietCard('not_confirmed', { ageDays: 40 }),
       await seedQuietCard('email_unverified', { ageDays: 40 }),
       await seedQuietCard('reschedule_or_cancel', { ageDays: 40, severity: 'blocking' }),
       await seedQuietCard('missing_unit_number', { ageDays: 40 }),
@@ -602,7 +605,7 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const dry = await sweep.reopenQuietAged({ since });
     expect(dry.reopened).toBe(0);
     expect(dry.reopenable).toBeGreaterThanOrEqual(1);
-    expect(dry.skippedHasLiveCard).toBeGreaterThanOrEqual(1);
+    expect(dry.skippedSuperseded).toBeGreaterThanOrEqual(1);
     expect((await cardRow(swept.cardId)).status).toBe('dismissed');
 
     const applied = await sweep.reopenQuietAged({ since, apply: true });
@@ -619,6 +622,21 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const again = await sweep.reopenQuietAged({ since, apply: true });
     expect((await cardRow(swept.cardId)).status).toBe('open');
     expect(again.reopened).toBe(0);
+  });
+
+  test('reopenQuietAged: a newer settled card of the same reason supersedes the dismissal; an older settled card does not', async () => {
+    const since = new Date(Date.now() - 60 * 1000);
+    const handled = await seedQuietCard('second_service_address', { dismissedAs: { rule: 'quiet_aged' } });
+    const resolvedTwin = { call_log_id: handled.callId, category: 'time_ambiguous', severity: 'advisory', reason_code: 'second_service_address', summary: 'fixture', payload: '{}' };
+    await db('triage_items').insert({ ...resolvedTwin, status: 'resolved', resolution_source: 'human', resolved_at: new Date(), created_at: new Date() });
+    const prior = await seedQuietCard('second_service_address', { dismissedAs: { rule: 'quiet_aged' } });
+    await db('triage_items').insert({ ...resolvedTwin, call_log_id: prior.callId, status: 'resolved', resolution_source: 'human', resolved_at: new Date(Date.now() - 20 * 86400000), created_at: new Date(Date.now() - 30 * 86400000) });
+    const dry = await sweep.reopenQuietAged({ since });
+    expect(dry.skippedSuperseded).toBeGreaterThanOrEqual(1);
+    await sweep.reopenQuietAged({ since, apply: true });
+    expect((await cardRow(handled.cardId)).status).toBe('dismissed');
+    expect((await db('call_log').where({ id: handled.callId }).first('review_status')).review_status).toBe('dismissed');
+    expect((await cardRow(prior.cardId)).status).toBe('open');
   });
 
   test('reopenQuietAged: a card of another call that turns eligible after the first read is not touched by that run', async () => {

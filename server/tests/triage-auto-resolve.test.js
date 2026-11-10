@@ -27,6 +27,7 @@ const {
   MAX_TRANSITIONS_PER_RUN,
   capDecisions,
   planQuietAgedReopen,
+  parseRollbackSince,
 } = require('../services/triage-auto-resolve');
 const { resolveRescheduleCards } = require('../services/call-reschedule-apply');
 
@@ -417,18 +418,17 @@ describe('quiet_aged (owner 2026-11-09) — 7 quiet days drop a listed card', ()
   });
 
   test('a BLOCKING card of a listed code ages out too', () => {
-    expect(rule(quiet({ reason_code: 'not_confirmed', severity: 'blocking' }))).toEqual({ action: 'dismiss', rule: 'quiet_aged' });
-    expect(rule(quiet({ reason_code: 'quote_promised', severity: 'blocking' }))).toEqual({ action: 'dismiss', rule: 'quiet_aged' });
+    expect(rule(quiet({ reason_code: 'rental_or_tenant_occupied', severity: 'blocking' }))).toEqual({ action: 'dismiss', rule: 'quiet_aged' });
   });
 
   test('an in_progress (claimed) card never ages out', () => {
-    expect(rule(quiet({ reason_code: 'not_confirmed', status: 'in_progress' }))).toBeNull();
+    expect(rule(quiet({ reason_code: 'rental_or_tenant_occupied', status: 'in_progress' }))).toBeNull();
   });
 
   test('a recent updated_at (a person or a recurrence touched it) never ages out', () => {
-    expect(rule(item({ reason_code: 'not_confirmed', created_at: ago(40), updated_at: ago(2) }))).toBeNull();
-    expect(rule(item({ reason_code: 'not_confirmed', created_at: ago(40), updated_at: null }))).toBeNull();
-    expect(rule(item({ reason_code: 'not_confirmed', created_at: ago(40), updated_at: undefined }))).toBeNull();
+    expect(rule(item({ reason_code: 'rental_or_tenant_occupied', created_at: ago(40), updated_at: ago(2) }))).toBeNull();
+    expect(rule(item({ reason_code: 'rental_or_tenant_occupied', created_at: ago(40), updated_at: null }))).toBeNull();
+    expect(rule(item({ reason_code: 'rental_or_tenant_occupied', created_at: ago(40), updated_at: undefined }))).toBeNull();
   });
 
   test.each(['email_unverified', 'reschedule_or_cancel', 'missing_unit_number'])('%s (state-bearing) never ages out', (code) => {
@@ -436,18 +436,21 @@ describe('quiet_aged (owner 2026-11-09) — 7 quiet days drop a listed card', ()
     expect(rule(quiet({ reason_code: code, severity: 'blocking' }))).toBeNull();
   });
 
+  // Codex round 1 (2026-11-10): this sweep's own readers count the live cards of these codes
+  // (claimant / contest / email-release veto), so a quiet dismissal would change another card's verdict.
+  test.each(['name_email_mismatch', 'quote_promised', 'not_confirmed'])('%s never gets quiet_aged', (code) => {
+    expect(QUIET_AGE_CODES.has(code)).toBe(false);
+    expect(rule(quiet({ reason_code: code }))).toBeNull();
+    expect(rule(quiet({ reason_code: code, severity: 'blocking' }))).toBeNull();
+  });
+
   test('a reschedule proposal or link promise payload is untouchable even on a listed code', () => {
-    expect(rule(quiet({ reason_code: 'not_confirmed', payload: { reschedule_proposal: { id: 'p1' } } }))).toBeNull();
-    expect(rule(quiet({ reason_code: 'not_confirmed', payload: { reschedule_link_promise: true } }))).toBeNull();
+    expect(rule(quiet({ reason_code: 'rental_or_tenant_occupied', payload: { reschedule_proposal: { id: 'p1' } } }))).toBeNull();
+    expect(rule(quiet({ reason_code: 'rental_or_tenant_occupied', payload: { reschedule_link_promise: true } }))).toBeNull();
   });
 
   test('an evidence rule still wins over quiet_aged for the same card', () => {
-    const it = quiet({ reason_code: 'not_confirmed', id: 'nc1' });
-    const ev = { evidence: new Map([['nc1', { booking_after_card: true }]]) };
-    const decision = rule(it, ev);
-    expect(decision.rule).not.toBe('quiet_aged');
-    expect(decision.action).toBe('resolve');
-    // A moot-condition resolve wins too: the surname is now on file.
+    // A moot-condition resolve wins: the surname is now on file.
     const moot = rule(quiet({ reason_code: 'missing_last_name', customer_last_name: 'Sample', ...heardV1('Pat', null) }));
     expect(moot.rule).toBe('name_moot');
   });
@@ -472,23 +475,67 @@ describe('quiet_aged (owner 2026-11-09) — 7 quiet days drop a listed card', ()
 });
 
 describe('quiet_aged reopen plan', () => {
-  const row = (id, call, code, at) => ({ id, call_log_id: call, reason_code: code, resolved_at: at });
+  const row = (id, call, code, resolvedAt, createdAt = '2026-10-20T00:00:00Z') => ({
+    id, call_log_id: call, reason_code: code, created_at: createdAt, resolved_at: resolvedAt,
+  });
+  const twin = (id, call, code, status, createdAt) => ({ id, call_log_id: call, reason_code: code, status, created_at: createdAt });
 
   test('reopens each (call, reason) once, newest dismissal wins, skips a call with a live twin', () => {
     const rows = [
-      row('a', 'c1', 'not_confirmed', '2026-11-01T00:00:00Z'),
-      row('b', 'c1', 'not_confirmed', '2026-11-05T00:00:00Z'),
+      row('a', 'c1', 'rental_or_tenant_occupied', '2026-11-01T00:00:00Z', '2026-10-20T00:00:00Z'),
+      row('b', 'c1', 'rental_or_tenant_occupied', '2026-11-05T00:00:00Z', '2026-10-20T00:00:00Z'),
       row('c', 'c2', 'voicemail', '2026-11-02T00:00:00Z'),
-      row('d', 'c3', 'quote_promised', '2026-11-03T00:00:00Z'),
+      row('d', 'c3', 'second_service_address', '2026-11-03T00:00:00Z'),
     ];
-    const plan = planQuietAgedReopen(rows, [{ call_log_id: 'c3', reason_code: 'quote_promised' }]);
+    const plan = planQuietAgedReopen(rows, [twin('x', 'c3', 'second_service_address', 'open', '2026-11-04T00:00:00Z')]);
     expect(plan.reopen.map((r) => r.id).sort()).toEqual(['b', 'c']);
-    expect(plan.skippedHasLiveCard).toBe(1);
+    expect(plan.skippedSuperseded).toBe(1);
     expect(plan.skippedDuplicate).toBe(1);
   });
 
+  test.each(['resolved', 'dismissed'])('a NEWER %s card of the same reason on the call supersedes the dismissal', (status) => {
+    const rows = [row('d', 'c1', 'voicemail', '2026-11-03T00:00:00Z', '2026-10-20T00:00:00Z')];
+    const plan = planQuietAgedReopen(rows, [twin('n', 'c1', 'voicemail', status, '2026-11-04T00:00:00Z')]);
+    expect(plan.reopen).toEqual([]);
+    expect(plan.skippedSuperseded).toBe(1);
+  });
+
+  test('an OLDER settled card, another reason or another call does not block', () => {
+    const rows = [row('d', 'c1', 'voicemail', '2026-11-03T00:00:00Z', '2026-10-20T00:00:00Z')];
+    const plan = planQuietAgedReopen(rows, [
+      twin('o', 'c1', 'voicemail', 'resolved', '2026-10-01T00:00:00Z'),
+      twin('r', 'c1', 'second_service_address', 'resolved', '2026-11-04T00:00:00Z'),
+      twin('k', 'c2', 'voicemail', 'resolved', '2026-11-04T00:00:00Z'),
+      twin('d', 'c1', 'voicemail', 'dismissed', '2026-10-20T00:00:00Z'), // the row itself
+    ]);
+    expect(plan.reopen.map((r) => r.id)).toEqual(['d']);
+    expect(plan.skippedSuperseded).toBe(0);
+  });
+
   test('nothing to reopen is an empty plan', () => {
-    expect(planQuietAgedReopen([], [])).toEqual({ reopen: [], skippedHasLiveCard: 0, skippedDuplicate: 0 });
+    expect(planQuietAgedReopen([], [])).toEqual({ reopen: [], skippedSuperseded: 0, skippedDuplicate: 0 });
+  });
+});
+
+describe('rollback cutoff parsing', () => {
+  test.each(['2026-11-10T03:00:00', '2026-11-10T03:00', '2026-11-10', 'yesterday', '', null, undefined, 12345, '2026-11-10 03:00:00Z', '2026-13-45T03:00:00Z'])(
+    'refuses %p (no explicit zone, date only, or garbage)', (v) => {
+      expect(() => parseRollbackSince(v)).toThrow(/explicit zone/);
+    },
+  );
+
+  test.each([
+    ['2026-11-10T08:00:00Z', '2026-11-10T08:00:00.000Z'],
+    ['2026-11-10T03:00:00-05:00', '2026-11-10T08:00:00.000Z'],
+    ['2026-11-10T03:00:00.5+00:00', '2026-11-10T03:00:00.500Z'],
+  ])('accepts %s', (v, iso) => {
+    expect(parseRollbackSince(v).toISOString()).toBe(iso);
+  });
+
+  test('accepts a Date, refuses an invalid Date', () => {
+    const d = new Date('2026-11-10T08:00:00Z');
+    expect(parseRollbackSince(d)).toBe(d);
+    expect(() => parseRollbackSince(new Date('nope'))).toThrow(/explicit zone/);
   });
 });
 
@@ -511,6 +558,8 @@ describe('fail-closed allowlist — cards other code reads as state are NEVER sw
     'callback_number_needed', 'text_number_differs', 'call_prepay_choice',
     'customer_creation_failed', 'family_account_candidates', 'reschedule_link_promise',
     'confirmed_without_start_time',
+    // Read by this sweep's own claimant / contest / veto readers (2026-11-10 Codex round 1).
+    'quote_promised', 'not_confirmed', 'name_email_mismatch',
     'some_future_unknown_code',
   ];
   // missing_last_name is never swept by the 30-day advisory rule (owed identity

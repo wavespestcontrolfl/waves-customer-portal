@@ -75,6 +75,11 @@
  *     no code path reads cards of that code as state outside the filing site,
  *     this sweep, the admin triage UI routes and tests (2026-11-09 audit).
  *     The codes that DO carry state stay off it and never age out here:
+ *     quote_promised and not_confirmed (this sweep's own claimant and contest
+ *     readers count the customer's OTHER open cards of the code: dismissing one
+ *     would let another close on a booking or estimate that answers the
+ *     first), name_email_mismatch (a live card vetoes the automatic email
+ *     release, loadUnambiguousEmailEvidence),
  *     email_unverified / email_invalid (lead-first-touch-resume holds the
  *     first-touch email while one is live and treats a dismissed one as
  *     'email_review_dismissed'), missing_unit_number (estimate-clarify-asks,
@@ -237,12 +242,17 @@ const ADVISORY_AGE_CODES = new Set([
 // a booking, an email, a text or a number are never on the list.
 // An unknown or new code is NEVER swept; add a code here only after the same
 // search (the literal, constants that hold it, and triage_items reads with a
-// category, a reason_code IN list or no reason filter).
+// category, a reason_code IN list or no reason filter). That search includes
+// THIS file: a code whose live cards another card's decision reads as a veto,
+// a claim or a contest stays off the list (quote_promised and not_confirmed:
+// loadCardClaimants, soleClaimant, computeContestedNotConfirmedIds;
+// name_email_mismatch: the mismatchLive veto in loadUnambiguousEmailEvidence).
+// The evidence loaders' own status === 'open' filters only pick the card being
+// judged, so they decide nothing for another card.
 const QUIET_AGE_CODES = new Set([
   // Owed-ask and note cards whose only readers are filing, this sweep, the
   // UI and the callback-spam repair scans (those scans only CLOSE open cards
   // of CALLBACK_SPAM_MOOT_CODES; a dismissed card has nothing left to close).
-  'quote_promised', 'not_confirmed',
   'missing_service_address', 'missing_last_name',
   'address_unverified', 'address_unverifiable',
   'ambiguous_pest_or_service', 'ambiguous_scheduling',
@@ -252,7 +262,7 @@ const QUIET_AGE_CODES = new Set([
   // only email_unverified / email_invalid do.
   'customer_email_missing',
   // Identity, access and property notes for the office.
-  'caller_not_authorized', 'name_email_mismatch', 'name_spelling_differs',
+  'caller_not_authorized', 'name_spelling_differs',
   'rental_or_tenant_occupied', 'second_service_address', 'multi_property_call',
   'caller_phone_not_on_file',
   // Address read-back notes. The replay and readiness scripts read
@@ -2888,23 +2898,32 @@ async function planQuietAged({ now = new Date(), ignoreGate = false } = {}) {
 
 // Rollback support. Which of the dismissed quiet_aged rows can go back to
 // 'open': never two rows for one (call, reason) (the open-unique index allows
-// one), and never one whose call already holds a live card of that reason (a
-// reprocess filed a fresh one after the dismissal). Newest dismissal wins.
-// Pure; `rows` are { id, call_log_id, reason_code, resolved_at }, `liveTwins` the
-// open / in_progress { call_log_id, reason_code } pairs.
-function planQuietAgedReopen(rows, liveTwins = []) {
+// one), and never one that a newer card of the same reason on the same call
+// supersedes, whatever that card's status (a reprocess filed a fresh one after
+// the dismissal, and staff may have resolved or dismissed it since: reopening
+// the old one would undo that decision; the same rule as
+// reopenParentOnCallbackCorrected). A live (open / in_progress) twin always
+// blocks. Newest dismissal wins. Pure; `rows` are { id, call_log_id,
+// reason_code, created_at, resolved_at }, `twins` every card on those calls
+// { id, call_log_id, reason_code, status, created_at }.
+function planQuietAgedReopen(rows, twins = []) {
   const key = (r) => `${r.call_log_id}|${r.reason_code}`;
-  const live = new Set(liveTwins.map(key));
+  const at = (v) => (v ? new Date(v).getTime() : 0);
+  const byKey = new Map();
+  for (const t of twins) byKey.set(key(t), [...(byKey.get(key(t)) || []), t]);
+  const supersededBy = (row) => (byKey.get(key(row)) || []).some((t) => String(t.id) !== String(row.id)
+    && (t.status === 'open' || t.status === 'in_progress'
+      || at(t.created_at) > at(row.created_at)
+      || (at(t.created_at) === at(row.created_at) && String(t.id) > String(row.id))));
   const picked = new Map();
-  let skippedHasLiveCard = 0;
-  const stamp = (r) => (r.resolved_at ? new Date(r.resolved_at).getTime() : 0);
-  const newestFirst = [...rows].sort((a, b) => stamp(b) - stamp(a));
+  let skippedSuperseded = 0;
+  const newestFirst = [...rows].sort((a, b) => at(b.resolved_at) - at(a.resolved_at));
   for (const row of newestFirst) {
-    if (live.has(key(row))) { skippedHasLiveCard += 1; continue; }
+    if (supersededBy(row)) { skippedSuperseded += 1; continue; }
     if (!picked.has(key(row))) picked.set(key(row), row);
   }
   const reopen = [...picked.values()];
-  return { reopen, skippedHasLiveCard, skippedDuplicate: rows.length - skippedHasLiveCard - reopen.length };
+  return { reopen, skippedSuperseded, skippedDuplicate: rows.length - skippedSuperseded - reopen.length };
 }
 
 // `onlyCallIds` (optional) limits the scan to those calls: the re-plan under
@@ -2914,12 +2933,25 @@ async function readQuietAgedReopenPlan(conn, since, onlyCallIds = null) {
     .where({ status: 'dismissed', resolution_rule: QUIET_AGED_RULE })
     .where('resolved_at', '>=', since);
   if (onlyCallIds) query.whereIn('call_log_id', onlyCallIds);
-  const rows = await query.select('id', 'call_log_id', 'reason_code', 'resolved_at');
+  const rows = await query.select('id', 'call_log_id', 'reason_code', 'created_at', 'resolved_at');
   const callIds = [...new Set(rows.map((r) => r.call_log_id).filter(Boolean))];
-  const liveTwins = callIds.length
-    ? await conn('triage_items').whereIn('call_log_id', callIds).whereIn('status', ['open', 'in_progress']).select('call_log_id', 'reason_code')
+  const twins = callIds.length
+    ? await conn('triage_items').whereIn('call_log_id', callIds).select('id', 'call_log_id', 'reason_code', 'status', 'created_at')
     : [];
-  return { rows, ...planQuietAgedReopen(rows.filter((r) => r.call_log_id), liveTwins) };
+  return { rows, ...planQuietAgedReopen(rows.filter((r) => r.call_log_id), twins) };
+}
+
+// A rollback cutoff must name its zone: 'Z' or '+/-hh:mm'. An offset-less
+// time would be read as UTC on the server, not Eastern, and reopen cards
+// dismissed hours before the intended window. A Date is accepted as is.
+// Throws before any read or write.
+const ZONED_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+function parseRollbackSince(since) {
+  const date = since instanceof Date ? since : (typeof since === 'string' && ZONED_ISO.test(since.trim()) ? new Date(since.trim()) : null);
+  if (!date || Number.isNaN(date.getTime())) {
+    throw new Error('since must be an ISO date-time with an explicit zone, for example 2026-11-10T03:00:00-05:00 or 2026-11-10T08:00:00Z');
+  }
+  return date;
 }
 
 // Undo the quiet_aged dismissals closed at or after `since`: status back to
@@ -2929,14 +2961,13 @@ async function readQuietAgedReopenPlan(conn, since, onlyCallIds = null) {
 // default. Reopened cards restart the 7-day clock (updated_at = now), so turn
 // the rule off or expect them to fall off again in a week.
 async function reopenQuietAged({ since, apply = false, now = new Date(), conn = db } = {}) {
-  const sinceDate = new Date(since);
-  if (!since || Number.isNaN(sinceDate.getTime())) throw new Error('reopenQuietAged needs a valid since time');
+  const sinceDate = parseRollbackSince(since);
   const plan = await readQuietAgedReopenPlan(conn, sinceDate);
   const byReason = {};
   for (const row of plan.reopen) byReason[row.reason_code] = (byReason[row.reason_code] || 0) + 1;
   const result = {
-    found: plan.reopen.length + plan.skippedHasLiveCard + plan.skippedDuplicate,
-    reopenable: plan.reopen.length, skippedHasLiveCard: plan.skippedHasLiveCard, skippedDuplicate: plan.skippedDuplicate,
+    found: plan.reopen.length + plan.skippedSuperseded + plan.skippedDuplicate,
+    reopenable: plan.reopen.length, skippedSuperseded: plan.skippedSuperseded, skippedDuplicate: plan.skippedDuplicate,
     byReason, reopened: 0,
   };
   if (!apply || !plan.reopen.length) return result;
@@ -3105,6 +3136,7 @@ module.exports = {
   planQuietAged,
   reopenQuietAged,
   planQuietAgedReopen,
+  parseRollbackSince,
   capDecisions,
   classifyTriageItem,
   hasNewAddressEvidence,
