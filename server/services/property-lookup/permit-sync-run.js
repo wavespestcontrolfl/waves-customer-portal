@@ -18,12 +18,26 @@
  *   - runs the detail step for at most RETRY_DETAIL_BUDGET_MS. Each permit's
  *     result is written as it is read, so the killed run's reads are kept
  *     and the next weekly run picks up the rest (newest permits first).
+ *
+ * The daily catch-up (`runPermitReportCatchUp`, 7:41 AM ET on the six other
+ * days) runs the report step again when Monday's did not commit. 2026-11-09:
+ * the county refused the first report download of both sections with HTTP
+ * 403, 0.7 s into the run, and nothing asked again for a week (the tables
+ * stayed at Nov 2; also 2026-10-12, a web page for both reports). One
+ * refused request now costs a day, not a week. The catch-up never runs the
+ * detail step: Monday's run did, and next Monday reads the new permits.
  */
 
 const logger = require('../logger');
+const { gateEnvValue } = require('../../config/feature-gates');
 
 const REPORT_FRESH_MS = 6 * 60 * 60 * 1000;
 const RETRY_DETAIL_BUDGET_MS = 5 * 60 * 1000;
+// Older than this, the last report sync is from a Monday before this week's.
+// A good Monday run commits by about 7:45 AM, so the catch-up at 7:41 AM on
+// the next Sunday reads it as 6 days old (fresh). After a failed Monday the
+// newest rows are 8 days old or more on Tuesday (stale).
+const CATCH_UP_STALE_MS = 6.5 * 24 * 60 * 60 * 1000;
 
 async function reportAlreadyDone(sync, nowMs) {
   try {
@@ -33,6 +47,50 @@ async function reportAlreadyDone(sync, nowMs) {
     logger.warn(`Permit sync retry: report freshness unreadable, running the report step (${err.message})`);
     return false;
   }
+}
+
+/**
+ * True when the daily catch-up has work: the gate is on and a report section
+ * has not committed since this week's Monday run. A gate that is off answers
+ * before any database read. An unreadable freshness check answers true: a
+ * second report run is harmless (same rule as the deploy-kill retry).
+ */
+async function reportCatchUpDue({ now = Date.now } = {}) {
+  if (!gateEnvValue('GATE_PERMIT_SYNC')) return false;
+  const sync = require('./manatee-permit-sync');
+  try {
+    return !(await sync.reportSyncedSince(new Date(now() - CATCH_UP_STALE_MS)));
+  } catch (err) {
+    logger.warn(`Permit sync catch-up: report freshness unreadable, running the report step (${err.message})`);
+    return true;
+  }
+}
+
+/**
+ * The catch-up body (scheduler.js runs it under the `permit-sync` lease, so
+ * job health reads the result). Freshness is read again under the lease: a
+ * tick that waited behind another instance's catch-up must not ask the
+ * county for the same reports minutes later (2026-10-26: that got HTTP 403).
+ * A failure throws, so the job stays failed until a run commits.
+ */
+async function runPermitReportCatchUp({ now = Date.now } = {}) {
+  if (!(await reportCatchUpDue({ now }))) {
+    logger.info('Permit sync catch-up: the report step already committed this week; nothing to do');
+    return { skipped: 'fresh' };
+  }
+  const sync = require('./manatee-permit-sync');
+  let res;
+  try {
+    res = await sync.syncPermits();
+  } catch (err) {
+    logger.error(`Permit sync catch-up failed: ${err.message}`);
+    throw new Error(`report sync (catch-up): ${err.message}`);
+  }
+  if (res && !res.skipped) {
+    const part = (r) => (r ? `${r.written}/${r.fetched} rows` : 'failed');
+    logger.info(`Permit sync catch-up: pool ${part(res.pool)}; construction ${part(res.construction)}`);
+  }
+  return res;
 }
 
 async function runPermitSyncSteps({ afterKill = false, now = Date.now } = {}) {
@@ -69,4 +127,11 @@ async function runPermitSyncSteps({ afterKill = false, now = Date.now } = {}) {
   if (failures.length) throw new Error(failures.join(' | '));
 }
 
-module.exports = { runPermitSyncSteps, REPORT_FRESH_MS, RETRY_DETAIL_BUDGET_MS };
+module.exports = {
+  runPermitSyncSteps,
+  reportCatchUpDue,
+  runPermitReportCatchUp,
+  REPORT_FRESH_MS,
+  RETRY_DETAIL_BUDGET_MS,
+  CATCH_UP_STALE_MS,
+};
