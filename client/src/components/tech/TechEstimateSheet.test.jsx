@@ -210,6 +210,29 @@ describe('the price request and the save request', () => {
       expect(saves()).toEqual([]);
     });
 
+    // The answer to "Update price" clears the open changes. A digit typed while the request is out would be priced
+    // with the earlier value and then dropped, and Save would open for that earlier value.
+    it('locks the fact fields while the price update is out', async () => {
+      await priceThenChange('2000');
+      let release;
+      const held = new Promise((resolve) => { release = resolve; });
+      globalThis.fetch.mockImplementationOnce(async (_url, options) => {
+        calls.push({ method: 'POST', path: '/price', body: JSON.parse(options.body) });
+        await held;
+        return { ok: true, status: 200, json: async () => ({ ...READY, facts: { ...READY.facts, homeSqFt: { value: 2000, source: 'technician' } } }) };
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Update price' }));
+      await waitFor(() => expect(screen.getByLabelText('New home size')).toBeDisabled());
+      expect(screen.getByRole('button', { name: 'Cancel the change to home size' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Change lot size' })).toBeDisabled();
+      // The save button reads "Working…" while a request is out, and it is off.
+      expect(screen.getByRole('button', { name: 'Working…' })).toBeDisabled();
+      release();
+      await waitFor(() => expect(screen.queryByLabelText('New home size')).not.toBeInTheDocument());
+      expect(priceCalls()[1].body.facts).toEqual({ homeSqFt: 2000 });
+      expect(saveButton()).toBeEnabled();
+    });
+
     it('two changes go in one update; one bad field holds both back', async () => {
       await priceThenChange('2000');
       fireEvent.click(screen.getByRole('button', { name: 'Change lot size' }));

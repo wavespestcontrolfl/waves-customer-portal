@@ -61,9 +61,11 @@ function FactRow({ name, label, unit, fact, edit, onEdit, disabled }) {
       </div>
       {edit !== undefined && (
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {/* Locked while a price or a save is out: the answer clears the open changes, so a digit typed in between
+              would be dropped without a word. */}
           <input
             aria-label={`New ${label.toLowerCase()}`} inputMode="numeric" style={{ ...s.input, marginBottom: 0, flex: 1, minWidth: 0 }}
-            value={edit} onChange={(e) => onEdit(name, e.target.value)}
+            value={edit} disabled={disabled} onChange={(e) => onEdit(name, e.target.value)}
           />
           <button type="button" style={s.small} disabled={disabled} aria-label={`Cancel the change to ${label.toLowerCase()}`} onClick={() => onEdit(name, undefined)}>Cancel</button>
         </div>
