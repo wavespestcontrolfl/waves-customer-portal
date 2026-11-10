@@ -523,6 +523,12 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'An email needs a manual review',
       expect.any(String), expect.objectContaining({ bell: true, dedupeKey: `email-operations-failed:${email.id}` }));
+    // The failure bell is written directly, not through the trigger registry, so it carries its own bell labels.
+    expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata).toMatchObject({
+      triggerKey: 'email_operational_exception', customerId, email_id: email.id,
+      area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'message_reviewed',
+      subject: { type: 'customer', id: String(customerId) },
+    });
 
     // A fourth tick never retries it again — excluded by BOTH the terminal
     // receipt AND its now-non-null operational_analysis.
