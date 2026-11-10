@@ -14,8 +14,11 @@
  * It never calls find-slots (that endpoint is an LLM parse, a paid call).
  */
 import { useEffect, useRef, useState } from 'react';
+import { addETDays, etDateString } from '../../lib/timezone';
 
 export const LOOKAHEAD_DAYS = 90;
+// Same horizon as the server's noTimeSoon (customer-move-limits.js): ET today + 7 days, inclusive.
+export const SOON_DAYS = 7;
 const LIST_SLOT_COUNT = 3;
 
 // Bodies the slot reads answer with INSTEAD of slots (200 with empty lists):
@@ -30,6 +33,17 @@ const isBrowsable = (body) => !!body && !NO_BOOKING_FLAGS.some((flag) => body[fl
 
 // A normal, bookable answer that simply has no open slot in its window.
 export const isEmptyBrowsable = (body) => isBrowsable(body) && bodySlots(body).length === 0;
+
+// True when the page has times to show but none within SOON_DAYS: the cue to tell the
+// customer to text or call. `answer` is the 14-day list body, `slots` what is on screen.
+// The API list is capped and route-ordered, so firstDayAvailability can name an earlier
+// open day the list left out; that counts as open soon.
+export function noTimeSoon(answer, slots, now = new Date()) {
+  if (!isBrowsable(answer) || !slots.length) return false;
+  const horizon = etDateString(addETDays(now, SOON_DAYS));
+  const firstDay = answer.metadata?.firstDayAvailability?.date;
+  return !slots.some((slot) => slot.date <= horizon) && !(firstDay && firstDay <= horizon);
+}
 
 // Date, then start time; one entry per slotId.
 export function sortSlots(slots) {
