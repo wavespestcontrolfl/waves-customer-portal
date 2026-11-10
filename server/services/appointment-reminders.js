@@ -1317,6 +1317,25 @@ function confirmationCoversDayBefore({ sent, dayOnly, apptTime }) {
   return Boolean(sent) && dayOnly !== true && etDateString(apptTime) <= etDateString(addETDays(new Date(), 1));
 }
 
+/** GATE_BOOKING_TEXT_COVERS_DAY_BEFORE (owner 2026-11-09). A booking path that sends its own confirmation text after the
+ *  reminder row was registered with the confirmation already marked (the call pipeline) cannot stamp the 24-hour flag in
+ *  the confirmation's own write, so it calls this once the text is known delivered. The SAME rule as deliverConfirmation
+ *  (confirmationCoversDayBefore), one fenced write: the row must still hold the time the text quoted, still be live, and
+ *  still have the 24-hour text unsent. A failed, blocked or held send passes sent false and leaves the reminder armed.
+ *  Gate off (or a gate reader missing): nothing is read or written. Returns true when a row was closed. */
+async function closeDayBeforeForBookingText({ scheduledServiceId, apptTime, sent, dayOnly = false }) {
+  if (!scheduledServiceId || !(apptTime instanceof Date) || Number.isNaN(apptTime.getTime())) return false;
+  if (!require('../config/feature-gates').bookingTextCoversDayBeforeLive?.()) return false;
+  if (!confirmationCoversDayBefore({ sent, dayOnly, apptTime })) return false;
+  const closed = await db('appointment_reminders')
+    .where({ scheduled_service_id: scheduledServiceId, appointment_time: apptTime, cancelled: false, reminder_24h_sent: false })
+    .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date(), updated_at: new Date() });
+  if (Number(closed) > 0) {
+    logger.info(`[appt-remind] Booking text for ${scheduledServiceId} covers the day-before notice - 24h reminder closed`);
+  }
+  return Number(closed) > 0;
+}
+
 /** After a render: when the send was decided day-only, keep the day marker only if the day row actually rendered. The
  *  state is also what the email leg reads, so a text that fell back to the window copy is never followed by a day email. */
 function noteDayRender(meta, state, rendered) {
@@ -7455,6 +7474,8 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
     return { sent: false, reason: 'error' };
   }
 }
+// GATE_BOOKING_TEXT_COVERS_DAY_BEFORE: the call pipeline closes the 24h reminder after its own confirmation text (see the function).
+AppointmentReminders.closeDayBeforeForBookingText = closeDayBeforeForBookingText;
 AppointmentReminders.sendConfirmationToServiceContact = sendConfirmationToServiceContact;
 AppointmentReminders.revalidateDelayedDaySend = revalidateDelayedDaySend;
 // GATE_DAY_ONLY_PROMISE part B2: the move-notice senders (services/day-only-move-notice.js) build their day fields with the same helper.

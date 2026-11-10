@@ -256,6 +256,7 @@
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
  *   GATE_PORTAL_CARD_REMOVAL_HOLD_NOTICE=true (portal GET /api/billing/cards stamps holdsAppointment on a card holding a future secured visit, so Remove opens the call-us disclaimer; removal itself is never blocked — off = field absent, payload unchanged)
  *   GATE_PAYMENT_METHOD_CHANGE_EMAILS=true (customer lifecycle emails for Auto Pay turned OFF and saved method REMOVED — portal, and Stripe-dashboard detaches via webhook)
+ *   GATE_BOOKING_TEXT_COVERS_DAY_BEFORE=true (owner 2026-11-09: changes which texts a customer gets. A customer who books a visit for the next day by phone got the booking confirmation text and, 3 to 12 minutes later, the 24-hour "your visit is tomorrow" reminder (5 call-booked visits since 2026-10-26): the call pipeline registers the reminder row with the confirmation already marked and sends its own confirmation text afterwards. On, a call-booking confirmation text that was really delivered (not blocked, not held for quiet hours or a move) stands in for the 24-hour reminder when the visit is today or tomorrow in ET: the rule the office-booked and self-booked confirmations already apply (confirmationCoversDayBefore), written as one fenced update on the reminder row (the appointment time must still match and the 24-hour flag still be unsent). A failed, blocked or held text leaves the 24-hour reminder armed. Read at call time via bookingTextCoversDayBeforeLive(), strict 'true', dark by default; off = the call pipeline behaves exactly as before. Sends nothing new.)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
  *   GATE_VOICE_RELAY_EVAL=true  (weekly voice relay conversation eval)
@@ -5193,6 +5194,9 @@ const gates = {
   // warranty13692CheckLive().
   warranty13692Check: gateEnvValue('GATE_WARRANTY_13692_CHECK'),
 
+  // GATE_BOOKING_TEXT_COVERS_DAY_BEFORE (a delivered call-booking confirmation text stands in for the 24-hour reminder when the visit is today or tomorrow, dark). Boot-log entry only; the call-time reader is bookingTextCoversDayBeforeLive().
+  bookingTextCoversDayBefore: process.env.GATE_BOOKING_TEXT_COVERS_DAY_BEFORE === 'true',
+
   // Mark accepted sends the FDACS-13692 consumer notice (owner 2026-10-26). Ships DARK.
   // This entry is for logGateStatus only: estimate-consumer-notice.js reads
   // GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND at call time via manualAcceptConsumerNoticeSendLive().
@@ -7339,6 +7343,12 @@ function warranty13692CheckLive() {
   return gateEnvValue('GATE_WARRANTY_13692_CHECK');
 }
 
+// GATE_BOOKING_TEXT_COVERS_DAY_BEFORE read at CALL time (so a flip needs no redeploy); strict 'true', dark (owner 2026-11-09).
+// On, a delivered call-booking confirmation text stands in for the 24-hour reminder of a visit booked for today or tomorrow. Off = unchanged.
+function bookingTextCoversDayBeforeLive() {
+  return process.env.GATE_BOOKING_TEXT_COVERS_DAY_BEFORE === 'true';
+}
+
 // GATE_ESTIMATE_CONSUMER_NOTICE read at CALL time (same 1/true/on convention as
 // gateEnvValue). Owner 2026-10-25, Rule 5E-14.105(1): the customer signs the
 // FDACS-13692 consumer notice on the estimate page before accepting a termite
@@ -9056,6 +9066,8 @@ module.exports.lawnWateringRuleLive = lawnWateringRuleLive;
 module.exports.lawnWateringForecastLive = lawnWateringForecastLive;
 module.exports.lawnWateringTextForecastLive = lawnWateringTextForecastLive;
 module.exports.warranty13692CheckLive = warranty13692CheckLive;
+// GATE_BOOKING_TEXT_COVERS_DAY_BEFORE reader, on its own line so gate PRs never conflict.
+module.exports.bookingTextCoversDayBeforeLive = bookingTextCoversDayBeforeLive;
 module.exports.lawnExpectationsLive = lawnExpectationsLive;
 module.exports.lawnCoverageHideDefaultZonesLive = lawnCoverageHideDefaultZonesLive;
 module.exports.lawnProgramDetailLive = lawnProgramDetailLive;

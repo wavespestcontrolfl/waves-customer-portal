@@ -5167,6 +5167,21 @@ async function callbackSpokenNumberSuggested({ call, extracted, customerLinkOver
   return true;
 }
 
+// GATE_BOOKING_TEXT_COVERS_DAY_BEFORE: this pipeline registers the reminder row with the confirmation already marked
+// (sendConfirmation:false) and sends its own text afterwards, so a delivered text for a visit booked for today or tomorrow
+// left the 24-hour "is tomorrow" reminder armed (it went out 3 to 12 minutes later). Called only after the primary text was
+// delivered; the shared rule and the fenced write live in appointment-reminders. Best-effort: never throws into the pass.
+async function closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate, windowStart }) {
+  try {
+    if (!scheduledServiceId || !scheduledDate) return false;
+    const apptTime = parseETDateTime(`${String(scheduledDate).slice(0, 10)}T${windowStart ? String(windowStart).slice(0, 5) : '08:00'}`);
+    return await require('./appointment-reminders').closeDayBeforeForBookingText({ scheduledServiceId, apptTime, sent: true, dayOnly: false });
+  } catch (err) {
+    logger.warn(`[call-proc] day-before close after the booking text failed for visit ${scheduledServiceId}: ${err.code || err.name || 'error'}`);
+    return false;
+  }
+}
+
 async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false, callbackNumberHoldActive = false, disclaimedPhone = null, callLogId = null }) {
   // Codex round-2 finding #4 (PR #4807), tightened round 3: the AUTHORITATIVE
   // stamp for the two main call-booking paths (fresh insert, idempotency-
@@ -23167,6 +23182,7 @@ const CallRecordingProcessor = {
                     };
                   } else {
                     logger.info(`[call-proc] Appointment SMS sent to customer ${customerId}`);
+                    await closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog });
                     appointmentResult = { smsSent: true, scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog };
                   }
                   // Gated fan-out to the OTHER appointment contacts: the same
@@ -26104,6 +26120,7 @@ CallRecordingProcessor._test = {
   extractCallDataV2,
   CALL_EXTRACTION_V1_BACKUP_ROUTE,
   callTimeETString,
+  closeDayBeforeAfterBookingText,
   CALL_EXTRACTION_ROUTE,
   CALL_EXTRACTION_MODEL_FOR,
   v1BackupTimingsJson,
