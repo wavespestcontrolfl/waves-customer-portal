@@ -7,7 +7,8 @@
  * completion-record-invariants.js included); this module only (1) gives each
  * a common finding shape, (2) runs them together once a day, and (3) emails
  * contact@ when — and only when — something is off. It defines NO predicates
- * of its own, writes NO rows except the ops-email send marker, and never
+ * of its own (one exception: new_plan_without_welcome, a read-only SQL check
+ * written here because no earlier detector covers it), writes NO rows except the ops-email send marker, and never
  * talks to a customer. Two of the checks
  * (`churned_live_state`, `waveguard_alignment_drift`) promote CLI audits that
  * were manual-only until now; the alignment scan is invoked with no `onRepair`,
@@ -41,9 +42,86 @@ const SEND_MARKER_KEY = 'lead-to-cash-invariants';
 const TWENTY_HOURS_MS = 20 * 60 * 60 * 1000;
 const SAMPLE_IDS = 25;
 const CLOSEOUT_VISIT_CAP = 150;
+// new_plan_without_welcome: a first plan is judged once it is this old (the
+// welcome is queued 60 min after booking, so 3 h is a wide grace) and until it
+// is this many days old (a miss older than that is the owner's backlog, not a
+// fresh fault).
+const NEW_PLAN_WINDOW_DAYS = 14;
+const NEW_PLAN_GRACE_HOURS = 3;
+// A Mark Won estimate is linked to a plan by source_estimate_id; when staff
+// book the visit before the win lands (or never stamp the link), the win must
+// have landed within this many days of the plan start to count.
+const MARK_WON_LINK_DAYS = 7;
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 const sweepEmail = () => process.env.LEAD_TO_CASH_SWEEP_EMAIL || 'contact@wavespestcontrol.com';
 const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcontrol.com';
+
+// First-plan customers who never got the new-customer welcome. SQL twin of the
+// welcome rule (new-recurring-welcome-sms.js isNewRecurringSignupCandidate),
+// read-only. Plan = a recurring root (is_recurring, no parent); it started when
+// its earliest follow-up row was created, else when the root was. A visit made
+// recurring weeks later keeps its old created_at but its follow-ups are new.
+// Only the customer's EARLIEST plan is judged. By-design silent cases are
+// excluded: Mark Won (estimates.price_locked_by = 'manual_accept' — the dialog
+// promises no text), commercial-only plans (customers.waveguard_tier =
+// 'Commercial', stamped by the converter's commercialOnlyRecurring), customers
+// with no phone and no email (sendNewRecurringWelcome returns no_contact), and
+// a cancelled plan root. Known false-alarm class not excluded: an estimate that
+// the converter treated as one-time only (suppressRecurringConversion) but a
+// recurring visit was booked for by hand — no column tells them apart.
+const NEW_PLAN_WITHOUT_WELCOME_SQL = `
+  WITH plans AS (
+    SELECT r.id AS root_id, r.customer_id, r.status AS root_status, r.source_estimate_id,
+           COALESCE(MIN(f.created_at), r.created_at) AS plan_start
+      FROM scheduled_services r
+      LEFT JOIN scheduled_services f ON f.recurring_parent_id = r.id
+     WHERE r.is_recurring = true AND r.recurring_parent_id IS NULL AND r.customer_id IS NOT NULL
+     GROUP BY r.id
+  ), first_plan AS (
+    SELECT DISTINCT ON (customer_id) customer_id, root_id, root_status, source_estimate_id, plan_start
+      FROM plans
+     ORDER BY customer_id, plan_start, root_id
+  )
+  SELECT p.customer_id
+    FROM first_plan p
+    JOIN customers c ON c.id = p.customer_id
+   WHERE p.plan_start >= ? AND p.plan_start <= ?
+     AND p.root_status IS DISTINCT FROM 'cancelled'
+     AND c.deleted_at IS NULL
+     AND (COALESCE(BTRIM(c.phone), '') <> '' OR COALESCE(BTRIM(c.email), '') <> '')
+     AND c.waveguard_tier IS DISTINCT FROM 'Commercial'
+     AND NOT EXISTS (
+       SELECT 1 FROM sms_sequences q WHERE q.customer_id = p.customer_id AND q.sequence_type = ?
+     )
+     AND NOT EXISTS (
+       SELECT 1 FROM scheduled_services v
+        WHERE v.customer_id = p.customer_id AND v.status IN ('completed', 'on_site')
+          AND v.scheduled_date < (p.plan_start AT TIME ZONE 'America/New_York')::date - ?::int
+     )
+     AND NOT EXISTS (
+       SELECT 1 FROM service_records sr
+        WHERE sr.customer_id = p.customer_id AND sr.status IS DISTINCT FROM 'cancelled'
+          AND sr.service_date < (p.plan_start AT TIME ZONE 'America/New_York')::date - ?::int
+     )
+     AND NOT EXISTS (
+       SELECT 1 FROM estimates e
+        WHERE e.price_locked_by = 'manual_accept'
+          AND (e.id = p.source_estimate_id
+               OR (e.customer_id = p.customer_id
+                   AND e.accepted_at BETWEEN p.plan_start - (?::int * INTERVAL '1 day')
+                                         AND p.plan_start + (?::int * INTERVAL '1 day')))
+     )
+   ORDER BY p.plan_start, p.customer_id`;
+
+async function newPlanWithoutWelcomeCustomerIds(now, conn = db) {
+  const { SEQUENCE_TYPE, NEW_CUSTOMER_HISTORY_DAYS } = require('./new-recurring-welcome-sms');
+  const since = new Date(now.getTime() - NEW_PLAN_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  const until = new Date(now.getTime() - NEW_PLAN_GRACE_HOURS * 60 * 60 * 1000);
+  const res = await conn.raw(NEW_PLAN_WITHOUT_WELCOME_SQL, [
+    since, until, SEQUENCE_TYPE, NEW_CUSTOMER_HISTORY_DAYS, NEW_CUSTOMER_HISTORY_DAYS, MARK_WON_LINK_DAYS, MARK_WON_LINK_DAYS,
+  ]);
+  return (Array.isArray(res?.rows) ? res.rows : []).map((r) => r.customer_id);
+}
 
 // ---------------------------------------------------------------------------
 // Registry. Each detector returns { count, ids, detail? } — count is the
@@ -248,6 +326,16 @@ const DETECTORS = Object.freeze([
       return { count: ids.length, ids };
     },
   },
+  {
+    key: 'new_plan_without_welcome',
+    label: 'New customers whose first recurring plan started 3 h to 14 days ago and who have no welcome text on record',
+    href: '/admin/customers',
+    provenance: 'owner 2026-11-09 — 24 first-plan customers from late July to Oct 24 had no new_customer_welcome row; 8 had no known cause',
+    async run({ now }) {
+      const ids = await newPlanWithoutWelcomeCustomerIds(now);
+      return { count: ids.length, ids, detail: { windowDays: NEW_PLAN_WINDOW_DAYS, graceHours: NEW_PLAN_GRACE_HOURS } };
+    },
+  },
   // History-wide completion ↔ report record invariants (integrity audit
   // 2026-09-02). closeout_failed_facts above reads yesterday only and skips
   // `pending` facts, so a missing record / token / tracker stamp / customer
@@ -401,5 +489,5 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
 module.exports = {
   runLeadToCashInvariantSweep,
   DETECTORS,
-  _private: { runDetectors, composeReport, sentRecently, stampSendMarker, SEND_MARKER_KEY, SAMPLE_IDS, CLOSEOUT_VISIT_CAP },
+  _private: { runDetectors, composeReport, newPlanWithoutWelcomeCustomerIds, sentRecently, stampSendMarker, SEND_MARKER_KEY, SAMPLE_IDS, CLOSEOUT_VISIT_CAP },
 };
