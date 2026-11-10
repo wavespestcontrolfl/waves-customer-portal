@@ -104,6 +104,11 @@ const EXP_SKEW_MS = 60 * 1000;
 // offers, whose canonical string is unchanged.
 const CAPACITY_OFFER_POLICY = 'capacity_2026_09_09';
 
+// The estimate page's one make-room hour (GATE_BOOKING_MAKE_ROOM on, owner 2026-11-09): an hour a regular stop holds,
+// offered because that stop can move later the same day. It is signed under its own tag, so a normal or hand-made
+// slotId can never reach reserveSlot's make-room path, and a make-room slotId fails the normal check.
+const MAKE_ROOM_OFFER_POLICY = 'make_room_2026_11_09';
+
 // Same mechanism, for /book self-serve offers that may be inserted BETWEEN a
 // day's existing stops (owner 2026-09-28, PR #5231 round 2): a gate flip
 // (rollback, mixed rolling deploy) during the 45-minute offer lifetime can
@@ -332,6 +337,7 @@ function generateConfirmationCode() {
 
 module.exports = {
   CAPACITY_OFFER_POLICY,
+  MAKE_ROOM_OFFER_POLICY,
   BOOK_INSERTION_OFFER_POLICY,
   bookInsertionOfferPolicy,
   BOOK_ARRIVAL_GRACE_OFFER_POLICY,
