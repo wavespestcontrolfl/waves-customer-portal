@@ -47,7 +47,7 @@ function load() {
 // it resolves `rows`, and .del() resolves `delCount` for the prune call.
 function makeChain(rows, delCount = 0, { insertError = null, first = null, selectError = null } = {}) {
   const chain = {};
-  for (const m of ['where', 'andWhere', 'whereNot', 'groupBy', 'select', 'count', 'sum', 'max', 'countDistinct']) {
+  for (const m of ['where', 'andWhere', 'whereNot', 'whereRaw', 'groupBy', 'select', 'count', 'sum', 'max', 'countDistinct']) {
     chain[m] = jest.fn(() => chain);
   }
   chain.del = jest.fn(() => Promise.resolve(delCount));
@@ -248,6 +248,78 @@ describe('llm-dispatch-metrics', () => {
       const row = mockInsert.mock.calls[0][0];
       expect(row.ok).toBe(false);
       expect(row.provider).toBeNull();
+    });
+  });
+
+  describe('max_runner workload (Max-plan runner jobs)', () => {
+    const ORIGINAL_WORKLOAD = process.env.AGENT_CONTEXT_WORKLOAD;
+    afterEach(() => {
+      if (ORIGINAL_WORKLOAD === undefined) delete process.env.AGENT_CONTEXT_WORKLOAD; else process.env.AGENT_CONTEXT_WORKLOAD = ORIGINAL_WORKLOAD;
+    });
+
+    async function recordedWorkloads() {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      process.env.GATE_LLM_CALL_LEDGER = 'true';
+      // metrics and context must come from the SAME module registry (ALS store)
+      let metrics; let ctx;
+      jest.isolateModules(() => {
+        metrics = require('../services/llm-dispatch-metrics');
+        ctx = require('../services/agent-control/context');
+      });
+      const { recordDispatch, recordCall } = metrics;
+      const out = {};
+      const record = async (label) => {
+        mockInsert.mockClear();
+        recordDispatch(MODELS.TEXT_POLICIES.report, { ok: false, reason: 'no_key', failures: [{ provider: 'openai', model: 'm', reason: 'no_key' }] });
+        await recordCall({ provider: 'openai', requestedModel: 'm', ok: false, errorCode: 'no_key' });
+        const rows = mockInsert.mock.calls.map((c) => c[0]);
+        out[label] = rows.map((r) => ({ kind: r.row_kind, workload: r.workload, policy: r.policy }));
+      };
+      process.env.AGENT_CONTEXT_WORKLOAD = 'max_runner';
+      await record('env');
+      await ctx.withWorkload('replay', () => record('replay'));
+      await ctx.runInLane('pest_id', () => record('lane'));
+      process.env.AGENT_CONTEXT_WORKLOAD = 'bogus';
+      await record('unknown');
+      return out;
+    }
+
+    it('stamps chain and call rows with the process default, lets a scope win, ignores unknown values', async () => {
+      const out = await recordedWorkloads();
+      expect(out.env.length).toBeGreaterThan(0);
+      expect(out.env.filter((r) => r.kind === 'chain')).toHaveLength(1);
+      expect(out.env.every((r) => r.workload === 'max_runner')).toBe(true);
+      // max_runner is not replay: no :replay suffix on the policy label
+      expect(out.env.find((r) => r.kind === 'chain').policy).toBe('report');
+      expect(out.replay.every((r) => r.workload === 'replay')).toBe(true);
+      expect(out.lane.every((r) => r.workload === 'max_runner')).toBe(true);
+      expect(out.unknown.every((r) => r.workload === null)).toBe(true);
+    });
+
+    it('loadStats leaves max_runner chains out of the digest and keeps NULL-workload rows in', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      mockEmailSend.mockResolvedValue({ ok: true });
+      const stats = makeChain([{ policy: 'fastStructured', total: '58', fallbacks: '8', failed: '0' }]);
+      mockDb
+        .mockReturnValueOnce(makeChain([], 0))
+        .mockReturnValueOnce(stats)
+        .mockReturnValueOnce(makeChain([]))
+        .mockReturnValueOnce(makeChain([]))
+        .mockReturnValueOnce(makeChain([], 0, { first: { n: '24' } }))
+        .mockReturnValueOnce(makeChain([], 0, { first: { n: '168' } }));
+      const { runLlmDispatchDigest } = load();
+      const out = await runLlmDispatchDigest();
+      expect(stats.whereRaw).toHaveBeenCalledWith('workload IS DISTINCT FROM ?', ['max_runner']);
+      expect(out.exceptions.map((e) => e.kind)).not.toContain('fallback_rate');
+    });
+
+    it('reports a real production fallback rate once the runner chains are out of the counts', () => {
+      const { detectExceptions } = load();
+      // 11-09: 168 runner fallbacks + 58 production chains, 8 of them fallbacks.
+      const quiet = detectExceptions([{ policy: 'fastStructured', total: 58, fallbacks: 8, failed: 0 }], []);
+      expect(quiet.filter((e) => e.kind === 'fallback_rate')).toHaveLength(0);
+      const real = detectExceptions([{ policy: 'fastStructured', total: 58, fallbacks: 15, failed: 0 }], []);
+      expect(real.find((e) => e.kind === 'fallback_rate').detail).toMatch(/answered 15 of 58 calls/);
     });
   });
 

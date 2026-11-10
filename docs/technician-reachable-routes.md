@@ -10,7 +10,7 @@ A route being listed as reachable means a technician may call it; routers still 
 
 Routers marked "router exemption gate" (admin-inventory, admin-estimates, admin-invoices, admin-drafts, admin-review-requests, …) run a router-level function that admits a technician only on the router's own named exemptions and otherwise requires admin; the static census cannot evaluate that condition, so their routes are listed with the flag and the allow-list match, not as open or closed.
 
-Allow-list buckets: session, own-visits, own-time, own-texts, promises, documents, pay-growth, knowledge-read, equipment-read, own-truck.
+Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promises, documents, pay-growth, knowledge-read, equipment-read, own-truck.
 
 ## Reachable by a technician after the flip
 
@@ -294,6 +294,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/tech/answers/:kind` | tech-answers |
 | POST | `/api/tech/dictation` | tech-dictation |
 | GET | `/api/tech/dictation/availability` | tech-dictation |
+| POST | `/api/tech/estimates/price` | tech-estimates |
+| GET | `/api/tech/estimates/setup` | tech-estimates |
 | POST | `/api/tech/field-lead` | tech-field-lead |
 | GET | `/api/tech/knowledge/lookup` | tech-knowledge |
 | POST | `/api/tech/knowledge/query` | tech-knowledge |

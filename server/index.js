@@ -1191,6 +1191,8 @@ app.use('/api/admin/pricing-reality-check', require('./routes/admin-pricing-real
 app.use('/api/admin/rate-review', require('./routes/admin-rate-review'));
 app.use('/api/admin/route-scorecard', require('./routes/admin-route-scorecard'));
 app.use('/api/tech/field-lead', require('./routes/tech-field-lead'));
+// Technician estimate tool (GATE_TECH_ESTIMATES, dark): every path answers 404 {enabled:false} while the gate or the technician's switch is off.
+app.use('/api/tech/estimates', require('./routes/tech-estimates'));
 app.use('/api/tech/lawn-diagnostic', require('./routes/tech-lawn-diagnostic'));
 app.use('/api/tech/social', require('./routes/tech-social'));
 app.use('/api/notification-prefs', require('./routes/notification-prefs'));

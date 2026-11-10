@@ -230,5 +230,7 @@ module.exports = {
   loadRadiusMeters,
   checkCustomerArrival,
   checkProspectLocation,
+  // The place rule alone, for the technician estimate tool (tech-estimate-price.js): the same house the flag proves.
+  visitedPremise,
   normalizeProspect,
 };
