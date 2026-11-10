@@ -11,8 +11,9 @@
 //     node ops/agents/waves-ai-replay.js [--days=30] [--limit=2000] [--json] [--out=<dir outside the repo>]
 //
 // stdout: counts and rates only, never message text — overall, by intent and by prompt version (unsafe
-// rate, as-good-or-better rate, average judge score, could-send rate), the links and actions the drafts
-// asked for, and how many cancel / refund / charge requests the drafts handed to the office.
+// rate, as-good-or-better rate, average judge score, could-send rate), each judge's drafts apart (the
+// rates count one judge's drafts only), the links and actions the drafts asked for, and how many cancel /
+// refund / charge requests the drafts handed to the office.
 // --out writes <dir>/cases.jsonl: one redacted case per draft (customer text, Waves AI draft, the
 // person's reply, verdict, actions) for a side-by-side read. Customer text, so the folder must be
 // outside the repository (the session scratchpad); delete it when done.
@@ -30,7 +31,7 @@ const fs = require('fs');
 const path = require('path');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
-const { summarize, caseOf } = require(path.join(REPO_ROOT, 'server', 'services', 'eval', 'waves-ai-replay'));
+const { summarize, caseOf, FIRST_JUDGE } = require(path.join(REPO_ROOT, 'server', 'services', 'eval', 'waves-ai-replay'));
 
 const DRAFTER = 'house_voice';
 
@@ -77,8 +78,23 @@ function assertOutsideRepo(dir) {
   return resolved;
 }
 
+// Writes <dir>/cases.jsonl as a new file, never through a link. A cases.jsonl that is already there as a
+// symbolic link could point back into the repository while the folder itself passes the check above, so
+// anything that is not a plain file is refused; a plain file from an earlier run is removed, and the new
+// one is created exclusively (the open fails if a link appears in between) and readable by the owner only.
+function writeCaseFile(dir, text) {
+  assertOutsideRepo(dir);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'cases.jsonl');
+  const existing = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (existing && !existing.isFile()) throw usageError(`${file} is a link or a folder, not a plain file: remove it or pick another --out folder`);
+  if (existing) fs.unlinkSync(file);
+  fs.writeFileSync(file, text, { flag: 'wx', mode: 0o600 });
+  return file;
+}
+
 async function loadRows(dbi, { since, limit, withText }) {
-  const cols = ['d.id', 'd.created_at', 'd.intent', 'd.prompt_version', 'd.intended_actions', 'j.verdict', 'j.scores', 'j.could_send', 'j.human_replied'];
+  const cols = ['d.id', 'd.created_at', 'd.intent', 'd.prompt_version', 'd.intended_actions', 'j.verdict', 'j.judge_version', 'j.scores', 'j.could_send', 'j.human_replied'];
   // The restricted-request count reads the customer's text in memory; it is printed only as a count.
   cols.push('d.inbound_message');
   if (withText) cols.push('d.draft_response', 'j.human_reply_text', 'c.first_name', 'c.last_name');
@@ -103,11 +119,26 @@ function line(label, g) {
     + `  score ${g.avg_overall == null ? '  -' : String(g.avg_overall).padStart(4)}${g.small_sample ? '  (small sample)' : ''}`;
 }
 
+const judgeName = (version) => (version === FIRST_JUDGE ? 'first judge (before j2)' : `judge ${version}`);
+const theJudge = (version) => (version === FIRST_JUDGE ? `the ${judgeName(version)}` : judgeName(version));
+const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+// The rates count one judge's drafts (summarize): say which, and that another judge's drafts are apart.
+function judgeNote(s) {
+  if (!s.judge_version) return 'No draft in this window has a judge verdict yet, so there are no rates.';
+  const others = s.by_judge_version.filter((g) => g.key !== s.judge_version);
+  const apart = others.length
+    ? ` Not in them: ${others.map((g) => `${count(g.graded, 'draft', 'drafts')} graded by ${theJudge(g.key)}`).join(', ')} (see "By judge"). Judges use different rules, so one rate never mixes their drafts.`
+    : '';
+  return `The graded, unsafe, as-good, could-send and score columns count only the drafts graded by ${theJudge(s.judge_version)}.${apart}`;
+}
+
 function formatReport(s, { days, truncated }) {
   const out = [
     `Waves AI (SMS house-voice agent) on real customer texts, last ${days} days${truncated ? ' (row limit reached: raise --limit)' : ''}`,
     'unsafe = invented fact, price quote or unsafe commitment, over graded drafts. as-good = judged equal to or better than the person.',
-    'could-send = the person could have sent the AI draft as is or with an edit (stricter judge only).',
+    'could-send = the person could have sent the AI draft as is or with an edit (judge j2 only).',
+    judgeNote(s),
     '',
     line('all texts', s.overall),
     '',
@@ -117,10 +148,15 @@ function formatReport(s, { days, truncated }) {
     'By drafter version:',
     ...s.by_prompt_version.map((g) => line(g.key, g)),
     '',
+    'By judge (drafts = the drafts that judge saw):',
+    ...(s.by_judge_version.length ? s.by_judge_version.map((g) => line(judgeName(g.key), g)) : ['  none']),
+    '',
     'Links and actions the drafts asked for (drafts per action):',
     ...(s.actions.length ? s.actions.map((a) => `  ${a.action.padEnd(40)} ${String(a.drafts).padStart(5)}`) : ['  none']),
     '',
     `Cancel / refund / charge requests: ${s.restricted.requests}  handed to the office: ${s.restricted.escalated}  not handed over: ${s.restricted.not_escalated}`,
+    `  A request = the text asks for it in plain words ("please cancel", "I want a refund", "charged twice"), or the draft filed a cancel_request.`,
+    `  ${count(s.restricted.mentions_only, 'more text only names', 'more texts only name')} one of these (thanks, a status question, other wording). Not counted above: read them in cases.jsonl (restricted = mention).`,
   ];
   return out.join('\n');
 }
@@ -132,16 +168,14 @@ async function run({ dbi, argv, now = new Date(), log = console.log }) {
   const summary = summarize(rows, { since: since.toISOString(), until: now.toISOString() });
   const truncated = rows.length >= args.limit;
   if (args.out) {
-    fs.mkdirSync(args.out, { recursive: true });
-    const file = path.join(args.out, 'cases.jsonl');
-    fs.writeFileSync(file, rows.map((r) => JSON.stringify(caseOf(r))).join('\n') + (rows.length ? '\n' : ''), { mode: 0o600 });
+    const file = writeCaseFile(args.out, rows.map((r) => JSON.stringify(caseOf(r))).join('\n') + (rows.length ? '\n' : ''));
     console.error(`wrote ${rows.length} redacted cases to ${file} — customer text: delete the folder when done`);
   }
   log(args.json ? JSON.stringify({ ...summary, days: args.days, truncated }, null, 2) : formatReport(summary, { days: args.days, truncated }));
   return summary;
 }
 
-module.exports = { parseArgs, assertOutsideRepo, formatReport, run };
+module.exports = { parseArgs, assertOutsideRepo, writeCaseFile, formatReport, run };
 
 if (require.main === module) {
   const db = require(path.join(REPO_ROOT, 'server', 'models', 'db'));
