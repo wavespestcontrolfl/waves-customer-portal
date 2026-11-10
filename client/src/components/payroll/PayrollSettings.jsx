@@ -15,6 +15,7 @@ import { etDateString } from '../../lib/timezone';
 import { dayLabel, dollars } from './payrollFormat';
 import PayRuns from './PayRuns';
 import PayrollForms from './PayrollForms';
+import { RateStepsButton } from './RateSteps';
 import { SimpleIraButton, SimpleSummary } from './SimpleIra';
 
 // Staff page, Payroll tab (owner 2026-10-25, basic payroll layer 1b-2a). An admin
@@ -457,6 +458,7 @@ export default function PayrollSettings() {
                 <Button onClick={() => setDialog({ kind: 'w4', tech })}>Enter W-4</Button>
                 <Button variant="secondary" onClick={() => setDialog({ kind: 'history', tech })}>History</Button>
                 <SimpleIraButton call={call} technician={tech} onSaved={saved} />
+                <RateStepsButton call={call} technician={tech} onSaved={saved} />
                 <Button variant="secondary" onClick={() => setDialog({ kind: 'pay', tech })}>Pay method</Button>
               </div>
             </TD>

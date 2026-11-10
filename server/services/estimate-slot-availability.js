@@ -2599,7 +2599,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   });
   // GATE_BOOKING_MAKE_ROOM: the taken hours this customer could have, measured against this same final pool.
   startMakeRoomCheck(makeRoomModeFor(userOpts), {
-    estimateId, pool: routeChecked, coords, durationMinutes: serviceProfile.durationMinutes, dateFrom, dateTo,
+    estimateId, pool: routeChecked, coords, durationMinutes: serviceProfile.durationMinutes, candidateExpectedMinutes, dateFrom, dateTo,
     // The page's capability rule (filterCollidingSlots) for the technician whose stop would move.
     capabilityRows: serviceProfile.reservationServiceMix ? capabilityRowsFor(serviceProfile.reservationServiceMix) : null,
     // The zone the page passes find-time, for the self-serve drive cap's route-day lift.

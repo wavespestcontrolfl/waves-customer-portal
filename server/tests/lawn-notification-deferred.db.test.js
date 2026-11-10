@@ -126,6 +126,32 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
     return { result, queued, sms };
   }
 
+  // Two sends that both read the assessment while it is unclaimed. Left to run
+  // freely, their claims land in either order, so the second waits at its
+  // guard, right before its claim, until the test lets it go: 'during' the
+  // first send's dispatch, while the first still holds the claim, or 'after'
+  // the first send has returned.
+  async function sendTwice(assessmentId, secondClaims) {
+    let secondHasRead;
+    let letSecondClaim;
+    const read = new Promise((resolve) => { secondHasRead = resolve; });
+    const mayClaim = new Promise((resolve) => { letSecondClaim = resolve; });
+    const second = LawnIntel.sendAssessmentNotification(assessmentId, {
+      beforeSend: async () => { secondHasRead(); await mayClaim; },
+    });
+    if (secondClaims === 'during') {
+      const dispatch = mockNotify.getMockImplementation();
+      mockNotify.mockImplementationOnce(async (...args) => {
+        letSecondClaim();
+        await second;
+        return dispatch(...args);
+      });
+    }
+    const first = await LawnIntel.sendAssessmentNotification(assessmentId, { beforeSend: () => read });
+    letSecondClaim();
+    return [first, await second];
+  }
+
   function replayDeps() {
     return {
       knex: fixture.knex,
@@ -182,11 +208,10 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
     mockNotify.mockImplementation((...args) => RealNotificationDispatcher.notify(...args));
     jest.useFakeTimers().setSystemTime(new Date('2026-09-12T12:00:00Z')); // 08:00 ET
     try {
-      const results = await Promise.all([
-        LawnIntel.sendAssessmentNotification(seeded.assessment.id, { beforeSend: jest.fn() }),
-        LawnIntel.sendAssessmentNotification(seeded.assessment.id, { beforeSend: jest.fn() }),
-      ]);
-      expect(results.filter((result) => result?.notificationQueued)).toHaveLength(1);
+      // A second send whose claim lands while the first still holds it is
+      // fenced before the dispatcher.
+      const results = await sendTwice(seeded.assessment.id, 'during');
+      expect(results).toEqual([expect.objectContaining({ notificationQueued: true }), null]);
       expect(mockNotify).toHaveBeenCalledTimes(1);
       expect(mockSendCustomerMessage).not.toHaveBeenCalled();
       const rows = await fixture.knex('sms_log').where({ customer_id: seeded.customerId });
@@ -218,6 +243,26 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  test('a send whose claim lands after another send deferred the hold joins the same queue row', async () => {
+    // The deferral hands the claim back together with its queue row, so a send
+    // that read the assessment earlier may still claim and dispatch again.
+    // Both sends then report the hold as queued. One row is the invariant, not
+    // one caller: the replay of that row re-claims before any text goes out.
+    const seeded = await seed();
+    mockNotify.mockResolvedValue(dispatcherResult(holdSms()));
+    const results = await sendTwice(seeded.assessment.id, 'after');
+    expect(results).toEqual([
+      expect.objectContaining({ notificationQueued: true }), expect.objectContaining({ notificationQueued: true }),
+    ]);
+    expect(mockNotify).toHaveBeenCalledTimes(2);
+    const rows = await fixture.knex('sms_log').where({ customer_id: seeded.customerId });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: 'scheduled', message_body: '' });
+    expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
+      .toMatchObject({ notification_sent: false, notification_sent_at: null });
+    expect((await runs.loadRun(seeded.assessment.id, fixture.knex)).reconciliation).toEqual({});
   });
 
   test('registry replay rechecks service-complete preferences and waits until customer quiet hours end', async () => {

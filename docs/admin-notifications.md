@@ -604,7 +604,8 @@ first (`tech_estimates.office_first_reasons` is not empty), after the save commi
 key, so the estimate never rings twice and no `RERING` entry is owed). The why names the first reason in a fixed order (a changed
 fact, a one-time job over the limit, an engine line to review, a possible current customer); the full list is in `detail`. The
 relevance sweep (class `tech_estimate_office_first`) closes the row once the estimate is sent, accepted, declined, expired, archived
-or gone. A failure to raise is logged with ids only and never fails the technician's create. It sends nothing to a customer.
+or gone. A send that is only queued, in flight or failed keeps the row open, because the close is final. A failure to raise is
+logged with ids only and never fails the technician's create. It sends nothing to a customer.
 
 ## 7. How to raise one
 
