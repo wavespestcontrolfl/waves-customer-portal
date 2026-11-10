@@ -283,7 +283,7 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     expect([closedByVisit.done_by, closedByVisit.resolution]).toEqual(['relevance', 'A visit was booked']);
   });
 
-  test('an estimator call bell with no call customer and no lead of its own follows the lead the call is stamped with (metadata lead_id or relay_lead_id); a deleted stamped lead leaves it open', async () => {
+  test('an estimator call bell with no call customer and no lead of its own follows the lead the call is stamped with (metadata lead_id or relay_lead_id) or that carries the call\'s sid; a deleted one leaves it open', async () => {
     const now = new Date();
     const hour = 60 * 60 * 1000;
     const callAt = new Date(now.getTime() - 3 * hour);
@@ -292,10 +292,11 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     const delivered = JSON.stringify({ deliveryState: { firstDeliveredAt: quoteAt.toISOString(), lastDeliveredAt: quoteAt.toISOString() } });
     const stamped = async (stampKey, label, phone) => {
       const customer = await insert('customers', { first_name: label, phone });
-      const lead = await insert('leads', { first_name: label, phone, status: 'new', customer_id: customer.id });
       const sid = `CAL${String(Date.now()).slice(-8)}${Math.random().toString(36).slice(2, 10)}`;
+      // stampKey null: no stamp on the call; the lead carries the call's sid instead.
+      const lead = await insert('leads', { first_name: label, phone, status: 'new', customer_id: customer.id, ...(stampKey ? {} : { twilio_call_sid: sid }) });
       await insert('call_log', { direction: 'inbound', from_phone: phone, to_phone: '+19415550100', customer_id: null, status: 'completed',
-        twilio_call_sid: sid, created_at: callAt, metadata: JSON.stringify({ [stampKey]: lead.id }) });
+        twilio_call_sid: sid, created_at: callAt, metadata: JSON.stringify(stampKey ? { [stampKey]: lead.id } : {}) });
       const callBell = await bell({ category: 'lead', created_at: bellAt, link: '/admin/estimates?estimateId=00000000-0000-4000-8000-000000000533',
         metadata: { callSid: sid, estimator_engine: true, quote_promised: true, lane: 'residential', promise: true } });
       return { customer, lead, callBell };
@@ -304,12 +305,13 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     const viaRelay = await stamped('relay_lead_id', 'Stamprelay', '+15555557032');
     const deleted = await stamped('lead_id', 'Stampgone', '+15555557033');
     await db('leads').where({ id: deleted.lead.id }).update({ deleted_at: now });
-    for (const who of [viaLeadId, viaRelay, deleted]) {
+    const viaSid = await stamped(null, 'Sidlinked', '+15555557034');
+    for (const who of [viaLeadId, viaRelay, deleted, viaSid]) {
       await insert('estimates', { status: 'sent', customer_id: who.customer.id, sent_at: quoteAt, estimate_data: delivered });
     }
     await relevance.runAdminAlertRelevanceSweep({ now });
-    const [a, b, c] = await Promise.all([viaLeadId, viaRelay, deleted].map((w) => get(w.callBell.id)));
-    expect([a.done_at != null, b.done_at != null, c.done_at != null]).toEqual([true, true, false]);
+    const [a, b, c, d] = await Promise.all([viaLeadId, viaRelay, deleted, viaSid].map((w) => get(w.callBell.id)));
+    expect([a.done_at != null, b.done_at != null, c.done_at != null, d.done_at != null]).toEqual([true, true, false, true]);
     expect([a.done_by, a.resolution]).toEqual(['relevance', 'Estimate was sent']);
   });
 

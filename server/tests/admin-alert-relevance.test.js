@@ -814,7 +814,7 @@ describe('class rules', () => {
       expect(witnessQueries()).toEqual([]);
     });
 
-    test('the lead the call is stamped with (metadata lead_id or relay_lead_id) is a subject when the call and the bell have no customer or lead; a deleted, unknown or customer-less stamped lead adds nothing', async () => {
+    test('the lead the call is stamped with (metadata lead_id or relay_lead_id) is a subject when the call and the bell have no customer or lead; a deleted, unknown or customer-less stamped lead adds nothing; so does a lead that carries the call\'s sid only when it is live and has a customer', async () => {
       const OTHER = uid(98);
       const LINKED = uid(77);
       const linkedLead = (over = {}) => lead({ id: LINKED, customer_id: OTHER, ...over });
@@ -849,6 +849,20 @@ describe('class rules', () => {
       mockTables.leads = [linkedLead({ id: uid(76) })];
       expect((await reasonFor(bellOnly)).reason).toBeNull();
       mockTables.leads = [linkedLead({ customer_id: null })];
+      expect((await reasonFor(bellOnly)).reason).toBeNull();
+      // A lead that carries the call's sid (no stamp on the call) is a subject too; a deleted one is not. One read per batch.
+      mockTables[callTable] = [callRow({ customer_id: null })];
+      mockTables.leads = [linkedLead({ twilio_call_sid: SID })];
+      mockQueries = [];
+      expect((await reasonFor(bellOnly)).reason).toBe('A visit was booked');
+      mockQueries = [];
+      await loadSubjects([callBell(), callBell({ estimateId: null }), callBell({ estimateId: uid(5) })]);
+      expect(asked('leads').filter((q) => JSON.stringify(q.calls).includes('twilio_call_sid'))).toHaveLength(1);
+      mockTables.leads = [linkedLead({ twilio_call_sid: SID, deleted_at: AFTER_BELL })];
+      expect((await reasonFor(bellOnly)).reason).toBeNull();
+      mockTables.leads = [linkedLead({ twilio_call_sid: SID, customer_id: null })];
+      expect((await reasonFor(bellOnly)).reason).toBeNull();
+      mockTables.leads = [linkedLead({ twilio_call_sid: 'CA-other' })];
       expect((await reasonFor(bellOnly)).reason).toBeNull();
       // A stamp that is not a uuid is ignored, not sent to the database.
       mockTables[callTable] = [callRow({ customer_id: null, linked_lead_id: 'not-a-uuid' })];
