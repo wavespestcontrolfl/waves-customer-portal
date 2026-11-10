@@ -1736,7 +1736,10 @@ router.get('/export/pnl', async (req, res, next) => {
 
 router.get('/export/tax-package', async (req, res, next) => {
   try {
-    const archiver = require('archiver');
+    // archiver 8 is ESM-only. Node 24 (the pinned runtime) can load it with a
+    // native require(); Jest's CommonJS loader cannot, so go through Node's own
+    // createRequire instead of a bare require('archiver').
+    const { ZipArchive } = process.getBuiltinModule('module').createRequire(__filename)('archiver');
     const year = req.query.year || String(new Date().getFullYear());
     const sd = `${year}-01-01`;
     const ed = `${year}-12-31`;
@@ -1919,7 +1922,7 @@ router.get('/export/tax-package', async (req, res, next) => {
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="waves-tax-package-${year}.zip"`);
 
-    const archive = archiver('zip', { zlib: { level: 9 } });
+    const archive = new ZipArchive({ zlib: { level: 9 } });
     archive.on('error', (err) => { throw err; });
     archive.pipe(res);
 
