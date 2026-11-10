@@ -15071,7 +15071,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // (GitHub Codex r3 P1).
       let completionSmsProviderAccepted = false;
       // On-location contacts get a plain report text when this completion
-      // text goes out (GATE_CONTACT_REPORT_TEXT, contact-report-text.js). Set
+      // text goes out (contact-report-text.js). Set
       // only when the text carries a real report link. Called on every path
       // that records the text as sent or queued, the accepted-send recovery
       // included; a repeat for the same record queues nothing. Never throws.

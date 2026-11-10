@@ -40,6 +40,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/communications/link-library` | admin-communications |
 | GET | `/api/admin/communications/log` | admin-communications |
 | POST | `/api/admin/communications/messages/read` | admin-communications |
+| POST | `/api/admin/communications/name-check` | admin-communications |
 | POST | `/api/admin/communications/rewrite-sms` | admin-communications |
 | POST | `/api/admin/communications/send-prep` | admin-communications |
 | GET | `/api/admin/communications/sender` | admin-communications |
@@ -519,6 +520,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/inventory/restock-requests/:id/order-evidence` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/restock-requests/:id/siteone-email` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/restock-requests/:id/siteone-email` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
+| POST | `/api/admin/inventory/restock-requests/:id/vendor-cancellation` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/scrape-jobs` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/scrape-jobs/:vendorId/trigger` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/service-usage` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |

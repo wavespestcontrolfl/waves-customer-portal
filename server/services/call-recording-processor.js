@@ -1547,7 +1547,7 @@ function isFreshInboundCall(call = {}, now = Date.now()) {
 }
 
 // Single source of truth for whether implied SMS/email consent may apply to
-// THIS call (owner ruling 2026-09-26, GATE_CALL_OUTBOUND_RETURN_MESSAGES):
+// THIS call (owner ruling 2026-09-26):
 // inbound always qualifies; outbound qualifies only once the caller's own
 // `outboundEligible` (outboundReturnMessagesEligible — prior contact
 // confirmed) has cleared. Every checkTcpaConsent call site on this call
@@ -6580,26 +6580,17 @@ async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadS
   }
 }
 
-// Phone agent stop order (GATE_CALL_BOOKING_STOP_ORDER, owner 2026-10-26
-// "go d"): a fresh call booking numbers its technician's day in the order the
-// staff route check certifies (placeMovedVisit, the writer New Appointment and
-// staff moves use), so the tech app and the board list it in its place, not
-// last. A street-level pending row (its address waits on the office) stays as
-// it was. The writer is a no-op unless GATE_STAFF_ROUTE_INSERTION is on, runs
-// under a savepoint and never fails the booking. Read at call time; a partial
-// test mock of the gates module reads as off.
-// The shared auto-save helper (owner 2026-10-29, Route Check Everywhere 2b) is
-// the placement for the automatic writers: with the gate above off it places the
-// same booking through that helper (source 'call_booking'). With
-// the gate above on, THIS call is the only placement, so the helper never adds
-// a second one.
+// Phone agent stop order (owner 2026-10-26 "go d"): a fresh call booking
+// numbers its technician's day in the order the staff route check certifies
+// (placeMovedVisit, the writer New Appointment and staff moves use), so the
+// tech app and the board list it in its place, not last. A street-level
+// pending row (its address waits on the office) stays as it was. The writer
+// runs under a savepoint and never fails the booking. THIS call is the only
+// placement for a call booking, so the shared auto-save helper never adds a
+// second one.
 async function placeCallBookingInRoute(trx, created, { streetLevelPending = false } = {}) {
   if (streetLevelPending || !created?.id) return null;
-  const gates = require('../config/feature-gates');
-  if (typeof gates.gateEnvValue === 'function' && gates.gateEnvValue('GATE_CALL_BOOKING_STOP_ORDER')) {
-    return require('./scheduling/arrival-route').placeMovedVisit(trx, { serviceId: created.id, source: 'phone_call' });
-  }
-  return require('./scheduling/staff-save-route-check').placeAutoSavedVisit(trx, { visit: created, source: 'call_booking' });
+  return require('./scheduling/arrival-route').placeMovedVisit(trx, { serviceId: created.id, source: 'phone_call' });
 }
 
 // Convert the call's lead to won when the pipeline books an appointment,
@@ -7930,8 +7921,7 @@ function commercialQuoteBookableFor({ extracted = {}, preAdoptionExtracted = nul
   };
 }
 
-// Whole-structure unit waiver for one call (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT;
-// caller checks the gate). Resolves the call's service the way the booking
+// Whole-structure unit waiver for one call. Resolves the call's service the way the booking
 // resolves it and hands the verdict to the pure waiver in call-triage-flags.js.
 // The service must resolve to a bookable CATALOG row on the allowlist — a
 // coarse label alone never waives, since that booking would carry no service_id.
@@ -7940,7 +7930,7 @@ function commercialQuoteBookableFor({ extracted = {}, preAdoptionExtracted = nul
 // gate, and the V2-overridden view the approved booking will book. Returns the
 // SAME verdict object unless the waiver applies.
 function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, preAdoptionExtracted = null, transcription = '', services = [], property = null, v2Extraction = null, unclearServiceAssessment = false } = {}) {
-  // Both gates on and the call carries the unclear-service signal: routing may
+  // The call carries the unclear-service signal (with the Assessment gate on): routing may
   // force the Waves Assessment row, which is not a whole-structure service.
   if (unclearServiceAssessment && serviceMayForceAssessment(v2Extraction)) return addressValidation;
   const prop = property || v2Extraction?.property || {};
@@ -7958,7 +7948,6 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
       coarseServiceLabel: coarse.ok ? coarse.service : null,
     });
     const waived = applyWholeStructureUnitWaiver(addressValidation, {
-      enabled: true,
       serviceKey: row?.service_key || null,
       propertyType: prop.property_type,
       commercial: prop.property_type === 'commercial' || prop.hoa_common_area_service === true,
@@ -9170,14 +9159,12 @@ Rules:
 
 // Why the contact pass / decoder runs for this transcript, or null when it does not.
 // 'signals' = the dictation detector (always on). 'collapse:<signal>' = a collapsed
-// spelling's marks (GATE_CALL_SPELLING_COLLAPSE_TRIGGER, dark): the ONLY case the new
-// trigger adds a pass, so it is the one that is logged. `ctx` carries { extracted,
-// knownCustomer } once the extraction exists; the second pass runs before it, so the
-// near-miss signal can only fire at the decoder gate.
+// spelling's marks: the ONLY case the collapse trigger adds a pass, so it is the one that is
+// logged. `ctx` carries { extracted, knownCustomer } once the extraction exists; the second
+// pass runs before it, so the near-miss signal can only fire at the decoder gate.
 function contactPassTrigger(transcription, ctx = {}) {
   if (!transcription) return null;
   if (detectContactDictationSignals(transcription).any) return 'signals';
-  if (!require('../config/feature-gates').callSpellingCollapseTriggerLive()) return null;
   // The name-only trigger feeds the name-spelling card, which never files on an outbound call
   // (outbound diarization can swap the labels): no paid pass for it there.
   if (ctx.call && isOutboundCall(ctx.call)) return null;
@@ -9247,12 +9234,11 @@ async function quarantineLatePanPass(call, panCount) {
   return panCount;
 }
 
-// Whether the late (post-extraction) pass may run at all: gate on, contact dictation not switched
+// Whether the late (post-extraction) pass may run at all: contact dictation not switched
 // off, an inbound call whose recording is still there, and an extraction with a name to work with.
 // The wrapper already bought (and may have lost) the pass for the transcript-only signals; only the
 // near miss, which needs the extraction, is new after it, and the near miss needs a last name.
 function lateContactPassAllowed({ call, extracted, contactPassAttempted }) {
-  if (!require('../config/feature-gates').callSpellingCollapseTriggerLive()) return false;
   if (process.env.CONTACT_DICTATION_ENABLED === 'false') return false;
   if (!call.recording_url || isOutboundCall(call)) return false;
   if (!extracted?.first_name && !extracted?.last_name) return false;
@@ -9275,7 +9261,7 @@ async function lateContactPassTrigger({ call, contactPhone, transcription, extra
 }
 
 // The decoder gate. Runs when a second-pass transcript exists or the dictation detector fires
-// (as before). With GATE_CALL_SPELLING_COLLAPSE_TRIGGER on it also runs for a collapsed spelling the
+// (as before). It also runs for a collapsed spelling the
 // wrapper could not see before the extraction existed (the near miss): one late second pass on a
 // fresh, verified download. A pass that hears a card number is quarantined and nothing is decoded.
 // Fail-open: any failure leaves the decoder off. `late` carries what the caller must persist;
@@ -13036,8 +13022,7 @@ const CallRecordingProcessor = {
       logger.info(`[call-proc] Voicemail ${callSid} has workable lead signal — continuing to lead creation`);
     }
 
-    // Outbound return-message eligibility (GATE_CALL_OUTBOUND_RETURN_MESSAGES,
-    // owner ruling 2026-09-26): whether the four customer-facing features
+    // Outbound return-message eligibility (owner ruling 2026-09-26): whether the four customer-facing features
     // #4912 kept inbound-only below (booking-confirmation implied consent,
     // the dropped-mid-intake address text, customer-less lead creation, the
     // clarify draft) may run the same on THIS outbound call. Requires prior
@@ -13053,11 +13038,11 @@ const CallRecordingProcessor = {
     // lead signal, the drop detector's MIN_CALL_SECONDS floor — and the
     // clarify-draft site alone ALSO requires hasRealTwoWayConversation,
     // since nothing else there rules out an early drop (see its own call
-    // site). Gate off, or inbound, or a probe failure ⇒ false, and every
+    // site). Inbound, or a probe failure ⇒ false, and every
     // `!isOutboundCall(call)` check downstream stays exactly as it reads
     // today.
     let outboundReturnMessagesEligible = false;
-    if (isOutboundCall(call) && isEnabled('callOutboundReturnMessages')) {
+    if (isOutboundCall(call)) {
       try {
         // outboundPriorContactCustomerId (above): call.customer_id, or
         // knownCaller.id (the phone pre-lookup) as a fallback for a row
@@ -13373,20 +13358,20 @@ const CallRecordingProcessor = {
       }
     }
 
-    // Whole-structure calls (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT, owner ruling
+    // Whole-structure calls (owner ruling
     // 2026-09-30): a WDO inspection or termite pre-treat/perimeter job is not
     // held for a missing unit number. The verdict is rewritten HERE, once,
     // after the shadow row persisted the ORIGINAL — so the enforce gate, the
     // shadow bridge and the audit path all read the same waived verdict. The
     // service is resolved the way the booking below resolves it (catalog row
-    // first, coarse label only when no catalog row matched). Gate off, or any
-    // non-qualifying call, returns the verdict object untouched.
+    // first, coarse label only when no catalog row matched). Any
+    // non-qualifying call returns the verdict object untouched.
     // Business whole building (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT, owner
     // ruling 2026-10-06): the same rewrite for a business address when the
     // caller says they own or occupy the WHOLE building. It rides the same
     // open-card guard and persisted marker (reason 'business_whole_building'),
     // and runs only when the whole-structure rule did not already waive the call.
-    if (v2AddressValidation && (isEnabled('callWholeStructureNoUnit') || isEnabled('callBusinessWholeBuildingNoUnit')) && isMissingUnitNumber(v2AddressValidation)) {
+    if (v2AddressValidation && isMissingUnitNumber(v2AddressValidation)) {
       try {
         // A reprocess of a call an earlier pass parked on the unit ask: the
         // open missing_unit_number card (and its clarify draft and merged
@@ -13401,18 +13386,16 @@ const CallRecordingProcessor = {
         if (openUnitCard) {
           logger.info(`[call-proc] Whole-structure unit waiver skipped for ${maskSid(callSid)}: an open missing_unit_number card still owes a human verdict`);
         } else {
-          let wsAv = isEnabled('callWholeStructureNoUnit')
-            ? wholeStructureUnitWaiverForCall({
-              addressValidation: v2AddressValidation,
-              extracted,
-              preAdoptionExtracted,
-              transcription,
-              services: bookableCallServices,
-              property: v2Result?.extraction?.property,
-              v2Extraction: v2Result?.extraction,
-              unclearServiceAssessment: unclearServiceAssessmentActive(),
-            })
-            : v2AddressValidation;
+          let wsAv = wholeStructureUnitWaiverForCall({
+            addressValidation: v2AddressValidation,
+            extracted,
+            preAdoptionExtracted,
+            transcription,
+            services: bookableCallServices,
+            property: v2Result?.extraction?.property,
+            v2Extraction: v2Result?.extraction,
+            unclearServiceAssessment: unclearServiceAssessmentActive(),
+          });
           if (wsAv === v2AddressValidation && isEnabled('callBusinessWholeBuildingNoUnit')) {
             wsAv = businessWholeBuildingUnitWaiverForCall({
               addressValidation: v2AddressValidation,
@@ -13775,16 +13758,14 @@ const CallRecordingProcessor = {
           // Those alternate recipients still require explicit sms_consent_given
           // (v2SmsConsentExplicit, captured mode-independently above) and are
           // enforced at the send site.
-          // Outbound return calls count too (owner ruling 2026-09-26,
-          // GATE_CALL_OUTBOUND_RETURN_MESSAGES): they contacted Waves first,
+          // Outbound return calls count too (owner ruling 2026-09-26):
+          // they contacted Waves first,
           // so the SAME implied consent covers the dialed number
           // (contactPhone above is already resolveCallContactPhone's
           // outbound leg — the customer's number, never a staff line).
           // outboundImpliedConsentEligible is the shared predicate every
           // checkTcpaConsent call site on this call reads (see its own
-          // comment) — outboundReturnMessagesEligible is false whenever the
-          // gate is off, so this stays exactly `!isOutboundCall(call)`
-          // off-gate.
+          // comment).
           const tcpa = checkTcpaConsent(v2Extraction, {
             impliedConsent: isEnabled('callInboundImpliedConsent')
               && outboundImpliedConsentEligible(call, outboundReturnMessagesEligible),
@@ -16979,16 +16960,12 @@ const CallRecordingProcessor = {
     // An operator's explicit UNLINK covers the lead too (Codex #3736 r8
     // P2): the call belongs to no one, so a reprocess must not mint or
     // reuse a customer-less lead from its phone and stamp the call with it.
-    // Cold/sales outbound calls (owner ruling 2026-09-26,
-    // GATE_CALL_OUTBOUND_RETURN_MESSAGES): blocks ONLY when the gate is
-    // explicitly on and this outbound call has no prior contact — a no-op
-    // whenever the gate is off, so this stays exactly today's (direction-
-    // blind) behavior off-gate. A return call that clears
+    // Cold/sales outbound calls (owner ruling 2026-09-26): blocks an outbound
+    // call that has no prior contact. A return call that clears
     // outboundReturnMessagesEligible still mints/reuses the lead below the
     // same as inbound, which is also what lets an existing lead record for
     // this phone (itself evidence of prior contact) get found and reused.
     const outboundColdCallBlocksLead = isOutboundCall(call)
-      && isEnabled('callOutboundReturnMessages')
       && !outboundReturnMessagesEligible;
     const workableUnnamedLead = !customerId && !nonLeadCall && !explicitUnlink
       && !outboundColdCallBlocksLead
@@ -17354,12 +17331,10 @@ const CallRecordingProcessor = {
         // the claim-race recovery below needs it to re-judge suppression
         // against the replacement row (codex P2 r8).
         let droppedDetectorFired = false;
-        // Owner ruling 2026-09-26 (GATE_CALL_OUTBOUND_RETURN_MESSAGES): an
+        // Owner ruling 2026-09-26: an
         // outbound return call that dropped mid-conversation gets the same
         // "sorry we got cut off" text as inbound, but only once prior
-        // contact is confirmed — outboundReturnMessagesEligible is false
-        // whenever the gate is off, so this stays exactly
-        // `!isOutboundCall(call)` off-gate.
+        // contact is confirmed (outboundReturnMessagesEligible).
         if (leadId && !voicemailLeadPath && !extracted.is_voicemail && !extracted.is_spam
           && (!isOutboundCall(call) || outboundReturnMessagesEligible) && transcription) {
           try {
@@ -18810,13 +18785,12 @@ const CallRecordingProcessor = {
         // Both DNC shapes gate it — the V2 consent object AND the legacy
         // flat extractor field (V2 off / unavailable / schema-failed still
         // sets the flat one) (codex r5 P1).
-        // Owner ruling 2026-09-26 (GATE_CALL_OUTBOUND_RETURN_MESSAGES)
+        // Owner ruling 2026-09-26
         // resolved the pending outbound-SMS-consent decision: an approved
         // draft is sent under the voice channel's transactional consent
         // (admin-drafts.js), and a call WE placed carries that consent too
-        // once the person contacted Waves first — outboundReturnMessagesEligible
-        // is false whenever the gate is off, so this stays exactly
-        // `!isOutboundCall(call)` off-gate. clarifyAskTargetPhone already
+        // once the person contacted Waves first (outboundReturnMessagesEligible).
+        // clarifyAskTargetPhone already
         // resolves the customer leg for both directions.
         // hasRealTwoWayConversation is required HERE, on the outbound leg
         // ONLY (codex pre-push r1 P2 + r4 P1): nothing else at this site
@@ -19502,8 +19476,8 @@ const CallRecordingProcessor = {
     const outboundAutoBooking = isOutboundCall(call) && outboundAutoBookingEnabled();
     // The v2 TCPA verdict is only computed in ENFORCE routing mode — but
     // outbound consent is never implied UNLESS this outbound call cleared
-    // the return-message eligibility gate above (owner ruling 2026-09-26,
-    // GATE_CALL_OUTBOUND_RETURN_MESSAGES), and the removed review hold used
+    // the return-message eligibility check above (owner ruling 2026-09-26),
+    // and the removed review hold used
     // to be the backstop that kept a shadow/legacy-mode outbound booking
     // from texting. Recompute the verdict for outbound bookings regardless
     // of routing mode, fail-closed: with no extraction/consent data,

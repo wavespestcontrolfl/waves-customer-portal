@@ -6283,6 +6283,21 @@ function addDaysDateInput(dateString, days) {
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
 }
+// One message when the plan dates cannot be used, else "". Dates are YYYY-MM-DD, so they compare as text; `today` is Eastern.
+// The server enforces the same rules.
+function planDateProblem({ today, planStartDate, nextPaymentDate }) {
+  if (planStartDate && planStartDate < today) return "Start date cannot be in the past.";
+  if (nextPaymentDate && nextPaymentDate < today) return "Next payment cannot be in the past.";
+  if (planStartDate && nextPaymentDate && nextPaymentDate < planStartDate) {
+    return "Next payment cannot be before the start date.";
+  }
+  return "";
+}
+
+function laterDate(a, b) {
+  return b && b > a ? b : a;
+}
+
 function PaymentPlanModal({
   invoice,
   isMobile,
@@ -6318,8 +6333,9 @@ function PaymentPlanModal({
     Number.isFinite(amount) &&
     amount > 0 &&
     Math.round(amount * 100) <= Math.round(owed * 100);
+  const dateProblem = planDateProblem({ today: startDate, planStartDate, nextPaymentDate });
   const createDisabled =
-    saving || !validAmount || !nextPaymentDate || !planStartDate;
+    saving || !validAmount || !nextPaymentDate || !planStartDate || Boolean(dateProblem);
   const createPlan = async () => {
     if (savingRef.current) return;
     if (createDisabled) return;
@@ -6435,6 +6451,7 @@ function PaymentPlanModal({
               <Input
                 type="date"
                 value={planStartDate}
+                min={startDate}
                 onChange={(e) => setPlanStartDate(e.target.value)}
                 disabled={saving}
               />
@@ -6445,12 +6462,18 @@ function PaymentPlanModal({
               <Input
                 type="date"
                 value={nextPaymentDate}
+                min={laterDate(startDate, planStartDate)}
                 onChange={(e) => setNextPaymentDate(e.target.value)}
                 disabled={saving}
               />
             </Field>
           </div>
         </div>
+        {dateProblem && (
+          <div className="text-alert-fg text-ui-body" role="alert">
+            {dateProblem}
+          </div>
+        )}
         <Field label={<>Note (optional)</>} className="min-w-0">
           <Textarea
             value={notes}
@@ -9399,6 +9422,7 @@ function CreateInvoice({
             >
               <Field className="min-w-0" label="Notes (optional)">
                 <Textarea
+                  data-own-mic="true"
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                   rows={2}
@@ -9463,6 +9487,7 @@ function CreateInvoice({
               >
                 <Field className="min-w-0" label="Email message (optional)">
                   <Textarea
+                    data-own-mic="true"
                     value={emailMessage}
                     onChange={(e) =>
                       setEmailMessage(e.target.value.slice(0, 800))

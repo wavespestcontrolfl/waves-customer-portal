@@ -207,6 +207,82 @@ describe('checkMove', () => {
     expect(got).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_HOLD', audit: { verdict: 'hold', entry_id: 'E1' } });
     expect(JSON.stringify(got)).not.toMatch(/Thursdays/);
     expect(run.proofreader.held).toBe(1);
+    // The question it answered, as a print (a later run finds the hold by it): never the words.
+    expect(got.audit.question).toMatch(/^[0-9a-f]{64}$/);
+    expect(got.audit.why).toBe('quoted_statement');
+  });
+
+  // Dispatch audit Fix 2 (owner 2026-11-08): one visit got the same hold on 11 of 14 nights, one Opus call each.
+  describe('a kept hold: the same question is not asked again', () => {
+    const HOLD = { verdict: 'hold', why: 'quoted_statement', entry_id: 'E1', quote: 'never come on Thursdays', reason: 'Thursday breaks it.' };
+    let reads;
+    // The decision log as keptHold reads it: the newest hold row of the visit whose question matches.
+    const logConn = (stored, { fail = false } = {}) => (table) => {
+      const filters = [];
+      let question = null;
+      const chain = {
+        where: (w) => { filters.push(w); return chain; },
+        whereIn: () => chain,
+        orderBy: () => chain,
+        whereRaw: (_sql, bindings) => { if (table === 'auto_dispatch_audit_logs') [question] = bindings; return chain; },
+        select: async () => [{ id: 't1', name: 'Alex Rivera' }, { id: 't2', name: 'Sam Lee' }],
+        first: async () => {
+          if (table !== 'auto_dispatch_audit_logs') return null;
+          if (fail) throw new Error('log down');
+          reads.push({ filters, question });
+          return stored && stored.question === question ? { constraints_checked: { proofreader: stored } } : null;
+        },
+      };
+      return chain;
+    };
+    const askAgain = (stored, { best = BEST, record = RECORD, fail = false } = {}) => {
+      const run = runOf();
+      const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' }, record);
+      return nightly.checkMove({ service: SERVICE, best, run }, { conn: logConn(stored, { fail }), proofreader })
+        .then((got) => ({ got, run, proofreader }));
+    };
+    let first;
+    beforeEach(async () => {
+      reads = [];
+      first = (await check(runOf(), proofreaderOf(HOLD))).audit;
+    });
+
+    test('the same question again: the hold is kept, no model is asked and no call is spent', async () => {
+      const { got, run, proofreader } = await askAgain(first);
+      expect(got).toMatchObject({
+        allowed: false, reason_code: 'PROOFREADER_HOLD', broke: false, audit: { verdict: 'hold', why: 'kept_hold', entry_id: 'E1', question: first.question },
+      });
+      expect(proofreader.proofreadMove).not.toHaveBeenCalled();
+      // Not proof the check works tonight: the check-down notice reads `answered`.
+      expect(run.proofreader).toMatchObject({ calls: 0, held: 1, answered: 0 });
+      expect(reads[0].filters).toContainEqual({ scheduled_service_id: 's1', reason_code: 'PROOFREADER_HOLD' });
+      // The kept row keeps the hold the night after, too.
+      expect((await askAgain(got.audit)).got).toMatchObject({ allowed: false, audit: { why: 'kept_hold', question: first.question } });
+    });
+
+    test('a new entry in the record or another target slot is a new question: the model is asked', async () => {
+      const newer = { ...RECORD, entries: [...RECORD.entries, { id: 'E2', channel: 'text', from: 'customer', at: '2026-10-30T09:00:00-04:00', text: 'Thursdays are fine now.' }] };
+      const byRecord = await askAgain(first, { record: newer });
+      expect(byRecord.proofreader.proofreadMove).toHaveBeenCalledTimes(1);
+      expect(byRecord.got).toMatchObject({ allowed: true });
+      const bySlot = await askAgain(first, { best: { ...BEST, start_time: '15:00', end_time: '16:00' } });
+      expect(bySlot.proofreader.proofreadMove).toHaveBeenCalledTimes(1);
+      expect(reads.map((r) => r.question)).not.toContain(undefined);
+      expect(new Set(reads.map((r) => r.question)).size).toBe(2);
+    });
+
+    test('only a hold is kept: a stored row that is not a hold asks the model', async () => {
+      const { got, proofreader } = await askAgain({ ...first, verdict: 'unknown', why: 'model_unsure' });
+      expect(proofreader.proofreadMove).toHaveBeenCalledTimes(1);
+      expect(got).toMatchObject({ allowed: true });
+    });
+
+    test('the earlier holds cannot be read: the model is asked, as before', async () => {
+      const { got, run, proofreader } = await askAgain(first, { fail: true });
+      expect(proofreader.proofreadMove).toHaveBeenCalledTimes(1);
+      expect(got).toMatchObject({ allowed: true });
+      expect(run.proofreader).toMatchObject({ calls: 1, broke: 0 });
+    });
   });
 
   test.each(['model_unsure', 'hold_without_quote', 'record_incomplete', 'record_too_long', 'model_failed', 'bad_answer'])('unknown (%s): the visit stays and the next run asks again', async (why) => {

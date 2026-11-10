@@ -2684,6 +2684,8 @@ function SavedVisitDetails({ visits }) {
       <strong>{visit.serviceType || visit.type || 'Service visit'}</strong>
       <div>{parseDate(visit.date).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</div>
       {visit.windowStart && <div>Arrival {formatTime(visit.windowStart)} – {formatTime(arrivalWindowEnd(visit.windowStart))}</div>}
+      {/* GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour. */}
+      {!visit.windowStart && visit.day_only && visit.arrival_note && <div>{visit.arrival_note}</div>}
     </li>)}
   </ul>;
 }
@@ -3140,6 +3142,12 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
                 {nextService?.windowStart && (
                   <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
                     {formatTime(nextService.windowStart)} - {formatTime(arrivalWindowEnd(nextService.windowStart))}
+                  </div>
+                )}
+                {/* GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour. */}
+                {!nextService?.windowStart && nextService?.day_only && nextService.arrival_note && (
+                  <div data-testid="next-visit-day-only-note" style={{ marginTop: 2, fontSize: 14, color: muted }}>
+                    {nextService.arrival_note}
                   </div>
                 )}
               </div>
@@ -4451,7 +4459,9 @@ function nextVisitLabel(next) {
   if (!next) return 'No visit scheduled';
   if (next.customerPickBy) return `${PICK_DAY_LABEL} · Pick a time`;
   const day = parseDate(next.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-  const time = next.windowStart ? `${formatTime(next.windowStart)} – ${formatTime(arrivalWindowEnd(next.windowStart))}` : 'Time TBD';
+  const time = next.windowStart
+    ? `${formatTime(next.windowStart)} – ${formatTime(arrivalWindowEnd(next.windowStart))}`
+    : (next.day_only && next.arrival_note ? next.arrival_note : 'Time TBD');
   return `${day} · ${time}`;
 }
 
@@ -4888,12 +4898,6 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
   // nothing here may read as texts switched back on (codex #6363 r3 P2).
   const stopped = data.smsOptin === 'declined';
   const channelOptions = data.emailAvailable ? CONTACT_CHANNEL_OPTIONS : CONTACT_CHANNEL_OPTIONS.filter((o) => o.value !== 'email');
-  // The service report reaches a contact by text only while the contact
-  // report text is on (server: contactReportTexts); otherwise "Text" would
-  // just hold the email (codex #6363 r9 P2).
-  const optionsFor = (row) => (row.key === 'serviceCompleted' && data.contactReportTexts !== true
-    ? channelOptions.filter((o) => o.value !== 'sms')
-    : channelOptions);
   return (
     <section data-glass="card" style={{ ...card, overflow: 'hidden' }} data-testid="contact-notification-card">
       <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
@@ -4947,7 +4951,7 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
                   disabled={holderOff || !isOn || busy}
                   aria-label={`Delivery method for ${p.label}`}
                 >
-                  {optionsFor(p).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  {channelOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </CustomerSelect>
                 <GoldSwitch on={isOn} disabled={holderOff || busy} onChange={() => save({ [p.key]: !isOn })} label={p.label} />
               </div>
@@ -5013,28 +5017,21 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const perPropertyTexts = savedScope && propertyPrefs.some((p) => p.propertyId);
   const shownTextsEntry = perPropertyTexts ? propertyPrefs.find((p) => p.id === activePropertyId) || null : null;
   const [propertyPrefsError, setPropertyPrefsError] = useState(false);
-  // What an on-location contact is told they get. The server says when the
-  // report text is on (GATE_CONTACT_REPORT_TEXT).
-  // The report text follows the account holder's own visit-complete text, so
-  // the wording carries that condition.
-  const contactTextsFor = (entry) => (entry?.contactReportTexts === true
-    ? 'appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit'
-    : 'appointment texts');
+  // What an on-location contact is told they get. The report text follows the
+  // account holder's own visit-complete text, so the wording carries that condition.
+  const CONTACT_TEXTS_COPY = 'appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit';
   // The report text never goes to a contact our records mark as a tenant, or
   // to any contact on a property manager's account
   // (customer-contact.js slotWithheldFromReports). A contact added here has
   // no recorded role, so the copy promises only what the records decide.
-  const contactReportExceptionFor = (entry) => (entry?.contactReportTexts === true
-    ? ' Contacts our records list as tenants, and contacts on a property manager\'s account other than a manager or landlord, get appointment texts only.'
-    : '');
+  const CONTACT_REPORT_EXCEPTION_COPY = ' Contacts our records list as tenants, and contacts on a property manager\'s account other than a manager or landlord, get appointment texts only.';
   // The entries the contact card renders (one house, or the profile list).
   const contactCardEntries = perPropertyTexts
     ? propertyPrefs.filter((p) => p.id === activePropertyId)
     : propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === customer?.id) : propertyPrefs;
-  // The card's header copy promises the report text only when every entry under it gets it.
-  const contactCardReportTexts = { contactReportTexts: contactCardEntries.length > 0 && contactCardEntries.every((p) => p.contactReportTexts === true) };
-  const contactTexts = contactTextsFor(contactCardReportTexts);
-  const contactReportException = contactReportExceptionFor(contactCardReportTexts);
+  // The card's header copy promises the report text once the card has an entry.
+  const contactTexts = contactCardEntries.length > 0 ? CONTACT_TEXTS_COPY : 'appointment texts';
+  const contactReportException = contactCardEntries.length > 0 ? CONTACT_REPORT_EXCEPTION_COPY : '';
 
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
@@ -5413,6 +5410,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   // Time TBD note helper
   const renderTimeTBD = (s) => {
     if (s.windowStart) return null;
+    // GATE_DAY_ONLY_PROMISE: the time line above already says the window is texted the day before.
+    if (s.day_only) return null;
     if (s.customerPickBy) {
       return (
         <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
@@ -5519,7 +5518,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
         <div style={{ padding: '16px 18px' }}>
           <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{s.serviceType}</div>
           <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
-            {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : (s.customerPickBy ? 'Pick a time' : 'Time TBD')}
+            {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : (s.customerPickBy ? 'Pick a time' : (s.day_only && s.arrival_note ? s.arrival_note : 'Time TBD'))}
           </div>
 
           {/* Service description */}
@@ -5620,7 +5619,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
         <div style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy }}>{s.serviceType}</div>
         {s.customerPickBy && <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginTop: 2 }}>{PICK_DAY_LABEL}</div>}
         <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
-          {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : (s.customerPickBy ? 'Pick a time' : 'Time TBD')}
+          {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : (s.customerPickBy ? 'Pick a time' : (s.day_only && s.arrival_note ? s.arrival_note : 'Time TBD'))}
         </div>
         <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           Visit #{s.visitNum} — {s.description}
@@ -6223,7 +6222,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     </label>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                       <div style={{ fontSize: 14, color: muted, lineHeight: 1.4, flex: compact ? '1 1 100%' : 1, minWidth: 0 }}>
-                        These people receive {contactTextsFor(property)} for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}).{contactReportExceptionFor(property)} {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
+                        These people receive {CONTACT_TEXTS_COPY} for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}).{CONTACT_REPORT_EXCEPTION_COPY} {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
                       </div>
                       <button
                         type="button"
@@ -8696,9 +8695,6 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   // email suppress derivation until the customer's next irrigation edit
   // stamps it on, so the card must not claim a figure they aren't counting.
   const [irrigationSuppressed, setIrrigationSuppressed] = useState(false);
-  // GATE_IRRIGATION_OWNER_RATES: the server says which head rate table its emails use (key present only while the gate
-  // is live), so the line under Minutes per Zone shows the number the server would use.
-  const [ownerRates, setOwnerRates] = useState(false);
   // GATE_AWAY_WATCH: the server says whether the Away Watch section shows (key present only while the gate is live).
   const [awayWatchEnabled, setAwayWatchEnabled] = useState(false);
   const irrigationEditRevision = useRef(0);
@@ -8720,7 +8716,6 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         // Inches, so the field never renders and then drops on save.
         if (typeof d.hasLawnCare === 'boolean') setServerHasLawnCare(d.hasLawnCare);
         setIrrigationSuppressed(d.irrigationSuppressed === true);
-        setOwnerRates(d.irrigationOwnerRates === true);
         setAwayWatchEnabled(d.awayWatchEnabled === true);
         setLoading(false);
       })
@@ -9167,7 +9162,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
     runMinutes: prefs.irrigationRunMinutes,
     wateringDays: prefs.wateringDays,
     systemType: prefs.irrigationSystemType,
-  }, ownerRates ? { rates: OWNER_HEAD_RATE_IN_PER_HR } : undefined);
+  }, { rates: OWNER_HEAD_RATE_IN_PER_HR });
   const explicitInchesEntered = Number.isFinite(Number(prefs.irrigationInchesPerWeek)) && Number(prefs.irrigationInchesPerWeek) > 0;
   // Stored "off" from the retired toggle: the report and Monday email
   // suppress a prefs-only schedule — typed inches AND a derived figure alike
@@ -9181,7 +9176,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
       const inches = derivedIrrigation.inchesPerWeek.toFixed(2).replace(/\.?0+$/, '');
       return explicitInchesEntered
         ? `Your ${describeRuntimeBasis(derivedIrrigation)} works out to about ${inches}" a week — your Weekly Inches entry above is what we'll use.`
-        : `About ${inches}" a week from ${describeRuntimeBasis(derivedIrrigation)} — typical head rates${ownerRates ? '' : ' from University of Florida turf guidance'}. If your controller runs more than one cycle a day, enter the total minutes; enter Weekly Inches if you know your system's actual output.`;
+        : `About ${inches}" a week from ${describeRuntimeBasis(derivedIrrigation)} — typical head rates. If your controller runs more than one cycle a day, enter the total minutes; enter Weekly Inches if you know your system's actual output.`;
     }
     // An explicit Weekly Inches entry is already authoritative — a decline
     // prompt asking for what's filled in above would never be satisfiable.
@@ -11979,6 +11974,8 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
     const windowEnd = clockLabel(arrivalWindowEnd(event.windowStart || event.window_start));
     if (windowStart && windowEnd) return `${windowStart} - ${windowEnd}`;
     if (windowStart) return windowStart;
+    // GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour.
+    if (event.day_only && event.arrival_note) return event.arrival_note;
 
     const checkIn = clockLabel(event.checkInTime || event.check_in_time);
     const checkOut = clockLabel(event.checkOutTime || event.check_out_time);

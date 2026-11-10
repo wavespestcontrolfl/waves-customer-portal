@@ -43,6 +43,7 @@ const {
   techFindingsCopyLive, normalizeTechFindings, filterCaptionsForCustomer, summaryForCustomer,
 } = require('./tree-shrub-tech-findings');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
+const { dayOnlyIds, dayOnlyFields } = require('../time-display');
 const { applyRodentReportNarrative, applyTypedReportNarrative, isTypedNarrativeFallback } = require('./rodent-report-narrative');
 const { technicianReportCustomerCopy } = require('./technician-report-copy');
 const {
@@ -2237,7 +2238,9 @@ function withoutDarkFourSectionBody(snapshot) {
 }
 
 // The report's next-appointment shape for a scheduled_services row.
-function nextAppointmentFields(row) {
+// `dayOnly` (GATE_DAY_ONLY_PROMISE, part C1): the customer was told only the day, so no hour leaves the server. The
+// narrative builders read windowStart, so a blank one makes them print the date alone.
+function nextAppointmentFields(row, dayOnly = false) {
   if (!row || !row.scheduled_date) return null;
   const rawDate = row.scheduled_date;
   return {
@@ -2245,8 +2248,16 @@ function nextAppointmentFields(row) {
     scheduledDate: rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10),
     // window_start only — the customer-facing arrival window is always
     // window_start + 2 hours (window_end is the internal job block).
-    windowStart: row.window_start || null,
+    windowStart: dayOnly ? null : (row.window_start || null),
+    ...dayOnlyFields(dayOnly),
   };
+}
+
+// The upcoming rows whose hour a report may show: the same-line pick plus the first few by date (GATE_DAY_ONLY_PROMISE,
+// part C1). Any row picked later is checked when it is picked.
+const DAY_ONLY_FIRST_ROWS = 12;
+function dayOnlyCandidates(pick, upcomingRows) {
+  return [pick, ...(Array.isArray(upcomingRows) ? upcomingRows.slice(0, DAY_ONLY_FIRST_ROWS) : [])];
 }
 
 // LIVE-VIEW-ONLY schedule fields, stripped from every non-live render in one
@@ -6505,6 +6516,18 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const rodentReportRefresh = serviceLine === 'rodent'
     && process.env.GATE_RODENT_REPORT_REFRESH === 'true';
 
+  // GATE_DAY_ONLY_PROMISE (part C1): the visits whose hour this live report must not show. checkDayOnly() asks
+  // loadTimeDisplay (through dayOnlyIds) once for the first batch of upcoming rows and again only for a row it has not
+  // seen. Gate off: nothing is read and nothing is hidden. Any mode: a payload that is not stripped must not carry the hour.
+  const dayOnlyHidden = new Set();
+  const dayOnlySeen = new Set();
+  const checkDayOnly = async (rows) => {
+    const fresh = (Array.isArray(rows) ? rows : []).filter((r) => r && r.id != null && !dayOnlySeen.has(String(r.id)));
+    if (!fresh.length) return;
+    fresh.forEach((r) => dayOnlySeen.add(String(r.id)));
+    (await dayOnlyIds(knex, fresh)).forEach((id) => dayOnlyHidden.add(id));
+  };
+  const dayOnlyRow = (row) => !!row && dayOnlyHidden.has(String(row.id));
   let nextAppointment = null;
   let sameLineNextAppointment = null;
   // The candidate rows the next-appointment pick read, kept for the
@@ -6567,7 +6590,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // report reads unambiguously ("Quarterly Pest Control · Wed, Nov 18").
     // Same disclosable-status pool; the strict same-line pick above still
     // wins whenever it exists.
-    const toNextAppointment = nextAppointmentFields;
+    await checkDayOnly(dayOnlyCandidates(nextApptRow, upcomingRows));
+    const toNextAppointment = (row) => nextAppointmentFields(row, dayOnlyRow(row));
     // The narrative builders below were written under the same-line
     // invariant (they keep only the date/window), so they receive the
     // strict same-line pick ONLY; the hero cell gets the cross-line
@@ -6638,6 +6662,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         }
         if (isBait) { baitRow = row; break; }
       }
+      await checkDayOnly([baitRow]);
       termiteNextMonitoringVisit = toNextAppointment(baitRow);
     }
 
@@ -6665,7 +6690,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           ? { treatmentNumber: program.treatmentNumber, laterCompleted: program.laterCompleted || 0 }
           : { treatmentNumber: null, reason: program.positionReason || 'no_lineage' };
         cockroachUpcomingRoachVisits = program.upcoming;
-        if (opts.mode === 'live') cockroachNextTreatmentVisit = toNextAppointment(program.nextRow);
+        if (opts.mode === 'live') {
+          await checkDayOnly([program.nextRow]);
+          cockroachNextTreatmentVisit = toNextAppointment(program.nextRow);
+        }
       } else if (program && program.failed) {
         cockroachProgramPosition = null;
       }
@@ -7102,6 +7130,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // ANY failure: the report never breaks.
           const planReschedule = reportPlanRescheduleLive();
           const buildRescheduleLink = planReschedule ? require('../reschedule-link').buildRescheduleLink : null;
+          await checkDayOnly(matched);
           const visits = await Promise.all(matched.map(async (row) => {
             let rescheduleUrl = null;
             let reschedulePreview = false;
@@ -7128,7 +7157,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               scheduledDate: row.scheduled_date instanceof Date
                 ? row.scheduled_date.toISOString().slice(0, 10)
                 : String(row.scheduled_date).slice(0, 10),
-              windowStart: row.window_start || null,
+              windowStart: dayOnlyRow(row) ? null : (row.window_start || null),
+              ...dayOnlyFields(dayOnlyRow(row)),
               ...(planReschedule ? { rescheduleUrl } : {}),
               ...(reschedulePreview ? { reschedulePreview: true } : {}),
             };
@@ -7468,7 +7498,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       const next = await nextSameLineVisitAtProperty({
         knex, rows: upcomingVisitRows, reportVisit, serviceLine,
       });
-      if (next.state === 'scheduled') nextSameServiceAppointment = nextAppointmentFields(next.row);
+      if (next.state === 'scheduled') {
+        await checkDayOnly([next.row]);
+        nextSameServiceAppointment = nextAppointmentFields(next.row, dayOnlyRow(next.row));
+      }
     } catch {
       nextSameServiceAppointment = null;
     }

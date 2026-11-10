@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { box, row, request, dateLabel } from './common';
 
-// Admin view on the staff documents page (GATE_STAFF_ONBOARDING_DOCS): for each active staff
+// Admin view on the staff documents page (staff onboarding documents): for each active staff
 // member, the required documents they signed and the ones still outstanding. Renders nothing
 // while the gate is off, on a failed read, or when no document is required.
 export default function OnboardingStatus({ enabled = false }) {

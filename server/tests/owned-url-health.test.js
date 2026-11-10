@@ -350,6 +350,51 @@ describe('checkOwnedUrlHealth (shared checker, injected fetchImpl)', () => {
     expect(result).toMatchObject({ verdict: 'soft_404', detail: { contentType: 'application/json' } });
   });
 
+  // 2026-11-07: the hub's live /llms.txt (Markdown served as text/plain) read
+  // soft_404 because it has no HTML element. A cited .txt file is judged as a
+  // plain-text document; a page URL with the same body still fails.
+  describe('a cited plain-text .txt file', () => {
+    const LLMS = 'https://www.wavespestcontrol.com/llms.txt';
+    const MARKDOWN = '# Waves Pest Control\n\n> Family-owned pest control and lawn care in Southwest Florida.\n\n## Services\n\n- [Pest control](https://www.wavespestcontrol.com/pest-control/): recurring plans\n';
+    const TEXT = { 'content-type': 'text/plain; charset=utf-8' };
+    const check = (url, body, headers = TEXT) => checkOwnedUrlHealth(url, {
+      fetchImpl: jest.fn(fetchMap({ [url]: response(200, body, headers) })),
+    });
+
+    test('a live llms.txt is ok', async () => {
+      expect(await check(LLMS, MARKDOWN)).toMatchObject({ verdict: 'ok', detail: { contentType: 'text/plain; charset=utf-8' } });
+    });
+
+    test('a 301 that lands on a live .txt is redirect_ok', async () => {
+      const fetchImpl = jest.fn(fetchMap({
+        'https://wavespestcontrol.com/llms.txt': response(301, '', { location: LLMS }),
+        [LLMS]: response(200, MARKDOWN, TEXT, LLMS),
+      }));
+      const result = await checkOwnedUrlHealth('https://wavespestcontrol.com/llms.txt', { fetchImpl });
+      expect(result).toMatchObject({ verdict: 'redirect_ok', finalUrl: LLMS });
+    });
+
+    test('the same body at a page URL is still soft_404', async () => {
+      expect((await check('https://www.wavespestcontrol.com/pest-control/', MARKDOWN)).verdict).toBe('soft_404');
+    });
+
+    test('a .txt that is not served as text/plain is still soft_404', async () => {
+      expect((await check(LLMS, MARKDOWN, { 'content-type': 'application/octet-stream' })).verdict).toBe('soft_404');
+    });
+
+    test('a .txt carrying a not-found message is still soft_404', async () => {
+      expect((await check(LLMS, '404 - Page not found. The requested file could not be located on this server.')).verdict).toBe('soft_404');
+    });
+
+    test('a near-empty .txt is soft_404 (empty body)', async () => {
+      expect(await check(LLMS, '# Waves\n')).toMatchObject({ verdict: 'soft_404', detail: { reason: 'empty_body' } });
+    });
+
+    test('a .txt sent with X-Robots-Tag noindex is noindex', async () => {
+      expect((await check(LLMS, MARKDOWN, { ...TEXT, 'x-robots-tag': 'noindex' })).verdict).toBe('noindex');
+    });
+  });
+
   test('a network-level failure surfaces as fetch_blocked', async () => {
     const fetchImpl = jest.fn(fetchMap({
       'https://wavespestcontrol.com/x/': new Error('timeout'),

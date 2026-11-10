@@ -180,6 +180,26 @@ function preserveWithdrawalStamp(database) {
   return database.raw("CASE WHEN scheduled_send_error LIKE 'payer_billed:%' THEN scheduled_send_error ELSE NULL END");
 }
 
+// A bill's first delivery never carries a due date before the day it goes out (owner 2026-11-06,
+// "fix"). The mint already refuses one (utils/invoice-due-base-day.js: never before today), but a
+// bill that waits as a draft or a scheduled send (a review hold, a parked send, an annual prepay
+// sent days after its term started) kept its old day and reached the customer already past due,
+// so the overdue and collections surfaces counted it late from its first day. This is the due_date
+// value for the UPDATE that claims or stamps a first delivery: Postgres reads every column in it
+// from the row as it was before the UPDATE, so only a draft, scheduled or claimed row with no
+// delivery stamp and a due date before `today` moves, to `today`. A delivered row (a resend), a
+// due date on or after today and a NULL due date keep their value. The reminder start does not
+// change: a due day on or before the send day already counts from the send (invoice-followups.js
+// newSequenceAnchor). A send that fails after its claim leaves the new day on the undelivered
+// draft; its next delivery moves it again.
+function firstDeliveryDueDate(database, today) {
+  return database.raw(
+    "CASE WHEN status IN ('draft', 'scheduled', 'sending') AND sent_at IS NULL AND sms_sent_at IS NULL"
+      + " AND email_sent_at IS NULL AND due_date < ?::date THEN ?::date ELSE due_date END",
+    [today, today],
+  );
+}
+
 // The accepted-Text/pending-Email marker on scheduled_send_error (matched everywhere by
 // prefix): the queue's sender treats the Text leg as delivered and sends only the Email.
 // A combined-visit invoice whose link rides the visit summary text is scheduled under it
@@ -546,6 +566,7 @@ module.exports = {
   isStaleClaimReviewHold,
   staleClaimReviewHoldError,
   preserveWithdrawalStamp,
+  firstDeliveryDueDate,
   selfPayAtDispatch,
   INVOICE_UNCOLLECTIBLE_STATUSES,
   VISIT_NEVER_RAN_STATUSES,

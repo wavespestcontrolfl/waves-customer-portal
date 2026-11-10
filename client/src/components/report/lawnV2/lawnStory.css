@@ -1,5 +1,4 @@
-/* GATE_LAWN_REPORT_STORY: the lawn report's story order (LawnLayoutBody adds .lawn-story-layout only
-   while the payload's lawnLayout key carries story:true; the status card is one of its sections). Layout
+/* The lawn report's story order (LawnLayoutBody adds .lawn-story-layout; the status card is one of its sections). Layout
    only: glass-theme.css owns the card materials, depth, highlights and gold actions, as it does for every
    report. */
 .service-report-v1 .lawn-story-layout .service-report-hero { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; margin-bottom: 16px; }

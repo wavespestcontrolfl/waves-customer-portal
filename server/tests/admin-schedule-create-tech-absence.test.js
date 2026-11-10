@@ -491,7 +491,7 @@ describe('POST / — admin create — Auto technician choice (GATE_UNASSIGNED_VI
   });
 });
 
-// GATE_NEW_APPT_STOP_ORDER (owner 2026-10-26, "OK GO"): the save numbers the
+// New Appointment stop order (owner 2026-10-26, "OK GO"): the save numbers the
 // booked visit's technician day through the staff writer, on the booking's own
 // transaction, so the board and the tech app list it in its place, not last.
 describe('POST / — admin create — New Appointment stop order', () => {
@@ -505,28 +505,18 @@ describe('POST / — admin create — New Appointment stop order', () => {
     technicianId: 'tech-no-absence',
     estimatedPrice: 89,
   };
-  afterEach(() => { delete process.env.GATE_NEW_APPT_STOP_ORDER; });
-
-  test('gate on: the booked visit goes to the staff writer, on the booking transaction', async () => {
-    process.env.GATE_NEW_APPT_STOP_ORDER = 'true';
+  test('the booked visit goes to the staff writer, on the booking transaction', async () => {
     const { status } = await post(body);
     expect(status).toBe(201);
     expect(placeMovedVisit).toHaveBeenCalledTimes(1);
     expect(placeMovedVisit).toHaveBeenCalledWith(trx, { serviceId: 'new-1', source: 'new_appointment', staffSave: true, lateDays: true });
   });
 
-  test('gate on, a recurring create: the parent visit only (the night pass orders the children)', async () => {
-    process.env.GATE_NEW_APPT_STOP_ORDER = 'true';
+  test('a recurring create: the parent visit only (the night pass orders the children)', async () => {
     const { status } = await post({ ...body, isRecurring: true, recurringPattern: 'monthly', recurringCount: 3, createInvoice: true });
     expect(status).toBe(201);
     expect(placeMovedVisit).toHaveBeenCalledTimes(1);
     expect(placeMovedVisit.mock.calls[0][1]).toEqual({ serviceId: 'new-1', source: 'new_appointment', staffSave: true, lateDays: true });
-  });
-
-  test('gate off (default): the save writes no stop order', async () => {
-    const { status } = await post(body);
-    expect(status).toBe(201);
-    expect(placeMovedVisit).not.toHaveBeenCalled();
   });
 });
 
@@ -553,7 +543,6 @@ describe('POST / — admin create — route check on the saved visit', () => {
   });
   afterEach(() => {
     delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
-    delete process.env.GATE_NEW_APPT_STOP_ORDER;
   });
   const gateOn = () => {
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
@@ -599,23 +588,15 @@ describe('POST / — admin create — route check on the saved visit', () => {
     expect(arrivalCalls()).toHaveLength(0);
   });
 
-  test('GATE_NEW_APPT_STOP_ORDER on: the stop-order placement runs before the route check (Codex P1 on 9837f0c3d4)', async () => {
+  test('the stop-order placement runs before the route check (Codex P1 on 9837f0c3d4)', async () => {
     const { placeMovedVisit } = require('../services/scheduling/arrival-route');
     gateOn();
-    process.env.GATE_NEW_APPT_STOP_ORDER = 'true';
     const { status, body: res } = await post(body);
     expect(status).toBe(201);
     expect(res.warnings).toContain(ROUTE_WARNING);
     expect(placeMovedVisit).toHaveBeenCalledTimes(1);
     const arrivalIdx = findConflictingVisits.mock.calls.findIndex(([a]) => a.arrivalWindow);
     expect(placeMovedVisit.mock.invocationCallOrder[0]).toBeLessThan(findConflictingVisits.mock.invocationCallOrder[arrivalIdx]);
-  });
-
-  test('GATE_NEW_APPT_STOP_ORDER off: the stop-order writer is untouched (the route check numbers nothing here)', async () => {
-    const { placeMovedVisit } = require('../services/scheduling/arrival-route');
-    gateOn();
-    await post(body);
-    expect(placeMovedVisit).not.toHaveBeenCalled();
   });
 });
 

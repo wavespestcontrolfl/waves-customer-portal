@@ -343,6 +343,14 @@ describe('the approved-version claim checks, one decision each', () => {
     await expect(checks.approvedEffectsRefusal(base({ verifyEffects: async () => true }))).resolves.toBeNull();
     await expect(checks.approvedEffectsRefusal(base({ verifyEffects: async () => false }))).resolves.toMatchObject({ code: 'approved_version_changed' });
     await expect(checks.approvedEffectsRefusal(base({ verifyEffects: async () => { throw new Error('x'); } }))).resolves.toMatchObject({ code: 'approved_version_changed' });
+    // The claim may move a stale due date to the send day (owner 2026-11-06 "fix"): the card
+    // was planned on the row before the claim, so the check sees that row's due date.
+    const seen = [];
+    await expect(checks.approvedEffectsRefusal(base(
+      { verifyEffects: async (claimed) => { seen.push([claimed.status, claimed.due_date]); return true; } },
+      { invoice: { ...row, status: 'sending', due_date: '2026-11-06' }, current: { ...row, due_date: '2026-10-30' } },
+    ))).resolves.toBeNull();
+    expect(seen).toEqual([[row.status, '2026-10-30']]);
   });
 
   test('owner: null when absent or the verifier is satisfied; its text, or the fail-closed text when it throws, is the refusal', async () => {

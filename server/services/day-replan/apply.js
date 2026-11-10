@@ -198,7 +198,7 @@ async function promiseLevelFacts(trx, deps, id) {
 async function recheckVisit(trx, deps, { id, dateStr, toStart }) {
   const toldLock = typeof deps.toldLockOn === 'function' && deps.toldLockOn() === true;
   const row = await trx('scheduled_services').where({ id }).first(
-    'id', 'status', 'window_start', 'customer_id', 'visit_id', 'reservation_expires_at', 'auto_dispatch_locked', 'auto_dispatch_excluded',
+    'id', 'status', 'window_start', 'customer_id', 'property_id', 'visit_id', 'reservation_expires_at', 'auto_dispatch_locked', 'auto_dispatch_excluded',
     ...(toldLock ? TOLD_ROW_COLUMNS : []),
   );
   if (!row) throw coded('NOT_MOVABLE', 'the visit no longer exists');
@@ -216,6 +216,8 @@ async function recheckVisit(trx, deps, { id, dateStr, toStart }) {
     visitCounts: new Map(row.visit_id != null ? [[row.visit_id, mate ? 2 : 1]] : []),
     customerCounts: new Map(row.customer_id != null ? [[row.customer_id, sameCustomer ? 2 : 1]] : []),
     sent24: new Set(reminder && reminder.reminder_24h_sent === true ? [id] : []),
+    // Whether the 24-hour reminder will still go out (it carries the new hour), read with the transaction; fails closed.
+    ...(typeof deps.loadReminder24hOffIds === 'function' ? { reminder24hOff: await deps.loadReminder24hOffIds(trx, [row]) } : {}),
     ...(toldLock ? await toldLockFacts(trx, deps, { row, id, dateStr }) : {}),
   };
   const why = deps.fixedReason(row, ctx) || deps.fixedReason({ ...row, window_start: minToHhmm(toStart) }, ctx);

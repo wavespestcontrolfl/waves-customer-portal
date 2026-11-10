@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-// GATE_NEW_APPT_ADDRESS_TIMES (owner 2026-10-24): a new caller's picked address alone answers
+// New Appointment address-first times (owner 2026-10-24): a new caller's picked address alone answers
 // the time box, on a 30-minute search until a service sets the length; a chip fills the day
-// and hour. Gate off: no customer, no search.
+// and hour.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -22,6 +22,7 @@ vi.mock('../../hooks/useDiscountStacking', () => ({
 }));
 import CreateAppointmentModal from './CreateAppointmentModal.jsx';
 
+const PEST = { id: 'svc-q', service_key: 'pest_control_quarterly', name: 'Quarterly Pest Control', billing_type: 'recurring', frequency: 'quarterly', base_price: 100, default_duration_minutes: 30 };
 const today = etDateString();
 const slot = (date, start) => ({
   date, start_time: start, end_time: '10:30', detour_minutes: 9, drive_in_minutes: 6, rain_chance: 10,
@@ -38,6 +39,7 @@ beforeEach(() => {
       if (String(url).includes('/find-time')) {
         return { ok: true, slots: [], summary: { days: [{ date: today, status: 'open', hours: [slot(today, '10:00')] }], best: { day: [slot(today, '10:00')], week: [], week_covered: true } } };
       }
+      if (String(url).includes('/admin/services?')) return { services: [PEST] };
       if (String(url).includes('/customers/quick-add')) {
         return { customer: { id: 'cust-1', firstName: 'Pat', lastName: 'Example', phone: '9415550100', address: '100 Example Way', city: 'Bradenton', state: 'FL', zip: '34200' } };
       }
@@ -59,6 +61,20 @@ const renderModal = (props = {}) => render(
   </MemoryRouter>,
 );
 
+// Fills the New customer block, adds a service and presses the one Save, which adds the customer.
+const saveNewCustomer = async () => {
+  const block = screen.getByLabelText('quick-add address').closest('div').parentElement;
+  const [first, last, phone] = Array.from(block.querySelectorAll('input'));
+  fireEvent.change(first, { target: { value: 'Pat' } });
+  fireEvent.change(last, { target: { value: 'Example' } });
+  fireEvent.change(phone, { target: { value: '9415550100' } });
+  fireEvent.change(screen.getByPlaceholderText('Search services'), { target: { value: 'Quarterly' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Quarterly Pest Control/i }));
+  const save = screen.getByRole('button', { name: 'Schedule appointment' });
+  await waitFor(() => expect(save.disabled).toBe(false));
+  fireEvent.click(save);
+};
+
 const pickAddress = () => {
   fireEvent.click(screen.getByText('+ New customer'));
   fireEvent.click(screen.getByText('pick suggestion'));
@@ -66,7 +82,7 @@ const pickAddress = () => {
 
 describe('CreateAppointmentModal address-first best times', () => {
   it('searches on the picked address alone, 30 minutes, and a chip fills the day and hour', async () => {
-    renderModal({ addressFirstTimes: true });
+    renderModal();
     pickAddress();
     const chips = await screen.findAllByTestId('availability-hour');
     const [body] = findTimeBodies();
@@ -88,7 +104,7 @@ describe('CreateAppointmentModal address-first best times', () => {
   });
 
   it('searches nothing before a suggestion is picked, and drops the answer when the address is edited by hand', async () => {
-    renderModal({ addressFirstTimes: true });
+    renderModal();
     fireEvent.click(screen.getByText('+ New customer'));
     await act(async () => { await new Promise((r) => setTimeout(r, 400)); });
     expect(findTimeBodies()).toEqual([]);
@@ -99,23 +115,18 @@ describe('CreateAppointmentModal address-first best times', () => {
   });
 
   it('collapsing the New customer block drops the chips for its address', async () => {
-    renderModal({ addressFirstTimes: true });
+    renderModal();
     pickAddress();
     await screen.findAllByTestId('availability-hour');
     fireEvent.click(screen.getByText('+ New customer'));
     await waitFor(() => expect(screen.queryAllByTestId('availability-hour')).toEqual([]));
   });
 
-  it('after Add customer, a reopened blank New customer block does not search the created customer\'s address (Codex #6655 r1)', async () => {
-    renderModal({ addressFirstTimes: true });
+  it('after Save adds the customer, a reopened blank New customer block does not search the created customer\'s address (Codex #6655 r1)', async () => {
+    renderModal();
     pickAddress();
     await screen.findAllByTestId('availability-hour');
-    const block = screen.getByRole('button', { name: 'Add customer' }).parentElement;
-    const [first, last, phone] = Array.from(block.querySelectorAll('input'));
-    fireEvent.change(first, { target: { value: 'Pat' } });
-    fireEvent.change(last, { target: { value: 'Example' } });
-    fireEvent.change(phone, { target: { value: '9415550100' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Add customer' }));
+    await saveNewCustomer();
     await screen.findByLabelText('Clear selected customer');
     const searchesBefore = findTimeBodies().length;
     fireEvent.click(screen.getByLabelText('Clear selected customer'));
@@ -135,26 +146,13 @@ describe('CreateAppointmentModal address-first best times', () => {
       const data = await res.json();
       return { ...res, json: async () => ({ ...data, pickedByTech: [{ start: '13:00', fits: true, detour_minutes: 9, drive_in_minutes: 6, technician: { id: 'tech-9', name: 'Example Tech' } }] }) };
     });
-    renderModal({ addressFirstTimes: true });
+    renderModal();
     pickAddress();
     await screen.findAllByTestId('availability-hour');
     expect(findTimeBodies().at(-1).compareTechs).toBe(true);
     expect(screen.queryByRole('region', { name: 'Technicians free at this hour' })).toBeNull();
-    // Add customer creates and selects the customer: the rows come back.
-    const block = screen.getByRole('button', { name: 'Add customer' }).parentElement;
-    const [first, last, phone] = Array.from(block.querySelectorAll('input'));
-    fireEvent.change(first, { target: { value: 'Pat' } });
-    fireEvent.change(last, { target: { value: 'Example' } });
-    fireEvent.change(phone, { target: { value: '9415550100' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Add customer' }));
+    // Save adds and selects the customer: the rows come back.
+    await saveNewCustomer();
     expect(await screen.findByRole('region', { name: 'Technicians free at this hour' })).toBeTruthy();
-  });
-
-  it('gate off: a picked address with no customer searches nothing', async () => {
-    renderModal();
-    pickAddress();
-    await act(async () => { await new Promise((r) => setTimeout(r, 400)); });
-    expect(findTimeBodies()).toEqual([]);
-    expect(screen.queryAllByTestId('availability-hour')).toEqual([]);
   });
 });

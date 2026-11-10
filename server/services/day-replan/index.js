@@ -18,7 +18,8 @@
  *   status pending or confirmed, not an estimate-slot hold, no staff lock (auto_dispatch_locked or
  *   auto_dispatch_excluded), not part of a grouped visit (another live row shares its visit_id), no
  *   other live stop that day for the same customer (co-visits stay together), its appointment starts
- *   more than 24.25 hours from now (America/New_York), and its 24-hour reminder is not sent.
+ *   more than 24.25 hours from now (America/New_York), its 24-hour reminder is not sent, and that reminder will go out
+ *   (reminder_24h_off: the customer turned it off, or the answer is unknown or unreadable; it is the only notice of a new hour).
  * GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a": a night tool never changes a time the customer was already told) fixes
  * four more kinds of stop, checked after the rules above: customer_confirmed, first_or_one_time (not a recurring
  * visit with a parent series), person_placed (staff or the customer chose the date or time; the auto-dispatch rule,
@@ -157,6 +158,24 @@ async function loadReminder24hSent(conn, ids) {
 }
 
 /**
+ * Ids of stops whose 24-hour reminder will NOT clearly go out (the customer turned it off, texts are off for a text-only
+ * choice, or the answer is unknown). Apply re-times a visit silently, and that reminder is the only notice of the new hour,
+ * so such a stop stays fixed ('reminder_24h_off'). Reads `rows` ({ id, customer_id, property_id }) with the office's bulk
+ * answer (appointment-reminders.loadVisitReminder24hAnswers). Fails CLOSED and never throws: a failed read marks every
+ * row off, and a row with no answer (no customer) counts as off.
+ */
+async function loadReminder24hOffIds(conn, rows) {
+  const list = rows || [];
+  try {
+    const answers = await require('../appointment-reminders').loadVisitReminder24hAnswers(conn, list);
+    return new Set(list.filter((r) => answers.get(r.id) !== true).map((r) => r.id));
+  } catch (err) {
+    logger.warn(`[day-replan] 24-hour reminder answers unreadable (${err.message}) - every stop of the day stays fixed`);
+    return new Set(list.map((r) => r.id));
+  }
+}
+
+/**
  * Ids of stops the customer has been told a time for: the no-show detector's promise reader (a delivered text or
  * push, an email, a call commitment, a booking, an applied reschedule, a series move), the latest promise with a known
  * slot. reminder_72h_sent is not used: it is also set when the 72-hour reminder was skipped. A promise with an unknown
@@ -214,7 +233,8 @@ async function loadDayContext(conn, dateStr, now) {
   const rows = await loadDayStops(conn, dateStr, toldLock);
   if (!rows || rows.length === 0) return null;
   const sent24 = await loadReminder24hSent(conn, rows.map((r) => r.id));
-  const ctx = { dateStr, now, allRows: rows, visitCounts: countBy(rows, 'visit_id'), customerCounts: countBy(rows, 'customer_id'), sent24 };
+  const reminder24hOff = await loadReminder24hOffIds(conn, rows);
+  const ctx = { dateStr, now, allRows: rows, visitCounts: countBy(rows, 'visit_id'), customerCounts: countBy(rows, 'customer_id'), sent24, reminder24hOff };
   if (!toldLock) return ctx;
   const dayOnly = dayOnlyOn();
   const facts = dayOnly ? await loadToldLevels(conn, rows, now) : { told: await loadToldIds(conn, rows, now) };
@@ -285,6 +305,9 @@ function fixedReason(row, ctx) {
   if (row.customer_id != null && customerCounts.get(row.customer_id) > 1) return 'same_customer';
   if (!startsMoreThanLockAway(row, dateStr, now)) return 'within_24h';
   if (sent24.has(row.id)) return 'reminder_24h_sent';
+  // The 24-hour reminder carries the new hour; when it will not go out, nothing tells the customer. A context without
+  // this fact (a caller that never loaded it) skips the check.
+  if (ctx.reminder24hOff && ctx.reminder24hOff.has(row.id)) return 'reminder_24h_off';
   return ctx.toldLock === true ? toldLockReason(row, ctx) : null;
 }
 
@@ -676,6 +699,8 @@ function applyDeps() {
     toldLockOn: nightToldLockOn,
     // GATE_DAY_ONLY_PROMISE: the move transaction re-reads what the customer was told (apply.js toldLockFacts).
     dayOnlyOn,
+    // The move transaction re-reads whether the visit's 24-hour reminder will go out (apply.js recheckVisit).
+    loadReminder24hOffIds,
     loadPromiseLevels: (conn, ids, now) => require('../auto-dispatch/told-visits').loadPromiseLevels(conn, ids, now),
     isPersonPlacedVisit: (row, conn) => require('../auto-dispatch/eligibility').isPersonPlacedVisit(row, conn),
     // The ids among `ids` the customer has a known time for (the no-show detector's promise reader); throws when unreadable.
@@ -703,4 +728,6 @@ function applyDeps() {
   };
 }
 
-module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, lockDayRows, plannerStop, versionHash, loadDayContext, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS } };
+module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, lockDayRows, plannerStop, versionHash, loadDayContext, loadReminder24hOffIds, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS,
+  // The booking-time make-room check (scheduling/booking-make-room.js) reads a day, a preference and a leg the same way.
+  loadDayStops, loadPref, legMin } };

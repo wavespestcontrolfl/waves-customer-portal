@@ -1,8 +1,8 @@
 /**
- * GATE_IRRIGATION_OWNER_RATES freeze rule (Codex round 1 on #6236): the live gate is read only when a NEW week-plan
- * decision is made. The snapshot records the table in decisionInputs.rateTable (key written ONLY for the owner table, so a
- * gate-off snapshot keeps today's exact shape), and replay plus every renderer of a stored plan read that key. A row
- * without the key is the package table, whatever the gate reads now.
+ * Freeze rule (Codex round 1 on #6236): a NEW week-plan decision uses the owner table. The snapshot records the table in
+ * decisionInputs.rateTable (key written ONLY for the owner table), and replay plus every renderer of a stored plan read
+ * that key. A stored row without the key was decided on the package table and keeps its minutes, so a plan decided
+ * and sent before the owner table went live never changes. A legacy row is built here by pinning rateTable: 'package'.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -22,15 +22,13 @@ const { buildReportWeekPlan } = require('../services/service-report/report-data'
 const { storedRateTable, resolveRateTable, rateTableInputs } = require('../services/irrigation-rates');
 
 const now = new Date('2026-09-07T14:05:00Z');
-const gateOn = () => { process.env.GATE_IRRIGATION_OWNER_RATES = 'true'; };
-const gateOff = () => { delete process.env.GATE_IRRIGATION_OWNER_RATES; };
 
 // A customer with a spray head and no typed inches: the plan runs on the default rate table, so its minutes depend on it.
 const KNOWN_HEAD = {};
 // No head type on file (typed weekly inches only): events-only plan, so the generic "about N minutes on spray zones" sentence.
 const NO_HEAD = { irrigation_run_minutes: null, watering_days: null, irrigation_system_type: null, irrigation_inches_per_week: 1 };
 
-function decide({ customerInputs = KNOWN_HEAD, forecast = 0.3, rain = 0.6, snapshotExtra = {} } = {}) {
+function decide({ customerInputs = KNOWN_HEAD, forecast = 0.3, rain = 0.6, snapshotExtra = {}, rateTable = undefined } = {}) {
   const customer = {
     id: 'fixture-customer', first_name: 'Sample', email: 'sample@example.invalid',
     address_line1: '100 Fixture Lane', address_line2: 'Unit 1', city: 'Sarasota', zip: '34236',
@@ -43,7 +41,7 @@ function decide({ customerInputs = KNOWN_HEAD, forecast = 0.3, rain = 0.6, snaps
   const decision = buildWeeklyEmailDecision({
     ...weeklyInputsForCustomer(customer, {
       weekEnding: '2026-09-06', weekWeather: { rainInches: rain, et0Inches: 1.6 },
-      weekPlanEnabled: true, planWeekEnd: '2026-09-13', now,
+      weekPlanEnabled: true, planWeekEnd: '2026-09-13', now, rateTable,
     }),
     forecastRainInches: forecast, forecastEt0Inches: 1.6,
   });
@@ -60,30 +58,24 @@ function decide({ customerInputs = KNOWN_HEAD, forecast = 0.3, rain = 0.6, snaps
 
 beforeEach(() => {
   jest.clearAllMocks();
-  gateOff();
   process.env.GATE_IRRIGATION_APP_PLAN = 'true';
   process.env.GATE_IRRIGATION_WEEK_PLAN = 'true';
   process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({ maxDaysPerWeek: 1, expiresOn: '2099-12-31', label: 'Synthetic test policy', hoursNote: 'on your assigned day', coverage: 'all' });
 });
 afterEach(() => {
-  gateOff();
   delete process.env.GATE_IRRIGATION_APP_PLAN;
   delete process.env.GATE_IRRIGATION_WEEK_PLAN;
   delete process.env.IRRIGATION_RESTRICTION_POLICY;
 });
 
 describe('the rate table keys', () => {
-  test('a stored row is the package table unless it says owner; the live gate decides only an unpinned (new) decision', () => {
+  test('a stored row is the package table unless it says owner; only an unpinned (new) decision is the owner table', () => {
     expect(storedRateTable({})).toBe('package');
     expect(storedRateTable(null)).toBe('package');
     expect(storedRateTable({ rateTable: 'owner' })).toBe('owner');
     expect(storedRateTable({ rateTable: 'bogus' })).toBe('package');
-    gateOn();
-    expect(storedRateTable({})).toBe('package');
     expect(resolveRateTable()).toBe('owner');
     expect(resolveRateTable('package')).toBe('package');
-    gateOff();
-    expect(resolveRateTable()).toBe('package');
     expect(resolveRateTable('owner')).toBe('owner');
   });
   test('the snapshot key exists only for the owner table', () => {
@@ -92,12 +84,20 @@ describe('the rate table keys', () => {
   });
 });
 
-describe('a NEW decision reads the live gate and freezes it', () => {
-  test('gate off: package minutes and NO rateTable key (snapshot shape identical to main)', () => {
+describe('a NEW decision uses the owner table and freezes it', () => {
+  test('owner minutes and rateTable "owner" frozen in decisionInputs', () => {
     const { decision, snapshot } = decide();
+    expect(decision.weekPlan).toMatchObject({ rateSource: 'system_type_default', rateInPerHr: 1 });
+    expect(snapshot.decisionInputs.rateTable).toBe('owner');
+  });
+
+  test('a pinned package-table decision (legacy shape): package minutes and NO rateTable key', () => {
+    const owner = decide();
+    const { decision, snapshot } = decide({ rateTable: 'package' });
     expect(decision.weekPlan).toMatchObject({ rateSource: 'system_type_default', rateInPerHr: 1.5 });
+    expect(decision.weekPlan.minutesPerEvent).toBeLessThan(owner.decision.weekPlan.minutesPerEvent);
     expect(Object.keys(snapshot.decisionInputs)).not.toContain('rateTable');
-    // The exact key list main writes, in order, so the claim hash of a gate-off snapshot cannot move.
+    // The exact key list a legacy row carries, in order, so the claim hash of a stored legacy snapshot cannot move.
     expect(Object.keys(snapshot.decisionInputs)).toEqual([
       'targetInches', 'lastWeekTargetInches', 'appliedInches', 'priorWeekEvents', 'priorWeekPrescribedInches',
       'priorWeekCreditedInches', 'priorWeekRainOverride', 'priorWeekSkippedRunInches', 'rainOnlyCarryover',
@@ -106,37 +106,24 @@ describe('a NEW decision reads the live gate and freezes it', () => {
       'planWeekEnd', 'home', 'rainfallInches7d', 'et0Inches', 'rainSource', 'scheduleSource', 'scheduleUnconfirmed',
     ]);
     expect(JSON.stringify(snapshot.decisionInputs)).not.toMatch(/rateTable/);
-  });
-
-  test('gate on: owner minutes and rateTable "owner" frozen in decisionInputs', () => {
-    const off = decide().decision;
-    gateOn();
-    const { decision, snapshot } = decide();
-    expect(decision.weekPlan).toMatchObject({ rateSource: 'system_type_default', rateInPerHr: 1 });
-    expect(decision.weekPlan.minutesPerEvent).toBeGreaterThan(off.weekPlan.minutesPerEvent);
-    expect(snapshot.decisionInputs.rateTable).toBe('owner');
-    // Everything but the key and the table's own consequences matches the gate-off decision's inputs.
-    expect(Object.keys(snapshot.decisionInputs).filter((k) => k !== 'rateTable')).toEqual(Object.keys(off.decisionInputs));
+    // Everything but the key matches the owner decision's inputs.
+    expect(Object.keys(owner.snapshot.decisionInputs).filter((k) => k !== 'rateTable')).toEqual(Object.keys(snapshot.decisionInputs));
   });
 
   test('the claim hash covers the frozen table: an owner snapshot hashes differently from a package one', () => {
-    const pkg = decide().snapshot;
-    gateOn();
+    const pkg = decide({ rateTable: 'package' }).snapshot;
     const owner = decide().snapshot;
     expect(_private.decisionHash(owner.plan, owner.decisionInputs, owner.restriction))
       .not.toBe(_private.decisionHash(pkg.plan, pkg.decisionInputs, pkg.restriction));
   });
 });
 
-describe('gate flips ON after a package-table snapshot (legacy row, no key)', () => {
+describe('a stored package-table snapshot (legacy row, no key) keeps its minutes', () => {
   test('known head: replay equal, app plan still loads, minutes and sentences unchanged', async () => {
-    const { customer, snapshot, decision } = decide();
-    const before = await loadCustomerWateringPlan('fixture-customer', { now });
-    gateOn();
+    const { customer, snapshot, decision } = decide({ rateTable: 'package' });
     expect(replayWeekPlanForCustomer(snapshot, customer)).not.toBeNull();
     const after = await loadCustomerWateringPlan('fixture-customer', { now });
     expect(after).not.toBeNull();
-    expect(after).toEqual(before);
     expect(after.instruction).toBe(decision.payload.week_plan);
     expect(after.note).toBe(decision.payload.plan_note || '');
     expect(after.note).toContain('from University of Florida turf guidance');
@@ -144,8 +131,7 @@ describe('gate flips ON after a package-table snapshot (legacy row, no key)', ()
   });
 
   test('no head: the generic sentence stays 20 / 60 in the app plan and the report card', async () => {
-    const { customer, snapshot } = decide({ customerInputs: NO_HEAD });
-    gateOn();
+    const { customer, snapshot } = decide({ customerInputs: NO_HEAD, rateTable: 'package' });
     expect(replayWeekPlanForCustomer(snapshot, customer)).not.toBeNull();
     const plan = await loadCustomerWateringPlan('fixture-customer', { now });
     expect(plan).not.toBeNull();
@@ -154,8 +140,7 @@ describe('gate flips ON after a package-table snapshot (legacy row, no key)', ()
   });
 
   test('a hold or conditional plan keeps its "20 / 60" fallback sentence in the report card (buildReportWeekPlan)', () => {
-    const { snapshot } = decide({ customerInputs: NO_HEAD, forecast: 1.4 }); // conditional on forecast, no head
-    gateOn();
+    const { snapshot } = decide({ customerInputs: NO_HEAD, forecast: 1.4, rateTable: 'package' }); // conditional on forecast, no head
     const card = buildReportWeekPlan(snapshot, '2026-09-08');
     expect(card).not.toBeNull();
     expect(card.detail).toMatch(/about 20 minutes on spray zones, 60 on rotor zones/);
@@ -163,33 +148,26 @@ describe('gate flips ON after a package-table snapshot (legacy row, no key)', ()
   });
 
   test('a changed customer input still withholds the plan (the freeze does not loosen the validity check)', async () => {
-    const { customer } = decide();
-    gateOn();
+    const { customer } = decide({ rateTable: 'package' });
     findEligibleCustomers.mockResolvedValue([{ ...customer, irrigation_run_minutes: 35 }]);
     expect(await loadCustomerWateringPlan('fixture-customer', { now })).toBeNull();
   });
 });
 
-describe('gate flips OFF after an owner-table snapshot', () => {
-  test('known head: replay equal, app plan still loads with the owner minutes and no UF attribution', async () => {
-    gateOn();
+describe('an owner-table snapshot', () => {
+  test('known head: replay equal, app plan loads with the owner minutes and no UF attribution', async () => {
     const { customer, snapshot, decision } = decide();
     expect(snapshot.decisionInputs.rateTable).toBe('owner');
-    const before = await loadCustomerWateringPlan('fixture-customer', { now });
-    gateOff();
     expect(replayWeekPlanForCustomer(snapshot, customer)).not.toBeNull();
     const after = await loadCustomerWateringPlan('fixture-customer', { now });
     expect(after).not.toBeNull();
-    expect(after).toEqual(before);
     expect(after.instruction).toBe(decision.payload.week_plan);
     expect(after.note).not.toMatch(/University of Florida/);
     expect(snapshot.plan.rateInPerHr).toBe(1);
   });
 
-  test('no head: the generic sentence stays 30 / 80 in the app plan and the report card', async () => {
-    gateOn();
+  test('no head: the generic sentence is 30 / 80 in the app plan and the report card', async () => {
     const { customer, snapshot } = decide({ customerInputs: NO_HEAD, forecast: 1.4 });
-    gateOff();
     expect(replayWeekPlanForCustomer(snapshot, customer)).not.toBeNull();
     const plan = await loadCustomerWateringPlan('fixture-customer', { now });
     expect(plan).not.toBeNull();
@@ -202,34 +180,27 @@ describe('gate flips OFF after an owner-table snapshot', () => {
 });
 
 describe('replay is pinned to the stored table', () => {
-  test('a gate-on snapshot whose key is stripped (treated as the old table) no longer replays equal', () => {
-    gateOn();
+  test('an owner snapshot whose key is stripped (treated as the old table) no longer replays equal', () => {
     const { customer, snapshot } = decide();
     const stripped = JSON.parse(JSON.stringify(snapshot));
     delete stripped.decisionInputs.rateTable;
     expect(replayWeekPlanForCustomer(stripped, customer)).toBeNull();
   });
 
-  test('the weekly inputs always carry the table the decision is pinned to: the given one, else today\'s gate read once', () => {
+  test('the weekly inputs always carry the table the decision is pinned to: the given one, else the owner table', () => {
     const { customer } = decide();
     const args = { weekEnding: '2026-09-06', weekWeather: { rainInches: 0.6, et0Inches: 1.6 }, weekPlanEnabled: true, planWeekEnd: '2026-09-13', now };
-    expect(weeklyInputsForCustomer(customer, args).rateTable).toBe('package');
-    gateOn();
     expect(weeklyInputsForCustomer(customer, args).rateTable).toBe('owner');
-    expect(weeklyInputsForCustomer(customer, { ...args, rateTable: 'package' }).rateTable).toBe('package');
-    gateOff();
     expect(weeklyInputsForCustomer(customer, { ...args, rateTable: 'package' }).rateTable).toBe('package');
   });
 
-  test('a decision pinned to the package table ignores a live gate that is on, and the reverse', () => {
+  test('a decision pinned to a table keeps it', () => {
     const base = (rateTable) => buildWeeklyEmailDecision({
       ...weeklyInputsForCustomer(decide().customer, { weekEnding: '2026-09-06', weekWeather: { rainInches: 0.6, et0Inches: 1.6 }, weekPlanEnabled: true, planWeekEnd: '2026-09-13', now, rateTable }),
       forecastRainInches: 0.3, forecastEt0Inches: 1.6,
     });
-    gateOn();
     expect(base('package').weekPlan.rateInPerHr).toBe(1.5);
     expect(base('package').decisionInputs).not.toHaveProperty('rateTable');
-    gateOff();
     expect(base('owner').weekPlan.rateInPerHr).toBe(1);
     expect(base('owner').decisionInputs.rateTable).toBe('owner');
   });
@@ -252,27 +223,21 @@ describe('the move guard follows the decision\'s table (stale fallback, 60 min x
 
   test('a new decision pins ONE table for the guard and the decision', () => {
     const { customer } = decide({ customerInputs: MOVED_STALE });
-    expect(weeklyInputsForCustomer(customer, inputsArgs)).toMatchObject({ scheduleUnconfirmed: true, rateTable: 'package' });
-    gateOn();
     expect(weeklyInputsForCustomer(customer, inputsArgs)).toMatchObject({ scheduleUnconfirmed: false, rateTable: 'owner' });
-    // An explicit table wins over the gate in both directions, for the guard as well as the decision.
+    // An explicit table wins for the guard as well as the decision.
     expect(weeklyInputsForCustomer(customer, { ...inputsArgs, rateTable: 'package' })).toMatchObject({ scheduleUnconfirmed: true, rateTable: 'package' });
-    gateOff();
     expect(weeklyInputsForCustomer(customer, { ...inputsArgs, rateTable: 'owner' })).toMatchObject({ scheduleUnconfirmed: false, rateTable: 'owner' });
   });
 
   test.each([
-    { decidedOn: 'off', unconfirmed: true },
-    { decidedOn: 'on', unconfirmed: false },
-  ])('published with the gate $decidedOn, then the gate flips: replay equal, plan loads, pending email payload identical', async ({ decidedOn, unconfirmed }) => {
-    if (decidedOn === 'on') gateOn();
-    const { customer, snapshot, decision } = decide({ customerInputs: MOVED_STALE });
+    { table: 'package', unconfirmed: true },
+    { table: 'owner', unconfirmed: false },
+  ])('a published $table-table plan: replay equal, plan loads, pending email payload identical', async ({ table, unconfirmed }) => {
+    const { customer, snapshot, decision } = decide({ customerInputs: MOVED_STALE, rateTable: table });
     expect(snapshot.decisionInputs.scheduleUnconfirmed).toBe(unconfirmed);
-    expect(snapshot.decisionInputs.rateTable).toBe(decidedOn === 'on' ? 'owner' : undefined);
+    expect(snapshot.decisionInputs.rateTable).toBe(table === 'owner' ? 'owner' : undefined);
     const before = await loadCustomerWateringPlan('fixture-customer', { now });
     expect(before).not.toBeNull();
-    // The gate flips with the plan published and its email pending.
-    if (decidedOn === 'on') gateOff(); else gateOn();
     const replay = replayWeekPlanForCustomer(snapshot, customer);
     expect(replay).not.toBeNull();
     expect(replay.payload).toEqual(decision.payload);

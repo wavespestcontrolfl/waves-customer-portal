@@ -808,7 +808,7 @@ function newLeadMovedOn(s) {
 }
 
 // The repeat-form alert asks the office to call a lead who sent the quote
-// form again (GATE_LEAD_REPEAT_FORM). Only what reached the customer after
+// form again (lead-webhook.js, ringRepeatFormAlert). Only what reached the customer after
 // its latest form counts, each by its shared witness: a staff text
 // (deliveredTexts), an estimate handed off (handedOffWithin, never sent_at),
 // a live visit booked; or the lead deleted. A call alone is a person's to mark

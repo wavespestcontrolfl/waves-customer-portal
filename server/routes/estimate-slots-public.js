@@ -99,6 +99,9 @@ const {
 const { recordCheckoutStepReached, CHECKOUT_KIND } = require('../services/estimate-checkout-events');
 
 const TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
+// The ?timeOfDay= values available-slots passes on (estimate-slot-availability filterTimeOfDay;
+// same names as scheduling/parse-when.js VALID_TIME_OF_DAY, where 'any' means no filter).
+const SLOT_TIME_OF_DAY = new Set(['morning', 'afternoon', 'evening']);
 // Accept both the legacy admin slug tokens (nameSlug-8hex) AND the new
 // 64-char hex format. Post-estimate-versions PR every new token will be
 // 64-char hex; existing slug tokens remain valid for historical estimates
@@ -498,9 +501,11 @@ router.get('/:token/available-slots', async (req, res) => {
     if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= MAX_SLOT_HORIZON_DAYS) {
       opts.windowDays = windowDays;
     }
-    if (typeof req.query.timeOfDay === 'string' && req.query.timeOfDay.trim()) {
-      opts.timeOfDay = req.query.timeOfDay.trim();
-    }
+    // Only a known value reaches the lookup: the slot cache key carries opts.timeOfDay, so any other
+    // string forced a cache miss (a fresh list build per request) and filtered like 'afternoon'.
+    // An unknown value, 'any' or none = no filter. The page itself sends no timeOfDay.
+    const timeOfDay = typeof req.query.timeOfDay === 'string' ? req.query.timeOfDay.trim().toLowerCase() : '';
+    if (SLOT_TIME_OF_DAY.has(timeOfDay)) opts.timeOfDay = timeOfDay;
     opts.serviceMode = resolveSlotServiceMode(estimate, req.query.serviceMode);
     if (typeof req.query.selectedFrequency === 'string' && req.query.selectedFrequency.trim()) {
       opts.selectedFrequency = req.query.selectedFrequency.trim();

@@ -17,3 +17,23 @@ describe('dictation routes share one paid-transcription limiter', () => {
     expect(src).not.toMatch(/const\s+dictationLimiter\s*=/);
   });
 });
+
+describe('live words spend from the same bucket', () => {
+  test('a session counts as one clip, and only while half the budget is free', async () => {
+    const { takeLiveSessionBudget, dictationLimiter } = require('../services/dictation-upload');
+    expect(typeof dictationLimiter).toBe('function');
+    const key = 'tech:budget-test:v1';
+    for (let i = 0; i < 20; i += 1) expect(await takeLiveSessionBudget(key)).toBe(true);
+    expect(await takeLiveSessionBudget(key)).toBe(false);
+    // concurrent starts cannot all pass against an empty bucket
+    const burst = await Promise.all(Array.from({ length: 100 }, () => takeLiveSessionBudget('tech:burst-test:v1')));
+    expect(burst.filter(Boolean)).toHaveLength(20);
+    // a full bucket whose window has passed admits again, before the store's own sweep
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    jest.setSystemTime(Date.now() + 16 * 60 * 1000);
+    expect(await takeLiveSessionBudget(key)).toBe(true);
+    jest.useRealTimers();
+    // the clip route still has its other half: the limiter's own store holds the same count
+    expect(await takeLiveSessionBudget('tech:other:v1')).toBe(true);
+  });
+});

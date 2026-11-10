@@ -77,14 +77,10 @@ function comboRouteCheckLive() {
   return gateEnvValue('GATE_COMBO_ROUTE_CHECK');
 }
 
-/** GATE_STAFF_ROUTE_INSERTION (owner 2026-10-25, "go" + "save order"): dark
- *  unless set, read at call time, capacity mode off only. On, a staff check of
- *  a MOVED visit tries it at every place in the technician's stored order
- *  instead of after the last numbered stop, and the save numbers the day in
- *  the certified order (placeMovedVisit). Off: byte-identical. */
-function staffRouteInsertionLive() {
-  return gateEnvValue('GATE_STAFF_ROUTE_INSERTION');
-}
+// Staff route insertion (owner 2026-10-25, "go" + "save order"), capacity mode
+// off only: a staff check of a MOVED visit tries it at every place in the
+// technician's stored order instead of after the last numbered stop, and the
+// save numbers the day in the certified order (placeMovedVisit).
 
 // A moved visit goes in ahead of a stop only when that stop still arrives at
 // least this long before its window closes: the drive model is off by about
@@ -92,7 +88,7 @@ function staffRouteInsertionLive() {
 // fit (owner 2026-10-25).
 const INSERTION_MARGIN_MINUTES = 15;
 
-/** Where a check stands under GATE_STAFF_ROUTE_INSERTION: 'move' for a new
+/** Where a check stands for staff route insertion: 'move' for a new
  *  visit, the save writer's own placement (`place`), or another day,
  *  technician or start than the saved row; 'saved' for the visit where it is
  *  saved; null for a hand-built context with no saved place (the gap tool),
@@ -288,7 +284,7 @@ async function loadArrivalRouteContext({
   date, now, grouped, activeTarget, activeStop, prospective: !!prospective,
   insertTarget: dateOnly(stored.scheduled_date) !== date || stored.technician_id !== techId
     || (changes.window_start && String(changes.window_start).slice(0, 5) !== String(stored.window_start).slice(0, 5)),
-  // Where the visit is saved now (staffPlacement, GATE_STAFF_ROUTE_INSERTION).
+  // Where the visit is saved now (staffPlacement).
   placedAt: prospective ? null : { date: dateOnly(stored.scheduled_date),
     technicianId: stored.technician_id || null, windowStart: String(stored.window_start || '').slice(0, 5) },
   routeOrderPinned,
@@ -541,7 +537,7 @@ function resolvePlacementOrigin(context, capacity, departureMin, target, own, fa
  *  a prospective placement or a genuine move; an existing save probe
  *  re-sequences the day once with the target appended. Tried once per
  *  sequencer (see the stale-order rescue above the caller). `staffInsert`
- *  (GATE_STAFF_ROUTE_INSERTION, capacity off): every position for a moved
+ *  (capacity off): every position for a moved
  *  visit, the save probe included, since the save writes that order. */
 function buildCandidateOrders(context, capacity, groupedPending, target, allowInsertion, sequencers, baselineDriveMinutes, staffInsert = false) {
   const insert = staffInsert || (capacity && allowInsertion && (context.prospective || context.insertTarget));
@@ -647,7 +643,7 @@ function dayIsOvercommitted(sequencers, groupedPending, simulate) {
 /** Why an `arrival_window` failure happened, from the same simulation re-run to report
  *  lateness instead of stopping at the first miss (explain: true only). The new visit is
  *  tried at EVERY position of the day's current order (n+1), whatever capacity mode or
- *  GATE_STAFF_ROUTE_INSERTION do for the real placement, so one cramped order never speaks
+ *  staff route insertion do for the real placement, so one cramped order never speaks
  *  for the day.
  *
  *  A position is VIABLE only if the new visit keeps its OWN 2-hour window there. A position
@@ -980,11 +976,11 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
       : !target.technician_id ? { code: 'no_technician' }
         : !hasCoords(target) ? { code: 'no_pin', rows: [target] } : { code: 'grouped' }));
   }
-  // Staff route insertion (GATE_STAFF_ROUTE_INSERTION, capacity off): a move
+  // Staff route insertion (capacity off): a move
   // tries every place (staffPlacement). A whole shared stop (`unit`) and a
   // route number the office typed keep today's rule: their save keeps that
   // place.
-  const placement = !capacity && staffRouteInsertionLive() && !target.memberIds && !context.routeOrderPinned
+  const placement = !capacity && !target.memberIds && !context.routeOrderPinned
     ? staffPlacement(context, place, date, target.technician_id, windowStart) : null;
   const staffInsert = placement === 'move';
   const own = rows.filter(row => row.technician_id === target.technician_id && (capacity || row.reservation_expires_at == null));
@@ -999,7 +995,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // numbering, not a plan. Simulate the day in promised-window order too and
   // certify whichever fits better; commit persists the certified order. A
   // complete, window-ordered dispatch order stays the only baseline. Under
-  // GATE_STAFF_ROUTE_INSERTION a staff move follows the same rule, and so does
+  // staff route insertion a staff move follows the same rule, and so does
   // the visit where it is saved, so its own hour reads like every other hour
   // (nothing is written for it: only a move's result carries an order).
   const sequencers = (capacity || placement) && storedOrderStale(groupedPending, pending) ? [currentOrder, clockOrder] : [currentOrder];
@@ -1270,9 +1266,9 @@ async function persistArrivalOrder(conn, fit, targetId) {
   await recordCapacityDecision(conn, fit, targetId);
 }
 
-/** GATE_STAFF_ROUTE_INSERTION, capacity mode off: after a staff save moved a
+/** Capacity mode off: after a staff save moved a
  *  visit (another day, technician or start), or New Appointment booked one
- *  (GATE_NEW_APPT_STOP_ORDER; `source: 'new_appointment'` goes on the audit
+ *  (`source: 'new_appointment'` goes on the audit
  *  row), number its technician's day in the order the staff check
  *  certified. Until then such a visit has no number, and the board, the tech
  *  app and the tracking page list it after every numbered stop. Runs on the
@@ -1287,7 +1283,7 @@ async function persistArrivalOrder(conn, fit, targetId) {
  *  the hour under, and numbers the day in that order. Returns the order
  *  written, or null. */
 async function placeMovedVisit(conn, { serviceId, source, staffSave = false, lateDays = false } = {}) {
-  if (capacityEnabled() || !staffRouteInsertionLive() || !arrivalWindowRoutingEnabled()) return null;
+  if (capacityEnabled() || !arrivalWindowRoutingEnabled()) return null;
   if (!conn?.isTransaction || !serviceId) return null;
   try {
     return await conn.transaction(sp => placeInSavepoint(sp, { serviceId, source, staffSave, lateDays }));
@@ -1483,7 +1479,7 @@ async function buySaveRoads({
     const checkContext = await load({ fromActiveStop: pickerRoadCheckLive(), excludeServiceIds });
     // The route number is read from a context with no exclusions and no active
     // stop (placeMovedVisit); reuse the check's when it is the same one.
-    const placeContext = staffRouteInsertionLive() && !capacityEnabled()
+    const placeContext = !capacityEnabled()
       && (excludeServiceIds.length || checkContext?.activeStop ? await load({}) : checkContext);
     const travel = roadTimes.createPickerTravel({ spender, budget });
     // `check: false` = a move that numbers the day but runs no advisory check (Quick Move).

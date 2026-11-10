@@ -164,7 +164,7 @@ function DiscountsSection() {
   const save = async () => {
     try {
       const payload = { ...form };
-      if (!payload.promo_code) delete payload.promo_code;
+      if (!payload.promo_code) payload.promo_code = null;
       [
         "max_discount_dollars",
         "min_service_count",

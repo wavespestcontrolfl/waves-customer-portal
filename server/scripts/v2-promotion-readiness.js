@@ -329,7 +329,7 @@ async function main({ aps = false, apsPass = null } = {}) {
     //
     // Resolved with production's OWN resolver (see contactPhoneForCall above).
     const contactPhone = contactPhoneForCall(r);
-    // A whole-structure unit waiver (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT) is stamped
+    // A whole-structure unit waiver is stamped
     // on the persisted row; rebuild the verdict the routing gate saw.
     const storedAv = reconstructWaivedAddressValidation(parseJson(r.ai_address_validation));
     const effectiveAv = recoveredCallIds.has(r.id)

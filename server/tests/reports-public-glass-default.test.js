@@ -5,8 +5,6 @@
  *   renders the liquid-glass experience;
  * - pdf / static / sms_preview modes NEVER carry it — the Playwright print
  *   pipeline and cached artifacts stay untouched.
- * GATE_REPORT_SHARED_TEMPLATE rides the same live-only rule: gate on + live mode → reportTemplate: true
- * (service_report_v1 and older records); print modes never carry it; gate off → no key.
  */
 jest.mock('../models/db', () => {
   const mock = jest.fn();
@@ -22,7 +20,6 @@ jest.mock('../config', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
-  reportSharedTemplateLive: jest.fn(() => false),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -159,96 +156,15 @@ describe('GET /reports/:token/data glass default flag', () => {
       });
     },
   );
-});
 
-const featureGates = require('../config/feature-gates');
-const { reportTemplatePayload } = require('../services/service-report/report-template');
-
-async function fetchData(query = '') {
-  return withServer(async (baseUrl) => {
-    const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data${query}`);
-    return { status: res.status, body: await res.json() };
-  });
-}
-
-describe('reportTemplatePayload', () => {
-  afterEach(() => { featureGates.reportSharedTemplateLive.mockReturnValue(false); });
-
-  test('gate off → no key; gate on → reportTemplate: true', () => {
-    expect(reportTemplatePayload()).toEqual({});
-    featureGates.reportSharedTemplateLive.mockReturnValue(true);
-    expect(reportTemplatePayload()).toEqual({ reportTemplate: true });
-  });
-
-  test('a feature-gates module without the reader (a partial mock) reads as off, never a crash', () => {
-    const reader = featureGates.reportSharedTemplateLive;
-    delete featureGates.reportSharedTemplateLive;
-    try {
-      expect(reportTemplatePayload()).toEqual({});
-    } finally {
-      featureGates.reportSharedTemplateLive = reader;
-    }
-  });
-});
-
-describe('GET /reports/:token/data reportTemplate key (GATE_REPORT_SHARED_TEMPLATE)', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    featureGates.reportSharedTemplateLive.mockReturnValue(false);
-    buildReportV1Data.mockResolvedValue({
-      typedReport: { headline: 'Perimeter looked quiet today.' },
-      pestPressure: null,
-      pdfUrl: `/api/reports/${VALID_TOKEN}`,
-    });
-  });
-
-  test('gate off, live mode → no reportTemplate key (glassDefault unchanged)', async () => {
-    mockDb();
-    const { status, body } = await fetchData();
-    expect(status).toBe(200);
-    expect(body.glassDefault).toBe(true);
-    expect('reportTemplate' in body).toBe(false);
-  });
-
-  test('gate on, live mode → reportTemplate: true', async () => {
-    featureGates.reportSharedTemplateLive.mockReturnValue(true);
-    mockDb();
-    const { status, body } = await fetchData();
-    expect(status).toBe(200);
-    expect(body.reportTemplate).toBe(true);
-  });
-
-  test.each(['pdf', 'static', 'sms_preview'])(
-    'gate on, mode=%s → never carries reportTemplate (print pipeline untouched)',
-    async (mode) => {
-      featureGates.reportSharedTemplateLive.mockReturnValue(true);
-      mockDb();
-      const { status, body } = await fetchData(`?mode=${mode}`);
-      expect(status).toBe(200);
+  test('older record, live mode → the older payload, with no reportTemplate key (the shared template is unconditional)', async () => {
+    mockDb({ templateVersion: null });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.cityState).toBeDefined();
       expect('reportTemplate' in body).toBe(false);
-    },
-  );
-
-  test('older record: gate on + live → reportTemplate: true; gate off → no key', async () => {
-    featureGates.reportSharedTemplateLive.mockReturnValue(true);
-    mockDb({ templateVersion: null });
-    const on = await fetchData();
-    expect(on.status).toBe(200);
-    expect(on.body.cityState).toBeDefined();
-    expect(on.body.reportTemplate).toBe(true);
-
-    featureGates.reportSharedTemplateLive.mockReturnValue(false);
-    mockDb({ templateVersion: null });
-    const off = await fetchData();
-    expect(off.status).toBe(200);
-    expect('reportTemplate' in off.body).toBe(false);
-  });
-
-  test('older record, gate on, mode=pdf → no reportTemplate key', async () => {
-    featureGates.reportSharedTemplateLive.mockReturnValue(true);
-    mockDb({ templateVersion: null });
-    const { status, body } = await fetchData('?mode=pdf');
-    expect(status).toBe(200);
-    expect('reportTemplate' in body).toBe(false);
+    });
   });
 });

@@ -38,6 +38,7 @@ const dryTime = require('./dry-time');
 const mowingDays = require('./mowing-days');
 const roadCheck = require('./road-check');
 const moveLimit = require('./move-limit');
+const reminderOff = require('./reminder-off');
 const needsPerson = require('./needs-person-notice');
 const moveCheck = require('./proofreader/nightly');
 const checkDown = require('./check-down-notice');
@@ -977,6 +978,14 @@ async function loadRunMoveCounts(run, services) {
   if (!run.moveCounts) run.guardReadDegraded = true;
 }
 
+// REMINDERS-OFF LOCK (owner 2026-11-07, reminder-off.js): pass 1's one bulk read of
+// every loaded visit's 24-hour reminder answer. A failed read leaves null:
+// every placed visit then skips, and the run is degraded.
+async function loadRunReminderOff(run, services) {
+  run.reminderOffIds = await reminderOff.loadRunOffIds(db, services);
+  if (!run.reminderOffIds) run.guardReadDegraded = true;
+}
+
 // Pass 2's recheck: a fresh count for this one visit, so a move another run
 // landed since pass 1 is seen. Returns the skip row or null.
 async function recheckMoveLimit(pm, run) {
@@ -1215,6 +1224,9 @@ async function evaluateServiceForRun(service, run) {
   if (gate.skip) return logLapsedPlanSkip(run, service, gate.skip);
   notePinOk(run, service, gate.elig);
   if (!gate.elig.eligible) return logIneligible(run, service, gate.elig, gate.planCheck);
+  // REMINDERS-OFF LOCK: a visit whose 24-hour reminder will not go out never moves (reminder-off.js).
+  const offSkip = reminderOff.skipFor(run.reminderOffIds, service);
+  if (offSkip) return logSkip(run, service, offSkip);
 
   // ── Day-move guard (only when a guard mode is active) ──
   const guard = dayMoveGuarded(guardMode, service)
@@ -1357,6 +1369,13 @@ function movedDescription(appliedAudit) {
 // necessarily changed date and 409s). Refreshes the planned move's ctx on
 // success; returns the skip otherwise (a read failure degrades the run).
 async function recheckPlannedMove(pm, run) {
+  // REMINDERS-OFF LOCK (reminder-off.js), in every guard mode: the customer may
+  // have turned the 24-hour reminder off while the run scored the move.
+  const off = await reminderOff.recheckFor(db, pm.service);
+  if (off) {
+    if (off.degraded) run.guardReadDegraded = true;
+    return off;
+  }
   if (!dayMoveGuarded(run.guardMode, pm.service)) return null;
   const recheckNow = new Date();
   const recheck = await recheckDayMoveWindow(run.guardMode, pm.service, pm.ctx.tierMeta, recheckNow, run.config.nightLock24h === true, toldLockOf(run.config), dayOnlyOf(run.config));
@@ -1690,6 +1709,7 @@ async function runAutoDispatch(opts = {}) {
     // Visits auto-dispatch cannot fix alone; raised once at run end (needs-person-notice.js).
     needsPerson: new Map(),
     moveCounts: new Map(),
+    reminderOffIds: null, // pass 1's 24-hour reminder answers (loadRunReminderOff); null = unreadable
     // DAY RULES: visits this run may still move onto a Sunday (sundayBudget).
     sundays: sundayBudget(config),
     guardReadDegraded: false, // a failed guard read must not report a green run
@@ -1726,6 +1746,7 @@ async function runAutoDispatch(opts = {}) {
     run.guardCtx = await loadGuardContext(run.guardMode, services, nowDate, config.nightLock24h === true, toldLockOf(config), dayOnlyOf(config));
     run.guardReadDegraded = run.guardCtx.degraded;
     await loadRunMoveCounts(run, services);
+    await loadRunReminderOff(run, services);
 
     for (const service of services) {
       try {

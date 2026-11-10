@@ -40,6 +40,7 @@ jest.mock('../services/invoice-followups', () => ({
 const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-invoices');
+const { errorHandler } = require('../middleware/errors');
 
 const INVOICE = {
   id: 'inv-1',
@@ -73,7 +74,8 @@ async function withServer(fn) {
   const app = express();
   app.use(express.json());
   app.use('/admin/invoices', router);
-  app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+  // The production error handler: a thrown operational 400 must reach the client with its message.
+  app.use(errorHandler);
   const server = app.listen(0);
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   try {
@@ -127,6 +129,66 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
     db.transaction.mockImplementation(async (cb) => cb(trx));
   });
 
+  describe('plan dates', () => {
+    const dayOffset = (days) => {
+      const d = new Date();
+      d.setUTCDate(d.getUTCDate() + days);
+      return d.toISOString().slice(0, 10);
+    };
+    const post = (baseUrl, extra) => fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paymentFrequency: 'monthly', paymentAmount: 25, ...extra }),
+    });
+    const expectRefused = async (res, message) => {
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe(message);
+      expect(db.transaction).not.toHaveBeenCalled();
+      expect(trxPlans.insert).not.toHaveBeenCalled();
+      expect(trxFollowups.update).not.toHaveBeenCalled();
+    };
+
+    test('a start date in the past is refused: no plan, reminders keep running', async () => {
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, { planStartDate: dayOffset(-3), nextPaymentDate: dayOffset(30) });
+        await expectRefused(res, 'planStartDate cannot be in the past');
+      });
+    });
+
+    test('a first payment date in the past is refused', async () => {
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, { planStartDate: dayOffset(1), nextPaymentDate: dayOffset(-2) });
+        await expectRefused(res, 'nextPaymentDate cannot be in the past');
+      });
+    });
+
+    test('a first payment before the start date is refused', async () => {
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, { planStartDate: dayOffset(90), nextPaymentDate: dayOffset(30) });
+        await expectRefused(res, 'nextPaymentDate cannot be before planStartDate');
+      });
+    });
+
+    test('a first payment on the start day is allowed', async () => {
+      const day = dayOffset(30);
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, { planStartDate: day, nextPaymentDate: day });
+        expect(res.status).toBe(201);
+        expect(trxPlans.insert).toHaveBeenCalledWith(expect.objectContaining({ plan_start_date: day, next_payment_date: day }));
+        expect(trxFollowups.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'stopped' }));
+      });
+    });
+
+    test('a start date today is allowed', async () => {
+      const today = require('../utils/datetime-et').etDateString();
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, { nextPaymentDate: dayOffset(30) });
+        expect(res.status).toBe(201);
+        expect(trxPlans.insert).toHaveBeenCalledWith(expect.objectContaining({ plan_start_date: today }));
+      });
+    });
+  });
+
   test('creating a plan stops active/paused/autopay_hold follow-up sequences on the trx', async () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan`, {
@@ -135,7 +197,7 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
         body: JSON.stringify({
           paymentFrequency: 'monthly',
           paymentAmount: 25,
-          nextPaymentDate: '2026-08-01',
+          nextPaymentDate: '2099-08-01',
         }),
       });
       expect(res.status).toBe(201);
@@ -168,7 +230,7 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
         body: JSON.stringify({
           paymentFrequency: 'monthly',
           paymentAmount: 25,
-          nextPaymentDate: '2026-08-01',
+          nextPaymentDate: '2099-08-01',
         }),
       });
       expect(res.status).toBe(201);
@@ -200,7 +262,7 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
         body: JSON.stringify({
           paymentFrequency: 'monthly',
           paymentAmount: 25,
-          nextPaymentDate: '2026-08-01',
+          nextPaymentDate: '2099-08-01',
         }),
       });
       expect(res.status).toBe(201);
@@ -217,7 +279,7 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
         body: JSON.stringify({
           paymentFrequency: 'monthly',
           paymentAmount: 25,
-          nextPaymentDate: '2026-08-01',
+          nextPaymentDate: '2099-08-01',
         }),
       });
       expect(res.status).toBe(409);
@@ -234,7 +296,7 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
         body: JSON.stringify({
           paymentFrequency: 'monthly',
           paymentAmount: 25,
-          nextPaymentDate: '2026-08-01',
+          nextPaymentDate: '2099-08-01',
         }),
       });
       expect(res.status).toBe(409);
@@ -251,7 +313,7 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
         body: JSON.stringify({
           paymentFrequency: 'monthly',
           paymentAmount: 25,
-          nextPaymentDate: '2026-08-01',
+          nextPaymentDate: '2099-08-01',
         }),
       });
       // The error propagates out of db.transaction — the route must not

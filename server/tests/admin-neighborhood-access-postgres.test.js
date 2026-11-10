@@ -34,7 +34,6 @@ postgres('admin neighborhood gate-code routes', () => {
   let trx;
   let server;
   let baseUrl;
-  const OLD_GATE = process.env.GATE_NEIGHBORHOOD_ACCESS;
   const MONTHS_AGO = (n) => { const d = new Date(); d.setMonth(d.getMonth() - n); return d; };
 
   const call = async (method, path, body) => {
@@ -100,7 +99,6 @@ postgres('admin neighborhood gate-code routes', () => {
   });
   beforeEach(async () => {
     jest.clearAllMocks();
-    process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
     trx = await database.transaction();
     mockConnection = trx;
     // Only this test's rows: park everything already in the scratch database.
@@ -108,24 +106,13 @@ postgres('admin neighborhood gate-code routes', () => {
   });
   afterEach(async () => {
     await trx.rollback();
-    if (OLD_GATE === undefined) delete process.env.GATE_NEIGHBORHOOD_ACCESS;
-    else process.env.GATE_NEIGHBORHOOD_ACCESS = OLD_GATE;
   });
   afterAll(async () => {
     await new Promise((resolve) => server.close(resolve));
     await database.destroy();
   });
 
-  test('gate off: every route answers 404 enabled:false', async () => {
-    process.env.GATE_NEIGHBORHOOD_ACCESS = 'false';
-    const n = await neighborhood('Gate Off Glen');
-    const id = await entry(n);
-    expect(await call('GET', '/')).toEqual({ status: 404, body: { enabled: false } });
-    expect(await call('POST', `/${n}/entries`, { access_type: 'keypad', code: '5555' })).toEqual({ status: 404, body: { enabled: false } });
-    expect(await call('PATCH', `/entries/${id}`, { action: 'confirm' })).toEqual({ status: 404, body: { enabled: false } });
-    expect(await call('GET', `/customers/${randomUUID()}/properties`)).toEqual({ status: 404, body: { enabled: false } });
-    expect(await call('PUT', `/properties/${randomUUID()}/neighborhood`, { neighborhoodId: null })).toEqual({ status: 404, body: { enabled: false } });
-    // The disabled answer is never cached past a gate flip.
+  test('every response is no-store', async () => {
     const res = await fetch(`${baseUrl}/`);
     expect(res.headers.get('cache-control')).toBe('no-store');
   });

@@ -153,7 +153,15 @@ function applyRetryableNewsletterDeliveryFilter(query) {
     .whereNull('clicked_at');
 }
 
-router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
+// Body cap. SendGrid posts many events in one JSON array and flushes a batch
+// "within approximately 30 seconds or when the batch size reaches 768
+// kilobytes" (twilio.com/docs/sendgrid/for-developers/tracking-events/
+// twilio-sendgrid-event-webhook-overview). body-parser's 100 KB default refused
+// real batches, and SendGrid re-sent each at the same size until it gave up,
+// losing its bounces. 1 MB is the bound every other route already parses
+// before any auth (the global express.json limit in server/index.js), so this
+// adds no new exposure.
+router.post('/events', express.raw({ type: '*/*', limit: '1mb' }), async (req, res) => {
   // Fail closed unless the public key is configured — we don't want anyone
   // POSTing fake bounces to suppress recipients.
   if (!process.env.SENDGRID_WEBHOOK_PUBLIC_KEY) {
@@ -1097,9 +1105,8 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
         updated_at: at,
       });
     } else if (updates.subscriberAction === 'unsubscribe_if_active') {
-      await client('newsletter_subscribers')
-        .where({ id: delivery.subscriber_id })
-        .whereNot({ status: 'unsubscribed' })
+      await optOutNeedsWrite()(client('newsletter_subscribers')
+        .where({ id: delivery.subscriber_id }))
         .update({
           status: 'unsubscribed',
           unsubscribed_at: at,
@@ -1246,12 +1253,17 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
   return null;
 }
 
+// Lazy: keeps the subscriber service (and its sunset import) out of this
+// route's load path. See whereOptOutNeedsWrite (sweep #7765 B5).
+function optOutNeedsWrite() {
+  return require('../services/newsletter-subscribers').whereOptOutNeedsWrite;
+}
+
 async function unsubscribeNewsletterSubscriber(email, at, client = db) {
   if (!email) return;
   const lc = String(email).trim().toLowerCase();
-  await client('newsletter_subscribers')
-    .whereRaw('LOWER(email) = ?', [lc])
-    .whereNot({ status: 'unsubscribed' })
+  await optOutNeedsWrite()(client('newsletter_subscribers')
+    .whereRaw('LOWER(email) = ?', [lc]))
     .update({
       status: 'unsubscribed',
       unsubscribed_at: at,

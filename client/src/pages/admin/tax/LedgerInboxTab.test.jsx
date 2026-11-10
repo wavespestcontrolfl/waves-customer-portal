@@ -34,7 +34,7 @@ function json(body, ok = true) {
 
 beforeEach(() => {
   calls = [];
-  status = { enabled: true, rules: 3, inbox: 1 };
+  status = { rules: 3, inbox: 1 };
   localStorage.setItem('waves_admin_token', 'test-token');
   vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
     const u = String(url);
@@ -51,13 +51,6 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 const posts = () => calls.filter((c) => c.method === 'POST');
-
-it('renders only the off line when the ledger gate is off', async () => {
-  status = { enabled: false, rules: 0, inbox: 0 };
-  render(<LedgerInboxTab />);
-  expect(await screen.findByText('The tax ledger is off (GATE_TAX_LEDGER).')).toBeInTheDocument();
-  expect(calls.some((c) => c.url.includes('/ledger/inbox'))).toBe(false);
-});
 
 it('renders a row with its suggestion chip and signed amount', async () => {
   render(<LedgerInboxTab />);
@@ -139,7 +132,7 @@ it('a refused decide leaves the row in place with the server reason', async () =
 });
 
 it('the Income view loads view=income and explains that nothing counts it as revenue', async () => {
-  status = { enabled: true, rules: 3, inbox: 1, income: 2 };
+  status = { rules: 3, inbox: 1, income: 2 };
   render(<LedgerInboxTab />);
   expect(await screen.findByText('1 rows to review · 3 rules · 2 income')).toBeInTheDocument();
   // the view switch and the row's decision button both read "Income"; the view carries its own name
@@ -357,7 +350,7 @@ it('an older status answer never lands after a newer one when two row actions ov
     const u = String(url);
     if (u.includes('/ledger/status')) {
       statusCalls += 1;
-      if (statusCalls === 1) return json({ enabled: true, rules: 3, inbox: 2 });
+      if (statusCalls === 1) return json({ rules: 3, inbox: 2 });
       return new Promise((r) => { pendingStatus.push((body) => r(json(body))); });
     }
     if (u.includes('/ledger/inbox')) return json({ rows: [row, second], total: 2 });
@@ -371,9 +364,9 @@ it('an older status answer never lands after a newer one when two row actions ov
   fireEvent.click(within(screen.getByTestId('ledger-row-row-2')).getByRole('button', { name: 'Personal' }));
   await waitFor(() => expect(pendingStatus).toHaveLength(2));
   // the newer refresh (after row-2) answers first with the true count; the older one (after row-1) answers later and must be ignored
-  await act(async () => { pendingStatus[1]({ enabled: true, rules: 3, inbox: 0 }); });
+  await act(async () => { pendingStatus[1]({ rules: 3, inbox: 0 }); });
   await screen.findByText(/0 rows to review/);
-  await act(async () => { pendingStatus[0]({ enabled: true, rules: 3, inbox: 1 }); });
+  await act(async () => { pendingStatus[0]({ rules: 3, inbox: 1 }); });
   expect(screen.getByText(/0 rows to review/)).toBeInTheDocument();
   expect(screen.queryByText(/1 rows to review/)).not.toBeInTheDocument();
 });

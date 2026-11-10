@@ -26,7 +26,6 @@
 const logger = require('../logger');
 const {
   lawnWateringSmsLive, lawnWateringRuleLive, lawnWateringForecastLive, lawnWateringTextForecastLive, lawnWateringEveryVisitLive,
-  lawnWateringShortTextLive,
 } = require('../../config/feature-gates');
 const { etDateString } = require('../../utils/datetime-et');
 const { textForecastLine } = require('./lawn-watering-forecast');
@@ -34,9 +33,9 @@ const { shortWateringText, shortForecastSentence } = require('./lawn-watering-sh
 const { sendWateringTechNote } = require('./lawn-watering-tech-note');
 
 const TEMPLATE_KEY = 'lawn_watering_instruction';
-// GATE_LAWN_WATERING_SHORT_TEXT (owner 2026-10-23): the short steps go out
-// under their own template ("Lawn watering: {watering_lines}"). A shape the
-// short writer does not know, or a missing short row, sends the full lines.
+// Owner 2026-10-23: the short steps go out under their own template
+// ("Lawn watering: {watering_lines}"). A shape the short writer does not know,
+// or a missing short row, sends the full lines.
 const SHORT_TEMPLATE_KEY = 'lawn_watering_instruction_short';
 const PURPOSE = 'lawn_watering_instruction';
 const SENDABLE_STATES = Object.freeze(['hold', 'water_in', 'hold_then_water_in']);
@@ -108,10 +107,10 @@ function wateringInstructionFresh(instruction, completedAt, nowMs) {
   return true;
 }
 
-// GATE_LAWN_WATERING_SHORT_TEXT: the short steps from the same frozen fields,
-// and the short rain sentence when the full one is due. Null = full lines.
-function shortPlan(enabled, instruction, forecastLine) {
-  const short = enabled === true ? shortWateringText(instruction) : null;
+// The short steps from the same frozen fields, and the short rain sentence
+// when the full one is due. Null = full lines.
+function shortPlan(instruction, forecastLine) {
+  const short = shortWateringText(instruction);
   if (!short) return null;
   const rain = forecastLine && (shortForecastSentence(instruction, forecastLine) || forecastLine);
   return { send: true, templateKey: SHORT_TEMPLATE_KEY, vars: { watering_lines: [short, rain].filter(Boolean).map(smsSafe).join(' ') } };
@@ -146,7 +145,7 @@ function lawnWateringSmsPlan({
   completionTextRequested = true,
   everyVisit = false,
   forecastLine,
-  shortText,
+  shortText = true,
   nowMs = Date.now(),
 } = {}) {
   if (!gateOn) return { send: false, reason: 'gate_off' };
@@ -167,7 +166,8 @@ function lawnWateringSmsPlan({
   const lines = wateringLinesOf(instruction);
   if (!lines.length) return { send: false, reason: 'no_lines' };
   if (!wateringInstructionFresh(instruction, completedAt, nowMs)) return { send: false, reason: 'stale' };
-  const short = shortPlan(shortText, instruction, forecastLine);
+  // shortText: false is the fallback for a missing or inactive short template row.
+  const short = shortText === false ? null : shortPlan(instruction, forecastLine);
   if (short) return short;
   // GATE_LAWN_WATERING_TEXT_FORECAST: the rain sentence frozen with the
   // instruction (both sources agreed; textForecastLine) closes the text.
@@ -213,7 +213,6 @@ async function sendLawnWateringSms(args, deps) {
       completionTextRequested: args.completionTextRequested === true,
       everyVisit,
       forecastLine: lawnWateringTextForecastLive() && lawnWateringForecastLive() ? textForecastLine(instruction) : null,
-      shortText: lawnWateringShortTextLive(),
       nowMs: Date.now(),
     };
     const planned = lawnWateringSmsPlan(planInput);

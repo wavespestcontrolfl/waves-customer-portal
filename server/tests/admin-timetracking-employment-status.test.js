@@ -97,7 +97,7 @@ describe('createTechnician', () => {
     expect(res.statusCode).toBe(200);
     expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({
       employment_status: 'active', active: true, field_dispatchable: false,
-      // GATE_TECH_MOVE_SWITCH (owner 2026-10-25): a new technician cannot move visits until switched on.
+      // Owner 2026-10-25: a new technician cannot move visits until switched on.
       can_move_visits: false,
     }));
   });

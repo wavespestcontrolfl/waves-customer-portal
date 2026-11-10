@@ -98,7 +98,7 @@ const ADMIN_TECH_RESPONSE_FIELDS = [
   'bouncie_imei', 'bouncie_vin', 'vehicle_name',
   // Start-of-day point (home address is staff PII: admin-only, never logged).
   'start_address', 'start_lat', 'start_lng',
-  // Team tab "Can move visits" switch (GATE_TECH_MOVE_SWITCH).
+  // Team tab "Can move visits" switch.
   'can_move_visits',
   // Hired button state (GATE_HIRED_PACKET); present only while the gate is on.
   // Derived flags only: the token, its hash and the password hash never ship.

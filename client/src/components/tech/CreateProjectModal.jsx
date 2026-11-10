@@ -2654,6 +2654,7 @@ export default function CreateProjectModal({
                 )}
                 <div style={{ position: 'relative' }}>
                   <textarea
+                    data-own-mic="true"
                     value={recommendations}
                     onChange={(e) => setRecommendations(e.target.value)}
                     rows={6}

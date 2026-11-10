@@ -25,7 +25,6 @@ const trx = Object.assign(jest.fn(), { isTransaction: true });
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
-  process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
   route = createRoute();
   occupancy.findConflictingVisits.mockImplementation(async () => route.conflictRows());
   placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockImplementation(async () => route.place());
@@ -33,7 +32,6 @@ beforeEach(() => {
 afterEach(() => {
   placeSpy.mockRestore();
   delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
-  delete process.env.GATE_STAFF_ROUTE_INSERTION;
 });
 
 test('premise (real evaluator): read where it is saved the visit misses a promise; placement puts it first and the day fits', () => {

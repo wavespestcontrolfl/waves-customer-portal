@@ -96,6 +96,102 @@ describe('extractCompanyNames', () => {
     expect(await extractCompanyNames(DRAFT)).toMatchObject({ ok: true, companies: [] });
   });
 
+  // Owner 2026-11-06: the Bradenton and North Port affiliate pilot drafts
+  // parked named_competitor_off_list on their own approved products (the
+  // maker named as the fit-spec source, the link text) and on the author's
+  // background — the model's readings below are the ones prod stored.
+  describe('approved names are no company', () => {
+    const AFFILIATE_DRAFT = {
+      title: 'Door Gaps in Bradenton Homes',
+      frontmatter: { slug: '/pest-control/door-sweep-stops-ants-roaches-bradenton-fl/', meta_description: 'How to check a door gap.' },
+      body: [
+        "For the fit numbers I lean on KS Hardware's product page for its sweep.",
+        'If the gap fits, <AffiliateLink product="ks-adjustable-door-sweep" placement="alt-rec">an adjustable door sweep</AffiliateLink> closes it.',
+        'If you want one, <AffiliateLink product="police-security-inspector-penlight" placement="primary-rec">a pocket LED inspection light</AffiliateLink> fits this job.',
+      ].join('\n\n'),
+    };
+    const PROD_READING = ['KS Hardware', 'adjustable door sweep', 'pocket LED inspection light', 'Police Security'];
+    const gate = require('../services/content/comparison-table-gate');
+    const gateBefore = process.env.GATE_AFFILIATE_LINKS;
+    beforeEach(() => { process.env.GATE_AFFILIATE_LINKS = 'true'; });
+    afterAll(() => {
+      if (gateBefore === undefined) delete process.env.GATE_AFFILIATE_LINKS;
+      else process.env.GATE_AFFILIATE_LINKS = gateBefore;
+    });
+
+    test('a linked affiliate product: its link text, display name and maker move to exempted_names; another company stays', async () => {
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: [...PROD_READING, 'KS Hardware adjustable double-bubble exterior door sweep (36 in)', 'Bug Out'] } });
+
+      const r = await extractCompanyNames(AFFILIATE_DRAFT);
+
+      expect(r).toMatchObject({ ok: true, companies: ['Bug Out'] });
+      expect(r.exempted_names).toEqual(['KS Hardware', 'KS Hardware adjustable double-bubble exterior door sweep (36 in)', 'Police Security', 'adjustable door sweep', 'pocket LED inspection light']);
+      expect(gate.namedCompetitorListVerdict({ namedCompetitors: [], companyExtraction: r }))
+        .toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Bug Out'] });
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: PROD_READING } });
+      const clean = await extractCompanyNames(AFFILIATE_DRAFT);
+      expect(clean.companies).toEqual([]);
+      expect(gate.namedCompetitorListVerdict({ namedCompetitors: [], companyExtraction: clean })).toMatchObject({ ok: true });
+    });
+
+    test('the exemption needs the kill switch, the link and a registry row; a part word is no maker', async () => {
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['KS Hardware', 'adjustable door sweep', 'KS Hard'] } });
+      const all = ['KS Hard', 'KS Hardware', 'adjustable door sweep'];
+
+      delete process.env.GATE_AFFILIATE_LINKS;
+      expect((await extractCompanyNames(AFFILIATE_DRAFT)).companies).toEqual(all);
+      process.env.GATE_AFFILIATE_LINKS = 'true';
+      const unlinked = { ...AFFILIATE_DRAFT, body: AFFILIATE_DRAFT.body.replace(/<\/?AffiliateLink[^>]*>/g, '') };
+      expect((await extractCompanyNames(unlinked)).companies).toEqual(all);
+      const unknown = { ...AFFILIATE_DRAFT, body: AFFILIATE_DRAFT.body.replace(/ks-adjustable-door-sweep/g, 'no-such-product') };
+      expect((await extractCompanyNames(unknown)).companies).toEqual(all);
+      expect((await extractCompanyNames(AFFILIATE_DRAFT)).companies).toEqual(['KS Hard']);
+    });
+
+    test('a curated competitor is never exempt, even as the link text', async () => {
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Orkin'] } });
+      const draft = { ...AFFILIATE_DRAFT, body: '<AffiliateLink product="stuff-it-copper-mesh" placement="primary-rec">Orkin</AffiliateLink>' };
+      const r = await extractCompanyNames(draft);
+      expect(r.companies).toEqual(['Orkin']);
+      expect(r.exempted_names).toBeUndefined();
+    });
+
+    test("the author's own background is no company, with the kill switch off too", async () => {
+      delete process.env.GATE_AFFILIATE_LINKS;
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Augusta National', "Augusta National's", 'Augusta National Golf Club', 'Bug Out'] } });
+      const r = await extractCompanyNames({ ...DRAFT, body: 'Before Waves, I worked on the grounds crew at Augusta National.' });
+      expect(r.companies).toEqual(['Bug Out']);
+      expect(r.exempted_names).toEqual(['Augusta National', 'Augusta National Golf Club', "Augusta National's"]);
+    });
+
+    test('a stored result for the same text gets the same exemptions, with no call', async () => {
+      const prior = { ok: true, key: _internals.inputKey(_internals.extractionInput(AFFILIATE_DRAFT)), companies: ['Bug Out', 'KS Hardware'], checked_at: '2026-09-30T13:45:21.287Z' };
+      expect(await extractCompanyNames(AFFILIATE_DRAFT, { prior })).toEqual({ ...prior, companies: ['Bug Out'], exempted_names: ['KS Hardware'] });
+      expect(dispatchWithFallback).not.toHaveBeenCalled();
+    });
+
+    test('a stored exemption is judged again on reuse: kill switch off or product unlinked, the names go back to companies', async () => {
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Augusta National', 'Bug Out', 'KS Hardware'] } });
+      const stored = await extractCompanyNames(AFFILIATE_DRAFT);
+      expect(stored).toMatchObject({ companies: ['Bug Out'], exempted_names: ['Augusta National', 'KS Hardware'] });
+
+      delete process.env.GATE_AFFILIATE_LINKS;
+      const off = await extractCompanyNames(AFFILIATE_DRAFT, { prior: stored });
+      expect(off).toMatchObject({ companies: ['Bug Out', 'KS Hardware'], exempted_names: ['Augusta National'] });
+      process.env.GATE_AFFILIATE_LINKS = 'true';
+      const again = await extractCompanyNames(AFFILIATE_DRAFT, { prior: off });
+      expect(again).toMatchObject({ companies: ['Bug Out'], exempted_names: ['Augusta National', 'KS Hardware'] });
+      expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+
+      // Nothing exempt any more: the field goes, it never lingers empty.
+      const noBackground = { ok: true, key: stored.key, companies: ['Bug Out'], exempted_names: ['KS Hardware'] };
+      delete process.env.GATE_AFFILIATE_LINKS;
+      const plain = await extractCompanyNames(AFFILIATE_DRAFT, { prior: noBackground });
+      expect(plain.companies).toEqual(['Bug Out', 'KS Hardware']);
+      expect(plain).not.toHaveProperty('exempted_names');
+    });
+  });
+
   test('a provider failure, a throw, or malformed output is a RETRYABLE failure', async () => {
     dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'no_key' });
     expect(await extractCompanyNames(DRAFT)).toMatchObject({ ok: false, reason: 'no_key', retryable: true });
@@ -179,6 +275,27 @@ describe('assertOwnerListForCommit', () => {
     // The prompt keeps retailers presented as providers, drops incidental ones.
     expect(_internals.SYSTEM_PROMPT).toMatch(/PRESENTS as a provider, an alternative, or a comparison option/);
     expect(_internals.SYSTEM_PROMPT).toMatch(/only as a source or incidentally/);
+  });
+
+  test('an affiliate post commits when its only names are its linked product and the author background; an off-list company beside them is refused (owner 2026-11-06)', async () => {
+    const gateBefore = process.env.GATE_AFFILIATE_LINKS;
+    process.env.GATE_AFFILIATE_LINKS = 'true';
+    try {
+      const fm = { title: 'Door Gaps in Bradenton Homes', slug: '/pest-control/door-sweep-stops-ants-roaches-bradenton-fl/', meta_description: 'How to check a door gap.' };
+      const body = "I worked on the grounds crew at Augusta National. KS Hardware's page lists the fit range, so <AffiliateLink product=\"ks-adjustable-door-sweep\" placement=\"primary-rec\">an adjustable double-bubble door sweep</AffiliateLink> fits.";
+      const brief = { action_type: 'new_supporting_blog', gsc_signal: { bucket: 'category_seed' } };
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Augusta National', 'KS Hardware', 'adjustable double-bubble door sweep'] } });
+      const draft = {};
+      await expect(assertOwnerListForCommit({ draft, brief, frontmatter: fm, body })).resolves.toMatchObject({ requiresHumanMerge: false });
+      expect(draft.company_extraction).toMatchObject({ ok: true, companies: [], exempted_names: ['Augusta National', 'KS Hardware', 'adjustable double-bubble door sweep'] });
+
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['KS Hardware', 'Bug Out'] } });
+      await expect(assertOwnerListForCommit({ draft: {}, brief, frontmatter: fm, body }))
+        .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', offList: ['Bug Out'] });
+    } finally {
+      if (gateBefore === undefined) delete process.env.GATE_AFFILIATE_LINKS;
+      else process.env.GATE_AFFILIATE_LINKS = gateBefore;
+    }
   });
 
   test('scheduler lane (humanMergeFallback): only-six competitor content asks for a human merge; an off-list company is refused (Codex r6)', async () => {

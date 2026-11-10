@@ -18,6 +18,14 @@ async function seedBookSet(cast, { catalogPrice = 149 } = {}) {
   s.existingBefore = JSON.stringify(await cast.db('scheduled_services').where({ id: s.existing.id }).first()); // the complete seeded row
   s.commercial = await cast.customer({ first_name: 'Cora', last_name: 'Commercial', company_name: 'Fixture Commerce LLC', property_type: 'commercial', phone: phone(602), address_line1: '40 Fixture Plaza' });
   s.commercialProp = await cast.property(s.commercial.id, { is_primary: true, address_line1: '40 Fixture Plaza', occupancy_type: 'commercial', relationship: 'managed_for_client' });
+  // Both customers picked Text for booking confirmations, so a booking texts them and sends no email. Without that
+  // choice a new client (no completed visit, a member for under NEW_CLIENT_DAYS) gets the text AND the confirmation
+  // email (resolveConfirmationChannel in appointment-reminders.js), which is a different case from the one W5 measures.
+  for (const customer of [s.pellham, s.commercial]) {
+    await cast.db('notification_prefs')
+      .insert({ customer_id: customer.id, appointment_confirmation_channel: 'sms', appointment_confirmation_channel_explicit: true })
+      .onConflict('customer_id').merge(['appointment_confirmation_channel', 'appointment_confirmation_channel_explicit']);
+  }
   cast.key('cust-pellham', s.pellham); cast.key('cust-commercial-co', s.commercial);
   return s;
 }

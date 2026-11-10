@@ -107,12 +107,12 @@ describe('the pure rules', () => {
 });
 
 describe('the lawn layout page', () => {
-  it('gate off (no flag): the contact block and the applied card are as today', async () => {
+  it('gate off (no flag): the contact block is as today; the story order has no applied card either way', async () => {
     const { container } = renderReport(withStage1(mixedBase, { flag: false }));
     await waitForReport();
     expect(heroOf(container)).toHaveTextContent(EMAIL);
     expect(heroOf(container)).toHaveTextContent(PHONE);
-    expect(appliedLabels(container)).toHaveLength(1);
+    expect(appliedLabels(container)).toHaveLength(0);
   });
 
   it('gate on: the hero keeps the name and the service address and leaves out the email and phone', async () => {
@@ -134,15 +134,8 @@ describe('the lawn layout page', () => {
     expect(container.querySelector('#visit-summary')).not.toBeNull();
   });
 
-  it('gate on, an applied card that does not start with the result: it stays', async () => {
-    const { container } = renderReport(withStage1(mixedBase, { result: 'We visited today.' }));
-    await waitForReport();
-    expect(appliedLabels(container)).toHaveLength(1);
-  });
-
-  it('GATE_LAWN_REPORT_STORY: the distinct applied sentence opens the explained products instead of its own card', async () => {
+  it('the distinct applied sentence opens the explained products instead of its own card', async () => {
     const payload = withStage1(mixedBase, { result: 'We visited today.' });
-    payload.lawnLayout = { ...payload.lawnLayout, story: true };
     const { container } = renderReport(payload);
     await waitForReport();
     expect(appliedLabels(container)).toHaveLength(0);

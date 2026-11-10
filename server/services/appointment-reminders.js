@@ -11,7 +11,7 @@
  * All dates displayed in America/New_York timezone.
  *
  * Booking confirmations for a NEW client (no completed visit) go by text AND
- * email under GATE_NEW_CLIENT_CONFIRM_EMAIL: resolveConfirmationChannel
+ * email: resolveConfirmationChannel
  * promotes the default 'sms' channel to 'both' and the existing 'both' path
  * delivers it. An explicit portal choice, an unreadable prefs row, an email
  * opt-out or no usable email keeps today's SMS-led behavior (see
@@ -300,9 +300,9 @@ async function resolve72hChannel(prefChannel, scheduledServiceId, { prefsUnavail
   return (await isOneTimeVisit(scheduledServiceId)) ? 'email' : 'sms';
 }
 
-// Effective channel for a booking CONFIRMATION (owner ruling 2026-10-24,
-// GATE_NEW_CLIENT_CONFIRM_EMAIL): a NEW client gets the text AND the email.
-// Under the gate a confirmation whose channel resolves to the default 'sms'
+// Effective channel for a booking CONFIRMATION (owner ruling 2026-10-24):
+// a NEW client gets the text AND the email.
+// A confirmation whose channel resolves to the default 'sms'
 // is promoted to 'both' — the existing text + email path (Codex #3361,
 // #3588, #3609 hardening), never a parallel send. Same fail-closed order as
 // resolve72hChannel; anything that is not a provable "new client with a
@@ -314,7 +314,6 @@ async function resolve72hChannel(prefChannel, scheduledServiceId, { prefsUnavail
 //     row that predates the stamp counts as picked (20261024230000), so only a
 //     customer created after it can be promoted;
 //   - portal-wide email off, or the confirmation toggle off: 'sms';
-//   - gate off: 'sms';
 //   - new client = no scheduled_services row with status 'completed' for this
 //     customer, AND member_since (the became-a-customer date) unset or within
 //     NEW_CLIENT_DAYS, both read at send time. Either test failing keeps
@@ -334,8 +333,6 @@ async function resolveConfirmationChannel(prefs, { customerId, scheduledServiceI
   if (prefs.emailEnabled === false || prefs.appointmentConfirmation === false) return 'sms';
   if (!customerId) return 'sms';
   try {
-    // Read inside the try: a gate reader that cannot be read fails closed.
-    if (!require('../config/feature-gates').newClientConfirmEmailLive()) return 'sms';
     const completed = await db('scheduled_services')
       .where({ customer_id: customerId, status: 'completed' })
       .first('id');
@@ -500,7 +497,7 @@ async function callbackNumberHoldConfirmedForVisit(idsOrScheduledServiceId) {
 // `emailIdempotencyKey` (grouped reminders): the visit-scoped key the
 // claim owner sends under — see visitReminderEmailKey. Null keeps the
 // per-service key.
-async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, cardHoldNote = null, emailIdempotencyKey = null, requestedChannel = 'sms' }) {
+async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, cardHoldNote = null, emailIdempotencyKey = null, requestedChannel = 'sms', dayOnly, dayOnlyStrict }) {
   try {
     if (!customerId) return { ok: false, reason: 'no_customer' };
     // App backups, including the terminal quiet-hour email, share one
@@ -530,10 +527,10 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
       return { ok: false, held: true, reason: 'move_hold' };
     }
     if (kind === 'confirmation') {
-      return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl, idempotencyKey: emailIdempotencyKey || undefined });
+      return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl, idempotencyKey: emailIdempotencyKey || undefined, ...dayOnlyArg(dayOnly, dayOnlyStrict) });
     }
     if (kind === '72h' || kind === '24h') {
-      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl, cardHoldPolicyNote: cardHoldNote, idempotencyKey: emailIdempotencyKey || undefined });
+      return await AppointmentEmail.sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, kind, rescheduleUrl: resolvedRescheduleUrl, cardHoldPolicyNote: cardHoldNote, idempotencyKey: emailIdempotencyKey || undefined, ...dayOnlyArg(dayOnly, dayOnlyStrict) });
     }
     return { ok: false, reason: 'unsupported_kind' };
   } catch (err) {
@@ -548,9 +545,9 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
 // `smsOutcome` (optional): the caller's out-param — a grouped-move hold at
 // the email handoff is recorded there as MOVE_HOLD so the notice defers
 // (row unmarked, visit claim released) instead of reading as suppressed.
-async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null, emailIdempotencyKey = null, requestedChannel = 'sms' }) {
+async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null, emailIdempotencyKey = null, requestedChannel = 'sms', dayOnly }) {
   if (!customerId) return false;
-  const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel });
+  const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel, ...dayOnlyArg(dayOnly) });
   if (res?.reason === 'preferences_unavailable') {
     if (smsOutcome) {
       smsOutcome.retryable = true;
@@ -703,7 +700,7 @@ function cancellationBinding(stamp) {
 // (MOVE_NOTICE_REFUSALS). `cancellation` binds a cancellation email to its own
 // notice (cancellationNoticeStamp). Returns true when the email went out.
 // Never throws.
-async function deliverMoveNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, arrivalWindow, windowUnknown, notificationEventKey, noticeAt, cancellation, sendOutcome }) {
+async function deliverMoveNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, arrivalWindow, windowUnknown, notificationEventKey, noticeAt, cancellation, sendOutcome, dayOnly }) {
   try {
     if (!require('../config/feature-gates').moveNoticeEmailLive() || !customerId || !scheduledServiceId) return false;
     if (MOVE_NOTICE_REFUSALS.has(sendOutcome?.blockedCode)) return false;
@@ -716,6 +713,8 @@ async function deliverMoveNoticeEmail({ kind, customerId, scheduledServiceId, ap
     const res = await MOVE_NOTICE_SENDERS[kind]({
       customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, arrivalWindow, windowUnknown, notificationEventKey, stillCurrent,
       idempotencyKey: moveNoticeEmailKey(kind, scheduledServiceId, { apptTime, windowUnknown, notificationEventKey, noticeAt, cancellation }),
+      // GATE_DAY_ONLY_PROMISE part B2: a day-only reschedule text is followed by the day-only email (kind 'rescheduled' only).
+      ...require('./day-only-move-notice').moveEmailDayArg(dayOnly, kind),
     });
     if (res?.ok) {
       logger.info(`[appt-remind] ${kind} email sent for ${scheduledServiceId} (the text reached nobody)`);
@@ -756,7 +755,9 @@ function bouncedNoticeKind(audit) {
 // reminder row's, which its claim binding (cancellationStillOwned) proves is
 // still the same cancellation.
 function bouncedNoticeTime(kind, meta, row) {
-  const quoted = [meta.rendered_slot_ms, meta.move_notice_slot_ms]
+  // A day-only text records no rendered slot; its queued-and-replayed twin keeps only B1's promise fields, so the guard slot
+  // (guard_slot_ms) is the last place the quoted slot survives.
+  const quoted = [meta.rendered_slot_ms, meta.move_notice_slot_ms, meta.guard_slot_ms]
     .filter((ms) => ms != null).map(Number).find(Number.isFinite);
   if (quoted !== undefined) return new Date(quoted);
   return kind === 'cancelled' && row?.appointment_time ? new Date(row.appointment_time) : null;
@@ -772,14 +773,30 @@ async function deliverBouncedMoveNoticeEmail({ kind, audit, customerId, schedule
     logger.info(`[appt-remind] bounced ${kind} notice for ${scheduledServiceId}: no quoted time on record, no email`);
     return;
   }
+  // GATE_DAY_ONLY_PROMISE part B2: a bounced DAY-ONLY reschedule text (window_unknown only because it quoted no window) goes
+  // through B1's delayed-send chokepoint (revalidateDelayedDaySend) before its recovery email: 'day' -> the day-only email;
+  // 'window' (inside the cutoff, the gate rolled back, the 24-hour reminder off) -> today's window email; 'suppress' (a later
+  // promise already stands, or none can be read) -> no email.
+  const dayText = kind === 'rescheduled' && isDayPromise(meta);
+  let dayOnly = false;
+  if (dayText) {
+    const verdict = await revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, noticeAt: meta.move_notice_at || audit.created_at });
+    if (verdict === 'suppress') {
+      logger.info(`[appt-remind] bounced day-only ${kind} text for ${scheduledServiceId}: a later promise already stands (or none can be read) - recovery email suppressed as stale`);
+      return;
+    }
+    dayOnly = verdict === 'day';
+  }
+  const windowUnknown = meta.window_unknown === true && !dayText;
   await deliverMoveNoticeEmail({
     kind, customerId, scheduledServiceId, apptTime,
     serviceLabel: smsServiceLabelStored(row.service_type),
-    arrivalWindow: meta.window_unknown === true ? require('../utils/sms-time-format').UNKNOWN_ARRIVAL_WINDOW : formatArrivalWindow(apptTime),
-    windowUnknown: meta.window_unknown === true,
+    arrivalWindow: windowUnknown ? require('../utils/sms-time-format').UNKNOWN_ARRIVAL_WINDOW : formatArrivalWindow(apptTime),
+    windowUnknown,
     notificationEventKey: meta.notificationEventKey,
     noticeAt: meta.move_notice_at || audit.created_at,
     cancellation: cancellationBinding(meta),
+    ...dayOnlyArg(dayOnly),
   });
 }
 
@@ -824,7 +841,7 @@ function cancellationNoticeReport(noticeSent, emailed) {
 // blockedCode and leave their row unmarked so the next cron tick re-decides
 // (72h/confirmation re-send at 8:00 AM; the 24h branch's own pre-check
 // applies the same-day skip ruling).
-async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null, stillOwnsClaim = null }) {
+async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null, stillOwnsClaim = null, dayState }) {
   // LAST-moment unit-move hold check, at the one chokepoint every
   // confirmation/72h/24h leg passes — inline creation confirmations
   // included (codex #3609 r30 P1): a grouped move stamped after a caller's
@@ -847,7 +864,13 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     return false;
   }
   const ch = apptChannel(channel, { preserveAppChoice: kind === '72h' || kind === '24h' });
-  const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl, cardHoldNote, emailIdempotencyKey };
+  // dayState (GATE_DAY_ONLY_PROMISE): { dayOnly } the caller decided; its SMS closure sets dayOnly false when the text
+  // fell back to the window copy, so the email leg that follows never tells a different story than the text did.
+  // Read when each email leg runs, not when this function starts. No dayState (every other caller) adds no key.
+  const emailArgsNow = () => ({
+    kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl, cardHoldNote, emailIdempotencyKey,
+    ...dayOnlyArg(dayState?.dayOnly, dayState?.smsDelivered),
+  });
   // Both hold codes are deferrals with the same contract: no fallback
   // that would deliver the notice anyway, no alert, row left unmarked.
   const smsHeld = () => !!smsOutcome && NOTICE_HOLD_CODES.includes(smsOutcome.blockedCode);
@@ -863,7 +886,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
   // has moved, no later leg (the 'both' email) may go out on the
   // superseded pass's behalf (codex #3677 P1). Null = unconditional.
   const legPermitted = async () => !stillOwnsClaim || !!(await stillOwnsClaim());
-  const sendEmailLeg = async () => (await legPermitted()) ? sendAppointmentNoticeEmail(emailArgs) : { ok: false, reason: 'claim_lost' };
+  const sendEmailLeg = async () => (await legPermitted()) ? sendAppointmentNoticeEmail(emailArgsNow()) : { ok: false, reason: 'claim_lost' };
   const runSms = async () => {
     if (!(await legPermitted())) return false;
     try {
@@ -905,6 +928,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
 
   if (ch === 'both') {
     const smsOk = await runSms();
+    noteSmsDelivered(dayState, smsOk);
     if (!smsOk && smsHeld()) {
       // The SMS leg defers to the window; the EMAIL leg is not subject to
       // it and goes out NOW. Returning false still leaves the caller's row
@@ -960,7 +984,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     // A successful fallback email IS a real delivery (GH codex r2 P1):
     // callers that ledger the visit effect must see it, or a failed
     // finalize would skip the durable close and a sibling could resend.
-    const fallbackOk = await deliverAppointmentEmailFallback({ ...emailArgs, smsOutcome, requestedChannel: ch });
+    const fallbackOk = await deliverAppointmentEmailFallback({ ...emailArgsNow(), smsOutcome, requestedChannel: ch });
     if (fallbackOk && smsOutcome) smsOutcome.fallbackEmailOk = true;
   }
   return smsOk;
@@ -1218,11 +1242,230 @@ function isBookedAfterNoPick(svc) {
   return Number.isFinite(pickBy) && Number.isFinite(placedAt) && placedAt > pickBy;
 }
 
+// GATE_DAY_ONLY_PROMISE part B1 (owner 2026-11-05 "D2 a", 2026-11-06 "office"): until the 24-hour reminder a customer is
+// promised only the DAY. The booking confirmation and the 72-hour reminder of an office-booked first visit or a
+// system-placed recurring visit then use the day rows below and record DAY_PROMISE_META (no slot, promise_level 'day').
+// Customer picks, visits inside the 24.25 h cutoff and customers with the 24-hour reminder off keep today's window copy.
+// The decision is services/time-promise.js dayOnlySendDecision; any failure answers false (window copy, the safe side).
+const DAY_72H_KEY = 'reminder_72h_day_v1';
+const DAY_72H_NO_PICK_KEY = 'reminder_72h_no_reply_day_v1';
+const DAY_CONFIRMATION_KEYS = Object.freeze({ v2: 'appointment_confirmation_day_v2', v1: 'appointment_confirmation_day_v1' });
+
+/** Will the 24-hour reminder actually go out for this customer? The ONE predicate the 24-hour branch of the reminder scan
+ *  skips-and-closes on (the reminder is on, and a text-only choice is not paired with texts being off), shared with the
+ *  day-only decision so the two cannot drift: a day-only promise ("we'll text your arrival window the day before") is made
+ *  only when that reminder will really be sent. Unreadable or missing preferences: false (window copy). */
+function reminder24hWillSend(prefs) {
+  if (!prefs || prefs.unavailable) return false;
+  return Boolean(prefs.serviceReminder24h) && !(prefs.reminder24hChannel === 'sms' && !prefs.smsEnabled);
+}
+
+/** True when this send may promise only the day. Gate off (or any error): false, and nothing is read. */
+async function dayOnlyForSend({ id, startAt, reminder24hEnabled, ignoreLevel = false }) {
+  try {
+    const timePromise = require('./time-promise');
+    if (!timePromise.dayOnlyPromiseOn()) return false;
+    const decision = await timePromise.dayOnlySendDecision(db, { id, startAt, reminder24hEnabled, ...(ignoreLevel ? { ignoreLevel: true } : {}) });
+    return decision.dayOnly === true;
+  } catch (err) {
+    logger.warn(`[appt-remind] day-only decision failed for ${id} (${err.message}) - sending the window copy`);
+    return false;
+  }
+}
+
+/** May this booking confirmation promise only the day? A windowless placeholder (its reminder windows are pre-closed, so
+ *  no 24-hour text will ever follow) is never day-only. */
+async function confirmationDayOnly(record, { scheduledServiceId, apptTime, prefs }) {
+  if (!scheduledServiceId || record?.windows_preclosed === true) return false;
+  const args = { id: scheduledServiceId, startAt: apptTime, reminder24hEnabled: reminder24hWillSend(prefs) };
+  return (await dayOnlyForSend(args)) || moveReplayDayOnly(args);
+}
+
+/** A held or merged MOVE notice re-sent as a confirmation (GATE_DAY_ONLY_PROMISE part B2) keeps the recorded intent: a day
+ *  intent (customer_asked_time false) re-sends the day row even though the old promise was an hour (the move replaced it); a
+ *  set time (true) stays a window. Gate off (or any error): false, and nothing is read. */
+async function moveReplayDayOnly({ id, startAt, reminder24hEnabled }) {
+  try {
+    const timePromise = require('./time-promise');
+    if (!timePromise.dayOnlyPromiseOn()) return false;
+    return await timePromise.dayOnlyReplayDecision(db, { id, startAt, reminder24hEnabled });
+  } catch (err) {
+    logger.warn(`[appt-remind] day-only replay decision failed for ${id} (${err.message}) - sending the window copy`);
+    return false;
+  }
+}
+
+/** The `dayOnly: true` argument of an email leg, or nothing: the window email's call keeps its exact shape. */
+function isDayPromise(metadata) {
+  return metadata?.promise_level === 'day';
+}
+
+function dayOnlyArg(dayOnly, strict) {
+  if (dayOnly !== true) return {};
+  return strict === true ? { dayOnly: true, dayOnlyStrict: true } : { dayOnly: true };
+}
+
+/** Records that the day TEXT of a send was delivered, so its email leg never falls back to a window email (that would
+ *  contradict the text: appointment-email.js windowFallbackAllowed). */
+function noteSmsDelivered(dayState, smsOk) {
+  if (dayState && smsOk) dayState.smsDelivered = true;
+}
+
+/** Does this delivered confirmation stand in for the 24-hour text? A visit that is already tomorrow (or today) yes, unless
+ *  the confirmation was day-only: it gave no window, so the 24-hour text still owes the window the customer was promised. */
+function confirmationCoversDayBefore({ sent, dayOnly, apptTime }) {
+  return Boolean(sent) && dayOnly !== true && etDateString(apptTime) <= etDateString(addETDays(new Date(), 1));
+}
+
+/** After a render: when the send was decided day-only, keep the day marker only if the day row actually rendered. The
+ *  state is also what the email leg reads, so a text that fell back to the window copy is never followed by a day email. */
+function noteDayRender(meta, state, rendered) {
+  if (!state.dayOnly) return;
+  state.dayOnly = rendered?.dayOnly === true;
+  applyPromiseMeta(meta, state.dayOnly);
+}
+
+/** The non-promise occurrence fields a day-only send adds beside DAY_PROMISE_META: the slot the send was guarded on
+ *  (guard_slot_ms) and the ET date it promised (promised_date). The audit drops rendered_slot_ms for a day-only send, and
+ *  the no-show reader reads ONLY rendered_slot_ms, so these identify the occurrence (a bounced grouped text, a move
+ *  since) without restoring an hour promise. */
+function dayGuardMeta(slotMs) {
+  return Number.isFinite(slotMs) ? { guard_slot_ms: slotMs, promised_date: etDateString(new Date(slotMs)) } : {};
+}
+
+/** The ET date a bounced text was about: its rendered slot, or (a day-only text) its promised date / guard slot. Null
+ *  when the audit row carries neither (an ungrouped legacy send). */
+function bouncedOccurrenceDate(metadata) {
+  const rendered = Number(metadata?.rendered_slot_ms);
+  if (metadata?.rendered_slot_ms != null && Number.isFinite(rendered)) return etDateString(new Date(rendered));
+  if (!isDayPromise(metadata)) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(metadata.promised_date || ''))) return metadata.promised_date;
+  const guard = Number(metadata.guard_slot_ms);
+  return metadata.guard_slot_ms != null && Number.isFinite(guard) ? etDateString(new Date(guard)) : null;
+}
+
+/** Does this promise stand AFTER the notice being recovered, for the notice's own visit date? Only then does it supersede the
+ *  notice. A promise at or before the notice's time (the confirmation sent before a move) is the OLD slot's; so is a known
+ *  hour on a different date than the notice's. An unreadable time, or an unknown window newer than the notice, supersedes
+ *  (fail closed), as does a promise that cannot be resolved at all. */
+function promiseSupersedesNotice(promise, notice) {
+  if (!promise) return true; // the level read said 'hour' but no promise resolves now: unprovable, so it stands
+  const at = new Date(promise.communicated_at).getTime();
+  if (!Number.isFinite(at)) return true;
+  if (at <= notice.at.getTime()) return false;
+  if (promise.start_at == null) return true;
+  return !notice.visitDate || etDateString(new Date(promise.start_at)) === notice.visitDate;
+}
+
+/** Is a delayed day-only send stale? True when the visit's latest promise is already an hour (the 24-hour text went, or
+ *  anything newer than the original send), or the promise cannot be read: a delayed send must never become a newer day
+ *  promise over a known window. This is the ONE rule in front of the shared send decision.
+ *  `notice` ({ at, visitDate }) is given by a MOVE notice's recovery: an hour promise only counts when it supersedes that
+ *  notice (promiseSupersedesNotice). One that does not (the old date's confirmation, which the bounced move text had
+ *  replaced) is set aside, and notice.setAsideOld is set so the day decision ignores that old level too. */
+async function delayedSendIsStale(scheduledServiceId, notice = null) {
+  if (!scheduledServiceId) return false;
+  try {
+    const timePromise = require('./time-promise');
+    const levels = await timePromise.loadPromiseLevels(db, [scheduledServiceId], new Date());
+    if (levels.get(scheduledServiceId) !== 'hour') return false;
+    if (!notice) return true;
+    const promise = (await require('./auto-dispatch/told-visits').resolvePromises(db, [scheduledServiceId], new Date())).get(scheduledServiceId);
+    if (promiseSupersedesNotice(promise, notice)) return true;
+    notice.setAsideOld = true;
+    return false;
+  } catch (err) {
+    logger.warn(`[appt-remind] day-only bounce recovery for ${scheduledServiceId}: promise unreadable (${err.message})`);
+    return true;
+  }
+}
+
+/**
+ * THE chokepoint for every DELAYED day-only send: a bounced text's email recovery, and the morning replay of a queued
+ * contact's stored body (messaging/deferred-replay-registry.js appointment_notice_contact_deferred). Anything that sends a
+ * stored day-only body later must ask this first (day-only-promise-b1-persisted-paths.test.js scans for it).
+ *   'suppress'  a promise newer than the original send stands (the latest promise is already an hour, e.g. the 24-hour text
+ *               delivered the window) or the promise cannot be read: send nothing.
+ *   'day'       the SAME shared decision a fresh send uses (dayOnlyNow: live gate, the cutoff, reminder24hWillSend on the
+ *               customer's CURRENT preferences, full eligibility) still says day: the day-only body may go.
+ *   'window'    it no longer does (gate rolled back, the 24-hour reminder switched off, inside the cutoff): the day-only
+ *               body must not go. The caller sends window copy if it can render it, else suppresses.
+ * `apptTime` is the visit's start the caller already knows; absent, it is read from the visit.
+ * `noticeAt` (a MOVE notice's recovery, with `apptTime` the slot that notice quoted, or `noticeDate` its ET date): only a promise
+ * made AFTER that notice, for that notice's date, supersedes it. Every delayed move recovery (a bounced text, a queued contact
+ * text, a stored move email) passes it; a non-move send passes neither and keeps the plain rule. The old date's confirmation does not: the move replaced it, and its level is ignored.
+ */
+async function revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime, noticeAt, noticeDate }) {
+  const noticeTime = noticeAt ? new Date(noticeAt) : null;
+  const visitDate = noticeDate || (apptTime ? etDateString(new Date(apptTime)) : null);
+  const notice = noticeTime && !Number.isNaN(noticeTime.getTime()) && visitDate
+    ? { at: noticeTime, visitDate, setAsideOld: false } : null;
+  if (await delayedSendIsStale(scheduledServiceId, notice)) return 'suppress';
+  const startAt = apptTime || (scheduledServiceId ? await scheduledServiceApptTime(scheduledServiceId) : null);
+  return (await dayOnlyNow({ customerId, scheduledServiceId, apptTime: startAt, ignoreLevel: notice?.setAsideOld === true })) ? 'day' : 'window';
+}
+
+/** The email recovery of a bounced appointment text. A window text recovers as before. A day-only text goes through the
+ *  delayed-send chokepoint: suppress -> nothing; day -> a day-only email; window -> today's window copy (the email path
+ *  renders it fresh). */
+async function recoverBouncedNotice({ audit, kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey }) {
+  let dayOnly = false;
+  if (isDayPromise(audit.metadata)) {
+    const verdict = await revalidateDelayedDaySend({ customerId, scheduledServiceId, apptTime });
+    if (verdict === 'suppress') {
+      logger.info(`[appt-remind] bounced day-only ${kind} text for ${scheduledServiceId}: a later promise already stands (or none can be read) - recovery email suppressed as stale`);
+      return;
+    }
+    dayOnly = verdict === 'day';
+  }
+  await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel: audit.metadata?.requestedChannel, ...dayOnlyArg(dayOnly) });
+}
+
+/** Puts the day-only marker (and the occurrence guard fields) on a send's metadata, or takes them off when the window copy
+ *  went out instead. */
+function applyPromiseMeta(meta, dayOnly) {
+  if (dayOnly) {
+    Object.assign(meta, require('./time-promise').DAY_PROMISE_META, dayGuardMeta(meta.rendered_slot_ms));
+  } else {
+    delete meta.window_unknown;
+    delete meta.promise_level;
+    delete meta.guard_slot_ms;
+    delete meta.promised_date;
+  }
+  return meta;
+}
+
+// Renders one day row. The vars carry no {window} or {time}. A missing, disabled or unrenderable row answers null.
+async function renderDayRow(templateKey, vars, context) {
+  const { window: _window, time: _time, ...dayVars } = vars;
+  const required = smsTemplatesRouter.REQUIRED_TEMPLATE_PLACEHOLDERS?.[templateKey];
+  const body = await renderTemplate(templateKey, dayVars, context, required ? { requiredVars: required } : {});
+  if (!body) logger.warn(`[appt-remind] ${templateKey} is missing, disabled or did not render - sending the window copy`);
+  return body;
+}
+
+// The day version of the 72h reminder: the no-pick row first when it applies, then the base day row. null = both
+// failed, so the caller sends today's window rows.
+async function renderDay72hReminder({ noPick, vars, rescheduleUrl, context }) {
+  const dayVars = { ...vars, reschedule_line: require('./reschedule-link').dayOnlyLineFor(rescheduleUrl) };
+  for (const key of noPick ? [DAY_72H_NO_PICK_KEY, DAY_72H_KEY] : [DAY_72H_KEY]) {
+    const body = await renderDayRow(key, dayVars, context);
+    if (body) return { body, templateKey: key, dayOnly: true };
+  }
+  return null;
+}
+
 // Renders the 72h reminder body. The "we booked it" row is used only when
 // noPick is true; a missing, disabled or unrenderable row falls back to the
 // base reminder_72h row (same vars), so the customer always gets a text.
 // Returns { body, templateKey } - body is null when even the base row fails.
-async function render72hReminder({ noPick = false, vars, rescheduleUrl = null, context = {} }) {
+// dayOnly (GATE_DAY_ONLY_PROMISE): the day rows first (see above), then today's window rows if both day rows fail;
+// a day result also carries dayOnly: true so the caller records the day marker.
+async function render72hReminder({ noPick = false, vars, rescheduleUrl = null, context = {}, dayOnly = false }) {
+  if (dayOnly) {
+    const day = await renderDay72hReminder({ noPick, vars, rescheduleUrl, context });
+    if (day) return day;
+  }
   if (noPick) {
     const noPickVars = rescheduleUrl
       ? { ...vars, reschedule_line: `${NO_PICK_RESCHEDULE_ASK}${vars.reschedule_line}` }
@@ -2376,6 +2619,9 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
         appointment_contact_role: held.contact.role || null,
         original_block_code: 'QUIET_HOURS_HOLD',
         replay_purpose: purpose,
+        // A day-only body keeps its promise fields (promise_level, window_unknown, guard fields) so the 8 AM replay
+        // records a DAY promise, not an unknown window (which the readers count as an hour). {} for a window body.
+        ...require('./time-promise').promiseMetaOf(metaExtra),
         ...(requiredVisitStatuses ? { required_visit_statuses: requiredVisitStatuses } : {}),
         ...(slotStamp || {}),
         resolve_from_by_customer: true,
@@ -2517,9 +2763,104 @@ async function visitPrefsRow(customerId, scheduledServiceId = null) {
   }
 }
 
+// The three preference fields reminder24hWillSend reads, from the customer's notification_prefs row and the owner-resolved
+// channel row. THE one place that maps them: getReminderPrefs (the senders) and loadReminder24hAnswers (the office's bulk
+// read) both call it, so the two cannot drift.
+function reminder24hInputsFromRows(prefs, channelPrefs) {
+  return {
+    smsEnabled: prefs?.sms_enabled !== false,
+    serviceReminder24h: prefs?.service_reminder_24h !== false,
+    reminder24hChannel: apptChannel(channelPrefs?.service_reminder_24h_channel, { preserveAppChoice: true }),
+  };
+}
+
+/**
+ * The customer-level facts the 24-hour answer needs, from THREE bulk reads however many customers (the customers, their
+ * account owners, the prefs rows): Map<customerId, { own, channel }> where `own` is the customer's notification_prefs row
+ * (undefined = the table defaults, reminder on) and `channel` the row the channel is read from (the account owner's row
+ * for a secondary profile, as resolveChannelPrefsRow does). Throws on a failed read.
+ */
+async function loadCustomerReminderContext(conn, ids) {
+  const out = new Map();
+  if (!ids.length) return out;
+  const customers = await conn('customers').whereIn('id', ids).select('id', 'account_id', 'is_primary_profile');
+  const accounts = [...new Set(customers.filter((c) => c.is_primary_profile !== true && c.account_id).map((c) => c.account_id))];
+  const owners = accounts.length
+    ? await conn('customers').whereIn('account_id', accounts).where({ is_primary_profile: true }).select('id', 'account_id') : [];
+  const ownerOf = new Map(owners.map((o) => [String(o.account_id), String(o.id)]));
+  const rows = await conn('notification_prefs').whereIn('customer_id', [...ids, ...ownerOf.values()]).select('*');
+  const prefsOf = new Map(rows.map((r) => [String(r.customer_id), r]));
+  const accountOf = new Map(customers.map((c) => [String(c.id), c]));
+  for (const id of ids) {
+    const customer = accountOf.get(id);
+    const ownerId = customer && customer.is_primary_profile !== true && customer.account_id ? ownerOf.get(String(customer.account_id)) : null;
+    const own = prefsOf.get(id);
+    out.set(id, { own, channel: ownerId && ownerId !== id && prefsOf.get(ownerId) ? prefsOf.get(ownerId) : own });
+  }
+  return out;
+}
+
+/** reminder24hWillSend over a customer's context, with the property's toggles laid over the row when `overlay` is given. */
+function reminder24hAnswer({ own, channel }, overlay) {
+  const prefs = overlay ? require('./property-notification-prefs').overlayPropertyPrefs(overlay.property, overlay.row, own) : own;
+  return reminder24hWillSend({ unavailable: false, ...reminder24hInputsFromRows(prefs, channel) });
+}
+
+const distinctIds = (values) => [...new Set((values || []).filter((v) => v != null).map(String))];
+
+/**
+ * Will the 24-hour reminder go out, for each of these customers (their own row, no saved property)? Map<customerId,
+ * boolean>, from THREE bulk reads. Same rule as the senders: reminder24hWillSend over the prefs fields getReminderPrefs builds
+ * (reminder24hInputsFromRows), the channel from the account owner's row for a secondary profile. No prefs row = table
+ * defaults (reminder on). Throws on a failed read.
+ */
+async function loadReminder24hAnswers(conn, customerIds) {
+  const ids = distinctIds(customerIds);
+  const context = await loadCustomerReminderContext(conn, ids);
+  return new Map(ids.map((id) => [id, reminder24hAnswer(context.get(id))]));
+}
+
+/**
+ * Will the 24-hour reminder go out for each of these VISITS? Map<visit id, boolean>; `visits`: [{ id, customer_id,
+ * property_id }]. The office's "customer asked for this time" hint (GATE_DAY_ONLY_PROMISE part E) reads it. The customer row
+ * decides, except while property texts are ENFORCED (propertyTextsEnforced) for a visit stamped with an active non-primary
+ * saved property of its customer: that property's toggles (its own row, else the relationship default, quiet for
+ * rental_owned / managed_for_client) lie over the customer row, exactly as resolveAppointmentPrefs does for the senders
+ * (property-notification-prefs.overlayPropertyPrefs). Shadow mode or scope off: the customer row, no property read. READ-ONLY
+ * (no decision log). Reads: the three customer reads, plus two (properties, property prefs) only when enforced and a visit
+ * is stamped. Throws on a failed read.
+ */
+async function loadVisitReminder24hAnswers(conn, visits) {
+  const list = (visits || []).filter((v) => v && v.id != null && v.customer_id);
+  const context = await loadCustomerReminderContext(conn, distinctIds(list.map((v) => v.customer_id)));
+  const propertyPrefs = require('./property-notification-prefs');
+  const overlays = propertyPrefs.propertyTextsEnforced() ? await propertyPrefs.loadVisitProperties(conn, list) : new Map();
+  return new Map(list.map((v) => [v.id, reminder24hAnswer(context.get(String(v.customer_id)), overlays.get(v.id))]));
+}
+
+/**
+ * The booking window's answers for ONE customer: { customer, properties } where `customer` is the customer row's answer and
+ * `properties` maps each active non-primary saved property id to ITS answer, present only while property texts are enforced
+ * (otherwise the customer row decides for every property and the map is empty). The modal picks by the property it books.
+ * Throws on a failed read.
+ */
+async function loadBookingReminder24hAnswers(conn, customerId) {
+  const id = String(customerId);
+  const context = (await loadCustomerReminderContext(conn, [id])).get(id);
+  const propertyPrefs = require('./property-notification-prefs');
+  const properties = {};
+  if (propertyPrefs.propertyTextsEnforced()) {
+    const own = await conn('customer_properties').where({ customer_id: id }).select('id');
+    const found = await propertyPrefs.loadVisitProperties(conn, own.map((p) => ({ id: p.id, customer_id: id, property_id: p.id })));
+    for (const [propertyId, overlay] of found) properties[propertyId] = reminder24hAnswer(context, overlay);
+  }
+  return { customer: reminder24hAnswer(context), properties };
+}
+
 async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) {
   const prefs = await visitPrefsRow(customerId, scheduledServiceId);
   const channelPrefs = await resolveChannelPrefsRow(customerId, prefs);
+  const reminder24hInputs = reminder24hInputsFromRows(prefs, channelPrefs);
 
   return {
     raw: prefs || {},
@@ -2534,7 +2875,7 @@ async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) 
     // secondary-profile appointment whose owner lookup failed is equally
     // unknowable.
     unavailable: prefs?.__prefsUnavailable === true || channelPrefs?.__prefsUnavailable === true,
-    smsEnabled: prefs?.sms_enabled !== false,
+    smsEnabled: reminder24hInputs.smsEnabled,
     // Portal-wide email opt-out (pre-push #3588 P1): the email-first 72h
     // promotion must not route around it — AppointmentEmail sends on the
     // transactional_required stream and does not enforce this toggle
@@ -2544,12 +2885,12 @@ async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) 
     emailEnabled: prefs?.email_enabled !== false,
     appointmentConfirmation: prefs?.appointment_confirmation !== false,
     serviceReminder72h: prefs?.service_reminder_72h !== false,
-    serviceReminder24h: prefs?.service_reminder_24h !== false,
+    serviceReminder24h: reminder24hInputs.serviceReminder24h,
     confirmationChannel: apptChannel(channelPrefs?.appointment_confirmation_channel),
     // Explicit confirmation-channel choice: stamped by the notifications
     // route on any customer write of the channel; read from the same
     // owner-resolved row as the channel itself. The new-client text + email
-    // promotion (GATE_NEW_CLIENT_CONFIRM_EMAIL) skips it.
+    // promotion skips it.
     confirmationChannelExplicit: channelPrefs?.appointment_confirmation_channel_explicit === true,
     reminder72hChannel: apptChannel(channelPrefs?.service_reminder_72h_channel, { preserveAppChoice: true }),
     // Explicit delivery-method choice (Codex #3588 P1): stamped by the
@@ -2557,7 +2898,7 @@ async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) 
     // from the same owner-resolved row as the channel itself so a secondary
     // profile honors the account owner's choice.
     reminder72hChannelExplicit: channelPrefs?.service_reminder_72h_channel_explicit === true,
-    reminder24hChannel: apptChannel(channelPrefs?.service_reminder_24h_channel, { preserveAppChoice: true }),
+    reminder24hChannel: reminder24hInputs.reminder24hChannel,
   };
 }
 
@@ -2599,31 +2940,62 @@ async function appendHeldEstimateAcceptLine(body, { record, contact, customer, s
   }
 }
 
+// The "View and confirm / Everything about your visit" appointment-page link for a confirmation body. One place for
+// the v2 row's vars and the day-only v2 row's vars.
+async function confirmationAppointmentLine(scheduledServiceId, customerId) {
+  // Confirm-first label ONLY when there is something to confirm:
+  // a self-booked visit is inserted already confirmed
+  // (routes/booking.js), and asking that customer to "view and
+  // confirm" points at a page with no Confirm button.
+  const svcRow = await db('scheduled_services')
+    .where({ id: scheduledServiceId })
+    .first('status', 'customer_confirmed');
+  const alreadyConfirmed = String(svcRow?.status || '').toLowerCase() === 'confirmed'
+    || !!svcRow?.customer_confirmed;
+  const appointmentLink = await buildAppointmentLink(scheduledServiceId, {
+    customerId,
+    label: alreadyConfirmed ? 'Everything about your visit' : 'View and confirm your appointment',
+  });
+  return appointmentLink.line;
+}
+
+// The day-only confirmation (GATE_DAY_ONLY_PROMISE): the appointment-page ladder (GATE_APPOINTMENT_PAGE) uses
+// appointment_confirmation_day_v2, else appointment_confirmation_day_v1. A missing, disabled or unrenderable day row
+// answers null, and the caller sends today's window copy: a customer always gets a text, and a window text is the safe
+// side. No {window} or {time} var is passed. `out.dayOnly` and `out.templateKey` record the row that rendered.
+async function renderDayOnlyConfirmationBody({ scheduledServiceId, customerId, firstName, serviceLabel, date, day, rescheduleUrl, out }) {
+  const pageLadder = process.env.GATE_APPOINTMENT_PAGE === 'true';
+  const key = pageLadder ? DAY_CONFIRMATION_KEYS.v2 : DAY_CONFIRMATION_KEYS.v1;
+  const vars = { first_name: firstName || 'there', service_type: serviceLabel, day, date };
+  if (pageLadder) vars.appointment_line = await confirmationAppointmentLine(scheduledServiceId, customerId);
+  else vars.reschedule_line = require('./reschedule-link').dayOnlyLineFor(rescheduleUrl);
+  const body = await renderDayRow(key, vars, { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId });
+  if (body) {
+    out.templateKey = key;
+    out.dayOnly = true;
+  }
+  return body;
+}
+
 // The appointment_confirmation body, one place for the primary's confirmation
 // (deliverConfirmation) and the replay to a service contact who answered YES
 // (sendConfirmationToServiceContact). `ladder` (optional) receives the
-// rendered row's templateKey.
-async function renderConfirmationBody({ scheduledServiceId, customerId, firstName, serviceLabel, date, time, day, rescheduleLine, ladder = null }) {
+// rendered row's templateKey, and dayOnly: true when the day-only row rendered (dayOnly in, GATE_DAY_ONLY_PROMISE).
+async function renderConfirmationBody({ scheduledServiceId, customerId, firstName, serviceLabel, date, time, day, rescheduleLine, rescheduleUrl = null, dayOnly = false, ladder = null }) {
+  if (dayOnly) {
+    const out = ladder || {};
+    const dayBody = await renderDayOnlyConfirmationBody({ scheduledServiceId, customerId, firstName, serviceLabel, date, day, rescheduleUrl, out });
+    if (dayBody) return dayBody;
+    delete out.dayOnly;
+  }
   return renderAppointmentPageTemplate(
     'appointment_confirmation',
     async () => {
-      // Confirm-first label ONLY when there is something to confirm:
-      // a self-booked visit is inserted already confirmed
-      // (routes/booking.js), and asking that customer to "view and
-      // confirm" points at a page with no Confirm button.
-      const svcRow = await db('scheduled_services')
-        .where({ id: scheduledServiceId })
-        .first('status', 'customer_confirmed');
-      const alreadyConfirmed = String(svcRow?.status || '').toLowerCase() === 'confirmed'
-        || !!svcRow?.customer_confirmed;
-      const appointmentLink = await buildAppointmentLink(scheduledServiceId, {
-        customerId,
-        label: alreadyConfirmed ? 'Everything about your visit' : 'View and confirm your appointment',
-      });
+      const appointmentLine = await confirmationAppointmentLine(scheduledServiceId, customerId);
       // {window}, not {time} — the v2 body quotes the 2-hour arrival
       // promise, and every sender resolves it through the one helper.
       const window = await confirmationArrivalWindow({ scheduledServiceId });
-      return { first_name: firstName || 'there', service_type: serviceLabel, date, time, day, window, appointment_line: appointmentLink.line };
+      return { first_name: firstName || 'there', service_type: serviceLabel, date, time, day, window, appointment_line: appointmentLine };
     },
     { first_name: firstName || 'there', service_type: serviceLabel, date, time, day, reschedule_line: rescheduleLine },
     { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
@@ -2748,7 +3120,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       logger.info(`[appt-remind] Confirmation skipped by preference for customer ${customerId}`);
       return false;
     }
-    // New-client promotion (GATE_NEW_CLIENT_CONFIRM_EMAIL): every later read
+    // New-client promotion: every later read
     // of the channel below uses this value, so the send-window hold, the held
     // email leg and deliverAppointmentNotice all see the same channel.
     const confirmationChannel = await resolveConfirmationChannel(prefs, { customerId, scheduledServiceId });
@@ -2784,6 +3156,11 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         }
       }
 
+      // GATE_DAY_ONLY_PROMISE: an office-booked first visit or a system-placed recurring visit is promised only the
+      // DAY (the 24-hour text gives the window). Decided once here, so the held email leg, the text and the email
+      // that follows it all tell the same story. Gate off: false, nothing read.
+      const confirmationDay = { dayOnly: await confirmationDayOnly(record, { scheduledServiceId, apptTime, prefs }) };
+
       // Outside the send window: return WITHOUT marking confirmation_sent —
       // the stranded-confirmation sweep (every 15 min) re-calls this
       // function and the text goes out when the window opens at 8:00 AM.
@@ -2804,7 +3181,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         // night, and at 08:00 the past-appointment guard above closes the
         // row before the window ever admits the SMS.
         if (apptChannel(confirmationChannel) === 'both') {
-          const heldEmailRes = await sendAppointmentNoticeEmail({ kind: 'confirmation', customerId, scheduledServiceId, apptTime, serviceLabel, emailIdempotencyKey: coalescedNoticeEmailKey(record, scheduledServiceId, apptTime) });
+          const heldEmailRes = await sendAppointmentNoticeEmail({ kind: 'confirmation', customerId, scheduledServiceId, apptTime, serviceLabel, emailIdempotencyKey: coalescedNoticeEmailKey(record, scheduledServiceId, apptTime), ...dayOnlyArg(confirmationDay.dayOnly) });
           logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} held — email leg ${heldEmailRes?.ok ? 'sent now' : `not sent (${heldEmailRes?.reason || heldEmailRes?.error || 'unknown'})`}, SMS deferred`);
         }
         logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} deferred — outside 8AM-8PM ET send window`);
@@ -2836,15 +3213,19 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         rescheduleUrl: reschedule.url,
         smsOutcome,
         emailIdempotencyKey: coalescedNoticeEmailKey(record, scheduledServiceId, apptTime),
+        dayState: confirmationDay,
         smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer.first_name || 'there';
           const ladder = {};
           const rendered = await renderConfirmationBody({
-            scheduledServiceId, customerId, firstName, serviceLabel, date, time, day, rescheduleLine: reschedule.line, ladder,
+            scheduledServiceId, customerId, firstName, serviceLabel, date, time, day, rescheduleLine: reschedule.line,
+            rescheduleUrl: reschedule.url, dayOnly: confirmationDay.dayOnly, ladder,
           });
           // safeSendAppointment reads this metadata after the render, so
           // the send records the row that actually rendered (v2 or base).
           if (ladder.templateKey) confirmationMeta.templateKey = ladder.templateKey;
+          // The day marker rides with the day row only; a window fallback records its slot as today.
+          noteDayRender(confirmationMeta, confirmationDay, ladder);
           return appendHeldEstimateAcceptLine(rendered, { record, contact, customer, scheduledServiceId });
         }, 'confirmation', 'appointment_confirmation', Object.assign(confirmationMeta, { scheduled_service_id: scheduledServiceId, rendered_slot_ms: apptTime ? apptTime.getTime() : undefined }), { sendOutcome: smsOutcome, customerInitiated }),
       });
@@ -2872,7 +3253,9 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // (2026-10-26: confirmation 12:53 PM, reminder 1:00 PM). Close it in
       // this same fenced write so the cron never selects it. Delivered sends
       // only — a failed confirmation keeps the 24h reminder as the notice.
-      const coversDayBefore = sent && etDateString(apptTime) <= etDateString(addETDays(new Date(), 1));
+      // A day-only confirmation gave no window, so it never stands in for the 24-hour text: that one still owes the
+      // window the customer was promised (GATE_DAY_ONLY_PROMISE).
+      const coversDayBefore = confirmationCoversDayBefore({ sent, dayOnly: confirmationDay.dayOnly, apptTime });
       const marked = await db('appointment_reminders')
         .where({ id: record.id, appointment_time: apptTime })
         .update({ confirmation_sent: true, confirmation_sent_at: new Date(), confirmation_estimate_id: null,
@@ -4637,6 +5020,9 @@ const AppointmentReminders = {
             const cardHoldPolicyLine72 = copy72
               ? copy72.holdLine
               : await require('./estimate-card-holds').cardHoldReminderLine(r.scheduled_service_id);
+            // GATE_DAY_ONLY_PROMISE: the whole stop is promised only the day, or none of it (the stop's earliest slot
+            // decides the cutoff; one ineligible member means window copy). Gate off: false, nothing read.
+            const day72State = { dayOnly: await dayOnlyForSend({ id: r.scheduled_service_id, startAt: apptCopy72, reminder24hEnabled: reminder24hWillSend(prefs) }) };
             // smsOutcome carries a provider-handoff QUIET_HOURS_HOLD (the
             // pre-check above passed at 19:59, the clock crossed 20:00
             // mid-flight) back out so the hold defers instead of marking.
@@ -4662,6 +5048,7 @@ const AppointmentReminders = {
               serviceLabel,
               rescheduleUrl: reschedule.url,
               smsOutcome: smsOutcome72,
+              dayState: day72State,
               // callback_number_needed hold (P1-C + owner ruling
               // 2026-09-25, codex round-2 finding #7): the SMS leg is
               // gated at the single send boundary now — safeSendAppointment
@@ -4687,10 +5074,12 @@ const AppointmentReminders = {
                   vars: { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptCopy72), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   rescheduleUrl: reschedule.url,
                   context: { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
+                  dayOnly: day72State.dayOnly,
                 });
                 // Read by safeSendAppointment after this render (24h twin):
                 // the row that actually rendered, base or no-pick.
                 reminder72Meta.templateKey = rendered72.templateKey;
+                noteDayRender(reminder72Meta, day72State, rendered72);
                 return rendered72.body;
               }, 'reminder_72h', 'appointment_reminder_72h', Object.assign(reminder72Meta, { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined, notificationEventKey: ownsVisit72 ? claim72.dedupeKey : undefined }), { sendOutcome: smsOutcome72, expectedChannel: channel72 }),
             }));
@@ -4772,7 +5161,7 @@ const AppointmentReminders = {
           // Skip only if the reminder is off, or it is SMS-only and the
           // customer has opted out of texts. An email/both preference still
           // sends by email even when SMS is suppressed.
-          if (!prefs.serviceReminder24h || (channel24 === 'sms' && !prefs.smsEnabled)) {
+          if (!reminder24hWillSend(prefs)) {
             // Close the window like the neighboring skip branches — see the
             // 72h twin above: guarded on appointment_time so a concurrent
             // move's re-arm is never stomped; 0 rows matched = the row
@@ -5231,8 +5620,9 @@ const AppointmentReminders = {
               // bounced notice is stale; the re-armed rows own the new
               // date. Every grouped send stamps rendered_slot_ms, so a
               // missing stamp means an ungrouped send — per-row copy.
-              const slotMs = Number(audit.metadata?.rendered_slot_ms);
-              const textedDate = Number.isFinite(slotMs) ? etDateString(new Date(slotMs)) : null;
+              // A day-only text records no rendered_slot_ms (it promised no hour), so its occurrence comes from the
+              // non-promise guard fields instead (bouncedOccurrenceDate).
+              const textedDate = bouncedOccurrenceDate(audit.metadata);
               const visitDate = visit.scheduled_date instanceof Date
                 ? visit.scheduled_date.toISOString().slice(0, 10)
                 : String(visit.scheduled_date || '').slice(0, 10);
@@ -5257,7 +5647,8 @@ const AppointmentReminders = {
         }
       }
 
-      await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel: audit.metadata?.requestedChannel });
+      // A bounced day-only text is followed by the day-only email (GATE_DAY_ONLY_PROMISE).
+      await recoverBouncedNotice({ audit, kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey });
     } catch (err) {
       logger.error(`[appt-remind] handleUndeliveredSms failed: ${err.message}`);
     }
@@ -5508,6 +5899,10 @@ const AppointmentReminders = {
         logger.info(`[appt-remind] Reschedule sync skipped for ${scheduledServiceId} — the service no longer holds the caller's slot`);
         return { skippedStale: true };
       }
+      // GATE_DAY_ONLY_PROMISE part B2/B3: the customer's choice for the new slot is NOT written here: the move that set the slot
+      // writes it in its own UPDATE (rebooker.js moveIntentColumns: a customer surface records "asked for this time"), so it
+      // cannot land over a later move's intent. options.timePromise only decides THIS notice.
+
       // Repair-release for a retained unit-move hold (codex #3609 uncapped
       // audit + r33/r34 P1s): a PARTIAL move retains move_hold_until on
       // every planned member — the detached straggler AND the landed
@@ -5560,9 +5955,21 @@ const AppointmentReminders = {
           const time = formatTime(newApptTime);
 
           const serviceLabel = smsServiceLabelStored(record.service_type);
+          // GATE_DAY_ONLY_PROMISE part B2: a customer move that chose "any time that day" (options.timePromise 'day') to
+          // another date more than 24.25 h out promises only the new day. 'set_time' or no choice: today's copy, unchanged.
+          const dayMove = require('./day-only-move-notice');
+          const dayState = { dayOnly: await dayMove.customerMoveDayOnly({
+            options, resolved, serviceId: scheduledServiceId, customerId: record.customer_id, newStartAt: newApptTime,
+          }) };
+          const renderDay = (firstName) => dayMove.renderDayRescheduled({
+            state: dayState, serviceId: scheduledServiceId, customerId: record.customer_id, firstName, serviceLabel,
+            apptTime: newApptTime, keep: { move_notice_slot_ms: newApptTime.getTime() },
+          });
           const differentTimeLine = await rescheduledTextLine(scheduledServiceId, { customerId: record.customer_id });
           noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
+            const dayBody = await renderDay(firstName);
+            if (dayBody) return dayBody;
             return renderRequiredTemplate('appointment_rescheduled', {
               first_name: firstName,
               service_type: serviceLabel,
@@ -5576,7 +5983,7 @@ const AppointmentReminders = {
               entity_type: 'scheduled_service',
               entity_id: scheduledServiceId,
             });
-          }, 'appointment_rescheduled', 'appointment_confirmation', {
+          }, 'appointment_rescheduled', 'appointment_confirmation', dayMove.withDayMeta({
             scheduled_service_id: scheduledServiceId,
             rendered_slot_ms: newApptTime.getTime(),
             // A windowless notice promised no window: the slot still guards
@@ -5588,7 +5995,7 @@ const AppointmentReminders = {
             // The slot this text quotes, kept for its email version when safeSend leaves out the
             // promised slot (window_unknown): a bounce must not quote a later move's time.
             move_notice_slot_ms: newApptTime.getTime(),
-          }, { sendOutcome: rescheduleNoticeOutcome });
+          }, dayState, newApptTime.getTime()), { sendOutcome: rescheduleNoticeOutcome });
           if (noticeSent) {
             await this.markRescheduleNoticeSent(scheduledServiceId);
             logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
@@ -5597,6 +6004,7 @@ const AppointmentReminders = {
             await deliverMoveNoticeEmail({
               kind: 'rescheduled', customerId: record.customer_id, scheduledServiceId, apptTime: newApptTime, serviceLabel,
               ...rescheduleEmailWindow(resolved, newApptTime), noticeAt: now, sendOutcome: rescheduleNoticeOutcome,
+              ...dayMove.dayOnlyArg(dayState),
             });
           }
         }
@@ -6785,6 +7193,7 @@ AppointmentReminders.smsServiceLabelStored = smsServiceLabelStored;
 AppointmentReminders.deliverMoveNoticeEmail = deliverMoveNoticeEmail;
 
 AppointmentReminders._test = {
+  confirmationDayOnly,
   isBookedAfterNoPick,
   render72hReminder,
   NO_PICK_REMINDER_KEY,
@@ -6800,6 +7209,8 @@ AppointmentReminders._test = {
   deliverAppointmentNotice,
   withReminderSendFence,
   deliverConfirmation,
+  reminder24hWillSend,
+  dayOnlyNow,
   deliverConfirmationByChannel,
   scheduledServiceApptTime,
   sendAppointmentNoticeEmail,
@@ -6846,6 +7257,20 @@ AppointmentReminders.composeScheduledApptTime = composeScheduledApptTime;
 // The visit-aware prefs row for the call-booking confirmation email and the
 // deferred-replay recheck (app property scope, PR 3).
 AppointmentReminders.visitPrefsRow = visitPrefsRow;
+// GATE_DAY_ONLY_PROMISE part B2: the move-notice senders (services/day-only-move-notice.js) ask whether the customer's
+// 24-hour reminder will really be sent before promising only the day.
+AppointmentReminders.getReminderPrefs = getReminderPrefs;
+AppointmentReminders.reminder24hWillSend = reminder24hWillSend;
+// GATE_DAY_ONLY_PROMISE part E: the office's bulk read of the same answer (the phone-script hint).
+AppointmentReminders.loadReminder24hAnswers = loadReminder24hAnswers;
+AppointmentReminders.loadVisitReminder24hAnswers = loadVisitReminder24hAnswers;
+AppointmentReminders.loadBookingReminder24hAnswers = loadBookingReminder24hAnswers;
+
+// The 72-hour reminder's effective channel (email-first for one-time visits
+// under GATE_REMINDER_72H_EMAIL_FIRST), for the make-room check
+// (scheduling/booking-make-room.js), which reads the settings through
+// getReminderPrefs above.
+AppointmentReminders.resolve72hChannel = resolve72hChannel;
 
 // classifyDeliveryCertainty verdict -> replay result.
 const REPLAY_DELIVERY_RESULT = Object.freeze({
@@ -6946,6 +7371,21 @@ async function replayRecipient({ customerId, scheduledServiceId, contactKey, acc
   return { recipient };
 }
 
+// The day-only decision for a send made NOW outside the reminder scan (the service-contact replay, a bounce's email
+// recovery): the SAME shared decision a fresh send uses, on the live gate, the customer's CURRENT preferences
+// (reminder24hWillSend) and the full eligibility. Gate off (or any error, unreadable preferences): false, and the caller
+// sends window copy.
+async function dayOnlyNow({ customerId, scheduledServiceId, apptTime, ignoreLevel = false }) {
+  try {
+    if (!require('./time-promise').dayOnlyPromiseOn()) return false;
+    const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
+    if (prefs.unavailable) return false;
+    return await dayOnlyForSend({ id: scheduledServiceId, startAt: apptTime, reminder24hEnabled: reminder24hWillSend(prefs), ...(ignoreLevel ? { ignoreLevel: true } : {}) });
+  } catch {
+    return false;
+  }
+}
+
 async function sendConfirmationToServiceContact({ customerId, scheduledServiceId, phone, inReplyToYes = false } = {}) {
   const contactKey = String(phone || '').replace(/\D/g, '').slice(-10);
   if (!customerId || !scheduledServiceId || !contactKey) return { sent: false, reason: 'missing_input' };
@@ -6956,9 +7396,16 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
     const { recipient, reason } = await replayRecipient({ customerId, scheduledServiceId, contactKey, acct });
     if (reason) return { sent: false, reason };
     const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
+    // GATE_DAY_ONLY_PROMISE: the replay tells the same story as the primary's confirmation (a visit whose latest promise
+    // is an hour reads 'hour' and keeps the window copy).
+    const dayOnly = await dayOnlyNow({ customerId, scheduledServiceId, apptTime });
+    const ladder = {};
     const body = await renderConfirmationBody({
       scheduledServiceId,
       customerId,
+      ladder,
+      dayOnly,
+      rescheduleUrl: reschedule.url,
       firstName: firstNameFrom(recipient.name),
       // Same customer-facing label as the reminder rail: the reminder row's
       // (merged, add-on-aware) label when registered, admin suffixes stripped.
@@ -6978,6 +7425,8 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
       customerId,
       appointmentId: scheduledServiceId,
       renderedSlotMs: apptTime.getTime(),
+      // A day-only text quoted no window: the audit records no slot, only the day marker (DAY_PROMISE_META).
+      ...(ladder.dayOnly === true ? { promisedWindowUnknown: true } : {}),
       identityTrustLevel: 'service_contact_authorized',
       // Only the immediate answer to the recipient's own YES is a reply; a
       // sweep retry honors the send window (a held send stays retryable).
@@ -6987,6 +7436,7 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
         appointment_contact_role: recipient.role,
         scheduled_service_id: scheduledServiceId,
         entry_point: 'recipient_optin_confirmed_replay',
+        ...(ladder.dayOnly === true ? { ...require('./time-promise').DAY_PROMISE_META, ...dayGuardMeta(apptTime.getTime()) } : {}),
       },
     });
     // The shared delivery verdict (disabled template / owner-silence sentinels
@@ -7006,6 +7456,9 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
   }
 }
 AppointmentReminders.sendConfirmationToServiceContact = sendConfirmationToServiceContact;
+AppointmentReminders.revalidateDelayedDaySend = revalidateDelayedDaySend;
+// GATE_DAY_ONLY_PROMISE part B2: the move-notice senders (services/day-only-move-notice.js) build their day fields with the same helper.
+AppointmentReminders.dayGuardMeta = dayGuardMeta;
 
 // Shared with twilio.js's en-route/arrival senders (owner ruling
 // 2026-09-25) — see the function's own comment.

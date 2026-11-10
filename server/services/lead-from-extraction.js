@@ -587,7 +587,7 @@ async function stampCustomerPreferredLanguage(customerId, language) {
  */
 async function createLeadFromExtraction(extracted = {}, opts = {}) {
   const phone = opts.phone || extracted.phone || null;
-  // The text-thread reader (GATE_SMS_LEAD_EXTRACTION) writes through this same
+  // The text-thread reader (sms-lead-extraction.js) writes through this same
   // function so a texted lead gets the call path's reuse and merge rules; only
   // the labels below differ. Anything else is the voice path, as before.
   const viaSms = opts.channel === 'sms';

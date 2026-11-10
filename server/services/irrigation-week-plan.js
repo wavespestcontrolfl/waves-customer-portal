@@ -121,9 +121,9 @@ function decideWeekPlan({
   // Unconfirmed schedule after a move: carryover from observed RAIN only
   // (the former home's programmed irrigation is withheld).
   rainOnlyCarryover = false,
-  // Head rate table ('owner' | 'package') this decision uses. Omitted = a NEW decision: the live
-  // GATE_IRRIGATION_OWNER_RATES picks it. The snapshot freezes the choice (decisionInputs.rateTable, owner only), and a
-  // replay passes the stored table back in, so the gate never re-decides a stored row.
+  // Head rate table ('owner' | 'package') this decision uses. Omitted = a NEW decision: the owner's table. The snapshot
+  // freezes the choice (decisionInputs.rateTable, owner only), and a replay passes the stored table back in, so a stored
+  // row is never re-decided.
   rateTable = undefined,
   // Lawn area on file (customer_turf_profiles.lawn_sqft) for the "water you saved" gallons; null = no sentence.
   lawnSqft = null,
@@ -192,7 +192,7 @@ function decideWeekPlan({
     rainKnown,
     priorWeekEvents,
     rainOnlyCarryover,
-    // One head rate table for every reader (GATE_IRRIGATION_OWNER_RATES); off = the package table.
+    // One head rate table for every reader; a stored legacy row passes 'package'.
     rates: ratesForTable(table),
   });
   const runtime = normalizeRuntimeInputs({ runMinutes, wateringDays, systemType });

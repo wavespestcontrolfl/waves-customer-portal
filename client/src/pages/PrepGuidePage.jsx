@@ -253,6 +253,12 @@ function UpcomingVisitsBand({ visits, typeLabel }) {
                 Arrival {visit.windowLabel}
               </div>
             )}
+            {/* GATE_DAY_ONLY_PROMISE: the customer was told only the day, so the server sends no hour. */}
+            {!visit.windowLabel && visit.day_only && visit.arrival_note && (
+              <div data-testid="prep-day-only-note" style={{ fontSize: FS.body, fontWeight: FW.medium, color: SURFACE.body, textAlign: 'right', maxWidth: '45%' }}>
+                {visit.arrival_note}
+              </div>
+            )}
           </div>
         ))}
       </div>

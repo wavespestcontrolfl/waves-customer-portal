@@ -284,9 +284,4 @@ jest.setTimeout(30000);
     expect(raiseAdminAlert).not.toHaveBeenCalled();
     expect((await rowNow(row.id)).state).toBe('cancelled');
   });
-
-  test('gate off: nothing is read', async () => {
-    isEnabled.mockImplementation(() => false);
-    await expect(runLeadCallbackTick({ now: SLOT })).resolves.toEqual({ skipped: 'gate_off' });
-  });
 });
