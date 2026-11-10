@@ -306,12 +306,16 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     const deleted = await stamped('lead_id', 'Stampgone', '+15555557033');
     await db('leads').where({ id: deleted.lead.id }).update({ deleted_at: now });
     const viaSid = await stamped(null, 'Sidlinked', '+15555557034');
-    for (const who of [viaLeadId, viaRelay, deleted, viaSid]) {
+    // Two live leads on one sid: the sid adds no customer (resolveLeadLinkage's rule), the bell stays open.
+    const twice = await stamped(null, 'Sidtwice', '+15555557035');
+    const sidOf = (await db('leads').where({ id: twice.lead.id }).first()).twilio_call_sid;
+    await insert('leads', { first_name: 'Sidtwin', phone: '+15555557036', status: 'new', twilio_call_sid: sidOf });
+    for (const who of [viaLeadId, viaRelay, deleted, viaSid, twice]) {
       await insert('estimates', { status: 'sent', customer_id: who.customer.id, sent_at: quoteAt, estimate_data: delivered });
     }
     await relevance.runAdminAlertRelevanceSweep({ now });
-    const [a, b, c, d] = await Promise.all([viaLeadId, viaRelay, deleted, viaSid].map((w) => get(w.callBell.id)));
-    expect([a.done_at != null, b.done_at != null, c.done_at != null, d.done_at != null]).toEqual([true, true, false, true]);
+    const [a, b, c, d, e] = await Promise.all([viaLeadId, viaRelay, deleted, viaSid, twice].map((w) => get(w.callBell.id)));
+    expect([a.done_at != null, b.done_at != null, c.done_at != null, d.done_at != null, e.done_at != null]).toEqual([true, true, false, true, false]);
     expect([a.done_by, a.resolution]).toEqual(['relevance', 'Estimate was sent']);
   });
 

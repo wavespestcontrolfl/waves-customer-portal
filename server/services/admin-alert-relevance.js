@@ -599,7 +599,7 @@ function callQuoteSubject(row, calls, data, linkedLeads, sidLeads) {
   const lead = data.leads.get(refsFromRow(row).leadId);
   const linked = linkedLeads.get(uuidOrNull(String(call.linked_lead_id || '')) || '');
   const customerIds = [...new Set([call.customer_id, lead && !lead.deleted_at ? lead.customer_id : null, linked ? linked.customer_id : null,
-    ...(sidLeads.get(meta.callSid) || []).map((l) => l.customer_id)]
+    ...((sidLeads.get(meta.callSid) || []).length === 1 ? [sidLeads.get(meta.callSid)[0].customer_id] : [])]
     .map((id) => (id ? uuidOrNull(String(id)) : null)).filter(Boolean))];
   return customerIds.length ? { startedAt, customerIds } : null;
 }
@@ -619,7 +619,8 @@ async function loadCallQuoteMovedOn(rows, data, conn) {
     const linkedLeads = new Map(linkedIds.length
       ? (await conn('leads').whereIn('id', linkedIds).whereNull('deleted_at').select('id', 'customer_id')).map((l) => [String(l.id), l])
       : []);
-    // The live leads that carry a call's sid, in one read (skipped with no sids).
+    // The live leads that carry a call's sid, in one read (skipped with no sids). Two or more on one sid add no
+    // customer (callQuoteSubject): resolveLeadLinkage's rule, since the wrong lead's customer would close the bell.
     const sidLeads = new Map();
     if (sids.length) {
       for (const l of await conn('leads').whereIn('twilio_call_sid', sids).whereNull('deleted_at').select('id', 'customer_id', 'twilio_call_sid')) {

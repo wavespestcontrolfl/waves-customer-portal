@@ -864,6 +864,14 @@ describe('class rules', () => {
       expect((await reasonFor(bellOnly)).reason).toBeNull();
       mockTables.leads = [linkedLead({ twilio_call_sid: 'CA-other' })];
       expect((await reasonFor(bellOnly)).reason).toBeNull();
+      // Two live leads on one sid: the sid adds no customer (the shared resolver's rule), so the bell stays open.
+      mockTables.leads = [linkedLead({ twilio_call_sid: SID }), linkedLead({ id: uid(78), twilio_call_sid: SID })];
+      expect((await reasonFor(bellOnly)).reason).toBeNull();
+      // ...but the call's own stamped lead still counts beside an ambiguous sid.
+      mockTables[callTable] = [callRow({ customer_id: null, linked_lead_id: LINKED })];
+      mockTables.leads = [linkedLead({ twilio_call_sid: SID }), linkedLead({ id: uid(78), customer_id: uid(97), twilio_call_sid: SID })];
+      expect((await reasonFor(bellOnly)).reason).toBe('A visit was booked');
+      mockTables[callTable] = [callRow({ customer_id: null })];
       // A stamp that is not a uuid is ignored, not sent to the database.
       mockTables[callTable] = [callRow({ customer_id: null, linked_lead_id: 'not-a-uuid' })];
       mockTables.leads = [linkedLead()];
