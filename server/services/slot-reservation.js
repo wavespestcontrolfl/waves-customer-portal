@@ -919,6 +919,16 @@ async function destinationHitUnderGate(trx, makeRoom, slotId, window) {
   return !!makeRoom && makeRoomChainClash(trx, { payload: makeRoom.payload, excludeId: window.excludeId || null });
 }
 
+// commitReservation: a hold graduating inside the commit grace (row._lapsed) yields to another customer's live make-room
+// hold whose moved stop now holds this window (Codex pre-push P1, #7796). Once this hold's expiry passed, that chain's
+// proof no longer saw it as a stop, and the commit probes see each hold at its own window only. Mode on, hour mode only;
+// the committing hold never blocks itself. A hold that never lapsed is not asked: it was a stop in every chain proof
+// (the same line the commit probe draws with includeHolds).
+async function lapsedHoldOnMakeRoomDestination(client, { row, useCapacity, date, windowStart, windowEnd }) {
+  if (!row._lapsed || useCapacity || !makeRoomHoldsOn()) return false;
+  return !!(await makeRoomDestinationClash(client, { date, techId: row.technician_id || null, windowStart, windowEnd, excludeId: row.id }));
+}
+
 // The make-room hold's proof inside the reserve transaction: { payload, moveIds }, or the ordinary slot-taken throw.
 async function proveHoldOrRefuse(trx, slotId, args) {
   const proof = await proveMakeRoomHour(trx, args);
@@ -2268,7 +2278,9 @@ async function commitReservation({
       const interviewClash = useCapacity
         ? await findInterviewConflicts({ db: client, date: scheduledDate, windowStart, windowEnd: probeWindowEnd })
         : [];
-      if (committedClash.length || interviewClash.length) {
+      const destinationClash = !committedClash.length && !interviewClash.length
+        && await lapsedHoldOnMakeRoomDestination(client, { row, useCapacity, date: scheduledDate, windowStart, windowEnd: probeWindowEnd });
+      if (committedClash.length || interviewClash.length || destinationClash) {
         const err = new Error('slot no longer available');
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`;
@@ -3002,5 +3014,6 @@ module.exports = {
     refuseGracedOfferOnRivalHoldConflict,
     makeRoomDestinationClash,
     makeRoomChainClash,
+    lapsedHoldOnMakeRoomDestination,
   },
 };
