@@ -5188,8 +5188,10 @@ async function callbackSpokenNumberSuggested({ call, extracted, customerLinkOver
 // rule, the recipient check and the fenced write live in appointment-reminders. Best-effort: never throws into the pass.
 async function closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate, windowStart, customerId = null, recipientPhone = null }) {
   try {
-    if (!scheduledServiceId || !scheduledDate) return false;
-    const apptTime = parseETDateTime(`${String(scheduledDate).slice(0, 10)}T${windowStart ? String(windowStart).slice(0, 5) : '08:00'}`);
+    // dateOnlyString: a pg DATE can arrive as a UTC-midnight Date, which String().slice would turn into 'Mon Nov 09'.
+    const day = require('../utils/date-only').dateOnlyString(scheduledDate);
+    if (!scheduledServiceId || !day) return false;
+    const apptTime = parseETDateTime(`${day}T${windowStart ? String(windowStart).slice(0, 5) : '08:00'}`);
     return await require('./appointment-reminders').closeDayBeforeForBookingText({ scheduledServiceId, apptTime, sent: true, dayOnly: false, customerId, recipientPhone });
   } catch (err) {
     logger.warn(`[call-proc] day-before close after the booking text failed for visit ${scheduledServiceId}: ${err.code || err.name || 'error'}`);

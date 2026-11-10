@@ -241,9 +241,17 @@ describe('call pipeline: closeDayBeforeAfterBookingText hands the booked slot to
     expect(spy.mock.calls[0][0].apptTime).toEqual(parseETDateTime(`${date}T08:00`));
   });
 
-  test('no visit id or date: nothing is called', async () => {
+  test('a pg DATE that arrives as a UTC-midnight Date gives the same fenced time as its text form', async () => {
+    const date = etDateString(addETDays(new Date(), 1));
+    await callProc.closeDayBeforeAfterBookingText({ scheduledServiceId: 'ss1', scheduledDate: new Date(`${date}T00:00:00.000Z`), windowStart: '09:00:00' });
+    expect(spy.mock.calls[0][0].apptTime).toEqual(parseETDateTime(`${date}T09:00`));
+  });
+
+  test('no visit id, no date, or a value that is not a date: nothing is called', async () => {
     await expect(callProc.closeDayBeforeAfterBookingText({ scheduledServiceId: null, scheduledDate: '2026-11-10', windowStart: '09:00' })).resolves.toBe(false);
     await expect(callProc.closeDayBeforeAfterBookingText({ scheduledServiceId: 'ss1', scheduledDate: null, windowStart: '09:00' })).resolves.toBe(false);
+    await expect(callProc.closeDayBeforeAfterBookingText({ scheduledServiceId: 'ss1', scheduledDate: 'tomorrow', windowStart: '09:00' })).resolves.toBe(false);
+    await expect(callProc.closeDayBeforeAfterBookingText({ scheduledServiceId: 'ss1', scheduledDate: new Date('nope'), windowStart: '09:00' })).resolves.toBe(false);
     expect(spy).not.toHaveBeenCalled();
   });
 
