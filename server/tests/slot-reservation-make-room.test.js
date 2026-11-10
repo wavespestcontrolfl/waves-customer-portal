@@ -487,9 +487,14 @@ describe('commitReservation — another live make-room hold\'s destination over 
   beforeEach(() => {
     jest.clearAllMocks();
     delete process.env.GATE_SCHEDULING_CAPACITY;
+    // The clock sits well before DATE, as in the reserve blocks above: the accept's booking-notice check never reaches
+    // these fixtures, whatever day the suite runs.
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
     makeRoom.bookingMakeRoomMode.mockReturnValue('on');
     db.mockImplementation((table) => (table === 'booking_config' ? { first: jest.fn().mockResolvedValue(undefined) } : undefined));
   });
+  afterEach(() => { jest.useRealTimers(); });
 
   test('lapsed, mode on: a destination hit is a clash, and the probe leaves the committing hold out', async () => {
     const builder = destinationProbe({ id: 'hold-other' });
