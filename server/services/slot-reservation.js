@@ -2054,6 +2054,13 @@ async function commitReservation({
       err.code = 'RESERVATION_EXPIRED';
       throw err;
     }
+    // A make-room hold is never accepted here: nothing in this change moves the stops its chain needs. It is refused
+    // outright with the ordinary taken-slot answer, in either scheduling mode and whatever the gate reads (Codex #7796
+    // P2: in capacity mode the overlap probes that would otherwise refuse it do not run, and the arrival-capacity check
+    // alone could accept it). The accept change replaces this refusal with the moves.
+    if (row.make_room_moves) {
+      throw slotTaken(`${dateOnly(row.scheduled_date)}_${String(row.window_start).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`);
+    }
     // Self-serve notice window (owner ruling 2026-09-23): a hold reserved
     // just outside the window can cross the boundary during checkout. The
     // LOCKED hold's own start is re-checked here — after the

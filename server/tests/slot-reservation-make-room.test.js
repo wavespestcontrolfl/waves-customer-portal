@@ -487,9 +487,14 @@ describe('commitReservation — another live make-room hold\'s destination over 
   beforeEach(() => {
     jest.clearAllMocks();
     delete process.env.GATE_SCHEDULING_CAPACITY;
+    // The clock sits well before DATE, as in the reserve blocks above: the accept's booking-notice check never reaches
+    // these fixtures, whatever day the suite runs.
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
     makeRoom.bookingMakeRoomMode.mockReturnValue('on');
     db.mockImplementation((table) => (table === 'booking_config' ? { first: jest.fn().mockResolvedValue(undefined) } : undefined));
   });
+  afterEach(() => { jest.useRealTimers(); });
 
   test('lapsed, mode on: a destination hit is a clash, and the probe leaves the committing hold out', async () => {
     const builder = destinationProbe({ id: 'hold-other' });
@@ -631,49 +636,50 @@ describe('a hold revived by a refresh must not sit on another make-room hold\'s 
   });
 });
 
-describe('commitReservation — a make-room hold fails closed until the accept change moves the stops', () => {
+describe('commitReservation — a make-room hold is refused at accept until the accept change moves the stops', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    delete process.env.GATE_SCHEDULING_CAPACITY;
     makeRoom.bookingMakeRoomMode.mockReturnValue('on');
     db.mockImplementation((table) => (table === 'booking_config' ? { first: jest.fn().mockResolvedValue(undefined) } : undefined));
   });
+  afterEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
 
   const heldRow = {
     id: 'hold-1', source_estimate_id: EST, scheduled_date: DATE, window_start: '09:00:00', window_end: '10:00:00', technician_id: 'tech-1',
     reservation_expires_at: '2027-05-20T13:15:00.000Z', make_room_moves: PAYLOAD,
   };
 
-  function commitTrx({ narrow = null, global = [] }) {
+  // Only the date read and the locked hold row: any later read (a probe, the capacity check, a write) throws.
+  function commitTrx() {
     const dateProbe = chain({ first: jest.fn().mockResolvedValue({ scheduled_date: DATE, technician_id: 'tech-1' }) });
     const reservation = chain({ first: jest.fn().mockResolvedValue(heldRow) });
-    const conflict = chain({ whereNot: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(narrow) });
-    const probe = globalProbe(global);
-    const update = updater();
-    const queue = [dateProbe, reservation, conflict, probe, update];
+    const queue = [dateProbe, reservation];
     const trx = jest.fn((table) => {
-      if (table === 'scheduled_services') return queue.shift();
-      if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 'tech-1', employment_status: 'active', field_dispatchable: true }), forShare: jest.fn().mockReturnThis() });
-      if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
-      throw new Error(`unexpected table ${table}`);
+      if (table === 'scheduled_services' && queue.length) return queue.shift();
+      throw new Error(`unexpected read of ${table}`);
     });
     trx.raw = jest.fn((sql) => ({ raw: sql }));
-    return { trx, update, conflict, probe };
+    trx.isTransaction = true;
+    return { trx, queue };
   }
 
   const accept = (trx) => slotReservation.commitReservation({
     scheduledServiceId: 'hold-1', customerId: 'customer-1', estimate: { id: EST, service_interest: 'Pest Control' }, serviceMode: 'recurring', selectedFrequency: 'quarterly', trx,
   });
 
+  // Codex #7796 P2 (round 4): explicit, before any probe. In capacity mode the overlap probes that used to refuse it do
+  // not run, and the arrival-capacity check alone could accept it without moving the stops.
   test.each([
-    ['the technician-scoped probe', { narrow: { id: 'visit-b' } }],
-    ['the tech-blind global probe', { global: [{ id: 'visit-b', technician_id: 'tech-1', window_start: '09:00:00' }] }],
-  ])('the regular stop still sits in the held hour: %s refuses the accept through the taken-slot path, and nothing is written', async (_label, found) => {
-    const { trx, update, conflict, probe } = commitTrx(found);
+    ['hour mode, gate on', 'on', null],
+    ['capacity mode, gate on', 'on', 'true'],
+    ['hour mode, gate shadow', 'shadow', null],
+  ])('%s: the taken-slot answer, nothing written, no probe', async (_label, mode, capacity) => {
+    makeRoom.bookingMakeRoomMode.mockReturnValue(mode);
+    if (capacity) process.env.GATE_SCHEDULING_CAPACITY = capacity;
+    const { trx, queue } = commitTrx();
     await expect(accept(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: `${DATE}_09-00_tech-1` });
-    expect(update.update).not.toHaveBeenCalled();
-    // The commit probes know nothing of the chain: only the hold itself is excluded.
-    expect(conflict.whereNot).toHaveBeenCalledWith('id', 'hold-1');
-    if (found.global) expect(probe.whereNotIn).toHaveBeenCalledWith('id', ['hold-1']);
-    expect(trx.mock.calls.map(([table]) => table)).not.toContain('reschedule_log');
+    expect(queue).toHaveLength(0);
+    expect(trx.mock.calls.map(([table]) => table)).toEqual(['scheduled_services', 'scheduled_services']);
   });
 });

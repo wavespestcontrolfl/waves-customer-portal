@@ -1813,8 +1813,8 @@ not blocked by that chain). `/extend` re-proves a make-room hold's hour, or
 supersedes the hold through the existing `SLOT_UNAVAILABLE` path; with the
 gate not on, or in capacity mode, nothing can prove its hour, so it is
 superseded the same way. Nothing moves a visit yet: accepting a make-room
-hold fails closed through the existing taken-slot answer ("That slot was just
-taken") until the accept change ships. Auth, token rules, rate limits and
+hold is refused outright, in either scheduling mode, with the existing
+taken-slot answer ("That slot was just taken") until the accept change ships. Auth, token rules, rate limits and
 every other check are unchanged.
 **Estimate picker, service-line map live (`GATE_SERVICE_LINE_MAP=live`, roadmap
 build 4, owner 2026-10-30; ships dark: `shadow`, the prod value, and every other
