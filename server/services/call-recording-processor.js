@@ -10914,12 +10914,21 @@ async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v
   }
 }
 
+// The heartbeat beat matched no row. That is a LOST claim only while this pass still owned
+// the work: the pass's own terminal write clears processing_token on a normal finish, and the
+// steps after it (commitments, alerts) run with the timer still on. `claimReleased` is set by
+// each of the pass's own token-clearing writes, so a beat after a normal finish stays quiet and
+// a beat that misses before any terminal write (a peer reclaimed the call) still warns.
+function shouldWarnOwnershipLost(rows, claimReleased) {
+  return rows === 0 && !claimReleased;
+}
+
 // Terminal write for a tech follow-up call: the transcript is already
 // stored; this lands the extraction, summary and sentiment the Calls tab
 // reads, marks the call processed and releases the claim in one
 // token-fenced statement, then records commitments. No lead, booking,
 // automation, SMS, interaction or CSR write ever runs for the call.
-async function finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result }) {
+async function finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result, onClaimReleased = null }) {
   const written = await db('call_log')
     .where({ id: call.id })
     .where('processing_token', procToken)
@@ -10948,6 +10957,7 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
     logger.warn(`[call-proc] Skipped tech follow-up terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
     return { success: false, skipped: true, reason: 'terminal_write_ownership_lost', callSid };
   }
+  if (onClaimReleased) onClaimReleased();
   await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
   logger.info(`[call-proc] Completed tech follow-up processing for ${maskSid(callSid)}: customer=${call.customer_id || null}`);
   return { success: true, callSid, customerId: call.customer_id || null, extracted, techFollowUp: true };
@@ -11144,6 +11154,8 @@ const CallRecordingProcessor = {
     // every 60s while the pass runs, token-fenced so a pass that lost its
     // claim beats into 0 rows. Cleared in the outer finally on every exit.
     let heartbeatTimer = null;
+    // Set by each of THIS pass's own token-clearing writes (see shouldWarnOwnershipLost).
+    let claimReleased = false;
     // This pass's MONOTONIC generation — assigned by the claim write below
     // (processing_generation + 1). The token is the claim MUTEX; the
     // generation is the pass IDENTITY that survives finalization: a cleared
@@ -11429,7 +11441,7 @@ const CallRecordingProcessor = {
           // dead. Say so loudly: every terminal write from here is
           // token-fenced and will no-op, so the pass finishes into nothing,
           // and this line is the only trace of why.
-          if (rows === 0) {
+          if (shouldWarnOwnershipLost(rows, claimReleased)) {
             logger.warn(`[call-proc] ownership LOST mid-pass for ${maskSid(callSid)} — a peer reclaimed the claim; this pass's terminal writes will no-op`);
           }
         })
@@ -11850,7 +11862,7 @@ const CallRecordingProcessor = {
       // (processAllPending skips both), so it goes back to pending instead
       // (Codex #3736 r13 P2).
       const preClaimStatus = (call.processing_status === 'processing' || recordingChangedBeforeClaim) ? null : (call.processing_status || null);
-      await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+      const deferredRows = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
         processing_status: preClaimStatus,
         // The claim cleared the verdict time; a restored terminal status gets
         // its own stamp back, a NULL / pending status none (Codex #6269 r2).
@@ -11858,6 +11870,7 @@ const CallRecordingProcessor = {
         processing_token: null,
         updated_at: new Date(),
       });
+      if (deferredRows) claimReleased = true;
       logger.info(`[call-proc] Deferred ${maskSid(callSid)} — recording not fully propagated yet (status restored to ${preClaimStatus || 'pending'})`);
       return { success: false, skipped: true, reason: 'recording_not_ready' };
     }
@@ -12176,6 +12189,7 @@ const CallRecordingProcessor = {
         // (codex P1).
         return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      claimReleased = true;
       // At the cap the lane has ended: the call produced no lead, customer or
       // routing decision and no pass will try again, so the same permanent
       // processing-failure card the extraction lane files is owed here
@@ -12326,6 +12340,7 @@ const CallRecordingProcessor = {
           updated_at: new Date(),
         }).returning(['extraction_attempts']);
       if (failedRow) {
+        claimReleased = true;
         const attempts = Number(failedRow?.extraction_attempts) || 0;
         await fileExtractionExhaustedTriage(call.id, attempts, err, callSid);
       } else {
@@ -12709,7 +12724,7 @@ const CallRecordingProcessor = {
         noTextHoldArming = true;
         if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Result.extraction }))) return abandonToPeer('the disclaimed-number hold write');
       }
-      return finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result });
+      return finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result, onClaimReleased: () => { claimReleased = true; } });
     }
 
     // ── Voicemail routing ──
@@ -12874,6 +12889,7 @@ const CallRecordingProcessor = {
           lost.fenceLost = true;
           throw lost;
         }
+        claimReleased = true;
         return true;
       }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!terminalSettled) {
@@ -14622,6 +14638,7 @@ const CallRecordingProcessor = {
           lost.fenceLost = true;
           throw lost;
         }
+        claimReleased = true;
         return true;
       }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!vetoSettled) {
@@ -24639,6 +24656,10 @@ const CallRecordingProcessor = {
           ),
           updated_at: new Date(),
         });
+      // The token is cleared in this transaction: from here the heartbeat's missed beat is this
+      // pass's own finish, not a lost claim. Set before commit so a beat that waited on the row
+      // lock and then matched nothing finds the flag already up.
+      if (written > 0) claimReleased = true;
       // codex #4815 r5 P1: the durable price-agreed quarantine-retry
       // marker commits ATOMICALLY with the terminal status it protects —
       // either both land or neither does. Fenced on `written > 0`: if this
@@ -25237,6 +25258,7 @@ const CallRecordingProcessor = {
         if (!releasedRows.length) {
           logger.warn(`[call-proc] Skipped lock release for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
         } else {
+          claimReleased = true;
           const attempts = Number(releasedRows[0]?.extraction_attempts) || 0;
           await fileExtractionExhaustedTriage(call.id, attempts, procErr, callSid);
         }
@@ -26171,6 +26193,7 @@ CallRecordingProcessor._test = {
   resolveCallSecondaryContacts,
   withoutAnsweringStaffName,
   isFreshInboundCall,
+  shouldWarnOwnershipLost,
   resolveCallBillingPayer,
   persistCallSecondaryContact,
   onSiteOptinAskTrigger,
