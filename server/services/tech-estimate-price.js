@@ -2,7 +2,7 @@
 
 /**
  * The technician estimate tool's price preview (GATE_TECH_ESTIMATES, owner 2026-11-09). Step 1 of 4:
- * it prices and saves nothing, sends nothing.
+ * it prices and saves nothing, sends nothing. tech-estimate-save.js (step 2a) saves the same quote as a draft.
  *
  * The phone sends WHO (a visit of his: the customer and the house he is standing at; or a new person he typed),
  * WHICH pest services, and edits to a few measured facts. The SERVER does the rest, on the path that already makes estimates with no office user
@@ -145,7 +145,26 @@ function ownVisit(req, visitId) {
       'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
       'scheduled_services.service_address_city', 'scheduled_services.service_address_state', 'scheduled_services.service_address_zip',
       'c.address_line1 as customer_address_line1', 'c.address_line2 as customer_address_line2',
-      'c.city as customer_city', 'c.state as customer_state', 'c.zip as customer_zip');
+      'c.city as customer_city', 'c.state as customer_state', 'c.zip as customer_zip',
+      // Who the estimate is for, as the office builder stores it on the estimate (never shown to the phone).
+      'c.first_name as customer_first_name', 'c.last_name as customer_last_name', 'c.phone as customer_phone', 'c.email as customer_email');
+}
+
+// The customer's name, mobile number and email for the estimate row, read on the server from the visit's customer. The
+// office builder sends the same three with a customer id; without them the estimate could not be texted or emailed by
+// anyone. A stored number the shared save would refuse (US-shaped but not a real number) is left off, so the save
+// never fails on a number the technician cannot correct.
+function visitContact(visit) {
+  const { nanpPhoneProblem } = require('../utils/phone');
+  const text = (value) => String(value || '').trim();
+  const name = [text(visit.customer_first_name), text(visit.customer_last_name)].filter(Boolean).join(' ');
+  const phone = text(visit.customer_phone);
+  const email = text(visit.customer_email);
+  return {
+    ...(name ? { customerName: name } : {}),
+    ...(phone && !nanpPhoneProblem(phone) ? { customerPhone: phone } : {}),
+    ...(email ? { customerEmail: email } : {}),
+  };
 }
 
 // Who is being quoted: { customerId, visitId, address } or { prospect, address }.
@@ -171,6 +190,7 @@ async function resolveSubject(req, body) {
   return {
     customerId: String(visit.customer_id),
     visitId,
+    contact: visitContact(visit),
     address: joinAddress([place.address, place.unit, place.city, `${state} ${place.zip || ''}`]),
   };
 }
@@ -277,7 +297,7 @@ function estimateBody({ subject, keys, facts: layered, engineInputs }) {
   };
   const who = subject.prospect
     ? { customerName: [subject.prospect.firstName, subject.prospect.lastName].filter(Boolean).join(' '), customerPhone: subject.prospect.phone }
-    : { customerId: subject.customerId };
+    : { customerId: subject.customerId, ...subject.contact };
   return { ...who, address: subject.address, showOneTimeOption: false, billByInvoice: false, estimateData: { engineInputs, inputs } };
 }
 
@@ -323,13 +343,12 @@ function buildLines(mapped) {
   return lines;
 }
 
-// The verdict, like moving-auto-estimate.js cleanPrice: server-priced, with an engine line, and which lines the office
-// must look at. The save's own member-address check joins the flagged lines under ONE code, so a technician never
-// learns that an address belongs to another customer.
+// The verdict, like moving-auto-estimate.js cleanPrice: server-priced, with an engine line for every chosen service,
+// and whether the office must look at a line (engineReview) or at the address (memberAddress, the save's own check).
 function judgePrepared(prepared, keys) {
   const { lineRequiresReview, lineHasHeuristicTurf } = require('./estimator-engine/draft-builder');
   const estimate = prepared && prepared.estimate;
-  const data = estimate && (typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data);
+  const data = parseEstimateData(estimate);
   const lines = (data && data.engineResult && data.engineResult.lineItems) || [];
   if (!estimate || estimate.pricing_authority !== 'SERVER' || !data) throw officePrices();
   // Never a partial quote: every chosen service must come back as its own engine line, and a line the engine
@@ -339,10 +358,18 @@ function judgePrepared(prepared, keys) {
   if (missing || lines.some(unpriced)) throw officePrices();
   const flagged = (line) => lineRequiresReview(line) || lineHasHeuristicTurf(line)
     || String(line.pricingConfidence || '').toUpperCase() === 'LOW';
-  return { data, estimate, review: lines.some(flagged) || Boolean(prepared.memberLinkageWarning) };
+  return { data, estimate, engineReview: lines.some(flagged), memberAddress: Boolean(prepared.memberLinkageWarning) };
 }
 
-async function priceQuote(req, body) {
+function parseEstimateData(estimate) {
+  const raw = estimate && estimate.estimate_data;
+  if (typeof raw !== 'string') return raw || null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+// Everything up to the save body, shared by the preview and the create so the two cannot drift: the services he
+// may quote, his facts, who is quoted, the county-confirmed home, and the body for the shared estimate save.
+async function prepareQuote(req, body) {
   const allowed = await servicesFor(req);
   const keys = normalizeServices(body.services, allowed);
   const facts = normalizeFacts(body.facts);
@@ -357,19 +384,63 @@ async function priceQuote(req, body) {
     context: {},
     lookupEnriched: lookup.enriched,
   });
-  const prepared = await dryRun(req, estimateBody({ subject, keys, facts: layered, engineInputs }));
-  const { data, estimate, review } = judgePrepared(prepared, keys);
-  const oneTimeTotal = roundMoney(estimate.onetime_total);
-  const reasons = layered.changed.map((name) => `changed_fact:${name}`);
-  if (oneTimeTotal > ONE_TIME_HOLD_DOLLARS) reasons.push('one_time_over_limit');
-  if (review) reasons.push('office_review');
+  return { keys, subject, layered, saveBody: estimateBody({ subject, keys, facts: layered, engineInputs }) };
+}
+
+// The dry run of the save, judged.
+async function judgeQuote(req, prep) {
+  return judgePrepared(await dryRun(req, prep.saveBody), prep.keys);
+}
+
+// A new person whose typed phone is already a customer's goes to the office first (the portal's one phone identity
+// query). The preview and the create both ask, so the phone shows the verdict the save will store.
+async function phoneMatchesCustomer(subject) {
+  if (!subject.prospect) return false;
+  const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
+  return Boolean(await findKnownCallerCustomer(db, subject.prospect.phone, ['id']));
+}
+
+// The server's detailed reasons the office looks first, in a fixed order.
+function detailedReasons(prep, judged, { phoneMatch = false } = {}) {
+  const reasons = prep.layered.changed.map((name) => `changed_fact:${name}`);
+  if (roundMoney(judged.estimate.onetime_total) > ONE_TIME_HOLD_DOLLARS) reasons.push('one_time_over_limit');
+  if (judged.engineReview) reasons.push('engine_review');
+  if (judged.memberAddress) reasons.push('member_address');
+  if (phoneMatch) reasons.push('phone_matches_customer');
+  return reasons;
+}
+
+// What the phone may see: engine_review, member_address and phone_matches_customer are ONE code, so an answer never says
+// that an address or a phone belongs to a customer.
+const OFFICE_REVIEW_REASONS = new Set(['engine_review', 'member_address', 'phone_matches_customer']);
+function phoneReasons(detailed) {
+  const shown = detailed.map((reason) => (OFFICE_REVIEW_REASONS.has(reason) ? 'office_review' : reason));
+  return [...new Set(shown)];
+}
+
+// The answer, field by field, from an estimate row (a dry run, the saved row or a stored one) and its parsed data. The
+// preview also shows the measured facts it priced; a saved estimate answers from its stored row, which holds none.
+function quoteAnswer(estimate, data, { facts, detailed }) {
+  const reasons = phoneReasons(detailed);
   return {
-    lines: buildLines(data.result || {}),
+    lines: buildLines((data && data.result) || {}),
     monthlyTotal: roundMoney(estimate.monthly_total),
     annualTotal: roundMoney(estimate.annual_total),
-    oneTimeTotal,
-    facts: layered.shown,
+    oneTimeTotal: roundMoney(estimate.onetime_total),
+    ...(facts ? { facts } : {}),
     officeFirst: { required: reasons.length > 0, reasons },
+  };
+}
+
+async function priceQuote(req, body) {
+  const prep = await prepareQuote(req, body);
+  const judged = await judgeQuote(req, prep);
+  const { agentEngineResultDigest } = require('./agent-estimate-preview');
+  const phoneMatch = await phoneMatchesCustomer(prep.subject);
+  return {
+    ...quoteAnswer(judged.estimate, judged.data, { facts: prep.layered.shown, detailed: detailedReasons(prep, judged, { phoneMatch }) }),
+    // A hash of the engine result, not a price: the create sends it back so a price that moved in between is refused.
+    digest: agentEngineResultDigest(judged.data.engineResult),
   };
 }
 
@@ -377,7 +448,17 @@ module.exports = {
   PriceRefusal,
   ONE_TIME_HOLD_DOLLARS,
   PEST_SERVICES,
+  FACT_NAMES,
   setupFor,
   priceQuote,
+  officePrices,
+  prepareQuote,
+  judgeQuote,
+  detailedReasons,
+  phoneMatchesCustomer,
+  phoneReasons,
+  quoteAnswer,
+  buildLines,
+  parseEstimateData,
   _private: { ENGINE_SERVICES, layerFacts, engineServices, estimateBody, normalizeFacts },
 };

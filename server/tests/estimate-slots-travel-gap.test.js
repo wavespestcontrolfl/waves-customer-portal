@@ -170,6 +170,19 @@ describe('a make-room hour on the moved day (makeRoomPlacement)', () => {
     await expect(placement({ candidateExpectedMinutes: 40 })(candidateSlot(), MOVED)).resolves.toBe(true);
   });
 
+  test('inside a hold\'s transaction the placement reads through that connection, never the pool (Codex pre-push P1)', async () => {
+    wireRows([movedRow()]);
+    const viaPool = lastChain;
+    const trxChain = { ...viaPool, select: jest.fn().mockResolvedValue([movedRow()]) };
+    const trx = jest.fn(() => trxChain);
+    trx.raw = jest.fn((sql) => sql);
+    db.mockClear();
+    await expect(placement({ conn: trx })(candidateSlot(), MOVED)).resolves.toBe(true);
+    expect(trx).toHaveBeenCalledWith('scheduled_services');
+    expect(trxChain.select).toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
+  });
+
   test('the service-line rule: a technician the ranking rules out is refused', async () => {
     wireRows([movedRow()]);
     const lineRanking = { rankOf: (techId) => (techId === 'tech-2' ? 0 : null) };

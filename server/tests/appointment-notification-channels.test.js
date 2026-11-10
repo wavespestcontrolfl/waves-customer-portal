@@ -364,6 +364,42 @@ describe('getReminderPrefs account-level channel resolution', () => {
   });
 });
 
+describe('getReminderPrefs and resolve72hChannel on a caller\'s connection (make-room proof, Codex pre-push P1)', () => {
+  const firstChain = (value) => {
+    const q = {};
+    ['where', 'whereIn'].forEach((m) => { q[m] = jest.fn(() => q); });
+    q.first = jest.fn(async () => value);
+    return q;
+  };
+
+  test('every read of a secondary profile\'s prefs rides the given connection; the pool is never asked', async () => {
+    db.mockImplementation((table) => { throw new Error(`pool read of ${table}`); });
+    const queues = {
+      notification_prefs: [firstChain({ service_reminder_72h_channel: 'sms' }), firstChain({ service_reminder_72h_channel: 'email' })],
+      customers: [firstChain({ account_id: 'acct-1', is_primary_profile: false }), firstChain({ id: 'primary-1' })],
+    };
+    const trx = jest.fn((table) => queues[table].shift());
+    const prefs = await getReminderPrefs('secondary-1', { conn: trx });
+    expect(prefs.reminder72hChannel).toBe('email');
+    expect(prefs.unavailable).toBe(false);
+    expect(trx.mock.calls.map(([table]) => table)).toEqual(['notification_prefs', 'customers', 'customers', 'notification_prefs']);
+  });
+
+  test('the 72-hour channel\'s one-time lookup rides the given connection', async () => {
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation((name) => name === 'reminder72hEmailFirst');
+    try {
+      db.mockImplementation((table) => { throw new Error(`pool read of ${table}`); });
+      const trx = jest.fn(() => firstChain({ id: 'visit-1', is_recurring: false, recurring_parent_id: null, recurring_pattern: null }));
+      const { resolve72hChannel } = require('../services/appointment-reminders');
+      await expect(resolve72hChannel('sms', 'visit-1', { conn: trx })).resolves.toBe('email');
+      expect(trx).toHaveBeenCalledWith('scheduled_services');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 describe('resolveConfirmationChannel — new client gets text AND email', () => {
   const sampleRecipients = [{ email: 'sample.lead@example.com', name: 'Sample Lead', holder: true }];
   const prefsOf = (extra = {}) => ({

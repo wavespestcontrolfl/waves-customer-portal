@@ -602,6 +602,17 @@ browsers and the office network never raise it. The 5-minute estimate tick close
 declined or archived. Each date search, hold start and hold end is an `audit_log` row (`estimate_slot_search`,
 `estimate_hold_started`, `estimate_hold_ended`) for the next booking audit. It sends nothing to a customer.
 
+Held technician estimate (owner 2026-11-09, technician estimate tool step 2b; under `GATE_TECH_ESTIMATES`, no gate of its own):
+`server/services/tech-estimate-office-bell.js` raises one bell when a technician saves a NEW estimate that the office must check
+first (`tech_estimates.office_first_reasons` is not empty), after the save commits. Category `estimate` with `bell: true`, headline
+"Estimates — check <technician first name>'s estimate for <who>", link `/admin/estimates?estimateId=<id>`, done-when
+`estimate_sent_or_closed`, dedupeKey `tech-estimate-office-first:<estimate id>` without `dedupeOpenOnly` (a closed row still holds the
+key, so the estimate never rings twice and no `RERING` entry is owed). The why names the first reason in a fixed order (a changed
+fact, a one-time job over the limit, an engine line to review, a possible current customer); the full list is in `detail`. The
+relevance sweep (class `tech_estimate_office_first`) closes the row once the estimate is sent, accepted, declined, expired, archived
+or gone. A send that is only queued, in flight or failed keeps the row open, because the close is final. A failure to raise is
+logged with ids only and never fails the technician's create. It sends nothing to a customer.
+
 ## 7. How to raise one
 
 `composeAdminAlert(spec)` is pure. It validates the eight parts and returns

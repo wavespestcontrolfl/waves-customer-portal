@@ -173,6 +173,42 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
     expect(sentAnything()).toEqual([]);
   });
 
+  // Mode on (owner 2026-11-09): the page's offer and the hold's proof, on the same rolled-back rows, with the real page
+  // placement rules. The list's first free day is the next day, so the sooner rule looks at DAY.
+  test('mode on: the offer is the earliest passing hour, the hold\'s proof rebuilds the same chain, and no visit changes', async () => {
+    const { findMakeRoomOffers, verifyMakeRoomHour } = require('../services/scheduling/booking-make-room');
+    const NEXT = '2097-06-11';
+    const estimateId = randomUUID();
+    const placement = makeRoomPlacement({ estimateZone: null, coords: PIN, serviceMix: null, candidateExpectedMinutes: null, estimateId, lineRanking: null });
+    const before = await starts();
+    const { hours, report } = await findMakeRoomOffers({
+      estimateId, pool: [{ date: NEXT, windowStart: '12:00', techId }], coords: PIN, durationMinutes: 60, dateFrom: DAY, dateTo: NEXT,
+      admit, placement, now: NOW, conn: mockConn, budgetMs: 60000,
+    });
+    expect(report).toMatchObject({ error: null, timedOut: false, offerOnly: true });
+    expect(hours.map((h) => `${h.date} ${h.start}`)).toEqual([`${DAY} 09:00`]);
+    const proof = await verifyMakeRoomHour({
+      conn: mockConn, date: DAY, startMin: 9 * 60, techId, durationMinutes: 60, point: PIN, estimateId, admit, placement, now: NOW, budgetMs: 60000,
+    });
+    expect(proof.moves).toEqual([
+      { id: visitOf('b').id, from: '09:00', to: '10:00', widthMin: 60 },
+      { id: visitOf('c').id, from: '10:00', to: '11:00', widthMin: 60 },
+      { id: visitOf('d').id, from: '11:00', to: '12:00', widthMin: 60 },
+    ]);
+    // A stop make-room already moved stays where it is (one move per stop).
+    await mockConn('reschedule_log').insert({
+      scheduled_service_id: visitOf('c').id, customer_id: visitOf('c').customerId, original_date: DAY, new_date: DAY,
+      reason_code: 'booking_make_room', initiated_by: 'booking_make_room', original_window: '10:00', new_window: '11:00',
+    });
+    expect(await verifyMakeRoomHour({
+      conn: mockConn, date: DAY, startMin: 9 * 60, techId, durationMinutes: 60, point: PIN, estimateId, admit, placement, now: NOW, budgetMs: 60000,
+    })).toEqual({ reason: 'fixed_make_room_moved' });
+    await mockConn('reschedule_log').where({ scheduled_service_id: visitOf('c').id }).del();
+    // Nothing but the log row and the test's own reschedule_log row was written.
+    expect(await starts()).toEqual(before);
+    expect(sentAnything()).toEqual([]);
+  });
+
   test('travel gap on (production): a new visit that fills its whole hour leaves no turnaround before the moved stop, so the page refuses 9 AM', async () => {
     process.env.GATE_SLOT_TRAVEL_GAP = 'true';
     const report = await run();
