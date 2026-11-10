@@ -68,9 +68,9 @@ const heldRow = (extra = {}) => ({
 /**
  * One commit transaction. scheduled_services calls come in this order: the pre-read, the FOR UPDATE reload, the chain
  * clash probes (one per moved stop, then the shared-stop probe), the moved rows' window_end read, the narrow check, the
- * committed probe, the graduation update.
+ * committed probe, the destination probe (every accept in mode on), the graduation update.
  */
-function commitTrx({ pre = heldRow(), locked = heldRow(), narrow = null, global = [], clash = [null, null, null], skipChain = false, lockRows = !skipChain, executionPromise = undefined } = {}) {
+function commitTrx({ pre = heldRow(), locked = heldRow(), narrow = null, global = [], destination = null, clash = [null, null, null], skipChain = false, lockRows = !skipChain, executionPromise = undefined } = {}) {
   const lock = chain('lock-moved', { select: jest.fn(async () => { events.push('lock-moved'); return [{ id: 'visit-b' }, { id: 'visit-c' }]; }) });
   lock.orderBy = jest.fn(() => lock);
   const queue = [
@@ -84,6 +84,8 @@ function commitTrx({ pre = heldRow(), locked = heldRow(), narrow = null, global 
     ]),
     firstOf('narrow-check', narrow),
     globalProbe(global),
+    // Another live make-room hold's moved stop over the accepted window (acceptedWindowOnMakeRoomDestination).
+    firstOf('destination-probe', destination),
   ];
   const update = chain('graduation', { returning: jest.fn(async () => { events.push('graduation'); return [{ id: 'hold-1', customer_id: 'customer-1', technician_id: null }]; }) });
   queue.push(update);
@@ -246,6 +248,13 @@ describe('commitReservation — a make-room hold moves the stops at accept (mode
     const { trx, update } = commitTrx({ narrow: { id: 'visit-z' } });
     await expect(accept(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
     expect(apply._internals.writeMoves).toHaveBeenCalledTimes(1);
+    expect(update.update).not.toHaveBeenCalled();
+  });
+
+  test('another live chain\'s moved stop holds the accepted window: the accept fails after the move (rolled back with it)', async () => {
+    const { trx, update } = commitTrx({ destination: { id: 'hold-other' } });
+    await expect(accept(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+    expect(events.indexOf('write-moves')).toBeLessThan(events.indexOf('destination-probe'));
     expect(update.update).not.toHaveBeenCalled();
   });
 
