@@ -2,7 +2,8 @@
  * GATE_ROUTE_CHECK_LATE_DAYS on a staff save (Codex round 1, PR #7041, P1): the hour a picker offered by
  * inserting a visit ahead of an already-late stop must also be the order the save writes, or the visit keeps a
  * null route_order and sorts last (arriving past its own promise). placeMovedVisit takes `lateDays` from the
- * staff saves only; automatic writers, the gate off, and every other caller keep today's answer (null).
+ * staff saves only; automatic writers, the gate off, and every other caller keep today's answer: the check refuses
+ * and the visit is numbered by its arrival time (route-order-time-fallback.js).
  * REAL evaluator and the real placeMovedVisit on an in-memory day (no DB, no Google).
  * Drive model: 20 minutes between different points, 0 between stops at one point.
  */
@@ -76,6 +77,10 @@ beforeEach(() => {
 afterEach(() => { GATES.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
 
 const WRITTEN = [['A', 1], ['N', 2], ['B', 3]];
+// A refused check numbers the visit by its start (11:00), after the stops that start earlier. The fake connection
+// cannot judge IS DISTINCT FROM, so it records every number the writer offers.
+const BY_TIME = ['A', 'B', 'N'];
+const BY_TIME_WRITTEN = [['A', 1], ['B', 2], ['N', 3]];
 
 test('the audit reproduction: the offered 11:00 hour is saved in the order A, new visit, B', async () => {
   const { conn, updates } = fakeConn(NEW);
@@ -83,17 +88,17 @@ test('the audit reproduction: the offered 11:00 hour is saved in the order A, ne
   expect(updates).toEqual(WRITTEN);
 });
 
-test('the same save without lateDays keeps today\'s answer: nothing certified, nothing written', async () => {
+test('the same save without lateDays keeps today\'s answer: nothing certified, numbered by time', async () => {
   const { conn, updates } = fakeConn(NEW);
-  await expect(placeMovedVisit(conn, { serviceId: 'N', staffSave: true })).resolves.toBeNull();
-  expect(updates).toEqual([]);
+  await expect(placeMovedVisit(conn, { serviceId: 'N', staffSave: true })).resolves.toEqual(BY_TIME);
+  expect(updates).toEqual(BY_TIME_WRITTEN);
 });
 
 test('lateDays with the gate off is today\'s answer', async () => {
   delete process.env.GATE_ROUTE_CHECK_LATE_DAYS;
   const { conn, updates } = fakeConn(NEW);
-  await expect(placeMovedVisit(conn, { serviceId: 'N', staffSave: true, lateDays: true })).resolves.toBeNull();
-  expect(updates).toEqual([]);
+  await expect(placeMovedVisit(conn, { serviceId: 'N', staffSave: true, lateDays: true })).resolves.toEqual(BY_TIME);
+  expect(updates).toEqual(BY_TIME_WRITTEN);
 });
 
 test('the staff save writer passes it; the automatic writer does not', async () => {
@@ -101,14 +106,14 @@ test('the staff save writer passes it; the automatic writer does not', async () 
   await expect(placeStaffSavedVisit(staff.conn, { serviceId: 'N' })).resolves.toEqual(['A', 'N', 'B']);
   expect(staff.updates).toEqual(WRITTEN);
   const auto = fakeConn(NEW);
-  await expect(placeAutoSavedVisit(auto.conn, { serviceId: 'N' })).resolves.toBeNull();
-  expect(auto.updates).toEqual([]);
+  await expect(placeAutoSavedVisit(auto.conn, { serviceId: 'N' })).resolves.toEqual(BY_TIME);
+  expect(auto.updates).toEqual(BY_TIME_WRITTEN);
 });
 
-test('the cap holds on a save too: a visit that pushes the late stop 40 minutes later is not numbered', async () => {
+test('the cap holds on a save too: a visit that pushes the late stop 40 minutes later is numbered by time, not ahead of it', async () => {
   const long = row('N', '11:00', '11:38', 38, P2);
   mockDayRows = [A, B, long];
   const { conn, updates } = fakeConn(long);
-  await expect(placeMovedVisit(conn, { serviceId: 'N', staffSave: true, lateDays: true })).resolves.toBeNull();
-  expect(updates).toEqual([]);
+  await expect(placeMovedVisit(conn, { serviceId: 'N', staffSave: true, lateDays: true })).resolves.toEqual(BY_TIME);
+  expect(updates).toEqual(BY_TIME_WRITTEN);
 });

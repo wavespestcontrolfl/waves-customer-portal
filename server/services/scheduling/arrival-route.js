@@ -8,7 +8,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const RouteOptimizer = require('../route-optimizer');
 const { loadTechStartPoint } = require('./tech-start-point');
-const { gateEnvValue, multiTechConfirmLive, routeOrderTimeFallbackLive } = require('../../config/feature-gates');
+const { gateEnvValue, multiTechConfirmLive } = require('../../config/feature-gates');
 const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
@@ -1300,7 +1300,7 @@ function refusePlacement(serviceId, source, reason, date) {
   return null;
 }
 
-// GATE_ROUTE_ORDER_TIME_FALLBACK (owner 2026-11-01): the check refused, so number the day by arrival time
+// Route order time fallback (owner 2026-11-01): the check refused, so number the day by arrival time
 // (route-order-time-fallback.js) instead of leaving the visit last. Ordering only, no arrival simulation;
 // runs inside placeInSavepoint's savepoint, under the tech-day lock it holds.
 async function placeByTimeAfterRefusal(sp, { context, serviceId, source, date, technicianId, reason }) {
@@ -1334,10 +1334,9 @@ async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays }) 
   const fit = evaluateArrivalPlacement(context, { windowStart: String(row.window_start).slice(0, 5),
     windowEnd: row.window_end ? String(row.window_end).slice(0, 5) : undefined, place: true,
     ...(lateDays === true && gateEnvValue('GATE_ROUTE_CHECK_LATE_DAYS') ? { lateDays: true } : {}) });
-  // GATE_ROUTE_ORDER_TIME_FALLBACK: a refused check still numbers the visit by its arrival time.
+  // A refused check still numbers the visit by its arrival time.
   const refuseOrNumberByTime = async reason => {
-    const refused = refuse(reason);
-    if (!(typeof routeOrderTimeFallbackLive === 'function' && routeOrderTimeFallbackLive())) return refused;
+    refuse(reason);
     return placeByTimeAfterRefusal(sp, { context, serviceId, source, date, technicianId: row.technician_id, reason });
   };
   if (!fit.feasible) return refuseOrNumberByTime(fit.reason || 'no_order');
