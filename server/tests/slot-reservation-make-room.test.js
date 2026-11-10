@@ -19,7 +19,7 @@ jest.mock('../services/scheduling/booking-make-room', () => ({ bookingMakeRoomMo
  * GATE_BOOKING_MAKE_ROOM on (owner 2026-11-09 "YES"), reserveSlot: the hold of the page's one make-room hour. The hour is
  * the one a regular stop (visit-b) holds. With mode on, a capacity-off hour-mode reserve, and the make-room signature,
  * the transaction rebuilds the chain under its locks and the hold's own overlap probes skip the chain's moved stops.
- * Nothing moves a visit: accepting such a hold fails closed (commitReservation below).
+ * Nothing moves a visit at reserve; the accept moves the stops (slot-reservation-make-room-accept.test.js).
  */
 const db = require('../models/db');
 const estimateSlotAvailability = require('../services/estimate-slot-availability');
@@ -428,52 +428,5 @@ describe('a hold revived by a refresh must not sit on another make-room hold\'s 
     const { queue } = harness([liveHolds([ordinary]), globalProbe([]), update]);
     await slotReservation.reserveSlot({ estimateId: EST, slotId: slotId({}) });
     expect(queue).toHaveLength(0);
-  });
-});
-
-describe('commitReservation — a make-room hold fails closed until the accept change moves the stops', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    makeRoom.bookingMakeRoomMode.mockReturnValue('on');
-    db.mockImplementation((table) => (table === 'booking_config' ? { first: jest.fn().mockResolvedValue(undefined) } : undefined));
-  });
-
-  const heldRow = {
-    id: 'hold-1', source_estimate_id: EST, scheduled_date: DATE, window_start: '09:00:00', window_end: '10:00:00', technician_id: 'tech-1',
-    reservation_expires_at: '2027-05-20T13:15:00.000Z', make_room_moves: PAYLOAD,
-  };
-
-  function commitTrx({ narrow = null, global = [] }) {
-    const dateProbe = chain({ first: jest.fn().mockResolvedValue({ scheduled_date: DATE, technician_id: 'tech-1' }) });
-    const reservation = chain({ first: jest.fn().mockResolvedValue(heldRow) });
-    const conflict = chain({ whereNot: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(narrow) });
-    const probe = globalProbe(global);
-    const update = updater();
-    const queue = [dateProbe, reservation, conflict, probe, update];
-    const trx = jest.fn((table) => {
-      if (table === 'scheduled_services') return queue.shift();
-      if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 'tech-1', employment_status: 'active', field_dispatchable: true }), forShare: jest.fn().mockReturnThis() });
-      if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
-      throw new Error(`unexpected table ${table}`);
-    });
-    trx.raw = jest.fn((sql) => ({ raw: sql }));
-    return { trx, update, conflict, probe };
-  }
-
-  const accept = (trx) => slotReservation.commitReservation({
-    scheduledServiceId: 'hold-1', customerId: 'customer-1', estimate: { id: EST, service_interest: 'Pest Control' }, serviceMode: 'recurring', selectedFrequency: 'quarterly', trx,
-  });
-
-  test.each([
-    ['the technician-scoped probe', { narrow: { id: 'visit-b' } }],
-    ['the tech-blind global probe', { global: [{ id: 'visit-b', technician_id: 'tech-1', window_start: '09:00:00' }] }],
-  ])('the regular stop still sits in the held hour: %s refuses the accept through the taken-slot path, and nothing is written', async (_label, found) => {
-    const { trx, update, conflict, probe } = commitTrx(found);
-    await expect(accept(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: `${DATE}_09-00_tech-1` });
-    expect(update.update).not.toHaveBeenCalled();
-    // The commit probes know nothing of the chain: only the hold itself is excluded.
-    expect(conflict.whereNot).toHaveBeenCalledWith('id', 'hold-1');
-    if (found.global) expect(probe.whereNotIn).toHaveBeenCalledWith('id', ['hold-1']);
-    expect(trx.mock.calls.map(([table]) => table)).not.toContain('reschedule_log');
   });
 });

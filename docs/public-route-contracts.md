@@ -1804,10 +1804,18 @@ destinations stay busy for every other offer, reserve, same-slot refresh and
 unassigned rows when multi-tech confirm is on, every technician when it is
 off); a hold's own row never blocks itself. `/extend` re-proves a make-room
 hold's hour, or supersedes the hold through the existing
-`SLOT_UNAVAILABLE` path. Nothing moves a visit yet: accepting a make-room
-hold fails closed through the existing taken-slot answer ("That slot was just
-taken") until the accept change ships. Auth, token rules, rate limits and
-every other check are unchanged.
+`SLOT_UNAVAILABLE` path. Accepting a make-room hold (the accept routes'
+`commitReservation`, gate read inside the transaction) moves the stops: it
+takes the tech-day locks after the date lock, proves the chain again with the
+accepted service profile (it must equal the stored chain, and no other live
+chain may clash), writes the moved stops' new windows and one
+`reschedule_log` row each (`booking_make_room`) before the overlap probes, all
+or nothing with the accept. Any refusal (gate not on, proof differs, a stop no
+longer movable, a clash) is the existing taken-slot answer ("That slot was just
+taken") with nothing written; a hold whose technician or chain changed under
+the lock is `RESERVATION_EXPIRED`. No text, email or call goes out: the moved
+customers' reminders follow silently after the commit. Auth, token rules, rate
+limits and every other check are unchanged.
 **Estimate picker, service-line map live (`GATE_SERVICE_LINE_MAP=live`, roadmap
 build 4, owner 2026-10-30; ships dark: `shadow`, the prod value, and every other
 value leave these routes byte-identical, with no extra query).**

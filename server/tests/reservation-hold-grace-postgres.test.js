@@ -378,7 +378,7 @@ postgres('hold grace + extend (real Postgres)', () => {
   // GATE_BOOKING_MAKE_ROOM on (owner 2026-11-09): the hold of a make-room hour sits OVER a regular stop (the visit that
   // would move later). The chain proof (booking-make-room verifyMakeRoomHour) is the page module's own and has its own
   // suites; here it is stubbed so the SQL around it is proven on real rows: the probes, the stored chain, the extend,
-  // the destination probe, and that the accept fails closed because nothing moves the stop yet.
+  // the destination probe, and that the accept re-proves the chain and moves the stop.
   describe('a make-room hold (mode on)', () => {
     const estimateSlotAvailability = require('../services/estimate-slot-availability');
     const savedGate = process.env.GATE_BOOKING_MAKE_ROOM;
@@ -452,17 +452,32 @@ postgres('hold grace + extend (real Postgres)', () => {
       });
     });
 
-    test('accept (commitReservation) fails closed: nothing moves the stop in this change, so its probe sees it and the hold is not graduated', async () => {
+    test('accept (commitReservation): a chain the proof cannot rebuild is the taken-slot answer; nothing moves and the hold is not graduated', async () => {
       await withStopOverHold(async ({ trx, holdId, customerId, stopId }) => {
+        estimateSlotAvailability.verifyMakeRoomOffer.mockResolvedValue({ reason: 'fixed_time_told' });
         await expect(slotReservation.commitReservation({ scheduledServiceId: holdId, customerId, trx }))
           .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
-        expect(estimateSlotAvailability.verifyMakeRoomOffer).not.toHaveBeenCalled();
         const row = await holdRow(trx, holdId);
         expect(row.customer_id).toBeNull();
         expect(row.reservation_expires_at).not.toBeNull();
         // And the stop never moved, and no move was logged.
         expect((await trx('scheduled_services').where({ id: stopId }).first('window_start')).window_start).toBe('13:00:00');
         expect(await trx('reschedule_log').where({ scheduled_service_id: stopId })).toHaveLength(0);
+      });
+    });
+
+    test('accept (commitReservation): the proof equals the stored chain, so the stop moves in the same transaction and the hold graduates', async () => {
+      await withStopOverHold(async ({ trx, holdId, customerId, stopId, chain }) => {
+        estimateSlotAvailability.verifyMakeRoomOffer.mockResolvedValue({ shiftMin: 60, moves: chain().moves });
+        await slotReservation.commitReservation({ scheduledServiceId: holdId, customerId, trx });
+        const row = await holdRow(trx, holdId);
+        expect(row.customer_id).toBe(customerId);
+        expect(row.reservation_expires_at).toBeNull();
+        const moved = await trx('scheduled_services').where({ id: stopId }).first('window_start', 'window_end');
+        expect([String(moved.window_start).slice(0, 5), String(moved.window_end).slice(0, 5)]).toEqual(['14:00', '15:00']);
+        const log = await trx('reschedule_log').where({ scheduled_service_id: stopId });
+        expect(log).toHaveLength(1);
+        expect(log[0]).toMatchObject({ initiated_by: 'booking_make_room', reason_code: 'booking_make_room' });
       });
     });
 
