@@ -99,6 +99,8 @@ postgres('combined booking capacity on PostgreSQL', () => {
       for (const c of ['service_type', 'status', 'notes', 'zone', 'service_key_snapshot', 'payment_method_preference']) t.text(c);
       t.integer('estimated_duration_minutes'); t.decimal('estimated_price', 12, 2);
       t.boolean('is_recurring').defaultTo(false); t.boolean('customer_confirmed').defaultTo(false);
+      // The occupancy probe reads is_callback (planning minutes: a re-service plans at 15), as the real table has it.
+      t.boolean('is_callback').defaultTo(false);
       t.decimal('lat'); t.decimal('lng'); t.timestamp('reservation_expires_at'); t.timestamps(true, true);
     });
     await migration.up(mockPg);
