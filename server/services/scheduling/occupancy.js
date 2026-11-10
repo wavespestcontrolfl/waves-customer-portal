@@ -73,7 +73,7 @@ const defaultDb = require('../../models/db');
 const { guardedCoordSelects } = require('./day-stops');
 const { travelGapEnabled, travelGapConflicts } = require('./travel-gap');
 const { multiTechConfirmLive } = require('../../config/feature-gates');
-const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
+const { ensureCatalogLoaded, stopExpectedMinutesSync } = require('./expected-service-minutes');
 const { occupiedRows, allocationKey } = require('./visit-capacity');
 const logger = require('../logger');
 const { etParts, parseETDateTime, addETDays } = require('../../utils/datetime-et');
@@ -467,6 +467,9 @@ const CONFLICT_COLUMNS = [
   // customer-confirmed) — the rebooker's beyond-horizon series check reads
   // these to tell a disposable seeded row from a real booking.
   'is_recurring', 'recurring_parent_id', 'customer_confirmed',
+  // Planning-minute input (planning-minutes.js), with service_type and
+  // is_recurring above: stopCreditResolver credits a re-service at 15.
+  'is_callback',
 ];
 
 // One log line each time a staff save's route check comes back with a warning
@@ -759,7 +762,9 @@ async function bookedInterviewConflictRows(db, dateStr, startMin, endMin) {
 // allocated work is credited toward travel (Codex r1 P1). Keyed exactly as
 // occupiedRows keys the span. Reads the catalog cache synchronously — the
 // caller preloads with ensureCatalogLoaded (no cache → window length, zero
-// padding).
+// padding). While the owner planning table is live, a stop the table names
+// credits the table's minutes, as the night router plans it (owner
+// 2026-11-09, expected-service-minutes.js stopExpectedMinutesSync).
 function stopCreditResolver(rows) {
   const expectedByAllocation = new Map();
   for (const row of rows) {
@@ -769,17 +774,13 @@ function stopCreditResolver(rows) {
     const e = timeToMinutes(row.window_end);
     const span = s != null && e != null && e > s ? e - s
       : (Number(row.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : DEFAULT_DURATION_MINUTES);
-    const own = expectedMinutesSync({
-      serviceKey: row.service_key_snapshot, serviceType: row.service_type, windowMinutes: span,
-    });
+    const own = stopExpectedMinutesSync(row, span);
     expectedByAllocation.set(key, (expectedByAllocation.get(key) || 0) + own);
   }
   return (row, windowMinutes) => {
     const allocation = allocationKey(row);
     if (allocation) return Math.min(expectedByAllocation.get(allocation) || windowMinutes, windowMinutes);
-    return expectedMinutesSync({
-      serviceKey: row.service_key_snapshot, serviceType: row.service_type, windowMinutes,
-    });
+    return stopExpectedMinutesSync(row, windowMinutes);
   };
 }
 

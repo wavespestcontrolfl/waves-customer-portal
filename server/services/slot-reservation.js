@@ -94,19 +94,22 @@ async function candidateExpectedMinutesFromRow(conn, row, windowMinutes) {
       : mix.services.map(() => windowMinutes / mix.services.length);
     return expectedMinutesForServices(conn, mix.services.map((key, i) => ({
       category: key, durationMinutes: perMemberMinutes[i],
-    })), windowMinutes);
+    })), windowMinutes, { newVisit: true });
   }
+  // The hold is the visit being booked: the same new-visit minutes its offer
+  // and its accept read (expected-service-minutes.js `newVisit`).
   return expectedServiceMinutes(conn, {
     serviceKey: row.service_key_snapshot || null,
     serviceType: row.service_type || null,
     windowMinutes,
+    newVisit: true,
   });
 }
 async function candidateExpectedMinutesFromProfile(conn, serviceProfile, windowMinutes) {
   if (!serviceProfile || !Number.isFinite(windowMinutes) || windowMinutes <= 0) return undefined;
   // Every member of the profile, summed — never services[0] alone against
   // the whole window (push-audit P1).
-  return expectedMinutesForServices(conn, serviceProfile.services, windowMinutes);
+  return expectedMinutesForServices(conn, serviceProfile.services, windowMinutes, { newVisit: true });
 }
 
 // Business bounds shared with the slot generators (see the exporting module

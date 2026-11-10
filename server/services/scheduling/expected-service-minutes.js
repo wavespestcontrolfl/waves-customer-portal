@@ -32,7 +32,18 @@
  * expectedServiceMinutes()/ensureCatalogLoaded(), then read synchronously
  * with expectedMinutesSync() for every candidate/stop pair without a query
  * per pair.
+ *
+ * The router's minutes (owner 2026-11-09, picker audit option A): while the
+ * owner planning table is live (planning-minutes.js planningTableLive, i.e.
+ * GATE_SCHEDULING_CAPACITY=plan or true), a BOOKED stop credits the table's
+ * minutes for its service (stopExpectedMinutesSync: recurring pest and lawn
+ * 35, re-service 15, assessment / rodent / termite 30, one-time pest 45), the
+ * minutes the night router plans the same stop with, and the NEW visit a
+ * customer books online plans at 45 (`newVisit`). A service the table does
+ * not name keeps the catalog rule above. The table off: byte-identical.
  */
+
+const { plannedWorkMinutes, newVisitMinutes } = require('./planning-minutes');
 
 const CATALOG_TTL_MS = 5 * 60 * 1000;
 
@@ -144,9 +155,14 @@ function expectedFromCategoryRows(rows, windowMinutes) {
  * Synchronous lookup against whatever is currently cached — a caller that
  * never preloaded (or whose preload failed) degrades to the window length:
  * no catalog signal, no padding, exactly the legacy gap.
+ * `newVisit`: the identity is the visit a customer is booking now (an offer
+ * and its own booking check pass it alike); the planning table's new-visit
+ * minutes win when they apply (planning-minutes.js newVisitMinutes).
  */
-function expectedMinutesSync({ serviceKey = null, serviceType = null, category = null, windowMinutes } = {}) {
+function expectedMinutesSync({ serviceKey = null, serviceType = null, category = null, windowMinutes, newVisit = false } = {}) {
   const win = Number.isFinite(windowMinutes) && windowMinutes > 0 ? windowMinutes : 60;
+  const planned = newVisit ? newVisitMinutes(serviceType || category || serviceKey, win) : null;
+  if (planned != null) return planned;
   const row = catalogRowFor(serviceKey, serviceType);
   if (row) return expectedFromCatalogRow(row, win);
   if (category && catalogCache?.byCategory?.has(String(category).trim().toLowerCase())) {
@@ -154,6 +170,24 @@ function expectedMinutesSync({ serviceKey = null, serviceType = null, category =
     if (fromCategory != null) return fromCategory;
   }
   return win;
+}
+
+/**
+ * A BOOKED stop's expected minutes (a scheduled_services row): the planning
+ * table's minutes for the row while the table is live and names its service
+ * (plannedWorkMinutes: name, is_recurring, is_callback, and a stored
+ * estimate above the hour kept), clamped to the window; else the catalog
+ * rule by service_key_snapshot / service_type. Every reader whose rows feed
+ * an offer or a booking check selects those four columns, or the two sides
+ * would credit one stop differently.
+ */
+function stopExpectedMinutesSync(row, windowMinutes) {
+  const win = Number.isFinite(windowMinutes) && windowMinutes > 0 ? windowMinutes : 60;
+  const planned = row ? plannedWorkMinutes(row) : null;
+  if (planned != null) return clampToWindow(planned, win);
+  return expectedMinutesSync({
+    serviceKey: row?.service_key_snapshot || null, serviceType: row?.service_type || null, windowMinutes: win,
+  });
 }
 
 /**
@@ -165,8 +199,9 @@ function expectedMinutesSync({ serviceKey = null, serviceType = null, category =
  * whole window would credit a combined visit's other members' work toward
  * travel (push-audit P1, mirroring the version-2 allocation rule in
  * occupancy.js). No services -> the window length (zero padding).
+ * `newVisit` (see expectedMinutesSync) applies to every member alike.
  */
-function expectedMinutesForServicesSync(services, windowMinutes) {
+function expectedMinutesForServicesSync(services, windowMinutes, { newVisit = false } = {}) {
   const win = Number.isFinite(windowMinutes) && windowMinutes > 0 ? windowMinutes : 60;
   const list = Array.isArray(services) ? services.filter(Boolean) : [];
   if (!list.length) return win;
@@ -189,14 +224,15 @@ function expectedMinutesForServicesSync(services, windowMinutes) {
       // mismatch (Codex r4 P1). An explicit `.category` still wins.
       category: service.category || service.service || null,
       windowMinutes: own,
+      newVisit,
     });
   }
   return clampToWindow(total, win);
 }
 
-async function expectedMinutesForServices(conn, services, windowMinutes) {
+async function expectedMinutesForServices(conn, services, windowMinutes, opts = {}) {
   await ensureCatalogLoaded(conn);
-  return expectedMinutesForServicesSync(services, windowMinutes);
+  return expectedMinutesForServicesSync(services, windowMinutes, opts);
 }
 
 /** Preload-then-read convenience for a single one-off lookup. */
@@ -212,6 +248,7 @@ function clearExpectedServiceMinutesCache() {
 module.exports = {
   expectedServiceMinutes,
   expectedMinutesSync,
+  stopExpectedMinutesSync,
   expectedMinutesForServices,
   expectedMinutesForServicesSync,
   ensureCatalogLoaded,
