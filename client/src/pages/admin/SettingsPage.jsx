@@ -511,7 +511,9 @@ function GateFlipDialog({ request, onClose, onDone }) {
         ? { step: "done", preview, message: `${request.name} is now ${d.value}. ${d.redeployNotice || ""}` }
         : { step: "done", preview, isError: true, message: d.warning || "Railway did not confirm the change. Check the variable in Railway before trying again." });
     } catch (e) {
-      setState({ step: "ready", preview, isError: true, message: e.message || "The change was not made." });
+      // The server may already have used up this one-use card, so the card
+      // ends here; a retry starts from the switch with a fresh preview.
+      setState({ step: "done", preview, isError: true, message: `${e.message || "The change was not made."} Close and use the switch again to start over.` });
     } finally {
       setBusy(false);
     }

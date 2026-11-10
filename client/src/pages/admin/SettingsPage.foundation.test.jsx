@@ -705,7 +705,7 @@ describe("Feature gates flip switch", () => {
     { name: "GATE_SYNTH_STRICT", set: true, value: "on", readByCode: true, description: "Strict gate.", inverted: false, readsOn: false, flippable: true, notFlippableReason: null },
     { name: "GATE_SYNTH_MODE", set: true, value: "shadow", readByCode: true, description: "Synthetic mode gate.", inverted: false, readsOn: false, flippable: false, notFlippableReason: "Takes a mode, timestamp or list, not just on/off. Set it in Railway." },
   ];
-  function stubGates(flipAvailable) {
+  function stubGates(flipAvailable, commitResponse = response({ success: true, gate: "GATE_SYNTH_FLIP", value: "true", redeployNotice: "Restarting." })) {
     fetch.mockImplementation(async (url, options = {}) => {
       const path = String(url).replace(/^\/api/, "");
       if (path === "/admin/settings/gates") return response({ gates, flipAvailable });
@@ -713,7 +713,7 @@ describe("Feature gates flip switch", () => {
         gate: "GATE_SYNTH_FLIP", description: "Synthetic gate.", currentValue: "unset", newValue: "true",
         redeployNotice: "The portal restarts briefly.", customerFacing: false, prerequisites: [], requireTypedName: true, pendingActionId: "pa-1",
       });
-      if (path === "/admin/settings/gates/GATE_SYNTH_FLIP/commit") return response({ success: true, gate: "GATE_SYNTH_FLIP", value: "true", redeployNotice: "Restarting." });
+      if (path === "/admin/settings/gates/GATE_SYNTH_FLIP/commit") return commitResponse;
       return response(fixtureFor(url, options));
     });
   }
@@ -748,5 +748,20 @@ describe("Feature gates flip switch", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(await screen.findByRole("switch", { name: "Turn off GATE_SYNTH_FLIP" })).toHaveAttribute("aria-checked", "true");
     expect(screen.getByText(/Set to true\. It takes effect when Railway finishes restarting/)).toBeInTheDocument();
+  });
+
+  // A failed commit may have used up the one-use card on the server, so the
+  // dialog must not offer Confirm again on that card (codex #7732).
+  it("ends the card after a failed commit instead of offering Confirm again", async () => {
+    stubGates(true, response({ error: "The variable changed since the preview.", code: "target_changed" }, 409));
+    mount("gates");
+    fireEvent.click(await screen.findByRole("switch", { name: "Turn on GATE_SYNTH_FLIP" }));
+    expect(await screen.findByText("The portal restarts briefly.")).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "GATE_SYNTH_FLIP" } });
+    fireEvent.click(screen.getByRole("button", { name: "Turn on" }));
+    expect(await screen.findByText(/use the switch again to start over/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Turn on" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
   });
 });
