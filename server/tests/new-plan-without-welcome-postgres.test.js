@@ -1,7 +1,9 @@
-// new_plan_without_welcome (lead-to-cash invariants) on a real PostgreSQL: a
+// findFirstPlansWithoutWelcome (new-recurring-welcome-sms.js, read by the
+// lead-to-cash detector new_plan_without_welcome) on a real PostgreSQL: a
 // first recurring plan that started 3 hours to 14 days ago and left no
 // new_customer_welcome row is found, unless the welcome rule would not have
-// called the customer new or the silence is by design. Every row is written
+// called the customer new, the silence is by design, or the plan started
+// before the audit's start date. Every row is written
 // inside one transaction that is rolled back. Invented data only.
 const { randomUUID } = require('node:crypto');
 
@@ -25,10 +27,8 @@ const dateOnly = (d) => d.toISOString().slice(0, 10);
 
   beforeAll(async () => {
     database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 1 } });
-    ({ SEQUENCE_TYPE } = require('../services/new-recurring-welcome-sms'));
-    const invariants = require('../services/lead-to-cash-invariants');
-    findIds = invariants._private.newPlanWithoutWelcomeCustomerIds;
-    DETECTORS = invariants.DETECTORS;
+    ({ SEQUENCE_TYPE, findFirstPlansWithoutWelcome: findIds } = require('../services/new-recurring-welcome-sms'));
+    ({ DETECTORS } = require('../services/lead-to-cash-invariants'));
   });
   beforeEach(async () => { trx = await database.transaction(); });
   afterEach(async () => { await trx?.rollback(); });
@@ -62,6 +62,21 @@ const dateOnly = (d) => d.toISOString().slice(0, 10);
     const customerId = await newCustomer();
     await newPlan(customerId, { createdAt: hoursAgo(30) });
     expect(await found()).toContain(customerId);
+  });
+
+  test('a plan that started before the audit start date (the traced backlog) is not listed', async () => {
+    // NOW is Nov 9 15:00Z. Six days earlier is Nov 3: inside the 14-day window, before WELCOME_AUDIT_STARTS_AT (Nov 4 21:00Z).
+    const { WELCOME_AUDIT_STARTS_AT } = require('../services/new-recurring-welcome-sms');
+    const before = await newCustomer();
+    await newPlan(before, { createdAt: new Date(WELCOME_AUDIT_STARTS_AT.getTime() - 60 * 1000) });
+    const backlog = await newCustomer();
+    await newPlan(backlog, { createdAt: daysAgo(6) });
+    const after = await newCustomer();
+    await newPlan(after, { createdAt: new Date(WELCOME_AUDIT_STARTS_AT.getTime() + 60 * 1000) });
+    const ids = await found();
+    expect(ids).not.toContain(before);
+    expect(ids).not.toContain(backlog);
+    expect(ids).toContain(after);
   });
 
   test('the registered detector exists and the ids it reads are bare customer uuids', async () => {

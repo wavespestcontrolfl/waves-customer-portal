@@ -45,7 +45,7 @@ jest.mock('../config/completion-lane-registry', () => ({
   classifyCatalogRow: jest.fn(),
 }));
 jest.mock('../services/closeout-status', () => ({ getCloseoutStatus: jest.fn() }));
-jest.mock('../services/new-recurring-welcome-sms', () => ({ SEQUENCE_TYPE: 'new_customer_welcome', NEW_CUSTOMER_HISTORY_DAYS: 90 }));
+jest.mock('../services/new-recurring-welcome-sms', () => ({ findFirstPlansWithoutWelcome: jest.fn(), WELCOME_AUDIT_WINDOW_DAYS: 14, WELCOME_AUDIT_GRACE_HOURS: 3 }));
 jest.mock('../services/customer-properties', () => ({
   customersWithStreetLineHoldingLocality: jest.fn(), customersWithUnpinnedSavedAddress: jest.fn(), customersWithIncompleteAddress: jest.fn(),
 }));
@@ -426,17 +426,12 @@ describe('detector adapters', () => {
     expect(out.detail).toMatchObject({ checked: CLOSEOUT_VISIT_CAP, truncated: true });
   });
 
-  test('new_plan_without_welcome binds the 14-day window, 3-hour grace, welcome type and 90-day history, and lists customer ids only', async () => {
-    db.raw.mockResolvedValueOnce({ rows: [{ customer_id: 'cust-1' }, { customer_id: 'cust-2' }] });
+  test('new_plan_without_welcome delegates to the welcome service audit and lists customer ids only', async () => {
+    const welcome = require('../services/new-recurring-welcome-sms');
+    welcome.findFirstPlansWithoutWelcome.mockResolvedValueOnce(['cust-1', 'cust-2']);
     const out = await byKey('new_plan_without_welcome').run({ now: NOW });
-    expect(out.count).toBe(2);
-    expect(out.ids).toEqual(['cust-1', 'cust-2']);
-    const [sql, bindings] = db.raw.mock.calls[db.raw.mock.calls.length - 1];
-    expect(sql).toContain('sms_sequences');
-    expect(bindings[0]).toEqual(new Date(NOW.getTime() - 14 * 24 * 60 * 60 * 1000));
-    expect(bindings[1]).toEqual(new Date(NOW.getTime() - 3 * 60 * 60 * 1000));
-    expect(bindings[2]).toBe('new_customer_welcome');
-    expect(bindings.slice(3, 5)).toEqual([90, 90]);
+    expect(welcome.findFirstPlansWithoutWelcome).toHaveBeenCalledWith(NOW);
+    expect(out).toEqual({ count: 2, ids: ['cust-1', 'cust-2'], detail: { windowDays: 14, graceHours: 3 } });
   });
 
   test('completion-record predicates are registered one adapter each and delegate by key', async () => {
