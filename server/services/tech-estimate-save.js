@@ -48,13 +48,6 @@ function saveRefusal(err) {
   return err;
 }
 
-// A new person whose typed phone is already a customer's goes to the office first (the portal's one phone identity query).
-async function phoneMatchesCustomer(subject) {
-  if (!subject.prospect) return false;
-  const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
-  return Boolean(await findKnownCallerCustomer(db, subject.prospect.phone, ['id']));
-}
-
 // The tool row, the Sold by credit and the audit event for a NEW estimate; a retry only reads its stored reasons.
 async function recordToolEstimate(trx, req, saved, detailed) {
   const { estimate } = saved;
@@ -108,7 +101,7 @@ async function createQuote(req, body) {
   const { clientDraftId, digest } = createKeys(body);
   const prep = await Price.prepareQuote(req, body);
   const judged = await Price.judgeQuote(req, prep);
-  const phoneMatch = await phoneMatchesCustomer(prep.subject);
+  const phoneMatch = await Price.phoneMatchesCustomer(prep.subject);
   const saved = await saveDraft(req, { prep, clientDraftId, digest, detailed: Price.detailedReasons(prep, judged, { phoneMatch }) });
   return {
     id: saved.estimate.id,

@@ -360,7 +360,9 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
 
     test('a new person whose phone is a customer\'s goes to the office first, and the phone sees only office_review', async () => {
       await trx('customers').where({ id: ids.otherCustomer }).update({ phone: '+19415550142' });
-      const { saved } = await priceThenCreate({ prospect: PROSPECT, services: ['PEST'] });
+      const { preview, saved } = await priceThenCreate({ prospect: PROSPECT, services: ['PEST'] });
+      // The preview already shows the verdict the save stores.
+      expect(preview.body.officeFirst).toEqual({ required: true, reasons: ['office_review'] });
       expect(saved.body.officeFirst).toEqual({ required: true, reasons: ['office_review'] });
       expect((await trx('tech_estimates').where({ estimate_id: saved.body.id }).first()).office_first_reasons).toEqual(['phone_matches_customer']);
     });

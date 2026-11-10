@@ -329,7 +329,15 @@ async function judgeQuote(req, prep) {
   return judgePrepared(await dryRun(req, prep.saveBody), prep.keys);
 }
 
-// The server's detailed reasons the office looks first, in a fixed order. `phoneMatch` is set by the create only.
+// A new person whose typed phone is already a customer's goes to the office first (the portal's one phone identity
+// query). The preview and the create both ask, so the phone shows the verdict the save will store.
+async function phoneMatchesCustomer(subject) {
+  if (!subject.prospect) return false;
+  const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
+  return Boolean(await findKnownCallerCustomer(db, subject.prospect.phone, ['id']));
+}
+
+// The server's detailed reasons the office looks first, in a fixed order.
 function detailedReasons(prep, judged, { phoneMatch = false } = {}) {
   const reasons = prep.layered.changed.map((name) => `changed_fact:${name}`);
   if (roundMoney(judged.estimate.onetime_total) > ONE_TIME_HOLD_DOLLARS) reasons.push('one_time_over_limit');
@@ -364,8 +372,9 @@ async function priceQuote(req, body) {
   const prep = await prepareQuote(req, body);
   const judged = await judgeQuote(req, prep);
   const { agentEngineResultDigest } = require('./agent-estimate-preview');
+  const phoneMatch = await phoneMatchesCustomer(prep.subject);
   return {
-    ...quoteAnswer(judged.estimate, judged.data, { facts: prep.layered.shown, detailed: detailedReasons(prep, judged) }),
+    ...quoteAnswer(judged.estimate, judged.data, { facts: prep.layered.shown, detailed: detailedReasons(prep, judged, { phoneMatch }) }),
     // A hash of the engine result, not a price: the create sends it back so a price that moved in between is refused.
     digest: agentEngineResultDigest(judged.data.engineResult),
   };
@@ -381,6 +390,7 @@ module.exports = {
   prepareQuote,
   judgeQuote,
   detailedReasons,
+  phoneMatchesCustomer,
   phoneReasons,
   quoteAnswer,
   buildLines,
