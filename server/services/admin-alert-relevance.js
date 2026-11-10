@@ -107,6 +107,11 @@
  * customer kind's witnesses) and a visit for that customer was completed (visitsCompletedAfterBell, by customer
  * id, any Eastern day).
  *
+ * A complaint-call bell (`call_complaint`; a known customer's call got the final label complaint_escalated, dedupeKey
+ * `call-complaint:<call id>`) closes under GATE_ALERT_CONTACT_CLOSE alone once a person reached that customer after
+ * the bell: a call back, an answered call, a text or an email (personContactReason). A booked visit or a sent estimate
+ * alone never closes it.
+ *
  * Three more rules carry their OWN three-state gate (owner 2026-10-29, "Stuck
  * Alert Fixes"; the third 2026-10-31), so they can run in shadow while GATE_ALERT_CONTACT_CLOSE is
  * `true`. A class (`gate`) is not offered at all while its gate is off, except
@@ -181,6 +186,9 @@ const UNFINISHED_BOOKING_PREFIX = 'portal-unfinished-';
 // notification_prefs). Repeated, not imported: that module pulls in the transcript rescue. A test
 // pins them together.
 const BOUNCE_DONE_WHEN = 'bounced_email_replaced';
+// The dedupeKey prefix of a technician's held estimate (tech-estimate-office-bell.js KEY_PREFIX). Repeated, not imported:
+// that module pulls in the pricing stack. A test pins the two together.
+const TECH_ESTIMATE_PREFIX = 'tech-estimate-office-first:';
 const BOUNCE_CUSTOMER_FIELDS = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email'];
 
 const RETIRED_BY = 'alert-relevance';
@@ -684,7 +692,7 @@ async function loadSubjects(rows, conn = db, { judgeContact = false } = {}) {
   const estimateIds = [...new Set(resolved.flatMap((r) => [r.refs.estimateId, r.lead?.estimate_id && String(r.lead.estimate_id)]).filter(Boolean))];
   const leadCustomerIds = [...new Set([...[...data.leads.values()].map((l) => l.customer_id && String(l.customer_id)), ...contactCustomerIds].filter(Boolean))];
   if (estimateIds.length) {
-    data.estimates = byId(await conn('estimates').whereIn('id', estimateIds).select('id', 'sent_at'));
+    data.estimates = byId(await conn('estimates').whereIn('id', estimateIds).select('id', 'sent_at', 'status', 'accepted_at', 'archived_at'));
   }
   if (leadCustomerIds.length) {
     data.leadVisits = await bookedVisitsByCustomer(conn, leadCustomerIds);
@@ -1158,6 +1166,25 @@ function leadContactedMovedOn(s) {
   return s.quoteHandedOff ? 'Estimate was sent' : null;
 }
 
+// A technician's held estimate (tech-estimate-office-bell.js, doneWhen `estimate_sent_or_closed`): the office had to check it
+// before it went out. The fact judged is the office's release, not delivery: the tool never sends a held estimate and no
+// automatic sender selects a tool draft, so only an office send finishes one. Done = that send finished (`sent_at`, or the
+// status it settles on), or the estimate is closed: accepted, declined, expired, archived, or gone. A send that is only
+// queued (`scheduled`), in flight (`sending`) or failed (`send_failed`) keeps the bell: the retirement is final, and the
+// estimate has not gone.
+const RELEASED_STATUSES = new Set(['sent', 'viewed']);
+function techEstimateChecked(s) {
+  if (!s.refs.estimateId) return null;
+  const e = s.estimate;
+  if (!e) return 'Estimate was removed';
+  const status = String(e.status || '').toLowerCase();
+  if (e.archived_at) return 'Estimate was archived';
+  if (e.accepted_at || status === 'accepted') return 'Estimate was accepted';
+  if (status === 'declined') return 'Estimate was declined';
+  if (status === 'expired') return 'Estimate expired';
+  return e.sent_at || RELEASED_STATUSES.has(status) ? 'Estimate was sent' : null;
+}
+
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
 // rule returning null while the alert is still relevant, else a short reason.
 const CLASSES = [
@@ -1193,6 +1220,11 @@ const CLASSES = [
   },
   { // call-last-name-lookup.js — one suggestion per customer
     key: 'call_last_name_suggestion', categories: ['customer'], prefix: SUGGESTION_KEY_PREFIX, rule: lastNameSaved,
+  },
+  { // tech-estimate-office-bell.js — one bell per technician estimate held for the office; the bell dedupes on the key
+    // for good (no dedupeOpenOnly), so a retirement is final and the estimate never rings again.
+    key: 'tech_estimate_office_first', categories: ['estimate'], prefix: TECH_ESTIMATE_PREFIX, doneWhen: 'estimate_sent_or_closed',
+    match: (meta) => meta.doneWhen === 'estimate_sent_or_closed', rule: techEstimateChecked, rearm: false,
   },
   { // email-bounce-rescue.js sendSuggestionEmail — a fresh row per examined bounce, never refreshed on a key.
     // Its fallback bell (suggestionFallbackBell) keeps a stable dedupeKey, so that one stays a person's to close.
@@ -1266,6 +1298,13 @@ const CLASSES = [
   },
   { // call-recording-processor.js — one bell per voicemail, no dedupe key
     key: 'voicemail_callback', categories: ['voicemail_callback'], triggerKey: 'customer_voicemail_callback', contactOnly: true, contact: 'voice', contactRule: voicemailAnswered,
+  },
+  { // call-recording-processor.js keepComplaintCallAlert: a known customer's call got the final label complaint_escalated
+    // (dedupeKey call-complaint:<call id>, one bell per call, never refreshed, so created_at is its boundary). Closes once a
+    // person reached that customer after the bell (customerQuoteFormAnswered: personContactReason, the customer kind's
+    // witnesses). A booked visit or a sent estimate alone never closes it. Behind GATE_ALERT_CONTACT_CLOSE (`contactOnly`).
+    key: 'call_complaint', categories: ['customer'], prefix: 'call-complaint:', contactOnly: true, contact: 'customer',
+    contactRule: customerQuoteFormAnswered,
   },
   // Missed calls (customer_missed_call) are NOT here: missed-call-bell.js owns them
   // (retireCalledBackMissedCalls, every 2 minutes, one owner), and it judges the

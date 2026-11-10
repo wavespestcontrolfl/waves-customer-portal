@@ -62,6 +62,14 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/tech\/dictation\/availability$/ },
   { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/tech\/dictation$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/field-lead(\/.*)?$/ },
+  // Technician estimate tool (GATE_TECH_ESTIMATES + the technician's own switch; the router answers 404 otherwise):
+  // the setup read, the list-price preview, saving a draft, and reading his OWN drafts (the router filters to the
+  // caller's tool rows; any other id is a 404). It sends nothing; a customer is checked against his route.
+  { bucket: 'estimates', methods: READ, pattern: /^\/api\/tech\/estimates\/setup$/ },
+  { bucket: 'estimates', methods: ['POST'], pattern: /^\/api\/tech\/estimates\/price$/ },
+  { bucket: 'estimates', methods: ['POST'], pattern: /^\/api\/tech\/estimates$/ },
+  { bucket: 'estimates', methods: READ, pattern: /^\/api\/tech\/estimates$/ },
+  { bucket: 'estimates', methods: READ, pattern: /^\/api\/tech\/estimates\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/lawn-diagnostic(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/social(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/projects(\/.*)?$/ },

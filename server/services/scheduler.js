@@ -1098,6 +1098,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 12:07 AM ET — pay rate steps (owner 2026-11-05: $23.00, then $25 in the first full pay week after day 90).
+  // Applies every step whose Monday has come, so the staff record shows the new rate that day. It catches up: any
+  // due step, not only today's. A pay run applies due steps too. No gate, no message to anyone.
+  cron.schedule('7 0 * * *', async () => {
+    try {
+      await runExclusive('payroll-rate-steps', async () => {
+        const applied = await require('./payroll-rate-steps').applyDueStepsDaily();
+        if (applied.length) logger.info(`[payroll-rate-steps] ${applied.length} pay rate step(s) applied`);
+      });
+    } catch (err) {
+      logger.error(`[payroll-rate-steps] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // BOOT (+60s, then EVERY 6H at :23) — SMS draft-route canary: probes the
   // routed reply-drafting providers (gpt mini default / Sonnet save-the-sale)
   // and alerts Adam the moment one stops answering (bad model ID, revoked key,
@@ -1613,6 +1627,22 @@ function initScheduledJobs() {
   };
   cron.schedule('41 7 * * 1', () => runPermitSyncTick(), { timezone: 'America/New_York' });
   registerDeployKillRetry('permit-sync', () => runPermitSyncTick({ afterKill: true }));
+  // Catch-up on the six other days, same 7:41 AM slot: when Monday's report
+  // step did not commit (2026-11-09: the county refused both downloads with
+  // HTTP 403 and the tables stayed a week old), run the report step again.
+  // Freshness is read before the lease, so a normal week takes no lock and
+  // writes no job_health row. Report step only (about 3 minutes); a deploy
+  // kill goes through the retry registered above.
+  const runPermitReportCatchUpTick = async () => {
+    try {
+      const permitRun = require('./property-lookup/permit-sync-run');
+      if (!(await permitRun.reportCatchUpDue())) return;
+      await runExclusive('permit-sync', () => permitRun.runPermitReportCatchUp());
+    } catch (err) {
+      logger.error(`Permit sync catch-up lease failed: ${err.message}`);
+    }
+  };
+  cron.schedule('41 7 * * 0,2-6', () => runPermitReportCatchUpTick(), { timezone: 'America/New_York' });
 
   // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural

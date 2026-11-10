@@ -27,7 +27,7 @@ describe('agent-control taxonomy', () => {
       FAILURE_CLASS: ['infrastructure', 'provider', 'tool', 'timeout', 'bad_input', 'budget', 'reasoning', 'instruction', 'incomplete', 'regression', 'incorrect'],
       SIDE_EFFECT_CLASS: ['read_only', 'internal_write', 'draft_for_human', 'customer_visible', 'money', 'irreversible_external'],
       PRIORITY: ['P0', 'P1', 'P2', 'P3'],
-      WORKLOAD: ['live', 'replay', 'sealed', 'backfill'],
+      WORKLOAD: ['live', 'replay', 'sealed', 'backfill', 'max_runner'],
       ROW_KIND: ['chain', 'call', 'session', 'heartbeat'],
       FALLBACK_CLASS: ['interactive', 'offline', 'measurement'],
       EVAL_FAMILY: ['classification', 'structured_extraction', 'routine_copy', 'high_stakes_copy', 'service_report', 'vision_id', 'property_measurement', 'retrieval_qa', 'sql_tool', 'compliance_check', 'long_running_agent', 'transcription_contact'],

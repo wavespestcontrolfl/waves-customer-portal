@@ -1268,6 +1268,34 @@ describe('customer-contact classes', () => {
     expect(mockLoadContactBundles.mock.calls[0][0][0].refs).toMatchObject({ callLogId: null, customerId: null });
   });
 
+  test('a complaint-call bell (call-complaint:<call id>) is its own contact-only class, read by its customer id, and closes only on a person reaching that customer after the bell', async () => {
+    const complaint = (over = {}) => note({ category: 'customer', link: `/admin/communications#tab=calls&call=${CALL}`,
+      metadata: { dedupeKey: `call-complaint:${CALL}`, doneWhen: 'complaint_answered', customerId: CUST, callLogId: CALL, source: 'call_complaint', ...over } });
+    expect(classify(complaint())).toBeNull(); // contact gate off: not judged at all
+    gate('true');
+    expect(classify(complaint()).key).toBe('call_complaint');
+    // Another bell in the same category keeps no class here.
+    expect(classify(note({ category: 'customer', metadata: { dedupeKey: 'something-else:1', customerId: CUST } }))).toBeNull();
+    mockBundles = new Map();
+    await loadSubjects([complaint()]);
+    expect(mockLoadContactBundles.mock.calls.at(-1)[0].map((i) => [i.kind, i.refs])).toEqual([['customer', { customerId: CUST }]]);
+    // A bell with no customer id is not judged.
+    mockLoadContactBundles.mockClear();
+    await loadSubjects([complaint({ customerId: null })]);
+    expect(mockLoadContactBundles).not.toHaveBeenCalled();
+    expect((await verdictFor(complaint(), { backAt: at(10) })).reason).toBe('A person called back');
+    expect((await verdictFor(complaint(), { inAt: at(10) })).reason).toBe('A person answered their call');
+    expect((await verdictFor(complaint(), { textAt: at(10) })).reason).toBe('Answered by text');
+    expect((await verdictFor(complaint(), { replyAt: at(10) })).reason).toBe('Answered by email');
+    // Contact from before the bell, a booked visit and a sent quote alone, or nothing at all, leave it open.
+    expect((await verdictFor(complaint(), { backAt: at(-10), textAt: at(-10) })).reason).toBeNull();
+    expect((await verdictFor(complaint(), { visitAt: at(10), quote: true })).reason).toBeNull();
+    expect((await verdictFor(complaint(), {})).reason).toBeNull();
+    // Shadow mode records what would close and closes nothing.
+    gate('shadow');
+    expect(await verdictFor(complaint(), { backAt: at(10) })).toMatchObject({ reason: null, would: 'A person called back' });
+  });
+
   describe('rules', () => {
     beforeEach(() => gate('true'));
 
@@ -2346,6 +2374,56 @@ describe('customer-contact classes', () => {
         expect(result.bookingsRaised).toBeUndefined();
         expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('the unfinished-booking pass failed'));
         expect(require('../services/logger').warn.mock.calls.flat().join(' ')).not.toContain('+19415550142');
+      });
+    });
+
+    describe('a technician\'s held estimate closes once the estimate leaves the office\'s check (tech-estimate-office-bell.js)', () => {
+      const TECH_EST = uid(76);
+      const heldBell = (over = {}) => note({
+        category: 'estimate', link: `/admin/estimates?estimateId=${TECH_EST}`,
+        metadata: { area: 'Estimates', doneWhen: 'estimate_sent_or_closed', dedupeKey: `tech-estimate-office-first:${TECH_EST}`, estimateId: TECH_EST, ...over },
+      });
+      const held = (over = {}) => ({ id: TECH_EST, status: 'draft', sent_at: null, accepted_at: null, archived_at: null, ...over });
+
+      test('the prefix repeated here is the emitter\'s own, and only that bell is in the class', () => {
+        expect(require('../services/tech-estimate-office-bell').KEY_PREFIX).toBe('tech-estimate-office-first:');
+        expect(require('../services/tech-estimate-office-bell').DONE_WHEN).toBe('estimate_sent_or_closed');
+        expect(classify(heldBell()).key).toBe('tech_estimate_office_first');
+        expect(classify(heldBell({ dedupeKey: `manual-accept-consumer-notice:${TECH_EST}` }))).toBeNull();
+        expect(classify(heldBell({ doneWhen: 'something_else' }))).toBeNull();
+      });
+
+      test.each([
+        ['a draft the office has not touched', held(), null],
+        ['a send that failed', held({ status: 'send_failed' }), null],
+        ['a send that is only queued', held({ status: 'scheduled' }), null],
+        ['a send in flight', held({ status: 'sending' }), null],
+        ['sent', held({ status: 'sent', sent_at: at(30) }), 'Estimate was sent'],
+        ['viewed', held({ status: 'viewed' }), 'Estimate was sent'],
+        ['sent once, then a later send failed', held({ status: 'send_failed', sent_at: at(30) }), 'Estimate was sent'],
+        ['accepted', held({ status: 'accepted', accepted_at: at(30) }), 'Estimate was accepted'],
+        ['declined', held({ status: 'declined' }), 'Estimate was declined'],
+        ['expired', held({ status: 'expired' }), 'Estimate expired'],
+        ['archived', held({ archived_at: at(30) }), 'Estimate was archived'],
+      ])('%s', async (_label, estimate, reason) => {
+        mockTables.estimates = [estimate];
+        expect(await judged(heldBell(), null)).toMatchObject({ cls: 'tech_estimate_office_first', reason, would: null });
+      });
+
+      test('an estimate that is gone closes it; a bell with no estimate id closes nothing', async () => {
+        mockTables.estimates = [];
+        expect(await judged(heldBell(), null)).toMatchObject({ reason: 'Estimate was removed' });
+        expect(await judged({ ...heldBell({ estimateId: undefined }), link: '/admin/estimates' }, null)).toMatchObject({ reason: null });
+      });
+
+      test('the real sweep closes it with the reason and leaves a draft\'s bell open', async () => {
+        const sent = heldBell();
+        const draft = heldBell({ dedupeKey: 'tech-estimate-office-first:other', estimateId: uid(77) });
+        mockTables.notifications = [sent, draft];
+        mockTables.estimates = [held({ status: 'sent', sent_at: at(30) }), held({ id: uid(77) })];
+        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ retired: 1, byClass: { tech_estimate_office_first: 1 } });
+        expect(sent).toMatchObject({ done_by: 'relevance', resolution: 'Estimate was sent' });
+        expect(draft.done_at ?? null).toBeNull();
       });
     });
 
