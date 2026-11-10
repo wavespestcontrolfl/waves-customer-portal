@@ -8,6 +8,11 @@
  * so a pay run for an EARLIER week still pays the earlier rate when it is drafted after the step.
  * rateForWeek() is that rule; evaluate() in payroll-runs.js applies it with withWeekRates().
  *
+ * A step is for a W-2 employee. When the technician was made a contractor after the step was scheduled,
+ * the portal cancels the step on the day it is due (cancelled_by stays empty) and leaves the rate alone.
+ * Job costing reads the same history: payRatesOn() gives the rate in force on a visit's date, so a step
+ * applied later does not re-price an earlier visit (tech-cost-rates.js).
+ *
  * No feature gate. With no step rows every function here reads and returns what the payroll code did
  * before: withWeekRates() hands back the very same rows, applyDueSteps() changes nothing.
  * Nothing here sends a message to anyone.
@@ -107,6 +112,14 @@ async function withWeekRates(conn, rows, weekStart) {
   });
 }
 
+// technicians.pay_rate as it stood in the pay week that holds `day`, for technician rows ({ id, pay_rate }):
+// a Map of id -> rate. Job costing prices a visit with the rate of the visit's own week.
+async function payRatesOn(conn, technicians, day) {
+  const rows = technicians.map((tech) => ({ technician_id: tech.id, pay_rate: tech.pay_rate }));
+  const dated = await withWeekRates(conn, rows, staffWeekStartForWorkDate(day));
+  return new Map(dated.map((row) => [row.technician_id, row.pay_rate]));
+}
+
 // Steps waiting to be applied on `today` (Eastern date).
 const openDue = (conn, today) => conn('payroll_rate_steps').whereNull('applied_at').whereNull('cancelled_at').where('effective_on', '<=', today);
 
@@ -114,6 +127,33 @@ const openDue = (conn, today) => conn('payroll_rate_steps').whereNull('applied_a
 // first: the order finalizeRun uses (the lock, then the run row). Lock in the other order and a recompute
 // that applies a step can deadlock with a finalize of the same run.
 const hasDueSteps = async (conn, today = etDateString()) => Boolean(await openDue(conn, today).first('id'));
+
+// One due step, inside the caller's transaction; true when it changed the pay rate. The technician row is
+// locked first, so the employment type read here is the one in force when the rate changes. A technician
+// who is no longer a W-2 employee keeps the profile rate: the portal cancels the step and writes why.
+async function applyStep(trx, step) {
+  const tech = await trx('technicians').where({ id: step.technician_id }).forUpdate().first('id', 'pay_rate', 'employment_type');
+  if (tech.employment_type !== 'w2') {
+    await trx('payroll_rate_steps').where({ id: step.id }).update({ cancelled_at: trx.fn.now() });
+    await recordAuditEvent({
+      trx, critical: true, actor_type: 'system', actor_id: null,
+      action: 'payroll.rate_step_cancelled', resource_type: 'payroll_rate_steps', resource_id: step.id,
+      metadata: { technician_id: step.technician_id, rate_step_id: step.id, reason: 'not_w2' },
+    });
+    return false;
+  }
+  await trx('technicians').where({ id: step.technician_id }).update({ pay_rate: step.hourly_rate, updated_at: trx.fn.now() });
+  await trx('payroll_rate_steps').where({ id: step.id }).update({ previous_rate: tech.pay_rate, applied_at: trx.fn.now() });
+  // The same action a manual pay rate edit records (admin-timetracking.js), plus the step behind it.
+  await recordAuditEvent({
+    trx, critical: true, actor_type: 'system', actor_id: null,
+    action: 'payroll.pay_rate_changed', resource_type: 'technicians', resource_id: step.technician_id,
+    metadata: {
+      technician_id: step.technician_id, old_pay_rate: toNumber(tech.pay_rate), new_pay_rate: toNumber(step.hourly_rate), rate_step_id: step.id,
+    },
+  });
+  return true;
+}
 
 /**
  * Applies every step that is due on `today` (Eastern date), oldest first, inside the caller's
@@ -127,18 +167,7 @@ async function applyDueSteps(trx, { today = etDateString() } = {}) {
   const due = await open().orderBy([{ column: 'effective_on' }, { column: 'created_at' }, { column: 'id' }]).forUpdate().select('id', 'technician_id', 'hourly_rate');
   const applied = [];
   for (const step of due) {
-    const tech = await trx('technicians').where({ id: step.technician_id }).forUpdate().first('id', 'pay_rate');
-    await trx('technicians').where({ id: step.technician_id }).update({ pay_rate: step.hourly_rate, updated_at: trx.fn.now() });
-    await trx('payroll_rate_steps').where({ id: step.id }).update({ previous_rate: tech.pay_rate, applied_at: trx.fn.now() });
-    // The same action a manual pay rate edit records (admin-timetracking.js), plus the step behind it.
-    await recordAuditEvent({
-      trx, critical: true, actor_type: 'system', actor_id: null,
-      action: 'payroll.pay_rate_changed', resource_type: 'technicians', resource_id: step.technician_id,
-      metadata: {
-        technician_id: step.technician_id, old_pay_rate: toNumber(tech.pay_rate), new_pay_rate: toNumber(step.hourly_rate), rate_step_id: step.id,
-      },
-    });
-    applied.push(step.id);
+    if (await applyStep(trx, step)) applied.push(step.id);
   }
   return applied;
 }
@@ -229,5 +258,5 @@ async function cancelStep(stepId, actor, conn = db) {
 }
 
 module.exports = {
-  rateForWeek, withWeekRates, hasDueSteps, applyDueSteps, applyDueStepsDaily, suggestedDay90Monday, listSteps, createStep, cancelStep,
+  rateForWeek, withWeekRates, payRatesOn, hasDueSteps, applyDueSteps, applyDueStepsDaily, suggestedDay90Monday, listSteps, createStep, cancelStep,
 };

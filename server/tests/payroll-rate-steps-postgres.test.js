@@ -1,5 +1,6 @@
 // Real PostgreSQL transactions (rolled back): the pay rate step table (CHECKs, the unique open date, up and
-// down), applyDueSteps (applies once, stores the previous rate, one audit event), the admin routes
+// down), applyDueSteps (applies once, stores the previous rate, one audit event; a contractor's step is
+// cancelled, not applied), the admin routes
 // (create, duplicate 409, cancel, applied 409, the day-90 suggestion) and pay runs that read the steps: a week
 // before an applied step keeps the earlier rate even when drafted later, the step week gets the new rate, and
 // with no step the check is the technician's pay rate. All names are synthetic.
@@ -127,7 +128,8 @@ postgres('payroll pay rate steps', () => {
       expect(await refused(() => step(id, { hourly_rate: '0' }))).toBeTruthy();
       expect(await refused(() => step(id, { note: 'x'.repeat(501) }))).toBeTruthy();
       expect(await refused(() => step(id, { applied_at: new Date(), cancelled_at: new Date(), cancelled_by: ADMIN_ID }))).toBeTruthy();
-      expect(await refused(() => step(id, { cancelled_at: new Date() }))).toBeTruthy();
+      // An admin's name needs a cancel beside it; a cancel with no name is the portal's own (see applyDueSteps).
+      expect(await refused(() => step(id, { cancelled_by: ADMIN_ID }))).toBeTruthy();
       expect(await refused(() => step(id))).toBeUndefined();
     });
 
@@ -170,6 +172,36 @@ postgres('payroll pay rate steps', () => {
       expect(audits[0].metadata).toEqual({ technician_id: id, old_pay_rate: 23, new_pay_rate: 25, rate_step_id: due.id });
     });
 
+    it('a technician made a contractor before the step is due: the portal cancels the step and leaves the rate', async () => {
+      const id = await technician();
+      const due = await step(id);
+      await trx('technicians').where({ id }).update({ employment_type: '1099' });
+      expect(await steps.applyDueSteps(trx, { today: W2 })).toEqual([]);
+      const row = await trx('payroll_rate_steps').where({ id: due.id }).first();
+      expect(row.cancelled_at).toBeTruthy();
+      expect(row).toMatchObject({ applied_at: null, previous_rate: null, cancelled_by: null });
+      expect((await trx('technicians').where({ id }).first('pay_rate')).pay_rate).toBe('23.00');
+      expect(await rateAudits(id)).toHaveLength(0);
+      const cancels = await trx('audit_log').where({ action: 'payroll.rate_step_cancelled', resource_id: due.id });
+      expect(cancels).toHaveLength(1);
+      expect(cancels[0]).toMatchObject({ actor_type: 'system', actor_id: null });
+      expect(cancels[0].metadata).toEqual({ technician_id: id, rate_step_id: due.id, reason: 'not_w2' });
+      // Nothing is due any more: the next pay run waits for no payroll lock, and the list says Cancelled.
+      expect(await steps.hasDueSteps(trx, W2)).toBe(false);
+      expect((await steps.listSteps(id, trx)).steps[0]).toMatchObject({ id: due.id, status: 'cancelled' });
+    });
+
+    it('a W-2 technician with a due step and a contractor with one: only the W-2 rate changes', async () => {
+      const employee = await technician();
+      const contractor = await technician();
+      const kept = await step(employee);
+      await step(contractor);
+      await trx('technicians').where({ id: contractor }).update({ employment_type: '1099' });
+      expect(await steps.applyDueSteps(trx, { today: W2 })).toEqual([kept.id]);
+      expect((await trx('technicians').where({ id: employee }).first('pay_rate')).pay_rate).toBe('25.00');
+      expect((await trx('technicians').where({ id: contractor }).first('pay_rate')).pay_rate).toBe('23.00');
+    });
+
     it('catches up: a step from a missed week applies in date order on the next run', async () => {
       const id = await technician();
       const one = await step(id);
@@ -200,7 +232,8 @@ postgres('payroll pay rate steps', () => {
       expect(cancelled.status).toBe(200);
       expect(cancelled.body.step.status).toBe('cancelled');
       expect((await api('DELETE', `/rate-steps/${created.body.step.id}`)).status).toBe(409);
-      const audit = await trx('audit_log').whereIn('action', ['payroll.rate_step_created', 'payroll.rate_step_cancelled']).orderBy('created_at');
+      const audit = await trx('audit_log').where({ resource_id: created.body.step.id })
+        .whereIn('action', ['payroll.rate_step_created', 'payroll.rate_step_cancelled']).orderBy('created_at');
       expect(audit.map((r) => r.action).sort()).toEqual(['payroll.rate_step_cancelled', 'payroll.rate_step_created']);
       // The same date can be recorded again once the first was cancelled.
       expect((await api('POST', `/technicians/${id}/rate-steps`, { effectiveOn: day, hourlyRate: '26' })).status).toBe(201);

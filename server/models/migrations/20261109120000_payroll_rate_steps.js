@@ -6,7 +6,9 @@
  * (and every pay run) applies a step that is due: it stores the rate in force as previous_rate, sets
  * technicians.pay_rate to hourly_rate and stamps applied_at. previous_rate is what lets a pay run for a
  * week BEFORE the step still pay the earlier rate when it is drafted after the step was applied.
- * A step that has not been applied can be cancelled (cancelled_at); an applied step cannot.
+ * A step that has not been applied can be cancelled (cancelled_at); an applied step cannot. An admin's
+ * cancel stores cancelled_by. The portal cancels a due step itself, with cancelled_by empty, when the
+ * technician is no longer a W-2 employee.
  *
  * With no rows in this table every pay run reads what it read before: no existing column changes.
  */
@@ -30,7 +32,7 @@ exports.up = async function up(knex) {
     ADD CONSTRAINT payroll_rate_steps_rate_check CHECK (hourly_rate > 0 AND (previous_rate IS NULL OR previous_rate >= 0)),
     ADD CONSTRAINT payroll_rate_steps_monday_check CHECK (EXTRACT(ISODOW FROM effective_on) = 1),
     ADD CONSTRAINT payroll_rate_steps_not_both_check CHECK (applied_at IS NULL OR cancelled_at IS NULL),
-    ADD CONSTRAINT payroll_rate_steps_cancelled_by_check CHECK ((cancelled_at IS NULL) = (cancelled_by IS NULL)),
+    ADD CONSTRAINT payroll_rate_steps_cancelled_by_check CHECK (cancelled_by IS NULL OR cancelled_at IS NOT NULL),
     ADD CONSTRAINT payroll_rate_steps_note_check CHECK (note IS NULL OR char_length(note) <= 500)`);
 };
 
