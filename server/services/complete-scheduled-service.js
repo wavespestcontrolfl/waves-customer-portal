@@ -4884,7 +4884,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const activityScoresAvailable = await failSoftRead(db, (k) => k.schema.hasTable('service_activity_scores'), false);
     const useServiceReportV1 = true;
     let conditionsAtApplication = null;
-    // GATE_PEST_RAIN_OUTLOOK: the frozen 48-hour forecast summary, or null (gate off, not pest, unavailable).
+    // The frozen 48-hour forecast summary, or null (not pest, unavailable).
     let rainOutlookAtCompletion = null;
 
     const canLinkLawnAssessmentRecord = !isIncompleteVisit

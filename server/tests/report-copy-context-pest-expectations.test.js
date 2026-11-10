@@ -325,7 +325,7 @@ describe('buildReportCopyContext — writer rules: name-only products', () => {
   });
 });
 
-// GATE_PEST_LABEL_FACTS (owner 2026-10-24): the route passes the technician's
+// Owner 2026-10-24, "labels go": the route passes the technician's
 // own words as visitTexts; only the pests they name reach PRODUCT FACTS.
 describe('buildReportCopyContext — writer rules: label facts', () => {
   const ALPINE = {
@@ -343,21 +343,23 @@ describe('buildReportCopyContext — writer rules: label facts', () => {
     visitTexts: ['A German cockroach under the kitchen sink.'],
     knex: makeKnexStub({ customers: [CUSTOMER], catalogProducts: [ALPINE] }),
   });
-  afterEach(() => { delete process.env.GATE_PEST_LABEL_FACTS; });
-
-  test('on: a pest named in the note that the label names reaches PRODUCT FACTS', async () => {
-    process.env.GATE_PEST_LABEL_FACTS = 'true';
+  test('a pest named in the note that the label names reaches PRODUCT FACTS', async () => {
     const { contextText } = await run();
     expect(contextText).toContain('its label lists german cockroaches.');
   });
 
-  test('off (unset or not exactly "true"): no label fact', async () => {
-    for (const value of [undefined, '1', 'TRUE']) {
-      if (value === undefined) delete process.env.GATE_PEST_LABEL_FACTS;
-      else process.env.GATE_PEST_LABEL_FACTS = value;
-      const { contextText } = await run();
-      expect(contextText).toContain('PRODUCT FACTS');
-      expect(contextText).not.toContain('label lists');
-    }
+  test('a pest the note does not name adds no label fact', async () => {
+    const { contextText } = await buildReportCopyContext({
+      customerId: 'c1',
+      serviceType: 'Pest Control Service',
+      serviceLine: 'pest',
+      serviceDate: '2026-07-15',
+      products: [{ productId: 'p3', name: 'Alpine WSG', applicationMethod: 'spot_treatment', applicationArea: 'Kitchen' }],
+      writerRules: true,
+      visitTexts: ['Quiet visit, sprayed the kitchen.'],
+      knex: makeKnexStub({ customers: [CUSTOMER], catalogProducts: [ALPINE] }),
+    });
+    expect(contextText).toContain('PRODUCT FACTS');
+    expect(contextText).not.toContain('label lists');
   });
 });
