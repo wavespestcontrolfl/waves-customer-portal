@@ -18,7 +18,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../middleware/admin-auth', () => ({
   ...jest.requireActual('../middleware/admin-auth'),
   adminAuthenticate: (req, _res, next) => {
-    req.technician = { id: mockCaller.id, role: mockCaller.role };
+    req.technician = { id: mockCaller.id, role: mockCaller.role, name: 'Taylor Example' };
     req.technicianId = mockCaller.id;
     req.techRole = mockCaller.role;
     return next();
@@ -91,6 +91,7 @@ const lookupRoutes = require('../routes/property-lookup-v2');
 const persistence = require('../services/admin-estimate-persistence');
 const soldBy = require('../services/estimate-sold-by');
 const auditLog = require('../services/audit-log');
+const NotificationService = require('../services/notification-service');
 const knownCaller = require('../utils/known-caller-phone');
 const { technicianMayReach } = require('../middleware/technician-scope');
 const { PEST_SERVICES, _private: { ENGINE_SERVICES } } = require('../services/tech-estimate-price');
@@ -146,16 +147,16 @@ function prepared({ monthly = 37.33, annual = 448, oneTime = 99, authority = 'SE
 
 // What the real (not dry) save returns: the stored row (numeric columns as pg gives them) with its token, and the
 // flags. Extra keys prove nothing leaks.
-function saved({ reused = false, status = 'draft', warning = null } = {}) {
+function saved({ reused = false, status = 'draft', warning = null, customerName = null } = {}) {
   const base = prepared({ monthly: 37.33, annual: 448, oneTime: 99 }).estimate;
   return {
     reused,
     memberLinkageWarning: warning,
-    estimate: { ...base, id: ESTIMATE_ID, status, customer_id: CUSTOMER_ID, monthly_total: '37.33', annual_total: '448.00', onetime_total: '99.00', estimate_data: JSON.parse(base.estimate_data) },
+    estimate: { ...base, id: ESTIMATE_ID, status, customer_id: CUSTOMER_ID, customer_name: customerName, monthly_total: '37.33', annual_total: '448.00', onetime_total: '99.00', estimate_data: JSON.parse(base.estimate_data) },
   };
 }
 
-let server; let baseUrl; let lookupSpy; let saveSpy; let creditSpy; let auditSpy; let phoneSpy;
+let server; let baseUrl; let lookupSpy; let saveSpy; let creditSpy; let auditSpy; let phoneSpy; let bellSpy;
 beforeAll(() => new Promise((resolve) => {
   const app = express();
   app.use(express.json());
@@ -185,7 +186,7 @@ beforeEach(() => {
       { service_category: 'lawn', state: 'qualified' },
     ],
     customers: [
-      { id: CUSTOMER_ID, address_line1: '100 Sample St', address_line2: null, city: 'Sampletown', state: 'FL', zip: '34202' },
+      { id: CUSTOMER_ID, first_name: 'Casey', last_name: 'Sample', address_line1: '100 Sample St', address_line2: null, city: 'Sampletown', state: 'FL', zip: '34202' },
       { id: UNIT_CUSTOMER_ID, address_line1: '300 Sample St', address_line2: 'Apt 4', city: 'Sampletown', state: 'FL', zip: '34202' },
     ],
   });
@@ -194,6 +195,8 @@ beforeEach(() => {
   creditSpy = jest.spyOn(soldBy, 'creditCreator').mockImplementation(async (_trx, estimate) => ({ ...estimate, sold_by_source: 'creator' }));
   auditSpy = jest.spyOn(auditLog, 'recordAuditEvent').mockResolvedValue(null);
   phoneSpy = jest.spyOn(knownCaller, 'findKnownCallerCustomer').mockResolvedValue(null);
+  // The bell: the real compose rules run (they throw under test); only the write behind them is stubbed.
+  bellSpy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'bell-1' });
 });
 afterEach(() => {
   jest.restoreAllMocks();
@@ -724,6 +727,107 @@ describe('POST /api/tech/estimates: the answer and what is recorded', () => {
     expect(res.status).toBe(200);
     expect(creditSpy).not.toHaveBeenCalled();
     expect(auditSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 2b: one bell for a held estimate
+
+describe('POST /api/tech/estimates: the office bell for a held estimate', () => {
+  const HELD = { customerId: CUSTOMER_ID, services: ['PEST'], facts: { homeSqFt: 2600 } };
+  const ring = () => bellSpy.mock.calls.map(([category, headline, why, opts]) => ({ category, headline, why, opts }));
+
+  test('a held create rings ONE bell with the eight parts, after the transaction', async () => {
+    const res = await create(HELD);
+    expect(res.status).toBe(200);
+    expect(bellSpy).toHaveBeenCalledTimes(1);
+    const [{ category, headline, why, opts }] = ring();
+    expect(category).toBe('estimate');
+    expect(headline).toBe('Estimates — check Taylor\'s estimate for Casey Sample');
+    expect(headline.length).toBeLessThanOrEqual(60);
+    expect(why).toBe('The technician changed the home size, so it waits for your check before it goes.');
+    expect(why.length).toBeLessThanOrEqual(110);
+    expect(opts).toMatchObject({
+      bell: true,
+      dedupeKey: `tech-estimate-office-first:${ESTIMATE_ID}`,
+      link: `/admin/estimates?estimateId=${ESTIMATE_ID}`,
+      metadata: { area: 'Estimates', severity: 'needs-you', who: 'person', doneWhen: 'estimate_sent_or_closed', subject: { type: 'estimate', id: ESTIMATE_ID }, estimateId: ESTIMATE_ID },
+    });
+    expect(opts.dedupeOpenOnly).toBeUndefined();
+    expect(opts.detail).toMatch(/home size/);
+    // The transaction had already returned: the bell is not part of it.
+    expect(bellSpy.mock.invocationCallOrder[0]).toBeGreaterThan(auditSpy.mock.invocationCallOrder[0]);
+  });
+
+  test('nothing from the bell reaches the technician\'s answer', async () => {
+    const res = await create(HELD);
+    expect(JSON.stringify(res.body)).not.toMatch(/waits for your check|check Taylor|estimateId=|tech-estimate-office-first|bell/i);
+  });
+
+  test.each([
+    ['a changed fact', ['changed_fact:lotSqFt', 'one_time_over_limit', 'engine_review'], 'The technician changed the lot size, so it waits for your check before it goes.'],
+    ['the first changed fact in the tool\'s order', ['changed_fact:stories', 'changed_fact:homeSqFt'], 'The technician changed the home size, so it waits for your check before it goes.'],
+    ['a one-time job over the limit', ['one_time_over_limit', 'engine_review', 'member_address'], 'A one-time job over $1,000 waits for your check before it goes.'],
+    ['an engine line to review', ['engine_review', 'member_address'], 'The price needs your check before it goes.'],
+    ['a member address', ['member_address'], 'This may be a current customer, so check who it is before it goes.'],
+    ['a phone that matches a customer', ['phone_matches_customer'], 'This may be a current customer, so check who it is before it goes.'],
+  ])('why for %s', async (_label, detailed, expected) => {
+    const ringOffice = require('../services/tech-estimate-office-bell').ringOfficeFirst;
+    await ringOffice({ estimate: saved().estimate, detailed, technician: { id: 'tech-1', name: 'Taylor Example' } });
+    expect(ring()[0].why).toBe(expected);
+    expect(expected.length).toBeLessThanOrEqual(110);
+    // The full list is in the detail, in words.
+    expect(ring()[0].opts.detail).not.toMatch(/_/);
+  });
+
+  test('a long name still fits the 60-character headline', async () => {
+    saveSpy.mockImplementation(async (arg) => (arg.dryRun ? prepared() : saved({ customerName: 'Bartholomew Montgomery-Featherstonehaugh III' })));
+    await create(HELD);
+    expect(ring()[0].headline.length).toBeLessThanOrEqual(60);
+    expect(ring()[0].headline).toMatch(/^Estimates — check Taylor's estimate for Bartholomew/);
+  });
+
+  test('a quote the technician may send himself rings nothing', async () => {
+    const res = await create({ customerId: CUSTOMER_ID, services: ['PEST'] });
+    expect(res.body.officeFirst.required).toBe(false);
+    expect(bellSpy).not.toHaveBeenCalled();
+  });
+
+  test('a retry rings nothing', async () => {
+    saveSpy.mockImplementation(async (arg) => (arg.dryRun ? prepared() : saved({ reused: true })));
+    mockState.toolRow = { office_first_reasons: ['changed_fact:homeSqFt'] };
+    const res = await create(HELD);
+    expect(res.status).toBe(200);
+    expect(res.body.officeFirst.required).toBe(true);
+    expect(bellSpy).not.toHaveBeenCalled();
+  });
+
+  test('a lost insert race rings nothing (the winner rings)', async () => {
+    mockState.conflict = true;
+    mockState.toolRow = { office_first_reasons: ['changed_fact:homeSqFt'] };
+    expect((await create(HELD)).status).toBe(200);
+    expect(bellSpy).not.toHaveBeenCalled();
+  });
+
+  test('a save the office refuses rings nothing', async () => {
+    saveSpy.mockImplementation(async (arg) => { if (arg.dryRun) return prepared(); throw Object.assign(new Error('x'), { statusCode: 409 }); });
+    expect((await create(HELD)).status).toBe(422);
+    expect(bellSpy).not.toHaveBeenCalled();
+  });
+
+  test('a bell that cannot be raised never fails the create: 200, the same answer, one log line with ids only', async () => {
+    const quiet = await create(HELD);
+    bellSpy.mockClear();
+    bellSpy.mockRejectedValue(Object.assign(new Error('db down for Casey Sample 941-555-0142'), { code: 'ECONNRESET' }));
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    const res = await create(HELD);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(quiet.body);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const line = logger.warn.mock.calls[0][0];
+    expect(line).toContain(ESTIMATE_ID);
+    expect(line).not.toMatch(/Casey|941|db down/);
   });
 });
 

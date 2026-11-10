@@ -14,7 +14,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../middleware/admin-auth', () => ({
   ...jest.requireActual('../middleware/admin-auth'),
   adminAuthenticate: (req, _res, next) => {
-    req.technician = { id: mockCaller.id, role: mockCaller.role };
+    req.technician = { id: mockCaller.id, role: mockCaller.role, name: 'Synthetic Tech' };
     req.technicianId = mockCaller.id;
     req.techRole = mockCaller.role;
     return next();
@@ -365,6 +365,67 @@ postgres('the technician estimate tool (migrated PostgreSQL)', () => {
       expect(preview.body.officeFirst).toEqual({ required: true, reasons: ['office_review'] });
       expect(saved.body.officeFirst).toEqual({ required: true, reasons: ['office_review'] });
       expect((await trx('tech_estimates').where({ estimate_id: saved.body.id }).first()).office_first_reasons).toEqual(['phone_matches_customer']);
+    });
+  });
+
+  describe('the office bell for a held estimate', () => {
+    const bells = (estimateId) => trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`tech-estimate-office-first:${estimateId}`]);
+    const HELD = () => ({ customerId: ids.routeCustomer, services: ['PEST'], facts: { homeSqFt: 4200, stories: 2 } });
+
+    test('a held create writes one open bell row for the estimate; a quote he may send himself writes none', async () => {
+      const clean = await priceThenCreate({ customerId: ids.routeCustomer, services: ['PEST'] });
+      expect(clean.saved.body.officeFirst.required).toBe(false);
+      expect(await bells(clean.saved.body.id)).toEqual([]);
+
+      const { saved } = await priceThenCreate(HELD());
+      expect(saved.status).toBe(200);
+      const rows = await bells(saved.body.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual(expect.objectContaining({
+        category: 'estimate', title: 'Estimates — check Synthetic\'s estimate for Synthetic Fixture',
+        body: 'The technician changed the home size, so it waits for your check before it goes.',
+        link: `/admin/estimates?estimateId=${saved.body.id}`, done_at: null,
+      }));
+      expect(rows[0].metadata).toEqual(expect.objectContaining({
+        area: 'Estimates', severity: 'needs-you', who: 'person', doneWhen: 'estimate_sent_or_closed', estimateId: saved.body.id,
+        subject: { type: 'estimate', id: saved.body.id }, technicianId: ids.technicianId,
+      }));
+      expect(JSON.stringify(saved.body)).not.toMatch(/waits for your check|notification/i);
+    });
+
+    test('a retry, and a second raise for the same estimate, add no row (even after the row is closed)', async () => {
+      const body = HELD();
+      const { preview, saved } = await priceThenCreate(body);
+      const again = await create({ ...body, clientDraftId: saved.body.id, digest: preview.body.digest });
+      expect(again.status).toBe(200);
+      expect(await bells(saved.body.id)).toHaveLength(1);
+
+      const { ringOfficeFirst } = require('../services/tech-estimate-office-bell');
+      const estimate = await estimateRow(saved.body.id);
+      const raise = () => ringOfficeFirst({ estimate, detailed: ['changed_fact:homeSqFt'], technician: { id: ids.technicianId, name: 'Synthetic Tech' } });
+      await raise();
+      expect(await bells(saved.body.id)).toHaveLength(1);
+      // A closed row still holds the key: the estimate never rings twice.
+      await bells(saved.body.id).update({ done_at: new Date(), done_by: 'test', resolution: 'done' });
+      await raise();
+      expect(await bells(saved.body.id)).toHaveLength(1);
+    });
+
+    test.each([
+      ['sent', { status: 'sent', sent_at: new Date() }, 'Estimate was sent'],
+      ['archived', { archived_at: new Date() }, 'Estimate was archived'],
+    ])('the row closes itself when the estimate is %s (the real sweep, the real predicate)', async (_label, patch, resolution) => {
+      const { saved } = await priceThenCreate(HELD());
+      const { runAdminAlertRelevanceSweep } = require('../services/admin-alert-relevance');
+      // Still a draft: the sweep leaves it open.
+      await runAdminAlertRelevanceSweep();
+      expect((await bells(saved.body.id))[0].done_at).toBeNull();
+      await trx('estimates').where({ id: saved.body.id }).update(patch);
+      await runAdminAlertRelevanceSweep();
+      const [row] = await bells(saved.body.id);
+      expect(row).toEqual(expect.objectContaining({ done_by: 'relevance', resolution }));
+      expect(row.done_at).toBeInstanceOf(Date);
     });
   });
 

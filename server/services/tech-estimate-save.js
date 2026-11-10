@@ -2,8 +2,8 @@
 
 /**
  * The technician estimate tool, step 2a (GATE_TECH_ESTIMATES, owner 2026-11-09): save the quote as a DRAFT
- * estimate and read his own. Nothing is sent, texted or emailed here (the office bell is step 2b, the send is
- * step 4).
+ * estimate and read his own. Nothing is sent, texted or emailed here (the send is step 4). Step 2b rings the office bell once for a
+ * new held estimate, after the commit (ringIfHeld).
  *
  * The create rebuilds the quote exactly as the preview does (tech-estimate-price.js prepareQuote/judgeQuote),
  * then calls the SAME shared save (admin-estimate-persistence createOrReuseAdminEstimate), without dryRun, with
@@ -19,6 +19,7 @@
  */
 
 const db = require('../models/db');
+const logger = require('./logger');
 const Price = require('./tech-estimate-price');
 const { roundMoney } = require('./billing-cadence');
 
@@ -61,7 +62,7 @@ async function recordToolEstimate(trx, req, saved, detailed) {
     // A retry. An id that is not his tool estimate (an office estimate, or another login's) is refused.
     const row = await stored();
     if (!row) throw Price.officePrices();
-    return { estimate, detailed: row.office_first_reasons || [] };
+    return { estimate, detailed: row.office_first_reasons || [], created: false };
   }
   // Sold by = the creator, for a W-2 technician only: an admin login is never credited.
   const credited = req.techRole === 'admin' ? estimate
@@ -76,7 +77,7 @@ async function recordToolEstimate(trx, req, saved, detailed) {
     critical: true,
     trx,
   });
-  return { estimate: credited, detailed };
+  return { estimate: credited, detailed, created: true };
 }
 
 async function saveDraft(req, { prep, clientDraftId, digest, detailed }) {
@@ -97,12 +98,25 @@ async function saveDraft(req, { prep, clientDraftId, digest, detailed }) {
   }
 }
 
+// Step 2b: a NEW estimate held for the office rings the admin bell once (tech-estimate-office-bell.js). It runs after the
+// transaction has committed. A failure to raise is logged (ids only) and never fails the create: the estimate is saved and
+// the office also sees it in the estimate list.
+async function ringIfHeld(req, saved) {
+  if (!saved.created || saved.detailed.length === 0) return;
+  try {
+    await require('./tech-estimate-office-bell').ringOfficeFirst({ estimate: saved.estimate, detailed: saved.detailed, technician: req.technician });
+  } catch (err) {
+    logger.warn(`[tech-estimates] office bell not raised for estimate ${saved.estimate.id} (technician ${req.technicianId}): ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
+  }
+}
+
 async function createQuote(req, body) {
   const { clientDraftId, digest } = createKeys(body);
   const prep = await Price.prepareQuote(req, body);
   const judged = await Price.judgeQuote(req, prep);
   const phoneMatch = await Price.phoneMatchesCustomer(prep.subject);
   const saved = await saveDraft(req, { prep, clientDraftId, digest, detailed: Price.detailedReasons(prep, judged, { phoneMatch }) });
+  await ringIfHeld(req, saved);
   return {
     id: saved.estimate.id,
     status: saved.estimate.status,
