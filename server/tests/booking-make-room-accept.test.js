@@ -29,6 +29,32 @@ describe('isRefusalCode', () => {
   test.each(['ROUTE_CHANGED', '40P01', undefined])('%s is not', (code) => expect(accept.isRefusalCode(code)).toBe(false));
 });
 
+// Codex pre-push P1 on PR 4: the moved rows are locked before the accept's proof (slot-reservation moveMakeRoomStops).
+describe('lockMakeRoomStops', () => {
+  const builder = () => {
+    const b = { select: jest.fn(async () => [{ id: 'visit-b' }, { id: 'visit-c' }]) };
+    for (const name of ['whereIn', 'orderBy', 'forUpdate']) b[name] = jest.fn(() => b);
+    return b;
+  };
+
+  test('locks each moved stop once, FOR UPDATE, in id order', async () => {
+    const b = builder();
+    const trx = jest.fn(() => b);
+    await expect(accept.lockMakeRoomStops(trx, { moves: [{ id: 'visit-c' }, { id: 'visit-b' }, { id: 'visit-c' }] })).resolves.toHaveLength(2);
+    expect(trx).toHaveBeenCalledWith('scheduled_services');
+    expect(b.whereIn).toHaveBeenCalledWith('id', ['visit-b', 'visit-c']);
+    expect(b.orderBy).toHaveBeenCalledWith('id');
+    expect(b.forUpdate).toHaveBeenCalled();
+  });
+
+  test('no moves: no query', async () => {
+    const trx = jest.fn();
+    await expect(accept.lockMakeRoomStops(trx, { moves: [] })).resolves.toEqual([]);
+    await expect(accept.lockMakeRoomStops(trx, null)).resolves.toEqual([]);
+    expect(trx).not.toHaveBeenCalled();
+  });
+});
+
 describe('writeMakeRoomMoves', () => {
   const trxWith = (rows) => {
     const trx = jest.fn(() => ({ whereIn: () => ({ select: async () => rows }) }));

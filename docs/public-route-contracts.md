@@ -1806,7 +1806,8 @@ off); a hold's own row never blocks itself. `/extend` re-proves a make-room
 hold's hour, or supersedes the hold through the existing
 `SLOT_UNAVAILABLE` path. Accepting a make-room hold (the accept routes'
 `commitReservation`, gate read inside the transaction) moves the stops: it
-takes the tech-day locks after the date lock, proves the chain again with the
+takes the tech-day locks after the date lock, locks the moved stops' rows
+(`FOR UPDATE`, in id order, held to the end), proves the chain again with the
 accepted service profile (it must equal the stored chain, and no other live
 chain may clash), writes the moved stops' new windows and one
 `reschedule_log` row each (`booking_make_room`) before the overlap probes, all

@@ -32,6 +32,18 @@ function loadDeps() {
 }
 
 /**
+ * The moved stops' rows, FOR UPDATE in id order, before the accept proves the chain again (Codex pre-push P1 on PR 4).
+ * A writer that does not take the occupancy lock, such as a customer's confirmation (routes/schedule.js), then either
+ * commits first, and the proof and recheckVisit see it, or waits for the accept to end. The day re-plan's writeDay locks
+ * its rows the same way (after rung 1 and rung 3, in id order); the locks hold through the writes, to the transaction's end.
+ */
+async function lockMakeRoomStops(trx, payload) {
+  const ids = [...new Set((payload?.moves || []).map((move) => String(move.id)))].sort();
+  if (!ids.length) return [];
+  return trx('scheduled_services').whereIn('id', ids).orderBy('id').forUpdate().select('id');
+}
+
+/**
  * The chain's moves, written inside the caller's transaction: every moved stop is re-checked, then written with its
  * reschedule_log row, then the final state must pass the occupancy predicate. Throws the apply.js codes untouched
  * (isRefusalCode); the caller turns them into the ordinary slot-taken answer, and its rollback undoes every write.
@@ -120,6 +132,6 @@ async function reconcileMakeRoomMoves(conn, { today, deps = null }) {
 }
 
 module.exports = {
-  writeMakeRoomMoves, makeRoomAfterCommit, scheduleMakeRoomAfterCommit, reconcileMakeRoomMoves, isRefusalCode,
+  lockMakeRoomStops, writeMakeRoomMoves, makeRoomAfterCommit, scheduleMakeRoomAfterCommit, reconcileMakeRoomMoves, isRefusalCode,
   _internals: { REFUSAL_CODES, REPAIR_LOOKBACK_DAYS, minutesOf },
 };

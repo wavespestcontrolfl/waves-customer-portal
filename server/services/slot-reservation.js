@@ -1051,13 +1051,16 @@ async function writeChainOrRefuse(client, { row, scheduledDate }) {
  * commitReservation, a make-room hold (row.make_room_moves): the accept moves the regular stops later, inside the accept
  * transaction. Runs under the locks commitReservation holds (rung 1, the tech-days, the hold's row), after the service
  * profile resolved and BEFORE the narrow and global overlap probes, which then see the stops at their new hours; any
- * refusal there rolls the moves back with the rest. Order: the gate (read in the transaction), the chain proven again
- * and equal to the stored one, no clash with another live chain, then the writes. Every failure is the ordinary
+ * refusal there rolls the moves back with the rest. Order: the gate (read in the transaction), the moved stops' rows
+ * locked (FOR UPDATE, id order), the chain proven again and equal to the stored one, no clash with another live chain,
+ * then the writes. Every failure is the ordinary
  * slot-taken answer with nothing written. Returns the written visits ([] when the hold has no chain).
  */
 async function moveMakeRoomStops(client, { row, estimate, serviceProfile, effectiveDurationMinutes, scheduledDate, useCapacity }) {
   if (!row.make_room_moves) return [];
   if (useCapacity || !makeRoomHoldsOn()) throw refuseMakeRoomAccept(row, scheduledDate, 'mode_not_on');
+  // The moved stops' rows first, in id order, held to the end: nothing changes them between the proof and the writes.
+  await require('./scheduling/booking-make-room-accept').lockMakeRoomStops(client, row.make_room_moves);
   const proof = await reproveMakeRoomChain(client, { row, estimate, serviceProfile, effectiveDurationMinutes, scheduledDate });
   if (!proof.moves) throw refuseMakeRoomAccept(row, scheduledDate, `proof_${proof.reason}`);
   if (!sameMakeRoomChain(proof.payload, row.make_room_moves)) throw refuseMakeRoomAccept(row, scheduledDate, 'chain_changed');

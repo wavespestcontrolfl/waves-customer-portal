@@ -70,10 +70,14 @@ const heldRow = (extra = {}) => ({
  * clash probes (one per moved stop, then the shared-stop probe), the moved rows' window_end read, the narrow check, the
  * committed probe, the graduation update.
  */
-function commitTrx({ pre = heldRow(), locked = heldRow(), narrow = null, global = [], clash = [null, null, null], skipChain = false, executionPromise = undefined } = {}) {
+function commitTrx({ pre = heldRow(), locked = heldRow(), narrow = null, global = [], clash = [null, null, null], skipChain = false, lockRows = !skipChain, executionPromise = undefined } = {}) {
+  const lock = chain('lock-moved', { select: jest.fn(async () => { events.push('lock-moved'); return [{ id: 'visit-b' }, { id: 'visit-c' }]; }) });
+  lock.orderBy = jest.fn(() => lock);
   const queue = [
     firstOf('pre-read', pre),
     firstOf('reload', locked),
+    // The moved stops' rows, FOR UPDATE, right before the proof (reached whenever the gate check passes).
+    ...(lockRows ? [lock] : []),
     ...(skipChain ? [] : [
       firstOf('chain-probe-1', clash[0]), firstOf('chain-probe-2', clash[1]), firstOf('chain-probe-3', clash[2]),
       chain('moved-rows', { select: jest.fn(async () => { events.push('moved-rows'); return [{ id: 'visit-b', window_end: '10:00:00' }, { id: 'visit-c', window_end: null }]; }) }),
@@ -97,7 +101,7 @@ function commitTrx({ pre = heldRow(), locked = heldRow(), narrow = null, global 
     return { raw: sql };
   });
   if (executionPromise) trx.executionPromise = executionPromise;
-  return { trx, update, queue };
+  return { trx, update, queue, lock };
 }
 
 const accept = (trx, extra = {}) => slotReservation.commitReservation({
@@ -148,6 +152,21 @@ describe('commitReservation — a make-room hold moves the stops at accept (mode
     expect(estimateSlotAvailability.verifyMakeRoomOffer).toHaveBeenCalledWith(expect.objectContaining({ date: DATE, windowStart: '09:00:00', techId: 'tech-1', durationMinutes: 60 }));
   });
 
+  // Codex pre-push P1 on PR 4: a customer's confirmation takes no occupancy lock, so the moved rows are locked before
+  // the proof and held through the writes; a confirmation that lands first is seen, one that lands later waits.
+  test('the moved stops\' rows are locked FOR UPDATE, in id order, after the tech-day locks and before the proof', async () => {
+    estimateSlotAvailability.verifyMakeRoomOffer.mockImplementation(async () => { events.push('proof'); return PROOF; });
+    const { trx, lock } = commitTrx();
+    await expect(accept(trx)).resolves.toMatchObject({ id: 'hold-1' });
+    const at = (name) => events.indexOf(name);
+    expect(at('lock-moved')).toBeGreaterThan(at('lock:tech-day:unassigned'));
+    expect(at('proof')).toBeGreaterThan(at('lock-moved'));
+    expect(at('recheck')).toBeGreaterThan(at('proof'));
+    expect(lock.whereIn).toHaveBeenCalledWith('id', ['visit-b', 'visit-c']);
+    expect(lock.orderBy).toHaveBeenCalledWith('id');
+    expect(lock.forUpdate).toHaveBeenCalled();
+  });
+
   test('the tech-day locks are two (this technician, the unassigned day) and follow rung 1', async () => {
     const { trx } = commitTrx();
     await accept(trx);
@@ -162,11 +181,12 @@ describe('commitReservation — a make-room hold moves the stops at accept (mode
     expect(estimateSlotAvailability.verifyMakeRoomOffer).not.toHaveBeenCalled();
     expect(apply._internals.writeMoves).not.toHaveBeenCalled();
     expect(update.update).not.toHaveBeenCalled();
+    expect(events).not.toContain('lock-moved');
   });
 
   test('the proof fails: the ordinary slot-taken answer, nothing written', async () => {
     estimateSlotAvailability.verifyMakeRoomOffer.mockResolvedValue({ reason: 'no_chain' });
-    const { trx, update } = commitTrx({ skipChain: true });
+    const { trx, update } = commitTrx({ skipChain: true, lockRows: true });
     await expect(accept(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: `${DATE}_09-00_tech-1` });
     expect(apply._internals.recheckVisit).not.toHaveBeenCalled();
     expect(apply._internals.writeMoves).not.toHaveBeenCalled();
@@ -175,7 +195,7 @@ describe('commitReservation — a make-room hold moves the stops at accept (mode
 
   test('the proof differs from the stored chain (a stop moved later again): slot-taken, nothing written', async () => {
     estimateSlotAvailability.verifyMakeRoomOffer.mockResolvedValue({ shiftMin: 60, moves: [{ ...PROOF.moves[0], to: '10:30' }, PROOF.moves[1]] });
-    const { trx } = commitTrx({ skipChain: true });
+    const { trx } = commitTrx({ skipChain: true, lockRows: true });
     await expect(accept(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
     expect(apply._internals.writeMoves).not.toHaveBeenCalled();
   });
