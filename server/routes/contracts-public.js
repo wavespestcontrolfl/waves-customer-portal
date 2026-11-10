@@ -30,11 +30,10 @@ const DRAWN_SIGNATURE_LIMITS = Object.freeze({
   maxPixels: 1200 * 1000,
 });
 
-// The public payload of a contract. A consumer notice or a residential service agreement issued from
-// the estimate page (services/estimate-consumer-notice.js and services/estimate-service-agreement.js
-// mark their snapshots) also carries fromEstimate: true, so the signing page can offer "Back to your
-// estimate". The estimate id and token never leave the server.
-const FROM_ESTIMATE_SOURCES = new Set(['estimate_consumer_notice', 'estimate_service_agreement']);
+// The public payload of a contract. A consumer notice issued from the estimate page
+// (services/estimate-consumer-notice.js marks its snapshot) also carries fromEstimate: true, so the
+// signing page can offer "Back to your estimate". The estimate id and token never leave the server.
+const FROM_ESTIMATE_SOURCES = new Set(['estimate_consumer_notice']);
 // A Commercial Pest Service Agreement issued from the proposal page offers the way back too while
 // GATE_COMMERCIAL_FIRST_VISIT is on: the first visit is picked back on the estimate page.
 function publicContract(row) {
