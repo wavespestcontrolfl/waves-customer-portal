@@ -58,6 +58,16 @@ describe('open visit screen — admin look', () => {
     expect(onLead).toHaveBeenCalledWith(SERVICE);
   });
 
+  it('shows the Estimate button next to the flag only when the estimate tool handler is given', () => {
+    renderVisit();
+    expect(screen.queryByRole('button', { name: 'Estimate' })).not.toBeInTheDocument();
+    cleanup();
+    const onEstimate = vi.fn();
+    renderVisit({ onEstimate });
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate' }));
+    expect(onEstimate).toHaveBeenCalledWith(SERVICE);
+  });
+
   it('uses line icons, not emoji, on every action and contact button', () => {
     renderVisit({ onOutcome: vi.fn() });
     const panel = screen.getByTestId('visit-brief-panel');
