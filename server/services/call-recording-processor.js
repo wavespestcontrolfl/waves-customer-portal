@@ -10565,7 +10565,8 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
         },
         thirdPartyNatureDefault: callApplicantHandlingLive(),
       });
-      await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
+      const written = await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
+      await keepComplaintCallAlert({ written, disposition, call, callSid, customerId, extracted });
       // ...and once more after the write: a confirm that landed between the read
       // and the write found nothing to flip, so flip it now (compare-and-swap on
       // the pending value we just wrote).
@@ -11031,6 +11032,73 @@ async function keepOutOfAreaHoldRecords({ call, callSid, transcription, extracte
       await require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, alert.opts);
     }
   } catch (err) { failed('alert', err); }
+}
+
+// The one Comms alert for a call whose final label is complaint_escalated (the label alone rang nothing). The
+// customer's name is the one on file: the extraction's caller name is sometimes the staff member's. The quote is
+// the extractor's pain points, else its call summary, masked like every bell body; a quote that would break the
+// copy rules is left out of the why and stays in the detail.
+function buildComplaintCallAlert({ call, customerId, name = null, extracted }) {
+  const { fitAction, redactedWords, whyWithQuote } = require('./admin-alert-names');
+  const { firstSentence, breaksAlertRules } = require('./admin-alert-compose');
+  const who = name || 'the customer';
+  const points = (Array.isArray(extracted?.pain_points) ? extracted.pain_points : [extracted?.pain_points])
+    .filter((p) => typeof p === 'string' && p.trim()).join('; ');
+  const summary = typeof extracted?.call_summary === 'string' ? extracted.call_summary : '';
+  const said = redactedWords(firstSentence(points || summary)).replace(/[.\s]+$/u, '');
+  const when = callTimeETString(callStartedAt(call))?.replace(/\s/g, ' ');
+  const lead = when ? `Complained on the ${when} call: ` : 'Complained on this call: ';
+  const why = said && !breaksAlertRules(said)
+    ? whyWithQuote({ lead, quote: said, tail: '.' })
+    : `Complained on ${when ? `the ${when}` : 'this'} call.`;
+  const buttons = require('./alert-call-button').callButtons({ callLogId: call.id });
+  return {
+    category: 'customer',
+    spec: {
+      area: 'Comms',
+      action: fitAction('Comms', who, [(n) => `call ${n} about a complaint`, (n) => `call ${n}`]),
+      why,
+      severity: 'needs-you',
+      link: `/admin/communications#tab=calls&call=${encodeURIComponent(call.id)}`,
+      subject: { type: 'call', id: String(call.id) },
+      doneWhen: 'complaint_answered',
+      who: 'person',
+      contact: true,
+      ...(buttons ? { buttons } : {}),
+    },
+    opts: {
+      bell: true,
+      dedupeKey: `call-complaint:${call.id}`,
+      detail: [
+        `The call was labeled a complaint from a known customer${when ? ` (${when})` : ''}. Call them back. Nothing was sent to the customer.`,
+        points && `Pain points: ${redactedWords(points)}`,
+        summary && `Summary: ${redactedWords(summary)}`,
+      ].filter(Boolean).join('\n'),
+      metadata: { callLogId: call.id, customerId: String(customerId), source: 'call_complaint' },
+    },
+  };
+}
+
+// Raise it once per call, right after the label is written. All of these must hold, or nothing rings: this pass
+// wrote complaint_escalated, a customer is known and is not a test customer, the call is not a voice-relay
+// sandbox or tech-line call, and it ended in the last 24 hours (a reprocess of an old call stays quiet). One
+// bell per call ever: dedupeKey with no dedupeOpenOnly, so a reprocess neither rings again nor re-opens a closed
+// bell. A failure is logged by code and never fails the call. Sends nothing to the customer.
+async function keepComplaintCallAlert({ written, disposition, call, callSid, customerId = null, extracted = null, now = new Date() }) {
+  if (written !== true || disposition !== 'complaint_escalated') return null;
+  try {
+    const id = customerId || call.customer_id;
+    if (!id || require('./internal-test-customers').isInternalTestCustomerId(id)) return null;
+    if (require('./voice-agent/relay-protocol').isInternalCallSource(call.source)) return null;
+    const endedAt = require('./call-commitments').callEndedAt(call) || (call.created_at ? new Date(call.created_at) : null);
+    if (!endedAt || Number.isNaN(endedAt.getTime()) || now.getTime() - endedAt.getTime() > 24 * 60 * 60 * 1000) return null;
+    const customer = await db('customers').where({ id }).first('first_name', 'last_name').catch(() => null);
+    const alert = buildComplaintCallAlert({ call, customerId: id, name: require('./admin-alert-names').realName(customer), extracted });
+    return await require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, alert.opts);
+  } catch (err) {
+    logger.warn(`[call-proc] complaint call alert failed for ${maskSid(callSid)}: ${err?.code || err?.name || 'error'}`);
+    return null;
+  }
 }
 
 const CallRecordingProcessor = {
@@ -26000,6 +26068,8 @@ CallRecordingProcessor._test = {
   outOfAreaHoldDisposition,
   buildOutOfAreaHoldAlert,
   keepOutOfAreaHoldRecords,
+  buildComplaintCallAlert,
+  keepComplaintCallAlert,
   recordCommitmentsStep,
   fileApplicantCareersRowStep,
   applyCallRescheduleStep,
