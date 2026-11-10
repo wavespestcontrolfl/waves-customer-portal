@@ -705,7 +705,6 @@ describe('the sooner-day pass (log only)', () => {
   const sooner = (opts = {}) => check({ pool: LATER_POOL, dateTo: LATER, ...opts });
   const soonerStarts = (report) => report.sooner.passed.map((p) => `${p.date} ${p.start}`);
   // The hours the page's placement rules were asked about, first asked first.
-  const askedHours = (placement) => [...new Set(placement.mock.calls.map(([slot]) => `${slot.date} ${slot.windowStart}`))];
   // A second sooner day: two stops, at 9 AM and 12 PM.
   const daySoon = (date, tag) => [stop(`p${tag}`, 9, 20, { scheduled_date: date }), stop(`q${tag}`, 12, 30, { scheduled_date: date })];
 
@@ -813,7 +812,10 @@ describe('the sooner-day pass (log only)', () => {
       // 9 AM is expected to fail on both days; every other hour passes the screen.
       deps.travelGapConflicts = script({ 9: 'overlap' });
       const { report } = await check({ deps, placement, admit: () => true, pool: [{ date: '2097-06-12', windowStart: '12:00', techId: TECH }], dateTo: '2097-06-12' });
-      const order = askedHours(placement).slice(0, report.sooner.checked);
+      // The sooner pass runs after the saving pass, so its full checks are the last placement calls (every hour places
+      // here, so each check asks once). Raw calls, not unique hours: the saving pass asked
+      // some of the same hours first.
+      const order = placement.mock.calls.map(([slot]) => `${slot.date} ${slot.windowStart}`).slice(-report.sooner.checked);
       // Expected passes first, the earliest date and hour first (DAY's 8 AM, 10 AM, ..., then LATER's 12 PM), then the
       // expected failures in the same order.
       expect(order[0]).toBe(`${DAY} 08:00`);
@@ -841,6 +843,15 @@ describe('the sooner-day pass (log only)', () => {
       // Every checked hour that did not pass was expected to.
       expect(report.sooner.screenWrong).toEqual({ saidPass_failed: report.sooner.checked - report.sooner.passed.length, saidFail_passed: 0 });
       expect(report.sooner.screenWrong.saidPass_failed).toBeGreaterThanOrEqual(1);
+    });
+
+    test('capacity mode on: no screen, as the page skips its travel rule there', async () => {
+      const deps = makeDeps({ travelGap: true });
+      deps.capacityOn = () => true;
+      const { report } = await sooner({ deps });
+      expect(report.sooner.screenOn).toBe(false);
+      expect(deps.travelGapConflicts).not.toHaveBeenCalled();
+      expect(report.sooner.screen).toEqual({ pass: 0, overlap: 0, gap_before: 0, gap_after: 0 });
     });
 
     test('an hour passes the screen when either its 1-hour or its 2-hour shift does', async () => {

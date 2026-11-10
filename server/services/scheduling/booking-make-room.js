@@ -41,9 +41,10 @@
  * The report also carries a log-only measurement of the rule the owner is being asked about (owner 2026-11-09, "get it
  * live"): a "sooner day" pass (report.sooner). It looks only at days before the first day in the customer's list, and
  * swaps rule 5 for a drive cap: the self-serve cap (customerMaxDetourMinutes, with the zone route-day lift, read
- * whatever the capacity mode is). Every other rule above holds. It runs first, with its own MAX_SOONER_CHECKS full
- * checks under the same budget and caches, and the saving pass runs as before. When the travel-gap gate is on, a
- * screen predicts for each sooner candidate whether the page's travel rule passes on the moved day. The screen only
+ * whatever the capacity mode is). Every other rule above holds. It runs after the saving pass, so it never takes that
+ * pass's time, with its own MAX_SOONER_CHECKS full checks under what is left of the same budget and the same caches.
+ * When the travel-gap gate is on and capacity mode is off (the page's own travel rule runs only then), a screen
+ * predicts for each sooner candidate whether that rule passes on the moved day. The screen only
  * puts the likely passes first; it never drops a candidate, and the full check still decides. Nothing in the sooner
  * pass reaches a customer or changes the offer rule.
  *
@@ -689,7 +690,8 @@ async function runSoonerPass(report, { dayRows, pool, open, soonerCap, request, 
     const soonerRequest = { ...request, soonerCap };
     const found = collectCandidates(days, { open, env, request: soonerRequest, report: sooner });
     sooner.candidates = found.length;
-    sooner.screenOn = typeof env.travelGapEnabled === 'function' && !!env.travelGapEnabled();
+    // filterCollidingSlots returns before its travel rule in capacity mode, so the screen is off there too.
+    sooner.screenOn = typeof env.travelGapEnabled === 'function' && !!env.travelGapEnabled() && !env.capacityOn();
     if (sooner.screenOn && found.length) {
       // The page loads the catalog before its own travel-gap rule; the expected minutes of a stop read it.
       if (await budget.race(() => Promise.resolve(env.ensureCatalogLoaded?.(conn)).catch(() => {})) === TIMED_OUT) {
@@ -737,12 +739,13 @@ async function findMakeRoom(report, { conn, pool, point, durationMin, candidateE
     return;
   }
   const request = { point, durationMin, admit, placement, now, bestFree, estimateId, detourCap: caps.detourCap, candidateExpectedMinutes };
-  // Both passes share what the reads return.
+  // Both passes share what the reads return. The saving pass (the approved offer rule) runs first and unchanged; the
+  // log-only sooner pass gets what is left of the budget.
   const caches = { blocks: new Map(), routes: new Map(), days: new Map() };
-  await runSoonerPass(report, { dayRows, pool, open, soonerCap: caps.soonerCap, request, conn, env, budget, caches });
   const candidates = collectCandidates(dayRows, { open, env, request, report });
   report.candidates = candidates.length;
   await checkCandidates(candidates, { conn, env, request, budget, report, caches });
+  await runSoonerPass(report, { dayRows, pool, open, soonerCap: caps.soonerCap, request, conn, env, budget, caches });
 }
 
 // The sooner pass's line items: its best hour is the earliest day that passed.
