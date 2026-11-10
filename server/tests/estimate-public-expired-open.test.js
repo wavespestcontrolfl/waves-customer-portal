@@ -19,7 +19,6 @@ jest.mock('../config/feature-gates', () => ({
   commercialFirstVisitLive: () => false,
   estimateAssessmentFirstLive: () => false,
   estimateConsumerNoticeLive: () => false,
-  estimateServiceAgreementLive: () => false,
 }));
 jest.mock('../services/estimate-membership-context', () => ({
   buildEstimateMembershipContext: jest.fn().mockResolvedValue(null),
