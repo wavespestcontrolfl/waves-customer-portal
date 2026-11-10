@@ -27,7 +27,7 @@ const path = require('path');
 
 const config = require('./config');
 const logger = require('./services/logger');
-const { errorHandler, notFound } = require('./middleware/errors');
+const { errorHandler, uploadHangUp, notFound } = require('./middleware/errors');
 const { initScheduledJobs, initBankingSync } = require('./services/scheduler');
 const { checkBootSecrets } = require('./utils/boot-secret-check');
 const { applySensitiveSpaHeaders } = require('./utils/sensitive-spa-headers');
@@ -1390,6 +1390,10 @@ if (config.nodeEnv !== 'production') {
     throw new Error("My first Sentry error!");
   });
 }
+
+// A client that hung up mid-upload is not a server fault: it stops here, before Sentry sees it
+// (middleware/errors.js uploadHangUp; multer 2 reports these, multer 1 was silent).
+app.use(uploadHangUp);
 
 // Sentry error handler — must be before other error middleware
 Sentry.setupExpressErrorHandler(app);
