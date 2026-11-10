@@ -99,12 +99,29 @@ postgres('POST /api/tech/estimates/price (migrated PostgreSQL)', () => {
     });
     const routeCustomer = await customer('100 Test Lane');
     const otherCustomer = await customer('200 Test Lane');
-    await trx('scheduled_services').insert({
-      id: randomUUID(), customer_id: routeCustomer, technician_id: technicianId, service_type: 'Quarterly Pest Control',
-      status: 'pending', scheduled_date: etDateString(new Date()), window_start: '09:00', window_end: '10:00',
-      estimated_duration_minutes: 30,
+    const otherTechnician = randomUUID();
+    await trx('technicians').insert({
+      id: otherTechnician, name: 'Other Synthetic Tech', email: `${otherTechnician}@example.invalid`, role: 'technician',
+      active: true, employment_status: 'active',
     });
-    ids = { technicianId, routeCustomer, otherCustomer };
+    const visit = async (customerId, tech, over = {}) => {
+      const id = randomUUID();
+      await trx('scheduled_services').insert({
+        id, customer_id: customerId, technician_id: tech, service_type: 'Quarterly Pest Control',
+        status: 'pending', scheduled_date: etDateString(new Date()), window_start: '09:00', window_end: '10:00',
+        estimated_duration_minutes: 30, ...over,
+      });
+      return id;
+    };
+    ids = {
+      technicianId, routeCustomer, otherCustomer,
+      routeVisit: await visit(routeCustomer, technicianId),
+      // The same customer's second home: the visit carries its own service address.
+      secondHomeVisit: await visit(routeCustomer, technicianId, {
+        service_address_line1: '900 Second Home Rd', service_address_city: 'Test City', service_address_state: 'FL', service_address_zip: '00000',
+      }),
+      otherVisit: await visit(otherCustomer, otherTechnician),
+    };
     mockCaller.id = technicianId;
     mockCaller.role = 'technician';
     lookupSpy = jest.spyOn(lookupRoutes, 'performPropertyLookup').mockImplementation(async () => countyLookup());
@@ -129,7 +146,7 @@ postgres('POST /api/tech/estimates/price (migrated PostgreSQL)', () => {
 
   test('a technician with the switch on and a qualified general capability prices PEST for a customer on his route, and nothing is saved', async () => {
     const before = await counts();
-    const res = await price({ customerId: ids.routeCustomer, services: ['PEST'] });
+    const res = await price({ visitId: ids.routeVisit, services: ['PEST'] });
     expect(res.status).toBe(200);
     expect(res.body.monthlyTotal).toBeGreaterThan(0);
     expect(res.body.annualTotal).toBeGreaterThan(0);
@@ -141,9 +158,9 @@ postgres('POST /api/tech/estimates/price (migrated PostgreSQL)', () => {
   });
 
   test('every forged pricing key from the phone changes no number', async () => {
-    const clean = await price({ customerId: ids.routeCustomer, services: ['PEST'] });
+    const clean = await price({ visitId: ids.routeVisit, services: ['PEST'] });
     const forged = await price({
-      customerId: ids.routeCustomer,
+      visitId: ids.routeVisit,
       services: ['PEST'],
       manualDiscount: { type: 'PERCENT', value: 50, internalReason: 'x' },
       linePriceOverrides: { PEST: 1 },
@@ -165,8 +182,8 @@ postgres('POST /api/tech/estimates/price (migrated PostgreSQL)', () => {
   });
 
   test('a typed home size changes the price and sends the quote to the office first', async () => {
-    const base = await price({ customerId: ids.routeCustomer, services: ['PEST'] });
-    const edited = await price({ customerId: ids.routeCustomer, services: ['PEST'], facts: { homeSqFt: 4200, stories: 2 } });
+    const base = await price({ visitId: ids.routeVisit, services: ['PEST'] });
+    const edited = await price({ visitId: ids.routeVisit, services: ['PEST'], facts: { homeSqFt: 4200, stories: 2 } });
     expect(edited.status).toBe(200);
     expect(edited.body.officeFirst.reasons).toEqual(expect.arrayContaining(['changed_fact:homeSqFt', 'changed_fact:stories']));
     expect(edited.body.annualTotal).not.toBe(base.body.annualTotal);
@@ -186,29 +203,62 @@ postgres('POST /api/tech/estimates/price (migrated PostgreSQL)', () => {
   test('each of the six services comes back as its own priced engine line (an admin may quote all six)', async () => {
     mockCaller.role = 'admin';
     for (const key of ['PEST', 'OT_PEST', 'MOSQUITO', 'OT_MOSQUITO', 'RODENT_BAIT', 'TERMITE_BAIT']) {
-      const res = await price({ customerId: ids.routeCustomer, services: [key] });
+      const res = await price({ visitId: ids.routeVisit, services: [key] });
       expect([key, res.status]).toEqual([key, 200]);
       expect(res.body.lines.length).toBeGreaterThan(0);
       expect(res.body.monthlyTotal + res.body.oneTimeTotal).toBeGreaterThan(0);
     }
     // All six together: still one whole quote.
-    const all = await price({ customerId: ids.routeCustomer, services: ['PEST', 'OT_PEST', 'MOSQUITO', 'OT_MOSQUITO', 'RODENT_BAIT', 'TERMITE_BAIT'] });
+    const all = await price({ visitId: ids.routeVisit, services: ['PEST', 'OT_PEST', 'MOSQUITO', 'OT_MOSQUITO', 'RODENT_BAIT', 'TERMITE_BAIT'] });
     expect(all.status).toBe(200);
     expect(all.body.lines.length).toBeGreaterThanOrEqual(6);
   });
 
-  test('an off-route customer is a 404 and nothing is looked up', async () => {
-    const res = await price({ customerId: ids.otherCustomer, services: ['PEST'] });
-    expect(res).toEqual({ status: 404, body: { error: 'Customer not found' } });
+  test('another technician\'s visit is a 404 and nothing is looked up; so is his own visit once it is cancelled or old', async () => {
+    expect(await price({ visitId: ids.otherVisit, services: ['PEST'] })).toEqual({ status: 404, body: { error: 'Visit not found' } });
+    await trx('scheduled_services').where({ id: ids.routeVisit }).update({ status: 'cancelled' });
+    expect((await price({ visitId: ids.routeVisit, services: ['PEST'] })).status).toBe(404);
+    await trx('scheduled_services').where({ id: ids.routeVisit }).update({ status: 'completed', scheduled_date: '2020-01-06' });
+    expect((await price({ visitId: ids.routeVisit, services: ['PEST'] })).status).toBe(404);
     expect(lookupSpy).not.toHaveBeenCalled();
+  });
+
+  test('a visit at the customer\'s second home looks up and prices that house, not the primary address', async () => {
+    const res = await price({ visitId: ids.secondHomeVisit, services: ['PEST'] });
+    expect(res.status).toBe(200);
+    expect(lookupSpy.mock.calls[0][0]).toBe('900 Second Home Rd, Test City, FL 00000');
+    const primary = await price({ visitId: ids.routeVisit, services: ['PEST'] });
+    expect(lookupSpy.mock.calls[1][0]).toBe('100 Test Lane, Test City, FL 00000');
+    expect(primary.status).toBe(200);
+  });
+
+  test('the paid lookup budget is per technician and per day, kept in the shared counter: a miss counts, a cached address does not, and over the budget is 429', async () => {
+    const bucket = `tech-estimate-lookup:${ids.technicianId}`;
+    const used = async () => Number((await trx('public_llm_daily_usage').where({ bucket }).first('count'))?.count || 0);
+    // A cached address (the default mock answers the cache read): nothing is counted.
+    expect((await price({ visitId: ids.routeVisit, services: ['PEST'] })).status).toBe(200);
+    expect(await used()).toBe(0);
+    // A miss: one unit, then the live lookup.
+    lookupSpy.mockImplementation(async (_address, options) => (options.cacheOnly ? null : countyLookup()));
+    expect((await price({ visitId: ids.routeVisit, services: ['PEST'] })).status).toBe(200);
+    expect(await used()).toBe(1);
+    // The day's budget is spent: the next miss is refused before the paid call.
+    await trx('public_llm_daily_usage').where({ bucket }).update({ count: 30 });
+    lookupSpy.mockClear();
+    const refused = await price({ visitId: ids.routeVisit, services: ['PEST'] });
+    expect(refused.status).toBe(429);
+    expect(refused.body.code).toBe('daily_limit');
+    expect(lookupSpy.mock.calls.map((call) => call[1])).toEqual([{ cacheOnly: true, persist: false }]);
+    // Another technician's budget is untouched.
+    expect(await trx('public_llm_daily_usage').whereNot({ bucket }).where('bucket', 'like', 'tech-estimate-lookup:%').first()).toBeUndefined();
   });
 
   test('gate off, and the technician\'s switch off, are both 404 {enabled:false}', async () => {
     delete process.env.GATE_TECH_ESTIMATES;
-    expect(await price({ customerId: ids.routeCustomer, services: ['PEST'] })).toEqual({ status: 404, body: { enabled: false } });
+    expect(await price({ visitId: ids.routeVisit, services: ['PEST'] })).toEqual({ status: 404, body: { enabled: false } });
     process.env.GATE_TECH_ESTIMATES = 'true';
     await trx('technicians').where({ id: ids.technicianId }).update({ can_create_estimates: false });
-    expect(await price({ customerId: ids.routeCustomer, services: ['PEST'] })).toEqual({ status: 404, body: { enabled: false } });
+    expect(await price({ visitId: ids.routeVisit, services: ['PEST'] })).toEqual({ status: 404, body: { enabled: false } });
     expect(lookupSpy).not.toHaveBeenCalled();
   });
 });
