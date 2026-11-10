@@ -234,7 +234,8 @@ const ADVISORY_AGE_CODES = new Set([
 // tracking the card. It is not an office decision and not evidence. So: (1) a
 // reader that asks "did the office decide this call?" must not read it as a
 // decision: officeClosedCall (call-booking-miss-watchdog, call-held-visits)
-// counts it as still open. (2) a reader that asks "is tracked work pending for
+// counts it as still open, unless a person later settled a newer card of the
+// same reason on that call. (2) a reader that asks "is tracked work pending for
 // this customer?" reads it as not pending: the SMS courtesy-reply guard
 // (sms-gratitude-context, a lane that is off: GATE_SMS_GRATITUDE_REPLIES) is
 // held by the customer's open promises, service requests, inbox items and
@@ -2896,6 +2897,18 @@ async function planQuietAged({ now = new Date(), ignoreGate = false } = {}) {
   };
 }
 
+// Is card `a` newer than card `b`? Later created_at, ties by id: the one
+// ordering for "a newer card of the same reason" (the rollback planner and
+// officeClosedCall). Fails closed: a missing or invalid created_at or id on
+// either card is never newer.
+function cardIsNewer(a, b) {
+  const at = (v) => (v ? new Date(v).getTime() : NaN);
+  const ta = at(a?.created_at);
+  const tb = at(b?.created_at);
+  if (Number.isNaN(ta) || Number.isNaN(tb) || a.id == null || b.id == null) return false;
+  return ta > tb || (ta === tb && String(a.id) > String(b.id));
+}
+
 // Rollback support. Which of the dismissed quiet_aged rows can go back to
 // 'open': never two rows for one (call, reason) (the open-unique index allows
 // one), and never one that a newer card of the same reason on the same call
@@ -2911,10 +2924,8 @@ function planQuietAgedReopen(rows, twins = []) {
   const at = (v) => (v ? new Date(v).getTime() : 0);
   const byKey = new Map();
   for (const t of twins) byKey.set(key(t), [...(byKey.get(key(t)) || []), t]);
-  const supersededBy = (row) => (byKey.get(key(row)) || []).some((t) => String(t.id) !== String(row.id)
-    && (t.status === 'open' || t.status === 'in_progress'
-      || at(t.created_at) > at(row.created_at)
-      || (at(t.created_at) === at(row.created_at) && String(t.id) > String(row.id))));
+  const supersededBy = (row) => (byKey.get(key(row)) || []).some((t) => t.status === 'open' || t.status === 'in_progress'
+    || cardIsNewer(t, row));
   const picked = new Map();
   let skippedSuperseded = 0;
   const newestFirst = [...rows].sort((a, b) => at(b.resolved_at) - at(a.resolved_at));
@@ -3136,6 +3147,7 @@ module.exports = {
   planQuietAged,
   reopenQuietAged,
   planQuietAgedReopen,
+  cardIsNewer,
   parseRollbackSince,
   capDecisions,
   classifyTriageItem,

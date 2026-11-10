@@ -316,7 +316,8 @@ function byTimeThenCall(a, b) {
 // scheduled_services rows ({ customer_id, status, sched_date ('YYYY-MM-DD'),
 // window_start, created_at, source_call_log_id, notes, internal_notes });
 // `triageRows` are
-// triage_items ({ call_log_id, status, resolution_source, resolution_rule }). `namesakes` is
+// triage_items ({ id, call_log_id, reason_code, status, resolution_source,
+// resolution_rule, created_at }). `namesakes` is
 // the watchdog's call id -> Set(customer id) map; `customerNames` maps a
 // customer id to "First Last".
 function computeHeldVisits(calls, bookedRows, triageRows, {
@@ -398,7 +399,7 @@ async function listHeldVisits(dateET, { now = new Date() } = {}) {
       'id', 'customer_id', 'status', 'window_start', 'created_at', 'source_call_log_id', 'notes', 'internal_notes',
       db.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS sched_date"),
     );
-  const triageRows = await db('triage_items').whereIn('call_log_id', callIds).select('call_log_id', 'status', 'resolution_source', 'resolution_rule');
+  const triageRows = await db('triage_items').whereIn('call_log_id', callIds).select('id', 'call_log_id', 'reason_code', 'status', 'resolution_source', 'resolution_rule', 'created_at');
   const linkedIds = [...new Set(candidates.map((c) => c.call.customer_id).filter(Boolean))];
   const people = linkedIds.length ? await db('customers').whereIn('id', linkedIds).select('id', 'first_name', 'last_name') : [];
   const customerNames = new Map(people

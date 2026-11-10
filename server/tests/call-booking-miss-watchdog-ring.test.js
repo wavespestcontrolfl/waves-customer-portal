@@ -550,6 +550,35 @@ describe('officeClosedCall', () => {
       { status: 'dismissed', resolution_source: 'auto', resolution_rule: 'advisory_aged' },
     ])).toBe(true);
   });
+  // A person later settling a newer card of the same reason on the call supersedes the quiet dismissal.
+  describe('a quiet dismissal superseded by a newer card of the same reason', () => {
+    const human = { id: 'h0', reason_code: 'voicemail', status: 'dismissed', resolution_source: 'human', resolution_rule: null, created_at: '2026-11-02T00:00:00Z' };
+    const quiet = { id: 'q1', reason_code: 'rental_or_tenant_occupied', status: 'dismissed', resolution_source: 'auto', resolution_rule: 'quiet_aged', created_at: '2026-11-01T00:00:00Z' };
+    const newer = (over) => ({ id: 'n2', reason_code: 'rental_or_tenant_occupied', status: 'resolved', resolution_source: 'human', resolution_rule: null, created_at: '2026-11-05T00:00:00Z', ...over });
+    test('a newer human-resolved card of the same reason closes the call', () => {
+      expect(officeClosedCall([human, quiet, newer()])).toBe(true);
+      expect(officeClosedCall([quiet, newer({ status: 'dismissed' })])).toBe(true);
+    });
+    test('a newer card closed by auto does not', () => {
+      expect(officeClosedCall([human, quiet, newer({ resolution_source: 'auto' })])).toBe(false);
+    });
+    test('a newer human card of ANOTHER reason does not', () => {
+      expect(officeClosedCall([human, quiet, newer({ reason_code: 'voicemail' })])).toBe(false);
+    });
+    test('an OLDER human card of the same reason does not', () => {
+      expect(officeClosedCall([human, quiet, newer({ created_at: '2026-10-20T00:00:00Z' })])).toBe(false);
+    });
+    test('rows without created_at or id fail closed', () => {
+      expect(officeClosedCall([human, quiet, newer({ created_at: undefined })])).toBe(false);
+      expect(officeClosedCall([human, { ...quiet, created_at: undefined }, newer()])).toBe(false);
+      expect(officeClosedCall([human, quiet, newer({ id: undefined })])).toBe(false);
+    });
+    test('an equal created_at orders by id; a still-open card keeps the call open', () => {
+      expect(officeClosedCall([human, quiet, newer({ created_at: quiet.created_at, id: 'q9' })])).toBe(true);
+      expect(officeClosedCall([human, quiet, newer({ created_at: quiet.created_at, id: 'q0' })])).toBe(false);
+      expect(officeClosedCall([human, quiet, newer(), { id: 'o', reason_code: 'voicemail', status: 'open' }])).toBe(false);
+    });
+  });
   test('the rule name is the one the sweep stamps', () => {
     expect(require('../services/triage-auto-resolve').QUIET_AGED_RULE).toBe('quiet_aged');
   });

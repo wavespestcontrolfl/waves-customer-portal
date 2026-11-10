@@ -241,6 +241,14 @@ describe('clearing rules', () => {
     expect(run([call()], [], [{ call_log_id: 'call-2', status: 'dismissed', resolution_source: 'human' }])).toHaveLength(1);
   });
 
+  it('clears when a person later settled a newer card of the same reason as the quiet dismissal', () => {
+    const quiet = { id: 'q1', call_log_id: 'call-1', reason_code: 'rental_or_tenant_occupied', status: 'dismissed', resolution_source: 'auto', resolution_rule: 'quiet_aged', created_at: '2026-11-01T00:00:00Z' };
+    const later = { id: 'n2', call_log_id: 'call-1', reason_code: 'rental_or_tenant_occupied', status: 'resolved', resolution_source: 'human', resolution_rule: null, created_at: '2026-11-05T00:00:00Z' };
+    expect(run([call()], [], [quiet, later])).toEqual([]);
+    expect(run([call()], [], [quiet, { ...later, resolution_source: 'auto' }])).toHaveLength(1);
+    expect(run([call()], [], [quiet, { ...later, reason_code: 'voicemail' }])).toHaveLength(1);
+  });
+
   it('stays listed when a human-closed card sits beside a quiet_aged dismissal (the sweep proves nothing)', () => {
     const closed = { call_log_id: 'call-1', status: 'dismissed', resolution_source: 'human', resolution_rule: null };
     const quiet = { call_log_id: 'call-1', status: 'dismissed', resolution_source: 'auto', resolution_rule: 'quiet_aged' };
