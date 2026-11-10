@@ -6544,25 +6544,6 @@ function reportWriterRulesLive() {
   return process.env.GATE_REPORT_WRITER_RULES === 'true';
 }
 
-// GATE_PEST_REPORT_VOICE read at CALL time — strict `=== 'true'`, dark in
-// every environment. On (with GATE_REPORT_WRITER_RULES), the recurring pest
-// report writer gets one prompt in one voice (service-report/pest-report-voice.js)
-// in place of its stacked blocks; inputs and output screens are unchanged.
-// Off, the pest prompt is byte-identical to before.
-function pestReportVoiceLive() {
-  return process.env.GATE_PEST_REPORT_VOICE === 'true';
-}
-
-// GATE_PEST_QUIET_VISIT read at CALL time — strict `=== 'true'`, dark in
-// every environment. On (with GATE_REPORT_WRITER_RULES and
-// GATE_PEST_REPORT_VOICE), the one-voice pest writer gets pest_report_voice_v2:
-// a quiet visit opens on what we saw and where we worked, never on what the
-// customer did not say, and the route stops sending its empty "None" input
-// lines and the sheet's customer-home setting. Off, v1 is byte-identical.
-function pestQuietVisitLive() {
-  return process.env.GATE_PEST_QUIET_VISIT === 'true';
-}
-
 // GATE_REPORT_BLOG_POST read at CALL time — strict `=== 'true'`, dark in
 // every environment. Off, the blog search answers unavailable, a picked post
 // is ignored at completion and no report shows one (frozen picks included).
@@ -9075,8 +9056,6 @@ module.exports.seriesMoveCarriesVisitLive = seriesMoveCarriesVisitLive;
 // GATE_REPORT_WRITER_RULES reader, exported at the end of the file (after the
 // shared list) so gate PRs adding lines above never touch this one.
 module.exports.reportWriterRulesLive = reportWriterRulesLive;
-module.exports.pestReportVoiceLive = pestReportVoiceLive;
-module.exports.pestQuietVisitLive = pestQuietVisitLive;
 // GATE_REPORT_BLOG_POST reader, on its own line beside the writer rules'.
 module.exports.reportBlogPostLive = reportBlogPostLive;
 module.exports.techTipSourcesLive = techTipSourcesLive;
@@ -9465,28 +9444,6 @@ function oneTapReportLive() {
 }
 // GATE_ONE_TAP_REPORT reader, on its own line so gate PRs never conflict.
 module.exports.oneTapReportLive = oneTapReportLive;
-
-// GATE_PEST_RAIN_OUTLOOK read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-24).
-// On, a pest visit's completion freezes a 48-hour rain outlook in structured_notes.rainOutlook (a second forecast
-// fetch beside the conditions fetch) and the report's Weather call card may add, after its own text, dry weather
-// ahead, or rain ahead with a sentence on how dried spray behaves when the visit's outside sprays are fipronil or
-// pyrethroid.
-// Off = no forecast call, no key on the record, card and PDF key byte-identical to before.
-function pestRainOutlookLive() {
-  return process.env.GATE_PEST_RAIN_OUTLOOK === 'true';
-}
-// GATE_PEST_RAIN_OUTLOOK reader, on its own line so gate PRs never conflict.
-module.exports.pestRainOutlookLive = pestRainOutlookLive;
-
-// GATE_PEST_LABEL_FACTS read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-24, "labels
-// go"). On, the pest report writer's PRODUCT FACTS add "its label lists <pest>" for a pest the technician named today
-// (note, observations, product tags) that the product's reviewed EPA label list names (label-pest-facts.js). Off =
-// the block is byte-identical to before.
-function pestLabelFactsLive() {
-  return process.env.GATE_PEST_LABEL_FACTS === 'true';
-}
-// GATE_PEST_LABEL_FACTS reader, on its own line so gate PRs never conflict.
-module.exports.pestLabelFactsLive = pestLabelFactsLive;
 
 // GATE_SPECIALTY_REPORT_VOICE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-10-24,
 // "yes build voice"). On (with GATE_REPORT_WRITER_RULES), the termite, cockroach, rodent and mosquito report writers

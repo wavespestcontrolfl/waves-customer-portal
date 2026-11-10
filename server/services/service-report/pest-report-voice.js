@@ -1,5 +1,5 @@
 /**
- * The recurring pest report writer in one voice (GATE_PEST_REPORT_VOICE; owner
+ * The recurring pest report writer in one voice (owner
  * 2026-10-22: "I know the pest sucks", then "rewrite pest", "voice ok" and "do
  * all" on the report prompt review page). Under GATE_REPORT_WRITER_RULES the
  * pest writer got five stacked blocks, about 3,600 words of mostly "don't":
@@ -18,31 +18,32 @@
  */
 const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
 
-const PEST_REPORT_VOICE_VERSION = 'pest_report_voice_v1';
-// GATE_PEST_QUIET_VISIT (owner 2026-10-24, "ok go" on the pest report
-// relevance page, after "it always says tech noted nothing, this is lame"):
-// v1's first example showed a quiet visit as "you didn't mention anything new
-// when we talked", and the sheet sends "home — spoke with them" by default, so
-// quiet reports opened on what the customer did not say. v2 opens a quiet
-// visit on what we saw and where we worked.
-const PEST_REPORT_VOICE_V2_VERSION = 'pest_report_voice_v2';
+// Owner 2026-10-24, "ok go" on the pest report relevance page, after "it
+// always says tech noted nothing, this is lame": the first version's first
+// example showed a quiet visit as "you didn't mention anything new when we
+// talked", and the sheet sends "home — spoke with them" by default, so quiet
+// reports opened on what the customer did not say. v2 opens a quiet visit on
+// what we saw and where we worked, and says no talk happened unless the note
+// does.
+const PEST_REPORT_VOICE_VERSION = 'pest_report_voice_v2';
 
 // Three reports in the voice the owner approved on the review page (2026-10-22),
-// each with the EXPECTATIONS lines it was written against. pest-report-voice.test.js
-// runs every one through the writer's output screen with those lines.
+// each with the EXPECTATIONS lines it was written against. The first is a quiet
+// visit with nothing from the customer. pest-report-voice.test.js runs every
+// one through the writer's output screen with those lines.
 const PEST_VOICE_EXAMPLES = Object.freeze([
   Object.freeze({
-    visit: 'Quarterly visit. Very low activity. Homeowner home, nothing new to report. Insect-control treatment sprayed around the outside of the house.',
+    visit: 'Quarterly visit. Very low activity. Nothing from the customer. Webs along the lanai screen, swept. Insect-control treatment sprayed around the outside of the house.',
     expectations: ['We applied a non-repellent. Insects can\'t detect the treated zone, so they cross it, pick up the active ingredient and carry it back to their harborage. Activity can spike for a few days, then declines over the next couple of weeks.'],
     report: [
       'WHAT WE FOUND',
-      'We saw very little pest activity around your home today, and you didn\'t mention anything new when we talked.',
+      'Webs had built up along the lanai screen, and we saw very little other activity around the house today.',
       'WHAT WE DID AND WHY',
-      'We sprayed around the outside of the house with a treatment insects walk right through, so they carry it back with them.',
+      'We swept the webs off the lanai screen and sprayed around the outside of the house with a treatment insects walk right through, so they carry it back with them.',
       'WHAT TO EXPECT',
       'You may see a little more activity for a few days, then less over the next couple of weeks.',
       'WHAT\'S NEXT',
-      'If activity hasn\'t dropped off over the next couple of weeks, text or call us.',
+      'If webs build up on the lanai screen again over the next couple of weeks, text or call us.',
     ].join('\n'),
   }),
   Object.freeze({
@@ -78,27 +79,6 @@ const PEST_VOICE_EXAMPLES = Object.freeze([
   }),
 ]);
 
-// v2's first example: a quiet visit with nothing from the customer. Examples 2
-// and 3 are v1's. pest-report-voice.test.js runs each through the output screen.
-const QUIET_VISIT_EXAMPLE = Object.freeze({
-  visit: 'Quarterly visit. Very low activity. Nothing from the customer. Webs along the lanai screen, swept. Insect-control treatment sprayed around the outside of the house.',
-  expectations: ['We applied a non-repellent. Insects can\'t detect the treated zone, so they cross it, pick up the active ingredient and carry it back to their harborage. Activity can spike for a few days, then declines over the next couple of weeks.'],
-  report: [
-    'WHAT WE FOUND',
-    'Webs had built up along the lanai screen, and we saw very little other activity around the house today.',
-    'WHAT WE DID AND WHY',
-    'We swept the webs off the lanai screen and sprayed around the outside of the house with a treatment insects walk right through, so they carry it back with them.',
-    'WHAT TO EXPECT',
-    'You may see a little more activity for a few days, then less over the next couple of weeks.',
-    'WHAT\'S NEXT',
-    'If webs build up on the lanai screen again over the next couple of weeks, text or call us.',
-  ].join('\n'),
-});
-const PEST_VOICE_V2_EXAMPLES = Object.freeze([QUIET_VISIT_EXAMPLE, PEST_VOICE_EXAMPLES[1], PEST_VOICE_EXAMPLES[2]]);
-
-// v2's two rules, each placed beside the rule it extends.
-const QUIET_VISIT_VOICE_RULE = '\n- Never say we talked with, spoke with or met the customer unless the note says so, and never say what the customer did not mention, report or ask about.';
-const QUIET_VISIT_FOUND_RULE = 'When the customer told us nothing, start with what we saw today or with where we worked, never with what they did not say. ';
 
 const examplesText = (examples) => examples.map((example, i) => [
   `Example ${i + 1}. The visit: ${example.visit}`,
@@ -107,7 +87,7 @@ const examplesText = (examples) => examples.map((example, i) => [
   example.report,
 ].join('\n')).join('\n\n');
 
-const voicePromptText = ({ version, examples, quietVisit }) => `# SERVICE REPORT — RECURRING PEST, ONE VOICE
+const voicePromptText = ({ version, examples }) => `# SERVICE REPORT — RECURRING PEST, ONE VOICE
 # ${version}
 
 You write the short report a Waves Pest Control customer reads after a pest control visit. Write it the way the person who did the visit would tell the homeowner at the door: "we", plain words, short sentences, and only what happened at this visit.
@@ -121,7 +101,8 @@ WHAT'S NEXT
 No greeting, no sign-off, no customer name, no bullets, no markdown, no emojis. Length follows the visit: a visit with more going on gets more, a thin one gets a sentence per section. Never pad, and never make the same point in two sections.
 
 THE VOICE
-- "We" is the company and the person who came out. Never write "the technician", "our technician" or a name.${quietVisit ? QUIET_VISIT_VOICE_RULE : ''}
+- "We" is the company and the person who came out. Never write "the technician", "our technician" or a name.
+- Never say we talked with, spoke with or met the customer unless the note says so, and never say what the customer did not mention, report or ask about.
 - Say what we saw and did. Never write "recorded", "noted", "documented", "logged", "assessed", "scope", "service area", "the record" or "the notes": those are words from the inputs, not words a customer uses.
 - Use the words a homeowner uses: "around the outside of the house", "the plant beds", "the eaves", "the lanai". Not "perimeter band", "harborage", "conducive conditions", "entry points".
 - Say what a treatment does in one plain clause when HOW IT WORKS or an EXPECTATIONS line supplies it and it helps the customer understand what they will see ("a treatment insects walk right through, so they carry it back with them"). Say what it was for today only from its own "tagged today for" in PRODUCT FACTS or from the note. "Mainly used for" is what the treatment is generally used for, never why we used it today, and a treatment "not tagged today" gets no reason unless the note gives one. Never copy a HOW IT WORKS line, never explain chemistry ("detect", "active ingredient", "pheromone", "uptake"), never add a pest, a lasting period or an effect those lines do not state, and never put a reason in WHAT TO EXPECT.
@@ -130,7 +111,7 @@ THE VOICE
 - Write "german cockroaches" and "german roaches" with a small g, except as the first word of a sentence.
 
 WHAT GOES WHERE
-WHAT WE FOUND: first what the customer told us, said as theirs ("You told us…", "You mentioned…"), from BOOKED REASON, the customer concern, WHAT THE CUSTOMER TOLD US, any "Customer communication" lines and the note's sentences about what they said. Then what we saw today: the note's sightings, Observations, any "Findings observed" lines and the activity level in words. A pest a treatment was "tagged today for" in PRODUCT FACTS, or a recorded treatment objective, is what the work aimed at, not a sighting: it goes here only when the note, Observations or a "Findings observed" line says we saw it. A zero activity rating is an absence: say it only for a place we checked, named in the same clause (rule 4), and when the inputs name no place we checked, leave it out. Add an earlier visit only when it was the same pest or the same spot, with its date, as past, and never say things got better or worse unless the inputs show both visits. ${quietVisit ? QUIET_VISIT_FOUND_RULE : ''}With no sighting, no activity level and nothing the customer told us, write one sentence about where we worked or the service type, and invent no inspection or check.
+WHAT WE FOUND: first what the customer told us, said as theirs ("You told us…", "You mentioned…"), from BOOKED REASON, the customer concern, WHAT THE CUSTOMER TOLD US, any "Customer communication" lines and the note's sentences about what they said. Then what we saw today: the note's sightings, Observations, any "Findings observed" lines and the activity level in words. A pest a treatment was "tagged today for" in PRODUCT FACTS, or a recorded treatment objective, is what the work aimed at, not a sighting: it goes here only when the note, Observations or a "Findings observed" line says we saw it. A zero activity rating is an absence: say it only for a place we checked, named in the same clause (rule 4), and when the inputs name no place we checked, leave it out. Add an earlier visit only when it was the same pest or the same spot, with its date, as past, and never say things got better or worse unless the inputs show both visits. When the customer told us nothing, start with what we saw today or with where we worked, never with what they did not say. With no sighting, no activity level and nothing the customer told us, write one sentence about where we worked or the service type, and invent no inspection or check.
 WHAT WE DID AND WHY: each piece of work by its job (a treatment around the outside of the house, bait, a growth regulator) and where it went, from the note, Actions completed, Areas serviced, APPLICATION DETAILS and any "Work recorded" lines, with its reason when one is supplied. The place and the method come only from those inputs, never from a HOW IT WORKS or EXPECTATIONS line. Keep inside work apart from outside work, and keep sealing or repairs, advice, web removal, monitoring, bait and spraying as separate pieces of work. A station's condition is not a refill unless the inputs say we refilled it. A sweep of webs in Actions completed is on the report's own spider card: leave it out (rule 12). A sweep only the note names is work: say it here. "Tagged today for" in PRODUCT FACTS says what that one treatment was for.
 WHAT TO EXPECT: what the customer may see now, from the EXPECTATIONS lines that fit today's work, in your own words, tied to the pest or place from today ("the ants along the lanai"). Keep each timeframe in its exact EXPECTATIONS words. Pick what matters; you do not have to use every line. WHAT TO EXPECT never says how a treatment works. With no EXPECTATIONS lines, it is exactly one sentence from the SERVICE TYPE record (the server's own record of the visit, never the Service Type input): "Today's visit was part of your regular pest control plan." for a recurring plan, "Today was your one-time pest control service." for a one-time service, "Today was your return visit." for a re-service, and "Today's pest control service is done." with no SERVICE TYPE record, and nothing else.
 WHAT'S NEXT: what we will check or do next, only when the note or Recommendations say so; what the customer can do, only when the inputs name it; then end with when to reach out, tied to the REACH-OUT DATE when one is supplied, otherwise to an EXPECTATIONS timeframe, otherwise to a sign of today's pest or activity they can notice, at a place from today ("If the ants along the lanai come back, text or call us."). Reaching out is "text or call us". With a REACH-OUT DATE, that sentence names the pest and the date and nothing else, no place and no "come back" ("If you still see ants on <the REACH-OUT DATE>, text or call us."): any other word in it can read as a visit, and the report refuses it. Never ask the customer to watch something only we track, like a station count. Keep each next step as what it is: a recommendation, our plan, something we will do, or something the customer can do. Only when the inputs hold no next step from the note or Recommendations, no promise still open in PROMISES, no REACH-OUT DATE, nothing we saw today, nothing the customer told us and no EXPECTATIONS lines: one short sentence about this visit that repeats no other section, with no invented check, invitation or promise.
@@ -163,17 +144,14 @@ THREE GOOD REPORTS (match the voice; never copy their facts, every visit is diff
 
 ${examplesText(examples)}`;
 
-const PEST_REPORT_VOICE_PROMPT = voicePromptText({ version: PEST_REPORT_VOICE_VERSION, examples: PEST_VOICE_EXAMPLES, quietVisit: false });
-const PEST_REPORT_VOICE_V2_PROMPT = voicePromptText({ version: PEST_REPORT_VOICE_V2_VERSION, examples: PEST_VOICE_V2_EXAMPLES, quietVisit: true });
+const PEST_REPORT_VOICE_PROMPT = voicePromptText({ version: PEST_REPORT_VOICE_VERSION, examples: PEST_VOICE_EXAMPLES });
 
 // A re-service is named at the end, as the stacked writer added the callback
 // modifier: a callback flag or the re-service profile.
-function pestReportVoicePrompt({ reservice = false, quietVisit = false } = {}) {
-  const prompt = quietVisit ? PEST_REPORT_VOICE_V2_PROMPT : PEST_REPORT_VOICE_PROMPT;
-  return reservice ? `${prompt}\n\nTHIS VISIT IS A RE-SERVICE. Follow A RE-SERVICE above.` : prompt;
+function pestReportVoicePrompt({ reservice = false } = {}) {
+  return reservice ? `${PEST_REPORT_VOICE_PROMPT}\n\nTHIS VISIT IS A RE-SERVICE. Follow A RE-SERVICE above.` : PEST_REPORT_VOICE_PROMPT;
 }
 
 module.exports = {
   PEST_REPORT_VOICE_VERSION, PEST_REPORT_VOICE_PROMPT, PEST_VOICE_EXAMPLES, pestReportVoicePrompt,
-  PEST_REPORT_VOICE_V2_VERSION, PEST_REPORT_VOICE_V2_PROMPT, PEST_VOICE_V2_EXAMPLES,
 };
