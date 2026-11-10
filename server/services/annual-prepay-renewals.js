@@ -1869,10 +1869,10 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // manual admin-schedule / admin-leads / availability bookings);
   // multi-property customers stay office-placed. Resolved once per term.
   const seedPropertyId = await coverageSeedPropertyId(term, cols, conn);
-  // GATE_PREPAY_SEED_SERIES_SLOT (owner 2026-11-01): per seeded date, the
+  // Series slot (owner 2026-11-01): per seeded date, the
   // technician / copied time / taken-hour hand-off fields buildInsert writes.
-  // Filled by prepareSeedSlot inside the insert's lock scope; EMPTY with the
-  // gate off, so buildInsert reads nothing different. The insert call sites
+  // Filled by prepareSeedSlot inside the insert's lock scope; EMPTY when the
+  // customer has no series slot to copy. The insert call sites
   // stay as the booking insert-site contract froze them.
   const seedSlotPatches = new Map();
   const seedSlotFor = (scheduledDate, windowStartArg) => {
@@ -1929,9 +1929,6 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   let seriesSlot = null;
   let seriesAbsentDays = new Set();
   const resolveSeriesSlot = async () => {
-    // Read at call time; typeof-guarded so a whole-module feature-gates mock without the reader reads as off.
-    const gates = require('../config/feature-gates');
-    if (typeof gates.prepaySeedSeriesSlotLive !== 'function' || !gates.prepaySeedSeriesSlotLive()) return;
     if (!datesToSeed.length || !cols.technician_id || !cols.window_start) return;
     const SeriesSlot = require('./annual-prepay-series-slot');
     seriesSlot = await SeriesSlot.coverageSeriesSlot(conn, {

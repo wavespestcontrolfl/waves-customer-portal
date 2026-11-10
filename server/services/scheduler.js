@@ -1976,6 +1976,21 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 15 MIN — make-room move repair (GATE_BOOKING_MAKE_ROOM = true, owner 2026-11-09). The accept's moves commit
+  // first; the moved customers' reminders and records follow right after (services/scheduling/booking-make-room-accept.js).
+  // This pass finishes any that a restart cut off. Reads the committed rows, writes only what differs, sends nothing, no
+  // paid call. Mode not on: returns at once.
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      if (require('./scheduling/booking-make-room').bookingMakeRoomMode() !== 'on') return;
+      await runExclusive('booking-make-room-repair', async () => {
+        await require('./scheduling/booking-make-room-accept').reconcileMakeRoomMoves(db, { today: etDateString(new Date()) });
+      });
+    } catch (err) {
+      logger.error(`[booking-make-room] repair tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 4:40AM — Day RE-PLAN (GATE_DAY_REPLAN, dark; owner ruling
   // 2026-11-03). After the 4:20 reorder pass it plans each
@@ -2585,7 +2600,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // DAILY 07:20 — agreement renewal reminder: one admin notification 45 days before each signed new
-  // construction warranty renews (and, with GATE_AGREEMENT_RENEWAL_REMINDER on, each signed Commercial Pest
+  // construction warranty renews (and each signed Commercial Pest
   // Service Agreement's 12-month term ends), closed when staff mark the notice sent. It sends nothing to a
   // customer. runExclusive records the job health.
   cron.schedule('20 7 * * *', async () => {
@@ -5469,8 +5484,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKDAYS 11:47AM — Quiet overdue invoices (GATE_QUIET_OVERDUE_LIST; returns
-  // before any read when off). Owner 2026-10-24: one standing Billing bell
+  // WEEKDAYS 11:47AM — Quiet overdue invoices. Owner 2026-10-24: one standing Billing bell
   // lists the open self-pay invoices no reminder reaches (paused with no end,
   // stopped, finished, Auto Pay hold 7+ days, never set up); it rings only
   // when an invoice joins and closes itself when the list is empty. After the
@@ -5478,11 +5492,10 @@ function initScheduledJobs() {
   // listed as quiet; outside the 10am stagger plan. Sends nothing to a customer.
   // =========================================================================
   cron.schedule('47 11 * * 1-5', async () => {
-    if (!require('../config/feature-gates').quietOverdueListLive()) return;
     try {
       await runExclusive('quiet-overdue-invoices', async () => {
         const result = await require('./quiet-overdue-invoices').runQuietOverdueList();
-        logger.info(`Quiet overdue invoices: ${result.count ?? 0} listed (${result.outcome || result.skipped})`);
+        logger.info(`Quiet overdue invoices: ${result.count ?? 0} listed (${result.outcome})`);
       });
     } catch (err) {
       logger.error(`Quiet overdue invoices failed: ${err.message}`);
@@ -5595,8 +5608,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 7:23AM — Unbilled visits (GATE_UNBILLED_VISITS_LIST; returns before
-  // any read when off). Owner 2026-10-25 (Air Jobs Plan step 3): one standing
+  // DAILY 7:23AM — Unbilled visits. Owner 2026-10-25 (Air Jobs Plan step 3): one standing
   // Billing bell lists the visits done in the last 30 days with no invoice,
   // read from the Billing recovery page's own list, so the bell and the page
   // never disagree. It replaces the c02 check that ran on the owner's MacBook
@@ -5604,11 +5616,10 @@ function initScheduledJobs() {
   // empty. Bills nothing and sends nothing to a customer.
   // =========================================================================
   cron.schedule('23 7 * * *', async () => {
-    if (!require('../config/feature-gates').unbilledVisitsListLive()) return;
     try {
       await runExclusive('unbilled-visits-list', async () => {
         const result = await require('./unbilled-visits-list').runUnbilledVisitsList();
-        logger.info(`Unbilled visits: ${result.count ?? 0} listed (${result.outcome || result.skipped})`);
+        logger.info(`Unbilled visits: ${result.count ?? 0} listed (${result.outcome})`);
       });
     } catch (err) {
       logger.error(`Unbilled visits failed: ${err.message}`);

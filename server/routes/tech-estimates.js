@@ -4,20 +4,23 @@ const db = require('../models/db');
 const { adminAuthenticate } = require('../middleware/admin-auth');
 const featureGates = require('../config/feature-gates');
 
-// The technician estimate tool (steps 1 and 2a of 4): setup, a price preview, saving the quote as a draft and reading his
-// own drafts. Nothing is sent. GATE_TECH_ESTIMATES (owner 2026-11-09): the later steps text customers and the preview
-// runs the paid property lookup.
+// The technician estimate tool (steps 1, 2a and 4): setup, a price preview, saving the quote as a draft, reading his own
+// drafts and texting his own clean draft through the office's estimate send. GATE_TECH_ESTIMATES (owner 2026-11-09): the
+// send texts customers and the preview runs the paid property lookup.
 router.use(adminAuthenticate);
 
 const OFF = { enabled: false };
+// The setup read is the field workspace asking "is the tool on for this login?" on every load. Its "no" is a plain
+// answer (200), so a browser logs no failed request while the tool is off. Every other route answers 404.
+const off = (req, res) => (req.method === 'GET' && req.path === '/setup' ? res.json(OFF) : res.status(404).json(OFF));
 
-// Gate off, or a technician whose own switch is off: 404 before any customer read. An admin always passes.
+// Gate off, or a technician whose own switch is off: the off answer before any customer read. An admin always passes.
 router.use(async (req, res, next) => {
   try {
-    if (!featureGates.techEstimatesLive()) return res.status(404).json(OFF);
+    if (!featureGates.techEstimatesLive()) return off(req, res);
     if (req.techRole === 'admin') return next();
     const row = await db('technicians').where({ id: req.technicianId }).first('can_create_estimates');
-    if (!row || row.can_create_estimates !== true) return res.status(404).json(OFF);
+    if (!row || row.can_create_estimates !== true) return off(req, res);
     return next();
   } catch (err) { return next(err); }
 });
@@ -57,6 +60,9 @@ router.post('/', (req, res, next) => answer(req, res, next, 'create', () => save
 
 /* GET / — his own estimates, newest first */
 router.get('/', (req, res, next) => answer(req, res, next, 'list', () => save().listOwn(req)));
+
+/* POST /:id/send — text his own draft through the office's estimate send (409 office_first for a held one) */
+router.post('/:id/send', (req, res, next) => answer(req, res, next, 'send', () => require('../services/tech-estimate-send').sendOwn(req, req.params.id, req.body)));
 
 /* GET /:id — one of his own estimates (404 for any other id) */
 router.get('/:id', (req, res, next) => answer(req, res, next, 'read', () => save().readOwn(req, req.params.id)));

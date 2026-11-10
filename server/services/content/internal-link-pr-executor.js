@@ -45,6 +45,9 @@ const EXECUTOR_VERSION = 'internal-link-dry-run-v1';
 const PR_EXECUTOR_VERSION = 'internal-link-pr-executor-v2';
 const RECOVERED_PR_EXECUTOR_VERSION = 'internal-link-pr-executor-recovered';
 const DEFAULT_LIMIT = 10;
+// A pending/queued task idle this long has no caller left to dry-run it (the candidate sweep picks it up).
+const STRANDED_STATUSES = ['pending', 'queued'];
+const STRANDED_QUEUED_MS = 60 * 60 * 1000;
 // A pr_reserved row normally flips to pr_open/failed within seconds; one
 // untouched for 2h with no PR URL is a crash orphan (see
 // _recoverStalePrReservedTasks).
@@ -414,12 +417,27 @@ const MERGE_GATES = [mergeInFlightGate, prStateGate, provenanceGate, productionB
 class InternalLinkPrExecutor {
   async runDryRun({ limit = DEFAULT_LIMIT, taskIds = null } = {}) {
     const tasks = await this._loadQueuedTasks({ limit, taskIds });
+    return this._dryRunAndPersist(tasks);
+  }
+
+  // Dry-run each task and store its verdict. `onlyStatuses` fences the write: the row is updated only while it is
+  // still in one of them (a caller that does not own the task must not overwrite a status another caller set).
+  // `keepTransient`: a load failure that is not a confirmed-missing file (a GitHub rate limit, a network error, a 5xx)
+  // writes nothing, so the task keeps its status and the next pass tries it again (the PR batch's own rule,
+  // loadPagesStage). Without it every failure is stored as `failed`, which the callers that own their tasks recover
+  // themselves (isTransientLoadFailure).
+  async _dryRunAndPersist(tasks, { onlyStatuses = null, keepTransient = false } = {}) {
     const results = [];
     for (const task of tasks) {
       let result;
       try {
         result = await this.dryRunTask(task);
       } catch (err) {
+        if (keepTransient && !MISSING_FILE_RE.test(String(err?.message || err))) {
+          logger.warn(`[internal-link-pr-executor] transient dry-run failure for ${task.id} (retry next sweep): ${err.message}`);
+          results.push({ task_id: task.id, status: task.status, transient: true });
+          continue;
+        }
         logger.warn(`[internal-link-pr-executor] dry-run failed for ${task.id}: ${err.message}`);
         result = {
           task_id: task.id,
@@ -428,10 +446,29 @@ class InternalLinkPrExecutor {
           executor_version: EXECUTOR_VERSION,
         };
       }
-      await this._persistDryRunResult(task.id, result);
+      await this._persistDryRunResult(task.id, result, { onlyStatuses });
       results.push(result);
     }
     return { count: results.length, results };
+  }
+
+  // Tasks left in pending/queued that no caller will dry-run. A task is dry-run by whoever queues it, in the same
+  // call (the runner's own run, post-merge planning), and runPrBatch loads `patch_candidate` only. The review queue's
+  // "requeue" sets `queued` and calls nothing, so a requeued task waited for good (two tasks requeued 2026-11-04 were
+  // still queued on 11-09 while the daily sweep ran every day). The sweep dry-runs them here, so each one joins the
+  // candidates or gets its terminal verdict. Only rows idle for STRANDED_QUEUED_MS: a younger row may belong to a
+  // run that is about to dry-run it. No caller owns these rows, so nothing would recover one stored as `failed` by
+  // an outage: a transient load failure leaves the row as it is for the next sweep.
+  async _validateStrandedQueued({ limit, now = new Date() } = {}) {
+    const tasks = await db(TABLE)
+      .whereIn('status', STRANDED_STATUSES)
+      .where('updated_at', '<', new Date(now.getTime() - STRANDED_QUEUED_MS))
+      .orderByRaw('COALESCE(target_priority, 0) DESC')
+      .orderBy('updated_at', 'asc')
+      .limit(limit)
+      .select('*');
+    if (!tasks.length) return { count: 0, results: [] };
+    return this._dryRunAndPersist(tasks, { onlyStatuses: STRANDED_STATUSES, keepTransient: true });
   }
 
   async dryRunTask(task, { sourcePage = null, targetPage = null } = {}) {
@@ -600,7 +637,14 @@ class InternalLinkPrExecutor {
     } catch (err) {
       logger.warn(`[internal-link-pr-executor] pre-sweep reconciliation failed: ${err.message}`);
     }
-    return this.runPrBatch({ limit, scanLimit: envInt('AUTONOMOUS_INTERNAL_LINK_SWEEP_SCAN_LIMIT', 15) });
+    const scanLimit = envInt('AUTONOMOUS_INTERNAL_LINK_SWEEP_SCAN_LIMIT', 15);
+    // Requeued tasks nothing dry-ran (see _validateStrandedQueued) become candidates for this same sweep.
+    try {
+      await this._validateStrandedQueued({ limit: scanLimit });
+    } catch (err) {
+      logger.warn(`[internal-link-pr-executor] stranded-queued dry-run failed: ${err.message}`);
+    }
+    return this.runPrBatch({ limit, scanLimit });
   }
 
   // Recent autonomous blog publishes whose post-merge link planning failed or
@@ -1202,7 +1246,7 @@ class InternalLinkPrExecutor {
     throw new Error(`target_file_not_found:${candidates[0]}`);
   }
 
-  async _persistDryRunResult(taskId, result) {
+  async _persistDryRunResult(taskId, result, { onlyStatuses = null } = {}) {
     if (!taskId) return;
     const patch = {
       status: result.status,
@@ -1235,7 +1279,9 @@ class InternalLinkPrExecutor {
       failure_reason: result.failure_reason || null,
       updated_at: new Date(),
     };
-    await db(TABLE).where({ id: taskId }).update(patch);
+    const query = db(TABLE).where({ id: taskId });
+    if (Array.isArray(onlyStatuses) && onlyStatuses.length) query.whereIn('status', onlyStatuses);
+    await query.update(patch);
   }
 
   async _reserveTasksForPr(selected, { branch }) {

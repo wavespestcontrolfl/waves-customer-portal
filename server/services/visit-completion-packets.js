@@ -1724,8 +1724,8 @@ async function enrollVisitCompletionReviewOnce(packetId, database = db, { delive
   const formAsks = ({ body }) => body.requestReview !== false
     && (!body.reviewSuppression || body.reviewSuppression === 'invoice_created');
   let requested = payload.items.every(formAsks);
-  if (!requested && require('../config/feature-gates').reviewFirstAskLockLive()) {
-    // GATE_REVIEW_FIRST_ASK_LOCK: a member whose "no ask" the record kept on (a never-asked customer, no
+  if (!requested) {
+    // The first review ask: a member whose "no ask" the record kept on (a never-asked customer, no
     // "Complaint on site" reason) still asks; its record carries requestReview true and the marker.
     const kept = await database('visit_completion_packet_items as i')
       .join('service_records as r', 'r.id', 'i.service_record_id')

@@ -1,6 +1,6 @@
 /**
- * GATE_REVIEW_FIRST_ASK_LOCK (owner 2026-10-26): the completion panel's send-time preview also says whether the
- * visit's customer was never asked for a review (`firstReviewAsk`). Gate off, or no visit named: the key is absent and
+ * First review ask (owner 2026-10-26): the completion panel's send-time preview also says whether the
+ * visit's customer was never asked for a review (`firstReviewAsk`). No visit named: the key is absent and
  * the answer is as before. A re-service and an unknown visit are never a first ask (firstAskLockVisit answers null;
  * its rule is in review-first-ask-lock.test.js).
  */
@@ -39,8 +39,6 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const ReviewService = require('../services/review-request');
 
-const gateWas = process.env.GATE_REVIEW_FIRST_ASK_LOCK;
-afterEach(() => { if (gateWas === undefined) delete process.env.GATE_REVIEW_FIRST_ASK_LOCK; else process.env.GATE_REVIEW_FIRST_ASK_LOCK = gateWas; });
 beforeEach(() => {
   ReviewService.customerNeverAskedForReview.mockReset().mockResolvedValue(true);
   ReviewService.firstAskLockVisit.mockReset().mockResolvedValue({ customer_id: 'cust-1' });
@@ -57,22 +55,12 @@ async function preview(query) {
   return res.json.mock.calls[0][0];
 }
 
-describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_FIRST_ASK_LOCK', () => {
-  test('gate off: no firstReviewAsk key, and the helper is never asked', async () => {
-    delete process.env.GATE_REVIEW_FIRST_ASK_LOCK;
-    const out = await preview({ serviceType: 'Pest', serviceId: 'svc-1' });
-    expect(out).not.toHaveProperty('firstReviewAsk');
-    expect(ReviewService.firstAskLockVisit).not.toHaveBeenCalled();
-    expect(ReviewService.customerNeverAskedForReview).not.toHaveBeenCalled();
-  });
-
-  test('gate on, no visit named: no firstReviewAsk key', async () => {
-    process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true';
+describe('GET /admin/reviews/send-time-preview, first review ask', () => {
+  test('no visit named: no firstReviewAsk key', async () => {
     expect(await preview({ serviceType: 'Pest' })).not.toHaveProperty('firstReviewAsk');
   });
 
-  test('gate on, a visit whose customer was never asked: firstReviewAsk true', async () => {
-    process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true';
+  test('a visit whose customer was never asked: firstReviewAsk true', async () => {
     const out = await preview({ serviceType: 'Pest', serviceId: 'svc-1' });
     expect(out.firstReviewAsk).toBe(true);
     expect(ReviewService.firstAskLockVisit).toHaveBeenCalledWith('svc-1');
@@ -80,14 +68,12 @@ describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_FIRST_ASK_LOCK',
     expect(out.bucket).toBe('legacy:+120m');
   });
 
-  test('gate on, a customer asked before: firstReviewAsk false', async () => {
-    process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true';
+  test('a customer asked before: firstReviewAsk false', async () => {
     ReviewService.customerNeverAskedForReview.mockResolvedValue(false);
     expect((await preview({ serviceType: 'Pest', serviceId: 'svc-1' })).firstReviewAsk).toBe(false);
   });
 
-  test('gate on, a re-service visit or an unknown visit: firstReviewAsk false', async () => {
-    process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true';
+  test('a re-service visit or an unknown visit: firstReviewAsk false', async () => {
     ReviewService.firstAskLockVisit.mockResolvedValue(null);
     expect((await preview({ serviceType: 'Pest', serviceId: 'svc-1' })).firstReviewAsk).toBe(false);
     expect(ReviewService.customerNeverAskedForReview).not.toHaveBeenCalled();
@@ -125,14 +111,14 @@ describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_ALREADY_REVIEWED
     expect(ReviewService.alreadyReviewedForVisit).not.toHaveBeenCalled();
   });
 
-  test('gate on, no visit named: neither key', async () => {
+  test('no visit named: neither key', async () => {
     process.env.GATE_REVIEW_ALREADY_REVIEWED = 'true';
     const out = await preview({ serviceType: 'Pest' });
     expect(out).not.toHaveProperty('alreadyReviewed');
     expect(out).not.toHaveProperty('firstAskReasons');
   });
 
-  test('gate on, a marked customer: the mark with its date, and both off reasons', async () => {
+  test('a marked customer: the mark with its date, and both off reasons', async () => {
     process.env.GATE_REVIEW_ALREADY_REVIEWED = 'true';
     ReviewService.alreadyReviewedForVisit.mockResolvedValue({ reviewedOn: '2025-01-01' });
     const out = await preview({ serviceType: 'Pest', serviceId: 'svc-1' });
@@ -141,7 +127,7 @@ describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_ALREADY_REVIEWED
     expect(ReviewService.alreadyReviewedForVisit).toHaveBeenCalledWith('svc-1');
   });
 
-  test('gate on, a customer not marked: alreadyReviewed null (the key is there)', async () => {
+  test('a customer not marked: alreadyReviewed null (the key is there)', async () => {
     process.env.GATE_REVIEW_ALREADY_REVIEWED = 'true';
     const out = await preview({ serviceType: 'Pest', serviceId: 'svc-1' });
     expect(out).toHaveProperty('alreadyReviewed', null);

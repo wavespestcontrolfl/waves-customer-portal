@@ -69,6 +69,7 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'estimates', methods: ['POST'], pattern: /^\/api\/tech\/estimates\/price$/ },
   { bucket: 'estimates', methods: ['POST'], pattern: /^\/api\/tech\/estimates$/ },
   { bucket: 'estimates', methods: READ, pattern: /^\/api\/tech\/estimates$/ },
+  { bucket: 'estimates', methods: ['POST'], pattern: /^\/api\/tech\/estimates\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/send$/i },
   { bucket: 'estimates', methods: READ, pattern: /^\/api\/tech\/estimates\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/lawn-diagnostic(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/social(\/.*)?$/ },

@@ -29,8 +29,8 @@
 // Tech portal style rule (CLAUDE.md): inline styles, no Tailwind, no
 // components/ui.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Camera, ClipboardCheck, FileText, Flag, Map, MessageSquare, Phone } from 'lucide-react';
-import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
+import { Camera, ClipboardCheck, ClipboardList, FileText, Flag, Map, MessageSquare, Phone } from 'lucide-react';
+import { DEAD_ASSIGNMENT_STATUSES, stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import { withPassLinks } from './passLinks';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
 import { isMlUnit, mlToFlOz } from '../../lib/measure-units';
@@ -913,7 +913,7 @@ function ConsultationOutcomeAction({ service, onOutcome, style }) {
 
 // Per-service actions keep terminal reports read-only and preserve the
 // trace-eligibility guard — one row per member service on a grouped stop.
-function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead, onOutcome }) {
+function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead, onOutcome, onEstimate = null }) {
   const closeoutAvailable = !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service);
   const reportDisabled = !closeoutAvailable
     && (TERMINAL_STATUSES.has(service.status) || ['sent', 'closed'].includes(service.linkedProject?.status));
@@ -957,6 +957,8 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
           <button className="tf-button" onClick={() => onZone(service)} aria-label="Trace treatment zone" style={btn}><Map aria-hidden="true" />Zone</button>
         )}
         <button className="tf-button" onClick={() => onLead(service)} style={btn}><Flag aria-hidden="true" />Flag opportunity</button>
+        {/* The technician estimate tool (GATE_TECH_ESTIMATES): present only when the tool's setup answered. */}
+        {onEstimate && <button className="tf-button" onClick={() => onEstimate(service)} style={btn}><ClipboardList aria-hidden="true" />Estimate</button>}
         <ConsultationOutcomeAction service={service} onOutcome={onOutcome} style={btn} />
       </div>
     </div>
@@ -1119,8 +1121,9 @@ function SetTextsSection({ line, service, visitIds, request, onBusyChange }) {
 // second tap cannot originate a second bridge (codex #4072 r6 P2).
 const CALL_LOCK_MS = 45000;
 
-export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, onOutcome = null, techLine = null, request = null, onBusyChange = null, onGateChanged = null }) {
+export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, onOutcome = null, onEstimate = null, techLine = null, request = null, onBusyChange = null, onGateChanged = null }) {
   const service = stop.primary;
+  const estimateService = stop.services.find((member) => !DEAD_ASSIGNMENT_STATUSES.has(member.status));
   const phone = service.customerPhone || service.customer_phone || null;
   // Own-line mode: Call bridges through the line, Text composes from it.
   // `{ unknown: true }` = the line lookup has not succeeded (it failed on
@@ -1344,6 +1347,9 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       {stop.services.map((s) => (
         <ServiceActions
           key={s.id}
+          // One estimate button for the visit's customer, on the first service of the stop the server still calls his
+          // (a skipped or cancelled member cannot be quoted through: the tool would answer "not on your route").
+          onEstimate={s.id === estimateService?.id ? onEstimate : null}
           service={s}
           showType={grouped}
           onPhotos={onPhotos}

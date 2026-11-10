@@ -45,6 +45,8 @@ const OWNER_ALERT_KINDS = Object.freeze({
   'sms-lead': Object.freeze({ area: 'Leads', severity: 'needs-you', doneWhen: 'estimate_sent' }),
   'web-lead': Object.freeze({ area: 'Leads', severity: 'needs-you', doneWhen: 'lead_contacted' }),
   'field-lead': Object.freeze({ area: 'Leads', severity: 'needs-you', doneWhen: 'lead_contacted' }),
+  // The technician estimate tool (GATE_TECH_ESTIMATES): a quiet line when a technician texts an estimate from the phone.
+  'tech-estimate-sent': Object.freeze({ area: 'Estimates', severity: 'fyi', doneWhen: 'report_read' }),
   'content-pr-stuck': Object.freeze({ area: 'Content', severity: 'needs-you', doneWhen: 'pr_resolved' }),
   'content-visibility': Object.freeze({ area: 'Content', severity: 'needs-you', doneWhen: 'page_fixed' }),
   'content-engine-error': Object.freeze({ area: 'Content', severity: 'needs-you', doneWhen: 'error_resolved' }),

@@ -94,7 +94,7 @@ const INTERACTION_COPIES = ['sms_outbound', 'email_outbound', 'call', 'inbound_c
 const NOT_THIS_CUSTOMER_OUTCOMES = ['wrong_number', 'spam'];
 const SUBJECT_SETTLE_MS = 15 * 60 * 1000;
 // reschedule_log rows written by code: their notes are program text.
-const PROGRAM_RESCHEDULERS = ['system', 'auto_dispatch', 'day_replan'];
+const PROGRAM_RESCHEDULERS = ['system', 'auto_dispatch', 'day_replan', 'booking_make_room'];
 
 const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
 // Eastern wall time with its offset: the prompt says every time is Eastern,

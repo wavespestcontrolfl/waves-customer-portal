@@ -190,79 +190,68 @@ describe('pestReportV2PdfSignature — PDF cache-key component', () => {
   test('trace-or-nothing gate appends -ton1 to every pest-line key (cached PDFs re-render once)', () => {
     process.env.PEST_REPORT_V2 = 'true';
     process.env.GATE_PEST_TRACE_OR_NOTHING = 'true';
-    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2c-ton1-noarea1');
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2c-ton1-rain1-noarea1');
     expect(pestReportV2PdfSignature({
       service_line: 'pest',
       service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach' } }),
-    })).toBe('-roachtyped2-ton1-noarea1');
+    })).toBe('-roachtyped2-ton1-rain1-noarea1');
     // Non-pest lines stay untouched in every gate state.
     expect(pestReportV2PdfSignature({ service_line: 'lawn' })).toBe('');
     delete process.env.GATE_PEST_TRACE_OR_NOTHING;
-    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2c-noarea1');
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2c-rain1-noarea1');
   });
 
   test('-ton1 keys pest PDFs even with PEST_REPORT_V2 off — the suppression is V2-independent (codex P1)', () => {
     delete process.env.PEST_REPORT_V2;
     process.env.GATE_PEST_TRACE_OR_NOTHING = 'true';
-    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-ton1-noarea1');
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-ton1-rain1-noarea1');
     delete process.env.GATE_PEST_TRACE_OR_NOTHING;
-    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-noarea1');
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-rain1-noarea1');
   });
 
-  test('rain outlook gate appends -rain1 to every pest-line key and to no other line', () => {
+  test('every pest-line key carries -rain1 and no other line does', () => {
     process.env.PEST_REPORT_V2 = 'true';
-    process.env.GATE_PEST_RAIN_OUTLOOK = 'true';
-    try {
-      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2c-rain1-noarea1');
-      expect(pestReportV2PdfSignature({
-        service_line: 'pest',
-        service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach' } }),
-      })).toBe('-roachtyped2-rain1-noarea1');
-      delete process.env.PEST_REPORT_V2;
-      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-rain1-noarea1');
-      expect(pestReportV2PdfSignature({ service_line: 'lawn' })).toBe('');
-      process.env.GATE_PEST_TRACE_OR_NOTHING = 'true';
-      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-ton1-rain1-noarea1');
-      // Anything but exactly 'true' is off.
-      delete process.env.GATE_PEST_TRACE_OR_NOTHING;
-      process.env.GATE_PEST_RAIN_OUTLOOK = '1';
-      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-noarea1');
-      delete process.env.GATE_PEST_RAIN_OUTLOOK;
-      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-noarea1');
-    } finally {
-      delete process.env.GATE_PEST_RAIN_OUTLOOK;
-    }
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2c-rain1-noarea1');
+    expect(pestReportV2PdfSignature({
+      service_line: 'pest',
+      service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach' } }),
+    })).toBe('-roachtyped2-rain1-noarea1');
+    delete process.env.PEST_REPORT_V2;
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-rain1-noarea1');
+    expect(pestReportV2PdfSignature({ service_line: 'lawn' })).toBe('');
+    process.env.GATE_PEST_TRACE_OR_NOTHING = 'true';
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-ton1-rain1-noarea1');
   });
 
   it('is empty when the gate is off, regardless of line', () => {
     delete process.env.PEST_REPORT_V2;
-    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-noarea1');
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-rain1-noarea1');
   });
 
   it('marks pest-line records only when the gate is on', () => {
     process.env.PEST_REPORT_V2 = 'true';
-    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2c-noarea1');
-    expect(pestReportV2PdfSignature({ service_type: 'Quarterly Pest Control' })).toBe('-pestv2c-noarea1');
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2c-rain1-noarea1');
+    expect(pestReportV2PdfSignature({ service_type: 'Quarterly Pest Control' })).toBe('-pestv2c-rain1-noarea1');
     // Cockroach typed records dropped the dashboard (owner 2026-07-27) —
     // their PDFs carry a distinct suffix so cached dashboard renders
     // re-render once on next view.
     expect(pestReportV2PdfSignature({
       service_line: 'pest',
       service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach' } }),
-    })).toBe('-roachtyped2-noarea1');
+    })).toBe('-roachtyped2-rain1-noarea1');
     // the whole roach FAMILY shares the opt-out (codex P1 #3007)
     expect(pestReportV2PdfSignature({
       service_line: 'pest',
       service_data: JSON.stringify({ typedReportSnapshot: { type: 'german_roach_knockdown' } }),
-    })).toBe('-roachtyped2-noarea1');
+    })).toBe('-roachtyped2-rain1-noarea1');
     expect(pestReportV2PdfSignature({
       service_line: 'pest',
       service_data: JSON.stringify({ typedReportSnapshot: { type: 'palmetto_roach_knockdown' } }),
-    })).toBe('-roachtyped2-noarea1');
+    })).toBe('-roachtyped2-rain1-noarea1');
     expect(pestReportV2PdfSignature({
       service_line: 'pest',
       service_data: JSON.stringify({ typedReportSnapshot: { type: 'bed_bug' } }),
-    })).toBe('-pestv2c-noarea1');
+    })).toBe('-pestv2c-rain1-noarea1');
     // Other lines keep their keys — the pest gate must not invalidate
     // cached lawn/mosquito/termite report PDFs.
     expect(pestReportV2PdfSignature({ service_line: 'mosquito' })).toBe('');
@@ -438,7 +427,7 @@ describe('pestReportV2PdfSignature — expectations gate suffix', () => {
     const ORIGINAL_V2 = process.env.PEST_REPORT_V2;
     delete process.env.PEST_REPORT_V2;
     try {
-      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex5-noarea1');
+      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex5-rain1-noarea1');
     } finally {
       process.env.PEST_REPORT_V2 = ORIGINAL_V2;
     }
@@ -446,6 +435,6 @@ describe('pestReportV2PdfSignature — expectations gate suffix', () => {
 
   it('is absent when the gate is off', () => {
     delete process.env.GATE_PEST_REPORT_EXPECTATIONS;
-    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-noarea1');
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-rain1-noarea1');
   });
 });

@@ -207,7 +207,9 @@ async function lapsedPlanKeys(services, db) {
  * marks the result degraded so the run does not report as healthy.
  */
 // 'day_replan': the nightly day re-plan (services/day-replan/apply.js, owner 2026-11-03) is an automatic mover too.
-const AUTOMATIC_INITIATORS = new Set(['auto_dispatch', 'system', 'machine', 'weather_auto', 'day_replan']);
+// 'booking_make_room': the booking-time make-room move (services/scheduling/booking-make-room-accept.js, owner 2026-11-09) is
+// an automatic mover, not a person's placement.
+const AUTOMATIC_INITIATORS = new Set(['auto_dispatch', 'system', 'machine', 'weather_auto', 'day_replan', 'booking_make_room']);
 const CUSTOMER_INITIATORS = new Set(['customer', 'customer_self_serve', 'customer_portal', 'customer_sms', 'sms_offer_ai', 'ai_call_pipeline']);
 const HUMAN_EXCEPTION_SOURCES = new Set([...CUSTOMER_INITIATORS,
   'admin', 'admin_ib', 'admin_bulk', 'operator', 'tech', 'rider_onetime_move']);

@@ -185,6 +185,8 @@ async function createQuote(req, body) {
 const OWN_COLUMNS = [
   'e.id', 't.created_at', 'e.status', 'e.sent_at', 'e.accepted_at', 'e.address',
   'e.monthly_total', 'e.annual_total', 'e.onetime_total', 't.office_first_reasons',
+  // Read to answer needsTextRequest only; the id itself is never returned.
+  'e.customer_id',
 ];
 const ownQuery = (req) => db('tech_estimates as t')
   .join('estimates as e', 'e.id', 't.estimate_id')
@@ -194,7 +196,8 @@ const ownQuery = (req) => db('tech_estimates as t')
 const whoColumn = () => db.raw("COALESCE(NULLIF(e.customer_name, ''), NULLIF(trim(concat_ws(' ', c.first_name, c.last_name)), '')) as who");
 
 function ownShape(row) {
-  const reasons = Price.phoneReasons(Array.isArray(row.office_first_reasons) ? row.office_first_reasons : []);
+  const stored = Array.isArray(row.office_first_reasons) ? row.office_first_reasons : [];
+  const reasons = Price.phoneReasons(stored);
   return {
     id: row.id,
     createdAt: row.created_at,
@@ -207,6 +210,10 @@ function ownShape(row) {
     annualTotal: roundMoney(row.annual_total),
     oneTimeTotal: roundMoney(row.onetime_total),
     officeFirst: { required: reasons.length > 0, reasons },
+    // Step 4: the Send button shows for his draft only when no stored reason holds it for the office.
+    canSend: row.status === 'draft' && stored.length === 0,
+    // A new person (no customer on the estimate): the send needs his confirmation that the person asked for the text.
+    needsTextRequest: !row.customer_id,
   };
 }
 
