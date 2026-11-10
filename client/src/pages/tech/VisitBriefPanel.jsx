@@ -30,7 +30,7 @@
 // components/ui.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Camera, ClipboardCheck, ClipboardList, FileText, Flag, Map, MessageSquare, Phone } from 'lucide-react';
-import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
+import { DEAD_ASSIGNMENT_STATUSES, stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import { withPassLinks } from './passLinks';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
 import { isMlUnit, mlToFlOz } from '../../lib/measure-units';
@@ -1123,6 +1123,7 @@ const CALL_LOCK_MS = 45000;
 
 export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, onOutcome = null, onEstimate = null, techLine = null, request = null, onBusyChange = null, onGateChanged = null }) {
   const service = stop.primary;
+  const estimateService = stop.services.find((member) => !DEAD_ASSIGNMENT_STATUSES.has(member.status));
   const phone = service.customerPhone || service.customer_phone || null;
   // Own-line mode: Call bridges through the line, Text composes from it.
   // `{ unknown: true }` = the line lookup has not succeeded (it failed on
@@ -1343,11 +1344,12 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       )}
 
       <SectionLabel>Actions</SectionLabel>
-      {stop.services.map((s, index) => (
+      {stop.services.map((s) => (
         <ServiceActions
           key={s.id}
-          // One estimate button for the visit's customer, on the first service of a grouped stop.
-          onEstimate={index === 0 ? onEstimate : null}
+          // One estimate button for the visit's customer, on the first service of the stop the server still calls his
+          // (a skipped or cancelled member cannot be quoted through: the tool would answer "not on your route").
+          onEstimate={s.id === estimateService?.id ? onEstimate : null}
           service={s}
           showType={grouped}
           onPhotos={onPhotos}
