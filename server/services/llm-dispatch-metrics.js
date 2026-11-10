@@ -1033,6 +1033,11 @@ async function loadStats(db, start, end) {
     // but describe legs, not outcomes, and would double-count every chain.
     .where('row_kind', 'chain')
     .whereNot('policy', HEARTBEAT_POLICY)
+    // Max-plan runner jobs run portal code off-box with every paid key
+    // removed, so their OpenAI leg stops at no_key by design. They are not
+    // production route traffic: they must not move a route's fallback or
+    // failure rate, or make a quiet lane look active. NULL workload stays in.
+    .whereRaw('workload IS DISTINCT FROM ?', ['max_runner'])
     .groupBy('policy')
     .select('policy')
     .count({ total: '*' })
@@ -1358,5 +1363,5 @@ module.exports = {
   BACKUP_ONLY_POLICIES,
   EVENT_DRIVEN_POLICIES,
   SILENT_CONSECUTIVE_DAYS,
-  _private: { emailExceptions, missedDigestDays, DIGEST_BOOKMARK_KEY, MAX_BACKFILL_DAYS },
+  _private: { loadStats, emailExceptions, missedDigestDays, DIGEST_BOOKMARK_KEY, MAX_BACKFILL_DAYS },
 };
