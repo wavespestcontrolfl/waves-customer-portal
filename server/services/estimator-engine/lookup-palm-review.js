@@ -7,9 +7,9 @@
 // review reason: the lane goes yellow and the send gate holds the draft until
 // an admin counts the palms on the aerial photo and confirms (AI Draft Review
 // -> confirm the send), or rebuilds the quote in the estimate tool, whose
-// resubmitted line is caller-stated and carries no palmCountFromLookup. With
-// GATE_SATELLITE_PALM_COUNT_TYPED on, the confirm also needs the admin's typed
-// count (satellitePalmCountToConfirm below, read by the send gate).
+// resubmitted line is caller-stated and carries no palmCountFromLookup. The
+// confirm also needs the admin's typed count (satellitePalmCountToConfirm
+// below, read by the send gate).
 //
 // This runs on the FRESH draft pricing only, NOT inside the pricer: the
 // stored engineInputs of every sent quote still carry palmCountFromLookup and
