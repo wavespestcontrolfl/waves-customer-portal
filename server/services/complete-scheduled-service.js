@@ -3292,7 +3292,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // completion profile and both dark gates are known.
       customerRecapMode,
       requestReview: requestReviewPosted,
-      // "Complaint on site" (GATE_REVIEW_FIRST_ASK_LOCK), or "Already left a review" (GATE_REVIEW_ALREADY_REVIEWED):
+      // "Complaint on site" (the first review ask), or "Already left a review" (GATE_REVIEW_ALREADY_REVIEWED):
       // the reasons a never-asked customer's review ask may be turned off. Read only below, through
       // ReviewService.firstAskLockChoice.
       reviewOptOutReason,
@@ -3399,11 +3399,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Re-checked under the visit row lock against the registry's active stations.
       stationRosterSeen,
     } = completionInput.body;
-    // First review ask (GATE_REVIEW_FIRST_ASK_LOCK, owner 2026-10-26): a never-asked customer's ask turned off
+    // First review ask (owner 2026-10-26): a never-asked customer's ask turned off
     // WITHOUT an off reason ("Complaint on site"; "Already left a review" under GATE_REVIEW_ALREADY_REVIEWED) stays on. Only a tech's explicit requestReview:false on a real,
     // completed, loud, non-re-service visit is looked at; system closeouts, backdated, incomplete, concern and
-    // declined visits, the fixed re-service text and re-services (firstAskLockVisit) keep today's behavior. Gate
-    // off: no read at all, requestReview is the posted value.
+    // declined visits, the fixed re-service text and re-services (firstAskLockVisit) keep today's behavior.
     let requestReview = requestReviewPosted;
     let reviewFirstAskLock = null;
     let reviewTimingBody = completionInput.body || {};
@@ -3412,8 +3411,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && customerRecapMode !== require('./reservice-fixed-recap').MODE
       && !completionInput.issuedInvoiceCloseout && completionInput.systemQuietCloseout !== true
       // A sheet that pins every customer text off (no completion text, no pay link, no ask) means "send nothing".
-      && !(sendCompletionSmsRequested === false && includePayLink === false)
-      && require('../config/feature-gates').reviewFirstAskLockLive()) {
+      && !(sendCompletionSmsRequested === false && includePayLink === false)) {
       const reviewRequest = require('./review-request');
       // `db` is the packet transaction in a visit-closeout records phase: the reads ride it.
       const lockVisit = await reviewRequest.firstAskLockVisit(completionInput.serviceId, db);
@@ -6371,12 +6369,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
         ? resumedStructuredNotes.customerRequestedReview
         : null;
       // A kept-on first review ask was frozen with the record: a resumed retry (the customer may have been
-      // asked since) finishes the choice the record holds (GATE_REVIEW_FIRST_ASK_LOCK).
+      // asked since) finishes the choice the record holds (the first review ask).
       if (resumedStructuredNotes.reviewFirstAskLock?.forcedOn === true) {
         requestReview = true;
         completionReviewDelayMinutes = undefined;
       } else if (reviewFirstAskLock?.forcedOn) {
-        // The committed record decides. It holds no kept-on marker (the gate was off then, or the customer
+        // The committed record decides. It holds no kept-on marker (it was saved before the first-ask rule, or the customer
         // was asked since), so this run's preflight override is undone: the posted choice and the posted
         // timing stand, as for any committed retry.
         requestReview = requestReviewPosted;
@@ -7353,7 +7351,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             requestReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion) ? false : requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
-            // GATE_REVIEW_FIRST_ASK_LOCK audit: a never-asked customer's "no ask" was kept on (forcedOn) or
+            // First review ask audit: a never-asked customer's "no ask" was kept on (forcedOn) or
             // turned off with the "Complaint on site" reason. Absent when the lock did not act.
             ...(reviewFirstAskLock && (reviewFirstAskLock.forcedOn || reviewFirstAskLock.optOutReason)
               ? { reviewFirstAskLock: { neverAsked: true, forcedOn: reviewFirstAskLock.forcedOn, optOutReason: reviewFirstAskLock.optOutReason } }

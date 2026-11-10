@@ -1,5 +1,5 @@
 /**
- * Inbound referral confirm (GATE_REFERRAL_INBOUND_CONFIRM, owner 2026-10-26
+ * Inbound referral confirm (owner 2026-10-26
  * "YES GO").
  *
  * The program pays $25 to each side after a referred customer's first recurring

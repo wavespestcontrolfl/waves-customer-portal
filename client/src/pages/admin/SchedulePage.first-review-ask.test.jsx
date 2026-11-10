@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// First review ask (GATE_REVIEW_FIRST_ASK_LOCK, owner 2026-10-26): in the Complete Service panel a customer
+// First review ask (owner 2026-10-26): in the Complete Service panel a customer
 // never asked for a review sees the box as "First review ask", on and kept on; turning it off asks to confirm
 // the one reason, "Complaint on site", and cancelling keeps it on. A customer asked before keeps today's box.
 // Synthetic data only; every request is a stub.

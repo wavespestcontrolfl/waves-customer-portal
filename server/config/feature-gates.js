@@ -24,8 +24,7 @@
  *   GATE_AI_CREDIT_KEYS=true (owner 2026-10-29: the owner's Claude Max / ChatGPT Pro plans each give a monthly API credit that lands in its own API organization. With this on and ANTHROPIC_CREDIT_KEYS / OPENAI_CREDIT_KEYS set (comma-separated, one credit-only key per organization), Anthropic and OpenAI calls that carry the main key are tried on the credit keys first, in order, and fall back to the main key when a credit key runs out of credit, is rejected or is rate limited (paused in memory 6 h, 1 h or the retry-after time). Only stateless calls move (messages, count_tokens, chat completions, embeddings, moderations, images, audio, and /v1/responses with store:false); file, container, batch, session and streamed-body calls stay on the main key. One wrapper around globalThis.fetch installed at boot by server/services/llm/credit-key-pool.js, so a flip needs a redeploy. Strict 'true', dark by default; off = nothing wrapped, every call as before. Sends nothing to a customer.)
  *   GATE_BID_KIT_PRODUCT_LIST_SYNC=true (owner 2026-10-25: once a day in the 6:05 AM ET compliance slot the Bid kit Product List PDF (every product applied on a visit in the last 12 months, with active ingredient, EPA Reg. No., Label and SDS links) is rebuilt from the visit records. A changed list replaces the file; when ONLY products bought from SiteOne changed and the list is complete (every pesticide has an EPA number, label and SDS) the kit signs it off itself and logs an automatic sign-off, otherwise the file is left NOT signed off and ONE admin bell says what changed. Read at call time via bidKitProductListSyncLive(), strict 'true', dark by default; off = the job returns before any query. Sends nothing to anyone.)
  *   GATE_PRODUCT_INTAKE_GUARD=true (owner 2026-10-26 "fix a": a purchase title that carries a product-line word the catalog product's own name lacks ("Dismiss NXT" vs "Dismiss", "Gentrol Complete EC3" vs "Gentrol") no longer matches that product by name containment or by the inventory agent's "existing" answer; it goes to a person through the agent's "not added" bell and no stock moves (alias matches are never guarded). A product the agent creates for a pesticide gets its EPA registration number and EPA label link from EPA's label system when one exact brand-name match proves it, otherwise the EPA number stays blank (never "N/A"), and the "logged a purchase" bell names what is still missing. Admin inventory only; nothing reaches a customer. Read at call time via productIntakeGuardLive(), strict 'true', dark by default; off = today's behavior.)
- *   GATE_REVIEW_FIRST_ASK_LOCK=true (owner 2026-10-26 "YES GO", option B: a customer who was never asked for a review (no review request ever texted or emailed, and not marked as already reviewed) gets the completion panel's review box labeled "First review ask", on by default and kept on. A tech can turn it off only with the reason "Complaint on site"; the server keeps the ask on for a never-asked customer unless the completion carries that reason, and saves the reason with the visit record. Customers asked before keep today's box. The ask text, timing, quiet hours, cap and cooldown, the already-reviewed rule, the unpaid-invoice hold and re-services staying off are unchanged. Strict opt-in, read at call time via reviewFirstAskLockLive(); dark by default; off = byte-identical. Texts a review ask on visits where a tech used to switch it off, so the owner flips it.)
- *   GATE_REVIEW_ALREADY_REVIEWED=true (owner 2026-11-04 "1 + 2": in the completion panel a customer marked as already reviewed ("Left Google review", the mark every review ask already skips on) gets the review box off and greyed out, labeled "Already left a Google review" with the Eastern date of the newest linked live Google review, else the day the mark was set; the one-time recap box is unchanged. The first review ask (GATE_REVIEW_FIRST_ASK_LOCK) also gets a second off reason, "Already left a review": the completion saves it on the visit record and marks the customer as reviewed in the same transaction, so no later visit asks again. Read at call time via reviewAlreadyReviewedLive(), strict 'true', dark by default; off = the box, the preview and the saved choice are byte for byte as before. Stops review texts to each customer a tech marks, so the owner flips it.)
+ *   GATE_REVIEW_ALREADY_REVIEWED=true (owner 2026-11-04 "1 + 2": in the completion panel a customer marked as already reviewed ("Left Google review", the mark every review ask already skips on) gets the review box off and greyed out, labeled "Already left a Google review" with the Eastern date of the newest linked live Google review, else the day the mark was set; the one-time recap box is unchanged. The first review ask also gets a second off reason, "Already left a review": the completion saves it on the visit record and marks the customer as reviewed in the same transaction, so no later visit asks again. Read at call time via reviewAlreadyReviewedLive(), strict 'true', dark by default; off = the box, the preview and the saved choice are byte for byte as before. Stops review texts to each customer a tech marks, so the owner flips it.)
  *   GATE_REVIEW_ASK_AFTER_REPORT=true (owner 2026-10-22: the same-day (Day 0) review-ask text goes out about 10 minutes after the service report text, for every service line, instead of the smart send window. Only a report sent as a text at completion anchors it: 10 minutes after that text, or 10 minutes after payment for a paid invoice. A report held for the morning moves the ask to 10 minutes after its 8 AM replay goes out as a text. A report sent by the Waves app, failed, blocked, skipped or unknown keeps the smart window. Cadence mode only (needs GATE_REVIEW_SEQUENCES): the legacy path ignores this gate. Covers a completion, a paid invoice and combined-visit packets; the ask goes at the first :14/:44 review send after the 10 minutes. The 8 AM-8 PM window, 72 h ask spacing, click guard, holds, opt-outs and explicit operator timing are unchanged. Read at call time; off unless exactly 'true'; off = today's smart window for new enrollments (an ask already planned keeps its time, at most ~10 minutes out).)
  *   GATE_YARD_WRAPPED=true (owner 2026-10-31 perks round 4, build ask 2026-11-01: "Yard Wrapped", a year-in-review card for WaveGuard members on the Home tab of the customer app. From Dec 1 to Jan 31 (Eastern time) an active member with at least 3 performed visits in the year (the December year, so January still shows the year just ended) sees counts only: visits and the split by service line, the first and last tech-confirmed lawn score when there are two or more, up to 5 pests or weeds the year's products were logged for (each screened by customerCopyViolations), the technician who did the most visits, one lawn photo the app already serves, and the registered company name. A Share button hands the stats to the phone's share sheet. One read-only endpoint, GET /api/yard-wrapped. Read at call time via yardWrappedLive(), strict 'true', dark by default; off = the endpoint answers {enabled:false} with no database read and the card renders nothing, byte-identical to before. Sends nothing to anyone.)
  *   GATE_REVIEW_SENDER_EVERY_5_MIN=true (owner 2026-10-22: the review cadence sender runs every 5 minutes on its own offset (:04 ... :59) instead of :14/:44, so a due review text goes within 5 minutes. Same job and lock. Read at boot; off unless exactly 'true'; off = :14/:44 exactly as before.)
@@ -339,10 +338,8 @@
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true ("Your program" block under the lawn price card — annual application count + four plain season rows behind a toggle; count from the scheduling catalog on /data; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
- *   GATE_REFERRAL_INBOUND_CONFIRM=true (owner 2026-10-26 "YES GO": the Referrals Queue lists plan customers who came in through a referral link (?ref=CODE on their landing page) or named a referrer on their first call, with the likely referrer; the office confirms the referrer or marks "not a referral". Confirm makes the referral row and runs the existing conversion; when a performed recurring visit is on record, both $25 credits post at once, otherwise at the next performed recurring visit as today; either way the referrer gets one thank-you email at the next 9:00 AM ET and no reward text (owner 2026-10-29). Read at call time via referralInboundConfirmLive(), strict 'true', dark by default; off = the list and both actions are hidden.)
- *   GATE_REFERRAL_INBOUND_BELL=true (owner 2026-10-29 "ok go": one admin bell row for each card waiting in Referrals → Queue, with server-set buttons that run the Queue's own steps: Confirm <referrer>, only for one sure referrer, while rewards wait for the first visit, before the friend's first plan visit and not at a milestone (checked again under the confirm's locks), and Not a referral; the row closes when the card is answered in the bell or the Queue. Acts only while GATE_REFERRAL_INBOUND_CONFIRM is on. Read at call time via referralInboundBellLive(), strict 'true', dark by default; off = no row is raised, and no button is served or run.)
- *   GATE_ALERT_CLOSE_BUTTONS=true (owner 2026-10-29 "ok go", PR 2 of the bell buttons: close-only buttons the server sets on three admin bell rows, Handled on a customer's texts and Called back on a call-back follow-up and a missed call; a tap is the bell's own Done with that note and sends no reply and places no call. Read at call time via alertCloseButtonsLive(), strict 'true', dark by default; off = the rows serve no such button and a tap answers 409.)
- *   GATE_ALERT_CALL_BUTTON=true (owner 2026-11-02 "cant we add a call button, where we can call them from the admin notification": a Call button the server sets on admin bell rows about one caller (missed call, voicemail, promise chaser, repeat caller, Sandy hand-offs, landline, lead CALL replies, text call-back follow-ups); a tap reads the call or customer again and runs POST /api/admin/communications/call in-process with the body the linked page's own Call button sends, so the owner's phone rings first and press 1 connects; the row stays open until the caller is reached, Called back / Handled or Done. Read at call time via alertCallButtonLive(), strict 'true', dark by default; off = no Call button is served and a tap answers 409. A row's Called back / Handled button keeps following GATE_ALERT_CLOSE_BUTTONS.)
+ *   GATE_REFERRAL_INBOUND_BELL=true (owner 2026-10-29 "ok go": one admin bell row for each card waiting in Referrals → Queue, with server-set buttons that run the Queue's own steps: Confirm <referrer>, only for one sure referrer, while rewards wait for the first visit, before the friend's first plan visit and not at a milestone (checked again under the confirm's locks), and Not a referral; the row closes when the card is answered in the bell or the Queue. Read at call time via referralInboundBellLive(), strict 'true', dark by default; off = no row is raised, and no button is served or run.)
+ *   GATE_ALERT_CALL_BUTTON=true (owner 2026-11-02 "cant we add a call button, where we can call them from the admin notification": a Call button the server sets on admin bell rows about one caller (missed call, voicemail, promise chaser, repeat caller, Sandy hand-offs, landline, lead CALL replies, text call-back follow-ups); a tap reads the call or customer again and runs POST /api/admin/communications/call in-process with the body the linked page's own Call button sends, so the owner's phone rings first and press 1 connects; the row stays open until the caller is reached, Called back / Handled or Done. Read at call time via alertCallButtonLive(), strict 'true', dark by default; off = no Call button is served and a tap answers 409. A row's Called back / Handled button is always served.)
  *   GATE_BID_ALERT_BUTTONS=true (owner 2026-10-29 "bid buttons, as a trial", PR 3 of the bell buttons: No bid on a new bid invite's bell row, and Bid only once the bid's due date is confirmed; a tap runs the Bid desk's own save step, sends nothing to a buyer or customer and moves no money. Week-1 read-out: ops job bid-buttons-trial-week1, Nov 5. Read at call time via bidAlertButtonsLive(), strict 'true', dark by default, and only while GATE_BID_DESK is on; off = the rows serve no such button and a tap answers 409.)
  *   GATE_ADS_NEGATIVES=true (owner plan A 2026-11-02: the owner's negative word list goes to Google Ads as phrase negatives on every linked campaign, each ads-advisor word arrives as one bell row with Add and Decline (3 a day at most), and every block can be undone on the Ads page; sends nothing to a customer and moves no money, but changes where the ads can show. Read at call time via adsNegativesLive(), strict 'true', dark by default; off = the /negatives routes answer 404, the bell rows serve no buttons, the advisor writes no rows, the 6 AM sync skips the step and no Google write runs.)
  *   GATE_ADS_HEALTH_CARD=true (owner 2026-11-04, option A on the PPC gap page: a read-only Ad health card on Ads → Dashboard. GET /api/admin/ads/health returns each Google campaign's live serving status and Google's reasons, ad disapprovals, the portal's 30-day conversion upload counts with Google's own upload check, and a 30-day who-changed-what timeline (Google change history from people and Google tools, plus the portal's budget log and negative keyword decisions). Reads only: it sends nothing, moves no money and changes no ad. Read at call time via adsHealthCardLive(), strict 'true', dark by default; off = the route answers 404 and the card renders nothing.)
@@ -521,8 +518,6 @@ const gates = {
   moneyNoticeCatchup: process.env.GATE_MONEY_NOTICE_CATCHUP === 'true',
   // GATE_PRODUCT_INTAKE_GUARD (near-name guard + EPA number/label for agent-created pesticides, dark). Boot-log entry only; the call-time reader is productIntakeGuardLive().
   productIntakeGuard: process.env.GATE_PRODUCT_INTAKE_GUARD === 'true',
-  // GATE_REVIEW_FIRST_ASK_LOCK (first review ask box locked on for a never-asked customer, dark). Boot-log entry only; the call-time reader is reviewFirstAskLockLive().
-  reviewFirstAskLock: process.env.GATE_REVIEW_FIRST_ASK_LOCK === 'true',
   // GATE_REVIEW_ALREADY_REVIEWED (already-reviewed notice + "Already left a review" off reason, dark). Boot-log entry only; the call-time reader is reviewAlreadyReviewedLive().
   reviewAlreadyReviewed: process.env.GATE_REVIEW_ALREADY_REVIEWED === 'true',
   editorialEvidence: gateEnvValue('GATE_EDITORIAL_EVIDENCE'),
@@ -2886,12 +2881,8 @@ const gates = {
   // unchanged). Once per customer ever, mirroring referral.invite's own
   // idempotency. Unset = referral.invite email returns.
   referralNudgeEnroll: process.env.GATE_REFERRAL_NUDGE_ENROLL === 'true',
-  // GATE_REFERRAL_INBOUND_CONFIRM (Referrals Queue: confirm the referrer of a linked or named inbound plan customer, dark). Boot-log entry only; the call-time reader is referralInboundConfirmLive().
-  referralInboundConfirm: process.env.GATE_REFERRAL_INBOUND_CONFIRM === 'true',
   // GATE_REFERRAL_INBOUND_BELL (a bell row with Confirm / Not a referral for each card in Referrals → Queue, dark). Boot-log entry only; the call-time reader is referralInboundBellLive().
   referralInboundBell: process.env.GATE_REFERRAL_INBOUND_BELL === 'true',
-  // GATE_ALERT_CLOSE_BUTTONS (Handled / Called back buttons on text, follow-up and missed-call bell rows, dark). Boot-log entry only; the call-time reader is alertCloseButtonsLive().
-  alertCloseButtons: process.env.GATE_ALERT_CLOSE_BUTTONS === 'true',
   // GATE_ALERT_CALL_BUTTON (a Call button on bell rows about one caller, dark). Boot-log entry only; the call-time reader is alertCallButtonLive().
   alertCallButton: process.env.GATE_ALERT_CALL_BUTTON === 'true',
   // GATE_BID_ALERT_BUTTONS (No bid / Bid buttons on a new bid invite's bell row, dark trial). Boot-log entry only; the call-time reader is bidAlertButtonsLive().
@@ -6281,14 +6272,6 @@ function productIntakeGuardLive() {
   return process.env.GATE_PRODUCT_INTAKE_GUARD === 'true';
 }
 
-// GATE_REVIEW_FIRST_ASK_LOCK read at CALL time, strict `=== 'true'`, dark by default. The one reader for the first-review-ask lock: the
-// completion panel's "First review ask" box (GET /api/admin/reviews/send-time-preview with a serviceId) and the server rule in
-// services/complete-scheduled-service.js that keeps a never-asked customer's ask on unless the completion carries the "Complaint on site"
-// reason. Off: the box, the preview and the saved choice are byte for byte as before. Kill: unset.
-function reviewFirstAskLockLive() {
-  return process.env.GATE_REVIEW_FIRST_ASK_LOCK === 'true';
-}
-
 // GATE_REVIEW_ALREADY_REVIEWED read at CALL time, strict `=== 'true'`, dark by default. The one reader for the completion panel's
 // "Already left a Google review" box (GET /api/admin/reviews/send-time-preview with a serviceId) and the first review ask's second off
 // reason, "Already left a review" (ReviewService.firstAskLockChoice; complete-scheduled-service.js marks the customer reviewed with the
@@ -6804,25 +6787,11 @@ function reserviceDetailsRequiredLive() {
   return process.env.GATE_RESERVICE_DETAILS_REQUIRED === 'true';
 }
 
-// GATE_REFERRAL_INBOUND_CONFIRM read at CALL time, strict `=== 'true'`, dark by default. The one reader for the Referrals Queue's
-// inbound list and its confirm / dismiss actions (routes/admin-referrals-v2.js, services/referral-inbound.js).
-// Off: GET /inbound answers enabled:false with no list, both actions 404, and the page shows no section. Kill: unset.
-function referralInboundConfirmLive() {
-  return process.env.GATE_REFERRAL_INBOUND_CONFIRM === 'true';
-}
-
 // GATE_REFERRAL_INBOUND_BELL read at CALL time, strict `=== 'true'`, dark by default. The one reader for the new-referral
-// bell row and its buttons (services/referral-inbound-bell.js, the scheduler's referral-inbound-bell job). It acts only
-// while referralInboundConfirmLive() is true too. Off: no row is raised, open rows serve no buttons, a tap answers 409. Kill: unset.
+// bell row and its buttons (services/referral-inbound-bell.js, the scheduler's referral-inbound-bell job).
+// Off: no row is raised, open rows serve no buttons, a tap answers 409. Kill: unset.
 function referralInboundBellLive() {
   return process.env.GATE_REFERRAL_INBOUND_BELL === 'true';
-}
-
-// GATE_ALERT_CLOSE_BUTTONS read at CALL time, strict `=== 'true'`, dark by default. The one reader for the close_note
-// button kind (services/admin-alert-buttons.js): Handled on a customer's texts, Called back on a call-back follow-up
-// and a missed call. Off: those rows serve no such button and a tap answers 409. Kill: unset.
-function alertCloseButtonsLive() {
-  return process.env.GATE_ALERT_CLOSE_BUTTONS === 'true';
 }
 
 // GATE_ALERT_CALL_BUTTON read at CALL time, strict `=== 'true'`, dark by default. The one reader for the Call button
@@ -9139,12 +9108,8 @@ module.exports.ibLeadConvertLive = ibLeadConvertLive;
 // GATE_SHORTLINK_LEGACY_EXPIRE reader, on its own line.
 module.exports.shortlinkLegacyExpireLive = shortlinkLegacyExpireLive;
 module.exports.reserviceDetailsRequiredLive = reserviceDetailsRequiredLive;
-// GATE_REFERRAL_INBOUND_CONFIRM reader, on its own line so gate PRs never conflict.
-module.exports.referralInboundConfirmLive = referralInboundConfirmLive;
 // GATE_REFERRAL_INBOUND_BELL reader, on its own line so gate PRs never conflict.
 module.exports.referralInboundBellLive = referralInboundBellLive;
-// GATE_ALERT_CLOSE_BUTTONS reader, on its own line so gate PRs never conflict.
-module.exports.alertCloseButtonsLive = alertCloseButtonsLive;
 // GATE_ALERT_CALL_BUTTON reader, on its own line so gate PRs never conflict.
 module.exports.alertCallButtonLive = alertCallButtonLive;
 // GATE_BID_ALERT_BUTTONS reader, on its own line so gate PRs never conflict.
@@ -9868,8 +9833,6 @@ module.exports.deadAnimalRemovalLive = deadAnimalRemovalLive;
 module.exports.bidKitProductListSyncLive = bidKitProductListSyncLive;
 // GATE_PRODUCT_INTAKE_GUARD reader, on its own line so gate PRs never conflict.
 module.exports.productIntakeGuardLive = productIntakeGuardLive;
-// GATE_REVIEW_FIRST_ASK_LOCK reader, on its own line so gate PRs never conflict.
-module.exports.reviewFirstAskLockLive = reviewFirstAskLockLive;
 // GATE_REVIEW_ALREADY_REVIEWED reader, on its own line so gate PRs never conflict.
 module.exports.reviewAlreadyReviewedLive = reviewAlreadyReviewedLive;
 module.exports.annualPlanDocumentsLive = annualPlanDocumentsLive;

@@ -4,7 +4,7 @@
  * admin notification rules; the bell serves the buttons only for a word still pending; a tap runs the Ads page's step.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ adsNegativesLive: jest.fn(() => true), alertCloseButtonsLive: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ adsNegativesLive: jest.fn(() => true) }));
 let mockDb;
 jest.mock('../models/db', () => {
   const proxy = (...args) => mockDb(...args);

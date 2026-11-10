@@ -130,7 +130,7 @@ Kinds today:
   the tap sends nothing and moves no money: the $25 credits and the referrer's 9:00 AM email follow
   the first plan visit. The confirm step itself (`deferredOnly`) checks each of these again under its
   locks and saves nothing when one fails. Any other case is answered in the Queue.
-- `close_note` (`server/services/admin-alert-buttons.js`, `GATE_ALERT_CLOSE_BUTTONS`): close-only
+- `close_note` (`server/services/admin-alert-buttons.js`): close-only
   buttons. **Handled** on a customer's texts (the `sms_reply` thread row), **Called back** on a
   text call-back follow-up (an `sms_operational_followup` row for a call-back promise; other
   promise kinds and email follow-ups get no button) and on a missed call (`customer_missed_call`). The step is the bell's own
@@ -166,8 +166,7 @@ Kinds today:
   step's own refusal (a callback already ringing) is shown as it reads. The row stays open (rule 5).
   A row that had a close button keeps it after Call (**Called back** on a missed call and a text
   call-back follow-up, **Handled** on the CALL text); that button is the `close_note` step itself and
-  follows `GATE_ALERT_CLOSE_BUTTONS`, so each button is served while its own gate is on
-  (`visibleItems`). A text thread row takes the buttons of the text it shows: the CALL text's
+  is always served, while Call follows `GATE_ALERT_CALL_BUTTON` (`visibleItems`). A text thread row takes the buttons of the text it shows: the CALL text's
   emission carries Call, the next text's emission drops it, and an older late text keeps the row's own.
   **On the phone push** (owner 2026-11-02, "A Call button on the phone push notification itself"):
   a registry alert whose row carries Call pushes to admin-role logins with `apnsCategory: 'WAVES_CALL'`
@@ -181,7 +180,7 @@ Kinds today:
   the app, once the staff session is verified; the address loses the param first). The answer waits outside
   the bell for whichever bell is on screen when it lands, so a bell the layout or a route change mounts again
   still shows it. A row that changed since the push answers 409 and the bell shows its list. Alerts raised through `raiseAdminAlert` ring the bell only and send no push.
-- `text_note` (`server/services/sms-text-note-buttons.js`, `GATE_ALERT_CLOSE_BUTTONS`; owner 2026-11-02
+- `text_note` (`server/services/sms-text-note-buttons.js`; owner 2026-11-02
   "C"): **Save to profile** and **One visit only** on the SMS reader's review bell ("Comms — check
   <name>'s text note", `sms-property-instructions:<sms>`). Both are stored at raise; `visibleItems`
   serves Save only while it would write something. Save re-reads the held-back facts of the bell's
