@@ -931,13 +931,13 @@ async function destinationHitUnderGate(trx, makeRoom, slotId, window) {
   return !!makeRoom && makeRoomChainClash(trx, { payload: makeRoom.payload, excludeId: window.excludeId || null });
 }
 
-// commitReservation: a hold graduating inside the commit grace (row._lapsed) yields to another customer's live make-room
-// hold whose moved stop now holds this window (Codex pre-push P1, #7796). Once this hold's expiry passed, that chain's
-// proof no longer saw it as a stop, and the commit probes see each hold at its own window only. Mode on;
-// the committing hold never blocks itself. A hold that never lapsed is not asked: it was a stop in every chain proof
-// (the same line the commit probe draws with includeHolds). Asked in capacity mode too (makeRoomGuardsOn).
-async function lapsedHoldOnMakeRoomDestination(client, { row, date, windowStart, windowEnd }) {
-  if (!row._lapsed || !makeRoomGuardsOn()) return false;
+// commitReservation: the accepted window yields to another customer's live make-room hold whose moved stop now holds any
+// part of it (Codex pre-push P1s, #7796). The commit probes see each hold at its own window only, and no chain proof saw
+// this window as it is now in two cases: a hold whose expiry passed inside the grace, and an accept that lengthens the
+// held window (the service profile is resolved again). So every accept is asked, with the final window. Mode on, hour
+// or capacity mode (makeRoomGuardsOn); the committing hold never blocks itself.
+async function acceptedWindowOnMakeRoomDestination(client, { row, date, windowStart, windowEnd }) {
+  if (!makeRoomGuardsOn()) return false;
   return !!(await makeRoomDestinationClash(client, { date, techId: row.technician_id || null, windowStart, windowEnd, excludeId: row.id }));
 }
 
@@ -2293,7 +2293,7 @@ async function commitReservation({
         ? await findInterviewConflicts({ db: client, date: scheduledDate, windowStart, windowEnd: probeWindowEnd })
         : [];
       const destinationClash = !committedClash.length && !interviewClash.length
-        && await lapsedHoldOnMakeRoomDestination(client, { row, date: scheduledDate, windowStart, windowEnd: probeWindowEnd });
+        && await acceptedWindowOnMakeRoomDestination(client, { row, date: scheduledDate, windowStart, windowEnd: probeWindowEnd });
       if (committedClash.length || interviewClash.length || destinationClash) {
         const err = new Error('slot no longer available');
         err.code = 'SLOT_UNAVAILABLE';
@@ -3028,7 +3028,7 @@ module.exports = {
     refuseGracedOfferOnRivalHoldConflict,
     makeRoomDestinationClash,
     makeRoomChainClash,
-    lapsedHoldOnMakeRoomDestination,
+    acceptedWindowOnMakeRoomDestination,
     makeRoomGuardsOn,
     destinationHitUnderGate,
     extendMakeRoomState,

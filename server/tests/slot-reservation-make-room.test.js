@@ -472,10 +472,10 @@ describe('the destination guards in capacity mode (Codex #7796 P2)', () => {
   });
 });
 
-// Codex pre-push P1 (#7796): a hold that lapsed lost its place in every chain proof, so a live chain may since have
-// taken its hour as a moved stop's destination; a commit inside the grace must yield to that chain.
-describe('commitReservation inside the grace — another live make-room hold\'s destination', () => {
-  const { lapsedHoldOnMakeRoomDestination } = slotReservation._internals;
+// Codex pre-push P1s (#7796): no chain proof saw the accepted window as it is now when the hold lapsed inside the grace
+// or when the accept lengthens it, so a live chain may hold part of it as a moved stop's destination; the accept yields.
+describe('commitReservation — another live make-room hold\'s destination over the accepted window', () => {
+  const { acceptedWindowOnMakeRoomDestination } = slotReservation._internals;
   const lapsedRow = {
     id: 'hold-1', source_estimate_id: EST, scheduled_date: DATE, window_start: '13:00:00', window_end: '14:00:00', technician_id: 'tech-1',
     estimated_duration_minutes: 60, reservation_expires_at: '2027-05-20T13:15:00.000Z', make_room_moves: null, _lapsed: true,
@@ -491,7 +491,7 @@ describe('commitReservation inside the grace — another live make-room hold\'s 
   test('lapsed, mode on: a destination hit is a clash, and the probe leaves the committing hold out', async () => {
     const builder = destinationProbe({ id: 'hold-other' });
     const trx = jest.fn(() => builder);
-    await expect(lapsedHoldOnMakeRoomDestination(trx, args())).resolves.toBe(true);
+    await expect(acceptedWindowOnMakeRoomDestination(trx, args())).resolves.toBe(true);
     expect(builder.where).toHaveBeenCalledWith({ scheduled_date: DATE });
     expect(builder.whereNot).toHaveBeenCalledWith('id', 'hold-1');
     expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining("make_room_moves->'moves'"), ['14:00:00', '13:00:00']);
@@ -499,20 +499,22 @@ describe('commitReservation inside the grace — another live make-room hold\'s 
 
   test('no hit: no clash', async () => {
     const trx = jest.fn(() => destinationProbe(null));
-    await expect(lapsedHoldOnMakeRoomDestination(trx, args())).resolves.toBe(false);
+    await expect(acceptedWindowOnMakeRoomDestination(trx, args())).resolves.toBe(false);
   });
 
-  test('a hold that never lapsed is not asked (every chain proof saw it as a stop)', async () => {
-    const trx = jest.fn();
-    await expect(lapsedHoldOnMakeRoomDestination(trx, args({ row: { ...lapsedRow, _lapsed: false } }))).resolves.toBe(false);
-    expect(trx).not.toHaveBeenCalled();
+  test('a hold that never lapsed is asked too, with the window it is given (the accept may lengthen it)', async () => {
+    const builder = destinationProbe({ id: 'hold-other' });
+    const trx = jest.fn(() => builder);
+    const live = { ...lapsedRow, _lapsed: false };
+    await expect(acceptedWindowOnMakeRoomDestination(trx, args({ row: live, windowEnd: '15:00:00' }))).resolves.toBe(true);
+    expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining("make_room_moves->'moves'"), ['15:00:00', '13:00:00']);
   });
 
   test('capacity mode is asked too: a chain made in hour mode keeps its destinations (Codex #7796 P2)', async () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     try {
       const trx = jest.fn(() => destinationProbe({ id: 'hold-other' }));
-      await expect(lapsedHoldOnMakeRoomDestination(trx, args())).resolves.toBe(true);
+      await expect(acceptedWindowOnMakeRoomDestination(trx, args())).resolves.toBe(true);
     } finally {
       delete process.env.GATE_SCHEDULING_CAPACITY;
     }
@@ -521,18 +523,19 @@ describe('commitReservation inside the grace — another live make-room hold\'s 
   test.each(['shadow', 'off'])('mode %s: not asked', async (mode) => {
     makeRoom.bookingMakeRoomMode.mockReturnValue(mode);
     const trx = jest.fn();
-    await expect(lapsedHoldOnMakeRoomDestination(trx, args())).resolves.toBe(false);
+    await expect(acceptedWindowOnMakeRoomDestination(trx, args())).resolves.toBe(false);
     expect(trx).not.toHaveBeenCalled();
   });
 
-  function commitTrx({ destination }) {
+  function commitTrx({ destination, row = lapsedRow }) {
     const dateProbe = chain({ first: jest.fn().mockResolvedValue({ scheduled_date: DATE, technician_id: 'tech-1' }) });
-    const reservation = chain({ first: jest.fn().mockResolvedValue(lapsedRow) });
-    const rivalLiveHold = chain({ first: jest.fn().mockResolvedValue(null) });
+    const reservation = chain({ first: jest.fn().mockResolvedValue(row) });
+    // The lapsed-rival read runs for a lapsed hold only.
+    const rivalLiveHold = row._lapsed ? [chain({ first: jest.fn().mockResolvedValue(null) })] : [];
     const conflict = chain({ whereNot: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
     const probe = globalProbe([]);
     const update = updater();
-    const queue = [dateProbe, reservation, rivalLiveHold, conflict, probe, destination, update];
+    const queue = [dateProbe, reservation, ...rivalLiveHold, conflict, probe, destination, update];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return queue.shift();
       if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 'tech-1', employment_status: 'active', field_dispatchable: true }), forShare: jest.fn().mockReturnThis() });
@@ -561,6 +564,18 @@ describe('commitReservation inside the grace — another live make-room hold\'s 
     await accept(trx);
     expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'customer-1', reservation_expires_at: null }));
     expect(queue).toHaveLength(0);
+  });
+
+  test('a live hold whose accept lengthens the window is probed on the final window, and a hit refuses it (Codex pre-push P1)', async () => {
+    // Held 13:00-14:00 for 60 minutes; the accepted service takes 120, so the visit would run to 15:00.
+    estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+      durationMinutes: 120, serviceLabel: 'Pest Control', services: [{ service: 'pest_control', visitsPerYear: 4 }],
+    });
+    const destination = destinationProbe({ id: 'hold-other' });
+    const { trx, update } = commitTrx({ destination, row: { ...lapsedRow, _lapsed: false } });
+    await expect(accept(trx)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: `${DATE}_13-00_tech-1` });
+    expect(destination.whereRaw).toHaveBeenCalledWith(expect.stringContaining("make_room_moves->'moves'"), ['15:00:00', '13:00:00']);
+    expect(update.update).not.toHaveBeenCalled();
   });
 });
 

@@ -1780,8 +1780,9 @@ unchanged; only which slots the lists hold can differ. With the gate off
 (the default, exactly `true` turns it on, read at call time) the payload is
 byte-identical to today's.
 **Estimate picker, one make-room hour (`GATE_BOOKING_MAKE_ROOM=true`, owner
-2026-11-09 "YES"; hour mode only; `shadow`, off and capacity mode leave every
-route byte-identical).** `GET /api/public/estimates/:token/available-slots`
+2026-11-09 "YES"; the offer and the hold are hour mode only; `shadow` and off
+leave every route byte-identical, and so does capacity mode while no make-room
+hold made in hour mode is still live).** `GET /api/public/estimates/:token/available-slots`
 and `/find-slots` may carry ONE extra slot, first in the list: the earliest
 hour on a day before the list's first free day that a regular stop holds and
 can give up by moving later the same day (the sooner rule, at most the
@@ -1799,10 +1800,12 @@ transaction, and re-proves the hour from current data under the date,
 tech-day and zone locks; any failure is the ordinary `SLOT_UNAVAILABLE` and
 no hold is written. The hold stores the stops that would move in
 `scheduled_services.make_room_moves`. While that hold is live its moves'
-destinations stay busy for every other offer, reserve, same-slot refresh and
-`/extend`, under the occupancy technician scope (that technician's rows plus
-unassigned rows when multi-tech confirm is on, every technician when it is
-off); a hold's own row never blocks itself. `/extend` re-proves a make-room
+destinations stay busy for every other offer, reserve, same-slot refresh,
+`/extend` and accept (the accepted window as resolved at accept, so a hold
+inside the commit grace or lengthened by the accepted service is refused too),
+in hour mode and in capacity mode, under the occupancy technician scope (that
+technician's rows plus unassigned rows when multi-tech confirm is on, every
+technician when it is off); a hold's own row never blocks itself. `/extend` re-proves a make-room
 hold's hour, or supersedes the hold through the existing
 `SLOT_UNAVAILABLE` path. Nothing moves a visit yet: accepting a make-room
 hold fails closed through the existing taken-slot answer ("That slot was just

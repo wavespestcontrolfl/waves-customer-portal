@@ -504,31 +504,40 @@ postgres('hold grace + extend (real Postgres)', () => {
       });
     });
 
-    // Codex pre-push P1 (#7796): a hold that lapsed lost its place in every chain proof, so a live chain may since
-    // have taken its hour as a moved stop's destination. Graduating inside the grace would break that chain.
-    async function withRivalChainOver(lapsedSeconds, run) {
+    // Codex pre-push P1s (#7796): no chain proof saw the accepted window as it is now when the hold lapsed inside the
+    // grace, or when the accept lengthens it (the service profile is resolved again). A live chain may hold part of it
+    // as a moved stop's destination; graduating there would break that chain, so every accept is asked.
+    // The rival's make-room hold takes `rival.start`; its stop moves into 13:00-14:00.
+    const RIVAL_AT_NOON = { start: '12:00:00', end: '13:00:00', shiftMin: 60, from: '12:00' };
+    const RIVAL_AT_ELEVEN = { start: '11:00:00', end: '12:00:00', shiftMin: 120, from: '11:00' };
+    async function withRivalChainOver({ expiresInSeconds, windowStart, windowEnd, rival = RIVAL_AT_NOON }, run) {
       process.env.RESERVATION_COMMIT_GRACE_MINUTES = '10';
-      await withHold({ expiresInSeconds: lapsedSeconds }, async (ctx) => {
+      await withHold({ expiresInSeconds, windowStart, windowEnd }, async (ctx) => {
         const rivalEstimate = randomUUID();
         await ctx.trx('estimates').insert({
           id: rivalEstimate, token: randomUUID().replace(/-/g, ''), status: 'sent',
           customer_name: 'Rival Hold', address: '2 Test Way, Parrish, FL 34219',
           expires_at: ctx.trx.raw("NOW() + INTERVAL '7 days'"),
         });
-        // The rival's make-room hold is at 12:00; its stop moves into 13:00-14:00, this hold's hour.
         await ctx.trx('scheduled_services').insert({
           id: randomUUID(), source_estimate_id: rivalEstimate, customer_id: null,
-          scheduled_date: ctx.date, window_start: '12:00:00', window_end: '13:00:00',
+          scheduled_date: ctx.date, window_start: rival.start, window_end: rival.end,
           estimated_duration_minutes: 60, service_type: 'Lawn Care', status: 'pending',
           reservation_expires_at: ctx.trx.raw("NOW() + INTERVAL '10 minutes'"),
-          make_room_moves: { v: 1, date: ctx.date, techId: null, shiftMin: 60, moves: [{ id: randomUUID(), from: '12:00', to: '13:00', widthMin: 60 }] },
+          make_room_moves: {
+            v: 1, date: ctx.date, techId: null, shiftMin: rival.shiftMin,
+            moves: [{ id: randomUUID(), from: rival.from, to: '13:00', widthMin: 60 }],
+          },
         });
         await run(ctx);
       });
     }
+    const acceptWith = (durationMinutes) => estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+      durationMinutes, serviceLabel: 'Lawn Care', services: [{ service: 'lawn_care', visitsPerYear: 9 }],
+    });
 
     test('commit inside the grace: an ORDINARY hold whose hour is a live chain\'s destination is not graduated (Codex pre-push P1)', async () => {
-      await withRivalChainOver(-30, async ({ trx, holdId, customerId }) => {
+      await withRivalChainOver({ expiresInSeconds: -30 }, async ({ trx, holdId, customerId }) => {
         await expect(slotReservation.commitReservation({ scheduledServiceId: holdId, customerId, trx }))
           .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
         const row = await holdRow(trx, holdId);
@@ -537,8 +546,22 @@ postgres('hold grace + extend (real Postgres)', () => {
       });
     });
 
-    test('a punctual commit (the hold never lapsed) is not asked: every chain proof saw it as a stop, so it graduates', async () => {
-      await withRivalChainOver(300, async ({ trx, holdId, customerId }) => {
+    test('a punctual hold whose accept lengthens it onto a live chain\'s destination is not graduated (Codex pre-push P1)', async () => {
+      const window = { expiresInSeconds: 300, windowStart: '12:00:00', windowEnd: '13:00:00', rival: RIVAL_AT_ELEVEN };
+      await withRivalChainOver(window, async ({ trx, holdId, customerId }) => {
+        acceptWith(120); // 12:00-14:00 now covers the moved stop's 13:00-14:00
+        await expect(slotReservation.commitReservation({ scheduledServiceId: holdId, customerId, trx }))
+          .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        const row = await holdRow(trx, holdId);
+        expect(row.customer_id).toBeNull();
+        expect(row.reservation_expires_at).not.toBeNull();
+      });
+    });
+
+    test('the same punctual hold at its held length graduates (the destination starts where it ends)', async () => {
+      const window = { expiresInSeconds: 300, windowStart: '12:00:00', windowEnd: '13:00:00', rival: RIVAL_AT_ELEVEN };
+      await withRivalChainOver(window, async ({ trx, holdId, customerId }) => {
+        acceptWith(60);
         await slotReservation.commitReservation({ scheduledServiceId: holdId, customerId, trx });
         const row = await holdRow(trx, holdId);
         expect(row.customer_id).toBe(customerId);
