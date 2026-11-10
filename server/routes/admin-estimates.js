@@ -595,12 +595,12 @@ function blockingSiblingMessage(blockingSibling, beforeWhat) {
   return `Grouped estimate ${id} has no engine-verified price — re-save it from the estimate tool before ${beforeWhat}.`;
 }
 
-// Follow-up B to #6562 (owner 2026-10-24 "ok go"; GATE_SATELLITE_PALM_COUNT_TYPED):
-// the palm count a never-sent estimate still prices from the satellite read,
-// which an admin types from the aerial photo before the first send. Null when
-// nothing is asked (gate off, already sent, or no satellite palm line).
+// Follow-up B to #6562 (owner 2026-10-24 "ok go"): the palm count a
+// never-sent estimate still prices from the satellite read, which an admin
+// types from the aerial photo before the first send. Null when nothing is
+// asked (already sent, or no satellite palm line).
 function satellitePalmCountAwaitingSend(estimate) {
-  if (estimate.sent_at || require('../config/feature-gates').satellitePalmCountTypedLive?.() !== true) return null;
+  if (estimate.sent_at) return null;
   return satellitePalmCountToConfirm(parseEstimateData(estimate.estimate_data || estimate.estimateData));
 }
 
