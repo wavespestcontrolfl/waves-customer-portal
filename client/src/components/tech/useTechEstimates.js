@@ -23,12 +23,15 @@ export async function techEstimateRequest(path, { method = 'GET', body } = {}) {
 // it holds, so every view of the sheet agrees (the saved screen, the list, the detail), also a view that stayed mounted
 // in the other tab, and also after the sheet is closed and opened again. The server can still say "draft" for such an
 // estimate, so its answer alone is not enough. The lock lasts until the page loads again.
-const sendLocks = new Set();
+// Each lock keeps the words of the outcome that set it ({ text, ok }), so a view he comes to later can still say why
+// there is no Send button: he may have left the first view while the text was still going out.
+const sendLocks = new Map();
 const lockListeners = new Set();
 let lockVersion = 0;
 const lockChanged = () => { lockVersion += 1; lockListeners.forEach((listener) => listener()); };
-export const lockSend = (id) => { if (!sendLocks.has(String(id))) { sendLocks.add(String(id)); lockChanged(); } };
+export const lockSend = (id, outcome = null) => { sendLocks.set(String(id), outcome); lockChanged(); };
 export const sendLocked = (id) => sendLocks.has(String(id));
+export const sendLockNote = (id) => sendLocks.get(String(id)) || null;
 export const clearSendLocks = () => { sendLocks.clear(); lockChanged(); };
 const subscribeLocks = (listener) => { lockListeners.add(listener); return () => lockListeners.delete(listener); };
 // Draws the caller again when a lock changes; read the lock itself with sendLocked(id).

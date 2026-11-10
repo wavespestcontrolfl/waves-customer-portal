@@ -4,7 +4,7 @@ import { useFieldPortalClass } from './fieldPortal';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
-import { sendLocked, techEstimateRequest, useSendLocks } from './useTechEstimates';
+import { sendLocked, sendLockNote, techEstimateRequest, useSendLocks } from './useTechEstimates';
 import TechMyEstimates from './TechMyEstimates';
 import TechEstimateSend from './TechEstimateSend';
 import { INK, LineList, s, Totals } from './techEstimateParts';
@@ -120,12 +120,14 @@ function Saved({ saved, who, needsTextRequest, onMine, onAnother }) {
   // or from My estimates. This screen follows the same lock for its own layout.
   useSendLocks();
   const showSend = ready && !sendLocked(saved.id);
+  // The words of a send that finished from My estimates, or after he left this screen and came back.
+  const shown = note || sendLockNote(saved.id);
   return (
     <div>
       <p role="status" style={{ ...s.card, fontWeight: 500 }}>
         {ready ? 'Saved. Send it now, or later from My estimates.' : 'Saved. The office checks it and sends it.'}
       </p>
-      {note && <div role="status" style={note.ok ? s.card : s.notice}>{note.text}</div>}
+      {shown && <div role="status" style={shown.ok ? s.card : s.notice}>{shown.text}</div>}
       {ready && <TechEstimateSend id={saved.id} who={who} needsTextRequest={needsTextRequest} onOutcome={setNote} />}
       <button type="button" style={showSend ? s.secondary : s.primary} onClick={onMine}>My estimates</button>
       <button type="button" style={s.secondary} onClick={onAnother}>Another estimate</button>

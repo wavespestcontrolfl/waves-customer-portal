@@ -42,13 +42,14 @@ export default function TechEstimateSend({ id, who, needsTextRequest, onOutcome 
     setBusy(true);
     try {
       await techEstimateRequest(`/${encodeURIComponent(id)}/send`, { method: 'POST', body: box ? { askedForText: true } : {} });
-      lockSend(id);
+      const sent = { text: `Sent to ${name}.`, ok: true, reread: true };
+      lockSend(id, sent);
       setConfirming(false);
-      onOutcome({ text: `Sent to ${name}.`, ok: true, reread: true });
+      onOutcome(sent);
     } catch (err) {
       if (err.code === 'needs_text_request') { setNeedsBox(true); return; }
       const result = outcomeOf(err);
-      if (!result.keep) lockSend(id);
+      if (!result.keep) lockSend(id, result);
       setConfirming(false);
       onOutcome(result);
     } finally {

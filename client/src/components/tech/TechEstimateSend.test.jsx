@@ -318,12 +318,48 @@ describe('what each answer shows', () => {
       await screen.findByRole('heading', { name: 'Sample Customer' });
       tapSend();
       confirmSend();
-      await screen.findByText(words);
-      // Back on the saved screen: no Send there either.
+      // The words show in the detail, and the saved screen (still mounted in the other tab) takes them too.
+      await screen.findAllByText(words);
+      // Back on the saved screen: no Send there either, and it says why.
       fireEvent.click(screen.getByRole('button', { name: 'New estimate' }));
       expect(screen.getByText('Saved. Send it now, or later from My estimates.')).toBeVisible();
+      expect(screen.getByText(words)).toBeVisible();
       expect(screen.queryByRole('button', { name: 'Send to customer' })).not.toBeInTheDocument();
       expect(sendCalls()).toHaveLength(1);
+    });
+
+    // A dropped connection can take a long time to fail. He may leave the detail while the text is still going out;
+    // the answer then finds no screen to write on. The words stay with the lock, so the estimate still says why.
+    it('he left the detail while the text was going out: the estimate still says why there is no Send', async () => {
+      await openDetail();
+      let fail;
+      const held = new Promise((_resolve, reject) => { fail = reject; });
+      globalThis.fetch.mockImplementationOnce(async (url, options) => {
+        calls.push({ method: 'POST', path: String(url).replace('/api/tech/estimates', ''), body: JSON.parse(options.body) });
+        return held;
+      });
+      tapSend();
+      confirmSend();
+      fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+      await screen.findByRole('button', { name: /Sample Customer/ });
+      fail(new TypeError('Failed to fetch'));
+      await vi.waitFor(() => expect(screen.queryByText('Ready to send')).not.toBeInTheDocument());
+      fireEvent.click(screen.getByRole('button', { name: /Sample Customer/ }));
+      expect(await screen.findByText(words)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Send to customer' })).not.toBeInTheDocument();
+      expect(sendCalls()).toHaveLength(1);
+    });
+
+    it('the kept words are not shown once the server says the estimate is sent', async () => {
+      await dropSendFromDetail();
+      fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+      await screen.findByRole('button', { name: /Sample Customer/ });
+      // The office sent it meanwhile: the server's status line is the truth now.
+      reply('GET /est-1', 200, { ...ROW, status: 'sent', canSend: false, lines: READY.lines });
+      fireEvent.click(screen.getByRole('button', { name: /Sample Customer/ }));
+      await screen.findByText(/100 Sample St · Sent/);
+      expect(screen.queryByText(words)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Send to customer' })).not.toBeInTheDocument();
     });
 
     // The office has it. The server can keep the row a draft with canSend true (no mobile number, a price lock, a

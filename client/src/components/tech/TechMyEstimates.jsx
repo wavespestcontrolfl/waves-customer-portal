@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { sendLocked, techEstimateRequest, useSendLocks } from './useTechEstimates';
+import { sendLocked, sendLockNote, techEstimateRequest, useSendLocks } from './useTechEstimates';
 import TechEstimateSend from './TechEstimateSend';
 import { INK, LineList, MUTED, s, statusWords, Totals, totalsWords } from './techEstimateParts';
 
@@ -23,6 +23,10 @@ function Detail({ id, onBack, onGone }) {
     setNote(result);
     if (result.reread) void read();
   };
+  // Why there is no Send button, when the answer came after he left the view that sent it: the words kept with the lock.
+  // Only while the server still calls it sendable; once it is sent or the office's, the status line says it.
+  useSendLocks();
+  const shown = note || (quote?.canSend ? sendLockNote(id) : null);
   return (
     <div>
       <button type="button" style={{ ...s.small, marginBottom: 12 }} onClick={onBack}>Back</button>
@@ -37,7 +41,7 @@ function Detail({ id, onBack, onGone }) {
             <LineList lines={quote.lines} />
             <Totals quote={quote} />
           </div>
-          {note && <div role="status" style={note.ok ? s.card : s.notice}>{note.text}</div>}
+          {shown && <div role="status" style={shown.ok ? s.card : s.notice}>{shown.text}</div>}
           {quote.canSend && <TechEstimateSend id={id} who={quote.who} needsTextRequest={quote.needsTextRequest} onOutcome={outcome} />}
         </div>
       )}
