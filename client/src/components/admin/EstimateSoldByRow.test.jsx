@@ -65,4 +65,9 @@ describe('EstimateSoldByRow', () => {
     expect(soldByDetail({ source: 'flag', technicianId: 't1', name: 'Sample Alpha', gpsDistanceM: null, flaggedAt: null }))
       .toBe("from Sample Alpha's flag, truck GPS checked");
   });
+
+  it('words a creator credit without a flag or a truck', () => {
+    expect(soldByDetail({ source: 'creator', technicianId: 't1', name: 'Sample Alpha', gpsDistanceM: null, flaggedAt: null }))
+      .toBe('made the estimate in the technician tool');
+  });
 });

@@ -2,7 +2,7 @@
 
 /**
  * The technician estimate tool's price preview (GATE_TECH_ESTIMATES, owner 2026-11-09). Step 1 of 4:
- * it prices and saves nothing, sends nothing.
+ * it prices and saves nothing, sends nothing. tech-estimate-save.js (step 2a) saves the same quote as a draft.
  *
  * The phone sends WHO (a customer on his route, or a new person he typed), WHICH pest services, and edits to a
  * few measured facts. The SERVER does the rest, on the path that already makes estimates with no office user
@@ -280,13 +280,12 @@ function buildLines(mapped) {
   return lines;
 }
 
-// The verdict, like moving-auto-estimate.js cleanPrice: server-priced, with an engine line, and which lines the office
-// must look at. The save's own member-address check joins the flagged lines under ONE code, so a technician never
-// learns that an address belongs to another customer.
+// The verdict, like moving-auto-estimate.js cleanPrice: server-priced, with an engine line for every chosen service,
+// and whether the office must look at a line (engineReview) or at the address (memberAddress, the save's own check).
 function judgePrepared(prepared, keys) {
   const { lineRequiresReview, lineHasHeuristicTurf } = require('./estimator-engine/draft-builder');
   const estimate = prepared && prepared.estimate;
-  const data = estimate && (typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data);
+  const data = parseEstimateData(estimate);
   const lines = (data && data.engineResult && data.engineResult.lineItems) || [];
   if (!estimate || estimate.pricing_authority !== 'SERVER' || !data) throw officePrices();
   // Never a partial quote: every chosen service must come back as its own engine line, and a line the engine
@@ -296,10 +295,18 @@ function judgePrepared(prepared, keys) {
   if (missing || lines.some(unpriced)) throw officePrices();
   const flagged = (line) => lineRequiresReview(line) || lineHasHeuristicTurf(line)
     || String(line.pricingConfidence || '').toUpperCase() === 'LOW';
-  return { data, estimate, review: lines.some(flagged) || Boolean(prepared.memberLinkageWarning) };
+  return { data, estimate, engineReview: lines.some(flagged), memberAddress: Boolean(prepared.memberLinkageWarning) };
 }
 
-async function priceQuote(req, body) {
+function parseEstimateData(estimate) {
+  const raw = estimate && estimate.estimate_data;
+  if (typeof raw !== 'string') return raw || null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+// Everything up to the save body, shared by the preview and the create so the two cannot drift: the services he
+// may quote, his facts, who is quoted, the county-confirmed home, and the body for the shared estimate save.
+async function prepareQuote(req, body) {
   const allowed = await servicesFor(req);
   const keys = normalizeServices(body.services, allowed);
   const facts = normalizeFacts(body.facts);
@@ -314,19 +321,53 @@ async function priceQuote(req, body) {
     context: {},
     lookupEnriched: lookup.enriched,
   });
-  const prepared = await dryRun(req, estimateBody({ subject, keys, facts: layered, engineInputs }));
-  const { data, estimate, review } = judgePrepared(prepared, keys);
-  const oneTimeTotal = roundMoney(estimate.onetime_total);
-  const reasons = layered.changed.map((name) => `changed_fact:${name}`);
-  if (oneTimeTotal > ONE_TIME_HOLD_DOLLARS) reasons.push('one_time_over_limit');
-  if (review) reasons.push('office_review');
+  return { keys, subject, layered, saveBody: estimateBody({ subject, keys, facts: layered, engineInputs }) };
+}
+
+// The dry run of the save, judged.
+async function judgeQuote(req, prep) {
+  return judgePrepared(await dryRun(req, prep.saveBody), prep.keys);
+}
+
+// The server's detailed reasons the office looks first, in a fixed order. `phoneMatch` is set by the create only.
+function detailedReasons(prep, judged, { phoneMatch = false } = {}) {
+  const reasons = prep.layered.changed.map((name) => `changed_fact:${name}`);
+  if (roundMoney(judged.estimate.onetime_total) > ONE_TIME_HOLD_DOLLARS) reasons.push('one_time_over_limit');
+  if (judged.engineReview) reasons.push('engine_review');
+  if (judged.memberAddress) reasons.push('member_address');
+  if (phoneMatch) reasons.push('phone_matches_customer');
+  return reasons;
+}
+
+// What the phone may see: engine_review, member_address and phone_matches_customer are ONE code, so an answer never says
+// that an address or a phone belongs to a customer.
+const OFFICE_REVIEW_REASONS = new Set(['engine_review', 'member_address', 'phone_matches_customer']);
+function phoneReasons(detailed) {
+  const shown = detailed.map((reason) => (OFFICE_REVIEW_REASONS.has(reason) ? 'office_review' : reason));
+  return [...new Set(shown)];
+}
+
+// The answer, field by field, from an estimate row (a dry run, the saved row or a stored one) and its parsed data.
+function quoteAnswer(estimate, data, { facts, detailed }) {
+  const reasons = phoneReasons(detailed);
   return {
-    lines: buildLines(data.result || {}),
+    lines: buildLines((data && data.result) || {}),
     monthlyTotal: roundMoney(estimate.monthly_total),
     annualTotal: roundMoney(estimate.annual_total),
-    oneTimeTotal,
-    facts: layered.shown,
+    oneTimeTotal: roundMoney(estimate.onetime_total),
+    facts,
     officeFirst: { required: reasons.length > 0, reasons },
+  };
+}
+
+async function priceQuote(req, body) {
+  const prep = await prepareQuote(req, body);
+  const judged = await judgeQuote(req, prep);
+  const { agentEngineResultDigest } = require('./agent-estimate-preview');
+  return {
+    ...quoteAnswer(judged.estimate, judged.data, { facts: prep.layered.shown, detailed: detailedReasons(prep, judged) }),
+    // A hash of the engine result, not a price: the create sends it back so a price that moved in between is refused.
+    digest: agentEngineResultDigest(judged.data.engineResult),
   };
 }
 
@@ -336,5 +377,13 @@ module.exports = {
   PEST_SERVICES,
   setupFor,
   priceQuote,
+  officePrices,
+  prepareQuote,
+  judgeQuote,
+  detailedReasons,
+  phoneReasons,
+  quoteAnswer,
+  buildLines,
+  parseEstimateData,
   _private: { ENGINE_SERVICES, layerFacts, engineServices, estimateBody, normalizeFacts },
 };
