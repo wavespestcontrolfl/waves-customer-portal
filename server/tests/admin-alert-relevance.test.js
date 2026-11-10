@@ -1268,6 +1268,34 @@ describe('customer-contact classes', () => {
     expect(mockLoadContactBundles.mock.calls[0][0][0].refs).toMatchObject({ callLogId: null, customerId: null });
   });
 
+  test('a complaint-call bell (call-complaint:<call id>) is its own contact-only class, read by its customer id, and closes only on a person reaching that customer after the bell', async () => {
+    const complaint = (over = {}) => note({ category: 'customer', link: `/admin/communications#tab=calls&call=${CALL}`,
+      metadata: { dedupeKey: `call-complaint:${CALL}`, doneWhen: 'complaint_answered', customerId: CUST, callLogId: CALL, source: 'call_complaint', ...over } });
+    expect(classify(complaint())).toBeNull(); // contact gate off: not judged at all
+    gate('true');
+    expect(classify(complaint()).key).toBe('call_complaint');
+    // Another bell in the same category keeps no class here.
+    expect(classify(note({ category: 'customer', metadata: { dedupeKey: 'something-else:1', customerId: CUST } }))).toBeNull();
+    mockBundles = new Map();
+    await loadSubjects([complaint()]);
+    expect(mockLoadContactBundles.mock.calls.at(-1)[0].map((i) => [i.kind, i.refs])).toEqual([['customer', { customerId: CUST }]]);
+    // A bell with no customer id is not judged.
+    mockLoadContactBundles.mockClear();
+    await loadSubjects([complaint({ customerId: null })]);
+    expect(mockLoadContactBundles).not.toHaveBeenCalled();
+    expect((await verdictFor(complaint(), { backAt: at(10) })).reason).toBe('A person called back');
+    expect((await verdictFor(complaint(), { inAt: at(10) })).reason).toBe('A person answered their call');
+    expect((await verdictFor(complaint(), { textAt: at(10) })).reason).toBe('Answered by text');
+    expect((await verdictFor(complaint(), { replyAt: at(10) })).reason).toBe('Answered by email');
+    // Contact from before the bell, a booked visit and a sent quote alone, or nothing at all, leave it open.
+    expect((await verdictFor(complaint(), { backAt: at(-10), textAt: at(-10) })).reason).toBeNull();
+    expect((await verdictFor(complaint(), { visitAt: at(10), quote: true })).reason).toBeNull();
+    expect((await verdictFor(complaint(), {})).reason).toBeNull();
+    // Shadow mode records what would close and closes nothing.
+    gate('shadow');
+    expect(await verdictFor(complaint(), { backAt: at(10) })).toMatchObject({ reason: null, would: 'A person called back' });
+  });
+
   describe('rules', () => {
     beforeEach(() => gate('true'));
 
