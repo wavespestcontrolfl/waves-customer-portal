@@ -1098,6 +1098,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 12:07 AM ET — pay rate steps (owner 2026-11-05: $23.00, then $25 in the first full pay week after day 90).
+  // Applies every step whose Monday has come, so the staff record shows the new rate that day. It catches up: any
+  // due step, not only today's. A pay run applies due steps too. No gate, no message to anyone.
+  cron.schedule('7 0 * * *', async () => {
+    try {
+      await runExclusive('payroll-rate-steps', async () => {
+        const applied = await require('./payroll-rate-steps').applyDueStepsDaily();
+        if (applied.length) logger.info(`[payroll-rate-steps] ${applied.length} pay rate step(s) applied`);
+      });
+    } catch (err) {
+      logger.error(`[payroll-rate-steps] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // BOOT (+60s, then EVERY 6H at :23) — SMS draft-route canary: probes the
   // routed reply-drafting providers (gpt mini default / Sonnet save-the-sale)
   // and alerts Adam the moment one stops answering (bad model ID, revoked key,
