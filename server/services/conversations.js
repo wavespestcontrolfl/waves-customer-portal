@@ -562,11 +562,12 @@ async function recordTouchpoint(opts) {
 /**
  * Update the message row matching a Twilio SID. Used when recording or
  * transcription callbacks arrive after the initial message was logged.
+ * `refine` (optional) adds conditions to the UPDATE's WHERE.
  */
-async function updateByTwilioSid(twilioSid, patch) {
+async function updateByTwilioSid(twilioSid, patch, refine = (query) => query) {
   if (!twilioSid) return null;
   try {
-    const updated = await db('messages').where({ twilio_sid: twilioSid }).update(patch).returning('*');
+    const updated = await refine(db('messages').where({ twilio_sid: twilioSid })).update(patch).returning('*');
     return updated[0] || null;
   } catch (err) {
     logger.error(`[conversations] updateByTwilioSid failed: ${err.message}`);
