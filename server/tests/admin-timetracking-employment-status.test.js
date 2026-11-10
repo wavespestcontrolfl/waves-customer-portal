@@ -135,6 +135,19 @@ describe('updateTechnician', () => {
     expect(write.update).toHaveBeenCalledWith(expect.objectContaining({ name: 'Jordan Reyes' }));
   });
 
+  test('canCreateEstimates (GATE_TECH_ESTIMATES) must be a boolean; a boolean writes can_create_estimates and comes back on the row', async () => {
+    const bad = await invoke(updateTechnician, { params: { id: 'tech-1' }, body: { canCreateEstimates: 'yes' }, technicianId: 'adam' });
+    expect(bad.statusCode).toBe(400);
+    const target = makeChain({ first: { ...ADAM, id: 'tech-9', role: 'technician' } });
+    const write = makeChain();
+    const reread = makeChain({ first: { ...ADAM, id: 'tech-9', role: 'technician', can_create_estimates: true } });
+    installTransaction([target, write, reread]);
+    const res = await invoke(updateTechnician, { params: { id: 'tech-9' }, body: { canCreateEstimates: true }, technicianId: 'adam' });
+    expect(res.statusCode).toBe(200);
+    expect(write.update).toHaveBeenCalledWith(expect.objectContaining({ can_create_estimates: true }));
+    expect(res.body.technician.can_create_estimates).toBe(true);
+  });
+
   test.each([
     ['service history', { scheduled_services: { id: 'ss-1' } }],
     ['completed service records', { service_records: { id: 'sr-1' } }],

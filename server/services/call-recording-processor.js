@@ -119,7 +119,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, spelledLettersSettleEmailDisagreement, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards, thirdPartyCustomerOnlyCards, thirdPartyCallMakesNoServiceAsk } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, spelledLettersSettleEmailDisagreement, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards, callEndedWithNothingToDo, thirdPartyCustomerOnlyCards, thirdPartyCallMakesNoServiceAsk } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -1621,6 +1621,20 @@ function outboundPriorContactCustomerId({ call, knownCaller, callMeta, before, c
     return knownCaller.id;
   }
   return null;
+}
+
+// missing_last_name files no CARD when the call's customer was on file BEFORE this call and
+// already has a real last name (2026-11-09 audit: the office had nothing to do on 24 of 57
+// cards). "Before this call" reuses outboundPriorContactCustomerId's proof on the phone
+// pre-lookup customer: not the customer this call's own earlier pass created
+// (metadata.created_customer_id) and a row older than the call, so a reprocess answers the same
+// as the first pass. A call whose row is already linked to a DIFFERENT customer than the one the
+// lookup read keeps the card (the last name read is not that customer's). `lastNameOnFile` is the
+// pre-lookup row's non-placeholder last name, false on a failed read (fail closed).
+function lastNameOnFileBeforeCall({ call, knownCaller, callMeta, before, lastNameOnFile } = {}) {
+  if (lastNameOnFile !== true || !knownCaller?.id) return false;
+  if (call?.customer_id && String(call.customer_id) !== String(knownCaller.id)) return false;
+  return outboundPriorContactCustomerId({ call: {}, knownCaller, callMeta, before }) === knownCaller.id;
 }
 
 function phoneDigits(value) {
@@ -10901,12 +10915,21 @@ async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v
   }
 }
 
+// The heartbeat beat matched no row. That is a LOST claim only while this pass still owned
+// the work: the pass's own terminal write clears processing_token on a normal finish, and the
+// steps after it (commitments, alerts) run with the timer still on. `claimReleased` is set by
+// each of the pass's own token-clearing writes, so a beat after a normal finish stays quiet and
+// a beat that misses before any terminal write (a peer reclaimed the call) still warns.
+function shouldWarnOwnershipLost(rows, claimReleased) {
+  return rows === 0 && !claimReleased;
+}
+
 // Terminal write for a tech follow-up call: the transcript is already
 // stored; this lands the extraction, summary and sentiment the Calls tab
 // reads, marks the call processed and releases the claim in one
 // token-fenced statement, then records commitments. No lead, booking,
 // automation, SMS, interaction or CSR write ever runs for the call.
-async function finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result }) {
+async function finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result, onClaimReleased = null }) {
   const written = await db('call_log')
     .where({ id: call.id })
     .where('processing_token', procToken)
@@ -10935,6 +10958,7 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
     logger.warn(`[call-proc] Skipped tech follow-up terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
     return { success: false, skipped: true, reason: 'terminal_write_ownership_lost', callSid };
   }
+  if (onClaimReleased) onClaimReleased();
   await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
   logger.info(`[call-proc] Completed tech follow-up processing for ${maskSid(callSid)}: customer=${call.customer_id || null}`);
   return { success: true, callSid, customerId: call.customer_id || null, extracted, techFollowUp: true };
@@ -10950,6 +10974,9 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
 // No customer, lead, appointment, estimate, automation, text or email is written or
 // sent. Any other blocker (spam_or_wrong_number, do_not_contact_requested), alone or
 // beside out_of_service_area, keeps today's silent return.
+// The disposition: no_action_needed when the call ended with nothing to do and nobody asked for
+// or was promised a callback or quote (outOfAreaHoldDisposition), else callback_task_created for a
+// lead, a hot or warm caller, a quote ask or a Waves promise.
 const OUT_OF_AREA_HOLD_REASON = 'out_of_service_area_hold';
 
 function isOutOfAreaOnlyHold(finalFlags) {
@@ -10959,9 +10986,19 @@ function isOutOfAreaOnlyHold(finalFlags) {
 
 const isHotOrWarm = (extracted) => extracted?.lead_quality === 'hot' || extracted?.lead_quality === 'warm';
 
-// A lead or a quote/callback ask gets callback_task_created, anything else no_action_needed.
+// callback_task_created reads as "a callback is owed". A call the model itself closed as
+// no_action_needed, with no open thread (callEndedWithNothingToDo: no agreed time, no follow-up,
+// no promised quote, not a voicemail), and with no quote asked or promised and no recorded Waves
+// promise, owes nothing, even though is_lead is true (2026-11-09: two callers were told on the
+// call that Waves does not go there). Otherwise a lead, a hot or warm caller, a quote ask or a
+// Waves promise gets callback_task_created, anything else no_action_needed. With no valid V2
+// extraction the old rule stands. The alert for a hot or warm caller is not changed.
 function outOfAreaHoldDisposition({ extracted, v2Extraction = null, wavesPromiseRecorded = false }) {
   const { quoteRequested, quotePromised } = resolveCallQuoteSignals(extracted || {}, v2Extraction);
+  const askedNothing = wavesPromiseRecorded !== true && !quoteRequested && !quotePromised;
+  if (askedNothing && callEndedWithNothingToDo(v2Extraction)) {
+    return { disposition: 'no_action_needed', reason: OUT_OF_AREA_HOLD_REASON };
+  }
   const callbackOwed = extracted?.is_lead === true || isHotOrWarm(extracted)
     || quoteRequested || quotePromised || wavesPromiseRecorded === true;
   return { disposition: callbackOwed ? 'callback_task_created' : 'no_action_needed', reason: OUT_OF_AREA_HOLD_REASON };
@@ -11205,6 +11242,8 @@ const CallRecordingProcessor = {
     // every 60s while the pass runs, token-fenced so a pass that lost its
     // claim beats into 0 rows. Cleared in the outer finally on every exit.
     let heartbeatTimer = null;
+    // Set by each of THIS pass's own token-clearing writes (see shouldWarnOwnershipLost).
+    let claimReleased = false;
     // This pass's MONOTONIC generation — assigned by the claim write below
     // (processing_generation + 1). The token is the claim MUTEX; the
     // generation is the pass IDENTITY that survives finalization: a cleared
@@ -11490,7 +11529,7 @@ const CallRecordingProcessor = {
           // dead. Say so loudly: every terminal write from here is
           // token-fenced and will no-op, so the pass finishes into nothing,
           // and this line is the only trace of why.
-          if (rows === 0) {
+          if (shouldWarnOwnershipLost(rows, claimReleased)) {
             logger.warn(`[call-proc] ownership LOST mid-pass for ${maskSid(callSid)} — a peer reclaimed the claim; this pass's terminal writes will no-op`);
           }
         })
@@ -11911,7 +11950,7 @@ const CallRecordingProcessor = {
       // (processAllPending skips both), so it goes back to pending instead
       // (Codex #3736 r13 P2).
       const preClaimStatus = (call.processing_status === 'processing' || recordingChangedBeforeClaim) ? null : (call.processing_status || null);
-      await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+      const deferredRows = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
         processing_status: preClaimStatus,
         // The claim cleared the verdict time; a restored terminal status gets
         // its own stamp back, a NULL / pending status none (Codex #6269 r2).
@@ -11919,6 +11958,7 @@ const CallRecordingProcessor = {
         processing_token: null,
         updated_at: new Date(),
       });
+      if (deferredRows) claimReleased = true;
       logger.info(`[call-proc] Deferred ${maskSid(callSid)} — recording not fully propagated yet (status restored to ${preClaimStatus || 'pending'})`);
       return { success: false, skipped: true, reason: 'recording_not_ready' };
     }
@@ -12237,6 +12277,7 @@ const CallRecordingProcessor = {
         // (codex P1).
         return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      claimReleased = true;
       // At the cap the lane has ended: the call produced no lead, customer or
       // routing decision and no pass will try again, so the same permanent
       // processing-failure card the extraction lane files is owed here
@@ -12256,6 +12297,9 @@ const CallRecordingProcessor = {
     // coordinating a visit, complaining, or asking about billing.
     let knownCaller = null;
     let knownCallerLookupFailed = false;
+    // The pre-lookup row's last name is a real one (read here once, no new query): feeds
+    // lastNameOnFileBeforeCall at the card filter. False until proven, so a failed read keeps the card.
+    let knownCallerLastNameOnFile = false;
     try {
       // The operator's link outranks the phone lookup here too (Codex #3764
       // r2 P1): a relink exists because the phone identity was wrong or
@@ -12268,6 +12312,8 @@ const CallRecordingProcessor = {
           : null)
         : await findCustomerForCallContact(contactPhone, {});
       knownCaller = summarizeKnownCaller(knownCustomer);
+      knownCallerLastNameOnFile = !!knownCustomer
+        && !require('./call-commitments').isMissingName(knownCustomer.last_name);
     } catch (e) {
       knownCallerLookupFailed = true;
       logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);
@@ -12382,6 +12428,7 @@ const CallRecordingProcessor = {
           updated_at: new Date(),
         }).returning(['extraction_attempts']);
       if (failedRow) {
+        claimReleased = true;
         const attempts = Number(failedRow?.extraction_attempts) || 0;
         await fileExtractionExhaustedTriage(call.id, attempts, err, callSid);
       } else {
@@ -12765,7 +12812,7 @@ const CallRecordingProcessor = {
         noTextHoldArming = true;
         if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Result.extraction }))) return abandonToPeer('the disclaimed-number hold write');
       }
-      return finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result });
+      return finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result, onClaimReleased: () => { claimReleased = true; } });
     }
 
     // ── Voicemail routing ──
@@ -12930,6 +12977,7 @@ const CallRecordingProcessor = {
           lost.fenceLost = true;
           throw lost;
         }
+        claimReleased = true;
         return true;
       }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!terminalSettled) {
@@ -13815,6 +13863,11 @@ const CallRecordingProcessor = {
                 extracted, preAdoptionExtracted, v2Extraction, transcription, v2Valid,
                 services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
               }),
+            // The record already has a last name: no "missing last name" card (card only).
+            lastNameOnFile: finalFlags.includes('missing_last_name') && lastNameOnFileBeforeCall({
+              call, knownCaller, lastNameOnFile: knownCallerLastNameOnFile,
+              callMeta: parseJsonObjectSafe(call.metadata), before: callStartedAt(call) || call.created_at,
+            }),
           }).dropped);
           // A call that ended with nothing to do files no booking-hold card
           // (2026-10-10 audit). Codes, not flags: not_confirmed is the
@@ -14673,6 +14726,7 @@ const CallRecordingProcessor = {
           lost.fenceLost = true;
           throw lost;
         }
+        claimReleased = true;
         return true;
       }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!vetoSettled) {
@@ -24690,6 +24744,10 @@ const CallRecordingProcessor = {
           ),
           updated_at: new Date(),
         });
+      // The token is cleared in this transaction: from here the heartbeat's missed beat is this
+      // pass's own finish, not a lost claim. Set before commit so a beat that waited on the row
+      // lock and then matched nothing finds the flag already up.
+      if (written > 0) claimReleased = true;
       // codex #4815 r5 P1: the durable price-agreed quarantine-retry
       // marker commits ATOMICALLY with the terminal status it protects —
       // either both land or neither does. Fenced on `written > 0`: if this
@@ -25288,6 +25346,7 @@ const CallRecordingProcessor = {
         if (!releasedRows.length) {
           logger.warn(`[call-proc] Skipped lock release for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
         } else {
+          claimReleased = true;
           const attempts = Number(releasedRows[0]?.extraction_attempts) || 0;
           await fileExtractionExhaustedTriage(call.id, attempts, procErr, callSid);
         }
@@ -26085,6 +26144,7 @@ CallRecordingProcessor._test = {
   isTechFollowUpCall,
   finalizeTechFollowUpCall,
   isOutOfAreaOnlyHold,
+  lastNameOnFileBeforeCall,
   outOfAreaHoldDisposition,
   buildOutOfAreaHoldAlert,
   keepOutOfAreaHoldRecords,
@@ -26223,6 +26283,7 @@ CallRecordingProcessor._test = {
   resolveCallSecondaryContacts,
   withoutAnsweringStaffName,
   isFreshInboundCall,
+  shouldWarnOwnershipLost,
   resolveCallBillingPayer,
   persistCallSecondaryContact,
   onSiteOptinAskTrigger,
