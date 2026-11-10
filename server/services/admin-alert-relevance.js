@@ -145,7 +145,9 @@
  * needs review", the commercial scaffold; category `lead`, `estimator_engine`, a `callSid`) close once a quote reached
  * the call's customer or lead (handedOffWithin, never sent_at), or a live top-level visit was booked for them, after
  * the CALL STARTED (callStartedAtSql over the call's call_log row, not the bell's created_at: a quote can go out between
- * the call and the bell). No call row, or a call with no customer and no lead, leaves the bell open. A text-origin bell
+ * the call and the bell). The lead is the bell's own and the one the call is stamped with (`call_log.metadata`
+ * `lead_id` / `relay_lead_id`), since an estimator bell carries no leadId. No call row, or a call with no customer and
+ * no lead, leaves the bell open. A text-origin bell
  * (`smsThreadKey`, no callSid) is not in the class. No gate: it is an internal alert change, and the sweep's own kill
  * switch covers it.
  */
@@ -583,16 +585,19 @@ function isCallQuoteBell(meta, row) {
 // them, AFTER THE CALL STARTED? The boundary is the call's real start (callStartedAtSql over its call_log row), never the
 // bell's created_at: a quote can go out between the call and the bell. The quote is the promise lane's witness
 // (handedOffWithin inside the ownership fence, never sent_at), the visit the new-lead rule's (bookedVisitsByCustomer:
-// live, top-level). The subject is the call's customer and the bell's lead's customer. No call row, no customer: no
-// verdict. Loaded into data.callQuoteMovedOn (bell id -> the reason in words), after the leads are loaded. A failed read
+// live, top-level). The subject is the call's customer, the bell's lead's customer and the customer of the lead the
+// call is stamped with (call_log.metadata lead_id / relay_lead_id, the keys call-booking-link-text's leadIdOf reads):
+// an estimator bell links to the estimate and carries no leadId, and the call may have no customer of its own. A
+// deleted lead, or one with no customer, adds nothing. No call row, no customer: no verdict. Loaded into data.callQuoteMovedOn (bell id -> the reason in words), after the leads are loaded. A failed read
 // is no verdict: it leaves the bell open and keeps the re-arm pass from putting one back (callQuoteFailed).
-function callQuoteSubject(row, calls, data) {
+function callQuoteSubject(row, calls, data, linkedLeads) {
   const meta = parseMeta(row.metadata);
   const call = calls.get(meta.callSid);
   const startedAt = call?.started_at ? new Date(call.started_at) : null;
   if (!startedAt || Number.isNaN(startedAt.getTime())) return null;
   const lead = data.leads.get(refsFromRow(row).leadId);
-  const customerIds = [...new Set([call.customer_id, lead && !lead.deleted_at ? lead.customer_id : null]
+  const linked = linkedLeads.get(uuidOrNull(String(call.linked_lead_id || '')) || '');
+  const customerIds = [...new Set([call.customer_id, lead && !lead.deleted_at ? lead.customer_id : null, linked ? linked.customer_id : null]
     .map((id) => (id ? uuidOrNull(String(id)) : null)).filter(Boolean))];
   return customerIds.length ? { startedAt, customerIds } : null;
 }
@@ -604,9 +609,15 @@ async function loadCallQuoteMovedOn(rows, data, conn) {
     const { callStartedAtSql } = require('./sms-pending-conversations');
     const sids = [...new Set(bells.map((row) => parseMeta(row.metadata).callSid))];
     const found = await conn('call_log as cl').whereIn('cl.twilio_call_sid', sids)
-      .select('cl.twilio_call_sid', 'cl.customer_id', conn.raw(`${callStartedAtSql('cl')} as started_at`));
+      .select('cl.twilio_call_sid', 'cl.customer_id', conn.raw(`${callStartedAtSql('cl')} as started_at`),
+        conn.raw("COALESCE(cl.metadata->>'lead_id', cl.metadata->>'relay_lead_id') as linked_lead_id"));
     const calls = new Map(found.map((call) => [call.twilio_call_sid, call]));
-    const subjects = new Map(bells.map((row) => [String(row.id), callQuoteSubject(row, calls, data)]).filter(([, subject]) => subject));
+    // The leads the calls are stamped with, in one read. A stamp that is not a uuid is ignored, never a failed query.
+    const linkedIds = [...new Set(found.map((call) => (call.linked_lead_id ? uuidOrNull(String(call.linked_lead_id)) : null)).filter(Boolean))];
+    const linkedLeads = new Map(linkedIds.length
+      ? (await conn('leads').whereIn('id', linkedIds).whereNull('deleted_at').select('id', 'customer_id')).map((l) => [String(l.id), l])
+      : []);
+    const subjects = new Map(bells.map((row) => [String(row.id), callQuoteSubject(row, calls, data, linkedLeads)]).filter(([, subject]) => subject));
     const booked = await bookedVisitsByCustomer(conn, [...new Set([...subjects.values()].flatMap((s) => s.customerIds))]);
     const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
     for (const [id, { startedAt, customerIds }] of subjects) {

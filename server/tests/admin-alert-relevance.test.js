@@ -814,6 +814,50 @@ describe('class rules', () => {
       expect(witnessQueries()).toEqual([]);
     });
 
+    test('the lead the call is stamped with (metadata lead_id or relay_lead_id) is a subject when the call and the bell have no customer or lead; a deleted, unknown or customer-less stamped lead adds nothing', async () => {
+      const OTHER = uid(98);
+      const LINKED = uid(77);
+      const linkedLead = (over = {}) => lead({ id: LINKED, customer_id: OTHER, ...over });
+      mockTables.scheduled_services = [{ customer_id: OTHER, latest_created_at: BETWEEN }];
+      // The bell is an estimator bell: it links to the estimate and names no lead.
+      const bellOnly = callBell();
+      mockTables[callTable] = [callRow({ customer_id: null, linked_lead_id: LINKED })];
+      mockTables.leads = [linkedLead()];
+      expect((await reasonFor(bellOnly)).reason).toBe('A visit was booked');
+      // A quote handed off to the stamped lead's customer is asked about for that customer, from the call's start.
+      mockTables.scheduled_services = [];
+      mockTables.estimates = [{ id: uid(533), customer_id: OTHER }];
+      mockQueries = [];
+      const witness = jest.spyOn(require('../services/call-commitments'), 'handedOffWithin');
+      try {
+        expect((await reasonFor(bellOnly)).reason).toBe('Estimate was sent');
+        expect(witness.mock.calls.map(([, after]) => after.toISOString())).toEqual([CALL_START.toISOString()]);
+        expect(JSON.stringify(witnessQueries().pop().calls)).toContain(OTHER);
+      } finally {
+        witness.mockRestore();
+      }
+      // The relay stamp key is read the same way as lead_id: the loader selects both from the call's metadata.
+      expect(JSON.stringify(asked(callTable)[0].calls)).toContain('relay_lead_id');
+      // The stamped leads are read in one query for the whole batch, not one per bell.
+      mockQueries = [];
+      await loadSubjects([callBell(), callBell({ estimateId: null }), callBell({ estimateId: uid(5) })]);
+      expect(asked('leads').filter((q) => JSON.stringify(q.calls).includes(LINKED))).toHaveLength(1);
+      // A deleted stamped lead, an unknown one, and one with no customer add no subject: no verdict, bell open.
+      mockTables.scheduled_services = [{ customer_id: OTHER, latest_created_at: BETWEEN }];
+      mockTables.leads = [linkedLead({ deleted_at: AFTER_BELL })];
+      expect((await reasonFor(bellOnly)).reason).toBeNull();
+      mockTables.leads = [linkedLead({ id: uid(76) })];
+      expect((await reasonFor(bellOnly)).reason).toBeNull();
+      mockTables.leads = [linkedLead({ customer_id: null })];
+      expect((await reasonFor(bellOnly)).reason).toBeNull();
+      // A stamp that is not a uuid is ignored, not sent to the database.
+      mockTables[callTable] = [callRow({ customer_id: null, linked_lead_id: 'not-a-uuid' })];
+      mockTables.leads = [linkedLead()];
+      mockQueries = [];
+      expect((await reasonFor(bellOnly)).reason).toBeNull();
+      expect(asked('leads').filter((q) => JSON.stringify(q.calls).includes('not-a-uuid'))).toEqual([]);
+    });
+
     test('the call row is read once for a batch, by sid, from the call start helper; a read that fails is no verdict and leaves the bell open', async () => {
       mockTables[callTable] = [callRow()];
       mockTables.estimates = [{ id: uid(533), customer_id: CUST }];

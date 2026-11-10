@@ -307,7 +307,9 @@ customer's message by this rule.
    2026-11-09), once a quote was handed off to the call's customer or lead (`handedOffWithin`, never
    `sent_at`) or a live top-level visit was booked for them, after the CALL STARTED (`callStartedAtSql` over
    the call's `call_log` row, not the bell's `created_at`: a quote can go out between the call and the bell).
-   No call row, or a call with no customer and no lead, leaves the bell open. A text-origin bell (a
+   The lead is the bell's own and the one the call is stamped with (`call_log.metadata` `lead_id` or
+   `relay_lead_id`; an estimator bell links to the estimate and carries no `leadId`). No call row, or a call
+   with no customer and no lead, leaves the bell open. A text-origin bell (a
    `smsThreadKey`, no `callSid`) is not in the class. Re-armed like every class if the evidence goes.
    A new text from the same sender rings a fresh bell: the thread row is rewritten, rung and
    re-opened. The sweep never contacts a customer.
