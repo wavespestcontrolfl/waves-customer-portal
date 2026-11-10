@@ -19,7 +19,12 @@ let steps;
 let suggested;
 let calls;
 let refusal;
+// The dialog compares the day-90 Monday with today's Eastern date, so the clock is fixed: the dates in
+// this file stay "ahead" or "past" for good. Only Date is faked; timers stay real for waitFor.
+const NOW = new Date('2026-11-09T15:00:00.000Z');
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(NOW);
   steps = []; suggested = '2027-04-05'; calls = []; refusal = null;
   adminFetch.mockReset();
   adminFetch.mockImplementation((path, options = {}) => {
@@ -34,7 +39,7 @@ beforeEach(() => {
     return reply({}, false, 404);
   });
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 async function openDialog() {
   render(<PayrollSettings />);
