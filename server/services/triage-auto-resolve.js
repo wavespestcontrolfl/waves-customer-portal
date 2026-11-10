@@ -2886,11 +2886,14 @@ function planQuietAgedReopen(rows, liveTwins = []) {
   return { reopen, skippedHasLiveCard, skippedDuplicate: rows.length - skippedHasLiveCard - reopen.length };
 }
 
-async function readQuietAgedReopenPlan(conn, since) {
-  const rows = await conn('triage_items')
+// `onlyCallIds` (optional) limits the scan to those calls: the re-plan under
+// locks must not touch a call whose lock it does not hold.
+async function readQuietAgedReopenPlan(conn, since, onlyCallIds = null) {
+  const query = conn('triage_items')
     .where({ status: 'dismissed', resolution_rule: 'quiet_aged' })
-    .where('resolved_at', '>=', since)
-    .select('id', 'call_log_id', 'reason_code', 'resolved_at');
+    .where('resolved_at', '>=', since);
+  if (onlyCallIds) query.whereIn('call_log_id', onlyCallIds);
+  const rows = await query.select('id', 'call_log_id', 'reason_code', 'resolved_at');
   const callIds = [...new Set(rows.map((r) => r.call_log_id).filter(Boolean))];
   const liveTwins = callIds.length
     ? await conn('triage_items').whereIn('call_log_id', callIds).whereIn('status', ['open', 'in_progress']).select('call_log_id', 'reason_code')
@@ -2920,7 +2923,8 @@ async function reopenQuietAged({ since, apply = false, now = new Date(), conn = 
     const callIds = [...new Set(plan.reopen.map((r) => r.call_log_id))].sort();
     for (const callId of callIds) await lockTriageCall(trx, callId);
     // Re-plan under the locks: a card filed since the first read must still win.
-    const fresh = await readQuietAgedReopenPlan(trx, sinceDate);
+    // Only the locked calls: a card dismissed since the first read waits for the next run.
+    const fresh = await readQuietAgedReopenPlan(trx, sinceDate, callIds);
     const ids = fresh.reopen.map((r) => r.id);
     if (!ids.length) return 0;
     const updated = await trx('triage_items')

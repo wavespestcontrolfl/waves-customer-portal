@@ -620,4 +620,25 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     expect((await cardRow(swept.cardId)).status).toBe('open');
     expect(again.reopened).toBe(0);
   });
+
+  test('reopenQuietAged: a card of another call that turns eligible after the first read is not touched by that run', async () => {
+    const since = new Date(Date.now() - 60 * 1000);
+    const first = await seedQuietCard('not_confirmed', { dismissedAs: { rule: 'quiet_aged' } });
+    let late = null;
+    // Seeds the late card after the first (unlocked) plan read, before the locked re-plan.
+    const racing = (...a) => db(...a);
+    racing.transaction = async (fn) => {
+      late = await seedQuietCard('customer_email_missing', { dismissedAs: { rule: 'quiet_aged' } });
+      return db.transaction(fn);
+    };
+    const run = await sweep.reopenQuietAged({ since, apply: true, conn: racing });
+    expect(run.reopened).toBeGreaterThanOrEqual(1);
+    expect((await cardRow(first.cardId)).status).toBe('open');
+    expect((await cardRow(late.cardId)).status).toBe('dismissed');
+    expect((await db('call_log').where({ id: late.callId }).first('review_status')).review_status).toBe('dismissed');
+    // The next run plans and locks it.
+    await sweep.reopenQuietAged({ since, apply: true });
+    expect((await cardRow(late.cardId)).status).toBe('open');
+    expect((await db('call_log').where({ id: late.callId }).first('review_status')).review_status).toBe('open');
+  });
 });
