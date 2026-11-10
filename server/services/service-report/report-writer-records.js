@@ -103,10 +103,9 @@ function writerExpectations({ line = null, findingsType = null, applications = [
 // count stays on the product card: a figure the writer may say needs a screen
 // that knows the count and whether the customer asked. One line per job, never a product name. Reviewed config
 // only: config/report-product-copy.js.
-// GATE_PEST_LABEL_FACTS (label-pest-facts.js): `namedPests` is what the
-// technician named today; a product whose reviewed label list names one of
-// them adds "its label lists ...". Null (the gate off) leaves every line as
-// it was.
+// label-pest-facts.js: `namedPests` is what the technician named today; a
+// product whose reviewed label list names one of them adds "its label lists
+// ...". Null (not the pest line) leaves every line as it was.
 function productFactLines(applications, { namedPests = null } = {}) {
   const seen = new Set();
   return (Array.isArray(applications) ? applications : []).flatMap((application) => {

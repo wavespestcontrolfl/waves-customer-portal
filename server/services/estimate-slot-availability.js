@@ -38,7 +38,7 @@ const {
 } = require('./scheduling/travel-gap');
 const { ensureCatalogLoaded, expectedServiceMinutes, stopExpectedMinutesSync, expectedMinutesForServices } = require('./scheduling/expected-service-minutes');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
-const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
+const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY, MAKE_ROOM_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
 const { resolveZoneRouteDaySlug, readZoneRouteDays, preferRouteDayDates, zoneRouteDaysPolicyKey } = require('./scheduling/zone-route-days');
@@ -1318,7 +1318,7 @@ function lineMapOfferLive() {
  * program of a combined capacity hold, whose single window needs a technician on
  * every line. Line = catalog category first, then name (serviceLineFor).
  */
-async function heldVisitLines(serviceProfile) {
+async function heldVisitLines(serviceProfile, conn = db) {
   const { primaryProfileService } = require('./area-addon-visit-rows');
   const { serviceLineFor } = require('./scheduling/line-technician');
   const held = serviceProfile.reservationServiceMix
@@ -1326,7 +1326,7 @@ async function heldVisitLines(serviceProfile) {
     : [primaryProfileService(serviceProfile)].filter(Boolean);
   const lines = [];
   for (const service of held) {
-    const { line } = await serviceLineFor(db, {
+    const { line } = await serviceLineFor(conn, {
       serviceKey: service.resolvedServiceKey || service.catalogServiceKey || null,
       serviceType: service.label || service.service,
     });
@@ -1339,13 +1339,13 @@ async function heldVisitLines(serviceProfile) {
 // or the map is unreadable: getting the customer on the calendar beats withholding times).
 // The territory place is the ZIP typed in the QUOTED address only: a multi-property
 // estimate keeps the customer_id while quoting another property (see resolveEstimateCoords).
-async function lineOfferRankingFor(serviceProfile, estimate = null) {
+async function lineOfferRankingFor(serviceProfile, estimate = null, conn = db) {
   if (!lineMapOfferLive()) return null;
   try {
     const { lineOfferRanking } = require('./scheduling/line-technician');
     const { parseRawAddress } = require('../utils/address-normalizer');
     const zip = estimate && estimate.address ? parseRawAddress(estimate.address).zip || null : null;
-    return await lineOfferRanking(db, { lines: await heldVisitLines(serviceProfile), place: zip ? { zip } : null });
+    return await lineOfferRanking(conn, { lines: await heldVisitLines(serviceProfile, conn), place: zip ? { zip } : null });
   } catch (err) {
     logger.warn(`[estimate-slots] service-line map unreadable, offering today's list: ${err.message}`);
     return null;
@@ -1719,21 +1719,23 @@ async function filterCollidingSlots(slots, {
   // scheduled_services id -> minutes. Each row counts at its own window shifted
   // by those minutes (shiftMovedRows).
   shiftedServiceMinutes,
+  conn = db,
 } = {}) {
   if (!Array.isArray(slots) || slots.length === 0) return slots;
   let inactiveTechs = new Set();
   if (serviceMix) {
     const ids = [...new Set(slots.map((slot) => slot.techId).filter(Boolean))];
-    const inactive = await require('./technician-capabilities').inactiveCapabilitiesForServices(db, ids, capabilityRowsFor(serviceMix));
+    const inactive = await require('./technician-capabilities').inactiveCapabilitiesForServices(conn, ids, capabilityRowsFor(serviceMix));
     inactiveTechs = new Set(inactive.map((row) => String(row.technician_id)));
   }
   if (capacityEnabled()) {
     // The complete route already includes its technician's work and unassigned
     // blockers. A global fixed-window pass would erase certified flexibility.
-    return slots.filter(slot => slot.routeMode === 'arrival_windows' && slot.techId
-      && !inactiveTechs.has(String(slot.techId)) && slotWindowFitsDay(slot.windowStart, slot.windowEnd));
+    return dropLiveMakeRoomDestinations(slots.filter(slot => slot.routeMode === 'arrival_windows' && slot.techId
+      && !inactiveTechs.has(String(slot.techId)) && slotWindowFitsDay(slot.windowStart, slot.windowEnd)),
+    { conn, dateFrom, dateTo, ownEstimateId });
   }
-  let collisionQuery = db('scheduled_services')
+  let collisionQuery = conn('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
@@ -1755,6 +1757,8 @@ async function filterCollidingSlots(slots, {
       });
     });
   }
+  // Mode on: a live make-room hold also holds each move's destination (see the loop below), so its moves ride along.
+  const readMakeRoomMoves = makeRoomOffersOn(makeRoomModeNow());
   const rows = shiftMovedRows(await collisionQuery
     .select(
       'scheduled_services.id',
@@ -1766,24 +1770,26 @@ async function filterCollidingSlots(slots, {
       'scheduled_services.zone',
       'scheduled_services.customer_id',
       'scheduled_services.reservation_expires_at',
+      ...(readMakeRoomMoves ? ['scheduled_services.make_room_moves'] : []),
       'customers.city as customer_city',
       // Coordinates + service identity are only needed for the optional
       // travel-gap check (expected-minutes padding, owner ruling 2026-09-23).
       // Hold identity above also serves the unconditional global overlap check.
       ...(travelGapEnabled()
-        ? [...guardedCoordSelects(db), 'scheduled_services.service_type', 'scheduled_services.service_key_snapshot',
+        ? [...guardedCoordSelects(conn), 'scheduled_services.service_type', 'scheduled_services.service_key_snapshot',
           // Planning-minute inputs (stopExpectedMinutesSync), as the booking check's reader selects them.
           'scheduled_services.is_recurring', 'scheduled_services.is_callback']
         : []),
     ), shiftedServiceMinutes);
   const candidatePin = { lat: coords?.lat ?? null, lng: coords?.lng ?? null };
-  if (travelGapEnabled()) await ensureCatalogLoaded(db);
+  if (travelGapEnabled()) await ensureCatalogLoaded(conn);
 
   const zoneSlug = zoneSlugOf(estimateZone);
   const zoneCities = new Set(
     (estimateZone?.cities || []).map((c) => String(c || '').toLowerCase()).filter(Boolean),
   );
 
+  const rowsById = new Map(rows.map((row) => [String(row.id), row]));
   const byTechDate = new Map();
   // Every live row per date: reserveSlot's tech-conflict query drops its
   // technician filter for a techless slot, so an unassigned candidate must
@@ -1826,6 +1832,27 @@ async function filterCollidingSlots(slots, {
     byTechDate.get(key).push(busy);
     if (!allByDate.has(date)) allByDate.set(date, []);
     allByDate.get(date).push(busy);
+    // A LIVE make-room hold (booking-make-room: the hold row carries the stops that move later) makes each move's
+    // destination busy on that technician-day too, with the moved stop's pin and expected minutes so the travel gap
+    // sees it. The stop's current row stays busy as it is. The destination counts as a committed stop (the moved stop is
+    // a real visit there), not as a hold.
+    for (const move of readMakeRoomMoves && busy.hold ? makeRoomMovesOf(row) : []) {
+      const moved = rowsById.get(String(move.id));
+      const toMin = timeToMinutes(move.to);
+      const widthMin = Number(move.widthMin);
+      if (!moved || toMin == null || !(widthMin > 0)) continue;
+      const destination = {
+        ...busy,
+        startMin: toMin,
+        endMin: toMin + widthMin,
+        hold: false,
+        lat: moved.lat ?? null,
+        lng: moved.lng ?? null,
+        ...(travelGapEnabled() ? { windowMinutes: widthMin, expectedMinutes: stopExpectedMinutesSync(moved, widthMin) } : {}),
+      };
+      byTechDate.get(key).push(destination);
+      allByDate.get(date).push(destination);
+    }
     if (!row.technician_id && estimateZone) {
       const rowZone = String(row.zone || '').toLowerCase();
       const rowCity = String(row.customer_city || '').toLowerCase();
@@ -1877,6 +1904,57 @@ async function filterCollidingSlots(slots, {
       dayRows,
     );
   });
+}
+
+// GATE_BOOKING_MAKE_ROOM on, capacity mode (Codex #7796 P2): a make-room hold made in hour mode keeps its moved stops'
+// new hours for its whole life, even after capacity mode turns on. The capacity route knows only real rows, so a window
+// over one of those hours is dropped here; the reserve refuses it too (slot-reservation makeRoomDestinationClash). The
+// technician scope is the hour-mode check's (scopeToTechnician); this estimate's own holds are left out (its reserve
+// releases them first). Off and shadow read nothing.
+async function dropLiveMakeRoomDestinations(slots, { conn, dateFrom, dateTo, ownEstimateId = null }) {
+  if (!slots.length || !dateFrom || !dateTo || makeRoomModeNow() !== 'on') return slots;
+  const holds = await conn('scheduled_services')
+    .where('scheduled_date', '>=', dateFrom)
+    .where('scheduled_date', '<=', dateTo)
+    .whereNull('customer_id')
+    .whereNotNull('reservation_expires_at')
+    .whereRaw('reservation_expires_at > NOW()')
+    .whereNotNull('make_room_moves')
+    .modify((q) => { if (ownEstimateId) q.whereRaw('source_estimate_id IS DISTINCT FROM ?', [ownEstimateId]); })
+    .select('technician_id', 'scheduled_date', 'make_room_moves');
+  const taken = (holds || []).flatMap((hold) => {
+    const date = (typeof hold.scheduled_date === 'string' ? hold.scheduled_date : hold.scheduled_date.toISOString()).slice(0, 10);
+    return makeRoomMovesOf(hold).map((move) => {
+      const startMin = timeToMinutes(String(move.to || '').slice(0, 5));
+      return { date, technicianId: hold.technician_id, startMin, endMin: startMin == null ? null : startMin + Number(move.widthMin) };
+    });
+  }).filter((busy) => busy.startMin != null && Number.isFinite(busy.endMin));
+  if (!taken.length) return slots;
+  return slots.filter((slot) => {
+    const start = timeToMinutes(slot.windowStart);
+    const end = timeToMinutes(slot.windowEnd);
+    if (start == null || end == null) return true;
+    const sameDay = taken.filter((busy) => busy.date === slot.date);
+    return !scopeToTechnician(sameDay, slot.techId).some((busy) => start < busy.endMin && end > busy.startMin);
+  });
+}
+
+// The moves a make-room hold row carries ({ id, from, to, widthMin }), or [].
+function makeRoomMovesOf(row) {
+  let held = row?.make_room_moves;
+  if (typeof held === 'string') {
+    try { held = JSON.parse(held); } catch { return []; }
+  }
+  return Array.isArray(held?.moves) ? held.moves : [];
+}
+
+// GATE_BOOKING_MAKE_ROOM as the page reads it, at call time; any error reads as off.
+function makeRoomModeNow() {
+  try {
+    return require('./scheduling/booking-make-room').bookingMakeRoomMode();
+  } catch {
+    return 'off';
+  }
 }
 
 // Rows that count against a slot on `techId`'s route. Gate off, or a techless slot:
@@ -2035,11 +2113,13 @@ function signCustomerFacingSlots(slots, estimateId) {
       startMinutes: timeToMinutes(slot.windowStart),
       technicianId: slot.techId || null,
       durationMinutes: slot.durationMinutes,
-      policy: capacityEnabled() ? CAPACITY_OFFER_POLICY : undefined,
+      // The make-room hour (slot.makeRoom, set only by makeRoomOfferSlot in mode on) is signed under its own tag.
+      policy: slot.makeRoom === true ? MAKE_ROOM_OFFER_POLICY : (capacityEnabled() ? CAPACITY_OFFER_POLICY : undefined),
       arrivalGrace,
     });
     const publicSlot = { ...slot, slotId: appendOfferToSlotId(slot.slotId, { ...offer, arrivalGrace }) };
     delete publicSlot.routeMode;
+    delete publicSlot.makeRoom;
     return publicSlot;
   });
 }
@@ -2143,14 +2223,91 @@ function makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, fun
 // their new times: filterCollidingSlots with the classified pool's arguments (overlaps, live holds, zone limits,
 // capability, the day fit, and the travel gap with this estimate's expected minutes), then the service-line rule.
 // Resolves true, or the reason the page would not offer the hour.
-function makeRoomPlacement({ estimateZone, coords, serviceMix, candidateExpectedMinutes, estimateId, lineRanking }) {
+// `conn`: the hold's transaction when the proof runs inside reserve or extend (no second pool connection under its locks).
+function makeRoomPlacement({ estimateZone, coords, serviceMix, candidateExpectedMinutes, estimateId, lineRanking, conn = db }) {
   return async (slot, shiftedServiceMinutes) => {
     const kept = await filterCollidingSlots([slot], {
-      dateFrom: slot.date, dateTo: slot.date, estimateZone, coords, serviceMix, candidateExpectedMinutes, ownEstimateId: estimateId, shiftedServiceMinutes,
+      dateFrom: slot.date, dateTo: slot.date, estimateZone, coords, serviceMix, candidateExpectedMinutes, ownEstimateId: estimateId, shiftedServiceMinutes, conn,
     });
     if (!kept.length) return 'page_collision';
     return applyLineOfferRule(kept, lineRanking).length ? true : 'service_line';
   };
+}
+
+// Mode on, hour mode only: the page offers one make-room hour (booking-make-room findMakeRoomOffers). Capacity mode
+// offers nothing and keeps the shadow-style background check.
+function makeRoomOffersOn(mode) {
+  return mode === 'on' && !capacityEnabled();
+}
+
+// Longest the page waits for the offer pass, budget included: past it the page serves the free list.
+const MAKE_ROOM_OFFER_WAIT_MS = 2500;
+
+// The earliest passing make-room hour as a slot in the exact shape of the page's other hour-mode slots (classifySlot),
+// marked for signCustomerFacingSlots; null when none passes, on a time-out, or on any error.
+async function makeRoomOfferSlot(args, { durationMinutes }) {
+  let timer;
+  try {
+    // The finder and the card's technician name, both inside the page's one wait.
+    const build = async () => {
+      const found = await require('./scheduling/booking-make-room').findMakeRoomOffers(args);
+      const earliest = found?.hours?.[0];
+      if (!earliest) return null;
+      let name = null;
+      try { name = earliest.techId ? (await db('technicians').where({ id: earliest.techId }).first('name'))?.name || null : null; } catch { /* the card names no one */ }
+      return { hour: earliest, techName: name };
+    };
+    const built = await Promise.race([
+      build(),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), MAKE_ROOM_OFFER_WAIT_MS); }),
+    ]);
+    if (!built) return null;
+    const { hour, techName } = built;
+    const windowStart = hour.start;
+    return {
+      slotId: dateWithTimeSlotId(hour.date, windowStart, hour.techId),
+      date: hour.date,
+      windowStart,
+      windowEnd: addMinutesToHHMM(windowStart, durationMinutes),
+      durationMinutes,
+      techFirstName: (techName || '').split(/\s+/)[0] || null,
+      techId: hour.techId || null,
+      routeOptimal: false,
+      nearbyJob: null,
+      makeRoom: true,
+    };
+  } catch (err) {
+    logger.warn(`[booking-make-room] offer not built, serving the free list: ${err.message}`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The hold's proof of one make-room hour (slot-reservation reserveSlot and extendReservation): the finder's own checks
+// for that one hour, with this page's admit and placement rules built from the same helpers the offer used. `estimate`
+// is the locked estimate row; `serviceProfile` may be null (an extend has none: the season and service-line rules,
+// which only narrow who may be offered, were proven when the hold was reserved). Resolves { shiftMin, moves } or
+// { reason }; never throws.
+async function verifyMakeRoomOffer({ conn, estimate, serviceProfile = null, serviceMix = null, estimateZone = null, coords, date, windowStart, techId, durationMinutes, candidateExpectedMinutes }) {
+  try {
+    if (!coords) return { reason: 'no_pin' };
+    const startMin = timeToMinutes(windowStart);
+    const lineRanking = serviceProfile ? await lineOfferRankingFor(serviceProfile, estimate, conn) : null;
+    const routeDaySlug = await resolveZoneRouteDaySlug({ lat: coords.lat, lng: coords.lng, estimateZone, conn });
+    const opts = { ...DEFAULT_OPTS, includeWeekends: true, timeOfDay: 'any', minimumLeadMinutes: selfServeNoticeMinutes() };
+    return await require('./scheduling/booking-make-room').verifyMakeRoomHour({
+      conn, date, startMin, techId, durationMinutes, point: coords, estimateId: estimate.id, candidateExpectedMinutes,
+      capabilityRows: serviceMix ? capabilityRowsFor(serviceMix) : null,
+      zoneSlug: routeDaySlug,
+      // The offer was signed for this exact hour, so the request's own window and zone days were proven then.
+      admit: makeRoomAdmit({ opts, serviceProfile: serviceProfile || {}, dateFrom: date, dateTo: date, funnelDays: null }),
+      placement: makeRoomPlacement({ estimateZone, coords, serviceMix, candidateExpectedMinutes, estimateId: estimate.id, lineRanking, conn }),
+    });
+  } catch (err) {
+    logger.warn(`[booking-make-room] hold proof failed: ${err.message}`);
+    return { reason: 'error' };
+  }
 }
 
 function startMakeRoomCheck(mode, args) {
@@ -2222,6 +2379,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // null = config unreadable this request: neither read nor write the cache.
   const routeDayPolicyKey = await zoneRouteDaysPolicyKey(db);
   const routeCheckMode = routeCheckModeFor(userOpts);
+  // GATE_BOOKING_MAKE_ROOM on (hour mode): this list may carry one make-room hour; read at call time.
+  const makeRoomMode = makeRoomModeFor(userOpts);
+  const makeRoomOffer = makeRoomOffersOn(makeRoomMode);
   // Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate offers no first
   // visit before the move-in date, which the customer can still change. Only
   // a stamped estimate reads its move; every other estimate skips the lookup.
@@ -2279,6 +2439,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     `route-check:${routeCheckMode}`,
     // A gate flip to live must not serve the other list for the TTL.
     ...(lineMapOfferLive() ? ['line-map:live'] : []),
+    // A list with a make-room hour (mode on) is never served to a caller in another mode, or the other way round.
+    ...(makeRoomOffer ? ['make-room:on'] : []),
   ].join(':');
   // opts.bypassCache (explicit, off by default): a caller that must act on
   // the CURRENT calendar — the texting AI's send-time recheck of a quoted
@@ -2598,7 +2760,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode,
   });
   // GATE_BOOKING_MAKE_ROOM: the taken hours this customer could have, measured against this same final pool.
-  startMakeRoomCheck(makeRoomModeFor(userOpts), {
+  const makeRoomArgs = {
     estimateId, pool: routeChecked, coords, durationMinutes: serviceProfile.durationMinutes, candidateExpectedMinutes, dateFrom, dateTo,
     // The page's capability rule (filterCollidingSlots) for the technician whose stop would move.
     capabilityRows: serviceProfile.reservationServiceMix ? capabilityRowsFor(serviceProfile.reservationServiceMix) : null,
@@ -2606,7 +2768,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     zoneSlug: routeDaySlug,
     admit: makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnel }),
     placement: makeRoomPlacement({ estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, estimateId, lineRanking }),
-  });
+  };
+  // Mode on: the earliest passing make-room hour joins the list below (the free list when none does). Shadow, and
+  // capacity mode, keep the background check and never change the list.
+  let makeRoomSlot = null;
+  if (makeRoomOffer) makeRoomSlot = await makeRoomOfferSlot(makeRoomArgs, { durationMinutes: serviceProfile.durationMinutes });
+  else startMakeRoomCheck(makeRoomMode, makeRoomArgs);
   // The scarcity count below reads `bookable` when no funnel is active: leave out what the check removed.
   let countedBookable = bookable;
   if (routeChecked !== funneledEligible) {
@@ -2629,7 +2796,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     routeFirst: isEnabled('geoSlotRanking'),
     rainTierOf,
   });
-  const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
+  // The make-room hour is on a day before every free slot, so it is the soonest card: first, ahead of the free list's own
+  // pinned and spread order. The free list is selected, counted and badged exactly as without it; the last card makes room.
+  const shown = makeRoomSlot ? [makeRoomSlot, ...selected].slice(0, TARGET_TOTAL) : selected;
+  const { primary, expander } = splitSlotResults(shown, opts.maxResults, opts.expanderMaxResults);
 
   // Stamp rain BEFORE signing/caching (see stampSlotRainChances) so the
   // wrapper cache serves the decorated slots for its whole 5-min TTL.
@@ -2886,6 +3056,8 @@ module.exports = {
   filterCollidingSlots,
   // Shared with slot-reservation so holds can be geo-stamped as route anchors.
   resolveEstimateCoords,
+  // The hold's proof of one make-room hour (GATE_BOOKING_MAKE_ROOM on): slot-reservation reserveSlot / extendReservation.
+  verifyMakeRoomOffer,
   seasonalSelectionProfile,
   inMosquitoSeason,
   nextSeasonStartFrom,
@@ -2930,5 +3102,6 @@ module.exports = {
     stopDatesInRange,
     makeRoomAdmit,
     makeRoomPlacement,
+    makeRoomOfferSlot,
   },
 };

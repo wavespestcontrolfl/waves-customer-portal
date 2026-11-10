@@ -78,7 +78,8 @@ function LeadWho({ neighborEnabled, mode, onMode, prospect, onProspect, customer
   );
 }
 
-export default function FieldLeadModal({ service, onClose, onSubmit }) {
+// `initialProspect` (from the estimate tool's "the office needs to price this one") opens the Neighbor form filled in.
+export default function FieldLeadModal({ service, onClose, onSubmit, initialProspect = null }) {
   const fieldPortalClass = useFieldPortalClass();
   const isMobile = useIsMobile();
   const dialogRef = useModalFocus(true, onClose);
@@ -89,8 +90,8 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState('');
   const neighborEnabled = useFeatureFlag('commission_sold_by', false);
-  const [mode, setMode] = useState('visit');
-  const [prospect, setProspect] = useState(EMPTY_PROSPECT);
+  const [mode, setMode] = useState(initialProspect ? 'neighbor' : 'visit');
+  const [prospect, setProspect] = useState({ ...EMPTY_PROSPECT, ...(initialProspect || {}) });
 
   const customerName = service?.customerName || `${service?.first_name || ''} ${service?.last_name || ''}`.trim() || 'Unknown';
   const address = service?.address || service?.address_line1 || '';

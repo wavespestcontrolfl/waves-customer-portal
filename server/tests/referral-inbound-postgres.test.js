@@ -1,5 +1,5 @@
 // Runs with the existing CI PostgreSQL pass; never a production connection.
-// Inbound referral confirm (GATE_REFERRAL_INBOUND_CONFIRM) against real
+// Inbound referral confirm against real
 // Postgres: which plan customers the office is asked about, and what a confirm
 // writes through the real referral engine. The referrals table carries prod's
 // NOT NULL referrer and status CHECK; referral_inbound_reviews comes from the
@@ -610,9 +610,8 @@ jest.mock('../services/customer-credit', () => ({
     const TECH = randomUUID();
 
     beforeAll(() => {
-      for (const key of ['GATE_REFERRAL_INBOUND_BELL', 'GATE_REFERRAL_INBOUND_CONFIRM']) saved[key] = process.env[key];
+      for (const key of ['GATE_REFERRAL_INBOUND_BELL']) saved[key] = process.env[key];
       process.env.GATE_REFERRAL_INBOUND_BELL = 'true';
-      process.env.GATE_REFERRAL_INBOUND_CONFIRM = 'true';
       bell = require('../services/referral-inbound-bell');
       buttons = require('../services/admin-alert-buttons');
       NotificationService = require('../services/notification-service');
@@ -715,18 +714,11 @@ jest.mock('../services/customer-credit', () => ({
   describe('close-only buttons (close_note) on a real bell row', () => {
     let buttons;
     let NotificationService;
-    let saved;
     const TECH = randomUUID();
 
     beforeAll(() => {
-      saved = process.env.GATE_ALERT_CLOSE_BUTTONS;
-      process.env.GATE_ALERT_CLOSE_BUTTONS = 'true';
       buttons = require('../services/admin-alert-buttons');
       NotificationService = require('../services/notification-service');
-    });
-    afterAll(() => {
-      if (saved === undefined) delete process.env.GATE_ALERT_CLOSE_BUTTONS;
-      else process.env.GATE_ALERT_CLOSE_BUTTONS = saved;
     });
 
     const textRow = async () => {

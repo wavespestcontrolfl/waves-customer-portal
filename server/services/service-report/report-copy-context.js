@@ -584,7 +584,7 @@ async function buildReportCopyContext({
   // customer's open promises (visit-promises.js).
   visitPromises = [],
   // The technician's own words for this visit (the redacted note and
-  // observations): GATE_PEST_LABEL_FACTS reads only which pests they name.
+  // observations): the label facts read only which pests they name.
   visitTexts = [],
   knex = db,
 } = {}) {
@@ -833,9 +833,9 @@ async function buildReportCopyContext({
   let writerAllowedDates = [];
   let writerPromiseCount = 0;
   if (writerRules) {
-    // GATE_PEST_LABEL_FACTS: the pests named today (note, observations and
-    // the pests tagged on the product rows); null with the gate off.
-    const namedPests = line === 'pest' && require('../../config/feature-gates').pestLabelFactsLive()
+    // The pests named today (note, observations and the pests tagged on the
+    // product rows); null off the pest line.
+    const namedPests = line === 'pest'
       ? pestsNamedToday({
         texts: Array.isArray(visitTexts) ? visitTexts : [],
         targets: productEvidence.writerApplications.flatMap((application) => application.targets || []),

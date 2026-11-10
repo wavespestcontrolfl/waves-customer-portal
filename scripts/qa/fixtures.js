@@ -129,6 +129,9 @@ async function cleanup(db, f) {
     await trx('short_codes').whereIn('customer_id', customerIds).del();
     await trx('customer_cards').whereIn('customer_id', customerIds).del();
     await trx('referral_promoters').whereIn('customer_id', customerIds).del();
+    // The first review ask stays on for a completed visit, so the journey's completion leaves a review request.
+    // Its customer FK is restrictive (the review sequence and its drafts cascade).
+    await trx('review_requests').whereIn('customer_id', customerIds).del();
     await trx('property_application_history').whereIn('service_record_id',
       trx('service_records').select('id').whereIn('customer_id', customerIds)).del();
     await trx('conversations').whereIn('customer_id', customerIds).del();

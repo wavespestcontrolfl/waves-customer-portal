@@ -661,7 +661,7 @@ function buildWeatherCallContext({ record, applications = [] } = {}) {
     body = 'Low rainfall in the 24 hours before the visit and moderate wind supported exterior application.';
     recordOnlyBody = false;
   }
-  // GATE_PEST_RAIN_OUTLOOK: the frozen 48-hour outlook, when it has something
+  // The frozen 48-hour rain outlook, when it has something
   // supported to say, takes the place of a record-only body or follows a
   // factual one; null leaves today's card. The headline stays: it reads the
   // visit's weather, and the page's icon reads it.

@@ -45,7 +45,7 @@ describe('getReminderPrefs', () => {
   test('hands the visit to the resolver and reads the toggles from what it returns', async () => {
     Prefs.prefsForVisit.mockResolvedValueOnce({ ...PREFS, service_reminder_72h: false, tech_en_route: false });
     const out = await getReminderPrefs('c1', { scheduledServiceId: 'v1' });
-    expect(Prefs.prefsForVisit).toHaveBeenCalledWith(PREFS, 'c1', 'v1', 'reminders');
+    expect(Prefs.prefsForVisit).toHaveBeenCalledWith(PREFS, 'c1', 'v1', 'reminders', db);
     expect(out.serviceReminder72h).toBe(false);
     expect(out.raw.tech_en_route).toBe(false);
     expect(out.unavailable).toBe(false);
@@ -153,7 +153,7 @@ describe('direct appointment notices (visitPrefsRow)', () => {
   test('resolves the row through the property for the visit; a failure is the unavailable sentinel', async () => {
     Prefs.prefsForVisit.mockResolvedValueOnce({ ...PREFS, appointment_notify_primary: false });
     expect((await visitPrefsRow('c1', 'v1')).appointment_notify_primary).toBe(false);
-    expect(Prefs.prefsForVisit).toHaveBeenCalledWith(PREFS, 'c1', 'v1', 'reminders');
+    expect(Prefs.prefsForVisit).toHaveBeenCalledWith(PREFS, 'c1', 'v1', 'reminders', db);
     Prefs.prefsForVisit.mockRejectedValueOnce(new Error('down'));
     expect((await visitPrefsRow('c1', 'v1')).__prefsUnavailable).toBe(true);
     Prefs.prefsForVisit.mockClear();

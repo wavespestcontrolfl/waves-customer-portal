@@ -157,8 +157,8 @@ describe('PUT /ai/admin/escalations/:id', () => {
 });
 
 describe('PATCH /requests/:id', () => {
-  beforeEach(() => { jest.clearAllMocks(); delete process.env.GATE_PORTAL_INBOX; delete process.env.GATE_PORTAL_ITEM_CLOSE; });
-  afterAll(() => { delete process.env.GATE_PORTAL_INBOX; delete process.env.GATE_PORTAL_ITEM_CLOSE; });
+  beforeEach(() => { jest.clearAllMocks(); delete process.env.GATE_PORTAL_INBOX; });
+  afterAll(() => { delete process.env.GATE_PORTAL_INBOX; });
 
   const existing = { id: REQ_ID, status: 'new', customer_id: 'cust-1', category: 'general', resolved_at: null };
   const resolved = { ...existing, status: 'resolved' };
@@ -218,11 +218,10 @@ describe('PATCH /requests/:id', () => {
     });
   });
 
-  // GATE_PORTAL_ITEM_CLOSE: the Portal tab's Mark handled says `quiet: true` and the customer gets no
+  // The Portal tab's Mark handled says `quiet: true` and the customer gets no
   // "Your Waves request was updated" email. Customer 360 sends no `quiet`, so its email is unchanged.
-  test('GATE_PORTAL_ITEM_CLOSE on + quiet: the request resolves, its alerts still close, and no customer email goes', async () => {
+  test('quiet: the request resolves, its alerts still close, and no customer email goes', async () => {
     process.env.GATE_PORTAL_INBOX = 'true';
-    process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
     const alerts = chain({ pluck: ['alert-9'] });
     setDb({ service_requests: [chain({ first: existing }), chain({ returning: [resolved] })], notifications: [alerts] });
     await withServer(async (baseUrl) => {
@@ -234,8 +233,7 @@ describe('PATCH /requests/:id', () => {
     expect(AccountMembershipEmail.sendRequestUpdated).not.toHaveBeenCalled();
   });
 
-  test('GATE_PORTAL_ITEM_CLOSE on, no quiet (Customer 360) or quiet:false: the email still goes', async () => {
-    process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
+  test('no quiet (Customer 360) or quiet:false: the email still goes', async () => {
     for (const body of [{ status: 'resolved' }, { status: 'resolved', quiet: false }]) {
       setDb({ service_requests: [chain({ first: existing }), chain({ returning: [resolved] })] });
       await withServer(async (baseUrl) => {
@@ -245,8 +243,7 @@ describe('PATCH /requests/:id', () => {
     expect(AccountMembershipEmail.sendRequestUpdated).toHaveBeenCalledTimes(2);
   });
 
-  test('GATE_PORTAL_ITEM_CLOSE on + quiet from a technician: quiet is ignored and the email goes (admins only)', async () => {
-    process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
+  test('quiet from a technician: quiet is ignored and the email goes (admins only)', async () => {
     mockTechRole = 'technician';
     try {
       setDb({ service_requests: [chain({ first: existing }), chain({ returning: [resolved] })] });
@@ -259,22 +256,11 @@ describe('PATCH /requests/:id', () => {
     }
   });
 
-  test('gate off: quiet is ignored and the email goes exactly as before', async () => {
-    setDb({ service_requests: [chain({ first: existing }), chain({ returning: [resolved] })] });
+  test('quiet only changes nothing: the answer an empty body always got (400)', async () => {
     await withServer(async (baseUrl) => {
-      expect((await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, { status: 'resolved', quiet: true })).status).toBe(200);
+      expect((await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, { quiet: true })).status).toBe(400);
+      expect((await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, {})).status).toBe(400);
     });
-    expect(AccountMembershipEmail.sendRequestUpdated).toHaveBeenCalledTimes(1);
-  });
-
-  test('quiet only changes nothing: the answer an empty body always got (400), gate on or off', async () => {
-    for (const gateOn of [false, true]) {
-      if (gateOn) process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
-      await withServer(async (baseUrl) => {
-        expect((await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, { quiet: true })).status).toBe(400);
-        expect((await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, {})).status).toBe(400);
-      });
-    }
     expect(db).not.toHaveBeenCalled();
   });
 });

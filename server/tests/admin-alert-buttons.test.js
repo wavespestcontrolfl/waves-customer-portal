@@ -14,7 +14,6 @@ jest.mock('../services/bid-desk/alert-buttons', () => ({
 jest.mock('../services/alert-call-button', () => ({
   buttonHandler: { live: jest.fn(() => true), run: jest.fn() },
 }));
-jest.mock('../config/feature-gates', () => ({ alertCloseButtonsLive: jest.fn(() => true) }));
 jest.mock('../services/sms-operational-actions', () => ({ settleCommitmentsForDoneAlert: jest.fn(async () => 1) }));
 
 let mockRow;
@@ -45,7 +44,6 @@ jest.mock('../models/db', () => {
 });
 
 const NotificationService = require('../services/notification-service');
-const gates = require('../config/feature-gates');
 const { settleCommitmentsForDoneAlert } = require('../services/sms-operational-actions');
 const { buttonHandler } = require('../services/referral-inbound-bell');
 const { buttonHandler: bidHandler } = require('../services/bid-desk/alert-buttons');
@@ -241,14 +239,11 @@ describe('close-only buttons (close_note): the bell\'s own Done with the button\
   const closeRow = (over = {}) => row({ metadata: { buttons: CLOSE, dedupeKey: 'sms-commitment:c-9', customerId: 'c-1' }, ...over });
 
   beforeEach(() => {
-    gates.alertCloseButtonsLive.mockReturnValue(true);
     mockRow = closeRow();
   });
 
-  test('served while the gate is on, never while it is off', async () => {
+  test('served on the row', async () => {
     expect((await withAlertButtons([closeRow()], { role: 'admin' }))[0].actions).toEqual([{ id: 'called_back', label: 'Called back' }]);
-    gates.alertCloseButtonsLive.mockReturnValue(false);
-    expect((await withAlertButtons([closeRow()], { role: 'admin' }))[0]).not.toHaveProperty('actions');
   });
 
   test('a tap marks the row done by the person with the note, on the claimed version, then settles the follow-up', async () => {

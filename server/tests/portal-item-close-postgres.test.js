@@ -1,12 +1,12 @@
 /**
  * Portal items against live Postgres, the SQL as the sweep runs it:
- *   GATE_PORTAL_ITEM_CLOSE: a portal request bell and an add-service request bell close the way chat items do
+ *   Item close: a portal request bell and an add-service request bell close the way chat items do
  *     (a person's contact after the bell; an estimate handed to the customer after the bell), and the request
  *     row behind a closed bell resolves quietly. The shared witnesses decide what counts as contact: an
  *     automated text, a text from before the bell and a text to someone else do not.
- *   GATE_PORTAL_LATE_RERING: an open portal item bell past its one business hour with no contact since is
+ *   Late re-ring: an open portal item bell past its one business hour with no contact since is
  *     rung once more on the same row, never twice, never for an old ask, never over a reply.
- *   GATE_PORTAL_ESTIMATE_RERING: an open add-service request bell 2 business days old with no estimate for its
+ *   Estimate re-ring: an open add-service request bell 2 business days old with no estimate for its
  *     service is rung once more whatever a person said, never twice, never for an old ask.
  * The rules themselves are covered by admin-alert-relevance.test.js and portal-late-rering.test.js.
  */
@@ -32,7 +32,7 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
     portalInbox = require('../services/portal-inbox');
   });
   afterEach(() => {
-    for (const key of ['GATE_ALERT_CONTACT_CLOSE', 'GATE_PORTAL_ITEM_CLOSE', 'GATE_PORTAL_LATE_RERING', 'GATE_PORTAL_ESTIMATE_RERING', 'GATE_PORTAL_CHAT_ANSWERED_CLOSE', 'GATE_PORTAL_INBOX']) delete process.env[key];
+    for (const key of ['GATE_ALERT_CONTACT_CLOSE', 'GATE_PORTAL_CHAT_ANSWERED_CLOSE', 'GATE_PORTAL_INBOX']) delete process.env[key];
   });
   afterAll(async () => {
     for (const table of ['notifications', 'sms_log', 'call_log', 'emails', 'estimates', 'service_requests', 'customers']) {
@@ -66,7 +66,7 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
   // The bell POST /api/requests raises.
   const requestBell = (customer, request, at, over = {}) => bell({ category: 'service', link: `/admin/customers?customerId=${customer.id}`, created_at: at,
     metadata: { area: 'Customers', doneWhen: 'request_answered', requestId: request.id, customerId: customer.id, ...over } });
-  // The add-service bell (gate on): trigger fields under payload, the request id and customer on top.
+  // The add-service bell: trigger fields under payload, the request id and customer on top.
   const bundleBell = (customer, request, at, over = {}) => bell({ category: 'estimate', link: `/admin/customers?customerId=${customer.id}`, created_at: at,
     metadata: { triggerKey: 'bundle_quote_requested', priority: 'high', requestId: request.id, customerId: customer.id, payload: { customerId: customer.id, requestId: request.id, bundled: false }, ...over } });
   const chatBell = (customer, at, over = {}) => {
@@ -75,8 +75,8 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       metadata: { dedupeKey: `portal-chat-escalation:${id}`, doneWhen: 'customer_answered', customerId: customer.id, escalationId: id, conversationId: id, ...over } });
   };
 
-  describe('GATE_PORTAL_ITEM_CLOSE', () => {
-    const on = () => { process.env.GATE_ALERT_CONTACT_CLOSE = 'true'; process.env.GATE_PORTAL_ITEM_CLOSE = 'true'; };
+  describe('item close', () => {
+    const on = () => { process.env.GATE_ALERT_CONTACT_CLOSE = 'true'; };
 
     test('a request bell closes on a person\'s text after it and its request resolves quietly; an automated text, a text before the bell, a text to someone else and a cancellation bell do not', async () => {
       const now = new Date();
@@ -98,12 +98,6 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       await staffText(early, mins(bellAt, -20));
       await staffText(stranger, mins(bellAt, 20)); // a person's text, to someone else
 
-      // Gate off: nothing closes and nothing resolves.
-      process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
-      await sweep(now);
-      for (const c of Object.values(cases)) expect(await state(c.bell)).toBeNull();
-      expect((await getRequest(cases.answered.request.id)).status).toBe('new');
-
       on();
       await sweep(now);
       expect(await state(cases.answered.bell)).toEqual(['relevance', 'Answered by text']);
@@ -118,12 +112,6 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       // The cancellation bell for the same, answered customer is never judged.
       expect(await state(cancel)).toBeNull();
       expect((await getRequest(cancelRequest.id)).status).toBe('new');
-
-      // Rollback: the gate off puts the bell back; the request row stays resolved.
-      delete process.env.GATE_PORTAL_ITEM_CLOSE;
-      await sweep(now);
-      expect(await state(cases.answered.bell)).toBeNull();
-      expect((await getRequest(cases.answered.request.id)).status).toBe('resolved');
     }, 60000);
 
     test('a request already resolved by staff keeps its time and notes when its bell closes later', async () => {
@@ -148,7 +136,7 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       const other = await customerWith();
       const request = await requestRow(customer, { category: 'add_service', requested_service: 'mosquito', source: 'portal_home' });
       const asked = await bundleBell(customer, request, bellAt);
-      // Raised before the gate: the request id is only under payload, so Mark handled cannot find it.
+      // Raised before the request id rode on top: it is only under payload, so Mark handled cannot find it.
       const nested = await bell({ category: 'estimate', created_at: bellAt,
         metadata: { triggerKey: 'bundle_quote_requested', payload: { customerId: customer.id, requestId: request.id } } });
       await staffText(customer, mins(bellAt, 10));
@@ -292,13 +280,12 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
     }, 60000);
   });
 
-  describe('GATE_PORTAL_LATE_RERING', () => {
+  describe('late re-ring', () => {
     // A weekday-independent ask at 15:00 UTC yesterday: 10:00 or 11:00 ET, so due one hour later at 16:00 UTC.
     const base = new Date();
     const ASK = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate() - 1, 15, 0, 0));
     const BEFORE_DUE = mins(ASK, 50);
     const AFTER_DUE = mins(ASK, 70);
-    const lateOn = () => { process.env.GATE_PORTAL_LATE_RERING = 'true'; };
 
     test('the due time is one business hour on the follow-up clock', () => {
       const { dueAtFor } = require('../services/portal-late-rering');
@@ -315,11 +302,6 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       await db('notifications').whereIn('id', [chat.id, asked.id, bundle.id]).update({ read_at: mins(ASK, 5) });
       await automatedText(customer, mins(ASK, 10)); // an automated text is no reply
 
-      // Gate off: nothing.
-      await sweep(AFTER_DUE);
-      for (const b of [chat, asked, bundle]) expect((await get(b.id)).metadata.lateReRungAt).toBeUndefined();
-
-      lateOn();
       // Never before the hour.
       expect((await sweep(BEFORE_DUE)).lateReRung).toBeUndefined();
       for (const b of [chat, asked, bundle]) expect((await get(b.id)).metadata.lateReRungAt).toBeUndefined();
@@ -370,7 +352,6 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       await db('notifications').where({ id: rows.closed.id }).update({ done_at: mins(ASK, 30), done_by: '1' });
       await db('notifications').where({ id: rows.stamped.id }).update({ metadata: JSON.stringify({ ...rows.stamped.metadata, lateReRungAt: mins(ASK, 61).toISOString() }) });
 
-      lateOn();
       await sweep(AFTER_DUE);
       for (const key of ['replied', 'called', 'closed', 'old', 'estimateSent', 'cancelled']) expect((await get(rows[key].id)).body).not.toContain('Still waiting');
       expect((await get(rows.before.id)).body).toContain('Still waiting');
@@ -386,7 +367,6 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       const rightBell = await bundleBell(right, rightRequest, ASK);
       await insert('estimates', { status: 'accepted', customer_id: wrong.id, estimate_data: deliveredFor(mins(ASK, 30), 'svcPest') });
       await insert('estimates', { status: 'accepted', customer_id: right.id, estimate_data: deliveredFor(mins(ASK, 30)) });
-      lateOn();
       await sweep(AFTER_DUE);
       expect((await get(wrongBell.id)).body).toContain('Still waiting');
       expect((await get(rightBell.id)).body).not.toContain('Still waiting');
@@ -401,7 +381,6 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       const addCustomer = await customerWith();
       const addRequest = await requestRow(addCustomer, { category: 'add_service', requested_service: 'mosquito', source: 'portal_home' });
       const bundle = await bundleBell(addCustomer, addRequest, ASK);
-      lateOn();
       expect((await sweep(AFTER_DUE)).lateReRung).toBe(3);
       const bumped = await get(asked.id);
       expect(bumped.created_at.getTime()).toBeGreaterThan(AFTER_DUE.getTime());
@@ -410,7 +389,6 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       await staffText(other, mins(ASK, 25));
       await insert('estimates', { status: 'accepted', customer_id: addCustomer.id, estimate_data: deliveredFor(mins(ASK, 30)) });
       process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
-      process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
       process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE = 'true';
       const result = await sweep(mins(AFTER_DUE, 30));
       expect(result.lateReRung).toBeUndefined();
@@ -426,7 +404,6 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       const early = await customerWith();
       const replied = await chatBell(customer, ASK);
       const before = await chatBell(early, ASK);
-      lateOn();
       await sweep(AFTER_DUE);
       await staffText(customer, mins(ASK, 40));
       await staffText(early, mins(ASK, -40));
@@ -444,7 +421,6 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       // one fresh bell that is not due yet.
       for (let i = 0; i < 6; i += 1) rows.push(await chatBell(await customerWith(), ASK));
       const fresh = await chatBell(await customerWith(), mins(AFTER_DUE, -5));
-      lateOn();
       const result = await runPortalLateRering({ now: AFTER_DUE, pageSize: 2 });
       expect(result.rung).toBe(6);
       for (const b of rows) expect((await get(b.id)).metadata.lateReRungAt).toBe(AFTER_DUE.toISOString());
@@ -459,22 +435,19 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       const b = await requestBell(customer, request, ASK);
       await staffText(customer, mins(ASK, 20));
       process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
-      process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
-      lateOn();
       await sweep(AFTER_DUE);
       expect(await state(b)).toEqual(['relevance', 'Answered by text']);
       expect((await get(b.id)).body).not.toContain('Still waiting');
     }, 30000);
   });
 
-  describe('GATE_PORTAL_ESTIMATE_RERING', () => {
+  describe('estimate re-ring', () => {
     // An ask at 15:00 UTC three days ago (10:00 or 11:00 ET): due 24 open hours later, 48 to 49 wall-clock
     // hours on (the clocks change on 2026-11-01), so 44 hours is never due and 52 hours always is.
     const base = new Date();
     const ASK = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate() - 3, 15, 0, 0));
     const NOT_DUE = mins(ASK, 44 * 60);
     const DUE = mins(ASK, 52 * 60);
-    const estimateOn = () => { process.env.GATE_PORTAL_ESTIMATE_RERING = 'true'; };
     // Filed at the ask, not at FILED (now minus 3 days, to the minute): the quiet close resolves a request only when
     // its updated_at is at or before the bell's askedAt, and FILED passes ASK (15:00 UTC) every day after 15:00 UTC.
     const addRequest = (customer, service = 'mosquito') => requestRow(customer, { category: 'add_service', requested_service: service, source: 'portal_home', created_at: ASK, updated_at: ASK });
@@ -483,7 +456,7 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
     // Every test sweeps all open bells in this database: close the fixtures of the last test so none rings in the next.
     afterEach(async () => { await db('notifications').whereIn('id', made.notifications).whereNull('done_at').update({ done_at: new Date(), done_by: 'test' }); });
 
-    test('a request bell 2 business days old with a person\'s text but no estimate rings "Estimate still owed" exactly once: same row, unread, on top, stamped; not before it is due, not with the gate off', async () => {
+    test('a request bell 2 business days old with a person\'s text but no estimate rings "Estimate still owed" exactly once: same row, unread, on top, stamped; not before it is due', async () => {
       const customer = await customerWith();
       const b = await bundleFor(customer);
       await db('notifications').where({ id: b.id }).update({ read_at: mins(ASK, 5) });
@@ -492,19 +465,13 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       const chat = await chatBell(customer, ASK, { topic: 'add_service' });
       const requested = await requestBell(customer, await requestRow(customer), ASK);
 
-      await sweep(DUE); // gate off
-      expect((await get(b.id)).metadata.estimateReRungAt).toBeUndefined();
-
-      estimateOn();
       expect((await sweep(NOT_DUE)).estimateReRung).toBeUndefined();
       expect((await get(b.id)).body).not.toContain(rungText);
 
       // The close gates are on: a person's text still does not close or silence an add-service request.
       process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
-      process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
       const result = await sweep(DUE);
       expect(result.estimateReRung).toBe(1);
-      expect(result.lateReRung).toBeUndefined();
       const row = await get(b.id);
       expect(row.body.startsWith(rungText)).toBe(true);
       expect(row.body).toContain('Pat asked about adding a service');
@@ -536,7 +503,6 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       const mintedBell = await bundleBell(minted, mintedRequest, ASK);
       await insert('estimates', { status: 'accepted', customer_id: right.id, estimate_data: deliveredFor(mins(ASK, 30 * 60)) });
       await insert('estimates', { status: 'accepted', customer_id: wrong.id, estimate_data: deliveredFor(mins(ASK, 30 * 60), 'svcPest') });
-      estimateOn();
       expect((await sweep(DUE)).estimateReRung).toBe(1);
       expect((await get(wrongBell.id)).body).toContain(rungText);
       expect((await get(rightBell.id)).body).not.toContain(rungText);
@@ -551,7 +517,6 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       const insideBell = await bundleFor(inside, mins(DUE, -13 * 24 * 60));
       const closedBell = await bundleFor(closed);
       await db('notifications').where({ id: closedBell.id }).update({ done_at: mins(ASK, 30), done_by: '1' });
-      estimateOn();
       expect((await sweep(DUE)).estimateReRung).toBe(1);
       expect((await get(oldBell.id)).body).not.toContain(rungText);
       expect((await get(insideBell.id)).body).toContain(rungText);
@@ -564,14 +529,12 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       const never = await customerWith();
       const rungBell = await bundleFor(customer);
       const neverFirstRung = await bundleFor(never);
-      process.env.GATE_PORTAL_LATE_RERING = 'true';
       expect((await runPortalLateRering({ now: mins(ASK, 70) })).rung).toBe(2);
-      // The second bell is put back as one the first-reply pass never rang (a bell the gate was off for).
+      // The second bell is put back as one the first-reply pass never rang (a bell the first-reply pass skipped).
       await db('notifications').where({ id: neverFirstRung.id }).update({
         metadata: db.raw("metadata - 'lateReRungAt' - 'askedAt'"), body: 'Pat asked about adding a service', created_at: ASK });
       expect((await get(rungBell.id)).body.startsWith('Still waiting:')).toBe(true);
 
-      estimateOn();
       expect((await sweep(DUE)).estimateReRung).toBe(2);
       const row = await get(rungBell.id);
       expect(row.body.startsWith(rungText)).toBe(true);
@@ -595,12 +558,10 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       const customer = await customerWith();
       const request = await addRequest(customer);
       const b = await bundleBell(customer, request, ASK);
-      estimateOn();
       expect((await sweep(DUE)).estimateReRung).toBe(1);
       expect((await get(b.id)).created_at.getTime()).toBeGreaterThan(DUE.getTime());
       await insert('estimates', { status: 'accepted', customer_id: customer.id, estimate_data: deliveredFor(mins(ASK, 30 * 60)) });
       process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
-      process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
       const result = await sweep(mins(DUE, 30));
       expect(result.estimateReRung).toBeUndefined();
       expect(await state(b)).toEqual(['relevance', 'Estimate was sent']);
@@ -612,7 +573,6 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       const rows = [];
       for (let i = 0; i < 5; i += 1) rows.push(await bundleFor(await customerWith()));
       const fresh = await bundleFor(await customerWith(), mins(DUE, -5 * 60));
-      estimateOn();
       const result = await runPortalEstimateRering({ now: DUE, pageSize: 2 });
       expect(result.rung).toBe(5);
       for (const b of rows) expect((await get(b.id)).metadata.estimateReRungAt).toBe(DUE.toISOString());

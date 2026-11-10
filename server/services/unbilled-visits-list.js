@@ -20,12 +20,9 @@
 //
 // Window: visits completed in the last 30 days (the page opens on 90). Both of
 // the page's lists count: the one-click leaks and the needs-review rows.
-//
-// GATE_UNBILLED_VISITS_LIST (strict 'true', read at call time). Off = the daily
-// cron returns before any read.
 
 const db = require('../models/db');
-const { unbilledVisitsListLive, alertEpisodesLive } = require('../config/feature-gates');
+const { alertEpisodesLive } = require('../config/feature-gates');
 const { MAX_WHY_CHARS, breaksAlertRules, composeAdminAlert, raiseAdminAlert } = require('./admin-alert-compose');
 const { fitAction, shortDateET } = require('./admin-alert-names');
 
@@ -196,14 +193,12 @@ function loadPageList(days) {
 }
 
 /**
- * Daily cron entry point. Returns { skipped } when the gate is off, otherwise
- * { count, total, outcome }: raised | refreshed | unchanged | suppressed |
+ * Daily cron entry point. Returns { count, total, outcome }: raised | refreshed | unchanged | suppressed |
  * closed | clear. A read failure throws (runExclusive records it in
  * job_health) and never closes the row. `loadList` is the list source and
  * `dedupeKey` the row's key (tests set both).
  */
-async function runUnbilledVisitsList({ database = db, gateEnabled, loadList = loadPageList, dedupeKey = DEDUPE_KEY } = {}) {
-  if (!(gateEnabled ?? unbilledVisitsListLive())) return { skipped: 'disabled' };
+async function runUnbilledVisitsList({ database = db, loadList = loadPageList, dedupeKey = DEDUPE_KEY } = {}) {
   const items = listItems(await loadList(WINDOW_DAYS));
   if (!items.length) {
     const closed = Number(await closeList(database, dedupeKey)) || 0;

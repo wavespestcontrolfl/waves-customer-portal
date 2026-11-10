@@ -77,6 +77,8 @@ import TechFollowThroughCards from '../../components/tech/TechFollowThroughCards
 import TechTruckCheckCard from '../../components/tech/TechTruckCheckCard';
 import useTruckKit from '../../components/tech/useTruckKit';
 import FieldLeadModal from '../../components/tech/FieldLeadModal';
+import TechEstimateSheet from '../../components/tech/TechEstimateSheet';
+import useTechEstimateSetup from '../../components/tech/useTechEstimates';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag, useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
@@ -380,6 +382,11 @@ export default function TechHomePage({ section = 'today' }) {
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
   const [zoneTarget, setZoneTarget] = useState(null); // schedule row → treatment-zone mapper open
   const [leadTarget, setLeadTarget] = useState(null);
+  // The estimate tool: its setup is read once for the workspace (null = off, nothing of it shows). The sheet's
+  // `service` is the visit it opened from; `leadProspect` fills the flag form when the office must price it.
+  const estimateSetup = useTechEstimateSetup();
+  const [estimateTarget, setEstimateTarget] = useState(null);
+  const [leadProspect, setLeadProspect] = useState(null);
   const [outcomeTarget, setOutcomeTarget] = useState(null);
   const [recapService, setRecapService] = useState(null);
   const [fastCompleteService, setFastCompleteService] = useState(null);
@@ -889,6 +896,7 @@ export default function TechHomePage({ section = 'today' }) {
     ...truckCheckTool(truckKit.data, () => navigate(`${base}/truck-check${visitSearch}`)),
     { label: 'Lawn Diagnostic', description: 'Inspect and document lawn conditions', icon: 'lawn', onClick: () => navigate(`${base}/lawn-diagnostic${visitSearch}`) },
     projectReportTool({ saved, projectServices, loading, onClick: handleProjectQuickAction }),
+    ...(estimateSetup ? [{ label: 'Estimates', description: 'Quote a customer or a new person, and see your estimates', icon: 'estimate', onClick: () => setEstimateTarget({ service: null }) }] : []),
     ...(currentRole === 'admin' ? [{ label: 'Field Estimator', description: 'Create an estimate in the office pipeline', icon: 'estimate', onClick: () => navigate(`${base}/estimate`) }] : []),
     ...(socialPostEnabled ? [{ label: 'Social Post', description: 'Prepare field photos for a post', icon: 'social', onClick: () => navigate(`${base}/social-post${visitSearch}`) }] : []),
   ];
@@ -955,6 +963,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onRetry={() => loadStopDetail(selectedVisit)}
                 onPhotos={(service) => setPhotoTarget({ id: service.id, customerName: service.customerName || service.customer_name || 'Customer' })}
                 onProject={openServiceReport} onZone={setZoneTarget} onLead={setLeadTarget}
+                onEstimate={estimateSetup ? (service) => setEstimateTarget({ service }) : null}
                 onOutcome={setOutcomeTarget}
                 techLine={techLine} request={techRequest}
                 onBusyChange={(busy) => onStopBusyChange(selectedVisit, busy)}
@@ -1326,7 +1335,17 @@ export default function TechHomePage({ section = 'today' }) {
       {leadTarget && (
         <FieldLeadModal
           service={leadTarget}
-          onClose={() => setLeadTarget(null)}
+          initialProspect={leadProspect}
+          onClose={() => { setLeadTarget(null); setLeadProspect(null); }}
+        />
+      )}
+
+      {estimateTarget && estimateSetup && (
+        <TechEstimateSheet
+          setup={estimateSetup}
+          service={estimateTarget.service}
+          onClose={() => setEstimateTarget(null)}
+          onHandOff={({ service, prospect }) => { setEstimateTarget(null); setLeadProspect(prospect); setLeadTarget(service || {}); }}
         />
       )}
 
