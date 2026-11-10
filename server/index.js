@@ -629,8 +629,6 @@ app.use('/api/estimates', estimatePublicRoutes.contactPhonePreGuard);
 app.use('/api/estimates', estimatePublicRoutes.commercialAgreementPreGuard);
 // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): same reason, same shape.
 app.use('/api/estimates', estimatePublicRoutes.consumerNoticePreGuard);
-// Residential service agreement (GATE_ESTIMATE_SERVICE_AGREEMENT): same reason, same shape.
-app.use('/api/estimates', estimatePublicRoutes.serviceAgreementPreGuard);
 // Commercial first visit picker (GATE_COMMERCIAL_FIRST_VISIT): same reason, same shape.
 app.use('/api/estimates', estimatePublicRoutes.commercialFirstVisitPreGuard);
 
