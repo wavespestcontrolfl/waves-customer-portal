@@ -186,6 +186,7 @@
  *   GATE_AUTO_DISPATCH_KEEP_TECH=true (owner 2026-10-25, second technician starts early 2027: the 04:10 auto-dispatch night run keeps each visit on its own technician. On, a visit that has a technician gets candidate slots on that same technician only (other technicians' slots are dropped as `other_tech`), and the write refuses to change a technician (`TECH_CHANGE_BLOCKED`, the visit stays). An unassigned visit is handled as before. Strict opt-in: exactly 'true', read at call time via autoDispatchKeepTechLive(), resolved once per run as config.keepTech. Ships DARK; off = the night run may move a visit to another technician for a shorter drive, byte-identical to before. Sends nothing to a customer.)
  *   GATE_PROMISE_RECORD_EVIDENCE=shadow|true (owner 2026-10-29, fix F4 "Stuck Alert Fixes": three false overdue bells on promises and asks the records had already answered. On, (1) an invoice Waves sent the customer after a staff promise ("I'll adjust the payment terms") is evidence the model may cite, (2) an estimate the customer accepted after a send-estimate ask counts even if it was sent before the ask, and (3) a waves row (promise or customer request) of kind other, callback or technician_follow_up whose customer has a live, non-series visit booked after the promise text and with its window end still ahead does not ring as overdue until that window end. `shadow` = change nothing; write audit_log rows for what it would have changed (sms_commitment.fulfillment.shadow, sms_commitment.on_track.shadow). Anything else = off, byte-identical. Read at call time via promiseRecordEvidenceMode(). See docs/gates-and-env.md.)
  *   GATE_ALERT_RETENTION=shadow|true (owner 2026-10-26, "ok go": admin alerts expire instead of piling up. A nightly 1:32 AM ET sweep marks done, never deletes, an admin bell row idle for more than 30 days (read or not) and an FYI row idle for more than 7 days; read state is untouched; `shadow` = judge and record one audit_log summary row (counts by rule and category, the re-ring list), change nothing; `true` = expire. Anything else = off. Read at call time via alertRetentionMode(). See docs/gates-and-env.md.)
+ *   GATE_SETTINGS_GATE_FLIP=true (owner 2026-11-06: Settings → Advanced → Features gets an on/off switch on every gate the portal can flip (a plain on/off gate with a description line here). Owner login only (requireFullAccess); turning a gate on asks for its name to be typed, turning it off is one click and writes 'false'; every flip writes an audit_log row (gate.flip) and goes through the same Railway variable write as the Intelligence Bar's set_railway_gate (compare-and-swap on the prior value; Railway redeploys the portal, so it restarts briefly). This gate itself, mode/timestamp gates and gates with no description stay Railway-only. Strict opt-in, read at call time via settingsGateFlipLive(); off = the page is read-only exactly as before and the flip routes answer 404)
  *   GATE_ALERT_BELL_ORDER=true (owner 2026-11-05, admin-bell plan decision D1 "go": the admin bell lists the alerts that need the owner first (`metadata.severity` 'needs-you'), then rows with no severity label, then the rest (fyi, broken), each group newest first, and each row shows ONE Area chip (`areaChip`, from `metadata.area` when it is one of the nine Areas). Paging uses a three-part cursor "<rank>~<timestamp>~<uuid>"; a cursor of the other order (the gate flipped under an open panel) restarts at page 1 with restart: true. Technicians' lists use the same order. Unread count, the Done list and a technician's row copy are unchanged. Sends nothing to anyone. Strict 'true', read at call time via alertBellOrderLive(); dark by default; off = byte-identical list, cursor and client. Kill switch: unset.)
  *   GATE_ALERT_CUSTOMER_LINE=true (owner 2026-11-05, step S2 of the admin-bell plan, "go": the admin bell shows the "Customer: Name" line under an alert about a customer while GATE_ALERT_EXPLAINER stays off. The name is a database read (services/admin-alert-customer.js, no AI call); only `customer` is added to the row, never the "What to do" button or its summary. Admin role only. With GATE_ALERT_EXPLAINER on the bell is unchanged by this gate. Strict opt-in, read at call time via alertCustomerLineLive(); off = rows are served as before. Kill switch: unset.)
  *   GATE_ALERT_QUIET_FALL_OFF=shadow|true (owner 2026-11-04, "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF": every 10 minutes an open admin bell row with no new activity for 72 hours is marked done (done_by `quiet-72h`, resolution "No new activity for 3 days"), never deleted; last activity is the latest of created_at, metadata.rungAt, observedAt, lastFailureAt and a Reopen's quietHoldFrom, so a quiet refresh is not news; money alerts (billing, payment, dispute, refund, tax, payout, payroll, llm_cost), Activity-only rows and Claude-queue rows stay; a Reopen in Recently done puts one back and holds it 72 more hours, and a changed re-emission rings it back; `shadow` = count and log what would close, write nothing; `true` = close. Anything else = off. Read at call time via alertQuietFallOffMode(). See docs/admin-notifications.md.)
@@ -1254,7 +1255,7 @@ const gates = {
   // one. Off = identifyPestV2 is never called, stored v2 answers are not
   // served back, and the v1 identifyPest path stays byte-identical to
   // today. Kill switch: unset or any non-'true' value.
-  photoIdV2: process.env.GATE_PHOTO_ID_V2 === 'true',
+  photoIdV2: gateEnvValue('GATE_PHOTO_ID_V2'),
   // Public careers application funnel (POST /api/public/careers/apply).
   // Dark until the owner turns hiring on; the admin recruiting queue works
   // at any setting (it only reads/updates existing rows).
@@ -1320,7 +1321,7 @@ const gates = {
   // write metrics rows by accident). Kill switch: unset — recording and the
   // digest email no-op instantly; the daily retention prune keeps running so
   // existing rows still age out.
-  llmDispatchMetrics: process.env.GATE_LLM_DISPATCH_METRICS === 'true',
+  llmDispatchMetrics: gateEnvValue('GATE_LLM_DISPATCH_METRICS'),
 
   // Hybrid knowledge retrieval (lane A2): vector+FTS+RRF search behind the
   // IB's search_field_intelligence, plus the nightly knowledge-index sync
@@ -2294,6 +2295,8 @@ const gates = {
   // derived diarization) — or when the owner explicitly accepts LLM-label
   // risk. Without this gate the agent-commitment demotion never fires, even
   // with GATE_CALL_AGENT_COMMIT_BOOKING on. Owner-flip only.
+  // Stays exact 'true' (codex #7732 security review): Agent/Caller labels are
+  // LLM-inferred, so the trusted-speaker path fails closed on any other value.
   callAgentCommitTrustedLabels: process.env.GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS === 'true',
   // Commercial dictated booking (owner ruling 2026-09-30, call-booker gates
   // review item 8): a commercial job that Waves staff dictate on the call AND
@@ -2571,7 +2574,7 @@ const gates = {
   // path behaves byte-identically to H0 (#3614). Most call sites read the
   // env at call time via gateEnvValue('GATE_CANCEL_FLOW_V2'); kill switch =
   // unset. Owner flips with the C1 portal flow.
-  cancelFlowV2: process.env.GATE_CANCEL_FLOW_V2 === 'true',
+  cancelFlowV2: gateEnvValue('GATE_CANCEL_FLOW_V2'),
   // Boot diagnostics show the effective conjunction; selection reads it at call time.
   termiteAnnualPlan: termiteAnnualPlanSelectionEnabled(),
   // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
@@ -3724,7 +3727,7 @@ const gates = {
 
   // Saved Monday plan in My Property + the existing property-alerts sweep.
   // Explicit opt-in everywhere; email plan and property-alert gates still apply.
-  irrigationAppPlan: process.env.GATE_IRRIGATION_APP_PLAN === 'true',
+  irrigationAppPlan: gateEnvValue('GATE_IRRIGATION_APP_PLAN'),
 
   // Prepaid Invoice Receipt — when an operator marks a single visit prepaid
   // (cash / check / Zelle / card-over-phone) with "Email a paid receipt"
@@ -4535,19 +4538,19 @@ const gates = {
   // Staff page "Hired" button + Resend link (owner 2026-10-25, D7). Default off;
   // reads at call time via hiredPacketLive(). Emails one staff member a
   // set-password link per click. Kill switch: unset.
-  hiredPacket: gateEnvValue('GATE_HIRED_PACKET'),
+  hiredPacket: process.env.GATE_HIRED_PACKET === 'true',
   // Staff form prefill from the staff record (owner 2026-10-25). Default off; reads at
   // call time via staffDocPrefillLive(). Reads only; sends nothing.
-  staffDocPrefill: gateEnvValue('GATE_STAFF_DOC_PREFILL'),
+  staffDocPrefill: process.env.GATE_STAFF_DOC_PREFILL === 'true',
   // Review bonus goes to the technician on the review ask the customer acted on
   // (census M8). Default off; reads at call time via reviewBonusAskFirstLive().
-  reviewBonusAskFirst: gateEnvValue('GATE_REVIEW_BONUS_ASK_FIRST'),
+  reviewBonusAskFirst: process.env.GATE_REVIEW_BONUS_ASK_FIRST === 'true',
   // Leaderboard callbacks count against the technician whose visit they correct
   // (census M9). Default off; reads at call time via callbackSourceTechLive().
-  callbackSourceTech: gateEnvValue('GATE_CALLBACK_SOURCE_TECH'),
+  callbackSourceTech: process.env.GATE_CALLBACK_SOURCE_TECH === 'true',
   // A customer's text during their visit also reaches the visit's technician
   // (census M3). Default off; reads at call time via customerTextToVisitTechLive().
-  customerTextToVisitTech: gateEnvValue('GATE_CUSTOMER_TEXT_TO_VISIT_TECH'),
+  customerTextToVisitTech: process.env.GATE_CUSTOMER_TEXT_TO_VISIT_TECH === 'true',
   // Field Team Program rev 2b: evidence and simulation only; never payroll.
   fieldTeamProgram: gateEnvValue('GATE_FIELD_TEAM_PROGRAM'),
   // Auto lunch (owner 2026-10-25): paid hours drop the unpaid meal. A completed
@@ -10359,3 +10362,9 @@ function dictationLiveWordsLive() {
 }
 // GATE_DICTATION_LIVE_WORDS reader, on its own line so gate PRs never conflict.
 module.exports.dictationLiveWordsLive = dictationLiveWordsLive;
+
+function settingsGateFlipLive() {
+  return process.env.GATE_SETTINGS_GATE_FLIP === 'true';
+}
+// GATE_SETTINGS_GATE_FLIP reader, on its own line so gate PRs never conflict.
+module.exports.settingsGateFlipLive = settingsGateFlipLive;

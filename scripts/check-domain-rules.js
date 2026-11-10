@@ -49,6 +49,14 @@
  *      rule only warns: a PR that was green before the rule landed must not
  *      block a production deploy.
  *
+ *   8. gate-catalogue — every GATE_* in docs/gate-index.md has a header line
+ *      in server/config/feature-gates.js (` *   GATE_X=true (what it does)`),
+ *      so Settings → Advanced → Features shows what it does and its switch
+ *      can flip it (owner 2026-11-06). The gates that had no line on that
+ *      date are listed in scripts/gate-catalogue-baseline.json; the list may
+ *      only shrink: remove a name once its line exists. Warning only on
+ *      Railway, like rule 7.
+ *
  * Scope: the whole production server tree (server/) + client/src.
  * Tests, mocks, fixtures, migrations, seeds, contract-tests, one-off
  * scripts, and ops tooling are NOT scanned — they legitimately pin model
@@ -266,6 +274,32 @@ if (gateIndexProblems.length) {
   for (const line of gateIndexProblems.slice(0, 10)) console.error(`    ${line.slice(0, 160)}`);
   if (gateIndexProblems.length > 10) console.error(`    ... and ${gateIndexProblems.length - 10} more line(s).`);
   console.error('    The index differs from the gates the code reads. Run `npm run gates:index` and commit the file.\n');
+  if (!onRailway) violations += 1;
+}
+
+// =========================================================================
+// Gate catalogue (rule 8) — every gate has a described header line.
+// =========================================================================
+const GATE_CATALOGUE_BASELINE = path.join(__dirname, 'gate-catalogue-baseline.json');
+const gateCatalogueProblems = [];
+try {
+  const { gatesMissingCatalogueLine } = require('./gate-catalogue');
+  const missing = new Set(gatesMissingCatalogueLine());
+  const baseline = new Set(JSON.parse(fs.readFileSync(GATE_CATALOGUE_BASELINE, 'utf8')).gates);
+  for (const name of [...missing].filter((n) => !baseline.has(n)).sort()) {
+    gateCatalogueProblems.push(`${name}: add its line to the header of server/config/feature-gates.js (\` *   ${name}=true (what it does, owner date, kill)\`)`);
+  }
+  for (const name of [...baseline].filter((n) => !missing.has(n)).sort()) {
+    gateCatalogueProblems.push(`${name}: has its line now (or is gone), so remove it from ${rel(GATE_CATALOGUE_BASELINE)}`);
+  }
+} catch (err) {
+  gateCatalogueProblems.push(`the gate catalogue check failed: ${err.message}`);
+}
+if (gateCatalogueProblems.length) {
+  console.error(`server/config/feature-gates.js  [gate-catalogue]${onRailway ? ' (warning only on Railway)' : ''}`);
+  for (const line of gateCatalogueProblems.slice(0, 10)) console.error(`    ${line.slice(0, 200)}`);
+  if (gateCatalogueProblems.length > 10) console.error(`    ... and ${gateCatalogueProblems.length - 10} more.`);
+  console.error('    Settings → Features shows a gate\'s line as what it does, and only a gate with one can be flipped there.\n');
   if (!onRailway) violations += 1;
 }
 

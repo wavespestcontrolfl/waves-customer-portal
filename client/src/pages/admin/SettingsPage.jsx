@@ -37,6 +37,11 @@ import {
   CardBody,
   CardHeader,
   CardTitle,
+  Dialog,
+  DialogBody,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
   Field,
   Input,
   Select,
@@ -425,17 +430,22 @@ export default function SettingsPage() {
 // public /api/health reply stopped carrying gates in #2853.
 function useGateList() {
   const [gates, setGates] = useState(null);
+  const [flipAvailable, setFlipAvailable] = useState(false);
   const [error, setError] = useState(null);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let cancelled = false;
     setError(null);
     adminFetch("/admin/settings/gates")
-      .then((d) => { if (!cancelled) setGates(Array.isArray(d?.gates) ? d.gates : []); })
+      .then((d) => {
+        if (cancelled) return;
+        setGates(Array.isArray(d?.gates) ? d.gates : []);
+        setFlipAvailable(d?.flipAvailable === true);
+      })
       .catch((e) => { if (!cancelled) setError(e.message || "Could not load gates"); });
     return () => { cancelled = true; };
   }, [attempt]);
-  return { gates, error, retry: () => setAttempt((n) => n + 1) };
+  return { gates, flipAvailable, error, retry: () => setAttempt((n) => n + 1) };
 }
 
 function GateListError({ error, onRetry }) {
@@ -461,8 +471,119 @@ function GateSettingBadge({ gate }) {
   return <Badge tone={off ? "neutral" : "strong"} dot>{gate.value}</Badge>;
 }
 
+// The switch shows the variable as the code reads it (the server applies the
+// gate's own parser: exactly 'true' for a strict gate). After a flip the
+// server keeps the old value until Railway's redeploy is live, so the value
+// just written wins until a reload shows it.
+function gateReadsOn(gate, written) {
+  if (written && Object.prototype.hasOwnProperty.call(written, gate.name)) return written[gate.name] === "true";
+  return gate?.readsOn === true;
+}
+
+// Two steps (owner 2026-11-06, GATE_SETTINGS_GATE_FLIP): the server records
+// exactly that change as a one-use card; Confirm claims and writes it.
+// Turning a gate on asks for its name to be typed; off is one click.
+function GateFlipDialog({ request, onClose, onDone }) {
+  // One state for the card: loading → ready (or info / error) → done. The
+  // parent mounts a fresh dialog (keyed by gate and value) for every flip.
+  const [state, setState] = useState({ step: "loading", message: "Preparing the change..." });
+  const [typedName, setTypedName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const turnOn = request.value === "true";
+  useEffect(() => {
+    let cancelled = false;
+    adminFetch(`/admin/settings/gates/${encodeURIComponent(request.name)}/preview`, { method: "POST", body: JSON.stringify({ value: request.value }) })
+      .then((d) => { if (!cancelled) setState(d.alreadySet ? { step: "info", message: d.message } : { step: "ready", preview: d }); })
+      .catch((e) => { if (!cancelled) setState({ step: "error", isError: true, message: e.message || "Could not prepare the change" }); });
+    return () => { cancelled = true; };
+  }, [request.name, request.value]);
+
+  const { preview } = state;
+  const commit = async () => {
+    setBusy(true);
+    try {
+      const d = await adminFetch(`/admin/settings/gates/${encodeURIComponent(request.name)}/commit`, {
+        method: "POST",
+        body: JSON.stringify({ pendingActionId: preview.pendingActionId, confirmName: typedName }),
+      });
+      if (d.success) onDone(request.name, d.value);
+      setState(d.success
+        ? { step: "done", preview, message: `${request.name} is now ${d.value}. ${d.redeployNotice || ""}` }
+        : { step: "done", preview, isError: true, message: d.warning || "Railway did not confirm the change. Check the variable in Railway before trying again." });
+    } catch (e) {
+      // The server may already have used up this one-use card, so the card
+      // ends here; a retry starts from the switch with a fresh preview.
+      setState({ step: "done", preview, isError: true, message: `${e.message || "The change was not made."} Close and use the switch again to start over.` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const ready = state.step === "ready";
+  const offPrereqs = turnOn ? (preview?.prerequisites || []).filter((p) => !p.readsOn) : [];
+  return (
+    <Dialog open onClose={busy ? undefined : onClose} size="md">
+      <DialogHeader>
+        <DialogTitle>{turnOn ? "Turn on" : "Turn off"} {request.name}</DialogTitle>
+      </DialogHeader>
+      <DialogBody className="space-y-3">
+        {preview && (
+          <>
+            <p className="text-ui-body text-zinc-900 u-nums">
+              {preview.gate}: <span className="font-medium">{preview.currentValue}</span> → <span className="font-medium">{preview.newValue}</span>
+            </p>
+            <p className="text-ui-body text-ink-secondary">{preview.description}</p>
+            {preview.customerFacing && (
+              <ActionFeedback error>
+                This gate looks customer-facing (messages, money, prices or a customer page). Check what it does before you change it.
+              </ActionFeedback>
+            )}
+            {preview.inverted && (
+              <p className="text-ui-body text-ink-secondary">The name suggests "true" turns something OFF.</p>
+            )}
+            {offPrereqs.length > 0 && (
+              <p className="text-ui-body text-ink-secondary">
+                Its description names other gates that read as off now: {offPrereqs.map((p) => p.name).join(", ")}.
+                It may do nothing until they are on.
+              </p>
+            )}
+            <p className="text-ui-body text-ink-secondary">{preview.redeployNotice}</p>
+            {ready && preview.requireTypedName && (
+              <Field label="Type the gate name to turn it on">
+                <Input value={typedName} onChange={(e) => setTypedName(e.target.value)} autoComplete="off" spellCheck={false} />
+              </Field>
+            )}
+          </>
+        )}
+        {state.message && <ActionFeedback error={state.isError === true}>{state.message}</ActionFeedback>}
+      </DialogBody>
+      <DialogFooter>
+        <Button variant="secondary" onClick={onClose} disabled={busy}>{state.step === "done" ? "Close" : "Cancel"}</Button>
+        {ready && (
+          <Button onClick={commit} disabled={busy || (preview.requireTypedName && typedName !== request.name)}>
+            {busy ? "Saving..." : turnOn ? "Turn on" : "Turn off"}
+          </Button>
+        )}
+      </DialogFooter>
+    </Dialog>
+  );
+}
+
 function FeatureGatesTab() {
-  const { gates, error, retry } = useGateList();
+  const { gates, flipAvailable, error, retry } = useGateList();
+  const [flipRequest, setFlipRequest] = useState(null);
+  // Values written this visit, shown until a reload reports them as live.
+  const [written, setWritten] = useState({});
+  useEffect(() => {
+    if (!gates) return;
+    setWritten((prev) => {
+      const next = { ...prev };
+      for (const g of gates) {
+        if (g.name in next && g.readsOn === (next[g.name] === "true")) delete next[g.name];
+      }
+      return next;
+    });
+  }, [gates]);
   const setCount = (gates || []).filter((g) => g.set).length;
   return (
     <Card>
@@ -487,8 +608,23 @@ function FeatureGatesTab() {
                   {g.value !== null && g.value !== g.value.trim() && (
                     <div className="mt-1 text-ui-caption text-ink-secondary">The value has extra spaces. Some readers ignore them and some do not; remove them.</div>
                   )}
+                  {g.name in written && (
+                    <div className="mt-1 text-ui-caption text-ink-secondary">Set to {written[g.name]}. It takes effect when Railway finishes restarting the portal.</div>
+                  )}
+                  {flipAvailable && !g.flippable && g.notFlippableReason && (
+                    <div className="mt-1 text-ui-caption text-ink-secondary">{g.notFlippableReason}</div>
+                  )}
                 </div>
-                <GateSettingBadge gate={g} />
+                <div className="flex items-center gap-3">
+                  <GateSettingBadge gate={g} />
+                  {flipAvailable && g.flippable && (
+                    <Switch
+                      checked={gateReadsOn(g, written)}
+                      onChange={(next) => setFlipRequest({ name: g.name, value: next ? "true" : "false" })}
+                      aria-label={`${gateReadsOn(g, written) ? "Turn off" : "Turn on"} ${g.name}`}
+                    />
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -496,8 +632,22 @@ function FeatureGatesTab() {
         <p className="mt-4 rounded-md bg-zinc-50 p-3 text-ui-body text-ink-secondary">
           This shows each setting, not whether its feature runs: many features also need
           other gates or checks. Look a gate up in docs/gates-and-env.md before you change it.
-          To change one: Railway Dashboard → Variables. A change restarts the server.
+          {flipAvailable
+            ? " Flip an on/off gate with its switch; anything else: Railway Dashboard → Variables. Every change restarts the server."
+            : " To change one: Railway Dashboard → Variables. A change restarts the server."}
         </p>
+        {flipRequest && (
+        <GateFlipDialog
+          key={`${flipRequest.name}:${flipRequest.value}`}
+          request={flipRequest}
+          onClose={() => setFlipRequest(null)}
+          onDone={(name, value) => {
+            setWritten((prev) => ({ ...prev, [name]: value }));
+            // Reload once the redeploy is likely live; the written value shows meanwhile.
+            setTimeout(retry, 90 * 1000);
+          }}
+        />
+        )}
       </CardBody>
     </Card>
   );

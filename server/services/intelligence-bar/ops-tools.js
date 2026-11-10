@@ -763,6 +763,34 @@ async function commitRailwayGate(input) {
   };
 }
 
+// One audit_log row for every confirmed gate write, from the Settings page or
+// the bar (owner 2026-11-06). Records what was attempted and how it ended;
+// a non-boolean prior value is never recorded, only its kind. An audit
+// failure is logged, never thrown: the Railway write already happened.
+// Returns the outcome it recorded (written / outcome_unknown / target_changed
+// / refused).
+async function recordGateFlipAudit({ via, actorId = null, gate, value, priorKind = null, priorValue = null, result, ip = null, userAgent = null }) {
+  const outcome = result?.success === true ? 'written'
+    : result?.outcome_unknown ? 'outcome_unknown'
+      : result?.preview_changed ? 'target_changed' : 'refused';
+  try {
+    await require('../audit-log').recordAuditEvent({
+      actor_type: 'technician',
+      actor_id: actorId,
+      action: 'gate.flip',
+      resource_type: 'railway_variable',
+      // resource_id is a uuid column; the gate is a name, so it rides in
+      // metadata (codex #7732).
+      metadata: { gate: gate || null, via, value, prior_kind: priorKind, prior_value: priorValue, outcome, code: result?.code || null },
+      ip_address: ip,
+      user_agent: userAgent,
+      critical: true,
+    });
+  } catch (err) {
+    logger.error(`[intelligence-bar:ops] gate.flip audit row failed for ${gate}: ${err.message}`);
+  }  return outcome;
+}
+
 async function executeOpsTool(toolName, input = {}) {
   // "Not configured" is the expected DARK state (no token yet), not a
   // failure. Returning an { error } result here would count against the
@@ -799,4 +827,4 @@ async function executeOpsTool(toolName, input = {}) {
   }
 }
 
-module.exports = { OPS_TOOLS, executeOpsTool };
+module.exports = { OPS_TOOLS, executeOpsTool, gateNotFlippable, recordGateFlipAudit };
