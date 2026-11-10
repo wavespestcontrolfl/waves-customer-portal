@@ -35,6 +35,7 @@ const logger = require('./logger');
 const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
 const estimateSlotAvailability = require('./estimate-slot-availability');
 const { addETDays, etDateString } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate, CAPACITY_OFFER_POLICY, MAKE_ROOM_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { violatesSelfServeNotice, visitInsideNoticeWindow } = require('./scheduling/self-serve-notice');
@@ -968,7 +969,7 @@ const makeRoomSlotId = (row, scheduledDate) => `${scheduledDate}_${String(row.wi
 function normalizedMakeRoomChain(payload) {
   if (!payload || !Array.isArray(payload.moves)) return null;
   return {
-    date: String(payload.date).slice(0, 10),
+    date: dateOnlyString(payload.date),
     techId: payload.techId == null ? null : String(payload.techId),
     shiftMin: Number(payload.shiftMin),
     moves: payload.moves.map((move) => ({ id: String(move.id), from: String(move.from).slice(0, 5), to: String(move.to).slice(0, 5), widthMin: Number(move.widthMin) })),
