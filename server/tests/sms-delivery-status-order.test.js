@@ -32,10 +32,15 @@ jest.mock('../services/dead-number-alert', () => ({ handleDeadNumberCallback: (.
 
 const express = require('express');
 const router = require('../routes/twilio-webhook');
-const { storedStatusesBlocking } = require('../services/sms-delivery-status-order');
+const { storedStatusRule } = require('../services/sms-delivery-status-order');
 
-// Does a callback with this incoming status replace this stored one?
-const writes = (stored, incoming) => stored == null || stored === '' || !storedStatusesBlocking(incoming).includes(stored);
+// Does a callback with this incoming status replace this stored one? It reads the rule the way the UPDATE
+// does: `col IS NULL OR col IN (replaceOnly)`, or `col IS NULL OR col NOT IN (keep)`.
+const writes = (stored, incoming) => {
+  if (stored == null) return true;
+  const rule = storedStatusRule(incoming);
+  return rule.replaceOnly ? rule.replaceOnly.includes(stored) : !rule.keep.includes(stored);
+};
 
 describe('delivery status order rule', () => {
   test.each([
@@ -52,23 +57,40 @@ describe('delivery status order rule', () => {
     ['sent', 'sent', false],
     ['delivered', 'delivered', false],
     ['accepted', 'queued', true],
+    ['queued', 'accepted', false],
+    // Twilio still lists the deprecated partially_delivered: it is a final state.
+    ['sent', 'partially_delivered', true],
+    ['partially_delivered', 'sent', false],
+    ['partially_delivered', 'queued', false],
+    ['partially_delivered', 'delivered', false],
+    ['delivered', 'partially_delivered', false],
+    ['partially_delivered', 'read', true],
   ])('stored %s, incoming %s -> written: %s', (stored, incoming, expected) => {
     expect(writes(stored, incoming)).toBe(expected);
   });
 
-  test('an unknown incoming status is written over a live status, never over a final one', () => {
-    expect(writes('sent', 'partially_delivered')).toBe(true);
-    expect(writes('queued', 'partially_delivered')).toBe(true);
-    expect(writes('delivered', 'partially_delivered')).toBe(false);
-    expect(writes('failed', 'partially_delivered')).toBe(false);
-    expect(writes('read', 'partially_delivered')).toBe(false);
+  test('a status the table does not list is written over a live status, never over a final one', () => {
+    expect(writes('sent', 'some_new_status')).toBe(true);
+    expect(writes('queued', 'some_new_status')).toBe(true);
+    expect(writes('delivered', 'some_new_status')).toBe(false);
+    expect(writes('failed', 'some_new_status')).toBe(false);
+    expect(writes('read', 'some_new_status')).toBe(false);
+    expect(writes('some_new_status', 'some_new_status')).toBe(false);
   });
 
-  test('a stored NULL, empty or unlisted value is always written', () => {
-    for (const incoming of ['queued', 'sent', 'delivered', 'read', 'partially_delivered']) {
+  test('a stored status the table does not list is never moved back to a status before the final states', () => {
+    for (const incoming of ['accepted', 'scheduled', 'queued', 'sending', 'sent']) {
+      expect(writes('some_new_status', incoming)).toBe(false);
+    }
+    for (const incoming of ['delivered', 'undelivered', 'failed', 'read', 'another_new_status']) {
+      expect(writes('some_new_status', incoming)).toBe(true);
+    }
+  });
+
+  test('a stored NULL or empty value is always written', () => {
+    for (const incoming of ['accepted', 'queued', 'sent', 'delivered', 'partially_delivered', 'read', 'some_new_status']) {
       expect(writes(null, incoming)).toBe(true);
       expect(writes('', incoming)).toBe(true);
-      expect(writes('received', incoming)).toBe(true);
     }
   });
 });
@@ -97,15 +119,30 @@ describe('Twilio status callback bookkeeping', () => {
   });
 
   test('both UPDATEs refuse to move the stored status backward, in the statement itself', async () => {
+    // `sent` replaces only an empty value or an earlier status: the UPDATE lists what it may replace.
     expect(await status({ MessageSid: 'SM1', MessageStatus: 'sent', To: '+15555550101' })).toBe(200);
     const smsLog = mockWrites.find((w) => w.sql.startsWith('update "sms_log"'));
     const messages = mockWrites.find((w) => w.sql.startsWith('update "messages"'));
-    expect(smsLog.sql).toContain('("status" is null or "status" not in (');
-    expect(smsLog.bindings).toEqual(expect.arrayContaining(['SM1', 'sent', 'delivered', 'read']));
-    expect(smsLog.bindings).not.toContain('queued');
-    expect(messages.sql).toContain('("delivery_status" is null or "delivery_status" not in (');
+    expect(smsLog.sql).toContain('("status" is null or "status" in (');
+    expect(smsLog.bindings).toEqual(expect.arrayContaining(['SM1', 'sent', '', 'accepted', 'scheduled', 'queued', 'sending']));
+    for (const later of ['delivered', 'partially_delivered', 'undelivered', 'failed', 'canceled', 'read']) {
+      expect(smsLog.bindings).not.toContain(later);
+    }
+    expect(messages.sql).toContain('("delivery_status" is null or "delivery_status" in (');
     expect(messages.sql).toContain('"updated_at"');
-    expect(messages.bindings).toEqual(expect.arrayContaining(['SM1', 'sent', 'delivered', 'read']));
+    expect(messages.bindings).toEqual(expect.arrayContaining(['SM1', 'sent', '', 'queued', 'sending']));
+    expect(messages.bindings).not.toContain('delivered');
+  });
+
+  test('a final status replaces everything except a final status or read', async () => {
+    expect(await status({ MessageSid: 'SM3', MessageStatus: 'delivered', To: '+15555550101' })).toBe(200);
+    const smsLog = mockWrites.find((w) => w.sql.startsWith('update "sms_log"'));
+    const messages = mockWrites.find((w) => w.sql.startsWith('update "messages"'));
+    expect(smsLog.sql).toContain('("status" is null or "status" not in (');
+    expect(smsLog.bindings).toEqual(expect.arrayContaining(['SM3', 'delivered', 'partially_delivered', 'undelivered', 'failed', 'canceled', 'read']));
+    expect(smsLog.bindings).not.toContain('sent');
+    expect(messages.sql).toContain('("delivery_status" is null or "delivery_status" not in (');
+    expect(messages.bindings).toEqual(expect.arrayContaining(['SM3', 'delivered', 'read']));
   });
 
   test('the handlers after the bookkeeping run for every callback, even one the guard blocks', async () => {
