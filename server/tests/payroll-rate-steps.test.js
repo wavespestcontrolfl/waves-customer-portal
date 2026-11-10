@@ -7,6 +7,7 @@ jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn() }));
 
 const { rateForWeek, suggestedDay90Monday, createStep, cancelStep } = require('../services/payroll-rate-steps');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { floridaMinimumWageCentsFor } = require('../services/payroll-calc');
 const { staffWeekStartForWorkDate, addStaffWorkDays } = require('../utils/staff-time-work-date');
 
 const TECH_ID = '11111111-1111-4111-8111-111111111111';
@@ -93,7 +94,8 @@ describe('createStep validation', () => {
     ['exponent notation', { hourlyRate: '1e2' }, /2 decimal/],
     ['negative', { hourlyRate: '-5' }, /above 0/],
     ['too large', { hourlyRate: '1000000' }, /above 0/],
-    ['below the Florida minimum', { hourlyRate: '14.99' }, /Florida minimum wage of \$15\.00/],
+    // One cent under the floor in force that Monday, read from the wage table, so a new yearly rate does not break this.
+    ['below the Florida minimum', { hourlyRate: () => ((Number(floridaMinimumWageCentsFor(nextMonday())) - 1) / 100).toFixed(2) }, /cannot be below the Florida minimum wage of \$\d+\.\d{2}/],
     ['a long note', { note: 'x'.repeat(501) }, /at most 500/],
   ])('refuses %s before the connection is used', async (_label, patch, message) => {
     const resolved = Object.fromEntries(Object.entries(patch).map(([k, v]) => [k, typeof v === 'function' ? v() : v]));
