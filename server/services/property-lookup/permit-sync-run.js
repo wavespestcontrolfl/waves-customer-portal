@@ -30,14 +30,20 @@
 
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
+const { etWeekStart, parseETDateTime } = require('../../utils/datetime-et');
 
 const REPORT_FRESH_MS = 6 * 60 * 60 * 1000;
 const RETRY_DETAIL_BUDGET_MS = 5 * 60 * 1000;
-// Older than this, the last report sync is from a Monday before this week's.
-// A good Monday run commits by about 7:45 AM, so the catch-up at 7:41 AM on
-// the next Sunday reads it as 6 days old (fresh). After a failed Monday the
-// newest rows are 8 days old or more on Tuesday (stale).
-const CATCH_UP_STALE_MS = 6.5 * 24 * 60 * 60 * 1000;
+/**
+ * Start of this week's Monday in ET (the week runs Monday to Sunday, so on a
+ * Sunday it is six days back). A report commit at or after it is this
+ * week's: the Monday run, or a catch-up after it. A fixed age would not do:
+ * a catch-up that commits late in one week must not read as fresh after the
+ * next Monday's run fails.
+ */
+function thisWeeksMondayStart(nowMs) {
+  return parseETDateTime(`${etWeekStart(new Date(nowMs))}T00:00`);
+}
 
 async function reportAlreadyDone(sync, nowMs) {
   try {
@@ -51,7 +57,7 @@ async function reportAlreadyDone(sync, nowMs) {
 
 /**
  * True when the daily catch-up has work: the gate is on and a report section
- * has not committed since this week's Monday run. A gate that is off answers
+ * has not committed since the start of this week's Monday (ET). A gate that is off answers
  * before any database read. An unreadable freshness check answers true: a
  * second report run is harmless (same rule as the deploy-kill retry).
  */
@@ -59,7 +65,7 @@ async function reportCatchUpDue({ now = Date.now } = {}) {
   if (!gateEnvValue('GATE_PERMIT_SYNC')) return false;
   const sync = require('./manatee-permit-sync');
   try {
-    return !(await sync.reportSyncedSince(new Date(now() - CATCH_UP_STALE_MS)));
+    return !(await sync.reportSyncedSince(thisWeeksMondayStart(now())));
   } catch (err) {
     logger.warn(`Permit sync catch-up: report freshness unreadable, running the report step (${err.message})`);
     return true;
@@ -133,5 +139,5 @@ module.exports = {
   runPermitReportCatchUp,
   REPORT_FRESH_MS,
   RETRY_DETAIL_BUDGET_MS,
-  CATCH_UP_STALE_MS,
+  thisWeeksMondayStart,
 };

@@ -11,7 +11,8 @@
  *
  * The daily catch-up (2026-11-09: the county refused both report downloads
  * with HTTP 403 and nothing asked again for a week): due only when the gate
- * is on and a report section has not committed since this week's Monday run;
+ * is on and a report section has not committed since the start of this week's
+ * Monday in ET (a catch-up late in one week never hides the next failed Monday);
  * it runs the report step alone, reads freshness again under the lease, and
  * throws on a failure so job health keeps the job failed.
  */
@@ -32,7 +33,7 @@ const detail = require('../services/property-lookup/manatee-permit-detail');
 const { gateEnvValue } = require('../config/feature-gates');
 const {
   runPermitSyncSteps, reportCatchUpDue, runPermitReportCatchUp,
-  REPORT_FRESH_MS, RETRY_DETAIL_BUDGET_MS, CATCH_UP_STALE_MS,
+  REPORT_FRESH_MS, RETRY_DETAIL_BUDGET_MS, thisWeeksMondayStart,
 } = require('../services/property-lookup/permit-sync-run');
 
 const NOW = Date.parse('2026-10-26T12:02:52Z');
@@ -118,7 +119,8 @@ describe('the daily catch-up after a failed Monday report', () => {
   test('not due while both report sections committed this week', async () => {
     sync.reportSyncedSince.mockResolvedValue(true);
     await expect(reportCatchUpDue({ now })).resolves.toBe(false);
-    expect(sync.reportSyncedSince).toHaveBeenCalledWith(new Date(NOW - CATCH_UP_STALE_MS));
+    // NOW is Monday Oct 26 8:02 AM EDT; that Monday starts at 04:00Z.
+    expect(sync.reportSyncedSince).toHaveBeenCalledWith(new Date('2026-10-26T04:00:00Z'));
   });
 
   test('due when a section has not committed since the Monday run', async () => {
@@ -153,19 +155,31 @@ describe('the daily catch-up after a failed Monday report', () => {
     expect(detail.syncPermitDetails).not.toHaveBeenCalled();
   });
 
-  test('a good Monday run reads fresh on all six catch-up days, also across the clock change', () => {
-    const age = (commit, tick) => Date.parse(tick) - Date.parse(commit);
-    // Mon Nov 2 7:44 AM EST commit -> Sun Nov 8 7:41 AM EST tick.
-    expect(age('2026-11-02T12:44:00Z', '2026-11-08T12:41:00Z')).toBeLessThan(CATCH_UP_STALE_MS);
-    // Mon Oct 26 7:44 AM EDT commit -> Sun Nov 1 7:41 AM EST tick (25-hour day in between).
-    expect(age('2026-10-26T11:44:00Z', '2026-11-01T12:41:00Z')).toBeLessThan(CATCH_UP_STALE_MS);
+  test('the freshness line is the start of this week\'s Monday in ET, on each catch-up day', () => {
+    const since = (tick) => thisWeeksMondayStart(Date.parse(tick)).toISOString();
+    // Tue Nov 10 and Sat Nov 14, 7:41 AM EST -> Mon Nov 9 00:00 EST.
+    expect(since('2026-11-10T12:41:00Z')).toBe('2026-11-09T05:00:00.000Z');
+    expect(since('2026-11-14T12:41:00Z')).toBe('2026-11-09T05:00:00.000Z');
+    // Sun Nov 8 7:41 AM EST belongs to the week of Mon Nov 2.
+    expect(since('2026-11-08T12:41:00Z')).toBe('2026-11-02T05:00:00.000Z');
   });
 
-  test('a failed Monday reads stale on Tuesday, also across the spring clock change', () => {
-    const age = (commit, tick) => Date.parse(tick) - Date.parse(commit);
-    // Last commit Mon Nov 2 7:44 AM EST; Mon Nov 9 failed -> Tue Nov 10 7:41 AM EST tick.
-    expect(age('2026-11-02T12:44:00Z', '2026-11-10T12:41:00Z')).toBeGreaterThan(CATCH_UP_STALE_MS);
-    // Last commit Mon Mar 1 2027 7:44 AM EST; Mon Mar 8 failed -> Tue Mar 9 7:41 AM EST tick.
-    expect(age('2027-03-01T12:44:00Z', '2027-03-09T12:41:00Z')).toBeGreaterThan(CATCH_UP_STALE_MS);
+  test('the Monday line holds across both clock changes', () => {
+    const since = (tick) => thisWeeksMondayStart(Date.parse(tick)).toISOString();
+    // Sun Nov 1 2026 (clocks go back that day) 7:41 AM EST -> Mon Oct 26 00:00 EDT.
+    expect(since('2026-11-01T12:41:00Z')).toBe('2026-10-26T04:00:00.000Z');
+    // Sun Mar 14 2027 (clocks go forward that day) 7:41 AM EDT -> Mon Mar 8 00:00 EST.
+    expect(since('2027-03-14T11:41:00Z')).toBe('2027-03-08T05:00:00.000Z');
+    // Tue Mar 16 2027 7:41 AM EDT -> Mon Mar 15 00:00 EDT.
+    expect(since('2027-03-16T11:41:00Z')).toBe('2027-03-15T04:00:00.000Z');
+  });
+
+  test('a catch-up that committed last Sunday does not hide a failed Monday (pre-push audit P1)', () => {
+    // Sunday Nov 8 catch-up commits 7:44 AM; Monday Nov 9 fails; Tuesday Nov 10 must be due.
+    const sundayCommit = Date.parse('2026-11-08T12:44:00Z');
+    expect(sundayCommit).toBeLessThan(thisWeeksMondayStart(Date.parse('2026-11-10T12:41:00Z')).getTime());
+    // A good Monday Nov 9 7:44 AM commit reads fresh through Sunday Nov 15.
+    const mondayCommit = Date.parse('2026-11-09T12:44:00Z');
+    expect(mondayCommit).toBeGreaterThanOrEqual(thisWeeksMondayStart(Date.parse('2026-11-15T12:41:00Z')).getTime());
   });
 });
