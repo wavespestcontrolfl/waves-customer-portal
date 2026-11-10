@@ -45,18 +45,27 @@ const RESTRICTED_WORD_RE = /\b(?:cancel\w*|refund\w*|money\s+back|(?:over|double
 const ASK_SUBJECT = String.raw`(?<!\b(?:do|did|does|should|if|whether|when|unless)\s+)(?:i|we)`;
 const ASK_CUE = String.raw`(?:please|pls|plz|kindly|${ASK_SUBJECT}(?:\s+would|'d)?\s+(?:really\s+)?(?:want|need|like|wish)|${ASK_SUBJECT}\s+(?:have|had|plan|intend|decided)\s+to|${ASK_SUBJECT}(?:\s+am|\s+are|'m|'re)\s+(?:going|gonna|planning|asking|requesting)|(?:can|could|may|would)\s+(?:i|we|you|u)|how\s+(?:do|can|could|would)\s+(?:i|we)|is\s+(?:it\s+possible|there\s+(?:a|any)\s+way))`;
 const ASK_FILL = String.raw`(?:\s+(?:to|please|just|you|u|go|ahead|and|get|have|request|be|a|an|my|our|the|full|partial|me|us|for))*`;
-const ASK_ACTION = String.raw`\s+(?:cancel(?:l?ation)?\b|refund\w*(?!\s+(?:confirmation|receipt|status|number|policy))|money\s+back|charge\b)`;
+//    "Charge" needs what to charge ("charge my card", "charge me") or its undoing ("reverse the charge",
+//    "the charge removed"): alone it is price talk ("could you charge less", "would you charge a fee").
+const ASK_ACTION = String.raw`\s+(?:cancel(?:l?ation)?\b|refund\w*(?!\s+(?:confirmation|receipt|status|number|policy))|money\s+back|charge\s+(?:(?:my|our|the|this|that|a|another)\s+(?:\w+\s+)?(?:card|account)|me|us|it)\b|charge\s+(?:reversed|removed|refunded|voided|taken\s+off)\b|(?:reverse|remove|void)\s+(?:the|that|this|my)\s+(?:\w+\s+)?charge\b)`;
 const ASK_RE = new RegExp(String.raw`\b${ASK_CUE}${ASK_FILL}${ASK_ACTION}`, 'i');
-// 2. An instruction: the sentence opens with the verb and its object ("Cancel my plan", "Refund me").
-const INSTRUCTION_RE = /^\W*(?:(?:ok(?:ay)?|yes|yeah|hi|hello|hey)\W+)?(?:cancel|refund|charge)\s+(?:my|our|the|me|us|this|that|it|all|everything|both)\b/i;
+// 2. An instruction: the sentence, or a part of it after a comma, opens with the verb and its object
+//    ("Cancel my plan", "Refund me", "Hey there, cancel my service").
+const INSTRUCTION_RE = /(?:^|,)\W*(?:(?:ok(?:ay)?|yes|yeah|hi|hello|hey)\W+)?(?:cancel|refund|charge)\s+(?:my|our|the|me|us|this|that|it|all|everything|both)\b/i;
+//    Neither rule 1 nor rule 2 reads a price question as a request to be charged ("how much would you
+//    charge me for a one-time visit").
+const PRICE_QUESTION_RE = /\b(?:how\s+much|what)\b[^.!?]*\bcharg/i;
 // 3. The customer says they are doing it ("I'm cancelling", "we are disputing the charge").
 const DOING_RE = /\b(?:i|we)(?:(?:\s+am|\s+are|'m|'re)|(?:\s+will|'ll)\s+be)\s+(?:cancell?ing|disputing)\b/i;
 // 4. A disputed charge asks for money back in other words ("charged twice", "overcharged", "dispute"),
 //    unless the sentence says it did not happen ("I was not charged twice").
 const DISPUTED_RE = /\b(?:over|double)[\s-]?charg\w*|\bcharg(?:e|ed)\b[^.!?]{0,40}\b(?:twice|double|two\s+times|2x|wrong\w*|incorrect\w*|too\s+much|by\s+mistake|in\s+error)\b|\b(?:unauthori[sz]ed|fraudulent)\s+charg\w*|\bshould(?:n't|\s+not)\s+have\s+(?:been\s+)?charged\b|\bchargebacks?\b|\bdisput\w*/i;
 const NOT_CHARGED_RE = /\b(?:not|never|wasn't|weren't|didn't|isn't|no)\s+(?:been\s+|a\s+|an\s+|any\s+)?(?:(?:over|double)[\s-]?)?(?:charg|disput)/i;
-// Thanks for a finished action is never a request ("thanks for the refund", "thank you for cancelling").
-const THANKS_FOR_RE = /\bthank(?:s|\s+you|\s+u)?\s+(?:so\s+much\s+|again\s+)?for\b[^,.!?]{0,40}\b(?:cancel|refund|charg|disput)/i;
+// A thank-you names finished business ("thanks for the refund", "thank you for fixing the double
+// charge"), so its own words never make a request. It runs to the next comma, to "but", or to "and"
+// before a new subject or ask word; the rest of the sentence is read like any other text ("thanks for
+// the refund, please cancel my plan", "thanks for the refund but you charged me twice").
+const THANKS_SPAN_RE = /\bthank(?:s|\s+you|\s+u)?\s+(?:so\s+much\s+|again\s+)?for\b.*?(?=,|\s+but\b|\s+and\s+(?:i|we|you|u|please|pls|can|could)\b|$)/gi;
 
 function parseJson(value) {
   if (value == null) return null;
@@ -95,9 +104,10 @@ function actionLabel(action) {
 }
 
 function sentenceAsks(sentence) {
-  if (THANKS_FOR_RE.test(sentence)) return false;
-  if (ASK_RE.test(sentence) || INSTRUCTION_RE.test(sentence) || DOING_RE.test(sentence)) return true;
-  return DISPUTED_RE.test(sentence) && !NOT_CHARGED_RE.test(sentence);
+  const text = sentence.replace(THANKS_SPAN_RE, ' ');
+  if (!PRICE_QUESTION_RE.test(text) && (ASK_RE.test(text) || INSTRUCTION_RE.test(text))) return true;
+  if (DOING_RE.test(text)) return true;
+  return DISPUTED_RE.test(text) && !NOT_CHARGED_RE.test(text);
 }
 
 function asksForRestricted(text) {

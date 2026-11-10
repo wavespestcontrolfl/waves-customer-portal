@@ -122,9 +122,15 @@ describe('restricted requests', () => {
     'I want a refund', 'Can I get a refund?', 'can you refund me', 'I would like to request a refund for the last visit',
     'Is it possible to get a refund', 'I want my money back', 'Refund me the difference',
     'Can you charge my card for the balance?', 'Charge the card on file please',
+    'Would you charge my new card on the 1st instead?', 'Can you charge me for the next visit now?',
+    'What did you charge me twice for?', 'Please reverse the charge', 'Can you remove the late charge?',
     'Why did you charge my card twice?', 'I was double charged this month', 'You overcharged me',
     'I shouldn\u2019t have been charged for that visit', 'We are disputing this charge', 'I will file a chargeback',
-    'Thanks for the quick reply, please cancel my plan',
+    'Thanks for the quick reply, please cancel my plan', 'Hey there, cancel my service',
+    // A thank-you ends at its own clause: a request after it in the same sentence still counts.
+    'Thanks for the refund, please cancel my plan', 'Thanks for the refund, cancel my plan too',
+    'Thank you for cancelling that visit and please refund me', 'Thanks for the refund but you charged me twice again',
+    'Thanks for fixing the double charge and I was overcharged in May too',
   ])('asks for it: %s', (text) => {
     expect(kind(text)).toBe('request');
   });
@@ -132,12 +138,17 @@ describe('restricted requests', () => {
   test.each([
     'Thanks for the refund yesterday', 'Thank you for cancelling that visit', 'Thanks for fixing the double charge',
     'I got the refund, thank you', 'Refund received, thanks', 'Charge went through, thanks',
+    'Thanks for the credit and for fixing the double charge', 'I got it, thanks for the refund',
+    'Thanks so much for the refund and the quick reply',
     'Has my plan been cancelled?', 'Did you cancel my visit?', 'Was my card charged yet?', 'When will I be charged?',
     'When will you charge my card?', 'Can you tell me if my refund went through?', 'Can I get an update on my refund?',
     'I need the refund confirmation number', 'What is your cancellation policy?', 'Is there a cancellation fee?',
     "I don't want to cancel", "Please don't cancel my service", 'I do not want a refund, just a re-treat',
     'I never asked you to cancel', 'I was not charged twice, all good', 'No charge for the re-service, right?',
     'Do I need to cancel my appointment if it rains?', 'What happens if I want to cancel?', 'I have a refund pending, right?',
+    // "Charge" as price talk is not a request to be charged.
+    'How much would you charge me for a one-time treatment?', 'What do you charge for mosquito service?',
+    'Would you charge a fee to come back out?', 'Could you charge less next time?',
     'I had a charge on my card from you on the 3rd',
   ])('only names it: %s', (text) => {
     expect(kind(text)).toBe('mention');
@@ -158,10 +169,12 @@ describe('restricted requests', () => {
       draft({ inbound_message: 'Thanks for the refund yesterday' }),
       draft({ id: 'd2', inbound_message: 'Has my plan been cancelled?', intended_actions: { actions: [{ type: 'escalate', note: 'followup_promised' }] } }),
       draft({ id: 'd3', inbound_message: 'I want a refund' }),
+      // A request after a thank-you that the draft did not hand over is a missed hand-off, not a mention.
+      draft({ id: 'd4', inbound_message: 'Thanks for the refund, please cancel my plan' }),
     ]);
-    expect(s.restricted).toEqual({ requests: 1, escalated: 0, not_escalated: 1, mentions_only: 2 });
+    expect(s.restricted).toEqual({ requests: 2, escalated: 0, not_escalated: 2, mentions_only: 2 });
     const report = ops.formatReport(s, { days: 30, truncated: false });
-    expect(report).toContain('Cancel / refund / charge requests: 1  handed to the office: 0  not handed over: 1');
+    expect(report).toContain('Cancel / refund / charge requests: 2  handed to the office: 0  not handed over: 2');
     expect(report).toContain('2 more texts only name one of these');
   });
 });
