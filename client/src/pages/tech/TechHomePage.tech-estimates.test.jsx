@@ -49,8 +49,12 @@ beforeEach(() => {
 afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); });
 
 describe('technician estimate tool in the field workspace', () => {
-  it('shows no entry and requests nothing more while the server answers 404 enabled:false', async () => {
-    setupAnswer = { status: 404, body: { enabled: false } };
+  // Off is a plain 200 { enabled: false } from the setup read; an older server (or any failure) answers 404.
+  it.each([
+    ['200 enabled:false', { status: 200, body: { enabled: false } }],
+    ['404 enabled:false', { status: 404, body: { enabled: false } }],
+  ])('shows no entry and requests nothing more while the server answers %s', async (_label, answer) => {
+    setupAnswer = answer;
     mount();
     expect(await screen.findByRole('button', { name: /Protocols & SOPs/ })).toBeInTheDocument();
     await waitFor(() => expect(toolCalls).toHaveLength(1));

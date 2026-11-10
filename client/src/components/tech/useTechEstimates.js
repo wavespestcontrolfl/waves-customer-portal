@@ -17,9 +17,9 @@ export async function techEstimateRequest(path, { method = 'GET', body } = {}) {
   return data;
 }
 
-// GET /api/tech/estimates/setup, once for the field workspace. The server answers 404 { enabled: false } while the
-// gate or this technician's switch is off; then (and on any failure) the answer is null and nothing of the tool
-// shows. A setup with no service he may quote also reads as off.
+// GET /api/tech/estimates/setup, once for the field workspace. The server answers { enabled: false } (a plain 200, so
+// the browser logs no failed request) while the gate or this technician's switch is off; then (and on any failure) the
+// answer is null and nothing of the tool shows. A setup with no service he may quote also reads as off.
 export default function useTechEstimateSetup() {
   const [setup, setSetup] = useState(null);
   useEffect(() => {

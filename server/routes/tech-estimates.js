@@ -10,14 +10,17 @@ const featureGates = require('../config/feature-gates');
 router.use(adminAuthenticate);
 
 const OFF = { enabled: false };
+// The setup read is the field workspace asking "is the tool on for this login?" on every load. Its "no" is a plain
+// answer (200), so a browser logs no failed request while the tool is off. Every other route answers 404.
+const off = (req, res) => (req.method === 'GET' && req.path === '/setup' ? res.json(OFF) : res.status(404).json(OFF));
 
-// Gate off, or a technician whose own switch is off: 404 before any customer read. An admin always passes.
+// Gate off, or a technician whose own switch is off: the off answer before any customer read. An admin always passes.
 router.use(async (req, res, next) => {
   try {
-    if (!featureGates.techEstimatesLive()) return res.status(404).json(OFF);
+    if (!featureGates.techEstimatesLive()) return off(req, res);
     if (req.techRole === 'admin') return next();
     const row = await db('technicians').where({ id: req.technicianId }).first('can_create_estimates');
-    if (!row || row.can_create_estimates !== true) return res.status(404).json(OFF);
+    if (!row || row.can_create_estimates !== true) return off(req, res);
     return next();
   } catch (err) { return next(err); }
 });

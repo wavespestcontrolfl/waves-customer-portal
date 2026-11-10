@@ -253,20 +253,30 @@ const reasons = (res) => res.body.officeFirst.reasons;
 
 describe('the guard', () => {
   const GUARDED = [['GET', '/setup'], ['POST', '/price'], ['POST', ''], ['GET', ''], ['GET', `/${ESTIMATE_ID}`]];
-  test.each(GUARDED)('gate off: %s %s answers 404 {enabled:false} before any read', async (method, path) => {
+  // The off answer: the setup read (asked on every load of the field workspace) says it with a plain 200, so a browser
+  // logs no failed request; every other route answers 404. The body is the same and holds nothing.
+  const offAnswer = (method, path) => ({ status: method === 'GET' && path === '/setup' ? 200 : 404, body: { enabled: false } });
+  test.each(GUARDED)('gate off: %s %s answers {enabled:false} before any read', async (method, path) => {
     delete process.env.GATE_TECH_ESTIMATES;
     const res = await call(method, path, method === 'POST' ? { visitId: VISIT_ID, services: ['PEST'] } : undefined);
-    expect(res).toEqual({ status: 404, body: { enabled: false } });
+    expect(res).toEqual(offAnswer(method, path));
     expect(mockState.queries).toEqual([]);
     expect(lookupSpy).not.toHaveBeenCalled();
   });
 
-  test.each(GUARDED)('technician switch off: %s %s answers 404 before any customer read', async (method, path) => {
+  test.each(GUARDED)('technician switch off: %s %s answers {enabled:false} before any customer read', async (method, path) => {
     mockState.switchOn = false;
     const res = await call(method, path, method === 'POST' ? { visitId: VISIT_ID, services: ['PEST'] } : undefined);
-    expect(res).toEqual({ status: 404, body: { enabled: false } });
+    expect(res).toEqual(offAnswer(method, path));
     expect(mockState.queries).toEqual(['technicians']);
     expect(lookupSpy).not.toHaveBeenCalled();
+  });
+
+  test('only the setup read answers 200 while off: the same path with another method, and a longer path, are 404', async () => {
+    delete process.env.GATE_TECH_ESTIMATES;
+    expect(await call('GET', '/setup')).toEqual({ status: 200, body: { enabled: false } });
+    expect((await call('POST', '/setup', {})).status).toBe(404);
+    expect((await call('GET', '/setup/more')).status).toBe(404);
   });
 
   test('an admin passes without a switch', async () => {
