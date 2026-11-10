@@ -643,10 +643,12 @@ async function processDueWelcomes() {
 }
 
 // ── Read-only audit: first plans that left no welcome on record ──────────
-// Lead-to-cash detector `new_plan_without_welcome`. Welcome-text trace
-// 2026-11-09: of 94 first plans made Jul 25 to Oct 24, 27 got no welcome text
-// and 7 had no known cause, and nothing watched for the next miss. This is
-// the SQL twin of isNewRecurringSignupCandidate above; keep the two in step.
+// Lead-to-cash detector `new_plan_without_welcome`. Welcome-text traces
+// 2026-11-04 and 2026-11-09: of 94 first plans made Jul 25 to Oct 24, 27 got
+// no welcome text. 23 have a cause (the old history rule, two paths with no
+// welcome call, valid stops at send, silent-by-design cases); 4 have none, and
+// nothing watched for the next miss. This is the SQL twin of
+// isNewRecurringSignupCandidate above; keep the two in step.
 //
 // Plan = a recurring root (is_recurring, no parent). It started when its
 // earliest follow-up row was created, else when the root was: a visit that
@@ -658,9 +660,12 @@ async function processDueWelcomes() {
 // commercial-only plans (customers.waveguard_tier = 'Commercial', stamped by
 // the converter's commercialOnlyRecurring), a customer with no phone and no
 // email (sendNewRecurringWelcome returns no_contact), a deleted customer and a
-// cancelled plan root. Not excluded, because no column marks it: an estimate
-// the converter treated as one-time only (suppressRecurringConversion) for
-// which staff then booked a recurring visit by hand.
+// cancelled plan root. Not excluded, because no cheap column marks them (each
+// is rare, and a finding only lists the customer for a look): an estimate the
+// converter treated as one-time only (suppressRecurringConversion) for which
+// staff then booked a recurring visit by hand, and a self-booked plan whose
+// customer holds an auto label-only tier (appointment-tagger.js keeps that
+// stamp comms-silent; one such plan in the three months traced).
 //
 // A plan is judged from WELCOME_AUDIT_GRACE_HOURS after its start (the welcome
 // is queued at booking and sent 60 min later) for WELCOME_AUDIT_WINDOW_DAYS.

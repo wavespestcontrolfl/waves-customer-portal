@@ -252,7 +252,7 @@ const DETECTORS = Object.freeze([
     key: 'new_plan_without_welcome',
     label: 'New customers whose first recurring plan started in the last 14 days with no welcome text queued',
     href: '/admin/customers',
-    provenance: 'welcome-text trace 2026-11-09 — 27 of 94 first plans (Jul 25 to Oct 24) got no welcome text; 7 had no known cause',
+    provenance: 'welcome-text traces 2026-11-04 and 2026-11-09 — 27 of 94 first plans (Jul 25 to Oct 24) got no welcome text; 4 had no known cause',
     async run({ now }) {
       const { findFirstPlansWithoutWelcome, WELCOME_AUDIT_WINDOW_DAYS, WELCOME_AUDIT_GRACE_HOURS } = require('./new-recurring-welcome-sms');
       const ids = await findFirstPlansWithoutWelcome(now);
