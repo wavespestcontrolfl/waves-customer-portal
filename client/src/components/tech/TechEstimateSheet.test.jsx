@@ -116,7 +116,7 @@ describe('the price request and the save request', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }));
     await screen.findByText('Server trouble');
     fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }));
-    await screen.findByText('Saved. Sending from the phone comes next; for now the office sends it.');
+    await screen.findByText('Saved. Send it now, or later from My estimates.');
     const saves = calls.filter((c) => c.method === 'POST' && c.path === '/');
     expect(saves).toHaveLength(2);
     expect(Object.keys(saves[0].body).sort()).toEqual(['clientDraftId', 'digest', 'services', 'visitId']);

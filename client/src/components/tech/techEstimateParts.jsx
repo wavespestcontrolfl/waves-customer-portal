@@ -11,7 +11,7 @@ export const s = {
     width: '100%', padding: '10px 12px', borderRadius: 4, border: `1px solid ${LINE}`, fontSize: 16,
     color: INK, marginBottom: 10, background: '#fff', boxSizing: 'border-box', minHeight: 44,
   },
-  card: { background: '#fafaf9', border: '0.5px solid #e7e5e4', borderRadius: 6, padding: 14, marginBottom: 16 },
+  card: { background: '#fafaf9', border: '0.5px solid #e7e5e4', borderRadius: 6, padding: 14, marginBottom: 16, color: INK },
   primary: {
     width: '100%', minHeight: 48, padding: 12, borderRadius: 4, border: 'none', background: INK, color: '#fff',
     fontSize: 16, fontWeight: 500, cursor: 'pointer', marginBottom: 10,
