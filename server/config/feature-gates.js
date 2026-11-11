@@ -2586,8 +2586,10 @@ const gates = {
   // triage_items whose condition is provably moot (customer now has the
   // address/name the card asked for; the call verifiably produced a booking
   // via source_call_log_id) and auto-dismisses aged informational flags
-  // (spam 7d, listed advisory codes 30d). Explicit reason-code allowlist —
-  // owed-work cards (quote_promised, cancellation_request, booking holds,
+  // (spam 7d, listed advisory codes 30d) and, under the quiet_aged rule
+  // (owner 2026-11-09), cards nobody touched for 7 days (QUIET_AGE_CODES in
+  // triage-auto-resolve.js). Explicit reason-code allowlists — cards other
+  // code reads as state (cancellation_request, booking holds, email_unverified,
   // email_bounce_reverify, …) and in_progress cards are NEVER touched.
   // Born from the 2026-07 backlog: ~1,800 open vs 32 ever resolved.
   // Off → cron ticks are no-ops.

@@ -116,6 +116,9 @@ qualifies. Passing an exam does not change its mode, gate or activation cutoff.
 The existing shadow-drafting and cron gates must also be enabled for candidates
 to be created and evaluated; the general SMS auto-send gate can remain off.
 The prompt is `house_voice_v11`; evidence for older prompt versions is stale.
+Before activation, decide whether a card the `quiet_aged` sweep dismissed should
+still hold the courtesy reply. Today it does not: open promises, service
+requests, inbox items and still-open cards hold it.
 
 Choose the activation cutoff at actual launch, not at build time and not from
 historical test dates. A rollout date alone never activates this feature.

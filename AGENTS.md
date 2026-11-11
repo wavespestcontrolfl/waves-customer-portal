@@ -336,7 +336,8 @@ execute the workflows they describe.
   `text_number_differs` card binds per (line, arming) within ONE call;
   an owed ask auto-closes only on evidence answering THAT ask, never every
   open card because one later event was classified (`missing_unit_number` is
-  human-verdict-only, in `triage-auto-resolve.js`); auto-routing stays
+  human-verdict-only, in `triage-auto-resolve.js`; `quiet_aged` dismissal
+  proves nothing: no evidence, no office decision); auto-routing stays
   confidence-gated (address validates AND service maps AND no HOA/commercial
   flag, else triage — the ONE exception (owner 2026-09-24): the grounded
   agent commitment behind `GATE_CALL_AGENT_COMMIT_BOOKING` +
