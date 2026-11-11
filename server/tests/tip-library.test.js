@@ -20,6 +20,7 @@ const {
   lawnFindingsFromRun,
   LAWN_LABEL_FINDINGS,
   registryLineFor,
+  yardMatches,
   tipsForVisit,
   resolveTipIds,
   freezeTechTips,
@@ -298,13 +299,16 @@ describe('registryLineFor', () => {
   });
 });
 
+// A visit with no yard facts known: a tip fits unless it needs a known yard fact or a different month.
+const fitsBareVisit = (tip, month) => yardMatches(tip.yard, null) && (!tip.showMonths || tip.showMonths.includes(month));
+
 describe('tipsForVisit', () => {
   test.each(SERVICE_LINES)('only offers tips relevant to %s, including search results', (serviceLine) => {
     const { line, groups } = tipsForVisit({ serviceLine, date: '2026-08-15' });
     const all = groups.flatMap((group) => group.tips);
     expect(line).toBe(serviceLine);
-    // (a tip written for tips with facts is listed only behind its gate)
-    expect(all.map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes(serviceLine) && !tip.services && !tip.sourcedOnly).map((tip) => tip.id).sort());
+    // (no yard known: a tip that needs a known yard fact, or another month, stays out)
+    expect(all.map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes(serviceLine) && !tip.services && fitsBareVisit(tip, 8)).map((tip) => tip.id).sort());
     expect(groups.every((group) => group.tips.length > 0)).toBe(true);
   });
 
@@ -328,7 +332,7 @@ describe('tipsForVisit', () => {
   test('a visit whose service has its own tips leads with them; other visits never list them (owner-approved 2026-10-02)', () => {
     const bedBug = tipsForVisit({ serviceLine: 'pest', serviceKey: 'bed_bug_treatment', date: '2026-10-02' });
     expect(bedBug.groups[0]).toMatchObject({ id: 'for_service', label: 'For this service', primary: true });
-    expect(bedBug.groups[0].tips.map((tip) => tip.id)).toEqual(['bb_dryer_heat', 'bb_stay_put', 'bb_no_foggers', 'bb_encasements', 'bb_travel', 'bb_clutter']);
+    expect(bedBug.groups[0].tips.map((tip) => tip.id)).toEqual(['bb_dryer_heat', 'bb_stay_put', 'bb_no_foggers', 'bb_encasements', 'bb_travel', 'bb_clutter', 'bb_not_dirt', 'bb_skip_home_remedies']);
     expect(bedBug.groups.slice(1).flatMap((group) => group.tips).some((tip) => tip.services)).toBe(false);
     const quarterly = tipsForVisit({ serviceLine: 'pest', serviceKey: 'pest_general_quarterly', date: '2026-10-02' });
     expect(quarterly.groups[0].tips.map((tip) => tip.id)).toEqual(['pal_dry_drains', 'gp_sprinkler_off_wall', 'gp_first_days', 'gp_garage_dusk', 'gp_pressure_wash_first', 'gp_garage_floor_edge']);
@@ -393,7 +397,7 @@ describe('tipsForVisit', () => {
     for (const serviceKey of ['cockroach_control', 'pest_initial_roach']) {
       expect(lead('pest', serviceKey).filter((id) => id.startsWith('gr_'))).toEqual([]);
     }
-    expect(lead('pest', 'german_roach').filter((id) => id.startsWith('gr_'))).toHaveLength(4);
+    expect(lead('pest', 'german_roach').filter((id) => id.startsWith('gr_'))).toHaveLength(5);
     // A mesh or bird-box job seals one opening, not the house.
     for (const serviceKey of ['rodent_wire_mesh', 'rodent_bird_box']) expect(lead('rodent', serviceKey)).not.toContain('rx_garage_door');
     expect(lead('rodent', 'rodent_exclusion')).toContain('rx_garage_door');
@@ -429,7 +433,8 @@ describe('resolveTipIds', () => {
     expect(resolved.map((t) => t.id)).toEqual(['light_warm_bulbs', 'water_bromeliads']);
     for (const entry of resolved) {
       expect(entry.source).toBe('library');
-      expect(entry.copy).toBe(TIPS.find((t) => t.id === entry.id).copy);
+      const tip = TIPS.find((t) => t.id === entry.id);
+      expect(entry.copy).toBe(tip.sourcedCopy || tip.copy);
     }
   });
 
@@ -518,7 +523,7 @@ describe('lawn tip library', () => {
 
   test('a confirmed finding lifts its tips above the month and the season', () => {
     const disease = ids({ date: '2026-10-05', findings: ['disease'] });
-    expect(disease.slice(0, 5)).toEqual(expect.arrayContaining(['lawn_bag_clippings', 'lawn_shade_dry_between', 'lawn_skip_extra_nitrogen', 'lawn_water_morning']));
+    expect(disease.slice(0, 5)).toEqual(expect.arrayContaining(['lawn_bag_clippings', 'lawn_skip_extra_nitrogen', 'lawn_water_morning']));
     const thatch = ids({ date: '2026-08-15', findings: ['thatch'] });
     expect(thatch[0]).toBe('lawn_thatch_half_inch');
     // a named finding lifts only its own tips
@@ -606,8 +611,7 @@ describe('open search and pest tags (owner 2026-10-09)', () => {
       const visit = tipsForVisit({ serviceLine, serviceKey, date: '2026-10-09' });
       const listed = visit.groups.flatMap((group) => group.tips).map((tip) => tip.id);
       const more = visit.more.map((tip) => tip.id);
-      // (a tip written for tips with facts exists only behind its gate)
-      const offered = TIPS.filter((tip) => !tip.sourcedOnly);
+      const offered = TIPS.filter((tip) => fitsBareVisit(tip, 10));
       expect([...listed, ...more].sort()).toEqual(offered.map((tip) => tip.id).sort());
       expect(new Set([...listed, ...more]).size).toBe(offered.length);
     }
@@ -656,7 +660,7 @@ describe('open search and pest tags (owner 2026-10-09)', () => {
   });
 });
 
-describe('tips with facts (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+describe('tips with facts (owner 2026-10-24)', () => {
   const { FACTS } = require('../services/email-division/fact-register-data');
   const { CITATION_HOSTS, citationUrlAllowed, printableCitations } = require('../services/service-report/tip-library');
   const { etDateString } = require('../utils/datetime-et');
@@ -767,16 +771,8 @@ describe('tips with facts (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
     expect(printableCitations(undefined)).toEqual([]);
   });
 
-  test('gate off: the freeze is exactly what it was', () => {
-    for (const tip of resolveTipIds(['water_gutters', 'lawn_water_morning', 'ext_leaf_litter'])) {
-      expect(tip.citations).toBeUndefined();
-      expect(tip.copy).toBe(TIPS.find((t) => t.id === tip.id).copy);
-    }
-    expect(freezeTechTips({ ids: ['water_gutters'] }).tips[0].citations).toBeUndefined();
-  });
-
-  test('gate on: a sourced tip freezes its sourced words and its citations, as a snapshot', () => {
-    const [gutters, morning, litter] = resolveTipIds(['water_gutters', 'lawn_water_morning', 'ext_leaf_litter'], { sourced: true, date: '2026-10-24' });
+  test('a sourced tip freezes its sourced words and its citations, as a snapshot', () => {
+    const [gutters, morning, litter] = resolveTipIds(['water_gutters', 'lawn_water_morning', 'ext_leaf_litter'], { date: '2026-10-24' });
     expect(gutters.copy).toBe(TIPS.find((t) => t.id === 'water_gutters').sourcedCopy);
     expect(gutters.citations).toEqual([{ label: 'UF/IFAS', url: 'https://ask.ifas.ufl.edu/publication/IN1045' }]);
     // its live copy already names the sources, so the words stay and the links come
@@ -784,37 +780,32 @@ describe('tips with facts (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
     expect(morning.citations.map((c) => c.label)).toEqual(['UF/IFAS', 'SWFWMD']);
     expect(litter.citations).toBeUndefined();
     gutters.citations[0].label = 'edited';
-    expect(resolveTipIds(['water_gutters'], { sourced: true, date: '2026-10-24' })[0].citations[0].label).toBe('UF/IFAS');
-    expect(freezeTechTips({ ids: ['water_gutters'] }, { sourced: true }).tips[0].citations).toHaveLength(1);
+    expect(resolveTipIds(['water_gutters'], { date: '2026-10-24' })[0].citations[0].label).toBe('UF/IFAS');
+    expect(freezeTechTips({ ids: ['water_gutters'] }).tips[0].citations).toHaveLength(1);
   });
 
   test('a fact gives no citation from its expiresOn day on, as the register reads it', () => {
-    const labels = (date) => resolveTipIds(['lawn_water_morning'], { sourced: true, date })[0].citations.map((c) => c.label);
+    const labels = (date) => resolveTipIds(['lawn_water_morning'], { date })[0].citations.map((c) => c.label);
     expect(labels('2027-03-31')).toEqual(['UF/IFAS', 'SWFWMD']);
     expect(labels('2027-04-01')).toEqual(['UF/IFAS']);
   });
 });
 
-describe('the picker shows the words the completion freezes (GATE_TECH_TIP_SOURCES)', () => {
+describe('the picker shows the words the completion freezes', () => {
   const served = (opts) => {
     const library = tipsForVisit({ serviceLine: 'mosquito', date: '2026-07-15', ...opts });
     return [...library.groups.flatMap((group) => group.tips), ...library.more];
   };
 
-  test('gate on: a sourced tip is served with its sourced words, matching the freeze', () => {
-    const tip = served({ sourced: true }).find((t) => t.id === 'water_gutters');
-    expect(tip.copy).toBe(TIPS.find((t) => t.id === 'water_gutters').sourcedCopy);
-    expect(tip.copy).toBe(resolveTipIds(['water_gutters'], { sourced: true, date: '2026-07-15' })[0].copy);
-    expect(Object.isFrozen(tip)).toBe(true);
-  });
-
-  test('gate off: the registry entries themselves, unchanged', () => {
+  test('a sourced tip is served with its sourced words, matching the freeze', () => {
     const tip = served({}).find((t) => t.id === 'water_gutters');
-    expect(tip).toBe(TIPS.find((t) => t.id === 'water_gutters'));
+    expect(tip.copy).toBe(TIPS.find((t) => t.id === 'water_gutters').sourcedCopy);
+    expect(tip.copy).toBe(resolveTipIds(['water_gutters'], { date: '2026-07-15' })[0].copy);
+    expect(Object.isFrozen(tip)).toBe(true);
   });
 });
 
-describe('tips matched to the yard (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+describe('tips matched to the yard (owner 2026-10-24)', () => {
   const { yardMatches } = require('../services/service-report/tip-library');
   const ids = (opts) => {
     const library = tipsForVisit(opts);
@@ -841,29 +832,23 @@ describe('tips matched to the yard (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', (
     expect(yardMatches({ irrigation: 'system' }, null)).toBe(true);
   });
 
-  test('gate off: nothing is filtered', () => {
-    expect(ids(knockdown).has('lk_fills_from_edges')).toBe(true);
-    expect(ids(knockdown).has('lawn_shade_dry_between')).toBe(true);
-    expect(ids({ ...knockdown, yard: { irrigationSystem: false } }).has('lawn_check_heads_after_mow')).toBe(true);
+  test('a grass tip needs a trusted, matching grass, in every list including search', () => {
+    expect(ids({ ...knockdown }).has('lk_fills_from_edges')).toBe(false);
+    expect(ids({ ...knockdown, yard: { grass: 'bahia', grassTrusted: true } }).has('lk_fills_from_edges')).toBe(false);
+    expect(ids({ ...knockdown, yard: { grass: 'zoysia', grassTrusted: false } }).has('lk_fills_from_edges')).toBe(false);
+    expect(ids({ ...knockdown, yard: { grass: 'zoysia', grassTrusted: true } }).has('lk_fills_from_edges')).toBe(true);
   });
 
-  test('gate on: a grass tip needs a trusted, matching grass, in every list including search', () => {
-    expect(ids({ ...knockdown, sourced: true }).has('lk_fills_from_edges')).toBe(false);
-    expect(ids({ ...knockdown, sourced: true, yard: { grass: 'bahia', grassTrusted: true } }).has('lk_fills_from_edges')).toBe(false);
-    expect(ids({ ...knockdown, sourced: true, yard: { grass: 'zoysia', grassTrusted: false } }).has('lk_fills_from_edges')).toBe(false);
-    expect(ids({ ...knockdown, sourced: true, yard: { grass: 'zoysia', grassTrusted: true } }).has('lk_fills_from_edges')).toBe(true);
-  });
-
-  test('gate on: the sprinkler tips leave a yard known to have no system', () => {
-    const noSystem = ids({ ...knockdown, sourced: true, yard: { irrigationSystem: false } });
+  test('the sprinkler tips leave a yard known to have no system', () => {
+    const noSystem = ids({ ...knockdown, yard: { irrigationSystem: false } });
     expect(noSystem.has('lawn_check_heads_after_mow')).toBe(false);
     expect(noSystem.has('lawn_irrigation_portal')).toBe(false);
-    expect(ids({ ...knockdown, sourced: true }).has('lawn_check_heads_after_mow')).toBe(true);
+    expect(ids({ ...knockdown }).has('lawn_check_heads_after_mow')).toBe(true);
   });
 
-  test('gate on: a month-bound tip shows only in its months (large patch, November through May)', () => {
-    expect(ids({ ...knockdown, sourced: true }).has('lawn_shade_dry_between')).toBe(false);
-    expect(ids({ ...knockdown, sourced: true, date: '2026-01-15' }).has('lawn_shade_dry_between')).toBe(true);
+  test('a month-bound tip shows only in its months (large patch, November through May)', () => {
+    expect(ids({ ...knockdown }).has('lawn_shade_dry_between')).toBe(false);
+    expect(ids({ ...knockdown, date: '2026-01-15' }).has('lawn_shade_dry_between')).toBe(true);
   });
 
   test('every yard filter and month list names real values', () => {
@@ -882,21 +867,20 @@ describe('tips matched to the yard (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', (
   });
 });
 
-describe('the picker shows the sources and names the post (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+describe('the picker shows the sources and names the post (owner 2026-10-24)', () => {
   const served = (opts) => {
     const library = tipsForVisit(opts);
     return [...library.groups.flatMap((group) => group.tips), ...library.more];
   };
 
-  test('gate on: a sourced tip carries the citations the completion would freeze that day; off, none', () => {
-    const on = served({ serviceLine: 'lawn', date: '2026-07-15', sourced: true }).find((tip) => tip.id === 'lawn_water_morning');
-    expect(on.citations).toEqual(resolveTipIds(['lawn_water_morning'], { sourced: true, date: '2026-07-15' })[0].citations);
+  test('a sourced tip carries the citations the completion would freeze that day', () => {
+    const on = served({ serviceLine: 'lawn', date: '2026-07-15' }).find((tip) => tip.id === 'lawn_water_morning');
+    expect(on.citations).toEqual(resolveTipIds(['lawn_water_morning'], { date: '2026-07-15' })[0].citations);
     expect(on.citations.map((citation) => citation.label)).toEqual(['UF/IFAS', 'SWFWMD']);
     expect(Object.isFrozen(on.citations)).toBe(true);
-    expect(served({ serviceLine: 'lawn', date: '2026-07-15' }).some((tip) => tip.citations)).toBe(false);
     // The water-shortage order ends 2027-03-31: from the next day the picker,
     // like the freeze, names UF/IFAS alone.
-    const after = served({ serviceLine: 'lawn', date: '2027-04-01', sourced: true }).find((tip) => tip.id === 'lawn_water_morning');
+    const after = served({ serviceLine: 'lawn', date: '2027-04-01' }).find((tip) => tip.id === 'lawn_water_morning');
     expect(after.citations.map((citation) => citation.label)).toEqual(['UF/IFAS']);
   });
 
@@ -947,7 +931,7 @@ describe('a topic for the post a tip lacks (tech-tip-blog-seeder, owner 2026-10-
   });
 });
 
-describe('tips written for tips with facts exist only behind the gate (sourcedOnly, owner 2026-10-24, part 4)', () => {
+describe('tips written for tips with facts (sourcedOnly, owner 2026-10-24, part 4)', () => {
   const { yardMatches } = require('../services/service-report/tip-library');
   const ids = (opts) => {
     const library = tipsForVisit(opts);
@@ -963,18 +947,9 @@ describe('tips written for tips with facts exist only behind the gate (sourcedOn
     }
   });
 
-  test('gate off: never listed, never searched, never frozen', () => {
-    const off = ids({ serviceLine: 'lawn', date: '2026-07-15' });
-    const offPest = ids({ serviceLine: 'pest', date: '2026-07-15' });
-    for (const tip of NEW) {
-      expect([tip.id, off.has(tip.id) || offPest.has(tip.id)]).toEqual([tip.id, false]);
-    }
-    expect(resolveTipIds(['lawn_mow_dry', 'lawn_water_morning'])).toEqual([expect.objectContaining({ id: 'lawn_water_morning' })]);
-  });
-
-  test('gate on: listed where the yard and month fit, and frozen with their citations', () => {
-    expect(ids({ serviceLine: 'lawn', date: '2026-07-15', sourced: true }).has('lawn_mow_dry')).toBe(true);
-    const [frozen] = resolveTipIds(['lawn_mow_dry'], { sourced: true, date: '2026-07-15' });
+  test('listed where the yard and month fit, and frozen with their citations', () => {
+    expect(ids({ serviceLine: 'lawn', date: '2026-07-15' }).has('lawn_mow_dry')).toBe(true);
+    const [frozen] = resolveTipIds(['lawn_mow_dry'], { date: '2026-07-15' });
     expect(frozen.id).toBe('lawn_mow_dry');
     expect(frozen.citations.map((citation) => citation.label)).toEqual(['UF/IFAS']);
   });
@@ -983,12 +958,12 @@ describe('tips written for tips with facts exist only behind the gate (sourcedOn
     expect(yardMatches({ water: 'reclaimed' }, { waterSource: 'reclaimed' })).toBe(true);
     expect(yardMatches({ water: 'reclaimed' }, { waterSource: 'county' })).toBe(false);
     expect(yardMatches({ water: 'reclaimed' }, { waterSource: null })).toBe(false);
-    expect(ids({ serviceLine: 'lawn', date: '2026-07-15', sourced: true }).has('lawn_reclaimed_water')).toBe(false);
-    expect(ids({ serviceLine: 'lawn', date: '2026-07-15', sourced: true, yard: { waterSource: 'reclaimed' } }).has('lawn_reclaimed_water')).toBe(true);
+    expect(ids({ serviceLine: 'lawn', date: '2026-07-15' }).has('lawn_reclaimed_water')).toBe(false);
+    expect(ids({ serviceLine: 'lawn', date: '2026-07-15', yard: { waterSource: 'reclaimed' } }).has('lawn_reclaimed_water')).toBe(true);
   });
 
   test('the Sarasota County fertilizer season is never shown in North Port, whose season starts April 1', () => {
-    const july = { serviceLine: 'lawn', date: '2026-07-15', sourced: true };
+    const july = { serviceLine: 'lawn', date: '2026-07-15' };
     expect(ids({ ...july, yard: { county: 'Sarasota', city: 'venice' } }).has('lawn_fertilizer_season')).toBe(true);
     expect(ids({ ...july, yard: { county: 'Sarasota', city: 'north port' } }).has('lawn_fertilizer_season')).toBe(false);
     expect(ids({ ...july, yard: { county: 'Charlotte', city: 'port charlotte' } }).has('lawn_fertilizer_season')).toBe(false);
@@ -1018,8 +993,8 @@ describe('tips written for tips with facts exist only behind the gate (sourcedOn
     const { FACTS } = require('../services/email-division/fact-register-data');
     const tip = TIPS.find((t) => t.id === 'lawn_watering_day');
     expect(FACTS.find((fact) => fact.slug === tip.sources[0].fact).expiresOn).toBe('2027-04-01');
-    const visit = { serviceLine: 'lawn', sourced: true, yard: { irrigationSystem: true, county: 'Manatee', city: 'bradenton' } };
-    const freeze = (date) => freezeTechTips({ ids: ['lawn_watering_day'] }, { sourced: true, date });
+    const visit = { serviceLine: 'lawn', yard: { irrigationSystem: true, county: 'Manatee', city: 'bradenton' } };
+    const freeze = (date) => freezeTechTips({ ids: ['lawn_watering_day'] }, { date });
     for (const date of ['2026-10-26', '2027-03-31']) {
       expect([date, ids({ ...visit, date }).has('lawn_watering_day')]).toEqual([date, true]);
       expect(freeze(date).tips.map((t) => t.id)).toEqual(['lawn_watering_day']);

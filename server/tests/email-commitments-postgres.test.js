@@ -341,7 +341,7 @@ postgres('Email commitments on PostgreSQL', () => {
     expect((await mockPg('emails').where({ id: sent.id }).first()).operational_analysis).toBeNull();
   });
 
-  test('an email-sourced row counts a staff call to any of the customer\'s numbers; a text row still matches its own number', async () => {
+  test('an email-sourced row and a text row both count a staff call to any of the customer\'s numbers', async () => {
     const { loadSmsFulfillmentEvidence } = require('../services/sms-commitment-fulfillment');
     const sourceAt = new Date(Date.now() - 60 * 60000);
     const [call] = await mockPg('call_log').insert({ id: randomUUID(), customer_id: customerId, direction: 'outbound',
@@ -353,7 +353,7 @@ postgres('Email commitments on PostgreSQL', () => {
     const emailEvidence = await loadSmsFulfillmentEvidence(mockPg, commitment, { ...message, any_customer_phone: true }, new Date());
     expect(emailEvidence.records.some((r) => r.type === 'call' && r.id === call.id)).toBe(true);
     const smsEvidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date());
-    expect(smsEvidence.records.some((r) => r.type === 'call')).toBe(false);
+    expect(smsEvidence.records.some((r) => r.type === 'call' && r.id === call.id)).toBe(true);
   });
 
   test('an adopted sole property is re-read under the lock: a second property added mid-check leaves the row for the next tick', async () => {

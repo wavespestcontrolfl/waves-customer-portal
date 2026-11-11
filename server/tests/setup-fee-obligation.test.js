@@ -150,9 +150,10 @@ test('a CANCELED attached fee invoice DISCOVERABLE by #3474\'s lane (same estima
       scheduled_service_id: 'ss-1',
       line_items: JSON.stringify([{ description: 'WaveGuard Membership — one-time setup fee', amount: 99 }]),
     },
-    // Call 1 = the attached visit, call 2 = the completing visit — same
-    // estimate, same scheduled date ⇒ the sibling finder sees the row.
-    scheduled_services: () => (++ssCall === 1
+    // Call 1 = the settled-anywhere visit-date read, call 2 = the attached
+    // visit, call 3 = the completing visit — same estimate, same scheduled
+    // date ⇒ the sibling finder sees the row.
+    scheduled_services: () => (++ssCall === 2
       ? { scheduled_date: '2026-08-20', source_estimate_id: EST_ID }
       : { scheduled_date: '2026-08-20' }),
   });
@@ -173,8 +174,9 @@ test('a CANCELED attached fee invoice on a replaced-and-moved visit (different d
     },
     scheduled_services: () => {
       ssCall += 1;
-      if (ssCall === 1) return { scheduled_date: '2026-08-13', source_estimate_id: EST_ID };
-      if (ssCall === 2) return { scheduled_date: '2026-08-20' };
+      if (ssCall === 1) return { scheduled_date: '2026-08-20' }; // settled-anywhere visit-date read
+      if (ssCall === 2) return { scheduled_date: '2026-08-13', source_estimate_id: EST_ID };
+      if (ssCall === 3) return { scheduled_date: '2026-08-20' };
       return null; // prior-completed probe
     },
   });

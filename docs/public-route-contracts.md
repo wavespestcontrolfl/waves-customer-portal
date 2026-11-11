@@ -146,9 +146,8 @@ unchanged.
 Tips with facts, citations (owner 2026-10-24): on the same payload
 (`/api/reports/:token/data` and the renders that share `buildReportV1Data`),
 an entry of `techNote.tips` may carry the optional key
-`citations: [{ label, url }]` (one or two entries), present only while
-`GATE_TECH_TIP_SOURCES` is exactly `true` (dark; read at call time). The
-server freezes them at completion from the tip registry's `sources` (facts in
+`citations: [{ label, url }]` (one or two entries), present when the tip
+was frozen with sources. The server freezes them at completion from the tip registry's `sources` (facts in
 `server/services/email-division/fact-register-data.js`), together with the
 tip's sourced words, in `structured_notes.techTips`; the client never
 supplies them. Before a citation is sent, report-data re-checks it with
@@ -156,11 +155,8 @@ supplies them. Before a citation is sent, report-data re-checks it with
 characters and an `https` URL on an allowed host (`CITATION_HOSTS`, the host
 or a subdomain, no userinfo). Anything else is dropped, never repaired. The
 web report prints each label as a link after the tip's sentence, inside the
-quote, and never prints the raw URL. Rollback: unset
-`GATE_TECH_TIP_SOURCES`. The payload then carries no `citations`, frozen ones
-included, and new completions freeze the registry copy exactly as before. A
-tip frozen while the gate was on keeps its sourced words. Auth, headers and
-routes are unchanged.
+quote, and never prints the raw URL. A tip frozen before tips with facts
+has no `citations` and prints none. Auth, headers and routes are unchanged.
 
 "From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
 payload (`/api/reports/:token/data` and the renders that share

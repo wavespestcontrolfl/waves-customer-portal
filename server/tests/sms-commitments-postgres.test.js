@@ -3884,15 +3884,14 @@ postgres('SMS commitments on PostgreSQL', () => {
   });
 
 
-  describe('GATE_SMS_FOLLOWUP_WITNESS_FIX: three false alarms on the text follow-up alert (owner audit 2026-10-24)', () => {
+  describe('three false alarms on the text follow-up alert (owner audit 2026-10-24)', () => {
     const STAFF = '00000000-0000-4000-8000-000000000104';
     const OTHER_PHONE = '+12025550177';
-    afterEach(() => { delete process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX; });
     const after = () => new Date(message.created_at.getTime() + 1000);
     const callbackCommitment = () => ({ kind: 'callback', party: 'waves', evidence: [{ quote: 'Call' }],
       sms_context: { basis: 'request', property_id: null, property_ambiguous: true, customer_id: message.customer_id, source_at: message.created_at.toISOString() } });
 
-    test('1. a staff call to another phone on the same customer answers a callback; gate off keeps the exact-number rule', async () => {
+    test('1. a staff call to another phone on the same customer answers a callback', async () => {
       await mockPg('customers').where({ id: message.customer_id }).update({ secondary_phone: OTHER_PHONE });
       const [call] = await mockPg('call_log').insert({ customer_id: message.customer_id, direction: 'outbound',
         from_phone: numbers.locations.parrish.number, to_phone: OTHER_PHONE, status: 'completed', duration_seconds: 178,
@@ -3900,17 +3899,13 @@ postgres('SMS commitments on PostgreSQL', () => {
       const now = new Date(after().getTime() + 3600000);
       const commitment = callbackCommitment();
 
-      const off = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
-      expect(off.records.filter((r) => r.type === 'call')).toEqual([]);
-
-      process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX = 'true';
       const on = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
       const witness = on.records.find((r) => r.type === 'call');
       expect(witness.id).toBe(call.id);
       expect(admissibleWitness(witness, commitment, on.records)).toBe(true);
     });
 
-    test('1b. a call to the number that texted still counts with the gate off (unchanged)', async () => {
+    test('1b. a call to the number that texted still counts', async () => {
       const [call] = await mockPg('call_log').insert({ customer_id: message.customer_id, direction: 'outbound',
         from_phone: numbers.locations.parrish.number, to_phone: message.from_phone, status: 'completed', duration_seconds: 90,
         created_at: new Date(after().getTime() + 60000) }).returning('id');
@@ -3919,7 +3914,6 @@ postgres('SMS commitments on PostgreSQL', () => {
     });
 
     test('1c. another customer\'s call never counts', async () => {
-      process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX = 'true';
       const strangerId = randomUUID();
       await mockPg('customers').insert({ id: strangerId, first_name: 'Other', last_name: 'Fixture', phone: OTHER_PHONE });
       await mockPg('call_log').insert({ customer_id: strangerId, direction: 'outbound', from_phone: numbers.locations.parrish.number,
@@ -3939,18 +3933,7 @@ postgres('SMS commitments on PostgreSQL', () => {
         return { estimate, now: new Date(sentAt.getTime() + 3600000) };
       };
 
-      test('gate off: the estimate is refused as an invalid witness (old behavior)', async () => {
-        const { estimate, now } = await sendEstimate();
-        const commitment = estimateRequest();
-        const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
-        const witness = evidence.records.find((r) => r.id === estimate.id);
-        expect(admissibleWitness(witness, commitment, evidence.records)).toBe(false);
-        expect(groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: 'Mosquito' }, evidence, commitment))
-          .toMatchObject({ verdict: 'uncertain', reason: 'invalid_witness' });
-      });
-
-      test('gate on: it grounds a fulfilled verdict', async () => {
-        process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX = 'true';
+      test('it grounds a fulfilled verdict', async () => {
         const { estimate, now } = await sendEstimate();
         const commitment = estimateRequest();
         const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
@@ -3960,8 +3943,7 @@ postgres('SMS commitments on PostgreSQL', () => {
           .toMatchObject({ verdict: 'fulfilled', record_type: 'estimate', record_id: estimate.id });
       });
 
-      test('gate on: an estimate sent BEFORE the request, or one for a request that names a property, is still refused', async () => {
-        process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX = 'true';
+      test('an estimate sent BEFORE the request, or one for a request that names a property, is still refused', async () => {
         const before = new Date(message.created_at.getTime() - 3600000);
         const [early] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: null, status: 'sent',
           service_interest: 'Mosquito', estimate_data: { deliveryState: { lastDeliveredAt: before.toISOString() } } }).returning('id');
@@ -3994,17 +3976,7 @@ postgres('SMS commitments on PostgreSQL', () => {
         return { commitment, tick, alert };
       };
 
-      test('gate off: Done writes only the bell and the next tick rings again (old behavior)', async () => {
-        const { commitment, tick, alert } = await ringThenDone();
-        expect(await settleCommitmentsForDoneAlert(mockPg, alert.id, { reviewedBy: STAFF })).toBe(0);
-        expect((await mockPg('call_commitments').where({ id: commitment.id }).first()).status).toBe('open');
-        NotificationService.notifyAdmin.mockClear();
-        await tick(300000);
-        expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-      });
-
-      test('gate on: the follow-up is marked done by that person, and the next tick stays quiet', async () => {
-        process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX = 'true';
+      test('the follow-up is marked done by that person, and the next tick stays quiet', async () => {
         const { commitment, tick, alert } = await ringThenDone();
         expect(await settleCommitmentsForDoneAlert(mockPg, alert.id, { reviewedBy: STAFF })).toBe(1);
         const settled = await mockPg('call_commitments').where({ id: commitment.id }).first();
@@ -4015,8 +3987,7 @@ postgres('SMS commitments on PostgreSQL', () => {
         expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
       });
 
-      test('gate on: a Done on an alert of another kind, or on an already-settled follow-up, changes nothing and never throws', async () => {
-        process.env.GATE_SMS_FOLLOWUP_WITNESS_FIX = 'true';
+      test('a Done on an alert of another kind, or on an already-settled follow-up, changes nothing and never throws', async () => {
         const { commitment, alert } = await ringThenDone();
         const [other] = await mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert',
           title: 'Unrelated', body: 'x', metadata: JSON.stringify({ dedupeKey: 'something-else:1', customerId: message.customer_id }),
