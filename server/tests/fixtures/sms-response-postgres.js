@@ -22,6 +22,11 @@ async function createSmsResponseTables(trx) {
         v2_extraction_status varchar(20), ai_extraction_enriched jsonb, metadata jsonb,
         created_at timestamptz NOT NULL DEFAULT now()
       );
+      CREATE TABLE scheduled_services (
+        id uuid PRIMARY KEY, customer_id uuid, created_at timestamptz NOT NULL DEFAULT now(),
+        recurring_parent_id uuid, source_action varchar(60), status varchar(30)
+      );
+      CREATE TABLE invoices (id uuid PRIMARY KEY, customer_id uuid, payment_recorded_at timestamptz, payment_recorded_by text);
       CREATE TABLE blocked_numbers (id uuid PRIMARY KEY, number varchar(32));
       CREATE TABLE message_drafts (id uuid PRIMARY KEY, sms_log_id uuid, customer_id uuid, flags jsonb, intent text, sent_at timestamptz);
       CREATE TABLE messaging_audit_log (

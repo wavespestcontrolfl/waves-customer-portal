@@ -527,7 +527,7 @@ async function auditLawnSqftFromEstimate({ customer_id, estimate_id, sqft, befor
 }
 
 /**
- * What the relevance sweep WOULD have closed (GATE_ALERT_CONTACT_CLOSE=shadow,
+ * What the relevance sweep WOULD have closed (a contact rule whose own gate is `shadow`,
  * admin-alert-relevance.js). One row per notification per class per Eastern
  * day, so a sweep every ten minutes records a bell once a day, not 144 times.
  * Nothing on the bell changes; this row is the only trace. List them with

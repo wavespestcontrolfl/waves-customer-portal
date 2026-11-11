@@ -234,10 +234,10 @@ describe('the sweep\'s verdict decides who is listed', () => {
     }
   });
 
-  test('the sweep is asked as if the contact gate were on, and is handed the day in Eastern time', () => {
+  test('the sweep is asked for the row\'s class, and is handed the day in Eastern time', () => {
     const r = relevance();
     judgeOne(r, row(), { data: 1 }, '2026-11-02', state());
-    expect(r.classify).toHaveBeenCalledWith(row(), { assumeContactLive: true });
+    expect(r.classify).toHaveBeenCalledWith(row());
     expect(r.subjectFor).toHaveBeenCalledWith(row(), { data: 1 }, '2026-11-02');
   });
 
@@ -275,7 +275,7 @@ describe('the sweep\'s verdict decides who is listed', () => {
       expect(verdicts.size).toBe(450);
       expect([...verdicts.values()].every((v) => v.handled === false && v.unchecked === true)).toBe(true);
       expect(spy).toHaveBeenCalledTimes(3); // 200 + 200 + 50
-      expect(spy.mock.calls[0][2]).toEqual({ judgeContact: true });
+      expect(spy.mock.calls[0]).toHaveLength(2);
       expect(logger.warn).toHaveBeenCalledTimes(1);
     } finally {
       spy.mockRestore();

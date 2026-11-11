@@ -1,9 +1,8 @@
-// GATE_ALERT_CONTACT_CLOSE (owner 2026-10-24, approved 2026-10-26) on PostgreSQL: the
+// Contact close (owner 2026-10-24, approved 2026-10-26) on PostgreSQL: the
 // missed-call bell's ONE owner, missed-call-bell.js retireCalledBackMissedCalls, also closes
 // a bell once a person's text reached the caller, a visit was booked, or a quote was handed
 // off, each AFTER the call began (the call's real start, even for a row inserted after the
-// call was over). Off = nothing runs; shadow = audit_log rows only; true = retired through
-// supersedeMissedCallAdmin. Admin bell only; nothing is sent. CI's DATABASE_URL pass runs
+// call was over), retired through supersedeMissedCallAdmin. Admin bell only; nothing is sent. CI's DATABASE_URL pass runs
 // this; fixture rows live in a unique schema removed after the suite. Synthetic data only.
 const SKIP = !process.env.DATABASE_URL;
 const knex = require('knex');
@@ -41,7 +40,6 @@ jest.setTimeout(60000);
     await database('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Synthetic', phone: CALLER });
   });
   afterEach(async () => {
-    delete process.env.GATE_ALERT_CONTACT_CLOSE;
     for (const table of tables) await database.raw('TRUNCATE TABLE ??.?? CASCADE', [schema, table]);
   });
   afterAll(async () => {
@@ -50,7 +48,6 @@ jest.setTimeout(60000);
   });
 
   const sid = (p) => `${p}${randomUUID().replaceAll('-', '')}`;
-  const gate = (mode) => { process.env.GATE_ALERT_CONTACT_CLOSE = mode; };
   async function missedCall(extra = {}) {
     const row = {
       id: randomUUID(), twilio_call_sid: sid('CA'), direction: 'inbound', from_phone: CALLER, to_phone: BIZ, customer_id: customerId,
@@ -76,36 +73,17 @@ jest.setTimeout(60000);
     const r = await database('notifications').where({ id: row.id }).first();
     return r.done_at ? [r.done_by, r.resolution] : null;
   };
-  const wouldClose = (row) => database('audit_log').where({ action: 'notification.alert_relevance.would_close', resource_id: row.id });
   const run = () => missedCallBell.retireCalledBackMissedCalls();
 
-  test('gate off: nothing new runs, however answered the call is', async () => {
+  test('a person\'s text after the call closes the bell with the plain resolution', async () => {
     const call = await missedCall();
     const row = await bell(call);
     await staffText(mins(10));
-    expect(await run()).toBe(0);
-    expect(await state(row)).toBeNull();
-    expect(await wouldClose(row)).toHaveLength(0);
-  });
-
-  test('shadow records what would close once per day and retires nothing; true closes it with the plain resolution', async () => {
-    const call = await missedCall();
-    const row = await bell(call);
-    await staffText(mins(10));
-    gate('shadow');
-    expect(await run()).toBe(0);
-    expect(await run()).toBe(0);
-    expect(await state(row)).toBeNull();
-    const logged = await wouldClose(row);
-    expect(logged).toHaveLength(1);
-    expect(logged[0].metadata).toMatchObject({ class: 'missed_call', reason: 'A person texted the caller after the call' });
-    gate('true');
     expect(await run()).toBe(1);
     expect(await state(row)).toEqual(['supersede', 'A person texted the caller after the call']);
   });
 
   test('a person\'s text counts only when it is after the call, a person\'s, delivered, and to this caller (by customer or by phone)', async () => {
-    gate('true');
     const before = await bell(await missedCall());
     await staffText(mins(-5));
     expect(await run()).toBe(0);
@@ -123,7 +101,6 @@ jest.setTimeout(60000);
   });
 
   test('a shared phone never crosses two different customers: a text to another customer on the caller\'s number does not close it; a text with no customer id, or to the same customer, does', async () => {
-    gate('true');
     const other = randomUUID();
     await database('customers').insert({ id: other, first_name: 'Sam', last_name: 'Synthetic', phone: CALLER });
     const row = await bell(await missedCall());
@@ -143,7 +120,6 @@ jest.setTimeout(60000);
   });
 
   test('a call row inserted after the call was over is anchored on the call\'s real start: a text between the call and the delayed insert counts, one before the call does not', async () => {
-    gate('true');
     // The status callback inserted this row 10 minutes after the call began (it lasted 10 minutes).
     const delayed = await missedCall({ created_at: mins(10), duration_seconds: 600, metadata: JSON.stringify({ source: 'status_callback', inserted_on_status: 'completed' }) });
     const row = await bell(delayed);
@@ -155,7 +131,6 @@ jest.setTimeout(60000);
   });
 
   test('a visit booked for the call\'s customer after the call closes it; one before it, a cancelled one and a generated child do not', async () => {
-    gate('true');
     const row = await bell(await missedCall());
     const visit = (over) => database('scheduled_services').insert({ id: randomUUID(), customer_id: customerId, scheduled_date: '2026-10-30',
       service_type: 'General Pest Control', status: 'confirmed', created_at: mins(30), ...over });
@@ -169,7 +144,6 @@ jest.setTimeout(60000);
   });
 
   test('a quote handed off to the call\'s customer after the call closes it; sent_at alone, an earlier delivery and another customer\'s quote do not', async () => {
-    gate('true');
     const row = await bell(await missedCall());
     const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
     await database('estimates').insert({ id: randomUUID(), customer_id: customerId, status: 'sent', sent_at: mins(40) });
@@ -205,7 +179,6 @@ jest.setTimeout(60000);
   const closeOnly = () => missedCallBell.closeContactedMissedCalls();
 
   test('the whole candidate set is walked every run: an eligible quote bell after many non-matching candidates closes in one run', async () => {
-    gate('true');
     // 520 open bells for a customer with no quote (past the old 500-row candidate cap, over two pages), then ONE for a customer whose quote was handed off after the call.
     const fillers = await manyBells(520);
     const quoted = randomUUID();
@@ -225,24 +198,14 @@ jest.setTimeout(60000);
     expect(await closeOnly()).toBe(0);
   });
 
-  test('shadow audits every matching bell across pages, and true then closes all of them in one run (no fixed cap)', async () => {
+  test('every matching bell is closed across pages in one run (no fixed cap)', async () => {
     await staffText(mins(10));
-    const bells = await manyBells(450);
-    gate('shadow');
-    expect(await closeOnly()).toBe(0);
-    const logged = await database('audit_log').where({ action: 'notification.alert_relevance.would_close' });
-    expect(logged).toHaveLength(450);
-    expect(new Set(logged.map((r) => r.resource_id))).toEqual(new Set(bells.map((b) => b.id)));
-    // A second shadow run the same day adds nothing.
-    await closeOnly();
-    expect(await database('audit_log').where({ action: 'notification.alert_relevance.would_close' })).toHaveLength(450);
-    gate('true');
+    await manyBells(450);
     expect(await closeOnly()).toBe(450);
     expect(await database('notifications').whereNull('done_at')).toHaveLength(0);
   });
 
   test('the promise chaser and other missed-call-category bells are never touched', async () => {
-    gate('true');
     const call = await missedCall();
     await staffText(mins(10));
     const chaser = { id: randomUUID(), recipient_type: 'admin', category: 'missed_call', title: 'Called back', created_at: new Date(),

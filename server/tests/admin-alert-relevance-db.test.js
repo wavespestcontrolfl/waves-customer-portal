@@ -3,15 +3,13 @@
  * it: the re-arm pass (this module's stamp and its window, the put-back fenced
  * on the version read — a millisecond done_at compared exactly), a new
  * lead's booking evidence (after the bell, never a visit that did not run) and
- * the customer-contact classes behind GATE_ALERT_CONTACT_CLOSE (the shared
+ * the customer-contact classes (the shared
  * witnesses as SQL: the Messages reader, a person's text and call, a visit, a
- * quote, a person's email reply), and the two rules with their own gates
- * (GATE_VOICEMAIL_VISIT_UNDERWAY: a visit that ran after a voicemail;
- * GATE_LEAD_CONTACTED_CLOSE: the lead_contacted Leads bells;
- * GATE_PORTAL_CHAT_ANSWERED_CLOSE: a portal chat hand-off bell answered by a person), and
- * GATE_SMS_STAFF_ACTION_ANSWERS (a visit a person booked, or a payment a person
- * recorded, answers a text: the alert witness and the Messages reader). The rules
- * themselves are covered by admin-alert-relevance.test.js.
+ * quote, a person's email reply), the voicemail rule (a visit that ran after a
+ * voicemail), the lead_contacted Leads bells, a portal chat hand-off bell answered by
+ * a person (GATE_PORTAL_CHAT_ANSWERED_CLOSE, its own gate), and a staff action (a visit a
+ * person booked, or a payment a person recorded) answering a text: the alert witness
+ * and the Messages reader. The rules themselves are covered by admin-alert-relevance.test.js.
  */
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
@@ -30,10 +28,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     relevance = require('../services/admin-alert-relevance');
   });
   afterEach(() => {
-    delete process.env.GATE_ALERT_CONTACT_CLOSE;
-    delete process.env.GATE_VOICEMAIL_VISIT_UNDERWAY;
-    delete process.env.GATE_LEAD_CONTACTED_CLOSE;
-    delete process.env.GATE_SMS_STAFF_ACTION_ANSWERS;
     delete process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE;
   });
   afterAll(async () => {
@@ -337,13 +331,12 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     const kept = await get(leadBell.id);
     expect([kept.read_at, kept.done_at]).toEqual([retired.read_at, retired.done_at]);
   });
-  // ---- customer-contact classes (GATE_ALERT_CONTACT_CLOSE) -------------------
+  // ---- customer-contact classes -------------------
   describe('customer-contact classes', () => {
     const BIZ = '+15555559000';
     let n = 0;
     const sid = (prefix) => `${prefix}${String(Date.now()).slice(-8)}${String((n += 1)).padStart(6, '0')}`;
     const mins = (base, m) => new Date(base.getTime() + m * 60 * 1000);
-    const gate = (mode) => { process.env.GATE_ALERT_CONTACT_CLOSE = mode; };
     const sweep = (now = new Date()) => relevance.runAdminAlertRelevanceSweep({ now });
     const wouldClose = (id) => db('audit_log').where({ action: 'notification.alert_relevance.would_close', resource_type: 'notification', resource_id: id });
     const customerWith = (phone, extra = {}) => insert('customers', { first_name: 'Contact', phone, ...extra });
@@ -364,37 +357,11 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       status: 'completed', source: 'admin-click', duration_seconds: 180, v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: 'false' } }),
       twilio_call_sid: sid('CAO'), created_at: at, ...over });
 
-    test('gate off: a customer-contact bell is not judged at all, however answered it is', async () => {
-      const t0 = mins(new Date(), -120);
-      const customer = await customerWith('+15555558001');
-      const { row } = await text({ customer, phone: customer.phone, at: t0 });
-      await staffText(customer, customer.phone, mins(t0, 5));
-      const result = await sweep();
-      expect(result.byClass.inbound_sms).toBeUndefined();
-      expect((await get(row.id)).done_at).toBeNull();
-      expect(await wouldClose(row.id)).toHaveLength(0);
-    });
-
-    test('shadow: records what would close once per ET day and changes nothing on the bell; true closes it with the reason', async () => {
+    test('a text a person answered is closed with the reason', async () => {
       const t0 = mins(new Date(), -120);
       const customer = await customerWith('+15555558002');
       const { row } = await text({ customer, phone: customer.phone, at: t0 });
       await staffText(customer, customer.phone, mins(t0, 5));
-      const before = await get(row.id);
-
-      gate('shadow');
-      const first = await sweep();
-      expect(first.wouldClose).toBeGreaterThanOrEqual(1);
-      const after = await get(row.id);
-      expect([after.read_at, after.done_at, after.done_by, after.resolution]).toEqual([null, null, null, null]);
-      expect(after.metadata).toEqual(before.metadata);
-      const rows = await wouldClose(row.id);
-      expect(rows).toHaveLength(1);
-      expect(rows[0].metadata).toMatchObject({ class: 'inbound_sms', reason: 'Answered by text', etDay: etDateString(new Date()) });
-      await sweep();
-      expect(await wouldClose(row.id)).toHaveLength(1);
-
-      gate('true');
       await sweep();
       const closed = await get(row.id);
       expect([closed.done_by, closed.resolution]).toEqual(['relevance', 'Answered by text']);
@@ -403,7 +370,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     });
 
     test('a text: answered by a person\'s text, by a person\'s call, or no reply needed (a courtesy text) closes it; an unanswered one, a reply from before the text and an automated text do not', async () => {
-      gate('true');
       const t0 = mins(new Date(), -240);
       const answeredBy = await customerWith('+15555558003');
       const calledBy = await customerWith('+15555558004');
@@ -431,22 +397,18 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       for (const open of [d, e, f]) expect((await get(open.row.id)).done_at).toBeNull();
     });
 
-    test('a text from an unknown sender is never judged: whatever is sent to that number, its bell stays open and nothing is recorded in shadow', async () => {
+    test('a text from an unknown sender is never judged: whatever is sent to that number, its bell stays open and nothing is recorded', async () => {
       const t0 = mins(new Date(), -240);
       const phone = '+15555558009';
       const unknown = await text({ phone, at: t0, known: false });
       await staffText(null, phone, mins(t0, 10));
       await staffCall(null, phone, mins(t0, 12));
-      gate('shadow');
       await sweep();
       expect(await wouldClose(unknown.row.id)).toHaveLength(0);
-      gate('true');
-      await sweep();
       expect((await get(unknown.row.id)).done_at).toBeNull();
     });
 
     test('a tracking-line text from a number with no customer record (owner 2026-11-04, "D"): a person\'s text or call back to that number closes its row; an unanswered one and a reply from before the text keep theirs', async () => {
-      gate('true');
       const t0 = mins(new Date(), -240);
       // The new_lead row a text to a website line rings: no lead or customer behind it, and it names its text.
       const trackingText = async (phone) => {
@@ -492,7 +454,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     });
 
     test('a new text after a close rings the sender\'s thread bell again', async () => {
-      gate('true');
       const NotificationService = require('../services/notification-service');
       const t0 = mins(new Date(), -240);
       const customer = await customerWith('+15555558011');
@@ -521,7 +482,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     });
 
     test('a voicemail callback request (a missed call is missed-call-bell.js\'s, not the sweep\'s): a person\'s call back, a person-answered call in, a person\'s text, a booked visit or a handed-off quote after the call closes it; earlier contact, an unanswered callback and an automated bell do not', async () => {
-      gate('true');
       const t0 = mins(new Date(), -300);
       const callRow = (phone, customer, over = {}) => insert('call_log', { direction: 'inbound', from_phone: phone, to_phone: BIZ, customer_id: customer?.id || null,
         status: 'no-answer', twilio_call_sid: sid('CAI'), created_at: t0, ...over });
@@ -584,7 +544,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     });
 
     test('a call witness counts by when the call ENDED: a delayed insert of an earlier call, or a post-call row with no end stamp, never closes; a call that began before the event and ended after it does', async () => {
-      gate('true');
       const t0 = mins(new Date(), -300);
       const stamp = (extra) => JSON.stringify(extra);
       const missed = async (phone) => {
@@ -638,7 +597,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     });
 
     test('a voicemail bell for a call row inserted after the call was over is anchored on the call\'s real start (callStartedAt); a text before the call still does not count; a missed-call bell is not the sweep\'s', async () => {
-      gate('true');
       const t0 = mins(new Date(), -300);
       const delayed = async (phone) => {
         const customer = await customerWith(phone);
@@ -665,7 +623,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     });
 
     test('a shared phone never crosses two different customers: a text, call back or reply to B is not contact for A; a witness with no customer id, an unknown subject and the same customer by id still match', async () => {
-      gate('true');
       const t0 = mins(new Date(), -300);
       const shared = '+15555558081';
       const a = await customerWith(shared);
@@ -699,7 +656,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     });
 
     test('a text on a SHARED phone is judged only by this customer\'s own evidence: the Messages reader\'s phone-level verdict is not used (a reply to B, even one still "sent", leaves A open; a reply to A, sent or delivered, closes A)', async () => {
-      gate('true');
       const t0 = mins(new Date(), -240);
       // Two customers rows on one number.
       const shared = '+15555558083';
@@ -737,7 +693,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     });
 
     test('a phone is shared by what is tied to it, not only by customers rows: a text or call row carrying another customer id ties them; an unshared phone keeps the reader\'s verdict (a courtesy text still closes)', async () => {
-      gate('true');
       const t0 = mins(new Date(), -240);
       const a = await customerWith('+15555558086');
       const other = await customerWith('+15555558087');
@@ -759,7 +714,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     });
 
     test('an unknown sender on a shared phone is never judged either: no reply, with or without a customer id, closes it', async () => {
-      gate('true');
       const t0 = mins(new Date(), -240);
       const phone = '+15555558089';
       const c1 = await customerWith(phone);
@@ -772,7 +726,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     });
 
     test('an email from a customer: a person\'s reply in its thread closes it; a forward to someone else, a reply on another thread and an earlier reply do not', async () => {
-      gate('true');
       const t0 = mins(new Date(), -300);
       const mail = async (key, extra = {}) => {
         const customer = await customerWith(`+1555555803${key}`, { email: `contact${key}-${Date.now()}@example.invalid` });
@@ -801,7 +754,7 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       for (const open of [forwarded, elsewhere, earlier]) expect((await get(open.row.id)).done_at).toBeNull();
     });
 
-    test('a new lead: a person\'s text or call back after the bell closes it as contacted; contact from before the bell and a ring-out do not; shadow only records', async () => {
+    test('a new lead: a person\'s text or call back after the bell closes it as contacted; contact from before the bell and a ring-out do not', async () => {
       const bellAt = mins(new Date(), -240);
       const lead = async (phone, withCustomer = true) => {
         const customer = withCustomer ? await customerWith(phone) : null;
@@ -821,13 +774,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       await staffText(earlier.customer, earlier.phone, mins(bellAt, -60));
       await staffCall(ringOut.customer, ringOut.phone, mins(bellAt, 20), { v2_extraction_status: null, ai_extraction_enriched: null });
 
-      gate('shadow');
-      await sweep();
-      expect((await get(texted.note.id)).done_at).toBeNull();
-      expect(await wouldClose(texted.note.id)).toHaveLength(1);
-      expect((await wouldClose(texted.note.id))[0].metadata).toMatchObject({ class: 'new_lead', reason: 'Lead was contacted' });
-
-      gate('true');
       await sweep();
       for (const closed of [texted, called, phoneOnly]) {
         expect(await get(closed.note.id)).toMatchObject({ done_by: 'relevance', resolution: 'Lead was contacted' });
@@ -835,8 +781,7 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       for (const open of [earlier, ringOut]) expect((await get(open.note.id)).done_at).toBeNull();
     });
 
-    test('a voicemail callback request closes once the customer\'s own visit completed after the voicemail on the same ET day (GATE_VOICEMAIL_VISIT_UNDERWAY); the next ET day, before the voicemail, a visit that never ran, another customer\'s (even on the same phone) and an earlier-day voicemail do not', async () => {
-      gate('true');
+    test('a voicemail callback request closes once the customer\'s own visit completed after the voicemail on the same ET day; the next ET day, before the voicemail, a visit that never ran, another customer\'s (even on the same phone) and an earlier-day voicemail do not', async () => {
       const WENT_AHEAD = "The customer's visit went ahead after the call";
       // 10:20 AM Eastern (EDT) on 2026-10-26; the call row is the voicemail's start.
       const vmAt = new Date('2026-10-26T14:20:00Z');
@@ -868,26 +813,14 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       await visitFor(await customerWith('+15555558190'), mins(vmAt, 30));
       const sharedPhone = await mk(null);
       await visitFor(await customerWith(sharedPhone.phone), mins(vmAt, 30));
-      const positives = [sameDay];
       const stays = [nextDay, beforeCall, cancelled, noShow, noVisit, overMidnight, other, sharedPhone];
 
-      // Off: the reason is not offered, nothing is recorded.
-      await sweep();
-      for (const c of [...positives, ...stays]) expect((await get(c.row.id)).done_at).toBeNull();
-      expect(await wouldClose(sameDay.row.id)).toHaveLength(0);
-      // Shadow: only what WOULD close is recorded, and no bell changes (the contact gate being true does not matter).
-      process.env.GATE_VOICEMAIL_VISIT_UNDERWAY = 'shadow';
-      await sweep();
-      for (const c of [...positives, ...stays]) expect((await get(c.row.id)).done_at).toBeNull();
-      expect((await wouldClose(sameDay.row.id)).map((r) => r.metadata)).toEqual([expect.objectContaining({ class: 'voicemail_callback', reason: WENT_AHEAD })]);
-      for (const c of stays) expect(await wouldClose(c.row.id)).toHaveLength(0);
-      // True: closes the one, with the wording.
-      process.env.GATE_VOICEMAIL_VISIT_UNDERWAY = 'true';
+      // Closes the one, with the wording.
       await sweep();
       expect(await get(sameDay.row.id)).toMatchObject({ done_by: 'relevance', resolution: WENT_AHEAD });
       for (const c of stays) expect((await get(c.row.id)).done_at).toBeNull();
-      // Rollback: the gate off puts the bell back, unread.
-      delete process.env.GATE_VOICEMAIL_VISIT_UNDERWAY;
+      // The visit stops holding (it is cancelled): the re-arm pass puts the bell back, unread.
+      await db('scheduled_services').where({ customer_id: sameDay.customer.id }).update({ status: 'cancelled' });
       expect((await sweep()).rearmed).toBeGreaterThanOrEqual(1);
       const back = await get(sameDay.row.id);
       expect([back.read_at, back.done_at, back.done_by]).toEqual([null, null, null]);
@@ -895,8 +828,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     }, 30000);
 
     test('a voicemail callback request: a person\'s contact outranks the visit wording, and an email bell never closes on the visit', async () => {
-      gate('true');
-      process.env.GATE_VOICEMAIL_VISIT_UNDERWAY = 'true';
       const vmAt = new Date('2026-10-26T14:20:00Z');
       const customer = await customerWith('+15555558191', { email: `visit-${Date.now()}@example.invalid` });
       const call = await insert('call_log', { direction: 'inbound', from_phone: customer.phone, to_phone: BIZ, customer_id: customer.id, status: 'no-answer', twilio_call_sid: sid('CAI'), created_at: vmAt });
@@ -918,7 +849,7 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       expect(await get(row.id)).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
     }, 30000);
 
-    test('lead_contacted Leads bells (GATE_LEAD_CONTACTED_CLOSE, its own gate): a person\'s text or call back, a live visit booked, or an estimate handed off AFTER the bell closes it; earlier facts, sent_at alone, a visit that did not run and a bid-invite Leads bell do not', async () => {
+    test('lead_contacted Leads bells: a person\'s text or call back, a live visit booked, or an estimate handed off AFTER the bell closes it; earlier facts, sent_at alone, a visit that did not run and a bid-invite Leads bell do not', async () => {
       const bellAt = mins(new Date(), -240);
       const after = mins(bellAt, 60);
       const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
@@ -957,21 +888,7 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       const closes = [texted, called, booked, quoted];
       const stays = [earlier, suppressed, noShow, bid];
 
-      // Off (the contact gate is off too): nothing judged, nothing recorded.
-      await sweep();
-      for (const c of [...closes, ...stays]) { expect((await get(c.row.id)).done_at).toBeNull(); expect(await wouldClose(c.row.id)).toHaveLength(0); }
-      // Shadow: the would-close rows only, with each reason; no bell changes.
-      process.env.GATE_LEAD_CONTACTED_CLOSE = 'shadow';
-      await sweep();
-      for (const c of [...closes, ...stays]) expect((await get(c.row.id)).done_at).toBeNull();
-      const wouldReason = async (c) => (await wouldClose(c.row.id)).map((r) => [r.metadata.class, r.metadata.reason]);
-      expect(await wouldReason(texted)).toEqual([['lead_contacted', 'Lead was contacted']]);
-      expect(await wouldReason(called)).toEqual([['lead_contacted', 'Lead was contacted']]);
-      expect(await wouldReason(booked)).toEqual([['lead_contacted', 'A visit was booked']]);
-      expect(await wouldReason(quoted)).toEqual([['lead_contacted', 'Estimate was sent']]);
-      for (const c of stays) expect(await wouldClose(c.row.id)).toHaveLength(0);
-      // True: closes the four, with their reasons.
-      process.env.GATE_LEAD_CONTACTED_CLOSE = 'true';
+      // Closes the four, with their reasons.
       await sweep();
       const state = async (c) => { const r = await get(c.row.id); return r.done_at ? [r.done_by, r.resolution] : null; };
       expect(await state(texted)).toEqual(['relevance', 'Lead was contacted']);
@@ -979,8 +896,11 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       expect(await state(booked)).toEqual(['relevance', 'A visit was booked']);
       expect(await state(quoted)).toEqual(['relevance', 'Estimate was sent']);
       for (const c of stays) expect(await state(c)).toBeNull();
-      // Rollback: the gate off puts back what it closed.
-      delete process.env.GATE_LEAD_CONTACTED_CLOSE;
+      // The facts stop holding: the re-arm pass puts back what was closed.
+      await db('estimates').where({ customer_id: quoted.customer.id }).del();
+      await db('scheduled_services').where({ customer_id: booked.customer.id }).del();
+      await db('sms_log').where({ customer_id: texted.customer.id, direction: 'outbound' }).del();
+      await db('call_log').where({ customer_id: called.customer.id, direction: 'outbound' }).del();
       expect((await sweep()).rearmed).toBeGreaterThanOrEqual(4);
       for (const c of closes) {
         const back = await get(c.row.id);
@@ -990,7 +910,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     }, 30000);
 
     test('lead_contacted: a bell refreshed with new content (rungAt) is judged from that refresh — a reply, a booking or an estimate handoff between the first ring and the refresh never closes it; the same facts after the refresh do', async () => {
-      process.env.GATE_LEAD_CONTACTED_CLOSE = 'true';
       const now = new Date();
       const bellAt = mins(now, -300); // first ring (created_at is kept by a refresh without bumpOnRefresh)
       const early = mins(now, -200); // T1: after the first ring, before the refresh
@@ -1069,11 +988,8 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       const all = [texted, called, addService, emailed, emailedBefore, emailedElsewhere, textedBefore, reRung, emailChange, untouched];
 
       // The new gate off (the contact gate true): not judged, and the add-a-service chat keeps only its estimate rule.
-      gate('true');
       await sweep();
       for (const c of all) expect(await state(c)).toBeNull();
-
-      gate('true');
       process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE = 'shadow';
       await sweep();
       for (const c of all) expect(await state(c)).toBeNull();
@@ -1095,7 +1011,7 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       for (const c of all) expect(await state(c)).toBeNull();
     }, 30000);
 
-    test('current-customer quote-form bells (GATE_CURRENT_CUSTOMER_QUOTE_TEXT): a person\'s text or call back to that customer after the latest form closes it; contact before that form, no contact and the contact gate off do not', async () => {
+    test('current-customer quote-form bells (GATE_CURRENT_CUSTOMER_QUOTE_TEXT): a person\'s text or call back to that customer after the latest form closes it; contact before that form and no contact do not', async () => {
       const now = new Date();
       const formAt = mins(now, -300);
       const reFormAt = mins(now, -120);
@@ -1117,19 +1033,14 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       await staffText(textedBefore.customer, textedBefore.phone, mins(formAt, -20));
       await staffText(reFormed.customer, reFormed.phone, mins(formAt, 20)); // before the customer's latest form
       const state = async (c) => { const r = await get(c.row.id); return r.done_at ? [r.done_by, r.resolution] : null; };
-      const all = [texted, called, textedBefore, reFormed, untouched];
 
-      await sweep();
-      for (const c of all) expect(await state(c)).toBeNull();
-
-      gate('true');
       await sweep();
       expect(await state(texted)).toEqual(['relevance', 'Answered by text']);
       expect(await state(called)).toEqual(['relevance', 'A person called back']);
       for (const open of [textedBefore, reFormed, untouched]) expect(await state(open)).toBeNull();
     }, 30000);
 
-    test('text-note bells (owner 2026-11-02, GATE_ALERT_CONTACT_CLOSE alone): a person\'s text that reached the customer AND a visit of theirs completed after the bell close it, on any ET day; either alone, contact or a visit from before the bell, a visit that never ran, another customer\'s visit on the same phone and the older failure bell do not', async () => {
+    test('text-note bells (owner 2026-11-02): a person\'s text that reached the customer AND a visit of theirs completed after the bell close it, on any ET day; either alone, contact or a visit from before the bell, a visit that never ran, another customer\'s visit on the same phone and the older failure bell do not', async () => {
       const now = new Date();
       const bellAt = mins(now, -60 * 24 * 10);
       const WENT = 'Answered, and a visit after the text is done';
@@ -1158,7 +1069,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       const sharedPhone = await noteFor();
       const failure = await noteFor({ doneWhen: undefined, triggerKey: 'sms_operational_failure' });
       failure.row = await bell({ category: 'alert', created_at: bellAt, metadata: { triggerKey: 'sms_operational_failure', dedupeKey: `sms-operations-failed:${failure.row.id}`, customerId: failure.customer.id } });
-      const all = [both, bothLater, textOnly, visitOnly, textBefore, visitBefore, cancelled, automated, sharedPhone, failure];
 
       await staffText(both.customer, both.phone, mins(bellAt, 20));
       await visitFor(both, mins(bellAt, 60 * 24 * 3));
@@ -1181,17 +1091,7 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       await staffText(failure.customer, failure.phone, mins(bellAt, 20));
       await visitFor(failure, mins(bellAt, 60 * 24 * 3));
 
-      // Off: not judged. The portal chat gate is not this class's gate: it stays off through the rest.
-      await sweep();
-      for (const c of all) expect(await state(c)).toBeNull();
-      // Shadow: only what WOULD close is recorded.
-      gate('shadow');
-      await sweep();
-      for (const c of all) expect(await state(c)).toBeNull();
-      expect((await wouldClose(both.row.id))[0].metadata).toMatchObject({ class: 'text_note_checked', reason: WENT });
-      expect(await wouldClose(textOnly.row.id)).toHaveLength(0);
-      // True: closes the two with both facts, leaves every other open.
-      gate('true');
+      // Closes the two with both facts, leaves every other open.
       await sweep();
       expect(await state(both)).toEqual(['relevance', WENT]);
       expect(await state(bothLater)).toEqual(['relevance', WENT]);
@@ -1200,14 +1100,9 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       await visitFor(textOnly, mins(now, -5));
       await sweep();
       expect(await state(textOnly)).toEqual(['relevance', WENT]);
-      // Rollback: the gate off puts back, unread, what it closed.
-      delete process.env.GATE_ALERT_CONTACT_CLOSE;
-      await sweep();
-      for (const c of all) expect(await state(c)).toBeNull();
     }, 60000);
 
-    describe('a staff action answers a text (GATE_SMS_STAFF_ACTION_ANSWERS)', () => {
-      const f1 = (mode) => { if (mode === undefined) delete process.env.GATE_SMS_STAFF_ACTION_ANSWERS; else process.env.GATE_SMS_STAFF_ACTION_ANSWERS = mode; };
+    describe('a staff action answers a text', () => {
       let phoneN = 8301;
       let invoiceN = 0;
       const BOOKED = 'A visit was booked';
@@ -1255,56 +1150,26 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
         expect(require('../services/sms-staff-action-answers').SYSTEM_PAYMENT_RECORDERS).toContain(require('../services/zelle-notice-reconciler').RECORDED_BY);
       });
 
-      test('alert witness: off changes nothing; shadow records the would-close only; true closes by the action named (a series child, an action before the text or after 24 h, a cancelled, automatic or another customer\'s visit or payment, a card or Auto Pay payment and the reconciler do not)', async () => {
-        gate('true');
+      test('alert witness: closes by the action named (a series child, an action before the text or after 24 h, a cancelled, automatic or another customer\'s visit or payment, a card or Auto Pay payment and the Zelle reconciler\'s own entry do not)', async () => {
         const cases = await build();
-        const all = Object.values(cases);
-        await sweep();
-        for (const c of all) expect((await get(c.row.id)).done_at).toBeNull();
-
-        f1('shadow');
-        await sweep();
-        for (const c of all) expect((await get(c.row.id)).done_at).toBeNull();
-        for (const [name, reason] of Object.entries(closes)) {
-          const rows = await wouldClose(cases[name].row.id);
-          expect(rows).toHaveLength(1);
-          expect(rows[0].metadata).toMatchObject({ class: 'inbound_sms', reason });
-        }
-        for (const name of stays) expect(await wouldClose(cases[name].row.id)).toHaveLength(0);
-
-        f1('true');
         await sweep();
         for (const [name, reason] of Object.entries(closes)) expect(await get(cases[name].row.id)).toMatchObject({ done_by: 'relevance', resolution: reason });
         for (const name of stays) expect((await get(cases[name].row.id)).done_at).toBeNull();
-
-        // The gate switched off: the re-arm pass puts the closed alerts back.
-        f1(undefined);
-        const back = await sweep();
-        expect(back.rearmed).toBeGreaterThanOrEqual(Object.keys(closes).length);
-        for (const name of Object.keys(closes)) expect((await get(cases[name].row.id)).done_at).toBeNull();
       }, 60000);
 
-      test('the Messages reader: true drops a text a staff action answered; off and shadow list it as before; the others stay listed in every mode', async () => {
+      test('the Messages reader drops a text a staff action answered; the others stay listed', async () => {
         const { loadPendingSmsConversations } = require('../services/sms-pending-conversations');
         const cases = await build();
         const pendingFor = async (name) => (await loadPendingSmsConversations({ includeLegacyOnly: true, customerId: cases[name].customer.id }))
           .map((r) => r.customer_id || r.peer);
-        for (const mode of [undefined, 'shadow']) {
-          f1(mode);
-          for (const name of Object.keys(cases)) expect(await pendingFor(name)).toHaveLength(1);
-        }
-        f1('true');
         for (const name of Object.keys(closes)) expect(await pendingFor(name)).toHaveLength(0);
         for (const name of stays) expect(await pendingFor(name)).toHaveLength(1);
         // The Messages reader and the alert agree: with the reader dropping it, the sweep closes by the named action.
-        gate('true');
         await sweep();
         for (const [name, reason] of Object.entries(closes)) expect(await get(cases[name].row.id)).toMatchObject({ done_by: 'relevance', resolution: reason });
       }, 60000);
 
       test('a shared phone is judged by customer id: the action for this customer closes the text, one for the other customer on the number does not', async () => {
-        gate('true');
-        f1('true');
         const phone = `+1555555${phoneN += 1}`;
         const t0 = mins(new Date(), -360);
         const mine = await customerWith(phone);
@@ -1317,22 +1182,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
         await sweep();
         expect(await get(a.row.id)).toMatchObject({ done_by: 'relevance', resolution: BOOKED });
       }, 60000);
-    });
-
-    test('rollback: gate off puts back, unread, what the contact classes closed in the window', async () => {
-      const t0 = mins(new Date(), -120);
-      const customer = await customerWith('+15555558051');
-      const { row } = await text({ customer, phone: customer.phone, at: t0 });
-      await staffText(customer, customer.phone, mins(t0, 5));
-      gate('true');
-      await sweep();
-      expect((await get(row.id)).done_by).toBe('relevance');
-      delete process.env.GATE_ALERT_CONTACT_CLOSE;
-      const result = await sweep();
-      expect(result.rearmed).toBeGreaterThanOrEqual(1);
-      const back = await get(row.id);
-      expect([back.read_at, back.done_at, back.done_by]).toEqual([null, null, null]);
-      expect(back.metadata.retired).toBeUndefined();
     });
   });
 });

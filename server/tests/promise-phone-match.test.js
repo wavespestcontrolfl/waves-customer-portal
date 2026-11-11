@@ -8,7 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const GATES = ['GATE_CALL_PROMISE_AI_CLOSE', 'GATE_CALL_PROMISE_AI_NO_CUSTOMER', 'GATE_PROMISE_PHONE_MATCH_CLOSE', 'GATE_ALERT_CONTACT_CLOSE'];
+const GATES = ['GATE_CALL_PROMISE_AI_CLOSE', 'GATE_CALL_PROMISE_AI_NO_CUSTOMER', 'GATE_PROMISE_PHONE_MATCH_CLOSE'];
 const saved = Object.fromEntries(GATES.map((g) => [g, process.env[g]]));
 afterEach(() => { for (const g of GATES) { if (saved[g] === undefined) delete process.env[g]; else process.env[g] = saved[g]; } });
 beforeEach(() => { for (const g of GATES) delete process.env[g]; });
@@ -181,15 +181,14 @@ describe('the unknown-sender text bell (admin-alert-relevance.js unknown_sms)', 
     metadata: { triggerKey: 'sms_reply', dedupeKey: 'sms-reply:SM1', payload: { twilioSid: 'SM1', threadId: null } } });
   const anchor = new Date('2026-11-04T18:00:00Z');
   const minutes = (m) => new Date(anchor.getTime() + m * 60000);
-  const subject = (contact, contactMode = 'true') => ({ contactMode, contact: { anchor, unknownSender: true, ...contact } });
+  const subject = (contact) => ({ contact: { anchor, unknownSender: true, ...contact } });
 
   test('the emitter\'s key prefix is the one this class matches', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/sms-reply-alert-delivery.js'), 'utf8');
     expect(source).toContain('`sms-reply:${MessageSid}`');
     expect(fs.readFileSync(path.join(__dirname, '../services/admin-alert-relevance.js'), 'utf8')).toContain("const UNKNOWN_SMS_PREFIX = 'sms-reply:';");
   });
-  test('gate off: the row is the old inbound_sms class and nothing judges it; shadow or true: its own class', () => {
-    process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
+  test('gate off: the row is the old inbound_sms class; shadow or true: its own class', () => {
     expect(relevance().classify(bellRow()).key).toBe('inbound_sms');
     process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'shadow';
     expect(relevance().classify(bellRow()).key).toBe('unknown_sms');
@@ -201,7 +200,6 @@ describe('the unknown-sender text bell (admin-alert-relevance.js unknown_sms)', 
     expect(relevance().classify(known).key).toBe('inbound_sms');
   });
   test('a person\'s delivered reply after the text closes it; a person\'s call closes it', () => {
-    process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
     process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'true';
     const cls = relevance().classify(bellRow());
     expect(relevance().judge(cls, subject({ textAt: minutes(5) }))).toEqual({ reason: 'Answered by text', would: null });
@@ -209,7 +207,6 @@ describe('the unknown-sender text bell (admin-alert-relevance.js unknown_sms)', 
     expect(relevance().judge(cls, subject({ inAt: minutes(5) }))).toEqual({ reason: 'Answered by a call', would: null });
   });
   test('an automated reply (no person witness), a reply from before the text, and a reply before the sender\'s latest text leave it open', () => {
-    process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
     process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'true';
     const cls = relevance().classify(bellRow());
     const open = { reason: null, would: null };
@@ -219,16 +216,11 @@ describe('the unknown-sender text bell (admin-alert-relevance.js unknown_sms)', 
     expect(relevance().judge(cls, subject({ textAt: minutes(40), lastInboundAt: minutes(30) })).reason).toBe('Answered by text');
   });
   test('shadow records the verdict and closes nothing; a known customer item (no unknownSender flag) is not this rule\'s', () => {
-    process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
     process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'shadow';
     const cls = relevance().classify(bellRow());
     expect(relevance().judge(cls, subject({ textAt: minutes(5) }))).toEqual({ reason: null, would: 'Answered by text' });
     process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'true';
-    expect(relevance().judge(cls, { contactMode: 'true', contact: { anchor, textAt: minutes(5) } })).toEqual({ reason: null, would: null });
-  });
-  test('the contact gate off silences it whatever its own gate says', () => {
-    process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'true';
-    expect(relevance().classify(bellRow())).toBeNull(); // contactOnly: not in the table at all
+    expect(relevance().judge(cls, { contact: { anchor, textAt: minutes(5) } })).toEqual({ reason: null, would: null });
   });
 });
 
