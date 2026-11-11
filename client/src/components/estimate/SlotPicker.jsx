@@ -490,7 +490,7 @@ export default function SlotPicker({
   // Waves AI search sits above the picker; the 90-day date input below it
   // reaches past the two-week window (same order as /book).
   const search = (
-    <div style={{ display: 'grid', gap: 12, marginBottom: 16 }}>
+    <div className={website ? undefined : 'gc-slot-search'} style={{ display: 'grid', gap: 12, marginBottom: 16 }}>
       <WavesAIScheduleSearch
         theme={website ? { accent: '#ffd700', accentText: '#1b2c5b', text: '#1b2c5b', muted: '#475569', border: '#cbd5e1', surface: '#ffffff', inputBg: '#ffffff' } : { accent: W.blueDeeper, accentText: W.white, text: W.blueDeeper, muted: W.textCaption, border: W.borderCool, surface: W.white, inputBg: W.offWhite }}
         showEyebrow={false}
@@ -618,7 +618,7 @@ export default function SlotPicker({
       }}>
         {glassHeading || 'Search by date or time \u2014 no calling, no hold music, no back-and-forth'}
       </h2>
-      <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.5, marginBottom: 16 }}>
+      <div className="gc-lead" style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.5, marginBottom: 16 }}>
         {glass
           ? GLASS_COPY.schedExcerpt
           : 'These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.'}
@@ -627,7 +627,7 @@ export default function SlotPicker({
   );
 
   return (
-    <div data-website-card="" style={estimateCard()}>
+    <div data-website-card="" className={website ? undefined : 'gc-sched'} style={estimateCard()}>
       {website ? null : heading}
       {glass && selectedSlot && !glassSlotIsStale(selectedSlot) ? (
         <GlassTechChip slotMeta={glassSlotMeta(selectedSlot)} licenseNumber={licenseNumber} />
