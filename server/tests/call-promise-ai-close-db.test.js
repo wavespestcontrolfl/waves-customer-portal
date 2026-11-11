@@ -2,7 +2,7 @@
 // DATABASE_URL): which promises are candidates, what closes them (a later text, a
 // booked or rescheduled visit, the customer's own "got it"), what never does
 // (open, uncertain, an ungrounded quote, the customer's words on a call), the
-// dark gate, the verdict cache, Reopen, and the re-judge that keeps or reopens a
+// PROMISE_EVIDENCE_CLOSE off switch, the verdict cache, Reopen, and the re-judge that keeps or reopens a
 // close. The provider is mocked at dispatchWithFallback. Fixtures fictitious.
 process.env.GATE_CALL_COMMITMENTS = 'true';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -22,7 +22,7 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
   let close;
   let seq = 0;
   const made = { callIds: [], customerIds: [], smsIds: [], commitmentIds: [], visitIds: [] };
-  const saved = { gate: process.env.GATE_CALL_PROMISE_AI_CLOSE, close: process.env.PROMISE_EVIDENCE_CLOSE };
+  const saved = { close: process.env.PROMISE_EVIDENCE_CLOSE };
   // What the mocked provider answers, by the promise's description; anything
   // else (a stray row in a shared scratch database) is answered "open".
   const scenario = new Map();
@@ -38,9 +38,7 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
     close = require('../services/call-promise-ai-close');
   });
   afterAll(async () => {
-    for (const [name, value] of [['GATE_CALL_PROMISE_AI_CLOSE', saved.gate], ['PROMISE_EVIDENCE_CLOSE', saved.close]]) {
-      if (value === undefined) delete process.env[name]; else process.env[name] = value;
-    }
+    if (saved.close === undefined) delete process.env.PROMISE_EVIDENCE_CLOSE; else process.env.PROMISE_EVIDENCE_CLOSE = saved.close;
     const del = async (table, ids, column = 'id') => { if (ids.length) await db(table).whereIn(column, ids).del(); };
     await db('audit_log').whereIn('resource_id', made.commitmentIds).del();
     await del('job_status_history', made.visitIds, 'job_id');
@@ -55,7 +53,6 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
     await db.destroy();
   });
   beforeEach(() => {
-    process.env.GATE_CALL_PROMISE_AI_CLOSE = 'true';
     delete process.env.PROMISE_EVIDENCE_CLOSE;
     scenario.clear();
     dispatchWithFallback.mockReset();
@@ -235,17 +232,17 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       for (const w of [lonely, reviewed, done, customerParty, noCustomer]) expect(asked(w)).toHaveLength(0);
     });
 
-    test('gate off: nothing is read, asked or written', async () => {
-      delete process.env.GATE_CALL_PROMISE_AI_CLOSE;
+    test('PROMISE_EVIDENCE_CLOSE off: nothing is read, asked or written', async () => {
+      process.env.PROMISE_EVIDENCE_CLOSE = 'off';
       const w = await world();
       const text = await addSms(w);
       say(w, fulfilledBy(`sms:${text}`, 'the warranty covers the retreatment'));
       expect(await run(w)).toEqual({ skipped: true, reason: 'gated_off' });
-      expect(close.runInBackground({ conn: db, callIds: [w.call.id] })).toBeNull();
+      await close.runInBackground({ conn: db, callIds: [w.call.id] });
       expect(dispatchWithFallback).not.toHaveBeenCalled();
       const after = await row(w.commitment.id);
       expect(after).toMatchObject({ status: 'open', fulfillment: null, contact_check: null });
-      // The fixed-rule refresh is untouched by the gate: still no AI proof.
+      // The fixed-rule refresh is untouched by the switch: still no AI proof.
       await cc.refreshFulfillment(db, w.call.id);
       expect((await row(w.commitment.id)).fulfillment?.kind).not.toBe('ai_check');
     });

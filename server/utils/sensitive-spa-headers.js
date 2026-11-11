@@ -39,7 +39,7 @@ function isServiceReportPath(reqPath = '') {
 // (permanently redirected to wavespestcontrol.com). Over-noindexing a marketing page is a minor SEO cost;
 // under-noindexing a real estimate leaks address + pricing, so default to
 // noindex. The estimate's own "Book a free Waves Assessment first" page
-// (/estimate/<token>/assessment, GATE_ESTIMATE_ASSESSMENT_FIRST) carries the
+// (/estimate/<token>/assessment) carries the
 // same bearer token and the customer's name and address, so it is the same
 // sensitive page; case-insensitive, as the client router matches it.
 function isEstimatePath(reqPath = '') {

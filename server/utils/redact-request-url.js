@@ -71,7 +71,7 @@ const UUID_BEARER_PARENTS = new Set(['unsubscribe', 'confirm', 'quiz', 'feedback
 // -8hex suffix requirement keeps fixed admin children (slots, config,
 // extension-request, UUID row ids) out of scope. 'estimate-assessment' is the
 // estimate-token assessment booking API (/api/public/estimate-assessment/
-// <token>[/find-slots], GATE_ESTIMATE_ASSESSMENT_FIRST); its SPA page
+// <token>[/find-slots]); its SPA page
 // (/estimate/<token>/assessment) is already under 'estimate'.
 const ESTIMATE_BEARER_PARENTS = new Set(['estimate', 'estimates', 'estimate-assessment']);
 const LEGACY_ESTIMATE_SLUG = /^[a-z0-9][a-z0-9-]*-[a-f0-9]{8}$/i;

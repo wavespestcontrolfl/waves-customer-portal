@@ -4239,7 +4239,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     // contacts often have no opt-in row): if a later edit clears the stamp,
     // the held person's YES can still restore it.
     //
-    // officeConfirmedBy (the family-account card's Attach as contact, GATE_CALL_ADDRESS_FAMILY_CARD): the office
+    // officeConfirmedBy (the family-account card's Attach as contact): the office
     // tapping Attach IS the human confirmation that this person belongs to the account, so their next call may
     // link (owner 2026-10-24; that is how the duplicate stops). That is recorded as an explicit, separate fact,
     // service_preferences.office_confirmed_slot_phones [{ phone_key, by, at, source }], read by
@@ -4615,11 +4615,10 @@ function slotOnlyLinkAllowed(customer, phone, extracted = {}) {
   return !!extractedFirst && !!slotFirst && sameFirstName(extractedFirst, slotFirst);
 }
 
-// A slot the family-account card's Attach filed (GATE_CALL_ADDRESS_FAMILY_CARD) is identity only on the office's own
+// A slot the family-account card's Attach filed is identity only on the office's own
 // confirmation: its service_preferences.office_confirmed_slot_phones entry must name who confirmed it and when. A
-// slot with no such entry (every pre-existing slot) and the gate off are untouched.
+// slot with no such entry (every pre-existing slot) is untouched.
 function attachSlotOfficeConfirmed(customer, phone) {
-  if (!require('../config/feature-gates').callAddressFamilyCardLive()) return true;
   let prefs = customer.service_preferences;
   if (typeof prefs === 'string') {
     try { prefs = JSON.parse(prefs); } catch { prefs = null; }
@@ -15082,15 +15081,14 @@ const CallRecordingProcessor = {
     // could be written (a failed card write must never turn into a duplicate customer).
     let spokenNumberSuggested = false;
     let phoneMatchedThisPass = false;
-    // GATE_CALL_ADDRESS_FAMILY_CARD (owner 2026-10-24): an unknown-number caller whose stated address (or
-    // name) an account already has got a suggest-only family-account card above. With the gate on, that card
+    // Owner 2026-10-24: an unknown-number caller whose stated address (or
+    // name) an account already has got a suggest-only family-account card above. That card
     // is the pass's whole answer: no new customer is minted around it (the duplicate the card exists to
     // stop), the call stays customer-less like the shared-phone case, and the workable-lead path below still
     // captures the prospect. The card's New customer action closes it and reprocesses, which mints the old
     // way. A card an operator already closed is never filed again, so it holds nothing.
     let familyCardHold = false;
-    const familyCardCovers = !!familyCardReport.filed && familyCardReport.filed !== 'callback_spoken_number'
-      && require('../config/feature-gates').callAddressFamilyCardLive();
+    const familyCardCovers = !!familyCardReport.filed && familyCardReport.filed !== 'callback_spoken_number';
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic

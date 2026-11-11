@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 //
-// "Book a free Waves Assessment first" from an estimate (/estimate/:token/assessment,
-// GATE_ESTIMATE_ASSESSMENT_FIRST): the `assessment` flow in ScheduleFlowPage.jsx, the inspection page
+// "Book a free Waves Assessment first" from an estimate (/estimate/:token/assessment): the `assessment` flow in ScheduleFlowPage.jsx, the inspection page
 // keyed by the estimate's token (routes/estimate-assessment-public.js). It talks to its own API, names the
 // visit a free Waves Assessment, never offers to change the address, and keeps the inspection terminal and
 // SLOT_TAKEN behavior.

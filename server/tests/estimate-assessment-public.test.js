@@ -1,9 +1,8 @@
-// "Book a free Waves Assessment first" from an estimate (GATE_ESTIMATE_ASSESSMENT_FIRST,
-// routes/estimate-assessment-public.js). The inspection page's helpers, the estimate predicates and the
-// booking engine are stubbed at their seams. Invariants: gate off = the generic 404 with no read; only an
-// open estimate with a customer at the estimate's property is offered or booked; an open assessment answers
-// already_booked; the commit books the assessment for the estimate's own customer with this page's source
-// and alert, never linked to the estimate; the gate is read again right before the booking. Synthetic data.
+// "Book a free Waves Assessment first" from an estimate (routes/estimate-assessment-public.js). The
+// inspection page's helpers, the estimate predicates and the booking engine are stubbed at their seams.
+// Invariants: only an open estimate with a customer at the estimate's property is offered or booked; an
+// open assessment answers already_booked; the commit books the assessment for the estimate's own customer
+// with this page's source and alert, never linked to the estimate. Synthetic data.
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -93,7 +92,6 @@ function estimate(overrides = {}) {
 }
 
 beforeEach(() => {
-  process.env.GATE_ESTIMATE_ASSESSMENT_FIRST = 'true';
   estimateRow = estimate();
   customerRow = { ...CUSTOMER };
   visitRows = [];
@@ -109,7 +107,6 @@ beforeEach(() => {
   mockCallSideBlock.mockClear();
   mockBlockedUnderLock.mockReset().mockResolvedValue(false);
 });
-afterAll(() => { delete process.env.GATE_ESTIMATE_ASSESSMENT_FIRST; });
 
 async function call(path, { method = 'GET', body } = {}) {
   const app = express();
@@ -128,12 +125,6 @@ async function call(path, { method = 'GET', body } = {}) {
 }
 
 describe('GET /:token', () => {
-  test('gate off: the generic 404, no read', async () => {
-    delete process.env.GATE_ESTIMATE_ASSESSMENT_FIRST;
-    expect(await call(TOKEN)).toMatchObject({ status: 404, body: { error: 'not_found' } });
-    expect(db).not.toHaveBeenCalled();
-  });
-
   test('an open estimate: the page contract, the customer the estimate was sent to, the catalog duration, no-store', async () => {
     const res = await call(TOKEN);
     expect(res.status).toBe(200);
@@ -309,15 +300,6 @@ describe('POST /:token (book)', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('the gate turned off while the times were rebuilt: 404 and nothing booked', async () => {
-    mockInspection.buildAvailabilityForLead.mockImplementation(async () => {
-      delete process.env.GATE_ESTIMATE_ASSESSMENT_FIRST;
-      return { days: [{ date: '2026-11-03', slots: [{ start_time: '09:00', end_time: '09:45' }] }] };
-    });
-    expect((await book()).status).toBe(404);
-    expect(mockInspection.bookAssessmentVisit).not.toHaveBeenCalled();
-  });
-
   test('the per-customer assessment lane caught a duplicate: the already_booked state', async () => {
     mockInspection.bookAssessmentVisit.mockResolvedValue({ ok: false, status: 409, code: 'ALREADY_BOOKED', error: 'x' });
     mockInspection.findOpenVisit.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'visit-2', scheduled_date: '2026-11-03' });
@@ -330,14 +312,6 @@ describe('POST /:token (book)', () => {
       return { ok: false, status: 409, code: 'ESTIMATE_CHANGED', error: 'This estimate just changed — please refresh the page.' };
     });
     expect(await book()).toMatchObject({ status: 200, body: { state: 'gone' } });
-  });
-
-  test('the gate went dark inside the booking transaction: the generic 404', async () => {
-    mockInspection.bookAssessmentVisit.mockImplementation(async () => {
-      delete process.env.GATE_ESTIMATE_ASSESSMENT_FIRST;
-      return { ok: false, status: 409, code: 'ESTIMATE_CHANGED', error: 'x' };
-    });
-    expect(await book()).toMatchObject({ status: 404, body: { error: 'not_found' } });
   });
 
   test('a 409 at commit after which the property reads out of the area: gone, not a retry loop', async () => {
@@ -386,9 +360,6 @@ describe('the in-transaction estimate guard', () => {
     ['moved to another customer', () => { estimateRow = estimate({ customer_id: 'cust-2' }); }],
     ['blocked on the call side', () => { mockBlockedUnderLock.mockResolvedValueOnce(true); }],
     ['the customer moved off the estimate\'s property', () => { customerRow = { ...CUSTOMER, zip: '34236' }; }],
-    ['the gate turned off during the guard\'s lock waits', () => {
-      mockBlockedUnderLock.mockImplementationOnce(async () => { delete process.env.GATE_ESTIMATE_ASSESSMENT_FIRST; return false; });
-    }],
   ])('%s: ineligible', async (_label, arrange) => {
     arrange();
     expect(await revalidate(fakeTrx().trx)).toBe('ineligible');
@@ -437,14 +408,11 @@ describe('assessmentFirstFor (/data)', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('completed-assessment check skipped'));
   });
 
-  test('gate off, a staff or document view, an open assessment, another property: nothing', async () => {
+  test('a staff or document view, an open assessment, another property: nothing', async () => {
     expect(await assessmentFirstFor(estimate(), { open: false })).toBeNull();
     mockInspection.findOpenVisit.mockResolvedValueOnce({ id: 'visit-1', scheduled_date: '2026-11-03' });
     expect(await assessmentFirstFor(estimate(), { open: true })).toBeNull();
     customerRow = { ...CUSTOMER, zip: '34236' };
-    expect(await assessmentFirstFor(estimate(), { open: true })).toBeNull();
-    customerRow = { ...CUSTOMER };
-    delete process.env.GATE_ESTIMATE_ASSESSMENT_FIRST;
     expect(await assessmentFirstFor(estimate(), { open: true })).toBeNull();
   });
 });

@@ -79,7 +79,6 @@ jest.mock('../config/feature-gates', () => ({
   leadInspectionLinkLive: () => process.env.GATE_LEAD_INSPECTION_LINK === 'true',
   commercialProposalSignLive: () => false,
   commercialFirstVisitLive: () => false,
-  estimateAssessmentFirstLive: () => process.env.GATE_ESTIMATE_ASSESSMENT_FIRST === 'true',
   // The PDF render pass reads both misting layout gates (GATE_MISTING_LAYOUT_DESIGNER); off here.
   mosquitoMistingLive: () => false,
   mistingLayoutDesignerLive: () => false,
@@ -222,16 +221,14 @@ afterAll(() => {
   else process.env.GATE_LEAD_INSPECTION_LINK = originalInspectionGate;
 });
 
-// "Book a free Waves Assessment first" (GATE_ESTIMATE_ASSESSMENT_FIRST): when it is offered it replaces this lead-only
+// "Book a free Waves Assessment first": when it is offered it replaces this lead-only
 // offer, and the probe for the old one never runs. The offer's own eligibility is estimate-assessment-public.test.js's.
 describe('GET /:token/data — assessmentFirst replaces the consultation offer', () => {
   afterEach(() => {
-    delete process.env.GATE_ESTIMATE_ASSESSMENT_FIRST;
     jest.restoreAllMocks();
   });
 
-  test('gate on and offered: assessmentFirst rides the payload, no consultationOffer and no probe', async () => {
-    process.env.GATE_ESTIMATE_ASSESSMENT_FIRST = 'true';
+  test('offered: assessmentFirst rides the payload, no consultationOffer and no probe', async () => {
     const offer = jest.spyOn(require('../routes/estimate-assessment-public')._internals, 'assessmentFirstFor')
       .mockResolvedValue({ url: '/estimate/sampletoken/assessment' });
     const row = estimateRow();
@@ -245,8 +242,7 @@ describe('GET /:token/data — assessmentFirst replaces the consultation offer',
     expect(offer.mock.calls[0][1]).toMatchObject({ open: true });
   });
 
-  test('gate on but nothing to offer: the consultation offer is unchanged', async () => {
-    process.env.GATE_ESTIMATE_ASSESSMENT_FIRST = 'true';
+  test('nothing to offer: the consultation offer is unchanged', async () => {
     jest.spyOn(require('../routes/estimate-assessment-public')._internals, 'assessmentFirstFor').mockResolvedValue(null);
     const row = estimateRow();
     dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
@@ -257,16 +253,6 @@ describe('GET /:token/data — assessmentFirst replaces the consultation offer',
     });
   });
 
-  test('gate off: nothing new, and the offer is never asked', async () => {
-    const offer = jest.spyOn(require('../routes/estimate-assessment-public')._internals, 'assessmentFirstFor');
-    const row = estimateRow();
-    dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
-    await withServer(async (baseUrl) => {
-      const body = await (await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`)).json();
-      expect(Object.prototype.hasOwnProperty.call(body, 'assessmentFirst')).toBe(false);
-    });
-    expect(offer).not.toHaveBeenCalled();
-  });
 });
 
 // A Waves Assessment the customer already had completed while the estimate was prepared was the look: neither free
@@ -276,10 +262,8 @@ describe('GET /:token/data — a completed Waves Assessment (the look already ha
   const lookRow = () => estimateRow({ customer_id: 'cust-look', created_at: new Date(Date.now() - 7 * 86400000).toISOString() });
   const fetchData = (row) => withServer(async (baseUrl) => (await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`)).json());
   const has = (body, key) => Object.prototype.hasOwnProperty.call(body, key);
-  afterEach(() => { delete process.env.GATE_ESTIMATE_ASSESSMENT_FIRST; });
 
-  test('both consultation gates and assessment-first on, eligible lead, completed look: neither offer', async () => {
-    process.env.GATE_ESTIMATE_ASSESSMENT_FIRST = 'true';
+  test('both consultation gates on, eligible lead, completed look: neither offer', async () => {
     const row = lookRow();
     dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD, customers: CUSTOMER, scheduled_services: { id: 'visit-1' } };
     const body = await fetchData(row);
@@ -287,17 +271,9 @@ describe('GET /:token/data — a completed Waves Assessment (the look already ha
     expect(has(body, 'consultationOffer')).toBe(false);
   });
 
-  test('assessment-first gate off, completed look: the lead-link consultation offer is withheld', async () => {
-    const row = lookRow();
-    dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD, customers: CUSTOMER, scheduled_services: { id: 'visit-1' } };
-    expect(has(await fetchData(row), 'consultationOffer')).toBe(false);
-  });
-
-  test('no completed look: assessment-first is offered with its gate on, the consultation offer is unchanged with it off', async () => {
+  test('no completed look: assessment-first is offered and the consultation offer is not built', async () => {
     const row = lookRow();
     dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD, customers: CUSTOMER };
-    expect((await fetchData(row)).consultationOffer).toEqual({ url: expect.stringContaining('/inspection/') });
-    process.env.GATE_ESTIMATE_ASSESSMENT_FIRST = 'true';
     const body = await fetchData(row);
     expect(body.assessmentFirst).toEqual({ url: `/estimate/${row.token}/assessment` });
     expect(has(body, 'consultationOffer')).toBe(false);

@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * AI close of Waves' open CALL promises (owner ruling 2026-10-24, GATE_CALL_PROMISE_AI_CLOSE):
+ * AI close of Waves' open CALL promises (owner ruling 2026-10-24):
  * "open promises should close automatically ... a text is sent, the customer
  * confirms it has been resolved, or an appointment is booked or rescheduled —
  * all of these should be checked by the agent for all the communication lines
@@ -47,7 +47,7 @@
 
 const crypto = require('crypto');
 const logger = require('./logger');
-const { isEnabled, promiseEvidenceCloseLive, callPromiseAiCloseLive } = require('../config/feature-gates');
+const { isEnabled, promiseEvidenceCloseLive } = require('../config/feature-gates');
 // GATE_CALL_PROMISE_AI_NO_CUSTOMER, read at call time and guarded like the other late-added readers: a test that mocks
 // feature-gates without it reads off.
 const callPromiseAiNoCustomerLive = () => require('../config/feature-gates').callPromiseAiNoCustomerLive?.() === true;
@@ -490,7 +490,7 @@ async function storeCache(conn, row, cache, now) {
 }
 
 async function runCallPromiseAiClose({ conn = require('../models/db'), now = new Date(), maxModelCalls = MAX_MODEL_CALLS, callIds = null, pageSize = CANDIDATE_LIMIT, verify, verifyThread } = {}) {
-  if (!callPromiseAiCloseLive() || !isEnabled('callCommitments') || !promiseEvidenceCloseLive()) return { skipped: true, reason: 'gated_off' };
+  if (!isEnabled('callCommitments') || !promiseEvidenceCloseLive()) return { skipped: true, reason: 'gated_off' };
   const budget = { left: maxModelCalls };
   const tally = { candidates: 0, model_calls: 0, closed: 0, lost: 0, deferred: 0, skipped: 0, failed: 0 };
   const stopAt = Date.now() + MAX_RUN_MS;
@@ -589,7 +589,7 @@ async function checkRow(conn, row, { now, budget, cap, stopAt, tally, verify, ve
 // repeat call is the cache's to absorb).
 let backgroundRun = null;
 function runInBackground({ conn, callIds }) {
-  if (!callPromiseAiCloseLive() || backgroundRun || !callIds?.length) return null;
+  if (backgroundRun || !callIds?.length) return null;
   backgroundRun = runCallPromiseAiClose({ conn, callIds, maxModelCalls: QUEUE_MODEL_CALLS })
     .catch((err) => { logger.warn(`[call-promise-ai-close] background run failed: ${err.code || err.name}`); })
     .finally(() => { backgroundRun = null; });
