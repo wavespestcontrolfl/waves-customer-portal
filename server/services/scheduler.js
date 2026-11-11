@@ -9596,15 +9596,12 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 1:32AM — Admin alert retention (owner 2026-10-26, "ok go"). Marks done,
   // never deletes, an admin bell row idle 30 days and an FYI row idle 7 days
-  // (admin-alert-retention.js). GATE_ALERT_RETENTION: unset = no query, `shadow`
-  // = one audit_log summary row and no change, `true` = expire. Minute 32 of the
-  // 1am hour has no other job (#3208 rule). runExclusive: a deploy overlap must
-  // not run two sweeps over the same page of rows. A deploy that kills the run
-  // re-runs it: a second run finds nothing left to expire (shadow writes a
-  // second summary row, nothing else).
+  // (admin-alert-retention.js), with one audit_log summary row per run. Minute 32
+  // of the 1am hour has no other job (#3208 rule). runExclusive: a deploy overlap
+  // must not run two sweeps over the same page of rows. A deploy that kills the
+  // run re-runs it: a second run finds nothing left to expire.
   // =========================================================================
   const runAdminAlertRetentionTick = async () => {
-    if (require('../config/feature-gates').alertRetentionMode() === 'off') return;
     const tickStartedAt = Date.now();
     try {
       const lockRes = await runExclusive('admin-alert-retention', async () => {

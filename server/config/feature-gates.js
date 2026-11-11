@@ -174,7 +174,6 @@
  *   GATE_TECH_JOB_TYPE_CHECKS=true (owner 2026-10-25, second technician starts early 2027: job type from the service catalog. The capability checks (slot offers, automatic technician pick, tech-out auto-move, auto-dispatch apply, the save-time fences) today read a visit's job type from its NAME, so "Palm Tree Nutritional Treatment", "Semiannual Palm", "Palm Fert" and "Top Dress" read as general pest and a technician set to Off for Lawn can still get them. On, the category comes from the service library first (the visit's service_id, else its service key, to services.category, mapped onto the five capability categories by the same table the service-line map uses) and falls back to the name only when the catalog names none. Office saves (schedule create and edit, board assign and drag, lead booking, Dispatch New Appointment) also add a plain warning, never a block, when the chosen technician is set to Off for the visit's job type; "needs review" never warns. Strict opt-in: exactly 'true', read at call time via techJobTypeChecksLive(). Ships DARK; off = name-only classification and no extra warning, byte-identical. Sends nothing to a customer.)
  *   GATE_AUTO_DISPATCH_KEEP_TECH=true (owner 2026-10-25, second technician starts early 2027: the 04:10 auto-dispatch night run keeps each visit on its own technician. On, a visit that has a technician gets candidate slots on that same technician only (other technicians' slots are dropped as `other_tech`), and the write refuses to change a technician (`TECH_CHANGE_BLOCKED`, the visit stays). An unassigned visit is handled as before. Strict opt-in: exactly 'true', read at call time via autoDispatchKeepTechLive(), resolved once per run as config.keepTech. Ships DARK; off = the night run may move a visit to another technician for a shorter drive, byte-identical to before. Sends nothing to a customer.)
  *   GATE_PROMISE_RECORD_EVIDENCE=shadow|true (owner 2026-10-29, fix F4 "Stuck Alert Fixes": three false overdue bells on promises and asks the records had already answered. On, (1) an invoice Waves sent the customer after a staff promise ("I'll adjust the payment terms") is evidence the model may cite, (2) an estimate the customer accepted after a send-estimate ask counts even if it was sent before the ask, and (3) a waves row (promise or customer request) of kind other, callback or technician_follow_up whose customer has a live, non-series visit booked after the promise text and with its window end still ahead does not ring as overdue until that window end. `shadow` = change nothing; write audit_log rows for what it would have changed (sms_commitment.fulfillment.shadow, sms_commitment.on_track.shadow). Anything else = off, byte-identical. Read at call time via promiseRecordEvidenceMode(). See docs/gates-and-env.md.)
- *   GATE_ALERT_RETENTION=shadow|true (owner 2026-10-26, "ok go": admin alerts expire instead of piling up. A nightly 1:32 AM ET sweep marks done, never deletes, an admin bell row idle for more than 30 days (read or not) and an FYI row idle for more than 7 days; read state is untouched; `shadow` = judge and record one audit_log summary row (counts by rule and category, the re-ring list), change nothing; `true` = expire. Anything else = off. Read at call time via alertRetentionMode(). See docs/gates-and-env.md.)
  *   GATE_SETTINGS_GATE_FLIP=true (owner 2026-11-06: Settings → Advanced → Features gets an on/off switch on every gate the portal can flip (a plain on/off gate with a description line here). Owner login only (requireFullAccess); turning a gate on asks for its name to be typed, turning it off is one click and writes 'false'; every flip writes an audit_log row (gate.flip) and goes through the same Railway variable write as the Intelligence Bar's set_railway_gate (compare-and-swap on the prior value; Railway redeploys the portal, so it restarts briefly). This gate itself, mode/timestamp gates and gates with no description stay Railway-only. Strict opt-in, read at call time via settingsGateFlipLive(); off = the page is read-only exactly as before and the flip routes answer 404)
  *   GATE_ALERT_BELL_ORDER=true (owner 2026-11-05, admin-bell plan decision D1 "go": the admin bell lists the alerts that need the owner first (`metadata.severity` 'needs-you'), then rows with no severity label, then the rest (fyi, broken), each group newest first, and each row shows ONE Area chip (`areaChip`, from `metadata.area` when it is one of the nine Areas). Paging uses a three-part cursor "<rank>~<timestamp>~<uuid>"; a cursor of the other order (the gate flipped under an open panel) restarts at page 1 with restart: true. Technicians' lists use the same order. Unread count, the Done list and a technician's row copy are unchanged. Sends nothing to anyone. Strict 'true', read at call time via alertBellOrderLive(); dark by default; off = byte-identical list, cursor and client. Kill switch: unset.)
  *   GATE_ALERT_CUSTOMER_LINE=true (owner 2026-11-05, step S2 of the admin-bell plan, "go": the admin bell shows the "Customer: Name" line under an alert about a customer while GATE_ALERT_EXPLAINER stays off. The name is a database read (services/admin-alert-customer.js, no AI call); only `customer` is added to the row, never the "What to do" button or its summary. Admin role only. With GATE_ALERT_EXPLAINER on the bell is unchanged by this gate. Strict opt-in, read at call time via alertCustomerLineLive(); off = rows are served as before. Kill switch: unset.)
@@ -4851,10 +4850,6 @@ const gates = {
   // logGateStatus only; services/monday-review-bell.js reads mondayFellOffLineLive() at CALL time. Kill switch: unset.
   mondayFellOffLine: process.env.GATE_MONDAY_FELL_OFF_LINE === 'true',
 
-  // Admin alert retention (owner 2026-10-26). Registered for logGateStatus only; the sweep reads
-  // alertRetentionMode() at CALL time. 'shadow' records, 'true' expires. Kill switch: unset.
-  alertRetention: ['shadow', 'true'].includes(String(process.env.GATE_ALERT_RETENTION || '').trim().toLowerCase()),
-
   // Admin alert quiet fall-off (owner 2026-11-04). Registered for logGateStatus only; the sweep reads
   // alertQuietFallOffMode() at CALL time. 'shadow' counts and logs, 'true' closes. Kill switch: unset.
   alertQuietFallOff: ['shadow', 'true'].includes(String(process.env.GATE_ALERT_QUIET_FALL_OFF || '').trim().toLowerCase()),
@@ -4870,10 +4865,6 @@ const gates = {
   // Promise record evidence (owner 2026-10-29). Registered for logGateStatus only; consumers read
   // promiseRecordEvidenceMode() at CALL time. 'shadow' records, 'true' applies. Kill switch: unset.
   promiseRecordEvidence: ['shadow', 'true'].includes(String(process.env.GATE_PROMISE_RECORD_EVIDENCE || '').trim().toLowerCase()),
-
-  // SMS courtesy tail (owner 2026-10-29). Registered for logGateStatus only; isCourtesyOnly and the
-  // inbound webhook read courtesyTailMode() at CALL time. 'shadow' stamps, 'true' applies. Kill switch: unset.
-  smsCourtesyTail: ['shadow', 'true'].includes(String(process.env.GATE_SMS_COURTESY_TAIL || '').trim().toLowerCase()),
 
   // Service-line map (owner 2026-10-25): 'shadow' records, 'live' (build 4) records and picks.
   // Registered for logGateStatus only; consumers read serviceLineMapMode() at CALL time. Kill switch: unset.
@@ -6937,14 +6928,6 @@ function secondTechLowsLive() {
   return process.env.GATE_SECOND_TECH_LOWS === 'true';
 }
 
-// GATE_ALERT_RETENTION read at CALL time: 'shadow', 'true' or 'off' (services/admin-alert-retention.js).
-// 'shadow' (trimmed, any case) judges every candidate and records one audit_log summary row, changing
-// nothing; 'true' marks the expired rows done. Anything else is off: no query. Unset is the kill.
-function alertRetentionMode() {
-  const value = String(process.env.GATE_ALERT_RETENTION || '').trim().toLowerCase();
-  return value === 'shadow' || value === 'true' ? value : 'off';
-}
-
 // GATE_ALERT_QUIET_FALL_OFF read at CALL time: 'shadow', 'true' or 'off' (services/admin-alert-retention.js).
 // 'shadow' (trimmed, any case) counts and logs the open bell rows that would fall off after 72 quiet hours,
 // writing nothing; 'true' marks them done. Anything else is off: no query. Unset is the kill.
@@ -6965,15 +6948,6 @@ function alertCatalogMode() {
 // 'true' applies it. Anything else is off. Unset is the kill.
 function promiseRecordEvidenceMode() {
   const value = String(process.env.GATE_PROMISE_RECORD_EVIDENCE || '').trim().toLowerCase();
-  return value === 'shadow' || value === 'true' ? value : 'off';
-}
-
-// GATE_SMS_COURTESY_TAIL read at CALL time: 'shadow', 'true' or 'off' (isCourtesyOnly in
-// services/sms-intent.js). 'shadow' (trimmed, any case) leaves every result alone and lets the
-// inbound webhook stamp metadata.courtesyTailWould; 'true' applies the courtesy-tail rule
-// ("Perfect. Go browns" closes the thread). Anything else is off. Unset is the kill.
-function courtesyTailMode() {
-  const value = String(process.env.GATE_SMS_COURTESY_TAIL || '').trim().toLowerCase();
   return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
@@ -8924,12 +8898,8 @@ module.exports.techWorkDaysLive = techWorkDaysLive;
 module.exports.techJobTypeChecksLive = techJobTypeChecksLive;
 // GATE_SECOND_TECH_LOWS reader, on its own line so gate PRs never conflict.
 module.exports.secondTechLowsLive = secondTechLowsLive;
-// GATE_ALERT_RETENTION reader, on its own line so gate PRs never conflict.
-module.exports.alertRetentionMode = alertRetentionMode;
 // GATE_ALERT_QUIET_FALL_OFF reader, on its own line so gate PRs never conflict.
 module.exports.alertQuietFallOffMode = alertQuietFallOffMode;
-// GATE_SMS_COURTESY_TAIL reader, on its own line so gate PRs never conflict.
-module.exports.courtesyTailMode = courtesyTailMode;
 // GATE_SERVICE_LINE_MAP reader, on its own line so gate PRs never conflict.
 module.exports.serviceLineMapMode = serviceLineMapMode;
 // GATE_UNASSIGNED_VISIT_GUARD reader, on its own line so gate PRs never conflict.
@@ -9368,17 +9338,6 @@ function alertRingOnceLive() {
 }
 // GATE_ALERT_RING_ONCE reader, on its own line so gate PRs never conflict.
 module.exports.alertRingOnceLive = alertRingOnceLive;
-
-// GATE_ACCEPTED_PLAN_RING_ON_CHANGE read at CALL time, strict `=== 'true'`, dark in every environment
-// (owner 2026-10-29, "go"). On, the schedule-integrity watchdog versions its "Accepted recurring plan
-// needs schedule review" bell by the finding (issues, pattern, planned and recorded counts) instead of
-// every visit row's revision and date, so a routine visit edit no longer rings a standing bell again
-// or undoes a person's Done; a changed finding still rings. Off = today's behavior, byte for byte.
-function acceptedPlanRingOnChangeLive() {
-  return process.env.GATE_ACCEPTED_PLAN_RING_ON_CHANGE === 'true';
-}
-// GATE_ACCEPTED_PLAN_RING_ON_CHANGE reader, on its own line so gate PRs never conflict.
-module.exports.acceptedPlanRingOnChangeLive = acceptedPlanRingOnChangeLive;
 
 // GATE_ALERT_CLAUDE_FAULTS read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-02,
 // "build all"). On, an alert the bell policy would DROP (no row) is written to Claude's queue instead when the code

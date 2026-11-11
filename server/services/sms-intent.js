@@ -190,16 +190,14 @@ function isCourtesyOnlyStrict(body, { awaitingAnswer = true } = {}) {
   return !awaitingAnswer;
 }
 
-// ── GATE_SMS_COURTESY_TAIL (owner 2026-10-29, fix F2 "Stuck Alert Fixes") ──
+// ── Courtesy tail (owner 2026-10-29, fix F2 "Stuck Alert Fixes") ──
 // A closer with a short sign-off ("Perfect. Go browns") is still a closing
 // text. The strict grammar above needs the WHOLE text to be courtesy tokens,
 // so these threads stayed "needs reply" and the alert never closed. The new
 // rule splits HEAD and TAIL at the first sentence break: the HEAD must pass
 // the strict grammar and the TAIL must be a few plain words with no request,
 // contrast, problem, service, money or access word. Doubt → false.
-// Three states, read at CALL time: off (anything else) = byte-identical;
-// 'shadow' = results unchanged, the webhook only stamps courtesyTailWould;
-// 'true' = isCourtesyOnly applies the new rule.
+// isCourtesyOnly applies the rule (gate removed; it was live from 2026-10-30).
 const COURTESY_TAIL_MAX_CHARS = 80;
 const COURTESY_TAIL_MAX_WORDS = 6;
 const COURTESY_TAIL_BREAK_RE = /[.!,\n\r]|\s-\s/;
@@ -245,15 +243,6 @@ const COURTESY_SIGNOFF_RE = new RegExp(
   'i'
 );
 
-function courtesyTailMode() {
-  try {
-    const reader = require('../config/feature-gates').courtesyTailMode;
-    return typeof reader === 'function' ? reader() : 'off';
-  } catch {
-    return 'off';
-  }
-}
-
 // Strict grammar on a HEAD alone: the same tests isCourtesyOnlyStrict uses on a
 // whole text. A bare "ok" head is too weak to carry a tail, so it fails here.
 function headIsCourtesyGrammar(head) {
@@ -266,8 +255,7 @@ function headIsCourtesyGrammar(head) {
 }
 
 /**
- * Would the NEW courtesy-tail rule newly call this text courtesy-only? Gate
- * independent (the webhook's shadow stamp and the tests use it). True only when
+ * Would the courtesy-tail rule newly call this text courtesy-only? True only when
  * the strict rule says false, our last text asked nothing, and rules 2-6 hold.
  */
 function courtesyTailWould(body, { awaitingAnswer = true } = {}) {
@@ -292,15 +280,8 @@ function courtesyTailWould(body, { awaitingAnswer = true } = {}) {
     && (COURTESY_SIGNOFF_AGAIN_RE.test(part) || !COURTESY_TAIL_BLOCK_RE.test(part)));
 }
 
-// The webhook's metadata decision, pure so it is testable: stamp only in shadow
-// mode and only when the new rule would newly say true. Off and 'true' stamp nothing.
-function courtesyTailShadowMetadata(mode, would) {
-  return mode === 'shadow' && would === true ? { courtesyTailWould: true } : {};
-}
-
 function isCourtesyOnly(body, opts = {}) {
   if (isCourtesyOnlyStrict(body, opts)) return true;
-  if (courtesyTailMode() !== 'true') return false;
   return courtesyTailWould(body, { awaitingAnswer: opts.awaitingAnswer === undefined ? true : opts.awaitingAnswer });
 }
 
@@ -541,7 +522,5 @@ module.exports = {
   outboundAsksForReply,
   isCourtesyOnly,
   courtesyTailWould,
-  courtesyTailMode,
-  courtesyTailShadowMetadata,
   hasRescheduleOrAwayIntent,
 };

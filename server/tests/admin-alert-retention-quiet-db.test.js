@@ -35,7 +35,7 @@ maybeDescribe('admin alert quiet policy (live Postgres)', () => {
     }
     await db.destroy();
   });
-  const clearCursors = () => db('system_settings').whereIn('key', ['admin_alert_retention_cursor_shadow', 'admin_alert_retention_cursor_true', 'admin_alert_quiet_cursor_shadow', 'admin_alert_quiet_cursor_true']).del();
+  const clearCursors = () => db('system_settings').whereIn('key', ['admin_alert_retention_cursor_true', 'admin_alert_quiet_cursor_shadow', 'admin_alert_quiet_cursor_true']).del();
   beforeEach(async () => { await db('notifications').where({ title: TITLE }).del(); await clearCursors(); });
 
   const bell = async (row) => {
@@ -249,7 +249,7 @@ maybeDescribe('admin alert quiet policy (live Postgres)', () => {
       expect((await get(old.id)).done_by).toBe('quiet-72h');
       expect(await reopen(old.id)).toBe('reopened');
 
-      const retained = await retention.runAdminAlertRetention({ now, mode: 'true', scope });
+      const retained = await retention.runAdminAlertRetention({ now, scope });
       runIds.push(retained.runId);
       expect(retained.expire.total).toBe(0);
       expect((await run('true')).written).toBe(0);
@@ -257,7 +257,7 @@ maybeDescribe('admin alert quiet policy (live Postgres)', () => {
 
       // 73 hours on: the fall-off closes it again; retention still sees a 3-day-old sign of life and does not.
       const later = ago(-73, now);
-      const retainedLater = await retention.runAdminAlertRetention({ now: later, mode: 'true', scope });
+      const retainedLater = await retention.runAdminAlertRetention({ now: later, scope });
       runIds.push(retainedLater.runId);
       expect(retainedLater.expire.total).toBe(0);
       expect((await run('true', { now: later })).written).toBe(1);

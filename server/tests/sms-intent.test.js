@@ -222,19 +222,12 @@ describe('reaction recognizers stay linear on adversarial input', () => {
   });
 });
 
-describe('GATE_SMS_COURTESY_TAIL (owner 2026-10-29): closer + short sign-off', () => {
-  const { courtesyTailWould, courtesyTailShadowMetadata } = require('../services/sms-intent');
-  const { courtesyTailMode } = require('../config/feature-gates');
-  const GATE = 'GATE_SMS_COURTESY_TAIL';
-  const saved = process.env[GATE];
-  afterEach(() => {
-    if (saved === undefined) delete process.env[GATE]; else process.env[GATE] = saved;
-  });
-  const setGate = (v) => { if (v === undefined) delete process.env[GATE]; else process.env[GATE] = v; };
+describe('courtesy tail (owner 2026-10-29): closer + short sign-off', () => {
+  const { courtesyTailWould } = require('../services/sms-intent');
 
   // Texts only the NEW rule closes.
   const NEWLY_CLOSED = ['Perfect. Go browns', 'Thanks! Enjoy the weekend', 'Great, have a good one, Go Browns', 'Thanks. Go browns', 'Great, enjoy the weekend', 'Perfect. Go browns, have a great day', 'Thanks. Go browns, thanks again', 'Great! Roll tide', 'Awesome, take care'];
-  // Already closed by the strict rule (true in every gate state).
+  // Already closed by the strict rule.
   const ALREADY_CLOSED = ['Great, have a good one', 'Perfect. Have a good one', 'Thanks! Appreciate you', 'Awesome, appreciate you'];
   const STAYS_OPEN = [
     'Perfect, can you also do the back yard',
@@ -264,45 +257,12 @@ describe('GATE_SMS_COURTESY_TAIL (owner 2026-10-29): closer + short sign-off', (
     'Perfect. Go browns, please call',
   ];
 
-  it('mode reader: only shadow and true (trimmed, any case) are on', () => {
-    setGate(undefined); expect(courtesyTailMode()).toBe('off');
-    setGate(''); expect(courtesyTailMode()).toBe('off');
-    setGate('1'); expect(courtesyTailMode()).toBe('off');
-    setGate(' Shadow '); expect(courtesyTailMode()).toBe('shadow');
-    setGate('TRUE'); expect(courtesyTailMode()).toBe('true');
+  it('the pure rule says true for the new class and false for everything else', () => {
+    for (const t of NEWLY_CLOSED) expect([t, courtesyTailWould(t, { awaitingAnswer: false })]).toEqual([t, true]);
+    for (const t of [...ALREADY_CLOSED, ...STAYS_OPEN]) expect([t, courtesyTailWould(t, { awaitingAnswer: false })]).toEqual([t, false]);
   });
 
-  it('the pure rule says true for the new class and false for everything else, any gate state', () => {
-    for (const mode of [undefined, 'shadow', 'true']) {
-      setGate(mode);
-      for (const t of NEWLY_CLOSED) expect([t, courtesyTailWould(t, { awaitingAnswer: false })]).toEqual([t, true]);
-      for (const t of [...ALREADY_CLOSED, ...STAYS_OPEN]) expect([t, courtesyTailWould(t, { awaitingAnswer: false })]).toEqual([t, false]);
-    }
-  });
-
-  it('off (unset or other): isCourtesyOnly is the strict rule', () => {
-    for (const mode of [undefined, 'off', 'yes', '1']) {
-      setGate(mode);
-      for (const t of NEWLY_CLOSED) expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, false]);
-      for (const t of ALREADY_CLOSED) expect(isCourtesyOnly(t, { awaitingAnswer: false })).toBe(true);
-      for (const t of STAYS_OPEN) expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, false]);
-    }
-  });
-
-  it('shadow: every isCourtesyOnly result equals the off result', () => {
-    const all = [...NEWLY_CLOSED, ...ALREADY_CLOSED, ...STAYS_OPEN, 'Thanks!', 'Ok', '\u{1F44D}', '', null, undefined];
-    for (const awaitingAnswer of [true, false]) {
-      setGate(undefined);
-      const off = all.map((t) => isCourtesyOnly(t, { awaitingAnswer }));
-      setGate('shadow');
-      expect(all.map((t) => isCourtesyOnly(t, { awaitingAnswer }))).toEqual(off);
-    }
-    setGate('shadow');
-    expect(isCourtesyOnly('Perfect. Go browns')).toBe(false); // default awaitingAnswer = true
-  });
-
-  it('true: the new class closes; the rest stays open; an open question keeps everything open', () => {
-    setGate('true');
+  it('the new class closes; the rest stays open; an open question keeps everything open', () => {
     for (const t of [...NEWLY_CLOSED, ...ALREADY_CLOSED]) expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, true]);
     for (const t of STAYS_OPEN) expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, false]);
     for (const t of [...NEWLY_CLOSED, ...ALREADY_CLOSED, ...STAYS_OPEN]) {
@@ -312,8 +272,7 @@ describe('GATE_SMS_COURTESY_TAIL (owner 2026-10-29): closer + short sign-off', (
     }
   });
 
-  it('true: the 10-24 real case closes ("Perfect. Go browns" and "Perfect. Go Browns!")', () => {
-    setGate('true');
+  it('the 10-24 real case closes ("Perfect. Go browns" and "Perfect. Go Browns!")', () => {
     expect(isCourtesyOnly('Perfect. Go browns', { awaitingAnswer: false })).toBe(true);
     expect(isCourtesyOnly('Perfect. Go Browns!', { awaitingAnswer: false })).toBe(true);
   });
@@ -325,21 +284,6 @@ describe('GATE_SMS_COURTESY_TAIL (owner 2026-10-29): closer + short sign-off', (
     for (const t of ['Thanks. Go dogs', 'Thanks. Go rangers', 'Thanks. Have a good gate', 'Thanks. Go']) {
       expect([t, courtesyTailWould(t, { awaitingAnswer: false })]).toEqual([t, false]);
     }
-  });
-
-  it('shadow metadata: stamped only in shadow and only when the rule says true', () => {
-    expect(courtesyTailShadowMetadata('shadow', true)).toEqual({ courtesyTailWould: true });
-    expect(courtesyTailShadowMetadata('shadow', false)).toEqual({});
-    expect(courtesyTailShadowMetadata('off', true)).toEqual({});
-    expect(courtesyTailShadowMetadata('true', true)).toEqual({});
-    expect(courtesyTailShadowMetadata(undefined, true)).toEqual({});
-    expect(courtesyTailShadowMetadata('shadow', 'yes')).toEqual({});
-  });
-
-  it('the webhook spreads the shadow stamp into both the sms_log and the messages metadata', () => {
-    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/twilio-webhook.js'), 'utf8');
-    expect(src.match(/\.\.\.courtesyTailMetadata/g)).toHaveLength(2);
-    expect(src).toContain("courtesyTailShadowMetadata('shadow',");
   });
 });
 
