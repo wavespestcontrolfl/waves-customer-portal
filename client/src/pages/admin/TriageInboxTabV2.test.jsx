@@ -678,7 +678,7 @@ describe('FamilyEvidence — the caller\'s own account', () => {
   });
 });
 
-// GATE_CALL_ADDRESS_FAMILY_CARD: the address-basis card asks the question and offers the two actions.
+// The address-basis card asks the question and offers the two actions.
 describe('FamilyEvidence — stated address on an account (Attach as contact / New customer)', () => {
   const A = '11111111-2222-4333-8444-555555555555';
   const payload = {

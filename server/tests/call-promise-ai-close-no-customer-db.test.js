@@ -23,7 +23,7 @@ maybeDescribe('AI close of promises on calls with no customer (live Postgres)', 
   let evidence;
   let seq = 0;
   const made = { callIds: [], customerIds: [], smsIds: [], commitmentIds: [] };
-  const GATES = ['GATE_CALL_PROMISE_AI_CLOSE', 'GATE_CALL_PROMISE_AI_NO_CUSTOMER', 'PROMISE_EVIDENCE_CLOSE'];
+  const GATES = ['GATE_CALL_PROMISE_AI_NO_CUSTOMER', 'PROMISE_EVIDENCE_CLOSE'];
   const saved = Object.fromEntries(GATES.map((g) => [g, process.env[g]]));
   const scenario = new Map();
   const THREAD_PROMPT = 'Decide whether a LATER text in this customer';
@@ -47,7 +47,6 @@ maybeDescribe('AI close of promises on calls with no customer (live Postgres)', 
     await db.destroy();
   });
   beforeEach(() => {
-    process.env.GATE_CALL_PROMISE_AI_CLOSE = 'true';
     process.env.GATE_CALL_PROMISE_AI_NO_CUSTOMER = 'true';
     delete process.env.PROMISE_EVIDENCE_CLOSE;
     scenario.clear();
@@ -123,11 +122,11 @@ maybeDescribe('AI close of promises on calls with no customer (live Postgres)', 
       expect(await close.listCandidates(db, { callIds: [w.call.id] })).toEqual([]);
     });
 
-    test('the AI close itself off: the no-customer gate alone does nothing', async () => {
-      process.env.GATE_CALL_PROMISE_AI_CLOSE = 'false';
+    test('PROMISE_EVIDENCE_CLOSE off: the whole pass is skipped, the no-customer part too', async () => {
+      process.env.PROMISE_EVIDENCE_CLOSE = 'off';
       const w = await world();
-      expect(await close.listNoCustomerCandidates(db, { callIds: [w.call.id] })).toEqual([]);
       expect(await run(w)).toEqual({ skipped: true, reason: 'gated_off' });
+      expect(modelCalls()).toBe(0);
     });
   });
 

@@ -520,7 +520,8 @@ const SKIP = !process.env.DATABASE_URL;
     test('the suggestion disappearing (no longer a family call, or no match) retires the open card as an auto-dismiss', async () => {
       const mom = await customer();
       for (const gone of [
-        { v2CanonicalExtraction: { caller: { relationship_to_property: 'other' }, meta: {} } },
+        // No stated address either: the address basis does not depend on the relationship, so it would keep the card.
+        { statedAddress: null, v2CanonicalExtraction: { caller: { relationship_to_property: 'other' }, meta: {} } },
         { extracted: { first_name: 'Dana', last_name: 'Lee', is_voicemail: true } },
       ]) {
         const callLogId = await callWithToken();
@@ -560,7 +561,7 @@ const SKIP = !process.env.DATABASE_URL;
       expect(await trx('triage_items').where({ call_log_id: handled, status: 'open' })).toHaveLength(0);
       const swept = await callWithToken();
       await fileFamilyAccountCard(withToken(swept));
-      await fileFamilyAccountCard(withToken(swept, { v2CanonicalExtraction: { caller: { relationship_to_property: 'other' }, meta: {} } }));
+      await fileFamilyAccountCard(withToken(swept, { statedAddress: null, v2CanonicalExtraction: { caller: { relationship_to_property: 'other' }, meta: {} } }));
       expect(await trx('triage_items').where({ call_log_id: swept, status: 'open' })).toHaveLength(0);
       await fileFamilyAccountCard(withToken(swept));
       expect(await trx('triage_items').where({ call_log_id: swept, status: 'open' })).toHaveLength(1);
@@ -631,7 +632,8 @@ const SKIP = !process.env.DATABASE_URL;
     await customer({ pipeline_stage: 'new_lead' });
     await customer({ first_name: 'Angela' });
     const callLogId = await call();
-    expect(await fileFamilyAccountCard(input(callLogId))).toBeNull();
+    // The stated address is left out: the live near-name row sits at it, which is the address basis's match.
+    expect(await fileFamilyAccountCard(input(callLogId, { statedAddress: null }))).toBeNull();
     expect(await trx('triage_items').where({ call_log_id: callLogId })).toHaveLength(0);
   });
 
@@ -661,10 +663,11 @@ const SKIP = !process.env.DATABASE_URL;
     expect(await suggestFamilyAccounts({ ...base, extracted: { ...base.extracted, is_voicemail: true } })).toBeNull();
     expect(await suggestFamilyAccounts({ ...base, isOutbound: true })).toBeNull();
     expect(await suggestFamilyAccounts({ ...base, call: { ...base.call, customer_id: randomUUID() } })).toBeNull();
+    // (No stated address: the address basis does not depend on the relationship.)
     expect(await suggestFamilyAccounts({
-      ...base, v2CanonicalExtraction: { ...base.v2CanonicalExtraction, caller: { relationship_to_property: 'other' } },
+      ...base, statedAddress: null, v2CanonicalExtraction: { ...base.v2CanonicalExtraction, caller: { relationship_to_property: 'other' } },
     })).toBeNull();
-    expect(await suggestFamilyAccounts({ ...base, v2CanonicalExtraction: null })).toBeNull();
+    expect(await suggestFamilyAccounts({ ...base, statedAddress: null, v2CanonicalExtraction: null })).toBeNull();
     expect(await suggestFamilyAccounts(base)).not.toBeNull();
   });
 

@@ -1135,7 +1135,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
       });
   };
 
-  // GATE_CALL_ADDRESS_FAMILY_CARD card actions. Attach files the caller in the account's first free contact slot and
+  // Family-account card actions. Attach files the caller in the account's first free contact slot and
   // links the call; New customer closes the card and reprocesses the call. Both are version-bound like the other
   // card actions: a card refreshed since it was displayed is a 409.
   const familyCardAction = (item, path, body, failText) => {

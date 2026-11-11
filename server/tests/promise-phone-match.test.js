@@ -8,18 +8,16 @@
 const fs = require('fs');
 const path = require('path');
 
-const GATES = ['GATE_CALL_PROMISE_AI_CLOSE', 'GATE_CALL_PROMISE_AI_NO_CUSTOMER', 'GATE_PROMISE_PHONE_MATCH_CLOSE', 'GATE_ALERT_CONTACT_CLOSE'];
+const GATES = ['GATE_CALL_PROMISE_AI_NO_CUSTOMER', 'GATE_PROMISE_PHONE_MATCH_CLOSE', 'GATE_ALERT_CONTACT_CLOSE'];
 const saved = Object.fromEntries(GATES.map((g) => [g, process.env[g]]));
 afterEach(() => { for (const g of GATES) { if (saved[g] === undefined) delete process.env[g]; else process.env[g] = saved[g]; } });
 beforeEach(() => { for (const g of GATES) delete process.env[g]; });
 
 describe('the gates', () => {
   const gates = () => require('../config/feature-gates');
-  test('GATE_CALL_PROMISE_AI_NO_CUSTOMER is strict true, unset = off, and needs the AI close live', () => {
+  test('GATE_CALL_PROMISE_AI_NO_CUSTOMER is strict true, unset = off', () => {
     expect(gates().callPromiseAiNoCustomerLive()).toBe(false);
     process.env.GATE_CALL_PROMISE_AI_NO_CUSTOMER = 'true';
-    expect(gates().callPromiseAiNoCustomerLive()).toBe(false); // the AI close is off
-    process.env.GATE_CALL_PROMISE_AI_CLOSE = 'true';
     expect(gates().callPromiseAiNoCustomerLive()).toBe(true);
     for (const value of ['TRUE', '1', 'shadow', ' true', '']) {
       process.env.GATE_CALL_PROMISE_AI_NO_CUSTOMER = value;
@@ -39,7 +37,6 @@ describe('no-customer candidates (call-promise-ai-close.js)', () => {
   const close = () => require('../services/call-promise-ai-close');
   test('with the gate off no-customer calls are never listed, and the database is not even asked', async () => {
     const conn = jest.fn(() => { throw new Error('the database must not be read'); });
-    process.env.GATE_CALL_PROMISE_AI_CLOSE = 'true';
     await expect(close().listNoCustomerCandidates(conn)).resolves.toEqual([]);
     expect(conn).not.toHaveBeenCalled();
   });

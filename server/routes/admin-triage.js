@@ -1915,8 +1915,8 @@ router.post('/:id/save-contact-note', async (req, res) => {
   }
 });
 
-// GATE_CALL_ADDRESS_FAMILY_CARD: the two actions on a family_account_candidates card. The server decides which
-// cards offer them (open, to an admin, gate on), so the screen holds no second copy of the rule.
+// The two actions on a family_account_candidates card. The server decides which
+// cards offer them (open, to an admin), so the screen holds no second copy of the rule.
 // Attach as contact: only the stated_address_on_account basis (it alone carries the caller's name, number and role).
 // New customer: every basis that holds the pass back from creating the customer, i.e. all but the callback voicemail one.
 function parseCardPayload(row) {
@@ -1924,7 +1924,7 @@ function parseCardPayload(row) {
 }
 const cardOffersAttach = (p) => p?.match_basis === 'stated_address_on_account' && Boolean(p.caller_first_name && p.contact_phone);
 function stampFamilyCardActions(items, isAdmin = false) {
-  if (!isAdmin || !require('../config/feature-gates').callAddressFamilyCardLive()) return;
+  if (!isAdmin) return;
   for (const item of items.filter((i) => i.reason_code === 'family_account_candidates' && OPEN_STATES.includes(i.status))) {
     const payload = parseCardPayload(item);
     item.can_new_customer = payload?.match_basis !== 'callback_spoken_number';
@@ -1973,10 +1973,9 @@ const ATTACH_REFUSALS = {
 };
 
 // Loads the open family_account_candidates card both actions act on, with its parsed payload and call, or throws the
-// refusal. The same checks for both actions: gate, admin, a UUID, an open card, the version the screen showed, a call
+// refusal. The same checks for both actions: admin, a UUID, an open card, the version the screen showed, a call
 // no pass is working.
 async function loadFamilyCardForAction(req) {
-  must(require('../config/feature-gates').callAddressFamilyCardLive(), 404, 'Not found');
   must(req.techRole === 'admin', 403, 'Admin access required');
   must(UUID_RE.test(req.params.id), 400, 'Invalid card id');
   const item = await db('triage_items').where({ id: req.params.id }).first();
@@ -2004,7 +2003,7 @@ const familyCardRoute = (name, run) => async (req, res) => {
 };
 
 // POST /api/admin/triage/:id/attach-contact   { customer_id, role?, expected_updated_at }
-// Attach as contact (GATE_CALL_ADDRESS_FAMILY_CARD, stated_address_on_account cards): files the caller (name, number,
+// Attach as contact (stated_address_on_account cards): files the caller (name, number,
 // role from the card) in the FIRST FREE service-contact slot of the chosen listed account and relinks the call to that
 // account by the shared call relink (services/call-customer-relink), then resolves the card. The slot is written by the
 // pipeline's one slot writer (persistCallSecondaryContact, operatorAttach): never overwrites a slot (all three full = 409,
@@ -2059,7 +2058,7 @@ router.post('/:id/attach-contact', familyCardRoute('attach the contact', async (
 }));
 
 // POST /api/admin/triage/:id/new-customer   { expected_updated_at }
-// New customer (GATE_CALL_ADDRESS_FAMILY_CARD): the office says the caller is not the account's household. The card is
+// New customer: the office says the caller is not the account's household. The card is
 // closed by a person (resolution_source human, which a reprocess never refiles over) and the call is reprocessed the
 // way the Reprocess button does, so the pass creates the customer the old way. The answer says whether the pass ran and
 // whether it left the call with a customer (a skipped or failed pass, or a pass with nothing to create one from, leaves
