@@ -1,8 +1,10 @@
 /**
- * Permit-sync daily catch-up in the 7:41 AM ET cron on the six days that are not Monday
- * (server/services/scheduler.js). 2026-11-09: the county refused Monday's report downloads with HTTP 403 and
- * nothing asked again for a week. The tick takes the `permit-sync` lease only when the report step is due, runs
- * the catch-up body under it, and never throws out of the tick. Monday keeps its own full run.
+ * Permit-sync report catch-up slots (server/services/scheduler.js). 2026-11-09: the county refused Monday's
+ * report downloads with HTTP 403 and nothing asked again for a week. 2026-11-10: the one daily catch-up slot
+ * (7:41 AM ET) started 30 seconds before a deploy stopped the server, and nothing asked again that day. The
+ * catch-up now has four slots a day: 7:41 AM on the six days that are not Monday, and 9:11 AM, 1:41 PM and
+ * 5:41 PM every day. Each slot takes the `permit-sync` lease only when the report step is due, runs the
+ * catch-up body under it, and never throws out of the tick. Monday 7:41 keeps its own full run.
  *
  * Mock baseline copied from scheduler-alert-retention-cron.test.js.
  */
@@ -51,6 +53,7 @@ function registered(expression) {
   expect(registrations[0][2]).toEqual({ timezone: 'America/New_York' });
   return registrations[0][1];
 }
+const CATCH_UP_SLOTS = ['41 7 * * 0,2-6', '11 9 * * *', '41 13,17 * * *'];
 const catchUpTick = () => registered('41 7 * * 0,2-6')();
 
 beforeEach(() => {
@@ -86,6 +89,17 @@ test('a failed catch-up is logged, never thrown out of the tick', async () => {
   permitRun.runPermitReportCatchUp.mockRejectedValueOnce(new Error('report sync (catch-up): boom'));
   await expect(catchUpTick()).resolves.toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith('Permit sync catch-up lease failed: report sync (catch-up): boom');
+});
+
+test.each(CATCH_UP_SLOTS)('slot %s runs the same catch-up: nothing in a normal week, the report step when it is due', async (slot) => {
+  const tick = registered(slot);
+  await tick();
+  expect(permitRun.runPermitReportCatchUp).not.toHaveBeenCalled();
+  permitRun.reportCatchUpDue.mockResolvedValue(true);
+  await tick();
+  expect(runExclusive).toHaveBeenCalledWith('permit-sync', expect.any(Function));
+  expect(permitRun.runPermitReportCatchUp).toHaveBeenCalledTimes(1);
+  expect(permitRun.runPermitSyncSteps).not.toHaveBeenCalled();
 });
 
 test('Monday keeps its own tick: the full run (report, then detail) under the same lease', async () => {
