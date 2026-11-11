@@ -1,4 +1,4 @@
-// GATE_SETUP_FEE_SETTLED_ANYWHERE — the unminted-setup-fee alert, its
+// Setup fee settled anywhere — the unminted-setup-fee alert, its
 // completion hold and the alert reconcile all ask ONE predicate
 // (setup-fee-obligation.setupFeeSettledElsewhere). Before it, a fee that was
 // paid, waived or prepaid on an invoice that never cited the accepted
@@ -64,7 +64,6 @@ const { reconcileSetupFeeAlert } = require('../services/setup-fee-alert-reconcil
 
 const EST = 'e1000000-0000-0000-0000-000000000001';
 const CUST = 'c1000000-0000-0000-0000-000000000001';
-const GATE = 'GATE_SETUP_FEE_SETTLED_ANYWHERE';
 
 const recent = new Date().toISOString();
 // Case A / B: the fee paid on an ordinary visit invoice, named only
@@ -112,16 +111,11 @@ function obligationTables(invoices) {
   };
 }
 
-let savedGate;
 beforeEach(() => {
-  savedGate = process.env[GATE];
   mockTables = {};
   mockUpdates = [];
   mockCounters = {};
   mockTermCalls = [];
-});
-afterEach(() => {
-  if (savedGate === undefined) delete process.env[GATE]; else process.env[GATE] = savedGate;
 });
 
 describe('the detector behind the alert and the completion hold', () => {
@@ -129,30 +123,14 @@ describe('the detector behind the alert and the completion hold', () => {
     ['A/B: fee paid as a "WaveGuard Membership" line on another invoice', PAID_MEMBERSHIP, 'paid_fee'],
     ['C: live invoice with a waived $0 setup-fee line', WAIVED_LINE, 'waived'],
     ['C: annual prepay paid on a bundle invoice', PAID_ANNUAL_PREPAY, 'annual_prepay'],
-  ])('gate ON, %s -> not owed (no alert, no hold)', async (_name, invoices, reason) => {
-    process.env[GATE] = 'true';
+  ])('%s -> not owed (no alert, no hold)', async (_name, invoices, reason) => {
     mockTables = obligationTables(invoices);
     const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST });
     expect(result.owed).toBe(false);
     expect(result.settledElsewhere.reason).toBe(reason);
   });
 
-  test.each([
-    ['A/B', PAID_MEMBERSHIP],
-    ['C waived', WAIVED_LINE],
-    ['C prepay', PAID_ANNUAL_PREPAY],
-  ])('gate OFF, %s -> exactly the old behavior: still owed', async (_name, invoices) => {
-    delete process.env[GATE];
-    mockTables = obligationTables(invoices);
-    const result = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST });
-    expect(result.owed).toBe(true);
-    expect(db).toHaveBeenCalledWith('estimates');
-    // No customer-wide invoice scan runs with the gate off.
-    expect(mockCounters.invoices).toBe(1);
-  });
-
-  test('gate ON, nothing settled elsewhere -> still owed (the alert still fires for a real miss)', async () => {
-    process.env[GATE] = 'true';
+  test('nothing settled elsewhere -> still owed (the alert still fires for a real miss)', async () => {
     mockTables = obligationTables([]);
     expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST })).owed).toBe(true);
   });
@@ -167,14 +145,12 @@ describe('the detector behind the alert and the completion hold', () => {
     ['a $0 bait-station setup line is not a waived WaveGuard fee', [{ id: 'i', status: 'sent', created_at: recent, line_items: [{ description: 'Bait Station Setup — one-time setup fee (waived)', amount: 0 }] }]],
     ['a paid termite annual prepay is not a WaveGuard prepay', [{ id: 'i', status: 'paid', created_at: recent, line_items: [{ description: 'Termite Bait Monitoring — 12 months prepaid', category: 'Annual prepay', amount: 300 }] }]],
     ['a monthly membership-named line is not the one-time fee', [{ id: 'i', status: 'paid', created_at: recent, line_items: [{ description: 'WaveGuard Membership — Gold monthly', amount: 120 }] }]],
-  ])('gate ON, %s', async (_name, invoices) => {
-    process.env[GATE] = 'true';
+  ])('%s', async (_name, invoices) => {
     mockTables = obligationTables(invoices);
     expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST })).owed).toBe(true);
   });
 
   test('a covered annual-prepay TERM on the customer settles the fee, but never a termite annual plan', async () => {
-    process.env[GATE] = 'true';
     mockTables = { 'annual_prepay_terms as t': { id: 'term-1' }, invoices: { stamped: [], customer: [], other: [] } };
     const result = await setupFeeSettledElsewhere(db, { customerId: CUST, expectedFeeCents: 9900 });
     expect(result).toMatchObject({ settled: true, reason: 'annual_prepay_term' });
@@ -182,8 +158,7 @@ describe('the detector behind the alert and the completion hold', () => {
     expect(mockTermCalls).toContainEqual(['whereNull', 't.annual_plan_version']);
   });
 
-  test('gate ON, a paid fee that was later REFUNDED stays settled (never re-instruct); a refunded prepay bundle does not', async () => {
-    process.env[GATE] = 'true';
+  test('a paid fee that was later REFUNDED stays settled (never re-instruct); a refunded prepay bundle does not', async () => {
     mockTables = obligationTables([{ ...PAID_MEMBERSHIP[0], status: 'refunded' }]);
     expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST })).owed).toBe(false);
     mockTables = obligationTables([{ id: 'i', status: 'refunded', created_at: recent, line_items: [{ description: 'WaveGuard Membership — 12 months prepaid (setup fee waived)', category: 'Annual prepay', amount: 388 }] }]);
@@ -191,7 +166,6 @@ describe('the detector behind the alert and the completion hold', () => {
   });
 
   test('the term check is bounded to the visit date (completion) and to a real date when none is known', async () => {
-    process.env[GATE] = 'true';
     mockTables = { 'annual_prepay_terms as t': null, invoices: { stamped: [], customer: [], other: [] }, scheduled_services: { scheduled_date: '2026-10-23' } };
     await setupFeeSettledElsewhere(db, { customerId: CUST, expectedFeeCents: 9900, visitDate: '2026-10-23' });
     expect(mockTermCalls).toContainEqual(['where', 't.term_start', '<=', '2026-10-23']);
@@ -202,8 +176,7 @@ describe('the detector behind the alert and the completion hold', () => {
 
   // GATE_SETUP_FEE_OPEN_INVOICE_NOTICE reads `open`: an unpaid fee line is still not
   // collected money, but it is the fee this rule counts the day its invoice is paid.
-  test('gate ON, not settled: lists the open invoices whose fee lines count once paid, never a draft, void, prepaid, waived bundle or other fee', async () => {
-    process.env[GATE] = 'true';
+  test('not settled: lists the open invoices whose fee lines count once paid, never a draft, void, prepaid, waived bundle or other fee', async () => {
     const line = (description, amount) => ({ description, amount });
     mockTables = { 'annual_prepay_terms as t': null, invoices: { stamped: [], other: [], customer: [
       { id: 'inv-sent', invoice_number: 'W-1001', status: 'sent', created_at: recent, line_items: [line('Pest Control Service', 110), line('WaveGuard Membership', 99)] },
@@ -223,8 +196,7 @@ describe('the detector behind the alert and the completion hold', () => {
   describe('partial fee money paid elsewhere reduces the remainder (completion alert + hold)', () => {
     const PARTIAL = { id: 'inv-part', status: 'paid', created_at: recent, line_items: [{ description: 'WaveGuard Membership', amount: 50 }] };
 
-    test('gate ON: $50 paid elsewhere against $99 -> still owed, $49 remains, partial carried for the caller', async () => {
-      process.env[GATE] = 'true';
+    test('$50 paid elsewhere against $99 -> still owed, $49 remains, partial carried for the caller', async () => {
       mockTables = obligationTables([PARTIAL]);
       const r = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST });
       expect(r.owed).toBe(true);
@@ -232,16 +204,7 @@ describe('the detector behind the alert and the completion hold', () => {
       expect(r.settledElsewherePartial).toEqual([{ id: 'inv-part', cents: 5000 }]);
     });
 
-    test('gate OFF: byte-identical -> full $99 remains and no partial key', async () => {
-      delete process.env[GATE];
-      mockTables = obligationTables([PARTIAL]);
-      const r = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST });
-      expect(r.setupFeeRemainingCents).toBe(9900);
-      expect(r).not.toHaveProperty('settledElsewherePartial');
-    });
-
     test('no double count: the same invoice already counted by the stamped scan is not subtracted twice', async () => {
-      process.env[GATE] = 'true';
       const stampedPartial = { ...PARTIAL, notes: `accepted estimate #${EST}`, line_items: [{ description: 'WaveGuard Membership — one-time setup fee', amount: 50 }] };
       mockTables = { ...obligationTables([PARTIAL]), invoices: { stamped: [stampedPartial], customer: [PARTIAL], other: [] } };
       const r = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST });
@@ -250,7 +213,6 @@ describe('the detector behind the alert and the completion hold', () => {
     });
 
     test('stamped partial + a DIFFERENT partial elsewhere that together cover the fee -> not owed', async () => {
-      process.env[GATE] = 'true';
       const stamped = { id: 'inv-stamped', status: 'sent', notes: `accepted estimate #${EST}`, line_items: [{ description: 'WaveGuard Membership — one-time setup fee', amount: 50 }] };
       const other = { id: 'inv-other', status: 'paid', created_at: recent, line_items: [{ description: 'WaveGuard Membership', amount: 49 }] };
       mockTables = { ...obligationTables([other]), invoices: { stamped: [stamped], customer: [other], other: [] } };
@@ -278,7 +240,6 @@ describe('the detector behind the alert and the completion hold', () => {
     const FULL99 = { id: 'inv-p', status: 'paid', created_at: recent, line_items: [{ description: 'WaveGuard Membership', amount: 99 }] };
 
     test('unlocked lookup saw $50 (owed, $49 remains); the office then paid $99 -> the locked re-read settles', async () => {
-      process.env[GATE] = 'true';
       mockTables = obligationTables([PARTIAL50]);
       const unlocked = await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST });
       expect(unlocked.owed).toBe(true);
@@ -289,7 +250,6 @@ describe('the detector behind the alert and the completion hold', () => {
     });
 
     test('reverse: unlocked lookup saw $99 settled; the payment was refunded-away/voided -> the locked re-read is not settled', async () => {
-      process.env[GATE] = 'true';
       mockTables = obligationTables([FULL99]);
       expect((await findUnmintedSetupFeeObligation({ sourceEstimateId: EST, customerId: CUST })).owed).toBe(false);
       mockTables = obligationTables([{ ...FULL99, status: 'void' }]);
@@ -313,11 +273,6 @@ describe('the detector behind the alert and the completion hold', () => {
     });
   });
 
-  test('gate off returns before any read', async () => {
-    delete process.env[GATE];
-    expect(await setupFeeSettledElsewhere(db, { customerId: CUST, expectedFeeCents: 9900 })).toEqual({ settled: false });
-    expect(mockCounters).toEqual({});
-  });
 });
 
 describe('the reconcile reopen trap: billing the visit must not re-demand a settled fee', () => {
@@ -342,8 +297,7 @@ describe('the reconcile reopen trap: billing the visit must not re-demand a sett
     };
   }
 
-  test('gate ON: the visit is billed and the fee is paid elsewhere -> the alert RESOLVES', async () => {
-    process.env[GATE] = 'true';
+  test('the visit is billed and the fee is paid elsewhere -> the alert RESOLVES', async () => {
     mockTables = reconcileTables(PAID_MEMBERSHIP);
     await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
     expect(mockUpdates).toHaveLength(1);
@@ -352,18 +306,7 @@ describe('the reconcile reopen trap: billing the visit must not re-demand a sett
     expect(text).not.toContain('Still owed');
   });
 
-  test('gate OFF: the same state reopens the fee instruction (old behavior, the bug)', async () => {
-    delete process.env[GATE];
-    mockTables = reconcileTables(PAID_MEMBERSHIP);
-    await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
-    expect(mockUpdates).toHaveLength(1);
-    const text = mockUpdates[0].payload.detail || mockUpdates[0].payload.body;
-    expect(text).toContain('Still owed');
-    expect(text).toContain('one-time WaveGuard setup fee');
-  });
-
-  test('gate ON: $50 paid elsewhere against $99 -> the reopened instruction names only the $49.00 remainder', async () => {
-    process.env[GATE] = 'true';
+  test('$50 paid elsewhere against $99 -> the reopened instruction names only the $49.00 remainder', async () => {
     const partial = { id: 'inv-part', status: 'paid', created_at: recent, line_items: [{ description: 'WaveGuard Membership', amount: 50 }] };
     mockTables = reconcileTables([partial]);
     await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
@@ -373,8 +316,7 @@ describe('the reconcile reopen trap: billing the visit must not re-demand a sett
     expect(mockUpdates[0].payload.metadata).toBeDefined();
   });
 
-  test('gate ON: a partial already counted by the stamped scan is not subtracted twice', async () => {
-    process.env[GATE] = 'true';
+  test('a partial already counted by the stamped scan is not subtracted twice', async () => {
     const partial = { id: 'inv-part', status: 'paid', created_at: recent, notes: `accepted estimate #${EST}`, line_items: [{ description: 'WaveGuard Membership — one-time setup fee', amount: 50 }] };
     mockTables = { ...reconcileTables([partial]), invoices: { stamped: [partial], customer: [partial], other: [APP_INVOICE] } };
     await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
@@ -382,24 +324,13 @@ describe('the reconcile reopen trap: billing the visit must not re-demand a sett
     expect(text).toContain('$49.00 remaining');
   });
 
-  test('gate OFF: the same partial leaves the full-fee instruction (unchanged)', async () => {
-    delete process.env[GATE];
-    const partial = { id: 'inv-part', status: 'paid', created_at: recent, line_items: [{ description: 'WaveGuard Membership', amount: 50 }] };
-    mockTables = reconcileTables([partial]);
-    await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
-    const text = mockUpdates[0].payload.detail || mockUpdates[0].payload.body;
-    expect(text).not.toContain('remaining');
-  });
-
-  test('gate ON: reconcile bounds the term check to the alert visit date', async () => {
-    process.env[GATE] = 'true';
+  test('reconcile bounds the term check to the alert visit date', async () => {
     mockTables = { ...reconcileTables([]), scheduled_services: [{ scheduled_date: '2026-10-23' }] };
     await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
     expect(mockTermCalls).toContainEqual(['where', 't.term_start', '<=', '2026-10-23']);
   });
 
-  test('gate ON but the fee is NOT settled elsewhere -> the fee instruction still stands', async () => {
-    process.env[GATE] = 'true';
+  test('the fee is NOT settled elsewhere -> the fee instruction still stands', async () => {
     mockTables = reconcileTables([]);
     await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
     expect(mockUpdates).toHaveLength(1);

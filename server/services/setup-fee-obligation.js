@@ -416,8 +416,8 @@ async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId
   return { parentId, amount: owedAmount, alertId: alert?.id || null };
 }
 
-// ONE "is this customer's setup fee already settled somewhere else?" predicate
-// (GATE_SETUP_FEE_SETTLED_ANYWHERE). The unminted-setup-fee alert, the
+// ONE "is this customer's setup fee already settled somewhere else?" predicate.
+// The unminted-setup-fee alert, the
 // completion hold it drives (both via findUnmintedSetupFeeObligation) and the
 // alert reconcile (setup-fee-alert-reconcile.js) all ask it, so they can never
 // disagree. The note-based checks above only see invoices that cite
@@ -432,7 +432,7 @@ async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId
 //     amount (the prepay bundle) needs the invoice PAID, or
 //   - a covered annual-prepay term on the visit's date, or a PAID annual-prepay
 //     invoice from the last 13 months.
-// Gate off returns { settled: false } before any read. Pass `lock: true` inside
+// Pass `lock: true` inside
 // a transaction to read the invoices FOR UPDATE (the reconcile does).
 // Not settled, it also lists the open invoices whose fee lines this rule counts
 // once they are paid (`open`: id, invoice number, cents), so the reconcile can say
@@ -467,7 +467,7 @@ function settledLineCents(li) {
 }
 
 async function settledVisitDate(conn, visitId) {
-  if (!visitId || !require('../config/feature-gates').setupFeeSettledAnywhereLive()) return null;
+  if (!visitId) return null;
   const row = await conn('scheduled_services').where({ id: visitId }).first('scheduled_date');
   return row?.scheduled_date ? require('./estimate-first-application-invoice').dateOnly(row.scheduled_date) : null;
 }
@@ -501,7 +501,6 @@ function feeLineEvidence(li, status, createdAt) {
 async function setupFeeSettledElsewhere(conn, {
   customerId, expectedFeeCents = 0, visitDate, lock,
 } = {}) {
-  if (!require('../config/feature-gates').setupFeeSettledAnywhereLive()) return { settled: false };
   if (!customerId) return { settled: false };
   let query = conn('invoices')
     .where({ customer_id: customerId })
@@ -551,8 +550,7 @@ async function setupFeeSettledElsewhere(conn, {
 
 // Cents of the elsewhere-partial payments the caller has NOT already counted: per
 // invoice id, only what exceeds the fee cents the caller's own scan took from that
-// same row (sumPositiveSetupFeeCents) — no money is ever counted twice. Gate off:
-// no `partial` is ever produced, so this is 0.
+// same row (sumPositiveSetupFeeCents) — no money is ever counted twice.
 function partialElsewhereCents(partial, countedRows = []) {
   if (!Array.isArray(partial) || !partial.length) return 0;
   const { sumPositiveSetupFeeCents } = require('./estimate-first-application-invoice');
@@ -718,7 +716,7 @@ async function findUnmintedSetupFeeObligation({
     .reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0);
   const coveredFeeCents = liveStampedFeeCents + refundedFeeCents;
   if (coveredFeeCents >= expectedFeeCents) return { owed: false };
-  // GATE_SETUP_FEE_SETTLED_ANYWHERE: the fee was paid, waived or prepaid on an
+  // The fee was paid, waived or prepaid on an
   // invoice that never cited this estimate (the stamped scan above cannot see it).
   const settledElsewhere = await setupFeeSettledElsewhere(conn, {
     customerId: estimate.customer_id,
