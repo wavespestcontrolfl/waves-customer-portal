@@ -1371,6 +1371,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
         perVisit: resume.perVisit,
         cadenceLabel: resume.cadenceLabel || '',
         visitsPerYear: resume.visitsPerYear,
+        pricing: resume.pricing || null,
         terms: resume.terms,
         hasCardOnFile: resume.hasCardOnFile,
         holdMinutes: resume.holdMinutes,
@@ -1608,6 +1609,70 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
       <span style={{ fontWeight: 700, color: B.glassNavy, textAlign: 'right' }}>{value}</span>
     </div>
   );
+  // WaveGuard discount (owner 2026-11-11). The server composes every figure
+  // (`pricing` on init, resume and confirm); a purchase without one renders
+  // the rows it always did.
+  const tierName = (pricing) => `WaveGuard${pricing?.tierLabel ? ` ${pricing.tierLabel}` : ''}`;
+  const priceRows = (pricing, perVisit) => (
+    <>
+      {pricing?.newService ? (
+        <>
+          {summaryRow('List price', `${fmtMoney(pricing.newService.listPerVisit)} per application`)}
+          <div style={{ height: 6 }} />
+          {summaryRow(`${tierName(pricing)} discount`, `−${fmtMoney(pricing.newService.savingsPerVisit)} (${pricing.newService.discountPct}%)`)}
+          <div style={{ height: 6 }} />
+        </>
+      ) : null}
+      {summaryRow(pricing?.newService ? 'Your price' : 'Price', `${fmtMoney(perVisit)} per application`)}
+    </>
+  );
+  // The services the customer already has, at the price the new tier gives
+  // them. Before confirm these are the frozen plan; on the done screen only
+  // the ones the purchase actually repriced.
+  const existingServicesBox = (pricing, { done = false } = {}) => {
+    const rows = pricing?.existingServices || [];
+    if (!rows.length && !(done && pricing?.existingPending)) return null;
+    return (
+      <div style={softBox}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy }}>
+          {done ? `Your current services at the ${tierName(pricing)} price` : `Your current services get the ${tierName(pricing)} price too`}
+        </div>
+        {rows.map((svc) => {
+          const days = (svc.upcomingVisitDates || []).map(formatScoreDate);
+          return (
+            <div key={svc.key || svc.label} style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy }}>{svc.label}</div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginTop: 2, fontVariantNumeric: 'tabular-nums' }}>
+                <s style={{ fontSize: 14, color: muted }}>{fmtMoney(svc.currentPerVisit)}</s>
+                <span style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{fmtMoney(svc.newPerVisit)}</span>
+                <span style={{ fontSize: 14, color: muted }}>per application</span>
+              </div>
+              {days.length ? (
+                <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+                  {days.length === 1 ? 'Upcoming visit: ' : 'Upcoming visits: '}{days.join(' · ')}
+                </div>
+              ) : null}
+              {svc.prepaid === true ? (
+                <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+                  This service is prepaid, so the difference is credited to your account instead.
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+        {done && pricing?.existingPending ? (
+          <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.5 }}>
+            We are moving {rows.length ? 'the rest of your' : 'your'} current services to the {tierName(pricing)} price.
+          </div>
+        ) : null}
+        {!done ? (
+          <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.5 }}>
+            Applied automatically when you confirm. Your visit schedule does not change.
+          </div>
+        ) : null}
+      </div>
+    );
+  };
 
   // Portaled to <body>: the launch button lives inside a data-glass card
   // whose backdrop-filter makes it the fixed-position containing block —
@@ -1704,9 +1769,10 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
               <div style={softBox}>
                 {summaryRow('Service', init.label)}
                 <div style={{ height: 6 }} />
-                {summaryRow('Price', `${fmtMoney(init.perVisit)} per application`)}
+                {priceRows(init.pricing, init.perVisit)}
                 {init.cadenceLabel ? (<><div style={{ height: 6 }} />{summaryRow('Visits', init.cadenceLabel)}</>) : null}
               </div>
+              {existingServicesBox(init.pricing)}
               <div style={softBox}>
                 <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10, }}>
                   <Icon name="clipboard" size={14} strokeWidth={2} />Terms
@@ -1780,12 +1846,13 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
               <div style={softBox}>
                 {summaryRow('Service', init.label)}
                 <div style={{ height: 6 }} />
-                {summaryRow('Price', `${fmtMoney(init.perVisit)} per application`)}
+                {priceRows(init.pricing, init.perVisit)}
                 <div style={{ height: 6 }} />
                 {summaryRow('First visit', selectedSlot
                   ? `${oneTapDayLabel(selectedSlot.date)}, ${oneTapTime12(selectedSlot.windowStart)}–${oneTapTime12(selectedSlot.windowEnd)}`
                   : '—')}
               </div>
+              {existingServicesBox(init.pricing)}
               <div style={{ fontSize: 14, color: muted }}>
                 Your time is held for {init.holdMinutes || 15} minutes.{' '}
                 {/* Locked while confirming: reserving a replacement slot
@@ -1847,7 +1914,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
                 {result?.label || init.label} is confirmed
               </div>
               <div style={softBox}>
-                {summaryRow('Price', `${fmtMoney(result?.perVisit ?? init.perVisit)} per application`)}
+                {priceRows(result?.pricing, result?.perVisit ?? init.perVisit)}
                 {result?.firstVisit?.date ? (
                   <>
                     <div style={{ height: 6 }} />
@@ -1855,6 +1922,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
                   </>
                 ) : null}
               </div>
+              {existingServicesBox(result?.pricing, { done: true })}
               <div style={{ fontSize: 14, color: muted, lineHeight: 1.5, textAlign: 'center' }}>
                 {/* Only promise what can send: email is nullable on
                     phone-authenticated accounts (server says emailQueued). */}

@@ -35,7 +35,7 @@ const { getAvailableSlots } = require('./estimate-slot-availability');
 const { buildPortalPurchaseBasis, cacheOnlyPropertyLookup } = require('./service-report/cross-sell');
 const { acquireOccupancyLock } = require('./scheduling/occupancy');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
-const { customerPreservesMonthlyMembership } = require('./billing-cadence');
+const { customerPreservesMonthlyMembership, parseEstimateData, roundMoney } = require('./billing-cadence');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 
 // Single source of the terms the customer agrees to. The exact snapshot is
@@ -176,6 +176,69 @@ function estimateExpired(estimate) {
   return !!(estimate?.expires_at && new Date(estimate.expires_at) < new Date());
 }
 
+// ── WaveGuard discount on the purchase screens (owner 2026-11-11) ────────
+// Every figure is one the purchase persists. The new service's list price is
+// the engine line's own pre-discount annual over its visits. The existing
+// services are the frozen extension plan exactly as the estimate page
+// projects it (publicMembershipView: a whitelist, empty while
+// GATE_WAVEGUARD_EXTEND_EXISTING is off), so no row can show that the
+// converter would not apply.
+function shownPricing({ snapshot, line, visits, perVisit }) {
+  const { publicMembershipView } = require('./estimate-membership-context');
+  const view = publicMembershipView(snapshot);
+  const listAnnual = Number(line?.annualBeforeDiscount);
+  const listPerVisit = listAnnual > 0 ? roundMoney(listAnnual / visits) : 0;
+  const savingsPerVisit = roundMoney(listPerVisit - perVisit);
+  // A whole percent or nothing: a line whose list price rounds to the price
+  // paid shows no discount rows.
+  const discountPct = listPerVisit > 0 ? Math.round((savingsPerVisit / listPerVisit) * 100) : 0;
+  return {
+    tierLabel: view?.tierLabel || null,
+    newService: discountPct > 0 ? { listPerVisit, savingsPerVisit, discountPct } : null,
+    existingServices: view?.existingServices || [],
+  };
+}
+
+// Is the existing-service plan the customer was shown still the plan stored
+// for the converter? A staff edit of the open draft can re-freeze it, and
+// the gate can turn off between init and confirm; either way the customer
+// would confirm prices that will not apply.
+function shownPlanStillStored(estData) {
+  const { publicMembershipView } = require('./estimate-membership-context');
+  const planKeys = (services) => (services || [])
+    .map((svc) => `${svc.key}:${roundMoney(svc.currentPerVisit)}:${roundMoney(svc.newPerVisit)}`)
+    .sort()
+    .join('|');
+  return planKeys(estData?.oneTapPurchase?.pricing?.existingServices)
+    === planKeys(publicMembershipView(estData?.membershipSnapshot)?.existingServices);
+}
+
+// Pricing for the done screen and for a repeated confirm: the frozen
+// figures, with ONLY the existing services the accept repriced in full
+// (extensionOutcome.appliedFamilies). A shown service whose reprice parked
+// for the office reads as pending, never as repriced. null for a purchase
+// made before these figures were stored.
+// Read after the purchase committed, so a failed read answers null (the done
+// screen then shows the price alone) and never fails a completed purchase.
+async function completedPricing(estimateId) {
+  try {
+    const { publicMembershipView } = require('./estimate-membership-context');
+    const row = await db('estimates').where({ id: estimateId }).first('estimate_data');
+    const estData = parseEstimateData(row?.estimate_data);
+    const shown = estData.oneTapPurchase?.pricing;
+    if (!shown) return null;
+    const applied = publicMembershipView(estData.membershipSnapshot, { committed: true })?.existingServices || [];
+    return {
+      ...shown,
+      existingServices: applied,
+      existingPending: applied.length < (shown.existingServices || []).length,
+    };
+  } catch (err) {
+    logger.warn(`[one-tap-purchase] completed pricing read failed (code=${err?.code || 'none'})`);
+    return null;
+  }
+}
+
 // ── initPurchase ─────────────────────────────────────────────────────────
 // Recompute the offer server-side, reject on any drift from what the card
 // rendered, synthesize the NEW-SERVICE-ONLY draft estimate, ledger the
@@ -284,10 +347,18 @@ async function initPurchase({ customerId, clicked }) {
   // replays (waived setup, combined tier). Mirrors the IB draft lane: the
   // offer only renders on recurring ownership, so this customer is a proven
   // member — a missing snapshot must refuse, never fall through to
-  // new-customer terms. Deliberately NO frozen existingServices extension
-  // plan (freezeExtensionPlan stays false): freezing one would reprice the
-  // customer's EXISTING visits on accept.
-  const { computeMembershipContext } = require('./estimate-membership-context');
+  // new-customer terms.
+  // Existing-service extension (owner 2026-11-11: the purchase screens show
+  // the discounted price of the services the customer already has): the
+  // snapshot freezes the SAME plan a staff estimate freezes, under the same
+  // rules (computeMembershipContext: Bronze start, per-application lane,
+  // GATE_WAVEGUARD_EXTEND_EXISTING), bounded to the one premises this offer
+  // proved. The converter applies exactly that plan at confirm, so the price
+  // shown is the price billed. No plan freezes when those rules do not hold;
+  // the accept then keeps the 2026-08-05 office review.
+  const {
+    computeMembershipContext, membershipScopeArgs,
+  } = require('./estimate-membership-context');
   let membershipSnapshot = null;
   try {
     membershipSnapshot = await computeMembershipContext(db, {
@@ -299,6 +370,11 @@ async function initPurchase({ customerId, clicked }) {
           annualAfterDiscount: Number(engineResult.summary?.recurringAnnualAfterDiscount || 0),
         },
       },
+      ...membershipScopeArgs({
+        perPropertyStreetScope: basis.primaryStreet
+          ? { estimateStreet: basis.primaryStreet, customerPrimaryStreet: basis.primaryStreet }
+          : null,
+      }),
     });
   } catch {
     membershipSnapshot = null;
@@ -331,6 +407,7 @@ async function initPurchase({ customerId, clicked }) {
     selected: true,
     isSelected: true,
   };
+  const pricing = shownPricing({ snapshot: membershipSnapshot, line, visits, perVisit });
   const estimateData = {
     result: { ...engineResult, recurring: { services: [storedLine] } },
     engineInputs,
@@ -340,6 +417,10 @@ async function initPurchase({ customerId, clicked }) {
       fingerprint: offer.fingerprint,
       optionId: offer.option.id,
       perVisit,
+      // The discount figures the customer was shown, frozen with the offer:
+      // resume and the done screen read them back, and confirm refuses when
+      // the stored plan no longer matches them.
+      pricing,
       initiatedAt: new Date().toISOString(),
     },
   };
@@ -456,6 +537,7 @@ async function initPurchase({ customerId, clicked }) {
     perVisit,
     cadenceLabel: offer.option.cadence || '',
     visitsPerYear: visits,
+    pricing,
     terms: { version: TERMS_VERSION, text: TERMS_TEXT },
     hasCardOnFile,
     slots,
@@ -573,13 +655,16 @@ async function getPurchaseState({ customerId, purchaseId }) {
   const estimate = await db('estimates')
     .where({ id: purchase.estimate_id })
     .first('id', 'status', 'expires_at', 'estimate_data');
-  let line = null;
-  try {
-    const estData = typeof estimate?.estimate_data === 'string'
-      ? JSON.parse(estimate.estimate_data)
-      : estimate?.estimate_data;
-    line = estData?.result?.recurring?.services?.[0] || null;
-  } catch { line = null; }
+  const estData = parseEstimateData(estimate?.estimate_data);
+  const line = estData.result?.recurring?.services?.[0] || null;
+  // The frozen discount figures; the existing-service rows re-project so a
+  // plan the gate has since turned off stops showing (confirm then refuses).
+  const { publicMembershipView } = require('./estimate-membership-context');
+  const shown = estData.oneTapPurchase?.pricing || null;
+  const pricing = shown && {
+    ...shown,
+    existingServices: publicMembershipView(estData.membershipSnapshot)?.existingServices || [],
+  };
 
   let slot = null;
   let holdLive = false;
@@ -615,6 +700,7 @@ async function getPurchaseState({ customerId, purchaseId }) {
     perVisit: Number(purchase.per_visit),
     cadenceLabel: line?.frequencyLabel || '',
     visitsPerYear: Number(line?.visitsPerYear) || null,
+    pricing,
     terms: { version: purchase.terms_version, text: purchase.terms_snapshot },
     hasCardOnFile,
     slot,
@@ -835,6 +921,7 @@ async function completedRetryResponse(customerId, completedPurchase) {
     perVisit: Number(completedPurchase.per_visit),
     label: visit?.service_type || String(completedPurchase.service_key || 'service').replace(/_/g, ' '),
     emailQueued: !!(retryCustomer?.email && String(retryCustomer.email).includes('@')),
+    pricing: await completedPricing(completedPurchase.estimate_id),
   };
 }
 
@@ -989,8 +1076,9 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
       // fingerprint/option/per-visit must match the purchase row, the draft
       // must still be the single-recurring-line one-tap shape, and the
       // persisted annual total must still divide to the accepted
-      // per-application amount. Any divergence ⇒ 409, never a conversion of
-      // terms the customer never saw.
+      // per-application amount, and the existing-service plan the customer
+      // was shown must still be the stored one (shownPlanStillStored). Any
+      // divergence ⇒ 409, never a conversion of terms the customer never saw.
       let estData = null;
       try {
         estData = typeof est.estimate_data === 'string'
@@ -1011,7 +1099,8 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
         && String(frozen.optionId || '') === String(purchase.option_id || '')
         && Math.abs(Number(frozen.perVisit) - ledgerPer) < 0.005
         && storedServices.length === 1
-        && totalsPer !== null && Math.abs(totalsPer - ledgerPer) <= 0.005;
+        && totalsPer !== null && Math.abs(totalsPer - ledgerPer) <= 0.005
+        && shownPlanStillStored(estData);
       if (!snapshotIntact) throw httpError(409, OFFER_CHANGED);
 
       // CAS double-confirm guard: acceptance is where money commits.
@@ -1387,6 +1476,7 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
     perVisit: Number(purchase.per_visit),
     label: serviceLabel,
     emailQueued,
+    pricing: await completedPricing(purchase.estimate_id),
   };
 }
 

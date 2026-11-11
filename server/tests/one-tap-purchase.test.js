@@ -106,6 +106,7 @@ jest.mock('../services/pricing-engine', () => ({
   generateEstimate: jest.fn(),
 }));
 jest.mock('../services/estimate-membership-context', () => ({
+  ...jest.requireActual('../services/estimate-membership-context'),
   computeMembershipContext: jest.fn(),
 }));
 jest.mock('../services/estimate-converter', () => ({
@@ -195,6 +196,8 @@ const { maybeCreateTermiteProgramAgreement } = require('../services/termite-prog
 const { treeShrubTierCatalogStamp } = require('../routes/estimate-public');
 const AppointmentReminders = require('../services/appointment-reminders');
 
+const { gates } = require('../config/feature-gates');
+
 const oneTap = require('../services/one-tap-purchase');
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
@@ -261,8 +264,28 @@ const SLOT = {
 
 const futureIso = () => new Date(Date.now() + 12 * 3600 * 1000).toISOString();
 
+// A frozen existing-service plan as computeMembershipContext stores it, and
+// the row the customer sees (publicMembershipView drops keys and rowIds).
+const PLAN_ROW = {
+  key: 'pest_control', keys: ['pest_control'], label: 'Pest Control',
+  currentPerVisit: 119, newPerVisit: 107.1, extraDiscountPct: 10, perVisitSavings: 11.9,
+  remainingVisits: 2, upcomingVisitDates: ['2026-11-16', '2027-02-15'],
+  rowIds: ['ss-pest-1', 'ss-pest-2'], prepaid: false,
+};
+const SHOWN_ROW = {
+  key: 'pest_control', label: 'Pest Control',
+  currentPerVisit: 119, newPerVisit: 107.1, extraDiscountPct: 10, perVisitSavings: 11.9,
+  remainingVisits: 2, upcomingVisitDates: ['2026-11-16', '2027-02-15'], prepaid: false,
+};
+const SNAPSHOT_WITH_PLAN = {
+  tier: 'silver', tierLabel: 'Silver', tierDiscountPct: 10, isExistingCustomer: true,
+  existingServiceKeys: ['pest_control'], discountAppliesTo: 'new_and_existing_services',
+  existingServices: [PLAN_ROW],
+};
+
 beforeEach(() => {
   jest.clearAllMocks();
+  gates.waveguardExtendExisting = false;
   db.__state.tables = {
     customers: [{ ...CUSTOMER }],
     estimates: [],
@@ -460,6 +483,56 @@ describe('initPurchase', () => {
 });
 
 // ── reserve / release ────────────────────────────────────────────────────
+// Owner 2026-11-11: the purchase screens show the discount on the service
+// being added and the new price of the services the customer already has.
+// Both must be figures the purchase persists and the converter applies.
+describe('initPurchase — WaveGuard discount shown to the customer', () => {
+  test('the new service carries its list price and discount; the snapshot is asked to freeze the plan for the proven premises', async () => {
+    pricingEngine.generateEstimate.mockReturnValue({
+      ...ENGINE_RESULT,
+      lineItems: [{ ...LAWN_LINE, annualBeforeDiscount: 840 }],
+    });
+    const out = await oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED });
+
+    // $840 list over 9 applications, against the $84.00 the customer pays.
+    expect(out.pricing).toEqual({
+      tierLabel: 'Silver',
+      newService: { listPerVisit: 93.33, savingsPerVisit: 9.33, discountPct: 10 },
+      existingServices: [],
+    });
+    // Without these the snapshot never freezes a plan and the customer's
+    // current visits silently keep their old price.
+    expect(computeMembershipContext.mock.calls[0][1]).toMatchObject({
+      freezeExtensionPlan: true,
+      extensionStreetScope: { estimateStreet: 'street-key', customerPrimaryStreet: 'street-key' },
+    });
+  });
+
+  test('a line with no list price above the price paid shows no discount rows', async () => {
+    const out = await oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED });
+    expect(out.pricing.newService).toBeNull();
+  });
+
+  test('a frozen plan is shown as the estimate page projects it and stored as shown', async () => {
+    gates.waveguardExtendExisting = true;
+    computeMembershipContext.mockResolvedValue(SNAPSHOT_WITH_PLAN);
+    const out = await oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED });
+
+    expect(out.pricing.existingServices).toEqual([SHOWN_ROW]);
+    // Appointment ids are staff-side; they stay on the stored plan only.
+    expect(JSON.stringify(out)).not.toContain('ss-pest-1');
+    const estData = JSON.parse(db.__state.tables.estimates[0].estimate_data);
+    expect(estData.oneTapPurchase.pricing).toEqual(out.pricing);
+    expect(estData.membershipSnapshot.existingServices[0].rowIds).toEqual(['ss-pest-1', 'ss-pest-2']);
+  });
+
+  test('with GATE_WAVEGUARD_EXTEND_EXISTING off a frozen plan is never shown — the converter would not apply it', async () => {
+    computeMembershipContext.mockResolvedValue(SNAPSHOT_WITH_PLAN);
+    const out = await oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED });
+    expect(out.pricing.existingServices).toEqual([]);
+  });
+});
+
 describe('initPurchase — GH r5 hardening', () => {
   test('a payer-billed account is refused at init — nothing persists (GH r6 P0)', async () => {
     PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1' });
@@ -837,6 +910,56 @@ describe('confirm', () => {
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
   });
 
+  // ── Existing-service plan (owner 2026-11-11) ────────────────────────────
+  // The draft as init stores it when a plan was frozen and shown.
+  const withShownPlan = (snapshot = SNAPSHOT_WITH_PLAN) => {
+    const data = JSON.parse(SNAPSHOT_EST_DATA());
+    data.membershipSnapshot = snapshot;
+    data.oneTapPurchase.pricing = { tierLabel: 'Silver', newService: null, existingServices: [SHOWN_ROW] };
+    db.__state.tables.estimates[0].estimate_data = JSON.stringify(data);
+    return data;
+  };
+  // The converter stamps the apply outcome onto the stored snapshot.
+  const convertWithOutcome = (data, extensionOutcome) => {
+    EstimateConverter.convertEstimate.mockImplementation(async () => {
+      db.__state.tables.estimates[0].estimate_data = JSON.stringify({
+        ...data, membershipSnapshot: { ...data.membershipSnapshot, extensionOutcome },
+      });
+      return { membershipEmail: { customerId: 'cust-1' }, recurringConversionSkipped: false };
+    });
+  };
+  const confirmPlan = () => oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+
+  test('a stored plan that no longer matches the plan the customer was shown refuses', async () => {
+    gates.waveguardExtendExisting = true;
+    withShownPlan({ ...SNAPSHOT_WITH_PLAN, existingServices: [{ ...PLAN_ROW, newPerVisit: 101.15 }] });
+    await expect(confirmPlan()).rejects.toMatchObject({ status: 409 });
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(db.__state.tables.estimates[0].status).toBe('draft');
+  });
+
+  test('a plan shown while the gate was on refuses once the gate is off — it would not apply', async () => {
+    withShownPlan();
+    await expect(confirmPlan()).rejects.toMatchObject({ status: 409 });
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('the done screen lists the current services the accept repriced', async () => {
+    gates.waveguardExtendExisting = true;
+    convertWithOutcome(withShownPlan(), { applied: true, appliedFamilies: ['pest_control'] });
+    const out = await confirmPlan();
+    expect(out.pricing.existingServices).toEqual([SHOWN_ROW]);
+    expect(out.pricing.existingPending).toBe(false);
+  });
+
+  test('a shown plan the accept parked for the office reads as pending, never as repriced', async () => {
+    gates.waveguardExtendExisting = true;
+    convertWithOutcome(withShownPlan(), { applied: false, appliedFamilies: [] });
+    const out = await confirmPlan();
+    expect(out.pricing.existingServices).toEqual([]);
+    expect(out.pricing.existingPending).toBe(true);
+  });
+
   // ── Auto Pay enrollment (GH r5 P1): consent-row presence alone is not
   // charging protection — the accept-path enrollment semantics must run.
   test('confirm enrolls the consented card into Auto Pay post-commit', async () => {
@@ -1007,19 +1130,26 @@ describe('getPurchaseState / sweepStaleOneTapDrafts', () => {
     });
     db.__state.tables.estimates.push({
       id: 'est-1', customer_id: 'cust-1', status: 'draft', expires_at: futureIso(),
-      estimate_data: JSON.stringify({ result: { recurring: { services: [LAWN_LINE] } } }),
+      estimate_data: JSON.stringify({
+        result: { recurring: { services: [LAWN_LINE] } },
+        membershipSnapshot: SNAPSHOT_WITH_PLAN,
+        oneTapPurchase: { pricing: { tierLabel: 'Silver', newService: null, existingServices: [SHOWN_ROW] } },
+      }),
     });
     db.__state.tables.scheduled_services = [{
       id: 'ss-1', scheduled_date: '2026-08-20', window_start: '09:00',
       reservation_expires_at: futureIso(),
     }];
     findConsentedChargeableCard.mockResolvedValue({ id: 'pm-row' });
+    gates.waveguardExtendExisting = true;
 
     const state = await oneTap.getPurchaseState({ customerId: 'cust-1', purchaseId: 'p-1' });
     expect(state).toMatchObject({
       purchaseId: 'p-1', status: 'reserved', open: true, holdLive: true,
       perVisit: 84, hasCardOnFile: true,
       terms: { version: 'v1', text: 'Terms.' },
+      // The frozen discount figures ride the resume (card-redirect return).
+      pricing: { tierLabel: 'Silver', newService: null, existingServices: [SHOWN_ROW] },
     });
     expect(state.slot).toMatchObject({ date: '2026-08-20', windowStart: '09:00', windowEnd: '11:00' });
   });
