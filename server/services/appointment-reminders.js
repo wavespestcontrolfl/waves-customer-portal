@@ -1318,6 +1318,73 @@ function confirmationCoversDayBefore({ sent, dayOnly, apptTime }) {
   return Boolean(sent) && dayOnly !== true && etDateString(apptTime) <= etDateString(addETDays(new Date(), 1));
 }
 
+// GATE_BOOKING_TEXT_COVERS_DAY_BEFORE: how long the 24-hour pass leaves a call-booked reminder row alone after it was
+// registered. Longer than the call pipeline's registration-to-close time (it registers the row, sends its own confirmation
+// text and closes the 24-hour flag within seconds), shorter than one 15-minute tick, so by the next tick the flag is closed
+// (text delivered) or still armed (text not delivered, and the reminder goes then).
+const FRESH_CALL_BOOKED_ROW_MS = 10 * 60 * 1000;
+
+/** True when the 24-hour pass must leave this reminder row alone this tick: the gate is on and the row was registered by the
+ *  call pipeline (source 'call_recording') less than FRESH_CALL_BOOKED_ROW_MS ago, so the pipeline's own booking text may
+ *  still be in flight and about to close the 24-hour flag. Gate off (or a gate reader missing): always false, so the scan
+ *  behaves exactly as before. A missing or unreadable created_at is not "fresh" (the reminder is never held on unknowns).
+ *  created_at is set once at the row's insert; no path bumps it, so a reschedule never makes an old row young. */
+function holdFreshCallBookedRow(row, now = new Date()) {
+  if (!row || row.source !== 'call_recording') return false;
+  if (!require('../config/feature-gates').bookingTextCoversDayBeforeLive?.()) return false;
+  const createdMs = new Date(row.created_at).getTime();
+  const nowMs = new Date(now).getTime();
+  if (!Number.isFinite(createdMs) || !Number.isFinite(nowMs)) return false;
+  return nowMs - createdMs < FRESH_CALL_BOOKED_ROW_MS;
+}
+
+/** The number the 24-hour reminder texts FIRST for a visit: the same recipient set the cron send resolves
+ *  (getReminderPrefs -> resolveNoticeContacts), account holder first, as safeSendAppointment orders it. The 24-hour flag is
+ *  one flag for the whole visit, so this primary recipient decides whether a booking text covers it. Null when it cannot be
+ *  determined (customer or preferences unreadable, no contact): callers fail closed and leave the reminder armed. */
+async function reminderPrimaryRecipientPhone(customerId, scheduledServiceId) {
+  if (!customerId) return null;
+  const { customer } = await getCustomerAndTech(customerId, null);
+  if (!customer) return null;
+  const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
+  if (prefs.unavailable) return null;
+  const { allowedContacts } = await resolveNoticeContacts(customer, prefs.raw, 'appointment_reminder', 'appointment_reminder_24h');
+  const holder = lastTenDigits(customer.phone);
+  const first = [...allowedContacts].sort((a, b) => Number(lastTenDigits(b.phone) === holder) - Number(lastTenDigits(a.phone) === holder))[0];
+  return lastTenDigits(first?.phone) ? first.phone : null;
+}
+
+/** GATE_BOOKING_TEXT_COVERS_DAY_BEFORE (owner 2026-11-09). A booking path that sends its own confirmation text after the
+ *  reminder row was registered with the confirmation already marked (the call pipeline) cannot stamp the 24-hour flag in
+ *  the confirmation's own write, so it calls this once the text is known delivered. The SAME rule as deliverConfirmation
+ *  (confirmationCoversDayBefore), one fenced write: the row must still hold the time the text quoted, still be live, and
+ *  still have the 24-hour text unsent. A failed, blocked or held send passes sent false and leaves the reminder armed.
+ *  The text must also have reached the number the 24-hour reminder would text (reminderPrimaryRecipientPhone): an
+ *  implied-consent text redirected to the caller's number, when that is not the reminder's recipient, leaves the saved
+ *  number without any notice, so the reminder stays armed. An unknown recipient (either side) never closes.
+ *  While the gate is on, the 24-hour pass leaves a call-booked reminder row alone for its first 10 minutes
+ *  (holdFreshCallBookedRow), so it cannot send while the booking text is in flight.
+ *  Gate off (or a gate reader missing): nothing is read or written. Returns true when a row was closed. */
+async function closeDayBeforeForBookingText({ scheduledServiceId, apptTime, sent, dayOnly = false, customerId = null, recipientPhone = null }) {
+  if (!scheduledServiceId || !(apptTime instanceof Date) || Number.isNaN(apptTime.getTime())) return false;
+  if (!require('../config/feature-gates').bookingTextCoversDayBeforeLive?.()) return false;
+  if (!confirmationCoversDayBefore({ sent, dayOnly, apptTime })) return false;
+  const reached = lastTenDigits(recipientPhone);
+  if (!reached) return false;
+  const reminderPhone = lastTenDigits(await reminderPrimaryRecipientPhone(customerId, scheduledServiceId));
+  if (!reminderPhone || reminderPhone !== reached) {
+    logger.info(`[appt-remind] Booking text for ${scheduledServiceId} did not reach the 24h reminder's recipient - 24h reminder stays armed`);
+    return false;
+  }
+  const closed = await db('appointment_reminders')
+    .where({ scheduled_service_id: scheduledServiceId, appointment_time: apptTime, cancelled: false, reminder_24h_sent: false })
+    .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date(), updated_at: new Date() });
+  if (Number(closed) > 0) {
+    logger.info(`[appt-remind] Booking text for ${scheduledServiceId} covers the day-before notice - 24h reminder closed`);
+  }
+  return Number(closed) > 0;
+}
+
 /** After a render: when the send was decided day-only, keep the day marker only if the day row actually rendered. The
  *  state is also what the email leg reads, so a text that fell back to the window copy is never followed by a day email. */
 function noteDayRender(meta, state, rendered) {
@@ -5153,7 +5220,9 @@ const AppointmentReminders = {
         }
 
         // ── 24-hour reminder ──
-        if (!r.reminder_24h_sent && hoursUntil > 0 && hoursUntil <= 24.25) {
+        // While the gate is on, the 24-hour pass leaves a call-booked reminder row alone for its first 10 minutes, so it cannot
+        // send while the booking text is in flight (holdFreshCallBookedRow). Text and email legs share this branch.
+        if (!r.reminder_24h_sent && hoursUntil > 0 && hoursUntil <= 24.25 && !holdFreshCallBookedRow(r, now)) {
           const prefs = await getReminderPrefs(r.customer_id, { scheduledServiceId: r.scheduled_service_id });
           if (prefs.unavailable) {
             logger.warn(`[appt-remind] 24h reminder for ${r.scheduled_service_id} held: notification preferences unreadable`);
@@ -7195,6 +7264,8 @@ AppointmentReminders.smsServiceLabelStored = smsServiceLabelStored;
 AppointmentReminders.deliverMoveNoticeEmail = deliverMoveNoticeEmail;
 
 AppointmentReminders._test = {
+  holdFreshCallBookedRow,
+  FRESH_CALL_BOOKED_ROW_MS,
   confirmationDayOnly,
   isBookedAfterNoPick,
   render72hReminder,
@@ -7457,6 +7528,8 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
     return { sent: false, reason: 'error' };
   }
 }
+// GATE_BOOKING_TEXT_COVERS_DAY_BEFORE: the call pipeline closes the 24h reminder after its own confirmation text (see the function).
+AppointmentReminders.closeDayBeforeForBookingText = closeDayBeforeForBookingText;
 AppointmentReminders.sendConfirmationToServiceContact = sendConfirmationToServiceContact;
 AppointmentReminders.revalidateDelayedDaySend = revalidateDelayedDaySend;
 // GATE_DAY_ONLY_PROMISE part B2: the move-notice senders (services/day-only-move-notice.js) build their day fields with the same helper.
