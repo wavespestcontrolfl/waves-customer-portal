@@ -183,7 +183,7 @@ describe('raiseAdminAlert', () => {
   });
 });
 
-describe('customer declaration (GATE_CUSTOMER_ALERTS_RING, owner 2026-10-29 "small" E1)', () => {
+describe('customer declaration (owner 2026-10-29 "small" E1)', () => {
   test('contact or promise rides in metadata; absent stays absent', () => {
     expect(composeAdminAlert(spec({ contact: true })).metadata).toMatchObject({ contact: true });
     expect(composeAdminAlert(spec({ promise: true })).metadata).toMatchObject({ promise: true });

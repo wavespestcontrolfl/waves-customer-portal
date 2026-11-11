@@ -13,7 +13,7 @@
  *      (ambiguous). A personal/non-chemical item (Chromebook, shampoo,
  *      brass fittings) is expected to land here every time.
  *
- * GATE_PRODUCT_INTAKE_GUARD (dark): step 2 declines a lone containment hit when the
+ * Near-name guard: step 2 declines a lone containment hit when the
  * title carries a product-line word the product's own name lacks ("Dismiss NXT" vs
  * "Dismiss"). It only ever removes a match; alias matches are never guarded.
  *
@@ -21,7 +21,6 @@
  * the hit would have come from their own name or an alias pointing at them.
  */
 const db = require('../../models/db');
-const { productIntakeGuardLive } = require('../../config/feature-gates');
 
 function normalizeForMatch(value) {
   return String(value || '')
@@ -116,11 +115,9 @@ function matchTitleInCatalog(title, { aliasRows, products }) {
 
   const containmentHits = products.filter((product) => containsWholeWords(normTitle, normalizeForMatch(product.name)));
   if (containmentHits.length === 1) {
-    if (productIntakeGuardLive()) {
-      const variantWords = variantWordsMissingFromName(normTitle, normalizeForMatch(containmentHits[0].name).split(' '));
-      if (variantWords.length) {
-        return { matched: false, reason: 'variant_word', matchType: 'containment', candidates: [containmentHits[0].id], variantWords };
-      }
+    const variantWords = variantWordsMissingFromName(normTitle, normalizeForMatch(containmentHits[0].name).split(' '));
+    if (variantWords.length) {
+      return { matched: false, reason: 'variant_word', matchType: 'containment', candidates: [containmentHits[0].id], variantWords };
     }
     return { matched: true, product: containmentHits[0], matchType: 'containment' };
   }

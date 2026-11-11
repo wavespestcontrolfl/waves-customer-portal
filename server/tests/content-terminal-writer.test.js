@@ -332,7 +332,7 @@ describe('waiting rows and the admin item', () => {
 describe("owner 2026-11-02: the daily item is Claude's; the owner's bell is a list the terminal stopped handling", () => {
   const routing = require('../services/admin-alert-routing');
   const saved = { ...process.env };
-  beforeEach(() => { process.env.GATE_ALERT_CLAUDE_QUEUE = 'true'; delete process.env.AUTONOMOUS_CONTENT_TERMINAL_DUE_QUIET; });
+  beforeEach(() => { delete process.env.AUTONOMOUS_CONTENT_TERMINAL_DUE_QUIET; });
   afterEach(() => { process.env = { ...saved }; });
 
   const now = new Date('2026-11-04T14:20:00Z');
@@ -392,8 +392,8 @@ describe("owner 2026-11-02: the daily item is Claude's; the owner's bell is a li
     expect(d.episodes.closeAdminAlertKeys.mock.calls.find((c) => c[2] === 'terminal_caught_up')[1]).toEqual(['content-terminal-stalled:2026-11-04']);
   });
 
-  test('switch off, or Claude\'s queue off: the daily item rings the owner as before and no owner item is raised', async () => {
-    for (const env of [{ AUTONOMOUS_CONTENT_TERMINAL_DUE_QUIET: 'false' }, { GATE_ALERT_CLAUDE_QUEUE: 'false' }]) {
+  test('switch off: the daily item rings the owner as before and no owner item is raised', async () => {
+    for (const env of [{ AUTONOMOUS_CONTENT_TERMINAL_DUE_QUIET: 'false' }]) {
       Object.assign(process.env, env);
       const d = deps([row(OLD, 60)], ['content-terminal-stalled:2026-11-04']);
       await tw.raiseTerminalDue({ now, deps: d });
@@ -404,7 +404,6 @@ describe("owner 2026-11-02: the daily item is Claude's; the owner's bell is a li
       expect(routing.classifyClaudeQueue({ category: 'content', metadata: opts.metadata, dedupeKey: opts.dedupeKey })).toBeNull();
       // The daily item rings itself, so a standing owner item is closed.
       expect(d.episodes.closeAdminAlertKeys.mock.calls.find((c) => c[2] === 'terminal_caught_up')[1]).toEqual(['content-terminal-stalled:2026-11-04']);
-      process.env.GATE_ALERT_CLAUDE_QUEUE = 'true';
       delete process.env.AUTONOMOUS_CONTENT_TERMINAL_DUE_QUIET;
     }
   });

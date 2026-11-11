@@ -25,7 +25,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { savepointRead } = require('../../utils/savepoint-read');
-const { gateEnvValue, gateEnvTimestamp, productIntakeGuardLive } = require('../../config/feature-gates');
+const { gateEnvValue, gateEnvTimestamp } = require('../../config/feature-gates');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { raiserFor } = require('../admin-alert-injected');
@@ -583,11 +583,10 @@ function productNamedByTitle(titleWords, product, aliasesByProduct) {
   return (aliasesByProduct[product.id] || []).some((alias) => everyWordInTitle(titleWords, normalizeForMatch(alias).split(' ').filter(Boolean)));
 }
 
-// GATE_PRODUCT_INTAKE_GUARD (dark): the product-line words ("NXT", "Complete", "EC3") the title carries that the candidate does
+// Near-name guard: the product-line words ("NXT", "Complete", "EC3") the title carries that the candidate does
 // not. The candidate's words are its catalog NAME plus every PRE-EXISTING alias whose words all appear in the title (the alias
-// that names it: a person confirmed that alias, so its words are the product's own). [] with the gate off.
+// that names it: a person confirmed that alias, so its words are the product's own).
 function missingVariantWords(titleWords, candidate, aliasesByProduct) {
-  if (!productIntakeGuardLive()) return [];
   const own = new Set(normalizeForMatch(candidate.name).split(' ').filter(Boolean));
   for (const alias of (aliasesByProduct || {})[candidate.id] || []) {
     const words = normalizeForMatch(alias).split(' ').filter(Boolean);
@@ -1164,7 +1163,7 @@ async function callDecision(dispatch, userMessage) {
 
 // ---- applying a validated decision (one transaction per line) -----------
 
-// The EPA lookup evidence saved on a new pesticide's line (GATE_PRODUCT_INTAKE_GUARD): what EPA's label system answered, never
+// The EPA lookup evidence saved on a new pesticide's line: what EPA's label system answered, never
 // the raw response.
 function epaLookupEvidence(lookup) {
   if (!lookup) return null;
@@ -1467,8 +1466,7 @@ async function resolveNewProduct(trx, { line, vendor, decision }) {
   // decision was validated against. A hit is never a hard failure: the line
   // stays pending, and the next run sees the now-existing product as a
   // candidate and very likely resolves to 'existing'.
-  const intake = productIntakeGuardLive();
-  const pesticide = intake && isPesticideCategory(decision.newProduct.category);
+  const pesticide = isPesticideCategory(decision.newProduct.category);
   const lookup = pesticide ? decision.newProduct.epaLookup || { status: 'unavailable' } : null;
   const created = await inventoryOperations.createCatalogProduct({
     name: decision.newProduct.name,
@@ -1501,13 +1499,9 @@ async function resolveNewProduct(trx, { line, vendor, decision }) {
   if (!created) return { ok: false, stop: { outcome: { applied: false, reason: 'name_collision_retry' } } };
   return {
     ok: true, productId: created.id, createdProductId: created.id,
-    catalogChangeNote: intake
-      ? intakeChangeNote(created, decision.newProduct, lookup)
-      : `added "${created.name}" to the catalog${decision.newProduct.listingEpaRegNumber
-        ? `; the listing gives EPA Reg. No. ${decision.newProduct.listingEpaRegNumber}, so confirm it from the label and enter it on the product`
-        : ''}`,
+    catalogChangeNote: intakeChangeNote(created, decision.newProduct, lookup),
     // The "logged a purchase" bell opens the new product (the products tab expands ?productId=).
-    bellLink: intake ? `${INVENTORY_LINK}&productId=${created.id}` : null,
+    bellLink: `${INVENTORY_LINK}&productId=${created.id}`,
     originalProductFields: null,
   };
 }
@@ -1516,7 +1510,7 @@ async function resolveNewProduct(trx, { line, vendor, decision }) {
 // nothing to chase.
 const SDS_ONLY_CATEGORIES = new Set(['fertilizer', 'micronutrient fertilizer', 'adjuvant', 'soil_amendment']);
 
-// GATE_PRODUCT_INTAKE_GUARD: the "added to the catalog" part of the bell names what EPA filled and what a person still has to add.
+// The "added to the catalog" part of the bell names what EPA filled and what a person still has to add.
 function intakeChangeNote(created, newProduct, lookup) {
   const sentences = [`added "${created.name}" to the catalog`];
   if (!lookup) {
@@ -2063,11 +2057,11 @@ async function closeBeforeCutoff(conn, lineId) {
   });
 }
 
-// GATE_PRODUCT_INTAKE_GUARD: a validated new pesticide asks EPA's label system for its registration number and label BEFORE
+// A validated new pesticide asks EPA's label system for its registration number and label BEFORE
 // applyDecision opens its transaction (a network call never runs inside one; decideForTitle stays free of it so the read-only
-// replay makes no EPA call). Never throws: findEpaRegistrationByName answers 'unavailable' instead. No-op with the gate off.
+// replay makes no EPA call). Never throws: findEpaRegistrationByName answers 'unavailable' instead.
 async function attachEpaLookup(decision) {
-  if (!productIntakeGuardLive() || decision?.kind !== 'new_product' || !isPesticideCategory(decision.newProduct.category)) return;
+  if (decision?.kind !== 'new_product' || !isPesticideCategory(decision.newProduct.category)) return;
   decision.newProduct.epaLookup = await findEpaRegistrationByName(decision.newProduct.name, { listingRegistration: decision.newProduct.listingEpaRegNumber });
 }
 
@@ -2272,7 +2266,7 @@ module.exports = {
   // re-classification already resolves the title (item 2a, 2026-09-27 round
   // 9 review).
   decideForTitle,
-  // The EPA registration lookup processOneLine runs between decideForTitle and applyDecision (GATE_PRODUCT_INTAKE_GUARD).
+  // The EPA registration lookup processOneLine runs between decideForTitle and applyDecision.
   attachEpaLookup, processOneLine, intakeChangeNote, resolveNewProduct, decisionRecord,
   // The same catalog view the live agent decides against, for the read-only
   // replay tool (ops/agents/inventory-agent-replay.js).

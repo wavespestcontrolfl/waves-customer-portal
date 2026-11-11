@@ -1325,49 +1325,33 @@ describe('ops/agents/inventory-agent-undo.js CLI — DATABASE_PUBLIC_URL enables
   }, 30000);
 });
 
-describe('GATE_PRODUCT_INTAKE_GUARD — an "existing" answer for a near-name product', () => {
-  const originalGate = process.env.GATE_PRODUCT_INTAKE_GUARD;
-  afterEach(() => {
-    if (originalGate === undefined) delete process.env.GATE_PRODUCT_INTAKE_GUARD;
-    else process.env.GATE_PRODUCT_INTAKE_GUARD = originalGate;
-  });
-  const gateOn = () => { process.env.GATE_PRODUCT_INTAKE_GUARD = 'true'; };
+describe('near-name guard — an "existing" answer for a near-name product', () => {
   const dismiss = { id: 'p-dismiss', name: 'Dismiss', container_size: '1 gal', inventory_unit: 'gal' };
   const reading = { size_text: '1 gal', size_number: 1, size_unit: 'gal', pack_count: 1 };
   const existing = { kind: 'existing', product_id: 'p-dismiss', reading };
 
-  test('gate on: "Dismiss NXT" against catalog "Dismiss" is held, naming the word, with no closest guess', () => {
-    gateOn();
+  test('"Dismiss NXT" against catalog "Dismiss" is held, naming the word, with no closest guess', () => {
     const decision = classifyDecision(existing, ctx({ rawTitle: 'Dismiss NXT Turf Herbicide 1 gal', candidates: [dismiss], allActiveProducts: [dismiss] }));
     expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
     expect(decision.reason).toBe('the title has a product-line word ("nxt") that "Dismiss" does not');
     expect(decision).not.toHaveProperty('suggestion');
   });
 
-  test('gate off: the same answer validates exactly as before', () => {
-    delete process.env.GATE_PRODUCT_INTAKE_GUARD;
-    expect(classifyDecision(existing, ctx({ rawTitle: 'Dismiss NXT Turf Herbicide 1 gal', candidates: [dismiss], allActiveProducts: [dismiss] })))
-      .toMatchObject({ kind: 'existing', status: 'logged' });
-  });
-
-  test('gate on: a refused candidate is not shown as "Closest guess" when the model only answered unsure with its id', () => {
-    gateOn();
+  test('a refused candidate is not shown as "Closest guess" when the model only answered unsure with its id', () => {
     const decision = classifyDecision({ kind: 'unsure', product_id: 'p-dismiss', reason: 'not sure' }, ctx({
       rawTitle: 'Dismiss NXT Turf Herbicide 1 gal', candidates: [dismiss], allActiveProducts: [dismiss] }));
     expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
     expect(decision).not.toHaveProperty('suggestion');
   });
 
-  test('gate on: a title with the same words as the product (a size such as "4 x 30 g" included) still validates', () => {
-    gateOn();
+  test('a title with the same words as the product (a size such as "4 x 30 g" included) still validates', () => {
     const advion = { id: 'p-adv', name: 'Advion Cockroach Gel Bait', container_size: '30 g', inventory_unit: 'g' };
     const decision = classifyDecision({ kind: 'existing', product_id: 'p-adv', reading: { size_text: '30 g', size_number: 30, size_unit: 'g', pack_count: 4 } },
       ctx({ rawTitle: 'Advion Cockroach Gel Bait 4 x 30 g', lineQuantity: 1, candidates: [advion], allActiveProducts: [advion] }));
     expect(decision).toMatchObject({ kind: 'existing', status: 'logged' });
   });
 
-  test('gate on: a pre-existing alias that names the product supplies its product-line words (a person confirmed that alias)', () => {
-    gateOn();
+  test('a pre-existing alias that names the product supplies its product-line words (a person confirmed that alias)', () => {
     const gentrol = { id: 'p-gentrol', name: 'Gentrol', container_size: '16 fl oz', inventory_unit: 'fl_oz' };
     const raw = { kind: 'existing', product_id: 'p-gentrol', reading: { size_text: '16 fl oz', size_number: 16, size_unit: 'fl_oz', pack_count: 1 } };
     const title = 'Zoecon Gentrol Complete EC3 Insecticide 16 fl oz';
@@ -1377,22 +1361,17 @@ describe('GATE_PRODUCT_INTAKE_GUARD — an "existing" answer for a near-name pro
     expect(withoutAlias.reason).toBe('the title has a product-line word ("complete") that "Gentrol" does not');
   });
 
-  test('gate on: when the catalog matcher already named the product the answer is not guarded', () => {
-    gateOn();
+  test('when the catalog matcher already named the product the answer is not guarded', () => {
     const decision = classifyDecision(existing, ctx({
       rawTitle: 'Dismiss NXT Turf Herbicide 1 gal', candidates: [dismiss], allActiveProducts: [dismiss], matchedProductId: 'p-dismiss' }));
     expect(decision).toMatchObject({ kind: 'existing', status: 'logged' });
   });
 });
 
-describe('GATE_PRODUCT_INTAKE_GUARD — a new pesticide asks EPA for its number and label', () => {
-  const originalGate = process.env.GATE_PRODUCT_INTAKE_GUARD;
+describe('a new pesticide asks EPA for its number and label', () => {
   afterEach(() => {
     jest.restoreAllMocks();
-    if (originalGate === undefined) delete process.env.GATE_PRODUCT_INTAKE_GUARD;
-    else process.env.GATE_PRODUCT_INTAKE_GUARD = originalGate;
   });
-  const gateOn = () => { process.env.GATE_PRODUCT_INTAKE_GUARD = 'true'; };
   const GENTROL_RECORD = {
     eparegno: '89459-119', productname: 'RF2296 LH EC', product_status: 'Active', cancel_flag: 'No',
     altbrandnames: [{ altbrandname: 'GENTROL\u00ae COMPLETE EC3' }], active_ingredients: [{ active_ing: '(S)-Hydroprene' }],
@@ -1409,17 +1388,7 @@ describe('GATE_PRODUCT_INTAKE_GUARD — a new pesticide asks EPA for its number 
   const createSpy = () => jest.spyOn(inventoryOperations, 'createCatalogProduct').mockImplementation(async (fields) => ({ id: 'p-new', name: fields.name }));
   const run = (decision) => resolveNewProduct({}, { line: { raw_title: 'Zoecon Gentrol Complete EC3 16 fl oz' }, vendor: 'siteone', decision });
 
-  test('attachEpaLookup: gate off makes no EPA request', async () => {
-    delete process.env.GATE_PRODUCT_INTAKE_GUARD;
-    const fetched = jest.spyOn(global, 'fetch');
-    const decision = newProductDecision();
-    await attachEpaLookup(decision);
-    expect(fetched).not.toHaveBeenCalled();
-    expect(decision.newProduct).not.toHaveProperty('epaLookup');
-  });
-
-  test('attachEpaLookup: gate on looks up a pesticide, passing the listing number, and skips every other kind of decision', async () => {
-    gateOn();
+  test('attachEpaLookup: looks up a pesticide, passing the listing number, and skips every other kind of decision', async () => {
     const fetched = jest.spyOn(global, 'fetch').mockImplementation(async (url) => (String(url).includes('/riname/')
       ? new Response(JSON.stringify({ items: [{ eparegno: '89459-119', productname: 'GENTROL\u00ae COMPLETE EC3', product_status: 'Active', product_name_status: 'Active' }] }))
       : new Response(JSON.stringify({ items: [GENTROL_RECORD] }))));
@@ -1436,7 +1405,6 @@ describe('GATE_PRODUCT_INTAKE_GUARD — a new pesticide asks EPA for its number 
   });
 
   test('attachEpaLookup never throws when EPA does not answer', async () => {
-    gateOn();
     jest.spyOn(global, 'fetch').mockRejectedValue(new TypeError('network down'));
     const decision = newProductDecision();
     await expect(attachEpaLookup(decision)).resolves.toBeUndefined();
@@ -1451,28 +1419,13 @@ describe('GATE_PRODUCT_INTAKE_GUARD — a new pesticide asks EPA for its number 
     const apply = source.slice(source.indexOf('async function resolveNewProduct('), source.indexOf('async function attachEpaLookup('));
     expect(apply).not.toMatch(/findEpaRegistrationByName\(/);
     // And at run time: creating the product (inside applyDecision's transaction) makes no EPA request.
-    gateOn();
     createSpy();
     const fetched = jest.spyOn(global, 'fetch');
     await run(newProductDecision({ epaLookup: FOUND }));
     expect(fetched).not.toHaveBeenCalled();
   });
 
-  test('gate off: the product is created exactly as today (no EPA fields) and the bell text is today\'s', async () => {
-    delete process.env.GATE_PRODUCT_INTAKE_GUARD;
-    const spy = createSpy();
-    const result = await run(newProductDecision({ listingEpaRegNumber: '279-3206' }));
-    const fields = spy.mock.calls[0][0];
-    expect(fields).not.toHaveProperty('epaRegNumber');
-    expect(fields).not.toHaveProperty('labelUrl');
-    expect(fields).not.toHaveProperty('leaveEpaBlank');
-    expect(result.catalogChangeNote).toBe('added "Gentrol Complete EC3" to the catalog; the listing gives EPA Reg. No. 279-3206, so confirm it from the label and enter it on the product');
-    expect(result.bellLink).toBeNull();
-    expect((await run(newProductDecision())).catalogChangeNote).toBe('added "Gentrol Complete EC3" to the catalog');
-  });
-
-  test('gate on, found: EPA number and label are saved; label_verified_by / label_verified_at are never set; the bell links to the product', async () => {
-    gateOn();
+  test('found: EPA number and label are saved; label_verified_by / label_verified_at are never set; the bell links to the product', async () => {
     const spy = createSpy();
     const result = await run(newProductDecision({ epaLookup: FOUND }));
     const fields = spy.mock.calls[0][0];
@@ -1489,8 +1442,7 @@ describe('GATE_PRODUCT_INTAKE_GUARD — a new pesticide asks EPA for its number 
     ['not_found', { status: 'not_found', reason: 'no_exact_name' }, "EPA's label system could not prove one EPA number for this name"],
     ['ambiguous', { status: 'ambiguous', registrations: ['1-2', '3-4'] }, "EPA's label system could not prove one EPA number for this name"],
     ['unavailable', { status: 'unavailable' }, "EPA's label system did not answer"],
-  ])('gate on, %s: the pesticide is still created with the EPA number left blank, never "N/A", and the bell says what is missing', async (_label, lookup, sentence) => {
-    gateOn();
+  ])('%s: the pesticide is still created with the EPA number left blank, never "N/A", and the bell says what is missing', async (_label, lookup, sentence) => {
     const spy = createSpy();
     const result = await run(newProductDecision({ epaLookup: lookup }));
     const fields = spy.mock.calls[0][0];
@@ -1500,8 +1452,7 @@ describe('GATE_PRODUCT_INTAKE_GUARD — a new pesticide asks EPA for its number 
     expect(result.catalogChangeNote).toBe(`added "Gentrol Complete EC3" to the catalog. ${sentence}. Still missing: EPA number, label, SDS and active ingredient; add them on the product`);
   });
 
-  test('gate on: a listing number is named in the bell, as a mismatch or as something to confirm', () => {
-    gateOn();
+  test('a listing number is named in the bell, as a mismatch or as something to confirm', () => {
     const created = { name: 'Taurus SC' };
     const base = { listingEpaRegNumber: '53883-279', category: 'termiticide' };
     expect(intakeChangeNote(created, base, { status: 'not_found', listingMismatch: true })).toMatch(/\. The listing gives EPA Reg\. No\. 53883-279; it does not match this name in EPA's records$/);
@@ -1510,8 +1461,7 @@ describe('GATE_PRODUCT_INTAKE_GUARD — a new pesticide asks EPA for its number 
     expect(intakeChangeNote(created, base, FOUND)).not.toMatch(/The listing gives/);
   });
 
-  test('gate on, a pesticide with no lookup recorded keeps the number blank (never "N/A") and says EPA did not answer', async () => {
-    gateOn();
+  test('a pesticide with no lookup recorded keeps the number blank (never "N/A") and says EPA did not answer', async () => {
     const spy = createSpy();
     const result = await run(newProductDecision());
     expect(spy.mock.calls[0][0]).toMatchObject({ leaveEpaBlank: true });
@@ -1520,8 +1470,7 @@ describe('GATE_PRODUCT_INTAKE_GUARD — a new pesticide asks EPA for its number 
 
   test.each([
     ['fertilizer'], ['micronutrient fertilizer'], ['adjuvant'], ['soil_amendment'],
-  ])('gate on, %s: no EPA fields (the default "N/A" stays) and the bell says only the SDS is missing', async (category) => {
-    gateOn();
+  ])('%s: no EPA fields (the default "N/A" stays) and the bell says only the SDS is missing', async (category) => {
     const spy = createSpy();
     const result = await run(newProductDecision({ name: 'Nutri Mix', category }));
     const fields = spy.mock.calls[0][0];
@@ -1529,13 +1478,12 @@ describe('GATE_PRODUCT_INTAKE_GUARD — a new pesticide asks EPA for its number 
     expect(result.catalogChangeNote).toBe('added "Nutri Mix" to the catalog. Still missing: SDS; add it on the product');
   });
 
-  test('gate on, rodent_trap: no missing sentence at all', async () => {
-    gateOn();
+  test('rodent_trap: no missing sentence at all', async () => {
     createSpy();
     expect((await run(newProductDecision({ name: 'Victor Snap Trap', category: 'rodent_trap' }))).catalogChangeNote).toBe('added "Victor Snap Trap" to the catalog');
   });
 
-  test('decisionRecord keeps the lookup evidence on the line (gate on) and adds nothing with the gate off', () => {
+  test('decisionRecord keeps the lookup evidence on the line and adds nothing when there is none', () => {
     const withLookup = decisionRecord(newProductDecision({ epaLookup: { ...FOUND, listingMismatch: true } }));
     expect(withLookup.epaLookup).toEqual({
       status: 'found', registration: '89459-119', matchedName: 'GENTROL\u00ae COMPLETE EC3', labelFile: '089459-00119-20260204.pdf',

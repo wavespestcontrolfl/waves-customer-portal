@@ -90,7 +90,7 @@ describe('TechNoteCard', () => {
     expect(document.querySelector('#tech-note')).toHaveAttribute('data-glass', 'card');
   });
 
-  it('prints a tip\'s source as a labelled link after the sentence, inside the quote, never the raw URL (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+  it('prints a tip\'s source as a labelled link after the sentence, inside the quote, never the raw URL (tips with facts, owner 2026-10-24)', () => {
     const sourced = { id: 'seal_door_sweeps', copy: 'The CDC puts a mouse through a hole about a quarter inch wide.', source: 'library', citations: [{ label: 'CDC', url: 'https://www.cdc.gov/healthy-pets/rodent-control/seal-up.html' }] };
     render(<TechNoteCard data={payload({ techNote: { tips: [sourced, TIPS[2]], technicianFirstName: 'Adam' } })} mode="live" />);
     const link = screen.getByRole('link', { name: 'CDC' });
