@@ -7,6 +7,7 @@ const store = require('../services/bid-kit-store');
 const files = require('../services/bid-kit-files');
 const expiry = require('../services/bid-kit-expiry');
 const { scrubError, errorTag } = require('../services/bid-kit-log');
+const { isUploadHangUp } = require('../middleware/errors');
 const catalog = require('../../shared/bid-kit-catalog.cjs');
 const { validCalendarDate } = require('../utils/datetime-et');
 
@@ -261,13 +262,17 @@ router.post('/:id/attest', async (req, res, next) => {
   }
 });
 
-// multer stops reading one byte past the cap; the exact 15 MB rule is files.validateFile's (a file of exactly 15 MB passes).
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: files.MAX_FILE_BYTES + 1, files: 1 } });
+// multer 2 refuses a file only once it is OVER limits.fileSize, so the cap is the limit itself (a file of exactly 15 MB passes;
+// one byte more is refused here with the 413 line below). files.validateFile keeps the same rule for anything that skips multer.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: files.MAX_FILE_BYTES, files: 1 } });
 function receiveFile(req, res, next) {
   upload.single('file')(req, res, (err) => {
     if (!err) return next();
     if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'The file is larger than 15 MB' });
     if (err.code === 'LIMIT_UNEXPECTED_FILE' || err.code === 'LIMIT_FILE_COUNT') return res.status(400).json({ error: 'Send one file in the "file" field' });
+    // A client that hung up mid-upload: multer's own fixed message, no data in it to scrub. It goes on unchanged so the
+    // app's hang-up guard (middleware/errors.js) knows it and keeps it out of the error log and Sentry.
+    if (isUploadHangUp(err, req)) return next(err);
     return next(scrubError(err));
   });
 }

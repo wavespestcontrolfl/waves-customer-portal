@@ -87,6 +87,25 @@ function loggedErrorText(err, req) {
   return { message: `[admin read] ${parts.join(', ')}`, stack: frames };
 }
 
+// A client that hangs up in the middle of an upload. multer 2 reports it to the route as
+// Error('Request aborted') or Error('Request closed'); multer 1 never called back. A route that
+// passes the error on would log a server error and raise a Sentry issue for a dropped phone
+// connection. Nobody is waiting for a reply and nothing failed here: one info line, and the
+// error goes no further. Mounted BEFORE the Sentry handler. Every other error passes through.
+// The test reads multer's own message, so a route that rewrites errors before it passes them on
+// must hand a hang-up over unchanged (isUploadHangUp; admin-bid-kit.js receiveFile does).
+const UPLOAD_HANG_UP_MESSAGES = new Set(['Request aborted', 'Request closed']);
+function isUploadHangUp(err, req) {
+  return !!err && !err.code && UPLOAD_HANG_UP_MESSAGES.has(err.message)
+    && (req.destroyed === true || req.aborted === true);
+}
+function uploadHangUp(err, req, res, next) {
+  if (!isUploadHangUp(err, req)) return next(err);
+  logger.info(`${req.method} ${redactRequestUrlFor(req, req.originalUrl || req.path || '')}: client hung up during an upload`);
+  if (!res.headersSent && !res.destroyed) res.status(400).end();
+  return undefined;
+}
+
 function errorHandler(err, req, res, next) {
   // Public bearer tokens ride the PATH (/api/pay/<token>, …) — redact before
   // logging or the error log becomes a reusable-credential store.
@@ -135,4 +154,4 @@ function notFound(req, res) {
   res.status(404).json(notFoundBody(req));
 }
 
-module.exports = { errorHandler, notFound, notFoundBody, redactSensitiveBody };
+module.exports = { errorHandler, uploadHangUp, isUploadHangUp, notFound, notFoundBody, redactSensitiveBody };
