@@ -14754,12 +14754,9 @@ export function CompletionPanel({
   // empty query reads nothing but the visit): only where /complete keeps the
   // pick, every service but WDO, termite pre-treat and tree, shrub & palm
   // (blogPostAllowedFor). The tree, shrub & palm forms never ask: another
-  // lane owns those completions. Lawn asks only with tips with facts on
-  // (GATE_TECH_TIP_SOURCES, as the tips payload says; owner 2026-10-24,
-  // decision 6).
-  const tipSourcesOn = techTips?.tipSources === true;
-  const blogPostLineExcluded = ["tree_shrub", "palm"].includes(serviceLineForCloseout)
-    || (serviceLineForCloseout === "lawn" && !tipSourcesOn);
+  // lane owns those completions. Lawn asks too (tips with facts, owner
+  // 2026-10-24, decision 6).
+  const blogPostLineExcluded = ["tree_shrub", "palm"].includes(serviceLineForCloseout);
   useEffect(() => {
     setBlogPost(null);
     setBlogPostFrom(null);
@@ -14798,13 +14795,13 @@ export function CompletionPanel({
   const pickTechTips = useCallback((ids) => {
     const added = ids.find((id) => !selectedTipIds.includes(id));
     setSelectedTipIds(ids);
-    const post = added && tipSourcesOn ? techTips?.blogPosts?.[added] : null;
+    const post = added ? techTips?.blogPosts?.[added] : null;
     if (!post || blogPost || blogPostOffer !== "yes") return;
     const tip = [...(techTips.groups || []).flatMap((group) => group.tips || []), ...(techTips.more || [])]
       .find((candidate) => candidate.id === added);
     setBlogPost(post);
     setBlogPostFrom({ id: post.id, label: tip?.label || "" });
-  }, [selectedTipIds, tipSourcesOn, techTips, blogPost, blogPostOffer]);
+  }, [selectedTipIds, techTips, blogPost, blogPostOffer]);
   // A post the technician picks or removes is their own.
   const changeBlogPost = useCallback((post) => {
     setBlogPost(post);
@@ -20589,7 +20586,6 @@ export function CompletionPanel({
                   value={blogPost}
                   onChange={changeBlogPost}
                   note={blogPostNote}
-                  canChange={tipSourcesOn}
                   disabled={generating || submitting}
                   tokens={{ ink: M.ink, muted: M.ink3, border: M.hairline, card: M.card, font, inputStyle: mInput }}
                 />
@@ -23098,7 +23094,6 @@ export function CompletionPanel({
                   value={blogPost}
                   onChange={changeBlogPost}
                   note={blogPostNote}
-                  canChange={tipSourcesOn}
                   disabled={generating || submitting}
                   tokens={{ ink: D.text, muted: D.muted, border: D.border, card: D.card, inputStyle }}
                 />
@@ -25132,7 +25127,7 @@ function TechTipPicker({
   const ranked = q ? rankTechTips(searchTips, q) : null;
   const lastSent = library?.lastSent || {};
   const conditions = library?.conditions || {};
-  // Tips with facts: what the list was matched to (null with the gate off).
+  // Tips with facts: what the list was matched to (null when the server sent no yard).
   const yardLine = techTipYardLine(library?.yard);
   const inactive = disabled || loading || !!error;
 
