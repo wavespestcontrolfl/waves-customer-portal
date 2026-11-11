@@ -25,7 +25,7 @@ import { glassScarcityInfo, glassSlotIsStale, glassSlotMeta } from '../../lib/es
 import { GlassScarcityBadge, GlassTechChip } from './glass/GlassEstimateExtras';
 import { W } from './tokens';
 import { GOLD_CTA } from '../../theme-brand';
-import { bodySlots, useSlotLookahead } from './slotLookahead';
+import { bodySlots, noTimeSoon, useSlotLookahead } from './slotLookahead';
 
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -108,6 +108,22 @@ function toAvailability(slots) {
   return { days, ...pickerRange(days) };
 }
 
+// Times exist but none within 7 days (owner wording 10-09, the same line as the reschedule page).
+// Only on the default answer: never while blocked (preview, loading, error) or on a searched or picked date.
+function NoTimeSoonNote({ blocked, searching, answer, slots }) {
+  if (blocked || searching || !noTimeSoon(answer, slots)) return null;
+  const link = { color: W.blueDeeper };
+  return (
+    // 16px, as the reschedule page's line: guidance the customer acts on, not fine print.
+    <div data-testid="no-time-soon-note" style={{ fontSize: 16, lineHeight: 1.55, color: W.textBody, marginBottom: 12 }}>
+      Nothing is open in the next 7 days. If you need a sooner visit, text or call the office and we&apos;ll find a time.{' '}
+      <a href="sms:+19412975749" style={link}>Text (941) 297-5749</a>
+      {' · '}
+      <a href="tel:+19412975749" style={link}>Call (941) 297-5749</a>
+    </div>
+  );
+}
+
 // The review shape the slot reads answer for an estimate parked for the office (B18).
 const isContactReview = (body) => body?.reviewBeforeBooking === true && body?.reason === 'contact_review';
 
@@ -183,6 +199,7 @@ export default function SlotPicker({
 
   // Past-14-days look-ahead: reads the 90-day horizon once when the 14-day list
   // is a bookable answer with no slots (the dead end). See slotLookahead.js.
+  const blocked = preview || loading || !!error;
   const view = useSlotLookahead({
     apiBase: API_BASE,
     token,
@@ -190,7 +207,7 @@ export default function SlotPicker({
     selectedFrequency,
     serviceCadences,
     refreshSignal,
-    blocked: preview || loading || !!error,
+    blocked,
     data,
     searchData,
     pickedData,
@@ -449,6 +466,7 @@ export default function SlotPicker({
   const picker = (
     <>
       {view.notice ? <div style={{ fontSize: 14, color: W.textBody, marginBottom: 12 }}>{view.notice}</div> : null}
+      <NoTimeSoonNote blocked={blocked} searching={!!activePayload} answer={data} slots={shownSlots} />
       <SchedulePicker
         frame="inner"
         availability={availability}

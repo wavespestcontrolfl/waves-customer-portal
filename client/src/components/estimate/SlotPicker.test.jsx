@@ -709,4 +709,79 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
     expect(screen.queryByText(/November 21/)).not.toBeInTheDocument();
     expect(wideCalls(fetchMock)).toHaveLength(2);
   });
+
+  // Clock is 2099-10-01 ET, so the 7-day horizon ends 2099-10-08 (inclusive).
+  describe('text-or-call line when nothing is open in 7 days', () => {
+    const NOTE = 'no-time-soon-note';
+    const LINE = /Nothing is open in the next 7 days\. If you need a sooner visit, text or call the office/;
+
+    it('shows the line with text and call links when every time on screen is past day 7', async () => {
+      stubFetch({ list: { primary: [OPEN('late', '2099-10-12')], expander: [], metadata: { firstDayAvailability: { date: '2099-10-12' } } } });
+      renderPicker();
+      await screen.findAllByText(/Arrival window|Pick/);
+      expect(screen.getByTestId(NOTE).textContent).toMatch(LINE);
+      // Customer guidance, not fine print: the reschedule page's 16px.
+      expect(screen.getByTestId(NOTE)).toHaveStyle({ fontSize: '16px' });
+      expect(screen.getByRole('link', { name: 'Text (941) 297-5749' })).toHaveAttribute('href', 'sms:+19412975749');
+      expect(screen.getAllByRole('link', { name: 'Call (941) 297-5749' })[0]).toHaveAttribute('href', 'tel:+19412975749');
+    });
+
+    // 08:00 ET: today's 09:00 opening is inside the 2-hour booking lead, so the glass picker drops it.
+    // The capped list cannot show that days 2-7 are empty, so the line makes no claim.
+    it('stays away after the glass picker drops a stale today slot while the first open day is today', async () => {
+      setGlassDefault(true);
+      try {
+        stubFetch({ list: { primary: [OPEN('today', '2099-10-01'), OPEN('late', '2099-10-12')], expander: [], metadata: { firstDayAvailability: { date: '2099-10-01', openCount: 1 } } } });
+        renderPicker();
+        await screen.findAllByText(/Arrival window|Pick/);
+        expect(screen.queryByTestId(NOTE)).not.toBeInTheDocument();
+      } finally {
+        setGlassDefault(false);
+      }
+    });
+
+    it('shows the line on the look-ahead list (14-day list empty, first opening after Nov 21)', async () => {
+      stubFetch({ wide: { primary: [SLOT_NOV21], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21' } } } });
+      renderPicker();
+      await screen.findByText('The next 2 weeks are full. Here are open times after that:');
+      expect(screen.getByTestId(NOTE).textContent).toMatch(LINE);
+    });
+
+    it('stays away when a time on screen is on day 7 (inclusive)', async () => {
+      stubFetch({ list: { primary: [OPEN('edge', '2099-10-08'), OPEN('later', '2099-10-12')], expander: [], metadata: { firstDayAvailability: { date: '2099-10-08' } } } });
+      renderPicker();
+      await screen.findAllByText(/Arrival window|Pick/);
+      expect(screen.queryByTestId(NOTE)).not.toBeInTheDocument();
+    });
+
+    it('stays away when firstDayAvailability names an open day inside 7 days that the capped list left out', async () => {
+      stubFetch({ list: { primary: [OPEN('late', '2099-10-12')], expander: [], metadata: { firstDayAvailability: { date: '2099-10-03' } } } });
+      renderPicker();
+      await screen.findAllByText(/Arrival window|Pick/);
+      expect(screen.queryByTestId(NOTE)).not.toBeInTheDocument();
+    });
+
+    it('stays away when nothing is on screen (the empty text already gives a call link)', async () => {
+      stubFetch({ wide: { primary: [], expander: [], metadata: { firstDayAvailability: null } } });
+      renderPicker();
+      await screen.findByText(/No open slots in the next 14 days/);
+      expect(screen.queryByTestId(NOTE)).not.toBeInTheDocument();
+    });
+
+    it('stays away for an office-review answer and after a date pick', async () => {
+      stubFetch({ list: { primary: [OPEN('late', '2099-10-12')], expander: [], reviewBeforeBooking: true, reason: 'other', metadata: {} } });
+      const view = renderPicker();
+      await screen.findAllByText(/Arrival window|Pick/);
+      expect(screen.queryByTestId(NOTE)).not.toBeInTheDocument();
+      view.unmount();
+      stubFetch({
+        list: { primary: [OPEN('late', '2099-10-12')], expander: [], metadata: { firstDayAvailability: { date: '2099-10-12' } } },
+        byDate: { '2099-10-20': { primary: [OPEN('d20', '2099-10-20')], expander: [], metadata: {} } },
+      });
+      renderPicker();
+      await screen.findByTestId(NOTE);
+      fireEvent.change(screen.getByLabelText(/pick one that works for you/i), { target: { value: '2099-10-20' } });
+      await waitFor(() => expect(screen.queryByTestId(NOTE)).not.toBeInTheDocument());
+    });
+  });
 });
