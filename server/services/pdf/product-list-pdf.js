@@ -1,6 +1,6 @@
 'use strict';
 
-// Bid kit Product List PDF (GATE_BID_KIT_PRODUCT_LIST_SYNC). Every product applied on a visit in the last 12 months, with its
+// Bid kit Product List PDF. Every product applied on a visit in the last 12 months, with its
 // active ingredient, EPA Reg. No. and a Label and SDS link, in two tables: registered pesticides, then fertilizers, adjuvants
 // and other products. Built with pdfkit like the other print documents (no browser). The caller (services/bid-kit-product-list.js)
 // passes rows already read and sorted; nothing here reads the database or the clock.
