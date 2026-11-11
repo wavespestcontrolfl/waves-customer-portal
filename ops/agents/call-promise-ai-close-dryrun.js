@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // READ-ONLY
 //
-// call-promise-ai-close-dryrun.js — what GATE_CALL_PROMISE_AI_CLOSE would do to
+// call-promise-ai-close-dryrun.js — what the call-promise AI close would do to
 // the Waves call promises that are open right now, with NO writes. It loads the
 // open party='waves' promises (the nightly watchdog's own candidate query,
 // call-promise-ai-close.js listCandidates) and judges each one with the REAL

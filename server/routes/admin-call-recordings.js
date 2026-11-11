@@ -431,7 +431,7 @@ router.get('/commitments/open', async (req, res, next) => {
       }
       if (changed > 0) rows = await listOpenCommitments(db, reread);
       // The AI check for the promises the fixed rules left open on these calls
-      // (GATE_CALL_PROMISE_AI_CLOSE, dark): behind the response, a few model calls,
+      // (model calls on, off with PROMISE_EVIDENCE_CLOSE): behind the response, a few model calls,
       // one run at a time; a close shows on the next read.
       require('../services/call-promise-ai-close').runInBackground({ conn: db, callIds });
     }
