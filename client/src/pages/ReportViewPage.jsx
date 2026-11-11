@@ -2593,7 +2593,7 @@ export function TechNoteCard({ data, mode = 'live' }) {
                 <a href={tip.link.path}>{tip.link.label || 'My Property'}</a>
               </>
             ) : null}
-            {/* The sources behind the tip (GATE_TECH_TIP_SOURCES, owner
+            {/* The sources behind the tip (tips with facts, owner
                 2026-10-24): each label a link after the sentence, inside the
                 quote, never the raw URL. The server sends them only with an
                 https URL on an allowed host. */}

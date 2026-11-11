@@ -952,7 +952,7 @@ describe('frozenBlogPostWithImage', () => {
   });
 });
 
-describe('the post a tip fills in (tips with facts, GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+describe('the post a tip fills in (tips with facts, owner 2026-10-24)', () => {
   // A knex fake that records the one registry read and answers the rows given.
   function registryKnex(rows) {
     const calls = [];
