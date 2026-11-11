@@ -1,5 +1,5 @@
 /**
- * Claude's queue routing (GATE_ALERT_CLAUDE_QUEUE, services/admin-alert-routing.js): which admin
+ * Claude's queue routing (services/admin-alert-routing.js): which admin
  * rows leave the owner's bell, and what create() / the refresh merge do with them. No database:
  * create() runs against a recording connection. The write paths against Postgres are in
  * admin-alert-routing-db.test.js (CI).
@@ -16,8 +16,7 @@ const bellPolicy = require('../services/notification-bell-policy');
 
 const { classifyClaudeQueue, stampClaudeQueue, CLAUDE_QUEUE_CLASSES } = routing;
 
-beforeEach(() => { process.env.GATE_ALERT_CLAUDE_QUEUE = 'true'; bellPolicy.bellAllowed.mockClear(); });
-afterAll(() => { delete process.env.GATE_ALERT_CLAUDE_QUEUE; });
+beforeEach(() => { bellPolicy.bellAllowed.mockClear(); });
 
 // One real-shaped row per class, from the emitters.
 const CLASS_ROWS = {
@@ -87,22 +86,15 @@ describe('routing table', () => {
   });
 });
 
-describe('stampClaudeQueue and the gate', () => {
+describe('stampClaudeQueue', () => {
   const canary = CLASS_ROWS['sms-draft-canary'];
 
-  test('gate on: Activity-only, who claude, severity, class', () => {
+  test('Activity-only, who claude, severity, class', () => {
     const out = stampClaudeQueue(canary);
     expect(out).toMatchObject({ feed: 'activity', who: 'claude', severity: 'broken', claudeQueue: 'sms-draft-canary', dedupeKey: canary.metadata.dedupeKey });
     expect(out).not.toBe(canary.metadata);
     // Idempotent: a second stamp (notifyAdmin, then create) returns the same object.
     expect(stampClaudeQueue({ category: canary.category, metadata: out })).toBe(out);
-  });
-
-  test('gate off or unset: the metadata object is returned untouched', () => {
-    for (const v of [undefined, 'false', '1', 'TRUE']) {
-      if (v === undefined) delete process.env.GATE_ALERT_CLAUDE_QUEUE; else process.env.GATE_ALERT_CLAUDE_QUEUE = v;
-      expect(stampClaudeQueue(canary)).toBe(canary.metadata);
-    }
   });
 
   test('a stamp overrides a stale who / severity the emitter wrote (the canary raises who person, needs-you)', () => {
@@ -119,7 +111,7 @@ describe('create()', () => {
   };
   const make = (over) => ({ recipientType: 'admin', title: 'T', body: 'B', link: '/admin/agents', ...over });
 
-  test('gate on: a routed row is written Activity-only even when the bell policy would silence it', async () => {
+  test('a routed row is written Activity-only even when the bell policy would silence it', async () => {
     const { conn, inserted } = recorder();
     const out = await NotificationService.create(make({ category: 'system', connection: conn, metadata: { ...CLASS_ROWS['sms-draft-canary'].metadata } }));
     expect(out.id).toBe('n1');
@@ -127,18 +119,10 @@ describe('create()', () => {
     expect(JSON.parse(inserted[0].metadata)).toMatchObject({ feed: 'activity', who: 'claude', severity: 'broken' });
   });
 
-  test('gate on: an unrouted row still meets the bell policy (silenced = no row)', async () => {
+  test('an unrouted row still meets the bell policy (silenced = no row)', async () => {
     const { conn, inserted } = recorder();
     const out = await NotificationService.create(make({ category: 'system', connection: conn, metadata: { dedupeKey: 'other:1' } }));
     expect(out).toMatchObject({ suppressed: true, reason: 'bell_policy' });
-    expect(inserted).toHaveLength(0);
-  });
-
-  test('gate off: the same row is policy-silenced exactly as before', async () => {
-    delete process.env.GATE_ALERT_CLAUDE_QUEUE;
-    const { conn, inserted } = recorder();
-    const out = await NotificationService.create(make({ category: 'system', connection: conn, metadata: { ...CLASS_ROWS['sms-draft-canary'].metadata } }));
-    expect(out).toMatchObject({ suppressed: true });
     expect(inserted).toHaveLength(0);
   });
 
@@ -299,7 +283,6 @@ describe('dropped Claude faults (classifyClaudeFault, rescueClaudeFault)', () =>
     expect(out).toEqual({ ...metadata, feed: 'activity', who: 'claude', severity: 'broken', claudeQueue: 'event_sources_unhealthy' });
     expect(out).not.toBe(metadata);
     // The stamp is the one create() and notifyAdmin already honor: a second stamp returns it unchanged.
-    process.env.GATE_ALERT_CLAUDE_QUEUE = 'true';
     expect(stampClaudeQueue({ category: 'newsletter', metadata: out })).toBe(out);
   });
 });

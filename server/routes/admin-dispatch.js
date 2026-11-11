@@ -749,29 +749,23 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         .first('reviewed_findings', 'added_details')
         .catch(() => null)
       : null;
-    // Tips with facts (GATE_TECH_TIP_SOURCES, read at call time): the picker
-    // shows the words the completion freezes and only the tips that fit this
-    // yard (grass, irrigation, the visit address's county and city).
-    const tipSources = require('../config/feature-gates').techTipSourcesLive?.() === true;
-    const yard = tipSources
-      ? await loadTechTipYard(db, {
-        customerId: svc.customer_id,
-        zip: svc.service_address_zip || svc.current_property_zip,
-        city: svc.service_address_city || svc.current_property_city,
-      })
-      : null;
+    // Tips with facts: the picker shows the words the completion freezes and
+    // only the tips that fit this yard (grass, irrigation, the visit
+    // address's county and city).
+    const yard = await loadTechTipYard(db, {
+      customerId: svc.customer_id,
+      zip: svc.service_address_zip || svc.current_property_zip,
+      city: svc.service_address_city || svc.current_property_city,
+    });
     // The live post each tip names, for the office form to fill an empty
-    // blog slot on a pick (gate on only; a failed read offers none).
-    const blogPosts = tipSources
-      ? await require('../services/service-report/report-blog-post').tipBlogPosts(db, TIPS).catch(() => ({}))
-      : null;
+    // blog slot on a pick (a failed read offers none).
+    const blogPosts = await require('../services/service-report/report-blog-post').tipBlogPosts(db, TIPS).catch(() => ({}));
     const library = tipsForVisit({
       serviceLine,
       serviceKey,
       serviceKeys: addonKeys,
       findings: [...lawnFindingsFromAssessment(lawnAssessment), ...lawnFindingsFromRun(lawnRun)],
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
-      sourced: tipSources,
       yard,
     });
     // The 90-day window is ET calendar days: the database's own current
@@ -820,14 +814,13 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       lastSent,
       conditions: { irrigation_on_file: irrigationSettingsOnFile(prefs) },
       ...(completionChoicesEnabled ? { previousRecommendations } : {}),
-      // Tips with facts (gate on): what the tips were matched to, for the
-      // picker's one-line note, and the post each tip fills in. The flag also
-      // offers the blog post on a lawn visit (owner 2026-10-24, decision 6).
-      ...(tipSources ? {
-        tipSources: true,
-        ...(yard ? { yard: { grass: yard.grassTrusted ? yard.grassLabel : null, irrigationSystem: yard.irrigationSystem, county: yard.county } } : {}),
-        blogPosts,
-      } : {}),
+      // Tips with facts: what the tips were matched to, for the picker's
+      // one-line note, and the post each tip fills in. `tipSources` stays on
+      // the wire for an older cached client; it also offers the blog post on
+      // a lawn visit (owner 2026-10-24, decision 6).
+      tipSources: true,
+      yard: { grass: yard.grassTrusted ? yard.grassLabel : null, irrigationSystem: yard.irrigationSystem, county: yard.county },
+      blogPosts,
     });
   } catch (err) { next(err); }
 });

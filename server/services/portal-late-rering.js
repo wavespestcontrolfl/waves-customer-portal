@@ -137,7 +137,7 @@ async function ringAgain({ row, meta, askedAt }, now) {
       ...notifications._private.DONE_CLEARED,
       created_at: db.fn.now(),
       // askedAt first: created_at is bumped above, and the close and contact checks must keep the ask as their boundary.
-      // `contact: true` declares a customer reaching us, which the bell policy rings (GATE_CUSTOMER_ALERTS_RING).
+      // `contact: true` declares a customer reaching us, which the bell policy rings.
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ askedAt: askedAt.toISOString(), lateReRungAt: at, contact: true })]),
     });
   return rewritten ? 1 : 0;
@@ -312,7 +312,7 @@ async function ringEstimateAgain({ row, meta, askedAt }, now) {
       ...notifications._private.DONE_CLEARED,
       created_at: db.fn.now(),
       // askedAt first: created_at is bumped above, and the close and contact checks must keep the ask as their boundary.
-      // `contact: true` declares a customer reaching us, which the bell policy rings (GATE_CUSTOMER_ALERTS_RING).
+      // `contact: true` declares a customer reaching us, which the bell policy rings.
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ askedAt: askedAt.toISOString(), estimateReRungAt: now.toISOString(), contact: true })]),
     });
   return rewritten ? 1 : 0;

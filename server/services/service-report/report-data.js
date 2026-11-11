@@ -2135,10 +2135,10 @@ function buildProtocolPayload(record) {
         ...(tip.link && typeof tip.link.path === 'string' && tip.link.path.startsWith('/portal')
           ? { link: { label: String(tip.link.label || 'My Property'), path: tip.link.path } }
           : {}),
-        // The sources behind the tip (GATE_TECH_TIP_SOURCES): the frozen
-        // snapshot, re-checked against the registry's host rule before it
-        // prints; never a label without an allowed https URL.
-        ...(featureGates.techTipSourcesLive?.() === true && printableCitations(tip.citations).length
+        // The sources behind the tip: the frozen snapshot, re-checked against
+        // the registry's host rule before it prints; never a label without an
+        // allowed https URL. A tip frozen before tips with facts has none.
+        ...(printableCitations(tip.citations).length
           ? { citations: printableCitations(tip.citations) }
           : {}),
       })),

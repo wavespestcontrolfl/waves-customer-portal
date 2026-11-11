@@ -979,7 +979,7 @@ async function settleCommitmentAlert(trx, initial, id, { action, reviewedBy }) {
   else await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [`email-commitment:${id}`]).update(update);
 }
 
-// GATE_SMS_FOLLOWUP_WITNESS_FIX (docs/admin-notifications.md: the emitter that
+// Done on a text follow-up bell (docs/admin-notifications.md: the emitter that
 // raises a row owns clearing it). A person's Done on a text follow-up bell
 // used to write only the notifications row, so the next sweep tick saw the
 // commitment still open and rang again. Done now also marks every open
@@ -990,7 +990,7 @@ async function settleCommitmentAlert(trx, initial, id, { action, reviewedBy }) {
 // moved) is skipped and logged, never a failure for the Done click.
 const SMS_ALERT_KEY = /^sms-commitment(?:-source)?:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 async function settleCommitmentsForDoneAlert(conn, notificationId, { reviewedBy }) {
-  if (!require('../config/feature-gates').smsFollowupWitnessFixLive() || !reviewedBy) return 0;
+  if (!reviewedBy) return 0;
   const alert = await conn('notifications').where({ id: notificationId, recipient_type: 'admin' }).first('metadata');
   let metadata = alert?.metadata;
   if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch (_) { metadata = null; } }
@@ -1350,7 +1350,7 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
   // a new row. With no open row (first time, or a person marked it done and
   // the promise is still overdue) the insert is fresh: one new row, one bell.
   const ringOnce = require('../config/feature-gates').alertRingOnceLive?.();
-  // promise: a follow-up we owe the customer (GATE_CUSTOMER_ALERTS_RING; it already rings through bell: true).
+  // promise: a follow-up we owe the customer (it already rings through bell: true).
   const notification = await raiseAdminAlert('alert', { ...spec, promise: true }, ringOnce || refreshOnly
     ? { ...ringOpts, dedupeWindowMs: undefined, dedupeOpenOnly: true, ringOnRefresh: () => false }
     : ringOpts);

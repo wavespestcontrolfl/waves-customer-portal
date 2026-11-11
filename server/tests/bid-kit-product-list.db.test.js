@@ -1,4 +1,4 @@
-// Bid kit Product List sync (GATE_BID_KIT_PRODUCT_LIST_SYNC) through PostgreSQL: the 12-month product query, the SiteOne
+// Bid kit Product List sync through PostgreSQL: the 12-month product query, the SiteOne
 // purchase lookup, the file replacement with its details merge and system sign-off, and the whole daily run on real rows.
 // The bell service and S3 are stand-ins (their SQL runs elsewhere); the kit's own SQL is real. Every write runs in a
 // transaction that is rolled back. Synthetic data only. Skips without DATABASE_URL (CI runs it against the migrated database).
@@ -49,7 +49,6 @@ describeDb('Bid kit Product List sync (PostgreSQL)', () => {
     if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } });
     mockPg = database;
-    process.env.GATE_BID_KIT_PRODUCT_LIST_SYNC = 'true';
   });
   beforeEach(async () => {
     mockPg = await database.transaction();
@@ -63,7 +62,6 @@ describeDb('Bid kit Product List sync (PostgreSQL)', () => {
   });
   afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => {
-    delete process.env.GATE_BID_KIT_PRODUCT_LIST_SYNC;
     if (database) await database.destroy();
   });
 

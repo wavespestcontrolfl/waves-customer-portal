@@ -47,25 +47,22 @@
  * (email-division/fact-register-data.js) whose quoted words back the copy,
  * the label the customer reads ("UF/IFAS") and the page the link opens
  * (one of the fact's sourceUrls; the fact's first when absent). A tip whose
- * facts change its words also carries `sourcedCopy`. Behind
- * GATE_TECH_TIP_SOURCES the completion freezes `sourcedCopy` (else `copy`)
- * and the sources as `citations: [{ label, url }]`, and the live report prints
- * them as links after the sentence; with the gate off the freeze is exactly
- * what it was. The lint (tip-library.test.js) holds every figure in the
+ * facts change its words also carries `sourcedCopy`. The completion freezes
+ * `sourcedCopy` (else `copy`) and the sources as
+ * `citations: [{ label, url }]`, and the live report prints them as links
+ * after the sentence. The lint (tip-library.test.js) holds every figure in the
  * sourced words to the facts' quotes.
  *
- * Behind the same gate a tip may also be matched to the yard (owner
+ * A tip may also be matched to the yard (owner
  * 2026-10-24): `yard: { grass: [...], irrigation: 'system', county: [...],
  * city: [...] }` and `showMonths: [1-12]`. The picker leaves a tip out when
  * the yard does not match (yardMatches) or the visit falls outside its
  * months. Grass, county, city and water source (`water: 'reclaimed'`) need
  * a known fact (fail closed); an irrigation tip hides only where the yard is
- * known to have no system. With the gate off, nothing is filtered.
+ * known to have no system.
  *
  * A tip written for this feature (`sourcedOnly`, owner 2026-10-24, part 4)
- * exists only behind the gate: with it off, the picker never lists it and
- * the freeze drops it, so its words reach no report until the gate flips.
- * Its `copy` is the sourced text, so the picker and the freeze also drop it
+ * has its `copy` as the sourced text, so the picker and the freeze drop it
  * from the day a fact it cites expires (`expiresOn`; showMonths repeats every
  * year, an expiry does not).
  *
@@ -1887,7 +1884,7 @@ deepFreeze(TIPS);
 deepFreeze(TIP_GROUPS);
 
 const TIPS_BY_ID = new Map(TIPS.map((tip) => [tip.id, tip]));
-// A tip as the picker shows it with GATE_TECH_TIP_SOURCES on: its sourced
+// A tip as the picker shows it: its sourced
 // words and the citations the completion would freeze on `day` (the office
 // form prints their labels on the tip's chip), frozen like the registry. A
 // tip with neither is the registry's own entry.
@@ -1927,17 +1924,17 @@ function registryLineFor(serviceLine) {
  * visit that finds roaches or fleas can reach that advice. It is never listed
  * unasked, so a tip that names work still leads only its own services.
  */
-function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date = new Date(), findings = [], sourced = false, yard = null } = {}) {
+function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date = new Date(), findings = [], yard = null } = {}) {
   const line = registryLineFor(serviceLine);
   const season = seasonForDate(date);
-  // Behind GATE_TECH_TIP_SOURCES a tip that does not fit this yard, this
-  // visit's month, or (a sourcedOnly tip) the day its facts are live, is left
-  // out of every list, search included.
+  // A tip that does not fit this yard, this visit's month, or (a
+  // sourcedOnly tip) the day its facts are live, is left out of every list,
+  // search included.
   const month = monthForDate(date);
   const day = etDay(date);
-  const fits = (tip) => (sourced
-    ? yardMatches(tip.yard, yard) && (!tip.showMonths || tip.showMonths.includes(month)) && tipAvailable(tip, { sourced, day })
-    : !tip.sourcedOnly);
+  const fits = (tip) => yardMatches(tip.yard, yard)
+    && (!tip.showMonths || tip.showMonths.includes(month))
+    && tipAvailable(tip, { day });
   const TIPS_HERE = TIPS.filter(fits);
   // Within a group the best fit leads: this visit's confirmed findings, then
   // the month, then the season; ties keep registry order (the sort is stable).
@@ -1956,11 +1953,10 @@ function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date =
   const keys = new Set([serviceKey, ...serviceKeys].filter(Boolean));
   const forService = keys.size ? TIPS_HERE.filter((tip) => tip.services?.some((key) => keys.has(key))).sort(bySeason) : [];
   const listed = new Set([...forService, ...groups.flatMap((group) => group.tips)]);
-  // Behind GATE_TECH_TIP_SOURCES the picker shows what the completion will
-  // freeze (a sourced tip's sourcedCopy and its citations), so the
-  // technician approves exactly what the customer reads; off, the
-  // registry's own entries.
-  const shown = (tip) => (sourced ? sourcedView(tip, day) : tip);
+  // The picker shows what the completion will freeze (a sourced tip's
+  // sourcedCopy and its citations), so the technician approves exactly what
+  // the customer reads.
+  const shown = (tip) => sourcedView(tip, day);
   const allGroups = forService.length ? [{ ...FOR_SERVICE_GROUP, primary: true, tips: forService }, ...groups] : groups;
   return {
     line,
@@ -2025,13 +2021,13 @@ function citationsFor(tip, day) {
 }
 
 // Whether a tip may be offered or frozen on `day` (no tip, no). A tip written
-// for tips with facts (`sourcedOnly`) needs the gate, and every fact it cites
-// unexpired that day: its words are the fact's, and an expired fact leaves
-// nothing to print. Every other tip is available as before.
-function tipAvailable(tip, { sourced, day }) {
+// for tips with facts (`sourcedOnly`) needs every fact it cites unexpired
+// that day: its words are the fact's, and an expired fact leaves nothing to
+// print. Every other tip is available.
+function tipAvailable(tip, { day }) {
   if (!tip) return false;
   if (!tip.sourcedOnly) return true;
-  return sourced && (tip.sources || []).every((source) => {
+  return (tip.sources || []).every((source) => {
     const fact = FACTS_BY_SLUG.get(source.fact);
     return Boolean(fact) && !(fact.expiresOn && fact.expiresOn <= day);
   });
@@ -2040,27 +2036,26 @@ function tipAvailable(tip, { sourced, day }) {
 /**
  * Resolve picked ids to frozen entries. Unknown ids are dropped — the client
  * never supplies copy, so an unrecognised id has nothing to print. Duplicates
- * collapse and the result is capped at MAX_TIPS_PER_VISIT. With `sourced`
- * (GATE_TECH_TIP_SOURCES, read by the caller) a sourced tip freezes its
- * sourced words and its citations; without it the result is unchanged.
+ * collapse and the result is capped at MAX_TIPS_PER_VISIT. A sourced tip
+ * freezes its sourced words and its citations.
  */
-function resolveTipIds(ids, { sourced = false, date = new Date() } = {}) {
+function resolveTipIds(ids, { date = new Date() } = {}) {
   const day = etDay(date);
   const seen = new Set();
   const resolved = [];
   for (const raw of Array.isArray(ids) ? ids : []) {
     const id = String(raw || '').trim();
     const tip = TIPS_BY_ID.get(id);
-    // A tip written for tips with facts never freezes with the gate off, or
-    // once a fact it cites has expired.
-    if (seen.has(id) || !tipAvailable(tip, { sourced, day })) continue;
+    // A tip written for tips with facts never freezes once a fact it cites
+    // has expired.
+    if (seen.has(id) || !tipAvailable(tip, { day })) continue;
     seen.add(id);
     // The link is a snapshot, never the registry's own object — a caller
     // that edits its payload must not edit the registry for every later call.
-    const citations = sourced ? citationsFor(tip, day) : [];
+    const citations = citationsFor(tip, day);
     resolved.push({
       id,
-      copy: sourced && tip.sourcedCopy ? tip.sourcedCopy : tip.copy,
+      copy: tip.sourcedCopy || tip.copy,
       source: 'library',
       ...(tip.aftercare ? { aftercare: true } : {}),
       ...(tip.link ? { link: { ...tip.link } } : {}),
@@ -2094,9 +2089,9 @@ function sentenceCount(text) {
   return (t.match(/[.!?]+(?:["')\]]+)?(?=\s+\S)/g) || []).length + 1;
 }
 
-function freezeTechTips(input, { sourced = false, date = new Date() } = {}) {
+function freezeTechTips(input, { date = new Date() } = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return { tips: [], dropped: [] };
-  const tips = resolveTipIds(input.ids, { sourced, date });
+  const tips = resolveTipIds(input.ids, { date });
   const dropped = [];
   // Nothing the tech was told would print may vanish silently: an id the
   // library no longer has (retired between picker load and completion, or
@@ -2111,7 +2106,7 @@ function freezeTechTips(input, { sourced = false, date = new Date() } = {}) {
     if (!id || seenIds.has(id)) continue;
     seenIds.add(id);
     if (kept.has(id)) continue;
-    dropped.push({ id, violations: [tipAvailable(TIPS_BY_ID.get(id), { sourced, day }) ? 'over_cap' : 'unknown_tip'] });
+    dropped.push({ id, violations: [tipAvailable(TIPS_BY_ID.get(id), { day }) ? 'over_cap' : 'unknown_tip'] });
   }
   // Never truncated: an over-long line is rejected as `too_long` so the
   // tech rewrites it, rather than a silently shortened sentence printing.

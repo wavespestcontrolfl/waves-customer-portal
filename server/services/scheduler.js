@@ -8735,9 +8735,9 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Bid kit expiry check failed: ${err.message}`);
     }
-    // Bid kit Product List (GATE_BID_KIT_PRODUCT_LIST_SYNC, dark): rebuilds the kit's product list PDF from the last 12 months of
-    // applied products. A SiteOne-only change signs itself off; anything else leaves it unsigned with one admin bell. Gate off =
-    // returns before any query. runExclusive: a deploy overlap must not build and store two files.
+    // Bid kit Product List: rebuilds the kit's product list PDF from the last 12 months of
+    // applied products. A SiteOne-only change signs itself off; anything else leaves it unsigned with one admin bell.
+    // runExclusive: a deploy overlap must not build and store two files.
     try {
       await runExclusive('bid-kit-product-list', async () => {
         const result = await require('./bid-kit-product-list').runBidKitProductListSync();

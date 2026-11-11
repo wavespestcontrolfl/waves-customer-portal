@@ -38,7 +38,7 @@ const rowFor = (key, meta, ageDays = 0) => ({
   metadata: meta, created_at: new Date(NOW.getTime() - ageDays * DAY_MS), read_at: null, done_at: null,
 });
 
-afterEach(() => { delete process.env.GATE_CUSTOMER_ALERTS_RING; delete process.env.GATE_ALERT_CLAUDE_QUEUE; delete process.env.GATE_ALERT_CLAUDE_FAULTS; });
+afterEach(() => { delete process.env.GATE_ALERT_CLAUDE_FAULTS; });
 
 describe('the labels a registry type stores are all valid composer values', () => {
   test.each(entries)('%s', (key, trigger) => {
@@ -75,7 +75,6 @@ describe('a refreshed standing row keeps its labels', () => {
 
 describe('Claude-queue routing ignores the labels', () => {
   test.each(entries)('%s: stampClaudeQueue and classifyClaudeQueue answer the same with and without labels', (key, trigger) => {
-    process.env.GATE_ALERT_CLAUDE_QUEUE = 'true';
     for (const dedupeKey of [undefined, 'sms-draft-canary:x', 'ops-reminder-broken:j:d']) {
       const plain = metaFor(key, { labels: false });
       const labelled = metaFor(key);
@@ -124,17 +123,9 @@ describe('the relevance sweep classes are not captured by the labels', () => {
 
 describe('the bell policy and the push agree with the stored declaration', () => {
   test.each(entries)('%s: ringsAsCustomerAlert reads the same from the rule and from the stored labels', (key, trigger) => {
-    process.env.GATE_CUSTOMER_ALERTS_RING = 'true';
     const stored = metaFor(key);
     expect(bellPolicy.ringsAsCustomerAlert({ triggerKey: key, declared: { contact: stored.contact === true, promise: stored.promise === true } }))
       .toBe(bellPolicy.ringsAsCustomerAlert({ triggerKey: key, declared: trigger.rule }));
-  });
-
-  test('with the ring gate off the stored declaration rings nothing extra', () => {
-    for (const key of CUSTOMER_KEYS) {
-      const stored = metaFor(key);
-      expect(bellPolicy.ringsAsCustomerAlert({ triggerKey: key, declared: { contact: stored.contact === true, promise: stored.promise === true } })).toBe(false);
-    }
   });
 });
 

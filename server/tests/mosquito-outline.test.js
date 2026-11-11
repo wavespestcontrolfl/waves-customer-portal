@@ -3,7 +3,7 @@
 // recommend"). Synthetic inputs: no database.
 //
 // Pins: the gate is strict; the year is four seasons and the build month's season opens; the library tips are read by id
-// in both GATE_TECH_TIP_SOURCES states (a sourced-only tip's tile drops with the gate off); the products are the active
+// with their sourced words; the products are the active
 // catalog rows with their active ingredient, the dunk and station rows only when the estimate holds that add-on; the
 // "not included" tags follow the same counts; only an exact recurring mosquito row is a program (not a one-time job, the
 // misting plan or a commercial row); the page-owned figures hold to their fact-register quotes; and every word passes the
@@ -90,16 +90,7 @@ const allText = (result) => {
   return [result.content.title, result.content.intro, ...result.content.sections.flatMap((s) => [s.title, s.body, ...s.bullets, ...drawn(s.visual)])].filter(Boolean);
 };
 const tileTitles = (result, key) => section(result, key).visual.items.map((i) => i.title);
-const tipCopy = (id, sourced) => resolveTipIds([id], { sourced, date: OCT_26 })[0]?.copy;
-
-// The same build with GATE_TECH_TIP_SOURCES on or off.
-async function withTipGate(value, run) {
-  const saved = process.env.GATE_TECH_TIP_SOURCES;
-  if (value === undefined) delete process.env.GATE_TECH_TIP_SOURCES; else process.env.GATE_TECH_TIP_SOURCES = value;
-  try { return await run(); } finally {
-    if (saved === undefined) delete process.env.GATE_TECH_TIP_SOURCES; else process.env.GATE_TECH_TIP_SOURCES = saved;
-  }
-}
+const tipCopy = (id) => resolveTipIds([id], { date: OCT_26 })[0]?.copy;
 
 describe('GATE_MOSQUITO_OUTLINE', () => {
   const saved = process.env.GATE_MOSQUITO_OUTLINE;
@@ -119,7 +110,7 @@ describe('GATE_MOSQUITO_OUTLINE', () => {
 
 describe('the Mosquito packet', () => {
   test('sections in order, stamped Mosquito, validation passed', async () => {
-    const result = await withTipGate('true', () => build());
+    const result = await build();
     expect(result.content.sections.map((s) => s.key)).toEqual([
       'mosquito_program', 'program_year', 'problems', 'treatment_categories', 'products', 'typical_visit',
       'after_treatment', 'your_part', 'what_to_expect', 'common_questions', 'safety', 'after_visit', 'not_included',
@@ -146,7 +137,7 @@ describe('the Mosquito packet', () => {
   });
 
   test('the tiles and cards read in the draft’s order and words', async () => {
-    const result = await withTipGate('true', () => build());
+    const result = await build();
     expect(tileTitles(result, 'mosquito_program')).toEqual(['Treat where they rest', 'Find where they breed', 'Treat water that has to stay']);
     expect(tileTitles(result, 'problems')).toEqual(['Water in containers', 'Water next door', 'Daytime biters', 'Not every biter is a mosquito']);
     expect(section(result, 'treatment_categories').visual.items.map((i) => [i.key, i.label])).toEqual([
@@ -167,7 +158,7 @@ describe('the Mosquito packet', () => {
 
 describe('the year as four seasons', () => {
   test.each([[1, 'Winter'], [3, 'Winter'], [4, 'Spring'], [7, 'Summer'], [10, 'Fall'], [12, 'Fall']])('month %i opens %s', async (month, open) => {
-    const year = section(await withTipGate('true', () => build({ month })), 'program_year');
+    const year = section(await build({ month }), 'program_year');
     expect(year.visual).toEqual(expect.objectContaining({ type: 'months', labels: {}, limitLabel: null }));
     expect(year.visual.months.map((m) => m.label)).toEqual(['Winter', 'Spring', 'Summer', 'Fall']);
     expect(year.visual.months.filter((m) => m.open).map((m) => m.label)).toEqual([open]);
@@ -185,37 +176,26 @@ describe('the year as four seasons', () => {
 describe('the library tips are read by id', () => {
   const SEASON_TIPS = ['water_bird_bath', 'mq_tree_holes', 'water_weekly_dump', 'mq_pool'];
 
-  test('gate on: the sourced words, every tip tile present', async () => {
-    const result = await withTipGate('true', () => build());
+  test('the sourced words, every tip tile present', async () => {
+    const result = await build();
     const atHome = section(result, 'program_year').visual.months.map((m) => m.atHome);
-    expect(atHome).toEqual(SEASON_TIPS.map((id) => tipCopy(id, true)));
+    expect(atHome).toEqual(SEASON_TIPS.map((id) => tipCopy(id)));
     expect(atHome[0]).toMatch(/^The Florida Department of Health's rule for birdbaths/);
     const text = (key, title) => section(result, key).visual.items.find((i) => i.title === title).text;
-    expect(text('problems', 'Daytime biters')).toBe(tipCopy('mq_daytime_biters', true));
-    expect(text('your_part', 'Check the ribbed downspout pipe')).toBe(tipCopy('mq_downspout_pipe', true));
-    expect(text('your_part', 'Thin the thick hedges')).toBe(tipCopy('mq_thin_hedges', true));
-    expect(text('your_part', 'Run a fan where you sit')).toBe(tipCopy('mq_lanai_fan', true));
-    expect(text('common_questions', 'Where do my mosquitoes come from?')).toBe(tipCopy('mq_few_blocks', true));
+    expect(text('problems', 'Daytime biters')).toBe(tipCopy('mq_daytime_biters'));
+    expect(text('your_part', 'Check the ribbed downspout pipe')).toBe(tipCopy('mq_downspout_pipe'));
+    expect(text('your_part', 'Thin the thick hedges')).toBe(tipCopy('mq_thin_hedges'));
+    expect(text('your_part', 'Run a fan where you sit')).toBe(tipCopy('mq_lanai_fan'));
+    expect(text('common_questions', 'Where do my mosquitoes come from?')).toBe(tipCopy('mq_few_blocks'));
   });
 
-  test('gate off: the plain words, and a sourced-only tip’s tile drops', async () => {
-    const result = await withTipGate(undefined, () => build());
-    const atHome = section(result, 'program_year').visual.months.map((m) => m.atHome);
-    expect(atHome).toEqual(SEASON_TIPS.map((id) => tipCopy(id, false)));
-    expect(atHome[0]).toMatch(/^Water changed every few days/);
-    expect(tileTitles(result, 'problems')).toEqual(['Water in containers', 'Water next door', 'Not every biter is a mosquito']);
-    expect(tileTitles(result, 'common_questions')).toEqual(['Isn\'t my pest control enough for mosquitoes?']);
-    expect(tileTitles(result, 'your_part')).toEqual(['Flush bromeliads weekly', 'Check the ribbed downspout pipe', 'Thin the thick hedges', 'Run a fan where you sit', 'On service day']);
-    expect(result.validation.status).toBe('passed');
-  });
-
-  test('every tip id the page uses is in the library with the gate on (a renamed tip cannot leave a hole)', () => {
+  test('every tip id the page uses is in the library (a renamed tip cannot leave a hole)', () => {
     const ids = [
       ...mosquito.MOSQUITO_COPY.seasons.map((s) => s.atHomeTip),
       ...[...mosquito.MOSQUITO_COPY.problemTiles, ...mosquito.MOSQUITO_COPY.yourPartTips, ...mosquito.MOSQUITO_COPY.questionTiles].map((t) => t.tipId).filter(Boolean),
     ];
     expect(ids).toHaveLength(9);
-    for (const id of ids) expect({ id, copy: tipCopy(id, true) }).toEqual({ id, copy: expect.any(String) });
+    for (const id of ids) expect({ id, copy: tipCopy(id) }).toEqual({ id, copy: expect.any(String) });
   });
 });
 
@@ -344,14 +324,14 @@ describe('page-owned figures hold to their fact-register quotes', () => {
   const normalize = (text) => text.replace(/[’‘]/g, "'");
 
   test('"7 to 10 days" is the CDC’s egg-to-adult figure', async () => {
-    const result = await withTipGate('true', () => build());
+    const result = await build();
     const text = section(result, 'problems').visual.items.find((i) => i.title === 'Water in containers').text;
     const [, low, high] = text.match(/takes (\d+) to (\d+) days to become an adult/);
     expect(quote('fact-container-mosquitoes')).toContain(`A mosquito egg takes ${low}–${high} days to develop into an adult mosquito.`);
   });
 
   test('"a bottle cap’s worth" is UF/IFAS’s figure', async () => {
-    const result = await withTipGate('true', () => build());
+    const result = await build();
     const text = section(result, 'your_part').visual.items.find((i) => i.title === 'Flush bromeliads weekly').text;
     expect(text).toContain('it takes only a bottle cap\'s worth to breed mosquitoes');
     expect(normalize(quote('fact-tip-water-bromeliads'))).toContain('It only takes a bottle cap\'s worth of water to provide a breeding ground for mosquitoes');
@@ -360,14 +340,12 @@ describe('page-owned figures hold to their fact-register quotes', () => {
 
 describe('the owner’s rulings and the customer-copy checks hold in every state', () => {
   const STATES = [
-    ['gate on, no add-ons', 'true', { dunkCount: 0, stationCount: 0 }],
-    ['gate on, dunks and stations', 'true', { dunkCount: 2, stationCount: 1 }],
-    ['gate off, no add-ons', undefined, { dunkCount: 0, stationCount: 0 }],
-    ['gate off, dunks and stations', undefined, { dunkCount: 2, stationCount: 1 }],
+    ['no add-ons', { dunkCount: 0, stationCount: 0 }],
+    ['dunks and stations', { dunkCount: 2, stationCount: 1 }],
   ];
 
-  test.each(STATES)('%s', async (_name, gate, addOns) => {
-    const result = await withTipGate(gate, () => build({ rows: [programRow(addOns)] }));
+  test.each(STATES)('%s', async (_name, addOns) => {
+    const result = await build({ rows: [programRow(addOns)] });
     expect(result.validation).toEqual({ status: 'passed', errors: [], warnings: [] });
     const words = allText(result).join(' ');
     // No price, visit count, cadence, terms or guarantee (the estimate and agreement carry those).
@@ -389,7 +367,7 @@ describe('the owner’s rulings and the customer-copy checks hold in every state
 
   test('no two cards share a label, and every icon is one the page draws', async () => {
     const icons = new Set(['inspection', 'feeding', 'barrier', 'micros', 'weeds', 'insects', 'disease', 'dry_spots', 'report', 'whole_lawn', 'spots', 'count', 'rotate', 'decide', 'treat', 'area', 'calendar', 'label', 'reentry', 'epa', 'reminders', 'portal', 'arrival']);
-    const result = await withTipGate('true', () => build({ rows: [programRow({ dunkCount: 1, stationCount: 1 })] }));
+    const result = await build({ rows: [programRow({ dunkCount: 1, stationCount: 1 })] });
     for (const s of result.content.sections) {
       const items = (s.visual?.items || []).filter((i) => typeof i !== 'string');
       const names = items.map((i) => i.title || i.label);
