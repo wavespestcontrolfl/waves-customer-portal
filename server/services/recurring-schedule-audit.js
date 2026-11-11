@@ -494,8 +494,7 @@ function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, se
   })).digest('hex').slice(0, 20);
   // The finding alone, what the bell says: the issues, the accepted pattern and the planned and
   // recorded application counts. No row revision or date, so a routine edit to a visit (any UPDATE
-  // moves xmin) leaves it as it was. The watchdog versions its bell with it under
-  // GATE_ACCEPTED_PLAN_RING_ON_CHANGE.
+  // moves xmin) leaves it as it was. The watchdog versions its bell with it.
   // A missed round carries its round ordinal (the program year's round on the continuous timeline), so a NEW missed round rings as a change
   // while the same one stays a standing bell; the key of every other finding is as it was.
   const findingKey = createHash('sha256').update(JSON.stringify({ issues, pattern, expectedVisits, recordedVisits: live.length, ...(missedRound ? { missedRound: missedRound.ordinal } : {}) }))

@@ -19,13 +19,8 @@
  * candidates, stamps, registry, writer and cursors: an open bell alert with no new activity for 72 hours is
  * marked done every 10 minutes (own gate GATE_ALERT_QUIET_FALL_OFF, own cron, own cursor key).
  *
- * Gate GATE_ALERT_RETENTION, three states (alertRetentionMode):
- *   unset / anything else = off, no query
- *   shadow                = judge every candidate and record what WOULD expire
- *                           in one audit_log row (admin_alert_retention.shadow),
- *                           change nothing
- *   true                  = expire, and record one audit_log row per run
- *                           (admin_alert_retention.expire)
+ * Each run expires the rows it judges due and records one audit_log row
+ * (admin_alert_retention.expire).
  *
  * LAST ACTIVITY. A refresh of a standing row does not always move created_at.
  * What the code leaves behind (notification-service.js notifyAdmin):
@@ -67,7 +62,7 @@
  * never returns a row that can never expire (a non-FYI Activity-feed row). A row kept
  * only for now (a recent activity stamp, a held promise, a periodic row past the cap, a
  * fence miss) is returned, so a run that stops on its budget saves a continuation
- * cursor (system_settings admin_alert_retention_cursor_<mode>) and the next run resumes
+ * cursor (system_settings admin_alert_retention_cursor_true) and the next run resumes
  * behind it; a run that reaches the end clears it and the next starts at the oldest row.
  *
  * Writes: batches of BATCH_SIZE, one short UPDATE each, fenced on the content
@@ -79,7 +74,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { alertRetentionMode, alertQuietFallOffMode } = require('../config/feature-gates');
+const { alertQuietFallOffMode } = require('../config/feature-gates');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const AGE_DAYS = 30;
@@ -294,9 +289,8 @@ async function loadPage(conn, { now, cursor, limit, scope = null }) {
 // Continuation cursor (the payment_failed_alert_sweep_cursor pattern): a run that
 // stops on its scan budget saves where it stopped, so the next run resumes there
 // instead of re-reading the same oldest rows; a run that reaches the end clears it,
-// so the next one starts from the oldest row again. One key per mode: a shadow run
-// never moves a live run's place.
-const CURSOR_KEY = (mode) => `admin_alert_retention_cursor_${mode}`;
+// so the next one starts from the oldest row again.
+const CURSOR_KEY = 'admin_alert_retention_cursor_true';
 const CURSOR_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function parseCursor(value) {
@@ -327,19 +321,8 @@ async function writeCursorAt(conn, key, cursor) {
   }
 }
 
-const readCursor = (conn, mode) => readCursorAt(conn, CURSOR_KEY(mode));
-const writeCursor = (conn, mode, cursor) => writeCursorAt(conn, CURSOR_KEY(mode), cursor);
-
-// Bell rows in the Activity feed that are older than 30 days and not FYI: not
-// touched (no bell to leave). Counted in shadow so the owner can see the pile.
-async function countActivityOnlyBacklog(conn, now) {
-  const row = await conn('notifications')
-    .where({ recipient_type: 'admin' }).whereNull('done_at')
-    .whereRaw("metadata->>'feed' = 'activity'")
-    .where('created_at', '<', new Date(now.getTime() - AGE_DAYS * DAY_MS))
-    .count('* as count').first();
-  return Number(row?.count) || 0;
-}
+const readCursor = (conn) => readCursorAt(conn, CURSOR_KEY);
+const writeCursor = (conn, cursor) => writeCursorAt(conn, CURSOR_KEY, cursor);
 
 // One short UPDATE per rule group. Fenced on done_at IS NULL and on the content
 // version each row was judged at. Read state is not touched. Returns the number
@@ -375,13 +358,12 @@ async function recordAudit(action, summary) {
   await recordAuditEvent({ actor_type: 'system', action, resource_type: 'notifications', metadata: summary });
 }
 
-const recordSummary = (summary) => recordAudit(summary.mode === 'true' ? 'admin_alert_retention.expire' : 'admin_alert_retention.shadow', summary);
+const recordSummary = (summary) => recordAudit('admin_alert_retention.expire', summary);
 
 const bump = (map, key, by = 1) => { map[key] = (map[key] || 0) + by; };
 
-function newSummary({ mode, runId, now }) {
+function newSummary({ runId, now }) {
   return {
-    mode,
     runId,
     cutoffs: {
       age30: new Date(now.getTime() - AGE_DAYS * DAY_MS).toISOString(),
@@ -458,9 +440,8 @@ const defaultIo = (conn, scope = null) => ({
   page: (args) => loadPage(conn, { ...args, scope }),
   live: (name, rows) => LIVE_CHECKS[name](conn, rows),
   expire: (rows, rule, ctx) => expireBatch(conn, rows, rule, ctx),
-  activityBacklog: (now) => countActivityOnlyBacklog(conn, now),
-  loadCursor: (mode) => readCursor(conn, mode),
-  saveCursor: (mode, cursor) => writeCursor(conn, mode, cursor),
+  loadCursor: () => readCursor(conn),
+  saveCursor: (cursor) => writeCursor(conn, cursor),
   record: recordSummary,
 });
 
@@ -473,25 +454,23 @@ async function writePage(io, toWrite, ctx) {
 }
 
 function logSummary(summary) {
-  const { mode, expire, kept, held, deferred } = summary;
-  const result = mode === 'true' ? `expired ${summary.written} of ${expire.total}` : `would expire ${expire.total}`;
-  logger.info(`[alert-retention] ${mode}: scanned ${summary.scanned}, ${result} (age30 ${expire.byRule.age30 || 0}, fyi7 ${expire.byRule.fyi7 || 0}), kept refreshed ${kept.refreshed}, held ${held.livePromise}, deferred ${deferred.ringRiskCap}`);
+  const { expire, kept, held, deferred } = summary;
+  logger.info(`[alert-retention] scanned ${summary.scanned}, expired ${summary.written} of ${expire.total} (age30 ${expire.byRule.age30 || 0}, fyi7 ${expire.byRule.fyi7 || 0}), kept refreshed ${kept.refreshed}, held ${held.livePromise}, deferred ${deferred.ringRiskCap}`);
 }
 
 /**
- * One sweep. Returns the summary, or { skipped: true, reason: 'gate_off' }.
+ * One sweep. Returns the summary.
  * `io` swaps the database edges (unit tests).
  */
 async function runAdminAlertRetention({
-  now = new Date(), mode = alertRetentionMode(), conn = db, scope = null, io = defaultIo(conn, scope),
+  now = new Date(), conn = db, scope = null, io = defaultIo(conn, scope),
   batchSize = BATCH_SIZE, maxBatches = MAX_BATCHES, ringRiskCap = RING_RISK_CAP,
 } = {}) {
-  if (mode !== 'shadow' && mode !== 'true') return { skipped: true, reason: 'gate_off' };
   const runId = now.toISOString();
-  const summary = newSummary({ mode, runId, now });
+  const summary = newSummary({ runId, now });
   summary.ringRisk.cap = ringRiskCap;
   const state = { periodicExpired: 0 };
-  let cursor = await io.loadCursor(mode);
+  let cursor = await io.loadCursor();
   summary.resumedFrom = cursor ? cursor.id : null;
   let reachedEnd = false;
 
@@ -506,13 +485,12 @@ async function runAdminAlertRetention({
 
     const toWrite = await planPage({ rows, now, summary, io, ringRiskCap, state });
 
-    if (mode === 'true') summary.written += await writePage(io, toWrite, { runId, now });
+    summary.written += await writePage(io, toWrite, { runId, now });
   }
 
   // Budget used up with rows left: resume there next run. Reached the end: start over.
-  await io.saveCursor(mode, reachedEnd ? null : cursor);
+  await io.saveCursor(reachedEnd ? null : cursor);
   summary.cursor = reachedEnd ? 'reset' : 'saved';
-  if (mode === 'shadow') summary.activityOnlyOpenOlderThan30 = await io.activityBacklog(now);
   logSummary(summary);
   await io.record(summary);
   return summary;

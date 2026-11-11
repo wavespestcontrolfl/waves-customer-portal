@@ -16,7 +16,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 1 })) }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), alertEpisodesLive: jest.fn(() => true), acceptedPlanRingOnChangeLive: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), alertEpisodesLive: jest.fn(() => true) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, fn) => fn()) }));
 jest.mock('../services/annual-prepay-renewals', () => ({
   annualPrepayCoversVisit: jest.fn(async () => false),
@@ -61,7 +61,7 @@ const { findAcceptedRecurringScheduleGaps } = require('../services/recurring-sch
 const { runCombinedBookingCheck } = require('../services/combined-booking-check');
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
-const { isEnabled, alertEpisodesLive, acceptedPlanRingOnChangeLive } = require('../config/feature-gates');
+const { isEnabled, alertEpisodesLive } = require('../config/feature-gates');
 const { annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
 const { anyInvoiceLinkedToVisit } = require('../services/invoice');
 const { siblingInvoiceCoverageVerdict } = require('../services/billing-lane');
@@ -158,7 +158,6 @@ const delegatingRaise = async (...args) => {
 beforeEach(() => {
   jest.clearAllMocks();
   alertEpisodesLive.mockReturnValue(true);
-  acceptedPlanRingOnChangeLive.mockReturnValue(false);
   NotificationService.notifyAdmin.mockImplementation(async () => ({ id: 1 }));
   episodeHelpers.raiseAdminAlertWithReopen.mockImplementation(delegatingRaise);
   episodeHelpers.openAdminAlertKeys.mockImplementation(async () => []);
@@ -599,15 +598,15 @@ describe('accepted-plan schedule detection', () => {
     expect(keys.filter((key) => key.startsWith('accepted-schedule:'))).toHaveLength(MAX_ALERTS_PER_RUN - 1);
   });
 
-  test('acceptance findings use the existing admin bell, a STABLE per-estimate+family dedupe key, and evidenceKey as dedupeVersion', async () => {
+  test('acceptance findings use the existing admin bell, a STABLE per-estimate+family dedupe key, and the finding as dedupeVersion', async () => {
     // The key used to embed evidenceKey directly and churned daily (it
     // hashes every family row's row_revision/scheduled_date) — one customer
     // rang 9 times in 9 days for the same standing gap. Now the key is
-    // stable per estimate+family; evidenceKey rides as dedupeVersion so
+    // stable per estimate+family; the findingKey rides as dedupeVersion so
     // notifyAdmin re-surfaces the ONE standing row unread on a real
-    // evidence change instead of minting a second row.
+    // finding change instead of minting a second row.
     const gap = { estimateId: 'e-1', customerId: 'c-1', serviceFamily: 'pest_control', pattern: 'monthly',
-      expectedVisits: 12, recordedVisits: 1, issues: ['missing_recurrence'], evidenceKey: 'evidence-1', appointmentIds: ['s-1'] };
+      expectedVisits: 12, recordedVisits: 1, issues: ['missing_recurrence'], evidenceKey: 'evidence-1', findingKey: 'finding-1', appointmentIds: ['s-1'] };
     findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([gap]);
     makeDbMock();
     expect(await runInner({ now: NOW })).toMatchObject({ acceptedScheduleGaps: 1, acceptedScheduleCheckFailed: false, alerted: 1 });
@@ -616,7 +615,7 @@ describe('accepted-plan schedule detection', () => {
       link: '/admin/customers?customerId=c-1',
       dedupeKey: 'accepted-schedule:e-1:pest_control',
       refreshOnDedupe: true,
-      dedupeVersion: 'evidence-1',
+      dedupeVersion: 'finding:finding-1',
       metadata: { dedupeKey: 'accepted-schedule:e-1:pest_control' },
     });
 
@@ -625,17 +624,17 @@ describe('accepted-plan schedule detection', () => {
     makeDbMock({ alertedKeys: new Set(['accepted-schedule:e-1:pest_control']) });
     expect(await runInner({ now: NOW })).toMatchObject({ alerted: 0 });
 
-    // Evidence churns (routine field change) — the KEY is unaffected; only
+    // The finding changes — the KEY is unaffected; only
     // dedupeVersion changes, which notifyAdmin (tested in its own suite)
     // uses to decide whether to refresh the standing row. This suite only
     // has to prove the correct key/version reach notifyAdmin, never a
     // SECOND key.
-    findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([{ ...gap, evidenceKey: 'evidence-2' }]);
+    findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([{ ...gap, findingKey: 'finding-2' }]);
     makeDbMock({ alertedKeys: new Set(['accepted-schedule:e-1:pest_control']) });
     await runInner({ now: NOW });
     const lastCall = NotificationService.notifyAdmin.mock.calls.at(-1);
     expect(lastCall[3].dedupeKey).toBe('accepted-schedule:e-1:pest_control');
-    expect(lastCall[3].dedupeVersion).toBe('evidence-2');
+    expect(lastCall[3].dedupeVersion).toBe('finding:finding-2');
   });
 
   test('a missed lawn round rides the accepted-plan bell: its text is in the body, and a new missed round is a new finding version', async () => {
@@ -643,7 +642,6 @@ describe('accepted-plan schedule detection', () => {
     const MISSED = 'Round 3 (Mar 15-Apr 23) passed with no completed visit; that round\'s step was not applied.';
     const gap = { estimateId: 'e-9', customerId: 'c-9', serviceFamily: 'lawn_care', pattern: 'every_6_weeks', expectedVisits: 9, recordedVisits: 3,
       issues: ['missing_applications', MISSED], evidenceKey: 'evidence-1', findingKey: 'finding-round-3', appointmentIds: ['s-1'] };
-    acceptedPlanRingOnChangeLive.mockReturnValue(true);
     findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([gap]);
     makeDbMock();
     expect(await runInner({ now: NOW })).toMatchObject({ acceptedScheduleGaps: 1, alerted: 1 });
@@ -696,7 +694,7 @@ describe('accepted-plan schedule detection', () => {
 
 describe('alert episodes (ALERT_EPISODES)', () => {
   const gap = (over = {}) => ({ estimateId: 'e-1', customerId: 'c-1', serviceFamily: 'pest_control', pattern: 'monthly',
-    expectedVisits: 12, recordedVisits: 1, issues: ['missing_recurrence'], evidenceKey: 'evidence-1', appointmentIds: ['s-1'], ...over });
+    expectedVisits: 12, recordedVisits: 1, issues: ['missing_recurrence'], evidenceKey: 'evidence-1', findingKey: 'finding-1', appointmentIds: ['s-1'], ...over });
   const openKeysByPrefix = (byPrefix) => episodeHelpers.openAdminAlertKeys.mockImplementation(async (_conn, prefix) => byPrefix[prefix] || []);
   // Keys closed, grouped by reason (several calls may share a reason).
   const closedBy = () => episodeHelpers.closeAdminAlertKeys.mock.calls.reduce((by, [, keys, reason]) => ({ ...by, [reason]: [...(by[reason] || []), ...keys] }), {});
@@ -717,18 +715,16 @@ describe('alert episodes (ALERT_EPISODES)', () => {
       metadata: expect.objectContaining({ dedupeKey: 'unpriced-series:ss-parent-1' }),
     });
     expect(unpricedOpts.ringOnRefresh()).toBe(false);
-    // Accepted-schedule keeps its evidence version at generation 0.
+    // Accepted-schedule keeps its finding version at generation 0, with its own ring rule.
     expect(episodeHelpers.raiseAdminAlertWithReopen.mock.calls[1][3]).toMatchObject({
-      dedupeKey: 'accepted-schedule:e-1:pest_control', dedupeVersion: 'evidence-1', refreshOnDedupe: true,
+      dedupeKey: 'accepted-schedule:e-1:pest_control', dedupeVersion: 'finding:finding-1', refreshOnDedupe: true,
+      ringOnRefresh: expect.any(Function),
     });
-    // Gate off: no ring rule of its own, so any version change rings, as before.
-    expect(episodeHelpers.raiseAdminAlertWithReopen.mock.calls[1][3]).not.toHaveProperty('ringOnRefresh');
   });
 
-  test('GATE_ACCEPTED_PLAN_RING_ON_CHANGE: the accepted-plan version is the finding, and only a different finding rings the standing row', async () => {
+  test('the accepted-plan version is the finding, and only a different finding rings the standing row', async () => {
     // Production 10-29: 11 of 18 standing accepted-plan bells rang again in 7 days on routine
     // visit edits (the evidenceKey hashes each row's xmin), each time unread and no longer Done.
-    acceptedPlanRingOnChangeLive.mockReturnValue(true);
     findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([gap({ findingKey: 'f-1' })]);
     makeDbMock();
     await runInner({ now: NOW });
@@ -736,7 +732,7 @@ describe('alert episodes (ALERT_EPISODES)', () => {
       .find((call) => call[3].dedupeKey === 'accepted-schedule:e-1:pest_control')[3];
     expect(opts).toMatchObject({ dedupeVersion: 'finding:f-1', refreshOnDedupe: true, ringOnRefresh: expect.any(Function) });
     const rings = (stored) => opts.ringOnRefresh({}, stored === undefined ? {} : { dedupeVersion: stored });
-    // A row still on an evidence version (or none) moves to the finding version quietly: the flip rings nothing.
+    // A stored row still on an evidence version (or none) moves to the finding version quietly.
     expect(rings('evidence-1')).toBe(false);
     expect(rings('evidence-1::g2')).toBe(false);
     expect(rings(undefined)).toBe(false);

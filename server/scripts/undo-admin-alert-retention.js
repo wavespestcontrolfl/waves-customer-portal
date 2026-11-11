@@ -8,7 +8,7 @@
  * so each row comes back exactly as it stood. A row a later closer took (an
  * emitter's own close, a person) no longer has done_by 'retention' and is left
  * alone. Reopened rows are old, so they sit low in the newest-first bell, and
- * the next nightly run expires them again unless GATE_ALERT_RETENTION is unset.
+ * the next nightly run expires them again.
  *
  * Run:
  *   node server/scripts/undo-admin-alert-retention.js                        (list runs)

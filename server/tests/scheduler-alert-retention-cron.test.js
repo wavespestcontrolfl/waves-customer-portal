@@ -1,6 +1,6 @@
 /**
- * Admin alert retention in the 1:32 AM ET cron (server/services/scheduler.js): gate off returns before the lock,
- * gate on runs the sweep under runExclusive, a failed sweep is logged and never thrown, and a deploy kill re-runs it.
+ * Admin alert retention in the 1:32 AM ET cron (server/services/scheduler.js): the tick runs the sweep under
+ * runExclusive, a failed sweep is logged and never thrown, and a deploy kill re-runs it.
  *
  * Mock baseline copied from scheduler-bid-kit-expiry-cron.test.js.
  */
@@ -17,7 +17,7 @@ jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
-  recurringSeriesTopUpLive: jest.fn(() => false), alertRetentionMode: jest.fn(() => 'off'),
+  recurringSeriesTopUpLive: jest.fn(() => false),
 }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
@@ -34,7 +34,7 @@ jest.mock('../services/admin-alert-retention', () => ({ runAdminAlertRetention: 
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
-const { isEnabled, alertRetentionMode } = require('../config/feature-gates');
+const { isEnabled } = require('../config/feature-gates');
 const { runAdminAlertRetention } = require('../services/admin-alert-retention');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
@@ -50,31 +50,21 @@ function retentionTick() {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  alertRetentionMode.mockReturnValue('off');
 });
 
-test('gate off: the tick returns before the lock and the sweep', async () => {
-  await retentionTick();
-  expect(runExclusive).not.toHaveBeenCalledWith('admin-alert-retention', expect.any(Function));
-  expect(runAdminAlertRetention).not.toHaveBeenCalled();
-});
-
-test.each(['shadow', 'true'])('gate %s: the sweep runs inside runExclusive', async (mode) => {
-  alertRetentionMode.mockReturnValue(mode);
+test('the sweep runs inside runExclusive', async () => {
   await retentionTick();
   expect(runExclusive).toHaveBeenCalledWith('admin-alert-retention', expect.any(Function));
   expect(runAdminAlertRetention).toHaveBeenCalledTimes(1);
 });
 
 test('a tick another instance already holds never runs a second sweep', async () => {
-  alertRetentionMode.mockReturnValue('true');
   runExclusive.mockImplementationOnce(async () => ({ skipped: true, reason: 'lease_held' }));
   await retentionTick();
   expect(runAdminAlertRetention).not.toHaveBeenCalled();
 });
 
 test('a failed sweep is logged, never thrown out of the tick', async () => {
-  alertRetentionMode.mockReturnValue('true');
   runAdminAlertRetention.mockRejectedValueOnce(new Error('boom'));
   await expect(retentionTick()).resolves.toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith('[alert-retention] sweep tick failed: boom');
