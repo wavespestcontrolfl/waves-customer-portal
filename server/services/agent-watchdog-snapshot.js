@@ -1,10 +1,11 @@
 /**
- * Agent watchdog snapshot — the ONE health read the external Hermes watchdog
- * polls (docs/hermes/waves-agent-watchdog-skill.md).
+ * Agent watchdog snapshot — the ONE health read the outside watchdog polls:
+ * the MacBook Air job since 2026-11-06 (ops/outside-watchdog/README.md), the
+ * Hostinger Hermes box until 2026-09-05 (docs/hermes/waves-agent-watchdog-skill.md).
  *
- * Why it exists: the Hostinger Hermes box sits outside Railway, so it is the
- * only observer that can report the portal down, the database degraded, or the
- * scheduler silent. Everything it needs to judge that is already recorded:
+ * Why it exists: the poller sits outside Railway, so it is the only observer
+ * that can report the portal down, the database degraded, or the scheduler
+ * silent. Everything it needs to judge that is already recorded:
  *   - job_health (advisory-locked crons) through the SAME classifier the Ops
  *     queue and the IB job-health tool use, so the three can never disagree;
  *   - a prompt scheduler heartbeat: the hermes-watchdog-liveness cron ticks

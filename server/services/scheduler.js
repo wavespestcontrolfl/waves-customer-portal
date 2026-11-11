@@ -10074,23 +10074,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // Hermes watchdog liveness — every 23 min. The external agent watchdog on
-  // the Hostinger Hermes box polls /api/integrations/watchdog-worker/status
-  // every 10 min; this asks when it LAST polled and rings one bell per ET day
-  // when the answer is never / past the limit. 23 is coprime with 10 so the
-  // sample walks through every phase offset (the '*/7' reasoning above).
-  // Dark behind GATE_HERMES_WATCHDOG (the service reads the gate itself).
-  // Like every registration below the cronJobs early return, this never runs
-  // while GATE_CRON_JOBS is off — the snapshot then reports
-  // scheduler:disabled so Hermes pages instead of waiting on a bell that
-  // cannot ring. See server/services/agent-watchdog-liveness.js.
+  // Outside watchdog liveness — every 23 min. The outside watchdog on the
+  // MacBook Air (ops/outside-watchdog/; the Hostinger Hermes box until
+  // 2026-09-05) polls /api/integrations/watchdog-worker/status every 10 min;
+  // this asks when it LAST polled and writes one engineering fault row per
+  // silence episode when the answer is never / past the limit. 23 is coprime
+  // with 10 so the sample walks through every phase offset (the '*/7'
+  // reasoning above). Dark behind GATE_HERMES_WATCHDOG (the service reads the
+  // gate itself). Like every registration below the cronJobs early return,
+  // this never runs while GATE_CRON_JOBS is off — the snapshot then reports
+  // scheduler:disabled, so the outside watchdog reports it instead of waiting
+  // on a row that cannot be written. This job's job_health row is also the
+  // scheduler heartbeat the snapshot reads. See
+  // server/services/agent-watchdog-liveness.js.
   // =========================================================================
   cron.schedule('*/23 * * * *', async () => {
     try {
       await runExclusive('hermes-watchdog-liveness', async () => {
         const { runWatchdogLivenessCheck } = require('./agent-watchdog-liveness');
         const result = await runWatchdogLivenessCheck();
-        if (!result.skipped && result.alerted) {
+        if (!result.skipped && result.silent) {
           logger.warn(`[hermes-watchdog-liveness] watchdog silent — age=${result.ageMinutes}min limit=${result.limit}min`);
         }
       });
