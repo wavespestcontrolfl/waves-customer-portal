@@ -1350,7 +1350,7 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
   // a new row. With no open row (first time, or a person marked it done and
   // the promise is still overdue) the insert is fresh: one new row, one bell.
   const ringOnce = require('../config/feature-gates').alertRingOnceLive?.();
-  // promise: a follow-up we owe the customer (GATE_CUSTOMER_ALERTS_RING; it already rings through bell: true).
+  // promise: a follow-up we owe the customer (it already rings through bell: true).
   const notification = await raiseAdminAlert('alert', { ...spec, promise: true }, ringOnce || refreshOnly
     ? { ...ringOpts, dedupeWindowMs: undefined, dedupeOpenOnly: true, ringOnRefresh: () => false }
     : ringOpts);

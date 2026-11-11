@@ -18950,7 +18950,7 @@ const CallRecordingProcessor = {
                 `${callerName}: the agent promised to send a quote (${servicesText}${propertyCount > 1 ? `, ${propertyCount} properties` : ''}). Send it before end of day — the lead stays open in the pipeline until it goes out.`,
                 {
                   link: `/admin/leads?lead=${leadId}`,
-                  // promise: a quote we owe the caller (GATE_CUSTOMER_ALERTS_RING rings it; the bell policy mutes 'lead').
+                  // promise: a quote we owe the caller (it rings; the bell policy mutes 'lead').
                   metadata: { leadId, callSid: call.twilio_call_sid, quote_promised: true, promise: true, property_count: propertyCount },
                 },
               );
@@ -19288,7 +19288,7 @@ const CallRecordingProcessor = {
               customerId: customerId || null,
               callSid: call.twilio_call_sid,
               quote_promised: true,
-              // promise: a quote we owe the caller (GATE_CUSTOMER_ALERTS_RING rings it; the bell policy mutes 'lead').
+              // promise: a quote we owe the caller (it rings; the bell policy mutes 'lead').
               promise: true,
               property_count: propertyCount,
               no_lead: true,

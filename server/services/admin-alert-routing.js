@@ -1,5 +1,5 @@
 // Which admin rows belong to Claude's queue instead of the owner's bell (owner ruling 2026-10-26,
-// "ok go"; docs/admin-notifications.md section 5, GATE_ALERT_CLAUDE_QUEUE).
+// "ok go"; docs/admin-notifications.md section 5).
 //
 // Three kinds of row go to Claude:
 //   1. A reminder bell from a Claude job on the owner's Mac (~/ops-oneshots/lib/bell.js stamps
@@ -111,15 +111,6 @@ function classifyClaudeQueue({ category, metadata, dedupeKey } = {}) {
   return hit ? { className: hit.name, severity: hit.severity || 'broken' } : null;
 }
 
-// GATE_ALERT_CLAUDE_QUEUE, read defensively: a test that mocks feature-gates without this reader,
-// or a read that throws, leaves every row where it was.
-function claudeQueueEnabled() {
-  try {
-    const gates = require('../config/feature-gates');
-    return typeof gates.alertClaudeQueueLive === 'function' && gates.alertClaudeQueueLive() === true;
-  } catch { return false; }
-}
-
 // Dropped faults (owner 2026-11-02, "build all"; GATE_ALERT_CLAUDE_FAULTS). The bell policy writes NO row for an
 // alert it silences, so a fault the code itself marks "Claude fixes this" vanished: the property-lookup canary
 // failed for weeks with no row anywhere. With the gate on, the two drop points (NotificationService.create and
@@ -192,11 +183,11 @@ function keepSentToClaude(existing, existingMeta, metadata) {
   return { ...metaOf(metadata), ...kept };
 }
 
-// The metadata to write for an admin row: the same object when the row stays in the bell (gate off, no
+// The metadata to write for an admin row: the same object when the row stays in the bell (no
 // match, already stamped), else a copy with the Claude-queue fields. Never throws.
 function stampClaudeQueue({ category, metadata, dedupeKey }) {
   try {
-    if (!metadata || typeof metadata !== 'object' || isStamped(metadata) || !claudeQueueEnabled()) return metadata;
+    if (!metadata || typeof metadata !== 'object' || isStamped(metadata)) return metadata;
     const verdict = classifyClaudeQueue({ category, metadata, dedupeKey });
     if (!verdict) return metadata;
     logger.info('[claude-queue] routed', { category, className: verdict.className });
@@ -219,13 +210,12 @@ const PAGE = 500;
 const SAMPLE = 5;
 
 // The one-time mover: open (done_at empty) admin rows the routing above would send to Claude, written
-// before the gate went on. Visibility only: it sets the same fields a new row gets and leaves read state,
+// before the routing went live (2026-10-26). Visibility only: it sets the same fields a new row gets and leaves read state,
 // done state, title, body and link alone, so nothing rings. A row already off the bell (feed 'activity')
 // is stamped for Claude without moving. A row whose metadata changed between the read and the write is skipped
-// (`changedSinceRead`). Dry run by default. Refuses when the gate is off.
+// (`changedSinceRead`). Dry run by default.
 // `onlyIds` narrows the scan to the given rows (tests use it so a run never touches other rows in a shared database).
 async function rerouteOpenRows(conn, { execute = false, onlyIds = null } = {}) {
-  if (!claudeQueueEnabled()) throw new Error('GATE_ALERT_CLAUDE_QUEUE is off: the mover only runs while the gate is on');
   const byClass = {};
   const samples = {};
   const planned = []; // { id, patch, snapshot }: the metadata each row was classified with
@@ -283,7 +273,6 @@ module.exports = {
   keepSentToClaude,
   classifyClaudeQueue,
   classifyClaudeFault,
-  claudeQueueEnabled,
   claudeFaultsEnabled,
   stampClaudeQueue,
   rescueClaudeFault,

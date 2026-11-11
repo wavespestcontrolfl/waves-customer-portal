@@ -221,9 +221,8 @@ describe('the move alert and the admin bell policy', () => {
     return { category, spec, opts, composed: composeAdminAlert(spec) };
   }
 
-  test('a declared customer contact rings with GATE_ADMIN_BELL_POLICY and GATE_CUSTOMER_ALERTS_RING on', async () => {
+  test('a declared customer contact rings with GATE_ADMIN_BELL_POLICY on', async () => {
     process.env.GATE_ADMIN_BELL_POLICY = 'true';
-    process.env.GATE_CUSTOMER_ALERTS_RING = 'true';
     const { category, opts, composed } = await composedMoveAlert();
     expect(category).toBe('service');
     expect(composed.metadata.contact).toBe(true);

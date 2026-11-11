@@ -112,7 +112,7 @@ function ruleError(violations, message = `Admin alert breaks docs/admin-notifica
   return Object.assign(new Error(message), { code: RULE_CODE, violations });
 }
 
-// A customer declaration (GATE_CUSTOMER_ALERTS_RING, owner 2026-10-29 "small" E1): `contact: true` = a customer
+// A customer declaration (owner 2026-10-29 "small" E1): `contact: true` = a customer
 // reached us, `promise: true` = a follow-up we owe a customer. Absent = neither; the two never go together.
 function customerDeclaration({ contact, promise } = {}) {
   return { ...(contact === true ? { contact: true } : {}), ...(promise === true ? { promise: true } : {}) };
@@ -174,7 +174,7 @@ function validStructuredFields(spec = {}) {
     ...(SUBJECT_TYPES.includes(subject?.type) && idOk ? { subject: { type: subject.type, id } } : {}),
     ...(typeof doneWhen === 'string' && DONE_WHEN.test(doneWhen) ? { doneWhen } : {}),
     ...(WHO.includes(who) ? { who } : {}),
-    // A copy violation must not cost a customer alert its ring (GATE_CUSTOMER_ALERTS_RING).
+    // A copy violation must not cost a customer alert its ring.
     ...(customerDeclarationViolations(spec).length ? {} : customerDeclaration(spec)),
     ...(buttons != null && !buttonViolations(buttons).length ? { buttons: normalizedButtons(buttons) } : {}),
   };

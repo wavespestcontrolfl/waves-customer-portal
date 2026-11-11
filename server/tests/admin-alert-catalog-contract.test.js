@@ -40,7 +40,7 @@ describe('trigger registry catalog contract', () => {
       expect(rule.expiryDays).toBe(rule.severity === 'fyi' ? 7 : 30);
     }
     expect(Object.keys(rule).filter((k) => !['area', 'severity', 'who', 'doneWhen', 'closedBy', 'expiryDays', 'contact', 'promise'].includes(k))).toEqual([]);
-    // Customer declaration (GATE_CUSTOMER_ALERTS_RING, owner 2026-10-29 "small" E1): only `true`, never both, and only
+    // Customer declaration (owner 2026-10-29 "small" E1): only `true`, never both, and only
     // on a needs-you type for a person: a customer alert is never an FYI, a fault or Claude's.
     for (const flag of ['contact', 'promise']) if (rule[flag] !== undefined) expect(rule[flag]).toBe(true);
     expect(rule.contact === true && rule.promise === true).toBe(false);
@@ -54,7 +54,7 @@ describe('trigger registry catalog contract', () => {
     }
   });
 
-  test('the customer declarations are exactly these (a change here changes what rings once GATE_CUSTOMER_ALERTS_RING is on)', () => {
+  test('the customer declarations are exactly these (a change here changes what rings)', () => {
     const declared = (flag) => entries.filter(([, t]) => t.rule[flag] === true).map(([key]) => key).sort();
     expect(declared('contact')).toEqual([
       'appointment_reschedule_intent', 'bundle_quote_requested', 'customer_email_received', 'customer_missed_call',
