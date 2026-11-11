@@ -1627,12 +1627,28 @@ function initScheduledJobs() {
   };
   cron.schedule('41 7 * * 1', () => runPermitSyncTick(), { timezone: 'America/New_York' });
   registerDeployKillRetry('permit-sync', () => runPermitSyncTick({ afterKill: true }));
-  // Catch-up on the six other days, same 7:41 AM slot: when Monday's report
-  // step did not commit (2026-11-09: the county refused both downloads with
-  // HTTP 403 and the tables stayed a week old), run the report step again.
-  // Freshness is read before the lease, so a normal week takes no lock and
-  // writes no job_health row. Report step only (about 3 minutes); a deploy
-  // kill goes through the retry registered above.
+  // Catch-up: when this week's report step has not committed (2026-11-09:
+  // the county refused both downloads with HTTP 403 and the tables stayed a
+  // week old), run the report step again. Freshness is read before the
+  // lease, so a normal week takes no lock and writes no job_health row.
+  // Report step only (about 3 minutes); a deploy kill goes through the retry
+  // registered above.
+  // Four slots a day, not one (2026-11-10: the first catch-up started at
+  // 7:41:00 and a deploy stopped the server at 7:41:30; the retry at 7:48:03
+  // was stopped at 7:48:11; the third request, at 7:59, got HTTP 403, and
+  // nothing asked again that day). The slots are hours apart, so one bad
+  // slot costs hours, not a day, and no slot asks the county again within
+  // minutes of another:
+  //   - 7:41 AM on the six days that are not Monday (Monday 7:41 is the full
+  //     run above);
+  //   - 9:11 AM, 1:41 PM and 5:41 PM every day, Monday included, so a failed
+  //     Monday run is repaired the same day. On a Monday the 9:11 slot comes
+  //     after the detail step's 60-minute budget; a run that still holds the
+  //     lease makes the slot a no-op.
+  // 9:11, not 9:41: merges into this repo are held from 8:40 to 9:40 AM ET
+  // for the 9 AM content batch, so a deploy rarely lands between 9:00 and
+  // 9:45. The database work stays one upsert transaction about 3 minutes
+  // after the start, and it ends before the :18 and :48 groups.
   const runPermitReportCatchUpTick = async () => {
     try {
       const permitRun = require('./property-lookup/permit-sync-run');
@@ -1642,7 +1658,9 @@ function initScheduledJobs() {
       logger.error(`Permit sync catch-up lease failed: ${err.message}`);
     }
   };
-  cron.schedule('41 7 * * 0,2-6', () => runPermitReportCatchUpTick(), { timezone: 'America/New_York' });
+  for (const slot of ['41 7 * * 0,2-6', '11 9 * * *', '41 13,17 * * *']) {
+    cron.schedule(slot, () => runPermitReportCatchUpTick(), { timezone: 'America/New_York' });
+  }
 
   // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural

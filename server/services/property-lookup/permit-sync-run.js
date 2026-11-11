@@ -19,13 +19,15 @@
  *     result is written as it is read, so the killed run's reads are kept
  *     and the next weekly run picks up the rest (newest permits first).
  *
- * The daily catch-up (`runPermitReportCatchUp`, 7:41 AM ET on the six other
- * days) runs the report step again when Monday's did not commit. 2026-11-09:
+ * The catch-up (`runPermitReportCatchUp`, four slots a day in scheduler.js)
+ * runs the report step again when this week's did not commit. 2026-11-09:
  * the county refused the first report download of both sections with HTTP
  * 403, 0.7 s into the run, and nothing asked again for a week (the tables
- * stayed at Nov 2; also 2026-10-12, a web page for both reports). One
- * refused request now costs a day, not a week. The catch-up never runs the
- * detail step: Monday's run did, and next Monday reads the new permits.
+ * stayed at Nov 2; also 2026-10-12, a web page for both reports).
+ * 2026-11-10: deploys stopped the one daily catch-up 30 s after its start
+ * and its retry 8 s after its start. One refused or stopped request now
+ * costs hours, not a week. The catch-up never runs the detail step:
+ * Monday's run did, and next Monday reads the new permits.
  */
 
 const logger = require('../logger');
