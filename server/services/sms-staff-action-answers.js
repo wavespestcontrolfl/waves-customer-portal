@@ -1,5 +1,5 @@
 /**
- * "A staff action answers a text" (GATE_SMS_STAFF_ACTION_ANSWERS; owner
+ * "A staff action answers a text" (owner
  * 2026-10-29, decision page "Stuck Alert Fixes" F1).
  *
  * A customer texts "please remove that spot" or "I will Zelle you $108"; the
@@ -8,14 +8,14 @@
  * types, so the Messages reader never counted them as an answer and the text
  * stayed "needs reply". This module is the ONE definition of the actions that
  * count, shared by the admin-alert witness (admin-alert-contact-witnesses.js)
- * and, in `true` mode only, the Messages reader (sms-pending-conversations.js).
+ * and the Messages reader (sms-pending-conversations.js).
  *
  * A staff action answers a text when it is for the text's customer (by
  * customer id only, never by phone), happened after the text and within
  * STAFF_ACTION_WINDOW_HOURS of it, and is one of:
  *   - a visit a person created in the admin (visitFacts below);
  *   - a payment a person recorded (paymentFacts below).
- * Pure definitions and SQL fragments: nothing here reads the gate or the db.
+ * Pure definitions and SQL fragments: nothing here reads the db.
  */
 
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');

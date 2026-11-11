@@ -1,6 +1,6 @@
 /**
  * Witnesses for the customer-contact classes of admin-alert-relevance.js
- * (GATE_ALERT_CONTACT_CLOSE; owner 2026-10-24: "most of these should close
+ * (owner 2026-10-24: "most of these should close
  * automatically ... text sent, agent confirms resolved, appt booked,
  * rescheduled"). A bell about a customer reaching out is done once a person
  * answered. Every "it was handled" fact below is the repo's existing
@@ -24,19 +24,17 @@
  *     passed in as `bookedVisits`;
  *   - an email a person answered: a Gmail SENT row in the customer's thread
  *     (personSentFilter + resolveEmailCustomerLink, email-customer-link.js);
- *   - a visit that ran after a voicemail (GATE_VOICEMAIL_VISIT_UNDERWAY, voice items
- *     only): the voicemail's customer, by customer id and never by phone, has a visit
- *     in a status that ran with completed_at after the call's start on the same
- *     Eastern day. Loaded only when the caller asks (`visitRan`).
+ *   - a visit that ran after a voicemail (voice items only): the voicemail's customer,
+ *     by customer id and never by phone, has a visit in a status that ran with
+ *     completed_at after the call's start on the same Eastern day.
  *   - a visit done after a text-note bell (text_note_checked class, customer items): the
  *     customer's own visit (by customer id, never by phone) with completed_at after the bell,
  *     in a status that ran, on ANY Eastern day (visitsCompletedAfterBell, which shares the
  *     predicate above; read-only, called by the relevance loader for that class only).
- *   - a staff action after a text (GATE_SMS_STAFF_ACTION_ANSWERS, sms items only): a visit
+ *   - a staff action after a text (sms items only): a visit
  *     a person booked in the admin, or a payment a person recorded, for the text's customer
  *     (by customer id, never by phone) within 24 hours after the text
- *     (sms-staff-action-answers.js, the one definition the Messages reader shares). Loaded
- *     only when the caller asks (`staffActions`).
+ *     (sms-staff-action-answers.js, the one definition the Messages reader shares).
  *   - an email a person sent to a portal chat's customer (customer items only): a Gmail SENT
  *     row after the bell, in ANY thread, that resolveEmailCustomerLink links to that customer
  *     (the same linkage as the email reply above, but not tied to one thread). Read only for
@@ -344,11 +342,10 @@ async function visitsCompletedAfterBell(conn, items) {
 
 // The earliest staff action (sms-staff-action-answers.js) after each sms item's text and
 // within 24 hours of it, by notification id: { at, kind }. By customer id only, so an item
-// with no customer id has none, and `enabled` false (the gate off) reads nothing. One query per kind
-// for the whole batch.
-async function staffActionsAfterTexts(conn, smsIdents, enabled) {
+// with no customer id has none. One query per kind for the whole batch.
+async function staffActionsAfterTexts(conn, smsIdents) {
   const found = new Map();
-  const withCustomer = enabled ? smsIdents.filter((i) => i.customerId) : [];
+  const withCustomer = smsIdents.filter((i) => i.customerId);
   if (!withCustomer.length) return found;
   const customerIds = unique(withCustomer.map((i) => i.customerId));
   const from = new Date(Math.min(...withCustomer.map((i) => i.anchor.getTime())));
@@ -436,13 +433,13 @@ async function attachCustomerEmailSends(conn, idents, bundles) {
  *   refs by kind: sms {sid, customerId}; voice {callLogId, customerId, phone};
  *   email {emailId, customerId}; lead {customerId, phone}; customer {customerId, phone?} (anchor = bellAt;
  *   phone only for a visitor with no customer id).
- * @param {{conn, bookedVisits: (customerIds: string[]) => Promise<Map>, visitRan?: boolean, staffActions?: boolean}} deps
+ * @param {{conn, bookedVisits: (customerIds: string[]) => Promise<Map>}} deps
  * @returns {Promise<Map<string, object>>} notification id -> bundle
  *   { anchor, shared (sms), pending (sms), textAt, backAt, inAt, visitAt, quote, replyAt, visitRanAt,
- *     staffActionAt, staffActionKind (sms, with `staffActions`) };
+ *     staffActionAt, staffActionKind (sms) };
  *   an item whose subject cannot be identified is absent (never judged).
  */
-async function loadContactBundles(items, { conn, bookedVisits, visitRan = false, staffActions = false }) {
+async function loadContactBundles(items, { conn, bookedVisits }) {
   const bundles = new Map();
   if (!items.length) return bundles;
 
@@ -481,8 +478,8 @@ async function loadContactBundles(items, { conn, bookedVisits, visitRan = false,
   const shared = smsIdents.length ? await sharedPhoneItems(conn, smsIdents, since) : new Set();
   const replyRows = shared.size ? await ownReplyRows(conn, { customerIds, peers, since }) : [];
   const visits = await bookedVisits(customerIds);
-  const ranVisits = visitRan ? await visitsThatRan(conn, idents.filter((i) => i.item.kind === 'voice')) : new Map();
-  const staffActed = await staffActionsAfterTexts(conn, smsIdents, staffActions);
+  const ranVisits = await visitsThatRan(conn, idents.filter((i) => i.item.kind === 'voice'));
+  const staffActed = await staffActionsAfterTexts(conn, smsIdents);
   const unknownSenders = idents.filter((i) => i.item.kind === 'sms' && i.item.refs.unknownSender === true && !i.customerId);
   const lastInbound = await latestInboundTexts(conn, unknownSenders);
   for (const ident of idents) {

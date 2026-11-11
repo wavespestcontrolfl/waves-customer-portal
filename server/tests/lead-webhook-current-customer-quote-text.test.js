@@ -209,7 +209,7 @@ describe('gate on: a current or past customer sends the quote form', () => {
     await submit(router);
     const { CLASSES } = require('../services/admin-alert-relevance');
     const cls = CLASSES.find((c) => c.key === 'customer_quote_form');
-    expect(cls).toMatchObject({ categories: ['lead'], contact: 'customer', contactOnly: true, rearm: false });
+    expect(cls).toMatchObject({ categories: ['lead'], contact: 'customer', rearm: false });
     expect(notifyAdmin.mock.calls[0][3].dedupeKey.startsWith(cls.prefix)).toBe(true);
   });
 

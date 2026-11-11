@@ -18,7 +18,7 @@ maybeDescribe('phone-matched alert and promise rules (live Postgres)', () => {
   let relevance;
   let cc;
   const made = { notifications: [], sms_log: [], call_log: [], customers: [] };
-  const GATES = ['GATE_ALERT_CONTACT_CLOSE', 'GATE_PROMISE_PHONE_MATCH_CLOSE'];
+  const GATES = ['GATE_PROMISE_PHONE_MATCH_CLOSE'];
   const saved = Object.fromEntries(GATES.map((g) => [g, process.env[g]]));
   const BIZ = '+15555559000';
   let seq = 0;
@@ -68,7 +68,6 @@ maybeDescribe('phone-matched alert and promise rules (live Postgres)', () => {
       const phone = phoneOf();
       const { row } = await unknownText(phone, t0);
       await personText(phone, mins(t0, 5));
-      process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
       const off = await sweep();
       expect(off.byClass.unknown_sms).toBeUndefined();
       expect((await get(row.id)).done_at).toBeNull();
@@ -90,7 +89,6 @@ maybeDescribe('phone-matched alert and promise rules (live Postgres)', () => {
     });
 
     test('an automated reply, a reply from before the text, a reply before the sender\'s latest text, and a number a customer also carries all leave it open', async () => {
-      process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
       process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'true';
       const t0 = mins(new Date(), -180);
 
@@ -124,7 +122,6 @@ maybeDescribe('phone-matched alert and promise rules (live Postgres)', () => {
     });
 
     test('a call a person placed and spoke on to that phone closes it too', async () => {
-      process.env.GATE_ALERT_CONTACT_CLOSE = 'true';
       process.env.GATE_PROMISE_PHONE_MATCH_CLOSE = 'true';
       const t0 = mins(new Date(), -120);
       const phone = phoneOf();

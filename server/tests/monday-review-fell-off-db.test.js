@@ -152,17 +152,14 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
     expect(out.count).toBe(out.entries.length);
   });
 
-  test('the list does not depend on the mode of GATE_ALERT_CONTACT_CLOSE', async () => {
+  test('a text a person answered is left out; an unanswered one is listed', async () => {
     const answered = await addCustomer('Uniform');
     const uniform = await textAlert(answered, { name: 'Uniform' });
     await staffText(answered, new Date(uniform.sentAt.getTime() + 3 * HOUR));
     await textAlert(await addCustomer('Victor'), { name: 'Victor' });
-    for (const mode of ['off', 'shadow', 'true']) {
-      setEnv('GATE_ALERT_CONTACT_CLOSE', mode);
-      const { names } = await listed();
-      expect(names).toContain('Victor');
-      expect(names).not.toContain('Uniform');
-    }
+    const { names } = await listed();
+    expect(names).toContain('Victor');
+    expect(names).not.toContain('Uniform');
   });
 
   test('a text that was not delivered, an automated text and a bare call row answer nothing', async () => {

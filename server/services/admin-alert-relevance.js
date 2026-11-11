@@ -65,15 +65,13 @@
  * called back and spoke, a person's text reached the customer, a visit was
  * booked or a quote was handed off, each judged only by what came AFTER the
  * event the bell is about. Every such fact is a shared witness read in
- * admin-alert-contact-witnesses.js, and read_at is never evidence. Behind
- * GATE_ALERT_CONTACT_CLOSE (alertContactCloseMode): off = these classes are not
- * judged; `shadow` = judged, with what WOULD close recorded in audit_log and
- * no bell changed; `true` = closed like any other class. Review bells and
+ * admin-alert-contact-witnesses.js, and read_at is never evidence. These
+ * classes close like any other class. Review bells and
  * money-owed/failed/refund alerts are still never in the table: a class is
  * only in it if its category (plus dedupeKey prefix or trigger) is listed
  * below. A missed call (customer_missed_call) is NOT in the table: its one owner
  * is missed-call-bell.js (retireCalledBackMissedCalls, every 2 minutes), which
- * judges the same contact facts behind the same gate. A new text from a known
+ * judges the same contact facts. A new text from a known
  * sender rewrites the sender's one thread bell and rings it again (the refresh clears done and the retired stamp). An
  * unknown sender's text bell (no customer on file) is judged only under
  * GATE_PROMISE_PHONE_MATCH_CLOSE (the `unknown_sms` class, by the sender's phone):
@@ -102,34 +100,35 @@
  * surface, and a later callback rings its own bell.
  *
  * A text-note bell (owner 2026-11-02; the SMS reader's "check <name>'s text note", doneWhen
- * `text_note_checked`) also closes under GATE_ALERT_CONTACT_CLOSE alone, once BOTH hold after the bell: a person
+ * `text_note_checked`) also closes, once BOTH hold after the bell: a person
  * answered that customer (a text that reached them, a call a person made or took, a person's email: the
  * customer kind's witnesses) and a visit for that customer was completed (visitsCompletedAfterBell, by customer
  * id, any Eastern day).
  *
  * A complaint-call bell (`call_complaint`; a known customer's call got the final label complaint_escalated, dedupeKey
- * `call-complaint:<call id>`) closes under GATE_ALERT_CONTACT_CLOSE alone once a person reached that customer after
+ * `call-complaint:<call id>`) closes once a person reached that customer after
  * the bell: a call back, an answered call, a text or an email (personContactReason). A booked visit or a sent estimate
  * alone never closes it.
  *
- * Three more rules carry their OWN three-state gate (owner 2026-10-29, "Stuck
- * Alert Fixes"; the third 2026-10-31), so they can run in shadow while GATE_ALERT_CONTACT_CLOSE is
- * `true`. A class (`gate`) is not offered at all while its gate is off, except
- * to the re-arm pass, so turning a gate off puts back what it closed; a single
- * reason (a contact rule answering `{ reason, mode }`) is silent while its mode
- * is off and never closes more than the contact gate allows.
- *   - GATE_VOICEMAIL_VISIT_UNDERWAY: a voicemail callback request also closes
- *     once the voicemail's customer has a visit that completed after the call
- *     on the same Eastern day, when no person's contact did (voice items only).
- *   - GATE_LEAD_CONTACTED_CLOSE: the Leads bells whose emitters promise
- *     `doneWhen: 'lead_contacted'` (call or reply to a lead) close once a
- *     person's text or call reached the lead, a visit was booked for the lead's
- *     customer, or an estimate was handed off, each after the bell.
+ * More rules, each judged by what came after the bell:
+ *   - A voicemail callback request also closes once the voicemail's customer has
+ *     a visit that completed after the call on the same Eastern day, when no
+ *     person's contact did (voice items only).
+ *   - The Leads bells whose emitters promise `doneWhen: 'lead_contacted'` (call or
+ *     reply to a lead) close once a person's text or call reached the lead, a visit
+ *     was booked for the lead's customer, or an estimate was handed off, each after
+ *     the bell.
+ *   - A staff action (a visit a person booked in the admin, a payment a person
+ *     recorded, for the text's customer within 24 hours) answers a text.
+ * One more carries its OWN three-state gate, so it can run in shadow: a class (`gate`)
+ * is not offered at all while its gate is off, except to the re-arm pass, so turning
+ * a gate off puts back what it closed; a single reason (a contact rule answering
+ * `{ reason, mode }`) is silent while its mode is off and only recorded while it is
+ * `shadow`.
  *   - GATE_PORTAL_CHAT_ANSWERED_CLOSE: a portal chat hand-off bell (dedupeKey
  *     `portal-chat-escalation:`, `doneWhen: 'customer_answered'`, a customer id) closes once a
  *     person called back, answered the customer's call, texted or emailed that customer after the
- *     bell's latest event (bellEventAt: a re-rung bell's `rungAt`). Rides on
- *     GATE_ALERT_CONTACT_CLOSE (the weaker of the two wins). The add-a-service chat keeps its
+ *     bell's latest event (bellEventAt: a re-rung bell's `rungAt`). The add-a-service chat keeps its
  *     estimate rule, and also closes on this contact. The confirmed-email-change bell
  *     (`portal-chat-email-change:`) is never judged: its answer is the account change.
  *   - Two more portal classes (owner 2026-11-01). A portal request
@@ -137,8 +136,7 @@
  *     same person contact after the bell as the chat hand-off. An add-service request bell (trigger
  *     `bundle_quote_requested` carrying its request id at the top of its metadata) closes once an estimate was
  *     handed to that customer after the bell. Whenever the sweep closes one of them it also resolves that
- *     request row quietly (portal-inbox.js resolveRequestQuietly: no customer email). The contact close rides
- *     on GATE_ALERT_CONTACT_CLOSE like the chat class. A cancellation bell (`cancellation_reviewed`) is never judged.
+ *     request row quietly (portal-inbox.js resolveRequestQuietly: no customer email). A cancellation bell (`cancellation_reviewed`) is never judged.
  *   - GATE_PORTAL_BOOKING_ITEMS (boolean, own gate; owner 2026-11-02): the unfinished-booking bell
  *     (portal-unfinished-bookings.js, the card step of an estimate our office sent: dedupeKey
  *     `portal-unfinished-checkout:<estimate id>`, `doneWhen: 'customer_answered'`) closes once a person
@@ -159,7 +157,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { adminAlertRelevanceLive, alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode, staffActionAnswersMode, portalChatAnsweredCloseMode } = require('../config/feature-gates');
+const { adminAlertRelevanceLive, portalChatAnsweredCloseMode } = require('../config/feature-gates');
 // GATE_PROMISE_PHONE_MATCH_CLOSE, read at call time and guarded like the other late-added readers: a test that mocks
 // feature-gates without it reads off.
 const promisePhoneMatchCloseMode = () => require('../config/feature-gates').promisePhoneMatchCloseMode?.() ?? 'off';
@@ -281,7 +279,7 @@ function resolveRefs(row, data) {
   return { refs, visit, lead, estimate, customer };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), quoteHandedOff: new Set(), bookingMovedOn: new Map(), callQuoteMovedOn: new Map(), callQuoteFailed: false, promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map(), contact: new Map(), noteVisits: new Map(), bounceRecords: new Map(), contactMode: 'off', contactFailed: false, assumeContact: false });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), quoteHandedOff: new Set(), bookingMovedOn: new Map(), callQuoteMovedOn: new Map(), callQuoteFailed: false, promises: new Map(), consents: new Map(), customers: new Map(), contacts: new Map(), contact: new Map(), noteVisits: new Map(), bounceRecords: new Map(), contactFailed: false });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The latest valid time per customer across rows (a bad time is skipped).
@@ -388,18 +386,13 @@ function contactRefs(kind, row, data, cls) {
   return lead ? { customerId: uuidOrNull(lead.customer_id), phone: lead.phone } : null;
 }
 
-// GATE_ALERT_CONTACT_CLOSE on (shadow or true): load the witnesses for the
-// customer-contact rows of this batch. A load that fails is no verdict, never
+// Load the witnesses for the customer-contact rows of this batch. A load that fails is no verdict, never
 // a guess: rows stay unjudged and the re-arm pass leaves them as they are.
 async function loadContact(rows, data, conn) {
   const items = [];
   for (const row of rows) {
-    const cls = classify(row, { assumeContactLive: data.assumeContact });
-    // A class with its own gate (the lead_contacted class) reads witnesses by that gate; every
-    // other class by GATE_ALERT_CONTACT_CLOSE, as before.
-    if (!cls || (cls.gate ? cls.gate() === 'off' : data.contactMode === 'off')) continue;
-    // A gated class that judges by the contact witnesses also rides on GATE_ALERT_CONTACT_CLOSE.
-    if (cls.gate && cls.contactRule && data.contactMode === 'off') continue;
+    const cls = classify(row);
+    if (!cls) continue;
     // The portal chat contact witnesses (customer kind) are read only while their own gate is on.
     // (The portal item classes read them under their own gates, GATE_PORTAL_BOOKING_ITEMS for the booking class,
     // checked above.)
@@ -419,8 +412,6 @@ async function loadContact(rows, data, conn) {
     data.contact = await loadContactBundles(items, {
       conn,
       bookedVisits: (ids) => bookedVisitsByCustomer(conn, ids),
-      visitRan: voicemailVisitUnderwayMode() !== 'off',
-      staffActions: staffActionAnswersMode() !== 'off',
     });
   } catch (err) {
     data.contactFailed = true;
@@ -430,12 +421,11 @@ async function loadContact(rows, data, conn) {
 
 // Each text-note bell (the SMS reader's "check <name>'s text note"): did a visit for its customer complete
 // after the bell? The shared visit witness (admin-alert-contact-witnesses.js visitsCompletedAfterBell), by
-// customer id only. Read only while GATE_ALERT_CONTACT_CLOSE is shadow or true; a load that fails is no verdict.
+// customer id only. A load that fails is no verdict.
 async function loadNoteVisits(rows, data, conn) {
-  if (data.contactMode === 'off') return;
   const items = [];
   for (const row of rows) {
-    if (classify(row, { assumeContactLive: data.assumeContact })?.key !== TEXT_NOTE_CLASS) continue;
+    if (classify(row)?.key !== TEXT_NOTE_CLASS) continue;
     const refs = contactRefs('customer', row, data);
     const bellAt = row.created_at ? new Date(row.created_at) : null;
     if (refs && bellAt && !Number.isNaN(bellAt.getTime())) items.push({ id: row.id, customerId: refs.customerId, bellAt });
@@ -560,14 +550,13 @@ async function quoteAnswered(conn, { meta, customerId, bellAt }) {
     || estimatePricesRequest(estimate, serviceKey));
 }
 
-// GATE_LEAD_CONTACTED_CLOSE on (shadow or true): was an estimate handed off to each
+// Was an estimate handed off to each
 // lead_contacted bell's lead after the bell? The promise lane's own witness again (a real
 // delivery or the customer's acceptance, never sent_at), by the lead's customer. One small
 // query per bell, and only for these bells. Needs the batch's leads loaded.
 async function loadLeadHandoffs(rows, data, conn) {
-  if (leadContactedCloseMode() === 'off') return;
   for (const row of rows) {
-    const cls = classify(row, { assumeContactLive: data.assumeContact });
+    const cls = classify(row);
     if (cls?.key !== 'lead_contacted') continue;
     const lead = data.leads.get(refsFromRow(row).leadId);
     const customerId = lead?.customer_id ? uuidOrNull(String(lead.customer_id)) : null;
@@ -698,15 +687,8 @@ function bounceSubject(meta, data) {
 // The live records for a batch of notification rows: one query per table per
 // batch (a lead's estimate is only known once the lead is loaded, so estimates
 // run second). Plain reads — never a lock.
-// `judgeContact` (the Monday review's fell-off list reads the sweep's verdicts on rows the sweep may not judge): read the
-// customer-contact witnesses whatever GATE_ALERT_CONTACT_CLOSE says, as `shadow` when it is off. The sweep never passes it.
-async function loadSubjects(rows, conn = db, { judgeContact = false } = {}) {
+async function loadSubjects(rows, conn = db) {
   const data = emptyData();
-  data.contactMode = alertContactCloseMode();
-  if (judgeContact) {
-    data.assumeContact = true;
-    if (data.contactMode === 'off') data.contactMode = 'shadow';
-  }
   const all = rows.map(refsFromRow);
   const ids = (pick) => [...new Set(all.flatMap(pick))];
   const visitIds = ids((r) => r.visitIds);
@@ -734,7 +716,7 @@ async function loadSubjects(rows, conn = db, { judgeContact = false } = {}) {
     data.leads = byId(await conn('leads').whereIn('id', leadIds)
       .select('id', 'deleted_at', 'customer_id', 'estimate_id', 'status', 'phone'));
   }
-  if (data.contactMode !== 'off' || leadContactedCloseMode() !== 'off') await loadContact(rows, data, conn);
+  await loadContact(rows, data, conn);
   await loadNoteVisits(rows, data, conn);
   await loadLeadHandoffs(rows, data, conn);
   await loadCallQuoteMovedOn(rows, data, conn);
@@ -823,10 +805,8 @@ function subjectFor(row, data, todayET) {
     // The latest staff text that reached the bell's customer (loaded for
     // repeat-form alerts only).
     leadContactedAt: repeatCustomer ? data.contacts.get(repeatCustomer) : null,
-    // GATE_ALERT_CONTACT_CLOSE: its mode when the batch was read, and this
-    // row's witnesses (absent = the subject could not be identified, or the
+    // This row's contact witnesses (absent = the subject could not be identified, or the
     // load failed — contactUnknown — and either way nothing is judged).
-    contactMode: data.contactMode,
     contactUnknown: data.contactFailed,
     contact: data.contact.get(String(row.id)) || null,
     // When a visit for the bell's customer was completed after the bell (text-note bells only).
@@ -1056,7 +1036,7 @@ function lastNameSaved(s) {
   return String(s.customer.last_name ?? '').trim() ? 'Last name was saved' : null;
 }
 
-// ---- Customer-contact bells (GATE_ALERT_CONTACT_CLOSE) ---------------------
+// ---- Customer-contact bells ---------------------
 // Each rule reads `s.contact`, the witnesses admin-alert-contact-witnesses.js
 // loaded for the row; a row with none (its subject could not be identified, or
 // the load failed) is never judged. Only events AFTER the bundle's anchor count
@@ -1087,9 +1067,8 @@ function textAnswered(s) {
   if (c.pending !== false) return action;
   if (contactAfter(c, c.textAt)) return 'Answered by text';
   if (contactAfter(c, c.backAt) || contactAfter(c, c.inAt)) return 'Answered by a call';
-  // Before the plain fallback so the reason names the action. Only while live: in `shadow` the
-  // reader still answers this text by its own rules, so the real close keeps its plain reason.
-  if (action?.mode === 'true') return action;
+  // Before the plain fallback so the reason names the action.
+  if (action) return action;
   return 'Answered, or no reply needed';
 }
 
@@ -1097,7 +1076,7 @@ function textAnswered(s) {
 // person's delivered reply, or a call a person placed or answered and spoke on, reached the sender's phone after the
 // sender's LATEST text (the bell's anchor is the first text of a 4-hour window). Only a person counts: an automated
 // reply, the Messages reader's "no reply needed" and a texting assistant's reply never close it. Answered with the
-// gate's own mode, so it runs in shadow while the contact gate is `true`.
+// gate's own mode, so it can run in shadow.
 function unknownTextAnswered(s) {
   const c = s.contact;
   const mode = promisePhoneMatchCloseMode();
@@ -1109,17 +1088,13 @@ function unknownTextAnswered(s) {
   return null;
 }
 
-// A staff action for the text's customer after the text (GATE_SMS_STAFF_ACTION_ANSWERS, "Stuck Alert
-// Fixes" F1: a visit a person booked in the admin, or a payment a person recorded, within 24 hours,
-// by customer id): answered with its own mode so it can run in shadow while the contact gate is `true`.
+// A staff action for the text's customer after the text ("Stuck Alert Fixes" F1: a visit a person
+// booked in the admin, or a payment a person recorded, within 24 hours, by customer id).
 let staffActionReasons;
 function staffActionAnswer(c) {
   if (!c.staffActionKind || !contactAfter(c, c.staffActionAt)) return null;
-  const mode = staffActionAnswersMode();
-  if (mode === 'off') return null;
   staffActionReasons ||= require('./sms-staff-action-answers').STAFF_ACTION_REASONS;
-  const reason = staffActionReasons[c.staffActionKind];
-  return reason ? { reason, mode } : null;
+  return staffActionReasons[c.staffActionKind] || null;
 }
 
 // A voicemail callback request: a person called back and
@@ -1136,19 +1111,16 @@ function callerReached(s) {
 }
 
 // The voicemail's customer has a visit that completed after the call on the same Eastern
-// day (GATE_VOICEMAIL_VISIT_UNDERWAY; the real case: the tech arrived at 10:17, the
+// day ("Stuck Alert Fixes" F3; the real case: the tech arrived at 10:17, the
 // customer left a voicemail about the visit at 10:20 and the visit completed). The
-// reason is the missed-call lane's wording for the same fact. Answered with its own
-// mode so it can run in shadow while the contact gate is `true`; voice items only (the
+// reason is the missed-call lane's wording for the same fact. Voice items only (the
 // email class falls back to callerReached, never to this).
 let visitUnderwayResolution;
 function visitWentAhead(s) {
   const c = s.contact;
   if (!c || !contactAfter(c, c.visitRanAt)) return null;
-  const mode = voicemailVisitUnderwayMode();
-  if (mode === 'off') return null;
   visitUnderwayResolution ||= require('./missed-call-bell').VISIT_UNDERWAY_RESOLUTION;
-  return { reason: visitUnderwayResolution, mode };
+  return visitUnderwayResolution;
 }
 
 // A voicemail callback request: any contact witness first (callerReached), else the visit.
@@ -1166,8 +1138,8 @@ function emailAnswered(s) {
 }
 
 // A new lead that a person's text reached or called back, after the bell: the
-// part of the new-lead class the gate controls (its other reasons are
-// newLeadMovedOn's and always on).
+// part of the new-lead class the contact witnesses answer (its other reasons are
+// newLeadMovedOn's).
 function leadContacted(s) {
   const c = s.contact;
   if (!c || !s.lead) return null;
@@ -1186,8 +1158,7 @@ function personContactReason(c) {
 // A portal chat hand-off (GATE_PORTAL_CHAT_ANSWERED_CLOSE; owner 2026-10-31: "a chat item closes itself
 // when someone texts, calls or emails that customer after the request"): a person called back, answered
 // the customer's call, texted or emailed that customer after the bell's latest event (the witnesses'
-// anchor, bellEventAt). Answered with the gate's own mode, so it follows the weaker of that and
-// GATE_ALERT_CONTACT_CLOSE (judge). No visit or estimate reason here: the add-a-service chat keeps its
+// anchor, bellEventAt). Answered with the gate's own mode (judge). No visit or estimate reason here: the add-a-service chat keeps its
 // estimate rule beside it.
 function portalChatAnswered(s) {
   const c = s.contact;
@@ -1239,7 +1210,7 @@ function resolveRequestOf(bell, note) {
   return require('./portal-inbox').resolveRequestQuietly(uuidOrNull(meta.requestId), uuidOrNull(meta.customerId), note, { notAfter: askedAtOf(bell, meta) });
 }
 
-// A lead_contacted Leads bell (GATE_LEAD_CONTACTED_CLOSE): the emitters promise "done when
+// A lead_contacted Leads bell: the emitters promise "done when
 // the lead is contacted" and nothing closed it. Judged only by what came AFTER the bell
 // (its latest event, bellEventAt: created_at or the last ringing refresh's rungAt): a person's text or call back reached the lead (the
 // lead contact kind's witnesses), a live top-level visit was booked for the lead's customer,
@@ -1294,7 +1265,7 @@ const CLASSES = [
     // submission filed as a duplicate, an email follow-up's new draft) is
     // fresh work about a lead already on file, never judged.
     key: 'new_lead', categories: ['new_lead'], match: (meta, row) => meta.triggerKey === 'new_lead' && !!refsFromRow(row).leadId, rule: newLeadMovedOn,
-    // GATE_ALERT_CONTACT_CLOSE: also "Lead was contacted" (a person's text or call back after the bell).
+    // Also "Lead was contacted" (a person's text or call back after the bell).
     contact: 'lead', contactRule: leadContacted,
   },
   { // visit-promises.js alertUnsavedVisitPromiseMarks — one bell per visit,
@@ -1365,17 +1336,15 @@ const CLASSES = [
   },
   { // lead-webhook.js ringCustomerQuoteFormAlert (GATE_CURRENT_CUSTOMER_QUOTE_TEXT): a current or past customer sent
     // the quote form. Open-only dedupe like the repeat form's, so a retirement ends the episode and the next form rings
-    // a fresh row; its boundary is the latest form (BELL_EVENT_CLASSES). Behind GATE_ALERT_CONTACT_CLOSE (`contactOnly`).
-    key: 'customer_quote_form', categories: ['lead'], prefix: CUSTOMER_QUOTE_FORM_PREFIX, contactOnly: true, contact: 'customer',
+    // a fresh row; its boundary is the latest form (BELL_EVENT_CLASSES)..
+    key: 'customer_quote_form', categories: ['lead'], prefix: CUSTOMER_QUOTE_FORM_PREFIX, contact: 'customer',
     contactRule: customerQuoteFormAnswered, rearm: false,
   },
-  // Customer-initiated contact bells (owner 2026-10-24), all behind
-  // GATE_ALERT_CONTACT_CLOSE (`contactOnly`: not in the table at all while it is
-  // off) and keyed by the emitter's trigger.
-  { // notification-triggers.js sms_reply, an unknown sender (sms-reply:<sid>, one row per 4-hour window). Own gate;
-    // it rides on GATE_ALERT_CONTACT_CLOSE (the weaker wins). Listed BEFORE inbound_sms, which would otherwise take
+  // Customer-initiated contact bells (owner 2026-10-24), keyed by the emitter's trigger.
+  { // notification-triggers.js sms_reply, an unknown sender (sms-reply:<sid>, one row per 4-hour window). Own gate
+    // (GATE_PROMISE_PHONE_MATCH_CLOSE). Listed BEFORE inbound_sms, which would otherwise take
     // the row and (with the gate off) judge nothing.
-    key: UNKNOWN_SMS_CLASS, categories: ['inbound_sms'], triggerKey: 'sms_reply', prefix: UNKNOWN_SMS_PREFIX, contactOnly: true,
+    key: UNKNOWN_SMS_CLASS, categories: ['inbound_sms'], triggerKey: 'sms_reply', prefix: UNKNOWN_SMS_PREFIX,
     gate: promisePhoneMatchCloseMode, contact: 'sms', contactRule: unknownTextAnswered,
   },
   { // notification-triggers.js sms_reply. A known sender's texts share ONE row
@@ -1385,85 +1354,80 @@ const CLASSES = [
     // unknown sender's bell (a row per 4-hour window, sms-reply:<sid>) is NOT
     // judged (contactRefs returns null): a second text inside the window raises
     // no new row, so no anchor can stand for its latest text.
-    key: 'inbound_sms', categories: ['inbound_sms'], triggerKey: 'sms_reply', contactOnly: true, contact: 'sms', contactRule: textAnswered,
+    key: 'inbound_sms', categories: ['inbound_sms'], triggerKey: 'sms_reply', contact: 'sms', contactRule: textAnswered,
   },
   { // twilio-webhook.js: a number with no customer record texting a website or van-wrap line rings a new_lead
     // row with no lead record (sms-reply-alert-delivery.js ringTrackingLineTextBell: one row per sender that each
     // new text rewrites; one row per text before 2026-11-04). The row names the text it shows (?message=<sid>), so
     // it is judged like a known sender's thread, by that text's sender number (owner 2026-11-04, "D").
-    key: 'tracking_text', categories: ['new_lead'], triggerKey: 'new_lead', contactOnly: true, contact: 'sms', contactRule: textAnswered,
+    key: 'tracking_text', categories: ['new_lead'], triggerKey: 'new_lead', contact: 'sms', contactRule: textAnswered,
     match: (meta, row) => !refsFromRow(row).leadId && Boolean(first(linkParams(row.link).get('message'), parseMeta(meta.payload).twilioSid)),
   },
   { // call-recording-processor.js — one bell per voicemail, no dedupe key
-    key: 'voicemail_callback', categories: ['voicemail_callback'], triggerKey: 'customer_voicemail_callback', contactOnly: true, contact: 'voice', contactRule: voicemailAnswered,
+    key: 'voicemail_callback', categories: ['voicemail_callback'], triggerKey: 'customer_voicemail_callback', contact: 'voice', contactRule: voicemailAnswered,
   },
   { // call-recording-processor.js keepComplaintCallAlert: a known customer's call got the final label complaint_escalated
     // (dedupeKey call-complaint:<call id>, one bell per call, never refreshed, so created_at is its boundary). Closes once a
     // person reached that customer after the bell (customerQuoteFormAnswered: personContactReason, the customer kind's
-    // witnesses). A booked visit or a sent estimate alone never closes it. Behind GATE_ALERT_CONTACT_CLOSE (`contactOnly`).
-    key: 'call_complaint', categories: ['customer'], prefix: 'call-complaint:', contactOnly: true, contact: 'customer',
+    // witnesses). A booked visit or a sent estimate alone never closes it.
+    key: 'call_complaint', categories: ['customer'], prefix: 'call-complaint:', contact: 'customer',
     contactRule: customerQuoteFormAnswered,
   },
   // Missed calls (customer_missed_call) are NOT here: missed-call-bell.js owns them
   // (retireCalledBackMissedCalls, every 2 minutes, one owner), and it judges the
-  // contact clauses below behind the same gate. The promise chaser, repeat caller
+  // same contact facts. The promise chaser, repeat caller
   // and Sandy hand-off bells share the category and keep their own owners.
   { // email-sync.js ringCustomerEmailBell — one bell per email
-    key: 'inbound_email', categories: ['inbound_email'], triggerKey: 'customer_email_received', contactOnly: true, contact: 'email', contactRule: emailAnswered,
+    key: 'inbound_email', categories: ['inbound_email'], triggerKey: 'customer_email_received', contact: 'email', contactRule: emailAnswered,
   },
   { // sms-operational-actions.js recordMessageOperations — the SMS reader's "check <name>'s text note" bell,
     // one per text (dedupeKey sms-property-instructions:<sms_log id>, never refreshed, so created_at is its
     // boundary). Closes once a person answered that customer AND a visit for them completed after the bell
     // (owner 2026-11-02, option B). The failure bell (sms-operations-failed:) has no doneWhen and never matches.
     key: TEXT_NOTE_CLASS, categories: ['alert'], prefix: 'sms-property-instructions:', doneWhen: 'text_note_checked',
-    match: (meta) => meta.doneWhen === 'text_note_checked', contactOnly: true, contact: 'customer', contactRule: textNoteSettled,
+    match: (meta) => meta.doneWhen === 'text_note_checked', contact: 'customer', contactRule: textNoteSettled,
   },
   // Leads bells that promise `doneWhen: 'lead_contacted'` and name a lead (lead-call-text-followup,
   // lead-call-reply-ring, sms-lead-extraction, lead-unverified-hold, caller-callback-bell; the lead id is in metadata.leadId
   // and the link's ?lead=). The repeat-form alert (same doneWhen) is the lead_repeat_form class above,
-  // matched first. A bid-invite Leads bell (doneWhen bid_decided) never matches. The whole class runs
-  // under GATE_LEAD_CONTACTED_CLOSE (`gate`), whatever GATE_ALERT_CONTACT_CLOSE says.
+  // matched first. A bid-invite Leads bell (doneWhen bid_decided) never matches.
   {
-    key: 'lead_contacted', categories: ['lead'], doneWhen: LEAD_CONTACTED, gate: leadContactedCloseMode, contact: 'lead', rule: leadContactedMovedOn,
+    key: 'lead_contacted', categories: ['lead'], doneWhen: LEAD_CONTACTED, contact: 'lead', rule: leadContactedMovedOn,
     match: (meta, row) => meta.doneWhen === LEAD_CONTACTED && !!refsFromRow(row).leadId,
   },
 ];
 
-// One row's verdict. `reason` closes it now (the always-on rule, or the
-// contact rule while the gate is `true`); `would` is what the contact rule
-// says while the gate is `shadow`, recorded and never acted on. A contact rule
-// is silent when the gate is off or its witnesses did not load.
+// One row's verdict. `reason` closes it now (the always-on rule, or a contact rule whose
+// mode is `true`); `would` is what a contact rule says while its own mode is `shadow`,
+// recorded and never acted on. A contact rule is silent when its witnesses did not load.
 //
 // Own gates (owner 2026-10-29): a class with a `gate` reader judges nothing while it reads
 // 'off' and only records (`would`) while it reads 'shadow'. A contact rule may answer
-// `{ reason, mode }` instead of a string: its reason then follows the weaker of the contact
-// gate and its own mode (off = silent), so a new reason can run in shadow while the
-// contact gate is `true`. A plain string keeps following the contact gate alone.
+// `{ reason, mode }` instead of a string: its reason then follows its own mode (off =
+// silent, shadow = recorded only), so a new reason can run in shadow. A plain string
+// closes.
 const NONE = Object.freeze({ reason: null, would: null });
 function judge(cls, s) {
   const own = cls.gate ? cls.gate() : 'true';
   if (own === 'off') return NONE;
   const base = cls.rule ? cls.rule(s) : null;
   if (base) return own === 'true' ? { reason: base, would: null } : { reason: null, would: base };
-  if (!cls.contactRule || s.contactMode === 'off') return NONE;
+  if (!cls.contactRule) return NONE;
   const extra = cls.contactRule(s);
   if (!extra) return NONE;
   const { reason, mode } = typeof extra === 'string' ? { reason: extra, mode: 'true' } : extra;
   if (mode === 'off') return NONE;
-  return s.contactMode === 'true' && mode === 'true' ? { reason, would: null } : { reason: null, would: reason };
+  return mode === 'true' ? { reason, would: null } : { reason: null, would: reason };
 }
 
 // The class a row belongs to, or null. Category first, then the emitter's
-// dedupeKey prefix / trigger / extra metadata test. The contact-only classes
-// exist only while GATE_ALERT_CONTACT_CLOSE is shadow or true, and a class with its
-// own `gate` only while that gate is; the re-arm pass asks for them in every mode
-// (`anyMode`) so a gate switched back off puts back what it closed.
-function classify(row, { anyMode = false, assumeContactLive = false } = {}) {
+// dedupeKey prefix / trigger / extra metadata test. A class with its own `gate` exists only
+// while that gate is on; the re-arm pass asks for them in every mode (`anyMode`) so a gate
+// switched back off puts back what it closed.
+function classify(row, { anyMode = false } = {}) {
   const meta = parseMeta(row.metadata);
   const dedupeKey = String(meta.dedupeKey || '');
-  const contactLive = anyMode || assumeContactLive || alertContactCloseMode() !== 'off';
-  return CLASSES.find((c) => (!c.contactOnly || contactLive)
-    && (!c.gate || anyMode || c.gate() !== 'off')
+  return CLASSES.find((c) => (!c.gate || anyMode || c.gate() !== 'off')
     && c.categories.includes(row.category)
     && (!c.prefix || dedupeKey.startsWith(c.prefix))
     && (!c.triggerKey || meta.triggerKey === c.triggerKey)
@@ -1489,9 +1453,7 @@ function candidateQuery(cursor) {
       .whereRaw("done_at >= now() - interval '7 days'")))
     .whereRaw("metadata->'retired' IS NULL")
     .where((q) => {
-      const contactLive = alertContactCloseMode() !== 'off';
       for (const c of CLASSES) {
-        if (c.contactOnly && !contactLive) continue;
         if (c.gate && c.gate() === 'off') continue;
         q.orWhere((cq) => {
           cq.whereIn('category', c.categories);
@@ -1706,8 +1668,8 @@ async function rearmRelevantAgain(now, todayET) {
 // one starts over. In-process: a restart simply starts over.
 let resumeAfter = null;
 
-// GATE_ALERT_CONTACT_CLOSE=shadow: one audit_log row per bell per class per
-// Eastern day for what the contact rules would close. The bell, its metadata
+// A rule in shadow (a contact rule's own gate set to `shadow`): one audit_log row per bell per class per
+// Eastern day for what that rule would close. The bell, its metadata
 // and its read / done state are untouched (the emitters compare metadata on a
 // refresh and the retire's version fence reads it). Advisory: a failed write is
 // logged, never fatal.
@@ -1727,7 +1689,7 @@ async function recordWouldClose(items, now, todayET) {
 
 // One row of a batch. The batch read is a first pass: only a row that looks
 // moved on pays for the fresh recheck that actually retires it. A shadow
-// verdict (GATE_ALERT_CONTACT_CLOSE=shadow) is only collected: an open row is
+// verdict (a rule's own gate set to `shadow`) is only collected: an open row is
 // recorded, a person's own Done is not ours to judge there.
 async function sweepRow(row, cls, subject, { now, todayET, byClass, shadowed }) {
   const verdict = judge(cls, subject);
@@ -1771,7 +1733,7 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   if (retired) logger.info(`[alert-relevance] retired ${retired} of ${scanned} unread alert(s): ${JSON.stringify(byClass)}`);
   if (rearmed) logger.info(`[alert-relevance] put back ${rearmed} alert(s) whose subject is relevant again`);
   if (wouldClose) logger.info(`[alert-relevance] shadow: recorded ${wouldClose} alert(s) the customer-contact rules would close`);
-  const anyShadow = [alertContactCloseMode, voicemailVisitUnderwayMode, leadContactedCloseMode, staffActionAnswersMode, portalChatAnsweredCloseMode, promisePhoneMatchCloseMode].some((mode) => mode() === 'shadow');
+  const anyShadow = [portalChatAnsweredCloseMode, promisePhoneMatchCloseMode].some((mode) => mode() === 'shadow');
   const lateReRung = await lateReRingPass(now);
   const estimateReRung = await estimateReRingPass(now);
   const bookingsRaised = await unfinishedBookingsPass(now);

@@ -88,6 +88,12 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
     database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 1 } });
     mockPg = await database.transaction();
     await mockPg.raw(`
+      -- the unanswered-text read always checks staff actions (a visit a person booked, a payment a person recorded)
+      CREATE TEMP TABLE scheduled_services (
+        id uuid PRIMARY KEY, customer_id uuid, created_at timestamptz NOT NULL DEFAULT now(),
+        recurring_parent_id uuid, source_action varchar(60), status varchar(30)
+      );
+      CREATE TEMP TABLE invoices (id uuid PRIMARY KEY, customer_id uuid, payment_recorded_at timestamptz, payment_recorded_by text);
       CREATE TEMP TABLE customers (id uuid PRIMARY KEY, phone text, first_name text, last_name text, deleted_at timestamptz, updated_at timestamptz DEFAULT now());
       CREATE TEMP TABLE conversations (id uuid PRIMARY KEY, customer_id uuid, channel text, our_endpoint_id text, contact_phone text, unknown_contact boolean DEFAULT false);
       CREATE TEMP TABLE messages (id uuid PRIMARY KEY, conversation_id uuid, channel text, direction text, body text,

@@ -785,8 +785,7 @@ const RETIRE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
  * Runs on the 2-minute call-alert cron; idempotent (a done bell is not
  * selected again). Never re-opens: a retired bell stays done.
  * This module is the ONE owner of missed-call bells (the relevance sweep has no
- * missed-call class). GATE_ALERT_CONTACT_CLOSE adds the contact clauses below
- * (closeContactedMissedCalls): off = exactly the retirements above.
+ * missed-call class). closeContactedMissedCalls adds the contact clauses below.
  */
 async function retireCalledBackMissedCalls({ limit = 100 } = {}) {
   let retired = await retireOpenMissedCalls({
@@ -838,7 +837,7 @@ async function supersedeCalls(callLogIds, resolution) {
   return retired;
 }
 
-// GATE_ALERT_CONTACT_CLOSE (owner 2026-10-24: customer-contact bells "should close
+// Contact clauses (owner 2026-10-24: customer-contact bells "should close
 // automatically"; approved 2026-10-26). Beside the called-back proof above
 // (calledBackSql, kept as it is), a missed-call bell closes once, AFTER the call
 // began (callStartedAtSql, the SQL form of call-timeline.js callStartedAt: a row
@@ -851,9 +850,7 @@ async function supersedeCalls(callLogIds, resolution) {
 //    top-level booking predicate, whereLiveBooking);
 //  - a quote was handed off to the call's customer (handedOffWithin +
 //    whereEstimateCustomerOwnership, never sent_at).
-// Gate off = nothing here runs. 'shadow' = what would close is recorded in
-// audit_log (once per bell per class per ET day) and nothing is retired.
-// 'true' = retired through supersedeMissedCallAdmin like the clauses above.
+// Retired through supersedeMissedCallAdmin like the clauses above.
 // read_at is never evidence. Sends nothing to anyone.
 const CONTACT_CLAUSES = [
   {
@@ -907,15 +904,13 @@ const CONTACT_CLAUSES = [
 ];
 // The candidate set is bounded by RETIRE_WINDOW_MS (7 days of open bells), so each
 // run walks ALL of it, clause by clause, in keyset pages ordered by bell id: a page
-// of rows that match nothing (a quote candidate with no hand-off, a shadow row
-// already audited) can never hide the rows after it. The ceiling is only a safety
+// of rows that match nothing (a quote candidate with no hand-off)
+// can never hide the rows after it. The ceiling is only a safety
 // valve against a runaway table; hitting it is logged.
 const CONTACT_PAGE_SIZE = 200;
 const CONTACT_RUN_CEILING = 5000;
 
 async function closeContactedMissedCalls() {
-  const mode = require('../config/feature-gates').alertContactCloseMode();
-  if (mode === 'off') return 0;
   const { callStartedAtSql } = require('./sms-pending-conversations');
   let closed = 0;
   for (const { clause, resolution, narrow } of CONTACT_CLAUSES) {
@@ -932,7 +927,7 @@ async function closeContactedMissedCalls() {
         cursor = page[page.length - 1].notification_id;
         seen += page.length;
         const matched = narrow ? await narrow(page) : page;
-        if (matched.length) closed += await closeContactPage(mode, matched, resolution);
+        if (matched.length) closed += await supersedeCalls(matched.map((r) => r.call_id), resolution);
         if (page.length < CONTACT_PAGE_SIZE) break;
         if (seen >= CONTACT_RUN_CEILING) {
           logger.warn(`[missed-call-bell] contact close stopped at ${seen} candidates (${resolution}); the rest wait for the next run`);
@@ -944,19 +939,6 @@ async function closeContactedMissedCalls() {
     }
   }
   return closed;
-}
-
-// `true` retires the matched bells; `shadow` only records them (audit_log).
-async function closeContactPage(mode, rows, resolution) {
-  if (mode === 'true') return supersedeCalls(rows.map((r) => r.call_id), resolution);
-  const { etDateString } = require('../utils/datetime-et');
-  const { auditAlertWouldClose } = require('./audit-log');
-  const judgedAt = new Date().toISOString();
-  await auditAlertWouldClose({
-    et_day: etDateString(),
-    items: rows.map((r) => ({ notification_id: r.notification_id, alert_class: 'missed_call', reason: resolution, judged_at: judgedAt })),
-  });
-  return 0;
 }
 
 module.exports = {

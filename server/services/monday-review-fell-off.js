@@ -17,8 +17,7 @@
 //     subjectFor, judge), never a second opinion written here. The sweep owns every boundary rule: the ask time a
 //     portal reminder keeps (askedAt), a re-rung bell's latest event, a shared phone, an unknown sender's latest text,
 //     a person's text, call or email, a live booking, a quote handed over (handedOffWithin, never sent_at). A row with
-//     a verdict, `reason` or `would`, is handled and left out, so the list does not depend on the mode of
-//     GATE_ALERT_CONTACT_CLOSE (loadSubjects `judgeContact` reads the contact witnesses even when that gate is off).
+//     a verdict, `reason` or `would`, is handled and left out.
 //     The sweep's other gates are honored: a class whose own gate is off is not judged, so its rows are listed.
 //   - When a row cannot be checked it is LISTED and marked unchecked: no class judges it (a missed call, say), the
 //     class needs witnesses it could not identify, or the subject load failed. The owner reads the list: an alert
@@ -71,7 +70,7 @@ function warnOnce(state, what, err) {
 function judgeOne(relevance, row, data, todayET, state) {
   if (!data) return { handled: false, unchecked: true };
   try {
-    const cls = relevance.classify(row, { assumeContactLive: true });
+    const cls = relevance.classify(row);
     if (!cls) return { handled: false, unchecked: true };
     const subject = relevance.subjectFor(row, data, todayET);
     const verdict = relevance.judge(cls, subject);
@@ -94,7 +93,7 @@ async function judgeRows(rows, database, now) {
     const batch = rows.slice(i, i + JUDGE_BATCH);
     let data = null;
     try {
-      data = await relevance.loadSubjects(batch, database, { judgeContact: true });
+      data = await relevance.loadSubjects(batch, database);
     } catch (err) {
       warnOnce(state, 'reply witnesses failed to load; the alerts are listed unchecked', err);
     }
