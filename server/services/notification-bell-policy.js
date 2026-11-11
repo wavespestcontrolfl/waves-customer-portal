@@ -12,10 +12,10 @@
  *
  * Decision order (first match wins):
  *   1. Explicit site-level tag: options.bell === true / false
- *   1b. GATE_CUSTOMER_ALERTS_RING only: a declared customer contact or promise
+ *   1b. A declared customer contact or promise
  *      (`declared.contact` / `declared.promise`) rings
- *   2. triggerKey allowlist (registry-routed events that must ring; with
- *      GATE_CUSTOMER_ALERTS_RING on, bill_payment_error too)
+ *   2. triggerKey allowlist (registry-routed events that must ring, and
+ *      bill_payment_error)
  *   3. triggerKey denylist — beats the category allowlist (payment FYIs and
  *      the alert firehose share categories with events that must ring)
  *   4. Owner category override: notification_preferences rows with
@@ -56,8 +56,8 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   'payment_failed',
 ]);
 
-// GATE_CUSTOMER_ALERTS_RING (owner 2026-10-29, "small" E1): a customer's invoice payment that failed at checkout,
-// bank or card, rings beside payment_failed under the same 09-11 ruling. Read only while the gate is on.
+// Owner 2026-10-29, "small" E1: a customer's invoice payment that failed at checkout,
+// bank or card, rings beside payment_failed under the same 09-11 ruling.
 const GATED_TRIGGER_BELL_ALLOWLIST = new Set(['bill_payment_error']);
 
 // GATE_MORNING_BANNER (owner 2026-11-03, "ok add", choice C: "At 8 AM, one banner tells you how many items wait for you,
@@ -123,8 +123,8 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // typed_decisions: the daily AI-test list from the dark typed-decisions shadow
 // lane (GATE_TYPED_DECISIONS). Since owner 2026-11-02 it is an FYI that
 // admin-alert-routing.js sends to Claude's queue, which this policy never
-// decides; it stays listed so the owner can still silence it whenever
-// GATE_ALERT_CLAUDE_QUEUE is off.
+// decides; it stays listed so the owner can still silence it if routing
+// ever stops sending it there.
 // llm_cost: the daily "check AI spend" item (services/llm-cost.js), raised only
 // when a lane's estimated spend spikes. The dark GATE_LLM_COST_TRACKING is the
 // switch; once it is on, the item must reach the owner, who can still silence
@@ -251,19 +251,16 @@ function clearOverrideCache() {
  * Only meaningful when isBellPolicyEnabled() — callers check the gate first.
  * Never throws.
  */
-// GATE_CUSTOMER_ALERTS_RING (owner 2026-10-29, "small" E1), read at call time: an alert declared as a customer contact
-// or as a promise we owe a customer (a registry rule's `contact`/`promise`, or the same flag in a composed alert's
-// metadata) rings, and so does a customer's failed invoice payment beside payment_failed. notification-triggers.js
-// asks the same question, so the bell write and the phone push agree. Guarded: a test that mocks feature-gates
-// without the reader reads it as off.
+// Owner 2026-10-29, "small" E1: an alert declared as a customer contact or as a promise we owe a customer (a
+// registry rule's `contact`/`promise`, or the same flag in a composed alert's metadata) rings, and so does a
+// customer's failed invoice payment beside payment_failed. notification-triggers.js asks the same question, so the
+// bell write and the phone push agree.
 function ringsAsCustomerAlert({ triggerKey = null, declared = null } = {}) {
-  const gates = require('../config/feature-gates');
-  if (!(typeof gates.customerAlertsRingLive === 'function' && gates.customerAlertsRingLive())) return false;
   return declared?.contact === true || declared?.promise === true || GATED_TRIGGER_BELL_ALLOWLIST.has(triggerKey);
 }
 
 // A trigger on the always-ringing allowlist, or on a banner's while its gate is on (GATE_MORNING_BANNER,
-// GATE_OWNER_NUDGE_BANNER; read at call time; guarded like customerAlertsRingLive: a test that mocks feature-gates
+// GATE_OWNER_NUDGE_BANNER; read at call time; guarded: a test that mocks feature-gates
 // without the reader reads it as off).
 function onAllowlist(triggerKey) {
   if (TRIGGER_BELL_ALLOWLIST.has(triggerKey)) return true;

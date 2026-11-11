@@ -1588,7 +1588,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // silenced categories) still buzzed the phone — and a push-only admin
     // bypassed it entirely (hook P1). Category overrides re-enable both.
     let policySilenced = false;
-    // GATE_CUSTOMER_ALERTS_RING: a customer alert (the type's rule declares `contact`/`promise`, or it is
+    // A customer alert (the type's rule declares `contact`/`promise`, or it is
     // bill_payment_error) passes the policy, and its bell write below carries `bell: true` so
     // NotificationService.create's own policy check, which sees only the category and the trigger key, agrees.
     let declaredCustomerAlert = false;
@@ -1597,7 +1597,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       if (bellPolicy.isBellPolicyEnabled()) {
         // bellAuthorized (pushOnly only): the banner for a bell row its writer already rang (bell-banners.js; each writer
         // tags bell: true). The push keeps that answer instead of judging the event again without the tag, so the
-        // banner does not depend on GATE_CUSTOMER_ALERTS_RING.
+        // banner does not depend on the customer-alert ring.
         const authorized = pushOnly && bellAuthorized ? { options: { bell: true } } : {};
         policySilenced = !(await bellPolicy.bellAllowed({ category: trigger.category, triggerKey, declared: trigger.rule, ...authorized }));
         // Guarded: a test that mocks the policy module without the helper keeps today's bell write.
