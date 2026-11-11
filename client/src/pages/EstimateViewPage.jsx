@@ -4952,8 +4952,8 @@ export function carryRefreshProjections(prev, body, isRefresh) {
   if (prev?.returnVisit && !body.returnVisit) carried.returnVisit = prev.returnVisit;
   // The offer is bound to the property it was matched against (GH codex
   // #4853 r3 P0): a staff revision to another address drops it. A refresh
-  // that now offers the free Waves Assessment (GATE_ESTIMATE_ASSESSMENT_FIRST,
-  // composed on every load) drops it too: the page carries one offer, never two.
+  // that now offers the free Waves Assessment (composed on
+  // every load) drops it too: the page carries one offer, never two.
   if (prev?.consultationOffer && !body.consultationOffer && !body.assessmentFirst
     && prev?.estimate?.address === body?.estimate?.address) carried.consultationOffer = prev.consultationOffer;
   return Object.keys(carried).length ? { ...body, ...carried } : body;
@@ -4987,7 +4987,7 @@ export function ConsultationOfferSection({ consultationOffer }) {
   );
 }
 
-// "Book a free Waves Assessment first" (GATE_ESTIMATE_ASSESSMENT_FIRST, owner 2026-10-26 decision page choice 3A):
+// "Book a free Waves Assessment first" (owner 2026-10-26 decision page choice 3A):
 // renders ONLY from /data's `assessmentFirst` ({ url }); the server decides eligibility (an open estimate the customer
 // is viewing, a customer account at the estimate's property, no open assessment). It links to the estimate-token
 // booking page (/estimate/:token/assessment) in a new tab, so a customer mid-configuration keeps their choices. It
