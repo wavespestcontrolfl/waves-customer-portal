@@ -710,7 +710,7 @@ export default function App() {
           {/* Moving link (GATE_MOVING_FLOW): the token is customer_moves.token; the API 404s while the gate is dark. */}
           <Route path="/moving/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><MovingPage /></Suspense>} />
           <Route path="/inspection/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ScheduleFlowPage key="inspection" flow="inspection" /></Suspense>} />
-          {/* "Book a free Waves Assessment first" from an estimate (GATE_ESTIMATE_ASSESSMENT_FIRST): the token is the estimate's. */}
+          {/* "Book a free Waves Assessment first" from an estimate: the token is the estimate's. */}
           <Route path="/estimate/:token/assessment" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ScheduleFlowPage key="assessment" flow="assessment" /></Suspense>} />
           <Route path="/appointment/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><AppointmentPage /></Suspense>} />
           <Route path="/secure/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><SecureAppointmentPage /></Suspense>} />

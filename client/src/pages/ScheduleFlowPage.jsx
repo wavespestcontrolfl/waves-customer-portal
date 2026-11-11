@@ -1849,7 +1849,7 @@ const FLOWS = {
     pickedNote: () => null,
   },
 };
-// "Book a free Waves Assessment first" from an estimate (GATE_ESTIMATE_ASSESSMENT_FIRST): the inspection page itself,
+// "Book a free Waves Assessment first" from an estimate: the inspection page itself,
 // keyed by the estimate's token (routes/estimate-assessment-public.js answers the same contract). The customer and the
 // property come from the estimate, so there is no address to change and no emailed time to preselect.
 const ASSESSMENT_NAME = 'free Waves Assessment';

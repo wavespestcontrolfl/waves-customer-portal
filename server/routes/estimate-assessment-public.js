@@ -1,7 +1,6 @@
 // ============================================================
 // estimate-assessment-public.js — "Book a free Waves Assessment first" from an
-// open estimate (GATE_ESTIMATE_ASSESSMENT_FIRST; owner 2026-10-26, "OK GO" on
-// decision page choice 3A).
+// open estimate (owner 2026-10-26, "OK GO" on decision page choice 3A).
 //
 // The /inspection booking page (inspection-public.js) belongs to a LEAD: its
 // token is a signed lead token, and many estimates have no lead behind them.
@@ -27,8 +26,8 @@
 // the estimate is not linked to that visit): gone.
 //
 // Mounted in server/index.js on /api/public/estimate-assessment behind a
-// pre-guard (privacy headers, the dark gate's 404 and the token format check
-// land before the global limiter and the body parsers).
+// pre-guard (privacy headers and the token format check land before the global
+// limiter and the body parsers).
 // ============================================================
 
 const express = require('express');
@@ -38,12 +37,9 @@ const logger = require('../services/logger');
 const { noStore } = require('../middleware/no-store');
 const { hadCompletedAssessmentLook } = require('../services/assessment-booking');
 const { rateLimitKey } = require('../middleware/rate-limit-key');
-const { estimateAssessmentFirstLive } = require('../config/feature-gates');
 
 const router = express.Router();
 router.use(noStore);
-// The pre-guard already answered a dark gate; this keeps the router correct on its own.
-router.use((req, res, next) => (estimateAssessmentFirstLive() ? next() : res.status(404).json({ error: 'not_found' })));
 
 const limiter = (max, error) => rateLimit({
   windowMs: 60 * 1000,
@@ -270,7 +266,7 @@ async function sendSlotTaken(res, setup, error) {
 // row), under the per-estimate lock createSelfBooking takes (callbackVisit.estimateGuard): the estimate, share-locked,
 // still open and customer-viewable for the same customer; its call-side verdict held under lock; still eligible on
 // this transaction (not grouped or drafted from a visit, the customer's address still the estimate's property, no
-// open assessment: 'booked'; no Waves Assessment completed while the estimate was prepared); and the gate read last, after every lock wait. 'ok', 'booked' or 'ineligible'.
+// open assessment: 'booked'; no Waves Assessment completed while the estimate was prepared). 'ok', 'booked' or 'ineligible'.
 function estimateGuardFor(estimate, customerId) {
   return {
     estimateId: estimate.id,
@@ -282,7 +278,7 @@ function estimateGuardFor(estimate, customerId) {
       if (await require('../utils/estimate-claim-sql').callSideBlockedUnderLock(trx, fresh)) return 'ineligible';
       const eligibility = await assessmentEligibility(fresh, parseEstimateData(fresh.estimate_data), trx);
       if (eligibility.state !== 'ok') return eligibility.state === 'already_booked' ? 'booked' : 'ineligible';
-      return estimateAssessmentFirstLive() ? 'ok' : 'ineligible';
+      return 'ok';
     },
   };
 }
@@ -311,8 +307,6 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     });
     const slot = inspection().findSlotIn(day, date, time);
     if (!slot) return sendSlotTaken(res, setup);
-    // The kill switch again right before the booking: a flip during the availability build books nothing.
-    if (!estimateAssessmentFirstLive()) return res.status(404).json({ error: 'not_found' });
 
     const result = await inspection().bookAssessmentVisit({
       booking: setup.booking,
@@ -327,9 +321,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     });
     if (!result.ok) {
       if (result.code === 'ESTIMATE_CHANGED') {
-        // The estimate stopped qualifying inside the booking transaction (closed, call-side blocked, moved, or the
-        // gate went dark): the page's own answer for it now.
-        if (!estimateAssessmentFirstLive()) return res.status(404).json({ error: 'not_found' });
+        // The estimate stopped qualifying inside the booking transaction (closed, call-side blocked or moved): the
+        // page's own answer for it now.
         const again = await resolveRequest(req.params.token);
         if (again.body) return send(res, again);
       }
@@ -355,7 +348,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 // (never a staff, draft or document render). Never throws.
 async function assessmentFirstFor(estimate, { open = false, estimateData = null } = {}) {
   try {
-    if (!estimateAssessmentFirstLive() || !open || !estimate?.token) return null;
+    if (!open || !estimate?.token) return null;
     const eligibility = await assessmentEligibility(estimate, estimateData || parseEstimateData(estimate.estimate_data));
     if (eligibility.state !== 'ok') return null;
     // The service area at the customer's stored pin, with no network call (service-area.js isInServiceAreaBox, the

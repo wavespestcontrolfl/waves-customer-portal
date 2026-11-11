@@ -17,7 +17,6 @@ jest.mock('../config/feature-gates', () => ({
   pafSetupFeeLive: () => false,
   commercialProposalSignLive: () => false,
   commercialFirstVisitLive: () => false,
-  estimateAssessmentFirstLive: () => false,
   estimateConsumerNoticeLive: () => false,
 }));
 jest.mock('../services/property-lookup/lookup-cache', () => ({
