@@ -19,6 +19,7 @@ vi.mock('../utils/api', () => ({
     getTermiteBond: vi.fn(),
     getTermiteAnnualPlan: vi.fn(),
     getLawnHealth: vi.fn(),
+    oneTapOffers: vi.fn(),
     getRequests: vi.fn(),
     updateAccountCreditPreference: vi.fn(),
   },
@@ -38,6 +39,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(console, 'error').mockImplementation(() => {});
   api.getLawnHealth.mockResolvedValue({ available: false });
+  api.oneTapOffers.mockResolvedValue({ offers: [] });
   api.getAutopay.mockResolvedValue({ state: 'disabled' });
   api.getStationMap.mockResolvedValue({ available: false });
   api.getTermiteBond.mockResolvedValue({ available: false });

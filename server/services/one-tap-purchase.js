@@ -32,7 +32,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const slotReservation = require('./slot-reservation');
 const { getAvailableSlots } = require('./estimate-slot-availability');
-const { buildPortalPurchaseBasis, cacheOnlyPropertyLookup } = require('./service-report/cross-sell');
+const { buildPortalPurchaseBasis, cacheOnlyPropertyLookup, OFFER_LADDER } = require('./service-report/cross-sell');
 const { acquireOccupancyLock } = require('./scheduling/occupancy');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { customerPreservesMonthlyMembership, parseEstimateData, roundMoney } = require('./billing-cadence');
@@ -239,12 +239,50 @@ async function completedPricing(estimateId) {
   }
 }
 
+// ── which accounts and which services can buy in one tap ─────────────────
+// The read-side mirror of init's own refusals, shared by the Home card's
+// `oneTap` flag and the My Plan list, so a buy button never renders that
+// init would refuse: monthly-membership lanes (the converter would fold the
+// add-on into monthly_rate, against the per-application terms), non-members
+// (their setup fee would be waived) and payer-billed accounts (the card step
+// would enroll the homeowner's card on a payer-routed account). Fail closed:
+// an unknowable payer picture hides the button.
+async function accountCanOneTap(customerId) {
+  const customer = await db('customers')
+    .where({ id: customerId })
+    .first('pipeline_stage', 'monthly_rate', 'billing_mode');
+  if (!customer || customerPreservesMonthlyMembership(customer)) return false;
+  const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
+  const qualifyingKeys = await loadExistingQualifyingServiceKeys(db, customerId).catch(() => []);
+  if (!qualifyingKeys.length) return false;
+  return customerIsPayerBilled(db, customerId).then((billed) => !billed).catch(() => false);
+}
+
+// My Plan "Add a service" (owner 2026-11-11): one priced offer for each
+// service the customer does not have. Each is the payload the Home card
+// carries for that family, so init's drift check treats a tap here exactly
+// like a tap there. A family that is owned, unprovable or unpriced is left
+// off; the pricing panel below the list still takes a request for it.
+async function listOffers({ customerId }) {
+  if (!(await accountCanOneTap(customerId))) return { offers: [] };
+  const bases = await Promise.all(
+    OFFER_LADDER.map((targetKey) => buildPortalPurchaseBasis(customerId, db, { targetKey })),
+  );
+  return { offers: bases.filter(Boolean).map((basis) => basis.payload) };
+}
+
 // ── initPurchase ─────────────────────────────────────────────────────────
 // Recompute the offer server-side, reject on any drift from what the card
 // rendered, synthesize the NEW-SERVICE-ONLY draft estimate, ledger the
 // purchase, and return terms + slots.
 async function initPurchase({ customerId, clicked }) {
-  const basis = await buildPortalPurchaseBasis(customerId, db);
+  // The family the customer tapped (owner 2026-11-11: My Plan lists every
+  // service they do not have, so the tap is no longer always the ladder's
+  // pick). The offer core prices that family under the same ownership,
+  // premises and pricing rules, and answers no basis when it is owned,
+  // unprovable or unpriced. A family outside the ladder is never sold here.
+  const targetKey = OFFER_LADDER.find((key) => key === clicked?.serviceKey);
+  const basis = targetKey ? await buildPortalPurchaseBasis(customerId, db, { targetKey }) : null;
   if (!basis) throw httpError(409, OFFER_CHANGED);
   const offer = basis.payload;
   assertNoDrift(offer, clicked);
@@ -1487,6 +1525,8 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
 }
 
 module.exports = {
+  accountCanOneTap,
+  listOffers,
   initPurchase,
   reserve,
   release,

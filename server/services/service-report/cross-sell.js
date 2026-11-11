@@ -1349,6 +1349,9 @@ module.exports = {
   buildPortalOffer,
   buildOfferForFamily,
   buildPortalPurchaseBasis,
+  // The families any surface may offer. The My Plan "Add a service" list
+  // walks it, and a one-tap purchase accepts no family outside it.
+  OFFER_LADDER,
   // The cache-only lookup discipline both offer surfaces price under — the
   // one-tap purchase re-resolves the same property context through it (one
   // definition; a live lookup must never run inside a portal view).
