@@ -5,7 +5,6 @@
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
-const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 jest.setTimeout(60000);
@@ -18,7 +17,10 @@ const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROP
   'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N'];
 const HALF_NOTE = 'Reclaimed water: half nitrogen today (0.375 lb N, 1.6 lb per 1,000).';
 const KEPT_NOTE = 'Reclaimed water: this bag carries the pre-emergent, so its full rate stays today.';
-const day = etDateString(addETDays(new Date(), -1));
+// The day the trouble area and its fungicide evidence are recorded: the day before the 2026-11-10 visits. The plan reads an area and its
+// evidence only when they are dated on or before the visit's day (lawn-trouble-areas loadActiveAsOf). This was "yesterday" by the real
+// clock, which moved past the fixed visit day on 2026-11-12 ET and turned the fungus case red on every PR.
+const day = '2026-11-09';
 
 describeDb('reclaimed water half nitrogen through PostgreSQL', () => {
   const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
