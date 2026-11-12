@@ -1,12 +1,13 @@
 'use strict';
 
-// How a Lock Screen visit card starts, on real migrated PostgreSQL (services/visit-live-activity.js,
+// The Lock Screen visit card's whole life on real migrated PostgreSQL (services/visit-live-activity.js,
 // GATE_VISIT_LIVE_ACTIVITY). The tracker's own state derivation, the push device scope, the notice
-// preference and the service label builder all run for real; only the Apple requests are scripted, so no
-// request leaves the test. Synthetic records, rolled back after every test. Runs in the DB-gated CI step.
+// preference and the service label builder all run for real; only the four Apple requests are scripted, so
+// no request leaves the test. Synthetic records, rolled back after every test. Runs in the DB-gated CI step.
 //
 // The unit suite (visit-live-activity.test.js) pins the pure rules. This suite is the proof of what they
-// cannot show: who gets a card, the one-live-card-per-stop claim, and one chance per step.
+// cannot show: the one-live-card-per-stop claim, the order of a card's updates, and that a card is never
+// left on a Lock Screen with nothing behind it.
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
@@ -26,6 +27,7 @@ jest.mock('../services/apns-live-activity', () => ({
   ...jest.requireActual('../services/apns-live-activity'),
   createChannel: jest.fn(),
   start: jest.fn(),
+  broadcast: jest.fn(),
   deleteChannel: jest.fn(),
 }));
 
@@ -66,6 +68,7 @@ postgres('Lock Screen visit card against migrated PostgreSQL', () => {
     jest.spyOn(apns, 'status').mockReturnValue({ configured: true, production: true, bundleId: 'com.wavespestcontrol.portal' });
     apple.createChannel.mockReset().mockImplementation(async () => { channels += 1; return { ok: true, channelId: `channel-${channels}` }; });
     apple.start.mockReset().mockResolvedValue({ ok: true });
+    apple.broadcast.mockReset().mockResolvedValue({ ok: true });
     apple.deleteChannel.mockReset().mockResolvedValue({ ok: true });
   });
 
@@ -113,6 +116,7 @@ postgres('Lock Screen visit card against migrated PostgreSQL', () => {
 
   const setVisit = (id, patch) => trx('scheduled_services').where({ id }).update(patch);
   const arrive = (id, minutes = -1) => setVisit(id, { status: 'on_site', track_state: 'on_property', arrived_at: at(minutes) });
+  const complete = (id, minutes = 0) => setVisit(id, { status: 'completed', track_state: 'complete', completed_at: at(minutes) });
   const sessions = (customerId) => trx('live_activity_sessions').where({ customer_id: customerId }).orderBy('created_at', 'asc');
   const aps = (mock, call = 0) => mock.mock.calls[call][0].payload.aps;
 
@@ -143,10 +147,83 @@ postgres('Lock Screen visit card against migrated PostgreSQL', () => {
       channel_id: 'channel-1', phase: 'en_route', devices_started: 1, member_ids: [visitId], ended_at: null,
     });
 
-    // The same visit, read again: the stop has its card, so nothing more is sent.
-    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'none', reason: 'card_live' });
-    expect(apple.createChannel).toHaveBeenCalledTimes(1);
+    // The same visit, read again: nothing more is sent.
+    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'none', reason: 'current' });
     expect(apple.start).toHaveBeenCalledTimes(1);
+    expect(apple.broadcast).not.toHaveBeenCalled();
+  });
+
+  test('arrived, then complete: one broadcast each, in order, and the card ends 15 minutes after', async () => {
+    const ids = await seedStop();
+    const visitId = await addVisit(ids);
+    await card.syncVisit(visitId, { now: NOW });
+
+    await arrive(visitId);
+    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'updated', reason: 'on_property' });
+    expect(apple.broadcast.mock.calls[0][0].channelId).toBe('channel-1');
+    expect(aps(apple.broadcast)).toEqual({
+      timestamp: seconds(NOW) + 1,
+      event: 'update',
+      'content-state': { phase: 'on_property', title: 'Sam B. has arrived', detail: 'Pest Control', step: 2 },
+      'stale-date': seconds(at(-1 + 120)),
+    });
+
+    await complete(visitId);
+    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'ended', reason: 'complete' });
+    expect(aps(apple.broadcast, 1)).toEqual({
+      // Each update carries a strictly later Apple timestamp, even inside one second.
+      timestamp: seconds(NOW) + 2,
+      event: 'end',
+      'content-state': { phase: 'complete', title: 'Service complete', detail: 'Pest Control', step: 3 },
+      'dismissal-date': seconds(at(15)),
+    });
+    const [row] = await sessions(ids.customer);
+    expect(row).toMatchObject({ phase: 'complete', end_reason: 'complete', channel_deleted_at: null });
+    expect(row.ended_at).not.toBeNull();
+
+    // A finished visit never gets a second card.
+    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'none', reason: 'visit_not_live' });
+    expect(apple.createChannel).toHaveBeenCalledTimes(1);
+  });
+
+  test('a completed status ends the card before the tracker stamps the completion time', async () => {
+    const ids = await seedStop();
+    const visitId = await addVisit(ids);
+    await card.syncVisit(visitId, { now: NOW });
+    await setVisit(visitId, { status: 'completed' });
+
+    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'ended', reason: 'complete' });
+    expect(aps(apple.broadcast)['content-state'].phase).toBe('complete');
+  });
+
+  test('a rewound visit takes the card down at once, and going out again starts a new card', async () => {
+    const ids = await seedStop();
+    const visitId = await addVisit(ids);
+    await card.syncVisit(visitId, { now: NOW });
+
+    await setVisit(visitId, { status: 'confirmed', track_state: 'scheduled', en_route_at: null });
+    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'ended', reason: 'visit_not_live' });
+    expect(aps(apple.broadcast)).toMatchObject({ event: 'end', 'dismissal-date': seconds(NOW) });
+    // The same step again changes nothing: the card it had is the only one for it.
+    await setVisit(visitId, { status: 'en_route', track_state: 'en_route', en_route_at: at(-2) });
+    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'none', reason: 'already_had_a_card' });
+
+    const later = at(10);
+    await setVisit(visitId, { en_route_at: at(9) });
+    expect(await card.syncVisit(visitId, { now: later })).toEqual({ action: 'started', devices: 1 });
+    const rows = await sessions(ids.customer);
+    expect(rows.map((r) => r.channel_id)).toEqual(['channel-1', 'channel-2']);
+    expect(rows.map((r) => r.end_reason)).toEqual(['visit_not_live', null]);
+  });
+
+  test('a cancelled or no-show visit takes the card down at once', async () => {
+    for (const status of ['cancelled', 'no_show']) {
+      const ids = await seedStop();
+      const visitId = await addVisit(ids);
+      await card.syncVisit(visitId, { now: NOW });
+      await setVisit(visitId, { status });
+      expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'ended', reason: 'visit_not_live' });
+    }
   });
 
   test('who gets a card: only an active account-holder iPhone on iOS 18 that registered, and no channel is made for anyone else', async () => {
@@ -275,6 +352,9 @@ postgres('Lock Screen visit card against migrated PostgreSQL', () => {
       start_results: [{ device: ids.device, ok: false, reason: 'apns_timeout' }],
     });
     expect(row.started_at).not.toBeNull();
+    await arrive(visitId);
+    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'updated', reason: 'on_property' });
+    expect(apple.broadcast.mock.calls[0][0].channelId).toBe('channel-1');
     // An answer from Apple that is a fault (5xx) is not "unsure": the start did not happen.
     const other = await seedStop();
     apple.start.mockResolvedValue({ ok: false, reason: 'ServiceUnavailable', retryable: true });
@@ -329,10 +409,22 @@ postgres('Lock Screen visit card against migrated PostgreSQL', () => {
     const lawn = await addVisit(ids, { service_type: 'Lawn Care', window_start: '09:30' });
 
     expect(await card.syncVisit(pest, { now: NOW })).toEqual({ action: 'started', devices: 1 });
-    expect(await card.syncVisit(lawn, { now: NOW })).toEqual({ action: 'none', reason: 'card_live' });
+    expect(await card.syncVisit(lawn, { now: NOW })).toEqual({ action: 'none', reason: 'current' });
     expect(apple.createChannel).toHaveBeenCalledTimes(1);
     expect(aps(apple.start)['content-state'].detail).toBe('Pest Control & Lawn Care');
     expect((await sessions(ids.customer))[0].member_ids.sort()).toEqual([pest, lawn].sort());
+
+    // The first service is finished and the second was never marked arrived: the technician is at the address.
+    await arrive(pest);
+    await card.syncVisit(pest, { now: NOW });
+    await complete(pest);
+    expect(await card.syncVisit(pest, { now: NOW })).toEqual({ action: 'none', reason: 'current' });
+    expect(aps(apple.broadcast)['content-state']).toMatchObject({ phase: 'on_property', title: 'Sam B. has arrived' });
+
+    await complete(lawn);
+    expect(await card.syncVisit(lawn, { now: NOW })).toEqual({ action: 'ended', reason: 'complete' });
+    expect(aps(apple.broadcast, 1)['content-state']).toMatchObject({ phase: 'complete', detail: 'Pest Control & Lawn Care' });
+    expect(await sessions(ids.customer)).toHaveLength(1);
   });
 
   test('a visit with no saved address is its own stop', async () => {
@@ -342,5 +434,231 @@ postgres('Lock Screen visit card against migrated PostgreSQL', () => {
     await card.syncVisit(first, { now: NOW });
     await card.syncVisit(second, { now: NOW });
     expect((await sessions(ids.customer)).map((r) => r.stop_key).sort()).toEqual([`visit:${first}`, `visit:${second}`].sort());
+  });
+
+  test('a start in progress elsewhere is left alone; one that died before it got a channel is closed', async () => {
+    const ids = await seedStop();
+    const visitId = await addVisit(ids);
+    const stopKey = `stop:${ids.customer}:${ids.property}:${TODAY}:${ids.tech}`;
+    const [claim] = await trx('live_activity_sessions').insert({
+      stop_key: stopKey, customer_id: ids.customer, property_id: ids.property, technician_id: ids.tech, service_day: TODAY,
+      scheduled_service_id: visitId, member_ids: JSON.stringify([visitId]), created_at: NOW, updated_at: NOW,
+    }).returning('id');
+
+    expect(await card.syncVisit(visitId, { now: at(0.5) })).toEqual({ action: 'none', reason: 'starting' });
+    expect(apple.createChannel).not.toHaveBeenCalled();
+
+    expect(await card.syncVisit(visitId, { now: at(2) })).toEqual({ action: 'ended', reason: 'start_abandoned' });
+    expect(apple.broadcast).not.toHaveBeenCalled();
+    expect(await trx('live_activity_sessions').where({ id: claim.id }).first()).toMatchObject({ end_reason: 'start_abandoned' });
+    // The stop is free again, but this step already had its one card.
+    expect(await card.syncVisit(visitId, { now: at(2) })).toEqual({ action: 'none', reason: 'already_had_a_card' });
+  });
+
+  test('a start that died after its channel is taken over: the card is brought up to date and ended with the visit', async () => {
+    const ids = await seedStop();
+    const visitId = await addVisit(ids);
+    await trx('live_activity_sessions').insert({
+      stop_key: `stop:${ids.customer}:${ids.property}:${TODAY}:${ids.tech}`, customer_id: ids.customer, property_id: ids.property,
+      technician_id: ids.tech, service_day: TODAY, scheduled_service_id: visitId, member_ids: JSON.stringify([visitId]),
+      channel_id: 'channel-orphan', created_at: NOW, updated_at: NOW,
+    });
+
+    expect(await card.syncVisit(visitId, { now: at(2) })).toEqual({ action: 'updated', reason: 'en_route' });
+    expect(apple.broadcast.mock.calls[0][0].channelId).toBe('channel-orphan');
+    await complete(visitId, 3);
+    expect(await card.syncVisit(visitId, { now: at(3) })).toEqual({ action: 'ended', reason: 'complete' });
+  });
+
+  test('a failed update is sent again by the next pass; only Apple\'s refusal of the channel closes the card', async () => {
+    const ids = await seedStop();
+    const visitId = await addVisit(ids);
+    await card.syncVisit(visitId, { now: NOW });
+    await arrive(visitId);
+
+    apple.broadcast.mockResolvedValueOnce({ ok: false, reason: 'apns_timeout', retryable: true });
+    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'failed', reason: 'apns_timeout' });
+    expect((await sessions(ids.customer))[0]).toMatchObject({ phase: 'en_route', ended_at: null });
+
+    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'updated', reason: 'on_property' });
+    // The second try carries a later Apple timestamp than the first, so the phone keeps the newest.
+    expect(aps(apple.broadcast, 1).timestamp).toBeGreaterThan(aps(apple.broadcast, 0).timestamp);
+
+    // A refusal that is not about the channel (a bad key, a refused payload) can be fixed, and the card is
+    // still on the phone: the row stays live and the end is sent by a later pass.
+    await complete(visitId);
+    apple.broadcast.mockResolvedValueOnce({ ok: false, reason: 'InvalidProviderToken' });
+    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'failed', reason: 'InvalidProviderToken' });
+    expect((await sessions(ids.customer))[0]).toMatchObject({ phase: 'on_property', ended_at: null });
+    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'ended', reason: 'complete' });
+    expect(aps(apple.broadcast, 3)).toMatchObject({ event: 'end', 'content-state': { phase: 'complete' } });
+
+    // Apple refuses the channel itself: no update can reach the card, so its row is closed.
+    const gone = await seedStop();
+    const goneVisit = await addVisit(gone);
+    await card.syncVisit(goneVisit, { now: NOW });
+    await arrive(goneVisit);
+    apple.broadcast.mockResolvedValueOnce({ ok: false, reason: 'BadChannelId' });
+    expect(await card.syncVisit(goneVisit, { now: NOW })).toEqual({ action: 'ended', reason: 'refused' });
+    expect((await sessions(gone.customer))[0].end_reason).toBe('refused:BadChannelId');
+  });
+
+  test('an update loses its turn to a newer one: it sends nothing and reads again', async () => {
+    const ids = await seedStop();
+    const visitId = await addVisit(ids);
+    await card.syncVisit(visitId, { now: NOW });
+    await arrive(visitId);
+    // Another process takes the next place between this pass's read of the card and its claim (the label
+    // lookup runs between the two).
+    const reminders = require('../services/appointment-reminders');
+    const realLabel = reminders.buildServiceLabel;
+    let stolen = false;
+    const spy = jest.spyOn(reminders, 'buildServiceLabel').mockImplementation(async (...args) => {
+      if (!stolen) {
+        stolen = true;
+        await trx.raw('UPDATE live_activity_sessions SET seq = seq + 1, push_ts = push_ts + 5 WHERE customer_id = ?', [ids.customer]);
+      }
+      return realLabel(...args);
+    });
+    try {
+      expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'updated', reason: 'on_property' });
+    } finally {
+      spy.mockRestore();
+    }
+    // One broadcast only (the pass that lost its turn sent nothing), stamped after the other sender's.
+    expect(apple.broadcast).toHaveBeenCalledTimes(1);
+    expect(aps(apple.broadcast).timestamp).toBe(seconds(NOW) + 6);
+  });
+
+  describe('the 2-minute sweep', () => {
+    test('a step past its time limit: the card is taken down at once', async () => {
+      const ids = await seedStop();
+      const visitId = await addVisit(ids);
+      await card.syncVisit(visitId, { now: NOW });
+
+      expect(await card.sweep({ now: at(60) })).toMatchObject({ cards: 1, ended: 0, updated: 0 });
+      expect(await card.sweep({ now: at(88) })).toMatchObject({ cards: 1, ended: 1 });
+      expect(aps(apple.broadcast)).toMatchObject({ event: 'end', 'dismissal-date': seconds(at(88)) });
+      expect((await sessions(ids.customer))[0].end_reason).toBe('time_limit');
+    });
+
+    test('a step the poke missed is sent, and a live visit with no card gets one', async () => {
+      const withCard = await seedStop();
+      const first = await addVisit(withCard);
+      await card.syncVisit(first, { now: NOW });
+      await arrive(first);
+      const noCard = await seedStop();
+      await addVisit(noCard);
+      const tooOld = await seedStop();
+      await addVisit(tooOld, { en_route_at: at(-40) });
+
+      expect(await card.sweep({ now: NOW })).toMatchObject({ cards: 1, updated: 1, started: 1, failed: 0 });
+      expect(await sessions(noCard.customer)).toHaveLength(1);
+      expect(await sessions(tooOld.customer)).toHaveLength(0);
+    });
+
+    test('gate off: every live card is taken down and nothing starts', async () => {
+      const ids = await seedStop();
+      const visitId = await addVisit(ids);
+      await card.syncVisit(visitId, { now: NOW });
+      const other = await seedStop();
+      await addVisit(other);
+
+      delete process.env.GATE_VISIT_LIVE_ACTIVITY;
+      expect(await card.sweep({ now: NOW })).toMatchObject({ cards: 1, ended: 1, started: 0 });
+      expect(aps(apple.broadcast)).toMatchObject({ event: 'end', 'dismissal-date': seconds(NOW) });
+      expect((await sessions(ids.customer))[0].end_reason).toBe('gate_off');
+      expect(await sessions(other.customer)).toHaveLength(0);
+    });
+
+    test('a customer taken off the allowlist loses the card', async () => {
+      const ids = await seedStop();
+      const visitId = await addVisit(ids);
+      await card.syncVisit(visitId, { now: NOW });
+      process.env.VISIT_LIVE_ACTIVITY_CUSTOMER_ALLOWLIST = randomUUID();
+      expect(await card.sweep({ now: NOW })).toMatchObject({ ended: 1 });
+      expect((await sessions(ids.customer))[0].end_reason).toBe('not_on_the_list');
+    });
+
+    test('a channel is removed 9 hours after its card ended, not before', async () => {
+      const ids = await seedStop();
+      const visitId = await addVisit(ids);
+      await card.syncVisit(visitId, { now: NOW });
+      await complete(visitId);
+      await card.syncVisit(visitId, { now: NOW });
+
+      expect(await card.sweep({ now: at(8 * 60) })).toMatchObject({ channelsRemoved: 0 });
+      expect(apple.deleteChannel).not.toHaveBeenCalled();
+
+      // A failure that is not about the channel (a timeout, a bad key) is tried again by the next sweep.
+      apple.deleteChannel.mockResolvedValueOnce({ ok: false, reason: 'apns_timeout', retryable: true });
+      expect(await card.sweep({ now: at(9 * 60 + 1) })).toMatchObject({ channelsRemoved: 0 });
+      apple.deleteChannel.mockResolvedValueOnce({ ok: false, reason: 'InvalidProviderToken' });
+      expect(await card.sweep({ now: at(9 * 60 + 3) })).toMatchObject({ channelsRemoved: 0 });
+      expect((await sessions(ids.customer))[0].channel_deleted_at).toBeNull();
+      expect(await card.sweep({ now: at(9 * 60 + 5) })).toMatchObject({ channelsRemoved: 1 });
+      expect(apple.deleteChannel).toHaveBeenLastCalledWith({ channelId: 'channel-1' });
+      expect((await sessions(ids.customer))[0].channel_deleted_at).not.toBeNull();
+      expect(await card.sweep({ now: at(9 * 60 + 7) })).toMatchObject({ channelsRemoved: 0 });
+      expect(apple.deleteChannel).toHaveBeenCalledTimes(3);
+    });
+
+    test('a channel Apple no longer knows counts as removed; one that will not go is left after a day of tries', async () => {
+      const refused = await seedStop();
+      const refusedVisit = await addVisit(refused);
+      await card.syncVisit(refusedVisit, { now: NOW });
+      await complete(refusedVisit);
+      await card.syncVisit(refusedVisit, { now: NOW });
+      apple.deleteChannel.mockResolvedValueOnce({ ok: false, reason: 'BadChannelId' });
+      expect(await card.sweep({ now: at(9 * 60 + 1) })).toMatchObject({ channelsRemoved: 1 });
+
+      const stuck = await seedStop();
+      const stuckVisit = await addVisit(stuck);
+      await card.syncVisit(stuckVisit, { now: NOW });
+      await complete(stuckVisit);
+      await card.syncVisit(stuckVisit, { now: NOW });
+      apple.deleteChannel.mockReset().mockResolvedValue({ ok: false, reason: 'InvalidProviderToken' });
+      expect(await card.sweep({ now: at(33 * 60 - 1) })).toMatchObject({ channelsRemoved: 0 });
+      expect(apple.deleteChannel).toHaveBeenCalledTimes(1);
+      // A day after its 9 hours were up, the sweep stops asking.
+      expect(await card.sweep({ now: at(33 * 60 + 1) })).toMatchObject({ channelsRemoved: 0 });
+      expect(apple.deleteChannel).toHaveBeenCalledTimes(1);
+    });
+
+    test('every live card, every new live visit and every old channel is met, however many pages they fill', async () => {
+      const cards = [];
+      for (let i = 0; i < 3; i += 1) {
+        const ids = await seedStop();
+        const visitId = await addVisit(ids);
+        await card.syncVisit(visitId, { now: NOW });
+        await arrive(visitId);
+        cards.push({ ids, visitId });
+      }
+      const fresh = [await seedStop(), await seedStop(), await seedStop()];
+      for (const ids of fresh) await addVisit(ids);
+
+      // One row to a page: nothing is left for a later sweep.
+      expect(await card.sweep({ now: NOW, pageSize: 1 })).toMatchObject({ cards: 3, updated: 3, started: 3, failed: 0 });
+
+      for (const { visitId } of cards) {
+        await complete(visitId);
+        await card.syncVisit(visitId, { now: NOW });
+      }
+      expect(await card.sweep({ now: at(9 * 60 + 1), pageSize: 1 })).toMatchObject({ channelsRemoved: 3 });
+    });
+
+    test('one failing stop does not stop the sweep', async () => {
+      const bad = await seedStop();
+      const badVisit = await addVisit(bad);
+      await card.syncVisit(badVisit, { now: NOW });
+      const good = await seedStop();
+      const goodVisit = await addVisit(good);
+      await card.syncVisit(goodVisit, { now: NOW });
+      await arrive(badVisit);
+      await arrive(goodVisit);
+      apple.broadcast.mockRejectedValueOnce(new Error('socket closed'));
+
+      expect(await card.sweep({ now: NOW })).toMatchObject({ cards: 2, failed: 1, updated: 1 });
+    });
   });
 });

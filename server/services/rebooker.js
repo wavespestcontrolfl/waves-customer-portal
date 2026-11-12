@@ -45,6 +45,7 @@ const { resolveStopCoords } = require('./scheduling/travel-gap');
 const { arrivalWindowRoutingEnabled, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, placeMovedVisit } = require('./scheduling/arrival-route');
 const { guardedCoordSelects, preloadServiceLocations } = require('./scheduling/day-stops');
 const { getIo } = require('../sockets');
+const visitLiveActivity = require('./visit-live-activity');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
   addETMonthsByWeekday, etNthWeekdayOfMonth, sameDayWindowElapsed,
@@ -1179,6 +1180,8 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
 // see the PII BOUNDARY block there before adding fields.
 function emitCustomerJobRefresh(service, toStatus) {
   if (!service?.customer_id) return;
+  // A rewound visit takes its Lock Screen card down (GATE_VISIT_LIVE_ACTIVITY; off = nothing).
+  visitLiveActivity.poke(service.id);
   const io = getIo();
   if (!io) {
     logger.warn('[rebooker] io not initialized; skipping customer refresh broadcast');
