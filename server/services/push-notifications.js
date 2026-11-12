@@ -532,6 +532,9 @@ function summarize(results, subscriptions) {
 
 const service = new PushNotificationService();
 service.PUSH_HEARTBEAT_HOURS = PUSH_HEARTBEAT_HOURS;
+// Whose devices a customer's pushes may reach, and whether the customer has app pushes on: the one answer
+// the Lock Screen card's registration route (routes/push.js) shares with the fan-out above.
+service.customerPushContext = customerPushContext;
 // Exposed for unit tests (platform routing); not part of the public API.
 service._sendSubscription = sendSubscription;
 // The saved property a push is ABOUT (uncapped codex r1s P1 — the producer
