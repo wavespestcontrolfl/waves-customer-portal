@@ -101,6 +101,16 @@ describe('the assistant\'s hold seam', () => {
   });
 });
 
+describe('the assistant\'s history seam', () => {
+  it('returns the history a caller supplied on the turn without reading the private transcript', async () => {
+    const supplied = [{ role: 'user', content: 'thread text' }];
+    expect(await assistant.buildHistory('conv-1', { newest: true, turn: { threadHistory: supplied } })).toBe(supplied);
+    expect(mockDbUse).not.toHaveBeenCalled();
+    await expect(assistant.buildHistory('conv-1', { newest: true, turn: {} })).rejects.toThrow();
+    expect(mockDbUse).toHaveBeenCalled();
+  });
+});
+
 describe('the quote and move tools on the Messages thread', () => {
   it('hand off instead of writing, and only when the turn holds', async () => {
     const held = { open: true, holdHandOff: true };

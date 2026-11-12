@@ -330,7 +330,9 @@ function portalLane(channel, { secondaryProperty = true, replay = false, thread 
   // The confirmed email-change hand-off: its own gate.
   // A crashed turn cannot confirm an address from a later transcript read-back.
   // Recover its original ask through the ordinary account-change handoff instead.
-  const emailChange = !replay && gates.portalChatEmailChangeLive();
+  // The Messages thread's turn (thread) has no read-back flow: the address check reads the assistant's private
+  // transcript, which that turn never uses (see buildHistory), and a hand-off there is the thread's own item.
+  const emailChange = !replay && !thread && gates.portalChatEmailChangeLive();
   // The opened-up chat: its own gate, on top of the self-serve switch.
   const open = gates.portalChatOpenLive();
   // The open prompt's cancel options exist only in the GATE_CANCEL_FLOW_V2 flow.
@@ -1090,6 +1092,9 @@ class WavesAssistant {
   // the original read: the first 20, which never reaches the latest turn once
   // a chat passes 20 (SMS keeps it unchanged).
   async buildHistory(conversationId, { newest = false, turn = null, through = null, isolate = false } = {}) {
+    // turn.threadHistory (portal-messages-night-ai.js): the caller supplies exactly what the customer can see in
+    // their Messages thread, so the assistant's private transcript is never read for that turn.
+    if (Array.isArray(turn?.threadHistory)) return turn.threadHistory;
     if (isolate) return [{ role: 'user', content: through.content }];
     const historyQuery = db('agent_messages')
       .where('conversation_id', conversationId)
