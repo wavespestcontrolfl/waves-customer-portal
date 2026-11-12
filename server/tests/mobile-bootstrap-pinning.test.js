@@ -107,6 +107,42 @@ describe('native customer-app bootstrap reproducibility', () => {
     expect(source).toContain('c.build_settings["DEVELOPMENT_TEAM"] = team unless team.empty?');
   });
 
+  test('the Lock Screen visit card is wired in only on request, and its Swift matches what the server sends', () => {
+    const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-ios.sh'), 'utf8');
+    // A release build takes the card on deliberately: no variable, no card.
+    expect(source).toContain('if [ "${WAVES_IOS_VISIT_CARD:-0}" = "1" ]; then');
+    // It runs after the sync that rewrites capacitor.config.json, and after the version, team and push setup.
+    const cardStep = source.indexOf('scripts/mobile/ios_visit_card.rb');
+    expect(cardStep).toBeGreaterThan(source.indexOf('\nnpx cap sync ios'));
+    expect(cardStep).toBeGreaterThan(source.indexOf('c.build_settings["MARKETING_VERSION"]'));
+    expect(cardStep).toBeGreaterThan(source.indexOf('ios_push.py" configure'));
+
+    const wiring = fs.readFileSync(path.join(root, 'scripts/mobile/ios_visit_card.rb'), 'utf8');
+    const card = (name) => fs.readFileSync(path.join(root, 'client/resources/visit-card', name), 'utf8');
+    // Apple matches the attributes type by NAME against the server's push, and decodes these keys.
+    const { ATTRIBUTES_TYPE } = require('../services/apns-live-activity');
+    expect(card('WavesVisitAttributes.swift')).toContain(`struct ${ATTRIBUTES_TYPE}: ActivityAttributes`);
+    for (const field of ['phase: String', 'title: String', 'detail: String', 'step: Int', 'visitRef: String']) {
+      expect(card('WavesVisitAttributes.swift')).toContain(`var ${field}`);
+    }
+    // The class name is how Capacitor finds the plugin; the JS name is what the web app asks for.
+    expect(card('WavesVisitCardPlugin.swift')).toContain('@objc(WavesVisitCardPlugin)');
+    expect(card('WavesVisitCardPlugin.swift')).toContain('public let jsName = "WavesVisitCard"');
+    expect(wiring).toContain('PLUGIN_CLASS = "WavesVisitCardPlugin"');
+    expect(wiring).toContain('classes << PLUGIN_CLASS');
+    // A card that listens on an Apple channel needs iOS 18, and iOS starts none without the plist key.
+    expect(wiring).toContain('EXTENSION_FLOOR = "18.0"');
+    expect(wiring).toContain('info["NSSupportsLiveActivities"] = true');
+    // App Store Connect refuses an extension whose version, build number or team differs from its app's.
+    expect(wiring).toContain('MIRRORED_SETTINGS = %w[MARKETING_VERSION CURRENT_PROJECT_VERSION DEVELOPMENT_TEAM');
+    expect(card('Info.plist')).toContain('$(MARKETING_VERSION)');
+    expect(card('Info.plist')).toContain('$(CURRENT_PROJECT_VERSION)');
+    expect(card('Info.plist')).toContain('com.apple.widgetkit-extension');
+    // GitHub CI compiles the card on every mobile change.
+    const workflow = fs.readFileSync(path.join(root, '.github/workflows/tests.yml'), 'utf8');
+    expect(workflow).toMatch(/WAVES_IOS_VISIT_CARD: "1"\n\s+run: bash scripts\/mobile\/bootstrap-ios\.sh/);
+  });
+
   test('bootstrap-ios installs the tracked icon into a clean catalog repeatably', () => {
     const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'waves-ios-assets-'));
     const assetCatalog = path.join(fixture, 'Assets.xcassets');
