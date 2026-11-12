@@ -617,6 +617,26 @@ describe('escalate under the gate', () => {
     expect(result.reply).toBe("Thanks Pat. I've sent this to our team, and they'll reply by text or email, usually within one business hour between 8 AM and 8 PM. Is there anything else you'd like me to pass along?");
   });
 
+  // Owner 2026-11-12: once the office can answer inside the portal, the reply names the Messages page.
+  test('with the Portal tab and portal messages both on, the hand-off names the Messages page first; either one off keeps "by text or email"', async () => {
+    const TODAY = "Thanks Pat. I've sent this to our team, and they'll reply by text or email, usually within one business hour between 8 AM and 8 PM. Is there anything else you'd like me to pass along?";
+    const reply = async (on) => {
+      for (const gate of ['GATE_PORTAL_INBOX', 'GATE_PORTAL_MESSAGES']) {
+        if (on.includes(gate)) process.env[gate] = 'true'; else delete process.env[gate];
+      }
+      mockCreate.mockResolvedValueOnce(handOff({}));
+      return (await say('The tech was rude')).reply;
+    };
+    try {
+      expect(await reply(['GATE_PORTAL_INBOX'])).toBe(TODAY);
+      expect(await reply(['GATE_PORTAL_MESSAGES'])).toBe(TODAY);
+      expect(await reply(['GATE_PORTAL_INBOX', 'GATE_PORTAL_MESSAGES'])).toBe("Thanks Pat. I've sent this to our team, and they'll reply on your Messages page here, or by text or email, usually within one business hour between 8 AM and 8 PM. Is there anything else you'd like me to pass along?");
+    } finally {
+      delete process.env.GATE_PORTAL_INBOX;
+      delete process.env.GATE_PORTAL_MESSAGES;
+    }
+  });
+
   test('the bell names the customer and the first hand-off makes one row and one bell', async () => {
     mockCreate.mockResolvedValueOnce(handOff({}));
 

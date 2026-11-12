@@ -49,7 +49,9 @@ describe('PortalMessages thread', () => {
     expect(screen.getByRole('heading', { name: 'Messages' })).toBeInTheDocument();
     expect(screen.getByText('Questions and answers between you and the Waves team.')).toBeInTheDocument();
     expect(screen.getByText('You')).toBeInTheDocument();
-    expect(screen.getByText('Waves Pest Control')).toBeInTheDocument();
+    // Owner 2026-11-12: the office's bubbles say "Waves", like our texts.
+    expect(screen.getByText('Waves')).toBeInTheDocument();
+    expect(screen.queryByText('Waves Pest Control')).toBeNull();
     expect(screen.getByText('Nov 3, 10:30 AM')).toBeInTheDocument();
     expect(screen.getByText('Nov 3, 11:05 AM')).toBeInTheDocument();
     const answer = screen.getByText((_, el) => el.textContent === 'Yes.\nEvery visit.' && el.children.length === 0);

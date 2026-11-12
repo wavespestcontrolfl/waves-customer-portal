@@ -147,6 +147,22 @@ test('confirmed after the read-back: one bell with both addresses, and the reply
   expect(db.__queries.some((sql) => /update "customers"/.test(sql))).toBe(false);
 });
 
+// Owner 2026-11-12: once the office can answer inside the portal, the reply names the Messages page.
+test('with the Portal tab and portal messages both on, the confirmed email change reply names the Messages page first', async () => {
+  process.env.GATE_PORTAL_INBOX = 'true';
+  process.env.GATE_PORTAL_MESSAGES = 'true';
+  try {
+    mockCreate.mockResolvedValueOnce(ask({ new_email: NEW, customer_confirmed: true }));
+
+    const result = await say(afterReadBack('Yes, that is right'));
+
+    expect(result.reply).toBe(`Thanks Pat. I've sent your new email address, ${NEW}, to our team. They'll update your account and reply on your Messages page here, or by text or email, usually within one business hour between 8 AM and 8 PM. Until then our emails go to the address on file. Is there anything else you'd like me to pass along?`);
+  } finally {
+    delete process.env.GATE_PORTAL_INBOX;
+    delete process.env.GATE_PORTAL_MESSAGES;
+  }
+});
+
 test('another tool already run this turn does not hide the read-back', async () => {
   const message = afterReadBack('Yes, and when is my next visit?');
   chat.unshift({ role: 'tool_use', content: 'get_upcoming_services', tool_results: JSON.stringify({ services: [] }) });
