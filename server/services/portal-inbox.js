@@ -249,13 +249,23 @@ const LAST_ANSWER_SQL = `(
   SELECT o.body FROM messages o WHERE o.conversation_id = cv.id AND o.direction = 'outbound' AND o.message_type IS DISTINCT FROM ${AI_TYPE_SQL}
   ORDER BY o.created_at DESC LIMIT 1
 )`;
-// The Waves AI's newest reply since the office's last answer and since Mark handled: { handOff, body }, or null.
+// "The current open stretch", defined once: a Waves AI reply (alias `ai`, on conversation alias `conv`) belongs to
+// it when the customer message it answers (metadata.answersMessageId) is newer than the office's last answer (an
+// outbound row that is not the AI's) AND newer than Mark handled (handledAt is the time of the newest customer
+// message the office handled through). The test is on the answered message, not on the reply's own time: a reply
+// is always newer than the handledAt stamp of the message it answers, so a reply-time bound would never let go of
+// a hand-off after Mark handled. Used by the item's aiReply below and by the one-hand-off check in
+// portal-messages-night-ai.js saveReply.
+const aiReplyInStretch = (conv, ai) => `EXISTS (
+  SELECT 1 FROM messages q WHERE q.id::text = ${ai}.metadata->>'answersMessageId'
+    AND q.created_at > coalesce((SELECT max(o.created_at) FROM messages o
+      WHERE o.conversation_id = ${conv}.id AND o.direction = 'outbound' AND o.message_type IS DISTINCT FROM ${AI_TYPE_SQL}), '-infinity'::timestamptz)
+    AND q.created_at > coalesce((${conv}.metadata->>'handledAt')::timestamptz, '-infinity'::timestamptz)
+)`;
+// The Waves AI's newest reply in the current open stretch: { handOff, body }, or null.
 const AI_REPLY_SQL = `(
   SELECT json_build_object('handOff', coalesce(a.metadata->>'handOff', '') = 'true', 'body', a.body) FROM messages a
-  WHERE a.conversation_id = cv.id AND a.message_type = ${AI_TYPE_SQL}
-    AND a.created_at > coalesce((SELECT max(o.created_at) FROM messages o
-      WHERE o.conversation_id = cv.id AND o.direction = 'outbound' AND o.message_type IS DISTINCT FROM ${AI_TYPE_SQL}), '-infinity'::timestamptz)
-    AND a.created_at > coalesce((cv.metadata->>'handledAt')::timestamptz, '-infinity'::timestamptz)
+  WHERE a.conversation_id = cv.id AND a.message_type = ${AI_TYPE_SQL} AND ${aiReplyInStretch('cv', 'a')}
   ORDER BY a.created_at DESC LIMIT 1
 )`;
 
@@ -543,6 +553,7 @@ module.exports = {
   openRequestScope,
   openBookingScope,
   openMessageScope,
+  aiReplyInStretch,
   onLockedThread,
   markMessageHandled,
   windowCutoff,

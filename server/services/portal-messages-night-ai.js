@@ -155,8 +155,8 @@ async function takeTurn(customerId, threadId, message) {
 }
 
 // Saves the reply on the locked thread row, or returns null when it no longer fits: the office or the customer
-// wrote after this message, Mark handled covered it, or a hand-off reply already stands since the last office
-// answer. last_message_at is put back after the insert (see the header).
+// wrote after this message, Mark handled covered it, or a hand-off reply already stands in the
+// current open stretch (portal-inbox.js aiReplyInStretch). last_message_at is put back after the insert (see the header).
 async function saveReply(threadId, message, { body, handOff }) {
   const PortalMessages = require('./portal-messages');
   return db.transaction(async (trx) => {
@@ -167,10 +167,11 @@ async function saveReply(threadId, message, { body, handOff }) {
     const handledAt = PortalMessages.__private.metaOf(thread).handledAt;
     if (handledAt && new Date(handledAt).getTime() >= sentAt) return null;
     if (handOff) {
-      const standing = await trx('messages as a').where({ 'a.conversation_id': threadId, 'a.message_type': PortalMessages.AI_MESSAGE_TYPE })
+      // One fixed reply per open stretch (portal-inbox.js aiReplyInStretch, the same definition the item shows).
+      const standing = await trx('messages as a').join('conversations as cv', 'cv.id', 'a.conversation_id')
+        .where({ 'a.conversation_id': threadId, 'a.message_type': PortalMessages.AI_MESSAGE_TYPE })
         .whereRaw("a.metadata->>'handOff' = 'true'")
-        .whereRaw(`a.created_at > coalesce((SELECT max(o.created_at) FROM messages o WHERE o.conversation_id = ?
-          AND o.direction = 'outbound' AND o.message_type IS DISTINCT FROM ?), '-infinity'::timestamptz)`, [threadId, PortalMessages.AI_MESSAGE_TYPE])
+        .whereRaw(require('./portal-inbox').aiReplyInStretch('cv', 'a'))
         .first('a.id');
       if (standing) return null;
     }

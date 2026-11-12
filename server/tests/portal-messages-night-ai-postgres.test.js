@@ -281,6 +281,53 @@ maybeDescribe('portal messages: after-hours Waves AI (live Postgres)', () => {
     expect(await escalationsFor(pat.id)).toHaveLength(0);
   }, 60000);
 
+  test('after Mark handled the next hand-off gets its own fixed reply, and the item shows only the current stretch\'s reply; inside one stretch still only one', async () => {
+    const pat = await customer('Reopen');
+    mockCreate.mockResolvedValue(toolUse('escalate', { reason: 'Complaint', topic: 'complaint' }));
+    const first = await post(pat, 'The technician left my gate open.');
+    expect(await settled(first.id)).toBe('handoff');
+    const row = await thread(pat.id);
+    // Same stretch: a second night message gets no second fixed reply.
+    const same = await post(pat, 'Hello? Anyone?');
+    expect(await settled(same.id)).toBe('superseded');
+    expect(await aiRows(pat.id)).toHaveLength(1);
+
+    // The office closes the item with Mark handled (no portal answer), through the newest customer message.
+    expect(await PortalInbox.markMessageHandled(row.id, same.id, actor)).toEqual({ handled: true, open: false });
+    expect((await PortalInbox.list()).items.filter((item) => item.customer.id === pat.id)).toHaveLength(0);
+
+    // A new complaint the next night is a new stretch: it gets its own fixed reply, and the item shows that one.
+    const next = await post(pat, 'Now the sprinkler head is broken too.');
+    expect(await settled(next.id)).toBe('handoff');
+    const ai = await aiRows(pat.id);
+    expect(ai).toHaveLength(2);
+    expect(ai[1].metadata).toMatchObject({ handOff: true, answersMessageId: next.id });
+    const item = (await PortalInbox.list()).items.find((i) => i.customer.id === pat.id);
+    expect(item).toMatchObject({ customerMessage: 'Now the sprinkler head is broken too.', aiReply: { handOff: true } });
+
+    // A model answer (not a hand-off) in a stretch whose earlier message was handled is not shown for the older reply.
+    await PortalInbox.markMessageHandled(row.id, next.id, actor);
+    mockCreate.mockReset();
+    mockCreate.mockResolvedValueOnce(answer('A technician can look at it.'));
+    const third = await post(pat, 'Is Tuesday possible?');
+    expect(await settled(third.id)).toBe('answered');
+    const reopened = (await PortalInbox.list()).items.find((i) => i.customer.id === pat.id);
+    expect(reopened.aiReply).toMatchObject({ handOff: false, body: 'A technician can look at it.' });
+  }, 60000);
+
+  test('Mark handled that lands while the turn runs wins: a reply to a message at or before handledAt is not saved', async () => {
+    const pat = await customer('Handled');
+    let release;
+    mockCreate.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve(toolUse('escalate', { reason: 'Complaint', topic: 'complaint' })); }));
+    const sent = await post(pat, 'The tech was rude.');
+    const row = await thread(pat.id);
+    await PortalInbox.markMessageHandled(row.id, sent.id, actor);
+    for (let i = 0; i < 100 && !release; i += 1) await pause(50);
+    release();
+    expect(await settled(sent.id)).toBe('superseded');
+    expect(await aiRows(pat.id)).toHaveLength(0);
+  }, 60000);
+
   test('a keyword hand-off, a failed model call and a quote request that would file an item are all the fixed reply, with nothing filed', async () => {
     const keyword = await customer('Key');
     const sentKeyword = await post(keyword, 'I want to cancel my service.');
