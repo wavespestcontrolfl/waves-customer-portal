@@ -953,6 +953,11 @@ jobs:
           pod --version
           xcodeproj --version
       - name: Generate and sync the pinned iOS app
+        # With the Lock Screen visit card, so its plugin and widget extension compile on every mobile
+        # change before a release build takes them on (docs/mobile/live-activity.md). The card step only
+        # adds to the project at the end of the bootstrap.
+        env:
+          WAVES_IOS_VISIT_CARD: "1"
         run: bash scripts/mobile/bootstrap-ios.sh
       - name: Verify iOS push signing setup and release checks
         run: python3 scripts/mobile/test_ios_push.py

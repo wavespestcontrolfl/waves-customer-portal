@@ -38,7 +38,36 @@ on this phone's row. It is `false` when the gate is off, when the token was clea
 account-holder iPhone row matched the device token. `400` for a missing device token or a start token that
 is not hex. The response is `Cache-Control: no-store`.
 
-The app posts again whenever iOS hands it a new push-to-start token, and each time it comes to the front.
+The app posts after each push registration the server confirms (app start, sign-in, a property switch),
+and again whenever iOS hands it a new push-to-start token.
+
+## The app side: where it lives and how it is built
+
+Tracked sources, in `client/resources/visit-card/`:
+
+| File | Built into | What it is |
+|---|---|---|
+| `WavesVisitAttributes.swift` | The app and the extension | The card's data type (next section). One file, compiled into both. |
+| `WavesVisitCardPlugin.swift` | The app | Capacitor plugin `WavesVisitCard`. `status()` answers `{ supported, enabled, osVersion, startToken? }`. `endAll()` ends this app's cards. A `startToken` event fires when iOS hands the app a new token. |
+| `WavesVisitCardWidget.swift`, `Info.plist` | The `WavesVisitCard` extension | The widget extension that draws the card on the Lock Screen and in the Dynamic Island. |
+
+The native project is generated, not tracked. `scripts/mobile/bootstrap-ios.sh` puts the card in only when
+`WAVES_IOS_VISIT_CARD=1` is set (it runs `scripts/mobile/ios_visit_card.rb`): the plugin goes into the App
+target, the `WavesVisitCard` extension target (iOS 18 or later, bundle id
+`com.wavespestcontrol.portal.VisitCard`) is embedded in the app, `NSSupportsLiveActivities` goes into the
+app's Info.plist, and the plugin class goes into `packageClassList` so Capacitor registers it at launch.
+Without the variable the project has no card. A project that was generated with the card is not reused
+for a build without it: the bootstrap stops and says how to regenerate (`git clean -fdX client/ios`).
+
+- GitHub CI (`native-ios`) sets the variable, so the Swift compiles on every mobile change.
+- A release build takes the card when the variable is set in its Xcode Cloud workflow (App Store Connect →
+  Xcode Cloud → the workflow → Environment → Environment Variables). `ci_post_clone.sh` runs the bootstrap
+  with the workflow's environment.
+- The first release build with the card needs an App ID for the extension (automatic signing makes it) and
+  Apple's Broadcast Capability on the app's own App ID.
+
+An app build without the card is safe with the web code that talks to it: the web code asks Capacitor
+whether the `WavesVisitCard` plugin exists and does nothing when it does not.
 
 ## The card's data
 
