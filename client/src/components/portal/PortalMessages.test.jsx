@@ -43,6 +43,23 @@ afterEach(() => {
 const composer = () => screen.getByPlaceholderText('Write a message to the Waves team');
 
 describe('PortalMessages thread', () => {
+  it('labels the Waves AI answer "Waves AI" and keeps the office bubble "Waves"', async () => {
+    api.getPortalMessages.mockResolvedValue({
+      messages: [
+        ...thread,
+        { id: 'm3', from: 'waves', ai: true, body: 'Thanks for your message. A member of our team will answer here after 8 AM.', createdAt: '2026-11-04T03:00:00.000Z' },
+      ],
+      hasMore: false,
+      unread: 1,
+    });
+    render(<PortalMessages />);
+    expect(await screen.findByText('Waves AI')).toBeInTheDocument();
+    expect(screen.getAllByText('Waves')).toHaveLength(1);
+    expect(screen.queryByText('Waves Pest Control')).toBeNull();
+    // The unread stamp still goes through the newest Waves message, the AI's included.
+    await waitFor(() => expect(api.markPortalMessagesRead).toHaveBeenCalledWith('m3'));
+  });
+
   it('shows the header, both labels, the times and keeps line breaks', async () => {
     render(<PortalMessages />);
     expect(await screen.findByText('Do you spray the pool cage?')).toBeInTheDocument();

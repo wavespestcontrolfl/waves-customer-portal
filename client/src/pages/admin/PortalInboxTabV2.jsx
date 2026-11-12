@@ -189,7 +189,7 @@ function WholeThread({ threadId }) {
       )}
       {thread.messages.map((m) => (
         <div key={m.id}>
-          <div className="text-14 text-ink-tertiary">{m.direction === "outbound" ? "Waves" : "Customer"} · {formatWhen(m.createdAt)}</div>
+          <div className="text-14 text-ink-tertiary">{m.direction === "outbound" ? (m.ai ? "Waves AI" : "Waves") : "Customer"} · {formatWhen(m.createdAt)}</div>
           <div className="text-14 text-zinc-900 whitespace-pre-wrap break-words">{m.body}</div>
         </div>
       ))}
@@ -207,6 +207,14 @@ function MessageDetails({ item }) {
       {item.lastAnswer && (
         <div className="text-14 text-ink-secondary mt-2">
           <span className="font-medium">Last answer:</span> {item.lastAnswer}
+        </div>
+      )}
+      {item.aiReply && (
+        <div className="text-14 text-ink-secondary mt-2" data-testid={`portal-ai-reply-${item.id}`}>
+          {item.aiReply.handOff
+            ? <span className="font-medium">Waves AI told them the team will answer after 8 AM.</span>
+            : (<><span className="font-medium">Waves AI answered:</span> {item.aiReply.body}</>)}
+          {" "}This item stays open until you answer or mark it handled.
         </div>
       )}
       <WholeThread threadId={item.id} />
