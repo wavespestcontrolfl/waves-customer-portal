@@ -434,6 +434,18 @@ RULES:
 - If the customer is frustrated, acknowledge it before solving
 - End with an offer to help with anything else`;
 
+// How the team's answer reaches a portal chat customer. With the Portal tab and portal messages both on
+// (GATE_PORTAL_INBOX, GATE_PORTAL_MESSAGES) the office can answer a hand-off inside the portal and the
+// customer reads it on their Messages page, so the reply names that page first (owner 2026-11-12). Either
+// one off: text or email, as before. Read at call time. Every portal chat session is an account holder's
+// (a contact session cannot reach the chat), and those are the sessions that have the Messages page.
+function teamReplyChannels() {
+  const gates = require('../../config/feature-gates');
+  return gates.portalInboxLive?.() && gates.portalMessagesLive?.()
+    ? 'on your Messages page here, or by text or email'
+    : 'by text or email';
+}
+
 // What the customer is told at a hand-off. Portal chat says the team was told
 // only when the bell exists; other channels keep the original wording (an SMS
 // hand-off reply is never sent).
@@ -449,11 +461,11 @@ function escalationReply({ isPortal, teamNotified, firstName, newEmail, say = ''
   // A confirmed email change: the team makes the change, the chat never does.
   if (newEmail) {
     return teamNotified
-      ? `${thanks}. I've sent your new email address, ${newEmail}, to our team. They'll update your account and reply by text or email, usually within one business hour between 8 AM and 8 PM. Until then our emails go to the address on file. Is there anything else you'd like me to pass along?`
+      ? `${thanks}. I've sent your new email address, ${newEmail}, to our team. They'll update your account and reply ${teamReplyChannels()}, usually within one business hour between 8 AM and 8 PM. Until then our emails go to the address on file. Is there anything else you'd like me to pass along?`
       : `${thanks}. I've saved your email change request for our team. If it can't wait, please call us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
   }
   return teamNotified
-    ? `${thanks}. I've sent this to our team, and they'll reply by text or email, usually within one business hour between 8 AM and 8 PM.${say ? ` ${say}` : ''} Is there anything else you'd like me to pass along?`
+    ? `${thanks}. I've sent this to our team, and they'll reply ${teamReplyChannels()}, usually within one business hour between 8 AM and 8 PM.${say ? ` ${say}` : ''} Is there anything else you'd like me to pass along?`
     : `${thanks}. I've saved your request for our team. If it can't wait, please call us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
 }
 
