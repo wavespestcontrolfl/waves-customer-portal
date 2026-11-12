@@ -241,6 +241,8 @@ module.exports = {
   STAFF_APP_BUNDLE_ID,
   send,
   status,
+  // The signed provider token, for the other APNs requests (services/apns-live-activity.js).
+  providerToken,
   // exported for unit tests
   signProviderToken,
   buildApnsPayload,
