@@ -188,19 +188,14 @@ describe('placeMovedVisit writes nothing unless it may', () => {
   });
 });
 
-// GATE_SAVE_ROAD_TIMES (owner 2026-10-28: Save uses Google too): a staff save's
+// Owner 2026-10-28: Save uses Google too: a staff save's
 // check and route number read the road times the pickers bought, and buy none.
 describe('a staff save reads the pickers\' road times', () => {
   const { staffSaveTravel } = require('../services/scheduling/arrival-route')._internals;
   const TODAY = etDateString(new Date());
   const drive = { date: TODAY, from: { lat: 27.5, lng: -82.4 }, to: { lat: 27.52, lng: -82.41 }, departureMin: 23 * 60 };
-  beforeEach(() => {
-    process.env.GATE_PICKER_ROAD_CHECK = 'true';
-    process.env.GATE_SAVE_ROAD_TIMES = 'true';
-  });
   afterEach(() => {
-    delete process.env.GATE_PICKER_ROAD_CHECK;
-    delete process.env.GATE_SAVE_ROAD_TIMES;
+    delete process.env.GATE_SCHEDULING_CAPACITY;
   });
 
   test('a road day: a source that buys nothing, and a drive no picker bought keeps the model', async () => {
@@ -214,13 +209,7 @@ describe('a staff save reads the pickers\' road times', () => {
     expect(staffSaveTravel(DATE)).toBeNull();
   });
 
-  test('off, without the pickers\' road check, or in capacity mode: the model', () => {
-    delete process.env.GATE_SAVE_ROAD_TIMES;
-    expect(staffSaveTravel(TODAY)).toBeNull();
-    process.env.GATE_SAVE_ROAD_TIMES = 'true';
-    delete process.env.GATE_PICKER_ROAD_CHECK;
-    expect(staffSaveTravel(TODAY)).toBeNull();
-    process.env.GATE_PICKER_ROAD_CHECK = 'true';
+  test('in capacity mode: the model', () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     expect(staffSaveTravel(TODAY)).toBeNull();
   });

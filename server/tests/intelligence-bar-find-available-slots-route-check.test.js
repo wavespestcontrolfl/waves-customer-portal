@@ -16,7 +16,7 @@ const db = require('../models/db');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 
-const ENV_KEYS = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_PICKER_ROAD_CHECK', 'GATE_SCHEDULING_CAPACITY'];
+const ENV_KEYS = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -37,7 +37,7 @@ afterEach(() => {
 
 const input = { lat: 27.4, lng: -82.5, duration_minutes: 45 };
 const search = (ctx) => executeScheduleTool('find_available_slots', input, ctx);
-const on = () => { process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; process.env.GATE_PICKER_ROAD_CHECK = 'true'; };
+const on = () => { process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; };
 
 test('arrival-window routing off: the old search, no arrival window, no road options', async () => {
   await search({ isAdmin: true, technicianId: 'staff-9' });

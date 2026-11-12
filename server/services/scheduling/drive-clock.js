@@ -1,18 +1,17 @@
 /**
- * Drive clock (GATE_DRIVE_CLOCK, owner 2026-10-28: "add drive clock if its
- * free"). Our own GPS (visit_gps_legs, 100 visit-to-visit legs, Aug 27 - Oct 27
+ * Drive clock (owner 2026-10-28: "add drive clock if its free"). Our own GPS (visit_gps_legs, 100 visit-to-visit legs, Aug 27 - Oct 27
  * 2026, Theil-Sen fits) says a leg takes:
  *   minutes = 4.11 + 1.70 x GPS road miles     (a Google road time, curb to
  *             curb, misses ~4 minutes of pulling out, parking and idling)
  *   minutes = 7.88 + 2.20 x straight-line miles (the calibrated estimate is
  *             4.25 + 2.35; per leg, GPS minus estimate: median +1.9, p75 +7.6)
- * On, every drive leg in the scheduling math carries this: estimate legs use
- * the fitted pair, Google legs get the park minutes added when READ (never
- * stored in a cache, so turning the gate off restores the raw values at once).
- * Nothing is fitted or derived from Google answers (Google Maps terms).
+ * With GATE_DRIVE_TIME_CALIBRATION on, every drive leg in the scheduling math
+ * carries this: estimate legs use the fitted pair, Google legs get the park
+ * minutes added when READ (never stored in a cache, so the raw values stay
+ * intact). Nothing is fitted or derived from Google answers (Google Maps
+ * terms).
  *
- * Read at CALL time via gateEnvValue: unset = off = byte for byte as before.
- * Settings (env, read at call time): a finite number inside its bounds, else
+ * GATE_DRIVE_TIME_CALIBRATION is read at CALL time via gateEnvValue. Settings (env, read at call time): a finite number inside its bounds, else
  * the default.
  */
 const { gateEnvValue } = require('../../config/feature-gates');
@@ -24,11 +23,10 @@ const SETTINGS = {
 };
 const GOOGLE_SOURCES = new Set(['google_traffic', 'google_road']);
 
-// The drive clock refines the calibrated model, so it needs
-// GATE_DRIVE_TIME_CALIBRATION too: with that off, every leg, Google's park
-// minutes and the saved label all stay legacy (pre-push P1).
+// The drive clock runs whenever GATE_DRIVE_TIME_CALIBRATION is on: with that
+// off, every leg, Google's park minutes and the saved label all stay legacy.
 function driveClockLive() {
-  return gateEnvValue('GATE_DRIVE_CLOCK') && gateEnvValue('GATE_DRIVE_TIME_CALIBRATION');
+  return gateEnvValue('GATE_DRIVE_TIME_CALIBRATION');
 }
 
 function driveClockSetting(name) {
@@ -43,7 +41,7 @@ function driveClockMinutes(miles) {
   return driveClockSetting('fixed') + miles * driveClockSetting('perMile');
 }
 
-/** A Google leg's minutes plus the park minutes (gate on), else unchanged. A
+/** A Google leg's minutes plus the park minutes (drive clock on), else unchanged. A
  * same-place leg (0 minutes) never carries them. */
 function parkedMinutes(minutes) {
   if (!driveClockLive() || !(minutes > 0)) return minutes;
@@ -60,8 +58,7 @@ function withDriveClockPark(answer) {
 
 /** The `drive_model` label saved with a day's quality numbers. */
 function driveModelLabel() {
-  if (driveClockLive()) return 'drive_clock';
-  return gateEnvValue('GATE_DRIVE_TIME_CALIBRATION') ? 'calibrated' : 'legacy';
+  return driveClockLive() ? 'drive_clock' : 'legacy';
 }
 
 module.exports = { driveClockLive, driveClockSetting, driveClockMinutes, parkedMinutes, withDriveClockPark, driveModelLabel };

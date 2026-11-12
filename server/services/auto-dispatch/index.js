@@ -1261,7 +1261,7 @@ async function evaluateServiceForRun(service, run) {
     // GATE_AUTO_DISPATCH_CONFLICT_MOVES: read the visit's current conflict.
     conflictMoves: config.conflictMovesEnabled === true,
     // GATE_AUTO_DISPATCH_ROAD_CHECK: the run's one road-time reader (null = off).
-    // ..._AT_APPLY: null here in apply mode; pass 2 sets it (holdBeforeRoadCheck).
+    // Null here in apply mode; pass 2 sets it (holdBeforeRoadCheck).
     roadTravel: roadCheck.pass1Travel(config, run.roadTravel),
     // GATE_AUTO_DISPATCH_ARRIVAL_SEARCH='true': the candidate search uses
     // find-time's arrival-window engine (candidate-slots.js); pass 2 reuses
@@ -1423,11 +1423,11 @@ function groupedNote(unitSize) {
   return unitSize > 1 ? `, grouped visit of ${unitSize}` : '';
 }
 
-// GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY (owner 2026-10-28): before the live
-// re-evaluation, a move the per-run cap already holds is logged as cap-held
-// without one, so no road check is bought for it. Any other move gets the
-// run's road reader, so Google is asked only for a move about to be written.
-// True = held and logged. Gate off (or a dry run): does nothing.
+// Owner 2026-10-28: before the live re-evaluation, a move the per-run cap
+// already holds is logged as cap-held without one, so no road check is bought
+// for it. Any other move gets the run's road reader, so Google is asked only
+// for a move about to be written. True = held and logged. A dry run or a run
+// with the road check off: does nothing.
 async function holdBeforeRoadCheck(pm, run) {
   const { config, totals, runId } = run;
   if (!roadCheck.deferredToApply(config)) return false;

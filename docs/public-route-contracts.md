@@ -6913,7 +6913,7 @@ code, error code, message text, limiter, signature or token changes.
   1.5 seconds a request) serves the unfiltered list. The check never throws
   into the route.
 - Cost: no Google call. Drive times are the default route-optimizer estimate
-  (the GPS-fitted clock while `GATE_DRIVE_CLOCK` is on).
+  (the GPS-fitted drive clock).
 - Commits and confirmations are unchanged and are NOT filtered. Every
   confirmation, commit, reserve or recheck path rebuilds its anti-forgery list
   WITHOUT the check: `POST /api/public/reschedule/:token` (and its SLOT_TAKEN

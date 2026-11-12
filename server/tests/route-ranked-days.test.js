@@ -61,7 +61,7 @@ const datesOf = (call) => {
   return out;
 };
 
-const ENV_KEYS = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_PICKER_ROAD_CHECK', 'GATE_SCHEDULING_CAPACITY',
+const ENV_KEYS = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY',
   'GATE_AUTO_DISPATCH_DAY_RULES'];
 let saved;
 beforeEach(() => {
@@ -93,7 +93,6 @@ describe('arrival-window routing on', () => {
   beforeEach(gateOn);
 
   test('admin caller: one search, Google through the staff spender and a request budget', async () => {
-    process.env.GATE_PICKER_ROAD_CHECK = 'true';
     findAvailableSlots.mockImplementation(async (call) => ({ slots: [slot(datesOf(call)[2], '10:00', 5)], rejections_by_date: {} }));
     await SmartRebooker.findRescheduleOptions('svc-1', undefined, { caller: ADMIN });
     expect(findAvailableSlots).toHaveBeenCalledTimes(1);
@@ -119,7 +118,6 @@ describe('arrival-window routing on', () => {
     ['a technician caller', { isAdmin: false, technicianId: 'tech-1' }],
     ['no caller', undefined],
   ])('%s: estimate only (no pickerRoadCheck, no spender, no budget)', async (_name, caller) => {
-    process.env.GATE_PICKER_ROAD_CHECK = 'true';
     findAvailableSlots.mockImplementation(async (call) => ({ slots: [slot(datesOf(call)[0], '10:00', 5)], rejections_by_date: {} }));
     await SmartRebooker.findRescheduleOptions('svc-1', undefined, caller ? { caller } : {});
     const call = findAvailableSlots.mock.calls[0][0];
@@ -129,10 +127,11 @@ describe('arrival-window routing on', () => {
     expect(call).not.toHaveProperty('pickerBudget');
   });
 
-  test('admin caller with the picker road check off, or no technician id, buys nothing', async () => {
+  test('admin caller under capacity mode (road check off), or no technician id, buys nothing', async () => {
     findAvailableSlots.mockImplementation(async (call) => ({ slots: [slot(datesOf(call)[0], '10:00', 5)], rejections_by_date: {} }));
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
     await SmartRebooker.findRescheduleOptions('svc-1', undefined, { caller: ADMIN });
-    process.env.GATE_PICKER_ROAD_CHECK = 'true';
+    delete process.env.GATE_SCHEDULING_CAPACITY;
     await SmartRebooker.findRescheduleOptions('svc-1', undefined, { caller: { isAdmin: true } });
     for (const [call] of findAvailableSlots.mock.calls) {
       expect(call.providerTravel).toBe(false);

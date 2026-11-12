@@ -46,7 +46,7 @@ function cachedMinutes(leg, now) {
 }
 
 // A travel source's stored answer: createSchedulingTravel's lookupRaw keeps
-// Google's own minutes (GATE_DRIVE_CLOCK adds its park minutes only when a
+// Google's own minutes (the drive clock adds its park minutes only when a
 // caller reads, never into the caches below); a source without one is raw.
 function rawLookup(source, leg) {
   return (source.lookupRaw || source.lookup).call(source, leg);
@@ -119,7 +119,7 @@ async function buyWithinCeilings({ spender, pro = 0, plain = 0 }, send) {
 async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now(), paid = false, spender = null } = {}) {
   // Only gap chips (GAP_LEGS) are re-priced; a capacity chip stays an
   // estimate (Codex #6045 r9: its admission and numbers stay on the model).
-  // An hour the route check already drove on Google (GATE_PICKER_ROAD_CHECK)
+  // An hour the route check already drove on Google
   // keeps that label.
   const estimate = (c) => ({ ...c, drive_source: c.drive_source === 'google' ? 'google' : 'estimate' });
   if (!Array.isArray(chips) || !chips.length) return [];
@@ -152,7 +152,7 @@ async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now(),
     }
     const minutesFor = (leg) => {
       const hit = cachedMinutes(leg, t);
-      // GATE_DRIVE_CLOCK: the park minutes join a Google leg here, once.
+      // Drive clock: the park minutes join a Google leg here, once.
       if (hit != null) return parkedMinutes(hit);
       const answer = travel && rawLookup(travel, leg);
       if (answer?.source !== 'google_traffic' || !Number.isFinite(answer.minutes)) return null;
@@ -179,7 +179,7 @@ async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now(),
   }
 }
 
-// Google inside the staff pickers' route check (GATE_PICKER_ROAD_CHECK).
+// Google inside the staff pickers' route check.
 // Owner 2026-10-26: "we need to run Google inside the scheduling check
 // itself"; 2026-10-27: run it on every create, reschedule and move, "we just
 // have to make sure costs are appropriate". Measured on real routes (10-27
@@ -305,7 +305,7 @@ const MODES = {
  * createSchedulingTravel shape). `spender` = the staff user the lookups are
  * reserved for; `budget` = the request's shared budget. A leg Google did not
  * answer gets the inner source's conservative model, labelled as such.
- * `cacheOnly` = a staff save's check (GATE_SAVE_ROAD_TIMES): read the road
+ * `cacheOnly` = a staff save's check: read the road
  * times the pickers already bought and buy nothing, so no Google call runs
  * inside a save's transaction.
  */
@@ -344,7 +344,7 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
     if (!r) return sources.traffic.lookup(leg);
     const m = MODES[r.mode];
     const hit = m.cached(r.key, r.asLeg, t);
-    // GATE_DRIVE_CLOCK: the park minutes join a Google leg on this read only;
+    // Drive clock: the park minutes join a Google leg on this read only;
     // both caches hold Google's own minutes.
     if (hit != null) return withDriveClockPark({ minutes: hit, source: m.source, reason: null });
     const answer = rawLookup(sources[r.mode], r.asLeg);

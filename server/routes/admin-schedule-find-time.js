@@ -25,7 +25,7 @@
  *                             // (same order, '' when none), for the rain ranking
  *     serviceTypes?,          // compareTechs: every service in the booking; a tech that
  *                             // cannot perform one is left out of `pickedByTech`
- *     quickMove?,             // Quick Move's picker: with GATE_PICKER_ROAD_CHECK on, the
+ *     quickMove?,             // Quick Move's picker: the
  *                             // route check Edit appointment uses (arrivalWindows)
  *     openTimes?,             // summary mode: the open-times
  *                             // list (the box; the Dispatch grid's lit hours) instead (up to 28 days,
@@ -355,11 +355,11 @@ router.post('/', trackRoadLimit, async (req, res) => {
       from, to, maxTo, today, pickedStart, pickedDate, slotStepMinutes,
     });
 
-    // Google inside the staff pickers' route check (GATE_PICKER_ROAD_CHECK,
-    // owner 2026-10-26): Quick Move joins Edit appointment's route check (it
+    // Google inside the staff pickers' route check (owner 2026-10-26):
+    // Quick Move joins Edit appointment's route check (it
     // used the gap check, which offers no start after 4 PM), and the check
     // drives this week on Google road times (find-time.js
-    // findArrivalWindowSlots). Off = byte-identical.
+    // findArrivalWindowSlots). Under GATE_SCHEDULING_CAPACITY the check stays off.
     // Paid Google road times are staff-only (Codex #6881 security): a
     // technician's own picker keeps the model, so the tech portal can never
     // spend the shared allowance.

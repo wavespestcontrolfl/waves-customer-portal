@@ -85,7 +85,7 @@ test.each(['requests', 'elements'])('new and concurrent providers share the paid
   }
 });
 
-// GATE_PICKER_ROAD_CHECK's later road days (owner 2026-10-27, "make sure costs
+// The staff pickers' later road days (owner 2026-10-27, "make sure costs
 // are appropriate"): a road time without traffic is Google's Essentials price
 // (half the traffic-aware one) and does not depend on the hour, so one lookup
 // per pair of places serves every departure on any day.
@@ -126,7 +126,7 @@ test('the default stays traffic-aware at the leg\'s departure', async () => {
   delete process.env.GOOGLE_MAPS_API_KEY;
 });
 
-// GATE_PICKER_ROAD_CHECK: a picker that closes (or searches again) aborts its
+// The staff pickers' route check: a picker that closes (or searches again) aborts its
 // request; no request still queued is sent to Google after that.
 test('an aborted signal sends no queued request', async () => {
   process.env.GOOGLE_MAPS_API_KEY = 'synthetic-test-key';
@@ -146,16 +146,18 @@ test('an aborted signal sends no queued request', async () => {
   delete process.env.GOOGLE_MAPS_API_KEY;
 });
 
-// GATE_DRIVE_CLOCK (owner 2026-10-28): the model fallback uses the GPS-fitted
-// pair, and a Google leg carries the park minutes at READ time, once. Off =
-// today's numbers.
-describe('GATE_DRIVE_CLOCK', () => {
-  const CLOCK = 'GATE_DRIVE_CLOCK';
+// Drive clock (owner 2026-10-28): with drive-time calibration on, the model
+// fallback uses the GPS-fitted pair, and a Google leg carries the park minutes
+// at READ time, once. Calibration off = the raw numbers.
+describe('drive clock', () => {
+  const CALIBRATION = 'GATE_DRIVE_TIME_CALIBRATION';
+  const clockOff = () => { delete process.env[CALIBRATION]; };
+  const clockOn = () => { process.env[CALIBRATION] = 'true'; };
   const to = { lat: 27.5, lng: -82.4 }; // 4.64 straight-line miles from HQ
   const answerWith = (duration) => jest.fn(async () => ({ ok: true, json: async () => [
     { originIndex: 0, destinationIndex: 0, status: {}, condition: 'ROUTE_EXISTS', duration },
   ] }));
-  // The drive clock needs the calibrated model on, as it is live.
+  // The drive clock runs with the calibrated model on, as it is live.
   const savedCalibration = process.env.GATE_DRIVE_TIME_CALIBRATION;
   beforeEach(() => {
     process.env.GOOGLE_MAPS_API_KEY = 'synthetic-test-key';
@@ -165,18 +167,18 @@ describe('GATE_DRIVE_CLOCK', () => {
     if (savedCalibration === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
     else process.env.GATE_DRIVE_TIME_CALIBRATION = savedCalibration;
     delete process.env.GOOGLE_MAPS_API_KEY;
-    delete process.env[CLOCK];
     delete process.env.DRIVE_CLOCK_PARK_MINUTES;
     delete process.env.DRIVE_CLOCK_FIXED_MINUTES;
     delete process.env.DRIVE_CLOCK_MINUTES_PER_MILE;
   });
 
-  test('the model fallback: calibrated pair off, fitted pair on, same-place 0', () => {
+  test('the model fallback: calibrated pair with calibration off, fitted pair on, same-place 0', () => {
     delete process.env.GOOGLE_MAPS_API_KEY;
+    clockOff();
     const provider = RouteOptimizer.createSchedulingTravel({ now: () => now.getTime() });
     const leg = { date, from: RouteOptimizer.HQ, to, departureMin: 480 };
     expect(provider.lookup(leg)).toMatchObject({ minutes: 16, source: 'conservative_model' }); // ceil(4.25 + 2.35 x 4.64)
-    process.env[CLOCK] = 'true';
+    clockOn();
     expect(provider.lookup(leg)).toMatchObject({ minutes: 19, source: 'conservative_model' }); // ceil(7.9 + 2.2 x 4.64)
     process.env.DRIVE_CLOCK_FIXED_MINUTES = '10';
     expect(provider.lookup(leg).minutes).toBe(21);
@@ -184,11 +186,12 @@ describe('GATE_DRIVE_CLOCK', () => {
   });
 
   test('a Google answer: raw off, +4 on, and never stored with the 4', async () => {
+    clockOff();
     const provider = RouteOptimizer.createSchedulingTravel({ fetchImpl: answerWith('601s'), now: () => now.getTime() });
     const leg = { date, from: RouteOptimizer.HQ, to, departureMin: 480 };
     await provider.preload([leg]);
     expect(provider.lookup(leg)).toEqual({ minutes: 11, source: 'google_traffic', reason: null });
-    process.env[CLOCK] = 'true';
+    clockOn();
     expect(provider.lookup(leg)).toEqual({ minutes: 15, source: 'google_traffic', reason: null });
     expect(provider.lookup(leg).minutes).toBe(15); // a second read adds nothing more
     expect(provider.lookupRaw(leg).minutes).toBe(11);
@@ -196,7 +199,7 @@ describe('GATE_DRIVE_CLOCK', () => {
     expect(provider.lookup(leg).minutes).toBe(17);
     process.env.DRIVE_CLOCK_PARK_MINUTES = '25'; // out of bounds: the default
     expect(provider.lookup(leg).minutes).toBe(15);
-    delete process.env[CLOCK];
+    clockOff();
     expect(provider.lookup(leg).minutes).toBe(11);
   });
 
@@ -204,7 +207,7 @@ describe('GATE_DRIVE_CLOCK', () => {
     const provider = RouteOptimizer.createSchedulingTravel({ fetchImpl: answerWith('541s'), now: () => now.getTime(), traffic: false });
     const leg = { date, from: RouteOptimizer.HQ, to, departureMin: 480 };
     await provider.preload([leg]);
-    process.env[CLOCK] = 'true';
+    clockOn();
     expect(provider.lookup(leg)).toMatchObject({ minutes: 14, source: 'google_road' });
   });
 
@@ -212,7 +215,7 @@ describe('GATE_DRIVE_CLOCK', () => {
     const provider = RouteOptimizer.createSchedulingTravel({ fetchImpl: answerWith('0s'), now: () => now.getTime() });
     const leg = { date, from: RouteOptimizer.HQ, to: RouteOptimizer.HQ, departureMin: 480 };
     await provider.preload([leg]);
-    process.env[CLOCK] = 'true';
+    clockOn();
     expect(provider.lookup(leg)).toMatchObject({ minutes: 0, source: 'google_traffic' });
   });
 
@@ -220,7 +223,7 @@ describe('GATE_DRIVE_CLOCK', () => {
     const fetchImpl = jest.fn(async () => { throw Object.assign(new Error('boom'), { name: 'TimeoutError' }); });
     const provider = RouteOptimizer.createSchedulingTravel({ fetchImpl, now: () => now.getTime() });
     const leg = { date, from: RouteOptimizer.HQ, to, departureMin: 480 };
-    process.env[CLOCK] = 'true'; // preload stores the model's answer for the leg
+    clockOn(); // preload stores the model's answer for the leg
     await provider.preload([leg]);
     // The model's 19 (fitted pair), not 19 + 4.
     expect(provider.lookup(leg)).toMatchObject({ minutes: 19, source: 'conservative_model' });

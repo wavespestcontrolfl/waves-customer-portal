@@ -261,7 +261,7 @@ function hintRequestBody({
   return {
     hint: true,
     arrivalWindows,
-    // Quick Move: the server decides (GATE_PICKER_ROAD_CHECK) whether it
+    // Quick Move: the server decides whether it
     // gets Edit appointment's route check.
     quickMove: quickMove || undefined,
     moveScope: moveScope || undefined,

@@ -275,7 +275,7 @@ it('open times, Quick Move: asks for the box on the visit\'s own route', async (
   hooks.availability = openTimesAt();
   render(<RainOutSheet service={{ id: 'svc-1', technicianId: 'tech-1', customerId: 'cust-1', scheduledDate: '2035-01-01' }} onClose={vi.fn()} onDone={vi.fn()} />);
   await screen.findByTestId('open-times-box');
-  // The server decides whether Quick Move gets the route check (GATE_PICKER_ROAD_CHECK).
+  // The server decides whether Quick Move gets the route check.
   expect(hooks.bestTimesArgs).toMatchObject({ openTimes: true, technicianId: 'tech-1', quickMove: true });
   expect(hooks.bestTimesArgs.techPick).toBeFalsy();
 });

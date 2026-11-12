@@ -1,6 +1,6 @@
 /**
  * Durable spend ceilings for the staff pickers' Google road times
- * (GATE_PICKER_ROAD_CHECK; owner 2026-10-27: "the dispatcher needs to run
+ * (owner 2026-10-27: "the dispatcher needs to run
  * every time we create, reschedule, etc, we just have to make sure costs are
  * appropriate").
  *

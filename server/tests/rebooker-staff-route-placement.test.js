@@ -137,9 +137,9 @@ describe('rescheduleOnce numbers the day after a staff move', () => {
     const result = await move(TARGET, { start: '09:00', end: '10:00' }, STAFF);
     expect(result.success).toBe(true);
     expect(placeMovedVisit).toHaveBeenCalledTimes(1);
-    // A staff move: its day is numbered on its picker's road times (GATE_SAVE_ROAD_TIMES).
+    // A staff move: its day is numbered on its picker's road times.
     expect(placeMovedVisit).toHaveBeenCalledWith(trx, { serviceId: 'svc-1', staffSave: true, lateDays: true });
-    // ...and its check reads the same road times (GATE_SAVE_ROAD_TIMES).
+    // ...and its check reads the same road times.
     expect(require('../services/scheduling/occupancy').findConflictingVisits).toHaveBeenCalledWith(
       expect.objectContaining({ arrivalWindow: expect.objectContaining({ serviceId: 'svc-1', roads: 'cache' }) }));
     expect(placeMovedVisit.mock.invocationCallOrder[0]).toBeGreaterThan(trxScheduled.update.mock.invocationCallOrder[0]);
@@ -252,7 +252,7 @@ describe('the series and Edit saves place only the visit the staff check placed 
     const src = read('../routes/admin-schedule.js');
     expect(src).toContain("if (useArrivalWindows && (scheduleMoveForNotice || assignmentNeedsChange) && !routeNumberTyped) {\n"
       + "        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: req.params.id, staffSave: true, lateDays: true });");
-    // Its advisory check reads the pickers' road times too (GATE_SAVE_ROAD_TIMES).
+    // Its advisory check reads the pickers' road times too.
     expect(src).toContain("arrivalWindow: { serviceId: req.params.id, changes: updates, roads: 'cache' },");
     expect(src).toContain("const routeNumberTyped = Number.isInteger(updates.route_order)\n"
       + "        && updates.route_order !== (commsPeek?.route_order ?? null);");

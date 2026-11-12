@@ -1124,7 +1124,7 @@ describe('moves need a real drive saving (owner 2026-10-09; same-day re-times to
     });
   });
 
-  // GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY (owner 2026-10-28, Google cost "way too high").
+  // Owner 2026-10-28, Google cost "way too high": in apply mode only pass 2 buys road legs.
   describe('the road check at apply', () => {
     const roadCheck = require('../services/auto-dispatch/road-check');
     const legs = (name, date) => ({ [roadCheck.ROAD_LEGS]: { prev: { p: name }, stop: { s: name }, next: { n: name }, date, startMin: 540 } });
@@ -1156,46 +1156,35 @@ describe('moves need a real drive saving (owner 2026-10-09; same-day re-times to
       if (prevAllow === undefined) delete process.env.AUTO_DISPATCH_ALLOW_APPLY; else process.env.AUTO_DISPATCH_ALLOW_APPLY = prevAllow;
     });
 
-    test('gate on, apply: pass 1 buys nothing; the move about to be written is checked', async () => {
-      const res = await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true, roadCheckAtApply: true });
+    test('apply: pass 1 buys nothing; the move about to be written is checked', async () => {
+      const res = await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true });
       expect(res).toMatchObject({ changed: 1 });
       expect(boughtInPass1).toBe(0);
       expect(preload.mock.calls.length).toBeGreaterThan(0);
       expect(lastDecision('changed').routeMetrics.road).toMatchObject({ saving_minutes: 30, source: 'google' });
     });
 
-    test('gate on, cap already full: the held move is not re-evaluated and buys nothing', async () => {
+    test('apply, cap already full: the held move is not re-evaluated and buys nothing', async () => {
       servicesResult = [svc(), svc({ id: 's2', customer_id: 'c2' })];
-      const res = await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true, roadCheckAtApply: true, maxChangesPerRun: 1 });
+      const res = await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true, maxChangesPerRun: 1 });
       expect(res).toMatchObject({ changed: 1, recommended: 1 });
       expect(boughtInPass1).toBe(0);
       // Only the one applied move was checked (one slot, three legs in a batch per side).
-      const bought = preload.mock.calls.length;
-      expect(bought).toBeGreaterThan(0);
+      expect(preload.mock.calls.length).toBeGreaterThan(0);
       expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
       const held = lastDecision('recommended');
       expect(held).toMatchObject({ reason_code: 'MAX_CHANGES_REACHED', reason_description: expect.stringContaining('Per-run change cap 1 reached (valid move held, +') });
       expect(held.service.id).toBe('s2');
-      // Run it again with the gate off for the same two visits: the held visit costs a road check of its own.
-      preload.mockClear();
-      await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true, roadCheckAtApply: false, maxChangesPerRun: 1 });
-      expect(preload.mock.calls.length).toBeGreaterThan(bought);
     });
 
-    test('gate off, apply: today\'s behavior, the road is checked in pass 1', async () => {
-      const res = await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true, roadCheckAtApply: false });
-      expect(res).toMatchObject({ changed: 1 });
-      expect(boughtInPass1).toBeGreaterThan(0);
-    });
-
-    test('gate on, dry run: today\'s behavior, the road is checked and the row carries it', async () => {
-      expect(await runAutoDispatch({ mode: 'dry_run', roadCheckEnabled: true, roadCheckAtApply: true })).toMatchObject({ recommended: 1 });
+    test('dry run: today\'s behavior, the road is checked and the row carries it', async () => {
+      expect(await runAutoDispatch({ mode: 'dry_run', roadCheckEnabled: true })).toMatchObject({ recommended: 1 });
       expect(preload.mock.calls.length).toBeGreaterThan(0);
       expect(lastDecision('recommended').routeMetrics.road).toMatchObject({ saving_minutes: 30, source: 'google' });
     });
 
-    test('the gate does nothing while the road check itself is off', async () => {
-      await runAutoDispatch({ mode: 'apply', roadCheckEnabled: false, roadCheckAtApply: true });
+    test('nothing is bought while the road check itself is off', async () => {
+      await runAutoDispatch({ mode: 'apply', roadCheckEnabled: false });
       expect(roadCheck.createRunTravel).not.toHaveBeenCalled();
     });
   });

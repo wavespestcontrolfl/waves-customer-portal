@@ -1,6 +1,6 @@
 /**
  * Durable spend ceilings for the staff pickers' Google road times
- * (picker-road-spend.js, GATE_PICKER_ROAD_CHECK; owner 2026-10-27: "we just
+ * (picker-road-spend.js; owner 2026-10-27: "we just
  * have to make sure costs are appropriate").
  *
  * What this locks down:

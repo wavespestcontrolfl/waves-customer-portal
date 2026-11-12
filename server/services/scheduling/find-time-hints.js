@@ -479,8 +479,8 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, off
       estimated_arrival: slot.estimated_arrival || null,
       stops_that_day: slot.stops_that_day ?? null,
       technician: slot.technician ? { id: slot.technician.id, name: slot.technician.name } : null,
-      // 'google' when the route check itself drove this hour on Google
-      // (GATE_PICKER_ROAD_CHECK); otherwise set by the road re-pricing.
+      // 'google' when the route check itself drove this hour on Google;
+      // otherwise set by the road re-pricing.
       ...(slot.drive_source ? { drive_source: slot.drive_source } : {}),
       // GATE_ROUTE_CHECK_LATE_DAYS: the day's existing stops already arrive late; this hour adds no new late stop.
       ...(slot.day_already_late === true ? { day_already_late: true } : {}),
