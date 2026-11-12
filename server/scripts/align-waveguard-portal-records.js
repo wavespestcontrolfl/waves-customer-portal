@@ -286,7 +286,13 @@ function buildCustomerUpdates(customer, detectedKeys, columns, today) {
   if (!inferredTier) return updates;
 
   if (columnPresent(columns, 'active') && customer.active !== true) updates.active = true;
-  if (columnPresent(columns, 'pipeline_stage') && customer.pipeline_stage !== 'active_customer') {
+  // at_risk stays: it is the Day 60/90 debt stamp (invoice-followups
+  // markAtRiskForLongOverdue) or a person's choice, and the reminder run
+  // returns the customer to active_customer once that debt is paid
+  // (clearAtRiskForSettledLongOverdue). Flipping it here would undo the stamp
+  // under --apply, and the daily lead-to-cash sweep would report a member who
+  // still owes as drift.
+  if (columnPresent(columns, 'pipeline_stage') && !['active_customer', 'at_risk'].includes(customer.pipeline_stage)) {
     updates.pipeline_stage = 'active_customer';
     setIfColumn(updates, columns, 'pipeline_stage_changed_at', new Date());
   }

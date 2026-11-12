@@ -5217,6 +5217,15 @@ function initScheduledJobs() {
         } catch (sweepErr) {
           logger.error(`Invoice follow-ups: autopay hold timeout sweep failed: ${sweepErr.message}`);
         }
+        // A customer the Day 60/90 step marked at_risk goes back to active_customer once that debt is
+        // paid; nothing else clears the stage. Before the due touches, so a customer who still owes
+        // another long-overdue invoice is stamped again in this run. A failure never stops the touch run.
+        try {
+          const cleared = await InvoiceFollowUps.clearAtRiskForSettledLongOverdue();
+          if (cleared.length) logger.info(`Invoice follow-ups: ${cleared.length} customer(s) back from at_risk, long-overdue debt paid: ${cleared.join(', ')}`);
+        } catch (sweepErr) {
+          logger.error(`Invoice follow-ups: at-risk clear sweep failed: ${sweepErr.message}`);
+        }
         const result = await InvoiceFollowUps.runPending();
         logger.info(`Invoice follow-ups done: ${result.sent} sent, ${result.skipped} skipped`);
       });
