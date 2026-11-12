@@ -290,6 +290,14 @@ describe('one open row', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  test('the same visits open again after a clean sweep ring again: the cleared row is no baseline', async () => {
+    const cleared = { summary_signature: _private.summarySignature(BACKLOG), autoCleared: true, autoClearedReason: 'stale_visits_clear' };
+    withBacklog(BACKLOG, { last: { metadata: cleared, created_at: new Date(Date.now() - 24 * 3600e3) } });
+    const r = await runStaleVisitSweep();
+    expect(r.rang).toBe(true);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
   test('ALERT_EPISODES off: the bell still rings and nothing is closed', async () => {
     alertEpisodesLive.mockReturnValue(false);
     withBacklog(BACKLOG, { open: ['n-61'] });

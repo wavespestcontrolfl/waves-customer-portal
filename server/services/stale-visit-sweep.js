@@ -39,6 +39,7 @@ const REMIND_DAYS = 7;
 const CATEGORY = 'stale_visit_sweep';
 const SUPERSEDED_RESOLUTION = 'Replaced by a newer list of stale visits';
 const CLEARED_RESOLUTION = 'Cleared: no past-dated visit is still open';
+const CLEAR_REASON = 'stale_visits_clear';
 
 // Query failures propagate — a schema/connection outage must surface as a
 // failed sweep in the scheduler's error log, never as clean:true (this sweep
@@ -118,6 +119,9 @@ async function lastBell() {
   if (!prior) return null;
   let meta = prior.metadata;
   if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+  // A row a clean sweep closed is no baseline: the backlog went to zero after it, so the same visits open
+  // again are a new backlog and must ring, not read as the list the owner was already told about.
+  if (meta?.autoClearedReason === CLEAR_REASON) return null;
   return { signature: meta?.summary_signature || null, createdAt: prior.created_at };
 }
 
@@ -162,7 +166,7 @@ async function runStaleVisitSweep({ now = new Date() } = {}) {
   return runExclusive('stale-visit-sweep', async () => {
     const visits = await findStaleVisits(now);
     if (!visits.length) {
-      return { ok: true, clean: true, closed: await closeRows(await openRowIds(), 'stale_visits_clear', CLEARED_RESOLUTION, now) };
+      return { ok: true, clean: true, closed: await closeRows(await openRowIds(), CLEAR_REASON, CLEARED_RESOLUTION, now) };
     }
 
     const signature = summarySignature(visits);

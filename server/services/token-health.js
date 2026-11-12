@@ -1057,6 +1057,8 @@ async function recheckErrors(results, delayMs) {
 // passed. Now a failure that stands keeps its one row (new text rewrites it and rings again), a platform whose
 // check passes closes its row, and a failure that comes back after a pass rings again. ALERT_EPISODES off (the
 // close and reopen kill switch every episodes caller reads) is the write as it was, with no close.
+const PASSED_RESOLUTION = 'Cleared: the credential check passed';
+
 async function settleTokenAlerts(results) {
   const failures = results.filter(isFailure);
   const live = require('../config/feature-gates').alertEpisodesLive();
@@ -1064,18 +1066,39 @@ async function settleTokenAlerts(results) {
   try {
     const NotificationService = require('./notification-service');
     const episodes = require('./admin-alert-episodes');
-    for (const f of failures) {
-      const title = `${f.platform} credential ${f.status}`;
-      const body = f.lastError || 'Check token health dashboard';
-      const opts = { icon: '\u{1F511}', link: '/admin/social-media' };
-      if (live) await episodes.raiseAdminAlertWithReopen('token_alert', title, body, { ...opts, dedupeKey: tokenAlertKey(f.platform), refreshOnDedupe: true });
-      else await NotificationService.notifyAdmin('token_alert', title, body, opts);
+    const title = (f) => `${f.platform} credential ${f.status}`;
+    const body = (f) => f.lastError || 'Check token health dashboard';
+    const opts = { icon: '\u{1F511}', link: '/admin/social-media' };
+    if (!live) {
+      for (const f of failures) await NotificationService.notifyAdmin('token_alert', title(f), body(f), opts);
+      return;
     }
-    if (!live) return;
-    const passed = results.filter((r) => r.status === 'healthy').map((r) => tokenAlertKey(r.platform));
-    const closed = Number(await episodes.closeAdminAlertKeys(db, passed, 'credential_check_passed', { resolution: 'Cleared: the credential check passed' })) || 0;
-    if (closed) logger.info(`[token-health] closed ${closed} alert row(s) for a platform that passed`);
+    const keyed = [];
+    for (const f of failures) {
+      const row = await episodes.raiseAdminAlertWithReopen('token_alert', title(f), body(f), { ...opts, dedupeKey: tokenAlertKey(f.platform), refreshOnDedupe: true });
+      if (row?.id) keyed.push(f.platform);
+    }
+    const passed = results.filter((r) => r.status === 'healthy').map((r) => r.platform);
+    const closed = (Number(await episodes.closeAdminAlertKeys(db, passed.map(tokenAlertKey), 'credential_check_passed', { resolution: PASSED_RESOLUTION })) || 0)
+      + await closeUnkeyedRows(episodes, passed, 'credential_check_passed', PASSED_RESOLUTION)
+      + await closeUnkeyedRows(episodes, keyed, 'credential_alert_keyed', 'Replaced by the one standing alert row of this platform');
+    if (closed) logger.info(`[token-health] closed ${closed} alert row(s)`);
   } catch (e) { logger.error(`[notifications] Token alert notification failed: ${e.message}`); }
+}
+
+// Open rows with no platform key: written before the key existed, or while ALERT_EPISODES was off (that write
+// carries none). Their title is "<platform> credential <status>". One closes when its platform passes, or when
+// the platform's keyed row now stands beside it (a failing platform whose keyed write left no row keeps it).
+async function closeUnkeyedRows(episodes, platforms, reason, resolution) {
+  if (!platforms.length) return 0;
+  const rows = await db('notifications')
+    .where({ recipient_type: 'admin', category: 'token_alert' })
+    .whereNull('done_at')
+    .whereRaw("metadata->>'dedupeKey' IS NULL")
+    .select('id', 'title');
+  const ids = rows.filter((r) => platforms.some((platform) => String(r.title).startsWith(`${platform} credential `))).map((r) => r.id);
+  if (!ids.length) return 0;
+  return Number(await episodes.closeAdminAlertIds(db, ids, reason, { resolution })) || 0;
 }
 
 // ── Public API ──

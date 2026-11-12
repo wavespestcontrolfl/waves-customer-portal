@@ -5,7 +5,7 @@
 //   April, 232 were closed by the 30-day retention sweep.
 // - A failure that stood wrote a new bell row every morning (one platform: 80 mornings in a row).
 jest.mock('../models/db', () => {
-  const query = { where: jest.fn().mockReturnThis(), first: jest.fn(async () => null), insert: jest.fn(async () => []), update: jest.fn(async () => 1), whereNotIn: jest.fn().mockReturnThis(), del: jest.fn(async () => 0), orderBy: jest.fn(async () => []) };
+  const query = { where: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), whereRaw: jest.fn().mockReturnThis(), select: jest.fn(async () => []), first: jest.fn(async () => null), insert: jest.fn(async () => []), update: jest.fn(async () => 1), whereNotIn: jest.fn().mockReturnThis(), del: jest.fn(async () => 0), orderBy: jest.fn(async () => []) };
   const db = jest.fn(() => query); db._query = query; db.fn = { now: () => new Date() }; db.raw = jest.fn();
   return db;
 });
@@ -15,6 +15,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(asyn
 jest.mock('../services/admin-alert-episodes', () => ({
   raiseAdminAlertWithReopen: jest.fn(async () => ({ id: 'n-1', rang: true })),
   closeAdminAlertKeys: jest.fn(async () => 0),
+  closeAdminAlertIds: jest.fn(async (_conn, ids) => ids.length),
 }));
 jest.mock('../services/owner-alerts', () => ({ recordOwnerAlert: jest.fn(async () => ({ ok: true, channel: 'in_app', id: 'n-2' })) }));
 jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => 1) }));
@@ -35,6 +36,9 @@ const failed = (platform, status, lastError) => ({ platform, status, lastError, 
 beforeEach(() => {
   jest.clearAllMocks();
   alertEpisodesLive.mockReturnValue(true);
+  db._query.select.mockResolvedValue([]);
+  episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'n-1', rang: true });
+  episodes.closeAdminAlertKeys.mockResolvedValue(0);
 });
 afterEach(() => { jest.restoreAllMocks(); });
 
@@ -89,6 +93,41 @@ describe('settleTokenAlerts: one bell row per failing platform, closed when the 
     expect(opts.resolution).toBe('Cleared: the credential check passed');
   });
 
+  // Rows with no key: every row written before this change (one was open on 2026-11-11), and any row written
+  // while ALERT_EPISODES is off. closeAdminAlertKeys cannot see them.
+  describe('open rows with no platform key', () => {
+    const unkeyed = [
+      { id: 'old-openai', title: 'openai credential error' },
+      { id: 'old-linkedin', title: 'linkedin credential expired' },
+      { id: 'old-meta-audiences', title: 'meta_audiences credential error' },
+    ];
+    const closedIds = () => episodes.closeAdminAlertIds.mock.calls.map(([, ids, reason]) => [ids, reason]);
+
+    test('the row of a platform that passed closes, read from open un-keyed token_alert rows only', async () => {
+      db._query.select.mockResolvedValue(unkeyed);
+      await settleTokenAlerts([healthy('openai'), healthy('meta_ads')]);
+      expect(db).toHaveBeenCalledWith('notifications');
+      expect(db._query.where).toHaveBeenCalledWith({ recipient_type: 'admin', category: 'token_alert' });
+      expect(db._query.whereNull).toHaveBeenCalledWith('done_at');
+      expect(db._query.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' IS NULL");
+      // meta_ads passed; the meta_audiences row is another platform's and stays.
+      expect(closedIds()).toEqual([[['old-openai'], 'credential_check_passed']]);
+    });
+
+    test('the row of a platform that still fails closes once its keyed row stands', async () => {
+      db._query.select.mockResolvedValue(unkeyed);
+      await settleTokenAlerts([failed('linkedin', 'expired', 'HTTP 401')]);
+      expect(closedIds()).toEqual([[['old-linkedin'], 'credential_alert_keyed']]);
+    });
+
+    test('a keyed write that left no row (muted) keeps the old row: it is the only one', async () => {
+      db._query.select.mockResolvedValue(unkeyed);
+      episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: null, suppressed: true, rang: false });
+      await settleTokenAlerts([failed('linkedin', 'expired', 'HTTP 401')]);
+      expect(episodes.closeAdminAlertIds).not.toHaveBeenCalled();
+    });
+  });
+
   test('ALERT_EPISODES off: the write as it was, and nothing is closed', async () => {
     alertEpisodesLive.mockReturnValue(false);
     await settleTokenAlerts([healthy('stripe'), failed('openai', 'error', 'HTTP 504')]);
@@ -98,6 +137,7 @@ describe('settleTokenAlerts: one bell row per failing platform, closed when the 
     expect(opts).not.toHaveProperty('dedupeKey');
     expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+    expect(episodes.closeAdminAlertIds).not.toHaveBeenCalled();
   });
 
   test('a failed alert write never fails the check', async () => {
