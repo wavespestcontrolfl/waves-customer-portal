@@ -217,17 +217,23 @@ async function cardDevices(customerId) {
     .select('id', 'live_activity_start_token');
 }
 
-// The customer's own "technician on the way" choice decides the card too: no on-the-way notice, no card.
-// A visit at a saved address other than the primary one follows that address's choice where those are
-// enforced (property-notification-prefs.js). Read only: no decision row is written from here.
-async function onTheWayNoticeOn(customerId, serviceId) {
+// The card goes to the account holder's own iPhones, so it follows the two choices that decide whether the
+// holder gets today's on-the-way notice: the "technician on the way" notice is on, and appointment notices
+// go to the holder too (`appointment_notify_primary`, read as customer-contact.js reads it: only an
+// explicit false is off). A visit at a saved address other than the primary one follows that address's
+// choices where those are enforced (property-notification-prefs.js). Read only: no decision row is written
+// from here.
+async function holderGetsOnTheWayNotice(customerId, serviceId) {
   const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
   const propertyPrefs = require('./property-notification-prefs');
-  if (!propertyPrefs.propertyTextsEnforced()) return Boolean(prefs?.tech_en_route);
-  const property = await propertyPrefs.visitProperty(customerId, serviceId);
-  if (!property) return Boolean(prefs?.tech_en_route);
-  const row = await propertyPrefs.propertyPrefsRow(property.id);
-  return Boolean(propertyPrefs.overlayPropertyPrefs(property, row, prefs).tech_en_route);
+  let effective = prefs;
+  if (propertyPrefs.propertyTextsEnforced()) {
+    const property = await propertyPrefs.visitProperty(customerId, serviceId);
+    if (property) {
+      effective = propertyPrefs.overlayPropertyPrefs(property, await propertyPrefs.propertyPrefsRow(property.id), prefs);
+    }
+  }
+  return Boolean(effective?.tech_en_route) && effective.appointment_notify_primary !== false;
 }
 
 // One chance per step: a stop whose card already ended at or after this step began gets no second card
@@ -265,7 +271,7 @@ async function startCard(stop, view, now) {
   if (!devices.length) return { action: 'none', reason: 'no_device' };
   // A server with no Apple key (a preview, a dev machine) writes no row and asks Apple nothing.
   if (!require('./apns').status().configured) return { action: 'none', reason: 'apns_not_configured' };
-  if (!(await onTheWayNoticeOn(stop.customerId, view.visits[0].id))) return { action: 'none', reason: 'notice_off' };
+  if (!(await holderGetsOnTheWayNotice(stop.customerId, view.visits[0].id))) return { action: 'none', reason: 'notice_off' };
   if (await hadCardSince(stop.key, view.since)) return { action: 'none', reason: 'already_had_a_card' };
 
   // The claim: the stop's one live row. A second process gets no row back and leaves the start to the first.

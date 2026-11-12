@@ -72,6 +72,8 @@ postgres('Lock Screen visit card against migrated PostgreSQL', () => {
   afterEach(async () => {
     delete process.env.GATE_VISIT_LIVE_ACTIVITY;
     delete process.env.VISIT_LIVE_ACTIVITY_CUSTOMER_ALLOWLIST;
+    delete process.env.GATE_APP_PROPERTY_SCOPE;
+    delete process.env.GATE_APP_PROPERTY_TEXTS;
     jest.restoreAllMocks();
     require('../models/db').connection = database;
     if (trx) await trx.rollback();
@@ -79,12 +81,12 @@ postgres('Lock Screen visit card against migrated PostgreSQL', () => {
   afterAll(async () => { await database?.destroy(); });
 
   // One customer with a saved address, a technician, and one iPhone that registered for the card.
-  async function seedStop({ device = {}, prefs = {}, withProperty = true } = {}) {
+  async function seedStop({ device = {}, prefs = {}, withProperty = true, property = {} } = {}) {
     const ids = { customer: randomUUID(), property: withProperty ? randomUUID() : null, tech: randomUUID() };
     await trx('customers').insert({ id: ids.customer, first_name: 'Synthetic', last_name: 'Fixture', phone: '+19415550142', email: `${ids.customer}@example.invalid` });
     await trx('notification_prefs').insert({ customer_id: ids.customer, ...prefs }).onConflict('customer_id').merge();
     if (withProperty) {
-      await trx('customer_properties').insert({ id: ids.property, customer_id: ids.customer, is_primary: true, address_line1: '12 Example Way', city: 'Bradenton', state: 'FL', zip: '34209' });
+      await trx('customer_properties').insert({ id: ids.property, customer_id: ids.customer, is_primary: true, address_line1: '12 Example Way', city: 'Bradenton', state: 'FL', zip: '34209', ...property });
     }
     await trx('technicians').insert({ id: ids.tech, name: 'Sam Brook' });
     if (device !== null) ids.device = await addPhone(ids.customer, device);
@@ -166,12 +168,40 @@ postgres('Lock Screen visit card against migrated PostgreSQL', () => {
     expect(await trx('live_activity_sessions').count('* as n').first()).toEqual({ n: '0' });
   });
 
-  test('the customer\'s own switches turn the card off: app notifications off, or the on-the-way notice off', async () => {
+  test('the customer\'s own switches turn the card off: app notifications, the on-the-way notice, or notices to the account holder', async () => {
     const pushOff = await seedStop({ prefs: { push_enabled: false } });
     expect(await card.syncVisit(await addVisit(pushOff), { now: NOW })).toEqual({ action: 'none', reason: 'no_device' });
     const noticeOff = await seedStop({ prefs: { tech_en_route: false } });
     expect(await card.syncVisit(await addVisit(noticeOff), { now: NOW })).toEqual({ action: 'none', reason: 'notice_off' });
+    // On-the-way notices still go to the service contacts, but the holder asked not to get them: the card
+    // goes only to the holder's own iPhones, so there is none.
+    const holderOut = await seedStop({ prefs: { appointment_notify_primary: false } });
+    expect(await card.syncVisit(await addVisit(holderOut), { now: NOW })).toEqual({ action: 'none', reason: 'notice_off' });
     expect(apple.createChannel).not.toHaveBeenCalled();
+  });
+
+  test('a saved address other than the primary one follows its own choices where those are enforced', async () => {
+    const rental = { is_primary: false, relationship: 'rental_owned' };
+    const family = { is_primary: false, relationship: 'family_home' };
+    // Not enforced: the customer's own choices decide, whatever the address says.
+    const before = await seedStop({ property: rental });
+    expect(await card.syncVisit(await addVisit(before), { now: NOW })).toEqual({ action: 'started', devices: 1 });
+
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    process.env.GATE_APP_PROPERTY_TEXTS = 'true';
+    // A rental starts quiet until its owner turns a notice on: no card.
+    const quiet = await seedStop({ property: rental });
+    expect(await card.syncVisit(await addVisit(quiet), { now: NOW })).toEqual({ action: 'none', reason: 'notice_off' });
+    // A family home takes the customer's choices, and its own "not to me" turns the card off.
+    const inherits = await seedStop({ property: family });
+    expect(await card.syncVisit(await addVisit(inherits), { now: NOW })).toEqual({ action: 'started', devices: 1 });
+    const notToMe = await seedStop({ property: family });
+    await trx('property_notification_prefs').insert({ property_id: notToMe.property, customer_id: notToMe.customer, appointment_notify_primary: false });
+    expect(await card.syncVisit(await addVisit(notToMe), { now: NOW })).toEqual({ action: 'none', reason: 'notice_off' });
+    const noticeOff = await seedStop({ property: family });
+    await trx('property_notification_prefs').insert({ property_id: noticeOff.property, customer_id: noticeOff.customer, tech_en_route: false });
+    expect(await card.syncVisit(await addVisit(noticeOff), { now: NOW })).toEqual({ action: 'none', reason: 'notice_off' });
+    expect(apple.createChannel).toHaveBeenCalledTimes(2);
   });
 
   test('the allowlist narrows the gate to its customers, and a late or gated-off visit starts nothing', async () => {
