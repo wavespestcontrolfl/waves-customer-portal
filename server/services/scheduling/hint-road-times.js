@@ -46,7 +46,7 @@ function cachedMinutes(leg, now) {
 }
 
 // A travel source's stored answer: createSchedulingTravel's lookupRaw keeps
-// Google's own minutes (GATE_DRIVE_CLOCK adds its park minutes only when a
+// Google's own minutes (the drive clock adds its park minutes only when a
 // caller reads, never into the caches below); a source without one is raw.
 function rawLookup(source, leg) {
   return (source.lookupRaw || source.lookup).call(source, leg);
@@ -152,7 +152,7 @@ async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now(),
     }
     const minutesFor = (leg) => {
       const hit = cachedMinutes(leg, t);
-      // GATE_DRIVE_CLOCK: the park minutes join a Google leg here, once.
+      // Drive clock: the park minutes join a Google leg here, once.
       if (hit != null) return parkedMinutes(hit);
       const answer = travel && rawLookup(travel, leg);
       if (answer?.source !== 'google_traffic' || !Number.isFinite(answer.minutes)) return null;
@@ -344,7 +344,7 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
     if (!r) return sources.traffic.lookup(leg);
     const m = MODES[r.mode];
     const hit = m.cached(r.key, r.asLeg, t);
-    // GATE_DRIVE_CLOCK: the park minutes join a Google leg on this read only;
+    // Drive clock: the park minutes join a Google leg on this read only;
     // both caches hold Google's own minutes.
     if (hit != null) return withDriveClockPark({ minutes: hit, source: m.source, reason: null });
     const answer = rawLookup(sources[r.mode], r.asLeg);

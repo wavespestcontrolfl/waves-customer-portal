@@ -85,7 +85,7 @@ test.each(['requests', 'elements'])('new and concurrent providers share the paid
   }
 });
 
-// GATE_PICKER_ROAD_CHECK's later road days (owner 2026-10-27, "make sure costs
+// The staff pickers' later road days (owner 2026-10-27, "make sure costs
 // are appropriate"): a road time without traffic is Google's Essentials price
 // (half the traffic-aware one) and does not depend on the hour, so one lookup
 // per pair of places serves every departure on any day.
@@ -126,7 +126,7 @@ test('the default stays traffic-aware at the leg\'s departure', async () => {
   delete process.env.GOOGLE_MAPS_API_KEY;
 });
 
-// GATE_PICKER_ROAD_CHECK: a picker that closes (or searches again) aborts its
+// The staff pickers' route check: a picker that closes (or searches again) aborts its
 // request; no request still queued is sent to Google after that.
 test('an aborted signal sends no queued request', async () => {
   process.env.GOOGLE_MAPS_API_KEY = 'synthetic-test-key';

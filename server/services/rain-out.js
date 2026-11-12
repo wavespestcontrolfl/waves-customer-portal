@@ -1127,8 +1127,8 @@ async function routeSameDayOptions(service, now = new Date()) {
   }
 }
 
-// The +2h/+4h guesses stand in only when the finder errors or finds no
-// feasible hour.
+// The +2h/+4h guesses stand in only when there is no route answer
+// (routeSameDayOptions returns null). A route judged full offers no hour.
 async function sameDayChoices(service) {
   const routed = await routeSameDayOptions(service);
   return routed === null ? sameDayOptions() : routed;
