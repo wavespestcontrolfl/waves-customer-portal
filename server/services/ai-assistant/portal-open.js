@@ -370,11 +370,16 @@ async function settleUnnamedQuote(trx, { customerId, requestedService, sources }
   });
 }
 
+// The Messages thread's turn (turn.holdHandOff, portal-messages-night-ai.js) files nothing of its own: the
+// thread is the office's item. A quote or a move there is a hand-off, with the customer's words in the reason.
+const HAND_OFF_HELD = { sent: false, instruction: 'This chat cannot save that request. Call escalate now with the customer\'s words in the reason, so the team answers it.' };
+
 // request_quote: one open add-service request per (customer, service), and
 // one bell for it. The writer is the same one the portal home card and the
 // service report use, so a second ask refreshes the standing row.
-async function requestQuote(customerId, input, { open = false } = {}, turn = null) {
+async function requestQuote(customerId, input, { open = false, holdHandOff = false } = {}, turn = null) {
   if (open !== true) return { error: 'Unknown tool: request_quote' };
+  if (holdHandOff) return HAND_OFF_HELD;
   const db = require('../../models/db');
   const { writeOrRefreshCtaRequest, CTA_REQUEST_SOURCES } = require('../cta-service-request');
   const { normalizeRequestedServiceKey } = require('../estimate-add-service-request');
@@ -418,8 +423,10 @@ const MOVE_FAILED_INSTRUCTION = 'The move could not be saved. Call escalate with
 // request_move: the hand-off item itself is written by assistant.js
 // (context.recordMove), the one place that owns the chat's hand-off row and
 // bell.
-async function requestMove(input, { open = false, recordMove = null } = {}) {
-  if (open !== true || typeof recordMove !== 'function') return { error: 'Unknown tool: request_move' };
+async function requestMove(input, { open = false, recordMove = null, holdHandOff = false } = {}) {
+  if (open !== true) return { error: 'Unknown tool: request_move' };
+  if (holdHandOff) return HAND_OFF_HELD;
+  if (typeof recordMove !== 'function') return { error: 'Unknown tool: request_move' };
   const move = moveDetails(input);
   let saved;
   try {

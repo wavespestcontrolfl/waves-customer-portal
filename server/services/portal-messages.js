@@ -22,8 +22,13 @@
  * - A thread is an open Portal-tab item while its newest message is the customer's and is newer than the
  *   thread's handledAt stamp (portal-inbox.js openMessageScope; Mark handled).
  *
+ * With GATE_PORTAL_MESSAGES_NIGHT_AI on, a customer message written outside 8 AM to 8 PM Eastern is also answered
+ * by the Ask Waves assistant in the same thread (portal-messages-night-ai.js): an outbound row of author_type
+ * 'agent', message_type AI_MESSAGE_TYPE, labelled Waves AI. It is not an answer by the office: the thread stays
+ * an open Portal-tab item until a staff answer or Mark handled.
+ *
  * Nothing here messages a customer on its own: the one send is the notice for an answer a staff member
- * pressed Send on. Every entry point refuses while the gate is off, and an answer to an inactive customer
+ * pressed Send on (the AI's answer gets the in-app bell and an app push only, never the email). Every entry point refuses while the gate is off, and an answer to an inactive customer
  * row (who can neither sign in nor take a push) is refused: the office texts them instead.
  */
 
@@ -46,6 +51,10 @@ const SWEEP_MIN_AGE_MS = 5 * 60 * 1000;
 const SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const SWEEP_LIMIT = 50;
 const MESSAGES_LINK = '/?tab=messages';
+// The after-hours AI answer's row (portal-messages-night-ai.js). portal-inbox.js repeats the message type in its
+// SQL (a test pins the two together).
+const AI_MESSAGE_TYPE = 'portal_ai_reply';
+const AI_AGENT_NAME = 'Waves AI';
 const NOTICE_TITLE = 'New message from Waves';
 const ANSWERED_NOTE = 'Answered in the portal';
 const ITEM_KINDS = ['chat', 'request', 'message'];
@@ -116,12 +125,21 @@ function priorSend(trx, threadId, direction, clientRequestId) {
     .whereRaw("metadata->>'clientRequestId' = ?", [clientRequestId]).first();
 }
 
+const isAiReply = (row) => row.message_type === AI_MESSAGE_TYPE;
+
+// `ai: true` marks the Waves AI's answer (the bubble is labelled Waves AI); a staff answer carries no flag.
 function customerView(row) {
-  return { id: row.id, from: row.direction === 'outbound' ? 'waves' : 'you', body: row.body || '', createdAt: row.created_at };
+  return {
+    id: row.id, from: row.direction === 'outbound' ? 'waves' : 'you', body: row.body || '', createdAt: row.created_at,
+    ...(isAiReply(row) ? { ai: true } : {}),
+  };
 }
 
 function staffView(row) {
-  return { id: row.id, direction: row.direction, body: row.body || '', createdAt: row.created_at, adminUserId: row.admin_user_id || null };
+  return {
+    id: row.id, direction: row.direction, body: row.body || '', createdAt: row.created_at, adminUserId: row.admin_user_id || null,
+    ...(isAiReply(row) ? { ai: true, ...(row.hand_off === 'true' ? { handOff: true } : {}) } : {}),
+  };
 }
 
 // The row each item kind names: a chat must be a portal chat hand-off, a request must be the customer's own
@@ -440,6 +458,18 @@ async function ringOffice(customer, threadId, message) {
   }
 }
 
+// GATE_PORTAL_MESSAGES_NIGHT_AI: the after-hours AI answer, started after the message is saved and the office
+// rung, and never awaited, so the customer's POST does not wait for the model. Gate off: nothing is loaded or
+// read. Never throws.
+function startNightAi(customer, threadId, message) {
+  try {
+    if (!featureGates.portalMessagesNightAiLive?.()) return;
+    void require('./portal-messages-night-ai').answerAfterHours({ customer, threadId, message });
+  } catch (err) {
+    logger.warn(`[portal-messages] after-hours AI answer not started for message ${message.id}: ${err.message}`);
+  }
+}
+
 /**
  * A signed-in customer writes in their portal thread.
  * @param {{ customer: { id: string, first_name?: string, last_name?: string }, body: string, clientRequestId?: string }} input
@@ -464,7 +494,10 @@ async function customerPost({ customer, body, clientRequestId = null }) {
     });
     return { message, threadId: thread.id };
   });
-  if (!saved.replay) await ringOffice(customer, saved.threadId, saved.message);
+  if (!saved.replay) {
+    await ringOffice(customer, saved.threadId, saved.message);
+    startNightAi(customer, saved.threadId, saved.message);
+  }
   return customerView(saved.message);
 }
 
@@ -483,7 +516,8 @@ async function threadPage(threadId, before, view) {
   const query = db('messages').where({ conversation_id: threadId, channel: CHANNEL }).whereIn('direction', ['inbound', 'outbound']);
   if (before) query.where('created_at', '<', before);
   const rows = await query.orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
-    .limit(PAGE_SIZE + 1).select('id', 'direction', 'body', 'created_at', 'admin_user_id');
+    .limit(PAGE_SIZE + 1).select('id', 'direction', 'body', 'created_at', 'admin_user_id', 'message_type',
+      db.raw("metadata->>'handOff' AS hand_off"));
   return { messages: rows.slice(0, PAGE_SIZE).reverse().map(view), hasMore: rows.length > PAGE_SIZE };
 }
 
@@ -531,6 +565,8 @@ module.exports = {
   CHANNEL,
   ENDPOINT,
   BODY_MAX,
+  AI_MESSAGE_TYPE,
+  AI_AGENT_NAME,
   MESSAGES_LINK,
   NOTICE_TITLE,
   PortalMessageError,
@@ -542,5 +578,5 @@ module.exports = {
   customerUnread,
   markRead,
   resumePendingNotices,
-  __private: { preview, noticeCustomer, closeItemWith, closeItemBells, itemCustomerWith, claimNotice, ringOffice },
+  __private: { preview, noticeCustomer, closeItemWith, closeItemBells, itemCustomerWith, claimNotice, ringOffice, metaOf, bellAndPush },
 };
