@@ -3,8 +3,8 @@
  * (markAtRiskForLongOverdue). Before it, nothing returned a customer from at_risk after the debt was
  * paid (2026-11-11: 3 of the 4 at-risk customers had paid in full weeks before, and the daily
  * lead-to-cash sweep listed them as drift). The rule is one UPDATE, so it is tested where its SQL runs:
- * the ET calendar-day count from the reminder anchor, "paid after the stamp", and "nothing 60+ days
- * old still owed". Disposable schema on a private QA / isolated CI database; skipped without
+ * the ET calendar-day count from the reminder anchor, "paid after the stamp", and "no open self-pay
+ * invoice 60+ days old" (the shared applyOpenSelfPayPredicates definition). Disposable schema on a private QA / isolated CI database; skipped without
  * APP_TEST_DATABASE_URL, run for real in CI.
  */
 jest.mock('../models/db', () => {
@@ -43,7 +43,8 @@ postgres('clearAtRiskForSettledLongOverdue on PostgreSQL', () => {
       id uuid PRIMARY KEY, active boolean DEFAULT true, deleted_at timestamptz,
       pipeline_stage text, pipeline_stage_changed_at timestamptz)`);
     await mockPg.raw(`CREATE TABLE invoices (
-      id uuid PRIMARY KEY, customer_id uuid NOT NULL, status text, payer_id uuid,
+      id uuid PRIMARY KEY, customer_id uuid NOT NULL, status text, payer_id uuid, payer_statement_id uuid,
+      scheduled_send_error text, total numeric DEFAULT 100, credit_applied numeric DEFAULT 0, amount_paid numeric NOT NULL DEFAULT 0,
       sent_at timestamptz, sms_sent_at timestamptz, paid_at timestamptz, created_at timestamptz DEFAULT now())`);
     await mockPg.raw(`CREATE TABLE invoice_followup_sequences (
       id uuid PRIMARY KEY, invoice_id uuid NOT NULL UNIQUE, customer_id uuid NOT NULL, status text,
@@ -72,10 +73,11 @@ postgres('clearAtRiskForSettledLongOverdue on PostgreSQL', () => {
 
   // One invoice. sentDaysAgo dates the reminder anchor; paidDaysAgo (a number) marks it paid then.
   async function invoice(customerId, {
-    status = 'paid', sentDaysAgo = 70, paidDaysAgo = null, payerId = null, sequence = true, anchorDaysAgo = null,
+    status = 'paid', sentDaysAgo = 70, paidDaysAgo = null, payerId = null, sequence = true, anchorDaysAgo = null, extra = {},
   } = {}) {
     const id = randomUUID();
     await mockPg('invoices').insert({
+      ...extra,
       id, customer_id: customerId, status, payer_id: payerId, sent_at: daysAgo(sentDaysAgo),
       paid_at: paidDaysAgo === null ? null : daysAgo(paidDaysAgo), created_at: daysAgo(sentDaysAgo + 1),
     });
@@ -109,7 +111,7 @@ postgres('clearAtRiskForSettledLongOverdue on PostgreSQL', () => {
   });
 
   test('another invoice 60+ days old and still owed keeps the stage', async () => {
-    for (const status of ['sent', 'viewed', 'overdue', 'processing']) {
+    for (const status of ['sent', 'viewed', 'overdue']) {
       const id = await customer();
       await invoice(id, { sentDaysAgo: 95, paidDaysAgo: 2 });
       await invoice(id, { status, sentDaysAgo: 65 });
@@ -118,15 +120,30 @@ postgres('clearAtRiskForSettledLongOverdue on PostgreSQL', () => {
     }
   });
 
-  test('an old invoice that is not owed does not keep the stage: void, refunded, draft, payer-billed, or younger than 60 days', async () => {
+  test('an old invoice that is not open self-pay debt does not keep the stage', async () => {
     const id = await customer();
     await invoice(id, { sentDaysAgo: 95, paidDaysAgo: 2 });
     await invoice(id, { status: 'void', sentDaysAgo: 80 });
     await invoice(id, { status: 'refunded', sentDaysAgo: 80 });
     await invoice(id, { status: 'draft', sentDaysAgo: 80 });
+    // A payment in flight: the customer is paying it.
+    await invoice(id, { status: 'processing', sentDaysAgo: 80 });
+    // Billed to a third-party payer: by payer_id, by the withdrawal stamp (payer_id stays NULL), or on a statement.
     await invoice(id, { status: 'sent', sentDaysAgo: 80, payerId: randomUUID() });
+    await invoice(id, { status: 'viewed', sentDaysAgo: 80, extra: { scheduled_send_error: 'payer_billed:packet' } });
+    await invoice(id, { status: 'sent', sentDaysAgo: 80, extra: { payer_statement_id: randomUUID() } });
+    // Nothing left to pay: credit and a part payment cover the total.
+    await invoice(id, { status: 'sent', sentDaysAgo: 80, extra: { total: 100, credit_applied: 40, amount_paid: 60 } });
+    // Still owed, but younger than 60 days.
     await invoice(id, { status: 'sent', sentDaysAgo: 20 });
     await expect(sweep()).resolves.toEqual([id]);
+  });
+
+  test('a paid invoice a third-party payer was billed for is no evidence', async () => {
+    const id = await customer({ stampedDaysAgo: 5 });
+    await invoice(id, { sentDaysAgo: 70, paidDaysAgo: 2, payerId: randomUUID() });
+    await expect(sweep()).resolves.toEqual([]);
+    expect(await stageOf(id)).toBe('at_risk');
   });
 
   test('a stage set after the payment stays (a person marked the customer at risk)', async () => {
