@@ -37,7 +37,8 @@ on this phone's row. It is `false` when the gate is off, when the token was clea
 account-holder iPhone row matched the device token. `400` for a missing device token or a start token that
 is not hex. The response is `Cache-Control: no-store`.
 
-The app posts again whenever iOS hands it a new push-to-start token, and each time it comes to the front.
+The app posts after each push registration the server confirms (app start, sign-in, a property switch),
+and again whenever iOS hands it a new push-to-start token.
 
 ## The app side: where it lives and how it is built
 
