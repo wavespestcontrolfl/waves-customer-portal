@@ -209,11 +209,14 @@ const CUSTOMER = {
   city: 'Bradenton', state: 'FL', zip: '34205',
 };
 
+// The engine's lawn line as service-pricing.js returns it: the visit count is
+// the numeric `frequency` and nothing else. This fixture once carried a
+// visitsPerYear the engine never sets, which hid that the stored line lacked
+// it (a lawn purchase then booked one visit and no series).
 const LAWN_LINE = {
   service: 'lawn_care',
   name: 'Lawn Care — 9x applications/yr',
   frequency: 9,
-  visitsPerYear: 9,
   monthlyAfterDiscount: 63,
   annualAfterDiscount: 756,
   annual: 756,

@@ -401,9 +401,15 @@ async function initPurchase({ customerId, clicked }) {
   // converter's recurringLinesFromEngineResult reads in production), with
   // the selection flags acceptance requires. No customerSelection.frequency
   // is ever set — the converter would treat it as the accepted plan cadence.
+  // visitsPerYear is the count the per-application price was divided by,
+  // stated explicitly: the engine's lawn line carries it only as a numeric
+  // `frequency`, and the converter seeds a lawn series from an explicit count
+  // alone, so without it a lawn purchase booked one visit and no series
+  // (one-tap-purchase-postgres.test.js).
   const storedLine = {
     ...line,
     name: line.name || offer.option.label || variant.label,
+    visitsPerYear: visits,
     selected: true,
     isSelected: true,
   };
