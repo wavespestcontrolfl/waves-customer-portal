@@ -375,6 +375,7 @@ async function recordBouncedTrackText({ sid } = {}) {
 module.exports = {
   sameTextDay,
   dayOf,
+  joinLabels,
   sendTrackTextOnce,
   recordBouncedTrackText,
 };
