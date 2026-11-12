@@ -24,7 +24,7 @@ vi.mock('../utils/api', () => {
 });
 
 import api from '../utils/api';
-import { DashboardTab } from './PortalPage';
+import { DashboardTab, MyPlanTab } from './PortalPage';
 
 const customer = {
   id: 'cust-1', firstName: 'Pat', lastName: 'Customer',
@@ -355,5 +355,59 @@ describe('one-tap purchase CTA gating', () => {
     fireEvent.click(await screen.findByText('Add now — $84.00 per application'));
     expect(await screen.findByText('This offer changed')).toBeInTheDocument();
     expect(screen.getByText('Refresh the page')).toBeInTheDocument();
+  });
+});
+
+// Owner 2026-11-11 (option A): My Plan lists every service the customer does
+// not have, each bought through the same purchase as the Home card.
+describe('My Plan "Add a service"', () => {
+  const offer = (over) => ({
+    serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', relationship: 'add',
+    option: { id: 'lawn-enhanced', label: 'Lawn care — 9x applications/yr', cadence: '9 applications/yr', perVisit: 84, waveguardTier: 'Silver' },
+    fingerprint: 'fp-lawn',
+    ...over,
+  });
+  const TREE = offer({
+    serviceKey: 'tree_shrub', label: 'Tree & Shrub Care', fingerprint: 'fp-tree',
+    option: { id: 'tree-standard', label: 'Standard tree & shrub care', cadence: '6 visits/year', perVisit: 96, waveguardTier: 'Silver' },
+  });
+
+  // The rodent line's cadence has no "/year" to rewrite; it reads as written.
+  const RODENT = offer({
+    serviceKey: 'rodent_bait', label: 'Rodent Bait Stations', fingerprint: 'fp-rodent',
+    option: { id: 'rodent-bait', label: 'Rodent monitoring stations', cadence: 'Quarterly station service', perVisit: 80.1, waveguardTier: 'Silver' },
+  });
+
+  it('lists each service with its visits and price, and a tap buys THAT service', async () => {
+    api.oneTapOffers.mockResolvedValue({ offers: [offer(), TREE, RODENT] });
+    render(<MyPlanTab customer={customer} />);
+
+    expect(await screen.findByText('Add to your plan')).toBeInTheDocument();
+    expect(screen.getByText('9 applications a year.')).toBeInTheDocument();
+    expect(screen.getByText('6 visits a year.')).toBeInTheDocument();
+    expect(screen.getByText('Quarterly station service.')).toBeInTheDocument();
+    expect(screen.getByText('Add now — $80.10 per application')).toBeInTheDocument();
+    expect(screen.getByText('Add now — $84.00 per application')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Add now — $96.00 per application'));
+    expect(await screen.findByRole('dialog', { name: /Add Tree & Shrub Care/ })).toBeInTheDocument();
+    // The second card's identity, not the first's: the server prices and
+    // drift-checks the family named here.
+    expect(api.oneTapInit).toHaveBeenCalledWith({
+      fingerprint: 'fp-tree', serviceKey: 'tree_shrub', optionId: 'tree-standard', perApplication: 96,
+    });
+  });
+
+  it('nothing to sell (or the gate off) renders no card', async () => {
+    api.oneTapOffers.mockResolvedValue({ offers: [] });
+    render(<MyPlanTab customer={customer} />);
+    await vi.waitFor(() => expect(api.oneTapOffers).toHaveBeenCalled());
+    expect(screen.queryByText('Add to your plan')).not.toBeInTheDocument();
+  });
+
+  it('a cancelled account never asks for offers', () => {
+    // Mount effects have run by the time render returns.
+    render(<MyPlanTab customer={{ ...customer, cancelled: true }} />);
+    expect(api.oneTapOffers).not.toHaveBeenCalled();
   });
 });

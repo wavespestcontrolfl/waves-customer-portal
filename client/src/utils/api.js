@@ -791,6 +791,12 @@ export class ApiClient {
 
   // ---- One-tap purchase (GATE_ONE_TAP_PURCHASE; the CTA renders only when
   // the recommendations payload says oneTap:true) ----
+  // My Plan "Add a service": one priced offer per service the customer does
+  // not have (gate-off answers an empty list).
+  oneTapOffers() {
+    return this.request('/one-tap/offers');
+  }
+
   oneTapInit(payload) {
     return this.request('/one-tap/init', {
       method: 'POST',

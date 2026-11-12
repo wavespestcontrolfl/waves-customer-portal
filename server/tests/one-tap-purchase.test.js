@@ -536,6 +536,44 @@ describe('initPurchase — WaveGuard discount shown to the customer', () => {
   });
 });
 
+// Owner 2026-11-11: My Plan lists every service the customer does not have,
+// so the tapped family is no longer always the one the ladder would pick.
+describe('buying a chosen service (My Plan "Add a service")', () => {
+  test('init prices the family the customer tapped, through the offer core', async () => {
+    await oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED });
+    expect(buildPortalPurchaseBasis).toHaveBeenCalledWith('cust-1', db, { targetKey: 'lawn_care' });
+  });
+
+  test('a family outside the purchase list is never sold: termite charges its station installation at the start', async () => {
+    await expect(oneTap.initPurchase({
+      customerId: 'cust-1', clicked: { ...CLICKED, serviceKey: 'termite' },
+    })).rejects.toMatchObject({ status: 409 });
+    expect(buildPortalPurchaseBasis).not.toHaveBeenCalled();
+    expect(db.__state.tables.estimates).toHaveLength(0);
+  });
+
+  // Owner 2026-11-12: mosquito and rodent bait join pest, lawn and tree and
+  // shrub in the list.
+  test('the list carries one priced offer per service the offer core can sell, in list order', async () => {
+    const offerFor = (serviceKey) => ({ ...OFFER_PAYLOAD, serviceKey, fingerprint: `fp-${serviceKey}` });
+    buildPortalPurchaseBasis.mockImplementation(async (_id, _db, { targetKey }) => (
+      // Pest is owned (no basis); every other family is purchasable.
+      targetKey === 'pest_control' ? null : { ...BASIS, payload: offerFor(targetKey) }
+    ));
+    const out = await oneTap.listOffers({ customerId: 'cust-1' });
+    expect(out.offers).toEqual(['lawn_care', 'tree_shrub', 'mosquito', 'rodent_bait'].map(offerFor));
+  });
+
+  test('an account init would refuse gets an empty list, and no offer is priced for it', async () => {
+    db.__state.tables.customers[0] = {
+      ...db.__state.tables.customers[0], pipeline_stage: 'active_customer', monthly_rate: 89, billing_mode: 'monthly_membership',
+    };
+    const out = await oneTap.listOffers({ customerId: 'cust-1' });
+    expect(out.offers).toEqual([]);
+    expect(buildPortalPurchaseBasis).not.toHaveBeenCalled();
+  });
+});
+
 describe('initPurchase — GH r5 hardening', () => {
   test('a payer-billed account is refused at init — nothing persists (GH r6 P0)', async () => {
     PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1' });
@@ -563,11 +601,11 @@ describe('initPurchase — GH r5 hardening', () => {
     getAvailableSlots.mockResolvedValue({ primary: [SLOT], expander: [], nearby: true });
   });
 
-  test('an engine run that produces a due-at-start/one-time component refuses (belt to the offer demotion)', async () => {
-    pricingEngine.generateEstimate.mockReturnValue({
-      ...ENGINE_RESULT,
-      lineItems: [{ ...LAWN_LINE, installation: { price: 300 } }],
-    });
+  test.each([
+    ['a due-at-start component on the service line', { lineItems: [{ ...LAWN_LINE, installation: { price: 300 } }] }],
+    ['a one-time line beside the service (the bait-station setup)', { summary: { ...ENGINE_RESULT.summary, oneTimeTotal: 99 } }],
+  ])('an engine run with %s refuses (belt to the offer demotion)', async (_label, engineOverride) => {
+    pricingEngine.generateEstimate.mockReturnValue({ ...ENGINE_RESULT, ...engineOverride });
     await expect(oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED }))
       .rejects.toMatchObject({ status: 409 });
     expect(db.__state.tables.one_tap_purchases).toHaveLength(0);
@@ -1204,6 +1242,7 @@ describe('route contracts', () => {
   });
 
   const serviceMock = {
+    listOffers: jest.fn(),
     initPurchase: jest.fn(),
     reserve: jest.fn(),
     release: jest.fn(),
@@ -1242,7 +1281,7 @@ describe('route contracts', () => {
 
   const PURCHASE_ID = '11111111-2222-4333-8444-555555555555';
 
-  test('gate off: every endpoint answers 404 Not available', async () => {
+  test('gate off: every purchase endpoint answers 404 Not available; the My Plan list answers empty', async () => {
     const base = await listen(appWithGate(false));
     const init = await fetch(`${base}/api/one-tap/init`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
@@ -1255,8 +1294,22 @@ describe('route contracts', () => {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
     });
     expect(confirm.status).toBe(404);
+    // Asked on every My Plan load, so gate-off is "nothing to render".
+    const offers = await fetch(`${base}/api/one-tap/offers`);
+    expect(offers.status).toBe(200);
+    expect(await offers.json()).toEqual({ offers: [] });
     expect(serviceMock.initPurchase).not.toHaveBeenCalled();
     expect(serviceMock.confirm).not.toHaveBeenCalled();
+    expect(serviceMock.listOffers).not.toHaveBeenCalled();
+  });
+
+  test('gate on: GET /offers answers the list for the signed-in customer (never read as a purchase id)', async () => {
+    serviceMock.listOffers.mockResolvedValue({ offers: [{ serviceKey: 'lawn_care' }] });
+    const base = await listen(appWithGate(true));
+    const r = await fetch(`${base}/api/one-tap/offers`);
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ offers: [{ serviceKey: 'lawn_care' }] });
+    expect(serviceMock.listOffers).toHaveBeenCalledWith({ customerId: 'cust-1' });
   });
 
   test('confirm keeps its OWN rate allowance — reserve churn can never 429 the required confirmation (GH r11 P2)', async () => {

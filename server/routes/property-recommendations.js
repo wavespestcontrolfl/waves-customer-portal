@@ -30,6 +30,7 @@ const { buildPropertyRecommendations, mosquitoNoteCard } = require('../services/
 const { buildPortalOffer } = require('../services/service-report/cross-sell');
 const { normalizeRequestedServiceKey } = require('../services/estimate-add-service-request');
 const { writeOrRefreshCtaRequest } = require('../services/cta-service-request');
+const { accountCanOneTap } = require('../services/one-tap-purchase');
 
 router.use(authenticate);
 
@@ -52,36 +53,11 @@ router.get('/', async (req, res, next) => {
     const result = await buildPropertyRecommendations(req.customerId);
     // Server-computed one-tap availability (bet 3): the client shows the
     // priced offer's purchase CTA only when this is true. Additive — the
-    // existing fields are untouched. Two fences mirror init's own refusals
-    // so the button never renders for an account init would deterministically
-    // 409: monthly-membership lanes (the converter would fold the add-on
-    // into monthly_rate, contradicting per-application terms) and
-    // non-members (isExistingCustomer derives from the same qualifying-rows
-    // authority — their $99 setup fee would be silently waived). The write
-    // side re-checks both.
-    let oneTap = gateEnvValue('GATE_ONE_TAP_PURCHASE');
-    if (oneTap) {
-      const { customerPreservesMonthlyMembership } = require('../services/billing-cadence');
-      const customer = await db('customers')
-        .where({ id: req.customerId })
-        .first('pipeline_stage', 'monthly_rate', 'billing_mode');
-      oneTap = !!customer && !customerPreservesMonthlyMembership(customer);
-    }
-    if (oneTap) {
-      const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
-      const qualifyingKeys = await loadExistingQualifyingServiceKeys(db, req.customerId).catch(() => []);
-      oneTap = qualifyingKeys.length > 0;
-    }
-    if (oneTap) {
-      // Payer fence mirror (GH r6 P0): payer-billed accounts are fenced out
-      // of one-tap at init/confirm — the flow's card-collection step would
-      // otherwise enroll the homeowner's card on a payer-routed account.
-      // Fail closed: an unknowable payer picture hides the button.
-      const { resolveForInvoice } = require('../services/payer');
-      oneTap = await resolveForInvoice({ customerId: req.customerId, throwOnError: true })
-        .then((p) => !p?.payerId)
-        .catch(() => false);
-    }
+    // existing fields are untouched. accountCanOneTap mirrors init's own
+    // refusals (monthly-membership lanes, non-members, payer-billed
+    // accounts), so the button never renders for an account init would
+    // deterministically 409. The write side re-checks each.
+    const oneTap = gateEnvValue('GATE_ONE_TAP_PURCHASE') && await accountCanOneTap(req.customerId);
     return res.json({ available: true, oneTap, ...result });
   } catch (err) {
     next(err);

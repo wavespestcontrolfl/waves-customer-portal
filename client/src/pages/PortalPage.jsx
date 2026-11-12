@@ -737,6 +737,40 @@ function usePropertyRecommendations() {
 }
 
 // =========================================================================
+// MY PLAN "ADD A SERVICE" HOOK (owner 2026-11-11) — one priced offer for each
+// service the customer does not have, bought through the same one-tap
+// purchase as the Home card. Dark behind GATE_ONE_TAP_PURCHASE: gate-off
+// answers an empty list and the card renders nothing. Best-effort: a failed
+// load just hides the card. `enabled` is false for a cancelled account,
+// whose session may not read it.
+// =========================================================================
+function usePlanOffers(enabled) {
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    if (!enabled) return undefined;
+    let cancelled = false;
+    api.oneTapOffers()
+      .then((d) => {
+        if (cancelled || !d?.offers?.length) return;
+        setData({
+          oneTap: true,
+          cards: d.offers.map((offer) => ({
+            ...offer,
+            id: `plan_offer_${offer.serviceKey}`,
+            kind: 'offer',
+            title: offer.label,
+            // "9 applications/yr" reads "9 applications a year." on the card.
+            body: offer.option?.cadence ? `${String(offer.option.cadence).replace(/\/(yr|year)$/, ' a year')}.` : '',
+          })),
+        });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [enabled]);
+  return data;
+}
+
+// =========================================================================
 // PROPERTY ALERTS HOOK — recent advisories from the daily alerts sweep
 // (dark behind GATE_PROPERTY_ALERTS; gate-off answers available:false and
 // the card renders nothing). Best-effort: a failed load just hides the card.
@@ -1044,14 +1078,27 @@ const RECOMMENDATION_PRIORITY_CHIPS = {
 const RECOMMENDATION_ICONS = {
   irrigation_advice: 'droplet',
   mosquito_note: 'bug',
-  // Offer icon by service family (matrix targets only).
+  // Offer icon by service family: the matrix targets, and the two families
+  // only the My Plan list offers.
   pest_control: 'shield',
   lawn_care: 'leaf',
   tree_shrub: 'tree',
   termite: 'shield',
+  mosquito: 'bug',
+  rodent_bait: 'rat',
 };
 
-function RecommendationsCard({ data, customer }) {
+// The Home stack's heading, and the My Plan "Add a service" list's.
+const RECOMMENDATIONS_HEADING = {
+  icon: 'sparkles', label: 'Recommendations', title: 'For your property',
+  subtitle: 'Services that fit this property and your current plan.',
+};
+const ADD_SERVICE_HEADING = {
+  icon: 'plus', label: 'Add a service', title: 'Add to your plan',
+  subtitle: 'Priced for this property. You pay per application, after each visit.',
+};
+
+function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
   // Per-card request state: idle → sending → sent | stale | failed.
   const [requestStates, setRequestStates] = useState({});
   // One-tap purchase overlay target (bet 3) — a priced offer card while the
@@ -1173,10 +1220,10 @@ function RecommendationsCard({ data, customer }) {
   return (
     <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 20 }}>
       <div data-glass="chip" style={CUSTOMER_SECTION_LABEL}>
-        <Icon name="sparkles" size={14} strokeWidth={2} />Recommendations
+        <Icon name={heading.icon} size={14} strokeWidth={2} />{heading.label}
       </div>
-      <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>For your property</div>
-      <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.45 }}>Services that fit this property and your current plan.</div>
+      <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>{heading.title}</div>
+      <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.45 }}>{heading.subtitle}</div>
       <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
         {visibleCards.map((card) => {
           const chip = RECOMMENDATION_PRIORITY_CHIPS[card.priority] || RECOMMENDATION_PRIORITY_CHIPS.low;
@@ -3407,7 +3454,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
         <PropertyScoreCard data={propertyScore} compact={compact} />
       )}
 
-      <RecommendationsCard data={propertyRecommendations} customer={customer} />
+      <RecommendationsCard data={propertyRecommendations} />
 
       {!dashboardSecondarySelection && <PropertyAlertsCard data={propertyAlerts} />}
 
@@ -11742,6 +11789,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
   // API client's retry traffic for data the cancelled panel never renders
   // (codex GH r17 P2).
   const lawnHealth = useLawnHealth(customer?.cancelled === true ? null : customer.id, { currentEntry, savedScope, selectedPropertyId: selectedProperty?.propertyId || null, onSavedScopeUnavailable });
+  const planOffers = usePlanOffers(customer?.cancelled !== true);
   const compact = useIsMobile(760);
   // Real billing mode (owner 2026-07-11): per-application / prepaid plans
   // must not present a "$X per month" plan rate — same source of truth as
@@ -12508,6 +12556,8 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
               </section>
             )
           )}
+
+          <RecommendationsCard data={planOffers} heading={ADD_SERVICE_HEADING} />
 
           <WavesAiPricingPanel
             compact={compact}
