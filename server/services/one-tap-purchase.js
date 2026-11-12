@@ -32,7 +32,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const slotReservation = require('./slot-reservation');
 const { getAvailableSlots } = require('./estimate-slot-availability');
-const { buildPortalPurchaseBasis, cacheOnlyPropertyLookup, OFFER_LADDER } = require('./service-report/cross-sell');
+const { buildPortalPurchaseBasis, cacheOnlyPropertyLookup, PURCHASE_FAMILIES } = require('./service-report/cross-sell');
 const { acquireOccupancyLock } = require('./scheduling/occupancy');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { customerPreservesMonthlyMembership, parseEstimateData, roundMoney } = require('./billing-cadence');
@@ -265,10 +265,14 @@ async function accountCanOneTap(customerId) {
 // off; the pricing panel below the list still takes a request for it.
 async function listOffers({ customerId }) {
   if (!(await accountCanOneTap(customerId))) return { offers: [] };
-  const bases = await Promise.all(
-    OFFER_LADDER.map((targetKey) => buildPortalPurchaseBasis(customerId, db, { targetKey })),
-  );
-  return { offers: bases.filter(Boolean).map((basis) => basis.payload) };
+  // One family at a time: each build is a run of short reads, and five at
+  // once would hold five pool connections for every My Plan load.
+  const offers = [];
+  for (const targetKey of PURCHASE_FAMILIES) {
+    const basis = await buildPortalPurchaseBasis(customerId, db, { targetKey });
+    if (basis) offers.push(basis.payload);
+  }
+  return { offers };
 }
 
 // ── initPurchase ─────────────────────────────────────────────────────────
@@ -280,8 +284,9 @@ async function initPurchase({ customerId, clicked }) {
   // service they do not have, so the tap is no longer always the ladder's
   // pick). The offer core prices that family under the same ownership,
   // premises and pricing rules, and answers no basis when it is owned,
-  // unprovable or unpriced. A family outside the ladder is never sold here.
-  const targetKey = OFFER_LADDER.find((key) => key === clicked?.serviceKey);
+  // unprovable or unpriced. A family outside the purchase list (termite) is
+  // never sold here.
+  const targetKey = PURCHASE_FAMILIES.find((key) => key === clicked?.serviceKey);
   const basis = targetKey ? await buildPortalPurchaseBasis(customerId, db, { targetKey }) : null;
   if (!basis) throw httpError(409, OFFER_CHANGED);
   const offer = basis.payload;
@@ -367,7 +372,11 @@ async function initPurchase({ customerId, clicked }) {
   // station installation): if THIS engine run produced one anyway, the
   // per-application-only draft below would silently drop a charge the
   // customer owes. Refuse — never sell an undisclosed one-time component.
-  if (Number(amount.dueAtStart) > 0 || Number(amount.oneTime) > 0) {
+  // The same holds for a one-time line beside the service's own (the $99
+  // bait-station setup a customer with no other WaveGuard service owes): a
+  // purchase bills per application and nothing else.
+  if (Number(amount.dueAtStart) > 0 || Number(amount.oneTime) > 0
+    || Number(engineResult.summary?.oneTimeTotal) > 0) {
     throw httpError(409, OFFER_CHANGED);
   }
   const perVisit = Math.round((annualAfter / visits) * 100) / 100;

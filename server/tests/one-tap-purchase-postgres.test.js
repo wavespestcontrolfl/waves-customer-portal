@@ -65,7 +65,7 @@ const { randomUUID } = require('node:crypto');
 const { addETDays, etDateString } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
 const { gates } = require('../config/feature-gates');
-const { buildPortalOffer } = require('../services/service-report/cross-sell');
+const { PURCHASE_FAMILIES } = require('../services/service-report/cross-sell');
 const oneTap = require('../services/one-tap-purchase');
 
 postgres('one-tap purchase against migrated PostgreSQL', () => {
@@ -159,10 +159,11 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
     return slotId;
   }
 
-  // The whole flow a customer walks: tap the Home card's offer, pick a time,
-  // confirm.
+  // The whole flow a customer walks: tap a service in the My Plan list, pick
+  // a time, confirm.
   async function buy(serviceKey) {
-    const offer = await buildPortalOffer(ids.customer, require('../models/db'));
+    const { offers } = await oneTap.listOffers({ customerId: ids.customer });
+    const offer = offers.find((candidate) => candidate.serviceKey === serviceKey);
     expect(offer).toMatchObject({ serviceKey, mode: 'priced' });
     // The four fields the buy button posts (routes/one-tap-purchase.js).
     const init = await oneTap.initPurchase({ customerId: ids.customer, clicked: {
@@ -183,13 +184,11 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
       now: new Date(), cutoff: new Date(Date.now() + 60000), estimateIds: [estimateId], coverage: new Map(),
     });
 
-  // The service the Home card offers a member who has one service: lawn care
-  // to a pest customer, pest control to a lawn customer.
-  test.each([
-    ['lawn_care', 'pest_control'],
-    ['pest_control', 'lawn_care'],
-  ])('buying %s books a year of visits at the price shown, and reprices the current %s to the price shown', async (family, owned) => {
-    await seedOwnedService(owned);
+  // Every family the My Plan list can sell, bought by a member who has one
+  // other service. A family added to PURCHASE_FAMILIES is proven here or
+  // fails here.
+  test.each(PURCHASE_FAMILIES)('buying %s books a year of visits at the price shown, and reprices the current service to the price shown', async (family) => {
+    await seedOwnedService(family === 'pest_control' ? 'lawn_care' : 'pest_control');
     const { init, done } = await buy(family);
 
     expect(done).toMatchObject({ success: true, perVisit: init.perVisit });

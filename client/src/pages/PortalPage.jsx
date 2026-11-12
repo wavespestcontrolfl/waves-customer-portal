@@ -1078,11 +1078,14 @@ const RECOMMENDATION_PRIORITY_CHIPS = {
 const RECOMMENDATION_ICONS = {
   irrigation_advice: 'droplet',
   mosquito_note: 'bug',
-  // Offer icon by service family (matrix targets only).
+  // Offer icon by service family: the matrix targets, and the two families
+  // only the My Plan list offers.
   pest_control: 'shield',
   lawn_care: 'leaf',
   tree_shrub: 'tree',
   termite: 'shield',
+  mosquito: 'bug',
+  rodent_bait: 'rat',
 };
 
 // The Home stack's heading, and the My Plan "Add a service" list's.

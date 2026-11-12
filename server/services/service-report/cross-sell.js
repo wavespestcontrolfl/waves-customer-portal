@@ -46,6 +46,16 @@ const logger = require('../logger');
 // can never disagree about what a customer may be offered.
 const OFFER_LADDER = ['pest_control', 'lawn_care', 'tree_shrub'];
 
+// What a customer may CHOOSE to add from the My Plan "Add a service" list
+// (owner 2026-11-12: "let's have the rodent bait and the mosquito also added
+// to it"): the ladder's three, plus mosquito and rodent bait. No surface
+// PUSHES those two: the ladder above still picks the Home card and the report
+// card, and buildOfferForFamily (photo triage) answers null for them as it
+// always has. Termite stays out: its station installation is charged at the
+// start, and a one-tap purchase charges nothing at confirm.
+const PURCHASE_ONLY_FAMILIES = ['mosquito', 'rodent_bait'];
+const PURCHASE_FAMILIES = [...OFFER_LADDER, ...PURCHASE_ONLY_FAMILIES];
+
 // Guarded-ownership families for the report's recent-report ambiguity guard
 // ONLY (see guardedFamilies below) — separate from OFFER_LADDER because
 // termite is no longer an offer rung on ANY surface but a recent,
@@ -63,12 +73,16 @@ const GUARDED_OWNERSHIP_FAMILIES = [...OFFER_LADDER, 'termite'];
 // words — one vocabulary, no parallel matcher to drift. SHARED with the
 // portal/photo-triage offer surfaces below (buildPortalOffer,
 // buildOfferForFamily) — never add a family here that those surfaces should
-// not also start reaching by requestedTargetKey.
+// not also start reaching by requestedTargetKey. mosquito and rodent_bait
+// are here for the My Plan purchase list alone (PURCHASE_ONLY_FAMILIES): the
+// ladder never picks them and buildOfferForFamily refuses them.
 const OFFER_PROMPTS = {
   pest_control: 'pest control',
   lawn_care: 'lawn care',
   tree_shrub: 'tree and shrub',
   termite: 'termite',
+  mosquito: 'mosquito',
+  rodent_bait: 'rodent bait stations',
 };
 
 // Card display names — stable copy, independent of pricing-ai's internal
@@ -78,16 +92,23 @@ const OFFER_LABELS = {
   lawn_care: 'Lawn Care',
   tree_shrub: 'Tree & Shrub Care',
   termite: 'Termite Protection',
+  mosquito: 'Mosquito Control',
+  rodent_bait: 'Rodent Bait Stations',
 };
 
 // The single variant the card shows, matching the generic-prompt default the
 // pricing panel auto-selects for each family (quarterly pest, 9x lawn,
-// standard T&S; termite has exactly one variant).
+// standard T&S, monthly mosquito; termite and rodent bait have exactly one
+// variant). Monthly is also the one mosquito program a customer can start in
+// any month: the seasonal program has no visit to book from November to
+// January.
 const PREFERRED_OPTION_IDS = {
   pest_control: 'pest-quarterly',
   lawn_care: 'lawn-enhanced',
   tree_shrub: 'tree-standard',
   termite: 'termite-basic',
+  mosquito: 'mosquito-monthly',
+  rodent_bait: 'rodent-bait',
 };
 
 // Ownership vocabulary (waveguard-existing-services) spells the termite
@@ -1316,6 +1337,8 @@ function unavailableBasis(targetKey, customer = null, ownedKeys = [], primaryStr
 // outage as confirmed staleness. Creation-time callers keep the
 // fail-closed 'unavailable' answer.
 async function buildOfferForFamily(customerId, database, targetKey, { throwOnError = false, ...opts } = {}) {
+  // Priced for the My Plan purchase list alone: unknown families here.
+  if (PURCHASE_ONLY_FAMILIES.includes(targetKey)) return null;
   try {
     const basis = await composePortalOffer(customerId, database, { ...opts, targetKey, throwOnError });
     return basis ? basis.payload : null;
@@ -1349,9 +1372,9 @@ module.exports = {
   buildPortalOffer,
   buildOfferForFamily,
   buildPortalPurchaseBasis,
-  // The families any surface may offer. The My Plan "Add a service" list
-  // walks it, and a one-tap purchase accepts no family outside it.
-  OFFER_LADDER,
+  // The families a customer may choose to add: the My Plan "Add a service"
+  // list walks it, and a one-tap purchase accepts no family outside it.
+  PURCHASE_FAMILIES,
   // The cache-only lookup discipline both offer surfaces price under — the
   // one-tap purchase re-resolves the same property context through it (one
   // definition; a live lookup must never run inside a portal view).

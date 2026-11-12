@@ -15,7 +15,7 @@ import {
   Medal, Megaphone, MessageCircle, MessageSquare, Microscope,
   Minus, MoreHorizontal, Mouse, Newspaper, Palmtree, Paperclip,
   PartyPopper, PawPrint, Pencil, Phone, Plus, Printer,
-  RefreshCw, Rocket, Ruler, Search, Share2,
+  Rat, RefreshCw, Rocket, Ruler, Search, Share2,
   Shield, ShieldCheck, Smartphone, Sparkles, Sprout,
   Star, Sun, Thermometer, Tornado, TreePine,
   TrendingUp, Trophy, Truck, Unlock, Upload,
@@ -129,6 +129,7 @@ const MAP = {
   tornado: Tornado,
   bug: Bug,
   mouse: Mouse,
+  rat: Rat,
   fish: Fish,
   paw: PawPrint,
 

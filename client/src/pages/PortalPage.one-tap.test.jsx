@@ -372,13 +372,21 @@ describe('My Plan "Add a service"', () => {
     option: { id: 'tree-standard', label: 'Standard tree & shrub care', cadence: '6 visits/year', perVisit: 96, waveguardTier: 'Silver' },
   });
 
+  // The rodent line's cadence has no "/year" to rewrite; it reads as written.
+  const RODENT = offer({
+    serviceKey: 'rodent_bait', label: 'Rodent Bait Stations', fingerprint: 'fp-rodent',
+    option: { id: 'rodent-bait', label: 'Rodent monitoring stations', cadence: 'Quarterly station service', perVisit: 80.1, waveguardTier: 'Silver' },
+  });
+
   it('lists each service with its visits and price, and a tap buys THAT service', async () => {
-    api.oneTapOffers.mockResolvedValue({ offers: [offer(), TREE] });
+    api.oneTapOffers.mockResolvedValue({ offers: [offer(), TREE, RODENT] });
     render(<MyPlanTab customer={customer} />);
 
     expect(await screen.findByText('Add to your plan')).toBeInTheDocument();
     expect(screen.getByText('9 applications a year.')).toBeInTheDocument();
     expect(screen.getByText('6 visits a year.')).toBeInTheDocument();
+    expect(screen.getByText('Quarterly station service.')).toBeInTheDocument();
+    expect(screen.getByText('Add now — $80.10 per application')).toBeInTheDocument();
     expect(screen.getByText('Add now — $84.00 per application')).toBeInTheDocument();
 
     fireEvent.click(screen.getByText('Add now — $96.00 per application'));

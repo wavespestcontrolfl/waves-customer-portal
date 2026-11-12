@@ -544,7 +544,7 @@ describe('buying a chosen service (My Plan "Add a service")', () => {
     expect(buildPortalPurchaseBasis).toHaveBeenCalledWith('cust-1', db, { targetKey: 'lawn_care' });
   });
 
-  test('a family outside the ladder is never sold: termite left one-tap on 2026-09-28', async () => {
+  test('a family outside the purchase list is never sold: termite charges its station installation at the start', async () => {
     await expect(oneTap.initPurchase({
       customerId: 'cust-1', clicked: { ...CLICKED, serviceKey: 'termite' },
     })).rejects.toMatchObject({ status: 409 });
@@ -552,15 +552,16 @@ describe('buying a chosen service (My Plan "Add a service")', () => {
     expect(db.__state.tables.estimates).toHaveLength(0);
   });
 
-  test('the list carries one priced offer per service the offer core can sell, in ladder order', async () => {
-    const treeOffer = { ...OFFER_PAYLOAD, serviceKey: 'tree_shrub', label: 'Tree & Shrub Care', fingerprint: 'fp-tree' };
-    buildPortalPurchaseBasis.mockImplementation(async (_id, _db, { targetKey }) => ({
-      // Pest is owned (no basis); lawn and tree & shrub are purchasable.
-      lawn_care: { ...BASIS },
-      tree_shrub: { ...BASIS, payload: treeOffer },
-    }[targetKey] || null));
+  // Owner 2026-11-12: mosquito and rodent bait join pest, lawn and tree and
+  // shrub in the list.
+  test('the list carries one priced offer per service the offer core can sell, in list order', async () => {
+    const offerFor = (serviceKey) => ({ ...OFFER_PAYLOAD, serviceKey, fingerprint: `fp-${serviceKey}` });
+    buildPortalPurchaseBasis.mockImplementation(async (_id, _db, { targetKey }) => (
+      // Pest is owned (no basis); every other family is purchasable.
+      targetKey === 'pest_control' ? null : { ...BASIS, payload: offerFor(targetKey) }
+    ));
     const out = await oneTap.listOffers({ customerId: 'cust-1' });
-    expect(out.offers).toEqual([OFFER_PAYLOAD, treeOffer]);
+    expect(out.offers).toEqual(['lawn_care', 'tree_shrub', 'mosquito', 'rodent_bait'].map(offerFor));
   });
 
   test('an account init would refuse gets an empty list, and no offer is priced for it', async () => {
@@ -600,11 +601,11 @@ describe('initPurchase — GH r5 hardening', () => {
     getAvailableSlots.mockResolvedValue({ primary: [SLOT], expander: [], nearby: true });
   });
 
-  test('an engine run that produces a due-at-start/one-time component refuses (belt to the offer demotion)', async () => {
-    pricingEngine.generateEstimate.mockReturnValue({
-      ...ENGINE_RESULT,
-      lineItems: [{ ...LAWN_LINE, installation: { price: 300 } }],
-    });
+  test.each([
+    ['a due-at-start component on the service line', { lineItems: [{ ...LAWN_LINE, installation: { price: 300 } }] }],
+    ['a one-time line beside the service (the bait-station setup)', { summary: { ...ENGINE_RESULT.summary, oneTimeTotal: 99 } }],
+  ])('an engine run with %s refuses (belt to the offer demotion)', async (_label, engineOverride) => {
+    pricingEngine.generateEstimate.mockReturnValue({ ...ENGINE_RESULT, ...engineOverride });
     await expect(oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED }))
       .rejects.toMatchObject({ status: 409 });
     expect(db.__state.tables.one_tap_purchases).toHaveLength(0);
