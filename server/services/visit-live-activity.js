@@ -48,6 +48,7 @@ const COMPLETE_SHOWN_MS = 15 * MINUTE;
 const END_PUSH_TTL_MS = 8 * 60 * MINUTE;
 const UPDATE_PUSH_TTL_MS = 60 * MINUTE;
 const CHANNEL_KEPT_MS = 9 * 60 * MINUTE;
+const CHANNEL_REMOVAL_TRIED_MS = 24 * 60 * MINUTE;
 // A start in progress in another process is left alone this long before a sweep takes the row over.
 const STARTING_GRACE_MS = MINUTE;
 // iOS itself ends a card after 8 hours. A row older than this is closed whatever Apple answers.
@@ -386,6 +387,13 @@ async function startCard(stop, view, now) {
 
 // ---- Keep a live card current ------------------------------------------------
 
+// Apple's answer says the channel itself is no good (its reason names the channel), as against a failure of
+// the request around it: a timeout, a busy Apple, a bad key, a refused payload. Apple's channel reasons are
+// not listed in its documents, so the test is the word, not a list.
+function channelRefused(result) {
+  return !result.ok && !result.retryable && !result.skipped && /channel/i.test(String(result.reason || ''));
+}
+
 // The state for an end that has no visit to show (the card leaves at once, so nobody reads it).
 function lastStateOf(session) {
   let stored = session.state;
@@ -438,11 +446,15 @@ async function sendInOrder(session, { target, state, sig, members }, now) {
     expiresAt: new Date(now.getTime() + (ending ? END_PUSH_TTL_MS : UPDATE_PUSH_TTL_MS)),
   });
   if (!sent.ok) {
-    // A failure that can pass (a timeout, a busy Apple) leaves the row as it is: the next pass sends again.
-    if (sent.retryable || sent.skipped) return { action: 'failed', reason: sent.reason };
-    // Apple refused the channel outright, so no later update can reach this card either.
-    await closeSession(session.id, `refused:${sent.reason}`, now);
-    return { action: 'ended', reason: 'refused' };
+    // Apple refused the channel itself: no later update can reach this card either, so the row is closed.
+    if (channelRefused(sent)) {
+      await closeSession(session.id, `refused:${sent.reason}`, now);
+      return { action: 'ended', reason: 'refused' };
+    }
+    // Any other failure (a timeout, a busy Apple, a bad key, a refused payload) can pass or be fixed, and
+    // the card may still be on a phone. The row stays as it is: the next pass sends again, until the row's
+    // age limit closes it.
+    return { action: 'failed', reason: sent.reason };
   }
   // Recorded only by the sender that still holds the newest place: a later sender records its own.
   await db('live_activity_sessions').where({ id: session.id, seq: session.seq + 1 }).update({
@@ -521,20 +533,23 @@ function poke(serviceId) {
   }
 }
 
+// A channel is asked to be removed for one day after its 9 hours are up. Apple answering "removed" or "no
+// such channel" marks it gone, and so does a refusal of the channel itself. Any other failure (a timeout,
+// a bad key) is tried again by the next sweep; a channel still there after the day is left (it costs
+// nothing, and the app has 10,000).
 async function removeOldChannels(now) {
   const la = require('./apns-live-activity');
+  const due = now.getTime() - CHANNEL_KEPT_MS;
   const rows = await db('live_activity_sessions')
-    .whereNotNull('ended_at')
     .whereNotNull('channel_id')
     .whereNull('channel_deleted_at')
-    .where('ended_at', '<', new Date(now.getTime() - CHANNEL_KEPT_MS))
+    .whereBetween('ended_at', [new Date(due - CHANNEL_REMOVAL_TRIED_MS), new Date(due)])
     .limit(SWEEP_LIMIT)
     .select('id', 'channel_id');
   let removed = 0;
   for (const row of rows) {
     const result = await la.deleteChannel({ channelId: row.channel_id });
-    // A refusal that cannot pass is final too: asking again every 2 minutes would change nothing.
-    if (!result.ok && (result.retryable || result.skipped)) continue;
+    if (!result.ok && !channelRefused(result)) continue;
     await db('live_activity_sessions').where({ id: row.id }).update({ channel_deleted_at: now, updated_at: now });
     removed += 1;
   }

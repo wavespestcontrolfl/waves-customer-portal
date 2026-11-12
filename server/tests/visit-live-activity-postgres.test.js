@@ -470,7 +470,7 @@ postgres('Lock Screen visit card against migrated PostgreSQL', () => {
     expect(await card.syncVisit(visitId, { now: at(3) })).toEqual({ action: 'ended', reason: 'complete' });
   });
 
-  test('an Apple failure that can pass is sent again by the next pass; an outright refusal closes the card', async () => {
+  test('a failed update is sent again by the next pass; only Apple\'s refusal of the channel closes the card', async () => {
     const ids = await seedStop();
     const visitId = await addVisit(ids);
     await card.syncVisit(visitId, { now: NOW });
@@ -484,10 +484,23 @@ postgres('Lock Screen visit card against migrated PostgreSQL', () => {
     // The second try carries a later Apple timestamp than the first, so the phone keeps the newest.
     expect(aps(apple.broadcast, 1).timestamp).toBeGreaterThan(aps(apple.broadcast, 0).timestamp);
 
+    // A refusal that is not about the channel (a bad key, a refused payload) can be fixed, and the card is
+    // still on the phone: the row stays live and the end is sent by a later pass.
     await complete(visitId);
+    apple.broadcast.mockResolvedValueOnce({ ok: false, reason: 'InvalidProviderToken' });
+    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'failed', reason: 'InvalidProviderToken' });
+    expect((await sessions(ids.customer))[0]).toMatchObject({ phase: 'on_property', ended_at: null });
+    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'ended', reason: 'complete' });
+    expect(aps(apple.broadcast, 3)).toMatchObject({ event: 'end', 'content-state': { phase: 'complete' } });
+
+    // Apple refuses the channel itself: no update can reach the card, so its row is closed.
+    const gone = await seedStop();
+    const goneVisit = await addVisit(gone);
+    await card.syncVisit(goneVisit, { now: NOW });
+    await arrive(goneVisit);
     apple.broadcast.mockResolvedValueOnce({ ok: false, reason: 'BadChannelId' });
-    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'ended', reason: 'refused' });
-    expect((await sessions(ids.customer))[0].end_reason).toBe('refused:BadChannelId');
+    expect(await card.syncVisit(goneVisit, { now: NOW })).toEqual({ action: 'ended', reason: 'refused' });
+    expect((await sessions(gone.customer))[0].end_reason).toBe('refused:BadChannelId');
   });
 
   test('an update loses its turn to a newer one: it sends nothing and reads again', async () => {
@@ -577,12 +590,39 @@ postgres('Lock Screen visit card against migrated PostgreSQL', () => {
       expect(await card.sweep({ now: at(8 * 60) })).toMatchObject({ channelsRemoved: 0 });
       expect(apple.deleteChannel).not.toHaveBeenCalled();
 
+      // A failure that is not about the channel (a timeout, a bad key) is tried again by the next sweep.
       apple.deleteChannel.mockResolvedValueOnce({ ok: false, reason: 'apns_timeout', retryable: true });
       expect(await card.sweep({ now: at(9 * 60 + 1) })).toMatchObject({ channelsRemoved: 0 });
-      expect(await card.sweep({ now: at(9 * 60 + 3) })).toMatchObject({ channelsRemoved: 1 });
+      apple.deleteChannel.mockResolvedValueOnce({ ok: false, reason: 'InvalidProviderToken' });
+      expect(await card.sweep({ now: at(9 * 60 + 3) })).toMatchObject({ channelsRemoved: 0 });
+      expect((await sessions(ids.customer))[0].channel_deleted_at).toBeNull();
+      expect(await card.sweep({ now: at(9 * 60 + 5) })).toMatchObject({ channelsRemoved: 1 });
       expect(apple.deleteChannel).toHaveBeenLastCalledWith({ channelId: 'channel-1' });
       expect((await sessions(ids.customer))[0].channel_deleted_at).not.toBeNull();
-      expect(await card.sweep({ now: at(9 * 60 + 5) })).toMatchObject({ channelsRemoved: 0 });
+      expect(await card.sweep({ now: at(9 * 60 + 7) })).toMatchObject({ channelsRemoved: 0 });
+      expect(apple.deleteChannel).toHaveBeenCalledTimes(3);
+    });
+
+    test('a channel Apple no longer knows counts as removed; one that will not go is left after a day of tries', async () => {
+      const refused = await seedStop();
+      const refusedVisit = await addVisit(refused);
+      await card.syncVisit(refusedVisit, { now: NOW });
+      await complete(refusedVisit);
+      await card.syncVisit(refusedVisit, { now: NOW });
+      apple.deleteChannel.mockResolvedValueOnce({ ok: false, reason: 'BadChannelId' });
+      expect(await card.sweep({ now: at(9 * 60 + 1) })).toMatchObject({ channelsRemoved: 1 });
+
+      const stuck = await seedStop();
+      const stuckVisit = await addVisit(stuck);
+      await card.syncVisit(stuckVisit, { now: NOW });
+      await complete(stuckVisit);
+      await card.syncVisit(stuckVisit, { now: NOW });
+      apple.deleteChannel.mockReset().mockResolvedValue({ ok: false, reason: 'InvalidProviderToken' });
+      expect(await card.sweep({ now: at(33 * 60 - 1) })).toMatchObject({ channelsRemoved: 0 });
+      expect(apple.deleteChannel).toHaveBeenCalledTimes(1);
+      // A day after its 9 hours were up, the sweep stops asking.
+      expect(await card.sweep({ now: at(33 * 60 + 1) })).toMatchObject({ channelsRemoved: 0 });
+      expect(apple.deleteChannel).toHaveBeenCalledTimes(1);
     });
 
     test('one failing stop does not stop the sweep', async () => {
