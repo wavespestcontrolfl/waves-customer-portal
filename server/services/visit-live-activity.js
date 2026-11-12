@@ -312,14 +312,18 @@ async function startCard(stop, view, now) {
     const answers = results.map((r, i) => ({ device: devices[i].id, ok: Boolean(r.ok), reason: r.reason || null }));
     await db('live_activity_sessions').where({ id: sessionId }).update({ start_results: JSON.stringify(answers), updated_at: now });
     const started = results.filter((r) => r.ok).length;
-    if (!started) {
-      // No phone took the start, so nobody listens on the channel.
+    // A start with no answer (a timeout, a dropped connection) may still have put a card on the phone.
+    const unsure = results.filter((r) => !r.ok && r.uncertain).length;
+    if (!started && !unsure) {
+      // Apple refused every start, so no card exists and nobody listens on the channel.
       const removed = await la.deleteChannel({ channelId });
       await closeSession(sessionId, `no_device_started:${results[0].reason || 'unknown'}`, now, { channelGone: removed.ok });
       return { action: 'none', reason: 'no_device_started' };
     }
-    // Only while the row is still this start's own (seq 0, not started): a later pass that took a stalled
-    // start over has already moved the card on, and its record must stand.
+    // With any start accepted or unsure, the row stays live and keeps its channel, so a card that did reach
+    // a phone still gets its updates and its end. Recorded only while the row is still this start's own
+    // (seq 0, not started): a later pass that took a stalled start over has already moved the card on, and
+    // its record must stand.
     await db('live_activity_sessions').where({ id: sessionId, seq: 0 }).whereNull('started_at').update({
       phase: state.phase,
       phase_since: view.since,
@@ -331,8 +335,8 @@ async function startCard(stop, view, now) {
       last_sent_at: now,
       updated_at: now,
     });
-    logger.info(`[visit-live-activity] card ${sessionId} started (${state.phase}) on ${started} of ${devices.length} iPhone(s)`);
-    return { action: 'started', devices: started };
+    logger.info(`[visit-live-activity] card ${sessionId} started (${state.phase}) on ${started} of ${devices.length} iPhone(s)${unsure ? `, ${unsure} with no answer` : ''}`);
+    return { action: 'started', devices: started, ...(unsure ? { unsure } : {}) };
   } catch (err) {
     // Before any start push: nothing is on a phone, so close the row. After one: a card may exist, so the
     // row stays open for the pass that keeps a live card current, which ends the card with the visit.

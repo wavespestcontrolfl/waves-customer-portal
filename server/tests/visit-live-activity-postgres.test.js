@@ -232,6 +232,26 @@ postgres('Lock Screen visit card against migrated PostgreSQL', () => {
     expect(aps(apple.start, 1)['content-state']).toMatchObject({ phase: 'on_property', title: 'Sam B. has arrived' });
   });
 
+  test('a start with no answer may be on the phone: the row stays live and keeps its channel', async () => {
+    const ids = await seedStop();
+    const visitId = await addVisit(ids);
+    apple.start.mockResolvedValue({ ok: false, reason: 'apns_timeout', retryable: true, uncertain: true });
+
+    expect(await card.syncVisit(visitId, { now: NOW })).toEqual({ action: 'started', devices: 0, unsure: 1 });
+    expect(apple.deleteChannel).not.toHaveBeenCalled();
+    const [row] = await sessions(ids.customer);
+    expect(row).toMatchObject({
+      channel_id: 'channel-1', phase: 'en_route', devices_started: 0, ended_at: null, channel_deleted_at: null,
+      start_results: [{ device: ids.device, ok: false, reason: 'apns_timeout' }],
+    });
+    expect(row.started_at).not.toBeNull();
+    // An answer from Apple that is a fault (5xx) is not "unsure": the start did not happen.
+    const other = await seedStop();
+    apple.start.mockResolvedValue({ ok: false, reason: 'ServiceUnavailable', retryable: true });
+    expect(await card.syncVisit(await addVisit(other), { now: NOW })).toEqual({ action: 'none', reason: 'no_device_started' });
+    expect(apple.deleteChannel).toHaveBeenCalledWith({ channelId: 'channel-2' });
+  });
+
   test('Apple refuses the channel (Broadcast Capability off): no start push, the row says why', async () => {
     const ids = await seedStop();
     const visitId = await addVisit(ids);

@@ -144,6 +144,22 @@ describe('results', () => {
     expect(skipped).toEqual({ ok: false, reason: 'apns_not_configured', skipped: true });
   });
 
+  test('a busy or failing Apple (429, 5xx) can pass by itself; any other refusal cannot', async () => {
+    const send = (answer) => la.broadcast({ channelId: 'x', payload: {}, expiresAt: NOW }, sends(answer));
+    expect(await send({ ok: false, status: 429, reason: 'TooManyRequests' })).toEqual({ ok: false, reason: 'TooManyRequests', retryable: true });
+    expect(await send({ ok: false, status: 503, reason: 'ServiceUnavailable' })).toEqual({ ok: false, reason: 'ServiceUnavailable', retryable: true });
+    expect(await send({ ok: false, status: 400, reason: 'BadChannelId' })).toEqual({ ok: false, reason: 'BadChannelId' });
+    expect(await send({ ok: false, status: 403, reason: 'InvalidProviderToken' })).toEqual({ ok: false, reason: 'InvalidProviderToken' });
+  });
+
+  test('no answer after the request may have left is uncertain: Apple may have taken it', async () => {
+    const lost = { ok: false, retryable: true, uncertain: true, reason: 'apns_timeout' };
+    expect(await la.start({ startToken: 'abc', payload: {}, expiresAt: NOW }, sends(lost))).toEqual({ ok: false, reason: 'apns_timeout', retryable: true, uncertain: true });
+    // An answer from Apple, even a fault, is not uncertain: the start did not happen.
+    const fault = await la.start({ startToken: 'abc', payload: {}, expiresAt: NOW }, sends({ ok: false, status: 503, reason: 'ServiceUnavailable' }));
+    expect(fault).toEqual({ ok: false, reason: 'ServiceUnavailable', retryable: true });
+  });
+
   test('with APNs not configured the real sender answers a skip and opens no connection', async () => {
     mockApnsStatus.configured = false;
     expect(await la.broadcast({ channelId: 'x', payload: {}, expiresAt: NOW })).toEqual({ ok: false, reason: 'apns_not_configured', skipped: true });
