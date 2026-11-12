@@ -12,6 +12,12 @@
  * (trigger `bundle_quote_requested` with its request id on top). The classes are admin-alert-relevance.js's,
  * so one definition says what each bell is.
  *
+ * Also a customer's own portal message (GATE_PORTAL_MESSAGES, portal-messages.js ringOffice): the open bell of
+ * a portal thread, named by metadata.portalConversationId. The Messages page makes the same promise under its
+ * box. That bell has no relevance class on purpose: only its thread closes it (an answer in the portal or
+ * Mark handled, portal-inbox.js onLockedThread), so it is recognised here and rung on the locked thread row,
+ * only while the thread still waits on the office. Nothing while GATE_PORTAL_MESSAGES is off.
+ *
  * - The clock is the follow-up SLA's (followup-sla-watcher.js followUpDueAt): 60 minutes counted only
  *   between 8 AM and 8 PM ET, no weekday carve-out. A 7:30 PM ask is due 8:30 AM next day.
  * - "Contact" is the shared customer witnesses (admin-alert-contact-witnesses.js: a person's text, a call a
@@ -41,6 +47,9 @@ const STILL_WAITING = 'Still waiting: no reply after 1 business hour';
 const LATE_CLASSES = new Set(['portal_chat_add_service', 'portal_chat_answered', 'portal_request_answered', 'portal_add_service_request']);
 // The classes whose answer is also an estimate handed to the customer.
 const QUOTE_CLASSES = new Set(['portal_chat_add_service', 'portal_add_service_request']);
+// A portal message's bell (see the header). The thread id is read as a uuid: it goes into a query.
+const MESSAGE_ITEM = Object.freeze({ key: 'portal_message' });
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const relevance = () => require('./admin-alert-relevance');
 const safeError = (err) => require('./notification-service').safeErrorSummary(err);
@@ -64,22 +73,32 @@ function candidateQuery(since, cursor, pageSize) {
     .where((q) => q
       .whereRaw("left(COALESCE(metadata->>'dedupeKey', ''), 23) = 'portal-chat-escalation:'")
       .orWhereRaw("metadata->>'doneWhen' = 'request_answered'")
-      .orWhereRaw("metadata->>'triggerKey' = 'bundle_quote_requested'"))
+      .orWhereRaw("metadata->>'triggerKey' = 'bundle_quote_requested'")
+      .orWhereRaw("metadata->>'portalConversationId' IS NOT NULL"))
     .modify((q) => { if (cursor) q.whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [cursor.createdAt, cursor.id]); })
     .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
     .limit(pageSize)
     .select('id', 'category', 'title', 'body', 'detail', 'link', 'metadata', 'created_at', db.raw('created_at::text AS created_at_token'));
 }
 
+// What a row is to this pass: a relevance class of LATE_CLASSES, a portal message's bell, or null. A row
+// the relevance table names is only ever that class.
+function lateClass(row, meta) {
+  const cls = relevance().classify(row, { anyMode: true });
+  if (cls) return LATE_CLASSES.has(cls.key) ? cls : null;
+  const isMessageBell = meta.doneWhen === 'customer_answered' && UUID_RE.test(String(meta.portalConversationId || ''));
+  return isMessageBell && require('../config/feature-gates').portalMessagesLive?.() ? MESSAGE_ITEM : null;
+}
+
 // The portal item bells among the rows that are due now: { row, cls, meta, askedAt, customerId }.
 function dueItems(rows, now) {
-  const { classify, bellEventAt, parseMeta } = relevance();
+  const { bellEventAt, parseMeta } = relevance();
   const floor = now.getTime() - WINDOW_MS;
   const items = [];
   for (const row of rows) {
-    const cls = classify(row, { anyMode: true });
-    if (!cls || !LATE_CLASSES.has(cls.key)) continue;
     const meta = parseMeta(row.metadata);
+    const cls = lateClass(row, meta);
+    if (!cls) continue;
     const askedAt = bellEventAt(row);
     const customerId = typeof meta.customerId === 'string' ? meta.customerId.trim().toLowerCase() : null;
     if (!askedAt || !customerId || askedAt.getTime() <= floor) continue;
@@ -117,7 +136,7 @@ async function stillWaiting(items) {
 
 // The one extra ring: this row, still open and unchanged since it was read, rewritten with the
 // "Still waiting" line, unread, at the top, stamped. Returns 1 when it landed.
-async function ringAgain({ row, meta, askedAt }, now) {
+async function ringAgain({ row, meta, askedAt }, now, conn = db) {
   const notifications = require('./notification-service');
   const text = notifications.normalizeAdminText({
     category: row.category,
@@ -126,7 +145,7 @@ async function ringAgain({ row, meta, askedAt }, now) {
     detail: row.detail || null,
   });
   const at = now.toISOString();
-  const rewritten = await db('notifications')
+  const rewritten = await conn('notifications')
     .where({ id: row.id, recipient_type: 'admin' })
     .whereNull('done_at')
     .whereRaw('metadata IS NOT DISTINCT FROM ?::jsonb', [JSON.stringify(meta)])
@@ -135,12 +154,20 @@ async function ringAgain({ row, meta, askedAt }, now) {
       detail: text.detail,
       read_at: null,
       ...notifications._private.DONE_CLEARED,
-      created_at: db.fn.now(),
+      created_at: conn.fn.now(),
       // askedAt first: created_at is bumped above, and the close and contact checks must keep the ask as their boundary.
       // `contact: true` declares a customer reaching us, which the bell policy rings.
-      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ askedAt: askedAt.toISOString(), lateReRungAt: at, contact: true })]),
+      metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ askedAt: askedAt.toISOString(), lateReRungAt: at, contact: true })]),
     });
   return rewritten ? 1 : 0;
+}
+
+// The ring for one item. A portal message's bell changes only on its locked thread row, like its close and
+// its first ring, and only while the thread still waits on the office: an answer in the portal or Mark handled
+// that landed since the row was read wins, and so does a thread whose bell was left open by a failed close.
+function ringItem(item, now) {
+  if (item.cls !== MESSAGE_ITEM) return ringAgain(item, now);
+  return require('./portal-inbox').onLockedThread(item.meta.portalConversationId, (trx, open) => (open ? ringAgain(item, now, trx) : 0));
 }
 
 // One page: the items due, those still waiting, and the one ring each. Returns the rows read and rung.
@@ -150,7 +177,7 @@ async function runPage(rows, now) {
   let rung = 0;
   for (const item of waiting) {
     try {
-      const landed = await ringAgain(item, now);
+      const landed = await ringItem(item, now);
       rung += landed;
       // Only a row this run really rewrote (the fenced update landed) pages the phones, once: the row is stamped
       // lateReRungAt in the same statement, so no later sweep reads it again. This waits for the customer's name
