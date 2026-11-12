@@ -113,7 +113,8 @@ const METRICS = [
     m?.spanCoverage?.unit === 'rows' ? 'rows timed' : 'stops timed') },
 ];
 
-// The footer's note for the current drive model (GATE_DRIVE_CLOCK adds drive_clock).
+// The footer's note for the current drive model. 'calibrated' stays for plans
+// saved before the drive clock became the only calibrated model.
 const DRIVE_MODEL_NOTE = {
   drive_clock: 'drive clock (fitted from our own GPS, parking time added to Google road times)',
   calibrated: 'calibrated (fitted from real trips)',

@@ -61,13 +61,13 @@ function createRunTravel(config, { travelFactory } = {}) {
   });
 }
 
-// GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY (owner 2026-10-28, Google cost "way
-// too high"): pass 1 prices every qualifying visit, but the per-run change cap
-// then holds most of them (10-27: 44 moves checked, 34 held). With the gate
-// on, in apply mode, only pass 2 asks Google, for a move about to be written.
-// Needs the road check itself on; a dry run keeps today's behavior.
+// Owner 2026-10-28, Google cost "way too high": pass 1 would price every
+// qualifying visit, but the per-run change cap then holds most of them (10-27:
+// 44 moves checked, 34 held). So in apply mode only pass 2 asks Google, for a
+// move about to be written. Needs the road check itself on; a dry run asks in
+// pass 1.
 function deferredToApply(config) {
-  return config.roadCheckAtApply === true && config.roadCheckEnabled === true && config.mode === 'apply';
+  return config.roadCheckEnabled === true && config.mode === 'apply';
 }
 
 // The reader a pass 1 evaluation gets (null = the model alone).
