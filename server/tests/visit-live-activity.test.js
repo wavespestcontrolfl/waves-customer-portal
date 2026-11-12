@@ -2,10 +2,12 @@
 
 // The Lock Screen visit card's rules (services/visit-live-activity.js): which stop a visit belongs to, what
 // a stop shows, when a card may start, and what a live card must do next. All pure, so no database and no
-// Apple request.
+// Apple request. The card's whole life against real tables is visit-live-activity-postgres.test.js.
 
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // The tracker's customer-facing state, as track-transitions.customerTrackState derives it. (The real module
-// loads the whole messaging stack.)
+// loads the whole messaging stack; the Postgres suite runs the real one.)
 jest.mock('../services/track-transitions', () => ({
   customerTrackState: (row) => {
     if (row.status === 'no_show') return 'no_show';
@@ -15,6 +17,7 @@ jest.mock('../services/track-transitions', () => ({
   },
 }));
 
+const db = require('../models/db');
 const card = require('../services/visit-live-activity');
 
 const NOW = new Date('2026-11-12T15:00:00.000Z');
@@ -31,7 +34,9 @@ const arrived = (over = {}) => visit({ status: 'on_site', track_state: 'on_prope
 const finished = (over = {}) => visit({ status: 'completed', track_state: 'complete', en_route_at: minutesAgo(70), arrived_at: minutesAgo(55), completed_at: minutesAgo(2), ...over });
 
 afterEach(() => {
+  delete process.env.GATE_VISIT_LIVE_ACTIVITY;
   delete process.env.VISIT_LIVE_ACTIVITY_CUSTOMER_ALLOWLIST;
+  db.mockReset();
 });
 
 describe('the stop a visit belongs to', () => {
@@ -171,5 +176,23 @@ describe('what a live card does next', () => {
     expect(card.targetOf(noStamp, held, NOW).since).toEqual(minutesAgo(30));
     // The card holds a time for another step: fall back to when the card started.
     expect(card.targetOf(noStamp, { ...held, phase: 'en_route' }, NOW).since).toEqual(minutesAgo(50));
+  });
+});
+
+describe('poke', () => {
+  test('gate off: reads nothing, schedules nothing, never throws', async () => {
+    expect(() => card.poke('v1')).not.toThrow();
+    expect(() => card.poke(undefined)).not.toThrow();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a failed sync is logged and swallowed', async () => {
+    process.env.GATE_VISIT_LIVE_ACTIVITY = 'true';
+    db.mockImplementation(() => { throw new Error('database is away'); });
+    expect(() => card.poke('v1')).not.toThrow();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('sync failed for visit v1'));
   });
 });

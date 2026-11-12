@@ -1,22 +1,30 @@
 /**
- * Visit day on the Lock Screen: the card's rules, and how a card starts
+ * Visit day on the Lock Screen: when a card starts, what it shows and when it ends
  * (GATE_VISIT_LIVE_ACTIVITY, owner 2026-11-11, "do this first Visit day on the Lock Screen").
  *
- * The card is a picture of the visit, not a message queue. Whatever looks at a visit decides from these
- * rules what its card must show now, so a lost signal only delays the card: the next look repairs it.
+ * The card is a picture of the visit, not a message queue. Every entry point (a tracker flip's poke, the
+ * 2-minute sweep) reads the visit as it is NOW and makes the card agree with it, so a lost poke, a restart
+ * or an Apple failure only delays the card: the next pass repairs it.
+ *
+ *   start   the technician goes on the way (or arrives): one Apple broadcast channel for the stop, and one
+ *           start push to each of the customer's iPhones that registered for the card (routes/push.js).
+ *   update  each later step is ONE broadcast on the channel: arrived.
+ *   end     service complete (the card stays 15 minutes), or at once when the visit is cancelled, moved
+ *           or rewound, when a step outlasts its time limit, or when the gate goes off.
+ *
+ * It adds to today's notices and changes none of them: the on-the-way and arrival texts and app
+ * notifications go out exactly as before.
  *
  * A STOP is the customer, the saved address, the ET day and the technician: the rule the on-the-way text
  * already uses (one-text-per-day.js), so two services at one address on one day share one card. A visit with
  * no saved address is its own stop.
  *
- * A card starts when the technician goes on the way (or arrives): one Apple broadcast channel for the stop,
- * and one start push to each of the customer's iPhones that registered for the card (routes/push.js). It adds
- * to today's notices and changes none of them.
+ * No lock and no connection is held across a call to Apple. Order is kept by the row itself
+ * (live_activity_sessions, see its migration): a start is claimed by inserting the stop's one live row, and
+ * each update takes the next `seq` with a strictly later Apple timestamp in one conditional UPDATE.
  *
- * No lock and no connection is held across a call to Apple. A start is claimed by inserting the stop's one
- * live row (live_activity_sessions, see its migration), so two passes can never start two cards for one stop.
- *
- * syncVisit is the one way in, and nothing calls it yet. The Apple transport, the push device scope and the
+ * The tracker, the job status service and the rebooker load this file, so it loads only what they already
+ * load (the database handle, the logger, the gates). The Apple transport, the push device scope and the
  * label builders load on first use.
  */
 const db = require('../models/db');
@@ -35,9 +43,20 @@ const STALE_AFTER_MS = { en_route: 45 * MINUTE, on_property: 120 * MINUTE };
 const END_AFTER_MS = { en_route: 90 * MINUTE, on_property: 180 * MINUTE };
 // "Service complete" stays on the Lock Screen this long.
 const COMPLETE_SHOWN_MS = 15 * MINUTE;
+// Apple keeps a channel's newest message for a phone that was offline (up to 8 hours). The channel stays
+// that long after the end so such a phone still hears it, then the sweep removes it.
+const END_PUSH_TTL_MS = 8 * 60 * MINUTE;
+const UPDATE_PUSH_TTL_MS = 60 * MINUTE;
+const CHANNEL_KEPT_MS = 9 * 60 * MINUTE;
+const CHANNEL_REMOVAL_TRIED_MS = 24 * 60 * MINUTE;
+// A start in progress in another process is left alone this long before a sweep takes the row over.
+const STARTING_GRACE_MS = MINUTE;
+// iOS itself ends a card after 8 hours. A row older than this is closed whatever Apple answers.
+const MAX_CARD_AGE_MS = 12 * 60 * MINUTE;
 // A card that listens on a channel needs iOS 18.
 const MIN_IOS_MAJOR = 18;
 const MAX_DEVICES = 5;
+const SWEEP_PAGE = 200;
 const LIVE_STATES = ['en_route', 'on_property'];
 const STEP = { en_route: 1, on_property: 2, complete: 3 };
 const VISIT_COLUMNS = ['id', 'customer_id', 'property_id', 'technician_id', 'status', 'track_state',
@@ -76,7 +95,8 @@ function latest(visits, column) {
   return all.length ? new Date(Math.max(...all)) : null;
 }
 
-// The customer-facing tracker state: the ONE derivation (track-transitions.js), required on use.
+// The customer-facing tracker state: the ONE derivation (track-transitions.js). Required on use because
+// that module loads this one.
 function trackState(visit) {
   return require('./track-transitions').customerTrackState(visit);
 }
@@ -100,6 +120,17 @@ function stopOf(visit) {
     ? `stop:${stop.customerId}:${stop.propertyId}:${stop.day}:${stop.technicianId || 'none'}`
     : `visit:${visit.id}`;
   return stop;
+}
+
+function stopOfSession(session) {
+  return {
+    key: session.stop_key,
+    customerId: session.customer_id,
+    propertyId: session.property_id || null,
+    technicianId: session.technician_id || null,
+    day: session.service_day,
+    serviceId: session.scheduled_service_id,
+  };
 }
 
 async function loadStopVisits(stop) {
@@ -328,8 +359,8 @@ async function startCard(stop, view, now) {
     }
     // With any start accepted or unsure, the row stays live and keeps its channel, so a card that did reach
     // a phone still gets its updates and its end. Recorded only while the row is still this start's own
-    // (seq 0, not started): a later pass that took a stalled start over has already moved the card on, and
-    // its record must stand.
+    // (seq 0, not started): a sweep that took a stalled start over has already moved the card on, and its
+    // record must stand.
     await db('live_activity_sessions').where({ id: sessionId, seq: 0 }).whereNull('started_at').update({
       phase: state.phase,
       phase_since: view.since,
@@ -345,7 +376,7 @@ async function startCard(stop, view, now) {
     return { action: 'started', devices: started, ...(unsure ? { unsure } : {}) };
   } catch (err) {
     // Before any start push: nothing is on a phone, so close the row. After one: a card may exist, so the
-    // row stays open for the pass that keeps a live card current, which ends the card with the visit.
+    // row stays open and the sweep takes it over after the grace time and ends it with the visit.
     if (!pushed) {
       const removed = channelId ? await la.deleteChannel({ channelId }) : { ok: true };
       await closeSession(sessionId, `start_failed:${err.code || 'error'}`, now, { channelGone: removed.ok }).catch(() => {});
@@ -354,13 +385,131 @@ async function startCard(stop, view, now) {
   }
 }
 
+// ---- Keep a live card current ------------------------------------------------
+
+// Apple's answer says the channel itself is no good (its reason names the channel), as against a failure of
+// the request around it: a timeout, a busy Apple, a bad key, a refused payload. Apple's channel reasons are
+// not listed in its documents, so the test is the word, not a list.
+function channelRefused(result) {
+  return !result.ok && !result.retryable && !result.skipped && /channel/i.test(String(result.reason || ''));
+}
+
+// The state for an end that has no visit to show (the card leaves at once, so nobody reads it).
+function lastStateOf(session) {
+  let stored = session.state;
+  if (typeof stored === 'string') { try { stored = JSON.parse(stored); } catch { stored = null; } }
+  return stored && stored.phase ? stored : { phase: 'complete', title: 'Waves', detail: '', step: STEP.complete };
+}
+
+// A row that must wait, or that is closed without a word to Apple. Null = the card can be advanced.
+async function settleUnusable(session, now) {
+  const age = now.getTime() - new Date(session.created_at).getTime();
+  // A start is in progress in another process.
+  if (!session.started_at && age < STARTING_GRACE_MS) return { action: 'none', reason: 'starting' };
+  // A start that died before it got a channel: no phone ever heard of this card.
+  if (!session.channel_id) {
+    await closeSession(session.id, 'start_abandoned', now, { channelGone: true });
+    return { action: 'ended', reason: 'start_abandoned' };
+  }
+  if (age > MAX_CARD_AGE_MS) {
+    await closeSession(session.id, 'too_old', now);
+    return { action: 'ended', reason: 'too_old' };
+  }
+  return null;
+}
+
+/**
+ * Send one update or end, in the card's order. Returns what happened, or null when another sender took the
+ * turn first.
+ */
+async function sendInOrder(session, { target, state, sig, members }, now) {
+  // The next place in the order: one conditional UPDATE gives this sender the seq and an Apple timestamp
+  // strictly later than every earlier one, so a slower, older update can never win on the phone.
+  const turn = await db('live_activity_sessions')
+    .where({ id: session.id, seq: session.seq })
+    .whereNull('ended_at')
+    .update({ seq: session.seq + 1, push_ts: db.raw('GREATEST(push_ts + 1, ?)', [epochSeconds(now)]), updated_at: now })
+    .returning('push_ts');
+  if (!turn.length) return null;
+
+  const ending = target.kind === 'end';
+  const la = require('./apns-live-activity');
+  const sent = await la.broadcast({
+    channelId: session.channel_id,
+    payload: la.buildPayload({
+      event: ending ? 'end' : 'update',
+      now: new Date(Number(turn[0].push_ts) * 1000),
+      contentState: state,
+      staleAt: target.staleAt,
+      dismissAt: target.dismissAt,
+    }),
+    expiresAt: new Date(now.getTime() + (ending ? END_PUSH_TTL_MS : UPDATE_PUSH_TTL_MS)),
+  });
+  if (!sent.ok) {
+    // Apple refused the channel itself: no later update can reach this card either, so the row is closed.
+    if (channelRefused(sent)) {
+      await closeSession(session.id, `refused:${sent.reason}`, now);
+      return { action: 'ended', reason: 'refused' };
+    }
+    // Any other failure (a timeout, a busy Apple, a bad key, a refused payload) can pass or be fixed, and
+    // the card may still be on a phone. The row stays as it is: the next pass sends again, until the row's
+    // age limit closes it.
+    return { action: 'failed', reason: sent.reason };
+  }
+  // Recorded only by the sender that still holds the newest place: a later sender records its own.
+  await db('live_activity_sessions').where({ id: session.id, seq: session.seq + 1 }).update({
+    phase: state.phase,
+    phase_since: target.since || session.phase_since || null,
+    state: JSON.stringify(state),
+    sent_sig: sig,
+    member_ids: JSON.stringify(members),
+    started_at: session.started_at || now,
+    last_sent_at: now,
+    ...(ending ? { ended_at: now, end_reason: target.reason } : {}),
+    updated_at: now,
+  });
+  if (ending) logger.info(`[visit-live-activity] card ${session.id} ended (${target.reason})`);
+  return { action: ending ? 'ended' : 'updated', reason: ending ? target.reason : state.phase };
+}
+
+/**
+ * One pass over a live card: make it agree with the visit. Returns what happened, or null when another
+ * sender took the turn first (the caller reads again).
+ */
+async function advanceCard(session, visits, now) {
+  const unusable = await settleUnusable(session, now);
+  if (unusable) return unusable;
+
+  const view = viewOf(visits, session.member_ids);
+  const target = targetOf(view, session, now, { live: gateLive(), allowed: customerAllowed(session.customer_id) });
+  const members = memberUnion(session, view);
+  const state = view ? await stateOf(view) : lastStateOf(session);
+  const sig = target.kind === 'end' ? `end|${target.reason}` : signature(state, members);
+  if (sig === session.sent_sig) return { action: 'none', reason: 'current' };
+  return sendInOrder(session, { target, state, sig, members }, now);
+}
+
+async function keepCurrent(stop, now) {
+  for (let pass = 0; pass < 3; pass += 1) {
+    const session = await liveSession(stop.key);
+    if (!session) return { action: 'none', reason: 'no_card' };
+    const outcome = await advanceCard(session, await loadStopVisits(stop), now);
+    if (outcome) return outcome;
+  }
+  return { action: 'none', reason: 'busy' };
+}
+
 // ---- Entry points ------------------------------------------------------------
 
-/** Make one stop's card agree with its visits. In this step: start one when the stop has none. */
+/** Make one stop's card agree with its visits: keep a live card current, or start one. */
 async function syncStop(stop, { now = new Date() } = {}) {
-  if (await liveSession(stop.key)) return { action: 'none', reason: 'card_live' };
+  const kept = await keepCurrent(stop, now);
+  if (kept.reason !== 'no_card') return kept;
   if (!gateLive()) return { action: 'none', reason: 'gate_off' };
-  return startCard(stop, viewOf(await loadStopVisits(stop)), now);
+  const started = await startCard(stop, viewOf(await loadStopVisits(stop)), now);
+  // The visit may have moved on while the start was in flight.
+  if (started.action === 'started') await keepCurrent(stop, now);
+  return started;
 }
 
 async function syncVisit(serviceId, { now = new Date() } = {}) {
@@ -369,8 +518,104 @@ async function syncVisit(serviceId, { now = new Date() } = {}) {
   return syncStop(stopOf(visit), { now });
 }
 
+/**
+ * A visit's customer-facing tracker state just changed: bring its card up to date. Called from every place
+ * that tells the customer's in-app tracker to refresh. Never throws and never waits; gate off = nothing.
+ */
+function poke(serviceId) {
+  try {
+    if (!serviceId || !gateLive()) return;
+    setImmediate(() => {
+      syncVisit(serviceId).catch((err) => logger.warn(`[visit-live-activity] sync failed for visit ${serviceId}: ${err.message}`));
+    });
+  } catch (err) {
+    logger.warn(`[visit-live-activity] poke failed for visit ${serviceId}: ${err.message}`);
+  }
+}
+
+// Every row of a list, a page at a time in id order, so a long list can never starve its tail. `build`
+// returns a fresh query each time; rows that leave the list while it is read are simply not met.
+async function eachRow(build, pageSize, each) {
+  let after = null;
+  let met = 0;
+  for (;;) {
+    const query = build().orderBy('id', 'asc').limit(pageSize);
+    if (after) query.where('id', '>', after);
+    const page = await query;
+    for (const row of page) await each(row);
+    met += page.length;
+    if (page.length < pageSize) return met;
+    after = page[page.length - 1].id;
+  }
+}
+
+// A channel is asked to be removed for one day after its 9 hours are up. Apple answering "removed" or "no
+// such channel" marks it gone, and so does a refusal of the channel itself. Any other failure (a timeout,
+// a bad key) is tried again by the next sweep; a channel still there after the day is left (it costs
+// nothing, and the app has 10,000).
+async function removeOldChannels(now, pageSize) {
+  const la = require('./apns-live-activity');
+  const due = now.getTime() - CHANNEL_KEPT_MS;
+  const ended = () => db('live_activity_sessions')
+    .whereNotNull('channel_id')
+    .whereNull('channel_deleted_at')
+    .whereBetween('ended_at', [new Date(due - CHANNEL_REMOVAL_TRIED_MS), new Date(due)])
+    .select('id', 'channel_id');
+  let removed = 0;
+  await eachRow(ended, pageSize, async (row) => {
+    const result = await la.deleteChannel({ channelId: row.channel_id });
+    if (!result.ok && !channelRefused(result)) return;
+    await db('live_activity_sessions').where({ id: row.id }).update({ channel_deleted_at: now, updated_at: now });
+    removed += 1;
+  });
+  return removed;
+}
+
+/**
+ * Every 2 minutes (scheduler.js): the repair pass.
+ *   1. Every live card is checked against its visit: a missed step is sent, a time limit ends the card.
+ *      With the gate off this ends every live card, so "off" clears the Lock Screens within 2 minutes.
+ *   2. Gate on: a visit that went live in the last 20 minutes with no card gets one (its poke was lost in a
+ *      restart, or its iPhone registered a moment late).
+ *   3. Channels of cards that ended more than 9 hours ago are removed.
+ */
+async function sweep({ now = new Date(), pageSize = SWEEP_PAGE } = {}) {
+  const counts = { cards: 0, started: 0, updated: 0, ended: 0, failed: 0, channelsRemoved: 0 };
+  const seen = new Set();
+  const run = async (stop) => {
+    seen.add(stop.key);
+    try {
+      const outcome = await syncStop(stop, { now });
+      if (counts[outcome.action] !== undefined) counts[outcome.action] += 1;
+    } catch (err) {
+      counts.failed += 1;
+      logger.warn(`[visit-live-activity] sweep could not sync ${stop.key}: ${err.message}`);
+    }
+  };
+
+  counts.cards = await eachRow(() => db('live_activity_sessions').whereNull('ended_at'), pageSize, (session) => run(stopOfSession(session)));
+
+  if (gateLive()) {
+    const cutoff = new Date(now.getTime() - START_WINDOW_MS);
+    const { etDateString } = require('../utils/datetime-et');
+    const wentLive = () => selectVisits()
+      .whereIn('track_state', LIVE_STATES)
+      .whereRaw('scheduled_date >= ?::date - 1', [etDateString(now)])
+      .where(function lately() { this.where('en_route_at', '>=', cutoff).orWhere('arrived_at', '>=', cutoff); });
+    await eachRow(wentLive, pageSize, async (visit) => {
+      const stop = stopOf(visit);
+      if (!seen.has(stop.key)) await run(stop);
+    });
+  }
+
+  counts.channelsRemoved = await removeOldChannels(now, pageSize);
+  return counts;
+}
+
 module.exports = {
+  poke,
   syncVisit,
+  sweep,
   // exported for unit tests
   stopOf,
   viewOf,
@@ -380,4 +625,5 @@ module.exports = {
   STALE_AFTER_MS,
   END_AFTER_MS,
   COMPLETE_SHOWN_MS,
+  CHANNEL_KEPT_MS,
 };

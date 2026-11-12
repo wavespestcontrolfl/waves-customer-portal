@@ -132,6 +132,7 @@ const { getIo } = require('../sockets');
 const { pingTechnicianRooms } = require('../sockets/tech-rooms');
 const logger = require('./logger');
 const { autoResolveOverdueAlertsForJob } = require('./dispatch-alerts');
+const visitLiveActivity = require('./visit-live-activity');
 
 const CUSTOMER_EVENT = 'customer:job_update';
 const ADMIN_EVENT = 'dispatch:job_update';
@@ -1148,6 +1149,9 @@ async function transitionJobStatus({
 }
 
 function emitToCustomer(customerId, payload) {
+  // A status change (a cancel, a no-show, a completion) reaches the Lock Screen visit card too
+  // (GATE_VISIT_LIVE_ACTIVITY; off = nothing).
+  visitLiveActivity.poke(payload?.job_id);
   const io = getIo();
   if (!io) {
     logger.warn('[job-status] io not initialized; skipping customer broadcast');

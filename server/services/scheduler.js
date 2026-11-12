@@ -1266,6 +1266,24 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 2 MIN — Lock Screen visit cards (GATE_VISIT_LIVE_ACTIVITY, read in the sweep): the repair pass
+  // behind the tracker's own pokes. Each live card is checked against its visit (a missed step is sent, a
+  // step past its time limit ends the card), a visit that just went live with no card gets one, and the
+  // Apple channels of long-ended cards are removed. Gate off = live cards are ended and nothing starts;
+  // with no card and the gate off it is two empty reads.
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      await runExclusive('visit-live-activity', async () => {
+        const result = await require('./visit-live-activity').sweep();
+        if (result.started || result.updated || result.ended || result.failed || result.channelsRemoved) {
+          logger.info(`[visit-live-activity] sweep: cards=${result.cards} started=${result.started} updated=${result.updated} ended=${result.ended} failed=${result.failed} channels_removed=${result.channelsRemoved}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[visit-live-activity] sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 10 MIN — portal answers whose customer notice never finished (GATE_PORTAL_MESSAGES, read in the
   // sweep): an answer a staff member sent is saved with its notice pending; a process that stopped before the
   // push or email leaves it pending, and this finishes it (5 minutes to 1 day old). Exclusive; gate off = nothing.
