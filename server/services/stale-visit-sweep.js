@@ -17,6 +17,12 @@
  * backlog summary differs from the last bell's, or when that bell is older
  * than REMIND_DAYS (a frozen backlog shouldn't go silent forever).
  *
+ * One open row: a new bell closes the older open ones (their list is out of
+ * date), and a clean sweep closes them all. Before, each changed night left
+ * its own row open for 3 days (2026-11: three rows with one title, the
+ * counts 61, 64 and 67). Through admin-alert-episodes.js, as the WDO
+ * attention sweep does; ALERT_EPISODES off = no close.
+ *
  * Gate: staleVisitSweep (GATE_STALE_VISIT_SWEEP). Reads scheduled_services;
  * writes nothing but admin notifications.
  */
@@ -31,6 +37,8 @@ const { etDateString } = require('../utils/datetime-et');
 const OPEN_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
 const REMIND_DAYS = 7;
 const CATEGORY = 'stale_visit_sweep';
+const SUPERSEDED_RESOLUTION = 'Replaced by a newer list of stale visits';
+const CLEARED_RESOLUTION = 'Cleared: no past-dated visit is still open';
 
 // Query failures propagate — a schema/connection outage must surface as a
 // failed sweep in the scheduler's error log, never as clean:true (this sweep
@@ -113,6 +121,23 @@ async function lastBell() {
   return { signature: meta?.summary_signature || null, createdAt: prior.created_at };
 }
 
+// This sweep's rows nobody has closed. Read BEFORE a new bell is written, so the new row is never in the list.
+// Empty while ALERT_EPISODES is off (the close kill switch every episodes caller reads): nothing is closed then.
+async function openRowIds() {
+  if (!require('../config/feature-gates').alertEpisodesLive()) return [];
+  const rows = await db('notifications')
+    .where({ recipient_type: 'admin', category: CATEGORY })
+    .whereNull('done_at')
+    .select('id');
+  return rows.map((r) => r.id);
+}
+
+// By id, never by dedupeKey: the key is cut at 200 characters.
+async function closeRows(ids, reason, resolution, now) {
+  if (!ids.length) return 0;
+  return Number(await require('./admin-alert-episodes').closeAdminAlertIds(db, ids, reason, { now, resolution })) || 0;
+}
+
 function etDayNumber(value) {
   const date = value instanceof Date ? value : new Date(value);
   const [y, m, d] = etDateString(date).split('-').map(Number);
@@ -136,13 +161,16 @@ async function runStaleVisitSweep({ now = new Date() } = {}) {
   const { runExclusive } = require('../utils/cron-lock');
   return runExclusive('stale-visit-sweep', async () => {
     const visits = await findStaleVisits(now);
-    if (!visits.length) return { ok: true, clean: true };
+    if (!visits.length) {
+      return { ok: true, clean: true, closed: await closeRows(await openRowIds(), 'stale_visits_clear', CLEARED_RESOLUTION, now) };
+    }
 
     const signature = summarySignature(visits);
     if (priorBellCovers(await lastBell(), signature, now)) {
       return { ok: true, deduped: true, items: visits.length };
     }
 
+    const standing = await openRowIds();
     const summary = summarize(visits);
     const bell = await NotificationService.notifyAdmin(
       CATEGORY,
@@ -165,7 +193,9 @@ async function runStaleVisitSweep({ now = new Date() } = {}) {
     // suppression returns a truthy sentinel and correctly counts as rung.)
     if (!bell) throw new Error('admin notification insert failed — bell not recorded');
     logger.info(`[stale-visit-sweep] rang: ${summary}`);
-    return { ok: true, rang: true, items: visits.length };
+    // A suppressed write (the sentinel { id: null, suppressed: true }) left no new row: the older rows stay.
+    const closed = bell.suppressed === true ? 0 : await closeRows(standing, 'stale_visits_superseded', SUPERSEDED_RESOLUTION, now);
+    return { ok: true, rang: true, items: visits.length, closed };
   });
 }
 

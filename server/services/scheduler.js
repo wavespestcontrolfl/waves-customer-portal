@@ -8861,27 +8861,10 @@ function initScheduledJobs() {
   cron.schedule('0 7 * * *', async () => {
     logger.info('Running: token credential health check');
     try {
-      const tokenHealth = require('./token-health');
-      const results = await tokenHealth.checkAll();
-      const failures = results.filter(r => r.status === 'expired' || r.status === 'error');
-      if (failures.length > 0) {
-        const msg = `Token Alert: ${failures.length} credential(s) need attention:\n` +
-          failures.map(f => `- ${f.platform}: ${f.status} — ${f.lastError || 'check dashboard'}`).join('\n');
-        // Was an internal text to the owner's phone, silenced since 2026-09
-        // (services/owner-alerts.js). One row per day; the failing platforms
-        // are its items, so a ringing alert rings again only on a new one.
-        const platforms = [...new Set(failures.map(f => String(f.platform)))].sort();
-        await require('./owner-alerts').recordOwnerAlert('credential-check', {
-          action: 'renew an expired credential',
-          why: `${failures.length} credential${failures.length === 1 ? '' : 's'} failed the 7 AM check.`,
-          subject: { type: 'check', id: 'credential-check' },
-          text: msg,
-          link: '/admin/settings?tab=integrations',
-          dedupeKey: `owner-alert:credential-check:${etDateString()}`,
-          itemKeys: platforms,
-        });
-      }
-      logger.info(`Token health check done: ${failures.length} failure(s) out of ${results.length}`);
+      // The checks and the owner's alert row (was an internal text to the owner's phone, silenced since
+      // 2026-09: services/owner-alerts.js) are in token-health.js runDailyCheck.
+      const { failures, total } = await require('./token-health').runDailyCheck();
+      logger.info(`Token health check done: ${failures} failure(s) out of ${total}`);
     } catch (err) {
       logger.error(`Token health check failed: ${err.message}`);
     }

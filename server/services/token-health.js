@@ -11,7 +11,21 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { TYPESAFE_SYSTEMONE_API, TYPESAFE_PINNED_MODEL_RE, WORKERS_AI_ACCOUNTS_API, workersAiDecisionModel } = require('./llm/call');
 
+const { etDateString } = require('../utils/datetime-et');
+
 const GBP_LOCATION_KEYS = ['LWR', 'PARRISH', 'SARASOTA', 'VENICE'];
+
+// One wrong answer from a provider is not a credential problem. On 2026-11-10 OpenAI's model list answered
+// HTTP 504 once at 7:00 AM and the check told the owner to renew a credential that worked. A result of 'error'
+// is checked once more after this wait, on the scheduled run only (the admin "check now" button answers at
+// once). 'expired' is not checked again: a 401 or 403 is the provider's own verdict on the credential.
+const RECHECK_DELAY_MS = 60 * 1000;
+
+// The owner's alert row for the 7 AM check (owner-alerts.js kind 'credential-check'): its ops digest key.
+const OWNER_ALERT_KEY = 'owner-alert:credential-check';
+
+const isFailure = (r) => r.status === 'expired' || r.status === 'error';
+const tokenAlertKey = (platform) => `token_alert:${platform}`;
 
 // Every platform checkAll() maintains. Rows outside this set are deprecated
 // leftovers, pruned by pruneStaleCredentials() (scheduled path only).
@@ -1027,6 +1041,43 @@ async function checkGitHub() {
   }
 }
 
+// ── Alerts ──
+
+async function recheckErrors(results, delayMs) {
+  if (!(delayMs > 0) || !results.some((r) => r.status === 'error')) return results;
+  await new Promise((resolve) => { setTimeout(resolve, delayMs); });
+  const settled = [];
+  for (const r of results) settled.push(r.status === 'error' ? await TokenHealthService.checkSingle(r.platform) : r);
+  return settled;
+}
+
+// The bell rows, one per failing platform (dedupe key token_alert:<platform>), through the alert episodes
+// helper (admin-alert-episodes.js). Before, every failing morning wrote a new row and no row ever closed: a
+// LinkedIn token rang 80 mornings in a row, and a one-time provider error stayed open after the next check
+// passed. Now a failure that stands keeps its one row (new text rewrites it and rings again), a platform whose
+// check passes closes its row, and a failure that comes back after a pass rings again. ALERT_EPISODES off (the
+// close and reopen kill switch every episodes caller reads) is the write as it was, with no close.
+async function settleTokenAlerts(results) {
+  const failures = results.filter(isFailure);
+  const live = require('../config/feature-gates').alertEpisodesLive();
+  if (!failures.length && !live) return;
+  try {
+    const NotificationService = require('./notification-service');
+    const episodes = require('./admin-alert-episodes');
+    for (const f of failures) {
+      const title = `${f.platform} credential ${f.status}`;
+      const body = f.lastError || 'Check token health dashboard';
+      const opts = { icon: '\u{1F511}', link: '/admin/social-media' };
+      if (live) await episodes.raiseAdminAlertWithReopen('token_alert', title, body, { ...opts, dedupeKey: tokenAlertKey(f.platform), refreshOnDedupe: true });
+      else await NotificationService.notifyAdmin('token_alert', title, body, opts);
+    }
+    if (!live) return;
+    const passed = results.filter((r) => r.status === 'healthy').map((r) => tokenAlertKey(r.platform));
+    const closed = Number(await episodes.closeAdminAlertKeys(db, passed, 'credential_check_passed', { resolution: 'Cleared: the credential check passed' })) || 0;
+    if (closed) logger.info(`[token-health] closed ${closed} alert row(s) for a platform that passed`);
+  } catch (e) { logger.error(`[notifications] Token alert notification failed: ${e.message}`); }
+}
+
 // ── Public API ──
 
 const TokenHealthService = {
@@ -1065,12 +1116,13 @@ const TokenHealthService = {
 
   /**
    * Run all checks. Returns array of results and upserts into DB.
+   * recheckDelayMs > 0: a platform that read 'error' is checked once more after that wait (RECHECK_DELAY_MS).
    */
-  async checkAll() {
+  async checkAll({ recheckDelayMs = 0 } = {}) {
     logger.info('[token-health] Running credential health checks...');
     // Prune BEFORE checking so this pass's upserts land on clean rows.
     await TokenHealthService.pruneStaleCredentials();
-    const results = [];
+    let results = [];
 
     // Run checks sequentially to avoid overwhelming APIs
     results.push(await checkFacebook());
@@ -1098,21 +1150,44 @@ const TokenHealthService = {
     results.push(await checkSendGrid());
     results.push(await checkGitHub());
 
+    results = await recheckErrors(results, recheckDelayMs);
+
     const healthy = results.filter(r => r.status === 'healthy').length;
-    const failures = results.filter(r => r.status === 'expired' || r.status === 'error');
+    const failures = results.filter(isFailure);
     logger.info(`[token-health] Check complete: ${healthy} healthy, ${failures.length} issues, ${results.length} total`);
 
-    // In-app notifications for credential failures
-    if (failures.length > 0) {
-      try {
-        const NotificationService = require('./notification-service');
-        for (const f of failures) {
-          await NotificationService.notifyAdmin('token_alert', `${f.platform} credential ${f.status}`, f.lastError || 'Check token health dashboard', { icon: '\u{1F511}', link: '/admin/social-media' });
-        }
-      } catch (e) { logger.error(`[notifications] Token alert notification failed: ${e.message}`); }
-    }
+    // In-app notifications for credential failures, and the close of a row whose platform passed
+    await settleTokenAlerts(results);
 
     return results;
+  },
+
+  /**
+   * The scheduled 7 AM run: every check (an 'error' is checked twice), then the owner's alert row.
+   * Failures: one row for the day; the failing platforms are its items, so a ringing alert rings again only
+   * on a new one, and the row of an earlier morning closes when this one lands (supersedePrior).
+   * No failure: the rows earlier mornings wrote close, because the problem they name is gone.
+   */
+  async runDailyCheck() {
+    const results = await TokenHealthService.checkAll({ recheckDelayMs: RECHECK_DELAY_MS });
+    const failures = results.filter(isFailure);
+    if (!failures.length) {
+      await require('./ops-digest-fall-off').retireIfClean(OWNER_ALERT_KEY);
+      return { failures: 0, total: results.length };
+    }
+    const msg = `Token Alert: ${failures.length} credential(s) need attention:\n` +
+      failures.map(f => `- ${f.platform}: ${f.status} — ${f.lastError || 'check dashboard'}`).join('\n');
+    await require('./owner-alerts').recordOwnerAlert('credential-check', {
+      action: 'renew an expired credential',
+      why: `${failures.length} credential${failures.length === 1 ? '' : 's'} failed the 7 AM check.`,
+      subject: { type: 'check', id: 'credential-check' },
+      text: msg,
+      link: '/admin/settings?tab=integrations',
+      dedupeKey: `${OWNER_ALERT_KEY}:${etDateString()}`,
+      itemKeys: [...new Set(failures.map(f => String(f.platform)))].sort(),
+      supersedePrior: true,
+    });
+    return { failures: failures.length, total: results.length };
   },
 
   /**
@@ -1169,3 +1244,4 @@ const TokenHealthService = {
 };
 
 module.exports = TokenHealthService;
+module.exports._private = { recheckErrors, settleTokenAlerts, RECHECK_DELAY_MS };

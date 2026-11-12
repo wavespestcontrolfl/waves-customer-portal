@@ -15,18 +15,21 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({}) }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(), alertEpisodesLive: jest.fn(() => true) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
+jest.mock('../services/admin-alert-episodes', () => ({ closeAdminAlertIds: jest.fn(async (_conn, ids) => ids.length) }));
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
-const { isEnabled } = require('../config/feature-gates');
+const episodes = require('../services/admin-alert-episodes');
+const { isEnabled, alertEpisodesLive } = require('../config/feature-gates');
 const { runStaleVisitSweep, _private } = require('../services/stale-visit-sweep');
 
 function chain(overrides = {}) {
   return {
     where: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     select: jest.fn().mockResolvedValue([]),
     first: jest.fn().mockResolvedValue(null),
@@ -44,7 +47,17 @@ const BACKLOG = [
 beforeEach(() => {
   jest.clearAllMocks();
   NotificationService.notifyAdmin.mockResolvedValue({});
+  alertEpisodesLive.mockReturnValue(true);
 });
+
+// The sweep's two reads of `notifications`: the newest row of the category (lastBell, .first) and the open rows
+// (openRowIds, .select).
+function notifications({ last = null, open = [] } = {}) {
+  return chain({
+    first: jest.fn().mockResolvedValue(last),
+    select: jest.fn().mockResolvedValue(open.map((id) => ({ id }))),
+  });
+}
 
 describe('summarySignature / summarize', () => {
   test('signature covers total, per-status counts, and the oldest date', () => {
@@ -223,6 +236,67 @@ describe('runStaleVisitSweep', () => {
       return chain();
     });
     await expect(runStaleVisitSweep()).rejects.toThrow('bell not recorded');
+  });
+});
+
+// 2026-11-11 audit: each night's changed list left its own row open (three rows with one title, the counts 61,
+// 64 and 67, none read), because nothing closed the row a newer list replaced.
+describe('one open row', () => {
+  const withBacklog = (rows, notif) => db.mockImplementation((table) => {
+    if (table === 'scheduled_services') return chain({ select: jest.fn().mockResolvedValue(rows) });
+    if (table === 'notifications') return notifications(notif);
+    return chain();
+  });
+
+  beforeEach(() => { isEnabled.mockReturnValue(true); });
+
+  test('a new bell closes the rows that were open before it, by id', async () => {
+    withBacklog(BACKLOG, { open: ['n-61', 'n-64'] });
+    const r = await runStaleVisitSweep();
+    expect(r).toMatchObject({ rang: true, closed: 2 });
+    expect(episodes.closeAdminAlertIds).toHaveBeenCalledTimes(1);
+    const [, ids, reason, opts] = episodes.closeAdminAlertIds.mock.calls[0];
+    expect(ids).toEqual(['n-61', 'n-64']);
+    expect(reason).toBe('stale_visits_superseded');
+    expect(opts.resolution).toBe('Replaced by a newer list of stale visits');
+  });
+
+  test('a muted write leaves no new row, so the older rows stay open', async () => {
+    NotificationService.notifyAdmin.mockResolvedValue({ id: null, suppressed: true });
+    withBacklog(BACKLOG, { open: ['n-61'] });
+    const r = await runStaleVisitSweep();
+    expect(r).toMatchObject({ rang: true, closed: 0 });
+    expect(episodes.closeAdminAlertIds).not.toHaveBeenCalled();
+  });
+
+  test('an unchanged list writes nothing and closes nothing', async () => {
+    withBacklog(BACKLOG, {
+      last: { metadata: { summary_signature: _private.summarySignature(BACKLOG) }, created_at: new Date(Date.now() - 24 * 3600e3) },
+      open: ['n-61'],
+    });
+    const r = await runStaleVisitSweep();
+    expect(r.deduped).toBe(true);
+    expect(episodes.closeAdminAlertIds).not.toHaveBeenCalled();
+  });
+
+  test('a clean sweep closes every open row', async () => {
+    withBacklog([], { open: ['n-61', 'n-64', 'n-67'] });
+    const r = await runStaleVisitSweep();
+    expect(r).toMatchObject({ clean: true, closed: 3 });
+    const [, ids, reason, opts] = episodes.closeAdminAlertIds.mock.calls[0];
+    expect(ids).toEqual(['n-61', 'n-64', 'n-67']);
+    expect(reason).toBe('stale_visits_clear');
+    expect(opts.resolution).toBe('Cleared: no past-dated visit is still open');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('ALERT_EPISODES off: the bell still rings and nothing is closed', async () => {
+    alertEpisodesLive.mockReturnValue(false);
+    withBacklog(BACKLOG, { open: ['n-61'] });
+    expect(await runStaleVisitSweep()).toMatchObject({ rang: true, closed: 0 });
+    withBacklog([], { open: ['n-61'] });
+    expect(await runStaleVisitSweep()).toMatchObject({ clean: true, closed: 0 });
+    expect(episodes.closeAdminAlertIds).not.toHaveBeenCalled();
   });
 });
 

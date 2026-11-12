@@ -38,6 +38,13 @@ beforeEach(() => {
 });
 
 describe('recordOwnerAlert', () => {
+  test('supersedePrior reaches the digest writer only when the caller asks for it', async () => {
+    await recordOwnerAlert('credential-check', credentialAlert({ supersedePrior: true }));
+    await recordOwnerAlert('credential-check', credentialAlert());
+    expect(deliverOpsDigest.mock.calls[0][0].supersedePrior).toBe(true);
+    expect(deliverOpsDigest.mock.calls[1][0]).not.toHaveProperty('supersedePrior');
+  });
+
   test('writes a quiet, composed Activity row under the dedupe key and sends no text or email', async () => {
     const result = await recordOwnerAlert('credential-check', credentialAlert());
     expect(result).toEqual({ ok: true, channel: 'in_app', id: 'n-1' });
