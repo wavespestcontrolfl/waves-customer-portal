@@ -33,7 +33,7 @@
  *   - Budget about 1500 ms: slots not yet evaluated are kept (timedOut).
  *   - Never throws: on any error the original list comes back (report.error).
  *   - Spends nothing: the default route-optimizer estimate drives every leg
- *     (the GPS-fitted clock under GATE_DRIVE_CLOCK). No Google, no road
+ *     (the GPS-fitted drive clock). No Google, no road
  *     check, no spender, no provider travel.
  */
 const logger = require('../logger');
