@@ -321,10 +321,10 @@ describe('rain-out service', () => {
     });
   });
 
-  // Owner 2026-10-28: techs move visits from their own app. Behind
-  // GATE_TECH_MOVE_ROUTE_TIMES the "Later today" choices are the hours the
-  // technician's route can keep, each with its added drive minutes.
-  describe('getOptions: route-checked same-day hours (GATE_TECH_MOVE_ROUTE_TIMES)', () => {
+  // Owner 2026-10-28: techs move visits from their own app. The "Later today"
+  // choices are the hours the technician's route can keep, each with its added
+  // drive minutes; the +2h and +4h guesses are only the fallback.
+  describe('getOptions: route-checked same-day hours', () => {
     const findTime = require('../services/scheduling/find-time');
     const blackout = require('../services/scheduling/blackout-dates');
     const slot = (start, detour, extra = {}) => ({
@@ -353,21 +353,12 @@ describe('rain-out service', () => {
       blackoutSpy = jest.spyOn(blackout, 'isBlackoutDate').mockResolvedValue(false);
     });
     afterEach(() => {
-      delete process.env.GATE_TECH_MOVE_ROUTE_TIMES;
       finder.mockRestore();
       blackoutSpy.mockRestore();
       jest.useRealTimers();
     });
 
-    test('gate off: the +2h and +4h guesses, the finder is never asked', async () => {
-      const options = await sameDay();
-      expect(options.map((o) => o.window.start)).toEqual(['12:00', '14:00']);
-      expect(options.every((o) => o.driveMinutes === undefined)).toBe(true);
-      expect(finder).not.toHaveBeenCalled();
-    });
-
-    test('gate on: feasible hours with added drive, lowest drive first, at most 4, none before now + 60 min', async () => {
-      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+    test('feasible hours with added drive, lowest drive first, at most 4, none before now + 60 min', async () => {
       finder.mockResolvedValue({ slots: [
         slot('10:00', 1), // starts before now + 60 min (11:00): dropped
         slot('11:00', 20.4),
@@ -397,38 +388,33 @@ describe('rain-out service', () => {
       expect(finder.mock.calls[0][0].pickerRoadCheck).toBeUndefined();
     });
 
-    test('gate on: an hour with no drive number is offered last, without driveMinutes', async () => {
-      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+    test('an hour with no drive number is offered last, without driveMinutes', async () => {
       finder.mockResolvedValue({ slots: [slot('11:00', null), slot('12:00', 9)] });
       const options = await sameDay();
       expect(options.map((o) => [o.window.start, o.driveMinutes])).toEqual([['12:00', 9], ['11:00', undefined]]);
     });
 
-    test('gate on: rounds now + 60 min up to the next hour', async () => {
-      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+    test('rounds now + 60 min up to the next hour', async () => {
       jest.setSystemTime(new Date('2026-06-11T14:10:00Z')); // 10:10 ET: first hour is 12:00
       finder.mockResolvedValue({ slots: [slot('11:00', 1), slot('12:00', 8)] });
       const options = await sameDay();
       expect(options.map((o) => o.window.start)).toEqual(['12:00']);
     });
 
-    test('gate on: a blackout today offers nothing and never asks the finder', async () => {
-      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+    test('a blackout today offers nothing and never asks the finder', async () => {
       blackoutSpy.mockResolvedValue(true);
       expect(await sameDay()).toEqual([]);
       expect(finder).not.toHaveBeenCalled();
     });
 
     // Codex #6932 r4: the visit's saved service location, as the staff finder reads it.
-    test('gate on: a visit at a secondary property searches from its own pin, not the customer\'s home', async () => {
-      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+    test('a visit at a secondary property searches from its own pin, not the customer\'s home', async () => {
       finder.mockResolvedValue({ slots: [slot('15:00', 3)] });
       await sameDay({ service_address_line1: '9 Rental Way', service_address_city: 'Venice', lat: 27.1, lng: -82.3 });
       expect(finder).toHaveBeenCalledWith(expect.objectContaining({ lat: 27.1, lng: -82.3 }));
     });
 
-    test('gate on: a stamped address with no pin is resolved from the geocode cache only', async () => {
-      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+    test('a stamped address with no pin is resolved from the geocode cache only', async () => {
       const dayStops = require('../services/scheduling/day-stops');
       const resolve = jest.spyOn(dayStops, 'resolveServiceLocation').mockResolvedValue({ lat: 27.2, lng: -82.35, source: 'address_geocoded_now' });
       try {
@@ -447,15 +433,13 @@ describe('rain-out service', () => {
       }
     });
 
-    test('gate on: no stamped address searches from the customer\'s pin', async () => {
-      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+    test('no stamped address searches from the customer\'s pin', async () => {
       finder.mockResolvedValue({ slots: [slot('15:00', 3)] });
       await sameDay();
       expect(finder).toHaveBeenCalledWith(expect.objectContaining({ lat: 27.4, lng: -82.4 }));
     });
 
-    test('gate on: the route is judged full today, so no same-day hour is offered (no unchecked guess)', async () => {
-      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+    test('the route is judged full today, so no same-day hour is offered (no unchecked guess)', async () => {
       finder.mockResolvedValue({ slots: [], rejections_by_date: { '2026-06-11': { arrival_window: 2, route_unverified: 1 } } });
       expect(await sameDay()).toEqual([]);
     });
@@ -463,14 +447,12 @@ describe('rain-out service', () => {
     test.each([
       ['no refusal at all', { slots: [] }],
       ['only route_unverified refusals', { slots: [], rejections_by_date: { '2026-06-11': { route_unverified: 3 } } }],
-    ])('gate on: no hour with %s, so the route was not judged and the guesses stay', async (_name, answer) => {
-      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+    ])('no hour with %s, so the route was not judged and the guesses stay', async (_name, answer) => {
       finder.mockResolvedValue(answer);
       expect((await sameDay()).map((o) => o.window.start)).toEqual(['12:00', '14:00']);
     });
 
-    test.each(['on_site', 'en_route'])('gate on: moving the stop the tech is at (%s) keeps the guesses and asks no finder', async (status) => {
-      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+    test.each(['on_site', 'en_route'])('moving the stop the tech is at (%s) keeps the guesses and asks no finder', async (status) => {
       expect((await sameDay({ status })).map((o) => o.window.start)).toEqual(['12:00', '14:00']);
       expect(finder).not.toHaveBeenCalled();
     });
@@ -478,8 +460,7 @@ describe('rain-out service', () => {
     test.each([
       ['throws', () => finder.mockRejectedValue(new Error('boom'))],
       ['returns an error', () => finder.mockResolvedValue({ error: 'lat/lng required', slots: [] })],
-    ])('gate on: the finder %s, so the +2h and +4h guesses are offered', async (_name, arrange) => {
-      process.env.GATE_TECH_MOVE_ROUTE_TIMES = 'true';
+    ])('the finder %s, so the +2h and +4h guesses are offered', async (_name, arrange) => {
       arrange();
       const options = await sameDay();
       expect(options.map((o) => o.window.start)).toEqual(['12:00', '14:00']);
@@ -865,7 +846,7 @@ describe('rain-out service', () => {
       notifyCustomer: true,
     };
 
-    test('gate on: renders the short v3 template with the link clause and stamps the v3 kill-switch key', async () => {
+    test('renders the short v3 template with the link clause and stamps the v3 kill-switch key', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       wireSingle();
 
@@ -987,7 +968,7 @@ describe('rain-out service', () => {
       notifyCustomer: false,
     };
 
-    test('gate on: a day move of a series child shifts the whole series, re-arms siblings silently, parks conflicted ones', async () => {
+    test('a day move of a series child shifts the whole series, re-arms siblings silently, parks conflicted ones', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       wireRecurring();
       SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
@@ -1174,7 +1155,7 @@ describe('rain-out service', () => {
       expect(AppointmentReminders.handleReschedule).not.toHaveBeenCalled();
     });
 
-    test('gate on: a REPLAYED series result runs the (idempotent) shared effects pass; Quick Move\'s own moved-SMS is CLAIMED on the row first — a winner that already concluded it means no second text', async () => {
+    test('a REPLAYED series result runs the (idempotent) shared effects pass; Quick Move\'s own moved-SMS is CLAIMED on the row first — a winner that already concluded it means no second text', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       db.fn = { now: jest.fn(() => 'now()') };
       const claim = chain({ update: jest.fn().mockResolvedValue(0) }); // notified_at already set by the winner
@@ -1196,7 +1177,7 @@ describe('rain-out service', () => {
       expect(result.results[0]).toMatchObject({ smsSent: false, smsReason: 'replayed' });
     });
 
-    test('gate on: a replay whose first pass died BEFORE the moved-SMS (claim still free) recovers the text — sent once, customer_notified stamped', async () => {
+    test('a replay whose first pass died BEFORE the moved-SMS (claim still free) recovers the text — sent once, customer_notified stamped', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       db.fn = { now: jest.fn(() => 'now()') };
       const claim = chain({ update: jest.fn().mockResolvedValue(1) });
@@ -1221,7 +1202,7 @@ describe('rain-out service', () => {
       expect(stamp.update).toHaveBeenCalledWith({ customer_notified: true });
     });
 
-    test('gate on: a rejected series shift falls back WITH the anchor CAS — a concurrent move is never overwritten', async () => {
+    test('a rejected series shift falls back WITH the anchor CAS — a concurrent move is never overwritten', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       wireRecurring();
       SmartRebooker.rescheduleSeries.mockRejectedValueOnce(
@@ -1247,7 +1228,7 @@ describe('rain-out service', () => {
       );
     });
 
-    test('gate on: overlaps are ADVISORY on the staff surface — both rebooker calls pass overlapAdvisory and a warned move surfaces on the member result + overlapCount', async () => {
+    test('overlaps are ADVISORY on the staff surface — both rebooker calls pass overlapAdvisory and a warned move surfaces on the member result + overlapCount', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       wireRecurring();
       SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
@@ -1271,7 +1252,7 @@ describe('rain-out service', () => {
       expect(result.overlapWarnings).toEqual([expect.stringContaining('2026-06-12'), expect.stringContaining('2026-09-12')]);
     });
 
-    test('gate on: a series shift that committed overlaps on other dates files ONE durable schedule_conflict card naming every clashing date', async () => {
+    test('a series shift that committed overlaps on other dates files ONE durable schedule_conflict card naming every clashing date', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       wireRecurring();
       SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
@@ -1293,7 +1274,7 @@ describe('rain-out service', () => {
       expect(result.overlapWarnings).toEqual([expect.stringContaining('2026-09-12'), expect.stringContaining('2026-12-12')]);
     });
 
-    test('gate on: a sent Quick Move text whose anchor reminder close FAILED records "text done, close owed" (customer_notified, notified_at NULL) for the reconciler — never a concluded text beside an armed reminder', async () => {
+    test('a sent Quick Move text whose anchor reminder close FAILED records "text done, close owed" (customer_notified, notified_at NULL) for the reconciler — never a concluded text beside an armed reminder', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       db.fn = { now: jest.fn(() => 'now()') };
       const claim = chain({ update: jest.fn().mockResolvedValue(1) });
@@ -1311,7 +1292,7 @@ describe('rain-out service', () => {
       expect(stamp.update).toHaveBeenCalledWith({ customer_notified: true, notified_at: null });
     });
 
-    test('gate on: a series shift that reports a grouped stop start — the moved-SMS quotes that start', async () => {
+    test('a series shift that reports a grouped stop start — the moved-SMS quotes that start', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       db.fn = { now: jest.fn(() => 'now()') };
       wireDb({
@@ -1330,7 +1311,7 @@ describe('rain-out service', () => {
       expect(vars.new_option).toContain('11:00 AM - 1:00 PM');
     });
 
-    test('gate on: an off-hour tech-supplied target is normalized on-the-hour before the series mints it (codex P1)', async () => {
+    test('an off-hour tech-supplied target is normalized on-the-hour before the series mints it (codex P1)', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       wireRecurring();
 
@@ -1374,7 +1355,7 @@ describe('rain-out service', () => {
       expect(SmartRebooker.reschedule.mock.calls[0][0]).toBe('svc-1');
     });
 
-    test('gate on: an un-shiftable series never fails the rain-out — the visit moves alone and the series parks', async () => {
+    test('an un-shiftable series never fails the rain-out — the visit moves alone and the series parks', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       wireRecurring();
       SmartRebooker.rescheduleSeries.mockRejectedValueOnce(
@@ -1461,7 +1442,7 @@ describe('rain-out service', () => {
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
     });
 
-    test('gate on: moves and texts the schedule lead with ZERO weather claims (v2 rung)', async () => {
+    test('moves and texts the schedule lead with ZERO weather claims (v2 rung)', async () => {
       process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
       wireSingle();
 
@@ -1486,7 +1467,7 @@ describe('rain-out service', () => {
       });
     });
 
-    test('gate on: customer_noshow REJECTS route scope — a no-show is about one customer, never the whole route', async () => {
+    test('customer_noshow REJECTS route scope — a no-show is about one customer, never the whole route', async () => {
       process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
       wireSingle();
 
@@ -1497,7 +1478,7 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
-    test('gate on: gate_locked REJECTS route scope — only the anchor property was inaccessible', async () => {
+    test('gate_locked REJECTS route scope — only the anchor property was inaccessible', async () => {
       process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
       wireSingle();
 
@@ -1569,7 +1550,7 @@ describe('rain-out service', () => {
       expect(countSegments(rendered).segmentCount).toBeLessThanOrEqual(2);
     });
 
-    test('gate on: running_late rejects same-day targets at/before the current window, allows later + day moves', async () => {
+    test('running_late rejects same-day targets at/before the current window, allows later + day moves', async () => {
       process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
 
       // SERVICE sits on 2026-06-11 at 09:00. Earlier same-day → reject.
@@ -1598,7 +1579,7 @@ describe('rain-out service', () => {
       expect(result.ok).toBe(true);
     });
 
-    test('gate on: customer_noshow is the SOFT no-show — rebooker logs the missed-outreach reason and the SMS says we missed you', async () => {
+    test('customer_noshow is the SOFT no-show — rebooker logs the missed-outreach reason and the SMS says we missed you', async () => {
       process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
       wireSingle();
 
@@ -1619,7 +1600,7 @@ describe('rain-out service', () => {
       expect(MissedAppointment.evaluateThreshold).toHaveBeenCalledWith('cust-1', 'quick_move_no_show');
     });
 
-    test('gate on: non-noshow reasons never run the missed-appointment threshold', async () => {
+    test('non-noshow reasons never run the missed-appointment threshold', async () => {
       process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
       wireSingle();
 
@@ -3351,7 +3332,7 @@ describe('rain-out service', () => {
       actorUserId: 'admin-7',
     };
 
-    test('gate on: a note that would push the notice to 3 segments is rejected BEFORE the move', async () => {
+    test('a note that would push the notice to 3 segments is rejected BEFORE the move', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
       wireSingle();
@@ -3381,7 +3362,7 @@ describe('rain-out service', () => {
     // no-link fallback. Uses an EXTRA reason (no "forecast" wording in its
     // link clause, unlike weather reasons — see renderV3MovedBody) so a
     // short url can actually beat the fallback's length.
-    test('gate on: a short link shorter than the no-link fallback is refused pre-move when the no-link variant alone would exceed the cap', async () => {
+    test('a short link shorter than the no-link fallback is refused pre-move when the no-link variant alone would exceed the cap', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
       mockV3Render();
@@ -3395,7 +3376,7 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
-    test('gate on: a short link that leaves BOTH variants inside the cap moves and sends normally', async () => {
+    test('a short link that leaves BOTH variants inside the cap moves and sends normally', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
       mockV3Render();
@@ -3478,7 +3459,7 @@ describe('rain-out service', () => {
       expect(result.remaining).toBe(0);
     });
 
-    test('gate on: a customer with no phone is never held to the cap — the move proceeds un-texted, nothing is measured', async () => {
+    test('a customer with no phone is never held to the cap — the move proceeds un-texted, nothing is measured', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
       wireSingle({ phone: null });
@@ -3498,7 +3479,7 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
-    test('gate on: a note that fits sends as v3 notice + note, measured on the same shape it sent', async () => {
+    test('a note that fits sends as v3 notice + note, measured on the same shape it sent', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
       wireSingle();
@@ -3521,7 +3502,7 @@ describe('rain-out service', () => {
       expect(preCheck.weather_lead.length).toBeGreaterThanOrEqual(send.weather_lead.length);
     });
 
-    test('gate on: gate_locked measures the portal nudge that rides ahead of the link', async () => {
+    test('gate_locked measures the portal nudge that rides ahead of the link', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
       mockV3Render();
@@ -3537,7 +3518,7 @@ describe('rain-out service', () => {
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
     });
 
-    test('gate on: the note is measured AS SENT — smart punctuation and link schemes count like the send, not UCS-2', async () => {
+    test('the note is measured AS SENT — smart punctuation and link schemes count like the send, not UCS-2', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
       wireSingle();
@@ -3552,7 +3533,7 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage.mock.calls[0][0].body).toContain('Note from our team: We’ll see you Friday — thanks for your patience!');
     });
 
-    test('gate on: the send reuses the measured link (built once, existing code preferred, eligibility kept) and pins the base v3 row', async () => {
+    test('the send reuses the measured link (built once, existing code preferred, eligibility kept) and pins the base v3 row', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
       wireSingle();
@@ -3578,7 +3559,7 @@ describe('rain-out service', () => {
       for (const call of v3Calls) expect(call[3]).toEqual({ noVariants: true, templateBody: V3_BODY });
     });
 
-    test('gate on: EVERY stop is measured at the LONGEST arrival label (a stop grouped after the snapshot lands at a start only the move knows)', async () => {
+    test('EVERY stop is measured at the LONGEST arrival label (a stop grouped after the snapshot lands at a start only the move knows)', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
       wireSingle();
@@ -3609,7 +3590,7 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('Note from our team');
     });
 
-    test('gate on: an UNREADABLE v3 row fails the move closed — never treated as uncapped', async () => {
+    test('an UNREADABLE v3 row fails the move closed — never treated as uncapped', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
       wireDb({
@@ -3632,7 +3613,7 @@ describe('rain-out service', () => {
       expect(preview).toEqual({ ok: false, reason: 'note_cap_unavailable' });
     });
 
-    test('gate on: a live snapshot that FAILS to render refuses the move — never an unmeasured send', async () => {
+    test('a live snapshot that FAILS to render refuses the move — never an unmeasured send', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       renderSmsTemplate.mockResolvedValueOnce(null);
       wireSingle();
@@ -3649,7 +3630,7 @@ describe('rain-out service', () => {
       expect(preview).toEqual({ ok: false, reason: 'note_cap_unavailable' });
     });
 
-    test('gate on: a same-day move is measured at the LONGEST part-of-day lead, whatever the clock says', async () => {
+    test('a same-day move is measured at the LONGEST part-of-day lead, whatever the clock says', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
       wireSingle();
@@ -3665,7 +3646,7 @@ describe('rain-out service', () => {
       expect(preCheck.weather_lead.length).toBeGreaterThanOrEqual(send.weather_lead.length);
     });
 
-    test('gate on: a pre-move link build FAILURE refuses the move — measuring "no link" and sending one later would grow the body', async () => {
+    test('a pre-move link build FAILURE refuses the move — measuring "no link" and sending one later would grow the body', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
       wireSingle();
@@ -3691,7 +3672,7 @@ describe('rain-out service', () => {
       expect(refused.ok).toBe(true);
     });
 
-    test('gate on: a measured "no link" (plain refusal) stays no link at send — never rebuilt', async () => {
+    test('a measured "no link" (plain refusal) stays no link at send — never rebuilt', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
       wireSingle();
@@ -3704,7 +3685,7 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage.mock.calls[0][0].body).toContain(' Need a different time? Reply to this message.');
     });
 
-    test('gate on: a disabled v3 row is uncapped here and PINNED — the send honours the kill switch even if the row is enabled in between', async () => {
+    test('a disabled v3 row is uncapped here and PINNED — the send honours the kill switch even if the row is enabled in between', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
       wireSingle({}, { v3Row: { body: V3_BODY, is_active: false } });
@@ -3720,7 +3701,7 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
-    test('gate on: an absent v3 row is PINNED — the send falls to v2 even if the row is created in between', async () => {
+    test('an absent v3 row is PINNED — the send falls to v2 even if the row is created in between', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
       wireSingle({}, { v3Row: null });
@@ -3732,7 +3713,7 @@ describe('rain-out service', () => {
       expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v2');
     });
 
-    test('gate on: the send rebuilds the link on the POST-move state — a visit grouped in between gets no link', async () => {
+    test('the send rebuilds the link on the POST-move state — a visit grouped in between gets no link', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
       wireSingle();
@@ -3863,7 +3844,7 @@ describe('rain-out service', () => {
       });
     }
 
-    test('gate on: a grouped stop whose partner starts first — the Custom text quotes the STOP start', async () => {
+    test('a grouped stop whose partner starts first — the Custom text quotes the STOP start', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
       wireGrouped();
@@ -3873,7 +3854,7 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage.mock.calls[0][0].body).toContain('Fri, Jun 12, 12:00 PM - 2:00 PM');
     });
 
-    test('gate on: the sheet preview measures the same stop-start body commit() renders', async () => {
+    test('the sheet preview measures the same stop-start body commit() renders', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
       wireGrouped();
@@ -3883,7 +3864,7 @@ describe('rain-out service', () => {
       for (const call of customCalls) expect(call[1].new_option).toContain('12:00 PM - 2:00 PM');
     });
 
-    test('gate on: an unpadded start (9:00) is never ranked after 10:00 — the text keeps 9 AM', async () => {
+    test('an unpadded start (9:00) is never ranked after 10:00 — the text keeps 9 AM', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
       wireDb({
@@ -3903,7 +3884,7 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage.mock.calls[0][0].body).toContain('Fri, Jun 12, 9:00 AM - 11:00 AM');
     });
 
-    test('gate on: a grouped stop that landed elsewhere than projected — the Custom text is not sent', async () => {
+    test('a grouped stop that landed elsewhere than projected — the Custom text is not sent', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
       wireGrouped();
@@ -3913,7 +3894,7 @@ describe('rain-out service', () => {
       expect(JSON.stringify(result)).toContain('stop_start_changed');
     });
 
-    test('gate on: route scope rejected — a custom message is stop-specific, like the note', async () => {
+    test('route scope rejected — a custom message is stop-specific, like the note', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       wireSingle();
       const result = await RainOut.commit({ ...COMMIT_ARGS, scope: 'route' });
@@ -3921,7 +3902,7 @@ describe('rain-out service', () => {
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
     });
 
-    test('gate on: blank message sends the standard opener instead of blocking the move (owner ruling 2026-08-24)', async () => {
+    test('blank message sends the standard opener instead of blocking the move (owner ruling 2026-08-24)', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
       // null and whitespace-only both sanitize to no note → same default.
@@ -3940,7 +3921,7 @@ describe('rain-out service', () => {
       }
     });
 
-    test('gate on: message opens the SMS, move line + link close it, no note append, no weather work', async () => {
+    test('message opens the SMS, move line + link close it, no note append, no weather work', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
       wireSingle();
@@ -3980,7 +3961,7 @@ describe('rain-out service', () => {
       expect(customCalls).toHaveLength(2);
     });
 
-    test('gate on: a body that would send as 3 segments is rejected BEFORE the move', async () => {
+    test('a body that would send as 3 segments is rejected BEFORE the move', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
       wireSingle();
@@ -4001,7 +3982,7 @@ describe('rain-out service', () => {
     // slots, 2 segments) would grow past the cap (307 slots, 3 segments) if
     // the link were ever dropped — commit() must catch this BEFORE the
     // move, not strand an already-moved visit with no notice.
-    test('gate on: a short link shorter than the no-link fallback is refused pre-move when the no-link variant alone would exceed the cap', async () => {
+    test('a short link shorter than the no-link fallback is refused pre-move when the no-link variant alone would exceed the cap', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
       wireSingle();
@@ -4019,7 +4000,7 @@ describe('rain-out service', () => {
     // The companion case: both variants fit, so the move proceeds and a
     // later landed-state revocation can safely swap to the pinned no-link
     // body (covered by the "swaps to the pinned no-link body" test above).
-    test('gate on: a short link that leaves BOTH variants inside the cap moves and sends normally', async () => {
+    test('a short link that leaves BOTH variants inside the cap moves and sends normally', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
       wireSingle();
@@ -4079,7 +4060,7 @@ describe('rain-out service', () => {
       expect(result.segments).toBe(2);
     });
 
-    test('gate on: missing/disabled custom template rejects the move pre-commit (kill switch, fail closed)', async () => {
+    test('missing/disabled custom template rejects the move pre-commit (kill switch, fail closed)', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       renderSmsTemplate.mockResolvedValueOnce(null);
       wireSingle();
@@ -4091,7 +4072,7 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
-    test('gate on: notifyCustomer=false moves silently with no render and no segment check', async () => {
+    test('notifyCustomer=false moves silently with no render and no segment check', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       wireSingle();
 
@@ -4107,7 +4088,7 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
-    test('gate on: emoji notes and template text reach the SMS send intact', async () => {
+    test('emoji notes and template text reach the SMS send intact', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       // Persistent (not Once): commit() now renders BOTH the linked and
       // no-link variants pre-move (codex round-3 P2) — both must get this
@@ -4121,7 +4102,7 @@ describe('rain-out service', () => {
       }));
     });
 
-    test('gate on: the standard note guards still screen the custom message pre-move', async () => {
+    test('the standard note guards still screen the custom message pre-move', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       wireSingle();
       const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'Back tomorrow {missing}' });
@@ -4158,7 +4139,7 @@ describe('rain-out service', () => {
     // about-to-be-superseded row) — so a visit that landed too soon to move
     // online again (or went grouped/frozen) must be caught HERE, at send
     // time, or the customer gets a link the reschedule page then refuses.
-    test('gate on: the send drops a link revoked by the landed-state re-check (too soon to move online again, or grouped/frozen) — re-renders with the no-link clause, never a stale link', async () => {
+    test('the send drops a link revoked by the landed-state re-check (too soon to move online again, or grouped/frozen) — re-renders with the no-link clause, never a stale link', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
       wireSingle();
@@ -4207,7 +4188,7 @@ describe('rain-out service', () => {
     // row `wireSingle` would serve on a SECOND read is a poisoned marker
     // that must never reach the customer, and exactly one read happens
     // regardless.
-    test('gate on: a landed-state link revocation swaps to the pinned no-link body and never re-reads the template row — a row that went disabled/lost its placeholder/grew longer in between cannot strand the move without a notice', async () => {
+    test('a landed-state link revocation swaps to the pinned no-link body and never re-reads the template row — a row that went disabled/lost its placeholder/grew longer in between cannot strand the move without a notice', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
       const POISON = 'POISONED-SECOND-READ-MUST-NEVER-RENDER';
@@ -4246,7 +4227,7 @@ describe('rain-out service', () => {
     // send-time pinnedUrl re-check must be treated exactly like an explicit
     // refusal — rescheduleUrl still lands on null, and the swap still uses
     // the pinned noLinkBody rather than re-reading or re-rendering.
-    test('gate on: a {failed:true} landed-state re-check (read failure, not a refusal) also drops the link and uses the pinned snapshot', async () => {
+    test('a {failed:true} landed-state re-check (read failure, not a refusal) also drops the link and uses the pinned snapshot', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
       wireSingle();
@@ -4639,7 +4620,7 @@ describe('commit summary — visit-covered members are not separate stops (local
   });
 });
 
-// Codex #6881 r3: the pickers' Google road times (GATE_PICKER_ROAD_CHECK)
+// Codex #6881 r3: the pickers' Google road times
 // are staff-only — the generic slot check asks for them only for an admin,
 // counts them against that admin (picker-road-spend.js), and gives the whole
 // batch ONE budget (pre-push audit: 25 concurrent checks must not each get
@@ -4884,7 +4865,7 @@ describe('rain-out: keep rain-OK stops (GATE_RAINOUT_KEEP_RAIN_OK)', () => {
       expect(clause({ reasonCode: 'weather_rain', serviceType: 'Rodent Trapping', serviceKey: 'rodent_trapping' }))
         .toContain('rain-free hours to bond');
     });
-    test('gate on: a rain-OK service skips the sentence, a spray keeps it', () => {
+    test('a rain-OK service skips the sentence, a spray keeps it', () => {
       process.env.GATE_RAINOUT_EFFICACY_NOTE = 'true';
       process.env.GATE_RAINOUT_KEEP_RAIN_OK = 'true';
       expect(clause({ reasonCode: 'weather_rain', serviceType: 'Rodent Trapping', serviceKey: 'rodent_trapping' })).toBe('');

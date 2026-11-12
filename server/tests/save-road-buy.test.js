@@ -41,7 +41,7 @@ const dayAhead = (n) => etDateString(addETDays(new Date(), n));
 const ROAD_DAY = dayAhead(1);
 const PLAIN_DAY = dayAhead(4);
 const NON_ROAD_DAY = dayAhead(12);
-const GATES = ['GATE_PICKER_ROAD_CHECK', 'GATE_SAVE_ROAD_TIMES', 'GATE_SAVE_ROAD_BUY', 'GATE_ADMIN_ARRIVAL_WINDOWS',
+const GATES = ['GATE_SAVE_ROAD_BUY', 'GATE_ADMIN_ARRIVAL_WINDOWS',
   'GATE_SCHEDULING_CAPACITY', 'GATE_DRIVE_TIME_CALIBRATION'];
 const savedEnv = Object.fromEntries(GATES.map((key) => [key, process.env[key]]));
 afterAll(() => {
@@ -93,8 +93,6 @@ beforeEach(() => {
   reserveRoadSpend.mockClear();
   reserveRoadSpend.mockImplementation(async () => ({ allowed: true, day: '2027-03-01' }));
   jest.spyOn(RouteOptimizer, 'createSchedulingTravel').mockImplementation((opts = {}) => fakeSource(opts.traffic === false ? 'plain' : 'traffic'));
-  process.env.GATE_PICKER_ROAD_CHECK = 'true';
-  process.env.GATE_SAVE_ROAD_TIMES = 'true';
   process.env.GATE_SAVE_ROAD_BUY = 'true';
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
   delete process.env.GATE_SCHEDULING_CAPACITY;
@@ -104,8 +102,6 @@ afterEach(() => { jest.restoreAllMocks(); });
 describe('gate off', () => {
   test.each([
     ['GATE_SAVE_ROAD_BUY unset', () => delete process.env.GATE_SAVE_ROAD_BUY],
-    ['GATE_SAVE_ROAD_TIMES unset', () => delete process.env.GATE_SAVE_ROAD_TIMES],
-    ['the pickers\' road check unset', () => delete process.env.GATE_PICKER_ROAD_CHECK],
     ['the arrival-window check unset', () => delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS],
     ['capacity mode on', () => { process.env.GATE_SCHEDULING_CAPACITY = 'true'; }],
   ])('%s: no read, no Google call, no spend', async (_name, turnOff) => {

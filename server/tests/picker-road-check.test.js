@@ -1,6 +1,5 @@
 /**
- * Google inside the staff pickers' route check (GATE_PICKER_ROAD_CHECK,
- * owner 2026-10-26: "we need to run Google inside the scheduling check
+ * Google inside the staff pickers' route check (owner 2026-10-26: "we need to run Google inside the scheduling check
  * itself" — "Next 7 days", "His current stop").
  *
  * What this locks down:
@@ -251,7 +250,7 @@ describe('createPickerTravel', () => {
     expect(logger.info).toHaveBeenCalledWith('[picker-road] 2 lookups sent, 2 answered by Google');
   });
 
-  // A staff save (GATE_SAVE_ROAD_TIMES) reads what the pickers bought and buys
+  // A staff save reads what the pickers bought and buys
   // nothing: no Google call inside a save's transaction.
   test('a cache-only source buys nothing and reads what a picker bought', async () => {
     await make().travel.preload([leg(plus(1), 9 * 60)]);

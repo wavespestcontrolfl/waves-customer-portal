@@ -227,7 +227,7 @@ async function probeMoveConflicts({
       serviceId: target.id,
       technicianId: target.technicianId || null,
       changes: target.changes,
-      // A staff move reads the road times its picker bought (GATE_SAVE_ROAD_TIMES).
+      // A staff move reads the road times its picker bought.
       roads: 'cache',
       ...(arrivalExcludeServiceIds ? { excludeServiceIds: arrivalExcludeServiceIds } : {}),
     } } : {}),
@@ -2574,7 +2574,7 @@ class SmartRebooker {
         // A stop still shared with a live member is left as it was by the
         // placement itself (the check never placed it either).
         // overlapAdvisory = a staff move (the tech-out mover is none): its day is
-        // numbered on the road times its picker bought (GATE_SAVE_ROAD_TIMES).
+        // numbered on the road times its picker bought.
         await placeMovedVisit(trx, { serviceId, staffSave: overlapAdvisory, ...(overlapAdvisory === true ? { lateDays: true } : {}) });
       }
 

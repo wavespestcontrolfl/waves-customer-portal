@@ -178,7 +178,7 @@ describe('wiring', () => {
     const rain = read('services/rain-out.js');
     expect(rain).toContain('technicianId: service.technician_id');
     // getOptions presets, checkTarget, route-scope probe, and the route-checked
-    // same-day hours (GATE_TECH_MOVE_ROUTE_TIMES): the visit's own technician.
+    // same-day hours: the visit's own technician.
     expect((rain.match(/technicianId: service\.technician_id/g) || []).length).toBe(4);
   });
 

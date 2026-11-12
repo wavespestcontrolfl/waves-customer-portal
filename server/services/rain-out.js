@@ -1000,22 +1000,17 @@ function sameDayOptions(now = new Date()) {
   return options;
 }
 
-// Route-checked "later today" hours (GATE_TECH_MOVE_ROUTE_TIMES, dark; owner
-// 2026-10-28, "yes techs can move visits from their own app"). Read at CALL
-// time so an unset is the kill switch. The tech sheet used to guess now + 2h
-// and now + 4h with no route check; on, it offers the hours the technician's
-// route can actually keep, each with the minutes of drive it adds. The free
+// Route-checked "later today" hours (owner 2026-10-28, "yes techs can move
+// visits from their own app"). The tech sheet offers the hours the
+// technician's route can actually keep, each with the minutes of drive it
+// adds; now + 2h and now + 4h are only the fallback (sameDayChoices). The free
 // straight-line estimate only: a technician's request never buys Google road
-// times (those stay staff-only, GATE_PICKER_ROAD_CHECK).
+// times (those stay staff-only, the pickers' route check).
 const TECH_MOVE_ROUTE_MAX_OPTIONS = 4;
 const SAME_DAY_LEAD_MINUTES = 60;
 // The stop the tech is at or driving to cannot be routed from itself
 // (arrival-route resolvePlacementOrigin refuses an active target).
 const ACTIVE_TARGET_STATUSES = new Set(['en_route', 'on_site']);
-
-function techMoveRouteTimesLive() {
-  return require('../config/feature-gates').gateEnvValue('GATE_TECH_MOVE_ROUTE_TIMES');
-}
 
 // Added drive of a finder slot in whole minutes; null when the finder has no
 // number for it (such an hour sorts after every hour that has one).
@@ -1132,9 +1127,9 @@ async function routeSameDayOptions(service, now = new Date()) {
   }
 }
 
-// Gate off = sameDayOptions() exactly as before.
+// The +2h/+4h guesses stand in only when the finder errors or finds no
+// feasible hour.
 async function sameDayChoices(service) {
-  if (!techMoveRouteTimesLive()) return sameDayOptions();
   const routed = await routeSameDayOptions(service);
   return routed === null ? sameDayOptions() : routed;
 }
@@ -1565,7 +1560,7 @@ async function checkSlots({ targets, caller = null } = {}) {
   const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./scheduling/arrival-route');
   // One Google budget for the whole batch (up to 25 checks at once), so an
   // admin's batch keeps the per-request limit and buys a shared leg once
-  // (GATE_PICKER_ROAD_CHECK). A technician's checks never use it.
+  // (the pickers' route check). A technician's checks never use it.
   const batchBudget = require('./scheduling/hint-road-times').createPickerBudget();
   const results = await Promise.all(parsed.map(async (p) => {
     if (p.serviceId && arrivalWindowRoutingEnabled()) {

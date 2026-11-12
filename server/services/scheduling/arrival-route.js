@@ -192,7 +192,7 @@ async function loadArrivalRouteContext({
   // departure-time.js): the minute the van leaves its start point. Unset:
   // the 08:00 shift open, as before.
   vanDepartureMin,
-  // Staff pickers only (GATE_PICKER_ROAD_CHECK, owner 2026-10-26): today's
+  // Staff pickers only (the route check, owner 2026-10-26): today's
   // route under way starts from the stop the tech is at or driving to
   // (resolvePlacementOrigin) instead of reading as unverified.
   fromActiveStop = false,
@@ -926,7 +926,7 @@ function buildFeasibleResult({ target, capacity, staffInsert = false, startMin, 
     } : {}),
     // The order a staff save writes (placeMovedVisit).
     ...(staffInsert ? { routeOrder } : {}),
-    // A staff picker's Google check (GATE_PICKER_ROAD_CHECK): whether every
+    // A staff picker's Google check: whether every
     // leg it drove came from Google (with traffic, or a road time without
     // traffic on the later road days), so the box can drop the "~".
     ...(!capacity && roadTravel ? { travelSource: pickerTravelSource(usedLegs) } : {}),
@@ -1276,7 +1276,7 @@ async function persistArrivalOrder(conn, fit, targetId) {
  *  and leaves the numbers as they were. A day the check cannot certify (a save past its warning, a stop
  *  under way, a missing location, a shared stop) also stays as it was.
  *  Callers hold the tech-day fence; a busy one leaves the numbers to the
- *  writer holding it. A staff save (`staffSave`, GATE_SAVE_ROAD_TIMES)
+ *  writer holding it. A staff save (`staffSave`)
  *  numbers a road day on the road times its check read. A staff save also
  *  passes `lateDays`: under GATE_ROUTE_CHECK_LATE_DAYS it certifies a day whose
  *  existing stops are already late by the same bounded rule the picker listed
@@ -1376,7 +1376,7 @@ async function recordCapacityDecision(conn, fit, targetId) {
       finish_minute: fit.finishMinute, occupied_minutes: fit.occupiedMinutes } });
 }
 
-// Staff checks agree with the pickers' list (GATE_PICKER_ROAD_CHECK): a
+// Staff checks agree with the pickers' list: a
 // route under way today continues from the tech's current stop (a caller
 // may opt out: the automatic tech-out mover). `roads: true` also drives the
 // placement on the same Google road times as the list (the pickers' road
@@ -1387,21 +1387,17 @@ async function recordCapacityDecision(conn, fit, targetId) {
 // (road times are preloaded before a scheduling lock). `roadSpender` = the
 // staff user the lookups are counted against (picker-road-spend.js); none =
 // no Google. `pickerBudget` = the request's shared budget, when it has one.
-// The staff pickers' Google route check (GATE_PICKER_ROAD_CHECK). Under
+// The staff pickers' Google route check (owner 2026-10-26). Under
 // GATE_SCHEDULING_CAPACITY the pickers list the capacity engine's hours
 // (find-time.js findCapacitySlots), which this check does not drive, so it
 // stays off there too: a listed hour and its live check never disagree.
+// A staff save's check and its route number (owner 2026-10-28, "yes do this")
+// read the road times the pickers bought for that day (`roads: 'cache'`), so
+// a save agrees with the hour its picker offered. Cache only: no Google call
+// inside a save's transaction and no spend; a drive no picker looked up keeps
+// the model. The spend's off switch is PICKER_ROAD_DAILY_CAP_CENTS=0.
 function pickerRoadCheckLive() {
-  return gateEnvValue('GATE_PICKER_ROAD_CHECK') && !capacityEnabled();
-}
-
-// GATE_SAVE_ROAD_TIMES (owner 2026-10-28, "yes do this"): a staff save's
-// check and its route number read the road times the pickers bought for that
-// day (`roads: 'cache'`), so a save agrees with the hour its picker offered.
-// Cache only: no Google call inside a save's transaction and no spend; a
-// drive no picker looked up keeps the model. Needs the pickers' road check.
-function saveRoadTimesLive() {
-  return gateEnvValue('GATE_SAVE_ROAD_TIMES') && pickerRoadCheckLive();
+  return !capacityEnabled();
 }
 
 // GATE_ROUTE_CHECK_BOOKING_SAVES (owner 2026-10-30, "ok go", Route Check
@@ -1420,18 +1416,17 @@ function routeCheckBookingSavesLive() {
 // bought (cache only, never a purchase); otherwise null, the model.
 function staffSaveTravel(date) {
   const roadTimes = require('./hint-road-times');
-  return saveRoadTimesLive() && roadTimes.onRoads(date, etDateString(new Date()))
+  return pickerRoadCheckLive() && roadTimes.onRoads(date, etDateString(new Date()))
     ? roadTimes.createPickerTravel({ cacheOnly: true }) : null;
 }
 
 // GATE_SAVE_ROAD_BUY (owner 2026-10-28 design, "ok go" 2026-10-29): before an
 // ADMIN staff save opens its transaction, buy the Google road times its own
 // check and route number will read, for the legs no picker bought. The save
-// then reads them from the cache (GATE_SAVE_ROAD_TIMES), so the New
-// Appointment save, the Edit save and the Edit dialog's slot check agree.
-// Needs the save road times and the pickers' road check.
+// then reads them from the cache, so the New Appointment save, the Edit save
+// and the Edit dialog's slot check agree. Needs the pickers' road check.
 function saveRoadBuyLive() {
-  return gateEnvValue('GATE_SAVE_ROAD_BUY') && saveRoadTimesLive() && arrivalWindowRoutingEnabled();
+  return gateEnvValue('GATE_SAVE_ROAD_BUY') && pickerRoadCheckLive() && arrivalWindowRoutingEnabled();
 }
 
 // One save buys at most this many lookups (about 15 cents) and waits at most

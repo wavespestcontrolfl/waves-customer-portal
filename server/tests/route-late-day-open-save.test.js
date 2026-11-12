@@ -65,7 +65,7 @@ function fakeConn(target) {
 }
 
 const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_ROUTE_CHECK_LATE_DAYS',
-  'GATE_SCHEDULING_CAPACITY', 'GATE_SAVE_ROAD_TIMES'];
+  'GATE_SCHEDULING_CAPACITY'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(GATES.map((k) => [k, process.env[k]]));
