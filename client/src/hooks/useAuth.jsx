@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useEffect, useCallback, useRef } f
 import api from '../utils/api';
 import { deactivateNativePushToken, flushNativePushToken, repostNativePushToken } from '../native/nativePush';
 import { clearNativeBadge } from '../native/nativeBadge';
+import { endVisitCards } from '../native/visitCard';
 
 const AuthContext = createContext(null);
 
@@ -475,6 +476,8 @@ export function AuthProvider({ children }) {
 
   const logout = () => {
     void clearNativeBadge();
+    // A Lock Screen visit card belongs to the account that is leaving (iPhone app with the card only).
+    void endVisitCards();
     // Invalidate every in-flight auth response (property switch, /auth/me)
     // — without this, a delayed switch response re-writes tokens after
     // sign-out and walks the user back into the portal.
