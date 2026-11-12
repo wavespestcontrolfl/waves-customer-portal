@@ -11,7 +11,10 @@
  * not requests: a person marks one handled with the bell's own Done, and `closeOlder` marks them Done too.
  * With GATE_PORTAL_MESSAGES on, a fourth kind (4): a customer's own message in their portal thread
  * (portal-messages.js) that nobody answered: the thread's newest message is the customer's and is newer than
- * its handledAt stamp. An answer in the portal (a newer outbound row) or Mark handled closes it.
+ * its handledAt stamp. An answer in the portal (a newer outbound row) or Mark handled closes it. The Waves AI's
+ * after-hours answer (GATE_PORTAL_MESSAGES_NIGHT_AI, portal-messages-night-ai.js) is NOT an answer: it is an
+ * outbound row that leaves the thread's last_message_at where it was, so the thread stays open for this scope
+ * and every reader of it, and the item shows what the AI said (aiReply).
  * The Communications Portal tab lists the last 14 days (`items`). Open items at
  * or before the cutoff are listed one by one too (`olderItems`) and counted
  * (`older`); `closeOlder` still closes them and sends NOTHING to a customer.
@@ -108,6 +111,8 @@ function openBookings(conn = db) {
 // A customer's portal thread waiting on the office, as a scope over a builder on `conversations as cv`: the
 // newest message is the customer's (appendMessage keeps last_inbound_at = last_message_at for it), and it is
 // newer than the thread's Mark handled stamp. openMessages below and the lead staleness sweep go through it.
+// The Waves AI's answer does not move last_message_at (portal-messages-night-ai.js saveReply puts it back), so it
+// is not "the newest message" here: only a staff answer, a newer customer message or Mark handled changes this.
 function openMessageScope(builder) {
   return builder
     .where('cv.channel', 'portal')
@@ -230,17 +235,38 @@ function bookingItem(row) {
 }
 
 // A customer's unanswered portal message: the words since the office's last answer (and since Mark handled),
-// and that last answer for context.
+// and that last answer for context. The Waves AI's answers are not the office's: they are left out of both.
+// AI_TYPE_SQL repeats portal-messages.js AI_MESSAGE_TYPE (a test pins the two together).
+const AI_TYPE_SQL = `'portal_ai_reply'`;
 const UNANSWERED_SQL = `(
   SELECT string_agg(m.body, E'\\n' ORDER BY m.created_at) FROM messages m
   WHERE m.conversation_id = cv.id AND m.direction = 'inbound'
     AND m.created_at > coalesce((SELECT max(o.created_at) FROM messages o
-      WHERE o.conversation_id = cv.id AND o.direction = 'outbound'), '-infinity'::timestamptz)
+      WHERE o.conversation_id = cv.id AND o.direction = 'outbound' AND o.message_type IS DISTINCT FROM ${AI_TYPE_SQL}), '-infinity'::timestamptz)
     AND m.created_at > coalesce((cv.metadata->>'handledAt')::timestamptz, '-infinity'::timestamptz)
 )`;
 const LAST_ANSWER_SQL = `(
-  SELECT o.body FROM messages o WHERE o.conversation_id = cv.id AND o.direction = 'outbound'
+  SELECT o.body FROM messages o WHERE o.conversation_id = cv.id AND o.direction = 'outbound' AND o.message_type IS DISTINCT FROM ${AI_TYPE_SQL}
   ORDER BY o.created_at DESC LIMIT 1
+)`;
+// "The current open stretch", defined once: a Waves AI reply (alias `ai`, on conversation alias `conv`) belongs to
+// it when the customer message it answers (metadata.answersMessageId) is newer than the office's last answer (an
+// outbound row that is not the AI's) AND newer than Mark handled (handledAt is the time of the newest customer
+// message the office handled through). The test is on the answered message, not on the reply's own time: a reply
+// is always newer than the handledAt stamp of the message it answers, so a reply-time bound would never let go of
+// a hand-off after Mark handled. Used by the item's aiReply below and by the one-hand-off check in
+// portal-messages-night-ai.js saveReply.
+const aiReplyInStretch = (conv, ai) => `EXISTS (
+  SELECT 1 FROM messages q WHERE q.id::text = ${ai}.metadata->>'answersMessageId'
+    AND q.created_at > coalesce((SELECT max(o.created_at) FROM messages o
+      WHERE o.conversation_id = ${conv}.id AND o.direction = 'outbound' AND o.message_type IS DISTINCT FROM ${AI_TYPE_SQL}), '-infinity'::timestamptz)
+    AND q.created_at > coalesce((${conv}.metadata->>'handledAt')::timestamptz, '-infinity'::timestamptz)
+)`;
+// The Waves AI's newest reply in the current open stretch: { handOff, body }, or null.
+const AI_REPLY_SQL = `(
+  SELECT json_build_object('handOff', coalesce(a.metadata->>'handOff', '') = 'true', 'body', a.body) FROM messages a
+  WHERE a.conversation_id = cv.id AND a.message_type = ${AI_TYPE_SQL} AND ${aiReplyInStretch('cv', 'a')}
+  ORDER BY a.created_at DESC LIMIT 1
 )`;
 
 // The newest customer message of the thread: what Mark handled covers when the office presses it.
@@ -258,6 +284,8 @@ function messageItem(row) {
     customer: customerOf(row),
     customerMessage: cut(row.unanswered),
     lastAnswer: cut(row.last_answer),
+    // The Waves AI answered or handed off in this thread's open stretch: { handOff, body }, absent otherwise.
+    ...(row.ai_reply ? { aiReply: { handOff: row.ai_reply.handOff === true, body: cut(row.ai_reply.body) } } : {}),
   };
 }
 
@@ -269,7 +297,7 @@ async function listMessages(cutoff, op) {
     .limit(LIST_CAP)
     .select('cv.id', 'cv.last_inbound_at as created_at', 'cv.customer_id', 'c.first_name', 'c.last_name', 'c.phone',
       db.raw(HAS_TEXTS_SQL), db.raw(`${UNANSWERED_SQL} AS unanswered`), db.raw(`${LAST_ANSWER_SQL} AS last_answer`),
-      db.raw(`${THROUGH_SQL} AS through_id`));
+      db.raw(`${AI_REPLY_SQL} AS ai_reply`), db.raw(`${THROUGH_SQL} AS through_id`));
   return rows.map(messageItem);
 }
 
@@ -525,6 +553,7 @@ module.exports = {
   openRequestScope,
   openBookingScope,
   openMessageScope,
+  aiReplyInStretch,
   onLockedThread,
   markMessageHandled,
   windowCutoff,

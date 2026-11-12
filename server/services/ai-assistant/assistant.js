@@ -307,10 +307,17 @@ function openHandOffOptions(lane, input) {
 // Tools that end the turn run last, in this order (every other tool first).
 const HAND_OFF_ORDER = ['request_email_change', 'escalate'];
 
+// Whether this turn's caller owns the hand-off (turn.holdHandOff, set by portal-messages-night-ai.js).
+const holdsHandOff = (turn) => turn?.holdHandOff === true;
+
 // `secondaryProperty`: the portal session is scoped to a non-primary saved
 // property (the route decides; anything but false withholds the re-service
 // button, which books at the primary address).
-function portalLane(channel, { secondaryProperty = true, replay = false } = {}) {
+// `thread` (GATE_PORTAL_MESSAGES_NIGHT_AI, portal-messages-night-ai.js): the turn answers inside the
+// customer's Messages thread, which shows text only and is itself the office's item. The lane keeps its
+// prompt, facts and tools but builds no button or card (every tool already answers "use escalate" when
+// those are not arrays, as for SMS), and writes no hand-off item of its own (see turn.holdHandOff).
+function portalLane(channel, { secondaryProperty = true, replay = false, thread = false } = {}) {
   if (!portalSelfServe(channel)) return { prompt: SYSTEM_PROMPT, tools: TOOLS, actions: null, cards: null, context: {} };
   const gates = require('../../config/feature-gates');
   // Three independent gates: the payment card, the past-visit facts and the
@@ -323,7 +330,9 @@ function portalLane(channel, { secondaryProperty = true, replay = false } = {}) 
   // The confirmed email-change hand-off: its own gate.
   // A crashed turn cannot confirm an address from a later transcript read-back.
   // Recover its original ask through the ordinary account-change handoff instead.
-  const emailChange = !replay && gates.portalChatEmailChangeLive();
+  // The Messages thread's turn (thread) has no read-back flow: the address check reads the assistant's private
+  // transcript, which that turn never uses (see buildHistory), and a hand-off there is the thread's own item.
+  const emailChange = !replay && !thread && gates.portalChatEmailChangeLive();
   // The opened-up chat: its own gate, on top of the self-serve switch.
   const open = gates.portalChatOpenLive();
   // The open prompt's cancel options exist only in the GATE_CANCEL_FLOW_V2 flow.
@@ -331,15 +340,16 @@ function portalLane(channel, { secondaryProperty = true, replay = false } = {}) 
   return {
     prompt: portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange, open, cancelFlow }),
     tools: portalToolsFor({ payments, visits, reservice, reserviceLawn, emailChange, open }),
-    actions: [],
-    cards: payments || visits ? [] : null,
+    actions: thread ? null : [],
+    cards: !thread && (payments || visits) ? [] : null,
     portal: true,
+    thread,
     // Whether the payment card and re-service tools are in this lane.
     payments,
     reservice,
     emailChange,
     open,
-    context: { secondaryProperty: secondaryProperty !== false, lawn: reserviceLawn, emailChange, open },
+    context: { secondaryProperty: secondaryProperty !== false, lawn: reserviceLawn, emailChange, open, ...(thread ? { holdHandOff: true } : {}) },
   };
 }
 
@@ -678,7 +688,7 @@ class WavesAssistant {
     // 2. Check for escalation triggers in the raw message
     // Portal chat gets its own prompt and button tools; every other channel
     // (and the portal with its switch off) keeps the original pair.
-    const lane = portalLane(channel, { secondaryProperty, replay: Boolean(replay.cursor) });
+    const lane = portalLane(channel, { secondaryProperty, replay: Boolean(replay.cursor), thread: holdsHandOff(turn) });
     turn?.registerFallbackExtras?.(() => laneExtras(lane));
     const trigger = this.matchedEscalationTrigger(turnMessage, channel);
 
@@ -789,7 +799,7 @@ class WavesAssistant {
   // moving hand-off item.
   bindLaneContext(lane, conversation, customerMessage, turn) {
     if (lane.emailChange) lane.context.conversationId = conversation.id;
-    if (lane.open) lane.context.recordMove = (move) => this.recordMoveItem({ conversation, customerMessage, move, turn });
+    if (lane.open && !lane.thread) lane.context.recordMove = (move) => this.recordMoveItem({ conversation, customerMessage, move, turn });
   }
 
   async resolveConversation(channel, channelIdentifier, customerId, customerPhone, turn) {
@@ -1082,6 +1092,9 @@ class WavesAssistant {
   // the original read: the first 20, which never reaches the latest turn once
   // a chat passes 20 (SMS keeps it unchanged).
   async buildHistory(conversationId, { newest = false, turn = null, through = null, isolate = false } = {}) {
+    // turn.threadHistory (portal-messages-night-ai.js): the caller supplies exactly what the customer can see in
+    // their Messages thread, so the assistant's private transcript is never read for that turn.
+    if (Array.isArray(turn?.threadHistory)) return turn.threadHistory;
     if (isolate) return [{ role: 'user', content: through.content }];
     const historyQuery = db('agent_messages')
       .where('conversation_id', conversationId)
@@ -1130,7 +1143,17 @@ class WavesAssistant {
   /**
    * Escalate to human — create escalation record, update conversation, notify Adam.
    */
-  async escalate(conversation, customerMessage, reason, { gap = false, topic, newEmail, emailReadBack, alsoAsked, emailUnchecked, turn = null, open = false, say = '' } = {}) {
+  async escalate(conversation, customerMessage, reason, options = {}) {
+    // turn.holdHandOff (portal-messages-night-ai.js): the caller owns the hand-off, because the customer's
+    // Messages thread already is the office's item. Nothing is filed or rung here and no reply is written:
+    // the decision goes back to the caller, whose turn result carries it.
+    if (holdsHandOff(options.turn)) {
+      return { reply: '', conversationId: conversation.id, escalated: true, handOffHeld: true, reason, ...(options.topic ? { topic: options.topic } : {}) };
+    }
+    return this.fileEscalation(conversation, customerMessage, reason, options);
+  }
+
+  async fileEscalation(conversation, customerMessage, reason, { gap = false, topic, newEmail, emailReadBack, alsoAsked, emailUnchecked, turn = null, open = false, say = '' } = {}) {
     // An opened portal chat keeps one hand-off item per chat. A confirmed
     // email change keeps its own bell and row.
     if (open && !newEmail && !emailReadBack && !alsoAsked && !emailUnchecked) {

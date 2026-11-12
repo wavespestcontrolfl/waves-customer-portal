@@ -333,7 +333,7 @@ function MessageBubble({ message }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: mine ? 'flex-end' : 'flex-start' }}>
       <div style={{ fontSize: 14, color: SHELL.muted, marginBottom: 4 }}>
-        <span style={{ fontWeight: 700, color: SHELL.text }}>{mine ? 'You' : 'Waves'}</span>
+        <span style={{ fontWeight: 700, color: SHELL.text }}>{mine ? 'You' : (message.ai ? 'Waves AI' : 'Waves')}</span>
         {' · '}
         <time dateTime={message.createdAt}>{stamp(message.createdAt)}</time>
       </div>
