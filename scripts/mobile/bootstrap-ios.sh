@@ -72,6 +72,17 @@ if [ "${1:-}" = "--assets-only" ]; then
   exit 0
 fi
 
+# A project generated with the Lock Screen visit card (WAVES_IOS_VISIT_CARD=1, near the end of this script)
+# keeps its extension target, while `npx cap sync` drops the plugin's registration. Reusing it for a build
+# without the card would ship the card half wired, so stop before anything is installed or built.
+if [ "${WAVES_IOS_VISIT_CARD:-0}" != "1" ] && grep -qs 'WavesVisitCard' ios/App/App.xcodeproj/project.pbxproj; then
+  echo "ERROR: client/ios/App was generated with the Lock Screen visit card." >&2
+  echo "       To keep the card:   WAVES_IOS_VISIT_CARD=1 bash scripts/mobile/bootstrap-ios.sh" >&2
+  echo "       To build without it: git clean -fdX client/ios   (removes only the generated project)," >&2
+  echo "                            then run this script again." >&2
+  exit 1
+fi
+
 echo "==> 1/5  Installing lockfile-pinned native dependencies…"
 # Run from client/ intentionally: npm resolves the workspace root lockfile.
 # `npm ci` refuses drift instead of silently moving Capacitor/plugin versions

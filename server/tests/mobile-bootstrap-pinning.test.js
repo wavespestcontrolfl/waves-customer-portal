@@ -111,6 +111,12 @@ describe('native customer-app bootstrap reproducibility', () => {
     const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-ios.sh'), 'utf8');
     // A release build takes the card on deliberately: no variable, no card.
     expect(source).toContain('if [ "${WAVES_IOS_VISIT_CARD:-0}" = "1" ]; then');
+    // A project that already has the card is never reused for a build without it (cap sync would drop the
+    // plugin's registration and leave the extension embedded): the script stops before it installs anything.
+    const reuseGuard = source.indexOf('if [ "${WAVES_IOS_VISIT_CARD:-0}" != "1" ] && grep -qs \'WavesVisitCard\' ios/App/App.xcodeproj/project.pbxproj; then');
+    expect(reuseGuard).toBeGreaterThan(-1);
+    expect(reuseGuard).toBeLessThan(source.indexOf('\nnpm ci\n'));
+    expect(source).toContain('git clean -fdX client/ios');
     // It runs after the sync that rewrites capacitor.config.json, and after the version, team and push setup.
     const cardStep = source.indexOf('scripts/mobile/ios_visit_card.rb');
     expect(cardStep).toBeGreaterThan(source.indexOf('\nnpx cap sync ios'));

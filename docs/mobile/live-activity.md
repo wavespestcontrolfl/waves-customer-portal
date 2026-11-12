@@ -55,7 +55,8 @@ The native project is generated, not tracked. `scripts/mobile/bootstrap-ios.sh` 
 target, the `WavesVisitCard` extension target (iOS 18 or later, bundle id
 `com.wavespestcontrol.portal.VisitCard`) is embedded in the app, `NSSupportsLiveActivities` goes into the
 app's Info.plist, and the plugin class goes into `packageClassList` so Capacitor registers it at launch.
-Without the variable the project has no card.
+Without the variable the project has no card. A project that was generated with the card is not reused
+for a build without it: the bootstrap stops and says how to regenerate (`git clean -fdX client/ios`).
 
 - GitHub CI (`native-ios`) sets the variable, so the Swift compiles on every mobile change.
 - A release build takes the card when the variable is set in its Xcode Cloud workflow (App Store Connect →
