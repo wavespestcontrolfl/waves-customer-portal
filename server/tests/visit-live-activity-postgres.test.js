@@ -625,6 +625,28 @@ postgres('Lock Screen visit card against migrated PostgreSQL', () => {
       expect(apple.deleteChannel).toHaveBeenCalledTimes(1);
     });
 
+    test('every live card, every new live visit and every old channel is met, however many pages they fill', async () => {
+      const cards = [];
+      for (let i = 0; i < 3; i += 1) {
+        const ids = await seedStop();
+        const visitId = await addVisit(ids);
+        await card.syncVisit(visitId, { now: NOW });
+        await arrive(visitId);
+        cards.push({ ids, visitId });
+      }
+      const fresh = [await seedStop(), await seedStop(), await seedStop()];
+      for (const ids of fresh) await addVisit(ids);
+
+      // One row to a page: nothing is left for a later sweep.
+      expect(await card.sweep({ now: NOW, pageSize: 1 })).toMatchObject({ cards: 3, updated: 3, started: 3, failed: 0 });
+
+      for (const { visitId } of cards) {
+        await complete(visitId);
+        await card.syncVisit(visitId, { now: NOW });
+      }
+      expect(await card.sweep({ now: at(9 * 60 + 1), pageSize: 1 })).toMatchObject({ channelsRemoved: 3 });
+    });
+
     test('one failing stop does not stop the sweep', async () => {
       const bad = await seedStop();
       const badVisit = await addVisit(bad);

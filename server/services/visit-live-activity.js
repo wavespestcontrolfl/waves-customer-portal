@@ -56,7 +56,7 @@ const MAX_CARD_AGE_MS = 12 * 60 * MINUTE;
 // A card that listens on a channel needs iOS 18.
 const MIN_IOS_MAJOR = 18;
 const MAX_DEVICES = 5;
-const SWEEP_LIMIT = 200;
+const SWEEP_PAGE = 200;
 const LIVE_STATES = ['en_route', 'on_property'];
 const STEP = { en_route: 1, on_property: 2, complete: 3 };
 const VISIT_COLUMNS = ['id', 'customer_id', 'property_id', 'technician_id', 'status', 'track_state',
@@ -533,26 +533,41 @@ function poke(serviceId) {
   }
 }
 
+// Every row of a list, a page at a time in id order, so a long list can never starve its tail. `build`
+// returns a fresh query each time; rows that leave the list while it is read are simply not met.
+async function eachRow(build, pageSize, each) {
+  let after = null;
+  let met = 0;
+  for (;;) {
+    const query = build().orderBy('id', 'asc').limit(pageSize);
+    if (after) query.where('id', '>', after);
+    const page = await query;
+    for (const row of page) await each(row);
+    met += page.length;
+    if (page.length < pageSize) return met;
+    after = page[page.length - 1].id;
+  }
+}
+
 // A channel is asked to be removed for one day after its 9 hours are up. Apple answering "removed" or "no
 // such channel" marks it gone, and so does a refusal of the channel itself. Any other failure (a timeout,
 // a bad key) is tried again by the next sweep; a channel still there after the day is left (it costs
 // nothing, and the app has 10,000).
-async function removeOldChannels(now) {
+async function removeOldChannels(now, pageSize) {
   const la = require('./apns-live-activity');
   const due = now.getTime() - CHANNEL_KEPT_MS;
-  const rows = await db('live_activity_sessions')
+  const ended = () => db('live_activity_sessions')
     .whereNotNull('channel_id')
     .whereNull('channel_deleted_at')
     .whereBetween('ended_at', [new Date(due - CHANNEL_REMOVAL_TRIED_MS), new Date(due)])
-    .limit(SWEEP_LIMIT)
     .select('id', 'channel_id');
   let removed = 0;
-  for (const row of rows) {
+  await eachRow(ended, pageSize, async (row) => {
     const result = await la.deleteChannel({ channelId: row.channel_id });
-    if (!result.ok && !channelRefused(result)) continue;
+    if (!result.ok && !channelRefused(result)) return;
     await db('live_activity_sessions').where({ id: row.id }).update({ channel_deleted_at: now, updated_at: now });
     removed += 1;
-  }
+  });
   return removed;
 }
 
@@ -564,7 +579,7 @@ async function removeOldChannels(now) {
  *      restart, or its iPhone registered a moment late).
  *   3. Channels of cards that ended more than 9 hours ago are removed.
  */
-async function sweep({ now = new Date() } = {}) {
+async function sweep({ now = new Date(), pageSize = SWEEP_PAGE } = {}) {
   const counts = { cards: 0, started: 0, updated: 0, ended: 0, failed: 0, channelsRemoved: 0 };
   const seen = new Set();
   const run = async (stop) => {
@@ -578,25 +593,22 @@ async function sweep({ now = new Date() } = {}) {
     }
   };
 
-  const sessions = await db('live_activity_sessions').whereNull('ended_at').orderBy('created_at', 'asc').limit(SWEEP_LIMIT);
-  counts.cards = sessions.length;
-  for (const session of sessions) await run(stopOfSession(session));
+  counts.cards = await eachRow(() => db('live_activity_sessions').whereNull('ended_at'), pageSize, (session) => run(stopOfSession(session)));
 
   if (gateLive()) {
     const cutoff = new Date(now.getTime() - START_WINDOW_MS);
     const { etDateString } = require('../utils/datetime-et');
-    const visits = await selectVisits()
+    const wentLive = () => selectVisits()
       .whereIn('track_state', LIVE_STATES)
       .whereRaw('scheduled_date >= ?::date - 1', [etDateString(now)])
-      .where(function wentLiveLately() { this.where('en_route_at', '>=', cutoff).orWhere('arrived_at', '>=', cutoff); })
-      .limit(SWEEP_LIMIT);
-    for (const visit of visits) {
+      .where(function lately() { this.where('en_route_at', '>=', cutoff).orWhere('arrived_at', '>=', cutoff); });
+    await eachRow(wentLive, pageSize, async (visit) => {
       const stop = stopOf(visit);
       if (!seen.has(stop.key)) await run(stop);
-    }
+    });
   }
 
-  counts.channelsRemoved = await removeOldChannels(now);
+  counts.channelsRemoved = await removeOldChannels(now, pageSize);
   return counts;
 }
 
