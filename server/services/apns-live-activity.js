@@ -122,6 +122,8 @@ function deleteChannelRequest({ channelId }) {
 /**
  * Send one request. Resolves with { ok, status, reason, headers } or { ok: false, skipped | retryable, reason }.
  * Bounded like apns.send: a hung connection fails the call instead of holding its caller.
+ * `uncertain` marks a failure with no answer after the request may have left (a timeout, a dropped
+ * connection): Apple may have taken it.
  */
 function request({ origin, method, path, headers, body }) {
   return new Promise((resolve) => {
@@ -148,9 +150,9 @@ function request({ origin, method, path, headers, body }) {
     };
     const wallClockKiller = setTimeout(() => {
       try { client.destroy(); } catch { /* noop */ }
-      finish({ ok: false, retryable: true, reason: 'apns_timeout' });
+      finish({ ok: false, retryable: true, uncertain: true, reason: 'apns_timeout' });
     }, apns.APNS_REQUEST_TIMEOUT_MS);
-    client.on('error', (err) => finish({ ok: false, retryable: true, reason: err.message }));
+    client.on('error', (err) => finish({ ok: false, retryable: true, uncertain: true, reason: err.message }));
     try {
       const payload = body == null ? null : Buffer.from(JSON.stringify(body));
       const req = client.request({
@@ -166,7 +168,7 @@ function request({ origin, method, path, headers, body }) {
       req.on('response', (h) => { status = h[':status']; responseHeaders = h; });
       req.setEncoding('utf8');
       req.on('data', (chunk) => { data += chunk; });
-      req.on('error', (err) => finish({ ok: false, retryable: true, reason: err.message }));
+      req.on('error', (err) => finish({ ok: false, retryable: true, uncertain: true, reason: err.message }));
       req.on('end', () => {
         let reason = null;
         if (data) { try { reason = JSON.parse(data).reason || null; } catch { /* non-JSON body */ } }
@@ -179,15 +181,27 @@ function request({ origin, method, path, headers, body }) {
   });
 }
 
+// What a caller may do with a failure:
+//   retryable  it can pass by itself: no answer, a busy Apple (429) or an Apple fault (5xx).
+//   uncertain  no answer came back after the request may have left, so Apple may have taken it. A caller
+//              must not treat it as refused.
+// Any other failure is Apple's refusal of this request, and sending it again changes nothing.
 function failure(kind, result) {
   const reason = result.reason || `apns_status_${result.status || 0}`;
   if (!result.skipped) logger.error(`[apns-live-activity] ${kind} failed status=${result.status || 0} reason=${reason}`);
-  return { ok: false, reason, ...(result.skipped ? { skipped: true } : {}), ...(result.retryable ? { retryable: true } : {}) };
+  const retryable = Boolean(result.retryable) || result.status === 429 || result.status >= 500;
+  return {
+    ok: false,
+    reason,
+    ...(result.skipped ? { skipped: true } : {}),
+    ...(retryable ? { retryable: true } : {}),
+    ...(result.uncertain ? { uncertain: true } : {}),
+  };
 }
 
 /**
  * Start a card on one iPhone. `expired: true` means Apple says the start token is dead (410): the caller
- * clears it. A 400 BadDeviceToken is NOT treated as dead, for the reason apns.js gives: Apple also returns
+ * clears it. `uncertain: true` means no answer came back, so the card may be on the phone. A 400 BadDeviceToken is NOT treated as dead, for the reason apns.js gives: Apple also returns
  * it for a host or bundle mismatch, and one wrong setting must not wipe every phone's token.
  */
 async function start({ startToken, payload, expiresAt }, send = request) {
