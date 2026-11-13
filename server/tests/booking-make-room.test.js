@@ -1282,3 +1282,164 @@ describe('one move per stop (owner 2026-11-09)', () => {
     expect([...(await _internals.defaultDeps().makeRoomMovedIds(conn, []))]).toEqual([]);
   });
 });
+
+/**
+ * The empty-hour move (owner 2026-11-12 "C", GATE_MAKE_ROOM_EMPTY_HOUR): the sooner rule also looks at an EMPTY hour that
+ * ends where a stop starts, and moves that next stop later so the drive to it fits. On the example day the empty hours
+ * before a stop are 7 AM (before A) and 12 PM (before E); nobody was told an hour here, so E and F may move.
+ */
+describe('the empty-hour move (GATE_MAKE_ROOM_EMPTY_HOUR)', () => {
+  const { findMakeRoomOffers, verifyMakeRoomHour } = require('../services/scheduling/booking-make-room');
+  const { resetBackgroundChecks, emptyHourStarts, EMPTY_HOUR_MAX_VISIT_MIN } = _internals;
+  const LATER = '2097-06-11';
+  const LATER_POOL = [{ date: LATER, windowStart: '12:00', techId: TECH }];
+  const emptyDeps = (opts = {}) => Object.assign(makeDeps({ told: [], ...opts }), { emptyHourOn: () => true });
+  // The page as it is refuses the hour (the drive to the next stop does not fit); with a stop moved it places it.
+  const REFUSED_AS_IS = async (_slot, moved) => (moved.size > 0 ? true : 'page_collision');
+  // A new customer between D and E: the 12 PM hour adds no drive.
+  const NOON_PIN = { lat: 12, lng: 45 };
+  const sooner = (opts = {}) => check({ pool: LATER_POOL, dateTo: LATER, placement: REFUSED_AS_IS, coords: NOON_PIN, ...opts });
+  const noon = (report) => report.sooner.passed.find((p) => p.date === DAY && p.start === '12:00');
+  beforeEach(() => resetBackgroundChecks());
+
+  test('gate off: the same hours, checks and report as before, and no empty hour is tried', async () => {
+    const { report: base } = await sooner({ deps: makeDeps({ told: [] }) });
+    const { report: off } = await sooner({ deps: Object.assign(makeDeps({ told: [] }), { emptyHourOn: () => false }) });
+    expect({ ...off.sooner }).toEqual({ ...base.sooner });
+    expect(off.sooner).not.toHaveProperty('emptyTried');
+    expect(noon(off)).toBeUndefined();
+  });
+
+  test('gate on: the empty 12 PM hour is found; E and F, the stops after it, move 1 hour later', async () => {
+    const { report } = await sooner({ deps: emptyDeps() });
+    expect(report.sooner.emptyTried).toBe(2);
+    const hour = noon(report);
+    expect(hour).toMatchObject({ emptyHour: true, shiftMin: 60, techId: TECH });
+    expect(moves(hour)).toEqual(['visit-e 13:00->14:00', 'visit-f 14:00->15:00']);
+    // An hour a stop holds is still found as before, and is not marked.
+    const one = report.sooner.passed.find((p) => p.start === '13:00');
+    expect(moves(one)).toEqual(['visit-e 13:00->14:00', 'visit-f 14:00->15:00']);
+    expect(one).not.toHaveProperty('emptyHour');
+  });
+
+  test('the starts tried are one whole hour before each stop, where no stop starts', () => {
+    const day = { own: exampleDay() };
+    const request = { soonerCap: () => 30, durationMin: 60 };
+    expect(emptyHourStarts(day, { env: { emptyHourOn: () => true }, request })).toEqual([7 * 60, 12 * 60]);
+    expect(emptyHourStarts(day, { env: { emptyHourOn: () => false }, request })).toEqual([]);
+    expect(emptyHourStarts(day, { env: {}, request })).toEqual([]);
+    // The saving rule (no sooner cap) and a longer visit never get one.
+    expect(emptyHourStarts(day, { env: { emptyHourOn: () => true }, request: { durationMin: 60 } })).toEqual([]);
+    expect(emptyHourStarts(day, { env: { emptyHourOn: () => true }, request: { ...request, durationMin: EMPTY_HOUR_MAX_VISIT_MIN + 30 } })).toEqual([]);
+  });
+
+  test('an hour the page already allows as it is moves nobody: free_as_is, with no 2-hour retry', async () => {
+    const { report } = await sooner({ deps: emptyDeps(), placement: PAGE_PLACES });
+    expect(noon(report)).toBeUndefined();
+    // Both empty hours of the day, 7 AM and 12 PM.
+    expect(report.sooner.byReason.free_as_is).toBe(2);
+    expect(report.sooner.passed.some((p) => p.emptyHour)).toBe(false);
+    expect(report.sooner.twoHourTried).toBe(0);
+  });
+
+  test('the as-is question is asked with nothing moved, before the moved day is judged', async () => {
+    const asked = [];
+    const placement = async (slot, moved) => { asked.push(`${slot.windowStart} ${moved.size}`); return moved.size > 0 ? true : 'page_collision'; };
+    await sooner({ deps: emptyDeps(), placement });
+    expect(asked.filter((a) => a.startsWith('12:00'))).toEqual(['12:00 0', '12:00 2']);
+    // An hour a stop holds is never asked as it is (both passes ask about 1 PM, each time with its two moved stops).
+    expect([...new Set(asked.filter((a) => a.startsWith('13:00')))]).toEqual(['13:00 2']);
+  });
+
+  test('when the 1-hour move leaves no time to drive, the empty hour is checked with the 2-hour move', async () => {
+    const twoHoursOnly = async (_slot, moved) => (moved.size > 0 && [...moved.values()].every((min) => min === 120) ? true : 'page_collision');
+    const rows = [stop('e', 13, 50), stop('f', 14, 60)];
+    const { report } = await sooner({ deps: emptyDeps({ rows }), placement: twoHoursOnly });
+    const hour = noon(report);
+    expect(hour).toMatchObject({ emptyHour: true, shiftMin: 120 });
+    expect(moves(hour)).toEqual(['visit-e 13:00->15:00', 'visit-f 14:00->16:00']);
+  });
+
+  test('every rule of a moved stop still holds: a stop told its hour refuses the empty hour before it', async () => {
+    const { report } = await sooner({ deps: emptyDeps({ told: ['visit-e'] }) });
+    expect(noon(report)).toBeUndefined();
+    expect(report.sooner.byReason.fixed_time_told).toBeGreaterThanOrEqual(1);
+  });
+
+  test('an extra start that a stop already holds part of is left to that stop\'s own hour', async () => {
+    // G holds 12:15 to 12:45, so the hour before E is not empty.
+    const rows = [...exampleDay(), stop('g', 12, 45, { window_start: '12:15:00', window_end: '12:45:00', estimated_duration_minutes: 30 })];
+    const { report } = await sooner({ deps: emptyDeps({ rows }) });
+    expect(report.sooner.byReason.empty_hour_taken).toBe(1);
+    expect(noon(report)).toBeUndefined();
+  });
+
+  test('a visit longer than 60 minutes never gets an empty hour', async () => {
+    const { report } = await sooner({ deps: emptyDeps(), durationMinutes: 90 });
+    expect(report.sooner).not.toHaveProperty('emptyTried');
+    expect(report.sooner.passed.some((p) => p.emptyHour)).toBe(false);
+  });
+
+  test('the saving rule never uses it', async () => {
+    const { report } = await check({ deps: emptyDeps(), placement: REFUSED_AS_IS });
+    expect(report).not.toHaveProperty('emptyTried');
+    expect(report.passed.some((p) => p.emptyHour)).toBe(false);
+  });
+
+  test('the page\'s offer: the empty hour is offered when it is the earliest hour that passes', async () => {
+    const { conn } = fakeConn();
+    const rows = [stop('e', 13, 50), stop('f', 14, 60)];
+    const { hours } = await findMakeRoomOffers({
+      estimateId: 'est-1', pool: LATER_POOL, coords: NOON_PIN, durationMinutes: 60, dateFrom: DAY, dateTo: LATER,
+      admit: (slot) => slot.date === DAY, placement: REFUSED_AS_IS, now: NOW, conn, deps: emptyDeps({ rows }),
+    });
+    expect(hours.map((h) => `${h.date} ${h.start}`)).toEqual([`${DAY} 12:00`]);
+    expect(hours[0]).toMatchObject({ emptyHour: true, shiftMin: 60 });
+  });
+
+  describe('the hold\'s proof', () => {
+    const prove = (extra = {}) => verifyMakeRoomHour({
+      conn: jest.fn(), date: DAY, startMin: 12 * 60, techId: TECH, durationMinutes: 60, point: NOON_PIN, estimateId: 'est-1',
+      admit: (slot) => slot.date === DAY, placement: REFUSED_AS_IS, now: NOW, deps: emptyDeps(), ...extra,
+    });
+
+    test('rebuilds the same chain for the empty hour: E and F move 1 hour', async () => {
+      const proof = await prove();
+      expect(proof.shiftMin).toBe(60);
+      expect(proof.moves).toEqual([
+        { id: 'visit-e', from: '13:00', to: '14:00', widthMin: 60 },
+        { id: 'visit-f', from: '14:00', to: '15:00', widthMin: 60 },
+      ]);
+    });
+
+    test('gate off since the offer: the hour proves nothing (the hold answers slot-taken)', async () => {
+      expect(await prove({ deps: makeDeps({ told: [] }) })).toEqual({ reason: 'hour_free' });
+    });
+
+    test('an hour the page now allows as it is, or with no stop in the hour after it, is refused', async () => {
+      expect(await prove({ placement: PAGE_PLACES })).toEqual({ reason: 'free_as_is' });
+      expect(await prove({ startMin: 15 * 60 })).toEqual({ reason: 'hour_free' });
+    });
+
+    test('an hour a stop holds proves exactly as before', async () => {
+      const proof = await prove({ startMin: 9 * 60, point: NEW_PIN });
+      expect(proof.moves.map((m) => m.id)).toEqual(['visit-b', 'visit-c', 'visit-d']);
+    });
+  });
+
+  describe('makeRoomEmptyHourLive (read at call time)', () => {
+    const gates = require('../config/feature-gates');
+    const saved = process.env.GATE_MAKE_ROOM_EMPTY_HOUR;
+    afterEach(() => { if (saved === undefined) delete process.env.GATE_MAKE_ROOM_EMPTY_HOUR; else process.env.GATE_MAKE_ROOM_EMPTY_HOUR = saved; });
+
+    test('exactly "true" is on; unset or anything else is off; the module reads this reader', () => {
+      delete process.env.GATE_MAKE_ROOM_EMPTY_HOUR;
+      expect(gates.makeRoomEmptyHourLive()).toBe(false);
+      process.env.GATE_MAKE_ROOM_EMPTY_HOUR = 'shadow';
+      expect(gates.makeRoomEmptyHourLive()).toBe(false);
+      process.env.GATE_MAKE_ROOM_EMPTY_HOUR = 'true';
+      expect(gates.makeRoomEmptyHourLive()).toBe(true);
+      expect(_internals.defaultDeps().emptyHourOn).toBe(gates.makeRoomEmptyHourLive);
+    });
+  });
+});

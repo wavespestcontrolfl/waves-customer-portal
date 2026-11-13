@@ -1820,6 +1820,26 @@ taken") with nothing written; a hold whose technician or chain changed under
 the lock is `RESERVATION_EXPIRED`. No text, email or call goes out: the moved
 customers' reminders follow silently after the commit. Auth, token rules, rate
 limits and every other check are unchanged.
+**Estimate picker, the make-room hour may be an empty hour
+(`GATE_MAKE_ROOM_EMPTY_HOUR=true`, owner 2026-11-12 "C"; needs
+`GATE_BOOKING_MAKE_ROOM=true`; off, the default, leaves every route
+byte-identical).** The ONE make-room slot above may also be an hour that no
+stop holds, when a regular stop starts in the hour after it and the page
+refuses the empty hour as it is (its own placement rules, in practice the drive
+to that next stop). The next stop, and each later stop it would then overlap,
+moves later the same day under every rule of the entry above; the new visit is
+at most 60 minutes, the hour is still on a day before the list's first free
+day, and it is still the single earliest hour that passes. An empty hour the
+page's rules already allow with nothing moved is never offered this way and
+moves nobody. The slot's payload shape, `slotId` format, signature policy
+(`MAKE_ROOM_OFFER_POLICY`) and the 2.5-second wait are unchanged, and nothing
+new reaches the client. `/reserve`, `/extend` and the accept re-prove the hour
+through the same proof as above, so the stored chain, the busy destinations,
+the locks, the `booking_make_room` log rows and every refusal are the same.
+With the gate turned off after a hold was made, the proof finds no chain for
+the empty hour: `/extend` supersedes the hold and the accept answers the
+existing taken-slot message, with nothing moved. No text, email or call goes
+out.
 **Estimate picker, service-line map live (`GATE_SERVICE_LINE_MAP=live`, roadmap
 build 4, owner 2026-10-30; ships dark: `shadow`, the prod value, and every other
 value leave these routes byte-identical, with no extra query).**

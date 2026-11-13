@@ -47,7 +47,7 @@ const DAY = '2097-06-10';
 const HQ = { lat: 27.4330885, lng: -82.4056801 };
 // GATE_REMINDER_72H_EMAIL_FIRST is cleared too: these fixture visits are one-time, and under it their 72-hour reminder
 // goes by email, so they would never move.
-const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_NIGHT_TOLD_LOCK', 'GATE_DAY_ONLY_PROMISE', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_TECH_START_POINTS', 'GATE_REMINDER_72H_EMAIL_FIRST', 'GATE_SLOT_TRAVEL_GAP'];
+const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_NIGHT_TOLD_LOCK', 'GATE_DAY_ONLY_PROMISE', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_TECH_START_POINTS', 'GATE_REMINDER_72H_EMAIL_FIRST', 'GATE_SLOT_TRAVEL_GAP', 'GATE_MAKE_ROOM_EMPTY_HOUR'];
 
 maybeDescribe('make-room accept on real PostgreSQL', () => {
   let database;
@@ -193,5 +193,78 @@ maybeDescribe('make-room accept on real PostgreSQL', () => {
     await expect(accept(holdId)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
     expect(await rowsNow()).toEqual(before);
     expect(await mockConn('reschedule_log').whereIn('scheduled_service_id', idsOf())).toHaveLength(0);
+  });
+
+  /**
+   * The empty-hour move (GATE_MAKE_ROOM_EMPTY_HOUR, owner 2026-11-12 "C"), with the page's real travel rule on: the 12 PM
+   * hour is empty, the new customer is beside D (11 AM), and E (1 PM) is a 28-minute drive away, so the page refuses 12 PM
+   * as it is. The proof moves E one hour later; the accept writes that one move.
+   */
+  describe('an empty hour (GATE_MAKE_ROOM_EMPTY_HOUR)', () => {
+    const NOON_PIN = { lat: HQ.lat + 0.124, lng: HQ.lng };
+    const farE = () => ({ lat: HQ.lat + 0.27, lng: HQ.lng + 0.01 });
+
+    beforeEach(async () => {
+      process.env.GATE_MAKE_ROOM_EMPTY_HOUR = 'true';
+      process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+      await mockConn('scheduled_services').where({ id: visitOf('e').id }).update(farE());
+    });
+
+    const proveNoon = (extra = {}) => require('../services/estimate-slot-availability').verifyMakeRoomOffer({
+      conn: mockConn, estimate, coords: NOON_PIN, date: DAY, windowStart: '12:00:00', techId, durationMinutes: 60, candidateExpectedMinutes: null, ...extra,
+    });
+
+    async function holdForNoon() {
+      const proof = await proveNoon();
+      expect(proof.moves).toEqual([{ id: visitOf('e').id, from: '13:00', to: '14:00', widthMin: 60 }]);
+      const holdId = randomUUID();
+      await mockConn('scheduled_services').insert({
+        id: holdId, source_estimate_id: estimate.id, customer_id: null, technician_id: techId, scheduled_date: DAY,
+        window_start: '12:00:00', window_end: '13:00:00', estimated_duration_minutes: 60, service_type: 'Pest Control', status: 'pending',
+        lat: NOON_PIN.lat, lng: NOON_PIN.lng, reservation_expires_at: mockConn.raw("NOW() + INTERVAL '15 minutes'"),
+        make_room_moves: JSON.stringify({ v: 1, date: DAY, techId, shiftMin: proof.shiftMin, moves: proof.moves.map(({ id, from, to, widthMin }) => ({ id, from, to, widthMin })) }),
+      });
+      return holdId;
+    }
+
+    test('the fixture is the case: the drive from the new customer to E does not fit before 1 PM', () => {
+      const { driveMin } = require('../services/auto-dispatch/geo');
+      const minutes = driveMin(NOON_PIN, farE());
+      expect(minutes).toBeGreaterThan(15);
+      expect(minutes).toBeLessThan(45);
+    });
+
+    test('a real accept takes the empty 12 PM hour and moves only E, one hour later, with one log row and nothing sent', async () => {
+      const holdId = await holdForNoon();
+      const before = await rowsNow();
+      const result = await accept(holdId);
+      expect(result).toMatchObject({ id: holdId, customer_id: newCustomerId, reservation_expires_at: null });
+      const after = await rowsNow();
+      expect(after[visitOf('e').id]).toBe('14:00-15:00');
+      for (const name of ['a', 'b', 'c', 'd']) expect(after[visitOf(name).id]).toBe(before[visitOf(name).id]);
+      const log = await mockConn('reschedule_log').whereIn('scheduled_service_id', idsOf()).select('scheduled_service_id', 'initiated_by');
+      expect(log).toEqual([{ scheduled_service_id: visitOf('e').id, initiated_by: 'booking_make_room' }]);
+      expect(sentAnything()).toEqual([]);
+    });
+
+    test('gate off: the hour proves nothing, and a hold made before the flip is refused with nothing moved', async () => {
+      const holdId = await holdForNoon();
+      delete process.env.GATE_MAKE_ROOM_EMPTY_HOUR;
+      expect(await proveNoon()).toEqual({ reason: 'hour_free' });
+      const before = await rowsNow();
+      await expect(accept(holdId)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect(await rowsNow()).toEqual(before);
+      expect(await mockConn('reschedule_log').whereIn('scheduled_service_id', idsOf())).toHaveLength(0);
+      expect(sentAnything()).toEqual([]);
+    });
+
+    test('an hour the page allows as it is moves nobody: with E close by, the proof answers free_as_is', async () => {
+      // The page plans a first visit at 45 minutes, which leaves 15 minutes before E: enough for a short drive.
+      await mockConn('scheduled_services').where({ id: visitOf('e').id }).update({ lat: NOON_PIN.lat + 0.002, lng: NOON_PIN.lng });
+      expect(await proveNoon({ candidateExpectedMinutes: 45 })).toEqual({ reason: 'free_as_is' });
+      // The same visit with E far away still needs the move.
+      await mockConn('scheduled_services').where({ id: visitOf('e').id }).update(farE());
+      expect((await proveNoon({ candidateExpectedMinutes: 45 })).moves).toHaveLength(1);
+    });
   });
 });
