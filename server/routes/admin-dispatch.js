@@ -5320,7 +5320,7 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       // the lock above releases still makes the write miss and 409, instead
       // of silently letting the former technician's move commit.
       requireAssignedTechnicianId: req.techRole !== 'admin' ? req.technicianId : null,
-      // GATE_SAVE_ROAD_BUY: only an admin's Quick Move buys road times.
+      // Save road buy: only an admin's Quick Move buys road times.
       ...(req.techRole === 'admin' && req.technicianId ? { roadSpender: req.technicianId } : {}),
     });
 
@@ -6430,7 +6430,7 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
   rescheduleOptions.overlapAdvisory = true;
   rescheduleOptions.adminWindowRules = !keepSlot;
-  // GATE_SAVE_ROAD_BUY: an ADMIN's move buys the Google road times its check
+  // Save road buy: an ADMIN's move buys the Google road times its check
   // and route number read, before the rebooker's transaction (the staff user
   // pays). A technician never buys: no spender, no purchase.
   if (actor.techRole === 'admin' && actor.technicianId) rescheduleOptions.roadSpender = actor.technicianId;
@@ -6704,7 +6704,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         // Staff surface: occupancy clashes commit with a warning instead of
         // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
         overlapAdvisory: true,
-        // GATE_SAVE_ROAD_BUY: the admin's anchor hour buys its road times
+        // Save road buy: the admin's anchor hour buys its road times
         // before the series transaction (a technician is refused above).
         ...(req.techRole === 'admin' && req.technicianId ? { roadSpender: req.technicianId } : {}),
         // Same staleness fence via the series writer's own expectAnchor

@@ -600,11 +600,11 @@ describe('POST / — admin create — route check on the saved visit', () => {
   });
 });
 
-// GATE_SAVE_ROAD_BUY (owner 2026-10-29): the New Appointment save buys the
+// Save road buy (owner 2026-10-29): the New Appointment save buys the
 // placement's Google road times BEFORE its transaction opens, as the staff
-// user. The helper reads its own gate and is spied: only the wiring is under
+// user. The helper is spied: only the wiring is under
 // test here (the purchase itself is proven in save-road-buy.test.js).
-describe('POST / — admin create — GATE_SAVE_ROAD_BUY wiring', () => {
+describe('POST / — admin create — save road buy wiring', () => {
   const roadBuy = require('../services/scheduling/save-road-buy');
   let buySpy;
   const located = (table) => chain(table === 'customers'

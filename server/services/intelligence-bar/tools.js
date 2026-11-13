@@ -3924,8 +3924,7 @@ async function createAppointment(input, actionContext = {}) {
   let overlapAdvisory = null;
   let routeAdvisories = [];
   try {
-  // Road times for the booked hour (GATE_SAVE_ROAD_BUY; unset = nothing
-  // runs): an ADMIN's booking buys them BEFORE the transaction, so the
+  // Road times for the booked hour (save road buy): an ADMIN's booking buys them BEFORE the transaction, so the
   // route number and route check below read the same Google road times the
   // Edit dialog's check does. A technician's Intelligence Bar never buys.
   // A named property books at the card's property stamp (lockedBookingProperty
@@ -4505,8 +4504,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
     return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. The bar can\'t move it from here yet. Nothing was changed.', code: 'package_visit_two_linked' };
   }
   let thrownRefusal = null;
-  // Road times for the landing hour (GATE_SAVE_ROAD_BUY; unset = nothing
-  // runs): an ADMIN's move buys them BEFORE the transaction, so the route
+  // Road times for the landing hour (save road buy): an ADMIN's move buys them BEFORE the transaction, so the route
   // number and route check below read the same Google road times the Edit
   // dialog's check does. A technician's Intelligence Bar never buys.
   if (actionContext.isAdmin === true && actionContext.technicianId && probeWindowStart && probeWindowEnd) {

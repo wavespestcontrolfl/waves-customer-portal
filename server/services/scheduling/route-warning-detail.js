@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * GATE_ROUTE_WARNING_DETAIL (owner 2026-10-29, "ok go"; the Waves route-dispatcher audit,
+ * Route warning detail (owner 2026-10-29, "ok go"; the Waves route-dispatcher audit,
  * fix B). A staff route warning says WHICH stop, its window, the arrival the route predicts and
  * the minutes it misses by, instead of one sentence for every day:
  *
@@ -10,32 +10,14 @@
  *
  * The words here are shared by every caller of a route check, technicians included
  * (rain-out slot-check), so they carry the stop NUMBER, its window, a time and minutes, never a
- * customer name. Read at call time; unset = today's strings, byte for byte. Warn only: the text
- * never blocks a save. Nothing here talks to a customer.
+ * customer name. Warn only: the text never blocks a save. Nothing here talks to a customer.
  */
 
-const { gateEnvValue } = require('../../config/feature-gates');
-
-function routeWarningDetailLive() {
-  return typeof gateEnvValue === 'function' && gateEnvValue('GATE_ROUTE_WARNING_DETAIL') === true;
-}
-
-/** True when a staff check asked for detail AND the gate is on. */
-function detailWanted(detail) {
-  return detail === true && routeWarningDetailLive();
-}
-
-/** `{ detail: true }` on a staff check's `arrivalWindow` while the gate is on, else `{}`, so the
- *  object a caller builds is exactly today's with the gate off. */
-function detailOption() {
-  return routeWarningDetailLive() ? { detail: true } : {};
-}
-
-/** A visit auto-dispatch never moves: not a recurring child. With the gate on, its address-pin notice stays
+/** A visit auto-dispatch never moves: not a recurring child. Its address-pin notice stays
  *  open when it is locked, excluded or customer-confirmed, because its pin serves the route check, not the
  *  night run (audit.js pinNoticeHeldOut, auto-dispatch/index.js stillLiveOn). */
 function pinServesRouteCheckOnly(row) {
-  return routeWarningDetailLive() && (row.is_recurring !== true || row.recurring_parent_id == null);
+  return row.is_recurring !== true || row.recurring_parent_id == null;
 }
 
 function clock(minutes) {
@@ -87,6 +69,6 @@ function dayEndSentence(dayEndMin) {
 }
 
 module.exports = {
-  routeWarningDetailLive, detailWanted, detailOption, pinServesRouteCheckOnly, clockText, windowText, stopLabel, plural,
+  pinServesRouteCheckOnly, clockText, windowText, stopLabel, plural,
   lateSentence, tightSentence, dayEndSentence,
 };

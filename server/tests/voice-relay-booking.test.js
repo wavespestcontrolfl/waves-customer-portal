@@ -106,7 +106,7 @@ jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(), sendCustomerMessage
 jest.mock('../services/email', () => ({ sendEmail: jest.fn() }));
 jest.mock('../services/appointment-reminders', () => ({ registerAppointment: jest.fn(), handleReschedule: jest.fn() }));
 jest.mock('../services/outbound-review-confirm', () => ({ runOutboundReviewConfirmHook: jest.fn() }));
-// GATE_ROUTE_CHECK_BOOKING_SAVES: the stop-number placement is asserted by its own calls below; this suite's
+// The stop-number placement is asserted by its own calls below; this suite's
 // feature-gates mock has no gateEnvValue, so the real helper would only log a skipped placement.
 jest.mock('../services/scheduling/staff-save-route-check', () => ({
   placeBookingSavedVisit: jest.fn(() => Promise.resolve(null)),
@@ -1287,9 +1287,9 @@ describe('BOTH GATES ON — request_booking behavior', () => {
   });
 });
 
-// GATE_ROUTE_CHECK_BOOKING_SAVES (owner 2026-10-30): the pending voice booking is numbered on its technician's day
+// Booking route numbers (owner 2026-10-30): the pending voice booking is numbered on its technician's day
 // inside the booking transaction, after the review card is written. Stop numbers only: nothing is sent.
-describe('GATE_ROUTE_CHECK_BOOKING_SAVES: the voice booking gets its stop number', () => {
+describe('the voice booking gets its stop number', () => {
   const { placeBookingSavedVisit } = require('../services/scheduling/staff-save-route-check');
   beforeEach(() => {
     process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
@@ -1319,11 +1319,11 @@ describe('GATE_ROUTE_CHECK_BOOKING_SAVES: the voice booking gets its stop number
     expect(placeBookingSavedVisit).not.toHaveBeenCalled();
   });
 
-  test('the real helper: gate on places once with source voice_relay; gate off never; a throwing placement still books', async () => {
+  test('the real helper: routing on places once with source voice_relay; routing off never; a throwing placement still books', async () => {
     const real = jest.requireActual('../services/scheduling/staff-save-route-check');
     const arrivalRoute = require('../services/scheduling/arrival-route');
     placeBookingSavedVisit.mockImplementation(real.placeBookingSavedVisit);
-    const liveSpy = jest.spyOn(arrivalRoute, 'routeCheckBookingSavesLive').mockReturnValue(true);
+    const liveSpy = jest.spyOn(arrivalRoute, 'arrivalWindowRoutingEnabled').mockReturnValue(true);
     const placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockResolvedValue([1]);
     try {
       expect(await executeTool('request_booking', GOOD_INPUT, CTX)).toMatch(/Booking REQUEST submitted/);

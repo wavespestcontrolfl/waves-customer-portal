@@ -1,12 +1,12 @@
 'use strict';
 
 /**
- * GATE_SAVE_ROAD_BUY (owner 2026-10-28 design, "ok go" 2026-10-29): the entry
+ * Save road buy (owner 2026-10-28 design, "ok go" 2026-10-29): the entry
  * points an ADMIN staff save calls BEFORE it opens its transaction, so the
  * save's route check and its route number read the same Google road times the
  * Edit dialog's slot check bought (arrival-route.js buySaveRoads).
  *
- *  - Gate off (unset): every function returns null before any read or call.
+ *  - Road check or arrival routing off (saveRoadBuyLive): every function returns null before any read or call.
  *  - Never throws, never blocks a save, never sends a customer message.
  *  - Call it outside any transaction, lock or row lock. It refuses to run on
  *    a transaction handle.
@@ -28,7 +28,7 @@ const day = (value) => (value ? String(value instanceof Date ? value.toISOString
 /** Buys the legs for a placement the caller already knows (date, technician,
  *  start, end, plus `serviceId` + `changes` for a visit that exists, or
  *  `prospective` for one about to be created). Returns the purchase result, or
- *  null when the gate is off. */
+ *  null when the road check or arrival routing is off. */
 async function buyRoadsBeforeSave(args = {}) {
   try {
     const route = arrivalRoute();

@@ -105,7 +105,7 @@ const rowStyle = ({ withDate, far, current, takeable }) => ({
   background: current ? '#18181B' : (far ? '#FFFBEB' : '#FFFFFF'),
   color: current ? '#FFFFFF' : '#18181B', cursor: takeable ? 'pointer' : 'default',
 });
-// The day's booked stops already arrive after their windows (GATE_ROUTE_CHECK_LATE_DAYS): a small status
+// The day's booked stops already arrive after their windows: a small status
 // tag like "unverified", never a sentence about the hour.
 export const ALREADY_LATE_TAG = 'already late';
 // The van reaches this stop more than END_OF_WINDOW_MINUTES after the hour, at the end of its arrival

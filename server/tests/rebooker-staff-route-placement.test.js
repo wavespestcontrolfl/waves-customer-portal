@@ -145,7 +145,7 @@ describe('rescheduleOnce numbers the day after a staff move', () => {
     expect(placeMovedVisit.mock.invocationCallOrder[0]).toBeGreaterThan(trxScheduled.update.mock.invocationCallOrder[0]);
   });
 
-  // GATE_SAVE_ROAD_BUY: an admin's move (the dispatch route's roadSpender) buys
+  // Save road buy: an admin's move (the dispatch route's roadSpender) buys
   // the placement's road times BEFORE the save transaction opens, never inside it.
   test('an admin move buys its road times before the transaction, for the landing hour', async () => {
     wireRescheduleMocks(service());

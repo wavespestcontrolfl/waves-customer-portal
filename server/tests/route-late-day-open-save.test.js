@@ -1,8 +1,8 @@
 /**
- * GATE_ROUTE_CHECK_LATE_DAYS on a staff save (Codex round 1, PR #7041, P1): the hour a picker offered by
+ * Late days on a staff save (Codex round 1, PR #7041, P1): the hour a picker offered by
  * inserting a visit ahead of an already-late stop must also be the order the save writes, or the visit keeps a
  * null route_order and sorts last (arriving past its own promise). placeMovedVisit takes `lateDays` from the
- * staff saves only; automatic writers, the gate off, and every other caller keep today's answer: the check refuses
+ * staff saves only; automatic writers and every other caller keep today's answer: the check refuses
  * and the visit is numbered by its arrival time (route-order-time-fallback.js).
  * REAL evaluator and the real placeMovedVisit on an in-memory day (no DB, no Google).
  * Drive model: 20 minutes between different points, 0 between stops at one point.
@@ -64,14 +64,13 @@ function fakeConn(target) {
   return { conn, updates };
 }
 
-const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_ROUTE_CHECK_LATE_DAYS',
+const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS',
   'GATE_SCHEDULING_CAPACITY'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(GATES.map((k) => [k, process.env[k]]));
   GATES.forEach((k) => { delete process.env[k]; });
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
-  process.env.GATE_ROUTE_CHECK_LATE_DAYS = 'true';
   mockDayRows = [A, B, NEW];
 });
 afterEach(() => { GATES.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
@@ -91,13 +90,6 @@ test('the audit reproduction: the offered 11:00 hour is saved in the order A, ne
 test('the same save without lateDays keeps today\'s answer: nothing certified, numbered by time', async () => {
   const { conn, updates } = fakeConn(NEW);
   await expect(placeMovedVisit(conn, { serviceId: 'N', staffSave: true })).resolves.toEqual(BY_TIME);
-  expect(updates).toEqual(BY_TIME_WRITTEN);
-});
-
-test('lateDays with the gate off is today\'s answer', async () => {
-  delete process.env.GATE_ROUTE_CHECK_LATE_DAYS;
-  const { conn, updates } = fakeConn(NEW);
-  await expect(placeMovedVisit(conn, { serviceId: 'N', staffSave: true, lateDays: true })).resolves.toEqual(BY_TIME);
   expect(updates).toEqual(BY_TIME_WRITTEN);
 });
 

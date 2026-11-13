@@ -470,17 +470,18 @@ test('missing-pin upkeep closes a standing notice whose visit now has a pin', as
   expect(retireSql.sql).toContain('c.active IS NOT FALSE');
 });
 
-// A lapsed plan gets no placement, and a locked or excluded visit is out of
-// auto-dispatch: neither is skipped for its pin (Codex #6208 r18, r21 P2).
+// A lapsed plan gets no placement, and a locked or excluded recurring child is out of
+// auto-dispatch: neither is skipped for its pin (Codex #6208 r18, r21 P2). A visit that is
+// not a recurring child keeps its notice: its pin serves the route check.
 test('missing-pin upkeep closes a standing notice whose plan lapsed or whose visit staff locked or excluded', async () => {
   const audit = require('../services/auto-dispatch/audit');
   existingNoticeKeys = ['v1', 'v2', 'v3', 'v4', 'v5'].map((id) => `auto-dispatch-missing-geo:${id}:2026-08-20`);
   query.select = jest.fn().mockResolvedValue([
-    { id: 'v1', customer_id: 'c1', recurring_parent_id: 'p1' },
-    { id: 'v2', customer_id: 'c2', recurring_parent_id: 'p2' },
-    { id: 'v3', customer_id: 'c3', recurring_parent_id: 'p3', auto_dispatch_locked: true },
-    { id: 'v4', customer_id: 'c4', recurring_parent_id: 'p4', auto_dispatch_excluded: true },
-    { id: 'v5', customer_id: 'c5', recurring_parent_id: 'p5', customer_confirmed: true },
+    { id: 'v1', customer_id: 'c1', is_recurring: true, recurring_parent_id: 'p1' },
+    { id: 'v2', customer_id: 'c2', is_recurring: true, recurring_parent_id: 'p2' },
+    { id: 'v3', customer_id: 'c3', is_recurring: true, recurring_parent_id: 'p3', auto_dispatch_locked: true },
+    { id: 'v4', customer_id: 'c4', is_recurring: true, recurring_parent_id: 'p4', auto_dispatch_excluded: true },
+    { id: 'v5', customer_id: 'c5', is_recurring: true, recurring_parent_id: 'p5', customer_confirmed: true },
   ]);
   query.leftJoin = jest.fn(() => query);
   eligibility.lapsedPlanKeys.mockResolvedValue(new Set(['c1:p1']));

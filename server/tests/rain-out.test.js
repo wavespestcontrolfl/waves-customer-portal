@@ -531,7 +531,7 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     });
 
-    // GATE_SAVE_ROAD_BUY: only the admin dispatch route passes a spender; the rebooker
+    // Save road buy: only the admin dispatch route passes a spender; the rebooker
     // buys the move's road times before its transaction. A technician passes none.
     test('an admin Quick Move hands the rebooker its staff spender; a technician\'s hands none', async () => {
       wireSingle();
@@ -2300,7 +2300,7 @@ describe('rain-out service', () => {
       expect(options.days).toHaveLength(2);
       expect(options.days[0]).toMatchObject({ date: '2026-06-12', rainChance: 65 });
       expect(options.days[1]).toMatchObject({ date: '2026-06-13', rainChance: 20 });
-      // GATE_ROUTE_CHECK_LATE_DAYS: the rebooker's already-late mark rides to the sheet; a clean day has no key.
+      // The rebooker's already-late mark rides to the sheet; a clean day has no key.
       expect(options.days[0].dayAlreadyLate).toBe(true);
       expect(options.days[1]).not.toHaveProperty('dayAlreadyLate');
       // Route-dispatcher audit D: the rebooker's driveMinutes rides to both sheets' "+N min drive"; an unpriced day has no key.

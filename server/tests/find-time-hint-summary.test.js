@@ -162,7 +162,7 @@ test('one row per date, empty days carry a status, hours in clock order', async 
   expect(body.rejections_by_date).toBeUndefined();
 });
 
-test('an already-late day (GATE_ROUTE_CHECK_LATE_DAYS) keeps its hours, flags them, and the day row says already_late; other days carry no flag', async () => {
+test('an already-late day keeps its hours, flags them, and the day row says already_late; other days carry no flag', async () => {
   const arrival = (date, start, over = {}) => slot(date, start, 3, { route_mode: 'arrival_windows', ...over });
   findAvailableSlots.mockResolvedValue({
     slots: [

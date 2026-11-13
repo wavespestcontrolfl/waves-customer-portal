@@ -192,7 +192,7 @@ describe('the box', () => {
   });
 });
 
-// GATE_ROUTE_CHECK_LATE_DAYS: a day whose booked stops already arrive late keeps its open hours and
+// Late days: a day whose booked stops already arrive late keeps its open hours and
 // carries a small tag. Owner 2026-10-24/25: still only open times, never a "doesn't fit" sentence.
 describe('already-late days', () => {
   const lateDays = [
@@ -226,7 +226,7 @@ describe('already-late days', () => {
   });
 });
 
-describe('the stopped-limit line (GATE_PICKER_ROAD_LIMIT_NOTICE)', () => {
+describe('the stopped-limit line', () => {
   const NOTE = 'Google road times paused: month limit reached. Times marked ~ use the estimate.';
   it('sits under the "~" legend, and is absent without the server\'s line', () => {
     render(<OpenTimesBox availability={answer(DAYS, { roadLimit: NOTE })} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} />);

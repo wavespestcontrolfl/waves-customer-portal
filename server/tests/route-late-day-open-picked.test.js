@@ -1,5 +1,5 @@
 /**
- * GATE_ROUTE_CHECK_LATE_DAYS on the staff picked-hour verdict (pre-push audit P1, PR #7041): the list offers
+ * Late days on the staff picked-hour verdict (pre-push audit P1, PR #7041): the list offers
  * hours on an already-late day, so picking one of them must read as a fit (not "doesn't fit"). REAL evaluator,
  * REAL checkArrivalPlacement and scorePickedHour on an in-memory day (no DB, no Google). The save advisory
  * (findConflictingVisits -> checkArrivalPlacement without lateDays) is not touched.
@@ -55,13 +55,12 @@ mockDayRows = [row('A', '08:00', '11:22', 202, P1, { route_order: 1 }), row('B',
 // The visit being moved here lives on another day, at B's address, and takes 10 minutes.
 const STORED = row('N', '09:00', '09:10', 10, P2, { scheduled_date: '2099-03-02' });
 
-const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_ROUTE_CHECK_LATE_DAYS', 'GATE_SCHEDULING_CAPACITY'];
+const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(GATES.map((k) => [k, process.env[k]]));
   GATES.forEach((k) => { delete process.env[k]; });
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
-  process.env.GATE_ROUTE_CHECK_LATE_DAYS = 'true';
   db.state.target = STORED;
 });
 afterEach(() => { GATES.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
@@ -93,12 +92,6 @@ test('offer and pick agree on every hour of the day: offered = fits, not offered
     expect([start, verdict.fits]).toEqual([start, offered.has(start)]);
     if (verdict.fits === false) expect(verdict.reason).toBe('arrival_window');
   }
-});
-
-test('gate off: the pick keeps today\'s verdict, "does not fit" on that hour, with no flag', async () => {
-  delete process.env.GATE_ROUTE_CHECK_LATE_DAYS;
-  const verdict = await pick('11:00');
-  expect(verdict).toEqual({ start: '11:00', fits: false, reason: 'arrival_window' });
 });
 
 test('an hour on the late day that would add a new late stop still does not fit', async () => {

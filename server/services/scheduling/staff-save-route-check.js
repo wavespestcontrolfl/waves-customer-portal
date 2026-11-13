@@ -84,26 +84,18 @@ async function placeStaffSavedVisit(conn, { serviceId, source } = {}) {
  * no warning, no notification, no message. Reads only the road times already
  * bought (`staffSave: true`). A failure is logged on one line and returns null:
  * it never fails or rolls back the booking. Arrival routing off: touches nothing.
- * `live` = the reader to ask (default: routeCheckLive), so the accept, assign
- * and booking callers share this one placement function.
+ * The accept, assign and booking callers share this one placement function.
  */
-async function placeAutoSavedVisit(conn, { serviceId, visit, source, live = routeCheckLive } = {}) {
+async function placeAutoSavedVisit(conn, { serviceId, visit, source } = {}) {
   const id = serviceId || (visit && visit.id);
   if (!conn || !id) return null;
   try {
-    if (!live()) return null;
+    if (!routeCheckLive()) return null;
     return await require('./arrival-route').placeMovedVisit(conn, { serviceId: id, staffSave: true, ...(source ? { source } : {}) });
   } catch (err) {
     logger.warn(`[staff-save-route-check] auto-save placement skipped for ${id}${source ? ` (${source})` : ''}: ${err.message}`);
     return null;
   }
-}
-
-// GATE_ROUTE_CHECK_BOOKING_SAVES: a customer-booked visit (self booking, customer reschedule,
-// voice agent booking, new-caller visit).
-function routeCheckBookingLive() {
-  const { routeCheckBookingSavesLive } = require('./arrival-route');
-  return typeof routeCheckBookingSavesLive === 'function' && routeCheckBookingSavesLive() === true;
 }
 
 /** Number an accepted estimate's visit inside the accept transaction. Never throws. */
@@ -116,13 +108,14 @@ function placeAssignedVisit(conn, { serviceId, visit } = {}) {
   return placeAutoSavedVisit(conn, { serviceId, visit, source: 'dispatch_assign' });
 }
 
-/** Number a newly booked visit inside the booking transaction. Never throws. */
+/** Number a newly booked visit inside the booking transaction (self booking, voice agent booking,
+ *  new-caller visit): stop numbers only, no message, no notification, no Google call. Never throws. */
 function placeBookingSavedVisit(conn, { serviceId, visit, source } = {}) {
-  return placeAutoSavedVisit(conn, { serviceId, visit, source, live: routeCheckBookingLive });
+  return placeAutoSavedVisit(conn, { serviceId, visit, source });
 }
 
 module.exports = {
   routeCheckLive, routeCheckArrivalWindow, staffSaveRouteWarnings,
   placeStaffSavedVisit, placeAutoSavedVisit, placeAcceptedVisit, placeAssignedVisit,
-  routeCheckBookingLive, placeBookingSavedVisit,
+  placeBookingSavedVisit,
 };

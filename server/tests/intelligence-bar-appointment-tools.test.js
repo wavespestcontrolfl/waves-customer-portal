@@ -2712,11 +2712,11 @@ describe('advisory route check on the create and reschedule saves', () => {
     });
   });
 
-  // GATE_SAVE_ROAD_BUY (owner 2026-10-29): an ADMIN's booking or move buys the
+  // Save road buy (owner 2026-10-29): an ADMIN's booking or move buys the
   // placement's Google road times BEFORE its transaction; a technician's bar
-  // never does. The helpers read their own gate and are spied: the purchase is
-  // proven in save-road-buy.test.js.
-  describe('GATE_SAVE_ROAD_BUY wiring', () => {
+  // never does. The helpers are spied: the purchase is proven in
+  // save-road-buy.test.js.
+  describe('save road buy wiring', () => {
     const roadBuy = require('../services/scheduling/save-road-buy');
     const admin = { isAdmin: true, technicianId: 'staff-1' };
     let createBuy;

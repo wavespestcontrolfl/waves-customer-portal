@@ -481,7 +481,7 @@ function isStaffSaveCheck(arrivalWindow) {
   return arrivalWindow?.roads === 'cache' || arrivalWindow?.detail === true;
 }
 
-// The unchanged sentence beside a worded warning (GATE_ROUTE_WARNING_DETAIL), for snapshots.
+// The unchanged sentence beside a worded warning, for snapshots.
 function baseWarningField(fit) {
   return fit.baseWarning ? { base_warning: fit.baseWarning } : {};
 }
@@ -571,7 +571,7 @@ async function findConflictingVisits({
       const fit = await checkArrivalPlacement({
         conn: db, ...arrivalWindow, date: String(date).split('T')[0],
         // Staff saves read cached road times (roads: 'cache'): their failure carries the diagnostics
-        // the log line below records, and its words with GATE_ROUTE_WARNING_DETAIL on.
+        // the log line below records, and its words.
         detail: isStaffSaveCheck(arrivalWindow),
         // A caller may give the arrival check its own exclusion list (the
         // series carry keeps a carried stop's members visible so the stop is
@@ -585,7 +585,7 @@ async function findConflictingVisits({
         ...fit.target, id: arrivalWindow.serviceId,
         window_start: windowStart, window_end: windowEnd,
         conflict_reason: fit.reason, warning: fit.warning,
-        // GATE_ROUTE_WARNING_DETAIL: the sentence a staff save shows is worded with the stop and
+        // The sentence a staff save shows is worded with the stop and
         // minutes; `base_warning` keeps the unchanged one for any snapshot that compares warnings.
         ...baseWarningField(fit),
       }], { db, date, windowStart, windowEnd, includeInterviews }), destinations);

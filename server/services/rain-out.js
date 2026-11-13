@@ -1569,9 +1569,9 @@ async function checkSlots({ targets, caller = null } = {}) {
           serviceId: p.serviceId, date: p.date, technicianId: p.technicianId,
           windowStart: p.window.start, windowEnd: p.window.end,
           durationMinutes: p.durationMinutes, excludeServiceIds: p.excludeServiceIds,
-          // GATE_ROUTE_WARNING_DETAIL: the warning names the stop, window and minutes (no customer
+          // The warning names the stop, window and minutes (no customer
           // name, so a technician's row reads the same).
-          ...require('./scheduling/route-warning-detail').detailOption(),
+          detail: true,
           // The pickers' Google road times are staff-only: a technician's
           // check stays on the model. Counted against the admin who asked
           // (picker-road-spend.js).
@@ -2667,7 +2667,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             // The day options came from the staff arrival check, so the move
             // numbers the day the way it checked.
             placeInRoute: true,
-            // GATE_SAVE_ROAD_BUY: an admin's move buys its road times before
+            // Save road buy: an admin's move buys its road times before
             // the series transaction (the dispatch route passes none for a technician).
             ...(roadSpender ? { roadSpender } : {}),
             sourceSurface: 'quick_move',

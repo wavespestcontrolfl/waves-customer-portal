@@ -209,35 +209,21 @@ describe('placeAcceptedVisit / placeAssignedVisit', () => {
   });
 });
 
-// GATE_ROUTE_CHECK_BOOKING_SAVES (owner 2026-10-30, "ok go", Route Check
+// Booking route numbers (owner 2026-10-30, "ok go", Route Check
 // Everywhere follow-up): customer and phone bookings through the same
-// placement function, asked through the booking gate.
-describe('placeBookingSavedVisit (GATE_ROUTE_CHECK_BOOKING_SAVES)', () => {
+// placement function as the other automatic writers.
+describe('placeBookingSavedVisit', () => {
   const trx = { isTransaction: true };
   const bookingOn = () => {
-    process.env.GATE_ROUTE_CHECK_BOOKING_SAVES = 'true';
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
   };
-  afterEach(() => {
-    delete process.env.GATE_ROUTE_CHECK_BOOKING_SAVES;
-  });
 
-  test('the reader is read at call time and needs the arrival-window route check', () => {
-    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
-    expect(arrivalRoute.routeCheckBookingSavesLive()).toBe(false);
-    process.env.GATE_ROUTE_CHECK_BOOKING_SAVES = 'true';
-    expect([arrivalRoute.routeCheckBookingSavesLive(), routeCheck.routeCheckBookingLive()]).toEqual([true, true]);
-    delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
-    expect(arrivalRoute.routeCheckBookingSavesLive()).toBe(false);
-  });
-
-  test('gate off: touches nothing, even with arrival-window routing on', async () => {
-    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  test('arrival routing off: touches nothing', async () => {
     expect(await routeCheck.placeBookingSavedVisit(trx, { serviceId: 'svc-1', source: 'self_booking' })).toBeNull();
     expect(placeSpy).not.toHaveBeenCalled();
   });
 
-  test('gate on: one placement on the caller transaction with the caller source (row or id), cache roads only', async () => {
+  test('arrival routing on: one placement on the caller transaction with the caller source (row or id), cache roads only', async () => {
     bookingOn();
     expect(await routeCheck.placeBookingSavedVisit(trx, { visit: { id: 'svc-9' }, source: 'new_caller' })).toEqual([1]);
     expect(await routeCheck.placeBookingSavedVisit(trx, { serviceId: 'svc-8', source: 'voice_relay' })).toEqual([1]);

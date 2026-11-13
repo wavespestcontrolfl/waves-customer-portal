@@ -1,9 +1,9 @@
 /**
- * GATE_ROUTE_WARNING_DETAIL, the pin half. The night run's address-pin notices cover only a recurring child
- * visit auto-dispatch loads. A one-time / rodent / project visit with no map pin (the Oct 30 case) got no
- * notice, so its route read "could not verify" with nobody told. With the gate on the SAME notice lane also
- * covers every pending or confirmed visit in the next 7 days with no usable pin (same key, dedupe, ring
- * budget and close rules; no new card). Gate off: the lane is exactly as it was. Synthetic ids only.
+ * Route warning detail, the pin half. The night run's address-pin notices used to cover only a recurring
+ * child visit auto-dispatch loads. A one-time / rodent / project visit with no map pin (the Oct 30 case) got
+ * no notice, so its route read "could not verify" with nobody told. The SAME notice lane also covers every
+ * pending or confirmed visit in the next 7 days with no usable pin (same key, dedupe, ring budget and close
+ * rules; no new card). Synthetic ids only.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
@@ -32,8 +32,7 @@ const base = (id, extra = {}) => ({
   ...extra,
 });
 
-beforeEach(() => { mockRows = []; mockCalls.length = 0; delete process.env.GATE_ROUTE_WARNING_DETAIL; });
-afterEach(() => { delete process.env.GATE_ROUTE_WARNING_DETAIL; });
+beforeEach(() => { mockRows = []; mockCalls.length = 0; });
 
 describe('which visits the pin notice reads (coverage decision)', () => {
   test('a one-time visit with no pin is covered: same notice key as the recurring lane, routeOnly wording', async () => {
@@ -72,19 +71,12 @@ describe('which visits the pin notice reads (coverage decision)', () => {
 describe('a held-out visit keeps its pin notice only when the run never moves it', () => {
   const locked = (extra) => base('x', { auto_dispatch_locked: true, ...extra });
 
-  test('gate off: every locked, excluded or confirmed visit is held out, as before', () => {
-    expect(audit.pinNoticeHeldOut(locked({}))).toMatchObject({ reason_code: 'MANUALLY_LOCKED' });
-    expect(audit.pinNoticeHeldOut(base('y', { customer_confirmed: true }))).toMatchObject({ reason_code: 'CUSTOMER_CONFIRMED' });
-  });
-
-  test('gate on: a visit that is not a recurring child is never held out (its pin serves the route check)', () => {
-    process.env.GATE_ROUTE_WARNING_DETAIL = 'true';
+  test('a visit that is not a recurring child is never held out (its pin serves the route check)', () => {
     expect(audit.pinNoticeHeldOut(locked({}))).toBeNull();
     expect(audit.pinNoticeHeldOut(base('y', { customer_confirmed: true }))).toBeNull();
   });
 
-  test('gate on: a recurring child that is locked or confirmed is still held out (old rule)', () => {
-    process.env.GATE_ROUTE_WARNING_DETAIL = 'true';
+  test('a recurring child that is locked or confirmed is still held out (old rule)', () => {
     const child = { is_recurring: true, recurring_parent_id: 'parent-1' };
     expect(audit.pinNoticeHeldOut(locked(child))).toMatchObject({ reason_code: 'MANUALLY_LOCKED' });
     expect(audit.pinNoticeHeldOut(base('y', { ...child, customer_confirmed: true }))).toMatchObject({ reason_code: 'CUSTOMER_CONFIRMED' });

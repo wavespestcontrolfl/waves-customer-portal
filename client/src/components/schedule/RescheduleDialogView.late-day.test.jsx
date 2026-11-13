@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// GATE_ROUTE_CHECK_LATE_DAYS: a suggested day whose booked stops already arrive late carries a small tag.
+// Late days: a suggested day whose booked stops already arrive late carries a small tag.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
