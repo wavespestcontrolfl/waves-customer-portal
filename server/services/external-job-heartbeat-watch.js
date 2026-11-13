@@ -18,18 +18,15 @@
  * complete run yet, nothing is raised and nothing is closed.
  *
  * Writes only admin notifications. No row locks, no customer messages, no
- * customer data. Dark behind GATE_EXTERNAL_HEARTBEAT_WATCH (call-time read;
- * unset = off = kill). Scheduled in scheduler.js hourly 07:05-22:05 ET.
+ * customer data. Scheduled in scheduler.js hourly 07:05-22:05 ET.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const alertEpisodes = require('./admin-alert-episodes');
 const { composeAdminAlert } = require('./admin-alert-compose');
-const { gateEnvValue } = require('../config/feature-gates');
 const { etDateString, etParts, formatETDate, formatETTime } = require('../utils/datetime-et');
 
-const GATE = 'GATE_EXTERNAL_HEARTBEAT_WATCH';
 const KEY_ROOT = 'external-heartbeat';
 const MAX_ERROR_CHARS = 120;
 
@@ -160,13 +157,11 @@ async function checkJob(job, now) {
 }
 
 async function runExternalHeartbeatWatch({ now = new Date() } = {}) {
-  if (!gateEnvValue(GATE)) return { skipped: true };
   const results = [];
   for (const job of EXTERNAL_JOBS) {
     results.push(await checkJob(job, now));
   }
   return {
-    skipped: false,
     checked: results.length,
     alerted: results.reduce((n, r) => n + r.alerted, 0),
     closed: results.reduce((n, r) => n + r.closed, 0),

@@ -5,7 +5,7 @@
  * total) already includes every product use that happened before it. When a
  * visit done BEFORE the product's latest count is closed or back-filled
  * afterwards, taking its usage off inventory_on_hand drops the stock twice.
- * Under GATE_STOCK_COUNT_AWARE_USAGE the two usage writers
+ * The two usage writers
  * (deductProductInventory in complete-scheduled-service.js and the
  * per-completion consumables in supplies-consumption.js) ask this module
  * whether the visit predates the latest count. If so they still write the
@@ -128,7 +128,6 @@ function usedBeforeCount({ scheduledService, serviceRecord } = {}, count) {
 // The one call the usage writers make. Returns the metadata to stamp on a
 // stock-unchanged usage movement, or null for a normal deduction.
 async function stockHoldFor(conn, productId, visit) {
-  if (!require('../config/feature-gates').stockCountAwareUsageLive()) return null;
   const count = await latestCount(conn, productId);
   if (!count) return null;
   // `visit` may be a function, so a writer holding only ids reads the visit's times after a count is known.

@@ -20,7 +20,7 @@
  * alert at a time.
  *
  * Always a confirm card (write-gates.js two-step), admin only (the route is requireAdmin), never owner-direct,
- * platform path only, dark behind GATE_IB_RESOLVE_DISPATCH_ALERT (which needs GATE_IB_PLATFORM).
+ * platform path only (GATE_IB_PLATFORM).
  *
  *   unconfirmed -> a PREVIEW: nothing is written. Its `_version` pins what the card showed (the alert id, type,
  *                  severity, text, payload, raised time, still unresolved, and the visit, customer and technician
@@ -33,8 +33,9 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 
-function resolveDispatchAlertLive() {
-  return require('../../config/feature-gates').ibResolveDispatchAlertLive() === true;
+// The tool exists only on the platform path (GATE_IB_PLATFORM), read at call time.
+function onPlatformPath() {
+  return require('../../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM') === true;
 }
 
 const DISPATCH_ALERT_TOOLS = [
@@ -309,7 +310,7 @@ async function executeDispatchAlertTool(toolName, input = {}, actionContext = {}
   if (actionContext?.isAdmin === false || (input.confirmed === true && actionContext?.isAdmin !== true)) {
     return refusal('Resolving a dispatch alert is limited to admin accounts', 'permission_denied');
   }
-  if (!resolveDispatchAlertLive()) return refusal('Resolving a dispatch alert from the bar is switched off.', 'gate_off');
+  if (!onPlatformPath()) return refusal('Resolving a dispatch alert from the bar is switched off.', 'gate_off');
   try {
     // Only /confirm-action sets confirmed (route-derived, never a model param).
     return input.confirmed === true ? await commitResolve(input, actionContext) : await buildPlan(input);
@@ -324,7 +325,6 @@ async function executeDispatchAlertTool(toolName, input = {}, actionContext = {}
 module.exports = {
   DISPATCH_ALERT_TOOLS,
   executeDispatchAlertTool,
-  resolveDispatchAlertLive,
   cardLines,
   buildPlan,
 };

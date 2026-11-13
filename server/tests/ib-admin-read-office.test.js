@@ -1,7 +1,7 @@
 /**
- * The general admin read on the OFFICE login (owner ruling 2026-10-28 "A1", GATE_IB_GENERAL_READ_OFFICE): a non-owner ADMIN gets
+ * The general admin read on the OFFICE login (owner ruling 2026-10-28 "A1"): a non-owner ADMIN gets
  * find_admin_reads and read_admin_data limited to the catalog rows reviewed as `office: true`. The owner login is unchanged, a
- * technician gets nothing, the gate off is byte-identical, notes are withheld on her login, and the catalog build refuses an office
+ * technician gets nothing, GATE_IB_GENERAL_READ off or GATE_IB_PLATFORM off refuses her login, notes are withheld on her login, and the catalog build refuses an office
  * row on the never-office list. No network: global fetch is mocked.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -23,13 +23,12 @@ const OFFICE_ENDPOINTS = ['/admin/dispatch/alerts', '/admin/email-templates', '/
 const owner = (extra = {}) => ({ fullAccess: true, isAdmin: true, staffAuthorization: AUTH, ...extra });
 const office = (extra = {}) => ({ fullAccess: false, isAdmin: true, staffAuthorization: AUTH, ...extra });
 const json = (body) => ({ status: 200, headers: { get: (k) => ({ 'content-type': 'application/json' })[String(k).toLowerCase()] ?? null }, text: async () => JSON.stringify(body) });
-const ENV = ['GATE_IB_PLATFORM', 'GATE_IB_GENERAL_READ', 'GATE_IB_GENERAL_READ_OFFICE', 'GATE_IB_OWNER_DIRECT'];
+const ENV = ['GATE_IB_PLATFORM', 'GATE_IB_GENERAL_READ', 'GATE_IB_OWNER_DIRECT'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(ENV.map((k) => [k, process.env[k]]));
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_GENERAL_READ = 'true';
-  process.env.GATE_IB_GENERAL_READ_OFFICE = 'true';
   global.fetch = jest.fn(async () => json({ ok: true }));
 });
 afterEach(() => { for (const k of ENV) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
@@ -114,17 +113,10 @@ describe('the office login', () => {
 });
 
 describe('the owner login is unchanged', () => {
-  test('finds and reads every row, office or not, with the office gate on or off', async () => {
-    const hits = async () => (await find('invoices customer timeline referral payouts', owner())).matches.map((m) => m.endpoint);
-    const on = await hits();
-    expect(on.some((e) => !OFFICE_ENDPOINTS.includes(e))).toBe(true);
-    delete process.env.GATE_IB_GENERAL_READ_OFFICE;
-    expect(await hits()).toEqual(on);
-    const readOwner = async () => JSON.stringify(await read({ endpoint: '/admin/referrals/payouts' }, owner()));
-    const off = await readOwner();
-    process.env.GATE_IB_GENERAL_READ_OFFICE = 'true';
-    expect(await readOwner()).toBe(off);
-    expect(JSON.parse(off)).toMatchObject({ status: 200 });
+  test('finds and reads every row, office or not', async () => {
+    const hits = (await find('invoices customer timeline referral payouts', owner())).matches.map((m) => m.endpoint);
+    expect(hits.some((e) => !OFFICE_ENDPOINTS.includes(e))).toBe(true);
+    expect(await read({ endpoint: '/admin/referrals/payouts' }, owner())).toMatchObject({ status: 200 });
   });
 });
 
@@ -146,17 +138,13 @@ describe('no access for anyone else', () => {
   });
 });
 
-describe('gate off is byte-identical', () => {
-  test('the office gate off: her login is refused as today and neither tool is offered; the office gate needs the general read gate', async () => {
-    delete process.env.GATE_IB_GENERAL_READ_OFFICE;
-    expect(await read({ endpoint: '/admin/dispatch/alerts' }, office())).toMatchObject({ code: 'permission_denied', error: 'This read is limited to the owner account.' });
+describe('the general read gate and the platform gate still refuse her login', () => {
+  test('GATE_IB_GENERAL_READ off or GATE_IB_PLATFORM off: both tools refuse and are not offered', async () => {
     const names = (scope) => registry.initialTools('dashboard', scope).map((t) => t.name);
-    expect(names({ role: 'admin', context: 'dashboard', fullAccess: false })).not.toEqual(expect.arrayContaining([READ]));
-    expect(names({ role: 'admin', context: 'dashboard', fullAccess: false })).not.toContain(FIND);
-    process.env.GATE_IB_GENERAL_READ_OFFICE = 'true';
     delete process.env.GATE_IB_GENERAL_READ;
     expect(await read({ endpoint: '/admin/dispatch/alerts' }, office())).toMatchObject({ code: 'gate_off' });
     expect(names({ role: 'admin', context: 'dashboard', fullAccess: false })).not.toContain(READ);
+    expect(names({ role: 'admin', context: 'dashboard', fullAccess: false })).not.toContain(FIND);
     delete process.env.GATE_IB_PLATFORM;
     process.env.GATE_IB_GENERAL_READ = 'true';
     expect(await read({ endpoint: '/admin/dispatch/alerts' }, office())).toMatchObject({ code: 'gate_off' });

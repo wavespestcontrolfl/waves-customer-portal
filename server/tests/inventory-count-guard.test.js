@@ -6,7 +6,6 @@ const {
   isCountCorrection, countTime, latestCount, visitStartedAt, usedBeforeCount, stockHoldFor, loadVisit,
 } = require('../services/inventory-count-guard');
 
-const GATE = 'GATE_STOCK_COUNT_AWARE_USAGE';
 const correction = (source, reason, extra = {}) => ({
   id: 'mv', movement_type: 'correction', created_at: new Date('2026-10-28T23:00:00Z'),
   metadata: { ...(source ? { source } : {}), reason, ...extra },
@@ -176,36 +175,20 @@ describe('latestCount', () => {
 
 describe('stockHoldFor', () => {
   const rows = [{ ...correction('owner_count', '', { countedAt: '2026-10-22T20:00:00Z' }), id: 'count-1' }];
-  afterEach(() => { delete process.env[GATE]; });
-
-  test('gate off: null, and nothing is read', async () => {
-    const conn = fakeConn(rows);
-    expect(await stockHoldFor(conn, 'prod-1', { serviceRecord: { service_date: '2026-10-02' } })).toBeNull();
-    expect(conn.calls).toHaveLength(0);
-  });
-  test('gate on, visit before the count: the metadata to stamp', async () => {
-    process.env[GATE] = 'true';
+  test('visit before the count: the metadata to stamp', async () => {
     expect(await stockHoldFor(fakeConn(rows), 'prod-1', { serviceRecord: { service_date: '2026-10-02' } })).toEqual({
       stockUnchanged: 'used_before_latest_count', countMovementId: 'count-1', countedAt: '2026-10-22T20:00:00.000Z',
     });
   });
-  test('gate on, visit after the count: null', async () => {
-    process.env[GATE] = 'true';
+  test('visit after the count: null', async () => {
     expect(await stockHoldFor(fakeConn(rows), 'prod-1', { serviceRecord: { service_date: '2026-10-26' } })).toBeNull();
   });
   test('the visit may be a function, read only after a count exists', async () => {
-    process.env[GATE] = 'true';
     const visit = jest.fn(async () => ({ serviceRecord: { service_date: '2026-10-02' } }));
     expect(await stockHoldFor(fakeConn([]), 'prod-1', visit)).toBeNull();
     expect(visit).not.toHaveBeenCalled();
     expect(await stockHoldFor(fakeConn(rows), 'prod-1', visit)).not.toBeNull();
     expect(visit).toHaveBeenCalledTimes(1);
-  });
-  test('any value but exactly "true" keeps the gate off', async () => {
-    for (const value of ['TRUE', '1', '', 'yes']) {
-      process.env[GATE] = value;
-      expect(await stockHoldFor(fakeConn(rows), 'prod-1', { serviceRecord: { service_date: '2026-10-02' } })).toBeNull();
-    }
   });
 });
 

@@ -1,12 +1,12 @@
 /**
- * GATE_STOCK_COUNT_AWARE_USAGE — a visit done before a product's latest physical count
+ * Stock-count-aware usage — a visit done before a product's latest physical count
  * must not take its usage off stock a second time.
  *
  *   - deductProductInventory (complete-scheduled-service.js)
  *   - consumeCompletionSupplies (supplies-consumption.js)
  *
- * Mocked-db unit tests: gate off = today's behavior; gate on + visit before the count =
- * usage movement written, stock and lockout untouched; gate on + visit after = normal.
+ * Mocked-db unit tests: visit before the count = usage movement written, stock and lockout
+ * untouched; visit after = normal.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/notification-service', () => ({
@@ -17,7 +17,6 @@ jest.mock('../services/notification-service', () => ({
 const { deductProductInventory } = require('../services/complete-scheduled-service');
 const { consumeCompletionSupplies } = require('../services/supplies-consumption');
 
-const GATE = 'GATE_STOCK_COUNT_AWARE_USAGE';
 const COUNT_ROW = {
   id: 'count-1',
   movement_type: 'correction',
@@ -73,19 +72,8 @@ const deductArgs = (over = {}) => ({
   ...over,
 });
 
-afterEach(() => { delete process.env[GATE]; });
-
 describe('deductProductInventory', () => {
-  test('gate off: an old visit still deducts, and no count is read', async () => {
-    const trx = fakeTrx({ countRows: [COUNT_ROW] });
-    const result = await deductProductInventory(trx, deductArgs());
-    expect(result).toMatchObject({ status: 'deducted', stockBefore: 150, stockAfter: 133.8 });
-    expect(trx.reads).not.toContain('product_inventory_movements');
-    expect(trx.writes.map((w) => w.table)).toEqual(['products_catalog', 'product_inventory_movements']);
-  });
-
-  test('gate on + visit before the count: the movement is written, stock is not changed', async () => {
-    process.env[GATE] = 'true';
+  test('visit before the count: the movement is written, stock is not changed', async () => {
     const trx = fakeTrx({ countRows: [COUNT_ROW] });
     const result = await deductProductInventory(trx, deductArgs());
     expect(trx.writes.filter((w) => w.table === 'products_catalog')).toEqual([]);
@@ -121,8 +109,7 @@ describe('deductProductInventory', () => {
     });
   });
 
-  test('gate on + visit before the count: no lockout even when stock would go negative', async () => {
-    process.env[GATE] = 'true';
+  test('visit before the count: no lockout even when stock would go negative', async () => {
     const trx = fakeTrx({ countRows: [COUNT_ROW] });
     const args = deductArgs({ product: { id: 'dimension', name: 'Dimension 18-0-10', inventory_on_hand: '3', inventory_unit: 'lb' } });
     const result = await deductProductInventory(trx, { ...args, allowNegative: false });
@@ -130,8 +117,7 @@ describe('deductProductInventory', () => {
     expect(trx.writes.filter((w) => w.table === 'products_catalog')).toEqual([]);
   });
 
-  test('gate on + visit after the count: a normal deduction', async () => {
-    process.env[GATE] = 'true';
+  test('visit after the count: a normal deduction', async () => {
     const trx = fakeTrx({ countRows: [COUNT_ROW] });
     const args = deductArgs({
       serviceRecord: { id: 'record-1', service_date: '2026-10-26' },
@@ -143,8 +129,7 @@ describe('deductProductInventory', () => {
     expect(trx.writes[1].insert.metadata).not.toHaveProperty('stockUnchanged');
   });
 
-  test('gate on + a recorded start time before the count on the count\'s own day: not deducted', async () => {
-    process.env[GATE] = 'true';
+  test('a recorded start time before the count on the count\'s own day: not deducted', async () => {
     const trx = fakeTrx({ countRows: [COUNT_ROW] });
     const args = deductArgs({
       serviceRecord: { id: 'record-1', service_date: '2026-10-22' },
@@ -153,8 +138,7 @@ describe('deductProductInventory', () => {
     expect((await deductProductInventory(trx, args)).status).toBe('not_deducted_counted');
   });
 
-  test('gate on + no start time + the count\'s own Eastern day: a normal deduction', async () => {
-    process.env[GATE] = 'true';
+  test('no start time + the count\'s own Eastern day: a normal deduction', async () => {
     const trx = fakeTrx({ countRows: [COUNT_ROW] });
     const args = deductArgs({
       serviceRecord: { id: 'record-1', service_date: '2026-10-22' },
@@ -163,22 +147,19 @@ describe('deductProductInventory', () => {
     expect((await deductProductInventory(trx, args)).status).toBe('deducted');
   });
 
-  test('gate on + the product was never counted: a normal deduction', async () => {
-    process.env[GATE] = 'true';
+  test('the product was never counted: a normal deduction', async () => {
     const trx = fakeTrx({ countRows: [{ id: 'fix', movement_type: 'correction', created_at: new Date('2026-10-23T01:00:00Z'), metadata: { source: 'siteone_invoice', setTotal: 99 } }] });
     expect((await deductProductInventory(trx, deductArgs())).status).toBe('deducted');
   });
 
-  test('gate on: the lockout still applies when there is no count to blame', async () => {
-    process.env[GATE] = 'true';
+  test('the lockout still applies when there is no count to blame', async () => {
     const trx = fakeTrx({ countRows: [] });
     const args = deductArgs({ product: { id: 'dimension', name: 'Dimension 18-0-10', inventory_on_hand: '3', inventory_unit: 'lb' } });
     await expect(deductProductInventory(trx, args)).rejects.toMatchObject({ code: 'waveguard_inventory_lockout' });
     expect(trx.writes).toEqual([]);
   });
 
-  test('gate on: a missing amount still short-circuits before any count read', async () => {
-    process.env[GATE] = 'true';
+  test('a missing amount still short-circuits before any count read', async () => {
     const trx = fakeTrx({ countRows: [COUNT_ROW] });
     const result = await deductProductInventory(trx, deductArgs({ productInput: { totalAmount: 0, amountUnit: 'lb' } }));
     expect(result.status).toBe('not_deducted');
@@ -216,17 +197,7 @@ describe('consumeCompletionSupplies', () => {
   beforeEach(() => { process.env.GATE_AUTO_REORDER = 'true'; });
   afterEach(() => { delete process.env.GATE_AUTO_REORDER; });
 
-  test('gate off: an old visit still takes the kit off stock, and no count is read', async () => {
-    const trx = consumeTrx({ countRows: [COUNT_ROW], scheduled: { scheduled_date: '2026-10-10' } });
-    const res = await consumeCompletionSupplies(dbFor(trx), args);
-    expect(res.consumed).toHaveLength(1);
-    expect(res.consumed[0]).toMatchObject({ before: 640, after: 639 });
-    expect(trx.writes.find((w) => w.table === 'products_catalog')).toEqual({ table: 'products_catalog', update: expect.objectContaining({ inventory_on_hand: 639 }) });
-    expect(trx.reads).not.toContain('scheduled_services');
-  });
-
-  test('gate on + visit before the count: the movement is written with stock unchanged', async () => {
-    process.env[GATE] = 'true';
+  test('visit before the count: the movement is written with stock unchanged', async () => {
     const trx = consumeTrx({
       countRows: [COUNT_ROW],
       scheduled: { scheduled_date: '2026-10-10', arrived_at: null },
@@ -251,8 +222,7 @@ describe('consumeCompletionSupplies', () => {
     });
   });
 
-  test('gate on + visit after the count: a normal deduction', async () => {
-    process.env[GATE] = 'true';
+  test('visit after the count: a normal deduction', async () => {
     const trx = consumeTrx({
       countRows: [COUNT_ROW],
       scheduled: { scheduled_date: '2026-10-27', arrived_at: '2026-10-27T14:00:00Z' },
@@ -264,8 +234,7 @@ describe('consumeCompletionSupplies', () => {
     expect(trx.writes.find((w) => w.table === 'products_catalog').update).toMatchObject({ inventory_on_hand: 639 });
   });
 
-  test('gate on + the product was never counted: a normal deduction and no visit read', async () => {
-    process.env[GATE] = 'true';
+  test('the product was never counted: a normal deduction and no visit read', async () => {
     const trx = consumeTrx({ countRows: [] });
     const res = await consumeCompletionSupplies(dbFor(trx), args);
     expect(res.consumed[0]).toMatchObject({ before: 640, after: 639 });

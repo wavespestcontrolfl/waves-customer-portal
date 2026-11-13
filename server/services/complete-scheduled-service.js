@@ -1621,7 +1621,7 @@ function notDeductibleInputWarning(inventoryProduct, amount, amountUnit) {
 }
 
 // The usage movement for a visit done before the product's latest count: the same quantity and cost a deduction
-// writes, with stock_before = stock_after and no products_catalog update (GATE_STOCK_COUNT_AWARE_USAGE).
+// writes, with stock_before = stock_after and no products_catalog update.
 async function recordCountedUsage(trx, {
   snapshot, inventoryProduct, productInput, serviceProduct, serviceRecord, scheduledService,
   amount, amountUnit, deductedAmount, inventoryUnit, stockBefore, countHold,
@@ -1846,7 +1846,7 @@ async function deductProductInventory(trx, {
       warning: 'Product inventory_on_hand is not numeric, so inventory was not deducted.',
     };
   }
-  // GATE_STOCK_COUNT_AWARE_USAGE: a visit done before the product's latest physical count was already
+  // A visit done before the product's latest physical count was already
   // counted out of stock. Record the use (cost and forecasts keep seeing it); leave stock and the lockout alone.
   const countHold = await require('./inventory-count-guard').stockHoldFor(trx, inventoryProduct.id, { scheduledService, serviceRecord });
   if (countHold) {
