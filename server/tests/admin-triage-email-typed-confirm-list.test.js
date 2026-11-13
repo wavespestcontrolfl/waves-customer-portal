@@ -1,4 +1,4 @@
-// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): the triage list flags every email
+// Owner 2026-10-29: the triage list flags every email
 // read-back card for an admin (email_typed_confirm), so the card shows the
 // in-place Confirm email form. Real route handler, SQL compiled by knex with
 // the runner stubbed (same harness as admin-triage-hold-live-visit). Synthetic data.
@@ -37,21 +37,12 @@ async function run(techRole) {
   }
 }
 
-afterEach(() => { delete process.env.GATE_CALL_EMAIL_CHECKS; });
-
-test('gate on, admin: both email card kinds are flagged, other cards are not', async () => {
-  process.env.GATE_CALL_EMAIL_CHECKS = 'true';
+test('admin: both email card kinds are flagged, other cards are not', async () => {
   const items = await run('admin');
   expect(items.map((i) => i.email_typed_confirm === true)).toEqual([true, true, false]);
 });
 
-test('gate off: no card is flagged', async () => {
-  const items = await run('admin');
-  expect(items.some((i) => 'email_typed_confirm' in i)).toBe(false);
-});
-
-test('gate on, a technician: no card is flagged (the confirm route is admin-only)', async () => {
-  process.env.GATE_CALL_EMAIL_CHECKS = 'true';
+test('a technician: no card is flagged (the confirm route is admin-only)', async () => {
   const items = await run('technician');
   expect(items.some((i) => 'email_typed_confirm' in i)).toBe(false);
 });

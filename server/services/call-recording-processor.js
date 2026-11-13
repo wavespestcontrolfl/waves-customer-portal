@@ -140,7 +140,7 @@ function recoveryMarkerPayload(db, passStamp) {
 }
 const { detectContactDictationSignals, spellingCollapseSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, spouseCallerIsNotAccountHolder, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
-const { callEmailChecksLive, screenCallEmail, deadDomainQuestion } = require('./call-email-checks');
+const { screenCallEmail, deadDomainQuestion } = require('./call-email-checks');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled, callApplicantHandlingLive } = require('../config/feature-gates');
@@ -1870,8 +1870,8 @@ async function eitherSpellingSuppressed({ email, otherSpelling }) {
   }
 }
 
-// GATE_CALL_EMAIL_CHECKS: an address whose domain has no mail server was set
-// aside before the upserts (email_raw). Its read-back reason becomes
+// An address whose domain has no mail server was set aside before the
+// upserts (email_raw). Its read-back reason becomes
 // email_invalid, and the card carries the domain and the question to ask, so
 // the office sees why instead of a plain "check this email". Mutates `reasons`.
 function applyDeadDomainReason(reasons, callEmailCheck) {
@@ -13645,12 +13645,12 @@ const CallRecordingProcessor = {
       }
     }
 
-    // GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): a DNS check on the address this
+    // Owner 2026-10-29: a DNS check on the address this
     // pass is about to save, after every adopt and hold above. A domain with no
     // mail server is set aside exactly like an unconfirmed dictation
     // (email_raw), so no write or send path can use it, and the card says why.
     // A DNS hiccup is unknown, never a block.
-    if (extracted.email && callEmailChecksLive()) {
+    if (extracted.email) {
       callEmailCheck = await screenCallEmail(extracted);
       if (callEmailCheck?.dead_domain) {
         logger.info(`[call-proc] Set aside a call email whose domain has no mail server for ${maskSid(callSid)}`);

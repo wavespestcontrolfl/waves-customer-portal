@@ -328,9 +328,8 @@ const DECODER_TIMEOUT_MS = Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS) > 0
   ? Number(process.env.CALL_PROC_EXTRACT_TIMEOUT_MS)
   : 180000;
 
-// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): the decoder no longer depends on
-// Gemini alone. Gemini first, then the OpenAI model the call extraction uses,
-// through the shared fallback chain; each leg gets the old single-call budget.
+// The decoder does not depend on Gemini alone (owner 2026-10-29). Gemini first,
+// then the OpenAI model the call extraction uses, through the shared fallback chain; each leg gets the old single-call budget.
 const DECODER_ROUTE = () => {
   const MODELS = require('../config/models');
   return Object.freeze({
@@ -391,30 +390,6 @@ async function fetchDecoderWithFallback(prompt) {
   return null;
 }
 
-async function fetchDecoderResponse(prompt) {
-  if (require('../config/feature-gates').callEmailChecksLive?.() === true) return fetchDecoderWithFallback(prompt);
-  if (!process.env.GEMINI_API_KEY) return null;
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${DECODER_MODEL()}:generateContent`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { response_mime_type: 'application/json', temperature: 0 },
-      }),
-      signal: AbortSignal.timeout(DECODER_TIMEOUT_MS),
-    }
-  );
-  if (!res.ok) {
-    // Was silent: a capped key looked exactly like "no email dictated".
-    logger.warn(`[contact-dictation] decoder request failed: gemini ${res.status}`);
-    return null;
-  }
-  const data = await res.json();
-  return data?.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text?.trim() || null;
-}
-
 /**
  * Filter decoder email candidates down to values that could actually be
  * stored: syntactically valid, not URL-shaped garble, confidence clamped to
@@ -447,7 +422,7 @@ function sanitizeEmailCandidates(candidates) {
 async function decodeDictatedContacts({ transcript, contactPassTranscript = null, deps = {} } = {}) {
   if (!ENABLED() || !String(transcript || '').trim()) return null;
   try {
-    const fetchResponse = deps.fetchResponse || fetchDecoderResponse;
+    const fetchResponse = deps.fetchResponse || fetchDecoderWithFallback;
     const rawText = await fetchResponse(buildDecoderPrompt({ transcript, contactPassTranscript }));
     if (!rawText) return null;
     const cleaned = String(rawText).replace(/^```json?\n?/i, '').replace(/\n?```$/i, '').trim();

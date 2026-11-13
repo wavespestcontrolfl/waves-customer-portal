@@ -1388,9 +1388,6 @@ function confirmEmailOutcomeResponse(outcome) {
   if (outcome === 'stale_version') {
     return { status: 409, body: { error: 'Card changed since it was displayed — reload and review the latest', code: 'STALE_CARD_VERSION' } };
   }
-  if (outcome === 'not_applicable') {
-    return { status: 400, body: { error: 'This card has no unresolved email disagreement to confirm.' } };
-  }
   if (outcome === 'lead_not_resolved') {
     return {
       status: 409,
@@ -1463,15 +1460,6 @@ async function resumeFirstTouchAfterConfirmEmail(id, item, resumeHeldFirstTouch,
   }
 }
 
-// Applies to a card with an actual unresolved disagreement. With
-// GATE_CALL_EMAIL_CHECKS on (owner 2026-10-29) it applies to every email
-// read-back card: the office types the right address in place instead of
-// resolving the held one or editing the customer record on another screen.
-// The route already admits only email read-back cards.
-function confirmEmailApplies(livePayload) {
-  return !!livePayload?.email_disagreement || require('../config/feature-gates').callEmailChecksLive?.() === true;
-}
-
 // 'candidate' when the address is one the card offered (a disagreement
 // spelling, or a plain card's held address), else 'operator_typed'.
 function confirmedSourceFor(livePayload, typedEmail) {
@@ -1481,10 +1469,12 @@ function confirmedSourceFor(livePayload, typedEmail) {
   return !livePayload?.email_disagreement && !!heldTarget && heldTarget === typedEmail ? 'candidate' : 'operator_typed';
 }
 
-// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): every email read-back card gets
-// the in-place "Confirm email" form, for an admin only, like its route.
+// Owner 2026-10-29: every email read-back card gets the in-place "Confirm
+// email" form, for an admin only, like its route. The office types the right
+// address in place instead of resolving the held one or editing the customer
+// record on another screen.
 function flagTypedEmailConfirm(items, techRole) {
-  if (techRole !== 'admin' || require('../config/feature-gates').callEmailChecksLive?.() !== true) return;
+  if (techRole !== 'admin') return;
   const { EMAIL_REVIEW_REASON_CODES } = require('../services/lead-first-touch-resume');
   for (const item of items) {
     if (EMAIL_REVIEW_REASON_CODES.includes(item.reason_code)) item.email_typed_confirm = true;
@@ -1516,7 +1506,6 @@ async function runConfirmEmailAttempt({ id, item, typedEmail, expectedUpdatedAt,
     const livePayload = typeof live.payload === 'string'
       ? (() => { try { return JSON.parse(live.payload); } catch { return null; } })()
       : live.payload;
-    if (!confirmEmailApplies(livePayload)) throw new ConfirmEmailRefusal('not_applicable');
     confirmedSource = confirmedSourceFor(livePayload, typedEmail);
 
     // Codex round-7 P1: with no customer at all, the confirmation requires
