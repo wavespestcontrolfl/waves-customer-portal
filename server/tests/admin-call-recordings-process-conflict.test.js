@@ -386,7 +386,6 @@ describe('claim ceiling is derived from the provider budgets', () => {
   // clients — which is how the contact decoder and address recovery stayed
   // unbounded behind a test written to prevent exactly that.
   test.each([
-    ['../services/contact-dictation'],
     ['../services/address-validation/recovery'],
   ])('%s bounds every outbound fetch', (modulePath) => {
     const source = require('fs').readFileSync(require.resolve(modulePath), 'utf8');
@@ -401,11 +400,13 @@ describe('claim ceiling is derived from the provider budgets', () => {
     });
   });
 
-  // csr-coach rides the dispatcher; its explicit timeoutMs is the shared
-  // wall-clock ceiling across both provider legs (llm/call.js).
+  // csr-coach and the contact decoder ride the dispatcher; the explicit
+  // timeoutMs is the shared wall-clock ceiling across both provider legs
+  // (llm/call.js).
   test.each([
     ['../services/call-recording-processor', 'messages.create(', /timeout: PROVIDER_FETCH_TIMEOUTS_MS/],
     ['../services/csr/csr-coach', 'dispatchWithFallback(', /timeoutMs: CSR_SCORE_TIMEOUT_MS/],
+    ['../services/contact-dictation', 'dispatchWithFallback(', /timeoutMs: DECODER_TIMEOUT_MS/],
   ])('%s bounds every provider call', (modulePath, callMarker, expectedTimeout) => {
     const source = require('fs').readFileSync(require.resolve(modulePath), 'utf8');
     const starts = [];

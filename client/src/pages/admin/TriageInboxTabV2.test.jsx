@@ -246,7 +246,7 @@ describe('email-disagreement confirm form', () => {
   });
 });
 
-// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): the server flags every email
+// Owner 2026-10-29: the server flags every email
 // read-back card for an admin (item.email_typed_confirm), and a plain card gets
 // the same form: the held address, or a typed correction.
 describe('typed email confirm on a plain email card', () => {
@@ -273,7 +273,7 @@ describe('typed email confirm on a plain email card', () => {
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/email-2/confirm-email', expect.anything()));
   });
 
-  it('without the flag (gate off) a plain card shows no confirm form', async () => {
+  it('without the flag (not an admin) a plain card shows no confirm form', async () => {
     adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
       ? { items: [plainCard], counts: { open: 1, resolved: 0, dismissed: 0 } }
       : { ok: true }));

@@ -27,7 +27,6 @@ const savedFetch = global.fetch;
 let fetchMock;
 
 beforeEach(() => {
-  process.env.GATE_CALL_EMAIL_CHECKS = 'true';
   process.env.GEMINI_API_KEY = 'test-gemini';
   process.env.OPENAI_API_KEY = 'test-openai';
   delete process.env.GEMINI_CONTACT_DECODER_MODEL;
