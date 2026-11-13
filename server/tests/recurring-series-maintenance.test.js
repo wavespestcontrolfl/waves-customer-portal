@@ -711,7 +711,11 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     // 7th: seriesNextOccurrencesUnbillable (the Intelligence Bar / customer-page
     // lane edit asks the top-up's own billable verdict for the next
     // occurrences) anchors its cadence walk on the same helper, read-only.
-    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(7);
+    // 8th: planReplacedVisits (a customer's frequency change) asks the same
+    // helper for the latest live visit BEFORE the pending ones it may replace
+    // (its exceptIds argument), read-only: the estimate that decides whether
+    // the first pending visit stays. The extension itself anchors as before.
+    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(8);
     // The occupied-dates preload is shared the same way — same 4th consumer.
     expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(4);
   });

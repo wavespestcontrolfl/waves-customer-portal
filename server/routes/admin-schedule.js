@@ -20165,12 +20165,16 @@ async function acquireRecurringSeriesMaintenanceLock(conn, parentId, wait = true
 // share recurring_parent_id but have is_recurring=false; excluded so the
 // next-date math keys off the true cadence. Shared by the maintenance
 // auto-extend and the recurring-alert extend/convert actions so the two
-// anchors can never drift apart again.
-function latestLiveSeriesVisit(conn, parentId) {
-  return conn('scheduled_services')
+// anchors can never drift apart again. `exceptIds` leaves rows out of the
+// search: a frequency change asks for the latest live visit BEFORE the
+// pending ones it may replace (changeSeriesFrequencyWithLocks).
+function latestLiveSeriesVisit(conn, parentId, exceptIds = []) {
+  const query = conn('scheduled_services')
     .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
     .where('is_recurring', true)
-    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    .whereNotIn('status', ['cancelled', 'rescheduled']);
+  if (exceptIds.length) query.whereNotIn('id', exceptIds);
+  return query
     // Order by cadence POSITION, not the raw (possibly moved) date — a "this
     // visit only" exception row occupies date_exception_cadence_date in the
     // series, same as rescheduleSeries.readSiblings (rebooker.js) and
@@ -21296,6 +21300,10 @@ async function runRecurringSeriesMaintenance(conn, svc) {
 // billable-amount gate, checked against this ACTUAL candidate date; omitted
 // (the completion path), the gate is never consulted, byte-identical to
 // before this extraction (owner ruling: warn at completion, don't block it).
+// `opts.minDate` (ET date string), when set, steps past any candidate before
+// it: the lead time of a customer's frequency change (changeSeriesFrequencyWithLocks
+// through topUpRecurringSeriesLocked), so the first visit of the new schedule
+// is never placed a day or two out. Omitted, nothing changes.
 // `opts.normalizeOffHourStart` (bool), when true, floors an off-hour
 // parent.window_start to the hour and recomputes the end from duration for
 // this insert only — topUp's guard against minting a stack of off-hour
@@ -21369,7 +21377,7 @@ async function walkExtensionCandidates(ctx) {
     conn, parent, parentId, cols, opts, latestStr, rOpts, skipParent, dirParent,
     blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
   } = ctx;
-  const { maxDate = null } = opts;
+  const { maxDate = null, minDate = null } = opts;
   // Advance until we find an open date or give up. Each step
   // moves one cadence interval forward from latestStr; capped to
   // avoid runaway loops on degenerate patterns.
@@ -21395,6 +21403,11 @@ async function walkExtensionCandidates(ctx) {
     }
     // Never seed a past-dated visit (+ its reminder) off a stale anchor.
     if (candidate <= etDateString()) {
+      attempt++;
+      continue;
+    }
+    // A frequency change's lead time: no visit nearer than minDate.
+    if (minDate && candidate < minDate) {
       attempt++;
       continue;
     }
@@ -22124,7 +22137,7 @@ function advisoryTryLockAcquired(rawResult) {
   return !!(row && (row.locked === true || row.locked === 't'));
 }
 
-async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } = {}) {
+async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365, minDate } = {}) {
   const cols = await conn('scheduled_services').columnInfo();
   let parent = await conn('scheduled_services').where({ id: parentId }).first();
   if (!parent) return { spawnedVisits: [], skipped: 'not_found' };
@@ -22295,7 +22308,7 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
     // guess — a series can fill partway then stop exactly where billability
     // breaks down, same as running out of horizon or hitting the cap.
     const spawned = await extendSeriesOnceLocked(conn, parent, parentId, cols, parent, {
-      maxDate: effectiveHorizon, checkUnbillable: true, normalizeOffHourStart: true, onSkip,
+      maxDate: effectiveHorizon, minDate, checkUnbillable: true, normalizeOffHourStart: true, onSkip,
     });
     if (!spawned) break;
     spawnedVisits.push(spawned);
@@ -22383,10 +22396,21 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
     throw new Error('topUpRecurringSeries must not be called with an already-open transaction — it registers a reminder for each spawned visit through a FRESH connection right after commit, and a nested savepoint on your transaction would not make its inserts visible outside it. Call with the plain db handle, or drive topUpRecurringSeriesWithLocks/topUpRecurringSeriesLocked yourself inside your own transaction and register reminders after your own commit.');
   }
   const result = await conn.transaction((trx) => topUpRecurringSeriesWithLocks(trx, parentId, opts));
+  await registerExtensionReminders(conn, result.spawnedVisits, 'recurring-topup');
   for (const spawnedVisit of result.spawnedVisits) {
-    // No confirmation SMS (sendConfirmation:false, matching every other
-    // spawned/extended child) and no other customer comms — this only
-    // registers the visit for the existing 72h/24h reminder cron.
+    logger.info(`[recurring-topup] Topped up ongoing plan parent=${parentId} → ${spawnedVisit.scheduledDate}`);
+  }
+  return result;
+}
+
+// The reminder of every visit an extension minted, registered once the
+// minting transaction has COMMITTED (the insert goes through a fresh
+// connection with a foreign key to the new visit). No confirmation SMS
+// (sendConfirmation:false, matching every other spawned/extended child) and
+// no other customer comms — this only registers the visit for the existing
+// 72h/24h reminder cron.
+async function registerExtensionReminders(conn, spawnedVisits, logContext) {
+  for (const spawnedVisit of spawnedVisits) {
     await registerSpawnedVisitReminder({
       scheduledServiceId: spawnedVisit.scheduledServiceId,
       customerId: spawnedVisit.customerId,
@@ -22395,10 +22419,219 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
       serviceType: spawnedVisit.serviceType,
       source: 'recurring_auto_extend',
     });
-    await cancelSpawnedReminderIfVisitTerminal(conn, spawnedVisit.scheduledServiceId, 'recurring-topup');
-    logger.info(`[recurring-topup] Topped up ongoing plan parent=${parentId} → ${spawnedVisit.scheduledDate}`);
+    await cancelSpawnedReminderIfVisitTerminal(conn, spawnedVisit.scheduledServiceId, logContext);
   }
-  return result;
+}
+
+// ---- Frequency change of an ongoing series --------------------------------
+//
+// A customer changes how often we visit (services/pest-frequency-change.js,
+// GATE_PEST_FREQUENCY_CHANGE; owner 2026-11-12). No writer could do this for
+// a plan whose first visit is long past: the Edit-appointment cadence rewrite
+// runs only from the series root and re-dates from the root's own date. This
+// one re-books the plan with the pieces that exist:
+//   1. the template: the new cadence on the root, and the new service and
+//      per-visit price as series template overrides (the stamp a 'following'
+//      edit writes), so every later extension keeps them;
+//   2. the pending visits the new schedule replaces are cancelled as a plan
+//      trim (transitionJobStatus with the notice suppressed, then the
+//      plan-reduction ledger — reconcileRecurringSeriesVisitCount's recipe);
+//   3. the top-up's own loop (topUpRecurringSeriesLocked) books the new
+//      visits to its horizon, counting from the series' latest live visit.
+// Which visits are replaced: all pending ones, so the new cadence counts from
+// the last visit we made. The first pending visit is instead KEPT exactly as
+// booked (its date, its price, its service) when its date is inside the lead
+// time, when its date was agreed (a confirmed visit or a one-off move), when
+// the series has no earlier live visit to count from, or when counting from
+// the last visit would not bring the next visit `soonerByDays` sooner. The
+// new cadence then counts from the kept visit.
+// No existing visit is moved or re-priced here: a price edit of a live visit
+// belongs to update-details and its invoice locks.
+//
+// Takes the per-parent maintenance lock and the customer-comms fence first,
+// like topUpRecurringSeriesWithLocks, then runs in the CALLER's transaction.
+// A preview calls it with dryRun and rolls back (the top-up's shadow-run
+// pattern); a dry run cancels with a plain update, because nothing of a real
+// transitionJobStatus is needed in a transaction that never commits. A real
+// change commits and then calls settleSeriesFrequencyChange.
+const FREQUENCY_CHANGE_PATTERNS = new Set(['monthly', 'bimonthly', 'quarterly']);
+const FREQUENCY_CHANGE_NOTE = 'Visit frequency changed: the new schedule replaces this visit';
+
+function frequencyChangeRefusal(code, message, detail = {}) {
+  return Object.assign(httpError(409, message), { code, isOperational: true, ...detail });
+}
+
+// The first date `pattern` gives when it counts from `latest` (a live visit
+// of the series): the extension walk's own steps from the same anchor,
+// without its weekend, blackout and taken-date handling. A planning estimate
+// only, for the keep-or-replace choice; the walk itself places every visit.
+function estimateFirstCadenceDate(latest, pattern, rOpts, minDate) {
+  const anchor = seriesExtendAnchor(latest, pattern, rOpts);
+  const today = etDateString();
+  for (let attempt = 1; attempt <= 12; attempt += 1) {
+    const candidate = nextRecurringDate(anchor, pattern, attempt, rOpts);
+    const usable = candidate > today && candidate >= minDate && !recurringCandidateTooCloseToAnchor(anchor, pattern, candidate);
+    if (usable) return candidate;
+  }
+  return null;
+}
+
+// Whether the first pending visit stays as booked (see the section header).
+function keepsFirstPendingVisit({ first, fromLast, minDate, soonerByDays, hasExceptionColumn }) {
+  const firstDate = dateOnly(first.scheduled_date);
+  const agreedDate = first.status === 'confirmed' || (hasExceptionColumn && first.date_exception === true);
+  return !fromLast || firstDate < minDate || agreedDate || etDateDiffDays(fromLast, firstDate) < soonerByDays;
+}
+
+// Step 0: both locks, then the root read under them, or a refusal.
+async function lockSeriesForFrequencyChange(trx, rootId, pattern, cols) {
+  await acquireRecurringSeriesMaintenanceLock(trx, rootId);
+  const peek = await trx('scheduled_services').where({ id: rootId }).first('customer_id');
+  if (!peek) throw frequencyChangeRefusal('SERIES_CHANGED_RETRY', 'This plan changed while saving — reload and try again.');
+  await lockCustomerComms(trx, peek.customer_id);
+  // Read again under both locks: a merge undo can repoint the root while
+  // this call waited on the comms fence (topUpRecurringSeriesWithLocks).
+  const root = await trx('scheduled_services').where({ id: rootId }).first();
+  if (!root || root.customer_id !== peek.customer_id) {
+    throw frequencyChangeRefusal('SERIES_CHANGED_RETRY', 'This plan changed while saving — reload and try again.');
+  }
+  // An ongoing series root on a month cadence, moving to another one. And the
+  // series template overlay must be live: the new service and price reach
+  // later visits only through it, so without it the plan would keep its old price.
+  const changeable = [
+    root.is_recurring, !root.recurring_parent_id, root.recurring_ongoing === true,
+    FREQUENCY_CHANGE_PATTERNS.has(root.recurring_pattern), FREQUENCY_CHANGE_PATTERNS.has(pattern), pattern !== root.recurring_pattern,
+    !!cols.recurring_template_overrides, isEnabled('editApptPriceServiceScope'),
+  ].every(Boolean);
+  if (!changeable) throw frequencyChangeRefusal('FREQUENCY_CHANGE_UNSUPPORTED', 'This plan cannot change its visit frequency here.');
+  return root;
+}
+
+// Step 1: which pending visit stays and which ones the new schedule replaces
+// (the section header's rule), refused when a replaced visit holds money.
+async function planReplacedVisits(trx, root, cols, { pattern, minDate, soonerByDays }) {
+  const pending = await trx('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', root.id).orWhere('id', root.id); })
+    .where('is_recurring', true)
+    .whereIn('status', UPCOMING_VISIT_STATUSES)
+    .where('scheduled_date', '>=', etDateString())
+    .orderBy('scheduled_date', 'asc')
+    .orderBy('created_at', 'asc');
+  if (!pending.length) return { kept: null, replaced: [] };
+  const lastEarlier = await latestLiveSeriesVisit(trx, root.id, pending.map((row) => row.id));
+  const fromLast = lastEarlier ? estimateFirstCadenceDate(lastEarlier, pattern, seriesRecurrenceOptions(root), minDate) : null;
+  const keepFirst = keepsFirstPendingVisit({
+    first: pending[0], fromLast, minDate, soonerByDays, hasExceptionColumn: !!cols.date_exception,
+  });
+  const replaced = keepFirst ? pending.slice(1) : pending;
+  // The root carries the cadence and the template every later visit reads,
+  // and a cancelled root fails the series price guard closed: never trim it.
+  if (replaced.some((row) => String(row.id) === String(root.id))) {
+    throw frequencyChangeRefusal('FREQUENCY_CHANGE_UNSUPPORTED', 'This plan cannot change its visit frequency here.');
+  }
+  const [coveredVisit] = replaced.length ? await findBillingCoveredVisits(trx, replaced) : [];
+  if (coveredVisit) {
+    const [coveredId, reason] = coveredVisit;
+    const when = replaced.find((row) => String(row.id) === String(coveredId));
+    throw frequencyChangeRefusal('FREQUENCY_CHANGE_BLOCKED_MONEY', `The ${dateOnly(when.scheduled_date)} visit is ${reason}, so the new schedule cannot replace it.`);
+  }
+  return { kept: keepFirst ? pending[0] : null, replaced };
+}
+
+// Step 2: the replaced visits leave the calendar as a plan trim.
+async function cancelReplacedVisits(trx, root, replaced, { actorId, claimToken, dryRun }) {
+  const replacedIds = replaced.map((row) => row.id);
+  if (!replacedIds.length) return;
+  if (dryRun) {
+    await trx('scheduled_services').whereIn('id', replacedIds).update({ status: 'cancelled' });
+    return;
+  }
+  const { transitionJobStatus } = require('../services/job-status');
+  for (const visit of replaced) {
+    await transitionJobStatus({
+      jobId: visit.id,
+      fromStatus: visit.status,
+      toStatus: 'cancelled',
+      transitionedBy: actorId,
+      notes: FREQUENCY_CHANGE_NOTE,
+      trx,
+      // Caller-owned and silent: settleSeriesFrequencyChange adopts exactly
+      // these claims with sendNotification:false. The customer asked for the
+      // new schedule on the screen that showed it.
+      notifyCustomer: 'caller_suppress',
+      cancelNoticeToken: claimToken,
+    });
+  }
+  // A deliberate replacement: on the plan-reduction ledger in the SAME
+  // transaction, so a later replay of one of these cancels can never add
+  // the visit back (recordReseedDeclines).
+  await recordReseedDeclines(trx, {
+    customerId: root.customer_id, rootId: root.id, cancelledIds: replacedIds, reason: 'frequency_change', source: 'frequency_change',
+  });
+}
+
+async function changeSeriesFrequencyWithLocks(trx, rootId, {
+  pattern, templateFields, keepDays, soonerByDays, horizonDays, actorId, claimToken, dryRun,
+}) {
+  const cols = await trx('scheduled_services').columnInfo();
+  const root = await lockSeriesForFrequencyChange(trx, rootId, pattern, cols);
+  const minDate = etDateString(addETDays(parseETDateTime(`${etDateString()}T12:00`), keepDays));
+  const { kept, replaced } = await planReplacedVisits(trx, root, cols, { pattern, minDate, soonerByDays });
+  await cancelReplacedVisits(trx, root, replaced, { actorId, claimToken, dryRun });
+
+  // Step 3: the template. The kept visit takes the new cadence too (a
+  // schedule fact; its date, price and service stay).
+  const patternIds = [rootId, ...(kept ? [kept.id] : [])];
+  await trx('scheduled_services').whereIn('id', patternIds).update({ recurring_pattern: pattern, updated_at: new Date() });
+  await stampRecurringTemplateOverrides(trx, rootId, templateFields, cols);
+
+  // Step 4: the new visits, by the top-up's own loop.
+  const topUp = await topUpRecurringSeriesLocked(trx, rootId, { horizonDays, minDate });
+  if (!topUp.spawnedVisits.length) {
+    throw frequencyChangeRefusal('FREQUENCY_CHANGE_NOT_PLACED', 'The new schedule could not be booked for this plan.', { skipped: topUp.skipped });
+  }
+  return {
+    rootId,
+    customerId: root.customer_id,
+    fromPattern: root.recurring_pattern,
+    pattern,
+    kept: kept && { id: kept.id, date: dateOnly(kept.scheduled_date) },
+    cancelled: replaced.map((row) => ({ id: row.id, date: dateOnly(row.scheduled_date) })),
+    spawnedVisits: topUp.spawnedVisits,
+    claimToken,
+  };
+}
+
+// The post-commit half of a frequency change: the new visits' reminders, and
+// what cancelling the replaced visits owes (their reminders and notice claims
+// closed with no text, then the cancellation follow-through the plan trim
+// runs). Best-effort per step: the change is committed.
+async function settleSeriesFrequencyChange(change, { actorId = null } = {}) {
+  try {
+    await registerExtensionReminders(db, change.spawnedVisits, 'frequency-change');
+  } catch (e) {
+    logger.error(`[schedule/frequency-change] reminder registration failed for parent ${change.rootId}: ${e.message}`);
+  }
+  const cancelledIds = change.cancelled.map((visit) => visit.id);
+  if (!cancelledIds.length) return;
+  try {
+    const AppointmentReminders = require('../services/appointment-reminders');
+    await AppointmentReminders.handleSeriesCancellation(
+      cancelledIds,
+      cancelledIds[0],
+      { sendNotification: false, scope: 'following', claimToken: change.claimToken },
+    );
+  } catch (e) {
+    logger.error(`[schedule/frequency-change] reminder cleanup failed for replaced visits (${cancelledIds.join(', ')}): ${e.message}`);
+  }
+  try {
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough({
+      targetIds: cancelledIds, actorId, waiveFee: false, reason: FREQUENCY_CHANGE_NOTE, source: 'schedule/frequency-change',
+    });
+  } catch (e) {
+    logger.error(`[schedule/frequency-change] cancellation follow-through failed for replaced visits (${cancelledIds.join(', ')}): ${e.message}`);
+  }
 }
 
 // ---- Post-cancel reseed (owner ruling 2026-09-24) -------------------------
@@ -22966,6 +23199,10 @@ async function readBulkPlanReductionIntent(conn, serviceIds) {
 // commit together — no extra lock is needed for that, and none is taken
 // here (the bulk route's per-row transaction holds no series locks to
 // order against).
+const RESEED_DECLINE_TEXT = {
+  visit_count_trim: 'Recurring plan shortened from Edit appointment — the removed visit will not be added back automatically',
+  frequency_change: 'Visit frequency changed — the new schedule replaces this visit; it will not be added back automatically',
+};
 async function recordReseedDeclines(conn, { customerId, rootId, cancelledIds, batchIds = null, reductionKey = null, reason, source }) {
   const { cancelEpisodeSourceStatus } = require('../services/recurring-series-cancel-reseed');
   const ids = [...new Set((cancelledIds || []).map(String))];
@@ -22991,9 +23228,8 @@ async function recordReseedDeclines(conn, { customerId, rootId, cancelledIds, ba
     action: 'recurring_cancel_reseed_declined',
     // Staff see these in the dashboard's Recent activity feed (the gate does
     // not hide them), so the text says what it means in plain words.
-    description: reason === 'visit_count_trim'
-      ? 'Recurring plan shortened from Edit appointment — the removed visit will not be added back automatically'
-      : `${group.length} visits of one recurring plan cancelled together — treated as a plan reduction; this visit will not be added back automatically`,
+    description: RESEED_DECLINE_TEXT[reason]
+      || `${group.length} visits of one recurring plan cancelled together — treated as a plan reduction; this visit will not be added back automatically`,
     metadata: JSON.stringify({
       cancelled_service_id: id, recurring_parent_id: String(rootId), episode_key: episodeKeyFor(id),
       reason, source, batch_ids: group, reduction_key: key,
@@ -30030,6 +30266,8 @@ module.exports.acquireRecurringSeriesMaintenanceLock = acquireRecurringSeriesMai
 module.exports.topUpRecurringSeries = topUpRecurringSeries;
 module.exports.topUpRecurringSeriesLocked = topUpRecurringSeriesLocked;
 module.exports.topUpRecurringSeriesWithLocks = topUpRecurringSeriesWithLocks;
+module.exports.changeSeriesFrequencyWithLocks = changeSeriesFrequencyWithLocks;
+module.exports.settleSeriesFrequencyChange = settleSeriesFrequencyChange;
 // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — consumed lazily
 // by services/recurring-series-cancel-reseed.js from the four single-visit
 // cancel surfaces, same avoid-a-route-load-cycle reason as above.
