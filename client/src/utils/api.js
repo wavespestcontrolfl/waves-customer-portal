@@ -832,6 +832,29 @@ export class ApiClient {
     });
   }
 
+  // ---- Pest control visit frequency (GATE_PEST_FREQUENCY_CHANGE; the My Plan
+  // entry renders only when the read answers available:true) ----
+  getPestFrequency() {
+    return this.request('/pest-frequency');
+  }
+
+  // Writes nothing: the new schedule and prices for the chosen frequency.
+  previewPestFrequency(payload) {
+    return this.request('/pest-frequency/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  // payload = { frequency, version }; `version` is the one the preview
+  // returned, and the server refuses a stale one.
+  confirmPestFrequency(payload) {
+    return this.request('/pest-frequency/confirm', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
   // ---- Property alerts (GATE_PROPERTY_ALERTS; gate-off answers
   // available:false) ----
   getPropertyAlerts() {
