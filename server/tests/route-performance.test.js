@@ -51,6 +51,44 @@ test('corrected, operator-reported and backfilled durations retain separate evid
     .toMatchObject({ durationMinutes: null, durationEvidence: 'backfill_unknown', arrival: null });
 });
 
+test('truck GPS minutes rank after a hand correction and before the typed, lifecycle and unverified rungs', () => {
+  const gps = { gps_on_site_minutes: 32 };
+  expect(recordedTiming(recorded({ ...gps, time_on_site_adjusted_minutes: 30 }))).toMatchObject({ durationMinutes: 30, durationEvidence: 'operator_corrected' });
+  expect(recordedTiming(recorded(gps))).toMatchObject({ durationMinutes: 32, durationEvidence: 'gps_measured', completion: null });
+  expect(recordedTiming(recorded({ ...gps, completionNotes: { timeOnSite: 35 }, statusHistory: [] }))).toMatchObject({ durationMinutes: 32, durationEvidence: 'gps_measured' });
+  expect(recordedTiming(recorded({ ...gps, statusHistory: [] }))).toMatchObject({ durationMinutes: 32, durationEvidence: 'gps_measured', arrival: null });
+  expect(recordedTiming(recorded({ ...gps, completionNotes: JSON.stringify({ backfill: true, timeOnSite: 40 }) })))
+    .toMatchObject({ durationMinutes: 32, durationEvidence: 'gps_measured' });
+  expect(recordedTiming(recorded({ ...gps, time_on_site_adjusted_minutes: 30, completionNotes: { backfill: true } })))
+    .toMatchObject({ durationMinutes: 30, durationEvidence: 'backfill_reported' });
+  // No leg, or a junk one: exactly today's number and evidence.
+  for (const junk of [{}, { gps_on_site_minutes: null }, { gps_on_site_minutes: 0 }, { gps_on_site_minutes: 481 }]) {
+    expect(recordedTiming(recorded(junk))).toMatchObject({ durationMinutes: 45, durationEvidence: 'recorded_lifecycle_interval' });
+  }
+});
+
+test('a GPS-measured duration is a comparable, separately labelled duration on the route', () => {
+  const result = measureRoutePerformance(snapshot, [recorded({ gps_on_site_minutes: 32 })]);
+  expect(result.stops[0]).toMatchObject({ recordedServiceMinutes: 32, durationEvidence: 'gps_measured', servicePredictionErrorMinutes: -28 });
+  expect(result.durationEvidenceCounts).toEqual({ gps_measured: 1 });
+  expect(result.serviceErrorByEvidence).toEqual({ gps_measured: { visits: 1, meanAbsoluteErrorMinutes: 28 } });
+});
+
+test('getRoutePerformance reads matched legs for completed visits only, and in one query', async () => {
+  const id = '11111111-1111-4111-8111-111111111111';
+  const plan = { ...snapshot, plannedStops: [{ ...snapshot.plannedStops[0], id }] };
+  const run = { id: 'run', created_at: snapshot.as_of, result: { route_quality: [plan] } };
+  const row = { id, customer_id: 'c1', technician_id: techId, scheduled_date: day, status: 'completed', window_start: '08:00' };
+  const { conn, calls } = recordingConn({ route_optimization_planner_runs: [run], scheduled_services: [row],
+    visit_gps_legs: [{ scheduled_service_id: id, gps_on_site_minutes: '31.50' }] });
+  const wrapped = table => conn(table);
+  wrapped.schema = { hasTable: async () => true };
+  const result = await getRoutePerformance({ from: day, to: day, now: new Date('2026-09-09T12:00:00Z') }, wrapped);
+  expect(result.plans[0].stops[0]).toMatchObject({ recordedServiceMinutes: 31.5, durationEvidence: 'gps_measured' });
+  expect(calls.filter(([table, method]) => table === 'visit_gps_legs' && method === 'whereIn')).toHaveLength(1);
+  expect(calls).toContainEqual(['visit_gps_legs', 'where', { status: 'matched' }]);
+});
+
 test('an inferred start or ambiguous/reconstructed status history is not a measured arrival', () => {
   const row = recorded();
   for (const statusHistory of [[], row.statusHistory.map(event => ({ ...event, from_status: null })), [...row.statusHistory, row.statusHistory[0]]]) {

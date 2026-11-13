@@ -39,7 +39,7 @@ function fakeConn() {
 
 const actual = (o) => ({
   stops: o.stops, physicalStops: o.physical ?? o.stops, onSiteMinutes: o.onSite ?? null,
-  onSiteCoverage: { covered: o.covered ?? 0, total: o.stops, unbaselined: o.unbaselined ?? 0 },
+  onSiteCoverage: { covered: o.covered ?? 0, total: o.stops, unbaselined: o.unbaselined ?? 0, gps: o.gps ?? 0 },
   driveMinutes: o.drive ?? null,
   driveCoverage: o.drive == null ? null : { timed: o.timed ?? o.trips ?? 1, total: o.trips ?? 1 },
 });
@@ -157,7 +157,17 @@ describe('buildTechScorecard', () => {
     mockDayScorecard.mockResolvedValue({ days: [
       { date: '2026-10-26', byTech: [dayRow(A, 'Ada', actual({ stops: 5, onSite: 125, covered: 5, unbaselined: 3 }))] },
     ] });
-    expect((await buildTechScorecard(fakeConn(), NOW)).rows[0].onSiteCoverage).toEqual({ recorded: 5, completed: 8 });
+    expect((await buildTechScorecard(fakeConn(), NOW)).rows[0].onSiteCoverage).toEqual({ recorded: 5, gps: 0, completed: 8 });
+  });
+
+  test('the GPS-measured stops are counted apart, and their minutes are in the per-stop average', async () => {
+    mockDayScorecard.mockResolvedValue({ days: [
+      { date: '2026-10-26', byTech: [dayRow(A, 'Ada', actual({ stops: 5, onSite: 150, covered: 5, gps: 4 }))] },
+      { date: '2026-10-27', byTech: [dayRow(A, 'Ada', actual({ stops: 5, onSite: 100, covered: 5, gps: 5 }))] },
+    ] });
+    const row = (await buildTechScorecard(fakeConn(), NOW)).rows[0];
+    expect(row.onSiteCoverage).toEqual({ recorded: 10, gps: 9, completed: 10 });
+    expect(row.onSiteMinutesPerStop).toBe(25);
   });
 
   test('a day with only some timed Bouncie trips is left out of drive per stop and counted as partial', async () => {

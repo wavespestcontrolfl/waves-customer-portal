@@ -3,6 +3,7 @@ const { staffEditLockPatch, autoDispatchBoxPatch } = require('../services/auto-d
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { loadGpsOnSiteMinutes, resolveVisitTimeOnSite } = require('../services/visit-time-on-site');
 const { applyAssignable, assertAssignableTechnician, isAssignable, absentTechDays } = require('../services/technician-eligibility');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = require('../services/scheduling/occupancy');
@@ -6909,6 +6910,8 @@ router.get('/', async (req, res, next) => {
       deferredPrepayCustomerIds = await require('../services/annual-prepay-renewals')
         .deferredPrepayHoldCustomerIds(db, services.map((s) => s.customer_id));
     } catch { deferredPrepayCustomerIds = null; }
+    // Truck-GPS time on site for the completed visits (one query); the visit card marks its source.
+    const gpsOnSite = await loadGpsOnSiteMinutes(db, services.filter((s) => s.status === 'completed').map((s) => s.id));
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
       // Any-line latest keeps the "Last:" card + new-customer detection
@@ -7272,6 +7275,10 @@ router.get('/', async (req, res, next) => {
         // With checkInTime/checkOutTime: the drive line finds where the tech is now.
         enRouteAt: s.en_route_at || null,
         actualDuration: s.actual_duration_minutes,
+        // { minutes, evidence }: hand correction, else truck GPS, else actualDuration (evidence 'not_gps').
+        timeOnSite: s.status === 'completed' ? resolveVisitTimeOnSite({
+          adjustedMinutes: s.time_on_site_adjusted_minutes, gpsMinutes: gpsOnSite.get(s.id), fallbackMinutes: s.actual_duration_minutes,
+        }) : null,
         weatherAdvisory: s.weather_advisory,
         isRecurring: s.is_recurring,
         recurringParentId: s.recurring_parent_id || null,

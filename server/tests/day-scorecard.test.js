@@ -342,7 +342,7 @@ describe('getDayScorecard', () => {
         unbaselinedCompletedVisits: 1,
         stops: [
           { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 480, recordedCompletionMinute: 540, arrivalOutcome: 'on_time' },
-          { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 540, recordedCompletionMinute: 600, arrivalOutcome: 'on_time' },
+          { durationEvidence: 'gps_measured', recordedServiceMinutes: 45, recordedArrivalMinute: 540, recordedCompletionMinute: 600, arrivalOutcome: 'on_time' },
         ],
       }],
     });
@@ -350,7 +350,7 @@ describe('getDayScorecard', () => {
     const row = result.days[0].byTech[0];
     // Full coverage on the SNAPSHOT's own two stops, but a third, unbaselined
     // completed job existed that day and is not folded into onSiteMinutes.
-    expect(row.actual.onSiteCoverage).toEqual({ covered: 2, total: 2, unbaselined: 1 });
+    expect(row.actual.onSiteCoverage).toEqual({ covered: 2, total: 2, unbaselined: 1, gps: 1 }); // the GPS-measured stop counts and is marked
     // 2 planned-and-completed stops + the 1 same-day unbaselined completion.
     expect(row.actual.stops).toBe(3);
   });

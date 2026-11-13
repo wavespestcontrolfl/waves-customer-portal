@@ -63,10 +63,12 @@ function fmtCount(value) {
 // snapshot never named it), so it always marks the day partial too.
 function fmtOnSite(m) {
   if (!m?.onSiteCoverage) return fmtMinutes(m?.onSiteMinutes); // planned side — no coverage concept
-  const { covered, total, unbaselined = 0 } = m.onSiteCoverage;
+  const { covered, total, unbaselined = 0, gps } = m.onSiteCoverage;
   const addedNote = unbaselined > 0 ? ` +${unbaselined} added same day not counted` : '';
   if (!covered) return unbaselined > 0 ? `unknown${addedNote} (partial)` : 'unknown';
-  const text = `${fmtMinutes(m.onSiteMinutes)} · ${covered}/${total} recorded`;
+  // Minutes from the truck GPS are marked as such; the rest were not measured by GPS.
+  const source = Number.isFinite(gps) ? ` (${gps} GPS, ${covered - gps} not GPS)` : '';
+  const text = `${fmtMinutes(m.onSiteMinutes)} · ${covered}/${total} recorded${source}`;
   return (covered < total || unbaselined > 0) ? `${text}${addedNote} (partial)` : text;
 }
 

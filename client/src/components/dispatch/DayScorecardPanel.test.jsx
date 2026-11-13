@@ -119,6 +119,16 @@ it('a partial actual on-site sum shows its coverage and is marked partial', asyn
   expect(screen.queryByText(/idle/i)).not.toBeInTheDocument();
 });
 
+it('actual on-site minutes say how many came from the truck GPS and how many did not', async () => {
+  mockAdminFetch.mockResolvedValue(ok(pastPayload({
+    onSiteMinutes: 90, onSiteCoverage: { covered: 3, total: 3, gps: 2 }, driveMinutes: 20, driveTrips: 2, spanMinutes: 130,
+  })));
+  render(<DayScorecardPanel />);
+  await screen.findByText('2026-09-01');
+  const actualRow = screen.getByText('Actual').closest('tr');
+  expect(within(actualRow).getByText('1h 30m · 3/3 recorded (2 GPS, 1 not GPS)')).toBeInTheDocument();
+});
+
 it('full actual coverage shows the count with no "(partial)" marker', async () => {
   mockAdminFetch.mockResolvedValue(ok(pastPayload({
     onSiteMinutes: 90, onSiteCoverage: { covered: 2, total: 2 }, driveMinutes: 20, driveTrips: 2, spanMinutes: 130,

@@ -10,6 +10,7 @@ const { isOperatorTimeOnSite } = require('../completion-attempts');
 const { effectiveWindowRange } = require('../route-reorder-window-fit');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { summarizeDurationReferences } = require('./duration-priors');
+const { loadGpsOnSiteMinutes, pickMeasuredOnSite, GPS_EVIDENCE } = require('../visit-time-on-site');
 
 const MAX_RECORDED_MINUTES = 720; // Same single-visit ceiling as completion corrections.
 const EVENT_TOLERANCE_MS = 5 * 60000;
@@ -54,6 +55,22 @@ function lifecycleMinutes(timing, row) {
     completion: timing.completion ? minuteOfServiceDay(timing.completion, serviceDate) : null };
 }
 
+// The duration rungs, best evidence first. The precedence between a hand correction and the truck's GPS minutes
+// is the one rule in visit-time-on-site.js (`measured`; gps_on_site_minutes is attached by getRoutePerformance).
+// The rungs below it are this reader's own: a person's typed time, then the lifecycle interval.
+function durationLadder({ notes, typed, corrected, measured, interval, anyStamp }) {
+  const gps = measured?.evidence === GPS_EVIDENCE;
+  if (notes.backfill === true) {
+    // A backfilled visit has no live timer, so GPS beats the typed number; a hand correction keeps its old label.
+    const minutes = gps ? measured.minutes : corrected ?? typed;
+    return { durationMinutes: minutes, durationEvidence: gps ? GPS_EVIDENCE : (minutes == null ? 'backfill_unknown' : 'backfill_reported') };
+  }
+  if (measured) return { durationMinutes: measured.minutes, durationEvidence: measured.evidence };
+  if (isOperatorTimeOnSite(notes.timeOnSite) && typed != null) return { durationMinutes: typed, durationEvidence: 'operator_reported' };
+  if (interval != null) return { durationMinutes: interval, durationEvidence: 'recorded_lifecycle_interval' };
+  return { durationMinutes: null, durationEvidence: anyStamp ? 'unverified_timing' : 'missing' };
+}
+
 function recordedTiming(row) {
   const notes = objectValue(row.completionNotes);
   const typed = boundedMinutes(minutesFromElapsed(notes.timeOnSite));
@@ -72,23 +89,9 @@ function recordedTiming(row) {
   const interval = arrival && ends.length === 1 && matches(end, ends[0])
     ? boundedMinutes(positiveMinutesBetween(arrival, end)) : null;
 
-  let durationMinutes = null;
-  let durationEvidence = 'missing';
-  if (notes.backfill === true) {
-    durationMinutes = corrected ?? typed;
-    durationEvidence = durationMinutes == null ? 'backfill_unknown' : 'backfill_reported';
-  } else if (corrected != null) {
-    durationMinutes = corrected;
-    durationEvidence = 'operator_corrected';
-  } else if (isOperatorTimeOnSite(notes.timeOnSite) && typed != null) {
-    durationMinutes = typed;
-    durationEvidence = 'operator_reported';
-  } else if (interval != null) {
-    durationMinutes = interval;
-    durationEvidence = 'recorded_lifecycle_interval';
-  } else if ([row.service_time_minutes, row.actual_duration_minutes, typed].some(value => boundedMinutes(value) != null) || start || end) {
-    durationEvidence = 'unverified_timing';
-  }
+  const { durationMinutes, durationEvidence } = durationLadder({ notes, typed, corrected, interval,
+    measured: pickMeasuredOnSite({ correctedMinutes: corrected, gpsMinutes: row.gps_on_site_minutes }),
+    anyStamp: [row.service_time_minutes, row.actual_duration_minutes, typed].some(value => boundedMinutes(value) != null) || start || end });
   return { arrival, durationMinutes, durationEvidence,
     // A corrected duration can imply an end instant; it is not a measured
     // finish. Keep that distinction even when an old status event remains.
@@ -368,7 +371,10 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
     .select('id', 'customer_id', 'technician_id', 'scheduled_date', 'status', 'visit_id', 'is_callback', 'followup_included', 'window_start', 'time_window',
       'actual_start_time', 'check_in_time', 'arrived_at', 'actual_end_time', 'check_out_time', 'completed_at',
       'service_time_minutes', 'actual_duration_minutes', 'time_on_site_adjusted_minutes');
-  const enriched = await withRecordedTimingEvidence(rows, conn);
+  const withEvidence = await withRecordedTimingEvidence(rows, conn);
+  // Truck GPS minutes for the completed visits (one query); a visit with no matched leg keeps its recorded timing.
+  const gpsMinutes = await loadGpsOnSiteMinutes(conn, rows.filter(row => row.status === 'completed').map(row => row.id));
+  const enriched = withEvidence.map(row => (gpsMinutes.has(row.id) ? { ...row, gps_on_site_minutes: gpsMinutes.get(row.id) } : row));
   const routeKey = (date, technicianId) => `${date}|${technicianId || ''}`;
   const coveredRoutes = new Map(plans.map(plan => [routeKey(plan.date, plan.technician_id), new Set(plan.plannedStops.map(stop => stop.id))]));
   const today = etDateString(now);
@@ -424,7 +430,9 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
     missingBaselineStops: missingBaselineActualStops(missingBaselineRoutes, pastWork, routeKey),
     unbaselinedCompletedVisits: [...unbaselinedByRoute.values()].reduce((sum, entries) => sum + entries.length, 0),
     truncatedPlanningRuns: runs.length > 500,
-    durationReferences: summarizeDurationReferences(pastWork, recordedTiming),
+    // Duration priors stay on the lifecycle interval the truck-GPS minutes replaced for display: GPS rows would
+    // otherwise drop out of the sample as a new evidence value.
+    durationReferences: summarizeDurationReferences(pastWork, row => recordedTiming({ ...row, gps_on_site_minutes: null })),
     note: 'Unknown arrivals are excluded from the on-time denominator. Duration sources stay separate; no GPS gap is classified as idle and no model is updated.',
   };
 }
