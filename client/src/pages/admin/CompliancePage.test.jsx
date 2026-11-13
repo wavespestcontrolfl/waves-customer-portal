@@ -214,13 +214,13 @@ describe('CompliancePage Staff authentication', () => {
         }),
       }),
     ));
-    // Gate off (no idCard block from the server): no training column or buttons, no new request.
+    // No idCard block from the server (a technician with no hire date): no training column or buttons, no new request.
     expect(screen.queryByText('ID card and training')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Training log' })).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.every(([url]) => !String(url).includes('training'))).toBe(true);
   });
 
-  // GATE_TECH_TRAINING_DATES (dark): the server adds the blocks only for a technician with a hire date.
+  // The server adds the blocks only for a technician with a hire date.
   describe('ID card and training dates', () => {
     const ID = '11111111-1111-4111-8111-111111111111';
     const employee = {

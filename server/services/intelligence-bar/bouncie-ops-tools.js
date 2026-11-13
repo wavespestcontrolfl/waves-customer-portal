@@ -14,7 +14,6 @@
 
 const bouncie = require('../bouncie');
 const { technicianNamesByImei } = require('../bouncie-mileage');
-const { truckViewsPerVehicleLive } = require('../../config/feature-gates');
 const { etDateString } = require('../../utils/datetime-et');
 const logger = require('../logger');
 
@@ -32,15 +31,13 @@ Use for: "where's the truck?", "is the truck moving?", "is the Bouncie tracker r
   },
   {
     name: 'get_truck_trips',
-    // The tool list is copied once when the action registry loads, so this text and schema are
-    // static and true with GATE_TRUCK_VIEWS_PER_VEHICLE on or off; the gate is read per call.
-    description: `Trips for one day (default today, Eastern): start/end times, distance, and total mileage. This is the live view of the same data the tax mileage ledger syncs on its cron. With per-vehicle truck views on, it lists every vehicle with its technician, and \`vehicle\` (a nickname or a technician's name) picks one.
+    description: `Trips for one day (default today, Eastern): start/end times, distance, and total mileage. This is the live view of the same data the tax mileage ledger syncs on its cron. It lists every vehicle with its technician, and \`vehicle\` (a nickname or a technician's name) picks one.
 Use for: "what did the truck drive today?", "how many miles yesterday?", "when did the day's route start?"`,
     input_schema: {
       type: 'object',
       properties: {
         date: { type: 'string', description: 'Day to report, YYYY-MM-DD (Eastern; default today)' },
-        vehicle: { type: 'string', description: 'With per-vehicle truck views on: one vehicle, by its nickname or by the name of the technician it is assigned to (not case-sensitive); leave out for every vehicle. With them off, the answer covers the default truck only and this is ignored.' },
+        vehicle: { type: 'string', description: 'One vehicle, by its nickname or by the name of the technician it is assigned to (not case-sensitive); leave out for every vehicle.' },
       },
     },
   },
@@ -54,11 +51,11 @@ function isConfigured() {
 
 async function getTruckStatus() {
   const vehicles = await bouncie.getVehicles();
-  const technicians = truckViewsPerVehicleLive() ? await technicianNamesByImei() : null;
+  const technicians = await technicianNamesByImei();
   return {
     vehicles: vehicles.map(v => ({
       nickname: v.nickname,
-      ...(technicians && { technician: technicians.get(String(v.imei)) || null }),
+      technician: technicians.get(String(v.imei)) || null,
       make: v.make,
       model: v.model,
       year: v.year,
@@ -102,21 +99,10 @@ async function getTruckTrips(input) {
     ? input.date.trim()
     : etDateString(new Date());
   const vehicles = await bouncie.getVehicles();
-  if (truckViewsPerVehicleLive()) return getTripsPerVehicle(date, vehicles, input.vehicle);
-  if (!vehicles.length) {
-    return { date, trips: [], total: 0, total_miles: 0, note: 'No vehicles registered on the Bouncie account.' };
-  }
-  const vehicle = vehicles.find(v => String(v.imei) === String(process.env.BOUNCIE_VEHICLE_IMEI)) || vehicles[0];
-  const trips = await bouncie.getTrips(vehicle.id, date, date);
-  return {
-    date,
-    vehicle: vehicle.nickname,
-    ...summarizeTrips(trips),
-    note: TRIPS_NOTE,
-  };
+  return getTripsPerVehicle(date, vehicles, input.vehicle);
 }
 
-// GATE_TRUCK_VIEWS_PER_VEHICLE on: every vehicle with its technician, or the one named.
+// Every vehicle with its technician, or the one named.
 async function getTripsPerVehicle(date, vehicles, wanted) {
   if (!vehicles.length) {
     return { date, vehicles: [], total_miles: 0, note: 'No vehicles registered on the Bouncie account.' };

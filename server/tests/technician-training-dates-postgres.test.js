@@ -1,4 +1,4 @@
-// GATE_TECH_TRAINING_DATES through PostgreSQL: the migration (columns, checks, unique key, cascade, up/down/up), the training-day
+// Technician training dates through PostgreSQL: the migration (columns, checks, unique key, cascade, up/down/up), the training-day
 // routes against the real table (add, duplicate, delete, record, the licenses read and the date save), and the daily sweep's
 // dedupe and close on real notifications rows. Every write runs in a transaction that is rolled back. Synthetic data only.
 // The sweep writes admin bell rows and nothing else: no text, email or push. Skips without DATABASE_URL (CI runs it against the
@@ -32,7 +32,6 @@ let mockPg;
 let mockAdminId = randomUUID();
 let server;
 let baseUrl;
-const GATE = 'GATE_TECH_TRAINING_DATES';
 
 describeDb('Technician training dates (PostgreSQL)', () => {
   beforeAll(async () => {
@@ -51,11 +50,10 @@ describeDb('Technician training dates (PostgreSQL)', () => {
   });
   beforeEach(async () => {
     mockPg = await database.transaction();
-    process.env[GATE] = 'true';
     mockAdminId = randomUUID();
     await mockPg('technicians').insert({ id: mockAdminId, name: 'Fixture admin', role: 'admin' });
   });
-  afterEach(async () => { delete process.env[GATE]; const trx = mockPg; mockPg = database; await trx.rollback(); });
+  afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => {
     if (server) await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     if (database) await database.destroy();
@@ -151,15 +149,6 @@ describeDb('Technician training dates (PostgreSQL)', () => {
       expect(ownerRow).not.toHaveProperty('idCard');
       expect(ownerRow).not.toHaveProperty('training');
     });
-
-    test('with the gate off the same read carries none of it and the dates are refused', async () => {
-      const id = await employee();
-      delete process.env[GATE];
-      const { body } = await call('GET', '/licenses');
-      expect(body.technicians.find((t) => t.id === id)).not.toHaveProperty('idCard');
-      expect((await call('PUT', `/licenses/${id}`, { id_card_applied_on: '2026-10-20' })).status).toBe(400);
-      expect((await call('POST', `/licenses/${id}/training-days`, day())).status).toBe(404);
-    });
   });
 
   describe('daily sweep', () => {
@@ -203,14 +192,12 @@ describeDb('Technician training dates (PostgreSQL)', () => {
       expect((await bells(id)).filter((b) => !b.done_at).map((b) => b.metadata.stage)).toEqual(['d3']);
     });
 
-    test('gate off writes nothing, and an inactive employee, a row with no hire date and a far-off deadline raise nothing', async () => {
+    test('an inactive employee, a row with no hire date and a far-off deadline raise nothing', async () => {
       const inactive = await employee({ active: false, employment_status: 'inactive' });
       const owner = await employee({ hire_date: null });
       const far = await employee({ hire_date: '2026-10-19' });
       expect(await reminders.runTechnicianTrainingReminders({ today: '2026-10-20' })).toMatchObject({ raised: 0 });
       for (const id of [inactive, owner, far]) expect((await bells(id)).length).toBe(0);
-      delete process.env[GATE];
-      expect(await reminders.runTechnicianTrainingReminders({ today: '2026-10-29' })).toEqual({ skipped: 'gate_off' });
     });
   });
 });

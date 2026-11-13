@@ -1,5 +1,5 @@
 /**
- * Technician ID-card and training reminders (GATE_TECH_TRAINING_DATES). The stage rules, the bell text through the real
+ * Technician ID-card and training reminders. The stage rules, the bell text through the real
  * composeAdminAlert (it throws on a rule break under NODE_ENV=test), dedupe keys, and the open / close decisions. The SQL
  * (real notifications rows, dedupe and close) runs in technician-training-dates-postgres.test.js.
  */
@@ -22,7 +22,6 @@ const reminders = require('../services/technician-training-reminders');
 
 const { dueReminders, stageOf, keyFor, alertSpec } = reminders._private;
 const TECH = '11111111-1111-4111-8111-111111111111';
-const GATE = 'GATE_TECH_TRAINING_DATES';
 
 const tech = (over = {}) => ({
   id: TECH, name: 'Maria Lopez', hire_date: '2026-10-01', license_expiry: null,
@@ -110,18 +109,8 @@ describe('runTechnicianTrainingReminders', () => {
     jest.clearAllMocks();
     episodes.openAdminAlertKeys.mockResolvedValue([]);
   });
-  afterEach(() => { delete process.env[GATE]; });
 
-  test('gate off returns before any query, bell or close', async () => {
-    const conn = connWith([tech()]);
-    expect(await reminders.runTechnicianTrainingReminders({ conn, today: '2026-10-20' })).toEqual({ skipped: 'gate_off' });
-    expect(conn).not.toHaveBeenCalled();
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
-  });
-
-  test('gate on raises one bell per technician and deadline, deduped on its key, as an admin bell only', async () => {
-    process.env[GATE] = 'true';
+  test('raises one bell per technician and deadline, deduped on its key, as an admin bell only', async () => {
     const result = await reminders.runTechnicianTrainingReminders({ conn: connWith([tech()]), today: '2026-10-20' });
     expect(result).toEqual({ scanned: 1, raised: 1, closed: 0 });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
@@ -137,7 +126,6 @@ describe('runTechnicianTrainingReminders', () => {
   });
 
   test('a later stage closes the earlier stage\'s bell and a settled deadline closes its own; nothing else is touched', async () => {
-    process.env[GATE] = 'true';
     const earlier = `tech-training:idcard:${TECH}:2026-10-31:d14`;
     const otherTech = 'tech-training:idcard:99999999-9999-4999-8999-999999999999:2026-10-31:d14';
     episodes.openAdminAlertKeys.mockResolvedValue([earlier, otherTech]);
@@ -149,7 +137,6 @@ describe('runTechnicianTrainingReminders', () => {
   });
 
   test('closeOnly (the save on the Licenses tab) closes what the entered date settled and raises nothing', async () => {
-    process.env[GATE] = 'true';
     const standing = `tech-training:idcard:${TECH}:2026-10-31:d3`;
     episodes.openAdminAlertKeys.mockResolvedValue([standing]);
     const applied = tech({ id_card_applied_on: '2026-10-28' });

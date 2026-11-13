@@ -143,8 +143,6 @@ export default function MileageTab() {
     const t = dash.today || {};
     const m = dash.mtd || {};
     const v = dash.live_vehicle;
-    // GATE_TRUCK_VIEWS_PER_VEHICLE: the server sends these two lists only when it is on.
-    const perVehicle = dash.vehicles || dash.live_vehicles;
     const bizPct = t.total_miles > 0 ? ((t.business_miles / t.total_miles) * 100) : 100;
 
     return (
@@ -166,12 +164,12 @@ export default function MileageTab() {
           ) : <div style={{ color: D.muted, fontSize: 13 }}>No live vehicle data available</div>}
         </div>
 
-        {/* Per-vehicle rows (only when the server sends them) */}
-        {perVehicle && <VehicleTable vehicles={dash.vehicles || []} live={dash.live_vehicles || []} />}
+        {/* Per-vehicle rows */}
+        <VehicleTable vehicles={dash.vehicles || []} live={dash.live_vehicles || []} />
 
         {/* Today's Summary */}
         <div style={sCard}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: '#0F172A', marginBottom: 12 }}>{perVehicle ? 'All vehicles · ' : ''}Today — {t.date || 'N/A'}</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: '#0F172A', marginBottom: 12 }}>All vehicles · Today — {t.date || 'N/A'}</div>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: 12, marginBottom: 14 }}>
             <StatBox label="Miles" value={fmtMi(t.total_miles)} color={D.teal} />
             <StatBox label="Trips" value={t.trip_count || 0} color={D.purple} />
@@ -194,7 +192,7 @@ export default function MileageTab() {
         </div>
 
         {/* MTD Stats */}
-        {perVehicle && <div style={{ fontSize: 15, fontWeight: 700, color: '#0F172A', marginBottom: 8 }}>All vehicles — month to date</div>}
+        <div style={{ fontSize: 15, fontWeight: 700, color: '#0F172A', marginBottom: 8 }}>All vehicles — month to date</div>
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: 12 }}>
           <div style={sCard}><StatBox label="MTD Miles" value={fmtMi(m.total_miles)} color={D.teal} /></div>
           <div style={sCard}><StatBox label="MTD IRS Deduction" value={fmt(m.irs_deduction)} color={D.amber} /></div>

@@ -1,10 +1,7 @@
 /**
- * GATE_TECH_TRAINING_DATES on the Compliance licenses routes (routes/admin-compliance-v2.js), through a real Express app with
- * a stand-in database. What this proves:
- *  - gate off: GET /licenses, PUT /licenses/:techId and the unknown-route answer are exactly today's (no new query, no new key,
- *    the four new dates are refused like any unknown field, the training routes do not exist);
- *  - gate on: the dates and statuses ride on GET only for a technician with a hire date; the PUT takes the four dates with
- *    validation; the training-day routes validate before they touch the database; every write is admin-only.
+ * The Compliance licenses routes (routes/admin-compliance-v2.js), through a real Express app with
+ * a stand-in database. What this proves: the dates and statuses ride on GET only for a technician with a hire date; the PUT
+ * takes the four dates with validation; the training-day routes validate before they touch the database; every write is admin-only.
  * The SQL runs against Postgres in technician-training-dates-postgres.test.js.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -33,7 +30,6 @@ const router = require('../routes/admin-compliance-v2');
 
 const TECH = '11111111-1111-4111-8111-111111111111';
 const DAY = '22222222-2222-4222-8222-222222222222';
-const GATE = 'GATE_TECH_TRAINING_DATES';
 
 // A thenable query builder: every method returns the builder, awaiting it yields `result`, and the calls are recorded.
 function builder(result, calls = []) {
@@ -64,11 +60,9 @@ beforeAll(async () => {
 afterAll(() => new Promise((resolve) => server.close(resolve)));
 beforeEach(() => {
   jest.clearAllMocks();
-  delete process.env[GATE];
   for (const key of Object.keys(tables)) delete tables[key];
   for (const key of Object.keys(calls)) delete calls[key];
 });
-afterEach(() => { delete process.env[GATE]; });
 
 async function call(method, path, body, token = 'admin') {
   const res = await fetch(`${base}${path}`, {
@@ -88,48 +82,13 @@ const licenseRow = (over = {}) => ({
 });
 const goodDay = (over = {}) => ({ training_date: '2026-10-01', hours: 8, category: 'GHP', topics: 'Label reading, PPE', trainer_name: 'Certified Operator', materials: 'Labels, SDS', ...over });
 
-describe('gate off: today\'s behavior', () => {
-  test('GET /licenses reads technicians once and adds no new key', async () => {
-    table('technicians', [licenseRow({ license_expiry: null })]);
-    const { status, json } = await call('GET', '/licenses');
-    expect(status).toBe(200);
-    expect(Object.keys(json.technicians[0]).sort()).toEqual(['active', 'email', 'id', 'license', 'licenseCategories', 'licenseExpiry', 'licenseStatus', 'name', 'phone']);
-    expect(db).toHaveBeenCalledTimes(1);
-    expect(db).toHaveBeenCalledWith('technicians');
-  });
-
-  test('PUT refuses the four new dates like any unknown field, and a license update writes and returns exactly the old columns', async () => {
-    const refused = await call('PUT', `/licenses/${TECH}`, { id_card_applied_on: '2026-10-01' });
+describe('training dates and training days', () => {
+  test('PUT still refuses a field that is not a license field', async () => {
+    const refused = await call('PUT', `/licenses/${TECH}`, { active: false });
     expect(refused.status).toBe(400);
     expect(refused.json).toEqual({ error: 'Only license fields may be updated' });
     expect(db).not.toHaveBeenCalled();
-
-    table('technicians', [{ id: TECH, fl_applicator_license: 'JE2', license_expiry: '2027-06-30', license_categories: ['core'] }]);
-    const ok = await call('PUT', `/licenses/${TECH}`, { fl_applicator_license: 'JE2' });
-    expect(ok.status).toBe(200);
-    expect(ok.json).toEqual({ success: true, technician: { id: TECH, license: 'JE2', licenseExpiry: '2027-06-30', licenseCategories: ['core'] } });
-    expect(calls.technicians).toEqual([
-      ['where', [{ id: TECH }]],
-      ['update', [{ fl_applicator_license: 'JE2' }]],
-      ['returning', [['id', 'fl_applicator_license', 'license_expiry', 'license_categories']]],
-    ]);
-    expect(runTechnicianTrainingReminders).not.toHaveBeenCalled();
   });
-
-  test.each([
-    ['GET', `/licenses/${TECH}/training-days`],
-    ['POST', `/licenses/${TECH}/training-days`],
-    ['DELETE', `/licenses/${TECH}/training-days/${DAY}`],
-    ['GET', `/licenses/${TECH}/training-record`],
-  ])('%s %s does not exist', async (method, path) => {
-    const { status } = await call(method, path, method === 'POST' ? goodDay() : undefined);
-    expect(status).toBe(404);
-    expect(db).not.toHaveBeenCalled();
-  });
-});
-
-describe('gate on', () => {
-  beforeEach(() => { process.env[GATE] = 'true'; });
 
   test('GET /licenses adds the blocks only for a technician with a hire date', async () => {
     const owner = licenseRow({ id: '33333333-3333-4333-8333-333333333333', name: 'Owner', license_expiry: null });
@@ -278,13 +237,14 @@ describe('license status on the ET calendar', () => {
     ['90 days out', '2026-08-01T16:00:00Z', '2026-10-30', 'expiring_soon'],
   ])('%s', async (_label, now, expiry, status) => {
     jest.useFakeTimers({ now: new Date(now), doNotFake: onlyDate });
-    table('technicians', [licenseRow({ license_expiry: expiry })]);
+    // The hire-date read (whereNotNull) finds no employee here; the list read returns the row.
+    table('technicians', (c) => (c.some(([name]) => name === 'whereNotNull') ? [] : [licenseRow({ license_expiry: expiry })]));
     const { json } = await call('GET', '/licenses');
     expect(json.technicians[0].licenseStatus).toBe(status);
   });
 
   test('reads license_expiry as YYYY-MM-DD, the shape the edit dialog sends back', async () => {
-    table('technicians', [licenseRow()]);
+    table('technicians', (c) => (c.some(([name]) => name === 'whereNotNull') ? [] : [licenseRow()]));
     await call('GET', '/licenses');
     const select = calls.technicians.find(([name]) => name === 'select')[1];
     expect(select).toContainEqual({ raw: "to_char(license_expiry, 'YYYY-MM-DD') as license_expiry" });

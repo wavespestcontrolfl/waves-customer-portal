@@ -11,7 +11,6 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, etParts } = require('../utils/datetime-et');
 const { firstPresent, num } = require('./bouncie-payload');
-const { truckViewsPerVehicleLive } = require('../config/feature-gates');
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -758,25 +757,23 @@ async function getDashboard() {
       live_vehicle: liveVehicles[0] || null,
     };
 
-    if (truckViewsPerVehicleLive()) {
-      // Split the SAME two reads by device; no query per vehicle.
-      const byVehicle = new Map();
-      const group = (id, name) => {
-        if (!byVehicle.has(id)) byVehicle.set(id, { name: name || id, today: [], mtd: [] });
-        return byVehicle.get(id);
-      };
-      for (const t of mtdTrips) group(String(t.vehicle_id ?? ''), t.vehicle_name).mtd.push(t);
-      for (const t of todayTrips) group(String(t.vehicle_id ?? ''), t.vehicle_name).today.push(t);
-      const technicians = await technicianNamesByImei();
-      result.vehicles = [...byVehicle].map(([id, g]) => ({
-        vehicle_id: id,
-        vehicle_name: g.name,
-        technician: technicians.get(id) || null,
-        today: { date: today, ...dayStats(g.today) },
-        mtd: { month: monthStart, ...monthStats(g.mtd) },
-      })).sort((a, b) => b.mtd.total_miles - a.mtd.total_miles);
-      result.live_vehicles = liveVehicles.map(v => ({ ...v, technician: technicians.get(String(v.imei)) || null }));
-    }
+    // Split the SAME two reads by device; no query per vehicle.
+    const byVehicle = new Map();
+    const group = (id, name) => {
+      if (!byVehicle.has(id)) byVehicle.set(id, { name: name || id, today: [], mtd: [] });
+      return byVehicle.get(id);
+    };
+    for (const t of mtdTrips) group(String(t.vehicle_id ?? ''), t.vehicle_name).mtd.push(t);
+    for (const t of todayTrips) group(String(t.vehicle_id ?? ''), t.vehicle_name).today.push(t);
+    const technicians = await technicianNamesByImei();
+    result.vehicles = [...byVehicle].map(([id, g]) => ({
+      vehicle_id: id,
+      vehicle_name: g.name,
+      technician: technicians.get(id) || null,
+      today: { date: today, ...dayStats(g.today) },
+      mtd: { month: monthStart, ...monthStats(g.mtd) },
+    })).sort((a, b) => b.mtd.total_miles - a.mtd.total_miles);
+    result.live_vehicles = liveVehicles.map(v => ({ ...v, technician: technicians.get(String(v.imei)) || null }));
 
     return result;
   } catch (err) {
