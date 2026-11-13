@@ -69,6 +69,14 @@
  * the chain through the same tryHour, so with the gate off a held empty hour proves nothing and answers slot-taken.
  * Gate off: byte-identical candidates, checks and report.
  *
+ * Later days (owner 2026-11-12 "lets do this as well", GATE_MAKE_ROOM_LATER_DAYS, read at call time; needs mode on to
+ * reach a customer): the sooner rule also scans each day AFTER the first day of the customer's list that has no free
+ * hour in the list. Days before the first free day are still scanned, and the walk is still earliest first, so an hour
+ * on an earlier day wins whenever one passes; a later day is offered only when no earlier one passes. Every other rule
+ * holds unchanged. The wider scan may check up to MAX_LATER_DAY_CHECKS hours (MAX_SOONER_CHECKS without it) inside the
+ * same time budget. The hold's proof never read the day rule, so the hold and the accept are unchanged. Gate off:
+ * byte-identical days, checks and report.
+ *
  * Never throws, spends nothing, sends nothing, and writes only its own log row. The estimate page starts it through
  * startBackgroundCheck: at most MAX_IN_FLIGHT checks at once and one per estimate per DEDUPE_MS, extra requests dropped.
  * A check has DEFAULT_BUDGET_MS. Once that runs out it sends no further read, and it keeps its slot until the reads it
@@ -83,6 +91,8 @@ const MAX_DATES = 21;
 const MAX_FULL_CHECKS = 6;
 // The sooner pass is log-only, so it may look at more hours than the offer rule's six.
 const MAX_SOONER_CHECKS = 24;
+// With GATE_MAKE_ROOM_LATER_DAYS the scan covers more days, so more hours may get a full check (same time budget).
+const MAX_LATER_DAY_CHECKS = 48;
 // The page waits for the offer pass (mode on), so it gets less time than the background check; the hold's proof of one
 // hour runs inside the reserve transaction, so it is bounded too.
 const OFFER_BUDGET_MS = 1500;
@@ -705,6 +715,8 @@ function defaultDeps() {
     multiTechConfirmLive: require('../../config/feature-gates').multiTechConfirmLive,
     // The empty-hour move's gate (GATE_MAKE_ROOM_EMPTY_HOUR), read at call time.
     emptyHourOn: require('../../config/feature-gates').makeRoomEmptyHourLive,
+    // The later-days scan's gate (GATE_MAKE_ROOM_LATER_DAYS), read at call time.
+    laterDaysOn: require('../../config/feature-gates').makeRoomLaterDaysLive,
   };
 }
 
@@ -785,10 +797,15 @@ function collectCandidates(days, { open, env, request, report }) {
 // `offerOnly` (the page's offer, mode on): no travel-gap screen, the earliest hour first, and the walk ends at the first
 // hour that passes, which is then the earliest one.
 async function runSoonerPass(report, { dayRows, pool, open, soonerCap, request, conn, env, budget, caches, offerOnly = false }) {
-  const firstFreeDay = pool.map((slot) => slot?.date).filter(Boolean).sort()[0] ?? null;
-  const days = [...dayRows].filter(([dateStr]) => firstFreeDay == null || dateStr < firstFreeDay);
+  const freeDays = new Set(pool.map((slot) => slot?.date).filter(Boolean));
+  const firstFreeDay = [...freeDays].sort()[0] ?? null;
+  const before = [...dayRows].filter(([dateStr]) => firstFreeDay == null || dateStr < firstFreeDay);
+  // GATE_MAKE_ROOM_LATER_DAYS: also the days after the first free day that have no free hour in the list.
+  const laterOn = typeof env.laterDaysOn === 'function' && env.laterDaysOn() === true;
+  const later = laterOn && firstFreeDay != null ? [...dayRows].filter(([dateStr]) => dateStr > firstFreeDay && !freeDays.has(dateStr)) : [];
+  const days = [...before, ...later];
   const sooner = {
-    firstFreeDay, daysBefore: days.length, capMin: env.customerMaxDetourMinutes(), tried: 0, candidates: 0, checked: 0,
+    firstFreeDay, daysBefore: before.length, ...(laterOn ? { laterDays: later.length } : {}), capMin: env.customerMaxDetourMinutes(), tried: 0, candidates: 0, checked: 0,
     twoHourTried: 0, passed: [], byReason: {}, screenOn: false,
     screen: { pass: 0, overlap: 0, gap_before: 0, gap_after: 0 }, screenWrong: { saidPass_failed: 0, saidFail_passed: 0 }, timedOut: false,
   };
@@ -816,7 +833,7 @@ async function runSoonerPass(report, { dayRows, pool, open, soonerCap, request, 
       if (candidate.screen === null && why) sooner.screenWrong.saidPass_failed += 1;
       if (candidate.screen !== null && !why) sooner.screenWrong.saidFail_passed += 1;
     };
-    await checkCandidates(found, { conn, env, request: soonerRequest, budget, report: sooner, caches, order: bySooner, limit: MAX_SOONER_CHECKS, onChecked, stopAfterPass: offerOnly });
+    await checkCandidates(found, { conn, env, request: soonerRequest, budget, report: sooner, caches, order: bySooner, limit: laterOn ? MAX_LATER_DAY_CHECKS : MAX_SOONER_CHECKS, onChecked, stopAfterPass: offerOnly });
   } catch (err) {
     sooner.error = err?.message || String(err);
   }
@@ -1079,5 +1096,5 @@ module.exports = {
   recordMakeRoomCheck,
   findMakeRoomOffers,
   verifyMakeRoomHour,
-  _internals: { buildChain, shiftsFor, MAX_SHIFT_MIN, EMPTY_HOUR_MAX_VISIT_MIN, EMPTY_HOUR_REACH_MIN, emptyHourStarts, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, remindersByText, moveBlockedReason, datesFor, bySaving, bySooner, daysBetween, defaultDeps, resetBackgroundChecks, makeBudget, TIMED_OUT, MIN_SAVING_MIN, MAX_FULL_CHECKS, MAX_SOONER_CHECKS, MAX_IN_FLIGHT, MAX_OFFERS_IN_FLIGHT, OFFER_BUDGET_MS, DEDUPE_MS, LINGER_MS, MOVED_BY },
+  _internals: { buildChain, shiftsFor, MAX_SHIFT_MIN, EMPTY_HOUR_MAX_VISIT_MIN, EMPTY_HOUR_REACH_MIN, emptyHourStarts, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, remindersByText, moveBlockedReason, datesFor, bySaving, bySooner, daysBetween, defaultDeps, resetBackgroundChecks, makeBudget, TIMED_OUT, MIN_SAVING_MIN, MAX_FULL_CHECKS, MAX_SOONER_CHECKS, MAX_LATER_DAY_CHECKS, MAX_IN_FLIGHT, MAX_OFFERS_IN_FLIGHT, OFFER_BUDGET_MS, DEDUPE_MS, LINGER_MS, MOVED_BY },
 };

@@ -244,6 +244,42 @@ describe('getAvailableSlots — the make-room offer (GATE_BOOKING_MAKE_ROOM on)'
     expect(result.metadata.firstDayAvailability).toEqual(free.metadata.firstDayAvailability);
   });
 
+  describe('a make-room hour on a later day (GATE_MAKE_ROOM_LATER_DAYS: a day with no free time after the first free day)', () => {
+    const LATER_HOUR = { ...HOUR, date: '2027-05-21' };
+    const { withMakeRoomSlot } = estimateSlotAvailability._internals;
+
+    test('is not the first card: it goes after the first three, and the last free card makes room', async () => {
+      makeRoom.bookingMakeRoomMode.mockReturnValue('off');
+      const free = keys(await getAvailableSlots('est-room-1', OFFER));
+      estimateSlotAvailability._internals.clearCaches();
+      makeRoom.bookingMakeRoomMode.mockReturnValue('on');
+      makeRoom.findMakeRoomOffers.mockImplementation(async () => ({ hours: [LATER_HOUR], report: {} }));
+      const result = await getAvailableSlots('est-room-1', OFFER);
+      const at = Math.min(3, free.length, free.length - 1);
+      expect(keys(result)).toEqual([...free.slice(0, at), '2027-05-21 09:00', ...free.slice(at)].slice(0, free.length));
+      expect(keys(result)[0]).toBe(free[0]);
+      // Same slot shape and its own signature policy as the earlier-day hour.
+      const room = [...result.primary, ...result.expander].find((slot) => slot.date === '2027-05-21');
+      expect(verifies(room, MAKE_ROOM_OFFER_POLICY)).toBe(true);
+      expect(room).not.toHaveProperty('makeRoom');
+    });
+
+    test('placement by day: before the first free day it is first; later it follows the best three; it is never cut', () => {
+      const slot = (date, start) => ({ date, windowStart: start });
+      const free = ['09:00', '10:00', '11:00', '12:00', '13:00'].map((start) => slot('2027-05-20', start));
+      const sooner = slot('2027-05-19', '09:00');
+      const later = slot('2027-05-21', '09:00');
+      expect(withMakeRoomSlot(free, sooner, { pool: free, total: 5 })).toEqual([sooner, ...free.slice(0, 4)]);
+      expect(withMakeRoomSlot(free, later, { pool: free, total: 5 })).toEqual([...free.slice(0, 3), later, free[3]]);
+      // A short or small list still shows it.
+      expect(withMakeRoomSlot(free.slice(0, 2), later, { pool: free, total: 9 })).toEqual([...free.slice(0, 2), later]);
+      expect(withMakeRoomSlot(free, later, { pool: free, total: 2 })).toEqual([free[0], later]);
+      expect(withMakeRoomSlot(free, later, { pool: free, total: 1 })).toEqual([later]);
+      // No free time at all: the hour is the soonest card.
+      expect(withMakeRoomSlot([], later, { pool: [], total: 9 })).toEqual([later]);
+    });
+  });
+
   test('never more than the list\'s own total: the last card makes room', async () => {
     const result = await getAvailableSlots('est-room-1', { ...OFFER, maxResults: 1, expanderMaxResults: 1 });
     expect(keys(result)).toHaveLength(2);
