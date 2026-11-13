@@ -247,15 +247,18 @@ async function completedPricing(estimateId) {
 // (their setup fee would be waived) and payer-billed accounts (the card step
 // would enroll the homeowner's card on a payer-routed account). Fail closed:
 // an unknowable payer picture hides the button.
-async function accountCanOneTap(customerId) {
-  const customer = await db('customers')
+// `conn` is the caller's transaction when the verdict is read under locks
+// that transaction holds (pest-frequency-change.js): every read here then
+// stays on that one connection instead of taking a second from the pool.
+async function accountCanOneTap(customerId, conn = db) {
+  const customer = await conn('customers')
     .where({ id: customerId })
     .first('pipeline_stage', 'monthly_rate', 'billing_mode');
   if (!customer || customerPreservesMonthlyMembership(customer)) return false;
   const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
-  const qualifyingKeys = await loadExistingQualifyingServiceKeys(db, customerId).catch(() => []);
+  const qualifyingKeys = await loadExistingQualifyingServiceKeys(conn, customerId).catch(() => []);
   if (!qualifyingKeys.length) return false;
-  return customerIsPayerBilled(db, customerId).then((billed) => !billed).catch(() => false);
+  return customerIsPayerBilled(conn, customerId).then((billed) => !billed).catch(() => false);
 }
 
 // My Plan "Add a service" (owner 2026-11-11): one priced offer for each

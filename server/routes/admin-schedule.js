@@ -22450,7 +22450,8 @@ async function registerExtensionReminders(conn, spawnedVisits, logContext) {
 // belongs to update-details and its invoice locks.
 //
 // Takes the per-parent maintenance lock and the customer-comms fence first,
-// like topUpRecurringSeriesWithLocks, then runs in the CALLER's transaction.
+// like topUpRecurringSeriesWithLocks, then every pending visit's row
+// (lockPendingSeriesVisits), and runs in the CALLER's transaction.
 // A preview calls it with dryRun and rolls back (the top-up's shadow-run
 // pattern); a dry run cancels with a plain update, because nothing of a real
 // transitionJobStatus is needed in a transaction that never commits. A real
@@ -22461,6 +22462,7 @@ const FREQUENCY_CHANGE_NOTE = 'Visit frequency changed: the new schedule replace
 function frequencyChangeRefusal(code, message, detail = {}) {
   return Object.assign(httpError(409, message), { code, isOperational: true, ...detail });
 }
+const frequencyChangeBusy = () => frequencyChangeRefusal('VISIT_BUSY_RETRY', 'Another change to a visit of this plan is in progress — try again in a moment.');
 
 // The first date `pattern` gives when it counts from `latest` (a live visit
 // of the series): the extension walk's own steps from the same anchor,
@@ -22508,17 +22510,34 @@ async function lockSeriesForFrequencyChange(trx, rootId, pattern, cols) {
   return root;
 }
 
-// Step 1: which pending visit stays and which ones the new schedule replaces
-// (the section header's rule). The replaced ones come back locked and judged
-// for money (lockReplacedVisits).
-async function planReplacedVisits(trx, root, cols, { pattern, minDate, soonerByDays }) {
-  const pending = await trx('scheduled_services')
-    .where(function () { this.where('recurring_parent_id', root.id).orWhere('id', root.id); })
+// The plan's pending visits, each locked FOR UPDATE NOWAIT, in date order.
+// Nothing about them is decided from an unlocked read: the customer's own
+// confirm of a visit (routes/schedule.js) and a staff edit take the visit row,
+// not the series maintenance lock, so a visit read first and locked after
+// could be kept or replaced on a status that changed in between. A caller
+// that reads the plan before changeSeriesFrequencyWithLocks takes these locks
+// first, with the same call (the locks are this transaction's own, so the
+// second call returns the same rows). Contention is a refusal to retry, never
+// a wait: a wait could close a lock cycle with a save that already holds one
+// of these rows.
+async function lockPendingSeriesVisits(trx, rootId) {
+  return trx('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', rootId).orWhere('id', rootId); })
     .where('is_recurring', true)
     .whereIn('status', UPCOMING_VISIT_STATUSES)
     .where('scheduled_date', '>=', etDateString())
     .orderBy('scheduled_date', 'asc')
-    .orderBy('created_at', 'asc');
+    .orderBy('created_at', 'asc')
+    .forUpdate()
+    .noWait()
+    .catch((err) => { throw err?.code === '55P03' ? frequencyChangeBusy() : err; });
+}
+
+// Step 1: which pending visit stays and which ones the new schedule replaces
+// (the section header's rule), chosen from the locked rows. The replaced ones
+// are then judged for money (guardReplacedVisits).
+async function planReplacedVisits(trx, root, cols, { pattern, minDate, soonerByDays }) {
+  const pending = await lockPendingSeriesVisits(trx, root.id);
   if (!pending.length) return { kept: null, replaced: [] };
   const lastEarlier = await latestLiveSeriesVisit(trx, root.id, pending.map((row) => row.id));
   const fromLast = lastEarlier ? estimateFirstCadenceDate(lastEarlier, pattern, seriesRecurrenceOptions(root), minDate) : null;
@@ -22531,41 +22550,33 @@ async function planReplacedVisits(trx, root, cols, { pattern, minDate, soonerByD
   if (replaced.some((row) => String(row.id) === String(root.id))) {
     throw frequencyChangeRefusal('FREQUENCY_CHANGE_UNSUPPORTED', 'This plan cannot change its visit frequency here.');
   }
-  return { kept: keepFirst ? pending[0] : null, replaced: await lockReplacedVisits(trx, replaced) };
+  await guardReplacedVisits(trx, replaced);
+  return { kept: keepFirst ? pending[0] : null, replaced };
 }
 
-// The replaced visits, locked and then judged for money, in the order a
-// 'following' re-price locks its siblings (lockAndGuardFollowingSiblings):
-// each row FOR UPDATE NOWAIT, then each visit's invoice-mint lock, tried in id
-// order. Every mint path takes the mint lock and then the visit row, so no
-// invoice can be minted for one of these visits between the money check here
-// and its cancel. Contention is a refusal to retry, never a wait: a wait
-// could close a lock cycle with a save that already holds one of these rows.
-// Returns the rows as locked (their status is the cancel's fromStatus).
-async function lockReplacedVisits(trx, replaced) {
-  if (!replaced.length) return replaced;
-  const busy = () => frequencyChangeRefusal('VISIT_BUSY_RETRY', 'Another change to a visit of this plan is in progress — try again in a moment.');
+// The replaced visits (rows this transaction holds locked), judged for money
+// the way a 'following' re-price guards its siblings
+// (lockAndGuardFollowingSiblings): each visit's invoice-mint lock, tried in id
+// order, then the money check. Every mint path takes the mint lock and then
+// the visit row, so no invoice can be minted for one of these visits between
+// the money check here and its cancel.
+async function guardReplacedVisits(trx, replaced) {
+  if (!replaced.length) return;
   const ids = replaced.map((row) => String(row.id)).sort();
-  const locked = await trx('scheduled_services').whereIn('id', ids).whereIn('status', UPCOMING_VISIT_STATUSES)
-    .orderBy('scheduled_date', 'asc').orderBy('created_at', 'asc').forUpdate().noWait()
-    .catch((err) => { throw err?.code === '55P03' ? busy() : err; });
-  // A visit that left the pending set since the read above changed the plan.
-  if (locked.length !== ids.length) throw frequencyChangeRefusal('SERIES_CHANGED_RETRY', 'This plan changed while saving — reload and try again.');
   const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
   for (const id of ids) {
-    if (!(await tryAcquireScheduledInvoiceMintLock(trx, id))) throw busy();
+    if (!(await tryAcquireScheduledInvoiceMintLock(trx, id))) throw frequencyChangeBusy();
   }
   // liveInvoice: any live invoice refuses, as for a re-price. The schedule
   // the customer confirmed replaces these visits; none may carry a bill.
-  const [coveredVisit] = await findBillingCoveredVisits(trx, locked, { liveInvoice: true });
+  const [coveredVisit] = await findBillingCoveredVisits(trx, replaced, { liveInvoice: true });
   if (coveredVisit) {
     const [coveredId, reason] = coveredVisit;
-    const when = locked.find((row) => String(row.id) === String(coveredId));
+    const when = replaced.find((row) => String(row.id) === String(coveredId));
     throw frequencyChangeRefusal('FREQUENCY_CHANGE_BLOCKED_MONEY', `The ${dateOnly(when.scheduled_date)} visit is ${reason}, so the new schedule cannot replace it.`);
   }
   // A /secure card confirmation mid-finish on one of them (the re-price guard's own check).
-  if (await findCompletingCardRequestVisitId(trx, ids)) throw busy();
-  return locked;
+  if (await findCompletingCardRequestVisitId(trx, ids)) throw frequencyChangeBusy();
 }
 
 // Step 2: the replaced visits leave the calendar as a plan trim.
@@ -30306,6 +30317,7 @@ module.exports.acquireRecurringSeriesMaintenanceLock = acquireRecurringSeriesMai
 module.exports.topUpRecurringSeries = topUpRecurringSeries;
 module.exports.topUpRecurringSeriesLocked = topUpRecurringSeriesLocked;
 module.exports.topUpRecurringSeriesWithLocks = topUpRecurringSeriesWithLocks;
+module.exports.lockPendingSeriesVisits = lockPendingSeriesVisits;
 module.exports.changeSeriesFrequencyWithLocks = changeSeriesFrequencyWithLocks;
 module.exports.settleSeriesFrequencyChange = settleSeriesFrequencyChange;
 // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — consumed lazily

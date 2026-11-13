@@ -155,7 +155,7 @@ async function officePathReason(conn, customerId, visits) {
   if (await hasAnnualPrepayTerm(conn, customerId)) return 'annual_prepay';
   if (await hasOpenPriceNotice(conn, customerId)) return 'price_notice_open';
   const { accountCanOneTap } = require('./one-tap-purchase');
-  return (await accountCanOneTap(customerId)) ? null : 'account';
+  return (await accountCanOneTap(customerId, conn)) ? null : 'account';
 }
 
 // The customer's general pest plan as the button reads it, with its choices, or the reason it has none.
@@ -256,12 +256,13 @@ async function moveCustomerMoneyFields(trx, plan, option) {
 }
 
 async function recordChange(trx, { plan, option, outcome, change, money, consent }) {
+  // `outcome` is what the customer was shown and confirmed, whole: both plans with their prices, the visit
+  // kept, the dates replaced and booked, and the version. A repeated confirm answers from it (appliedOutcome).
   const summary = {
-    series_root_id: String(plan.root.id), from: plan.frequency, to: option.frequency,
-    per_visit_before: plan.perVisit, per_visit_after: option.perVisit, per_year_before: plan.perYear, per_year_after: option.perYear,
-    kept_visit: outcome.keptVisit, replaced_visit_ids: change.cancelled.map((visit) => String(visit.id)),
-    new_visit_ids: change.spawnedVisits.map((visit) => String(visit.scheduledServiceId)), new_visit_dates: outcome.newVisits,
-    per_application_fee_moved: money.perApplicationFee, monthly_rate: money.monthlyRate, version: outcome.version,
+    series_root_id: String(plan.root.id), outcome,
+    replaced_visit_ids: change.cancelled.map((visit) => String(visit.id)),
+    new_visit_ids: change.spawnedVisits.map((visit) => String(visit.scheduledServiceId)),
+    per_application_fee_moved: money.perApplicationFee, monthly_rate: money.monthlyRate,
   };
   // The staff-facing line in the customer's activity, and the consent record (who, when, from where).
   await trx('activity_log').insert({
@@ -321,8 +322,9 @@ function chosenOption(read, to) {
 }
 
 // The change itself. A look first (which plan), then one transaction: the plan's locks in the top-up's
-// order, the plan read again under them, the re-booking, and (a real change only) the money fields and the
-// record. A dry run stops after the re-booking and rolls everything back.
+// order, its pending visits' rows, the plan read again under them (every read on the transaction's own
+// connection), the re-booking, and (a real change only) the money fields and the record. A dry run stops
+// after the re-booking and rolls everything back.
 async function run(customerId, to, { expectedVersion = null, consent = {} } = {}) {
   const dryRun = expectedVersion == null;
   const seen = await readPlan(db, customerId);
@@ -332,8 +334,14 @@ async function run(customerId, to, { expectedVersion = null, consent = {} } = {}
   let done = null;
   try {
     await db.transaction(async (trx) => {
-      await Schedule.acquireRecurringSeriesMaintenanceLock(trx, seen.plan.root.id);
+      // The plan's lock is tried, never waited for: a second look at one plan is told to try again at once,
+      // so requests for one plan cannot queue on the lock with a pool connection each.
+      await Schedule.acquireRecurringSeriesMaintenanceLock(trx, seen.plan.root.id, false);
       await lockCustomerComms(trx, customerId);
+      // The plan's pending visits are locked before the plan is read: the read below and the schedule's
+      // keep-or-replace choice then see rows that no other save can change (a visit the customer confirms
+      // at this moment is either read as confirmed or waits for this change).
+      await Schedule.lockPendingSeriesVisits(trx, seen.plan.root.id);
       const read = await readPlan(trx, customerId);
       const option = chosenOption(read, to);
       const { plan } = read;
@@ -370,10 +378,33 @@ async function preview(customerId, to) {
   return (await run(customerId, to)).outcome;
 }
 
+// A confirm that was made, asked again. When the first answer never reached the phone the customer is still
+// on the review screen, and the next tap names the same outcome: the plan no longer offers that choice, so
+// run() refuses it. That tap gets the first answer again, read from the change's own record (the rule of
+// one-tap-purchase.js confirm), and only while the plan still has the cadence that change gave it.
+async function appliedOutcome(customerId, to, version) {
+  const record = await db('activity_log').where({ customer_id: customerId, action: 'pest_frequency_changed' })
+    .whereRaw("metadata->'outcome'->>'version' = ?", [version]).first('metadata');
+  const applied = record?.metadata?.outcome;
+  if (!applied || applied.frequency !== to) return null;
+  const root = await db('scheduled_services').where({ id: record.metadata.series_root_id, customer_id: customerId }).first('recurring_pattern');
+  return root?.recurring_pattern === to ? applied : null;
+}
+
 // POST confirm: the change, when its outcome is the one the customer was shown.
 async function confirm(customerId, to, { version, ip = null, userAgent = null } = {}) {
   if (typeof version !== 'string' || !version) throw httpError(400, 'version required');
-  const done = await run(customerId, to, { expectedVersion: version, consent: { ip, userAgent } });
+  let done;
+  try {
+    done = await run(customerId, to, { expectedVersion: version, consent: { ip, userAgent } });
+  } catch (err) {
+    // A customer the first production test's list leaves out is answered before any read; every other
+    // "not available" may be the repeat of a change that was made.
+    const maybeRepeat = err.code === 'FREQUENCY_CHANGE_UNAVAILABLE' && err.reason !== 'allowlist';
+    const applied = maybeRepeat ? await appliedOutcome(customerId, to, version) : null;
+    if (!applied) throw err;
+    return { success: true, ...applied };
+  }
   const Schedule = require('../routes/admin-schedule');
   await Schedule.settleSeriesFrequencyChange(done.change);
   await notifyOffice(done);

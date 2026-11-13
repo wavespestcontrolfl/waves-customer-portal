@@ -10,6 +10,7 @@
 //      (the visits the nightly top-up books later).
 //   3. A first visit that is near, confirmed or moved on purpose stays exactly as booked.
 //   4. An account outside the rules is refused with nothing written.
+//   5. A plan another save holds is a retry at once, and a confirm asked twice is one change.
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
@@ -41,6 +42,7 @@ jest.mock('../services/messaging/send-customer-message', () => mockSending('../s
 
 const { randomUUID } = require('node:crypto');
 const { addETDays, etDateString } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 const { gates } = require('../config/feature-gates');
 const NotificationService = require('../services/notification-service');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -54,7 +56,9 @@ postgres('pest frequency change against migrated PostgreSQL', () => {
   let catalog;
   const ids = {};
   const day = (n) => etDateString(addETDays(new Date(), n));
-  const dayOf = (value) => etDateString(new Date(value));
+  // A pg DATE column: read by its calendar date (date-only.js). Through an ET conversion it lands a day
+  // early wherever the process zone is UTC, as in CI.
+  const dayOf = (value) => dateOnlyString(value);
   const daysBetween = (a, b) => Math.round((new Date(`${b}T12:00:00Z`) - new Date(`${a}T12:00:00Z`)) / 86400000);
   const planRows = () => trx('scheduled_services').where({ customer_id: ids.customer }).orderBy('scheduled_date', 'asc');
   const upcoming = async () => (await planRows()).filter((row) => ['pending', 'confirmed'].includes(row.status));
@@ -266,6 +270,67 @@ postgres('pest frequency change against migrated PostgreSQL', () => {
     expect((await trx('scheduled_services').where({ id: ids.root }).first()).recurring_pattern).toBe('quarterly');
     // The mint is over: the same confirm now goes through.
     await expect(pestFrequency.confirm(ids.customer, 'monthly', { version: shown.version })).resolves.toMatchObject({ success: true });
+  });
+
+  test('another save holds the plan: a look is told to try again at once and never waits for it', async () => {
+    await seedPlan();
+    // The nightly top-up, or a second look at this plan, is inside the plan's own lock on another connection.
+    const Schedule = require('../routes/admin-schedule');
+    const other = await database.transaction();
+    try {
+      await Schedule.acquireRecurringSeriesMaintenanceLock(other, ids.root);
+      await expect(pestFrequency.preview(ids.customer, 'monthly'))
+        .rejects.toMatchObject({ status: 409, code: 'FREQUENCY_CHANGE_RETRY', reason: 'VISIT_CHANGED_RETRY' });
+    } finally {
+      await other.rollback();
+    }
+    await expect(pestFrequency.preview(ids.customer, 'monthly')).resolves.toMatchObject({ frequency: 'monthly' });
+  });
+
+  test('inside the change the account check reads on the change\'s own connection, not a second one', async () => {
+    await seedPlan();
+    const accountCheck = jest.spyOn(require('../services/one-tap-purchase'), 'accountCanOneTap');
+    try {
+      await pestFrequency.preview(ids.customer, 'monthly');
+      // The look before any lock, then the read under the plan's locks: that one is handed the transaction.
+      expect(accountCheck.mock.calls.map(([customerId, conn]) => [customerId, conn?.isTransaction === true]))
+        .toEqual([[ids.customer, false], [ids.customer, true]]);
+    } finally {
+      accountCheck.mockRestore();
+    }
+  });
+
+  test('a first visit the customer confirmed after the look stays: the change asks for a new look', async () => {
+    await seedPlan({ lastVisitDaysAgo: 20 });
+    const shown = await pestFrequency.preview(ids.customer, 'monthly');
+    expect(shown.replacedVisits).toHaveLength(4);
+    // The customer confirms that visit in the portal (routes/schedule.js), then confirms the change.
+    await trx('scheduled_services').where({ id: ids.pending[0] }).update({ status: 'confirmed', customer_confirmed: true });
+    await expect(pestFrequency.confirm(ids.customer, 'monthly', { version: shown.version }))
+      .rejects.toMatchObject({ status: 409, code: 'PREVIEW_CHANGED' });
+    expect((await upcoming()).map((row) => [row.id, row.status])).toEqual(ids.pending.map((id, i) => [id, i === 0 ? 'confirmed' : 'pending']));
+    await expect(pestFrequency.preview(ids.customer, 'monthly')).resolves.toMatchObject({ keptVisit: { date: day(71), perVisit: 117 } });
+  });
+
+  test('a confirm asked again after it was made gets the first answer and writes nothing more', async () => {
+    await seedPlan();
+    const shown = await pestFrequency.preview(ids.customer, 'monthly');
+    const first = await pestFrequency.confirm(ids.customer, 'monthly', { version: shown.version });
+    const written = async () => JSON.stringify([await planRows(), await trx('customers').where({ id: ids.customer }).first(),
+      await trx('customer_plan_rates').where({ customer_id: ids.customer }), await trx('activity_log').where({ customer_id: ids.customer })]);
+    const afterFirst = await written();
+    jest.clearAllMocks();
+    // The first answer never reached the phone: the customer taps Confirm again on the same review screen.
+    await expect(pestFrequency.confirm(ids.customer, 'monthly', { version: shown.version })).resolves.toEqual(first);
+    expect(await written()).toBe(afterFirst);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+    // Another outcome of that choice is still refused. So is this one once the plan has moved on again.
+    await expect(pestFrequency.confirm(ids.customer, 'monthly', { version: 'another-outcome' }))
+      .rejects.toMatchObject({ status: 409, code: 'FREQUENCY_CHANGE_UNAVAILABLE' });
+    await trx('scheduled_services').where({ id: ids.root }).update({ recurring_pattern: 'quarterly' });
+    await expect(pestFrequency.confirm(ids.customer, 'monthly', { version: shown.version }))
+      .rejects.toMatchObject({ status: 409, code: 'FREQUENCY_CHANGE_UNAVAILABLE' });
   });
 
   test('a confirm for an outcome the customer did not see is refused and writes nothing', async () => {
