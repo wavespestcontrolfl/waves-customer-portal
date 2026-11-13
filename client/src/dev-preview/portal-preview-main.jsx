@@ -45,6 +45,29 @@ const PREVIEW_MESSAGES = [
   { id: 'msg-demo-3', from: 'waves', body: 'Tell us if you see ants inside and we will add a quick look at the next stop.', createdAt: hoursAgo(25) },
 ];
 
+// ── "Change how often we visit" (GATE_PEST_FREQUENCY_CHANGE) ───────────────
+// ?frequency=1 offers the change on the Plan tab's pest row (quarterly, both
+// choices); =monthly is the plan with no choice left; =unavailable refuses the
+// look, so the office path shows. Without the param the entry stays hidden,
+// as with the gate off.
+const FREQUENCY_MODE = new URLSearchParams(window.location.search).get('frequency');
+const FREQUENCY_PLANS = {
+  quarterly: { frequency: 'quarterly', visitsPerYear: 4, perVisit: 147, perYear: 588 },
+  bimonthly: { frequency: 'bimonthly', visitsPerYear: 6, perVisit: 129.36, perYear: 776.16 },
+  monthly: { frequency: 'monthly', visitsPerYear: 12, perVisit: 114.66, perYear: 1375.92 },
+};
+const frequencyOutcome = (frequency) => {
+  const gap = frequency === 'monthly' ? 30 : 61;
+  return {
+    ...FREQUENCY_PLANS[frequency],
+    today: FREQUENCY_PLANS.quarterly,
+    keptVisit: { date: day(5), perVisit: 147 },
+    replacedVisits: [day(96), day(187), day(278)],
+    newVisits: Array.from({ length: Math.floor(360 / gap) }, (_, i) => day(5 + gap * (i + 1))),
+    version: `preview-${frequency}`,
+  };
+};
+
 // ── personas ───────────────────────────────────────────────────────────────
 // ?persona=cancelled renders the C4 read-only cancelled state (churned
 // account: cancelled banner, cancelled plan page + restart hand-off, no
@@ -550,6 +573,19 @@ Object.assign(api, {
   // satisfaction / requests / documents
   getGoogleReviewCard: async () => ({ card: null }),
   getRequests: async () => ({ requests: [], total: 0 }),
+  // Pest visit frequency (see FREQUENCY_MODE above). Nothing is written.
+  getPestFrequency: async () => {
+    if (!FREQUENCY_MODE) return { available: false };
+    if (FREQUENCY_MODE === 'monthly') return { available: true, current: FREQUENCY_PLANS.monthly, options: [] };
+    return { available: true, current: FREQUENCY_PLANS.quarterly, options: [FREQUENCY_PLANS.bimonthly, FREQUENCY_PLANS.monthly] };
+  },
+  previewPestFrequency: async ({ frequency }) => {
+    if (FREQUENCY_MODE === 'unavailable') {
+      throw Object.assign(new Error('This change is not available online for this plan.'), { status: 409, code: 'FREQUENCY_CHANGE_UNAVAILABLE' });
+    }
+    return frequencyOutcome(frequency);
+  },
+  confirmPestFrequency: async ({ frequency }) => ({ success: true, ...frequencyOutcome(frequency) }),
   // Portal messages: one customer question and two Waves answers, no network.
   getPortalMessages: async () => ({ messages: PREVIEW_MESSAGES, hasMore: false, unread: 0 }),
   getPortalMessagesUnread: async () => ({ count: 0 }),

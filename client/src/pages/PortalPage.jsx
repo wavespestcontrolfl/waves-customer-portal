@@ -32,6 +32,7 @@ import MistingSystemCard from '../components/portal/MistingSystemCard';
 import YardWrappedCard from '../components/portal/YardWrappedCard';
 import PetNameAskCard from '../components/portal/PetNameAskCard';
 import PortalMessages, { usePortalMessagesGate } from '../components/portal/PortalMessages';
+import PestFrequencyChange, { usePestFrequency } from '../components/portal/PestFrequencyChange';
 import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
@@ -11760,7 +11761,7 @@ function PlanStationMap({ map, onOpen = null, onImageError = null }) {
   );
 }
 
-function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null }) {
+function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null, messagesEnabled = false }) {
   const portalGlass = usePortalGlass();
   // focusService pre-expands a row on mount — set by the home-page lawn
   // teaser and by ?tab=plan&service=<catalog id> deep-links.
@@ -11790,6 +11791,9 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
   // (codex GH r17 P2).
   const lawnHealth = useLawnHealth(customer?.cancelled === true ? null : customer.id, { currentEntry, savedScope, selectedPropertyId: selectedProperty?.propertyId || null, onSavedScopeUnavailable });
   const planOffers = usePlanOffers(customer?.cancelled !== true);
+  // "Change how often we visit" (pest control): the server's read decides
+  // whether the entry shows at all.
+  const pestFrequency = usePestFrequency(customer?.cancelled !== true);
   const compact = useIsMobile(760);
   // Real billing mode (owner 2026-07-11): per-application / prepaid plans
   // must not present a "$X per month" plan rate — same source of truth as
@@ -12223,6 +12227,19 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
     minHeight: 44,
   };
   const iconName = (name) => (typeof name === 'string' && /^[a-z]/i.test(name) ? name : 'shield');
+  const pestFrequencyEntry = (
+    <PestFrequencyChange
+      data={pestFrequency.data}
+      ui={{ shell: PORTAL_SHELL, subtle: GLASS_SUBTLE, primaryAction: PORTAL_PRIMARY_ACTION, secondaryAction: PORTAL_SECONDARY_ACTION, CloseButton: ShellCloseButton, IconTile: ShellIconTile }}
+      messagesEnabled={messagesEnabled}
+      onChanged={() => {
+        loadPlan();
+        pestFrequency.reload();
+        if (typeof refreshCustomer === 'function') Promise.resolve(refreshCustomer()).catch(() => {});
+      }}
+    />
+  );
+  const pestFrequencyInServiceRow = pestFrequency.data?.available === true && displayedServices.some((s) => s.id === 'pest_control');
 
   // C4: the cancelled state replaces every live plan card (and the cancel
   // flow) — one "Restart my plan" action that lands on a fresh estimate.
@@ -12446,6 +12463,10 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                       }} />
                     </div>
 
+                    {svc.id === 'pest_control' && pestFrequencyInServiceRow && (
+                      <div style={{ marginTop: 12 }}>{pestFrequencyEntry}</div>
+                    )}
+
                     {expanded && (
                       <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E7E2D7' }}>
                         <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>{svc.description}</div>
@@ -12526,6 +12547,10 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
               })}
             </div>
           </section>
+
+          {pestFrequency.data?.available === true && !pestFrequencyInServiceRow && (
+            <section data-glass="card" style={{ ...card, padding: 20 }}>{pestFrequencyEntry}</section>
+          )}
 
           {/* A lawn customer whose visible schedule has no qualifying lawn
               row (paused plan, tier slice) still gets their health card —
@@ -18524,7 +18549,7 @@ export default function PortalPage() {
         <PortalRefreshArea available={['dashboard', 'visits', 'documents'].includes(activeTab)}
           onlineContent={!cancelledAccount && !contactSession && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
         {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} onOpenPets={() => navigate('/?tab=property#pets')} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties}  focusRequestId={new URLSearchParams(location.search).get('requestId')} />}
-        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} currentEntry={activeProperty} savedScope={portalProperties.some((p) => p.key)} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} />}
+        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} currentEntry={activeProperty} savedScope={portalProperties.some((p) => p.key)} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} messagesEnabled={messagesGate.enabled} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);
           // Keep the URL's legacy token in step so refresh/share restores the
