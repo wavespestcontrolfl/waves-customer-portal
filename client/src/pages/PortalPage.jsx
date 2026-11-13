@@ -10861,9 +10861,22 @@ function LearnTab({ customer, onOpenPhotoId = null, scope = null }) {
 // =========================================================================
 // SERVICE CATALOG — pricing & details for My Plan
 // =========================================================================
+// The pest card's cadence line. My Plan used to render the first of the pest
+// frequencies for every customer, so a plan on every two months or monthly
+// read "Quarterly (4x)". The plan's own cadence is in its catalog name
+// ("Bi-Monthly Pest Control Service"); a name that states none keeps the first.
+export function pestCadenceLine(planName, frequencies) {
+  const name = String(planName || '').toLowerCase();
+  if (/bi-?monthly|every (two|2) months/.test(name)) return frequencies[1];
+  if (/monthly|every month/.test(name)) return frequencies[2];
+  return frequencies[0];
+}
+
 const SERVICE_CATALOG = [
   {
     id: 'pest_control', name: 'Pest Control', icon: 'bug',
+    // The three general pest cadences, in this order: pestCadenceLine picks
+    // the customer's own from the plan's catalog name.
     frequencies: ['Quarterly (4x)', 'Bi-Monthly (6x)', 'Monthly (12x)'],
     basePrice: 55, description: 'Interior + exterior treatment, granular perimeter band, bait station check, cobweb sweep on all eaves',
     // Advion granules are not used on pest visits (owner 2026-10-24); its catalog row is retired.
@@ -11946,6 +11959,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
     return null;
   };
   const detectedServiceIds = [];
+  const planRowName = (service) => service.serviceDisplayName || service.serviceType || service.service_type || service.type;
   // Real catalog name of the visit that matched each card ("Seasonal Mosquito
   // Control Service"), so the card never states the wrong program — the
   // SERVICE_CATALOG names are family placeholders for tier padding only.
@@ -11958,7 +11972,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
     // when catalog identity overrode a stale label's family (codex #3591
     // r79 P2) — prefer it so the card title matches the card's program
     // (a repointed "Rodent Trapping" label never titles the bait card).
-    const realName = service.serviceDisplayName || service.serviceType || service.service_type || service.type;
+    const realName = planRowName(service);
     if (realName && !detectedServiceNames[id]) detectedServiceNames[id] = realName;
   };
   // Only recurring, non-callback visits represent WaveGuard plan coverage. One-time
@@ -11990,6 +12004,15 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
     return true;
   };
   [nextService, ...upcomingServices].filter(isPlanCoverageRow).forEach(addDetectedService);
+  // The pest card names the plan as it goes on: its LAST upcoming visit (the
+  // schedule read is in date order). After a frequency change the next visit
+  // can be one that stays as booked on the old plan
+  // (pest-frequency-change.js), and a card titled by it would still read
+  // "Quarterly" right after the customer chose monthly. The other cards keep
+  // the name of their first visit.
+  const lastPestVisit = upcomingServices.filter(isPlanCoverageRow)
+    .filter((service) => detectCatalogServiceId(service) === 'pest_control').pop();
+  const pestPlanName = (lastPestVisit && planRowName(lastPestVisit)) || detectedServiceNames.pest_control;
 
   // For a tier'd member, the included-services list reflects the tier ENTITLEMENT, not
   // just the rows that happen to be on the visible schedule: surface detected recurring
@@ -12397,9 +12420,11 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                           <span style={{ minWidth: 0 }}>
                             <span data-glass="chip" style={{ ...CUSTOMER_SECTION_LABEL, marginLeft: 0 }}>
                               <Icon name={iconName(svc.icon)} size={15} strokeWidth={1.8} />
-                              {detectedServiceNames[svc.id] || svc.name}
+                              {(svc.id === 'pest_control' && pestPlanName) || detectedServiceNames[svc.id] || svc.name}
                             </span>
-                            <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: muted }}>{svc.frequencies[0]}</span>
+                            <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: muted }}>
+                              {svc.id === 'pest_control' ? pestCadenceLine(pestPlanName, svc.frequencies) : svc.frequencies[0]}
+                            </span>
                             {svc.id === 'lawn_care' && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
                               const avg = Math.round(lawnHealth.scores.overallScore);
                               const initialAvg = Math.round(lawnHealth.initialScores.overallScore);
