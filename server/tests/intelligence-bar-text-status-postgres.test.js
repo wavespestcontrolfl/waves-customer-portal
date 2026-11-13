@@ -104,13 +104,20 @@ jest.setTimeout(60000);
     expect(blockedTypes(out)).toEqual(APPOINTMENT_TYPES);
     expect(out.text_types.find((t) => t.type === 'tech_en_route')).toMatchObject({ code: 'PURPOSE_OPTED_OUT' });
     expect(out.text_types.filter((t) => t.allowed === true).map((t) => t.type))
-      .toEqual(['service_completion', 'billing', 'payment_receipt', 'review_request', 'conversational']);
+      .toEqual(['service_completion', 'payment_link', 'billing', 'payment_receipt', 'review_request', 'conversational']);
     expect(await rowCounts(second)).toEqual(before);
 
     const mainOut = await status(main);
     expect(mainOut.additional_property_profile).toBe(false);
     expect(blockedTypes(mainOut)).toEqual([]);
-    expect(mainOut.appointment_text_recipients).toEqual([{ role: 'primary', phone_last4: `…${main.phone.slice(-4)}` }]);
+  });
+
+  test('an email-only choice for billing notices blocks that text and no other', async () => {
+    const c = await customer();
+    await db('notification_prefs').where({ customer_id: c.id }).update({ billing_channel: 'email' });
+    const out = await status(c);
+    expect(blockedTypes(out)).toEqual(['billing']);
+    expect(out.text_types.find((t) => t.type === 'billing')).toMatchObject({ code: 'CHANNEL_EMAIL_ONLY', reason: expect.stringMatching(/email only/) });
   });
 
   test('a STOP blocks every text type and the do-not-text row is named', async () => {

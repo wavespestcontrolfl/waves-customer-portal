@@ -80,7 +80,7 @@ Use for: "show me the conversation with Henderson", "what did we say to the cust
   },
   {
     name: 'get_customer_text_status',
-    description: `Why texts do or do not reach ONE customer. Read only. Runs the send path's own opt-out checks for each kind of text and answers allowed, or the reason: STOP, the do-not-text list, a landline, or that kind switched off in notification settings (a second-home profile starts with its reminder texts off). Also returns who gets the reminder texts, texts blocked or undelivered in the last 60 days, and the last text sent. A switched-off kind leaves nothing in the thread or in the Twilio failure list: use this before you say you cannot see why texts are not going out.
+    description: `Why texts do or do not reach ONE customer. Read only. Runs the send path's own opt-out checks for each kind of text and answers allowed, or the reason: STOP, the do-not-text list, a landline, or that kind switched off in notification settings (a second-home profile starts with its reminder texts off). Also returns the texts blocked or undelivered in the last 60 days and the last text sent. A switched-off kind leaves nothing in the thread or in the Twilio failure list: use this before you say you cannot see why texts are not going out.
 Use for: "why isn't Henderson getting texts?", "did Smith opt out?", "is this number on the do-not-text list?"`,
     input_schema: {
       type: 'object',

@@ -73,7 +73,7 @@ test('asks the send path validators once per text type, for the customer\'s numb
   expect(out.text_types.every((t) => t.allowed === true)).toBe(true);
   expect(consent.checkConsentForPurpose).toHaveBeenCalledTimes(TEXT_TYPES.length);
   const [input, sendPolicy] = consent.checkConsentForPurpose.mock.calls.find(([i]) => i.purpose === 'appointment_reminder_72h');
-  expect(input).toMatchObject({ audience: 'customer', channel: 'sms', customerId: CUSTOMER_ID, to: '+12025550143' });
+  expect(input).toMatchObject({ audience: 'customer', channel: 'sms', customerId: CUSTOMER_ID, to: '+12025550143', hasEmailLeg: true });
   expect(sendPolicy.prefsColumn).toBe('service_reminder_72h');
   // An appointmentId makes loadContactState resolve the visit's property through resolveAppointmentPrefs, which writes
   // the senders' decision log. A read-only tool must never pass one.
@@ -81,7 +81,6 @@ test('asks the send path validators once per text type, for the customer\'s numb
   expect(out).toMatchObject({
     customer_id: CUSTOMER_ID, customer_name: 'Fixture Texts', phone_last4: '…0143', additional_property_profile: false,
     opted_out_of_all_texts: false, do_not_text_list: null, checked_for_visit: { service_id: VISIT_ID, date: '2099-03-04' },
-    appointment_text_recipients: [{ role: 'primary', phone_last4: '…0143' }],
     recent_blocked: [], recent_not_delivered: [], last_text_sent: null, window_days: 60,
   });
 });
@@ -143,13 +142,13 @@ test('a visit at a saved property: its toggles decide when the property rule is 
   expect(consent.checkConsentForPurpose.mock.calls[0][2].propertyToggles).toMatchObject({ sms_enabled: true, tech_en_route: false, service_reminder_72h: false });
   expect(resolve).not.toHaveBeenCalled();
 
-  // Unreadable under enforcement: the senders hold the text, so the state says the lookup failed and recipients are unknown.
+  // Unreadable under enforcement: the senders hold the text, so the state says the lookup failed.
   jest.clearAllMocks();
   tables({ visit });
   load.mockRejectedValue(new Error('read failed'));
   const out = await executeCommsTool('get_customer_text_status', { customer_id: CUSTOMER_ID });
   expect(consent.checkConsentForPurpose.mock.calls[0][2].lookupFailed).toBe(true);
-  expect(out.appointment_text_recipients).toBe('unavailable');
+  expect(out.checked_for_visit).toMatchObject({ service_id: VISIT_ID }); // the visit itself was read
 });
 
 test('a do-not-text list that could not be read is "could not check", not "allowed"', async () => {
@@ -197,6 +196,19 @@ test('lists the blocked sends, the undelivered texts and the last sent text; a q
   for (const q of queries.filter((entry) => entry.table === 'sms_log')) {
     expect(q.calls).toContainEqual(['where', { 'sms_log.customer_id': CUSTOMER_ID, 'sms_log.direction': 'outbound' }]);
   }
+});
+
+test('a next visit that cannot be read is not "no visit": every type reads "could not check"', async () => {
+  // The REAL consent validator, on the state the tool hands it.
+  consent.checkConsentForPurpose.mockImplementation(jest.requireActual('../services/messaging/validators/consent').checkConsentForPurpose);
+  fakeDb((table) => {
+    if (table === 'customers') return [customer()];
+    if (table === 'scheduled_services') throw new Error('connection reset');
+    return [];
+  });
+  const out = await executeCommsTool('get_customer_text_status', { customer_id: CUSTOMER_ID });
+  expect(out).toMatchObject({ checked_for_visit: 'unavailable', opted_out_of_all_texts: false });
+  expect(out.text_types.every((t) => t.allowed === null)).toBe(true);
 });
 
 test('an unreadable side table says "unavailable" and keeps the rest of the answer', async () => {

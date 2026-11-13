@@ -31,7 +31,7 @@ const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { loadContactState, checkConsentForPurpose } = require('./messaging/validators/consent');
 const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
 const { resolvePolicy } = require('./messaging/policy');
-const { getAppointmentContacts, isSecondaryProfile } = require('./customer-contact');
+const { isSecondaryProfile } = require('./customer-contact');
 const propertyPrefs = require('./property-notification-prefs');
 
 const WINDOW_DAYS = 60;
@@ -47,6 +47,7 @@ const TEXT_TYPES = [
   ['tech_en_route', 'Technician on the way'],
   ['tech_arrived', 'Technician arrived'],
   ['service_completion', 'Service complete'],
+  ['payment_link', 'Invoice or payment link'],
   ['billing', 'Billing notice'],
   ['payment_receipt', 'Payment receipt'],
   ['review_request', 'Review request'],
@@ -65,8 +66,8 @@ const PLAIN_REASON = {
   SUPPRESSED_WRONG_NUMBER: 'The number is flagged as a wrong number.',
   SUPPRESSED_MANUAL_DNC: 'Staff put the number on the do-not-contact list.',
   SUPPRESSED_NON_MOBILE: 'The number is a landline or cannot receive texts.',
-  CHANNEL_EMAIL_ONLY: 'The customer chose email only for this type.',
-  CHANNEL_NOT_SELECTED: 'The customer did not choose Text for billing notices.',
+  CHANNEL_EMAIL_ONLY: 'The customer chose email only for this type. A notice that has no email version still goes by text.',
+  CHANNEL_NOT_SELECTED: 'The customer did not choose Text for this kind of billing notice.',
   NO_CONSENT_RECORD: 'This customer has no notification settings row.',
 };
 
@@ -149,21 +150,29 @@ function outboundTexts(customerId, statuses) {
     .select('sms_log.created_at', 'sms_log.message_type', 'sms_log.status');
 }
 
-// What the consent rows say today: the STOP switch, the do-not-text list, each text type's verdict and who the
-// appointment texts go to. One load of the send path's contact state answers all four.
-async function consentAnswer(customer, visit) {
+// What the consent rows say today: the STOP switch, the do-not-text list and each text type's verdict.
+// One load of the send path's contact state answers all three.
+async function consentAnswer(customer) {
   // No appointmentId: with one, loadContactState would write the senders' decision log (see the header).
-  const base = { audience: 'customer', channel: 'sms', customerId: customer.id, to: customer.phone };
+  // hasEmailLeg: an email-only choice for billing or receipts stops the text only for a notice that also has an email
+  // version (the consent validator's rule). Most do, so that is the case answered; PLAIN_REASON says so.
+  const base = { audience: 'customer', channel: 'sms', customerId: customer.id, to: customer.phone, hasEmailLeg: true };
   // 'conversational' so the no-settings-row reply evidence is loaded too.
   let state = await loadContactState({ ...base, purpose: 'conversational' });
   state = await loadSuppressionState(base, state);
+  // The next visit can carry a saved property whose toggles decide. A visit or property that cannot be READ is not
+  // "no visit": the senders hold a text whose property toggles are unreadable, and the same state answers
+  // "could not check" here instead of the customer row's answer.
+  let visit = null;
   try {
+    visit = await nextOpenVisit(customer.id);
     state.propertyToggles = await visitPropertyToggles(customer.id, visit, state.prefs);
   } catch (err) {
-    // The senders hold a text whose property toggles cannot be read; the same state answers "could not check" here.
-    logger.warn(`[customer-text-status] property toggles unreadable (code=${err.code || 'unknown'})`);
+    logger.warn(`[customer-text-status] next visit or its property toggles unreadable (code=${err.code || 'unknown'})`);
     state.lookupFailed = true;
   }
+  let checkedForVisit = state.lookupFailed ? 'unavailable' : null;
+  if (visit) checkedForVisit = { service_id: visit.id, date: dateOnlyString(visit.scheduled_date) };
 
   let doNotText = state.suppressionLoaded === true ? null : 'unavailable';
   if (state.suppression) doNotText = { reason: state.suppression.reason, since: iso(state.suppression.created_at), source: state.suppression.source };
@@ -172,12 +181,11 @@ async function consentAnswer(customer, visit) {
     textTypes.push({ type: purpose, label, ...(await typeVerdict(purpose, base, state)) });
   }
   return {
-    opted_out_of_all_texts: state.prefs ? state.prefs.sms_enabled === false : null,
+    checked_for_visit: checkedForVisit,
+    // No settings row is "never opted out" (a STOP always writes one); a row that could not be read is unknown.
+    opted_out_of_all_texts: state.prefs || !state.lookupFailed ? state.prefs?.sms_enabled === false : null,
     do_not_text_list: doNotText,
     text_types: textTypes,
-    // Who gets them depends on the settings row: unknown settings, unknown recipients.
-    appointment_text_recipients: state.lookupFailed ? 'unavailable'
-      : getAppointmentContacts(customer, state.propertyToggles || state.prefs || {}).map((contact) => ({ role: contact.role, phone_last4: last4(contact.phone) })),
   };
 }
 
@@ -208,7 +216,7 @@ const ANSWER_NOTE = 'allowed covers consent and settings only. A sender can stil
   + 'recent_blocked lists those. A text type that is switched off is skipped before any send, so it leaves no row in recent_blocked.';
 
 /**
- * @param {object} customer a full customers row (the tool's resolver supplies it)
+ * @param {object} customer a customers row: id, first_name, last_name, phone, account_id, is_primary_profile
  */
 async function getCustomerTextStatus(customer) {
   const additionalProperty = isSecondaryProfile(customer);
@@ -222,11 +230,9 @@ async function getCustomerTextStatus(customer) {
   if (!customer.phone) {
     return { ...out, no_phone: true, note: 'No phone number is on file, so no text can go to this customer.' };
   }
-  const visit = await readOrNull('next visit', () => nextOpenVisit(customer.id));
   return {
     ...out,
-    checked_for_visit: visit ? { service_id: visit.id, date: dateOnlyString(visit.scheduled_date) } : null,
-    ...(await consentAnswer(customer, visit)),
+    ...(await consentAnswer(customer)),
     ...(await historyAnswer(customer.id)),
     note: ANSWER_NOTE,
   };
