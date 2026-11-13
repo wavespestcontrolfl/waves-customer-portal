@@ -63,16 +63,19 @@ function httpError(status, message, extra = {}) {
 const notAvailable = (reason) => httpError(409, 'This change is not available online for this plan.', { code: 'FREQUENCY_CHANGE_UNAVAILABLE', reason });
 
 const cents = (value) => (value == null || value === '' ? null : Math.round(Number(value) * 100));
-const round2 = (value) => Math.round(value * 100) / 100;
+// A year of visits at one per-visit price, in dollars, from whole cents.
+const yearOf = (perVisit, visitsPerYear) => (cents(perVisit) * visitsPerYear) / 100;
+// A curve factor as a whole number (0.88 -> 8800), so a price moves along the curve in integer arithmetic.
+const curveWeight = (frequency) => Math.round(PEST.frequencyDiscounts.v2[frequency] * 10000);
 
-// One choice, priced: the customer's own per-visit price moved along the engine's curve, in cents as the
-// engine rounds a per-visit price (service-pricing.js). From quarterly the factor is the curve's own;
-// from every two months it is the ratio of the two (monthly 0.78 over 0.88).
+// One choice, priced: the customer's own per-visit price moved along the engine's curve. From quarterly the
+// factor is the curve's own; from every two months it is the ratio of the two (monthly 0.78 over 0.88).
+// Whole cents times whole weights, rounded once: a half cent rounds up ($67.10 every two months is $59.48
+// monthly), where the same sum in floating-point dollars lands a cent low.
 function pricedOption(plan, to) {
-  const curve = PEST.frequencyDiscounts.v2;
-  const perVisit = round2(plan.perVisit * curve[to] / curve[plan.frequency]);
+  const perVisit = Math.round(cents(plan.perVisit) * curveWeight(to) / curveWeight(plan.frequency)) / 100;
   const visitsPerYear = PEST.frequencies[to];
-  return { frequency: to, visitsPerYear, perVisit, perYear: round2(perVisit * visitsPerYear) };
+  return { frequency: to, visitsPerYear, perVisit, perYear: yearOf(perVisit, visitsPerYear) };
 }
 
 // Any money or billing state on an upcoming visit that a new schedule must not touch: the Schedule screen's
@@ -170,7 +173,7 @@ async function readPlan(conn, customerId) {
   if (reason) return { plan: null, reason };
 
   const visitsPerYear = PEST.frequencies[rows.frequency];
-  const plan = { customer, lane, ...rows, visitsPerYear, perYear: round2(rows.perVisit * visitsPerYear) };
+  const plan = { customer, lane, ...rows, visitsPerYear, perYear: yearOf(rows.perVisit, visitsPerYear) };
   // A choice whose catalog service is missing or switched off is not offered.
   const sellable = (service) => !!service && service.is_active !== false && service.is_archived !== true;
   plan.options = MORE_VISITS[rows.frequency]
@@ -233,9 +236,10 @@ async function moveCustomerMoneyFields(trx, plan, option) {
     await trx('customers').where({ id: plan.customer.id }).update({ per_application_fee: option.perVisit, updated_at: new Date() });
     moved.perApplicationFee = true;
   }
-  const previousScalar = round2(Number(customer.monthly_rate) || 0);
+  const previousScalar = (cents(customer.monthly_rate) || 0) / 100;
   if (previousScalar <= 0) return moved;
-  const newScalar = round2(previousScalar + (option.perYear - plan.perYear) / 12);
+  // A twelfth of the change in yearly cost, in whole cents.
+  const newScalar = (cents(previousScalar) + Math.round((cents(option.perYear) - cents(plan.perYear)) / 12)) / 100;
   try {
     // A savepoint: a refused line edit (a held service, an unsplit ledger) undoes only itself.
     await trx.transaction(async (sp) => {

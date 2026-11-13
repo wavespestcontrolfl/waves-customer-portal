@@ -14,6 +14,10 @@ describe('pricing a choice', () => {
     // From every two months, the two factors' ratio: the same quarterly base gives the same monthly price.
     ['bimonthly', 102.96, 'monthly', { visitsPerYear: 12, perVisit: 91.26, perYear: 1095.12 }],
     ['quarterly', 89.5, 'monthly', { visitsPerYear: 12, perVisit: 69.81, perYear: 837.72 }],
+    // A half cent rounds up: 6710 x 78 / 88 = 5947.5 cents. In floating-point dollars the same sum is 59.47.
+    ['bimonthly', 67.1, 'monthly', { visitsPerYear: 12, perVisit: 59.48, perYear: 713.76 }],
+    // 4525 x 88 / 100 = 3982 cents exactly, and a year of it has no float tail.
+    ['quarterly', 45.25, 'bimonthly', { visitsPerYear: 6, perVisit: 39.82, perYear: 238.92 }],
   ])('%s at $%s to %s', (frequency, perVisit, to, expected) => {
     expect(_private.pricedOption({ frequency, perVisit }, to)).toEqual({ frequency: to, ...expected });
   });
