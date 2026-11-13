@@ -1,6 +1,6 @@
 // GATE_PORTAL_MESSAGES_NIGHT_AI, the parts that need no database: the gate reads strictly at call time, the
-// assistant's hold seam files nothing (and only when a caller sets it), the two quote and move tools hand off
-// instead of writing on the Messages thread's turn, and the message type SQL in portal-inbox.js matches the one
+// assistant's hold seam files nothing (and only when a caller sets it), the thread's turn has its four tools
+// (stay_silent answers only there), and the message type SQL in portal-inbox.js matches the one
 // portal-messages.js writes.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 process.env.ANTHROPIC_API_KEY = 'test-key';
@@ -21,7 +21,7 @@ const gates = require('../config/feature-gates');
 const NightAi = require('../services/portal-messages-night-ai');
 const PortalMessages = require('../services/portal-messages');
 const assistant = require('../services/ai-assistant/assistant');
-const portalOpen = require('../services/ai-assistant/portal-open');
+const { THREAD_TOOLS, executeToolCall } = require('../services/ai-assistant/tools');
 
 afterEach(() => { delete process.env.GATE_PORTAL_MESSAGES_NIGHT_AI; mockDbUse.mockClear(); });
 
@@ -111,15 +111,15 @@ describe('the assistant\'s history seam', () => {
   });
 });
 
-describe('the quote and move tools on the Messages thread', () => {
-  it('hand off instead of writing, and only when the turn holds', async () => {
-    const held = { open: true, holdHandOff: true };
-    expect(await portalOpen.requestQuote('cust-1', { service: 'mosquito' }, held)).toMatchObject({ sent: false });
-    expect(await portalOpen.requestMove({ new_address: '1 Example St' }, { ...held, recordMove: jest.fn() })).toMatchObject({ sent: false });
+describe('the Messages thread\'s tools', () => {
+  it('are exactly the four of the thread lane', () => {
+    expect(THREAD_TOOLS.map((tool) => tool.name)).toEqual(['get_upcoming_services', 'offer_reschedule_link', 'stay_silent', 'escalate']);
+  });
+
+  it('stay_silent answers only on the Messages thread\'s turn, and touches no database', async () => {
+    expect(await executeToolCall('stay_silent', { why: 'thanks' }, 'cust-1', null, null, { thread: true })).toEqual({ silent: true, why: 'thanks' });
+    expect(await executeToolCall('stay_silent', { why: 'thanks' }, 'cust-1', null, null, {})).toEqual({ error: 'Unknown tool: stay_silent' });
+    expect(await executeToolCall('stay_silent', { why: 'thanks' }, 'cust-1', [], [], { open: true, thread: false })).toEqual({ error: 'Unknown tool: stay_silent' });
     expect(mockDbUse).not.toHaveBeenCalled();
-    // Without the open gate the tools are still unknown, held or not (as before).
-    expect(await portalOpen.requestQuote('cust-1', {}, { open: false })).toEqual({ error: 'Unknown tool: request_quote' });
-    expect(await portalOpen.requestMove({}, { open: false, recordMove: jest.fn() })).toEqual({ error: 'Unknown tool: request_move' });
-    expect(await portalOpen.requestMove({}, { open: true })).toEqual({ error: 'Unknown tool: request_move' });
   });
 });

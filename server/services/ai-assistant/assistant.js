@@ -11,7 +11,8 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { TOOLS, portalToolsFor, executeToolCall, withoutEmails, emailReadBackAwaitingAnswer } = require('./tools');
+const { TOOLS, THREAD_TOOLS, portalToolsFor, executeToolCall, withoutEmails, emailReadBackAwaitingAnswer } = require('./tools');
+const threadLane = require('./thread-lane');
 const { renderCompanyFactsSection } = require('../sms-company-facts');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { recordGap } = require('../agent-gap-reports');
@@ -273,6 +274,8 @@ function laneExtras(lane) {
   return {
     ...(lane.actions?.length ? { actions: lane.actions } : {}),
     ...(lane.cards?.length ? { cards: lane.cards } : {}),
+    // The Messages thread's turn: whether a schedule tool returned something the reply may state (tools.js).
+    ...(lane.thread ? { grounded: lane.context.grounded === true } : {}),
   };
 }
 
@@ -304,8 +307,9 @@ function answeredInsteadOfRun(toolUse, toolResults) {
 function openHandOffOptions(lane, input) {
   return lane.open ? { open: true, say: portalOpen.sanitizeSay(input.say) } : {};
 }
-// Tools that end the turn run last, in this order (every other tool first).
-const HAND_OFF_ORDER = ['request_email_change', 'escalate'];
+// Tools that end the turn run last, in this order (every other tool first). The Messages thread's no-reply
+// move is after escalate, so a response that asks for both hands off.
+const HAND_OFF_ORDER = ['request_email_change', 'escalate', 'stay_silent'];
 
 // Whether this turn's caller owns the hand-off (turn.holdHandOff, set by portal-messages-night-ai.js).
 const holdsHandOff = (turn) => turn?.holdHandOff === true;
@@ -314,11 +318,22 @@ const holdsHandOff = (turn) => turn?.holdHandOff === true;
 // property (the route decides; anything but false withholds the re-service
 // button, which books at the primary address).
 // `thread` (GATE_PORTAL_MESSAGES_NIGHT_AI, portal-messages-night-ai.js): the turn answers inside the
-// customer's Messages thread, which shows text only and is itself the office's item. The lane keeps its
-// prompt, facts and tools but builds no button or card (every tool already answers "use escalate" when
-// those are not arrays, as for SMS), and writes no hand-off item of its own (see turn.holdHandOff).
+// customer's Messages thread, which shows text only and is itself the office's item. That turn has its own
+// short prompt and four tools (thread-lane.js), builds no button or card, and writes no hand-off item of its
+// own (see turn.holdHandOff). None of the portal chat's gates changes it.
 function portalLane(channel, { secondaryProperty = true, replay = false, thread = false } = {}) {
   if (!portalSelfServe(channel)) return { prompt: SYSTEM_PROMPT, tools: TOOLS, actions: null, cards: null, context: {} };
+  if (thread) {
+    return {
+      prompt: threadLane.THREAD_PROMPT,
+      tools: THREAD_TOOLS,
+      actions: null,
+      cards: null,
+      portal: true,
+      thread: true,
+      context: { secondaryProperty: secondaryProperty !== false, holdHandOff: true, thread: true },
+    };
+  }
   const gates = require('../../config/feature-gates');
   // Three independent gates: the payment card, the past-visit facts and the
   // re-service offer.
@@ -330,9 +345,7 @@ function portalLane(channel, { secondaryProperty = true, replay = false, thread 
   // The confirmed email-change hand-off: its own gate.
   // A crashed turn cannot confirm an address from a later transcript read-back.
   // Recover its original ask through the ordinary account-change handoff instead.
-  // The Messages thread's turn (thread) has no read-back flow: the address check reads the assistant's private
-  // transcript, which that turn never uses (see buildHistory), and a hand-off there is the thread's own item.
-  const emailChange = !replay && !thread && gates.portalChatEmailChangeLive();
+  const emailChange = !replay && gates.portalChatEmailChangeLive();
   // The opened-up chat: its own gate, on top of the self-serve switch.
   const open = gates.portalChatOpenLive();
   // The open prompt's cancel options exist only in the GATE_CANCEL_FLOW_V2 flow.
@@ -340,16 +353,15 @@ function portalLane(channel, { secondaryProperty = true, replay = false, thread 
   return {
     prompt: portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange, open, cancelFlow }),
     tools: portalToolsFor({ payments, visits, reservice, reserviceLawn, emailChange, open }),
-    actions: thread ? null : [],
-    cards: !thread && (payments || visits) ? [] : null,
+    actions: [],
+    cards: payments || visits ? [] : null,
     portal: true,
-    thread,
     // Whether the payment card and re-service tools are in this lane.
     payments,
     reservice,
     emailChange,
     open,
-    context: { secondaryProperty: secondaryProperty !== false, lawn: reserviceLawn, emailChange, open, ...(thread ? { holdHandOff: true } : {}) },
+    context: { secondaryProperty: secondaryProperty !== false, lawn: reserviceLawn, emailChange, open },
   };
 }
 
@@ -799,7 +811,7 @@ class WavesAssistant {
   // moving hand-off item.
   bindLaneContext(lane, conversation, customerMessage, turn) {
     if (lane.emailChange) lane.context.conversationId = conversation.id;
-    if (lane.open && !lane.thread) lane.context.recordMove = (move) => this.recordMoveItem({ conversation, customerMessage, move, turn });
+    if (lane.open) lane.context.recordMove = (move) => this.recordMoveItem({ conversation, customerMessage, move, turn });
   }
 
   async resolveConversation(channel, channelIdentifier, customerId, customerPhone, turn) {
@@ -922,6 +934,10 @@ class WavesAssistant {
           execution.rethrowDeadline(err);
           logger.error(`[ai-assistant] Failed to log tool use: ${err.message}`);
         }
+
+        // The Messages thread's no-reply move (thread-lane.js stay_silent, which only that turn's tools can
+        // answer): the turn ends with nothing for the customer.
+        if (result.silent === true) return { reply: '', conversationId: conversation.id, escalated: false, generated: true, silent: true };
 
         // Only the email-change tool returns these three fields.
         noteEmailResult(email, result);
