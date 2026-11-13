@@ -1443,3 +1443,106 @@ describe('the empty-hour move (GATE_MAKE_ROOM_EMPTY_HOUR)', () => {
     });
   });
 });
+
+/**
+ * Later days (owner 2026-11-12, GATE_MAKE_ROOM_LATER_DAYS): the sooner rule also scans the days AFTER the first free day
+ * that have no free hour in the customer's list. Here the list's first free day is the day before the example day.
+ */
+describe('later days (GATE_MAKE_ROOM_LATER_DAYS)', () => {
+  const { findMakeRoomOffers } = require('../services/scheduling/booking-make-room');
+  const { resetBackgroundChecks, MAX_SOONER_CHECKS, MAX_LATER_DAY_CHECKS } = _internals;
+  const EARLY = '2097-06-09';
+  const NOW_EARLY = new Date('2097-06-08T05:00:00Z');
+  const EARLY_POOL = [{ date: EARLY, windowStart: '12:00', techId: TECH }];
+  const laterDeps = (opts = {}) => Object.assign(makeDeps({ told: [], ...opts }), { laterDaysOn: () => true });
+  const scan = (opts = {}) => check({ pool: EARLY_POOL, dateFrom: EARLY, dateTo: DAY, now: NOW_EARLY, ...opts });
+  const found = (report) => report.sooner.passed.map((p) => `${p.date} ${p.start}`);
+  beforeEach(() => resetBackgroundChecks());
+
+  test('gate off: a day after the first free day is not scanned, and the report is the same as before', async () => {
+    const { report: base } = await scan({ deps: makeDeps({ told: [] }) });
+    const { report: off } = await scan({ deps: Object.assign(makeDeps({ told: [] }), { laterDaysOn: () => false }) });
+    expect(off.sooner).toEqual(base.sooner);
+    expect(off.sooner).toMatchObject({ firstFreeDay: EARLY, daysBefore: 0, tried: 0, passed: [] });
+    expect(off.sooner).not.toHaveProperty('laterDays');
+  });
+
+  test('gate on: a later day with no free hour in the list is scanned, under every rule of a taken hour', async () => {
+    const { report } = await scan({ deps: laterDeps() });
+    expect(report.sooner).toMatchObject({ firstFreeDay: EARLY, daysBefore: 0, laterDays: 1 });
+    expect(found(report)).toContain(`${DAY} 09:00`);
+    const nine = report.sooner.passed.find((p) => p.start === '09:00');
+    expect(moves(nine)).toEqual(['visit-b 09:00->10:00', 'visit-c 10:00->11:00', 'visit-d 11:00->12:00']);
+    expect(nine.daysGained).toBe(-1);
+    // The confirmed stop A still never moves.
+    expect(found(report)).not.toContain(`${DAY} 08:00`);
+  });
+
+  test('a later day that has a free hour in the list is left alone', async () => {
+    const { report } = await scan({ deps: laterDeps(), pool: [...EARLY_POOL, { date: DAY, windowStart: '15:00', techId: TECH }] });
+    expect(report.sooner).toMatchObject({ laterDays: 0, tried: 0, passed: [] });
+  });
+
+  test('an empty list has no later day: every loaded day is already scanned', async () => {
+    const { report } = await scan({ deps: laterDeps(), pool: [] });
+    expect(report.sooner).toMatchObject({ firstFreeDay: null, daysBefore: 2, laterDays: 0 });
+  });
+
+  describe('the page\'s offer', () => {
+    const BEFORE = '2097-06-10';
+    const FREE_DAY = '2097-06-11';
+    const AFTER = '2097-06-12';
+    const pair = (date, tag) => [stop(`p${tag}`, 9, 20, { scheduled_date: date }), stop(`q${tag}`, 12, 30, { scheduled_date: date })];
+    const offer = async (rows) => {
+      const { conn } = fakeConn();
+      return findMakeRoomOffers({
+        estimateId: 'est-1', pool: [{ date: FREE_DAY, windowStart: '12:00', techId: TECH }], coords: NEW_PIN, durationMinutes: 60,
+        dateFrom: BEFORE, dateTo: AFTER, admit: () => true, placement: PAGE_PLACES, now: NOW, conn, deps: laterDeps({ rows }),
+      });
+    };
+
+    test('an earlier day still wins: the walk is earliest first and ends at the first pass', async () => {
+      const { hours } = await offer([...pair(BEFORE, 'b'), ...pair(AFTER, 'a')]);
+      expect(hours.map((h) => `${h.date} ${h.start}`)).toEqual([`${BEFORE} 09:00`]);
+    });
+
+    test('with no stop to move on an earlier day, the later day is offered', async () => {
+      const { hours, report } = await offer(pair(AFTER, 'a'));
+      expect(hours.map((h) => `${h.date} ${h.start}`)).toEqual([`${AFTER} 09:00`]);
+      expect(report.sooner).toMatchObject({ firstFreeDay: FREE_DAY, laterDays: 1 });
+    });
+  });
+
+  test('the wider scan may check more hours: MAX_LATER_DAY_CHECKS with the gate on, MAX_SOONER_CHECKS without', async () => {
+    expect(MAX_LATER_DAY_CHECKS).toBeGreaterThan(MAX_SOONER_CHECKS);
+    // The first free day, then 20 later days with two stops each: 40 hours.
+    const dates = Array.from({ length: 20 }, (_, i) => `2097-07-${String(2 + i).padStart(2, '0')}`);
+    const rows = dates.flatMap((date, i) => [stop(`p${i}`, 9, 20, { scheduled_date: date }), stop(`q${i}`, 12, 30, { scheduled_date: date })]);
+    const run = (deps) => check({
+      deps, pool: [{ date: '2097-07-01', windowStart: '12:00', techId: TECH }], dateFrom: '2097-07-01', dateTo: '2097-07-21',
+      now: new Date('2097-06-29T05:00:00Z'), admit: () => true,
+    });
+    const { report } = await run(laterDeps({ rows }));
+    expect(report.sooner.candidates).toBe(40);
+    expect(report.sooner.checked).toBe(40);
+    expect(MAX_LATER_DAY_CHECKS).toBeGreaterThanOrEqual(40);
+    const { report: off } = await run(makeDeps({ rows, told: [] }));
+    expect(off.sooner.checked).toBe(0);
+  });
+
+  describe('makeRoomLaterDaysLive (read at call time)', () => {
+    const gates = require('../config/feature-gates');
+    const saved = process.env.GATE_MAKE_ROOM_LATER_DAYS;
+    afterEach(() => { if (saved === undefined) delete process.env.GATE_MAKE_ROOM_LATER_DAYS; else process.env.GATE_MAKE_ROOM_LATER_DAYS = saved; });
+
+    test('exactly "true" is on; unset or anything else is off; the module reads this reader', () => {
+      delete process.env.GATE_MAKE_ROOM_LATER_DAYS;
+      expect(gates.makeRoomLaterDaysLive()).toBe(false);
+      process.env.GATE_MAKE_ROOM_LATER_DAYS = 'shadow';
+      expect(gates.makeRoomLaterDaysLive()).toBe(false);
+      process.env.GATE_MAKE_ROOM_LATER_DAYS = 'true';
+      expect(gates.makeRoomLaterDaysLive()).toBe(true);
+      expect(_internals.defaultDeps().laterDaysOn).toBe(gates.makeRoomLaterDaysLive);
+    });
+  });
+});

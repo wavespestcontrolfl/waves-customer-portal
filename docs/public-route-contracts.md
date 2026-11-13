@@ -1840,6 +1840,23 @@ With the gate turned off after a hold was made, the proof finds no chain for
 the empty hour: `/extend` supersedes the hold and the accept answers the
 existing taken-slot message, with nothing moved. No text, email or call goes
 out.
+**Estimate picker, the make-room hour may be on a later day
+(`GATE_MAKE_ROOM_LATER_DAYS=true`, owner 2026-11-12; needs
+`GATE_BOOKING_MAKE_ROOM=true`; off, the default, leaves every route
+byte-identical).** The ONE make-room slot above may also be on a day AFTER the
+list's first free day, when that day has no free time in the list. It is still
+the single earliest hour that passes, so an hour on a day before the first free
+day wins whenever one passes, and every rule of the two entries above holds
+for the stops that move. Place in the list: an hour on a day before the first
+free day is first, as before; an hour on a later day goes after the first
+three cards (the page's "Our best times" strip reads the first three), and
+the last free card still drops out when the list was full. The slot's payload
+shape, `slotId` format, signature policy (`MAKE_ROOM_OFFER_POLICY`) and the
+2.5-second wait are unchanged, the free list's counts and
+`metadata.firstDayAvailability` are unchanged, and nothing new reaches the
+client. `/reserve`, `/extend` and the accept do not read the day rule: their
+proof, locks, writes and refusals are the same, so turning the gate off never
+strands a hold. No text, email or call goes out.
 **Estimate picker, service-line map live (`GATE_SERVICE_LINE_MAP=live`, roadmap
 build 4, owner 2026-10-30; ships dark: `shadow`, the prod value, and every other
 value leave these routes byte-identical, with no extra query).**

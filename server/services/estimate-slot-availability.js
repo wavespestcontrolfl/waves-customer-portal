@@ -2284,6 +2284,20 @@ async function makeRoomOfferSlot(args, { durationMinutes }) {
   }
 }
 
+// The page's "Our best times" strip reads the first cards of the list (client SlotPicker).
+const BEST_TIMES_CARDS = 3;
+
+// The list with the one make-room hour in it, never longer than `total` (the last free card makes room). An hour on a
+// day before the pool's first free day is the soonest card and goes first. An hour on a later day
+// (GATE_MAKE_ROOM_LATER_DAYS: a day with no free time after the first free day) is one more choice on its own day, not a
+// best time: it goes after the first BEST_TIMES_CARDS cards, and always inside the list.
+function withMakeRoomSlot(selected, makeRoomSlot, { pool, total }) {
+  const firstFreeDay = (pool || []).map((slot) => slot?.date).filter(Boolean).sort()[0] ?? null;
+  if (firstFreeDay == null || makeRoomSlot.date < firstFreeDay) return [makeRoomSlot, ...selected].slice(0, total);
+  const at = Math.max(0, Math.min(BEST_TIMES_CARDS, selected.length, total - 1));
+  return [...selected.slice(0, at), makeRoomSlot, ...selected.slice(at)].slice(0, total);
+}
+
 // The hold's proof of one make-room hour (slot-reservation reserveSlot and extendReservation): the finder's own checks
 // for that one hour, with this page's admit and placement rules built from the same helpers the offer used. `estimate`
 // is the locked estimate row; `serviceProfile` may be null (an extend has none: the season and service-line rules,
@@ -2796,9 +2810,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     routeFirst: isEnabled('geoSlotRanking'),
     rainTierOf,
   });
-  // The make-room hour is on a day before every free slot, so it is the soonest card: first, ahead of the free list's own
-  // pinned and spread order. The free list is selected, counted and badged exactly as without it; the last card makes room.
-  const shown = makeRoomSlot ? [makeRoomSlot, ...selected].slice(0, TARGET_TOTAL) : selected;
+  // The make-room hour on a day before every free slot is the soonest card: first, ahead of the free list's own pinned
+  // and spread order. The free list is selected, counted and badged exactly as without it; the last card makes room.
+  // A make-room hour on a later day (GATE_MAKE_ROOM_LATER_DAYS) is placed by withMakeRoomSlot.
+  const shown = makeRoomSlot ? withMakeRoomSlot(selected, makeRoomSlot, { pool: routeChecked, total: TARGET_TOTAL }) : selected;
   const { primary, expander } = splitSlotResults(shown, opts.maxResults, opts.expanderMaxResults);
 
   // Stamp rain BEFORE signing/caching (see stampSlotRainChances) so the
@@ -3103,5 +3118,6 @@ module.exports = {
     makeRoomAdmit,
     makeRoomPlacement,
     makeRoomOfferSlot,
+    withMakeRoomSlot,
   },
 };
