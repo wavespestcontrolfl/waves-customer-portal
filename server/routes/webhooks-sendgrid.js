@@ -26,10 +26,10 @@ const bounceRecovery = require('../services/email-bounce-recovery');
 const bounceRescue = require('../services/email-bounce-rescue');
 const providerRetry = require('../services/transactional-email-provider-retry');
 
-// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): SendGrid files "no mail server for
+// SendGrid (owner 2026-10-29) files "no mail server for
 // this domain" as a blocked bounce. That is a bad address, not a sender block:
 // no provider retry, no "the recipient did not bounce" handling, anywhere in
-// this webhook. Gate off = providerRetry.isProviderBlockedEvent exactly.
+// this webhook.
 function isProviderBlock(ev) {
   return providerRetry.isProviderBlockedEvent(ev) && !bounceRecovery.isNoMailServerEvent(ev);
 }
@@ -425,7 +425,7 @@ async function handleEvent(ev) {
     bounceRecovery.alertBouncedContactAddress(email, ev)
       .catch((err) => logger.error(`[sendgrid-webhook] bounced-contact alert failed: ${err.message}`));
     if (deadDomain) {
-      // GATE_CALL_EMAIL_CHECKS: a "blocked" bounce for a domain with no mail
+      // A "blocked" bounce for a domain with no mail
       // server goes to people only, on every send path: the alert above and
       // the recording re-check card. No rescue: it can apply a repair on its
       // own, and a call-captured address is never auto-corrected (AGENTS.md
@@ -520,13 +520,13 @@ async function handleEvent(ev) {
     // Tracked bounces are NOT routed through alertBouncedContactAddress —
     // attemptRecovery has its own richer alert (alertUnrecoverableBounce).
     if (processedNew && attemptMatched) {
-      // GATE_CALL_EMAIL_CHECKS: a "blocked" bounce whose domain has no mail
+      // A "blocked" bounce whose domain has no mail
       // server is a bad address, not a sender block — no retry rail for it.
       if (isProviderBlock(ev)) {
         providerRetry.alertIfProviderRetriesExhausted(emailMessage, ev)
           .catch((err) => logger.error(`[sendgrid-webhook] provider-retry alert failed for ${messageId}: ${err.message}`));
       } else if (bounceRecovery.isNoMailServerEvent(ev) && !isRateReview) {
-        // GATE_CALL_EMAIL_CHECKS: a domain with no mail server goes to people
+        // A domain with no mail server goes to people
         // (the alert and the recording re-check card), never to
         // attemptRecovery, which can repair a domain and resend on its own.
         alertUntrackedHardBounce();

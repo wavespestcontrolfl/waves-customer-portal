@@ -86,8 +86,8 @@ function isHardBounceEvent(ev) {
 }
 
 /**
- * GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): a send that failed because the
- * recipient's domain has no mail server. SendGrid files it as a "blocked"
+ * A send that failed because the recipient's domain has no mail server
+ * (owner 2026-10-29). SendGrid files it as a "blocked"
  * bounce ("unable to get mx info: ..."), which isHardBounceEvent rightly
  * leaves to the sender-retry rail for real IP blocks; a dead domain is a bad
  * address, so the webhook sends it to people instead (the bounced-contact
@@ -99,8 +99,7 @@ function isHardBounceEvent(ev) {
  * recordEmailSuppressionForEvent still keys on isHardBounceEvent.
  */
 function isNoMailServerEvent(ev) {
-  const { callEmailChecksLive, isNoMailServerReason } = require('./call-email-checks');
-  if (!callEmailChecksLive()) return false;
+  const { isNoMailServerReason } = require('./call-email-checks');
   if (!require('./transactional-email-provider-retry').isProviderBlockedEvent(ev)) return false;
   return isNoMailServerReason(ev?.reason || ev?.response || '');
 }

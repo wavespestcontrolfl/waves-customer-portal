@@ -599,7 +599,7 @@ export function PropertyRoleEvidence({ payload }) {
 // "Confirm email" action satisfies it in-band. Controlled: draft state
 // (which radio, the typed value) lives in the parent, keyed by item id, so
 // multiple open disagreement cards never share a draft.
-// typedConfirm (GATE_CALL_EMAIL_CHECKS, owner 2026-10-29): the server flags every
+// typedConfirm (owner 2026-10-29): the server flags every
 // email read-back card for an admin, and the same form confirms the held address
 // or a typed correction in place.
 export function EmailConfirmForm({ itemId, payload, draft, onChange, onConfirm, busy, typedConfirm = false }) {
