@@ -229,7 +229,7 @@ export const ADMIN_NAV_ITEMS = {
     flag: "agent_estimate",
     adminOnly: true,
   },
-  // Bids has two tabs: Open bids (bid invites found in the email table, GATE_BID_DESK) and Bid kit (the papers and facts
+  // Bids has two tabs: Open bids (bid invites found in the email table) and Bid kit (the papers and facts
   // every government bid asks for). The Bid kit tab is always there, so the entry shows to every admin.
   bids: {
     id: "bids",

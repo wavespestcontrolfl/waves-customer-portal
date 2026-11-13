@@ -1,13 +1,13 @@
 'use strict';
 
 /**
- * Bid Desk rules (GATE_BID_DESK). PURE: no database, no clock of its own, NO LLM.
+ * Bid Desk rules. PURE: no database, no clock of its own, NO LLM.
  *
  *   attachPatch(bid, parsed, kind)  what a later email changes on an existing bid
  *   reminderDue(bid, now)           which due-date reminder (if any) is owed right now
  *   datesDue(bid, now)              the questions and job-walk reminders owed right now
  *   daysLeft(dueAt, now)            whole ET calendar days until the due date
- *   lapsedBid(bid, now)             a bid that closes itself (GATE_BID_DESK_AUTO_DATES; the caller checks the gate)
+ *   lapsedBid(bid, now)             a bid that closes itself
  *
  * The date rule: an email never overwrites a due date. A date the operator confirmed is final; a date that was read
  * from an earlier email stays as it was and the bid is flagged `needs_date_confirmation` so a person looks.
@@ -103,7 +103,7 @@ const LAPSED_FLAGGED_AFTER_MS = 30 * DAY_MS;
 /**
  * True when an open bid should close itself as 'no_bid': still 'new' (never marked 'bid'), a due date more than 1 day
  * past (more than 30 days past when the date is flagged for confirmation), no submission recorded, and not closed by
- * itself before. A bid with no date never closes. Pure; the caller checks GATE_BID_DESK_AUTO_DATES.
+ * itself before. A bid with no date never closes. Pure.
  */
 function lapsedBid(bid, now = new Date()) {
   if (!bid || bid.status !== 'new' || !bid.due_at || bid.submitted_at) return false;
@@ -124,7 +124,7 @@ function daysLeft(dueAt, now = new Date()) {
 
 // ---------- work we do not do ----------
 
-// GATE_BID_DESK_NOT_OUR_WORK (owner 2026-10-29): "we are a lawn care, as in herbicide, micronutrients, fertilizer, lawn pest
+// Not our work (owner 2026-10-29): "we are a lawn care, as in herbicide, micronutrients, fertilizer, lawn pest
 // control, we dont mow". Waves never bids grounds upkeep. A title that names upkeep and none of our work is not our work;
 // a title that names neither is filed as always.
 const UPKEEP_WORDS = new RegExp(`\\b(?:${[
@@ -145,7 +145,7 @@ const NOT_OUR_WORK_NOTE = 'Not our work: mowing, edging or trimming (owner 2026-
 
 /**
  * True when the title names grounds-upkeep work and none of our work. Pure; empty or non-string input is false.
- * The caller checks GATE_BID_DESK_NOT_OUR_WORK and never applies it to a bid a person marked by hand.
+ * The caller never applies it to a bid a person marked by hand.
  */
 function notOurWork(title) {
   const t = typeof title === 'string' ? title : '';

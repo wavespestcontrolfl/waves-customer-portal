@@ -3,7 +3,6 @@ const Joi = require('joi');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { bidDeskLive } = require('../config/feature-gates');
 const { markEmailAsBid, columnsFor } = require('../services/bid-desk');
 const checklist = require('../services/bid-desk/checklist');
 const { TYPES: SOLICITATION_TYPES } = require('../models/migrations/20261023130000_bid_desk_checklist');
@@ -11,14 +10,12 @@ const { daysLeft } = require('../services/bid-desk/rules');
 const { parseETDateTime, validCalendarDate, etParts, etWallClockOccurrences } = require('../utils/datetime-et');
 const { closeDoneAlerts } = require('../services/bid-desk/close-alerts');
 
-// Bid Desk (GATE_BID_DESK, dark). Staff-only list, detail and decisions for bid invites found in the email table.
+// Bid Desk. Staff-only list, detail and decisions for bid invites found in the email table.
 // Nothing here sends a message to anyone; a due date only becomes "confirmed" when the operator types or confirms it.
 // Each bid also carries the solicitation type, the questions and job-walk dates, the estimate link, the documents, the
 // per-bid checklist and the submission record.
 const router = express.Router();
 router.use(adminAuthenticate, requireAdmin);
-// Gate off = the whole surface answers 404, exactly as if it were not mounted.
-router.use((req, res, next) => (bidDeskLive() ? next() : res.status(404).json({ error: 'Not found' })));
 
 const STATUSES = ['new', 'bid', 'no_bid', 'submitted', 'won', 'lost'];
 const LIST_LIMIT = 500;

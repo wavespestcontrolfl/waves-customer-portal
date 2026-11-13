@@ -1,6 +1,5 @@
 // Bid Desk checklist: bad ids and bad bodies are refused before any query, the due-date reminder query looks 14 days
-// ahead, and the date reminders return before any query while the Bid Desk gate is off. The mocked database throws if
-// it is touched when it must not be.
+// ahead. The mocked database throws if it is touched when it must not be.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const mockDb = jest.fn(() => { throw new Error('the database must not be touched'); });
@@ -46,17 +45,10 @@ beforeAll(async () => {
 afterAll(async () => {
   if (server) await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 });
-beforeEach(() => { mockDb.mockReset(); mockDb.mockImplementation(() => { throw new Error('the database must not be touched'); }); delete process.env.GATE_BID_DESK; });
-afterEach(() => { delete process.env.GATE_BID_DESK; });
+beforeEach(() => { mockDb.mockReset(); mockDb.mockImplementation(() => { throw new Error('the database must not be touched'); }); });
 
 describe('reminders', () => {
-  test('the date reminders return before any query while the Bid Desk gate is off', async () => {
-    expect(await service.sendDateReminders()).toBe(0);
-    expect(mockDb).not.toHaveBeenCalled();
-  });
-
   test('the due-date reminder query looks 14 days ahead', async () => {
-    process.env.GATE_BID_DESK = 'true';
     const calls = [];
     const chain = new Proxy({}, {
       get: (_t, name) => {
@@ -73,8 +65,6 @@ describe('reminders', () => {
 });
 
 describe('validation', () => {
-  beforeEach(() => { process.env.GATE_BID_DESK = 'true'; });
-
   test('bad ids and bad bodies are refused before any query', async () => {
     const refused = [
       ['PATCH', `/${ID}`, { solicitationType: 'carrier_pigeon' }, 400],

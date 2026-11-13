@@ -1,4 +1,4 @@
-// Bid Desk detector and parser (GATE_BID_DESK): pure, no database, no AI. Every name, address and email below is
+// Bid Desk detector and parser: pure, no database, no AI. Every name, address and email below is
 // invented; the bodies copy the SHAPE of the BuildingConnected and Procore templates, not any real message.
 const {
   detectBidEmail, parseBidEmail, parseDateET, htmlToText, passesGmailSpam,
