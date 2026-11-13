@@ -24,7 +24,7 @@
  * GATE_IB_PLATFORM, which has the owner-only access model) and
  * owner-login only (ibFullAccess, carried as actionContext.fullAccess).
  *
- * OFFICE login (owner ruling 2026-10-28 "A1", GATE_IB_GENERAL_READ_OFFICE, which needs GATE_IB_GENERAL_READ): a non-owner ADMIN login
+ * OFFICE login (owner ruling 2026-10-28 "A1"; on whenever GATE_IB_GENERAL_READ is on): a non-owner ADMIN login
  * gets the same two tools limited to the catalog rows a person marked `office: true` (admin-read-reviewed.json). find_admin_reads lists
  * only those rows; read_admin_data refuses any other row ("not available on this login"). Free-text notes are always withheld on that
  * login, and a keep-mode row never adds its keepNotes there. The loopback GET still carries her own
@@ -99,11 +99,6 @@ const BLOCKED_ROUTES = Object.freeze([...catalog.blockedRoutes]);
 
 function adminReadLive() {
   return require('../../config/feature-gates').ibGeneralReadLive() === true;
-}
-
-// GATE_IB_GENERAL_READ_OFFICE: the non-owner admin login's limited read. Read at call time.
-function officeReadLive() {
-  return require('../../config/feature-gates').ibGeneralReadOfficeLive() === true;
 }
 
 function refusal(error, code, extra = {}) {
@@ -448,8 +443,8 @@ async function executeAdminReadTool(name, input, actionContext = {}) {
     return refusal('Reading admin screen data from the bar is turned off (GATE_IB_GENERAL_READ, which needs GATE_IB_PLATFORM). Nothing was read.', 'gate_off');
   }
   const owner = actionContext?.fullAccess === true && actionContext?.isAdmin !== false;
-  // A non-owner login: only an authenticated ADMIN (isAdmin true, set by the route from the token's role), only with the office gate on.
-  const office = !owner && actionContext?.isAdmin === true && officeReadLive();
+  // A non-owner login: only an authenticated ADMIN (isAdmin true, set by the route from the token's role).
+  const office = !owner && actionContext?.isAdmin === true;
   if (!owner && !office) {
     return refusal('This read is limited to the owner account.', 'permission_denied');
   }
@@ -457,7 +452,7 @@ async function executeAdminReadTool(name, input, actionContext = {}) {
 }
 
 module.exports = {
-  ADMIN_READ_TOOLS, executeAdminReadTool, adminReadLive, officeReadLive, scopeBinding, wordsOf, stem, STOPWORDS,
+  ADMIN_READ_TOOLS, executeAdminReadTool, adminReadLive, scopeBinding, wordsOf, stem, STOPWORDS,
   ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL, MAX_RESULT_CHARS, READ_TIMEOUT_MS,
   // Exported for the withholding fixtures: the answer as the office login (notes withheld) gets it, for any catalog row.
   shapeResponse,

@@ -10115,8 +10115,7 @@ function initScheduledJobs() {
   // Mac) upserts its job_health row at the end of each run; this rings ONE
   // standing admin bell when no complete run has landed today by the job's
   // due time (07:00 ET for the sweep), and closes it by itself when one does.
-  // Dark behind GATE_EXTERNAL_HEARTBEAT_WATCH (the service reads the gate
-  // itself); writes only admin notifications. See
+  // Writes only admin notifications. See
   // server/services/external-job-heartbeat-watch.js.
   // =========================================================================
   cron.schedule('5 7-22 * * *', async () => {
@@ -10124,7 +10123,7 @@ function initScheduledJobs() {
       await runExclusive('external-heartbeat-watch', async () => {
         const { runExternalHeartbeatWatch } = require('./external-job-heartbeat-watch');
         const result = await runExternalHeartbeatWatch();
-        if (!result.skipped && (result.alerted > 0 || result.closed > 0)) {
+        if (result.alerted > 0 || result.closed > 0) {
           logger.warn(`[external-heartbeat-watch] alerted=${result.alerted} closed=${result.closed}`);
         }
       });

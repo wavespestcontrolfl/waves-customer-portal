@@ -180,7 +180,10 @@ test('a model that smuggles its own token or URL gets nothing', async () => {
   expect(loopbackCalls).toHaveLength(0);
 });
 
-test('an admin login without full access never gets the tools or a read', async () => {
+// The office login (a non-owner admin) is always offered the two read tools, limited to the catalog rows a person
+// marked `office: true`. A row outside that list is refused before any request is made.
+test('an office admin login is offered the tools but never reads a row outside the office list', async () => {
+  expect(ENTRY.office).not.toBe(true);
   const lists = [];
   scriptModel([
     (request) => { lists.push(request.tools.map(t => t.name)); return toolUse('t1', 'discover_capabilities', { query: 'admin screen data read endpoint' }); },
@@ -191,11 +194,13 @@ test('an admin login without full access never gets the tools or a read', async 
     const { status } = await postQuery(baseUrl, OTHER_ADMIN, { prompt: 'read the admin screen', context: 'dashboard', session_id: 'session-1' });
     expect(status).toBe(200);
   });
+  expect(lists).toHaveLength(2);
   for (const list of lists) {
-    expect(list).not.toContain('read_admin_data');
-    expect(list).not.toContain('find_admin_reads');
+    expect(list).toContain('read_admin_data');
+    expect(list).toContain('find_admin_reads');
   }
   expect(loopbackCalls).toHaveLength(0);
+  expect(mockToolEvent.mock.calls.some(([event]) => event.toolName === 'read_admin_data' && event.success === true)).toBe(false);
 });
 
 test('with the gate off the owner login does not get the tools either', async () => {

@@ -91,7 +91,6 @@ beforeAll(() => {
   process.env.GATE_IB_COMPOSE_EMAIL = 'true';
   process.env.GATE_IB_SET_BILL_TO = 'true';
   process.env.GATE_IB_AGENT_REVIEW_DRAFTS = 'true';
-  process.env.GATE_IB_RESOLVE_DISPATCH_ALERT = 'true';
   process.env.GATE_IB_UNBLOCK_SENDER = 'true';
   // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
   process.env.GATE_IB_INVOICE_ACTIONS = 'true';
@@ -116,7 +115,6 @@ afterAll(() => {
   delete process.env.GATE_IB_COMPOSE_EMAIL;
   delete process.env.GATE_IB_SET_BILL_TO;
   delete process.env.GATE_IB_AGENT_REVIEW_DRAFTS;
-  delete process.env.GATE_IB_RESOLVE_DISPATCH_ALERT;
   delete process.env.GATE_IB_UNBLOCK_SENDER;
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;

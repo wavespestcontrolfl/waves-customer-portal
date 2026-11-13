@@ -1046,7 +1046,7 @@ function keepNotesProblem(row) {
   return row.keepNotes.find(path => row.keep.includes(path)) ? 'keepNotes must not repeat a keep path' : null;
 }
 
-// office: the row is one the OFFICE login (a non-owner admin, GATE_IB_GENERAL_READ_OFFICE) may read. A reviewer marks it `office: true`
+// office: the row is one the OFFICE login (a non-owner admin, always on) may read. A reviewer marks it `office: true`
 // after reading what the response returns. These can never be office rows, whatever a reviewer writes: money in motion and the books
 // (banking, payouts, payroll, tax, revenue settings), pricing configuration, the SEO pipeline, credentials and tokens. A row reviewed to
 // return free-text notes (keepNotes) cannot be an office row either: the office login never receives notes (they are withheld at run

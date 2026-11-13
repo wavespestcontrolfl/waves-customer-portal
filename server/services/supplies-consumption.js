@@ -303,7 +303,7 @@ async function consumeCompletionSupplies(db, {
         const unitCost = Number.isFinite(costPerUnit) && costPerUnit >= 0 && costUnitMatches ? costPerUnit : null;
         const costUsed = unitCost != null ? Number((usage * unitCost).toFixed(4)) : null;
 
-        // GATE_STOCK_COUNT_AWARE_USAGE: a visit done before the product's latest count was already counted out of
+        // A visit done before the product's latest count was already counted out of
         // stock, so the use is recorded with stock unchanged (inventory-count-guard.js).
         const guard = require('./inventory-count-guard');
         const countHold = await guard.stockHoldFor(trx, locked.id, () => guard.loadVisit(trx, { scheduledServiceId, serviceRecordId }));

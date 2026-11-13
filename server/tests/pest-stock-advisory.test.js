@@ -50,6 +50,8 @@ describe('the deduction a pest visit now makes with allowNegative', () => {
     const trx = (table) => ({
       where: () => ({
         forUpdate: () => ({ first: async () => null }),
+        // The product has never been counted: the count read answers no rows.
+        orderBy: () => ({ limit: () => ({ select: async () => [] }) }),
         update: async (row) => { writes.push({ table, update: row }); return 1; },
         where: (...since) => ({ select: async () => { reads.push({ table, since }); return history; } }),
       }),
