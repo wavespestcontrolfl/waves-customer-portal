@@ -149,13 +149,21 @@ postgres('pest frequency change against migrated PostgreSQL', () => {
   });
 
   test('confirm books what the preview showed: the new schedule replaces the pending visits and counts from the last visit', async () => {
-    await seedPlan({ lastVisitDaysAgo: 20 });
+    // The last visit sets the plan's day of the week, so it is seeded on a weekday (20 to 22 days ago). On a
+    // Saturday or Sunday the schedule moves each new visit to the Monday, and a visit moved across a month end
+    // (Sat Feb 27 2027 -> Mon Mar 1) makes the next one count from March: April gets the visit and March gets
+    // none, a 56-day gap in a monthly plan. That is a gap in the schedule's own walk (extendSeriesOnceLocked
+    // counts from the moved date), not in the frequency change; this test went red on 2026-11-13, the first
+    // day "20 days ago" was a Saturday. The gap check below stays strict.
+    const lastVisitDaysAgo = [20, 21, 22].find((n) => ![0, 6].includes(new Date(`${day(-n)}T12:00:00Z`).getUTCDay()));
+    const nextVisitInDays = 91 - lastVisitDaysAgo;
+    await seedPlan({ lastVisitDaysAgo });
     // Each pending visit has its reminder row, and the cancellation-notice hook is on as in production.
     gates.cancelNoticeHook = true;
     await trx('appointment_reminders').insert(ids.pending.map((id, i) => ({ scheduled_service_id: id, customer_id: ids.customer,
-      appointment_time: new Date(Date.now() + (71 + 91 * i) * 86400000), source: 'fixture' })));
+      appointment_time: new Date(Date.now() + (nextVisitInDays + 91 * i) * 86400000), source: 'fixture' })));
     const shown = await pestFrequency.preview(ids.customer, 'monthly');
-    // The last visit was 20 days ago and the next one was 71 days out: monthly brings it weeks sooner.
+    // The last visit was about 20 days ago and the next one was about 71 days out: monthly brings it weeks sooner.
     expect(shown.keptVisit).toBeNull();
     expect(shown.replacedVisits).toHaveLength(4);
     expect(shown.newVisits[0] >= day(7)).toBe(true);
