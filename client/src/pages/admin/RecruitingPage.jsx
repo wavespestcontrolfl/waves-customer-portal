@@ -105,7 +105,11 @@ export const ANSWER_LABELS = {
   availability: "Availability & earliest start",
   pay_expectation: "Pay expectation",
   why_waves: "Why Waves / why this trade",
-  physical_limitations: "Lifting / ladder limitations",
+  // The form asks "Can you perform these essential functions, with or
+  // without reasonable accommodation?", so the answer is Yes when the
+  // applicant CAN do the work. The label has to say that: under
+  // "limitations" a Yes read as "has limitations".
+  physical_limitations: "Can do the physical work (50 lb, ladders, attics, crawl spaces)",
   referral_source: "How they heard about us",
 };
 
@@ -145,6 +149,8 @@ const STAGE_LABEL = {
   application_received: "Application received",
   interview_invite: "Interview invite",
   interview_confirmation: "Interview confirmation",
+  applicant_reply: "Applicant text",
+  owner_reply: "Office text",
 };
 
 // "Link sent" means a delivery attempt that may have reached the applicant
@@ -1036,7 +1042,10 @@ export default function RecruitingPage() {
                     }}
                   >
                     <div className="flex flex-col items-start justify-between gap-3 lg:flex-row lg:items-center">
-                      <div className="min-w-0">
+                      {/* max-w-full: in the stacked (phone) layout this
+                          block is as wide as its longest line, so the
+                          summary's truncate needs a width to cut against. */}
+                      <div className="min-w-0 max-w-full">
                         <div className="text-14 font-medium text-zinc-900 truncate">
                           {c.name || "Unknown"}
                           <span className="text-zinc-400 font-normal">

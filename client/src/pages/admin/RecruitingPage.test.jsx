@@ -459,6 +459,41 @@ describe('RecruitingPage — stage dialog field labels (audit R4)', () => {
   });
 });
 
+describe('RecruitingPage — the detail says what was stored, in plain words', () => {
+  function openDetailWith(overrides) {
+    const base = buildFetchMock();
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      if (url.endsWith('/admin/careers/app-1')) {
+        return Promise.resolve(apiResponse({ application: detailFixture(overrides) }));
+      }
+      return base(url, options);
+    }));
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    return screen.findByText('Jordan Lee').then((card) => fireEvent.click(card));
+  }
+
+  it('labels the essential-functions answer as what the applicant can do, so a Yes never reads as "has limitations"', async () => {
+    await openDetailWith({ answers: { physical_limitations: 'Yes (with or without reasonable accommodation)' } });
+
+    expect(await screen.findByText('Yes (with or without reasonable accommodation)')).toBeInTheDocument();
+    expect(screen.getByText('Can do the physical work (50 lb, ladders, attics, crawl spaces)')).toBeInTheDocument();
+    expect(screen.queryByText(/limitations/i)).not.toBeInTheDocument();
+  });
+
+  it('names the two text-thread message kinds, never the stored stage key', async () => {
+    await openDetailWith({
+      comms_history: [
+        { id: 'm-1', at: '2026-11-05T17:53:22Z', stage: 'owner_reply', channel: 'sms', outcome: 'sent', body: 'See you at 2' },
+        { id: 'm-2', at: '2026-11-05T17:53:48Z', stage: 'applicant_reply', channel: 'sms', outcome: 'received', body: 'Sounds good' },
+      ],
+    });
+
+    expect(await screen.findByText(/sms · Applicant text · received/)).toBeInTheDocument();
+    expect(screen.getByText(/sms · Office text · sent/)).toBeInTheDocument();
+    expect(screen.queryByText(/applicant_reply|owner_reply/)).not.toBeInTheDocument();
+  });
+});
+
 describe('inviteDelivered', () => {
   it('is true only for a sent/uncertain/handoff interview_invite entry, never for a minted token alone', () => {
     expect(inviteDelivered({ interview_url: 'https://x/y', comms_history: [] })).toBe(false);
