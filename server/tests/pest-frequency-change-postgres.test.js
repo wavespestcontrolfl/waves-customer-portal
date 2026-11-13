@@ -262,7 +262,11 @@ postgres('pest frequency change against migrated PostgreSQL', () => {
       const [payer] = await trx('payers').insert({ display_name: 'Fixture payer' }).returning('id');
       await trx('scheduled_services').where({ id: ids.pending[0] }).update({ payer_id: payer.id });
     }],
-    ['a visit under way', 'plan_shape', async () => trx('scheduled_services').where({ id: ids.pending[0] }).update({ track_state: 'en_route' })],
+    ['a pending visit whose tracker is live', 'plan_shape', async () => trx('scheduled_services').where({ id: ids.pending[0] }).update({ track_state: 'en_route' })],
+    // By status such a visit is not among the upcoming rows at all: the plan itself is asked.
+    ['a technician on the way to a visit', 'visit_under_way', async () => trx('scheduled_services').where({ id: ids.pending[0] }).update({ status: 'en_route', scheduled_date: day(0) })],
+    ['a technician at a visit', 'visit_under_way', async () => trx('scheduled_services').where({ id: ids.pending[0] }).update({ status: 'on_site', scheduled_date: day(0) })],
+    ['a first visit that was never closed', 'visit_under_way', async () => trx('scheduled_services').where({ id: ids.root }).update({ status: 'on_site' })],
     ['an add-on line on a visit', 'plan_shape', async () => trx('scheduled_service_addons').insert({ scheduled_service_id: ids.pending[0], service_name: 'Fixture add-on' })],
     ['a plan that is not ongoing', 'plan_shape', async () => trx('scheduled_services').where({ id: ids.root }).update({ recurring_ongoing: false })],
     ['a plan whose first visit was cancelled', 'plan_shape', async () => trx('scheduled_services').where({ id: ids.root }).update({ status: 'cancelled' })],

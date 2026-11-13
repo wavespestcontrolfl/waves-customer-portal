@@ -44,6 +44,8 @@ const MORE_VISITS = { quarterly: ['bimonthly', 'monthly'], bimonthly: ['monthly'
 const CADENCE_WORDS = { quarterly: 'every three months', bimonthly: 'every two months', monthly: 'every month' };
 const PER_VISIT_LANES = new Set(['per_application', 'per_visit']);
 const UPCOMING_STATUSES = ['pending', 'confirmed'];
+// A technician is on the way to, or at, a visit of the plan (the statuses the bar's re-price tool reads the same way).
+const IN_PROGRESS_STATUSES = ['en_route', 'on_site', 'in_progress'];
 // A first visit nearer than this stays as booked, and no new visit is placed nearer than this.
 const KEEP_DAYS = 7;
 // The new schedule replaces the first pending visit only when it brings the next visit this much sooner.
@@ -107,13 +109,19 @@ async function readPlanRows(conn, customerId, catalog) {
 
   const root = await conn('scheduled_services').where({ id: rootIds[0] }).first();
   if (!root) return { reason: 'plan_shape' };
+  // A visit of this plan under way by its STATUS is not among the upcoming rows read below, whatever its
+  // date (a visit never closed keeps the status): the plan waits until that visit is done.
+  const underWay = await conn('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', root.id).orWhere('id', root.id); })
+    .whereIn('status', IN_PROGRESS_STATUSES).first('id');
+  if (underWay) return { reason: 'visit_under_way' };
   const frequency = root.recurring_pattern;
   const service = catalog.find((row) => row.service_key === CATALOG_KEY[frequency]);
   const visits = await upcomingPlanRows()
     .where(function () { this.where('recurring_parent_id', root.id).orWhere('id', root.id); })
     .orderBy('scheduled_date', 'asc').orderBy('created_at', 'asc');
   // An ongoing plan of the customer's own, on a cadence with its catalog service, every upcoming visit a
-  // plain visit of that service: no payer, not a re-service, not under way. Not a plan whose first visit
+  // plain visit of that service: no payer, not a re-service, no live tracker. Not a plan whose first visit
   // was cancelled: the series price guard holds every extension of one (series-price-guards.js).
   const plain = [
     String(root.customer_id) === String(customerId), root.is_recurring, !root.recurring_parent_id, root.recurring_ongoing === true, !!service,
