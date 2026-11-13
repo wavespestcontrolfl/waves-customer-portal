@@ -1,6 +1,6 @@
 'use strict';
 
-// Deadline math for a technician's ID card and training (GATE_TECH_TRAINING_DATES, dark). Pure: no I/O, no clock.
+// Deadline math for a technician's ID card and training. Pure: no I/O, no clock.
 // Every date is a calendar date ('YYYY-MM-DD', Eastern); `today` is passed in (etDateString()), and the math runs on the
 // date text at noon UTC, never `new Date(dateOnlyString)` day arithmetic.
 //

@@ -161,8 +161,7 @@ const TOOLS = [
     },
 ];
 
-// GATE_BI_TECH_SCORECARD: the scorecard rules for the prompt and the tool description.
-// Off, neither is touched (BI_AGENT_CONFIG.system and .tools are the constants above).
+// The scorecard rules for the prompt and the tool description.
 const TECH_SCORECARD_PROMPT = `
 
 TECHNICIAN SCORECARD (only when get_operations_snapshot returns "techScorecard"):
@@ -170,26 +169,15 @@ TECHNICIAN SCORECARD (only when get_operations_snapshot returns "techScorecard")
 - The owner SMS gets one short line per technician, ONLY when techScorecard.rows has 2 or more technicians (name, stops/day, on-site min vs target, drive min, callbacks, review asks, revenue/day vs cost/day; leave out any n/a figure). With 0 or 1 row, put nothing about technicians in the SMS. Keep the SMS under 480 chars: trim the content/SEO line, then the ads line, before these lines — never the Ops 7d line.
 - The saved report's operations_section ALWAYS carries the full table when techScorecard is present: every row, every field, each null with its reason. If techScorecard has "unavailable", write that it is unavailable and why. Never compute these figures yourself.`;
 
-const TECH_SCORECARD_TOOL_NOTE = ` When GATE_BI_TECH_SCORECARD is on it also returns "techScorecard": { week, onSiteTargetMinutes, rows, note, unavailable? } for the last full week (Monday to Sunday ET) — one row per technician with a completed visit: completedStops, daysWorked, stopsPerDay, onSiteMinutesPerStop, driveMinutesPerStop, callbacks (credited to the technician whose visit they correct), reviewAsks, revenuePerDay, costPerDay, lowSample and "reasons" (why each null value is unknown). Null means unknown, never zero.`;
+const TECH_SCORECARD_TOOL_NOTE = ` It also returns "techScorecard": { week, onSiteTargetMinutes, rows, note, unavailable? } for the last full week (Monday to Sunday ET) — one row per technician with a completed visit: completedStops, daysWorked, stopsPerDay, onSiteMinutesPerStop, driveMinutesPerStop, callbacks (credited to the technician whose visit they correct), reviewAsks, revenuePerDay, costPerDay, lowSample and "reasons" (why each null value is unknown). Null means unknown, never zero.`;
 
-function techScorecardOn() {
-  return require('../config/feature-gates').biTechScorecardLive();
-}
-
-// system and tools are read when a session is created (bi-agent.js), so the gate is read
-// at call time. Off returns the very same constants as before the gate existed.
 const BI_AGENT_CONFIG = {
   name: 'waves-weekly-briefing',
   description: 'Monday morning business intelligence briefing — revenue, customers, ads, content, SEO, reviews in one SMS',
   model: MODELS.FLAGSHIP,
-  get system() {
-    return techScorecardOn() ? SYSTEM_PROMPT + TECH_SCORECARD_PROMPT : SYSTEM_PROMPT;
-  },
-  get tools() {
-    if (!techScorecardOn()) return TOOLS;
-    return TOOLS.map((tool) => (tool.name === 'get_operations_snapshot'
-      ? { ...tool, description: tool.description + TECH_SCORECARD_TOOL_NOTE } : tool));
-  },
+  system: SYSTEM_PROMPT + TECH_SCORECARD_PROMPT,
+  tools: TOOLS.map((tool) => (tool.name === 'get_operations_snapshot'
+    ? { ...tool, description: tool.description + TECH_SCORECARD_TOOL_NOTE } : tool)),
 };
 
 module.exports = { BI_AGENT_CONFIG };

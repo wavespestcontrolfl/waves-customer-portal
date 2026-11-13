@@ -1,6 +1,5 @@
 /**
- * Weekly scorecard per technician for the Monday BI briefing (GATE_BI_TECH_SCORECARD,
- * second technician build 7, owner GO 2026-10-29). Reads only; sends nothing.
+ * Weekly scorecard per technician for the Monday BI briefing (second technician build 7, owner GO 2026-10-29). Reads only; sends nothing.
  *
  * Window: the last full week, Monday to Sunday ET, before the Monday the briefing runs.
  * One row per technician with 1+ completed visit that week. Every number reuses the

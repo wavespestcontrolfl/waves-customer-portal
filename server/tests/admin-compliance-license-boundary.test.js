@@ -1,6 +1,12 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const mockDb = jest.fn();
+  mockDb.raw = jest.fn((sql) => ({ raw: sql }));
+  return mockDb;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/technician-training-reminders', () => ({ runTechnicianTrainingReminders: jest.fn(async () => ({ closed: 0 })) }));
 jest.mock('../services/compliance', () => ({
   getApplications: jest.fn(),
   getDacsReport: jest.fn(),
@@ -95,6 +101,10 @@ describe('compliance license mutation boundary', () => {
       fl_applicator_license: 'JE362022',
       license_expiry: '2027-06-30',
       license_categories: ['core', 'ornamental'],
+      id_card_applied_on: null,
+      id_card_issued_on: null,
+      classroom_hours_done_on: null,
+      renewal_training_done_on: null,
       password_hash: 'must-not-leak',
       ssn_last4: '1234',
       address: '123 Private Way',
@@ -127,6 +137,10 @@ describe('compliance license mutation boundary', () => {
       'fl_applicator_license',
       'license_expiry',
       'license_categories',
+      { raw: "to_char(id_card_applied_on, 'YYYY-MM-DD') as id_card_applied_on" },
+      { raw: "to_char(id_card_issued_on, 'YYYY-MM-DD') as id_card_issued_on" },
+      { raw: "to_char(classroom_hours_done_on, 'YYYY-MM-DD') as classroom_hours_done_on" },
+      { raw: "to_char(renewal_training_done_on, 'YYYY-MM-DD') as renewal_training_done_on" },
     ]);
     expect(body).toEqual({
       success: true,
@@ -135,6 +149,10 @@ describe('compliance license mutation boundary', () => {
         license: 'JE362022',
         licenseExpiry: '2027-06-30',
         licenseCategories: ['core', 'ornamental'],
+        idCardAppliedOn: null,
+        idCardIssuedOn: null,
+        classroomHoursDoneOn: null,
+        renewalTrainingDoneOn: null,
       },
     });
 
