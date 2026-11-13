@@ -494,6 +494,55 @@ describe('RecruitingPage — the detail says what was stored, in plain words', (
   });
 });
 
+describe('RecruitingPage — the same person\'s other records (same phone number)', () => {
+  const OTHER = { id: 'app-2', status: 'new', name: 'Jordan L', origin: 'phone_call', created_at: '2026-09-04T18:31:00Z' };
+
+  function fetchWithTwoRecords() {
+    const base = buildFetchMock();
+    return vi.fn((url, options = {}) => {
+      if (url.endsWith('/admin/careers/app-1')) {
+        return Promise.resolve(apiResponse({ application: detailFixture(), reply_media: {}, same_phone: [OTHER] }));
+      }
+      if (url.endsWith('/admin/careers/app-2')) {
+        return Promise.resolve(apiResponse({
+          application: detailFixture({ id: 'app-2', contact_snapshot: { name: 'Jordan L', phone: '9415551234' }, answers: {}, ai_score: null, ai_recommendation: null }),
+          reply_media: {},
+          same_phone: [{ id: 'app-1', status: 'new', name: 'Jordan Lee', origin: 'web_form', created_at: '2026-09-10T12:00:00Z' }],
+        }));
+      }
+      return base(url, options);
+    });
+  }
+
+  it('names the other record with its stage, origin and date, and Open loads that record in the same dialog', async () => {
+    const fetchMock = fetchWithTwoRecords();
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText('Jordan Lee'));
+
+    expect(await screen.findByText('Same phone number')).toBeInTheDocument();
+    expect(screen.getByText(/^Jordan L · New · Phone call · Sep 4, /)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open the New record of Jordan L' }));
+
+    // The dialog now shows the phone-call record, which names the form record back.
+    expect(await screen.findByRole('heading', { name: 'Jordan L — Technician' })).toBeInTheDocument();
+    expect(screen.getByText(/^Jordan Lee · New · Online form · Sep 10, /)).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/admin/careers/app-2'))).toHaveLength(1);
+  });
+
+  it('shows no block for an applicant with one record', async () => {
+    vi.stubGlobal('fetch', buildFetchMock());
+
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText('Jordan Lee'));
+
+    await screen.findByRole('heading', { name: 'Jordan Lee — Technician' });
+    expect(screen.queryByText('Same phone number')).not.toBeInTheDocument();
+  });
+});
+
 describe('inviteDelivered', () => {
   it('is true only for a sent/uncertain/handoff interview_invite entry, never for a minted token alone', () => {
     expect(inviteDelivered({ interview_url: 'https://x/y', comms_history: [] })).toBe(false);
