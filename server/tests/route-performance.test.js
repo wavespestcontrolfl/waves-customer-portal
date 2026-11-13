@@ -54,9 +54,12 @@ test('corrected, operator-reported and backfilled durations retain separate evid
 test('truck GPS minutes rank after a hand correction and before the typed, lifecycle and unverified rungs', () => {
   const gps = { gps_on_site_minutes: 32 };
   expect(recordedTiming(recorded({ ...gps, time_on_site_adjusted_minutes: 30 }))).toMatchObject({ durationMinutes: 30, durationEvidence: 'operator_corrected' });
-  expect(recordedTiming(recorded(gps))).toMatchObject({ durationMinutes: 32, durationEvidence: 'gps_measured', completion: null });
+  // GPS replaces the minutes only: the corroborated completion stamp stays, so the day span keeps its end.
+  expect(recordedTiming(recorded(gps))).toMatchObject({ durationMinutes: 32, durationEvidence: 'gps_measured',
+    completion: recordedTiming(recorded()).completion });
+  expect(recordedTiming(recorded()).completion).toBeInstanceOf(Date);
   expect(recordedTiming(recorded({ ...gps, completionNotes: { timeOnSite: 35 }, statusHistory: [] }))).toMatchObject({ durationMinutes: 32, durationEvidence: 'gps_measured' });
-  expect(recordedTiming(recorded({ ...gps, statusHistory: [] }))).toMatchObject({ durationMinutes: 32, durationEvidence: 'gps_measured', arrival: null });
+  expect(recordedTiming(recorded({ ...gps, statusHistory: [] }))).toMatchObject({ durationMinutes: 32, durationEvidence: 'gps_measured', arrival: null, completion: null });
   expect(recordedTiming(recorded({ ...gps, completionNotes: JSON.stringify({ backfill: true, timeOnSite: 40 }) })))
     .toMatchObject({ durationMinutes: 32, durationEvidence: 'gps_measured' });
   expect(recordedTiming(recorded({ ...gps, time_on_site_adjusted_minutes: 30, completionNotes: { backfill: true } })))
@@ -70,6 +73,9 @@ test('truck GPS minutes rank after a hand correction and before the typed, lifec
 test('a GPS-measured duration is a comparable, separately labelled duration on the route', () => {
   const result = measureRoutePerformance(snapshot, [recorded({ gps_on_site_minutes: 32 })]);
   expect(result.stops[0]).toMatchObject({ recordedServiceMinutes: 32, durationEvidence: 'gps_measured', servicePredictionErrorMinutes: -28 });
+  // The route's last completion is the same minute as without the GPS leg (535 in the lifecycle test above).
+  expect(result.lastRecordedCompletionMinute).toBe(535);
+  expect(result.stops[0]).toMatchObject({ recordedCompletionMinute: 535, lifecycleCompletionMinute: 535 });
   expect(result.durationEvidenceCounts).toEqual({ gps_measured: 1 });
   expect(result.serviceErrorByEvidence).toEqual({ gps_measured: { visits: 1, meanAbsoluteErrorMinutes: 28 } });
 });

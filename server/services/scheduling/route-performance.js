@@ -95,7 +95,9 @@ function recordedTiming(row) {
   return { arrival, durationMinutes, durationEvidence,
     // A corrected duration can imply an end instant; it is not a measured
     // finish. Keep that distinction even when an old status event remains.
-    completion: durationEvidence === 'recorded_lifecycle_interval' ? end : null };
+    // GPS minutes only replace the duration: the completion stamp its status
+    // event corroborates still bounds the day span (day-scorecard actualSpan).
+    completion: interval != null && (durationEvidence === 'recorded_lifecycle_interval' || durationEvidence === GPS_EVIDENCE) ? end : null };
 }
 
 const anyStringId = id => typeof id === 'string';
