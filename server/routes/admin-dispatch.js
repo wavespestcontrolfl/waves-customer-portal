@@ -96,6 +96,7 @@ const {
   recordTrackTransitionFailure,
   recordTrackTransitionResultFailure,
 } = require('../services/track-transition-alerts');
+const { loadGpsOnSiteMinutes, resolveVisitTimeOnSite } = require('../services/visit-time-on-site');
 const { finiteDate, positiveNumber, buildOnSiteLifecycleUpdates, buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 
 // Haversine ETA for the dispatch board tech cards. Returns a whole
@@ -1535,6 +1536,8 @@ router.get('/:date?', async (req, res, next) => {
       )
       .orderByRaw('COALESCE(route_order, 999), window_start');
 
+    // Truck-GPS time on site for the completed visits (one query); the visit card marks its source.
+    const gpsOnSite = await loadGpsOnSiteMinutes(db, services.filter((s) => s.status === 'completed').map((s) => s.id));
     // Enrich with property preferences and last service
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
@@ -1755,6 +1758,10 @@ router.get('/:date?', async (req, res, next) => {
         actualStartTime: s.actual_start_time,
         actualEndTime: s.actual_end_time,
         serviceTimeMinutes: s.service_time_minutes,
+        // { minutes, evidence }: hand correction, else truck GPS, else the number above (evidence 'not_gps').
+        timeOnSite: s.status === 'completed' ? resolveVisitTimeOnSite({
+          adjustedMinutes: s.time_on_site_adjusted_minutes, gpsMinutes: gpsOnSite.get(s.id), fallbackMinutes: s.service_time_minutes,
+        }) : null,
         checkInTime: s.check_in_time || s.actual_start_time,
         checkOutTime: s.check_out_time || s.actual_end_time,
         statusLog: statusLog.map(l => ({ status: l.status, at: l.at, notes: l.notes || null })),

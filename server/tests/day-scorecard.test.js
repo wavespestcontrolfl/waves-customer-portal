@@ -342,7 +342,7 @@ describe('getDayScorecard', () => {
         unbaselinedCompletedVisits: 1,
         stops: [
           { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 480, recordedCompletionMinute: 540, arrivalOutcome: 'on_time' },
-          { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 540, recordedCompletionMinute: 600, arrivalOutcome: 'on_time' },
+          { durationEvidence: 'gps_measured', recordedServiceMinutes: 45, recordedArrivalMinute: 540, recordedCompletionMinute: 600, arrivalOutcome: 'on_time' },
         ],
       }],
     });
@@ -350,9 +350,40 @@ describe('getDayScorecard', () => {
     const row = result.days[0].byTech[0];
     // Full coverage on the SNAPSHOT's own two stops, but a third, unbaselined
     // completed job existed that day and is not folded into onSiteMinutes.
-    expect(row.actual.onSiteCoverage).toEqual({ covered: 2, total: 2, unbaselined: 1 });
+    expect(row.actual.onSiteCoverage).toEqual({ covered: 2, total: 2, unbaselined: 1, gps: 1 }); // the GPS-measured stop counts and is marked
     // 2 planned-and-completed stops + the 1 same-day unbaselined completion.
     expect(row.actual.stops).toBe(3);
+  });
+
+  // Codex P1 (pre-push, GPS time on site): the truck's GPS minutes replace a stop's DURATION only. Its
+  // corroborated completion stamp must still close the day span, or the span of a day whose last stop has a GPS
+  // leg reads unknown. Built from the real recordedTiming, not a hand-written stop.
+  test('a GPS-measured stop keeps its recorded completion in the day span', async () => {
+    const date = '2026-09-01';
+    const { measureRoutePerformance } = jest.requireActual('../services/scheduling/route-performance');
+    const snapshot = { date, technician_id: 'tech1', as_of: '2026-08-31T08:20:00Z', snapshot_phase: 'loaded_schedule',
+      plannedStops: [{ id: 'visit', arrivalWindow: { startMin: 480, endMin: 600 }, serviceMinutes: 60, predictedArrivalMinute: 480 }] };
+    const row = { id: 'visit', technician_id: 'tech1', scheduled_date: date, status: 'completed', window_start: '08:00',
+      actual_start_time: '2026-09-01T12:10:00Z', actual_end_time: '2026-09-01T12:55:00Z', gps_on_site_minutes: 32,
+      statusHistory: [
+        { from_status: 'confirmed', to_status: 'on_site', transitioned_at: '2026-09-01T12:10:01Z' },
+        { from_status: 'on_site', to_status: 'completed', transitioned_at: '2026-09-01T12:55:02Z' },
+      ] };
+    const measured = measureRoutePerformance(snapshot, [row]);
+    expect(measured.stops[0]).toMatchObject({ durationEvidence: 'gps_measured', recordedServiceMinutes: 32 });
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{ date, technicianId: 'tech1', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 0,
+        plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'legacy', stops: measured.stops }],
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    const actual = result.days[0].byTech[0].actual;
+    expect(actual.onSiteMinutes).toBe(32); // the GPS minutes
+    expect(actual.onSiteCoverage).toMatchObject({ covered: 1, total: 1, gps: 1 });
+    expect(actual.spanMinutes).toBe(45); // 8:10 arrival to 8:55 completion, both from the visit's own stamps
   });
 
   // Codex P2 (round 5): the actual SPAN (first arrival to last completion)

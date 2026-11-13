@@ -199,6 +199,12 @@ import { NEXT_VISIT_NOTE_MAX, nextVisitNoteFields } from "../../lib/completion-n
 import { rankTechTips, techTipSubtext, techTipSentLabel, pickableTipIds, rotatedTipGroups, techTipYardLine, techTipSourceLabels } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 import { directionsHref } from "../../lib/directionsHref";
+// The marker under "Time on site" on a completed visit (server timeOnSite.evidence).
+const TIME_ON_SITE_SOURCE_LABEL = {
+  gps_measured: "Measured by truck GPS",
+  operator_corrected: "Corrected by hand",
+  not_gps: "Not measured by GPS (closeout time)",
+};
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
@@ -1912,10 +1918,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // rows: actualDuration); the seed doubles as the dirty check so an
   // untouched field never PATCHes.
   const timeOnSiteSeed = (() => {
-    const v = service.serviceTimeMinutes ?? service.actualDuration ?? null;
+    const v = service.timeOnSite?.minutes ?? service.serviceTimeMinutes ?? service.actualDuration ?? null;
     return v != null && Number(v) > 0 ? String(Math.round(Number(v))) : "";
   })();
   const [timeOnSiteMinutes, setTimeOnSiteMinutes] = useState(timeOnSiteSeed);
+  // Where the seeded number came from (server: hand correction, else truck GPS, else the closeout minutes).
+  const timeOnSiteSource = TIME_ON_SITE_SOURCE_LABEL[service.timeOnSite?.evidence] || "";
   const isCompletedVisit =
     String(service.status || "").toLowerCase() === "completed";
   // Terminal rows (completed / cancelled / skipped / no_show) are records,
@@ -6035,6 +6043,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 <div style={{ marginBottom: 14 }}>
                   {" "}
                   <label style={labelStyle}>Time on site (minutes)</label>{" "}
+                  {timeOnSiteSource && timeOnSiteSeed && (
+                    <div
+                      style={{
+                        fontSize: 14,
+                        color: D.muted,
+                        marginBottom: 6,
+                        fontWeight: service.timeOnSite.evidence === "not_gps" ? 400 : 600,
+                      }}
+                    >
+                      {timeOnSiteSource}
+                    </div>
+                  )}{" "}
                   <input
                     type="number"
                     inputMode="numeric"

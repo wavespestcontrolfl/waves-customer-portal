@@ -65,7 +65,7 @@ function totalsByTechnician(days) {
       if (!technicianId || !(stops > 0)) continue;
       const t = byTech.get(technicianId) || {
         technicianId, technician, dates: [], stops: 0,
-        onSiteMinutes: 0, onSiteRecorded: 0, onSiteCompleted: 0, driveMinutes: 0, driveStops: 0, driveDays: 0, drivePartialDays: 0,
+        onSiteMinutes: 0, onSiteRecorded: 0, onSiteGps: 0, onSiteCompleted: 0, driveMinutes: 0, driveStops: 0, driveDays: 0, drivePartialDays: 0,
       };
       t.dates.push(day.date);
       t.stops += stops;
@@ -75,6 +75,7 @@ function totalsByTechnician(days) {
       if (actual.onSiteMinutes != null) {
         t.onSiteMinutes += actual.onSiteMinutes;
         t.onSiteRecorded += actual.onSiteCoverage.covered;
+        t.onSiteGps += actual.onSiteCoverage.gps ?? 0;
       }
       // Only a day whose every Bouncie trip has a duration counts: a partly timed day's sum would understate
       // the drive and still divide by all its stops. It is counted apart as partialDays.
@@ -135,7 +136,7 @@ async function buildRow(conn, t, { callbacks, asks, leaderboard }) {
     onSiteMinutesPerStop: known('onSiteMinutesPerStop',
       t.onSiteRecorded ? round(t.onSiteMinutes / t.onSiteRecorded, 1) : null, 'no recorded on-site minutes'),
     onSiteTargetMinutes: ON_SITE_TARGET_MINUTES,
-    onSiteCoverage: { recorded: t.onSiteRecorded, completed: t.onSiteCompleted },
+    onSiteCoverage: { recorded: t.onSiteRecorded, gps: t.onSiteGps, completed: t.onSiteCompleted },
     driveMinutesPerStop: known('driveMinutesPerStop',
       t.driveStops ? round(t.driveMinutes / t.driveStops, 1) : null,
       t.drivePartialDays ? 'Bouncie trips only partly timed' : 'no timed Bouncie trips'),
