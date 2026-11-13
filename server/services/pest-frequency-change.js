@@ -53,6 +53,8 @@ const SOONER_BY_DAYS = 14;
 const LEDGER_FAMILY = 'pest_control';
 const LEDGER_SOURCE = 'frequency_change';
 const DRY_RUN = Symbol('pest-frequency-dry-run');
+// Schedule refusals that pass by themselves: another save holds a lock, or the plan moved under this one.
+const RETRY_CODES = new Set(['VISIT_BUSY_RETRY', 'SERIES_CHANGED_RETRY', 'VISIT_CHANGED_RETRY']);
 
 function httpError(status, message, extra = {}) {
   const err = new Error(message);
@@ -350,12 +352,14 @@ async function run(customerId, to, { expectedVersion = null, consent = {} } = {}
     });
   } catch (err) {
     if (err === DRY_RUN) return done;
-    // The schedule's own refusals are worded for the office: the customer gets the one neutral answer,
-    // and the reason goes to the log.
+    // The schedule's own refusals are worded for the office: the customer gets one of two neutral answers,
+    // and the reason goes to the log. A lock held by another save, or a plan that moved under this one, is
+    // a retry; every other refusal keeps the office path.
     const scheduleRefusal = (err.status === 409 || err.statusCode === 409)
       && err.code !== 'PREVIEW_CHANGED' && err.code !== 'FREQUENCY_CHANGE_UNAVAILABLE';
     if (!scheduleRefusal) throw err;
     logger.info(`[pest-frequency] customer ${customerId}: the schedule refused the change (${err.code || 'conflict'})`);
+    if (RETRY_CODES.has(err.code)) throw httpError(409, 'That did not go through. Please try again in a moment.', { code: 'FREQUENCY_CHANGE_RETRY', reason: err.code });
     throw notAvailable(err.code || 'schedule');
   }
   return done;

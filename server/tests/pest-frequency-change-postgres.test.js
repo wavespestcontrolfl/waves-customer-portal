@@ -248,6 +248,26 @@ postgres('pest frequency change against migrated PostgreSQL', () => {
     expect(gaps.every((gap) => gap >= 25 && gap <= 36)).toBe(true);
   });
 
+  test('an invoice being made for a visit the new schedule replaces: the change waits its turn and writes nothing', async () => {
+    await seedPlan();
+    const shown = await pestFrequency.preview(ids.customer, 'monthly');
+    // Another connection is inside an invoice mint for one of the pending visits: it holds that visit's
+    // mint lock, as every mint path does before it reads the visit.
+    const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+    const mint = await database.transaction();
+    try {
+      await acquireScheduledInvoiceMintLock(mint, ids.pending[2]);
+      await expect(pestFrequency.confirm(ids.customer, 'monthly', { version: shown.version }))
+        .rejects.toMatchObject({ status: 409, code: 'FREQUENCY_CHANGE_RETRY', reason: 'VISIT_BUSY_RETRY' });
+    } finally {
+      await mint.rollback();
+    }
+    expect((await upcoming()).map((row) => row.id).sort()).toEqual([...ids.pending].sort());
+    expect((await trx('scheduled_services').where({ id: ids.root }).first()).recurring_pattern).toBe('quarterly');
+    // The mint is over: the same confirm now goes through.
+    await expect(pestFrequency.confirm(ids.customer, 'monthly', { version: shown.version })).resolves.toMatchObject({ success: true });
+  });
+
   test('a confirm for an outcome the customer did not see is refused and writes nothing', async () => {
     await seedPlan();
     const shown = await pestFrequency.preview(ids.customer, 'monthly');
