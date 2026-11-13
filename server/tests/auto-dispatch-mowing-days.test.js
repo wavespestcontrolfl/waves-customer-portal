@@ -3,6 +3,8 @@
 // predicate, the blocked weekdays, the HARD slot filter (candidate-slots.js and
 // the schedule gap tool), the 'mowing_day' conflict and its precedence, no
 // needs-a-person notice for it, and the shadow audit block. No database.
+// The south-zone day funnel's gate resolves at feature-gates require time (the far-south day block below).
+process.env.GATE_SOUTH_ZONE_DAY_FUNNEL = 'true';
 jest.mock('../services/scheduling/find-time', () => ({ findAvailableSlots: jest.fn() }));
 jest.mock('../services/route-optimizer', () => ({
   ...jest.requireActual('../services/route-optimizer'),
@@ -453,5 +455,175 @@ describe('apply-time destination check (mowing-days.js assertDestinationClear, a
     const guard = makeMoveGuard({ service: SERVICE, best: { date: WED, start_time: '08:00', technician_id: 't1' } });
     await expect(guard({ trx: trxWith({ preferred_day: null, mowing_days: ['Tue'] }), technicianId: 't1' }))
       .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', statusCode: 409, message: expect.stringContaining('mowing day') });
+  });
+});
+
+// Far-south days stay far-south (south-day-kept.js, owner 2026-11-12): the night run never moves a visit outside the
+// funneled zones onto another DATE that holds a live far-south stop. Zones and stop dates come from the south-zone
+// day funnel's own helpers; the funnel's gate is the rule's off switch. A same-day re-time is not a date move.
+describe('far-south days stay far-south (south-day-kept.js)', () => {
+  const logger = require('../services/logger');
+  const { SouthDays } = require('../services/auto-dispatch/south-day-kept');
+  const funnel = require('../services/scheduling/zone-day-funnel');
+  const VENICE = { id: 'z-ven', zone_name: 'Venice / North Port', cities: ['Venice', 'Nokomis'] };
+  const NORTH = { ...SERVICE, zone: 'parrish', customer_city: 'Parrish' };
+  const SOUTH = { ...SERVICE, zone: 'venice', customer_city: 'Venice' };
+  const STOP_WED = [{ scheduled_date: WED, zone: 'venice', service_city: 'Venice', customer_city: null }];
+  const plain = () => normalizePreferences({ mowing_days: ['Mon'] }, LAWN);
+
+  // service_zones rows, the funnel's stop read (the only chain that calls andWhere) and the mowing preferences row.
+  function southDb({ stops = [], zonesFail = false, prefs } = {}) {
+    const counters = { stopReads: 0 };
+    const fn = jest.fn((name) => {
+      const c = {};
+      ['where', 'whereNot', 'whereNotIn', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'forShare']
+        .forEach((m) => { c[m] = () => c; });
+      c.andWhere = () => { c.funnel = true; return c; };
+      c.select = async () => {
+        if (name === 'service_zones') { if (zonesFail) throw new Error('zones down'); return [VENICE]; }
+        if (name === 'scheduled_services' && c.funnel) { counters.stopReads += 1; return stops; }
+        return [];
+      };
+      c.pluck = async () => [];
+      c.first = async () => (name === 'property_preferences' ? prefs : undefined);
+      return c;
+    });
+    fn.counters = counters;
+    return fn;
+  }
+  const run = (service, extra = {}, prefs = plain()) => findValidCandidateSlots(service, prefs, ctx({ db: southDb({ stops: STOP_WED }), ...extra }));
+
+  beforeEach(() => { findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '10:00'), slot(WED), slot(THU)] }); });
+
+  test('a north visit loses the date that holds a far-south stop (counted), keeps its own date and open dates', async () => {
+    const out = await run(NORTH);
+    expect(out.candidates.map((c) => c.date)).toEqual([TUE, THU]);
+    expect(out.drops.south_day_kept).toBe(1);
+  });
+
+  test('a far-south visit may still move onto a south day; its drop tally has no south_day_kept key', async () => {
+    const out = await run(SOUTH);
+    expect(out.candidates.map((c) => c.date)).toEqual([TUE, WED, THU]);
+    expect(out.drops).not.toHaveProperty('south_day_kept');
+  });
+
+  test('a date with no far-south stop is untouched, whatever its weekday (Friday here)', async () => {
+    findAvailableSlots.mockResolvedValue({ slots: [slot('2026-08-07'), slot('2026-08-08')] });
+    const out = await run(NORTH);
+    expect(out.candidates.map((c) => c.date)).toEqual(['2026-08-07', '2026-08-08']);
+    expect(out.drops.south_day_kept).toBe(0);
+  });
+
+  test('a same-day re-time is never dropped, even on a day that holds a far-south stop', async () => {
+    findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '13:00')] });
+    const out = await findValidCandidateSlots(NORTH, plain(), ctx({
+      db: southDb({ stops: [{ scheduled_date: TUE, zone: 'venice', service_city: 'Venice', customer_city: null }] }),
+    }));
+    expect(out.candidates.map((c) => c.date)).toEqual([TUE]);
+  });
+
+  test('a visit with no zone stamp and no city fails open, with one log line', async () => {
+    const out = await run({ ...SERVICE, zone: null, customer_city: null });
+    expect(out.candidates.map((c) => c.date)).toEqual([TUE, WED, THU]);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('south-day rule skipped for visit s1'));
+  });
+
+  test('a failed zone read fails open (logged) and the run keeps every date', async () => {
+    const out = await findValidCandidateSlots(NORTH, plain(), ctx({ db: southDb({ stops: STOP_WED, zonesFail: true }) }));
+    expect(out.candidates.map((c) => c.date)).toEqual([TUE, WED, THU]);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('failing open'));
+  });
+
+  test('zones are read once per run: three visits share one store and make one stop read', async () => {
+    const db3 = southDb({ stops: STOP_WED });
+    const southDays = new SouthDays();
+    for (const id of ['a', 'b', 'c']) await findValidCandidateSlots({ ...NORTH, id }, plain(), ctx({ db: db3, southDays }));
+    expect(db3.counters.stopReads).toBe(1);
+    expect(db3.mock.calls.filter((c) => c[0] === 'service_zones')).toHaveLength(1);
+    // A move changed the schedule: the next evaluation reads again.
+    southDays.invalidate();
+    await findValidCandidateSlots(NORTH, plain(), ctx({ db: db3, southDays }));
+    expect(db3.counters.stopReads).toBe(2);
+  });
+
+  test('funnel gate off: nothing is read and nothing is dropped', async () => {
+    const spy = jest.spyOn(funnel, 'funnelZoneRows').mockResolvedValue([]);
+    try {
+      const d = southDb({ stops: STOP_WED });
+      const out = await findValidCandidateSlots(NORTH, plain(), ctx({ db: d }));
+      expect(out.candidates.map((c) => c.date)).toEqual([TUE, WED, THU]);
+      expect(out.drops).not.toHaveProperty('south_day_kept');
+      expect(d.counters.stopReads).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  describe('the decision (index.js evaluatePlacement)', () => {
+    const CONFIG = { minScoreImprovement: 15, removeStabilityFloor: 35, minDayMoveDriveSavingMinutes: 6 };
+    const mowingCtx = (stops) => ctx({ conflictMoves: true, db: southDb({ stops, prefs: { preferred_day: null, mowing_days: ['Mon'] } }) });
+
+    test('mowing-day move: the only open date holds a far-south stop -> the visit stays, reason SOUTH_DAY_KEPT', async () => {
+      process.env[GATE] = 'true';
+      findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '10:00'), slot(WED)] });
+      const result = await evaluatePlacement(NORTH, prefsFor('true'), mowingCtx(STOP_WED), CONFIG, '2026-07-03');
+      expect(result.kind).toBe('no_change');
+      expect(result.reason_code).toBe('SOUTH_DAY_KEPT');
+      expect(result.audit.constraints.drops).toMatchObject({ mowing_day: 1, south_day_kept: 1 });
+    });
+
+    test('mowing-day move: another open date still takes the visit; a far-south visit may use the south day', async () => {
+      process.env[GATE] = 'true';
+      findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '10:00'), slot(WED), slot(THU)] });
+      const north = await evaluatePlacement(NORTH, prefsFor('true'), mowingCtx(STOP_WED), CONFIG, '2026-07-03');
+      expect(north.kind).toBe('move');
+      expect(north.rankedCandidates.map((c) => c.date)).toEqual([THU]);
+      const south = await evaluatePlacement(SOUTH, prefsFor('true'), mowingCtx(STOP_WED), CONFIG, '2026-07-03');
+      expect(south.rankedCandidates.map((c) => c.date)).toContain(WED);
+    });
+
+    test('score move: a date that would win on drive but holds a far-south stop is not taken, and the row says so', async () => {
+      const low = { ...CONFIG, minScoreImprovement: 5, removeStabilityFloor: 5, minDayMoveDriveSavingMinutes: 1 };
+      const better = { ...slot(WED), detour_minutes: 0, total_drive_minutes: 1, stops_that_day: 8, score: 1 };
+      const worse = { ...slot(THU), detour_minutes: 60, total_drive_minutes: 90, stops_that_day: 1, score: 90 };
+      const plainCtx = (stops) => ctx({ db: southDb({ stops }) });
+      findAvailableSlots.mockResolvedValue({ slots: [better] });
+      const open = await evaluatePlacement(NORTH, plain(), plainCtx([]), low, '2026-07-03');
+      expect(open.kind).toBe('move');
+      expect(open.best.date).toBe(WED);
+      // Only date left in the pool: nothing to offer, reason SOUTH_DAY_KEPT.
+      const held = await evaluatePlacement(NORTH, plain(), plainCtx(STOP_WED), low, '2026-07-03');
+      expect(held.kind).toBe('no_change');
+      expect(held.reason_code).toBe('SOUTH_DAY_KEPT');
+      // Another date remains but does not beat tonight's placement: the score reason stands and the note names the rule.
+      findAvailableSlots.mockResolvedValue({ slots: [better, worse] });
+      const kept = await evaluatePlacement(NORTH, plain(), plainCtx(STOP_WED), low, '2026-07-03');
+      expect(kept.kind).toBe('no_change');
+      expect(kept.reason_code).not.toBe('SOUTH_DAY_KEPT');
+      expect(kept.reason_description).toContain('SOUTH_DAY_KEPT');
+      expect(kept.audit.constraints.south_day_kept).toBe(1);
+    });
+  });
+
+  describe('apply time (south-day-kept.js assertDestinationClear, apply.js move guard)', () => {
+    const { makeMoveGuard } = require('../services/auto-dispatch/apply');
+    const guardFor = (service, date = WED) => makeMoveGuard({ service, best: { date, start_time: '08:00', technician_id: 't1' } });
+
+    test('the move transaction refuses a date that now holds a far-south stop', async () => {
+      await expect(guardFor(NORTH)({ trx: southDb({ stops: STOP_WED }), technicianId: 't1' }))
+        .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', statusCode: 409, message: expect.stringContaining('far-south stop') });
+    });
+
+    test('a far-south visit, an open date, a same-day move and an unresolved visit pass; a failed read fails open', async () => {
+      const { assertDestinationClear } = require('../services/auto-dispatch/south-day-kept');
+      const refuse = (id, why) => Object.assign(new Error(`service ${id} ${why}`), { code: 'REFUSED' });
+      const check = (service, date, trx) => assertDestinationClear(trx, service, service, date, refuse);
+      await expect(check(SOUTH, WED, southDb({ stops: STOP_WED }))).resolves.toBeUndefined();
+      await expect(check(NORTH, THU, southDb({ stops: STOP_WED }))).resolves.toBeUndefined();
+      await expect(check(NORTH, TUE, southDb({ stops: [{ ...STOP_WED[0], scheduled_date: TUE }] }))).resolves.toBeUndefined();
+      await expect(check({ ...NORTH, zone: null, customer_city: null }, WED, southDb({ stops: STOP_WED }))).resolves.toBeUndefined();
+      await expect(check(NORTH, WED, southDb({ stops: STOP_WED, zonesFail: true }))).resolves.toBeUndefined();
+      await expect(check(NORTH, WED, southDb({ stops: STOP_WED }))).rejects.toMatchObject({ code: 'REFUSED' });
+    });
   });
 });

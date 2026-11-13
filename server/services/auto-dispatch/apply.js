@@ -21,6 +21,7 @@ const routeTiers = require('./route-tiers');
 const flexTier = require('./flex-tier');
 const moveLimit = require('./move-limit');
 const mowingDays = require('./mowing-days');
+const southDayKept = require('./south-day-kept');
 const { classifyServiceCategory } = require('./service-category');
 const { assertCapabilitiesActive } = require('../technician-capabilities');
 const { etDateString } = require('../../utils/datetime-et');
@@ -365,6 +366,8 @@ function makeMoveGuard({ service, best, config = {} }) {
     await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
     // GATE_AUTO_DISPATCH_MOWING_DAYS='true': the destination against the mowing rule as saved now.
     await mowingDays.assertDestinationClear(trx, row, best.date, refuse, [row.service_type]);
+    // GATE_SOUTH_ZONE_DAY_FUNNEL: a visit outside the far-south zones never lands on a date holding a far-south stop.
+    await southDayKept.assertDestinationClear(trx, row, service, best.date, refuse);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
     // GATE_TERRITORY_NIGHT_RUN: the moving visit lands only in its own territory, read at apply (a ZIP can

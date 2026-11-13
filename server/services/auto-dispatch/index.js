@@ -20,6 +20,7 @@ const {
 } = require('./eligibility');
 const { getCustomerSchedulingPreferences } = require('./preferences');
 const { findValidCandidateSlots, SCORE_CAP } = require('./candidate-slots');
+const southDayKept = require('./south-day-kept');
 const { resolveGeo } = require('./geo');
 const { scoreAppointmentPlacement } = require('./scoring');
 const {
@@ -245,9 +246,21 @@ async function findSlotsOrSkip(service, prefs, ctx) {
 function noSlotReason(drops, skipped) {
   if (skipped) return skipped;
   const prefDropped = !!drops && (drops.preferred_day > 0 || drops.preferred_time > 0);
-  return prefDropped
-    ? { code: 'NO_SLOT_MATCHING_PREFERENCE', description: 'No candidate slot honored the customer\'s explicit day/time preference' }
+  if (prefDropped) return { code: 'NO_SLOT_MATCHING_PREFERENCE', description: 'No candidate slot honored the customer\'s explicit day/time preference' };
+  return southKept(drops)
+    ? { code: southDayKept.CODE, description: `No candidate slot left: ${drops.south_day_kept} slot(s) on dates that hold a far-south stop were not offered (a visit outside the far-south zones stays off those days)` }
     : { code: 'NO_VALID_SLOT', description: 'No valid candidate slot found' };
+}
+
+// Slots the far-south day rule (south-day-kept.js) kept out of this evaluation's candidates.
+const southKept = (drops) => !!drops && drops.south_day_kept > 0;
+
+// A no-move reason with the far-south day rule's part named: the code stays, since a score or drive reason
+// still says why the best remaining date did not win.
+function withSouthNote(reason, drops) {
+  return southKept(drops)
+    ? { ...reason, reason_description: `${reason.reason_description}; ${drops.south_day_kept} slot(s) on far-south days were not offered (${southDayKept.CODE})` }
+    : reason;
 }
 
 // A flex visit whose window collapsed for a stale anchor and found no same-day
@@ -427,6 +440,8 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   } = buildPlacementAudit({
     current, currentScore, candidate: best, candidateScore: ranked.bestScore, service, prefs, lockBoundary, ctx, threshold,
   });
+  // Far-south day rule: the audit row names the slots it kept out, move or not (south-day-kept.js).
+  if (southKept(drops)) constraints.south_day_kept = drops.south_day_kept;
   const shadowPool = dryShadowCandidates.length ? candidates.concat(dryShadowCandidates) : candidates;
   const live = ranked.qualifies ? best : null;
   Object.assign(constraints, dryTimeConstraint(prefs, {
@@ -446,7 +461,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
 
   if (!ranked.qualifies) {
     return {
-      kind: 'no_change', ...noMoveReason(ranked, improvement, threshold, routeMetrics, config), conflict: current.conflict || null, audit: auditCtx,
+      kind: 'no_change', ...withSouthNote(noMoveReason(ranked, improvement, threshold, routeMetrics, config), drops), conflict: current.conflict || null, audit: auditCtx,
     };
   }
   return {
@@ -1254,6 +1269,8 @@ async function evaluateServiceForRun(service, run) {
     lookaheadDays: config.lookaheadDays,
     dateToleranceDays: config.dateToleranceDays,
     capabilityFor: run.capabilityFor,
+    // Far-south stop dates, read once per run (south-day-kept.js).
+    southDays: run.southDays,
     // GATE_TECH_START_POINTS: the run's technician start points, read once
     // per technician (candidate-slots.js loadStartPoints); unused gate off.
     startPoints: run.startPoints,
@@ -1549,6 +1566,7 @@ async function applyPlannedMove(pm, run, attempt) {
     }),
   });
   totals.changed += result.movedCount || 1;
+  run.southDays.invalidate(); // a move changed which dates hold a far-south stop; the next re-evaluation reads them again
   // A SLOT_TAKEN fallback (Codex pre-push P1) can land on a DIFFERENT
   // candidate than `fresh.best` — re-derive the audit from whichever one
   // `result.applied` says actually moved, never the first-tried placement.
@@ -1577,6 +1595,7 @@ async function applyPlannedMove(pm, run, attempt) {
 async function recordApplyFailure(pm, fresh, applyErr, run) {
   run.totals.failed++;
   run.totals.changed += applyErr.movedCount || 0;
+  if (applyErr.movedCount > 0) run.southDays.invalidate();
   // A partial grouped move onto a Sunday still put rows there.
   if (applyErr.movedCount > 0) run.sundays.note(pm.service, applyErr.lastAttempted || (fresh && fresh.best));
   const failedMembers = Array.isArray(applyErr.failedMembers) ? applyErr.failedMembers : [];
@@ -1692,6 +1711,7 @@ async function runAutoDispatch(opts = {}) {
     runId,
     config,
     startPoints: new Map(),
+    southDays: new southDayKept.SouthDays(), // far-south stop dates for the run (south-day-kept.js)
     guardMode: config.guardMode,
     nowDate,
     today,

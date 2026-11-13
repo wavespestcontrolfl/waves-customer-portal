@@ -164,7 +164,7 @@ async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, service
   }
   return durationMinutes;
 }
-const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
+const { fallbackCenterZoneName, funnelOfferPool } = require('../services/scheduling/zone-day-funnel');
 const {
   CUSTOMER_HOUR_GRID, pastCustomerLastStart, customerWindowAdmits, refreshCustomerBookingWindowConfig,
 } = require('../services/scheduling/customer-windows');
@@ -1697,7 +1697,9 @@ function detachVoiceRouteCheck(plan, candidates) {
 // `technicianId`: opt-in. find-time searches that one technician's days only
 // (its own technicianId filter). Only reschedule-public.js passes it: a visit
 // that already has a technician keeps that technician.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId }) {
+// `zoneFunnelAddress`: opt-in address text. With GATE_SOUTH_ZONE_DAY_FUNNEL live and an address in a
+// funneled far-south zone, the offered pool is funneled exactly as the estimate page's (funnelOfferPool).
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -2100,7 +2102,12 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // GATE_CUSTOMER_ROUTE_CHECK (customer-route-check.js): null with the gate
   // off or no surface named, and nothing below runs.
   const routeCheck = routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today });
-  const candidates = await applyRouteCheck(routeCheck, stampedCandidates);
+  // South-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL), opt-in per caller with the address text
+  // (the lead assessment link): the pool narrows BEFORE the customer route check, as on the estimate page.
+  const funneledCandidates = await funnelOfferPool(stampedCandidates, {
+    address: zoneFunnelAddress, dateFrom: rangeFrom, dateTo: rangeTo, routeDaySlug: zoneSlug, conn: db,
+  });
+  const candidates = await applyRouteCheck(routeCheck, funneledCandidates);
   const totalFeasible = result.total_feasible || 0;
   const { slots: curatedSlots, bestFitByDate, rankProfileFields } = applyReserviceProfile({
     rankProfile, candidates, today, totalFeasible, bestSlotCount,

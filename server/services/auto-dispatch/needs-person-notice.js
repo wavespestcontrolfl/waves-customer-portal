@@ -60,6 +60,7 @@ const REASON_KIND = {
   MOVE_LIMIT_REACHED: 'move_limit',
   CONFLICT_NO_NEAR_SLOT: 'no_near_slot',
   NO_VALID_SLOT: 'no_slot',
+  SOUTH_DAY_KEPT: 'no_slot',
   NO_SLOT_MATCHING_PREFERENCE: 'no_slot',
   DRIFT_ANCHOR_STALE: 'no_slot',
 };
