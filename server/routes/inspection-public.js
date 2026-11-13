@@ -779,7 +779,20 @@ async function serviceAreaFailure(location, address = null) {
   return null;
 }
 
-async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false }) {
+// The address as the text the south-zone day funnel resolves its zone from (null when there is none).
+function zoneFunnelText(address) {
+  return [address?.line1, address?.line2, address?.city, address?.state, address?.zip].filter(Boolean).join(', ') || null;
+}
+
+// A customer row's address in the {line1, line2, city, state, zip} shape the booking address uses.
+const customerAddressFields = (cust) => ({
+  line1: cust?.address_line1 || null, line2: cust?.address_line2 || null,
+  city: cust?.city || null, state: cust?.state || null, zip: cust?.zip || null,
+});
+
+// `address`: the booking address ({line1, line2, city, state, zip}) on every list a customer is OFFERED; the
+// south-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL) reads it. Commit and re-validation rebuilds omit it.
+async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null }) {
   const booking = require('./booking');
   const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
   return buildBookingAvailability({
@@ -817,6 +830,7 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     // same gate and grace value.
     bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
+    ...(zoneFunnelText(address) ? { zoneFunnelAddress: zoneFunnelText(address) } : {}),
   });
 }
 
@@ -873,7 +887,7 @@ async function computeConsultationSlotsForLead(leadId, { count = 3 } = {}) {
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
-    const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes });
+    const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, address: resolved.address });
     return {
       ok: true, slots: flattenNextSlots(built, count), needsAddress: false, address: resolved.address,
       addressInputs: bookingAddressInputs(lead, custRow),
@@ -1812,7 +1826,7 @@ router.get('/:token', async (req, res, next) => {
     let availability = null;
     if (resolved.location) {
       try {
-        const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true });
+        const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address });
         availability = built ? shapeAvailability(built, range) : null;
       } catch (err) {
         logger.error(`[inspection-public] availability failed for lead ${lead.id}: ${err.message}`);
@@ -1869,7 +1883,7 @@ router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => 
     if (!catalog.serviceId) return res.status(503).json({ error: 'booking_unavailable' });
     let availability = null;
     try {
-      const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true });
+      const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address });
       availability = built ? shapeAvailability(built, range) : null;
     } catch (err) {
       logger.error(`[inspection-public] address availability failed for lead ${lead.id}: ${err.message}`);
@@ -1940,7 +1954,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     try {
       availability = await buildAvailabilityForLead(resolved.location, {
         rangeFrom: when.dateFrom, rangeTo: when.dateTo, config,
-        duration: catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true,
+        duration: catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true, address: resolved.address,
       });
     } catch (err) {
       logger.error(`[inspection-public] find-slots availability failed for lead ${lead.id}: ${err.message}`);
@@ -2189,10 +2203,10 @@ function sendLocationFailure(res, failure, county, leadId) {
 // (round-10 P2) let a LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY caller
 // hand back the customer's CURRENT address alongside the refreshed times —
 // every other caller omits them and the body is byte-identical to before.
-async function sendSlotTaken(res, { location, range, config, catalog, leadId, error, leadPayload = null, addressChanged = false }) {
+async function sendSlotTaken(res, { location, address = null, range, config, catalog, leadId, error, leadPayload = null, addressChanged = false }) {
   let refreshed = null;
   try {
-    refreshed = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes });
+    refreshed = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address });
   } catch (err) {
     logger.warn(`[inspection-public] refresh availability failed for lead ${leadId}: ${err.message}`);
   }
@@ -2535,7 +2549,7 @@ async function sendBookingFailure(res, result, { lead, custRow, leadPayload, boo
     return res.status(409).json({ error: result.error, code: 'ADDRESS_UNVERIFIED' });
   }
   if (result.status === 409) {
-    return sendSlotTaken(res, { location: bookingLocation, range, config, catalog, leadId: lead.id, error: result.error });
+    return sendSlotTaken(res, { location: bookingLocation, address: customerAddressFields(custRow), range, config, catalog, leadId: lead.id, error: result.error });
   }
   return res.status(result.status || 500).json({ error: result.error });
 }
@@ -2608,7 +2622,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes,
     });
     const slot = findSlotIn(dayAvailability, date, time);
-    if (!slot) return sendSlotTaken(res, { location: resolved.location, range, config, catalog, leadId: lead.id });
+    if (!slot) return sendSlotTaken(res, { location: resolved.location, address: resolved.address, range, config, catalog, leadId: lead.id });
 
     // Phase 1 — lock, re-read the lead's customer_id FRESH (a concurrent
     // commit's phase 1 may have just linked one), re-run eligibility, then
@@ -2665,7 +2679,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const bookingSlot = locationMoved
       ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id })
       : slot;
-    if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, range, config, catalog, leadId: lead.id });
+    if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: customerAddressFields(custRow), range, config, catalog, leadId: lead.id });
 
     // Phase 2 — createSelfBooking's OWN atomic per-customer lane dedupe
     // (dedupeLane, left at its true default — no transaction of ours wraps

@@ -7364,7 +7364,21 @@ configured, county lookup returns null/throws), GET stays at `state: 'ok'`
 with `lead`, `needs_address: false`, `availability: null`, and
 `service_area_unavailable: true` — recoverable, not a verdict either way,
 so the page shows a retry message where the calendar would be rather than
-an empty one. `POST /:token/find-slots` is the same natural-language search
+an empty one. South-zone day funnel (`GATE_SOUTH_ZONE_DAY_FUNNEL`, live; no new
+gate): for an address in a funneled far-south zone, the OFFERED lists keep only
+days that already hold a live stop in that zone, or ONE seed day when none
+does: GET `availability`, `POST /:token/availability`, `POST /:token/find-slots`,
+the `SLOT_TAKEN` 409 refresh `availability`, and the times in the new_lead
+email (`computeConsultationSlotsForLead`). The zone and the days come from the
+estimate page's own helpers (`services/scheduling/zone-day-funnel.js`,
+`funnelOfferPool`; the pool narrows before the customer route check; the
+seed prefers the zone's route day under `GATE_ZONE_ROUTE_DAYS`), so such a lead
+can see fewer days, or one. A lead outside those zones, a gate-off request and
+any zone or stop lookup failure get the unfunneled list. The funnel is
+offer-time only, like the route check: the commit's single-day anti-forgery
+build and the location re-validation omit the address and are not funneled, so
+a time the funnel hid can still be committed by a request built by hand. No
+field, status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
 (same P1) is likewise routed through `finalizeBookingLocation` rather than
 a raw `resolveServiceAddress` — a directly supplied out-of-area address

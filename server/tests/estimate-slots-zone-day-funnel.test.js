@@ -29,6 +29,9 @@ const estimateSlotAvailability = require('../services/estimate-slot-availability
 const { getAvailableSlots } = estimateSlotAvailability;
 const {
   applyZoneDayFunnel,
+  funnelOfferPool,
+  funnelZoneRows,
+  rowInFunnelZones,
   isFunnelZone,
   fallbackCenterZoneName,
   _internals: funnelInternals,
@@ -429,5 +432,80 @@ describe('getAvailableSlots — funnel end to end', () => {
     const slots = [...(result.primary || []), ...(result.expander || [])];
     expect(new Set(slots.map((s) => s.date)).size).toBeGreaterThan(1);
     expect(result.metadata.zoneDayFunnel).toBeUndefined();
+  });
+});
+
+// The same funnel for another offer pool (the lead assessment link, booking.js buildBookingAvailability): same
+// helpers, only the address text and the pool come from the caller.
+describe('funnelOfferPool (assessment link pool, same helpers as the estimate page)', () => {
+  const pool = [slot('2027-05-19'), slot('2027-05-20'), slot('2027-05-21'), slot('2027-05-21', '13:00')];
+  const WINDOW_ARGS = { dateFrom: '2027-05-18', dateTo: '2027-05-24' };
+  const VENICE_ADDRESS = '9 Test Palm Way, Venice, FL, 34285';
+
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('a far-south address with a live zone stop keeps that day only, as applyZoneDayFunnel does', async () => {
+    mockDb({ scheduledRows: [zoneStopRow()] });
+    const out = await funnelOfferPool(pool, { address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db });
+    expect(out).toEqual(applyZoneDayFunnel(pool, new Set(['2027-05-20'])).slots);
+    expect(out.map((s) => s.date)).toEqual(['2027-05-20']);
+  });
+
+  test('no zone stop in the window seeds one day: the first date of the pool (its score order)', async () => {
+    mockDb({ scheduledRows: [] });
+    const out = await funnelOfferPool([slot('2027-05-21'), slot('2027-05-19')], { address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db });
+    expect(out.map((s) => s.date)).toEqual(['2027-05-21']);
+  });
+
+  test('a lead outside the funneled zones gets the very same pool, and no zone-stop query runs', async () => {
+    mockDb({ scheduledRows: [zoneStopRow()] });
+    const out = await funnelOfferPool(pool, { address: '55 Main St, Sarasota, FL, 34231', ...WINDOW_ARGS, conn: db });
+    expect(out).toBe(pool);
+    expect(db.mock.calls.map((c) => c[0])).not.toContain('scheduled_services');
+  });
+
+  test('no address, an empty pool: untouched, no query', async () => {
+    mockDb({ scheduledRows: [zoneStopRow()] });
+    expect(await funnelOfferPool(pool, { address: null, ...WINDOW_ARGS, conn: db })).toBe(pool);
+    const empty = [];
+    expect(await funnelOfferPool(empty, { address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db })).toBe(empty);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a zone or zone-stop lookup failure fails open with the full pool, as the estimate page does', async () => {
+    mockDb({ failFirstScheduledCall: true });
+    expect(await funnelOfferPool(pool, { address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db })).toBe(pool);
+    db.mockImplementation(() => ({ select: jest.fn().mockRejectedValue(new Error('zones down')) }));
+    expect(await funnelOfferPool(pool, { address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db })).toBe(pool);
+  });
+
+  test('gate off: the same pool and no query at all, also for funnelZoneRows', async () => {
+    const prev = process.env.GATE_SOUTH_ZONE_DAY_FUNNEL;
+    delete process.env.GATE_SOUTH_ZONE_DAY_FUNNEL;
+    try {
+      let fresh;
+      jest.isolateModules(() => { fresh = require('../services/scheduling/zone-day-funnel'); });
+      const dbc = jest.fn();
+      expect(await fresh.funnelOfferPool(pool, { address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: dbc })).toBe(pool);
+      expect(await fresh.funnelZoneRows(dbc)).toEqual([]);
+      expect(dbc).not.toHaveBeenCalled();
+    } finally {
+      process.env.GATE_SOUTH_ZONE_DAY_FUNNEL = prev;
+    }
+  });
+});
+
+describe('funnelZoneRows / rowInFunnelZones (the funneled zones and who is in them)', () => {
+  test('gate on: only the funneled zone rows; a visit row is in, out, or unresolved (null)', async () => {
+    mockDb();
+    const zones = await funnelZoneRows(db);
+    expect(zones).toEqual([VENICE_ZONE]);
+    expect(rowInFunnelZones({ zone: 'venice' }, zones)).toBe(true);
+    expect(rowInFunnelZones({ zone: 'venice_north_port' }, zones)).toBe(true);
+    expect(rowInFunnelZones({ zone: 'parrish', customer_city: 'Venice' }, zones)).toBe(false);
+    expect(rowInFunnelZones({ zone: null, service_city: 'Nokomis' }, zones)).toBe(true);
+    expect(rowInFunnelZones({ zone: 'lakewood_ranch', customer_city: 'Parrish' }, zones)).toBe(false);
+    expect(rowInFunnelZones({ zone: 'lakewood_ranch' }, zones)).toBeNull();
+    expect(rowInFunnelZones({}, zones)).toBeNull();
   });
 });
