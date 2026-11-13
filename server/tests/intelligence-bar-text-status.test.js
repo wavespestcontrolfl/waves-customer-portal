@@ -13,6 +13,7 @@ const consent = require('../services/messaging/validators/consent');
 const suppression = require('../services/messaging/validators/suppression');
 const { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool } = require('../services/intelligence-bar/comms-tools');
 const { TEXT_TYPES } = require('../services/customer-text-status');
+const propertyPrefs = require('../services/property-notification-prefs');
 const policy = require('../services/intelligence-bar/action-policy.json');
 
 const CUSTOMER_ID = '11111111-2222-4333-8444-555555555555';
@@ -39,7 +40,7 @@ function fakeDb(answer) {
 }
 const statusesOf = (calls) => (calls.find(([method, column]) => method === 'whereIn' && column === 'sms_log.status') || [])[2] || [];
 
-function tables({ customerRow = customer(), visit = { id: VISIT_ID, scheduled_date: '2099-03-04' }, blocked = [], undelivered = [], lastSent = [] } = {}) {
+function tables({ customerRow = customer(), visit = { id: VISIT_ID, scheduled_date: '2099-03-04', property_id: null }, blocked = [], undelivered = [], lastSent = [] } = {}) {
   return fakeDb((table, calls) => {
     if (table === 'customers') return [customerRow];
     if (table === 'scheduled_services') return visit ? [visit] : [];
@@ -50,6 +51,7 @@ function tables({ customerRow = customer(), visit = { id: VISIT_ID, scheduled_da
 }
 
 beforeEach(() => {
+  jest.restoreAllMocks();
   jest.clearAllMocks();
   consent.loadContactState.mockResolvedValue({ prefs: { sms_enabled: true }, customer: { id: CUSTOMER_ID }, propertyToggles: null });
   suppression.loadSuppressionState.mockImplementation(async (_input, state) => ({ ...state, suppressionLoaded: true }));
@@ -64,15 +66,18 @@ test('registered as a record-scope READ tool on every admin page, with a typed c
   expect(policy.get_customer_text_status).toMatchObject({ kind: 'read', scope: 'record', approval: null });
 });
 
-test('asks the send path validators once per text type, for the customer\'s number and next visit', async () => {
+test('asks the send path validators once per text type, for the customer\'s number, and never through the path that writes', async () => {
   tables();
   const out = await executeCommsTool('get_customer_text_status', { customer_id: CUSTOMER_ID });
   expect(out.text_types.map((t) => t.type)).toEqual(TEXT_TYPES.map(([type]) => type));
   expect(out.text_types.every((t) => t.allowed === true)).toBe(true);
   expect(consent.checkConsentForPurpose).toHaveBeenCalledTimes(TEXT_TYPES.length);
   const [input, sendPolicy] = consent.checkConsentForPurpose.mock.calls.find(([i]) => i.purpose === 'appointment_reminder_72h');
-  expect(input).toMatchObject({ audience: 'customer', channel: 'sms', customerId: CUSTOMER_ID, to: '+12025550143', appointmentId: VISIT_ID });
+  expect(input).toMatchObject({ audience: 'customer', channel: 'sms', customerId: CUSTOMER_ID, to: '+12025550143' });
   expect(sendPolicy.prefsColumn).toBe('service_reminder_72h');
+  // An appointmentId makes loadContactState resolve the visit's property through resolveAppointmentPrefs, which writes
+  // the senders' decision log. A read-only tool must never pass one.
+  for (const [loaded] of [...consent.loadContactState.mock.calls, ...consent.checkConsentForPurpose.mock.calls]) expect(loaded.appointmentId).toBeUndefined();
   expect(out).toMatchObject({
     customer_id: CUSTOMER_ID, customer_name: 'Fixture Texts', phone_last4: '…0143', additional_property_profile: false,
     opted_out_of_all_texts: false, do_not_text_list: null, checked_for_visit: { service_id: VISIT_ID, date: '2099-03-04' },
@@ -115,6 +120,55 @@ test('a STOP and a do-not-text row are named; an unknown code keeps the validato
   expect(consent.checkConsentForPurpose).not.toHaveBeenCalled();
 });
 
+test('a visit at a saved property: its toggles decide when the property rule is enforced, read without the decision log', async () => {
+  const visit = { id: VISIT_ID, scheduled_date: '2099-03-04', property_id: 'prop-1' };
+  const enforced = jest.spyOn(propertyPrefs, 'propertyTextsEnforced');
+  const load = jest.spyOn(propertyPrefs, 'loadVisitProperties');
+  const resolve = jest.spyOn(propertyPrefs, 'resolveAppointmentPrefs');
+
+  // Not enforced (shadow mode): the customer row decides and the property is not read at all.
+  tables({ visit });
+  enforced.mockReturnValue(false);
+  await executeCommsTool('get_customer_text_status', { customer_id: CUSTOMER_ID });
+  expect(load).not.toHaveBeenCalled();
+  expect(consent.checkConsentForPurpose.mock.calls[0][2].propertyToggles).toBeNull();
+
+  // Enforced: a rental's five appointment toggles (off by default) are laid over the customer row.
+  jest.clearAllMocks();
+  tables({ visit });
+  enforced.mockReturnValue(true);
+  load.mockResolvedValue(new Map([[VISIT_ID, { property: { id: 'prop-1', relationship: 'rental_owned' }, row: undefined }]]));
+  await executeCommsTool('get_customer_text_status', { customer_id: CUSTOMER_ID });
+  expect(load).toHaveBeenCalledWith(db, [{ id: VISIT_ID, customer_id: CUSTOMER_ID, property_id: 'prop-1' }]);
+  expect(consent.checkConsentForPurpose.mock.calls[0][2].propertyToggles).toMatchObject({ sms_enabled: true, tech_en_route: false, service_reminder_72h: false });
+  expect(resolve).not.toHaveBeenCalled();
+
+  // Unreadable under enforcement: the senders hold the text, so the state says the lookup failed and recipients are unknown.
+  jest.clearAllMocks();
+  tables({ visit });
+  load.mockRejectedValue(new Error('read failed'));
+  const out = await executeCommsTool('get_customer_text_status', { customer_id: CUSTOMER_ID });
+  expect(consent.checkConsentForPurpose.mock.calls[0][2].lookupFailed).toBe(true);
+  expect(out.appointment_text_recipients).toBe('unavailable');
+});
+
+test('a do-not-text list that could not be read is "could not check", not "allowed"', async () => {
+  // The REAL loader and validator: the loader swallows a failed read and the validator then fails open for a text.
+  const actual = jest.requireActual('../services/messaging/validators/suppression');
+  suppression.loadSuppressionState.mockImplementation(actual.loadSuppressionState);
+  suppression.checkSuppression.mockImplementation(actual.checkSuppression);
+  fakeDb((table) => {
+    if (table === 'customers') return [customer()];
+    if (table === 'messaging_suppression') throw new Error('connection reset');
+    return [];
+  });
+  const out = await executeCommsTool('get_customer_text_status', { customer_id: CUSTOMER_ID });
+  expect(out.do_not_text_list).toBe('unavailable');
+  expect(out.text_types).toHaveLength(TEXT_TYPES.length);
+  expect(out.text_types.every((t) => t.allowed === null && t.note === 'Could not check this right now.')).toBe(true);
+  expect(consent.checkConsentForPurpose).not.toHaveBeenCalled();
+});
+
 test('a failed lookup is "could not check", never a block on the customer', async () => {
   tables();
   consent.checkConsentForPurpose.mockResolvedValue({ ok: false, code: 'CONSENT_LOOKUP_FAILED', reason: 'retry advised' });
@@ -154,7 +208,6 @@ test('an unreadable side table says "unavailable" and keeps the rest of the answ
   const out = await executeCommsTool('get_customer_text_status', { customer_id: CUSTOMER_ID });
   expect(out).toMatchObject({ recent_blocked: 'unavailable', recent_not_delivered: 'unavailable', last_text_sent: 'unavailable', checked_for_visit: null });
   expect(out.text_types).toHaveLength(TEXT_TYPES.length);
-  expect(consent.checkConsentForPurpose.mock.calls[0][0].appointmentId).toBeUndefined();
 });
 
 test('no phone on file: says so and runs no check', async () => {

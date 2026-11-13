@@ -16,6 +16,8 @@ jest.setTimeout(60000);
   let executeCommsTool;
   let createDefaultCustomerRows;
   const created = { customers: [], accounts: [], phones: [] };
+  const GATES = ['GATE_APP_PROPERTY_SCOPE', 'GATE_APP_PROPERTY_TEXTS'];
+  const gatesBefore = Object.fromEntries(GATES.map((gate) => [gate, process.env[gate]]));
   const APPOINTMENT_TYPES = ['appointment_confirmation', 'appointment_reminder_72h', 'appointment_reminder_24h', 'tech_en_route', 'tech_arrived'];
 
   beforeAll(() => {
@@ -29,12 +31,23 @@ jest.setTimeout(60000);
     ({ createDefaultCustomerRows } = require('../services/customer-default-rows'));
   });
 
+  afterEach(() => {
+    for (const gate of GATES) {
+      if (gatesBefore[gate] === undefined) delete process.env[gate];
+      else process.env[gate] = gatesBefore[gate];
+    }
+  });
+
   afterAll(async () => {
     if (!db) return;
     if (created.phones.length) await db('messaging_suppression').whereIn('phone', created.phones).del();
     for (const id of created.customers) {
       await db('sms_log').where({ customer_id: id }).del();
       await db('messaging_audit_log').where({ customer_id: id }).del();
+      await db('property_text_decisions').where({ customer_id: id }).del();
+      await db('scheduled_services').where({ customer_id: id }).del();
+      await db('property_notification_prefs').where({ customer_id: id }).del();
+      await db('customer_properties').where({ customer_id: id }).del();
       await db('notification_prefs').where({ customer_id: id }).del();
       await db('property_preferences').where({ customer_id: id }).del();
       await db('customers').where({ id }).del();
@@ -151,6 +164,35 @@ jest.setTimeout(60000);
     expect(out.last_text_sent).toMatchObject({ type: 'receipt', status: 'delivered' });
     expect(Date.now() - new Date(out.last_text_sent.time).getTime()).toBeLessThan(6 * 86400000);
     expect(out.text_types.every((t) => t.allowed === true)).toBe(true);
+  });
+
+  test('a visit at a saved rental: the tool never writes the senders\' decision log, and follows the property only when that rule is enforced', async () => {
+    const c = await customer();
+    const [property] = await db('customer_properties').insert({ customer_id: c.id, is_primary: false, relationship: 'rental_owned', label: 'Synthetic rental' }).returning('id');
+    const propertyId = property.id || property;
+    const tomorrow = require('../utils/datetime-et').etDateString(require('../utils/datetime-et').addETDays(new Date(), 1));
+    await db('scheduled_services').insert({ customer_id: c.id, scheduled_date: tomorrow, service_type: 'Synthetic service', property_id: propertyId });
+    const decisions = async () => Number((await db('property_text_decisions').where({ customer_id: c.id }).count('* as n').first()).n);
+
+    // Shadow mode (the property rule not enforced): the senders log a decision here. The tool reads the customer row and logs nothing.
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    delete process.env.GATE_APP_PROPERTY_TEXTS;
+    const shadow = await status(c);
+    expect(shadow.checked_for_visit).toMatchObject({ date: tomorrow });
+    expect(blockedTypes(shadow)).toEqual([]);
+    expect(await decisions()).toBe(0);
+
+    // Enforced: a rental starts with its five appointment texts off, whatever the customer row says. Still no log row.
+    process.env.GATE_APP_PROPERTY_TEXTS = 'true';
+    const enforced = await status(c);
+    expect(blockedTypes(enforced)).toEqual(APPOINTMENT_TYPES);
+    expect(enforced.text_types.find((t) => t.type === 'payment_receipt').allowed).toBe(true);
+    expect(await decisions()).toBe(0);
+
+    // The property's own row switches one text back on.
+    await db('property_notification_prefs').insert({ property_id: propertyId, customer_id: c.id, tech_en_route: true });
+    expect(blockedTypes(await status(c))).toEqual(APPOINTMENT_TYPES.filter((type) => type !== 'tech_en_route'));
+    expect(await decisions()).toBe(0);
   });
 
   // customers.phone is NOT NULL: a customer with no number carries an empty string.
