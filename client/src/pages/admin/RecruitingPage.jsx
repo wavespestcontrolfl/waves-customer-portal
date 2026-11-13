@@ -771,13 +771,58 @@ function InterviewSchedulingBlock({ detail, onOpenStageDialog }) {
   );
 }
 
+const RECORD_ORIGIN_LABEL = {
+  phone_call: "Phone call",
+  web_form: "Online form",
+};
+
+// The person's other records (same phone number). Someone who called and
+// later filled in the form has two: the texts are on one and the answers on
+// the other, and each must name the other. Open loads that record here.
+function SamePhoneBlock({ records, onOpenApplication }) {
+  if (!records?.length) return null;
+  return (
+    <div className="mb-4 border-hairline border rounded p-3">
+      <div className="text-ui-caption font-medium text-ink-secondary mb-1">
+        Same phone number
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {records.map((other) => (
+          <div key={other.id} className="flex items-center justify-between gap-3 flex-wrap">
+            <span className="text-14 text-zinc-800">
+              {[
+                other.name || "Applicant",
+                STATUS_LABEL[other.status] || other.status,
+                RECORD_ORIGIN_LABEL[other.origin],
+                formatETDateTime(other.created_at),
+              ].filter(Boolean).join(" · ")}
+            </span>
+            <Button
+              size="sm"
+              variant="secondary"
+              aria-label={`Open the ${STATUS_LABEL[other.status] || other.status} record of ${other.name || "this applicant"}`}
+              onClick={() => onOpenApplication(other.id)}
+            >
+              Open
+            </Button>
+          </div>
+        ))}
+      </div>
+      <div className="text-14 text-zinc-600 mt-1.5">
+        This person has more than one record. A new text goes to the record
+        that holds the newest text.
+      </div>
+    </div>
+  );
+}
+
 // The applicant detail dialog's content: contact links, the AI screen
 // summary, submitted answers, the interview-scheduling block, the stage
 // history with its notes, message history, and the per-stage action buttons. A substantive component in its
 // own right (derives contact/screen from `detail`, owns the interview-block
 // branching) rather than a one-use helper — moving it out is what actually
 // removes those decisions from RecruitingPage.
-function ApplicationDetailContent({ detail, replyMedia, onOpenStageDialog, onClose }) {
+function ApplicationDetailContent({ detail, replyMedia, samePhone, onOpenStageDialog, onOpenApplication, onClose }) {
   const contact = detail?.contact_snapshot || {};
   const screen = detail?.ai_screen || null;
 
@@ -807,6 +852,8 @@ function ApplicationDetailContent({ detail, replyMedia, onOpenStageDialog, onClo
           )}
           <Badge>{detail.status}</Badge>
         </div>
+
+        <SamePhoneBlock records={samePhone} onOpenApplication={onOpenApplication} />
 
         {screen && (
           <div className="mb-4 border-hairline border rounded p-3">
@@ -901,6 +948,8 @@ export default function RecruitingPage() {
   const [error, setError] = useState(null);
   const [detail, setDetail] = useState(null);
   const [replyMedia, setReplyMedia] = useState({});
+  // The open applicant's other records (same phone number), from the detail read.
+  const [samePhone, setSamePhone] = useState([]);
 
   // Monotonic request id: a slow response from a previously selected tab
   // must never overwrite the current tab's list (codex P2).
@@ -950,6 +999,7 @@ export default function RecruitingPage() {
       if (seq !== detailSeq.current) return; // superseded or dialog closed
       setDetail(data.application);
       setReplyMedia(data.reply_media || {});
+      setSamePhone(data.same_phone || []);
       stageWorkflow.resetForNewApplicant();
     } catch (err) {
       if (seq === detailSeq.current) setError(err.message);
@@ -959,6 +1009,7 @@ export default function RecruitingPage() {
   const closeDetail = useCallback(() => {
     detailSeq.current += 1; // invalidate any in-flight open
     setDetail(null);
+    setSamePhone([]);
     // The stage dialog nests inside the detail dialog's lifetime — closing
     // the outer one must not leave the inner one open over a null detail.
     stageWorkflow.closeStageDialog();
@@ -1114,7 +1165,9 @@ export default function RecruitingPage() {
           <ApplicationDetailContent
             detail={detail}
             replyMedia={replyMedia}
+            samePhone={samePhone}
             onOpenStageDialog={stageWorkflow.openStageDialog}
+            onOpenApplication={openDetail}
             onClose={closeDetail}
           />
         )}

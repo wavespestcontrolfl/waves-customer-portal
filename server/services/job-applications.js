@@ -189,6 +189,11 @@ function lastTenDigits(value) {
   return digits.length >= 10 ? digits.slice(-10) : null;
 }
 
+// SQL twin of lastTenDigits for the stored contact phone: one binding, the
+// 10-digit key. The call path's open-application check and the Recruiting
+// detail's same-phone list use it, so both mean the same "same phone".
+const CONTACT_PHONE_LAST_TEN_SQL = "right(regexp_replace(COALESCE(contact_snapshot->>'phone', ''), '[^0-9]', '', 'g'), 10) = ?";
+
 /**
  * Files ONE Careers application from a phone call whose caller was a job
  * applicant (GATE_CALL_APPLICANT_HANDLING). A sibling of createJobApplication,
@@ -274,7 +279,7 @@ async function createJobApplicationFromCall({ call = {}, extraction = null, data
 
     const open = await trx('job_applications')
       .whereIn('status', OPEN_STATUSES)
-      .whereRaw("right(regexp_replace(COALESCE(contact_snapshot->>'phone', ''), '[^0-9]', '', 'g'), 10) = ?", [phoneKey])
+      .whereRaw(CONTACT_PHONE_LAST_TEN_SQL, [phoneKey])
       .first('id');
     if (open) return { created: false, id: open.id, reason: 'open_application_same_phone' };
 
@@ -295,6 +300,8 @@ async function createJobApplicationFromCall({ call = {}, extraction = null, data
 
 module.exports = {
   createJobApplicationFromCall,
+  lastTenDigits,
+  CONTACT_PHONE_LAST_TEN_SQL,
   OPEN_STATUSES,
   ROLES,
   INTAKE_ROLES,
