@@ -204,7 +204,8 @@ postgres('pest frequency change against migrated PostgreSQL', () => {
     // The cancels are closed with no text, and every new visit gets its reminder.
     expect(AppointmentReminders.handleSeriesCancellation).toHaveBeenCalledWith(ids.pending, ids.pending[0],
       expect.objectContaining({ sendNotification: false }));
-    expect(runVisitCancellationFollowThrough).toHaveBeenCalledWith(expect.objectContaining({ targetIds: ids.pending, waiveFee: false }));
+    // ... and the cancel cascade is told to take no linked visit with it.
+    expect(runVisitCancellationFollowThrough).toHaveBeenCalledWith(expect.objectContaining({ targetIds: ids.pending, waiveFee: false, linkedChildren: [] }));
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalledTimes(booked.length);
   });
 
@@ -234,6 +235,17 @@ postgres('pest frequency change against migrated PostgreSQL', () => {
     const shown = await pestFrequency.preview(ids.customer, 'monthly');
     expect(shown.keptVisit).toEqual({ date: day(71), perVisit: 117 });
     expect(shown.newVisits[0] > day(71)).toBe(true);
+  });
+
+  test('a kept visit that was postponed: no new visit before it, and none nearer than the cadence allows', async () => {
+    // Its cadence slot is 71 days out; the customer moved it to 95 days out. The extension walk counts from
+    // the slot, whose next monthly step falls a few days after the day the visit was moved to.
+    await seedPlan({ lastVisitDaysAgo: 20, firstVisit: { scheduled_date: day(95), date_exception: true, date_exception_cadence_date: day(71) } });
+    const shown = await pestFrequency.preview(ids.customer, 'monthly');
+    expect(shown.keptVisit).toEqual({ date: day(95), perVisit: 117 });
+    expect(shown.newVisits[0] >= day(95 + 21)).toBe(true);
+    const gaps = shown.newVisits.slice(1).map((date, i) => daysBetween(shown.newVisits[i], date));
+    expect(gaps.every((gap) => gap >= 25 && gap <= 36)).toBe(true);
   });
 
   test('a confirm for an outcome the customer did not see is refused and writes nothing', async () => {
@@ -268,6 +280,8 @@ postgres('pest frequency change against migrated PostgreSQL', () => {
     ['a technician at a visit', 'visit_under_way', async () => trx('scheduled_services').where({ id: ids.pending[0] }).update({ status: 'on_site', scheduled_date: day(0) })],
     ['a first visit that was never closed', 'visit_under_way', async () => trx('scheduled_services').where({ id: ids.root }).update({ status: 'on_site' })],
     ['an add-on line on a visit', 'plan_shape', async () => trx('scheduled_service_addons').insert({ scheduled_service_id: ids.pending[0], service_name: 'Fixture add-on' })],
+    ['a follow-up visit linked to an upcoming visit', 'plan_shape', async () => trx('scheduled_services').insert({ id: randomUUID(), customer_id: ids.customer,
+      parent_service_id: ids.pending[1], service_type: 'Fixture follow-up', scheduled_date: day(180), status: 'pending' })],
     ['a plan that is not ongoing', 'plan_shape', async () => trx('scheduled_services').where({ id: ids.root }).update({ recurring_ongoing: false })],
     ['a plan whose first visit was cancelled', 'plan_shape', async () => trx('scheduled_services').where({ id: ids.root }).update({ status: 'cancelled' })],
     ['a second general pest plan', 'several_plans', async () => trx('scheduled_services').insert({ id: randomUUID(), customer_id: ids.customer,

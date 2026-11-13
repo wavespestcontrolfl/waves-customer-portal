@@ -22444,7 +22444,8 @@ async function registerExtensionReminders(conn, spawnedVisits, logContext) {
 // time, when its date was agreed (a confirmed visit or a one-off move), when
 // the series has no earlier live visit to count from, or when counting from
 // the last visit would not bring the next visit `soonerByDays` sooner. The
-// new cadence then counts from the kept visit.
+// new cadence then counts from the kept visit, and no new visit is placed
+// before it or nearer to it than two visits of the cadence may be.
 // No existing visit is moved or re-priced here: a price edit of a live visit
 // belongs to update-details and its invoice locks.
 //
@@ -22585,8 +22586,15 @@ async function changeSeriesFrequencyWithLocks(trx, rootId, {
   await trx('scheduled_services').whereIn('id', patternIds).update({ recurring_pattern: pattern, updated_at: new Date() });
   await stampRecurringTemplateOverrides(trx, rootId, templateFields, cols);
 
-  // Step 4: the new visits, by the top-up's own loop.
-  const topUp = await topUpRecurringSeriesLocked(trx, rootId, { horizonDays, minDate });
+  // Step 4: the new visits, by the top-up's own loop. None nearer than the
+  // lead time. And none nearer to the kept visit's ACTUAL date than the
+  // cadence allows between two visits (recurringCandidateTooCloseToAnchor's
+  // own threshold): the walk counts from a moved visit's cadence slot
+  // (seriesExtendAnchor), which can sit weeks before the day it was moved to.
+  const keptGapDays = MONTH_RECURRENCE_INTERVALS[pattern] * 21;
+  const afterKept = kept && etDateString(addETDays(parseETDateTime(`${dateOnly(kept.scheduled_date)}T12:00`), keptGapDays));
+  const firstNewDate = afterKept && afterKept > minDate ? afterKept : minDate;
+  const topUp = await topUpRecurringSeriesLocked(trx, rootId, { horizonDays, minDate: firstNewDate });
   if (!topUp.spawnedVisits.length) {
     throw frequencyChangeRefusal('FREQUENCY_CHANGE_NOT_PLACED', 'The new schedule could not be booked for this plan.', { skipped: topUp.skipped });
   }
@@ -22626,8 +22634,11 @@ async function settleSeriesFrequencyChange(change, { actorId = null } = {}) {
   }
   try {
     const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    // linkedChildren: [] — the cancel cascade takes no linked follow-up visit
+    // with it: none was on the screen the customer confirmed (the plan reader
+    // refuses a plan that has one).
     await runVisitCancellationFollowThrough({
-      targetIds: cancelledIds, actorId, waiveFee: false, reason: FREQUENCY_CHANGE_NOTE, source: 'schedule/frequency-change',
+      targetIds: cancelledIds, actorId, waiveFee: false, reason: FREQUENCY_CHANGE_NOTE, source: 'schedule/frequency-change', linkedChildren: [],
     });
   } catch (e) {
     logger.error(`[schedule/frequency-change] cancellation follow-through failed for replaced visits (${cancelledIds.join(', ')}): ${e.message}`);

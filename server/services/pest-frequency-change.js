@@ -130,10 +130,14 @@ async function readPlanRows(conn, customerId, catalog) {
       && !visit.payer_id && visit.is_callback !== true && (visit.track_state || 'scheduled') === 'scheduled'),
   ].every(Boolean);
   if (!plain) return { reason: 'plan_shape' };
-  // A booster (an extra visit beside the cadence) and an add-on line keep their own dates and prices.
+  // A booster (an extra visit beside the cadence) and an add-on line keep their own dates and prices. A
+  // follow-up visit linked to an upcoming visit (a call-booked second visit) leaves with it when that visit
+  // is cancelled: the new schedule never replaces a visit that has one.
+  const visitIds = visits.map((visit) => visit.id);
   const booster = await conn('scheduled_services').where({ recurring_parent_id: root.id, is_recurring: false })
     .whereIn('status', UPCOMING_STATUSES).where('scheduled_date', '>=', today).first('id');
-  if (booster || await hasAddonLines(conn, [root.id, ...visits.map((visit) => visit.id)])) return { reason: 'plan_shape' };
+  const linkedFollowUp = await conn('scheduled_services').whereIn('parent_service_id', visitIds).whereIn('status', UPCOMING_STATUSES).first('id');
+  if (booster || linkedFollowUp || await hasAddonLines(conn, [root.id, ...visitIds])) return { reason: 'plan_shape' };
   const prices = [...new Set(visits.map((visit) => cents(visit.estimated_price)))];
   if (prices.length !== 1 || !(prices[0] > 0)) return { reason: 'visit_prices' };
   return { root, visits, service, frequency, perVisit: prices[0] / 100 };
