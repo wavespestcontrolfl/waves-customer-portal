@@ -111,13 +111,14 @@ describe('pest frequency entry', () => {
     api.getPestFrequency.mockResolvedValue(available());
     const dialog = await openSheet();
     expect(within(dialog).getByText('How often should we visit?')).toBeInTheDocument();
-    expect(within(dialog).getByText('Today: every three months · $119.00 a visit · $476.00 a year')).toBeInTheDocument();
+    // The Plan tab's own price words: per application, never "per visit".
+    expect(within(dialog).getByText('Today: every three months · $119.00 per application · $476.00 a year')).toBeInTheDocument();
     expect(within(dialog).getByText('Every two months')).toBeInTheDocument();
-    expect(within(dialog).getByText('6 visits a year')).toBeInTheDocument();
-    expect(within(dialog).getByText('$99.00 a visit · $594.00 a year')).toBeInTheDocument();
+    expect(within(dialog).getByText('6 applications a year')).toBeInTheDocument();
+    expect(within(dialog).getByText('$99.00 per application · $594.00 a year')).toBeInTheDocument();
     expect(within(dialog).getByText('Every month')).toBeInTheDocument();
-    expect(within(dialog).getByText('12 visits a year')).toBeInTheDocument();
-    expect(within(dialog).getByText('$79.00 a visit · $948.00 a year')).toBeInTheDocument();
+    expect(within(dialog).getByText('12 applications a year')).toBeInTheDocument();
+    expect(within(dialog).getByText('$79.00 per application · $948.00 a year')).toBeInTheDocument();
     // Opening the sheet writes nothing and previews nothing.
     expect(api.previewPestFrequency).not.toHaveBeenCalled();
   });
@@ -141,12 +142,16 @@ describe('pest frequency review and confirm', () => {
     expect(await within(dialog).findByText('Review your new plan')).toBeInTheDocument();
     expect(api.previewPestFrequency).toHaveBeenCalledWith({ frequency: 'bimonthly' });
     expect(within(dialog).getByText('Pest control every two months')).toBeInTheDocument();
-    expect(within(dialog).getByText('$99.00 a visit · $594.00 a year')).toBeInTheDocument();
-    expect(within(dialog).getByText('Today: $119.00 a visit · $476.00 a year')).toBeInTheDocument();
+    expect(within(dialog).getByText('$99.00 per application · $594.00 a year')).toBeInTheDocument();
+    expect(within(dialog).getByText('Today: $119.00 per application · $476.00 a year')).toBeInTheDocument();
     expect(within(dialog).getByText('Your visit on Nov 16, 2026 stays as booked at $119.00.')).toBeInTheDocument();
-    expect(within(dialog).getByText('Your new visits: Jan 15, 2027, Mar 15, 2027, May 15, 2027 and then every two months.')).toBeInTheDocument();
-    expect(within(dialog).getByText('These replace the visits you had on Feb 15, 2027, May 17, 2027.')).toBeInTheDocument();
-    expect(within(dialog).getByText('Nothing is charged today. We bill each visit after it\'s done.')).toBeInTheDocument();
+    // The first three new dates, one on a line, then how the plan goes on.
+    const fresh = within(dialog).getByText('Your new visits').parentElement;
+    expect([...fresh.children].map((el) => el.textContent))
+      .toEqual(['Your new visits', 'Jan 15, 2027', 'Mar 15, 2027', 'May 15, 2027', 'and then every two months']);
+    const replaced = within(dialog).getByText('These replace your visits on').parentElement;
+    expect([...replaced.children].map((el) => el.textContent)).toEqual(['These replace your visits on', 'Feb 15, 2027', 'May 17, 2027']);
+    expect(within(dialog).getByText('Nothing is charged today. You pay per application, after each visit.')).toBeInTheDocument();
     expect(api.confirmPestFrequency).not.toHaveBeenCalled();
   });
 
@@ -199,7 +204,8 @@ describe('pest frequency review and confirm', () => {
     expect(api.previewPestFrequency).toHaveBeenCalledTimes(2);
     expect(api.previewPestFrequency).toHaveBeenLastCalledWith({ frequency: 'bimonthly' });
     expect(within(dialog).getByText('Review your new plan')).toBeInTheDocument();
-    expect(within(dialog).getByText('Your new visits: Jan 22, 2027, Mar 22, 2027, May 22, 2027')).toBeInTheDocument();
+    expect([...within(dialog).getByText('Your new visits').parentElement.children].map((el) => el.textContent))
+      .toEqual(['Your new visits', 'Jan 22, 2027', 'Mar 22, 2027', 'May 22, 2027']);
     // The next confirm uses the new version.
     api.confirmPestFrequency.mockResolvedValue({ success: true, ...PREVIEW });
     fireEvent.click(within(dialog).getByText('Confirm change'));
@@ -218,6 +224,50 @@ describe('pest frequency review and confirm', () => {
     api.confirmPestFrequency.mockRejectedValueOnce(apiError('boom', { status: 500 }));
     fireEvent.click(within(dialog).getByText('Confirm change'));
     expect(await within(dialog).findByText('Something went wrong — please try again.')).toBeInTheDocument();
+  });
+});
+
+describe('pest frequency retry and one look at a time', () => {
+  it('a "try again" answer on confirm keeps the review, and the next tap confirms the same version', async () => {
+    api.getPestFrequency.mockResolvedValue(available());
+    api.previewPestFrequency.mockResolvedValue(PREVIEW);
+    api.confirmPestFrequency.mockRejectedValueOnce(apiError('That did not go through. Please try again in a moment.', { status: 409, code: 'FREQUENCY_CHANGE_RETRY' }));
+    const dialog = await openSheet();
+    fireEvent.click(within(dialog).getByText('Every two months'));
+    fireEvent.click(await within(dialog).findByText('Confirm change'));
+    expect(await within(dialog).findByText('Something went wrong — please try again.')).toBeInTheDocument();
+    expect(within(dialog).getByText('Review your new plan')).toBeInTheDocument();
+
+    api.confirmPestFrequency.mockResolvedValueOnce({ success: true, ...PREVIEW });
+    fireEvent.click(within(dialog).getByText('Confirm change'));
+    expect(await within(dialog).findByText('Your plan is changed')).toBeInTheDocument();
+    expect(api.confirmPestFrequency).toHaveBeenCalledTimes(2);
+    expect(api.confirmPestFrequency).toHaveBeenLastCalledWith({ frequency: 'bimonthly', version: 'v-7' });
+    expect(api.previewPestFrequency).toHaveBeenCalledTimes(1);
+  });
+
+  it('a new choice waits for the look still running; a choice the customer left is never sent', async () => {
+    api.getPestFrequency.mockResolvedValue(available());
+    const looks = [];
+    api.previewPestFrequency.mockImplementation(({ frequency }) => new Promise((resolve) => { looks.push({ frequency, resolve }); }));
+    const dialog = await openSheet();
+    // Every two months, back while it loads, every month, back again, every two months again.
+    fireEvent.click(within(dialog).getByText('Every two months'));
+    expect(await within(dialog).findByText('Checking your schedule…')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByText('Back'));
+    fireEvent.click(within(dialog).getByText('Every month'));
+    fireEvent.click(await within(dialog).findByText('Back'));
+    fireEvent.click(within(dialog).getByText('Every two months'));
+    await vi.waitFor(() => expect(looks).toHaveLength(1));
+    expect(api.previewPestFrequency).toHaveBeenCalledTimes(1);
+
+    // The first look ends: only the choice that is still on screen is asked for.
+    looks[0].resolve(PREVIEW);
+    await vi.waitFor(() => expect(looks).toHaveLength(2));
+    expect(looks.map((look) => look.frequency)).toEqual(['bimonthly', 'bimonthly']);
+    looks[1].resolve({ ...PREVIEW, version: 'v-9' });
+    fireEvent.click(await within(dialog).findByText('Confirm change'));
+    expect(api.confirmPestFrequency).toHaveBeenCalledWith({ frequency: 'bimonthly', version: 'v-9' });
   });
 });
 
