@@ -59,6 +59,16 @@
  * A stop moves at most once by make-room (owner 2026-11-09): one that already has a reschedule_log row with
  * initiated_by 'booking_make_room' is fixed (fixed_make_room_moved), read with one query per day.
  *
+ * The empty-hour move (owner 2026-11-12 "C", GATE_MAKE_ROOM_EMPTY_HOUR, read at call time; needs mode on to reach a
+ * customer): the sooner rule also looks at an EMPTY hour that ends where a stop starts. The page refuses such an hour
+ * when the drive to that next stop does not fit before it starts (its travel rule). Here the next stop, and each later
+ * stop it would then overlap, moves later by the same whole hours as a taken hour's chain, so the drive fits. Every
+ * rule above holds for it unchanged. Two more apply: the new visit is at most EMPTY_HOUR_MAX_VISIT_MIN long, and the
+ * hour must be refused by the page as it is (free_as_is: when the page's own placement rules already allow the hour
+ * with nothing moved, no stop moves for it and make-room does not offer it). The hold's proof and the accept rebuild
+ * the chain through the same tryHour, so with the gate off a held empty hour proves nothing and answers slot-taken.
+ * Gate off: byte-identical candidates, checks and report.
+ *
  * Never throws, spends nothing, sends nothing, and writes only its own log row. The estimate page starts it through
  * startBackgroundCheck: at most MAX_IN_FLIGHT checks at once and one per estimate per DEDUPE_MS, extra requests dropped.
  * A check has DEFAULT_BUDGET_MS. Once that runs out it sends no further read, and it keeps its slot until the reads it
@@ -142,6 +152,11 @@ function shiftMinutesFor(durationMin) {
 
 // The most a moved stop may shift when its first shift is 1 hour (owner 2026-11-07 "B": up to 2 hours, not 1).
 const MAX_SHIFT_MIN = 120;
+
+// The empty-hour move (owner 2026-11-12 "C"): only a new visit up to this long, and the stop that moves for it starts
+// within this many minutes after the new visit's booked end.
+const EMPTY_HOUR_MAX_VISIT_MIN = 60;
+const EMPTY_HOUR_REACH_MIN = 60;
 
 // The shifts to try for one hour, in order: the owner's 1-hour move first, then 2 hours. A longer visit's own shift
 // (2 hours or more) is the only one.
@@ -242,13 +257,14 @@ function chainRanges(candidate) {
 }
 
 // One shift of one hour, with the checks that need no read. Returns { candidate } or { reason }.
-function chainCandidate({ day, startMin, env, request, slot, shiftMin }) {
+function chainCandidate({ day, startMin, env, request, slot, shiftMin, emptyHour = false }) {
   const { durationMin } = request;
-  const chain = buildChain(day.own, { startMin, durationMin, closeMin: env.closeMin, shiftMin });
+  // An empty hour's chain starts at the stop after it: the walk treats the hour after the new visit as taken too.
+  const chain = buildChain(day.own, { startMin, durationMin: emptyHour ? durationMin + EMPTY_HOUR_REACH_MIN : durationMin, closeMin: env.closeMin, shiftMin });
   if (chain.reason) return { reason: chain.reason };
   const fixed = chain.moves.map((m) => env.fixedReason(m.row, day.quick)).find(Boolean);
   if (fixed) return { reason: `fixed_${fixed}` };
-  const candidate = { dateStr: day.dateStr, techId: day.techId, startMin, durationMin, shiftMin, moves: chain.moves, slot };
+  const candidate = { dateStr: day.dateStr, techId: day.techId, startMin, durationMin, shiftMin, moves: chain.moves, slot, ...(emptyHour ? { emptyHour: true } : {}) };
   if (hitsAny(chainRanges(candidate), day.taken)) return { reason: 'taken_by_other' };
   const { prev } = neighbours(day.own, startMin, day.home);
   candidate.detourMin = addedDrive(env.legMin, prev, request.point, pointOf(chain.moves[0].row));
@@ -263,16 +279,36 @@ function chainCandidate({ day, startMin, env, request, slot, shiftMin }) {
 // One hour on one technician-day, with the checks that need no read. Returns { candidate } or { reason }. The
 // candidate is the first shift that passes them; `later` is the 2-hour shift that also passed, for the full check to
 // try when the 1-hour one fails there. When no shift passes, the reason is the first shift's.
-function tryHour({ day, startMin, env, request }) {
+// With the empty-hour move on, an hour no stop holds is tried once more with the chain that starts at the stop after it.
+// `emptyOnly` (the finder's extra starts): only that second kind counts; an hour a stop holds is left to its own start.
+function tryHour({ day, startMin, env, request, emptyOnly = false }) {
   const { durationMin } = request;
   // routeMode: every hour that passes is checked on the arrival-window route (routeKeepsWindows), like the page's own
   // capacity-mode slots, which is what filterCollidingSlots asks of a slot in capacity mode.
   const slot = { date: day.dateStr, windowStart: hhmm(startMin), windowEnd: hhmm(startMin + durationMin), durationMinutes: durationMin, techId: day.techId, routeMode: 'arrival_windows' };
   if (!request.admit(slot)) return { reason: 'not_offerable' };
-  const tries = shiftsFor(durationMin).map((shiftMin) => chainCandidate({ day, startMin, env, request, slot, shiftMin }));
+  const shifts = (emptyHour) => shiftsFor(durationMin).map((shiftMin) => chainCandidate({ day, startMin, env, request, slot, shiftMin, emptyHour }));
+  let tries = shifts(false);
+  const hourFree = tries[0].reason === 'hour_free';
+  if (emptyOnly && !hourFree) return { reason: tries[0].reason || 'hour_taken' };
+  if (hourFree && emptyHourAllowed(env, request)) tries = shifts(true);
   const [candidate, later] = tries.map((t) => t.candidate).filter(Boolean);
   if (!candidate) return { reason: tries[0].reason };
   return { candidate: later ? { ...candidate, later } : candidate };
+}
+
+// The empty-hour move applies to the sooner rule only (request.soonerCap: the sooner pass, the page's offer and the
+// hold's proof), to a visit of up to EMPTY_HOUR_MAX_VISIT_MIN, and only while GATE_MAKE_ROOM_EMPTY_HOUR is on.
+function emptyHourAllowed(env, request) {
+  return !!request.soonerCap && request.durationMin <= EMPTY_HOUR_MAX_VISIT_MIN
+    && typeof env.emptyHourOn === 'function' && env.emptyHourOn() === true;
+}
+
+// The starts of the empty hours worth a try on one technician-day: one whole hour before each stop, where no stop starts.
+function emptyHourStarts(day, { env, request }) {
+  if (!emptyHourAllowed(env, request)) return [];
+  const starts = new Set(day.own.map((row) => bookedRange(row).startMin));
+  return [...starts].map((next) => next - EMPTY_HOUR_REACH_MIN).filter((startMin) => startMin >= 0 && !starts.has(startMin));
 }
 
 function tally(report, reason) {
@@ -301,6 +337,12 @@ function dayCandidates({ dateStr, rows, techId, env, request, report }) {
     const { candidate, reason } = tryHour({ day, startMin, env, request });
     if (candidate) found.push(candidate);
     else tally(report, reason);
+  }
+  for (const startMin of emptyHourStarts(day, { env, request })) {
+    report.emptyTried = (report.emptyTried || 0) + 1;
+    const { candidate, reason } = tryHour({ day, startMin, env, request, emptyOnly: true });
+    if (candidate) found.push(candidate);
+    else tally(report, `empty_${reason}`);
   }
   return found;
 }
@@ -482,6 +524,11 @@ async function fullCheck(candidate, ctx) {
   const blocks = await cached(caches.blocks, `${candidate.dateStr}|${candidate.techId}`, () => env.loadBlocks(conn, candidate.dateStr, candidate.techId));
   if (hitsAny(chainRanges(candidate), blocks || [])) return 'schedule_block';
   if (budget.spent()) return TIMED_OUT;
+  if (candidate.emptyHour) {
+    // The hour as it is, with nothing moved: when the page's own rules already allow it, no stop moves for it.
+    if (await request.placement(candidate.slot, new Map()) === true) return 'free_as_is';
+    if (budget.spent()) return TIMED_OUT;
+  }
   const placed = await request.placement(candidate.slot, new Map(candidate.moves.map((m) => [String(m.row.id), m.toMin - m.fromMin])));
   if (placed !== true) return placed || 'page_rules';
   if (budget.spent()) return TIMED_OUT;
@@ -656,6 +703,8 @@ function defaultDeps() {
     stopExpectedMinutesSync: require('./expected-service-minutes').stopExpectedMinutesSync,
     ensureCatalogLoaded: require('./expected-service-minutes').ensureCatalogLoaded,
     multiTechConfirmLive: require('../../config/feature-gates').multiTechConfirmLive,
+    // The empty-hour move's gate (GATE_MAKE_ROOM_EMPTY_HOUR), read at call time.
+    emptyHourOn: require('../../config/feature-gates').makeRoomEmptyHourLive,
   };
 }
 
@@ -663,13 +712,14 @@ function summaryOf(candidate) {
   return {
     date: candidate.dateStr, start: hhmm(candidate.startMin), techId: candidate.techId, shiftMin: candidate.shiftMin,
     detourMin: candidate.detourMin, savingMin: candidate.savingMin,
+    ...(candidate.emptyHour ? { emptyHour: true } : {}),
     moves: candidate.moves.map((m) => ({ id: m.row.id, from: hhmm(m.fromMin), to: hhmm(m.toMin) })),
   };
 }
 
 // Full-check reasons a 2-hour move cannot change: the moved stops' own facts (the 2-hour chain holds every stop of the
 // 1-hour one, from the same first stop) and a failed check.
-const SAME_FOR_ANY_SHIFT = /^(changed$|fixed_|reminders_|prefs_unreadable$|error$)/;
+const SAME_FOR_ANY_SHIFT = /^(changed$|fixed_|reminders_|prefs_unreadable$|error$|free_as_is$)/;
 
 // One full check within the budget: null when every rule holds, else why, or TIMED_OUT.
 async function checkOne(candidate, ctx) {
@@ -1029,5 +1079,5 @@ module.exports = {
   recordMakeRoomCheck,
   findMakeRoomOffers,
   verifyMakeRoomHour,
-  _internals: { buildChain, shiftsFor, MAX_SHIFT_MIN, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, remindersByText, moveBlockedReason, datesFor, bySaving, bySooner, daysBetween, defaultDeps, resetBackgroundChecks, makeBudget, TIMED_OUT, MIN_SAVING_MIN, MAX_FULL_CHECKS, MAX_SOONER_CHECKS, MAX_IN_FLIGHT, MAX_OFFERS_IN_FLIGHT, OFFER_BUDGET_MS, DEDUPE_MS, LINGER_MS, MOVED_BY },
+  _internals: { buildChain, shiftsFor, MAX_SHIFT_MIN, EMPTY_HOUR_MAX_VISIT_MIN, EMPTY_HOUR_REACH_MIN, emptyHourStarts, bestFreeTime, addedDrive, neighbours, tryHour, remindersOn, remindersByText, moveBlockedReason, datesFor, bySaving, bySooner, daysBetween, defaultDeps, resetBackgroundChecks, makeBudget, TIMED_OUT, MIN_SAVING_MIN, MAX_FULL_CHECKS, MAX_SOONER_CHECKS, MAX_IN_FLIGHT, MAX_OFFERS_IN_FLIGHT, OFFER_BUDGET_MS, DEDUPE_MS, LINGER_MS, MOVED_BY },
 };
