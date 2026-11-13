@@ -13,6 +13,7 @@ const { RESCHEDULABLE_STATUSES } = require('../reschedule-eligibility');
 const { listPortalPayments } = require('../portal-payment-history');
 const { listPortalServiceHistory } = require('../portal-service-history');
 const portalOpen = require('./portal-open');
+const threadLane = require('./thread-lane');
 const { DAY_ONLY_ARRIVAL_NOTE, loadDayOnlyCheck } = require('../day-only-ai-context');
 const { dayOnlyPromiseOn } = require('../time-promise');
 const runQuery = (query, turn, stage) => turn ? turn.query(query, stage) : query;
@@ -216,6 +217,9 @@ function portalToolsFor({ payments = false, visits = false, reservice = false, r
   ];
 }
 const PORTAL_FACTS_TOOLS = portalToolsFor({ payments: true });
+// The Messages thread's turn (GATE_PORTAL_MESSAGES_NIGHT_AI, thread-lane.js): the visit read, the reschedule
+// check, the no-reply move and escalate. Nothing that builds a button or a card, gives advice or files an item.
+const THREAD_TOOLS = [TOOLS[0], threadLane.RESCHEDULE_TOOL, threadLane.STAY_SILENT_TOOL, PORTAL_TOOLS[4]];
 
 const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments', 'get_recent_visits', 'offer_reservice', 'request_email_change', 'request_quote', 'request_move']);
 const TOOL_CANCELLATION_CODES = new Set(['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014']);
@@ -228,7 +232,7 @@ function isToolCancellation(err) {
 const TOOL_EXECUTORS = new Map([
   ['get_upcoming_services', ({ customerId, turn }) => getUpcomingServices(customerId, turn)],
   ['get_pest_advice', ({ input, turn }) => getPestAdvice(input.topic, turn)],
-  ['offer_reschedule_link', ({ customerId, actions, turn }) => offerRescheduleLink(customerId, actions, turn)],
+  ['offer_reschedule_link', ({ customerId, actions, context, turn }) => offerRescheduleLink(customerId, actions, turn, context)],
   ['open_portal_section', ({ input, actions, turn }) => openPortalSection(input.section, actions, turn)],
   ['show_recent_payments', ({ customerId, actions, cards, turn }) => showRecentPayments(customerId, actions, cards, turn)],
   ['get_recent_visits', ({ customerId, actions, cards, turn }) => getRecentVisits(customerId, actions, cards, turn)],
@@ -236,6 +240,8 @@ const TOOL_EXECUTORS = new Map([
   ['request_email_change', ({ customerId, input, context, turn }) => requestEmailChange(customerId, input, context, turn)],
   ['request_quote', ({ customerId, input, context, turn }) => portalOpen.requestQuote(customerId, input, context, turn)],
   ['request_move', ({ input, context }) => portalOpen.requestMove(input, context)],
+  // The Messages thread's no-reply move, for that turn only: assistant.js ends the turn on it (thread-lane.js).
+  ['stay_silent', ({ input, context }) => (context.thread === true ? { silent: true, why: input.why || null } : { error: 'Unknown tool: stay_silent' })],
   // Handled in assistant.js before reaching here.
   ['escalate', ({ input }) => ({ escalated: true, reason: input.reason })],
 ]);
@@ -280,7 +286,10 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
 
     const execute = TOOL_EXECUTORS.get(toolName);
     if (!execute) return { error: `Unknown tool: ${toolName}` };
-    return await execute({ input, customerId: contextCustomerId, actions, cards, context, turn });
+    const result = await execute({ input, customerId: contextCustomerId, actions, cards, context, turn });
+    // The Messages thread's turn: note that a schedule tool returned something the reply may state.
+    if (context.thread === true && threadLane.grounds(toolName, result)) context.grounded = true;
+    return result;
   } catch (err) {
     if (isToolCancellation(err)) throw err;
     logger.error(`Tool ${toolName} failed: ${err.message}`);
@@ -354,12 +363,15 @@ async function movableVisit(id, database = db) {
   return verdict?.ok ? svc : null;
 }
 
-async function offerRescheduleLink(customerId, actions, turn) {
+// `context.thread` (thread-lane.js): the Messages thread shows no button, so the same check only tells the
+// model to point the customer to the Reschedule button their Visits tab already shows.
+async function offerRescheduleLink(customerId, actions, turn, context = {}) {
   const NO_LINK = {
     available: false,
     instruction: 'No visit of this customer can be moved online right now. Use the escalate tool so the team moves it.',
   };
-  if (!customerId || !Array.isArray(actions)) return NO_LINK;
+  const thread = context.thread === true;
+  if (!customerId || (!thread && !Array.isArray(actions))) return NO_LINK;
   // A button only for a visit the reschedule page itself will accept: its own
   // loader and GET verdict (account state, status, dispatch review, grouped or
   // frozen visit, the self-serve move notice window), never a mirror of it.
@@ -421,7 +433,9 @@ async function offerRescheduleLink(customerId, actions, turn) {
   return {
     available: true,
     visits,
-    instruction: `A Reschedule button for each listed visit is now shown under your reply${multiProperty ? ', each naming its property' : ''}. Tell the customer to tap it to see the open times and pick one. Do not state or promise a new time yourself.`,
+    instruction: thread
+      ? threadLane.RESCHEDULE_INSTRUCTION
+      : `A Reschedule button for each listed visit is now shown under your reply${multiProperty ? ', each naming its property' : ''}. Tell the customer to tap it to see the open times and pick one. Do not state or promise a new time yourself.`,
   };
 }
 
@@ -914,4 +928,4 @@ async function getPestAdvice(topic, turn) {
   }
 }
 
-module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall, reservicePageSwitchesOn, withoutEmails, emailReadBackAwaitingAnswer };
+module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, THREAD_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall, reservicePageSwitchesOn, withoutEmails, emailReadBackAwaitingAnswer };

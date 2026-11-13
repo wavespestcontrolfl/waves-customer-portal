@@ -14,13 +14,19 @@
  *   request id never gets here), and the step first claims the message with one conditional UPDATE
  *   (metadata.nightAi, claimMessage), so a second start for the same message does nothing. The turn also
  *   carries a request id made from the message id, so the portal turn coordinator's own receipt agrees.
- * - Same assistant, no second prompt or model call site: assistant.js processMessage on the portal_chat
- *   channel with the live gates, through runPortalTurn. Its context is the customer's visible Messages thread
+ * - Same assistant and model call site (assistant.js processMessage on the portal_chat channel, through
+ *   runPortalTurn), on the thread's own short prompt and four tools (ai-assistant/thread-lane.js, owner
+ *   2026-11-12 "A" after the replay of 82 night texts). Its context is the customer's visible Messages thread
  *   (threadHistory: the newest 20 rows, staff answers labelled "Waves team", ending with the message), supplied
- *   as turn.threadHistory so the assistant's private agent_messages history is never read for this turn. The turn is marked `holdHandOff`: the assistant files
- *   no hand-off item, rings nothing and builds no button or card (a Messages bubble shows text only; every
- *   tool already answers "use escalate" then). A hand-off decision comes back to this module, because the
+ *   as turn.threadHistory so the assistant's private agent_messages history is never read for this turn. The
+ *   turn is marked `holdHandOff`: the assistant files no hand-off item, rings nothing and builds no button or
+ *   card (a Messages bubble shows text only). A hand-off decision comes back to this module, because the
  *   customer's thread already IS the office's item: one fixed reply, HAND_OFF_REPLY below.
+ * - Three outcomes for the customer. Nothing at all ('silent'): the message is only thanks, an acknowledgment
+ *   or a reaction (needsNoReply, no model call), or the model's stay_silent says it needs no answer. The
+ *   model's own text ('answered'): only when a schedule tool returned something in that turn (`grounded`),
+ *   so it states a visit's date and window or points to the Reschedule button on the Visits tab. Every other
+ *   turn is the fixed reply ('handoff'), text the model wrote with no such result included.
  * - The per-customer cap (GATE_PORTAL_CHAT_CUSTOMER_CAP) counts these turns too. Over it: no AI answer and
  *   nothing else.
  * - The answer is an outbound message of author_type 'agent' (a value the table's own comment lists; the
@@ -38,6 +44,7 @@ const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
 const Conversations = require('./conversations');
 const { etParts } = require('../utils/datetime-et');
+const { needsNoReply } = require('./ai-assistant/thread-lane');
 
 // The one reply for a hand-off. The owner approves or changes this sentence here, and only here.
 const HAND_OFF_REPLY = 'Thanks for your message. A member of our team will answer here after 8 AM.';
@@ -116,7 +123,7 @@ function recordOutcome(messageId, outcome) {
     .catch((err) => logger.warn(`[portal-night-ai] could not record the outcome for message ${messageId}: ${err.message}`));
 }
 
-// The assistant's turn for this message: { kind: 'answer', body } | { kind: 'handoff' } | { kind: 'capped' }.
+// The assistant's turn for this message: { kind: 'answer', body } | { kind: 'silent' } | { kind: 'handoff' } | { kind: 'capped' }.
 async function takeTurn(customerId, threadId, message) {
   const WavesAssistant = require('./ai-assistant/assistant');
   const { runPortalTurn } = require('./ai-assistant/portal-turn');
@@ -147,10 +154,13 @@ async function takeTurn(customerId, threadId, message) {
     },
   });
   if (result?.capped) return { kind: 'capped' };
+  // The model's no-reply move (thread-lane.js stay_silent).
+  if (result?.generated === true && result.silent === true) return { kind: 'silent' };
   const body = require('./portal-messages').cleanBody(result?.reply);
-  // Only true model output that decided nothing about a hand-off is an answer. A held hand-off decision, a
-  // canned fallback, a timeout and a busy turn all hand the thread to the team.
-  if (result?.generated === true && result.escalated !== true && !result.handOffHeld && body) return { kind: 'answer', body };
+  // Only true model output that follows a schedule tool's result in this turn is an answer (thread-lane.js
+  // grounds). A held hand-off decision, text with no such result, a canned fallback, a timeout and a busy
+  // turn all hand the thread to the team.
+  if (result?.generated === true && result.grounded === true && result.escalated !== true && !result.handOffHeld && body) return { kind: 'answer', body };
   return { kind: 'handoff' };
 }
 
@@ -194,7 +204,7 @@ async function saveReply(threadId, message, { body, handOff }) {
 
 /**
  * The after-hours step for one saved customer message. Returns the outcome word ('answered', 'handoff',
- * 'capped', 'superseded') or null when it did nothing. Never throws.
+ * 'silent', 'capped', 'superseded') or null when it did nothing. Never throws.
  * @param {{ customer: { id: string }, threadId: string, message: object }} input
  */
 async function answerAfterHours({ customer, threadId, message }) {
@@ -203,14 +213,16 @@ async function answerAfterHours({ customer, threadId, message }) {
     if (!enabled() || !isAfterHours(message.created_at)) return null;
     if (!(await claimMessage(message.id))) return null;
     claimed = true;
-    // A turn that fails is a hand-off: the team answers.
-    const turn = await takeTurn(customer.id, threadId, message).catch((err) => {
+    // Only thanks, an acknowledgment or a reaction: no model call and no answer. Otherwise the assistant's
+    // turn; one that fails is a hand-off: the team answers.
+    const turn = needsNoReply(message.body) ? { kind: 'silent' } : await takeTurn(customer.id, threadId, message).catch((err) => {
       logger.warn(`[portal-night-ai] the assistant turn for message ${message.id} failed: ${err.message}`);
       return { kind: 'handoff' };
     });
-    if (turn.kind === 'capped') {
-      await recordOutcome(message.id, 'capped');
-      return 'capped';
+    // Nothing is sent: the message stays the office's open item, as it was.
+    if (turn.kind === 'capped' || turn.kind === 'silent') {
+      await recordOutcome(message.id, turn.kind);
+      return turn.kind;
     }
     const handOff = turn.kind === 'handoff';
     const saved = await saveReply(threadId, message, { body: handOff ? HAND_OFF_REPLY : turn.body, handOff });
