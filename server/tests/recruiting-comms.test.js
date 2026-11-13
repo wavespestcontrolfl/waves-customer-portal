@@ -1064,6 +1064,22 @@ describe('owner reply — boundary guard and evidence-owning application', () =>
   });
 });
 
+describe('application receipt email makes no timing promise (owner 2026-11-12)', () => {
+  test('en and es intro say the owner reads it and will call or text; no business-days promise', () => {
+    const app = baseApp();
+    const en = RecruitingComms.buildEmailContent({ ...app, language: 'en' }, 'application_received', {});
+    const es = RecruitingComms.buildEmailContent({ ...app, language: 'es' }, 'application_received', {});
+    expect(en.text).toContain('thanks for applying to Waves Pest Control. Adam, the owner, reads every application himself and will call or text you directly if it looks like a fit.');
+    expect(es.text).toContain('gracias por postularte a Waves Pest Control. Adam, el dueño, lee cada solicitud personalmente y te llamará o enviará un mensaje directamente si parece una buena opción.');
+    for (const built of [en, es]) {
+      expect(built.text).not.toMatch(/business days|d[ií]as h[aá]biles|dias habiles/i);
+      expect(built.html).not.toMatch(/business days|d[ií]as h[aá]biles|dias habiles/i);
+    }
+    expect(en.subject).toBe('We received your application');
+    expect(es.subject).toBe('Recibimos tu solicitud');
+  });
+});
+
 describe('applicant emails never invite an email reply', () => {
   test('copy directs questions to the phone, not a reply', () => {
     const app = baseApp();
