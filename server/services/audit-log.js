@@ -695,8 +695,31 @@ async function auditCardDetailsSynced({ payment_method_row_id, source, changed_f
   });
 }
 
+/**
+ * A customer changed how often we visit for pest control, in the portal
+ * (services/pest-frequency-change.js). The consent record of a price change:
+ * who, from where, and exactly which plan, prices and visits. Critical, and
+ * written in the change's own transaction: a change with no record of the
+ * customer's consent does not commit.
+ */
+async function auditPestFrequencyChange({ customerId, seriesRootId, metadata = {}, ip = null, userAgent = null, trx = null }) {
+  return recordAuditEvent({
+    actor_type: 'customer',
+    actor_id: customerId,
+    action: 'pest_frequency_change',
+    resource_type: 'scheduled_service',
+    resource_id: seriesRootId,
+    metadata,
+    ip_address: ip,
+    user_agent: userAgent,
+    critical: true,
+    trx,
+  });
+}
+
 module.exports = {
   recordAuditEvent,
+  auditPestFrequencyChange,
   auditEstimateExpiredOpen,
   auditEstimateBookingStep,
   auditCardDetailsSynced,
