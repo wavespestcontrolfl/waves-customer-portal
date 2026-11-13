@@ -165,7 +165,7 @@ function checkRecruitingStageSupersession(meta, app, stage) {
   return null;
 }
 
-// A queued application receipt ("we'll reach out within 2 business days")
+// A queued application receipt ("we received your application")
 // is stale once the owner has moved on: the application advanced past the
 // review stages, or a LATER stage/owner text is already live in the ledger
 // (Codex #4623 r17). Either way the applicant must not get the older
