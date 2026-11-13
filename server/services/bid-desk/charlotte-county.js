@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Bid Desk Charlotte County due dates (GATE_BID_DESK_CHARLOTTE_DATES, dark; needs GATE_BID_DESK). Charlotte County's
+ * Bid Desk Charlotte County due dates. Charlotte County's
  * emailed notices ("Addendum Notification for Bid 26-674") carry no due date, so those bids were filed with none and
  * never reminded or closed. The county publishes its active bid list as public JSON, read by its own bids page:
  * https://purchasingbids.charlottecountyfl.gov/ContractsCatalogs/GetContractData
@@ -12,14 +12,12 @@
  *
  * The county is called only when an open Charlotte County bid with a bid number has no date (a cheap database check
  * first), so a quiet week makes no outside call. A date is only ever filled into an empty field: an existing date, a
- * decided bid, a status, a title and a decision are never touched. The date counts as confirmed only while
- * GATE_BID_DESK_AUTO_DATES is on (the same policy as a template date), so the 14 / 7 / 2-day reminders and the
- * automatic close then work as for any confirmed date. Nothing is sent to anyone and no new bell rings. Errors carry
+ * decided bid, a status, a title and a decision are never touched. The date counts as confirmed (the same
+ * policy as a template date), so the 14 / 7 / 2-day reminders and the automatic close work as for any confirmed date. Nothing is sent to anyone and no new bell rings. Errors carry
  * the HTTP status or the error class only.
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { bidDeskCharlotteDatesLive, bidDeskAutoDatesLive } = require('../../config/feature-gates');
 const { OPEN_STATUSES } = require('./rules');
 const { closeDoneAlerts } = require('./close-alerts');
 
@@ -153,12 +151,10 @@ async function openDatelessCandidates() {
 }
 
 /**
- * Fills the due date of open Charlotte County bids that have none. Gate off: nothing, no call. No open dateless
- * Charlotte County bid: nothing, no call. Otherwise one read of the county's list. A failed read throws (a failed run
+ * Fills the due date of open Charlotte County bids that have none. No open dateless Charlotte County bid: nothing, no call. Otherwise one read of the county's list. A failed read throws (a failed run
  * in job health) and writes nothing. Returns { filled, unmatched, fetched }.
  */
 async function runCharlotteDates({ fetchImpl } = {}) {
-  if (!bidDeskCharlotteDatesLive()) return { skipped: 'gate_off' };
   const candidates = await openDatelessCandidates();
   if (!candidates.length) return { skipped: 'nothing_to_fill' };
   const list = parseCountyList(await fetchCountyList({ fetchImpl }));
@@ -170,12 +166,12 @@ async function runCharlotteDates({ fetchImpl } = {}) {
     try {
       const done = await db.transaction(async (trx) => {
         const before = await trx('bid_opportunities').where({ id: candidate.id }).forUpdate().first();
-        if (!before || !bidDeskCharlotteDatesLive()) return false;
+        if (!before) return false;
         if (!OPEN_STATUSES.includes(before.status) || before.due_at || before.group_key !== candidate.group_key) return false;
         const patch = {
           due_at: due,
           due_source_line: `Charlotte County bid list: due ${etStamp(due)}`,
-          due_confirmed: bidDeskAutoDatesLive(),
+          due_confirmed: true,
           needs_date_confirmation: false,
           reminder_14d_sent_at: null,
           reminder_7d_sent_at: null,

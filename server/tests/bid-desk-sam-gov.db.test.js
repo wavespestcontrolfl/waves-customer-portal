@@ -65,7 +65,6 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } });
     mockPg = database;
-    process.env.GATE_BID_DESK = 'true';
   });
   beforeEach(async () => {
     mockPg = await database.transaction();
@@ -76,7 +75,6 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
   });
   afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => {
-    delete process.env.GATE_BID_DESK;
     if (database) await database.destroy();
   });
 
@@ -107,7 +105,7 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     expect(first).toMatchObject({ read: 2, filed: 1, rung: 1, skippedByReason: { outside_area: 1 } });
     expect(fetchImpl).toHaveBeenCalledTimes(sam.NAICS_CODES.length);
     const [bid] = await samBids();
-    expect(bid).toMatchObject({ external_id: 'n-1', external_url: 'https://sam.gov/opp/n-1/view', due_confirmed: false, status: 'new' });
+    expect(bid).toMatchObject({ external_id: 'n-1', external_url: 'https://sam.gov/opp/n-1/view', due_confirmed: true, status: 'new' });
     expect(bid.notified_at).not.toBeNull();
     expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
     expect(raiseAdminAlert.mock.calls[0][2].dedupeKey).toBe(`bid-desk:new:${bid.id}`);
@@ -119,29 +117,23 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
   });
 
-  test('GATE_BID_DESK_NOT_OUR_WORK: a grounds-upkeep notice is filed as no bid with no bell; off, it files and rings as before', async () => {
+  test('a grounds-upkeep notice is filed as no bid with no bell; a mixed one is filed as new and rings', async () => {
     const upkeep = (id) => notice(id, { title: 'Grounds Maintenance Services' });
-    process.env.GATE_BID_DESK_NOT_OUR_WORK = 'true';
-    try {
-      const mixed = notice('n-fert', { title: 'Mowing and Fertilization' });
-      const run = await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([upkeep('n-1'), mixed]), apiKey: 'test-key' });
-      expect(run).toMatchObject({ filed: 2, rung: 1 });
-      const declined = await mockPg('bid_opportunities').where({ external_id: 'n-1' }).first();
-      expect(declined).toMatchObject({
-        status: 'no_bid', decision_note: 'Not our work: mowing, edging or trimming (owner 2026-10-29).', owed_alert_kind: null, owed_alert_key: null, notified_at: null,
-      });
-      expect(await mockPg('bid_opportunities').where({ external_id: 'n-fert' }).first()).toMatchObject({ status: 'new', decision_note: null });
-      expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
-      expect(raiseAdminAlert.mock.calls[0][2].dedupeKey).not.toContain(declined.id);
-      // A republished notice (new deadline) refreshes the declined bid but rings nothing.
-      raiseAdminAlert.mockClear();
-      await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([{ ...upkeep('n-1'), responseDeadLine: '2026-11-12T14:00:00-05:00' }]), apiKey: 'test-key' });
-      expect(raiseAdminAlert).not.toHaveBeenCalled();
-      expect((await mockPg('bid_opportunities').where({ external_id: 'n-1' }).first()).status).toBe('no_bid');
-    } finally { delete process.env.GATE_BID_DESK_NOT_OUR_WORK; }
-    await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([upkeep('n-2')]), apiKey: 'test-key' });
-    expect(await mockPg('bid_opportunities').where({ external_id: 'n-2' }).first()).toMatchObject({ status: 'new', decision_note: null });
+    const mixed = notice('n-fert', { title: 'Mowing and Fertilization' });
+    const run = await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([upkeep('n-1'), mixed]), apiKey: 'test-key' });
+    expect(run).toMatchObject({ filed: 2, rung: 1 });
+    const declined = await mockPg('bid_opportunities').where({ external_id: 'n-1' }).first();
+    expect(declined).toMatchObject({
+      status: 'no_bid', decision_note: 'Not our work: mowing, edging or trimming (owner 2026-10-29).', owed_alert_kind: null, owed_alert_key: null, notified_at: null,
+    });
+    expect(await mockPg('bid_opportunities').where({ external_id: 'n-fert' }).first()).toMatchObject({ status: 'new', decision_note: null });
     expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(raiseAdminAlert.mock.calls[0][2].dedupeKey).not.toContain(declined.id);
+    // A republished notice (new deadline) refreshes the declined bid but rings nothing.
+    raiseAdminAlert.mockClear();
+    await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([{ ...upkeep('n-1'), responseDeadLine: '2026-11-12T14:00:00-05:00' }]), apiKey: 'test-key' });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect((await mockPg('bid_opportunities').where({ external_id: 'n-1' }).first()).status).toBe('no_bid');
   });
 
   test('a failed bell stays owed and the 15-minute sweep rings it; a decided bid never rings', async () => {
@@ -169,6 +161,8 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
 
   test('a republished notice refreshes the bid: a new deadline replaces an unconfirmed date and rings an addendum', async () => {
     await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-6')]), apiKey: 'test-key' });
+    // A filed deadline arrives confirmed; put it back to unconfirmed, the state this test is about.
+    await mockPg('bid_opportunities').where({ external_id: 'n-6' }).update({ due_confirmed: false });
     raiseAdminAlert.mockClear();
     const moved = notice('n-6', { title: 'Pest Control Services n-6 (amended)', responseDeadLine: '2026-11-12T14:00:00-05:00' });
     const result = await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([moved]), apiKey: 'test-key' });
@@ -371,6 +365,7 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-31')]), apiKey: 'test-key' });
     const [filed] = await samBids();
     expect(filed.due_at).not.toBeNull();
+    await mockPg('bid_opportunities').where({ id: filed.id }).update({ due_confirmed: false });
     await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-31', { responseDeadLine: null })]), apiKey: 'test-key' });
     const bid = await mockPg('bid_opportunities').where({ id: filed.id }).first();
     expect(bid.due_at).toBeNull();
@@ -478,21 +473,12 @@ describeDb('Bid Desk SAM.gov reader (PostgreSQL)', () => {
     }
   });
 
-  describe('GATE_BID_DESK_AUTO_DATES', () => {
-    beforeEach(() => { process.env.GATE_BID_DESK_AUTO_DATES = 'true'; });
-    afterEach(() => { delete process.env.GATE_BID_DESK_AUTO_DATES; });
-
-    test('gate on: a new notice with a response deadline is filed with the date confirmed; a notice with none is not', async () => {
+  describe('automatic dates', () => {
+    test('a new notice with a response deadline is filed with the date confirmed; a notice with none is not', async () => {
       await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-60'), notice('n-61', { responseDeadLine: null })]), apiKey: 'test-key' });
       const bids = await samBids();
       expect(bids.find((b) => b.external_id === 'n-60')).toMatchObject({ due_confirmed: true, needs_date_confirmation: false });
       expect(bids.find((b) => b.external_id === 'n-61')).toMatchObject({ due_at: null, due_confirmed: false });
-    });
-
-    test('gate off: the same notice is filed with the date unconfirmed', async () => {
-      delete process.env.GATE_BID_DESK_AUTO_DATES;
-      await sam.runSamGovPoll({ now: NOW, fetchImpl: fakeFetch([notice('n-62')]), apiKey: 'test-key' });
-      expect((await samBids())[0]).toMatchObject({ due_confirmed: false });
     });
 
     test('a deadline SAM.gov moves later still flags the confirmed date and never overwrites it', async () => {

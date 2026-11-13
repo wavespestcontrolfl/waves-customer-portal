@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isValidFeatureFlagKey } = require('../services/feature-flags');
-const { bidDeskLive, estimateCallListLive, dayOnlyPromiseLive } = require('../config/feature-gates');
+const { estimateCallListLive, dayOnlyPromiseLive } = require('../config/feature-gates');
 const { soldByLive: commissionSoldByLive } = require('../services/estimate-sold-by');
 const {
   VISUAL_SERVICE_NOTES_FLAG,
@@ -25,9 +25,9 @@ router.get('/', async (req, res, next) => {
     const flags = {};
     for (const row of rows) flags[row.flag_key] = !!row.enabled;
     flags[VISUAL_SERVICE_NOTES_FLAG] = await isVisualServiceNotesEnabled(req.technicianId);
-    // Bid Desk nav entry (GATE_BID_DESK): a deploy-wide gate, so a stray per-user row can never show it while the gate is off.
-    if (bidDeskLive()) flags.bid_desk = true;
-    else delete flags.bid_desk;
+    // Bid Desk: always on. No current client reads this key; it stays true so a browser still running an older client
+    // build (which hides the Open bids tab without it) keeps the tab. Remove it once old builds are gone.
+    flags.bid_desk = true;
     // Bid kit nav entry: always on.
     flags.bid_kit = true;
     // Neighbor flag in the tech app (GATE_COMMISSION_SOLD_BY), the same way.

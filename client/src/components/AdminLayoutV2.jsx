@@ -127,8 +127,6 @@ export default function AdminLayoutV2() {
   // Per verified account, like the field-workspace read below: an account
   // switch in another tab refetches flags (Codex #5573 r8).
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false, userId);
-  // Bid Desk (GATE_BID_DESK): the server only sends this flag while the gate is on.
-  const bidDeskEnabled = useFeatureFlag("bid_desk", false, userId);
   const paletteRef = useRef(null);
   // Global Messages badge: conversations needing a reply. Polled
   // only once staff access is verified (same cadence as the bell). The icon's
@@ -245,7 +243,7 @@ export default function AdminLayoutV2() {
 
   return (
     <IntelligenceBarPageDataProvider open={openPalette}>
-    <AdminNavigationProvider key={user?.id || 'unverified'} user={user} enabled={sessionReady} agentEstimateEnabled={agentEstimateEnabled} bidDeskEnabled={bidDeskEnabled}>
+    <AdminNavigationProvider key={user?.id || 'unverified'} user={user} enabled={sessionReady} agentEstimateEnabled={agentEstimateEnabled}>
     <div
       className="admin-shell-v2"
       style={{

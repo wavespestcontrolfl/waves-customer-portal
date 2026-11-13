@@ -3,7 +3,7 @@
 // runs the Bid desk's own save step. The save step itself and a real tap run through PostgreSQL in
 // bid-desk.db.test.js; the runner (claim, record, close) is admin-alert-buttons.test.js.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ bidAlertButtonsLive: jest.fn(() => true), bidDeskLive: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ bidAlertButtonsLive: jest.fn(() => true) }));
 jest.mock('../routes/admin-bid-desk', () => ({ saveBidUpdate: jest.fn() }));
 
 let mockBids = [];
@@ -39,7 +39,6 @@ beforeEach(() => {
   mockBids = [];
   mockQueries.length = 0;
   gates.bidAlertButtonsLive.mockReturnValue(true);
-  gates.bidDeskLive.mockReturnValue(true);
 });
 
 test('a new bid invite\'s row stores both buttons, within the button rules', () => {
@@ -138,12 +137,7 @@ describe('a tap (run)', () => {
   });
 });
 
-test.each([
-  [true, true, true],
-  [true, false, false],
-  [false, true, false],
-])('buttons gate %s and Bid desk gate %s: live %s', (buttonsOn, deskOn, live) => {
+test.each([[true], [false]])('buttons gate %s: live %s', (buttonsOn) => {
   gates.bidAlertButtonsLive.mockReturnValue(buttonsOn);
-  gates.bidDeskLive.mockReturnValue(deskOn);
-  expect(buttonHandler.live()).toBe(live);
+  expect(buttonHandler.live()).toBe(buttonsOn);
 });

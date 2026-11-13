@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Bid Desk intake (GATE_BID_DESK, dark; PR 1). Files bid invites found in the `emails` table as bid_opportunities.
+ * Bid Desk intake. Files bid invites found in the `emails` table as bid_opportunities.
  *
  *   runBidDeskTick()      every 15 minutes: new emails since a stored watermark -> ingestEmail, then reminders
  *   runBackfill()         one-time, last 180 days; rows are `historical` (listed, never notified, never reminded)
@@ -9,14 +9,13 @@
  *   ingestEmail()         detect, parse, group by thread else sender org + project title, attach or create
  *   sendDueReminders()    14, 7 and 2 days before a due date the operator CONFIRMED; each fires once. Also 2 days
  *                         before the questions date and the job walk
- *   closeLapsedBids()     GATE_BID_DESK_AUTO_DATES: a still-new bid whose due date passed closes itself as no bid
+ *   closeLapsedBids()     a still-new bid whose due date passed closes itself as no bid
  *
  * No AI call, no change to leads or to the email classifier, and nothing is ever sent to a buyer or a contractor:
- * the only output is a row here and an admin notification. Inert unless bidDeskLive().
+ * the only output is a row here and an admin notification.
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { bidDeskLive, bidDeskAutoDatesLive, bidDeskNotOurWorkLive } = require('../../config/feature-gates');
 const { detectBidEmail, parseBidEmail, classifyKind, passesGmailSpam } = require('./detector');
 const { attachPatch, reminderDue, datesDue, lapsedBid, OPEN_STATUSES, AUTO_CLOSE_NOTE, LAPSED_AFTER_MS, LAPSED_FLAGGED_AFTER_MS, notOurWork, NOT_OUR_WORK_NOTE } = require('./rules');
 const alerts = require('./alerts');
@@ -141,11 +140,11 @@ async function detectWithThread(email) {
   return inThread ? { bid: true, source: inThread.source, kind: classifyKind(email), reason: 'thread' } : detected;
 }
 
-// GATE_BID_DESK_AUTO_DATES: a date read from a provider's fixed template counts as confirmed when the bid is first
+// A date read from a provider's fixed template counts as confirmed when the bid is first
 // filed. Not history, and not a first email that is an addendum (the date may have moved). A later email still goes
 // through attachPatch, which flags a changed or late date for the operator.
 function autoConfirmsDate(parsed, kind, historical) {
-  return !historical && Boolean(parsed.template && parsed.due_at) && kind !== 'addendum' && bidDeskAutoDatesLive();
+  return !historical && Boolean(parsed.template && parsed.due_at) && kind !== 'addendum';
 }
 
 async function ingestEmail(rawEmail, { historical = false, manual = false } = {}) {
@@ -198,9 +197,9 @@ async function ingestEmail(rawEmail, { historical = false, manual = false } = {}
       return { bidId: existing.id, created: false, kind, owedLinkId: alertKind ? link.id : null };
     }
 
-    // GATE_BID_DESK_NOT_OUR_WORK: a NEW bid for grounds upkeep is filed as no bid, with no bell. Never for a bid a person
+    // A NEW bid for grounds upkeep is filed as no bid, with no bell. Never for a bid a person
     // marked by hand, and the bid is not reopened later (an addendum joins it and rings nothing).
-    const declined = !manual && bidDeskNotOurWorkLive()
+    const declined = !manual
       && notOurWork([parsed.project_title, parsed.package_name].filter(Boolean).join(' ') || email.subject);
     const [bid] = await trx('bid_opportunities').insert({
       source: detected.source,
@@ -410,7 +409,6 @@ async function latePass(state, limit, result, now) {
 }
 
 async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
-  if (!bidDeskLive()) return { skipped: 'gate_off' };
   const stored = await readWatermark();
   // First run: start an hour back (the backfill covers history). Nothing older is notified as new.
   const start = stored || { at: new Date(now.getTime() - FIRST_RUN_LOOKBACK_MS).toISOString(), id: '00000000-0000-0000-0000-000000000000' };
@@ -420,7 +418,7 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
   if (rows.length || !stored) await writeWatermark(state);
   result.owedAlerts = await deliverOwedAlerts();
   result.reminders = await sendDueReminders({ now });
-  if (bidDeskAutoDatesLive()) result.autoClosed = await closeLapsedBids({ now });
+  result.autoClosed = await closeLapsedBids({ now });
   return result;
 }
 
@@ -431,7 +429,6 @@ async function runBidDeskTick({ now = new Date(), limit = BATCH_LIMIT } = {}) {
  * before the 7-day one, and the questions and job-walk dates get their own reminders (sendDateReminders).
  */
 async function sendDueReminders({ now = new Date() } = {}) {
-  if (!bidDeskLive()) return 0;
   const horizon = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
   const sevenDays = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
   const twoDays = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
@@ -487,7 +484,6 @@ async function sendDueReminders({ now = new Date() } = {}) {
  * only. Returns the number rung.
  */
 async function sendDateReminders({ now = new Date() } = {}) {
-  if (!bidDeskLive()) return 0;
   const twoDays = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
   const window = (column, stamp) => (q) => q.whereNull(stamp).where(column, '>', now).where(column, '<=', twoDays);
   const candidates = await db('bid_opportunities')
@@ -503,7 +499,6 @@ async function sendDateReminders({ now = new Date() } = {}) {
     try {
       const rung = await db.transaction(async (trx) => {
         const bid = await trx('bid_opportunities').where({ id }).forUpdate().first();
-        if (!bidDeskLive()) return 0;
         const owed = datesDue(bid, now);
         const stamps = {};
         if (owed.includes('questions')) {
@@ -529,12 +524,11 @@ async function sendDateReminders({ now = new Date() } = {}) {
 // ---------- bids that close themselves ----------
 
 /**
- * GATE_BID_DESK_AUTO_DATES: a bid still marked 'new' whose due date passed with no decision closes as 'no_bid', with a
+ * A bid still marked 'new' whose due date passed with no decision closes as 'no_bid', with a
  * note saying so, and its bells close exactly as an operator's decision closes them (closeDoneAlerts). Each bid has its
  * own transaction: the row is locked and the rule is checked again on the locked row. Returns the number closed.
  */
 async function closeLapsedBids({ now = new Date() } = {}) {
-  if (!bidDeskAutoDatesLive()) return 0;
   const lapsedBefore = new Date(now.getTime() - LAPSED_AFTER_MS);
   const flaggedBefore = new Date(now.getTime() - LAPSED_FLAGGED_AFTER_MS);
   // The same rule as lapsedBid, so rows it would refuse cannot fill the limit.
@@ -549,7 +543,7 @@ async function closeLapsedBids({ now = new Date() } = {}) {
     try {
       const done = await db.transaction(async (trx) => {
         const before = await trx('bid_opportunities').where({ id }).forUpdate().first();
-        if (!bidDeskAutoDatesLive() || !lapsedBid(before, now)) return false;
+        if (!lapsedBid(before, now)) return false;
         const after = {
           ...before,
           status: 'no_bid',
@@ -607,7 +601,6 @@ async function backfillOne(rawEmail, { dryRun, previewThreads, result }) {
  * stopped. Recent mail is therefore always filed live (with its bell), never as history.
  */
 async function runBackfill({ days = BACKFILL_DAYS, dryRun = true, now = new Date() } = {}) {
-  if (!bidDeskLive()) return { skipped: 'gate_off' };
   const since = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
   const stored = await readWatermark();
   // The live intake owns everything AFTER this (created_at, id) point; the backfill takes it and everything before.

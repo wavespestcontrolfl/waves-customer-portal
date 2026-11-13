@@ -1,5 +1,5 @@
-// Bid Desk Charlotte County due dates (GATE_BID_DESK_CHARLOTTE_DATES): the pure list parser, the one fixed outside
-// call (a fake fetch; no test reaches the county), the strict gate and the scheduler wiring. Synthetic rows only.
+// Bid Desk Charlotte County due dates: the pure list parser, the one fixed outside
+// call (a fake fetch; no test reaches the county) and the scheduler wiring. Synthetic rows only.
 const fs = require('fs');
 const path = require('path');
 
@@ -125,39 +125,13 @@ describe('fetchCountyList', () => {
   });
 });
 
-describe('GATE_BID_DESK_CHARLOTTE_DATES', () => {
-  const { bidDeskCharlotteDatesLive } = require('../config/feature-gates');
-  afterEach(() => { delete process.env.GATE_BID_DESK; delete process.env.GATE_BID_DESK_CHARLOTTE_DATES; });
-
-  test('dark by default, strict, and it needs the Bid Desk on', () => {
-    expect(bidDeskCharlotteDatesLive()).toBe(false);
-    process.env.GATE_BID_DESK = 'true';
-    expect(bidDeskCharlotteDatesLive()).toBe(false);
-    for (const value of ['true ', '1', 'TRUE', 'on', 'yes']) {
-      process.env.GATE_BID_DESK_CHARLOTTE_DATES = value;
-      expect(bidDeskCharlotteDatesLive()).toBe(false);
-    }
-    process.env.GATE_BID_DESK_CHARLOTTE_DATES = 'true';
-    expect(bidDeskCharlotteDatesLive()).toBe(true);
-    delete process.env.GATE_BID_DESK;
-    expect(bidDeskCharlotteDatesLive()).toBe(false);
-  });
-
-  test('gate off: the run returns before any database query or outside call', async () => {
-    const fetchImpl = jest.fn();
-    expect(await county.runCharlotteDates({ fetchImpl })).toEqual({ skipped: 'gate_off' });
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-});
-
-test('the scheduler checks the gate before the cron lock, runs hourly 7:40-18:40 ET and logs only the safe error', () => {
+test('the scheduler runs under the cron lock, hourly 7:40-18:40 ET and logs only the safe error', () => {
   const source = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
   const at = source.indexOf("'0 40 7-18 * * *'");
   expect(at).toBeGreaterThan(-1);
   const block = source.slice(at, at + 1500);
   expect(block).toContain("timezone: 'America/New_York'");
-  expect(block.indexOf('bidDeskCharlotteDatesLive()')).toBeGreaterThan(-1);
-  expect(block.indexOf('bidDeskCharlotteDatesLive()')).toBeLessThan(block.indexOf("runExclusive('bid-desk-charlotte'"));
+  expect(block).toContain("runExclusive('bid-desk-charlotte'");
   expect(block).toContain('runCharlotteDates');
   expect(block).toContain('safeError(err)');
   expect(block).toContain("recordJobEnd('bid-desk-charlotte'");

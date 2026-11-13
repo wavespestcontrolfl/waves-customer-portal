@@ -145,7 +145,7 @@ Kinds today:
   its due date is confirmed on the Bid desk (its reminders run on no other date). A tap is the Bid
   desk's own save step (`saveBidUpdate` in `server/routes/admin-bid-desk.js`, behind the page's Save
   decision) with the same checks again under its row lock: still new, and a confirmed date for Bid.
-  It sends nothing to a buyer or customer and moves no money. Off unless `GATE_BID_DESK` is on too.
+  It sends nothing to a buyer or customer and moves no money.
 - `call_back` (`server/services/alert-call-button.js`, `GATE_ALERT_CALL_BUTTON`; owner 2026-11-02:
   "for the voicemail, or missed call notifications, or any other related to calls, cant we add a call
   button, where we can call them from the admin notification", and a lead's CALL reply): **Call** on a
