@@ -1,7 +1,6 @@
 /**
- * GATE_BI_TECH_SCORECARD: with the gate off, get_operations_snapshot has no techScorecard key and the
- * agent's prompt and tools are today's; with it on, the snapshot carries the scorecard and the prompt
- * and the one tool description gain the scorecard rules. Nothing is sent and no model is called.
+ * The snapshot carries the scorecard, and the agent's prompt and the one tool description carry the
+ * scorecard rules. Nothing is sent and no model is called.
  */
 const makeChain = (value) => {
   const chain = {
@@ -31,28 +30,17 @@ const SNAPSHOT_KEYS = [
 ];
 const SCORECARD = { week: { from: '2026-10-26', to: '2026-11-01' }, rows: [{ technician: 'Ada' }] };
 
-beforeEach(() => { delete process.env.GATE_BI_TECH_SCORECARD; mockBuild.mockReset(); });
-afterAll(() => { delete process.env.GATE_BI_TECH_SCORECARD; });
+beforeEach(() => { mockBuild.mockReset(); });
 
 describe('get_operations_snapshot techScorecard', () => {
-  test('gate off: no techScorecard key, and the scorecard is never built', async () => {
-    const result = await executeBITool('get_operations_snapshot', {});
-    expect(Object.keys(result)).toEqual(SNAPSHOT_KEYS);
-    expect(mockBuild).not.toHaveBeenCalled();
-    process.env.GATE_BI_TECH_SCORECARD = 'TRUE';
-    expect(Object.keys(await executeBITool('get_operations_snapshot', {}))).toEqual(SNAPSHOT_KEYS);
-  });
-
-  test('gate on: the snapshot carries the scorecard after today\'s keys', async () => {
-    process.env.GATE_BI_TECH_SCORECARD = 'true';
+  test('the snapshot carries the scorecard after today\'s keys', async () => {
     mockBuild.mockResolvedValue(SCORECARD);
     const result = await executeBITool('get_operations_snapshot', {});
     expect(Object.keys(result)).toEqual([...SNAPSHOT_KEYS, 'techScorecard']);
     expect(result.techScorecard).toBe(SCORECARD);
   });
 
-  test('gate on: a scorecard failure leaves the rest of the snapshot and says unavailable', async () => {
-    process.env.GATE_BI_TECH_SCORECARD = 'true';
+  test('a scorecard failure leaves the rest of the snapshot and says unavailable', async () => {
     mockBuild.mockRejectedValue(new Error('boom'));
     const result = await executeBITool('get_operations_snapshot', {});
     expect(result.techScorecard).toEqual({ rows: [], unavailable: 'scorecard failed' });
@@ -63,27 +51,12 @@ describe('get_operations_snapshot techScorecard', () => {
 describe('BI agent config', () => {
   const snapshotTool = (tools) => tools.find((t) => t.name === 'get_operations_snapshot');
 
-  test('gate off: no scorecard text anywhere in the prompt or tools', () => {
-    expect(BI_AGENT_CONFIG.system).not.toMatch(/techScorecard|TECHNICIAN SCORECARD/);
-    expect(JSON.stringify(BI_AGENT_CONFIG.tools)).not.toMatch(/techScorecard/);
-    expect(BI_AGENT_CONFIG.tools).toBe(BI_AGENT_CONFIG.tools); // same constant on every read
-  });
-
-  test('gate on: today\'s prompt plus the scorecard rules; only the snapshot tool description changes', () => {
-    const offSystem = BI_AGENT_CONFIG.system;
-    const offTools = BI_AGENT_CONFIG.tools;
-    process.env.GATE_BI_TECH_SCORECARD = 'true';
-    const onTools = BI_AGENT_CONFIG.tools;
-    expect(BI_AGENT_CONFIG.system.startsWith(offSystem)).toBe(true);
+  test('the prompt carries the scorecard rules and only the snapshot tool description carries the tool note', () => {
+    expect(BI_AGENT_CONFIG.system).toMatch(/TECHNICIAN SCORECARD/);
     expect(BI_AGENT_CONFIG.system).toMatch(/ONLY when techScorecard\.rows has 2 or more technicians/);
     expect(BI_AGENT_CONFIG.system).toMatch(/operations_section ALWAYS carries the full table/);
-    expect(onTools.map((t) => t.name)).toEqual(offTools.map((t) => t.name));
-    onTools.forEach((tool, i) => {
-      if (tool.name === 'get_operations_snapshot') return;
-      expect(tool).toBe(offTools[i]);
-    });
-    expect(snapshotTool(onTools).description.startsWith(snapshotTool(offTools).description)).toBe(true);
-    expect(snapshotTool(onTools).description).toMatch(/techScorecard/);
-    expect(snapshotTool(onTools).input_schema).toEqual(snapshotTool(offTools).input_schema);
+    expect(snapshotTool(BI_AGENT_CONFIG.tools).description).toMatch(/It also returns "techScorecard"/);
+    const others = BI_AGENT_CONFIG.tools.filter((t) => t.name !== 'get_operations_snapshot');
+    expect(JSON.stringify(others)).not.toMatch(/techScorecard/);
   });
 });

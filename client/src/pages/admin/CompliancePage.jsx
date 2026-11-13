@@ -282,8 +282,8 @@ function ProductLimitsTab({ token }) {
   </div>;
 }
 
-// ID card and training (GATE_TECH_TRAINING_DATES, dark). The server sends these blocks only for a technician with a hire date
-// and only with the gate on; without them the Licenses tab is unchanged. F.S. 482.091 and rule 5E-14.1421.
+// ID card and training. The server sends these blocks only for a technician with a hire date; without them the Licenses tab
+// shows no training column. F.S. 482.091 and rule 5E-14.1421.
 const TRAINING_CATEGORIES = ["GHP", "L&O", "Termite/WDO", "Fumigation"];
 const EMPTY_TRAINING_DAY = { training_date: "", hours: "8", category: "GHP", topics: "", trainer_name: "", materials: "" };
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);

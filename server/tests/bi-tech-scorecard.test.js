@@ -1,5 +1,5 @@
 /**
- * GATE_BI_TECH_SCORECARD: the weekly scorecard builder (services/bi-tech-scorecard.js)
+ * The weekly scorecard builder (services/bi-tech-scorecard.js)
  * over mocked sources — the day scorecard, callback credit, review asks, the dashboard
  * leaderboard and the cost cards. Pins the week window, how each figure is derived, and
  * that an unknown value is null with a reason, never 0.
