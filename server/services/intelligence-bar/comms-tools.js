@@ -79,6 +79,19 @@ Use for: "show me the conversation with Henderson", "what did we say to the cust
     },
   },
   {
+    name: 'get_customer_text_status',
+    description: `Why texts do or do not reach ONE customer. Read only. Runs the send path's own opt-out checks for each kind of text and answers allowed, or the reason: STOP, the do-not-text list, a landline, or that kind switched off in notification settings (a second-home profile starts with its reminder texts off). Also returns who gets the reminder texts, texts blocked or undelivered in the last 60 days, and the last text sent. A switched-off kind leaves nothing in the thread or in the Twilio failure list: use this before you say you cannot see why texts are not going out.
+Use for: "why isn't Henderson getting texts?", "did Smith opt out?", "is this number on the do-not-text list?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        customer_id: { type: 'string', format: 'uuid' },
+        customer_name: { type: 'string', description: 'Customer name (partial match OK)' },
+        phone: { type: 'string', description: 'Phone number' },
+      },
+    },
+  },
+  {
     name: 'search_messages',
     description: `Search SMS messages by content, customer name, phone number, direction, or message type.
 Use for: "find messages about rescheduling", "who texted us about lawn care?", "show all review request texts this week"`,
@@ -259,6 +272,7 @@ Use for: "cancel that scheduled text", "stop the reminder we just queued for the
 const COMMS_READ_TOOL_NAMES = new Set([
   'get_unanswered_threads',
   'get_conversation_thread',
+  'get_customer_text_status',
   'search_messages',
   'get_sms_stats',
   'get_call_log',
@@ -278,6 +292,7 @@ const COMMS_READ_TOOLS = COMMS_TOOLS.filter(t => COMMS_READ_TOOL_NAMES.has(t.nam
 const COMMS_TOOL_HANDLERS = {
   get_unanswered_threads: (input) => getUnansweredThreads(input),
   get_conversation_thread: (input) => getConversationThread(input),
+  get_customer_text_status: (input) => customerTextStatus(input),
   search_messages: (input) => searchMessages(input),
   get_sms_stats: (input) => getSmsStats(input.days || 30),
   get_call_log: (input) => getCallLog(input),
@@ -997,6 +1012,14 @@ async function getConversationThread(input) {
   };
 }
 
+
+// Why one customer is or is not getting texts (gap #23). The reader is services/customer-text-status.js.
+async function customerTextStatus(input) {
+  const customer = await resolveCustomer(input);
+  if (!customer) return { error: 'Customer not found' };
+  if (customer.error) return customer;
+  return require('../customer-text-status').getCustomerTextStatus(customer);
+}
 
 async function searchMessages(input) {
   const { search, customer_name, phone: requestedPhone, direction, message_type, days_back = 7, limit: rawLimit } = input;
