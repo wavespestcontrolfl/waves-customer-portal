@@ -80,6 +80,19 @@ test('list_commercial_proposals is found for its own searches and never pushes t
   expect(ids('customer estimate')).not.toContain('list_commercial_proposals');
 });
 
+test('get_customer_text_status leads the search the bar ran before gap #23 and stays out of unrelated customer searches', () => {
+  const scope = { role: 'admin', context: 'dashboard', fullAccess: true };
+  const ids = (query) => registry.discover({ query }, scope).result.capabilities.map((c) => c.id);
+  expect(ids('SMS delivery failures, opt-out status, conversation thread for a customer')[0]).toBe('get_customer_text_status');
+  expect(ids('why is a customer not getting texts')[0]).toBe('get_customer_text_status');
+  // Each of these lost a tool to an earlier wording of the description (property, appointment, call).
+  for (const query of ['add customer property', 'switch appointment property', 'call log']) {
+    expect(ids(query)).not.toContain('get_customer_text_status');
+  }
+  expect(ids('add customer property')).toContain('remove_customer_property');
+  expect(ids('call log')).toContain('get_open_commitments');
+});
+
 test('Quick Links load on the pages that write texts, emails, blog posts and schedule notes, not on Estimates', () => {
   const names = (context) => registry.initialTools(context, { role: 'admin', context }).map(t => t.name);
   for (const context of ['comms', 'customers', 'dashboard', 'schedule', 'dispatch', 'seo', 'blog', 'email', 'reviews', 'leads']) {
@@ -358,7 +371,7 @@ const SCOPE_SNAPSHOT = {
   record: [
     // reads: a customer or record selector confines the rows to one customer
     'check_customer_status', 'compute_estimate', 'draft_review_reply', 'list_agent_review_drafts', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'find_schedule_gaps',
-    'get_call_log', 'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_customer_estimate_context', 'get_estimate_detail',
+    'get_call_log', 'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_customer_estimate_context', 'get_customer_text_status', 'get_estimate_detail',
     'get_open_commitments', 'get_service_history',
     // billing readers (W9): one customer's invoices / one invoice, by customer or invoice selector
     'get_customer_invoices', 'get_invoice_detail',
