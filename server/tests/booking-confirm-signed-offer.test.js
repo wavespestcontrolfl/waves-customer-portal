@@ -965,12 +965,12 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     }
   });
 
-  // GATE_ROUTE_CHECK_BOOKING_SAVES (owner 2026-10-30): with capacity mode off, the primary visit is numbered by the
+  // Booking route numbers (owner 2026-10-30): with capacity mode off, the primary visit is numbered by the
   // dispatcher's placement in the same transaction, right after the insert. A stub on the package follow-up (the next
   // statement) stops the flow after the placement, so each case also proves the booking went on past it.
-  describe('GATE_ROUTE_CHECK_BOOKING_SAVES: the primary visit gets its stop number', () => {
+  describe('the primary visit gets its stop number', () => {
     const arrivalRoute = require('../services/scheduling/arrival-route');
-    const GATES = ['GATE_ROUTE_CHECK_BOOKING_SAVES', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY', 'GATE_BOOK_CAPACITY_COMMIT'];
+    const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY', 'GATE_BOOK_CAPACITY_COMMIT'];
     let savedEnv;
     let placeSpy;
     let followUpSpy;
@@ -995,7 +995,6 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       });
     });
     const gateOn = () => {
-      process.env.GATE_ROUTE_CHECK_BOOKING_SAVES = 'true';
       process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     };
     const stopsAfterPlacement = async (payload) => {
@@ -1007,7 +1006,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       ['/book', 'self_booking', () => confirmPayload(mintSlotOfferField(offerPayload()))],
       ['the re-service page', 'reservice', () => callbackPayload()],
       ['the inspection page', 'inspection', () => callbackPayload({ callbackVisit: { ...callbackPayload().callbackVisit, isCallback: false } })],
-    ])('gate on, capacity off: %s places the new visit once, on the booking transaction, with source %s', async (_name, source, payload) => {
+    ])('arrival routing on, capacity off: %s places the new visit once, on the booking transaction, with source %s', async (_name, source, payload) => {
       gateOn();
       await stopsAfterPlacement(payload());
       expect(placeSpy).toHaveBeenCalledTimes(1);
@@ -1025,8 +1024,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       expect(require('../routes/booking')._internals.bookingPlacementSource(callbackVisit)).toBe(source);
     });
 
-    test('gate off: the placement is never called', async () => {
-      process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    test('arrival routing off: the placement is never called', async () => {
       await stopsAfterPlacement(confirmPayload(mintSlotOfferField(offerPayload())));
       expect(placeSpy).not.toHaveBeenCalled();
     });

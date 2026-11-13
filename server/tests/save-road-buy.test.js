@@ -1,10 +1,10 @@
 /**
- * GATE_SAVE_ROAD_BUY (owner 2026-10-28 design, "ok go" 2026-10-29): before an
+ * Save road buy (owner 2026-10-28 design, "ok go" 2026-10-29): before an
  * ADMIN staff save opens its transaction, buy the Google road times its own
  * check and route number will read, so the save agrees with the Edit dialog's
  * slot check. Locked down here:
- *  - gate off (unset): nothing runs, no Google call, no spend;
- *  - gate on, admin, road day: only the missing legs are bought (counted with
+ *  - arrival routing off or capacity mode on: nothing runs, no Google call, no spend;
+ *  - admin, road day: only the missing legs are bought (counted with
  *    a fake provider), at most 15 lookups; the save's cache-only read then
  *    finds them, and a second purchase buys 0;
  *  - a technician (no spender), a non-road day, a transaction handle: 0;
@@ -41,7 +41,7 @@ const dayAhead = (n) => etDateString(addETDays(new Date(), n));
 const ROAD_DAY = dayAhead(1);
 const PLAIN_DAY = dayAhead(4);
 const NON_ROAD_DAY = dayAhead(12);
-const GATES = ['GATE_SAVE_ROAD_BUY', 'GATE_ADMIN_ARRIVAL_WINDOWS',
+const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS',
   'GATE_SCHEDULING_CAPACITY', 'GATE_DRIVE_TIME_CALIBRATION'];
 const savedEnv = Object.fromEntries(GATES.map((key) => [key, process.env[key]]));
 afterAll(() => {
@@ -93,15 +93,13 @@ beforeEach(() => {
   reserveRoadSpend.mockClear();
   reserveRoadSpend.mockImplementation(async () => ({ allowed: true, day: '2027-03-01' }));
   jest.spyOn(RouteOptimizer, 'createSchedulingTravel').mockImplementation((opts = {}) => fakeSource(opts.traffic === false ? 'plain' : 'traffic'));
-  process.env.GATE_SAVE_ROAD_BUY = 'true';
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
   delete process.env.GATE_SCHEDULING_CAPACITY;
 });
 afterEach(() => { jest.restoreAllMocks(); });
 
-describe('gate off', () => {
+describe('road check or arrival routing off', () => {
   test.each([
-    ['GATE_SAVE_ROAD_BUY unset', () => delete process.env.GATE_SAVE_ROAD_BUY],
     ['the arrival-window check unset', () => delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS],
     ['capacity mode on', () => { process.env.GATE_SCHEDULING_CAPACITY = 'true'; }],
   ])('%s: no read, no Google call, no spend', async (_name, turnOff) => {

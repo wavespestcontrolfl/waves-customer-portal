@@ -2426,7 +2426,7 @@ async function describeSlotSearch(result, { dateFrom, dateTo, today, durationMin
   const slotCount = new Map();
   for (const slot of allSlots) slotCount.set(slot.date, (slotCount.get(slot.date) || 0) + 1);
   const slots = allSlots.slice(0, topN).map((slot, i) => ({ ...slot, rank: i + 1, day_label: slotDayLabel(slot.date) }));
-  // GATE_ROUTE_CHECK_LATE_DAYS: days whose existing stops already arrive late, listed by hours that add no new late stop.
+  // Days whose existing stops already arrive late, listed by hours that add no new late stop.
   const lateDates = new Set(allSlots.filter((slot) => slot.day_already_late === true).map((slot) => slot.date));
   const searchedDates = result.searched_dates || [];
   const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');

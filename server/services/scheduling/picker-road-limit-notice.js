@@ -1,10 +1,9 @@
 /**
  * What the staff pickers say when their Google road-time spending is stopped
- * (GATE_PICKER_ROAD_LIMIT_NOTICE; owner 2026-10-29, route-dispatcher audit
- * fix F). Staff only: nothing here reaches a customer.
+ * (owner 2026-10-29, route-dispatcher audit fix F). Staff only: nothing here
+ * reaches a customer.
  *
- * Two parts, both off with the gate (unset = byte-identical, no new response
- * field, no notification):
+ * Two parts:
  *
  * 1. A refused reservation (picker-road-spend.js: the user's day, the
  *    account's day, the account's month, or no counter at all = fail closed)
@@ -25,14 +24,10 @@
  *    ring gate or quiet refresh is needed). A dedupe hit refreshes nothing.
  */
 const { AsyncLocalStorage } = require('node:async_hooks');
-const { gateEnvValue } = require('../../config/feature-gates');
 const logger = require('../logger');
 
-const GATE = 'GATE_PICKER_ROAD_LIMIT_NOTICE';
 const MONTH_PERCENT = 80;
 const CATEGORY = 'system';
-
-const pickerRoadLimitNoticeLive = () => gateEnvValue(GATE);
 
 // The staff line for each refusal reason picker-road-spend.js returns; any
 // other reason (no staff user) is not a limit and gets no line.
@@ -45,9 +40,8 @@ const NOTES = {
 
 const scope = new AsyncLocalStorage();
 
-/** Express middleware: scopes one find-time request, only while the gate is on. */
+/** Express middleware: scopes one find-time request. */
 function trackRoadLimit(req, _res, next) {
-  if (!pickerRoadLimitNoticeLive()) return next();
   const store = { reason: null };
   req.pickerRoadLimit = store;
   return scope.run(store, next);
@@ -59,7 +53,7 @@ function noteRoadRefusal(reason) {
   if (store && !store.reason && NOTES[reason]) store.reason = reason;
 }
 
-/** `{ reason, note }` for the response, or null (nothing refused, or the gate was off). */
+/** `{ reason, note }` for the response, or null (nothing refused). */
 function roadLimitOf(req) {
   const reason = req?.pickerRoadLimit?.reason;
   return reason ? { reason, note: NOTES[reason] } : null;
@@ -84,7 +78,7 @@ const asked = new Map();
  */
 async function noteMonthSpend({ day, monthMills, capMills }) {
   try {
-    if (!pickerRoadLimitNoticeLive() || !(capMills > 0)) return;
+    if (!(capMills > 0)) return;
     if (monthMills * 100 < capMills * MONTH_PERCENT) return;
     const month = String(day).slice(0, 7);
     if (asked.has(month)) return;
@@ -116,6 +110,6 @@ async function noteMonthSpend({ day, monthMills, capMills }) {
 }
 
 module.exports = {
-  pickerRoadLimitNoticeLive, trackRoadLimit, noteRoadRefusal, roadLimitOf, noteMonthSpend,
+  trackRoadLimit, noteRoadRefusal, roadLimitOf, noteMonthSpend,
   _test: { NOTES, asked, usd },
 };

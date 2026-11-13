@@ -2567,7 +2567,7 @@ async function customerBookingLocation(customer) {
   return storedBookingPin({ latitude: location?.lat, longitude: location?.lng });
 }
 
-// The placement source for a self-booked visit (GATE_ROUTE_CHECK_BOOKING_SAVES):
+// The placement source for a self-booked visit's route number:
 // /book itself is 'self_booking'; the internal callers pass callbackVisit: the
 // re-service page ('reservice'), the commercial first-visit page
 // ('commercial_first_visit', isCallback false with an estimateGuard) and the
@@ -4606,11 +4606,11 @@ async function createSelfBooking(payload = {}) {
         const { persistArrivalOrder } = require('../services/scheduling/arrival-route');
         await persistArrivalOrder(trx, capacityCommitFit, scheduledRow.id);
       } else {
-        // GATE_ROUTE_CHECK_BOOKING_SAVES: capacity did not number this visit
+        // Capacity did not number this visit
         // (capacity mode is off), so the dispatcher's placement does, in this
         // same transaction. The primary visit only: package visit 2 is placed
         // by package-followup-booking. Nothing below changes this row's date,
-        // window or technician. Gate off: touches nothing. Never throws.
+        // window or technician. Arrival routing off: touches nothing. Never throws.
         await require('../services/scheduling/staff-save-route-check').placeBookingSavedVisit(trx, {
           serviceId: scheduledRow.id, source: bookingPlacementSource(callbackVisit),
         });

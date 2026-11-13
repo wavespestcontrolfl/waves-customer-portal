@@ -84,15 +84,15 @@ const REANCHOR_PULLFORWARD_DAYS = Math.max(
   Number(process.env.RESCHEDULE_REANCHOR_PULLFORWARD_DAYS) || 14
 );
 
-// GATE_ROUTE_CHECK_BOOKING_SAVES: the rebooker numbers a moved visit's day
-// (placeMovedVisit) when its caller passes placeInRoute. Stop numbers only: a
-// customer call has no road spender, so nothing buys road times, and
-// overlapAdvisory stays off, so the placement is not a staff save. Gate off or
-// any reader failure: false, the options are exactly as before.
+// The rebooker numbers a moved visit's day (placeMovedVisit) when its caller
+// passes placeInRoute, whenever arrival-window routing is on. Stop numbers
+// only: a customer call has no road spender, so nothing buys road times, and
+// overlapAdvisory stays off, so the placement is not a staff save. Routing off
+// or any reader failure: false.
 function bookingPlacesInRoute() {
   try {
-    const { routeCheckBookingSavesLive } = require('../services/scheduling/arrival-route');
-    return typeof routeCheckBookingSavesLive === 'function' && routeCheckBookingSavesLive() === true;
+    const { arrivalWindowRoutingEnabled } = require('../services/scheduling/arrival-route');
+    return typeof arrivalWindowRoutingEnabled === 'function' && arrivalWindowRoutingEnabled() === true;
   } catch (_err) {
     return false;
   }
@@ -1453,8 +1453,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             sourceSurface: 'customer_web',
             disclosedFuturePlacementDays: req.body.disclosed_future_placement_days ?? null,
             travelGap: true,
-            // GATE_ROUTE_CHECK_BOOKING_SAVES: number each moved visit's day (stop
-            // numbers only; no road purchase, no message). Gate off: false.
+            // Number each moved visit's day (stop numbers only; no road
+            // purchase, no message). Arrival routing off: false.
             placeInRoute: bookingPlacesInRoute(),
             // The confirmation is the series pass's durable text (below).
             notifyRequested: true,
@@ -1485,7 +1485,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             expect: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
             beforeMove: noticeRecheck,
             moveGuard: officeApprovalRecheck,
-            placeInRoute: bookingPlacesInRoute(), // GATE_ROUTE_CHECK_BOOKING_SAVES
+            placeInRoute: bookingPlacesInRoute(),
             // GATE_DAY_ONLY_PROMISE part B3: the picker's slots are hours the customer chose, recorded by this move's own UPDATE
             // (rebooker.js moveIntentColumns). Gate off: no key, so the call keeps today's exact arguments.
             ...dayPromiseMoveIntent(),

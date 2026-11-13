@@ -455,7 +455,7 @@ it('Quick Move: the search says so, for the server to pick its route check', asy
   expect(searches(fetch)[0]).toMatchObject({ hint: true, openTimes: true, quickMove: true });
 });
 
-// GATE_ROUTE_CHECK_LATE_DAYS: the day tag rides through both list shapes, and only when the server sent it.
+// Late days: the day tag rides through both list shapes, and only when the server sent it.
 it('an already_late day and its day_already_late hours reach the strip and the open-times box; a clean day gets neither', () => {
   const hourOf = (date, start, over = {}) => ({ start_time: start, end_time: `${Number(start.slice(0, 2)) + 1}:00`, detour_minutes: 3, technician: { id: 't1', name: 'T' }, ...over });
   const data = {
@@ -491,7 +491,7 @@ it('estimated_arrival reaches both list shapes as estimatedArrival; an hour with
   }
 });
 
-// ---- the stopped-limit line (GATE_PICKER_ROAD_LIMIT_NOTICE, owner 2026-10-29) ----
+// ---- the stopped-limit line (owner 2026-10-29) ----
 
 const LIMIT_NOTE = 'Google road times paused: daily limit reached. Times marked ~ use the estimate.';
 const road_limit = { reason: 'daily_cap', note: LIMIT_NOTE };

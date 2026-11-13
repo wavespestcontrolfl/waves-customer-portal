@@ -420,13 +420,12 @@ function standingMissingGeoKeys() {
   return standingNoticeKeys('auto-dispatch-missing-geo:%', MISSING_GEO_RESOLVED_TITLE);
 }
 
-// GATE_ROUTE_WARNING_DETAIL (owner 2026-10-29, route-dispatcher audit fix B): the night run's address-pin
+// Route warning detail (owner 2026-10-29, route-dispatcher audit fix B): the night run's address-pin
 // notices cover only a recurring child visit that auto-dispatch loads (is_recurring, past the lock
 // window, not locked, excluded or customer-confirmed). A one-time, rodent or project visit with no
-// map pin got no notice, so its route read "could not verify" with nobody told why. With the gate on
-// the SAME notice (same key, dedupe, ring budget and close rules) also covers every pending or
-// confirmed visit in the next NEAR_TERM_PIN_DAYS days with no usable pin. Admin notice only; the
-// gate off keeps the lane exactly as it was.
+// map pin used to get no notice, so its route read "could not verify" with nobody told why. The
+// SAME notice (same key, dedupe, ring budget and close rules) also covers every pending or
+// confirmed visit in the next NEAR_TERM_PIN_DAYS days with no usable pin. Admin notice only.
 const NEAR_TERM_PIN_DAYS = 7;
 
 // A visit the run can never move (not a recurring child) needs its pin for the route check alone,

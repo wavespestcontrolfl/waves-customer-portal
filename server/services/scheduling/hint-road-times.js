@@ -278,7 +278,7 @@ function trafficLeg(leg, nowEt) {
  */
 function createPickerBudget({ signal = null, maxLookups = null } = {}) {
   // `maxLookups` = a cap on the request's lookups in all (a staff save's
-  // purchase, GATE_SAVE_ROAD_BUY); unset = only the per-mode REQUEST_MAX.
+  // purchase, save road buy); unset = only the per-mode REQUEST_MAX.
   return { traffic: 0, plain: 0, signal, refused: null, claimed: new Map(), ...(maxLookups != null ? { maxLookups } : {}) };
 }
 

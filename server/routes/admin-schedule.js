@@ -9601,8 +9601,7 @@ async function scheduleCreateHandler(req, res, next) {
     // The linked estimate as the booking transaction read it under its lock (see assertLockedEstimateAddOns); the preflight copy
     // until that read.
     let lockedLinkedEstimate = linkedEstimate;
-    // Road times for the booked hour (GATE_SAVE_ROAD_BUY; unset = nothing
-    // runs): bought BEFORE the transaction, so the save's route check and
+    // Road times for the booked hour (save road buy): bought BEFORE the transaction, so the save's route check and
     // route number below read the same Google road times the Edit dialog's
     // check does. This is an admin route (requireAdmin): the staff user pays.
     // A parent with a time, a technician and a location only; any refusal,
@@ -12581,7 +12580,7 @@ async function planCollectiveEditDateMove(req) {
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
-        // GATE_SAVE_ROAD_BUY: this route is requireAdmin; the anchor's hour
+        // Save road buy: this route is requireAdmin; the anchor's hour
         // buys its road times before the series transaction.
         ...(req.techRole === 'admin' && req.technicianId ? { roadSpender: req.technicianId } : {}),
         // Never carries grouped partners (refuseCarriedStopInEditMove's
@@ -15311,7 +15310,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         await preloadServiceLocations(db, assignmentPlan?.targetIds || [req.params.id]);
       }
     }
-    // Road times for the saved hour (GATE_SAVE_ROAD_BUY; unset = nothing runs):
+    // Road times for the saved hour (save road buy):
     // bought BEFORE the transaction, so the save's route check and route
     // number read the same Google road times the Edit dialog's slot check
     // does (this route is requireAdmin: the staff user pays). A save that

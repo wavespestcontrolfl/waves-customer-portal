@@ -86,8 +86,8 @@ function addDays(ymd, days) {
 }
 
 // The staff line the server sends when Google road times are stopped by a
-// spending limit (GATE_PICKER_ROAD_LIMIT_NOTICE; `road_limit.note`); nothing
-// while the gate is off, so the availability object keeps its old shape.
+// spending limit (`road_limit.note`); nothing when no purchase was refused, so the
+// availability object keeps its usual shape.
 const roadLimitOf = (data) => (typeof data?.road_limit?.note === 'string' && data.road_limit.note
   ? { roadLimit: data.road_limit.note } : {});
 // The first answer's note, else the second search's (the week row, a far day).
@@ -108,7 +108,7 @@ export function normalizeAvailability(data, { date, scopedToTech }) {
       status: day.status || (day.hours?.length ? 'open' : 'full'),
       ...(day.closed === true ? { closed: true } : {}),
       ...(day.last_resort === true ? { last_resort: true } : {}),
-      // The day's booked stops already arrive after their windows (GATE_ROUTE_CHECK_LATE_DAYS): a small tag.
+      // The day's booked stops already arrive after their windows: a small tag.
       ...(day.already_late === true ? { alreadyLate: true } : {}),
       hours: (day.hours || []).map((h) => summaryHour({ ...h, date: day.date }, scopedToTech)),
     })),
@@ -148,7 +148,7 @@ export function normalizeOpenTimes(data, { date }) {
       status: day.status || (day.hours?.length ? 'open' : 'full'),
       ...(day.closed === true ? { closed: true } : {}),
       ...(day.last_resort === true ? { last_resort: true } : {}),
-      // The day's booked stops already arrive after their windows (GATE_ROUTE_CHECK_LATE_DAYS): a small tag.
+      // The day's booked stops already arrive after their windows: a small tag.
       ...(day.already_late === true ? { alreadyLate: true } : {}),
       hours: (day.hours || []).map((h) => ({ ...summaryHour({ ...h, date: day.date }, false), rainTier: h.rain_tier ?? null })),
     })),

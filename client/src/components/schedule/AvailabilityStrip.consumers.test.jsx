@@ -306,7 +306,7 @@ it('open times, New Appointment: every route is listed, and a row books its tech
   await waitFor(() => expect(screen.getAllByTestId('open-time-row').find((row) => row.textContent.includes('11 AM'))).toHaveAttribute('aria-pressed', 'true'));
 });
 
-// GATE_ROUTE_CHECK_LATE_DAYS: a Quick Move day whose booked stops already arrive late is offered with a small tag.
+// Late days: a Quick Move day whose booked stops already arrive late is offered with a small tag.
 it('rain-out: a day option the server marks dayAlreadyLate shows the "already late" tag; the other day shows none', async () => {
   vi.stubGlobal('fetch', vi.fn(async (url) => (String(url).includes('/rain-out-options')
     ? json({

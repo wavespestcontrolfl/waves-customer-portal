@@ -117,7 +117,7 @@ async function reserveRoadSpend({ spender, pro = 0, plain = 0, now = new Date(),
     limitNotice.noteRoadRefusal('counter_unavailable');
     return { allowed: false, reason: 'counter_unavailable' };
   }
-  // GATE_PICKER_ROAD_LIMIT_NOTICE: the month's one 80% notice (never throws,
+  // The month's one 80% notice (never throws,
   // and outside the transaction so a failed write never refuses a purchase).
   await limitNotice.noteMonthSpend({ day, monthMills, capMills: limits.monthMills });
   return { allowed: true, day };

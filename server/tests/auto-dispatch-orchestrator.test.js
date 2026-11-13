@@ -460,9 +460,26 @@ test.each([
   geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
   let reads = 0;
-  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? [svc()] : [svc(change)])));
+  // A recurring child: the flags take it out of auto-dispatch, so its pin no longer matters.
+  const child = { recurring_parent_id: 'parent-1' };
+  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? [svc(child)] : [svc({ ...child, ...change })])));
   await runAutoDispatch({ mode: 'dry_run' });
   expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+});
+
+// A visit that is not a recurring child never goes through auto-dispatch: its pin serves the route check, so a
+// lock, an exclusion or a customer confirmation after pass 1 keeps its notice.
+test.each([
+  ['locked', { auto_dispatch_locked: true }],
+  ['excluded', { auto_dispatch_excluded: true }],
+  ['confirmed by the customer', { customer_confirmed: true }],
+])('a visit that is not a recurring child, %s after pass 1, keeps its missing-geo notice', async (_label, change) => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  let reads = 0;
+  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? [svc()] : [svc(change)])));
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
 });
 
 // Pass 1 reuses the plan answer the geo self-heal read (no second read per

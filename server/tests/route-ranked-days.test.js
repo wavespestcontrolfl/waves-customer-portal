@@ -278,7 +278,7 @@ describe('arrival-window routing on', () => {
     }
   });
 
-  // GATE_ROUTE_CHECK_LATE_DAYS (fix A): a day whose existing stops already arrive late is listed, flagged.
+  // Late days (fix A): a day whose existing stops already arrive late is listed, flagged.
   test('an already-late day is a checked day: kept, flagged dayAlreadyLate, and ranked after every day that is not', async () => {
     findAvailableSlots.mockImplementation(async (call) => {
       const d = datesOf(call);

@@ -377,9 +377,9 @@ describe('PUT /:id/update-details — arrival warnings for partial route edits',
     expect(findConflictingVisits).not.toHaveBeenCalled();
   });
 
-  // GATE_SAVE_ROAD_BUY (owner 2026-10-29): Edit's save buys the placement's Google
+  // Save road buy (owner 2026-10-29): Edit's save buys the placement's Google
   // road times BEFORE its transaction (requireAdmin: the staff user pays). The
-  // helper reads its own gate and is spied; the purchase is proven in
+  // helper is spied; the purchase is proven in
   // save-road-buy.test.js.
   test('an edit that moves the hour buys road times first, as the staff user, before the transaction', async () => {
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';

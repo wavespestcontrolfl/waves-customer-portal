@@ -1117,7 +1117,7 @@ function stillLiveOn(row, date) {
     && row.customer_active !== false && !row.customer_deleted_at
     // Locked, excluded or customer-confirmed after pass 1: eligibility denies
     // it outright, so it is no longer skipped for its pin (r21, r24 P2). A visit that is not a
-    // recurring child (GATE_ROUTE_WARNING_DETAIL) keeps its notice: the pin serves its route check.
+    // recurring child keeps its notice: the pin serves its route check.
     && !(require('../scheduling/route-warning-detail').pinServesRouteCheckOnly(row) ? null : heldOutOfAutoDispatch(row));
 }
 
@@ -1139,15 +1139,13 @@ async function stillMissingPin(run, picked) {
 }
 
 async function raiseMissingGeoNotices(run) {
-  // GATE_ROUTE_WARNING_DETAIL: visits in the next week the run never loads (one-time, rodent, project,
+  // Visits in the next week the run never loads (one-time, rodent, project,
   // locked or confirmed) join the same lane when they have no pin. Read failure = the lane as before.
-  if (require('../scheduling/route-warning-detail').routeWarningDetailLive()) {
-    try {
-      const known = new Set([...run.missingGeoWanted.map((row) => String(row.id)), ...run.pinOkIds]);
-      run.missingGeoWanted.push(...await audit.nearTermPinlessVisits(run.nowDate, known));
-    } catch (err) {
-      logger.warn(`[auto-dispatch] near-term pin read failed: ${err.message}`);
-    }
+  try {
+    const known = new Set([...run.missingGeoWanted.map((row) => String(row.id)), ...run.pinOkIds]);
+    run.missingGeoWanted.push(...await audit.nearTermPinlessVisits(run.nowDate, known));
+  } catch (err) {
+    logger.warn(`[auto-dispatch] near-term pin read failed: ${err.message}`);
   }
   if (!run.missingGeoWanted.length) return;
   try {

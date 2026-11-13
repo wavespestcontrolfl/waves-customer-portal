@@ -247,7 +247,7 @@ router.get('/ui', (req, res) => {
   res.json({ ok: true, openTimes: gateEnvValue('GATE_BEST_TIME_HINTS') && gateEnvValue('GATE_OPEN_TIMES_BOX') });
 });
 
-// GATE_PICKER_ROAD_LIMIT_NOTICE: scopes this request so a refused Google
+// Scopes this request so a refused Google
 // purchase (a spending limit) is noted for the answer's `road_limit`.
 router.post('/', trackRoadLimit, async (req, res) => {
   try {
@@ -522,8 +522,7 @@ router.post('/', trackRoadLimit, async (req, res) => {
       paidRoads, roadSpender: req.technicianId,
     });
     const pickedOut = built.picked;
-    // GATE_PICKER_ROAD_LIMIT_NOTICE: the staff line for a stopped spending
-    // limit. Gate off (or nothing refused): no field.
+    // The staff line for a stopped spending limit. Nothing refused: no field.
     const roadLimit = roadLimitOf(req);
 
     res.json({

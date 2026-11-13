@@ -1,8 +1,8 @@
 /**
- * GATE_ROUTE_CHECK_LATE_DAYS (owner 2026-10-29, route-dispatcher audit fix A): the REAL evaluator
+ * Late days (owner 2026-10-29, route-dispatcher audit fix A): the REAL evaluator
  * (evaluateArrivalPlacement / enumerateArrivalPlacements) on an in-memory route, no DB, no Google.
  * A day whose existing stops already arrive late must still list the hours that add no NEW late stop,
- * flagged `dayAlreadyLate`; the option is `lateDays` (find-time.js passes it under the gate). Without
+ * flagged `dayAlreadyLate`; the option is `lateDays` (find-time.js passes it for the staff lists). Without
  * it the result is exactly what it was. Every leg is 20 minutes; arrival promises are 2 hours.
  */
 jest.mock('../models/db', () => jest.fn());

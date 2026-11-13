@@ -1,5 +1,5 @@
 /**
- * GATE_ROUTE_CHECK_LATE_DAYS cap: a stop that is already late may not arrive more than
+ * Late days cap: a stop that is already late may not arrive more than
  * INSERTION_MARGIN_MINUTES (15) LATER than it does without the new visit. REAL evaluator, in-memory route.
  * Drive model: 20 minutes between different points, 0 between stops at the same point, so a new visit at
  * the late stop's own address adds only its work minutes to that stop's wait.
@@ -40,7 +40,7 @@ test('the cap is the insertion margin', () => {
   expect(INSERTION_MARGIN_MINUTES).toBe(15);
 });
 
-test('without the option the late day refuses the hour (gate off, unchanged)', () => {
+test('without the option the late day refuses the hour (unchanged)', () => {
   const fit = evaluate('11:00', 8);
   expect(Object.keys(fit).sort()).toEqual(['feasible', 'reason', 'target', 'warning']);
   expect(fit).toMatchObject({ feasible: false, reason: 'arrival_window' });
