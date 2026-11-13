@@ -2663,12 +2663,10 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // EVERY 15 MIN — Bid Desk intake (GATE_BID_DESK, dark): files bid invites found in new `emails` rows as
+  // EVERY 15 MIN — Bid Desk intake: files bid invites found in new `emails` rows as
   // bid opportunities and sends the 7-day and 2-day reminders for due dates the operator confirmed. No AI call; it
-  // posts admin notifications only and sends nothing to a buyer, contractor or customer. The gate is read per tick,
-  // so a flip or an unset needs no restart. runExclusive records the job health.
+  // posts admin notifications only and sends nothing to a buyer, contractor or customer. runExclusive records the job health.
   cron.schedule('0 3,18,33,48 * * * *', async () => {
-    if (!require('../config/feature-gates').bidDeskLive()) return;
     try {
       const lockRes = await runExclusive('bid-desk-intake', async () => {
         const result = await require('./bid-desk').runBidDeskTick();
@@ -2687,16 +2685,15 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // DAILY 7:25 AM ET — Bid Desk SAM.gov reader (needs GATE_BID_DESK and SAM_GOV_API_KEY):
+  // DAILY 7:25 AM ET — Bid Desk SAM.gov reader (needs SAM_GOV_API_KEY):
   // files federal pest control and grounds notices from the official SAM.gov Opportunities API as bid opportunities
   // and rings one admin notification per new bid. Two API calls a day. No AI call; it sends nothing to an agency,
-  // contractor or customer. GATE_BID_DESK is read per run, so a flip or an unset needs no restart.
+  // contractor or customer.
   cron.schedule('0 25 7 * * *', async () => {
-    if (!require('../config/feature-gates').bidDeskLive()) return;
     try {
       const lockRes = await runExclusive('bid-desk-sam', async () => {
         const result = await require('./bid-desk/sam-gov').runSamGovPoll();
-        // Both gates on with no key imports nothing: a failed run in job health, not a quiet success.
+        // No key imports nothing: a failed run in job health, not a quiet success.
         if (result.skipped === 'no_api_key') throw new Error('SAM_GOV_API_KEY is not set');
         if (result.filed > 0) logger.info(`[bid-desk-sam] ${result.filed} new federal bid(s)`);
         // Discovery was filed; a re-read that stopped on a SAM.gov error is still a failed run (HTTP status only).
@@ -2715,13 +2712,12 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // HOURLY 7:40 AM-6:40 PM ET — Bid Desk Charlotte County due dates (GATE_BID_DESK_CHARLOTTE_DATES, dark; needs GATE_BID_DESK):
+  // HOURLY 7:40 AM-6:40 PM ET — Bid Desk Charlotte County due dates:
   // Charlotte County's emailed notices carry no date, so an open Charlotte County bid with a bid number and no due date
   // reads it from the county's public bid list (one GET). The run first checks the database and calls the county only
   // while such a bid is waiting. A failed read is a failed run in job health and writes nothing. No AI call; it sends
-  // nothing to anyone and rings no bell. The gate is read per run, so a flip or an unset needs no restart.
+  // nothing to anyone and rings no bell.
   cron.schedule('0 40 7-18 * * *', async () => {
-    if (!require('../config/feature-gates').bidDeskCharlotteDatesLive()) return;
     try {
       const lockRes = await runExclusive('bid-desk-charlotte', async () => {
         const result = await require('./bid-desk/charlotte-county').runCharlotteDates();

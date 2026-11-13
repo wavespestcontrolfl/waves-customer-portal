@@ -3,12 +3,8 @@ import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation, useSearchParams } from "react-router-dom";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 
-const { flags } = vi.hoisted(() => ({ flags: { bid_desk: true, ready: true } }));
-vi.mock("../../hooks/useFeatureFlag", () => ({
-  useFeatureFlagReady: (key) => ({ enabled: flags[key] === true, ready: flags.ready, known: true }),
-}));
 vi.mock("./BidDeskPage", () => ({
   default: function DeskStub({ embedded }) {
     const [params] = useSearchParams();
@@ -43,7 +39,6 @@ function renderAt(url) {
   );
 }
 
-beforeEach(() => { flags.bid_desk = true; flags.ready = true; });
 afterEach(cleanup);
 
 it("opens on Open bids when there is no tab param", () => {
@@ -77,21 +72,6 @@ it("switching tabs updates the URL and keeps the other params", () => {
   expect(back.has("tab")).toBe(false);
   expect(back.get("bid")).toBe("b1");
   expect(screen.getByTestId("desk")).toHaveTextContent("bid=b1");
-});
-
-it("shows only the kit when the Bid Desk flag is off", () => {
-  flags.bid_desk = false;
-  renderAt("/admin/bids");
-  expect(screen.queryByRole("button", { name: "Open bids" })).toBeNull();
-  expect(screen.getByTestId("kit")).toBeInTheDocument();
-  expect(screen.queryByTestId("desk")).toBeNull();
-});
-
-it("renders nothing until the flags are read", () => {
-  flags.ready = false;
-  renderAt("/admin/bids");
-  expect(screen.queryByTestId("desk")).toBeNull();
-  expect(screen.queryByTestId("kit")).toBeNull();
 });
 
 it("redirects /admin/bid-desk to Open bids and keeps ?bid= and the hash", () => {

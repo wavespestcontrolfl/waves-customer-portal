@@ -1174,7 +1174,7 @@ app.use('/api/admin/banking', require('./routes/admin-banking'));
 app.use('/api/admin/dashboard-ops', require('./routes/admin-dashboard-ops'));
 app.use('/api/admin/sms-templates', require('./routes/admin-sms-templates'));
 app.use('/api/admin/email', require('./routes/admin-email'));
-// Bid Desk (GATE_BID_DESK, dark): the router answers 404 for every path while the gate is off.
+// Bid Desk: staff-only list, detail and decisions for bid invites.
 app.use('/api/admin/bid-desk', require('./routes/admin-bid-desk'));
 // Bid kit (admin only).
 app.use('/api/admin/bid-kit', require('./routes/admin-bid-kit'));

@@ -65,11 +65,7 @@ async function run({ row, item }) {
 }
 
 const buttonHandler = {
-  // The Bid desk's own gate too: its routes answer 404 while GATE_BID_DESK is off.
-  live: () => {
-    const gates = require('../../config/feature-gates');
-    return gates.bidAlertButtonsLive() && gates.bidDeskLive();
-  },
+  live: () => require('../../config/feature-gates').bidAlertButtonsLive(),
   visibleItems,
   run,
 };

@@ -18,7 +18,6 @@
  * agency, a contractor or a customer. The API key is never logged (errors carry the HTTP status only).
  */
 const db = require('../../models/db');
-const { bidDeskLive, bidDeskAutoDatesLive, bidDeskNotOurWorkLive } = require('../../config/feature-gates');
 const { etDateString, addETDays, parseETDateTime, validCalendarDate } = require('../../utils/datetime-et');
 const { deliverOwedAlerts } = require('./index');
 const { OPEN_STATUSES, notOurWork, NOT_OUR_WORK_NOTE } = require('./rules');
@@ -279,11 +278,11 @@ async function upsertNotice(row, { block = null } = {}) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['bid-desk:ingest']);
     if (!block) {
-      // GATE_BID_DESK_AUTO_DATES: the notice's own response deadline counts as confirmed when the bid is first filed. A
+      // The notice's own response deadline counts as confirmed when the bid is first filed. A
       // later move of the deadline still flags the bid (refreshPatch), and a confirmed date is never overwritten.
-      const due_confirmed = Boolean(row.due_at) && bidDeskAutoDatesLive();
-      // GATE_BID_DESK_NOT_OUR_WORK: a notice for grounds upkeep is filed as no bid, with no bell owed.
-      const declined = bidDeskNotOurWorkLive() && notOurWork(row.project_title);
+      const due_confirmed = Boolean(row.due_at);
+      // A notice for grounds upkeep is filed as no bid, with no bell owed.
+      const declined = notOurWork(row.project_title);
       const filing = declined
         ? { ...row, due_confirmed, status: 'no_bid', decision_note: NOT_OUR_WORK_NOTE }
         : { ...row, due_confirmed, owed_alert_kind: 'new' };
@@ -407,11 +406,10 @@ async function fileNotices(notices, now) {
 }
 
 /**
- * Reads notices posted since the cursor and files the ones in scope. Inert unless bidDeskLive() and an API key.
+ * Reads notices posted since the cursor and files the ones in scope. Inert without an API key.
  * @returns {Promise<{ skipped?: string, read?: number, filed?: number, rung?: number, skippedByReason?: object }>}
  */
 async function runSamGovPoll({ now = new Date(), fetchImpl = globalThis.fetch, apiKey = process.env.SAM_GOV_API_KEY } = {}) {
-  if (!bidDeskLive()) return { skipped: 'gate_off' };
   const key = String(apiKey || '').trim();
   if (!key) return { skipped: 'no_api_key' };
 
