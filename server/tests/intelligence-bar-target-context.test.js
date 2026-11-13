@@ -574,7 +574,7 @@ test('payout details, payout exports and the open-closeout sweep list other cust
 
 test('keyed readers fail closed for a customer-specific request whose customer did not resolve', async () => {
   const schema = { properties: { phone: { type: 'string' }, email: { type: 'string' } } };
-  for (const [toolName, params] of [['get_partner_call_history', { phone: '5550001234' }], ['check_email_suppression', { email: 'someone@example.test' }]]) {
+  for (const [toolName, params] of [['get_partner_call_history', { phone: '5550001234' }], ['get_texting_opt_out', { phone: '5550001234' }], ['check_email_suppression', { email: 'someone@example.test' }]]) {
     expect(await Context.prepareReadInput(params, { targets: [], namesRequested: true, page: { ids: {} } }, { toolName, schema })).toMatchObject({ code: 'customer_scope_required' });
     expect(await Context.prepareReadInput(params, { targets: [], contactRequested: true, page: { ids: {} } }, { toolName, schema })).toMatchObject({ code: 'customer_scope_required' });
     // A request that names nobody keeps the reader; a resolved task customer still owns the key.
@@ -815,6 +815,7 @@ test('each read scope class enforces its rule for resolved, unresolved and unnam
     ['query_customers', 'scoped', 'ok', 'customer_scope_required', 'ok'],
     ['get_service_history', 'record', 'ok', 'customer_scope_required', 'ok'],
     ['get_partner_call_history', 'phone_keyed', 'target_clarification_required', 'customer_scope_required', 'ok'],
+    ['get_texting_opt_out', 'phone_keyed', 'target_clarification_required', 'customer_scope_required', 'ok'],
     ['check_email_suppression', 'email_keyed', 'target_clarification_required', 'customer_scope_required', 'ok'],
   ];
   for (const [toolName, scope, whenResolved, whenUnresolved, whenUnnamed] of matrix) {

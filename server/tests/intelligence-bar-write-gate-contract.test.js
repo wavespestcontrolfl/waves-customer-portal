@@ -369,7 +369,7 @@ const READ_ONLY = [
   'get_railway_status', 'get_railway_deployments', 'get_railway_logs', 'get_railway_variable_names',
   'get_sentry_top_issues', 'get_sentry_new_issues', 'get_sentry_issue_detail',
   'get_cloudflare_zones', 'get_cloudflare_pages_builds', 'get_cloudflare_edge_errors',
-  'get_twilio_alerts', 'get_twilio_failed_messages',
+  'get_twilio_alerts', 'get_twilio_failed_messages', 'get_texting_opt_out',
   'get_stripe_webhook_endpoints', 'get_stripe_webhook_failures', 'get_stripe_payment_intents',
   'get_recent_merged_prs', 'get_commit_info',
   'get_app_store_status', 'get_play_store_status',

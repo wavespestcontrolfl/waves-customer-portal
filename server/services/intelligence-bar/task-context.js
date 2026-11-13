@@ -1490,7 +1490,7 @@ function readScopeRefusal(scope, params, context, { toolName, schema }) {
 // to a task customer, so a model-supplied key cannot read another party's
 // call history or suppression state.
 const KEYED_READERS = {
-  phone_keyed: { field: 'phone', column: 'phone', key: value => String(value || '').replace(/\D/g, '').slice(-10), error: 'Use the task customer\'s own phone number for this call history' },
+  phone_keyed: { field: 'phone', column: 'phone', key: value => String(value || '').replace(/\D/g, '').slice(-10), error: 'Use the task customer\'s own phone number for this lookup' },
   email_keyed: { field: 'email', column: 'email', key: normalizeEmail, error: 'Use the task customer\'s own email address for this suppression check' },
 };
 async function keyedOwnerRefusal(scope, params, context) {

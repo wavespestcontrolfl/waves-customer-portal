@@ -618,6 +618,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       ['match_existing_customer', { phone: a.phone }, customerA],
       ['get_partner_call_history', { phone: a.phone }, 'calls'],
       ['get_partner_call_history', { phone: b.phone }, false],
+      ['get_texting_opt_out', { phone: b.phone }, false],
       ['check_email_suppression', { email: 'fixture-b@example.test' }, false],
       ['query_customers', {}, customerA],
       ['query_customers', { sort_by: 'name', limit: 50 }, customerA],

@@ -153,6 +153,9 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   // them) — redact like the comms tools.
   'get_twilio_alerts',
   'get_twilio_failed_messages',
+  // One number's do-not-text and block state: a phone tail, staff-typed block
+  // reasons and carrier error text.
+  'get_texting_opt_out',
   // SendGrid suppression results are lists of customer email addresses —
   // redact like the comms tools.
   'get_email_suppressions',

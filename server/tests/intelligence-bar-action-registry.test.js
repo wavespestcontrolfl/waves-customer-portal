@@ -300,6 +300,23 @@ test('generic lookup verbs cannot make an unsupported capability appear discover
     .definitions.length).toBeGreaterThan(0);
 });
 
+// Gap #24 (2026-11-13): the bar was asked for a number's opt-out and block
+// state and had only the account-wide failed-text list. Discovery keeps the top
+// 12 by shared words, so this pins both halves: the number check ranks first
+// for that request, and its wording takes no place from the tools a texting
+// search needs ("reply via sms" is scripted in intelligence-bar-platform-db).
+test('a texting opt-out or blocked-number question discovers the number check', () => {
+  const ids = (query) => registry.discover({ query }, { role: 'admin', context: 'communications', fullAccess: true })
+    .result.capabilities.map(c => c.id);
+  expect(ids('Twilio failed undelivered messages, SMS opt-out or blocked number status').slice(0, 2))
+    .toEqual(['get_texting_opt_out', 'get_twilio_failed_messages']);
+  expect(ids('is this number blocked')[0]).toBe('get_texting_opt_out');
+  expect(ids('did they opt out of texts')[0]).toBe('get_texting_opt_out');
+  const texting = ids('reply via sms');
+  expect(texting).toEqual(expect.arrayContaining(['reply_via_sms', 'get_conversation_thread']));
+  expect(texting).not.toContain('get_texting_opt_out');
+});
+
 // ─── Data-scope catalog (scope-policy.js) ───────────────────────────────
 // Membership lives in action-policy.json. These lists are the frozen policy
 // snapshot: a tool cannot silently leave a class or join the registry without
@@ -350,7 +367,7 @@ const SCOPE_SNAPSHOT = {
   ],
   scoped: ['draft_email_reply', 'get_email_thread', 'get_schedule_view', 'get_stale_leads', 'match_existing_customer', 'query_customers', 'query_leads', 'search_emails'],
   actor_wide: ['search_ib_history'],
-  phone_keyed: ['get_partner_call_history'],
+  phone_keyed: ['get_texting_opt_out', 'get_partner_call_history'],
   email_keyed: ['check_email_suppression'],
   address_keyed: ['lookup_property'],
   // unblock_sender (the blocklist is not one customer's record): refused inside a customer-scoped task rather than classed as none.

@@ -1367,6 +1367,14 @@
     "approval": null,
     "scope": "broad"
   },
+  "get_texting_opt_out": {
+    "module": "twilio-ops-tools.js",
+    "domain": "twilio-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "phone_keyed"
+  },
   "get_twilio_alerts": {
     "module": "twilio-ops-tools.js",
     "domain": "twilio-ops",
