@@ -49,8 +49,8 @@ const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const { stampedDivergesSql, VISIT_HOME_COLUMNS, visitAtCustomerHome } = require('../services/stamped-address');
 const { isLawnTreatmentVisit } = require('../services/lawn-treatment-visit');
-const { currentRestrictionPolicy, resolveRestrictionCounty } = require('../config/irrigation-restrictions');
-const { countyConfirmedAfterMove } = require('../services/irrigation-schedule-confirmation');
+const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
+const { loadWateringHome } = require('../services/watering-home');
 const { wateringTimeLine } = require('../services/lawn-watering-time-line');
 const {
   arrivalWindowRange,
@@ -694,22 +694,14 @@ async function prepPhotosField(svc, state, visitUnknown) {
 
 // The card's watering-time line (owner 2026-11-14, decision 1A): the sentence wateringTimeLine picks from the rule in
 // force on the visit's date for the customer's county, or '' (no rule on file, a rule whose hours fit neither sentence,
-// or a failed read). The county comes from the same inputs the lawn prep guide email uses (prep-guide-sender
-// loadWateringInputs): the ACTIVE turf profile and the home city and zip, with the move guards. The payload carries the
-// sentence only, never the county, the hours or the policy. Fails soft on its own: a failed read drops only the line.
-async function wateringLineFor(svc, prefs) {
+// or a failed read). The county comes from the same guarded snapshot the lawn prep guide uses (watering-home
+// loadWateringHome): the ACTIVE turf profile, the address re-read after the preferences and the move stamp re-read
+// after the address, so a move between loadByToken and this read never pairs the old address with the new stamp; a
+// snapshot that straddles a move throws, and the line is dropped (GH Codex #7885 r1). The payload carries the sentence
+// only, never the county, the hours or the policy. Fails soft on its own: a failed read drops only the line.
+async function wateringLineFor(svc) {
   try {
-    const turf = (await db('customer_turf_profiles').where({ customer_id: svc.customer_id, active: true }).first('county', 'city')) || {};
-    const movedAt = prefs?.irrigation_home_changed_at || null;
-    const county = resolveRestrictionCounty({
-      county: turf.county || null,
-      profileCity: turf.city || null,
-      city: svc.city,
-      zip: svc.zip,
-      homeMoved: !!movedAt,
-      movedAt,
-      countyConfirmed: countyConfirmedAfterMove(prefs || {}),
-    });
+    const { county } = await loadWateringHome({ id: svc.customer_id, city: svc.city, zip: svc.zip });
     const visitDay = apptDateStr(svc.scheduled_date);
     return wateringTimeLine(currentRestrictionPolicy(visitDay ? parseETDateTime(`${visitDay}T12:00`) : new Date(), { county }));
   } catch (err) {
@@ -729,13 +721,12 @@ async function lawnPrepField(svc, state, members) {
   try {
     const serviceTypes = Array.isArray(members) && members.length ? members.map((m) => m.service_type) : [svc.service_type];
     if (!isLawnTreatmentVisit(serviceTypes) || !visitAtCustomerHome(svc)) return {};
-    const prefs = await db('property_preferences').where({ customer_id: svc.customer_id })
-      .first('pets_structured', 'irrigation_home_changed_at', 'irrigation_confirmed_fields');
+    const prefs = await db('property_preferences').where({ customer_id: svc.customer_id }).first('pets_structured');
     let pets = prefs?.pets_structured;
     if (typeof pets === 'string') {
       try { pets = JSON.parse(pets); } catch { pets = null; }
     }
-    const wateringLine = await wateringLineFor(svc, prefs);
+    const wateringLine = await wateringLineFor(svc);
     return { lawnPrep: { petsOnFile: Array.isArray(pets) && pets.length > 0, ...(wateringLine ? { wateringLine } : {}) } };
   } catch (err) {
     logger.warn(`[appointment-public] lawnPrep lookup failed for ${svc.id}: ${err.message}`);

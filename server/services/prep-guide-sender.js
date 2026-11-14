@@ -44,9 +44,10 @@ const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
-const { currentRestrictionPolicy, resolveRestrictionCounty } = require('../config/irrigation-restrictions');
-const { countyConfirmedAfterMove, parseConfirmedFields } = require('./irrigation-schedule-confirmation');
+const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
+const { parseConfirmedFields } = require('./irrigation-schedule-confirmation');
 const { wateringTimeLine } = require('./lawn-watering-time-line');
+const { loadWateringHome } = require('./watering-home');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { BED_BUG_HEAT_KEYWORDS } = require('../utils/bed-bug-heat-service');
@@ -203,39 +204,21 @@ async function buildWateringBlock(customer, snapshot = {}) {
   return renderWateringBlock(inputs);
 }
 
-// The reads behind the block, as one consistent snapshot: preferences,
-// the ACTIVE turf profile only (a retired profile's county is the former
-// home's — the weekly sweep joins on tp.active = true; GH Codex #3953 r1
-// P1), the address re-read AFTER the preferences (the caller's customer row
-// may predate a move), and the move stamp re-read after the address — a
-// stamp that moved between the reads means the inputs straddle a move, and
-// a legal instruction is not built on that (r2 P1). Minutes saved before a
-// move are the former home's until re-confirmed (pre-push P1 on d82831055).
+// The reads behind the block: the home's county from one consistent
+// snapshot (watering-home loadWateringHome: preferences, the ACTIVE turf
+// profile, the address re-read after the preferences, the move stamp
+// re-read after the address; it throws when the inputs straddle a move,
+// GH Codex #3953 r1-r2). Minutes saved before a move are the former home's
+// until re-confirmed (pre-push P1 on d82831055).
 async function loadWateringInputs(customer, snapshot) {
-  const prefs = (await db('property_preferences').where({ customer_id: customer.id }).first()) || {};
-  const turf = (await db('customer_turf_profiles').where({ customer_id: customer.id, active: true }).first()) || {};
-  const home = (await db('customers').where({ id: customer.id }).first('city', 'zip')) || customer;
-  const stampAfter = (await db('property_preferences').where({ customer_id: customer.id }).first('irrigation_home_changed_at'))?.irrigation_home_changed_at || null;
-  const movedAt = prefs.irrigation_home_changed_at || null;
-  const stampMs = (v) => (v ? new Date(v).getTime() : null);
-  if (stampMs(stampAfter) !== stampMs(movedAt)) {
-    throw new Error('address changed while the watering block was being built');
-  }
+  const { prefs, county, moveStamp } = await loadWateringHome(customer);
   // The stamp this block was built against — re-checked at the dispatch
   // boundary (sendPrepEmail's onQueued) before the email leaves.
-  snapshot.moveStamp = stampAfter;
+  snapshot.moveStamp = moveStamp;
+  const movedAt = prefs.irrigation_home_changed_at || null;
   const minutesCurrent = !movedAt || parseConfirmedFields(prefs.irrigation_confirmed_fields).includes('irrigation_run_minutes');
   const runMinutes = Number(prefs.irrigation_run_minutes);
   const minutes = minutesCurrent && Number.isFinite(runMinutes) && runMinutes > 0 ? Math.round(runMinutes) : null;
-  const county = resolveRestrictionCounty({
-    county: turf.county || null,
-    profileCity: turf.city || null,
-    city: home.city,
-    zip: home.zip,
-    homeMoved: !!movedAt,
-    movedAt,
-    countyConfirmed: countyConfirmedAfterMove(prefs),
-  });
   return { minutes, policy: currentRestrictionPolicy(new Date(), { county }) };
 }
 

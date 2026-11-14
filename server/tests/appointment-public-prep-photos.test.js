@@ -123,7 +123,7 @@ function chain(table) {
   api.forUpdate = () => { lockRead = true; return api; };
   api.forShare = () => { lockRead = true; return api; };
   api.count = () => { countMode = table.indexOf('visit_prep_photos') === 0 ? 'photos' : 'submissions'; return api; };
-  api.first = async () => {
+  api.first = async (...cols) => {
     // The locked recheck's FOR UPDATE on the token row (Codex r1 P1) — a
     // lock read, not a loadByToken read, so it never advances the
     // first-vs-second loadByToken accounting below.
@@ -137,11 +137,20 @@ function chain(table) {
     // The office feed item's own unlocked name lookup (PR 3b,
     // notifyOfficeVisitPrepSubmission) — a plain read, never under the
     // stop/customer lock, and never on the write's own transaction.
+    // The watering line's address re-read (watering-home loadWateringHome, after the preferences): the CURRENT home,
+    // which is the token row's address unless a test models a move with `homeRow`.
+    if (!lockRead && table === 'customers' && cols.includes('zip')) {
+      return dbState.homeRow !== undefined ? dbState.homeRow : { city: dbState.svcRow?.city, zip: dbState.svcRow?.zip };
+    }
     if (!lockRead && table === 'customers') return dbState.customerNameRow;
-    // lawnPrepField's pets-on-file read (a yes/no only reaches the payload).
+    // lawnPrepField's pets-on-file read (a yes/no only reaches the payload), and loadWateringHome's two reads: the
+    // whole row first, then the move stamp alone after the address (`stampAfter` models a move between the reads).
     if (table === 'property_preferences') {
       if (dbState.prefsThrow) throw new Error('prefs lookup failed');
       dbState.prefsReads += 1;
+      if (cols.length === 1 && cols[0] === 'irrigation_home_changed_at' && dbState.stampAfter !== undefined) {
+        return { irrigation_home_changed_at: dbState.stampAfter };
+      }
       return dbState.petsRow;
     }
     // lawnPrepField's watering-line read (the active turf profile's county and city).
@@ -1006,6 +1015,26 @@ describe('GET /api/public/appointment/:token — additive lawnPrep', () => {
       expect((await payload(VISIT, { petsRow, turfRow: { county: 'Charlotte', city: 'Englewood' } })).lawnPrep).toHaveProperty('wateringLine');
       // The current address cannot name a county: no line, never the old profile's county.
       expect((await payload({ ...VISIT, city: 'Englewood', zip: '34223' }, { petsRow, turfRow: { county: 'Manatee', city: 'Bradenton' } })).lawnPrep).toEqual({ petsOnFile: false });
+    });
+
+    // GH Codex #7885 r1: the token row's address predates the preferences read, so the line re-reads the address after
+    // the preferences and the move stamp after the address. A move between the reads drops the line (fail closed).
+    test('a move between the reads drops only the line: never the old address paired with the new move stamp', async () => {
+      setPolicy();
+      const petsRow = { pets_structured: [{ name: 'Rex' }], irrigation_home_changed_at: null, irrigation_confirmed_fields: '[]' };
+      const moved = await payload(VISIT, { petsRow, stampAfter: '2026-11-14T23:00:00Z', homeRow: { city: 'Englewood', zip: '34223' } });
+      expect(moved.state).toBe('upcoming');
+      expect(moved.lawnPrep).toEqual({ petsOnFile: true });
+      // The same reads with no move in between keep the line.
+      expect((await payload(VISIT, { petsRow })).lawnPrep).toHaveProperty('wateringLine');
+    });
+
+    test('the county comes from the address re-read after the preferences, not the token row', async () => {
+      setPolicy();
+      // The token row says Bradenton (Manatee, covered); the current home is Tampa: no county, so no line.
+      expect((await payload(VISIT, { homeRow: { city: 'Tampa', zip: '33602' } })).lawnPrep).toEqual({ petsOnFile: false });
+      // The token row says Tampa; the current home is Bradenton: the line.
+      expect((await payload({ ...VISIT, city: 'Tampa', zip: '33602' }, { homeRow: { city: 'Bradenton', zip: '34202' } })).lawnPrep).toHaveProperty('wateringLine');
     });
 
     test('a failed read of the watering inputs drops only the line, never petsOnFile or the card', async () => {
