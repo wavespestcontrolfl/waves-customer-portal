@@ -5,7 +5,7 @@ import { adminFetch } from '../../lib/adminFetch';
 import { getAdminUser } from '../../lib/adminAuth';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import CancelFeeNotice from './CancelFeeNotice';
-import SkipVisitNotice, { SKIP_SCOPE, SKIP_LABEL, useSkipPreview, skipVisit } from './SkipVisitNotice';
+import SkipVisitOption from './SkipVisitOption';
 import { TIMEZONE } from '../../lib/timezone';
 import { appointmentHistory as buildAppointmentHistory } from './customerAppointments';
 import CallBridgeLink from '../admin/CallBridgeLink';
@@ -113,20 +113,6 @@ export default function ScheduleCustomerSidebar({
   // Book next, Edit and Take payment are office-only: their routes refuse a
   // technician, and /admin/invoices bounces one to Today.
   const officeActions = getAdminUser()?.role === 'admin';
-  // The office's "Skip this visit" choice (SkipVisitNotice.jsx): the server says
-  // whether this visit may be skipped. Asked only while the cancel window is
-  // open, and only for the office.
-  const skipPreview = useSkipPreview(service?.id, { enabled: showCancelModal && officeActions });
-  const skipEligible = officeActions && skipPreview?.eligible === true;
-  // A stale 'skip' choice never survives onto a visit that cannot be skipped.
-  const effectiveScope = cancelScope === SKIP_SCOPE && !skipEligible ? 'this_only' : cancelScope;
-  const isSkipScope = effectiveScope === SKIP_SCOPE;
-
-  // Keep the stored choice in step with what the window offers: a 'skip'
-  // choice the server no longer allows goes back to this appointment only.
-  useEffect(() => {
-    if (cancelScope === SKIP_SCOPE && !skipEligible) setCancelScope('this_only');
-  }, [cancelScope, skipEligible]);
 
   useEffect(() => {
     setNote(service?.notes || '');
@@ -275,25 +261,7 @@ export default function ScheduleCustomerSidebar({
     }
   };
 
-  // Skip one plan visit: no scope, no customer text, no card-fee step. The
-  // server judges the visit again and answers with a sentence when it refuses.
-  const confirmSkip = async () => {
-    if (!service?.id || cancelling || !canCancelAppointment || !skipEligible) return;
-    setCancelling(true);
-    try {
-      await skipVisit(service.id, { origin: 'appointment sidebar', note: notificationMessage });
-      onCancel?.(service);
-    } catch (err) {
-      window.alert('Failed to skip visit: ' + err.message);
-    } finally {
-      setCancelling(false);
-    }
-  };
-
   const cancelAppointment = async () => {
-    if (isSkipScope) { await confirmSkip(); return; }
-    // A stale 'skip' choice is reset by the effect above; it is never sent as a cancel scope.
-    if (cancelScope === SKIP_SCOPE) return;
     if (!service?.id || cancelling) return;
     if (!canCancelAppointment) return;
     if (cancelScope !== 'this_only' && !canCancelSeries) return;
@@ -615,14 +583,10 @@ export default function ScheduleCustomerSidebar({
 
             <div className="px-6 py-5">
               <p className="text-14 font-medium text-zinc-900">
-                {isSkipScope
-                  ? `Skip ${customerFirstName}'s visit?`
-                  : `Are you sure you want to cancel ${customerFirstName}'s appointment?`}
+                Are you sure you want to cancel {customerFirstName}'s appointment?
               </p>
               <p className="mt-3 text-14 leading-6 text-ink-secondary">
-                {isSkipScope
-                  ? 'The visit is marked Skipped. No make-up visit is booked. No text is sent to the customer.'
-                  : `This appointment will be removed from your calendar and will appear as canceled in ${customerDisplayName}'s appointment history.`}
+                This appointment will be removed from your calendar and will appear as canceled in {customerDisplayName}'s appointment history.
               </p>
 
               <div className="mt-6">
@@ -632,9 +596,8 @@ export default function ScheduleCustomerSidebar({
                     ['this_only', 'This appointment only'],
                     ['following', 'This and following appointments'],
                     ['series', 'All appointments in series'],
-                    ...(skipEligible ? [[SKIP_SCOPE, SKIP_LABEL]] : []),
                   ].map(([value, label]) => {
-                    const disabled = value !== 'this_only' && value !== SKIP_SCOPE && !canCancelSeries;
+                    const disabled = value !== 'this_only' && !canCancelSeries;
                     return (
                       <label
                         key={value}
@@ -644,7 +607,7 @@ export default function ScheduleCustomerSidebar({
                           type="radio"
                           name="cancel-scope"
                           value={value}
-                          checked={effectiveScope === value}
+                          checked={cancelScope === value}
                           disabled={disabled}
                           onChange={() => setCancelScope(value)}
                           className="h-4 w-4 accent-zinc-900"
@@ -657,10 +620,9 @@ export default function ScheduleCustomerSidebar({
                 {!canCancelSeries && (
                   <div className="mt-2 text-12 text-ink-tertiary">Series options are available for recurring appointments.</div>
                 )}
-                <SkipVisitNotice preview={skipPreview} chosen={isSkipScope} />
+                <SkipVisitOption key={service.id} service={service} enabled={officeActions} origin="appointment sidebar" onSkipped={onCancel} />
               </div>
 
-              {!isSkipScope && (
               <div className="mt-6">
                 <div className="text-13 font-medium text-zinc-900 mb-3">Client booking notifications</div>
                 <div className="text-12 font-medium uppercase tracking-label text-ink-tertiary mb-2">Notification type</div>
@@ -683,11 +645,10 @@ export default function ScheduleCustomerSidebar({
                   ))}
                 </div>
               </div>
-              )}
 
               <div className="mt-6">
                 <label className="block text-13 font-medium text-zinc-900 mb-2" htmlFor="cancel-notification-message">
-                  {isSkipScope ? 'Note' : 'Notification message'}
+                  Notification message
                 </label>
                 <textarea
                   id="cancel-notification-message"
@@ -696,17 +657,11 @@ export default function ScheduleCustomerSidebar({
                   rows={4}
                   className="w-full rounded-sm border-hairline border-zinc-300 bg-white px-3 py-2 text-14 text-zinc-900 focus:border-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900"
                 />
-                {isSkipScope ? (
-                  <div className="mt-2 text-14 leading-6 text-ink-secondary">
-                    Saved with the visit. Not sent to the customer.
-                  </div>
-                ) : (
-                  <div className="mt-2 text-12 leading-5 text-ink-tertiary">
-                    This message is saved with the cancellation note. A cancellation text is sent when a reminder record exists.
-                  </div>
-                )}
+                <div className="mt-2 text-12 leading-5 text-ink-tertiary">
+                  This message is saved with the cancellation note. A cancellation text is sent when a reminder record exists.
+                </div>
               </div>
-              {!isSkipScope && <CancelFeeNotice serviceId={service.id} scope={effectiveScope} />}
+              <CancelFeeNotice serviceId={service.id} scope={cancelScope} />
             </div>
 
             <div className="border-t border-hairline border-zinc-200 px-6 py-4 flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
@@ -720,12 +675,10 @@ export default function ScheduleCustomerSidebar({
               <button
                 type="button"
                 onClick={cancelAppointment}
-                disabled={cancelling || (!isSkipScope && cancelScope !== 'this_only' && !canCancelSeries)}
-                className={`h-10 px-4 rounded-sm ${isSkipScope ? 'bg-zinc-900' : 'bg-red-600'} text-13 font-medium uppercase tracking-label text-white disabled:opacity-50 u-focus-ring`}
+                disabled={cancelling || (cancelScope !== 'this_only' && !canCancelSeries)}
+                className="h-10 px-4 rounded-sm bg-red-600 text-13 font-medium uppercase tracking-label text-white disabled:opacity-50 u-focus-ring"
               >
-                {isSkipScope
-                  ? (cancelling ? 'Skipping...' : 'Skip visit')
-                  : (cancelling ? 'Cancelling...' : 'Cancel appointment(s)')}
+                {cancelling ? 'Cancelling...' : 'Cancel appointment(s)'}
               </button>
             </div>
           </div>
