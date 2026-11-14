@@ -596,12 +596,40 @@ function portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange,
 // (relay-conversation.js composeSystemPrompt: lines that give an instruction, a price or a policy are
 // dropped). Facts still come only from this lane's tools. Gate off, another channel, no approved profile or a
 // profile with nothing left after the filter: the lane's own prompt, byte for byte. Never throws.
+//
+// The profile is optional, so a turn never depends on its read. One read serves every turn for a minute
+// (a revoked or re-pinned profile is gone within that minute), one read runs at a time, and a turn waits for
+// a read at most PORTAL_VOICE_WAIT_MS; past that it answers on its own prompt and the read fills the cache
+// for the next turn.
+const PORTAL_VOICE_TTL_MS = 60 * 1000;
+const PORTAL_VOICE_WAIT_MS = 1000;
+let portalVoice = { text: '', at: 0 };
+let portalVoiceRead = null;
+function readPortalVoice() {
+  if (!portalVoiceRead) {
+    portalVoiceRead = Promise.resolve()
+      .then(() => require('../sms-shadow-drafter').fetchVoiceProfileForDrafter())
+      .then((profile) => { portalVoice = { text: profile?.profile_text || '', at: Date.now() }; })
+      .catch((err) => { logger.warn(`[ai-assistant] voice profile not read for the portal prompt: ${err.message}`); })
+      .finally(() => { portalVoiceRead = null; });
+  }
+  return portalVoiceRead;
+}
+async function portalVoiceText() {
+  if (Date.now() - portalVoice.at < PORTAL_VOICE_TTL_MS) return portalVoice.text;
+  let timer;
+  const waited = new Promise((resolve) => { timer = setTimeout(resolve, PORTAL_VOICE_WAIT_MS, false); });
+  const fresh = await Promise.race([readPortalVoice().then(() => true), waited]);
+  clearTimeout(timer);
+  // A read that failed or is still running: this turn has no profile (never an expired one).
+  return fresh && Date.now() - portalVoice.at < PORTAL_VOICE_TTL_MS ? portalVoice.text : '';
+}
 async function withPortalVoice(lane) {
   try {
     if (!lane.portal || !require('../../config/feature-gates').portalAiVoiceProfileLive?.()) return lane.prompt;
-    const profile = await require('../sms-shadow-drafter').fetchVoiceProfileForDrafter();
-    if (!profile?.profile_text) return lane.prompt;
-    return require('../voice-agent/relay-conversation').composeSystemPrompt(lane.prompt, profile.profile_text);
+    const text = await portalVoiceText();
+    if (!text) return lane.prompt;
+    return require('../voice-agent/relay-conversation').composeSystemPrompt(lane.prompt, text);
   } catch (err) {
     logger.warn(`[ai-assistant] voice profile not added to the portal prompt: ${err.message}`);
     return lane.prompt;
@@ -1663,3 +1691,5 @@ class WavesAssistant {
 }
 
 module.exports = new WavesAssistant();
+// Test seam: empties the portal voice cache (GATE_PORTAL_AI_VOICE_PROFILE).
+module.exports.__resetPortalVoice = () => { portalVoice = { text: '', at: 0 }; };
