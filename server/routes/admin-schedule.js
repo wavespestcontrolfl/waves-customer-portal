@@ -23454,10 +23454,10 @@ async function reseedNewBatchCancels(conn, { ids, source, results, skippedRoots 
 // stamping a reschedule outside the reschedule engine's side effects is not
 // a supported transition here — self-serve/staff reschedule always goes
 // through SmartRebooker), and neither is any value outside the DB's
-// scheduled_services status enum. 'completed' / 'cancelled' / 'no_show' are
-// syntactically valid but redirected to their own routes by the explicit
-// guards just below; every other enum member routes through this handler
-// (the V2 dispatch board's row actions, including Skip, run through here).
+// scheduled_services status enum. 'completed' / 'cancelled' / 'skipped' /
+// 'no_show' are syntactically valid but redirected to their own routes by the
+// explicit guards just below; every other enum member (confirmed, en_route,
+// on_site) routes through this handler.
 // The set lives in services/job-status.js so the sibling dispatch status
 // route enforces the identical closed set (pre-push fallback audit, PR #4673).
 router.put('/:id/status', async (req, res, next) => {
@@ -23507,6 +23507,19 @@ router.put('/:id/status', async (req, res, next) => {
       return res.status(409).json({
         error: 'Cancel visits through the dispatch status route (it owns the series scope and the cancellation follow-through).',
         code: 'USE_DISPATCH_CANCEL',
+      });
+    }
+
+    // ⛔ 'skipped' is not accepted here either (owner decision 2026-11-13).
+    // PUT /admin/dispatch/:id/status is the ONE staff skip writer: it keeps a
+    // skip to the office and to an open plan visit with no invoice, card or
+    // linked visit on it (services/visit-skip.js). This route's skip lost its
+    // last caller with the V2 dispatch cards (#3858); left open, a technician
+    // token could still skip its own visit here, past that rule.
+    if (toStatus === 'skipped') {
+      return res.status(409).json({
+        error: 'Skip a visit from the Cancel appointment window (the dispatch status route owns the skip rule).',
+        code: 'USE_DISPATCH_SKIP',
       });
     }
 
