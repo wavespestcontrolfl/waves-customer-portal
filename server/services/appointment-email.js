@@ -611,6 +611,17 @@ async function technicianFirstName(scheduledServiceId) {
   }
 }
 
+// GATE_LAWN_PREVISIT_LINE: the 24-hour reminder's lawn pre-visit line (the same line the 24-hour text carries, with the full https pets
+// link). '' when the gate is off (no read happens), the visit is not a lawn treatment, or anything fails: the email is then today's.
+async function lawnPrepLineForEmail({ customerId, scheduledServiceId, apptTime }) {
+  try {
+    const line = await require('./lawn-previsit-line').lawnPrevisitLineForVisit({ scheduledServiceId, customerId, apptTime, emailLinks: true });
+    return typeof line === 'string' ? line : '';
+  } catch {
+    return '';
+  }
+}
+
 // kind: '72h' | '24h'. dayOnly (GATE_DAY_ONLY_PROMISE, 72h only): the day-only email, no hour anywhere.
 async function sendReminderVariant({ customerId, scheduledServiceId, appointmentTime, serviceLabel, kind, rescheduleUrl, idempotencyKey, cardHoldPolicyNote: cardHoldNoteOverride = null, dayOnly } = {}) {
   const apptTime = toDate(appointmentTime);
@@ -668,6 +679,8 @@ async function sendReminderVariant({ customerId, scheduledServiceId, appointment
       technician_name: techName,
       reschedule_url: clean(rescheduleUrl),
       card_hold_policy_note: cardHoldPolicyNote,
+      // The template's callout block renders nothing for ''.
+      lawn_prep_line: await lawnPrepLineForEmail({ customerId, scheduledServiceId, apptTime }),
     };
   return sendTemplate({
     customerId,

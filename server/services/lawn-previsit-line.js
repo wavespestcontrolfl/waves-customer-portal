@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * The lawn pre-visit lines of the 24-hour reminder text (owner 2026-11-14). GATE_LAWN_PREVISIT_LINE, dark until the owner flips it.
+ * The lawn pre-visit lines of the 24-hour reminder text and email (owner 2026-11-14). GATE_LAWN_PREVISIT_LINE, dark until the owner flips it.
  *
  * A lawn treatment visit at the customer's home gets one fixed sentence in its 24-hour reminder. It is never composed: it is one of
  * two rows of the closed table below, and code picks the row.
@@ -11,7 +11,8 @@
  *
  * <who> is the customer's dog and cat names from property_preferences.pets_structured ("Biscuit", "Biscuit and Mochi", "Biscuit, Mochi
  * and Rex"); no name, or four and more, reads "pets". A customer with no pet on file also gets a second paragraph that links to the
- * Property tab where pets are added. No short link and no write.
+ * Property tab where pets are added. No short link and no write. The reminder email (appointment-email.js sendReminderVariant) carries
+ * the same line, with the full https link.
  *
  * The home's watering day comes from the last digit of the house number (config/irrigation-restrictions.js
  * wateringWeekdayForAddress) and counts only under a policy that covers the customer's county with one day a week. No policy, no
@@ -58,20 +59,23 @@ function hasPetOnFile(petsStructured) {
   return Array.isArray(pets) && pets.some((pet) => pet && typeof pet === 'object');
 }
 
-function petLinkLine() {
-  return `Have pets? Add them here: ${stripSmsUrlScheme(`${publicPortalUrl()}/?tab=property#pets`)}`;
+// The text keeps no URL scheme (SMS link policy). The reminder email keeps the full https URL so a mail client links it.
+function petLinkLine({ emailLinks = false } = {}) {
+  const url = `${publicPortalUrl()}/?tab=property#pets`;
+  return `Have pets? Add them here: ${emailLinks ? url : stripSmsUrlScheme(url)}`;
 }
 
 /**
  * The lawn text for these plain inputs, or '' when it fails the copy screen. wateringDayClash: the visit day is the home's one lawful
- * watering day. The pet link paragraph is added only when the customer has no pet on file.
+ * watering day. The pet link paragraph is added only when the customer has no pet on file. emailLinks: the reminder email's form,
+ * with the full https link; the words are the same.
  */
-function buildLawnPrevisitLine({ petsStructured, wateringDayClash = false } = {}) {
+function buildLawnPrevisitLine({ petsStructured, wateringDayClash = false, emailLinks = false } = {}) {
   const { customerCopyViolations } = require('./service-report/technician-report-copy');
   const sentenceFor = wateringDayClash ? WATERING_DAY_SENTENCE : NORMAL_SENTENCE;
   const finish = (who) => {
     const sentence = sentenceFor(who);
-    return hasPetOnFile(petsStructured) ? sentence : `${sentence}\n\n${petLinkLine()}`;
+    return hasPetOnFile(petsStructured) ? sentence : `${sentence}\n\n${petLinkLine({ emailLinks })}`;
   };
   const named = finish(whoFor(petsStructured));
   if (!customerCopyViolations(named).length) return named;
@@ -103,9 +107,9 @@ async function wateringDayClashFor(knex, { customerId, home, apptTime }) {
 
 /**
  * The lawn text for a visit's 24-hour reminder, or '' (gate off, not a lawn treatment visit, not at the customer's home, or any
- * failure). Reads only after the gate is on.
+ * failure). Reads only after the gate is on. emailLinks: the reminder email's form (see buildLawnPrevisitLine).
  */
-async function lawnPrevisitLineForVisit({ scheduledServiceId, customerId, apptTime, knex = db } = {}) {
+async function lawnPrevisitLineForVisit({ scheduledServiceId, customerId, apptTime, emailLinks = false, knex = db } = {}) {
   if (!scheduledServiceId || !customerId || !(apptTime instanceof Date)) return '';
   try {
     const gates = require('../config/feature-gates');
@@ -118,7 +122,7 @@ async function lawnPrevisitLineForVisit({ scheduledServiceId, customerId, apptTi
     if (!isLawnTreatmentVisit(await visitServiceTypes(knex, visit))) return '';
     const prefs = await knex('property_preferences').where({ customer_id: customerId }).first('pets_structured');
     const wateringDayClash = await wateringDayClashFor(knex, { customerId, home: visit, apptTime });
-    return buildLawnPrevisitLine({ petsStructured: prefs?.pets_structured, wateringDayClash });
+    return buildLawnPrevisitLine({ petsStructured: prefs?.pets_structured, wateringDayClash, emailLinks });
   } catch (err) {
     logger.warn(`[lawn-previsit-line] lawn line skipped for visit ${scheduledServiceId}: ${err.message}`);
     return '';
