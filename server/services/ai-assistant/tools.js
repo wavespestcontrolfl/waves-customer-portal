@@ -220,6 +220,8 @@ const PORTAL_FACTS_TOOLS = portalToolsFor({ payments: true });
 // The Messages thread's turn (GATE_PORTAL_MESSAGES_NIGHT_AI, thread-lane.js): the visit read, the reschedule
 // check, the no-reply move and escalate. Nothing that builds a button or a card, gives advice or files an item.
 const THREAD_TOOLS = [TOOLS[0], threadLane.RESCHEDULE_TOOL, threadLane.STAY_SILENT_TOOL, PORTAL_TOOLS[4]];
+// The same four for the office-hours turn (GATE_PORTAL_MESSAGES_DAY_AI): only stay_silent's description differs.
+const THREAD_DAY_TOOLS = THREAD_TOOLS.map((tool) => (tool === threadLane.STAY_SILENT_TOOL ? threadLane.STAY_SILENT_DAY_TOOL : tool));
 
 const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments', 'get_recent_visits', 'offer_reservice', 'request_email_change', 'request_quote', 'request_move']);
 const TOOL_CANCELLATION_CODES = new Set(['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014']);
@@ -928,4 +930,4 @@ async function getPestAdvice(topic, turn) {
   }
 }
 
-module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, THREAD_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall, reservicePageSwitchesOn, withoutEmails, emailReadBackAwaitingAnswer };
+module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, THREAD_TOOLS, THREAD_DAY_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall, reservicePageSwitchesOn, withoutEmails, emailReadBackAwaitingAnswer };

@@ -34,6 +34,10 @@
  *   office: saveReply restores the thread's last_message_at after the insert, so openMessageScope (which
  *   compares it with last_inbound_at) keeps the thread open for every reader (Portal tab, counts, Mark
  *   handled, the late re-ring, the lead staleness sweep). Only a staff answer or Mark handled closes it.
+ * - The office-hours step-in (portal-messages-day-ai.js, GATE_PORTAL_MESSAGES_DAY_AI) takes the same turn on a
+ *   message that waited 120 open minutes with no answer from a person. It shares the claim, the outcome record,
+ *   the turn, the save and the notice below (exported under __private), with its own metadata key, and sends
+ *   nothing for a hand-off.
  * - The customer's notice is the in-app bell plus an app push (bellAndPush), never the reply email, and
  *   the row carries no pending notice, so the notice sweep never touches it.
  */
@@ -53,12 +57,11 @@ const HAND_OFF_REPLY = 'Thanks for your message. A member of our team will answe
 const OFFICE_OPEN_HOUR = 8;
 const OFFICE_CLOSE_HOUR = 20;
 
-const gateOn = () => Boolean(featureGates.portalMessagesNightAiLive?.());
-
 // Needs the portal messages and the Portal tab on (the thread is the office's item), and Ask Waves on (the
-// portal assistant's own switch), as well as the gate. Read at call time.
-function enabled() {
-  return gateOn()
+// portal assistant's own switch), as well as the gate. Read at call time. The office-hours step-in
+// (portal-messages-day-ai.js) asks the same question of its own gate.
+function enabled(gate = featureGates.portalMessagesNightAiLive) {
+  return Boolean(gate?.())
     && Boolean(featureGates.portalMessagesLive?.())
     && Boolean(featureGates.portalInboxLive?.())
     && Boolean(featureGates.portalChatSelfServeLive?.());
@@ -100,37 +103,39 @@ async function threadHistory(threadId, message) {
 }
 
 // A uuid made from the customer message's id: the same message always names the same turn.
-function turnRequestId(messageId) {
-  const h = crypto.createHash('sha256').update(`portal-message-night-ai:${messageId}`).digest('hex');
+function turnRequestId(messageId, label = 'night-ai') {
+  const h = crypto.createHash('sha256').update(`portal-message-${label}:${messageId}`).digest('hex');
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
-// Takes the message for this step, once. False when an earlier start already took it.
-async function claimMessage(messageId) {
+// Takes the message for this step, once. False when an earlier start already took it. `key` is the metadata
+// key of the step: 'nightAi' here, 'dayAi' for the office-hours step-in.
+async function claimMessage(messageId, key = 'nightAi') {
   const rows = await db('messages').where({ id: messageId })
-    .whereRaw("(metadata->'nightAi') IS NULL")
+    .whereRaw('(metadata->?::text) IS NULL', [key])
     .update({
-      metadata: db.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object('nightAi', jsonb_build_object('claimedAt', ?::text))", [new Date().toISOString()]),
+      metadata: db.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object(?::text, jsonb_build_object('claimedAt', ?::text))", [key, new Date().toISOString()]),
     })
     .returning('id');
   return rows.length > 0;
 }
 
 // What happened, kept on the customer's message for whoever reads it later. Best effort.
-function recordOutcome(messageId, outcome) {
+function recordOutcome(messageId, outcome, key = 'nightAi') {
   return db('messages').where({ id: messageId })
-    .update({ metadata: db.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object('nightAi', coalesce(metadata->'nightAi', '{}'::jsonb) || jsonb_build_object('outcome', ?::text))", [outcome]) })
+    .update({ metadata: db.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object(?::text, coalesce(metadata->?::text, '{}'::jsonb) || jsonb_build_object('outcome', ?::text))", [key, key, outcome]) })
     .catch((err) => logger.warn(`[portal-night-ai] could not record the outcome for message ${messageId}: ${err.message}`));
 }
 
 // The assistant's turn for this message: { kind: 'answer', body } | { kind: 'silent' } | { kind: 'handoff' } | { kind: 'capped' }.
-async function takeTurn(customerId, threadId, message) {
+// `day`: the office-hours step-in's turn (the thread lane's day wording, assistant.js portalLane).
+async function takeTurn(customerId, threadId, message, { day = false } = {}) {
   const WavesAssistant = require('./ai-assistant/assistant');
   const { runPortalTurn } = require('./ai-assistant/portal-turn');
   const { checkPortalChatCustomerCap } = require('../middleware/portal-chat-customer-cap');
   const channelIdentifier = `portal-messages:${customerId}`;
   const result = await runPortalTurn({
-    requestId: turnRequestId(message.id),
+    requestId: turnRequestId(message.id, day ? 'day-ai' : 'night-ai'),
     message: message.body,
     customerId,
     propertyId: null,
@@ -138,6 +143,7 @@ async function takeTurn(customerId, threadId, message) {
     processTurn: async (turn) => {
       // The assistant files and rings nothing and shows no button on this turn (assistant.js escalate, portalLane).
       turn.holdHandOff = true;
+      if (day) turn.threadDay = true;
       const cap = await checkPortalChatCustomerCap(customerId);
       if (!cap.allowed) return { reply: '', escalated: false, generated: false, capped: true };
       // The visible thread is the whole context (assistant.js buildHistory).
@@ -202,6 +208,15 @@ async function saveReply(threadId, message, { body, handOff }) {
   });
 }
 
+// The customer's notice of a saved AI reply: the in-app bell plus an app push, recorded on the row so the notice
+// sweep never touches it.
+async function notifyCustomer(customerId, saved) {
+  const PortalMessages = require('./portal-messages');
+  const sent = await PortalMessages.__private.bellAndPush(customerId, saved, { push: true });
+  await db('messages').where({ id: saved.id })
+    .update({ metadata: db.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object('notice', ?::jsonb)", [JSON.stringify({ bell: sent.bell, pushAccepted: sent.pushAccepted, pending: false })]) });
+}
+
 /**
  * The after-hours step for one saved customer message. Returns the outcome word ('answered', 'handoff',
  * 'silent', 'capped', 'superseded') or null when it did nothing. Never throws.
@@ -228,12 +243,7 @@ async function answerAfterHours({ customer, threadId, message }) {
     const saved = await saveReply(threadId, message, { body: handOff ? HAND_OFF_REPLY : turn.body, handOff });
     const outcome = !saved ? 'superseded' : (handOff ? 'handoff' : 'answered');
     await recordOutcome(message.id, outcome);
-    if (saved) {
-      const PortalMessages = require('./portal-messages');
-      const sent = await PortalMessages.__private.bellAndPush(customer.id, saved, { push: true });
-      await db('messages').where({ id: saved.id })
-        .update({ metadata: db.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object('notice', ?::jsonb)", [JSON.stringify({ bell: sent.bell, pushAccepted: sent.pushAccepted, pending: false })]) });
-    }
+    if (saved) await notifyCustomer(customer.id, saved);
     return outcome;
   } catch (err) {
     logger.warn(`[portal-night-ai] no AI answer for message ${message?.id}: ${err.message}`);
@@ -242,4 +252,5 @@ async function answerAfterHours({ customer, threadId, message }) {
   }
 }
 
-module.exports = { HAND_OFF_REPLY, enabled, isAfterHours, turnRequestId, answerAfterHours };
+// What the office-hours step-in (portal-messages-day-ai.js) shares with this step.
+module.exports = { HAND_OFF_REPLY, enabled, isAfterHours, turnRequestId, answerAfterHours, __private: { claimMessage, recordOutcome, takeTurn, saveReply, notifyCustomer } };
