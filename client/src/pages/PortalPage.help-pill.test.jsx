@@ -95,6 +95,7 @@ async function openHelpMenu() {
   await waitFor(() => expect(api.getPhotoIds).toHaveBeenCalled());
   const pill = await screen.findByRole('button', { name: /^Help/ });
   await waitFor(() => {
+    pill.focus(); // a real tap or key press focuses the pill first
     fireEvent.click(pill);
     expect(screen.getByRole('dialog', { name: 'Help' })).toBeInTheDocument();
   });
@@ -104,18 +105,17 @@ async function openHelpMenu() {
 describe('Help pill with Messages and Photo ID both offered', () => {
   beforeEach(() => { messagesOn(); photoIdOn(); });
 
-  it('opens a menu with Chat with Waves and Photo ID, and hides itself behind the menu', async () => {
+  it('opens a menu with Chat with Waves and Photo ID', async () => {
     const { pill, sheet } = await openHelpMenu();
     expect(within(sheet).getByText('How can we help?')).toBeInTheDocument();
     expect(within(sheet).getByRole('button', { name: /Chat with Waves/ })).toHaveTextContent('We answer between 8 AM and 8 PM');
     expect(within(sheet).getByRole('button', { name: /Photo ID/ })).toBeInTheDocument();
-    expect(pill).toHaveAttribute('hidden');
     // No pill named for Photo ID alone is left on the page.
     expect(screen.queryByRole('button', { name: /^Photo ID/ })).toBe(within(sheet).getByRole('button', { name: /Photo ID/ }));
 
     fireEvent.click(within(sheet).getByRole('button', { name: 'Close help menu' }));
     expect(screen.queryByRole('dialog', { name: 'Help' })).toBeNull();
-    expect(pill).not.toHaveAttribute('hidden');
+    expect(pill).toHaveFocus();
   });
 
   it('Chat with Waves opens the Messages page, where the pill stays hidden', async () => {
@@ -126,13 +126,23 @@ describe('Help pill with Messages and Photo ID both offered', () => {
     expect(screen.queryByRole('dialog', { name: 'Help' })).toBeNull();
     expect(window.location.search).toBe('?tab=messages');
     expect(pill).toHaveAttribute('hidden');
+    // The hidden pill cannot hold keyboard focus: it lands on the page content.
+    expect(document.getElementById('portal-main')).toHaveFocus();
   });
 
-  it('Photo ID opens the Photo ID sheet', async () => {
-    const { sheet } = await openHelpMenu();
-    fireEvent.click(within(sheet).getByRole('button', { name: /Photo ID/ }));
-    expect(await screen.findByRole('dialog', { name: 'Photo ID' })).toBeInTheDocument();
+  it('Photo ID opens the Photo ID sheet, and closing it returns focus to the pill', async () => {
+    const { pill, sheet } = await openHelpMenu();
+    const row = within(sheet).getByRole('button', { name: /Photo ID/ });
+    row.focus();
+    fireEvent.click(row);
+    const photoId = await screen.findByRole('dialog', { name: 'Photo ID' });
     expect(screen.queryByRole('dialog', { name: 'Help' })).toBeNull();
+    expect(pill).toHaveAttribute('hidden');
+
+    fireEvent.click(within(photoId).getByRole('button', { name: 'Close Photo ID' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Photo ID' })).toBeNull());
+    expect(pill).not.toHaveAttribute('hidden');
+    expect(pill).toHaveFocus();
   });
 
   it('shows an unread answer on the pill and on the Chat row', async () => {

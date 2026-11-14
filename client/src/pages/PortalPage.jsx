@@ -1,5 +1,5 @@
 import { Fragment, useState, useEffect, useRef, useCallback, useMemo, useId, createContext, useContext } from 'react';
-import { createPortal } from 'react-dom';
+import { createPortal, flushSync } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, tokenCustomerId } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
@@ -17092,10 +17092,11 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
 // chat"): the one floating pill, bottom-right above the bottom nav. It opens
 // the Help sheet (Chat = the Messages thread, and Photo ID), or the single
 // feature this customer has, with no menu. A red dot shows an unread answer.
-// It stays mounted (hidden) while its sheet is open so focus returns to it.
-function HelpFab({ onOpen, hasBottomNav, hidden = false, unread = 0 }) {
+// It stays mounted (hidden) while Photo ID is open so focus returns to it.
+function HelpFab({ onOpen, hasBottomNav, hidden = false, unread = 0, buttonRef = null }) {
   return (
     <button
+      ref={buttonRef}
       type="button"
       onClick={onOpen}
       hidden={hidden}
@@ -17976,11 +17977,19 @@ export default function PortalPage() {
   // contact session, so `enabled` is already false there). With both features
   // the pill opens the Help sheet; with one it opens that feature directly.
   const [showHelp, setShowHelp] = useState(false);
+  const helpButtonRef = useRef(null);
   const chatAvailable = messagesGate.enabled;
   const helpAvailable = chatAvailable || photoIdAvailable;
+  // The pill is hidden on the Messages page, so keyboard focus moves to the
+  // page content there instead of being dropped with the hidden pill.
+  // flushSync: the Help sheet's own focus restore (to the pill) runs first.
+  const openChatPage = () => {
+    flushSync(() => { setShowHelp(false); switchTab('messages'); });
+    document.getElementById('portal-main')?.focus({ preventScroll: true });
+  };
   const openHelp = () => {
     if (chatAvailable && photoIdAvailable) setShowHelp(true);
-    else if (chatAvailable) switchTab('messages');
+    else if (chatAvailable) openChatPage();
     else setShowPhotoId(true);
   };
   // reportIssuePrefill lives here, above the keyed PortalReadProvider, so a
@@ -18760,17 +18769,19 @@ export default function PortalPage() {
         />
       )}
 
-      {/* Help pill + its sheet. Hidden while a chat or a sheet it opens is on
-          screen, and on the Messages page (the chat it leads to). */}
+      {/* Help pill + its sheet. Hidden while Photo ID or Ask Waves AI is on
+          screen, and on the Messages page (the chat it leads to). Behind its
+          own sheet it stays focusable: the Photo ID row hands focus back to
+          the pill first, so closing Photo ID returns there (as More does). */}
       {helpAvailable && (
-        <HelpFab onOpen={openHelp} hasBottomNav={isMobileShell} unread={messagesGate.unread}
-          hidden={showHelp || showPhotoId || showChat || activeTab === 'messages'} />
+        <HelpFab onOpen={openHelp} hasBottomNav={isMobileShell} unread={messagesGate.unread} buttonRef={helpButtonRef}
+          hidden={showPhotoId || showChat || activeTab === 'messages'} />
       )}
       {showHelp && (
         <HelpSheet
           onClose={() => setShowHelp(false)}
-          onChat={chatAvailable ? () => { setShowHelp(false); switchTab('messages'); } : null}
-          onOpenPhotoId={photoIdAvailable ? () => { setShowHelp(false); setShowPhotoId(true); } : null}
+          onChat={chatAvailable ? openChatPage : null}
+          onOpenPhotoId={photoIdAvailable ? () => { helpButtonRef.current?.focus({ preventScroll: true }); setShowPhotoId(true); setShowHelp(false); } : null}
           unread={messagesGate.unread}
         />
       )}
