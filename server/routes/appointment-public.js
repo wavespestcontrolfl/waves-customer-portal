@@ -697,11 +697,16 @@ async function prepPhotosField(svc, state, visitUnknown) {
 // or a failed read). The county comes from the same guarded snapshot the lawn prep guide uses (watering-home
 // loadWateringHome): the ACTIVE turf profile, the address re-read after the preferences and the move stamp re-read
 // after the address, so a move between loadByToken and this read never pairs the old address with the new stamp; a
-// snapshot that straddles a move throws, and the line is dropped (GH Codex #7885 r1). The payload carries the sentence
-// only, never the county, the hours or the policy. Fails soft on its own: a failed read drops only the line.
+// snapshot that straddles a move throws, and the line is dropped (GH Codex #7885 r1). The visit is then rechecked
+// against the home that snapshot read: lawnPrepField's visitAtCustomerHome ran on loadByToken's older join, so a visit
+// stamped at the former home would otherwise get the new home's guidance (r2). The payload carries the sentence only,
+// never the county, the hours or the policy. Fails soft on its own: a failed read drops only the line.
 async function wateringLineFor(svc) {
   try {
-    const { county } = await loadWateringHome({ id: svc.customer_id, city: svc.city, zip: svc.zip });
+    const { county, home } = await loadWateringHome({
+      id: svc.customer_id, address_line1: svc.address_line1, address_line2: svc.address_line2, city: svc.city, zip: svc.zip,
+    });
+    if (!visitAtCustomerHome({ ...svc, ...home })) return '';
     const visitDay = apptDateStr(svc.scheduled_date);
     return wateringTimeLine(currentRestrictionPolicy(visitDay ? parseETDateTime(`${visitDay}T12:00`) : new Date(), { county }));
   } catch (err) {

@@ -14,10 +14,13 @@
  *   - the move stamp re-read after the address. A stamp that moved between
  *     the reads means the inputs straddle a move: this throws, and the
  *     caller builds no watering instruction on them.
- * `customer` is { id, city?, zip? }; its city and zip are used only when the
- * customers row is gone. Returns { prefs, county, moveStamp }: the full
- * preferences row, the county (or null when none is established), and the
- * stamp the snapshot was read against.
+ * `customer` is { id, address_line1?, address_line2?, city?, zip? }; its
+ * address is used only when the customers row is gone. Returns
+ * { prefs, county, moveStamp, home }: the full preferences row, the county
+ * (or null when none is established), the stamp the snapshot was read
+ * against, and the home address it read (address_line1, address_line2,
+ * city, zip: the customer side of stamped-address VISIT_HOME_COLUMNS), so a
+ * caller can recheck a visit against the same home (GH Codex #7885 r2).
  */
 
 const db = require('../models/db');
@@ -29,7 +32,7 @@ const stampMs = (v) => (v ? new Date(v).getTime() : null);
 async function loadWateringHome(customer) {
   const prefs = (await db('property_preferences').where({ customer_id: customer.id }).first()) || {};
   const turf = (await db('customer_turf_profiles').where({ customer_id: customer.id, active: true }).first()) || {};
-  const home = (await db('customers').where({ id: customer.id }).first('city', 'zip')) || customer;
+  const home = (await db('customers').where({ id: customer.id }).first('address_line1', 'address_line2', 'city', 'zip')) || customer;
   const moveStamp = (await db('property_preferences').where({ customer_id: customer.id }).first('irrigation_home_changed_at'))?.irrigation_home_changed_at || null;
   const movedAt = prefs.irrigation_home_changed_at || null;
   if (stampMs(moveStamp) !== stampMs(movedAt)) {
@@ -44,7 +47,12 @@ async function loadWateringHome(customer) {
     movedAt,
     countyConfirmed: countyConfirmedAfterMove(prefs),
   });
-  return { prefs, county, moveStamp };
+  return {
+    prefs,
+    county,
+    moveStamp,
+    home: { address_line1: home.address_line1, address_line2: home.address_line2, city: home.city, zip: home.zip },
+  };
 }
 
 module.exports = { loadWateringHome };

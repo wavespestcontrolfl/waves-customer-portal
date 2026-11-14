@@ -140,7 +140,9 @@ function chain(table) {
     // The watering line's address re-read (watering-home loadWateringHome, after the preferences): the CURRENT home,
     // which is the token row's address unless a test models a move with `homeRow`.
     if (!lockRead && table === 'customers' && cols.includes('zip')) {
-      return dbState.homeRow !== undefined ? dbState.homeRow : { city: dbState.svcRow?.city, zip: dbState.svcRow?.zip };
+      if (dbState.homeRow !== undefined) return dbState.homeRow;
+      const s = dbState.svcRow || {};
+      return { address_line1: s.address_line1, address_line2: s.address_line2, city: s.city, zip: s.zip };
     }
     if (!lockRead && table === 'customers') return dbState.customerNameRow;
     // lawnPrepField's pets-on-file read (a yes/no only reaches the payload), and loadWateringHome's two reads: the
@@ -1035,6 +1037,21 @@ describe('GET /api/public/appointment/:token — additive lawnPrep', () => {
       expect((await payload(VISIT, { homeRow: { city: 'Tampa', zip: '33602' } })).lawnPrep).toEqual({ petsOnFile: false });
       // The token row says Tampa; the current home is Bradenton: the line.
       expect((await payload({ ...VISIT, city: 'Tampa', zip: '33602' }, { homeRow: { city: 'Bradenton', zip: '34202' } })).lawnPrep).toHaveProperty('wateringLine');
+    });
+
+    // GH Codex #7885 r2: lawnPrepField's at-home check ran on loadByToken's join. A visit stamped at the former home
+    // must not get the new home's line once the re-read shows the customer moved.
+    test('a visit stamped at the former home gets no line once the re-read home is elsewhere', async () => {
+      setPolicy();
+      const STAMPED_AT_OLD_HOME = { ...VISIT, service_address_line1: '12 Palm Way', service_address_city: 'Bradenton', service_address_zip: '34202' };
+      const movedHome = { address_line1: '400 Harbor Ln', address_line2: null, city: 'Sarasota', zip: '34236' };
+      const moved = await payload(STAMPED_AT_OLD_HOME, { homeRow: movedHome });
+      expect(moved.state).toBe('upcoming');
+      expect(moved.lawnPrep).toEqual({ petsOnFile: false });
+      // The same stamped visit while the home is still that address keeps the line.
+      expect((await payload(STAMPED_AT_OLD_HOME)).lawnPrep).toHaveProperty('wateringLine');
+      // An unstamped visit follows the customer to the new home: the new home's line.
+      expect((await payload(VISIT, { homeRow: movedHome })).lawnPrep).toHaveProperty('wateringLine');
     });
 
     test('a failed read of the watering inputs drops only the line, never petsOnFile or the card', async () => {
