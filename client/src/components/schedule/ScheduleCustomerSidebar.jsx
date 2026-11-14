@@ -5,6 +5,7 @@ import { adminFetch } from '../../lib/adminFetch';
 import { getAdminUser } from '../../lib/adminAuth';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import CancelFeeNotice from './CancelFeeNotice';
+import SkipVisitOption from './SkipVisitOption';
 import { TIMEZONE } from '../../lib/timezone';
 import { appointmentHistory as buildAppointmentHistory } from './customerAppointments';
 import CallBridgeLink from '../admin/CallBridgeLink';
@@ -619,6 +620,7 @@ export default function ScheduleCustomerSidebar({
                 {!canCancelSeries && (
                   <div className="mt-2 text-12 text-ink-tertiary">Series options are available for recurring appointments.</div>
                 )}
+                <SkipVisitOption key={service.id} service={service} enabled={officeActions} origin="appointment sidebar" onSkipped={onCancel} />
               </div>
 
               <div className="mt-6">

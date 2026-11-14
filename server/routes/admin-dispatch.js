@@ -2583,9 +2583,25 @@ router.get('/:serviceId/card-hold', async (req, res, next) => {
     const CardHolds = require('../services/estimate-card-holds');
     const holdPreview = await CardHolds.cardHoldCancelPreview(req.params.serviceId);
     const ApptCardRequests = require('../services/appointment-card-request');
-    res.json(await mergeCardHoldPreviews(holdPreview, () => ApptCardRequests.appointmentCardCancelPreview(req.params.serviceId)));
+    const preview = await mergeCardHoldPreviews(holdPreview, () => ApptCardRequests.appointmentCardCancelPreview(req.params.serviceId));
+    // `?skip=1` (the schedule sidebar's cancel window) also asks whether the office may skip this visit instead. Every
+    // other caller of this preview gets the answer it always got, and pays for no skip check.
+    res.json(req.query.skip === '1' ? { ...preview, skip: await skipPreviewForCancelWindow(req) } : preview);
   } catch (err) { next(err); }
 });
+// The cancel window's "Skip this visit" choice (visit-skip.js): whether this visit may be skipped, the plan's next
+// visit and, for a lawn plan on rounds, the round the skip drops. Best-effort: a failed check answers null, the
+// window then offers no skip, and the fee preview above is never held up by it.
+async function skipPreviewForCancelWindow(req) {
+  try {
+    return await require('../services/visit-skip').skipPreview(req.params.serviceId, {
+      isAdmin: req.techRole === 'admin', actorId: req.technicianId || null,
+    });
+  } catch (e) {
+    logger.warn(`[admin-dispatch] skip preview failed for ${req.params.serviceId}: ${e.message}`);
+    return null;
+  }
+}
 
 router.put('/:serviceId/status', serviceStatusHandler);
 // The cancellation text step (or the no-text suppression) of a post-commit cancel, under the request's fence when it has one.
