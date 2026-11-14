@@ -8,6 +8,10 @@
 // Rules this copy keeps: no safety claims, no hour or minute figures (a
 // number of days is fine), plain words, first-person plural. The card never
 // shows a pet name: the payload only says whether pets are on file.
+//
+// The pets ask and its link show only while no pet is on file. Owner
+// 2026-11-14: "if they have added their pets we should not include the link
+// to pets", before and after the visit.
 // =========================================================================
 
 // The portal's Pets section (PortalPage opens the Property tab and scrolls to #pets). A same-origin link;
@@ -25,9 +29,5 @@ export const LAWN_PREP_COPY = Object.freeze({
   noPets: Object.freeze({
     text: 'Tell us about your pets, so we can plan each visit around them.',
     button: 'Add your pets',
-  }),
-  hasPets: Object.freeze({
-    text: 'Your pets are on file. Changed? Update them any time.',
-    button: 'Update your pets',
   }),
 });

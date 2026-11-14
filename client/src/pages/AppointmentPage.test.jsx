@@ -411,13 +411,17 @@ describe('AppointmentPage lawn prep card', () => {
     expect(screen.queryByRole('link', { name: 'Update your pets' })).not.toBeInTheDocument();
   });
 
-  it('petsOnFile true: an Update your pets link to the same place', async () => {
+  // Owner 2026-11-14: once the customer has added pets, no pets link before or after the visit.
+  it('petsOnFile true: the three lines and no pets ask or pets link', async () => {
     stubFetch({ get: jsonResponse(upcomingPayload({ lawnPrep: { petsOnFile: true } })) });
     renderPage();
     const card = await screen.findByTestId('lawn-prep-card');
-    expect(card).toHaveTextContent('Your pets are on file. Changed? Update them any time.');
-    expect(screen.getByRole('link', { name: 'Update your pets' })).toHaveAttribute('href', '/?tab=property#pets');
-    expect(screen.queryByRole('link', { name: 'Add your pets' })).not.toBeInTheDocument();
+    expect(card.querySelectorAll('li')).toHaveLength(3);
+    expect(card).toHaveTextContent('Keep pets and kids inside while we treat.');
+    expect(card).not.toHaveTextContent('Your pets');
+    expect(card).not.toHaveTextContent('Tell us about your pets');
+    expect(card.querySelector('a')).toBeNull();
+    expect(document.querySelector('a[href*="#pets"]')).toBeNull();
   });
 });
 

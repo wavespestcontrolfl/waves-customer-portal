@@ -74,9 +74,9 @@ const PRIMARY_CTA = {
 };
 
 // "Before your lawn visit": the server sends `lawnPrep` only for an upcoming lawn treatment at the customer's home. It
-// says whether pets are on file, nothing more; the link opens the portal's Pets section (sign-in happens there).
+// says whether pets are on file, nothing more. The pets ask and its link (the portal's Pets section; sign-in happens
+// there) show only while no pet is on file: once pets are added, the card carries no pets link (owner 2026-11-14).
 function LawnPrepCard({ petsOnFile }) {
-  const pets = petsOnFile ? LAWN_PREP_COPY.hasPets : LAWN_PREP_COPY.noPets;
   return (
     <Card data-testid="lawn-prep-card">
       <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, lineHeight: 1.3, marginBottom: 8 }}>
@@ -85,13 +85,15 @@ function LawnPrepCard({ petsOnFile }) {
       <ul style={{ margin: 0, paddingLeft: 20, fontSize: 16, color: S.body, lineHeight: 1.55 }}>
         {LAWN_PREP_COPY.lines.map((line) => <li key={line} style={{ marginBottom: 6 }}>{line}</li>)}
       </ul>
-      <div style={{ borderTop: `1px solid ${S.border}`, marginTop: 16, paddingTop: 16 }}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: S.text, marginBottom: 4 }}>{LAWN_PREP_COPY.petsHeading}</div>
-        <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>{pets.text}</div>
-        <a href={LAWN_PREP_PETS_HREF} data-glass-accent="" data-glass-size="primary" style={{ ...PRIMARY_CTA, marginTop: 12 }}>
-          {pets.button}
-        </a>
-      </div>
+      {petsOnFile ? null : (
+        <div style={{ borderTop: `1px solid ${S.border}`, marginTop: 16, paddingTop: 16 }}>
+          <div style={{ fontSize: 16, fontWeight: 600, color: S.text, marginBottom: 4 }}>{LAWN_PREP_COPY.petsHeading}</div>
+          <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>{LAWN_PREP_COPY.noPets.text}</div>
+          <a href={LAWN_PREP_PETS_HREF} data-glass-accent="" data-glass-size="primary" style={{ ...PRIMARY_CTA, marginTop: 12 }}>
+            {LAWN_PREP_COPY.noPets.button}
+          </a>
+        </div>
+      )}
     </Card>
   );
 }
