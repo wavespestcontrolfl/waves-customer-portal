@@ -452,6 +452,10 @@ function isStandaloneReservation(row, reservations) {
 
 function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, seeder }) {
   const live = rows.filter((row) => !['cancelled', 'rescheduled', 'skipped', 'no_show'].includes(row.status));
+  // A skipped visit is a decision, not a gap (the office's Skip, visit-skip.js, or a plan hold's away dates): it
+  // keeps its place in the plan. The application count and the spacing walk read it as a visit, so a skip does not
+  // page as a missing application or as a double-length interval. Every other check reads the live rows only.
+  const placed = rows.filter((row) => !['cancelled', 'rescheduled', 'no_show'].includes(row.status));
   const expectedVisits = seeder.plannedVisitCountForPattern(pattern);
   const issues = [];
   let missedRound = null;
@@ -468,12 +472,12 @@ function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, se
     })) {
       issues.push('cadence_differs_from_acceptance');
     }
-    if (live.length < expectedVisits) issues.push('missing_applications');
+    if (placed.length < expectedVisits) issues.push('missing_applications');
     // A rounds series (the same 9x plan as every_6_weeks) is dated by its fixed
     // rounds, so its spacing is checked against them, not the acceptance's 42-day walk.
     const spacingPattern = live.some((row) => seeder.normalizeRecurringPattern(row.recurring_pattern) === LAWN_ROUNDS_9)
       ? LAWN_ROUNDS_9 : pattern;
-    if (hasAcceptedScheduleSpacingGap(live, spacingPattern, seeder)) issues.push('application_spacing_needs_review');
+    if (hasAcceptedScheduleSpacingGap(placed, spacingPattern, seeder)) issues.push('application_spacing_needs_review');
     // A rounds series whose latest ended round passed with no completed visit never took that round's step (owner 2026-10-29).
     if (spacingPattern === LAWN_ROUNDS_9) missedRound = missedLawnRound(rows, todayET);
     if (missedRound) issues.push(missedRound.issue);
@@ -507,7 +511,7 @@ function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, se
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const roundDay = (dateStr) => `${MONTH_NAMES[Number(dateStr.slice(5, 7)) - 1]} ${Number(dateStr.slice(8, 10))}`;
 
-// Lawn rounds: the MOST RECENTLY ENDED round (it ended before today ET) of a rounds series that has no completed plan visit. A booster
+// Lawn rounds: the MOST RECENTLY ENDED round (it ended before today ET) of a rounds series that has no completed or skipped plan visit. A booster
 // never counts: it sits on top of the plan. Only a round from the round of the series' first visit through the round of its last row (a
 // series not yet started or already past its term has no missed round), and only the latest one, so the finding clears itself once the
 // next round ends with a completed visit. Returns { ordinal, issue } or null. `rows` are the family's visits in any status.
@@ -518,7 +522,9 @@ function missedLawnRound(rows, todayET) {
   if (!ordinals.length || today == null) return null;
   const ended = today - 1;
   if (ended < Math.min(...ordinals) || ended > Math.max(...ordinals)) return null;
-  if (plan.some((row) => row.status === 'completed' && roundOrdinal(formatDateOnly(row.scheduled_date)) === ended)) return null;
+  // A completed visit took the round's step; a skipped one is the decision not to (the office's Skip or a plan hold),
+  // already known to the office, so neither is a missed round.
+  if (plan.some((row) => ['completed', 'skipped'].includes(row.status) && roundOrdinal(formatDateOnly(row.scheduled_date)) === ended)) return null;
   const programYear = Math.floor(ended / ROUNDS_PER_YEAR);
   const round = (ended % ROUNDS_PER_YEAR) + 1;
   return {
@@ -552,7 +558,8 @@ function weekendShiftBaseDate(row, dateStr, seeder) {
 // Lawn rounds: the k-th visit after the series anchor belongs in the round of
 // lawnRoundDate(anchor, k). A visit may sit anywhere inside that round (a
 // move or a weekend shift is not drift); outside it is the finding, and so is
-// a skipped or doubled round, which shifts every later visit one round.
+// a round with no visit or a doubled round, which shifts every later visit one
+// round. A visit with status `skipped` holds its round: the caller passes it in.
 function lawnRoundsOutOfRound(sorted) {
   let anchor = null;
   let k = 0;

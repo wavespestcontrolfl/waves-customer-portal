@@ -333,6 +333,41 @@ test('the finding key stays put on routine row edits and moves when the finding 
   expect(fewer.findingKey).not.toBe(before.findingKey);
 });
 
+// A skipped visit is a decision the office already knows: the Skip action (owner 2026-11-13, visit-skip.js) or a plan
+// hold's away dates. It keeps its place in the plan, so the application count and the spacing walk read it as a visit.
+// Before, the first office skip of a quarterly visit paged the plan every morning as a double-length interval.
+describe('a skipped plan visit keeps its place in the plan', () => {
+  const withStatus = (rows, index, status) => rows.map((row, i) => (i === index ? { ...row, status } : row));
+
+  test('a quarterly plan with one visit skipped raises no finding', () => {
+    expect(check(quarterlyPest(), withStatus(series('quarterly', 4), 1, 'skipped'))).toEqual([]);
+  });
+
+  test('the same visit CANCELLED is still a missing application and a double-length interval: nothing says that gap was meant', () => {
+    const [gap] = check(quarterlyPest(), withStatus(series('quarterly', 4), 1, 'cancelled'));
+    expect(gap.issues).toEqual(['missing_applications', 'application_spacing_needs_review']);
+  });
+
+  test('a plan booked past its year (five quarterly visits) with one skipped has no spacing finding either', () => {
+    expect(check(quarterlyPest(), withStatus(series('quarterly', 5), 1, 'skipped'))).toEqual([]);
+    expect(check(quarterlyPest(), withStatus(series('quarterly', 5), 1, 'cancelled'))[0].issues).toEqual(['application_spacing_needs_review']);
+  });
+
+  test('a lawn rounds plan with one round skipped has no count or spacing finding', () => {
+    expect(check(lawn9x(), withStatus(roundsSeries(), 4, 'skipped'))).toEqual([]);
+  });
+
+  test('a skip does not hide a real gap elsewhere in the plan', () => {
+    const rows = withStatus(series('quarterly', 5), 1, 'skipped').filter((_row, index) => index !== 3);
+    expect(check(quarterlyPest(), rows)[0].issues).toEqual(['application_spacing_needs_review']);
+  });
+
+  test('the other checks still read live visits only: a plan with every visit skipped is still flagged for review', () => {
+    const rows = series('quarterly', 4).map((row) => ({ ...row, status: 'skipped' }));
+    expect(check(quarterlyPest(), rows)[0].issues).toEqual(['cancelled_schedule_needs_review']);
+  });
+});
+
 // Lawn rounds: a rounds series whose most recently ENDED round passed with no completed visit never took that round's step (owner 2026-10-29,
 // PR 4b of the rounds build). The finding names the round and its dates, covers only the latest ended round (so it clears itself once the next
 // round ends with a completed visit), counts no booster, and leaves every other pattern as it was.
@@ -376,6 +411,19 @@ describe('a lawn round that passed with no completed visit', () => {
   test('a completed visit anywhere in the round (moved to Apr 10) counts', () => {
     const rows = base().map((row) => (row.id === 'r3' ? { ...row, status: 'completed', scheduled_date: '2027-04-10' } : row));
     expect(missedIssues(on('2027-04-30', rows))).toEqual([]);
+  });
+
+  test('a round whose visit was skipped (the office\'s Skip, or a plan hold\'s away dates) is not a missed round', () => {
+    const rows = base().map((row) => (row.id === 'r3' ? { ...row, status: 'skipped' } : row));
+    expect(missedIssues(on('2027-04-30', rows))).toEqual([]);
+    // Still only that round: round 4 ending with nothing done or skipped is named as before.
+    expect(missedIssues(on('2027-06-05', rows.map((row) => (row.id === 'r4' ? { ...row, status: 'cancelled' } : row)))))
+      .toEqual(['Round 4 (Apr 24-Jun 2) passed with no completed visit; that round\'s step was not applied.']);
+  });
+
+  test('a skipped booster in the round does not count as the round\'s visit', () => {
+    const booster = roundsRow('b3', '2027-03-25', 'skipped', { is_recurring: false, recurring_pattern: null });
+    expect(missedIssues(on('2027-04-30', [...base(), booster]))).toEqual([MISSED_ROUND_3]);
   });
 
   test('a completed booster in the round does not count as the round\'s visit', () => {
