@@ -46,6 +46,7 @@ const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { currentRestrictionPolicy, resolveRestrictionCounty } = require('../config/irrigation-restrictions');
 const { countyConfirmedAfterMove, parseConfirmedFields } = require('./irrigation-schedule-confirmation');
+const { wateringTimeLine } = require('./lawn-watering-time-line');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { BED_BUG_HEAT_KEYWORDS } = require('../utils/bed-bug-heat-service');
@@ -238,8 +239,10 @@ async function loadWateringInputs(customer, snapshot) {
   return { minutes, policy: currentRestrictionPolicy(new Date(), { county }) };
 }
 
-// The copy. No weekday, no hour window: the policy names neither. Fails
-// closed to the county's rules when there is no policy.
+// The copy. No weekday, no hour window: the policy names neither. The one
+// hour sentence is the owner-approved watering-time line (wateringTimeLine),
+// which follows the live rule or says nothing. Fails closed to the county's
+// rules when there is no policy.
 function renderWateringBlock({ minutes, policy }) {
   const minutesLine = minutes
     ? `run each grass zone about ${minutes} minutes.`
@@ -255,7 +258,8 @@ function renderWateringBlock({ minutes, policy }) {
   const dayWord = days === 1 ? 'one watering day' : `${days} watering days`;
   const hours = policy.hoursNote ? `, ${policy.hoursNote}` : '';
   const onDay = days === 1 ? 'On that day' : 'On each of those days';
-  return `Right now your area allows ${dayWord} a week (${policy.label})${hours}${through}. ${onDay}, ${minutesLine}`;
+  const timeLine = wateringTimeLine(policy);
+  return `Right now your area allows ${dayWord} a week (${policy.label})${hours}${through}. ${onDay}, ${minutesLine}${timeLine ? ` ${timeLine}` : ''}`;
 }
 
 // The text that carries the tokened guide page — one template for every

@@ -49,6 +49,9 @@ const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const { stampedDivergesSql, VISIT_HOME_COLUMNS, visitAtCustomerHome } = require('../services/stamped-address');
 const { isLawnTreatmentVisit } = require('../services/lawn-treatment-visit');
+const { currentRestrictionPolicy, resolveRestrictionCounty } = require('../config/irrigation-restrictions');
+const { countyConfirmedAfterMove } = require('../services/irrigation-schedule-confirmation');
+const { wateringTimeLine } = require('../services/lawn-watering-time-line');
 const {
   arrivalWindowRange,
   formatSmsTimeRange,
@@ -689,22 +692,51 @@ async function prepPhotosField(svc, state, visitUnknown) {
   }
 }
 
-// "Before your lawn visit" card (owner 2026-11-14, no gate: a page card with no write). Additive: `{ lawnPrep: { petsOnFile } }`
-// only for an upcoming lawn treatment visit at the customer's home; any other visit leaves the key absent and the
-// payload byte-identical. A grouped stop passes each member's raw service type (one lawn member is enough).
-// `petsOnFile` is a yes/no: the public payload never carries a pet name, count or any other pet detail. Fails soft:
-// a lookup error omits the key and logs a warning, never a 500.
+// The card's watering-time line (owner 2026-11-14, decision 1A): the sentence wateringTimeLine picks from the rule in
+// force on the visit's date for the customer's county, or '' (no rule on file, a rule whose hours fit neither sentence,
+// or a failed read). The county comes from the same inputs the lawn prep guide email uses (prep-guide-sender
+// loadWateringInputs): the ACTIVE turf profile and the home city and zip, with the move guards. The payload carries the
+// sentence only, never the county, the hours or the policy. Fails soft on its own: a failed read drops only the line.
+async function wateringLineFor(svc, prefs) {
+  try {
+    const turf = (await db('customer_turf_profiles').where({ customer_id: svc.customer_id, active: true }).first('county', 'city')) || {};
+    const movedAt = prefs?.irrigation_home_changed_at || null;
+    const county = resolveRestrictionCounty({
+      county: turf.county || null,
+      profileCity: turf.city || null,
+      city: svc.city,
+      zip: svc.zip,
+      homeMoved: !!movedAt,
+      movedAt,
+      countyConfirmed: countyConfirmedAfterMove(prefs || {}),
+    });
+    const visitDay = apptDateStr(svc.scheduled_date);
+    return wateringTimeLine(currentRestrictionPolicy(visitDay ? parseETDateTime(`${visitDay}T12:00`) : new Date(), { county }));
+  } catch (err) {
+    logger.warn(`[appointment-public] lawnPrep watering line unavailable for ${svc.id}: ${err.message}`);
+    return '';
+  }
+}
+
+// "Before your lawn visit" card (owner 2026-11-14, no gate: a page card with no write). Additive: `{ lawnPrep: { petsOnFile,
+// wateringLine? } }` only for an upcoming lawn treatment visit at the customer's home; any other visit leaves the key absent
+// and the payload byte-identical. A grouped stop passes each member's raw service type (one lawn member is enough).
+// `petsOnFile` is a yes/no: the public payload never carries a pet name, count or any other pet detail. `wateringLine` is
+// the one approved sentence from wateringLineFor, present only when there is one. Fails soft: a lookup error omits the
+// key and logs a warning, never a 500.
 async function lawnPrepField(svc, state, members) {
   if (state !== 'upcoming') return {};
   try {
     const serviceTypes = Array.isArray(members) && members.length ? members.map((m) => m.service_type) : [svc.service_type];
     if (!isLawnTreatmentVisit(serviceTypes) || !visitAtCustomerHome(svc)) return {};
-    const prefs = await db('property_preferences').where({ customer_id: svc.customer_id }).first('pets_structured');
+    const prefs = await db('property_preferences').where({ customer_id: svc.customer_id })
+      .first('pets_structured', 'irrigation_home_changed_at', 'irrigation_confirmed_fields');
     let pets = prefs?.pets_structured;
     if (typeof pets === 'string') {
       try { pets = JSON.parse(pets); } catch { pets = null; }
     }
-    return { lawnPrep: { petsOnFile: Array.isArray(pets) && pets.length > 0 } };
+    const wateringLine = await wateringLineFor(svc, prefs);
+    return { lawnPrep: { petsOnFile: Array.isArray(pets) && pets.length > 0, ...(wateringLine ? { wateringLine } : {}) } };
   } catch (err) {
     logger.warn(`[appointment-public] lawnPrep lookup failed for ${svc.id}: ${err.message}`);
     return {};

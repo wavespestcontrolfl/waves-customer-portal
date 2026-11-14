@@ -65,6 +65,56 @@ describe('currentRestrictionPolicy', () => {
   });
 });
 
+describe('allowedHours and noHourRestriction (owner 2026-11-14, watering-time line)', () => {
+  beforeEach(() => { logger.error.mockClear(); _private._lastLogged.clear(); });
+  const ORDER_HOURS = [{ start: '00:01', end: '04:00' }, { start: '20:00', end: '23:59' }];
+  const envWith = (extra) => ({ IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 1, effectiveFrom: '2026-10-02', expiresOn: '2027-03-31', label: 'order', hoursNote: 'on your assigned day, during your area\'s allowed hours', coverage: 'all', ...extra }) });
+  const read = (extra) => currentRestrictionPolicy(AFTER, { env: envWith(extra), county: 'Manatee' });
+
+  test('the default policy carries neither field: allowedHours null, noHourRestriction false', () => {
+    expect(DEFAULT_POLICY).not.toHaveProperty('allowedHours');
+    expect(currentRestrictionPolicy(IN_FORCE, { env: {}, county: 'Manatee' })).toMatchObject({ allowedHours: null, noHourRestriction: false });
+  });
+
+  test('well-formed windows come back as a frozen, normalized copy', () => {
+    const p = read({ allowedHours: [{ ...ORDER_HOURS[0], note: 'ignored' }, ORDER_HOURS[1]] });
+    expect(p.allowedHours).toEqual(ORDER_HOURS);
+    expect(Object.isFrozen(p.allowedHours)).toBe(true);
+    expect(Object.isFrozen(p.allowedHours[0])).toBe(true);
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  test('noHourRestriction is true only for the boolean true', () => {
+    expect(read({ hoursNote: '', noHourRestriction: true })).toMatchObject({ noHourRestriction: true, allowedHours: null });
+    expect(read({ noHourRestriction: 'true' })).toMatchObject({ noHourRestriction: false });
+  });
+
+  test('a malformed allowedHours reads as absent, keeps the policy valid and logs once', () => {
+    const bad = [
+      'midnight', {}, [], [{ start: '00:01' }], [{ start: '4am', end: '8pm' }], [{ start: '04:00', end: '00:01' }],
+      [{ start: '04:00', end: '04:00' }], [{ start: '00:01', end: '24:00' }], [ORDER_HOURS[0], null], [ORDER_HOURS[0], 'x'],
+    ];
+    for (const allowedHours of bad) {
+      _private._lastLogged.clear();
+      logger.error.mockClear();
+      const p = read({ allowedHours });
+      expect(p).toMatchObject({ maxDaysPerWeek: 1, expiresOn: '2027-03-31', allowedHours: null });
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('allowedHours is malformed'));
+    }
+    // Once per hour, not once per customer.
+    _private._lastLogged.clear();
+    logger.error.mockClear();
+    read({ allowedHours: 'midnight' });
+    read({ allowedHours: 'midnight' });
+    expect(logger.error).toHaveBeenCalledTimes(1);
+  });
+
+  test('every other validation is unchanged: a bad allowedHours does not rescue an invalid policy', () => {
+    expect(read({ expiresOn: 'soon', allowedHours: ORDER_HOURS })).toBeNull();
+    expect(read({ hoursNote: '', allowedHours: ORDER_HOURS })).toBeNull();
+  });
+});
+
 describe('jurisdiction', () => {
   test('the default order applies in Manatee and Sarasota; partial Charlotte and unknown county → no policy (fail closed)', () => {
     expect(currentRestrictionPolicy(IN_FORCE, { env: {}, county: 'Sarasota' })).toMatchObject({ maxDaysPerWeek: 1, county: 'Sarasota' });

@@ -6888,7 +6888,7 @@ and the GET payload is byte-identical to before this lane. A prepPhotos
 lookup failure on GET fails soft — the key is omitted and a warning is
 logged, never a 500).
 
-`GET /api/public/appointment/:token` also gains an additive top-level `lawnPrep: { petsOnFile: boolean }` (owner 2026-11-14,
+`GET /api/public/appointment/:token` also gains an additive top-level `lawnPrep: { petsOnFile: boolean, wateringLine?: string }` (owner 2026-11-14,
 no gate: a page card with no write, no new route and no new token). The key is present only when the page state is
 `upcoming`, the visit is a lawn treatment visit (`isLawnTreatmentVisit` in `server/services/lawn-treatment-visit.js`; a
 grouped stop passes each member's raw `service_type`, and one lawn member is enough), and the visit is at the customer's
@@ -6897,7 +6897,7 @@ home (`visitAtCustomerHome`). In every other case the key is absent and the payl
 carries a pet name, a count or any other pet detail. A lookup failure fails soft: the key is omitted and a warning is
 logged, never a 500. The page's "Before your lawn visit" card reads this key. While `petsOnFile` is false the card
 shows an "Add your pets" link to `/?tab=property#pets` (the portal's Pets section; the customer signs in there). Once
-it is true the card shows no pets link (owner 2026-11-14: no pets link after the customer adds pets).
+it is true the card shows no pets link (owner 2026-11-14: no pets link after the customer adds pets). `wateringLine` (owner 2026-11-14, decision 1A) is one of two fixed, owner-approved sentences from `wateringTimeLine` in `server/services/lawn-watering-time-line.js`, chosen from the restriction policy in force on the visit's date for the customer's county (`currentRestrictionPolicy`, county from the same inputs the lawn prep guide email uses), and the key is absent when no sentence applies (no policy on file, or hours that fit neither sentence). The payload carries the sentence only, never the county, the hours or the policy. The card shows it as a fourth bullet. A failed read of the watering inputs drops only `wateringLine`, never `petsOnFile` or the card.
 `GET /api/booking/config` (the /book page's public config payload, no token)
 gains `van_scene` — the same `GATE_VAN_SCENE` boolean, read by booking step 4
 to show the van scene above the secure-card block. Unset gate = `false`

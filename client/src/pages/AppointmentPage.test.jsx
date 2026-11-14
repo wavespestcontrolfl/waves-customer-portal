@@ -425,6 +425,36 @@ describe('AppointmentPage lawn prep card', () => {
   });
 });
 
+describe('AppointmentPage lawn prep card watering line', () => {
+  const LINE = 'On your watering day, use the midnight to 4 AM window, not the evening one. A lawn that stays wet all night gets more fungus.';
+
+  it('shows the server-chosen wateringLine as a fourth bullet after the three lines, with or without pets on file', async () => {
+    for (const petsOnFile of [false, true]) {
+      stubFetch({ get: jsonResponse(upcomingPayload({ lawnPrep: { petsOnFile, wateringLine: LINE } })) });
+      const { unmount } = renderPage();
+      const card = await screen.findByTestId('lawn-prep-card');
+      const bullets = [...card.querySelectorAll('li')];
+      expect(bullets).toHaveLength(4);
+      expect(bullets[3]).toHaveTextContent(LINE);
+      expect(bullets[3]).toBe(screen.getByTestId('lawn-prep-watering-line'));
+      expect(bullets[2]).toHaveTextContent('Clear the lawn');
+      unmount();
+    }
+  });
+
+  it('shows no fourth bullet and no hour words when the payload has no wateringLine (or an empty or non-text one)', async () => {
+    for (const lawnPrep of [{ petsOnFile: false }, { petsOnFile: false, wateringLine: '' }, { petsOnFile: false, wateringLine: 42 }]) {
+      stubFetch({ get: jsonResponse(upcomingPayload({ lawnPrep })) });
+      const { unmount } = renderPage();
+      const card = await screen.findByTestId('lawn-prep-card');
+      expect(card.querySelectorAll('li')).toHaveLength(3);
+      expect(screen.queryByTestId('lawn-prep-watering-line')).not.toBeInTheDocument();
+      expect(card).not.toHaveTextContent(/\bAM\b|\bPM\b/);
+      unmount();
+    }
+  });
+});
+
 describe('AppointmentPage non-upcoming states', () => {
   it('each terminal state gets its own copy and contact options, never the appointment card', async () => {
     const cases = [
