@@ -116,20 +116,22 @@ const COUNT_KEYS = { answered: 'answered', silent: 'silent', left_for_team: 'lef
  */
 async function answerWaitingMessages({ now = new Date() } = {}) {
   const counts = { scanned: 0, answered: 0, silent: 0, leftForTeam: 0, capped: 0, superseded: 0, failed: 0 };
+  // The sweep's clock: `now` plus the time this sweep has run (its candidate read included), so the close is
+  // seen while it works.
+  const started = Date.now();
+  const closed = () => NightAi.isAfterHours(new Date(now.getTime() + (Date.now() - started)));
   try {
-    if (!enabled() || NightAi.isAfterHours(now)) return counts;
+    if (!enabled() || closed()) return counts;
     const { followUpDueAt, OPEN_CALENDAR } = require('./followup-sla-watcher');
     const rows = await candidates(now);
     const due = rows.filter((row) => {
       const at = followUpDueAt(row.created_at, OPEN_CALENDAR, WAIT_OPEN_MINUTES);
       return at && at.getTime() <= now.getTime();
     }).slice(0, SWEEP_LIMIT);
-    // The sweep's clock: `now` plus the time this sweep has run, so the close is seen while it works.
-    const started = Date.now();
-    const closed = () => NightAi.isAfterHours(new Date(now.getTime() + (Date.now() - started)));
     for (const row of due) {
-      // Not taken up, so not claimed: it is due again at the next office-hours sweep.
-      if (closed()) break;
+      // The close, or the gate turned off mid-sweep (the kill switch): stop. A message not taken up is not
+      // claimed, so it is due again at the next office-hours sweep.
+      if (closed() || !enabled()) break;
       counts.scanned += 1;
       const outcome = await answerOne(row, closed);
       if (COUNT_KEYS[outcome]) counts[COUNT_KEYS[outcome]] += 1;

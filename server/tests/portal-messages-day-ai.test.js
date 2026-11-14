@@ -199,4 +199,19 @@ describe('answerWaitingMessages', () => {
       clock.mockRestore();
     }
   });
+
+  it('takes up nothing when the close passes while the candidates are read', async () => {
+    const clock = jest.spyOn(Date, 'now');
+    try {
+      const base = 1_800_000_000_000;
+      clock.mockReturnValue(base);
+      // The read itself runs past 8 PM Eastern.
+      mockQuery.mockImplementationOnce(() => { clock.mockReturnValue(base + 3 * 60 * 1000); });
+      expect(await DayAi.answerWaitingMessages({ now: new Date('2026-11-13T00:58:00Z') })).toEqual(ZERO);
+      expect(mockQuery).toHaveBeenCalledTimes(1);
+      expect(mockClaim).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
+  });
 });
