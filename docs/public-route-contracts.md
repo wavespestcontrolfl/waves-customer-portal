@@ -6895,8 +6895,9 @@ grouped stop passes each member's raw `service_type`, and one lawn member is eno
 home (`visitAtCustomerHome`). In every other case the key is absent and the payload is byte-identical to before.
 `petsOnFile` is true when `property_preferences.pets_structured` is a non-empty array for the customer. The payload never
 carries a pet name, a count or any other pet detail. A lookup failure fails soft: the key is omitted and a warning is
-logged, never a 500. The page's "Before your lawn visit" card and its "Add your pets" or "Update your pets" link to
-`/?tab=property#pets` (the portal's Pets section; the customer signs in there) read this key.
+logged, never a 500. The page's "Before your lawn visit" card reads this key. While `petsOnFile` is false the card
+shows an "Add your pets" link to `/?tab=property#pets` (the portal's Pets section; the customer signs in there). Once
+it is true the card shows no pets link (owner 2026-11-14: no pets link after the customer adds pets).
 `GET /api/booking/config` (the /book page's public config payload, no token)
 gains `van_scene` — the same `GATE_VAN_SCENE` boolean, read by booking step 4
 to show the van scene above the secure-card block. Unset gate = `false`
