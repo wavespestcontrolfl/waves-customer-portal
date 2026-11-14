@@ -26,6 +26,7 @@ import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { TIMEZONE } from '../../lib/timezone';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import CancelFeeNotice from './CancelFeeNotice';
+import SkipVisitOption from './SkipVisitOption';
 import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
 import RainOutSheet from './RainOutSheet';
 import { formatTimeWindow } from './timeWindow';
@@ -519,6 +520,14 @@ export default function MobileAppointmentDetailSheet({
     } catch (err) {
       alert('Failed to cancel: ' + err.message);
     } finally { setActionBusy(''); }
+  };
+
+  // After the office skipped this visit from the cancel panel (SkipVisitOption):
+  // the sheet closes as it does after a cancel.
+  const afterSkip = () => {
+    setConfirmingCancel(false);
+    onCancelled?.(service);
+    onClose?.();
   };
 
   const completeService = async () => {
@@ -1057,6 +1066,7 @@ export default function MobileAppointmentDetailSheet({
                       </div>
                     </div>
                   )}
+                  <SkipVisitOption key={service.id} service={service} enabled={adminActions} origin="appointment sheet" onSkipped={afterSkip} />
                   <div className="mt-4">
                     <div className="text-14 font-medium text-zinc-900 mb-2">Client booking notifications</div>
                     <div className="space-y-2">
