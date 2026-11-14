@@ -138,6 +138,12 @@ function chain(table) {
     // notifyOfficeVisitPrepSubmission) — a plain read, never under the
     // stop/customer lock, and never on the write's own transaction.
     if (!lockRead && table === 'customers') return dbState.customerNameRow;
+    // lawnPrepField's pets-on-file read (a yes/no only reaches the payload).
+    if (table === 'property_preferences') {
+      if (dbState.prefsThrow) throw new Error('prefs lookup failed');
+      dbState.prefsReads += 1;
+      return dbState.petsRow;
+    }
     if (countMode === 'photos') return { count: dbState.photoCount + dbState.inserted.photos.length };
     if (countMode === 'submissions') return { count: dbState.submissionCount + dbState.inserted.submissions.length };
     if (table.startsWith('scheduled_services')) {
@@ -230,6 +236,9 @@ function resetDbState(overrides = {}) {
     // customer name (no customer names in the repo).
     customerNameRow: { first_name: 'Jordan', last_name: 'Reyes' },
     groupedMembersForPreCheck: null,
+    petsRow: null,
+    prefsThrow: false,
+    prefsReads: 0,
     inserted: { submissions: [], photos: [], notifications: [] },
     notificationsInsertThrows: false,
     notificationsInsertHangs: false,
@@ -854,6 +863,85 @@ describe('GET /api/public/appointment/:token — additive prepPhotos', () => {
       const body = await res.json();
       expect(body.prepPhotos).toEqual({ eligible: true, photoCount: 2, photosRemaining: 4 });
     });
+  });
+});
+
+// "Before your lawn visit" card (owner 2026-11-14): additive lawnPrep, no gate.
+describe('GET /api/public/appointment/:token — additive lawnPrep', () => {
+  const prevAppt = process.env.GATE_APPOINTMENT_PAGE;
+  const LAWN = 'Every 6 Weeks Lawn Care Service';
+  const AT_HOME = {
+    service_address_line1: null, address_line1: '12 Palm Way', address_line2: null, city: 'Bradenton', zip: '34202',
+  };
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.clearAllMocks();
+    process.env.GATE_APPOINTMENT_PAGE = 'true';
+    router = require('../routes/appointment-public');
+  });
+  afterAll(() => {
+    if (prevAppt === undefined) delete process.env.GATE_APPOINTMENT_PAGE; else process.env.GATE_APPOINTMENT_PAGE = prevAppt;
+  });
+
+  async function payload(rowOverrides = {}, stateOverrides = {}) {
+    resetDbState(stateOverrides);
+    dbState.svcRow = { ...dbState.svcRow, ...AT_HOME, ...rowOverrides };
+    return withServer(async (baseUrl) => {
+      const res = await getAppointment(baseUrl);
+      expect(res.status).toBe(200);
+      return res.json();
+    });
+  }
+
+  test('an upcoming lawn treatment at home carries petsOnFile true when a pet is on file', async () => {
+    const body = await payload({ service_type: LAWN }, { petsRow: { pets_structured: [{ name: 'Biscuit', type: 'dog' }] } });
+    expect(body.state).toBe('upcoming');
+    expect(body.lawnPrep).toEqual({ petsOnFile: true });
+    // No pet name, count or detail ever rides on the public payload.
+    expect(JSON.stringify(body)).not.toMatch(/Biscuit|dog/i);
+  });
+
+  test('petsOnFile is false for no row, an empty list or a list stored as text', async () => {
+    for (const petsRow of [null, { pets_structured: null }, { pets_structured: [] }, { pets_structured: '[]' }, { pets_structured: 'not json' }]) {
+      const body = await payload({ service_type: LAWN }, { petsRow });
+      expect(body.lawnPrep).toEqual({ petsOnFile: false });
+    }
+    const asText = await payload({ service_type: LAWN }, { petsRow: { pets_structured: '[{"name":"Rex"}]' } });
+    expect(asText.lawnPrep).toEqual({ petsOnFile: true });
+  });
+
+  test('the key is absent for a non-lawn visit, a non-upcoming page and a visit stamped at another address', async () => {
+    const pest = await payload({}, { petsRow: { pets_structured: [{ name: 'Rex' }] } });
+    expect(pest.state).toBe('upcoming');
+    expect(pest).not.toHaveProperty('lawnPrep');
+    expect(dbState.prefsReads).toBe(0);
+
+    const done = await payload({ service_type: LAWN, status: 'completed' });
+    expect(done.state).toBe('completed');
+    expect(done).not.toHaveProperty('lawnPrep');
+
+    const away = await payload({ service_type: LAWN, service_address_line1: '9 Elsewhere Rd', service_address_city: 'Sarasota', service_address_zip: '34236' });
+    expect(away.state).toBe('upcoming');
+    expect(away).not.toHaveProperty('lawnPrep');
+    expect(dbState.prefsReads).toBe(0);
+  });
+
+  test('a lookup error fails soft: the key is omitted and the page still loads', async () => {
+    const body = await payload({ service_type: LAWN }, { prefsThrow: true });
+    expect(body.state).toBe('upcoming');
+    expect(body).not.toHaveProperty('lawnPrep');
+  });
+
+  test('a grouped stop is judged by each member raw service type', async () => {
+    const { lawnPrepField } = router._test;
+    resetDbState({ petsRow: { pets_structured: [{ name: 'Rex' }] } });
+    const svc = { id: 'svc-1', customer_id: 'cust-1', service_type: 'Quarterly Pest Control Service', ...AT_HOME };
+    expect(await lawnPrepField(svc, 'upcoming', [{ service_type: 'Quarterly Pest Control Service' }, { service_type: LAWN }]))
+      .toEqual({ lawnPrep: { petsOnFile: true } });
+    expect(await lawnPrepField(svc, 'upcoming', [{ service_type: 'Quarterly Pest Control Service' }, { service_type: 'Termite Inspection' }]))
+      .toEqual({});
+    expect(await lawnPrepField(svc, 'past', [{ service_type: LAWN }])).toEqual({});
   });
 });
 

@@ -47,7 +47,8 @@ const { parseETDateTime, etDateString, addETDays, formatETDate } = require('../u
 const NotificationService = require('../services/notification-service');
 const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
-const { stampedDivergesSql } = require('../services/stamped-address');
+const { stampedDivergesSql, VISIT_HOME_COLUMNS, visitAtCustomerHome } = require('../services/stamped-address');
+const { isLawnTreatmentVisit } = require('../services/lawn-treatment-visit');
 const {
   arrivalWindowRange,
   formatSmsTimeRange,
@@ -249,6 +250,9 @@ async function loadByToken(token, conn = db) {
       // this token is shared with whoever the notification reached, so the
       // account holder's name must not travel with it.
       'c.deleted_at as customer_deleted_at',
+      // The stamped visit address and the home address, for lawnPrepField's at-home test (same columns the
+      // pet-name line reads; this query aliases the visit as `s`).
+      ...VISIT_HOME_COLUMNS.map((column) => column.replace(/^ss\./, 's.')),
       // Same rule as reschedule-public: only an EXPLICITLY active customer
       // may mutate through this shared token (C4 keeps a cancelled
       // customer's schedule read-only; anything but true is inactive).
@@ -685,6 +689,28 @@ async function prepPhotosField(svc, state, visitUnknown) {
   }
 }
 
+// "Before your lawn visit" card (owner 2026-11-14, no gate: a page card with no write). Additive: `{ lawnPrep: { petsOnFile } }`
+// only for an upcoming lawn treatment visit at the customer's home; any other visit leaves the key absent and the
+// payload byte-identical. A grouped stop passes each member's raw service type (one lawn member is enough).
+// `petsOnFile` is a yes/no: the public payload never carries a pet name, count or any other pet detail. Fails soft:
+// a lookup error omits the key and logs a warning, never a 500.
+async function lawnPrepField(svc, state, members) {
+  if (state !== 'upcoming') return {};
+  try {
+    const serviceTypes = Array.isArray(members) && members.length ? members.map((m) => m.service_type) : [svc.service_type];
+    if (!isLawnTreatmentVisit(serviceTypes) || !visitAtCustomerHome(svc)) return {};
+    const prefs = await db('property_preferences').where({ customer_id: svc.customer_id }).first('pets_structured');
+    let pets = prefs?.pets_structured;
+    if (typeof pets === 'string') {
+      try { pets = JSON.parse(pets); } catch { pets = null; }
+    }
+    return { lawnPrep: { petsOnFile: Array.isArray(pets) && pets.length > 0 } };
+  } catch (err) {
+    logger.warn(`[appointment-public] lawnPrep lookup failed for ${svc.id}: ${err.message}`);
+    return {};
+  }
+}
+
 // GATE_DAY_ONLY_PROMISE (part C1): the stop this row belongs to, for the day-only decision. A grouped stop is judged as
 // a whole (dayOnlyVisit): its members at its earliest start, the start the page and the calendar file show. Every link
 // to one stop then agrees. Ungrouped: no members, and the row is judged at its own start.
@@ -819,6 +845,7 @@ router.get('/:token', async (req, res, next) => {
         collectiveAnchor: !!svc.is_recurring && process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true',
       },
       weather,
+      ...(await lawnPrepField(svc, state, visitMembers)),
       // Mirror the reschedule-link/reschedule-public dispatch-owned guard
       // (codex #3429 r3 P2): an unreviewed dispatch-owned booking's reminder
       // now arms before office confirm, and the page must not render a
@@ -1570,6 +1597,7 @@ router.post(
 router._test = {
   pageState,
   prepPhotosField,
+  lawnPrepField,
   deriveVisitPrepEligibility,
   reloadEligibleVisitPrepRow,
   visitPrepPreParserGuard,

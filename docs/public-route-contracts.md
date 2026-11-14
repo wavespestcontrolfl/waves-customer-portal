@@ -6887,6 +6887,16 @@ client can render the right empty/full state); gate off, the key is absent
 and the GET payload is byte-identical to before this lane. A prepPhotos
 lookup failure on GET fails soft — the key is omitted and a warning is
 logged, never a 500).
+
+`GET /api/public/appointment/:token` also gains an additive top-level `lawnPrep: { petsOnFile: boolean }` (owner 2026-11-14,
+no gate: a page card with no write, no new route and no new token). The key is present only when the page state is
+`upcoming`, the visit is a lawn treatment visit (`isLawnTreatmentVisit` in `server/services/lawn-treatment-visit.js`; a
+grouped stop passes each member's raw `service_type`, and one lawn member is enough), and the visit is at the customer's
+home (`visitAtCustomerHome`). In every other case the key is absent and the payload is byte-identical to before.
+`petsOnFile` is true when `property_preferences.pets_structured` is a non-empty array for the customer. The payload never
+carries a pet name, a count or any other pet detail. A lookup failure fails soft: the key is omitted and a warning is
+logged, never a 500. The page's "Before your lawn visit" card and its "Add your pets" or "Update your pets" link to
+`/?tab=property#pets` (the portal's Pets section; the customer signs in there) read this key.
 `GET /api/booking/config` (the /book page's public config payload, no token)
 gains `van_scene` — the same `GATE_VAN_SCENE` boolean, read by booking step 4
 to show the van scene above the secure-card block. Unset gate = `false`
