@@ -38,6 +38,14 @@ jest.mock('../services/portal-messages-night-ai', () => ({
   },
 }));
 
+// The office calendar (Settings' closed days): a set of Eastern dates a test fills, or a read that fails.
+const mockClosedDays = new Set();
+const mockCalendar = jest.fn(async () => ({ start: '08:00', end: '20:00', closed: mockClosedDays }));
+jest.mock('../services/followup-sla-watcher', () => ({
+  ...jest.requireActual('../services/followup-sla-watcher'),
+  loadSlaCalendar: (...a) => mockCalendar(...a),
+}));
+
 const gates = require('../config/feature-gates');
 const DayAi = require('../services/portal-messages-day-ai');
 
@@ -56,6 +64,7 @@ const ZERO = { scanned: 0, answered: 0, silent: 0, leftForTeam: 0, capped: 0, su
 beforeEach(() => {
   jest.clearAllMocks();
   mockTaken.clear();
+  mockClosedDays.clear();
   mockRows = [row()];
   process.env.GATE_PORTAL_MESSAGES_DAY_AI = 'true';
   process.env.GATE_PORTAL_MESSAGES = 'true';
@@ -213,5 +222,29 @@ describe('answerWaitingMessages', () => {
     } finally {
       clock.mockRestore();
     }
+  });
+
+  describe('days the office calendar marks closed', () => {
+    it('takes up nothing on a closed day', async () => {
+      mockClosedDays.add('2026-11-12');
+      expect(await DayAi.answerWaitingMessages({ now: DUE })).toEqual(ZERO);
+      expect(mockClaim).not.toHaveBeenCalled();
+    });
+
+    it('counts no minute of a closed day toward the 120', async () => {
+      // Written Wednesday 10:00 AM Eastern, a closed day: the clock starts Thursday 8:00 AM, so it is due at 10:00 AM.
+      mockClosedDays.add('2026-11-11');
+      mockRows = [{ ...row(), created_at: new Date('2026-11-11T15:00:00Z') }];
+      mockTurn.mockResolvedValue({ kind: 'handoff' });
+      expect(await DayAi.answerWaitingMessages({ now: new Date('2026-11-12T14:30:00Z') })).toEqual(ZERO);
+      expect(mockClaim).not.toHaveBeenCalled();
+      expect(await DayAi.answerWaitingMessages({ now: new Date('2026-11-12T15:01:00Z') })).toEqual({ ...ZERO, scanned: 1, leftForTeam: 1 });
+    });
+
+    it('sends nothing when the calendar cannot be read', async () => {
+      mockCalendar.mockRejectedValueOnce(new Error('pool timeout'));
+      expect(await DayAi.answerWaitingMessages({ now: DUE })).toEqual(ZERO);
+      expect(mockClaim).not.toHaveBeenCalled();
+    });
   });
 });

@@ -5,7 +5,10 @@
  * The night step (portal-messages-night-ai.js) answers a message written outside 8 AM to 8 PM Eastern. This step
  * covers the other half: a customer's message that waited 120 OPEN minutes with no answer from a person. The 120
  * is the owner's own rule for texts (2026-10-02 "OK 2 HRS IS FINE", sms-unanswered-reply.js). The clock is
- * followUpDueAt (followup-sla-watcher.js), which counts only 8 AM to 8 PM Eastern minutes; there is no second clock.
+ * followUpDueAt (followup-sla-watcher.js) on the office calendar the text rule reads (loadSlaCalendar): only
+ * 8 AM to 8 PM Eastern minutes count, and a day Settings marks closed (a weekly day off, a holiday, a blackout)
+ * counts for nothing. There is no second clock. On a closed day the sweep takes up nothing, and a calendar that
+ * cannot be read means nothing is sent that run.
  *
  * - When: a sweep every five minutes (scheduler.js) calls answerWaitingMessages. It does nothing while the gate or
  *   its inputs are off, and nothing while the clock is outside office hours, so this step never sends at night.
@@ -35,6 +38,7 @@ const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
 const NightAi = require('./portal-messages-night-ai');
 const { needsNoReply } = require('./ai-assistant/thread-lane');
+const { etDateString } = require('../utils/datetime-et');
 
 const KEY = 'dayAi';
 // The owner's rule for texts: two hours of open office time with no answer from a person.
@@ -116,16 +120,23 @@ const COUNT_KEYS = { answered: 'answered', silent: 'silent', left_for_team: 'lef
  */
 async function answerWaitingMessages({ now = new Date() } = {}) {
   const counts = { scanned: 0, answered: 0, silent: 0, leftForTeam: 0, capped: 0, superseded: 0, failed: 0 };
-  // The sweep's clock: `now` plus the time this sweep has run (its candidate read included), so the close is
-  // seen while it works.
+  // The sweep's clock: `now` plus the time this sweep has run (its reads included), so the close is seen while
+  // it works. Closed = outside 8 AM to 8 PM Eastern, or a day the office calendar marks closed.
   const started = Date.now();
-  const closed = () => NightAi.isAfterHours(new Date(now.getTime() + (Date.now() - started)));
+  let calendar = null;
+  const closed = () => {
+    const at = new Date(now.getTime() + (Date.now() - started));
+    return NightAi.isAfterHours(at) || Boolean(calendar?.closed.has(etDateString(at)));
+  };
   try {
     if (!enabled() || closed()) return counts;
-    const { followUpDueAt, OPEN_CALENDAR } = require('./followup-sla-watcher');
+    const { followUpDueAt, loadSlaCalendar } = require('./followup-sla-watcher');
     const rows = await candidates(now);
+    if (!rows.length) return counts;
+    // The office calendar (closed days), from the oldest candidate on. Unreadable: nothing is sent this run.
+    calendar = await loadSlaCalendar(db, new Date(rows[0].created_at), now);
     const due = rows.filter((row) => {
-      const at = followUpDueAt(row.created_at, OPEN_CALENDAR, WAIT_OPEN_MINUTES);
+      const at = followUpDueAt(row.created_at, calendar, WAIT_OPEN_MINUTES);
       return at && at.getTime() <= now.getTime();
     }).slice(0, SWEEP_LIMIT);
     for (const row of due) {
