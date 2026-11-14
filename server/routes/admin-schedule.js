@@ -890,6 +890,36 @@ function fastForwardCadenceAnchor(baseDateStr, pattern, rOpts) {
   return anchor >= today ? anchor : today;
 }
 
+// A month cadence puts each visit on the series' own day of a month (the nth
+// weekday in rOpts) and counts the next visit from the MONTH of the latest
+// one. A weekend shift or a holiday nudge can carry a visit over a month end
+// (Sat Feb 27 -> Mon Mar 1; a back shift: Sat Aug 1 -> Fri Jul 31). Counted
+// from the month it landed in, the next monthly visit went to April and March
+// got none, and a back shift made one bimonthly or quarterly gap a month
+// short. Such a visit still fills the slot it was moved from: when the series
+// day of the month before or after is at most MONTH_SLOT_SHIFT_DAYS from the
+// visit's date, that day is its cadence position. Seven days covers a weekend
+// shift and a short closure, and it keeps the next monthly visit 21 or more
+// days after the real date (recurringCandidateTooCloseToAnchor's own floor).
+// A date in the same month as its slot comes back unchanged, as does every
+// other pattern.
+const MONTH_SLOT_SHIFT_DAYS = 7;
+function monthCadenceSlot(dateStr, pattern, rOpts) {
+  if (!MONTH_RECURRENCE_INTERVALS[pattern] && pattern !== 'monthly_nth_weekday') return dateStr;
+  const nth = parseInt(rOpts?.nth, 10);
+  const weekday = parseInt(rOpts?.weekday, 10);
+  if (isNaN(nth) || isNaN(weekday)) return dateStr;
+  const at = parseETDateTime(`${dateStr}T12:00`);
+  if (isNaN(at.getTime())) return dateStr;
+  const { year, month } = etParts(at);
+  for (const offset of [-1, 1]) {
+    const slot = etDateString(etNthWeekdayOfMonth(year, month + offset, nth, weekday));
+    const gap = etDateDiffDays(slot, dateStr);
+    if (gap != null && Math.abs(gap) <= MONTH_SLOT_SHIFT_DAYS) return slot;
+  }
+  return dateStr;
+}
+
 function seriesExtendAnchor(latest, pattern, rOpts) {
   // A "this visit only" exception row (rebooker.dateExceptionStamp) still
   // occupies its ORIGINAL cadence slot — date_exception_cadence_date — even
@@ -909,9 +939,11 @@ function seriesExtendAnchor(latest, pattern, rOpts) {
   // that due date — the night tool never stamps an exception — so the next
   // extension projects from the due date, not the placement; otherwise every
   // hand-off could shift the plan by up to three days, compounding.
+  // A visit a weekend shift or a holiday nudge carried over a month end
+  // keeps the month it was moved from (monthCadenceSlot).
   const latestStr = seriesCadencePosition(latest);
   if (!latestStr) return etDateString();
-  return fastForwardCadenceAnchor(latestStr, pattern, rOpts);
+  return fastForwardCadenceAnchor(monthCadenceSlot(latestStr, pattern, rOpts), pattern, rOpts);
 }
 
 // Compute booster appointment dates for a recurring series. Booster months
