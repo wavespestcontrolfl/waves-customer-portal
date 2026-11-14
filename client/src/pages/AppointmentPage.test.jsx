@@ -388,6 +388,39 @@ describe('AppointmentPage visit prep photos block', () => {
   });
 });
 
+describe('AppointmentPage lawn prep card', () => {
+  it('renders nothing when the payload has no lawnPrep key', async () => {
+    stubFetch();
+    renderPage();
+    await screen.findByText(/Wednesday, August 5/);
+    expect(screen.queryByTestId('lawn-prep-card')).not.toBeInTheDocument();
+    expect(screen.queryByText('Before your lawn visit')).not.toBeInTheDocument();
+  });
+
+  it('petsOnFile false: the three lines and an Add your pets link to the portal Pets section', async () => {
+    stubFetch({ get: jsonResponse(upcomingPayload({ lawnPrep: { petsOnFile: false } })) });
+    renderPage();
+    const card = await screen.findByTestId('lawn-prep-card');
+    expect(card).toHaveTextContent('Before your lawn visit');
+    expect(card.querySelectorAll('li')).toHaveLength(3);
+    expect(card).toHaveTextContent('Keep sprinklers off the night before and the morning of your visit. We treat a dry lawn.');
+    expect(card).toHaveTextContent('Mowing due? Mow at least 2 days before your visit, and wait 2 days after.');
+    expect(card).toHaveTextContent('Clear the lawn: toys, hoses, pet bowls and pet waste. Unlock the gate. Keep pets and kids inside while we treat.');
+    expect(card).toHaveTextContent('Tell us about your pets, so we can plan each visit around them.');
+    expect(screen.getByRole('link', { name: 'Add your pets' })).toHaveAttribute('href', '/?tab=property#pets');
+    expect(screen.queryByRole('link', { name: 'Update your pets' })).not.toBeInTheDocument();
+  });
+
+  it('petsOnFile true: an Update your pets link to the same place', async () => {
+    stubFetch({ get: jsonResponse(upcomingPayload({ lawnPrep: { petsOnFile: true } })) });
+    renderPage();
+    const card = await screen.findByTestId('lawn-prep-card');
+    expect(card).toHaveTextContent('Your pets are on file. Changed? Update them any time.');
+    expect(screen.getByRole('link', { name: 'Update your pets' })).toHaveAttribute('href', '/?tab=property#pets');
+    expect(screen.queryByRole('link', { name: 'Add your pets' })).not.toBeInTheDocument();
+  });
+});
+
 describe('AppointmentPage non-upcoming states', () => {
   it('each terminal state gets its own copy and contact options, never the appointment card', async () => {
     const cases = [
