@@ -62,7 +62,7 @@ jest.mock('../services/autopay-enrollment', () => mockSending('../services/autop
 jest.mock('../services/messaging/send-customer-message', () => mockSending('../services/messaging/send-customer-message', ['sendCustomerMessage']));
 
 const { randomUUID } = require('node:crypto');
-const { addETDays, etDateString } = require('../utils/datetime-et');
+const { addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
 const { gates } = require('../config/feature-gates');
 const { PURCHASE_FAMILIES } = require('../services/service-report/cross-sell');
@@ -79,9 +79,9 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
   // reserve step refuses a closed day: with a plain day(14) every purchase in
   // this suite failed on each Saturday and Sunday ("That time was just taken").
   const openDay = (n) => {
-    let date = day(n);
-    for (let extra = 1; [0, 6].includes(new Date(`${date}T12:00:00`).getDay()); extra += 1) date = day(n + extra);
-    return date;
+    let at = addETDays(new Date(), n);
+    while ([0, 6].includes(etParts(at).dayOfWeek)) at = addETDays(at, 1);
+    return etDateString(at);
   };
   const money = (rows) => rows.map((row) => Number(row.estimated_price));
 
