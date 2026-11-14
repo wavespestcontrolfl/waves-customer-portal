@@ -537,6 +537,57 @@ async function markAtRiskForLongOverdue(customerId, database = db) {
     });
 }
 
+// The reverse of markAtRiskForLongOverdue. Nothing else returns a customer from
+// at_risk after the Day 60/90 debt is paid, so the stage read "at risk" for good
+// (2026-11-11: 3 of the 4 at-risk customers had paid in full weeks before). The
+// 10:16 scheduler tick runs this before the due touches. A customer goes back to
+// active_customer only when all of these hold:
+//  - the customer is active and not deleted;
+//  - one of their own (not payer-billed) invoices was paid 60 or more ET days
+//    after its reminder anchor (the debt tier the stamp is for), and paid AFTER
+//    the stage moved to at_risk. A stage a person set after that payment stays;
+//  - none of their open self-pay invoices (applyOpenSelfPayPredicates, the
+//    shared definition: sent / viewed / overdue with money still due, not
+//    payer-billed, not withdrawn to a payer, not on a statement) is 60 or more
+//    ET days past its anchor.
+// Days are ET calendar days from the anchor, the way the Day 60 touch is dated
+// (anchorTo10amNY), not 24-hour blocks: a touch fires at 10 AM on day 60, which
+// can be less than 60 x 24 hours after an afternoon send.
+const AT_RISK_DEBT_DAYS = 60;
+const AT_RISK_PAID_STATUSES = ['paid', 'prepaid'];
+// The reminder anchor of an invoice as an ET date: sequenceAnchor() in SQL. An
+// invoice with no sequence row falls through to its own send / create time.
+const AT_RISK_ANCHOR_ET_DATE_SQL = "(COALESCE(s.anchor_at, invoices.sent_at, invoices.sms_sent_at, invoices.created_at) AT TIME ZONE 'America/New_York')::date";
+
+async function clearAtRiskForSettledLongOverdue(database = db) {
+  const { applyOpenSelfPayPredicates } = require('./open-balance');
+  const rows = await database('customers as c')
+    .where('c.pipeline_stage', 'at_risk')
+    .where('c.active', true)
+    .whereNull('c.deleted_at')
+    .whereExists(function longOverduePaidAfterStamp() {
+      this.select(database.raw('1'))
+        .from('invoices')
+        .leftJoin('invoice_followup_sequences as s', 's.invoice_id', 'invoices.id')
+        .whereRaw('invoices.customer_id = c.id')
+        .whereIn('invoices.status', AT_RISK_PAID_STATUSES)
+        .whereNull('invoices.payer_id')
+        .whereNotNull('invoices.paid_at')
+        .whereRaw('invoices.paid_at >= c.pipeline_stage_changed_at')
+        .whereRaw(`(invoices.paid_at AT TIME ZONE 'America/New_York')::date - ${AT_RISK_ANCHOR_ET_DATE_SQL} >= ?`, [AT_RISK_DEBT_DAYS]);
+    })
+    .whereNotExists(function longOverdueStillOwed() {
+      applyOpenSelfPayPredicates(this.select(database.raw('1'))
+        .from('invoices')
+        .leftJoin('invoice_followup_sequences as s', 's.invoice_id', 'invoices.id')
+        .whereRaw('invoices.customer_id = c.id'))
+        .whereRaw(`(NOW() AT TIME ZONE 'America/New_York')::date - ${AT_RISK_ANCHOR_ET_DATE_SQL} >= ?`, [AT_RISK_DEBT_DAYS]);
+    })
+    .update({ pipeline_stage: 'active_customer', pipeline_stage_changed_at: new Date() })
+    .returning('c.id');
+  return rows.map((row) => row.id);
+}
+
 function sequenceAnchor(row) {
   return row.anchor_at || row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
 }
@@ -4708,6 +4759,7 @@ module.exports = {
   isStaleTouch,
   FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID,
   markAtRiskForLongOverdue,
+  clearAtRiskForSettledLongOverdue,
   adoptOrphanInvoicesLive,
   // The Intelligence Bar's send-now card: the same text rendering and digest the service pins at dispatch.
   approvalDigest,
