@@ -204,4 +204,15 @@ function currentRestrictionPolicy(now = new Date(), { env = process.env, county 
   };
 }
 
+// The one lawful watering weekday of a home under a one-day-a-week order, from the last digit of the house number at the
+// start of its street line: 0 or 1 Monday, 2 or 3 Tuesday, 4 or 5 Wednesday, 6 or 7 Thursday, 8 or 9 Friday. Returns the
+// weekday as 1..5 (Monday = 1, the etParts dayOfWeek scale), or null when the line starts with no house number.
+const WATERING_WEEKDAY_BY_LAST_DIGIT = Object.freeze([1, 1, 2, 2, 3, 3, 4, 4, 5, 5]);
+function wateringWeekdayForAddress(addressLine1) {
+  const match = /^\s*(\d+)/.exec(String(addressLine1 || ''));
+  return match ? WATERING_WEEKDAY_BY_LAST_DIGIT[Number(match[1].slice(-1))] : null;
+}
+
 module.exports = { currentRestrictionPolicy, resolveRestrictionCounty, DEFAULT_POLICY, _private: { validPolicy, validCoverage, parseEnvPolicy, coversCounty, CITY_COUNTY, ZIP_COUNTY, _lastLogged } };
+// wateringWeekdayForAddress export, on its own line so parallel PRs never conflict.
+module.exports.wateringWeekdayForAddress = wateringWeekdayForAddress;

@@ -1602,6 +1602,24 @@ async function renderAppointmentPageTemplate(baseKey, v2VarsFactory, legacyVars,
   return legacyBody;
 }
 
+// The lawn version of the 24h reminder (GATE_LAWN_PREVISIT_LINE): the reminder_24h_lawn ladder with the same vars plus {lawn_prep_line}.
+// null = no lawn row rendered (missing, disabled, unrenderable, or an edited body that lost {lawn_prep_line}), so the caller sends today's
+// reminder_24h rows exactly as before. ladder.templateKey names the row that rendered.
+async function renderLawn24hReminder({ lawnLine, firstName, serviceLabel, time, window, appointmentLink, rescheduleLine, cardHoldPolicyLine, scheduledServiceId, ladder }) {
+  const base = { first_name: firstName, service_type: serviceLabel, time, window, card_hold_policy_line: cardHoldPolicyLine, lawn_prep_line: lawnLine };
+  const lawnLadder = {};
+  const body = await renderAppointmentPageTemplate(
+    'reminder_24h_lawn',
+    async () => ({ ...base, appointment_line: (await appointmentLink()).line }),
+    { ...base, reschedule_line: rescheduleLine },
+    { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
+    lawnLadder,
+  );
+  if (!body || !body.includes(lawnLine)) return null;
+  ladder.templateKey = lawnLadder.templateKey;
+  return body;
+}
+
 async function renderRequiredTemplate(templateKey, vars, context = {}, opts = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -5421,6 +5439,8 @@ const AppointmentReminders = {
             const smsOutcome24 = {};
             // Filled at the call below; the render adds templateKey before the send.
             const reminder24Meta = {};
+            // GATE_LAWN_PREVISIT_LINE: the lawn sentence, read once for the visit and only when an SMS actually renders.
+            let lawnLine24;
             const reached24 = await withReminderSendFence(r, '24h', () => deliverAppointmentNotice({
               channel: channel24,
               kind: '24h',
@@ -5440,6 +5460,14 @@ const AppointmentReminders = {
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 const ladder = {};
+                if (lawnLine24 === undefined) {
+                  lawnLine24 = await require('./lawn-previsit-line').lawnPrevisitLineForVisit({ scheduledServiceId: r.scheduled_service_id, customerId: r.customer_id, apptTime: apptCopy24 });
+                }
+                const lawnBody24 = lawnLine24 ? await renderLawn24hReminder({ lawnLine: lawnLine24, firstName, serviceLabel, time, window: formatArrivalWindow(apptCopy24), appointmentLink: () => buildAppointmentLink(r.scheduled_service_id, { customerId: r.customer_id }), rescheduleLine: reschedule.line, cardHoldPolicyLine: cardHoldPolicyLine24, scheduledServiceId: r.scheduled_service_id, ladder }) : null;
+                if (lawnBody24) {
+                  reminder24Meta.templateKey = ladder.templateKey;
+                  return lawnBody24;
+                }
                 const rendered24 = await renderAppointmentPageTemplate(
                   'reminder_24h',
                   // v2: the page carries the detail — body keeps the arrival
