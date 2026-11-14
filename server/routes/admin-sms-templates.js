@@ -132,6 +132,10 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   appointment_confirmation_day_v1: Object.freeze(['date', 'day']),
   reminder_72h_day_v1: Object.freeze(['date', 'day']),
   reminder_72h_no_reply_day_v1: Object.freeze(['date', 'day']),
+  // GATE_LAWN_PREVISIT_LINE lawn rows (owner 2026-11-14): the lawn sentence IS the reason for the row. appointment-reminders.js sends
+  // today's reminder_24h rows when a lawn row fails or does not carry the sentence.
+  reminder_24h_lawn_v2: Object.freeze(['lawn_prep_line']),
+  reminder_24h_lawn: Object.freeze(['lawn_prep_line']),
   // Part B2 (move notices): the new day and date ARE the promise of the reschedule text; the rain-out day row names the new
   // day (new_option); each series row names the first date. None requires a window.
   appointment_rescheduled_day_v1: Object.freeze(['date', 'day']),

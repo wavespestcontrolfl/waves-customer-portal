@@ -25,6 +25,7 @@ jest.mock('../services/appointment-email', () => ({
   sendAppointmentConfirmationEmail: jest.fn(async () => ({ ok: true })),
   sendAppointmentReminderEmail: jest.fn(async () => ({ ok: true })),
 }));
+jest.mock('../services/lawn-previsit-line', () => ({ lawnPrevisitLineForVisit: jest.fn(async () => '') }));
 jest.mock('../services/visit-groups', () => ({
   claimVisitNotification: jest.fn(),
   finalizeVisitNotification: jest.fn(async () => ({ ok: true })),
@@ -40,6 +41,7 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const VisitGroups = require('../services/visit-groups');
 const AppointmentEmail = require('../services/appointment-email');
 const AppointmentReminders = require('../services/appointment-reminders');
+const { lawnPrevisitLineForVisit } = require('../services/lawn-previsit-line');
 
 const fixedNow = new Date('2026-05-06T14:00:00.000Z'); // 10:00 AM ET
 const VISIT = 'visit-1';
@@ -604,6 +606,100 @@ describe('grouped-visit reminder dedupe (72h tier wiring)', () => {
       { dedupeKey: `${VISIT}:reminder_72h:2026-05-08` },
     );
     expect(flagUpdates(state, 'reminder_72h_sent')).toHaveLength(2);
+  });
+});
+
+describe('lawn pre-visit line in the 24h text (GATE_LAWN_PREVISIT_LINE wiring)', () => {
+  const LAWN_LINE = 'Please keep sprinklers off tonight and tomorrow morning, unlock the gate, and keep pets inside while we treat.';
+  const sentBody = () => sendCustomerMessage.mock.calls[0][0];
+  const templateKeysAsked = () => smsTemplatesRouter.getTemplate.mock.calls.map((c) => c[0]);
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.useFakeTimers().setSystemTime(fixedNow);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    lawnPrevisitLineForVisit.mockResolvedValue('');
+    smsTemplatesRouter.getTemplate.mockImplementation(async (key, vars) => (
+      key === 'reminder_24h_lawn' ? `Lawn reminder. ${vars.lawn_prep_line}` : '24-hour appointment reminder'));
+    installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': null } });
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    lawnPrevisitLineForVisit.mockReset();
+    lawnPrevisitLineForVisit.mockResolvedValue('');
+    smsTemplatesRouter.getTemplate.mockReset();
+    delete process.env.GATE_APPOINTMENT_PAGE;
+  });
+
+  test('no lawn text (gate off, not a lawn visit, not at home): today\'s reminder row and vars, no lawn row asked', async () => {
+    await AppointmentReminders.checkAndSendReminders();
+
+    expect(templateKeysAsked()).toEqual(['reminder_24h']);
+    expect(smsTemplatesRouter.getTemplate.mock.calls[0][1]).not.toHaveProperty('lawn_prep_line');
+    expect(sentBody().body).toBe('24-hour appointment reminder');
+    expect(sentBody().metadata.templateKey).toBe('reminder_24h');
+  });
+
+  test('lawn text: the lawn row renders with the same vars plus lawn_prep_line, and its key is recorded', async () => {
+    lawnPrevisitLineForVisit.mockResolvedValue(LAWN_LINE);
+
+    await AppointmentReminders.checkAndSendReminders();
+
+    expect(lawnPrevisitLineForVisit).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: 'svc-1', customerId: 'customer-1', apptTime: expect.any(Date) }));
+    expect(templateKeysAsked()).toEqual(['reminder_24h_lawn']);
+    expect(smsTemplatesRouter.getTemplate.mock.calls[0][1]).toEqual(expect.objectContaining({
+      first_name: 'Ada', service_type: 'Quarterly Pest Control', window: expect.any(String), time: '9:00 AM', lawn_prep_line: LAWN_LINE, card_hold_policy_line: '',
+    }));
+    expect(sentBody().body).toBe(`Lawn reminder. ${LAWN_LINE}`);
+    expect(sentBody().metadata.templateKey).toBe('reminder_24h_lawn');
+  });
+
+  test('lawn row missing or inactive (getTemplate answers null): today\'s reminder row is sent', async () => {
+    lawnPrevisitLineForVisit.mockResolvedValue(LAWN_LINE);
+    smsTemplatesRouter.getTemplate.mockImplementation(async (key) => (key === 'reminder_24h_lawn' ? null : '24-hour appointment reminder'));
+
+    await AppointmentReminders.checkAndSendReminders();
+
+    expect(templateKeysAsked()).toEqual(['reminder_24h_lawn', 'reminder_24h']);
+    expect(sentBody().body).toBe('24-hour appointment reminder');
+    expect(sentBody().metadata.templateKey).toBe('reminder_24h');
+  });
+
+  test('an edited lawn row that lost {lawn_prep_line} is not sent: today\'s reminder row is', async () => {
+    lawnPrevisitLineForVisit.mockResolvedValue(LAWN_LINE);
+    smsTemplatesRouter.getTemplate.mockImplementation(async (key) => (key === 'reminder_24h_lawn' ? 'Lawn reminder without the sentence.' : '24-hour appointment reminder'));
+
+    await AppointmentReminders.checkAndSendReminders();
+
+    expect(sentBody().body).toBe('24-hour appointment reminder');
+    expect(sentBody().metadata.templateKey).toBe('reminder_24h');
+  });
+
+  test('GATE_APPOINTMENT_PAGE on: the lawn v2 row renders first and is the recorded key', async () => {
+    process.env.GATE_APPOINTMENT_PAGE = 'true';
+    lawnPrevisitLineForVisit.mockResolvedValue(LAWN_LINE);
+    const plain = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const chain = plain(table);
+      if (table === 'sms_templates') chain.first = jest.fn(async () => ({ id: 7, is_active: true }));
+      return chain;
+    });
+    smsTemplatesRouter.getTemplate.mockImplementation(async (key, vars) => (
+      key === 'reminder_24h_lawn_v2' ? `Lawn v2. ${vars.lawn_prep_line}` : '24-hour appointment reminder'));
+
+    await AppointmentReminders.checkAndSendReminders();
+
+    expect(templateKeysAsked()).toEqual(['reminder_24h_lawn_v2']);
+    expect(smsTemplatesRouter.getTemplate.mock.calls[0][1]).toHaveProperty('appointment_line');
+    expect(sentBody().metadata.templateKey).toBe('reminder_24h_lawn_v2');
+  });
+
+  test('the lawn text is read once per send', async () => {
+    lawnPrevisitLineForVisit.mockResolvedValue(LAWN_LINE);
+
+    await AppointmentReminders.checkAndSendReminders();
+
+    expect(lawnPrevisitLineForVisit).toHaveBeenCalledTimes(1);
   });
 });
 
