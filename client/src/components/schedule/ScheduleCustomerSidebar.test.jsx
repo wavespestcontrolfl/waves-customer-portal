@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
 import { adminFetch } from '../../lib/adminFetch';
+import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 
 vi.mock('../admin/CallBridgeLink', () => ({ default: ({ phone }) => <span>{phone}</span> }));
-vi.mock('../../lib/cardHoldCancel', () => ({ confirmCardHoldFeeChoice: vi.fn() }));
+// CancelFeeNotice (inside the cancel window) reads its own fee preview through fetchCardHoldCancelPreview.
+vi.mock('../../lib/cardHoldCancel', () => ({ confirmCardHoldFeeChoice: vi.fn(), fetchCardHoldCancelPreview: vi.fn(async () => null) }));
 vi.mock('../../lib/adminFetch', () => ({
   adminFetch: vi.fn(async () => ({
     ok: true,
@@ -215,5 +217,109 @@ describe('ScheduleCustomerSidebar office-only actions by role', () => {
     expect(screen.getByRole('button', { name: 'Book next' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Edit' })).toBeTruthy();
     expect(screen.getByText('Take payment')).toBeTruthy();
+  });
+});
+
+// Owner decision 2026-11-13: the office can skip one plan visit. A skip marks
+// the visit skipped, books no make-up visit and sends no customer text.
+describe('ScheduleCustomerSidebar skip this visit', () => {
+  const recurring = { id: 'v0', customerId: 'c1', customerName: 'Test Customer', status: 'pending', isRecurring: true, recurringPattern: 'quarterly' };
+  const SKIP_LABEL = 'Skip this visit (no make-up visit)';
+
+  const PREVIEW_PATH = '/admin/dispatch/v0/card-hold?skip=1';
+  // The file's adminFetch mock answers every path with the customer profile. Here the cancel preview gets its own
+  // answer; every other request (the profile read, the status PUT) keeps the default.
+  const profileFetch = adminFetch.getMockImplementation();
+  afterEach(() => { adminFetch.mockImplementation(profileFetch); });
+
+  async function openCancelWindow(user, preview, onCancel = () => {}) {
+    if (user) localStorage.setItem('waves_admin_user', JSON.stringify(user));
+    adminFetch.mockImplementation((path, options) => (path === PREVIEW_PATH
+      ? Promise.resolve({ ok: true, json: async () => preview })
+      : profileFetch(path, options)));
+    render(<ScheduleCustomerSidebar service={recurring} onClose={() => {}} onCancel={onCancel} />);
+    await waitFor(() => expect(screen.getByText('Visit 0')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'More appointment actions' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel appointment' }));
+  }
+  const previewAsked = () => adminFetch.mock.calls.some(([path]) => path === PREVIEW_PATH);
+
+  it('an office user can skip an eligible visit: next visit shown, notification radios hidden, one PUT, no fee step', async () => {
+    adminFetch.mockClear();
+    confirmCardHoldFeeChoice.mockClear();
+    const onCancel = vi.fn();
+    await openCancelWindow({ role: 'admin' }, {
+      skip: { eligible: true, code: 'ok', message: '', nextVisitDate: '2027-02-22', lawnRound: null },
+    }, onCancel);
+    const option = await screen.findByLabelText(SKIP_LABEL);
+    expect(previewAsked()).toBe(true);
+    fireEvent.click(option);
+    expect(screen.getByText("Skip Test's visit?")).toBeTruthy();
+    expect(screen.getByText('Next visit: Mon, Feb 22, 2027')).toBeTruthy();
+    expect(screen.queryByText('Client booking notifications')).toBeNull();
+    expect(screen.queryByLabelText("Don't send a notification")).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Skip visit' }));
+    await waitFor(() => expect(onCancel).toHaveBeenCalledTimes(1));
+    const puts = adminFetch.mock.calls.filter(([, opts]) => opts?.method === 'PUT');
+    expect(puts).toEqual([[
+      '/admin/dispatch/v0/status',
+      { method: 'PUT', body: { status: 'skipped', notes: 'Skipped from appointment sidebar' } },
+    ]]);
+    expect(confirmCardHoldFeeChoice).not.toHaveBeenCalled();
+  });
+
+  it('a lawn round skip names the round and its dates', async () => {
+    await openCancelWindow({ role: 'admin' }, {
+      skip: { eligible: true, code: 'ok', message: '', nextVisitDate: null, lawnRound: { round: 8, start: '2026-10-01', end: '2026-11-09' } },
+    });
+    fireEvent.click(await screen.findByLabelText(SKIP_LABEL));
+    expect(screen.getByText('This skips lawn round 8 (Oct 1 to Nov 9). Later rounds keep their dates.')).toBeTruthy();
+    // The last booked visit of a series: the office is told nothing is booked after it.
+    expect(screen.getByText('No later visit of this series is booked.')).toBeTruthy();
+  });
+
+  it('the office note typed in the window is saved with the skip, and a refusal shows the server sentence', async () => {
+    adminFetch.mockClear();
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const onCancel = vi.fn();
+    await openCancelWindow({ role: 'admin' }, { skip: { eligible: true, code: 'ok', message: '', nextVisitDate: '2027-02-22', lawnRound: null } }, onCancel);
+    fireEvent.click(await screen.findByLabelText(SKIP_LABEL));
+    fireEvent.change(screen.getByLabelText('Note'), { target: { value: '  away until April ' } });
+    const refusal = 'This visit has an invoice, a card or a linked visit on it. Cancel it instead.';
+    // The customer read is done by now, so the next request is the skip itself: the server refuses it.
+    adminFetch.mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ error: refusal, code: 'skip_has_money_or_links' }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Skip visit' }));
+    await waitFor(() => expect(alert).toHaveBeenCalledWith(`Failed to skip visit: ${refusal}`));
+    const put = adminFetch.mock.calls.find(([, opts]) => opts?.method === 'PUT');
+    expect(put[1].body).toEqual({ status: 'skipped', notes: 'Skipped from appointment sidebar\nNote: away until April' });
+    expect(onCancel).not.toHaveBeenCalled();
+    alert.mockRestore();
+  });
+
+  it('a prepaid visit shows the operator sentence and no Skip option', async () => {
+    const message = 'This visit is paid for already. Move it to a new date instead of skipping it.';
+    await openCancelWindow({ role: 'admin' }, { skip: { eligible: false, code: 'prepaid', message, nextVisitDate: null, lawnRound: null } });
+    expect(await screen.findByText(message)).toBeTruthy();
+    expect(screen.queryByLabelText(SKIP_LABEL)).toBeNull();
+  });
+
+  it('with no skip field there is no Skip option and a normal cancel still sends status cancelled, scope this_only', async () => {
+    adminFetch.mockClear();
+    confirmCardHoldFeeChoice.mockResolvedValue({ proceed: true, waiveCardHoldFee: false });
+    await openCancelWindow({ role: 'admin' }, { held: false });
+    await screen.findByText('Client booking notifications');
+    expect(screen.queryByLabelText(SKIP_LABEL)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel appointment(s)' }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/dispatch/v0/status', expect.objectContaining({ method: 'PUT' })));
+    const put = adminFetch.mock.calls.find(([, opts]) => opts?.method === 'PUT')[1];
+    expect(put.body).toMatchObject({ status: 'cancelled', scope: 'this_only' });
+  });
+
+  it('a technician is never offered Skip, and the window does not ask the server for it', async () => {
+    adminFetch.mockClear();
+    await openCancelWindow({ role: 'technician' }, { skip: { eligible: true, code: 'ok', message: '', nextVisitDate: null, lawnRound: null } });
+    await screen.findByText('Client booking notifications');
+    expect(previewAsked()).toBe(false);
+    expect(screen.queryByLabelText(SKIP_LABEL)).toBeNull();
   });
 });

@@ -1,6 +1,7 @@
 /**
  * The office's "Skip this visit" (owner decision 2026-11-13) on the dispatch status route:
- * PUT /api/admin/dispatch/:serviceId/status { status: 'skipped' }.
+ * PUT /api/admin/dispatch/:serviceId/status { status: 'skipped' }, and the skip block of the cancel window's
+ * preview, GET /api/admin/dispatch/:serviceId/card-hold?skip=1.
  *
  * Before this change the route took 'skipped' from any caller for any visit: a technician could drop a plan visit
  * with no make-up, and a visit with an invoice or a card on it went to `skipped` with none of the cancel
@@ -53,25 +54,56 @@ const mockHandleCancellation = jest.fn().mockResolvedValue(undefined);
 jest.mock('../services/appointment-reminders', () => ({ handleCancellation: (...a) => mockHandleCancellation(...a) }));
 const mockRunFollowThrough = jest.fn().mockResolvedValue(undefined);
 jest.mock('../services/visit-cancellation-followthrough', () => ({ runVisitCancellationFollowThrough: (...a) => mockRunFollowThrough(...a) }));
+const mockHoldPreview = jest.fn();
+jest.mock('../services/estimate-card-holds', () => ({ cardHoldCancelPreview: (...a) => mockHoldPreview(...a) }));
+const mockApptPreview = jest.fn();
+jest.mock('../services/appointment-card-request', () => ({ appointmentCardCancelPreview: (...a) => mockApptPreview(...a) }));
 
-// scheduled_services in memory, behind a knex-shaped builder that honours the equality filters the route and the rule
-// write. `beforeTransaction` models a change that lands between the route's first read and its write transaction.
+// scheduled_services in memory, behind a knex-shaped builder that honours the filters the route and the rule write.
+// `beforeTransaction` models a change that lands between the route's first read and its write transaction.
 jest.mock('../models/db', () => {
   const state = { rows: [], writes: [], beforeTransaction: null, transactions: 0 };
   const norm = (column) => String(column).replace(/^scheduled_services\./, '');
+  const sortable = (value) => (value instanceof Date ? value.toISOString().slice(0, 10) : String(value));
   const builder = (table, tag) => {
     const filters = [];
+    let order = null;
+    let cap = Infinity;
     const b = {
-      where(column, value) {
-        if (column && typeof column === 'object') filters.push((row) => Object.entries(column).every(([key, val]) => row[norm(key)] === val));
-        else filters.push((row) => row[norm(column)] === value);
+      where(column, op, value) {
+        if (typeof column === 'function') {
+          const anyOf = [];
+          const group = {
+            where(col, val) { anyOf.push((row) => row[norm(col)] === val); return group; },
+            orWhere(col, val) { anyOf.push((row) => row[norm(col)] === val); return group; },
+          };
+          column.call(group);
+          filters.push((row) => anyOf.some((match) => match(row)));
+        } else if (column && typeof column === 'object') {
+          filters.push((row) => Object.entries(column).every(([key, val]) => row[norm(key)] === val));
+        } else if (value === undefined) {
+          filters.push((row) => row[norm(column)] === op);
+        } else if (op === '>') {
+          filters.push((row) => sortable(row[norm(column)]) > sortable(value));
+        } else {
+          throw new Error(`fake db: unsupported where(${column}, ${op})`);
+        }
         return b;
       },
+      whereIn(column, values) { filters.push((row) => values.includes(row[norm(column)])); return b; },
       leftJoin() { return b; },
       forUpdate() { return b; },
-      select() { return b; },
-      rows() { return (table === 'scheduled_services' ? state.rows : []).filter((row) => filters.every((match) => match(row))); },
+      orderBy(column, direction) { order = [norm(column), direction]; return b; },
+      limit(n) { cap = n; return b; },
+      rows() {
+        const source = table === 'scheduled_services' ? state.rows : [];
+        const hits = source.filter((row) => filters.every((match) => match(row)));
+        if (order) hits.sort((x, y) => sortable(x[order[0]]).localeCompare(sortable(y[order[0]])) * (order[1] === 'desc' ? -1 : 1));
+        return hits.slice(0, cap);
+      },
+      select(...columns) { b.columns = columns; return b; },
       async first() { const [row] = b.rows(); return row ? { ...row } : undefined; },
+      then(resolve, reject) { return Promise.resolve(b.rows().map((row) => ({ ...row }))).then(resolve, reject); },
       async update(changes) { state.writes.push({ table, op: 'update', via: tag, changes }); b.rows().forEach((row) => Object.assign(row, changes)); return 1; },
       async insert(row) { state.writes.push({ table, op: 'insert', via: tag, row }); return [1]; },
     };
@@ -135,7 +167,7 @@ const visit = (id = 'visit-2') => db.__state.rows.find((row) => row.id === id);
 
 beforeEach(() => {
   actor.role = 'admin';
-  for (const mock of [mockTransitionJobStatus, mockImpact, mockNotifyVisitCancelled, mockReseed, mockHandleCancellation, mockRunFollowThrough]) mock.mockReset();
+  for (const mock of [mockTransitionJobStatus, mockImpact, mockNotifyVisitCancelled, mockReseed, mockHandleCancellation, mockRunFollowThrough, mockHoldPreview, mockApptPreview]) mock.mockReset();
   mockTransitionJobStatus.mockResolvedValue({ ok: true, adminPayload: null });
   mockImpact.mockResolvedValue({ card_cancel_refusals: ['plan_makeup_visit'] });
   Object.assign(db.__state, { writes: [], beforeTransaction: null, transactions: 0 });
@@ -270,5 +302,47 @@ describe('PUT /:serviceId/status { status: "skipped" }', () => {
     expect(mockReseed).toHaveBeenCalledWith(expect.objectContaining({ serviceId: 'visit-2', source: 'admin-dispatch-status-cancel' }));
     // The skip rule is not consulted for a cancel.
     expect(mockImpact).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /:serviceId/card-hold?skip=1: the skip block of the cancel window', () => {
+  const noFee = { held: false, feeApplies: false, rule: { code: 'no_card', willCharge: false, text: 'No card on this visit.' } };
+  beforeEach(() => {
+    mockHoldPreview.mockResolvedValue(noFee);
+    mockApptPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: noFee.rule });
+  });
+
+  test('without ?skip=1 the fee preview is the answer it always was, and no skip check runs', async () => {
+    const { status, body } = await call('GET', 'visit-2/card-hold');
+    expect([status, body]).toEqual([200, noFee]);
+    expect(mockImpact).not.toHaveBeenCalled();
+  });
+
+  test('with ?skip=1 the office also gets whether the visit may be skipped and the plan\'s next visit', async () => {
+    const { status, body } = await call('GET', 'visit-2/card-hold?skip=1');
+    expect(status).toBe(200);
+    expect(body).toEqual({ ...noFee, skip: { eligible: true, code: 'ok', message: '', nextVisitDate: '2040-06-20', lawnRound: null } });
+  });
+
+  test('a paid visit says to move it, so the window can say so', async () => {
+    mockImpact.mockResolvedValue({ card_cancel_refusals: ['prepaid_coverage'] });
+    const { body } = await call('GET', 'visit-2/card-hold?skip=1');
+    expect(body.skip).toEqual({ eligible: false, code: 'prepaid', message: MESSAGES.prepaid, nextVisitDate: null, lawnRound: null });
+  });
+
+  test('a technician who asks gets the fee preview and a refusal, not the plan\'s dates', async () => {
+    actor.role = 'technician';
+    seed({ technician_id: 'staff-1' });
+    const { status, body } = await call('GET', 'visit-2/card-hold?skip=1');
+    expect(status).toBe(200);
+    expect(body).toEqual({ ...noFee, skip: { eligible: false, code: 'admin_only', message: MESSAGES.admin_only, nextVisitDate: null, lawnRound: null } });
+    expect(mockImpact).not.toHaveBeenCalled();
+  });
+
+  test('a failed skip check never holds up the fee preview: the window just offers no skip', async () => {
+    mockImpact.mockRejectedValue(new Error('invoices read failed'));
+    const { status, body } = await call('GET', 'visit-2/card-hold?skip=1');
+    expect(status).toBe(200);
+    expect(body).toEqual({ ...noFee, skip: null });
   });
 });

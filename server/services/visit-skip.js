@@ -16,14 +16,17 @@
  * visit itself.
  *
  * This module only reads. The write is the dispatch status route (PUT /admin/dispatch/:serviceId/status, status
- * 'skipped'), which asks skipVerdict before its transaction and assertSkippable under the visit's row lock.
+ * 'skipped'), which asks skipVerdict before its transaction and assertSkippable under the visit's row lock. The
+ * cancel window reads skipPreview (GET /admin/dispatch/:serviceId/card-hold, field `skip`) to offer the choice.
  */
 
 const db = require('../models/db');
+const { dateOnlyString } = require('../utils/date-only');
 
 const SKIPPABLE_FROM_STATUSES = ['pending', 'confirmed'];
 // A cancel may book a make-up visit; a skip never does, so this refusal is not about a skip.
 const MAKEUP_REFUSAL = 'plan_makeup_visit';
+const NEXT_VISIT_SCAN = 12;
 
 const MESSAGES = Object.freeze({
   ok: '',
@@ -86,9 +89,49 @@ async function assertSkippable(trx, serviceId, { isAdmin = false, actorId = null
   }
 }
 
+// The plan's next open visit after `date`: what the office tells the customer ("see you on ...").
+async function nextPlanVisitDate(conn, row, date) {
+  const { isPlanSeriesRow } = require('./recurring-series-cancel-reseed');
+  const rootId = row.recurring_parent_id || row.id;
+  const later = await conn('scheduled_services')
+    .where(function seriesRows() { this.where('recurring_parent_id', rootId).orWhere('id', rootId); })
+    .whereIn('status', SKIPPABLE_FROM_STATUSES)
+    .where('scheduled_date', '>', date)
+    .orderBy('scheduled_date', 'asc')
+    .limit(NEXT_VISIT_SCAN)
+    .select('id', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
+  const next = (later || []).find((candidate) => String(candidate.id) !== String(row.id) && isPlanSeriesRow(candidate));
+  return next ? dateOnlyString(next.scheduled_date) : null;
+}
+
+// A lawn plan on nine rounds: the round this visit sits in, so the office sees which treatment step the skip drops.
+function lawnRoundFor(row, date) {
+  const { LAWN_ROUNDS_9, roundOf } = require('./lawn-rounds');
+  const { normalizeRecurringPattern } = require('./recurring-appointment-seeder');
+  if (normalizeRecurringPattern(row.recurring_pattern) !== LAWN_ROUNDS_9) return null;
+  const round = roundOf(date);
+  return round ? { round: round.round, start: round.start, end: round.end } : null;
+}
+
+/**
+ * What the cancel window shows about a skip: the verdict, the plan's next visit and, for a lawn plan on rounds, the
+ * round the skip drops. Returns null when the visit does not exist. A read for display: the status route judges the
+ * visit again when the office confirms.
+ */
+async function skipPreview(serviceId, { isAdmin = false, actorId = null, conn = db } = {}) {
+  const row = await conn('scheduled_services').where({ id: serviceId })
+    .first(...VERDICT_COLUMNS, 'scheduled_date', 'recurring_pattern');
+  if (!row) return null;
+  const result = await skipVerdict(row, { conn, isAdmin, actorId });
+  if (!result.eligible) return { ...result, nextVisitDate: null, lawnRound: null };
+  const date = dateOnlyString(row.scheduled_date);
+  return { ...result, nextVisitDate: await nextPlanVisitDate(conn, row, date), lawnRound: lawnRoundFor(row, date) };
+}
+
 module.exports = {
   skipVerdict,
   assertSkippable,
+  skipPreview,
   SKIPPABLE_FROM_STATUSES,
-  _private: { rowRefusal, MESSAGES },
+  _private: { rowRefusal, nextPlanVisitDate, lawnRoundFor, MESSAGES },
 };
