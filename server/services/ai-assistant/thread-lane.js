@@ -14,6 +14,10 @@
  * that turn (`grounds`). An answer with no such result is a hand-off, whatever it says, so no reply explains
  * how a treatment works, what a plan covers or what a technician will do.
  *
+ * The same lane serves the office-hours step-in (GATE_PORTAL_MESSAGES_DAY_AI, portal-messages-day-ai.js) on a
+ * day wording of the same prompt (THREAD_DAY_PROMPT) and the same tools, with the silence tool's description made
+ * time-neutral; there a hand-off sends the customer nothing.
+ *
  * Pure: no database, no gates and no other assistant module (tools.js and assistant.js load this file).
  */
 
@@ -49,6 +53,22 @@ RULES
 - Do not offer more help and do not ask a question.
 - Keep it short, plain and warm. Use the customer's first name only when it is given to you.`;
 
+// The day wording of the same prompt (GATE_PORTAL_MESSAGES_DAY_AI, portal-messages-day-ai.js): the customer wrote
+// during office hours and nobody has answered yet, and a hand-off sends the customer nothing. Derived from
+// THREAD_PROMPT, so the four moves and the RULES cannot drift apart; a phrase that stops matching throws at load.
+// THREAD_PROMPT itself is the text the owner approved after the replay and does not change.
+const DAY_WORDING = [
+  ['outside office hours. The office answers there between 8 AM and 8 PM Eastern, and a person on the team reads every message in the morning.',
+    'during office hours, and nobody on the team has answered yet. The office answers there between 8 AM and 8 PM Eastern, and a person on the team reads every message.'],
+  ['needs no answer tonight:', 'needs no answer now:'],
+  ['The customer then sees one fixed sentence saying a team member will answer here after 8 AM; you do not write it.',
+    'The customer then gets no message from you, and a person on the team answers.'],
+];
+const THREAD_DAY_PROMPT = DAY_WORDING.reduce((text, [from, to]) => {
+  if (!text.includes(from)) throw new Error(`thread-lane: day wording phrase not found: ${from.slice(0, 40)}`);
+  return text.replace(from, to);
+}, THREAD_PROMPT);
+
 const STAY_SILENT_TOOL = {
   name: 'stay_silent',
   description: 'Send the customer nothing. Use only when their new message needs no answer tonight: a thank-you, a compliment, an acknowledgment, a reaction or emoji, a goodbye, or an automatic reply.',
@@ -59,6 +79,9 @@ const STAY_SILENT_TOOL = {
     additionalProperties: false,
   },
 };
+
+// The same tool for the day turn: its description names no time of day.
+const STAY_SILENT_DAY_TOOL = { ...STAY_SILENT_TOOL, description: STAY_SILENT_TOOL.description.replace('needs no answer tonight', 'needs no answer now') };
 
 // The thread's wording of the reschedule check: it shows no button, so the tool only tells the model what to say.
 const RESCHEDULE_TOOL = {
@@ -107,4 +130,4 @@ function needsNoReply(text) {
   return NO_REPLY_RE.test(words);
 }
 
-module.exports = { THREAD_PROMPT, STAY_SILENT_TOOL, RESCHEDULE_TOOL, RESCHEDULE_INSTRUCTION, grounds, needsNoReply };
+module.exports = { THREAD_PROMPT, THREAD_DAY_PROMPT, STAY_SILENT_TOOL, STAY_SILENT_DAY_TOOL, RESCHEDULE_TOOL, RESCHEDULE_INSTRUCTION, grounds, needsNoReply };

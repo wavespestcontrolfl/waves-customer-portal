@@ -5756,6 +5756,30 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MIN (offset four minutes) — Portal Messages: Waves AI step-in
+  // A portal message that waited 120 open minutes with no answer from a person gets the night step's turn
+  // (portal-messages-day-ai.js, GATE_PORTAL_MESSAGES_DAY_AI read at call time). Gate off: nothing is loaded
+  // or read. No cron lease: the claim on each message is one conditional UPDATE, so a second process does
+  // nothing with a message the first took; the in-process guard only skips an overlapping tick.
+  // =========================================================================
+  let portalDayAiRunning = false;
+  cron.schedule('4-59/5 * * * *', async () => {
+    if (!require('../config/feature-gates').portalMessagesDayAiLive?.() || portalDayAiRunning) return;
+    portalDayAiRunning = true;
+    try {
+      const counts = await require('./portal-messages-day-ai').answerWaitingMessages();
+      if (counts?.scanned > 0) {
+        logger.info(`[portal-day-ai] sweep: scanned=${counts.scanned} answered=${counts.answered} silent=${counts.silent} leftForTeam=${counts.leftForTeam} capped=${counts.capped} superseded=${counts.superseded} failed=${counts.failed}`);
+      }
+    } catch (err) {
+      // name/code only: knex errors can carry bound customer text (PII)
+      logger.warn(`[portal-day-ai] sweep failed: ${[err?.name || 'Error', err?.code].filter(Boolean).join(' ')}`);
+    } finally {
+      portalDayAiRunning = false;
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN — Process scheduled SMS sends
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {

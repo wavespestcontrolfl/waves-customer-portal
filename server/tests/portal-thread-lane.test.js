@@ -80,3 +80,47 @@ describe('the thread prompt', () => {
     }
   });
 });
+
+describe('the day wording of the thread prompt (GATE_PORTAL_MESSAGES_DAY_AI)', () => {
+  const crypto = require('crypto');
+  const { THREAD_PROMPT, THREAD_DAY_PROMPT, STAY_SILENT_TOOL, STAY_SILENT_DAY_TOOL } = threadLane;
+  // The text between two headings of the prompt: the moves and the RULES.
+  const between = (text, from, to) => text.slice(text.indexOf(from), to ? text.indexOf(to) : undefined);
+
+  it('leaves the night prompt and the night silence tool exactly as the owner approved them', () => {
+    expect(crypto.createHash('sha256').update(THREAD_PROMPT).digest('hex')).toBe('1694140d3a5ec1a61bffd30f63bae9e48f222855cb12ed17c41ee2e19eb84259');
+    expect(THREAD_PROMPT).toContain('outside office hours');
+    expect(THREAD_PROMPT).toContain('needs no answer tonight');
+    expect(STAY_SILENT_TOOL.description).toContain('tonight');
+  });
+
+  it('says nothing of the night: no "tonight", "after 8 AM", "outside office hours" or "in the morning"', () => {
+    for (const phrase of ['tonight', 'after 8 AM', 'outside office hours', 'in the morning']) {
+      expect(THREAD_DAY_PROMPT).not.toContain(phrase);
+    }
+    expect(THREAD_DAY_PROMPT).toContain('during office hours, and nobody on the team has answered yet');
+    expect(THREAD_DAY_PROMPT).toContain('needs no answer now:');
+    expect(THREAD_DAY_PROMPT).toContain('The customer then gets no message from you, and a person on the team answers.');
+    expect(THREAD_DAY_PROMPT).not.toContain('fixed sentence');
+  });
+
+  it('keeps the same four moves and the same RULES as the night prompt', () => {
+    for (const [from, to] of [['2. NEXT VISIT', '4. HAND OFF'], ['- how a treatment', 'RULES'], ['RULES', null]]) {
+      expect(between(THREAD_DAY_PROMPT, from, to)).toBe(between(THREAD_PROMPT, from, to));
+    }
+    for (const name of ['get_upcoming_services', 'offer_reschedule_link', 'stay_silent', 'escalate']) {
+      expect(THREAD_DAY_PROMPT).toContain(name);
+    }
+  });
+
+  it('gives the day turn a time-neutral silence tool and no other tool difference', () => {
+    expect(STAY_SILENT_DAY_TOOL.description).not.toContain('tonight');
+    expect(STAY_SILENT_DAY_TOOL.description).toContain('needs no answer now');
+    expect({ ...STAY_SILENT_DAY_TOOL, description: '' }).toEqual({ ...STAY_SILENT_TOOL, description: '' });
+    const { THREAD_TOOLS, THREAD_DAY_TOOLS } = require('../services/ai-assistant/tools');
+    expect(THREAD_DAY_TOOLS.map((tool) => tool.name)).toEqual(THREAD_TOOLS.map((tool) => tool.name));
+    expect(THREAD_TOOLS).toContain(STAY_SILENT_TOOL);
+    expect(THREAD_DAY_TOOLS).toContain(STAY_SILENT_DAY_TOOL);
+    expect(THREAD_DAY_TOOLS).not.toContain(STAY_SILENT_TOOL);
+  });
+});

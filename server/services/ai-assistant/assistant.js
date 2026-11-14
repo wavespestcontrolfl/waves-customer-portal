@@ -11,7 +11,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { TOOLS, THREAD_TOOLS, portalToolsFor, executeToolCall, withoutEmails, emailReadBackAwaitingAnswer } = require('./tools');
+const { TOOLS, THREAD_TOOLS, THREAD_DAY_TOOLS, portalToolsFor, executeToolCall, withoutEmails, emailReadBackAwaitingAnswer } = require('./tools');
 const threadLane = require('./thread-lane');
 const { renderCompanyFactsSection } = require('../sms-company-facts');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
@@ -313,6 +313,8 @@ const HAND_OFF_ORDER = ['request_email_change', 'escalate', 'stay_silent'];
 
 // Whether this turn's caller owns the hand-off (turn.holdHandOff, set by portal-messages-night-ai.js).
 const holdsHandOff = (turn) => turn?.holdHandOff === true;
+// Whether it is the office-hours step-in (turn.threadDay, set by portal-messages-day-ai.js): the day wording of the thread lane.
+const isDayThread = (turn) => turn?.threadDay === true;
 
 // `secondaryProperty`: the portal session is scoped to a non-primary saved
 // property (the route decides; anything but false withholds the re-service
@@ -320,13 +322,14 @@ const holdsHandOff = (turn) => turn?.holdHandOff === true;
 // `thread` (GATE_PORTAL_MESSAGES_NIGHT_AI, portal-messages-night-ai.js): the turn answers inside the
 // customer's Messages thread, which shows text only and is itself the office's item. That turn has its own
 // short prompt and four tools (thread-lane.js), builds no button or card, and writes no hand-off item of its
-// own (see turn.holdHandOff). None of the portal chat's gates changes it.
-function portalLane(channel, { secondaryProperty = true, replay = false, thread = false } = {}) {
+// own (see turn.holdHandOff). None of the portal chat's gates changes it. `day`: the same lane in its
+// office-hours wording (GATE_PORTAL_MESSAGES_DAY_AI, thread-lane.js THREAD_DAY_PROMPT).
+function portalLane(channel, { secondaryProperty = true, replay = false, thread = false, day = false } = {}) {
   if (!portalSelfServe(channel)) return { prompt: SYSTEM_PROMPT, tools: TOOLS, actions: null, cards: null, context: {} };
   if (thread) {
     return {
-      prompt: threadLane.THREAD_PROMPT,
-      tools: THREAD_TOOLS,
+      prompt: day ? threadLane.THREAD_DAY_PROMPT : threadLane.THREAD_PROMPT,
+      tools: day ? THREAD_DAY_TOOLS : THREAD_TOOLS,
       actions: null,
       cards: null,
       portal: true,
@@ -700,7 +703,7 @@ class WavesAssistant {
     // 2. Check for escalation triggers in the raw message
     // Portal chat gets its own prompt and button tools; every other channel
     // (and the portal with its switch off) keeps the original pair.
-    const lane = portalLane(channel, { secondaryProperty, replay: Boolean(replay.cursor), thread: holdsHandOff(turn) });
+    const lane = portalLane(channel, { secondaryProperty, replay: Boolean(replay.cursor), thread: holdsHandOff(turn), day: isDayThread(turn) });
     turn?.registerFallbackExtras?.(() => laneExtras(lane));
     const trigger = this.matchedEscalationTrigger(turnMessage, channel);
 
