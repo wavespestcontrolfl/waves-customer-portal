@@ -74,6 +74,15 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
   const ids = {};
   const HQ = require('../services/route-optimizer').HQ;
   const day = (n) => etDateString(addETDays(new Date(), n));
+  // The first Monday-to-Friday date n or more days out. The migrated database
+  // takes Saturday and Sunday off (schedule_weekly_days_off = [0, 6]), and the
+  // reserve step refuses a closed day: with a plain day(14) every purchase in
+  // this suite failed on each Saturday and Sunday ("That time was just taken").
+  const openDay = (n) => {
+    let date = day(n);
+    for (let extra = 1; [0, 6].includes(new Date(`${date}T12:00:00`).getDay()); extra += 1) date = day(n + extra);
+    return date;
+  };
   const money = (rows) => rows.map((row) => Number(row.estimated_price));
 
   beforeAll(() => {
@@ -150,7 +159,7 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
     const availability = jest.requireActual('../services/estimate-slot-availability');
     const estimate = await trx('estimates').where({ id: estimateId }).first();
     const profile = await availability.resolveCatalogSlotProfile(estimate, { serviceMode: 'recurring' }, trx);
-    const date = day(14);
+    const date = openDay(14);
     const slotId = appendOfferToSlotId(`${date}_10-00_${ids.technician}`,
       signSlotOffer({ surface: 'estimate', scopeId: estimateId, date, startMinutes: 600,
         technicianId: ids.technician, durationMinutes: profile.durationMinutes }));
