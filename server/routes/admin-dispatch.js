@@ -2671,6 +2671,22 @@ function ibRecoveryReplyFlags(req) {
   };
 }
 
+// The office skipped one plan visit (visit-skip.js): no customer text, no make-up visit, and the reminder trigger
+// has already cancelled its reminder row. The assigned technician hears it like a cancel (the notice a plan-hold
+// skip sends); a resend of an already skipped visit is not a new skip. The committed row names the holder: a
+// reassignment can land between the route's read and the transition.
+function notifyTechOfSkippedVisit({ req, svc, transition, fromStatus }) {
+  const row = transition?.adminPayload || null;
+  const technicianId = row?.tech_id || svc.technician_id;
+  if (fromStatus === 'skipped' || !technicianId) return;
+  const schedule = row || svc;
+  void require('../services/tech-visit-notifications').notifyVisitCancelled({
+    visitId: svc.id, technicianId, actorId: req.technicianId || null,
+    snapshot: { date: schedule.scheduled_date, windowStart: schedule.window_start || null, windowEnd: schedule.window_end || null },
+    previousStatus: fromStatus,
+  });
+}
+
 async function serviceStatusHandler(req, res, next) {
   try {
     const { status: toStatus, notes, lat, lng, notifyCustomer, scope = 'this_only' } = req.body;
@@ -2713,8 +2729,10 @@ async function serviceStatusHandler(req, res, next) {
     // and no_show (invoice void + card-on-file fee charge) — stay admin-only
     // even on the tech's own visit; the mobile UI never renders a manual
     // no-show button (removed 2026-07-31) and reaches series/following cancel
-    // only from the office-facing schedule surfaces.
-    if (req.techRole !== 'admin' && (toStatus === 'no_show' || (toStatus === 'cancelled' && ['following', 'series'].includes(scope)))) {
+    // only from the office-facing schedule surfaces. A skip takes one visit
+    // out of a customer's plan with no make-up visit: the office's call
+    // (owner decision 2026-11-13).
+    if (req.techRole !== 'admin' && (toStatus === 'no_show' || toStatus === 'skipped' || (toStatus === 'cancelled' && ['following', 'series'].includes(scope)))) {
       return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
     }
 
@@ -2942,6 +2960,15 @@ async function serviceStatusHandler(req, res, next) {
         code: 'street_level_hold',
       });
     }
+    // A skip is only for an open plan visit with no invoice, card or linked visit on it (visit-skip.js). Judged here
+    // first, before the transaction: a refusal holds no row lock, and any PaymentIntent the invoice read looks up
+    // lands in this cache. Judged again under the row lock below. A resend of an already skipped visit is not judged.
+    let skipPiCache = null;
+    if (toStatus === 'skipped' && fromStatus !== 'skipped') {
+      skipPiCache = new Map();
+      const skip = await require('../services/visit-skip').skipVerdict(svc, { isAdmin: req.techRole === 'admin', actorId: req.technicianId || null, piCache: skipPiCache });
+      if (!skip.eligible) return res.status(409).json({ error: skip.message, code: `skip_${skip.code}` });
+    }
     // Hoisted: the post-commit activation below must key skipCardRequest on
     // the SAME row-locked verification — a technician token alone is not
     // proof, and passing skipCardRequest for an unowned confirm permanently
@@ -3017,6 +3044,11 @@ async function serviceStatusHandler(req, res, next) {
             && ['pending', 'confirmed'].includes(String(locked.status));
         }
         const isFieldLifecycleTakeover = takeoverCandidate && fieldConfirmVerified;
+        // The skip rule again, under the row lock: an invoice, a card or a change to the visit that landed since the
+        // check above refuses the skip. It reads PaymentIntents from that check's cache, never from Stripe.
+        if (skipPiCache) {
+          await require('../services/visit-skip').assertSkippable(trx, svc.id, { isAdmin: req.techRole === 'admin', actorId: req.technicianId || null, piCache: skipPiCache });
+        }
         // Set only by cancelServiceFromBar: the Intelligence Bar cancel card re-checks what it showed, under this lock.
         if (typeof req.ibBeforeCancelCommit === 'function') await req.ibBeforeCancelCommit(trx);
         // Lifecycle timestamps live on the same row as status; flip
@@ -3278,6 +3310,8 @@ async function serviceStatusHandler(req, res, next) {
       await require('../services/recurring-series-cancel-reseed').runPostCancelSeriesReseed({
         db, serviceId: svc.id, source: 'admin-dispatch-status-cancel',
       });
+    } else if (toStatus === 'skipped') {
+      notifyTechOfSkippedVisit({ req, svc, transition, fromStatus });
     } else if (toStatus === 'no_show') {
       // Free the tech on the dispatch roster. A no-show marked after the
       // job already went en_route/on_site leaves tech_status.current_job_id
