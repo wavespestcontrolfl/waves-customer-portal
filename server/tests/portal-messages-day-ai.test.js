@@ -175,4 +175,28 @@ describe('answerWaitingMessages', () => {
     mockQuery.mockImplementationOnce(() => { throw new Error('db down'); });
     expect(await DayAi.answerWaitingMessages({ now: DUE })).toEqual(ZERO);
   });
+
+  // The last sweep of the day (7:58 PM Eastern) with two due messages: the first turn ends after the 8 PM close.
+  it('sends nothing after the office closes: a late answer is not saved and no further message is taken up', async () => {
+    mockRows = [row('m-1'), row('m-2')];
+    const clock = jest.spyOn(Date, 'now');
+    try {
+      const base = 1_800_000_000_000;
+      clock.mockReturnValue(base);
+      mockTurn.mockImplementationOnce(async () => {
+        clock.mockReturnValue(base + 3 * 60 * 1000);
+        return { kind: 'answer', body: 'Your next visit is Thursday.' };
+      });
+      const counts = await DayAi.answerWaitingMessages({ now: new Date('2026-11-13T00:58:00Z') });
+      expect(counts).toEqual({ ...ZERO, scanned: 1, leftForTeam: 1 });
+      expect(mockSave).not.toHaveBeenCalled();
+      expect(mockNotify).not.toHaveBeenCalled();
+      expect(mockRecord).toHaveBeenCalledWith('m-1', 'after_close', 'dayAi');
+      // The second message was never claimed, so the next office-hours sweep takes it.
+      expect(mockClaim).toHaveBeenCalledTimes(1);
+      expect(mockTaken.has('m-2')).toBe(false);
+    } finally {
+      clock.mockRestore();
+    }
+  });
 });

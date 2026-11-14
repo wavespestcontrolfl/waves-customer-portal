@@ -9,6 +9,9 @@
  *
  * - When: a sweep every five minutes (scheduler.js) calls answerWaitingMessages. It does nothing while the gate or
  *   its inputs are off, and nothing while the clock is outside office hours, so this step never sends at night.
+ *   The clock is read again before each message is taken up and before each answer is saved: a sweep that
+ *   starts at 7:59 PM takes up no further message once the office has closed, and an answer whose turn ended
+ *   after the close is not saved (outcome `after_close`; the message stays the office's open item).
  * - Which message: the NEWEST customer message of a thread that is still open for the office (openMessageScope,
  *   the Portal tab's own definition: no staff answer and no Mark handled after it), written in the last 72 hours,
  *   that the night step has not taken (metadata.nightAi) and this step has not taken (metadata.dayAi), that no AI
@@ -75,9 +78,10 @@ async function candidates(now) {
     .select('m.id', 'm.body', 'm.created_at', 'cv.id as thread_id', 'cv.customer_id');
 }
 
-// The step for one due message. Returns the outcome word: 'answered', 'silent', 'left_for_team', 'capped',
-// 'superseded', 'failed', or null when another start already took the message.
-async function answerOne(row) {
+// The step for one due message. Returns the outcome word: 'answered', 'silent', 'left_for_team', 'after_close',
+// 'capped', 'superseded', 'failed', or null when another start already took the message. `closed` reads the
+// clock: true once the office has closed.
+async function answerOne(row, closed) {
   const message = { id: row.id, body: row.body, created_at: row.created_at };
   const { claimMessage, recordOutcome, takeTurn, saveReply, notifyCustomer } = NightAi.__private;
   if (!(await claimMessage(message.id, KEY))) return null;
@@ -87,7 +91,9 @@ async function answerOne(row) {
     let outcome = turn.kind;
     // A hand-off sends nothing: the message stays the office's open item, as it was.
     if (turn.kind === 'handoff') outcome = 'left_for_team';
-    if (turn.kind === 'answer') {
+    // The turn can end after the close (it has its own budget of seconds): nothing is sent at night.
+    if (turn.kind === 'answer' && closed()) outcome = 'after_close';
+    else if (turn.kind === 'answer') {
       const saved = await saveReply(row.thread_id, message, { body: turn.body, handOff: false });
       outcome = saved ? 'answered' : 'superseded';
       if (saved) await notifyCustomer(row.customer_id, saved);
@@ -101,7 +107,7 @@ async function answerOne(row) {
   }
 }
 
-const COUNT_KEYS = { answered: 'answered', silent: 'silent', left_for_team: 'leftForTeam', capped: 'capped', superseded: 'superseded', failed: 'failed' };
+const COUNT_KEYS = { answered: 'answered', silent: 'silent', left_for_team: 'leftForTeam', after_close: 'leftForTeam', capped: 'capped', superseded: 'superseded', failed: 'failed' };
 
 /**
  * One sweep. `scanned` is the number of due messages it took up (at most 20), the other counts say what became of
@@ -118,9 +124,14 @@ async function answerWaitingMessages({ now = new Date() } = {}) {
       const at = followUpDueAt(row.created_at, OPEN_CALENDAR, WAIT_OPEN_MINUTES);
       return at && at.getTime() <= now.getTime();
     }).slice(0, SWEEP_LIMIT);
+    // The sweep's clock: `now` plus the time this sweep has run, so the close is seen while it works.
+    const started = Date.now();
+    const closed = () => NightAi.isAfterHours(new Date(now.getTime() + (Date.now() - started)));
     for (const row of due) {
+      // Not taken up, so not claimed: it is due again at the next office-hours sweep.
+      if (closed()) break;
       counts.scanned += 1;
-      const outcome = await answerOne(row);
+      const outcome = await answerOne(row, closed);
       if (COUNT_KEYS[outcome]) counts[COUNT_KEYS[outcome]] += 1;
     }
   } catch (err) {
