@@ -1,5 +1,5 @@
 import { Fragment, useState, useEffect, useRef, useCallback, useMemo, useId, createContext, useContext } from 'react';
-import { createPortal } from 'react-dom';
+import { createPortal, flushSync } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, tokenCustomerId } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
@@ -31,11 +31,11 @@ import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard'
 import MistingSystemCard from '../components/portal/MistingSystemCard';
 import YardWrappedCard from '../components/portal/YardWrappedCard';
 import PetNameAskCard from '../components/portal/PetNameAskCard';
-import PortalMessages, { usePortalMessagesGate } from '../components/portal/PortalMessages';
+import PortalMessages, { MESSAGES_COPY, usePortalMessagesGate } from '../components/portal/PortalMessages';
 import PestFrequencyChange, { usePestFrequency } from '../components/portal/PestFrequencyChange';
 import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
-import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
+import { PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
 import YardMonthCard, { useYardMonth } from '../components/portal/YardMonthCard';
 import { etDateString, formatETDateTime, formatETTime } from '../lib/timezone';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
@@ -17088,6 +17088,130 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
   );
 }
 
+// Help pill (owner 2026-11-05 mockups; 2026-11-13 "yes i want this to be
+// chat"): the one floating pill, bottom-right above the bottom nav. It opens
+// the Help sheet (Chat = the Messages thread, and Photo ID), or the single
+// feature this customer has, with no menu. A red dot shows an unread answer.
+// It stays mounted (hidden) while Photo ID is open so focus returns to it.
+function HelpFab({ onOpen, hasBottomNav, hidden = false, unread = 0, buttonRef = null }) {
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      onClick={onOpen}
+      hidden={hidden}
+      aria-label={unread > 0 ? `Help, ${unreadLabel(unread)}` : 'Help'}
+      data-glass-accent=""
+      style={{
+        position: 'fixed',
+        right: 'calc(14px + env(safe-area-inset-right, 0px))',
+        // The mobile nav includes the home-indicator inset in its height.
+        // Keep the whole button above that bar, including its bottom gap.
+        bottom: hasBottomNav
+          ? 'calc(var(--portal-bottom-nav-height, calc(70px + env(safe-area-inset-bottom, 0px))) + 20px)'
+          : 'calc(20px + env(safe-area-inset-bottom, 0px))',
+        zIndex: 97,
+        minHeight: 48,
+        padding: '0 18px 0 14px',
+        borderRadius: 999,
+        display: hidden ? 'none' : 'inline-flex',
+        alignItems: 'center',
+        gap: 8,
+        border: 'none',
+        cursor: 'pointer',
+        fontFamily: FONTS.body,
+        fontSize: 15,
+        fontWeight: 700,
+        boxShadow: '0 12px 30px rgba(15,23,42,0.24)',
+      }}
+    >
+      <Icon name="message" size={19} strokeWidth={2.25} />
+      Help
+      {unread > 0 && (
+        <span aria-hidden="true" data-help-unread-dot="" style={{
+          position: 'absolute', top: 2, right: 2, width: 12, height: 12, borderRadius: 999,
+          background: B.red, border: '2px solid #fff', boxSizing: 'border-box',
+        }} />
+      )}
+    </button>
+  );
+}
+
+// The Help pill's menu. A row is listed only while its handler is passed
+// (the Messages probe answered 200 / Photo ID is available).
+function HelpSheet({ onClose, onChat, onOpenPhotoId, unread = 0 }) {
+  // Rendered only while open — lock the page behind the sheet.
+  useLockBodyScroll(true);
+  const dialogRef = useModalFocus(true, onClose);
+  const row = (key, icon, label, description, onClick, badge = null) => (
+    <button key={key} type="button" onClick={onClick} style={{
+      width: '100%', minHeight: 56, display: 'flex', alignItems: 'center', gap: 12, padding: '11px 10px',
+      border: 'none', background: 'transparent', borderRadius: 8, cursor: 'pointer', textAlign: 'left',
+      color: B.grayDark, fontFamily: FONTS.body,
+    }}>
+      <span style={{
+        width: 38, height: 38, borderRadius: 8, background: PORTAL_SHELL.soft, color: PORTAL_SHELL.text,
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+      }}>
+        <Icon name={icon} size={18} strokeWidth={2} />
+      </span>
+      <span style={{ minWidth: 0, flex: 1 }}>
+        <span style={{ display: 'block', fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text }}>{label}</span>
+        <span style={{ display: 'block', marginTop: 2, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.35 }}>{description}</span>
+      </span>
+      {badge}
+      <Icon name="chevronRight" size={17} strokeWidth={2} style={{ color: PORTAL_SHELL.muted }} />
+    </button>
+  );
+
+  return (
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      data-glass-scrim=""
+      style={{
+        position: 'fixed', inset: 0, zIndex: 150,
+        background: 'rgba(15,23,42,0.42)',
+        backdropFilter: 'blur(5px)',
+        display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
+      }}
+    >
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Help" data-help-sheet="" data-glass="modal" style={{
+        background: PORTAL_SHELL.page,
+        borderRadius: '8px 8px 0 0',
+        position: 'relative',
+        padding: '12px calc(14px + env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px))',
+        boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
+        animation: 'helpSheetUp 0.25s ease',
+        borderTop: `1px solid ${PORTAL_SHELL.border}`,
+        // dvh: 100vh over-measures behind the iOS Safari toolbar.
+        maxHeight: `calc(100${DVH} - 16px - env(safe-area-inset-top, 0px))`,
+        boxSizing: 'border-box',
+        overflowY: 'auto',
+        WebkitOverflowScrolling: 'touch',
+        overscrollBehavior: 'contain',
+        fontFamily: FONTS.body,
+      }}>
+        <style>{`@keyframes helpSheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) {
+  [data-help-sheet] { animation: none !important; }
+}`}</style>
+        <div style={{ width: 36, height: 4, borderRadius: 999, background: '#D8D0C0', margin: '0 auto 12px' }} />
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
+          <div style={{ fontSize: 20, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.15 }}>How can we help?</div>
+          <ShellCloseButton onClick={onClose} label="Close help menu" />
+        </div>
+        <section data-glass="soft" style={{
+          background: PORTAL_SHELL.surface, border: `1px solid ${PORTAL_SHELL.border}`, borderRadius: 8,
+          boxShadow: PORTAL_SHELL.shadowSoft, position: 'relative', padding: 8,
+        }}>
+          {onChat && row('chat', 'message', 'Chat with Waves', MESSAGES_COPY.help, onChat, unread > 0 ? <UnreadCount count={unread} /> : null)}
+          {onOpenPhotoId && row('photoid', 'camera', 'Photo ID', 'Bugs, lawn, trees & shrubs', onOpenPhotoId)}
+        </section>
+      </div>
+    </div>
+  );
+}
+
 // Wraps ScheduleTab (upcoming) + ServicesTab (completed) behind a single
 // "Visits" surface — a visit is one object moving from upcoming → completed,
 // so customers shouldn't have to know which tab holds which state.
@@ -17849,6 +17973,25 @@ export default function PortalPage() {
     return () => { current = false; clearTimeout(timer); };
   }, [appRatingQuiet]);
   const photoIdAvailable = photoIdGate.status === 'available' && !cancelledAccount && !contactSession;
+  // Help pill: Chat is the Messages thread (never probed for a cancelled or
+  // contact session, so `enabled` is already false there). With both features
+  // the pill opens the Help sheet; with one it opens that feature directly.
+  const [showHelp, setShowHelp] = useState(false);
+  const helpButtonRef = useRef(null);
+  const chatAvailable = messagesGate.enabled;
+  const helpAvailable = chatAvailable || photoIdAvailable;
+  // The pill is hidden on the Messages page, so keyboard focus moves to the
+  // page content there instead of being dropped with the hidden pill.
+  // flushSync: the Help sheet's own focus restore (to the pill) runs first.
+  const openChatPage = () => {
+    flushSync(() => { setShowHelp(false); switchTab('messages'); });
+    document.getElementById('portal-main')?.focus({ preventScroll: true });
+  };
+  const openHelp = () => {
+    if (chatAvailable && photoIdAvailable) setShowHelp(true);
+    else if (chatAvailable) openChatPage();
+    else setShowPhotoId(true);
+  };
   // reportIssuePrefill lives here, above the keyed PortalReadProvider, so a
   // property/account switch (sessionEpoch — another tab, or this one) does
   // NOT clear it on its own. Left alone, a still-open Photo ID handoff would
@@ -18532,9 +18675,11 @@ export default function PortalPage() {
           float) plus the iOS home-indicator inset — a flat 92px left the last
           card underneath the bar on notched phones. */}
       <main id="portal-main" tabIndex={-1} style={{
+        // The Help pill floats 20px above the nav (or the page bottom) and is
+        // 48px tall: with it on screen the last card ends above the pill.
         padding: isMobileShell
-          ? '24px calc(16px + env(safe-area-inset-right, 0px)) calc(var(--portal-bottom-nav-height, 78px) + 30px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))'
-          : '24px calc(16px + env(safe-area-inset-right, 0px)) 32px calc(16px + env(safe-area-inset-left, 0px))',
+          ? `24px calc(16px + env(safe-area-inset-right, 0px)) calc(var(--portal-bottom-nav-height, 78px) + ${helpAvailable ? 78 : 30}px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))`
+          : `24px calc(16px + env(safe-area-inset-right, 0px)) ${helpAvailable ? 80 : 32}px calc(16px + env(safe-area-inset-left, 0px))`,
         // shellMaxWidth is the content cap. Preserve the existing 760px
         // desktop content column now that safe-area padding is border-box.
         maxWidth: shellMaxWidth + 32,
@@ -18624,11 +18769,24 @@ export default function PortalPage() {
         />
       )}
 
-      {/* Photo ID — floating button + sheet (GATE_CUSTOMER_PHOTO_ID; hidden
-          entirely on a 404 from GET /api/photo-id, see usePhotoIdGate). */}
-      {photoIdAvailable && (
-        <PhotoIdFab onOpen={() => setShowPhotoId(true)} hasBottomNav={isMobileShell} hidden={showPhotoId} />
+      {/* Help pill + its sheet. Hidden while Photo ID or Ask Waves AI is on
+          screen, and on the Messages page (the chat it leads to). Behind its
+          own sheet it stays focusable: the Photo ID row hands focus back to
+          the pill first, so closing Photo ID returns there (as More does). */}
+      {helpAvailable && (
+        <HelpFab onOpen={openHelp} hasBottomNav={isMobileShell} unread={messagesGate.unread} buttonRef={helpButtonRef}
+          hidden={showPhotoId || showChat || activeTab === 'messages'} />
       )}
+      {showHelp && (
+        <HelpSheet
+          onClose={() => setShowHelp(false)}
+          onChat={chatAvailable ? openChatPage : null}
+          onOpenPhotoId={photoIdAvailable ? () => { helpButtonRef.current?.focus({ preventScroll: true }); setShowPhotoId(true); setShowHelp(false); } : null}
+          unread={messagesGate.unread}
+        />
+      )}
+      {/* Photo ID sheet (GATE_CUSTOMER_PHOTO_ID; unavailable on a 404 from
+          GET /api/photo-id, see usePhotoIdGate). */}
       <PhotoIdSheet
         open={showPhotoId && photoIdAvailable}
         onClose={() => setShowPhotoId(false)}

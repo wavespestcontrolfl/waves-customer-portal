@@ -22,19 +22,18 @@ import { Chip, ResultPhotos, V2_TIER_LABEL } from './photoIdShared';
 // reassurance). The server owns every fact in the result — this file only
 // lays it out. See the API contract in the PR description / task brief.
 //
-// Three pieces:
+// Two pieces:
 //   usePhotoIdGate()  — one GET /api/photo-id at mount. 404 means the
-//                       feature is dark for this account: both the floating
-//                       button and the More-sheet row must disappear
-//                       entirely, so this hook is the single source of
-//                       truth both entry points read.
-//   PhotoIdFab        — the floating "Photo ID" pill (bottom-right, above
-//                       the bottom nav on the mobile shell).
+//                       feature is dark for this account: every entry point
+//                       (the Help pill, the More-sheet row, the Learn tab)
+//                       must drop it, so this hook is the single source of
+//                       truth they all read.
 //   PhotoIdSheet      — the whole flow: pick a type -> add photos -> "your
 //                       photo id" analyzing state -> result card -> history.
 //
-// PortalPage owns the open/closed boolean and the gate hook so the FAB and
-// the More-sheet row can never disagree about whether the feature is live.
+// PortalPage owns the open/closed boolean and the gate hook so the entry
+// points can never disagree about whether the feature is live. The floating
+// pill itself is PortalPage's Help pill (HelpFab), shared with Messages.
 // =========================================================================
 
 // `value` is the subject the sheet tracks as `selectedType`. `palm` is its
@@ -172,7 +171,7 @@ function resizeImage(dataUrl, maxEdge = 1600, quality = 0.85) {
 }
 
 // =========================================================================
-// Gate hook — single GET /api/photo-id, shared by the FAB and the More sheet.
+// Gate hook — single GET /api/photo-id, shared by every Photo ID entry point.
 //
 // `sessionKey` should be something that changes whenever the authorized
 // account does — PortalPage passes its `sessionEpoch` from useAuth (already
@@ -244,46 +243,6 @@ export function usePhotoIdGate(sessionKey, enabled = true) {
   }, [refresh, sessionKey, enabled]);
 
   return { status, items, refresh };
-}
-
-// =========================================================================
-// Floating button
-// =========================================================================
-export function PhotoIdFab({ onOpen, hasBottomNav, hidden = false }) {
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      hidden={hidden}
-      aria-label="Photo ID — identify a bug, lawn spot, tree or shrub"
-      data-glass-accent=""
-      style={{
-        position: 'fixed',
-        right: 'calc(14px + env(safe-area-inset-right, 0px))',
-        // The mobile nav includes the home-indicator inset in its height.
-        // Keep the whole button above that bar, including its bottom gap.
-        bottom: hasBottomNav
-          ? 'calc(var(--portal-bottom-nav-height, calc(70px + env(safe-area-inset-bottom, 0px))) + 20px)'
-          : 'calc(20px + env(safe-area-inset-bottom, 0px))',
-        zIndex: 97,
-        minHeight: 48,
-        padding: '0 18px 0 14px',
-        borderRadius: 999,
-        display: hidden ? 'none' : 'inline-flex',
-        alignItems: 'center',
-        gap: 8,
-        border: 'none',
-        cursor: 'pointer',
-        fontFamily: FONTS.body,
-        fontSize: 15,
-        fontWeight: 700,
-        boxShadow: '0 12px 30px rgba(15,23,42,0.24)',
-      }}
-    >
-      <Icon name="camera" size={19} strokeWidth={2.25} />
-      Photo ID
-    </button>
-  );
 }
 
 // =========================================================================
