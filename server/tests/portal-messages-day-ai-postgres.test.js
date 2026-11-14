@@ -282,6 +282,8 @@ maybeDescribe('portal messages: office-hours Waves AI step-in (live Postgres)', 
     await DayAi.answerWaitingMessages({ now: DUE });
     expect((await metaOf(sent.id)).dayAi).toMatchObject({ outcome: 'superseded' });
     expect(await aiRows(pat.id)).toHaveLength(0);
-    expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+    // The one push is the office's own answer; the AI's text never went out.
+    expect(PushService.sendToCustomer).toHaveBeenCalledTimes(1);
+    expect(PushService.sendToCustomer.mock.calls[0][1]).toMatchObject({ body: 'Friday at 9.' });
   }, 60000);
 });
