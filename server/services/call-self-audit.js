@@ -103,10 +103,11 @@ function callerOnFileBlock(call) {
 }
 
 // What the auditor is shown for one call: the direction instruction, the
-// caller-on-file line and the first 5,000 characters of the transcript. One
-// builder, so the audit and any later second reading render exactly the
+// caller-on-file line and the transcript up to the span call_judge and the
+// reviewer get (CALL_TRANSCRIPT_CHARS, one limit for every nightly reader).
+// One builder, so the audit and any later second reading render exactly the
 // same text.
-const AUDIT_TRANSCRIPT_CHARS = 5000;
+const AUDIT_TRANSCRIPT_CHARS = CALL_TRANSCRIPT_CHARS;
 function auditUserContent(call) {
   return `${callDirectionBlock(call.direction)}${callerOnFileBlock(call)}\nTranscript:\n${String(call.transcription || '').slice(0, AUDIT_TRANSCRIPT_CHARS)}`;
 }
@@ -160,7 +161,7 @@ async function shadowJevJudge(call, prod, verdict, tally, gateBaselines = {}) {
   // The dark call gates' own decisions beside the same providers' answers
   // (call_gate_checks.v1); tallied apart so call_judge's counts keep their meaning.
   // Asked only when the WHOLE transcript fits the span the models and the
-  // reviewer are shown (94% of calls, measured 10-02): the baselines come from
+  // reviewer are shown (every call of the 30 days to 11-13): the baselines come from
   // extractions over the full call, so a cut-off call would show a gate's
   // reason to neither (Codex #5645 r1). Long calls are counted, not asked.
   tally.gateChecks = tally.gateChecks || { asked: 0, recorded: 0, failed: 0, skippedLong: 0 };
