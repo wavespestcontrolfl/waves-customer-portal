@@ -25,11 +25,13 @@
 
 const logger = require('../logger');
 const {
-  lawnWateringSmsLive, lawnWateringRuleLive, lawnWateringForecastLive, lawnWateringTextForecastLive, lawnWateringEveryVisitLive,
+  lawnWateringSmsLive, lawnWateringRuleLive, lawnWateringForecastLive, lawnWateringTextForecastLive, lawnWateringEveryVisitLive, lawnWateringTextHoursLive,
 } = require('../../config/feature-gates');
 const { etDateString } = require('../../utils/datetime-et');
 const { textForecastLine } = require('./lawn-watering-forecast');
-const { shortWateringText, shortForecastSentence } = require('./lawn-watering-short-text');
+const { shortWateringText, shortForecastSentence, eveningWindowDay } = require('./lawn-watering-short-text');
+const { countSegments } = require('../messaging/segment-counter');
+const { PURPOSE_POLICY } = require('../messaging/policy');
 const { sendWateringTechNote } = require('./lawn-watering-tech-note');
 
 const TEMPLATE_KEY = 'lawn_watering_instruction';
@@ -108,12 +110,50 @@ function wateringInstructionFresh(instruction, completedAt, nowMs) {
 }
 
 // The short steps from the same frozen fields, and the short rain sentence
-// when the full one is due. Null = full lines.
-function shortPlan(instruction, forecastLine) {
-  const short = shortWateringText(instruction);
+// when the full one is due. Null = full lines. `eveningDay` (GATE_LAWN_WATERING_TEXT_HOURS)
+// names the evening window in the steps; a text with a rain sentence never uses it
+// (the rain checkpoint is before the deadline, after tonight's window). A plan that
+// names it carries `eveningDay`, so the send can measure the RENDERED body against
+// the purpose's segment target (renderWithinSegmentTarget).
+function shortPlan(instruction, forecastLine, eveningDay = null) {
+  const day = forecastLine ? null : eveningDay;
+  const short = shortWateringText(instruction, { eveningDay: day });
   if (!short) return null;
   const rain = forecastLine && (shortForecastSentence(instruction, forecastLine) || forecastLine);
-  return { send: true, templateKey: SHORT_TEMPLATE_KEY, vars: { watering_lines: [short, rain].filter(Boolean).map(smsSafe).join(' ') } };
+  const plan = { send: true, templateKey: SHORT_TEMPLATE_KEY, vars: { watering_lines: [short, rain].filter(Boolean).map(smsSafe).join(' ') } };
+  return day ? { ...plan, eveningDay: day } : plan;
+}
+
+// The evening window the text may name (GATE_LAWN_WATERING_TEXT_HOURS), or null for today's wording. Reads the
+// customer's county and home once (loadWateringHome throws when the reads straddle a move), requires the visit to be
+// at that home, and judges the restriction policy in force at the window. Any failure logs one warning and gives null.
+async function eveningDayFor(svc, instruction, deps) {
+  try {
+    const { loadWateringHome } = require('../watering-home');
+    const { visitAtCustomerHome } = require('../stamped-address');
+    const { currentRestrictionPolicy } = require('../../config/irrigation-restrictions');
+    const { county, home } = await loadWateringHome({ id: svc.customer_id, city: svc.city, zip: svc.customer_zip });
+    const stamp = 'service_address_line1' in svc
+      ? svc
+      : (await deps.db('scheduled_services').where({ id: svc.id })
+        .first('service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')) || {};
+    if (!visitAtCustomerHome({ ...stamp, ...home })) return null;
+    return eveningWindowDay(instruction, (at) => currentRestrictionPolicy(at, { county }));
+  } catch (err) {
+    logger.warn(`[lawn-watering-sms] evening window lookup failed for scheduled_service ${svc?.id}; the text keeps its deadline wording: ${err.message}`);
+    return null;
+  }
+}
+
+// The plan, with the evening window when GATE_LAWN_WATERING_TEXT_HOURS is on and the text can use it: a short text
+// that will send, with no rain sentence and a plain "by <deadline>" run clause. Anything else reads nothing.
+async function planWithEveningWindow(planInput, svc, deps) {
+  const planned = lawnWateringSmsPlan(planInput);
+  const { instruction } = planInput;
+  const plainRun = ['water_in', 'hold_then_water_in'].includes(instruction?.state) && instruction.longWindow !== true;
+  if (!planned.send || planned.templateKey !== SHORT_TEMPLATE_KEY || planInput.forecastLine || !plainRun || !lawnWateringTextHoursLive()) return planned;
+  const eveningDay = await eveningDayFor(svc, instruction, deps);
+  return eveningDay ? lawnWateringSmsPlan({ ...planInput, eveningDay }) : planned;
 }
 
 // The text body for a plan. A missing or inactive short row falls back to the
@@ -132,6 +172,16 @@ async function renderWateringBody(plan, planInput, record, deps) {
   return { plan: full, body: full.send ? await render(full) : null };
 }
 
+// The evening wording must keep the purpose's segment target on the body as RENDERED (the selected template or variant,
+// as staff may have edited it; GH Codex #7889 r1). A body past it renders today's wording instead (planInput carries no
+// eveningDay). Rendering only reads: a variant pick writes nothing.
+async function renderWithinSegmentTarget(planned, planInput, record, deps) {
+  const rendered = await renderWateringBody(planned, planInput, record, deps);
+  if (!rendered.plan.eveningDay || !rendered.body) return rendered;
+  if (countSegments(rendered.body).segmentCount <= PURPOSE_POLICY[PURPOSE].maxSegments) return rendered;
+  return renderWateringBody(lawnWateringSmsPlan(planInput), planInput, record, deps);
+}
+
 function lawnWateringSmsPlan({
   instruction = null,
   isBackfill = false,
@@ -145,6 +195,7 @@ function lawnWateringSmsPlan({
   completionTextRequested = true,
   everyVisit = false,
   forecastLine,
+  eveningDay,
   shortText = true,
   nowMs = Date.now(),
 } = {}) {
@@ -167,7 +218,7 @@ function lawnWateringSmsPlan({
   if (!lines.length) return { send: false, reason: 'no_lines' };
   if (!wateringInstructionFresh(instruction, completedAt, nowMs)) return { send: false, reason: 'stale' };
   // shortText: false is the fallback for a missing or inactive short template row.
-  const short = shortText === false ? null : shortPlan(instruction, forecastLine);
+  const short = shortText === false ? null : shortPlan(instruction, forecastLine, eveningDay);
   if (short) return short;
   // GATE_LAWN_WATERING_TEXT_FORECAST: the rain sentence frozen with the
   // instruction (both sources agreed; textForecastLine) closes the text.
@@ -215,7 +266,7 @@ async function sendLawnWateringSms(args, deps) {
       forecastLine: lawnWateringTextForecastLive() && lawnWateringForecastLive() ? textForecastLine(instruction) : null,
       nowMs: Date.now(),
     };
-    const planned = lawnWateringSmsPlan(planInput);
+    const planned = await planWithEveningWindow(planInput, svc, deps);
     if (!planned.send) {
       // GATE_LAWN_WATERING_EVERY_VISIT: the text was due (every earlier skip,
       // such as no phone or a backfill, means it was not) but the visit froze
@@ -229,7 +280,7 @@ async function sendLawnWateringSms(args, deps) {
 
     // Fail closed on a missing/inactive template row: no body, no send. No
     // marker either, so a later retry after the row is fixed can still send.
-    const { plan, body } = await renderWateringBody(planned, planInput, record, deps);
+    const { plan, body } = await renderWithinSegmentTarget(planned, planInput, record, deps);
     const templateKey = plan.templateKey || TEMPLATE_KEY;
     if (!body) {
       logger.warn(`[lawn-watering-sms] template ${templateKey} missing, inactive or unrenderable; no text sent for service_record ${record.id}`);
