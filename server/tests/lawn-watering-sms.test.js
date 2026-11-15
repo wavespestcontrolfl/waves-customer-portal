@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/watering-home', () => ({ loadWateringHome: jest.fn() }));
 
 const logger = require('../services/logger');
 const {
@@ -801,5 +802,181 @@ describe('short lawn watering text', () => {
     const sent = h.sendCustomerMessage.mock.calls[0][0];
     expect(sent.body).toMatch(/^Watering after today's visit: Skip your turf watering until today's treatment has dried\./);
     expect(sent.metadata.templateKey).toBe('lawn_watering_instruction');
+  });
+});
+
+describe('GATE_LAWN_WATERING_TEXT_HOURS: the short text names the evening window', () => {
+  const { loadWateringHome } = require('../services/watering-home');
+  const { parseETDateTime } = require('../utils/datetime-et');
+  const ENV_KEYS = ['GATE_LAWN_WATERING_SMS', 'GATE_LAWN_WATERING_RULE', 'GATE_LAWN_WATERING_TEXT_HOURS', 'IRRIGATION_RESTRICTION_POLICY'];
+  const NOW = parseETDateTime('2026-11-12T18:00');
+  const ORDER = {
+    maxDaysPerWeek: 1,
+    effectiveFrom: '2026-08-27',
+    expiresOn: '2026-12-31',
+    label: 'Test order',
+    hoursNote: 'on your assigned day, during your area\'s allowed hours',
+    allowedHours: [{ start: '00:01', end: '04:00' }, { start: '20:00', end: '23:59' }],
+    coverage: { counties: ['Manatee'], partial: [] },
+  };
+  const HOME = { address_line1: '1 Test St', address_line2: null, city: 'Bradenton', zip: '34205' };
+  let saved;
+  beforeEach(() => {
+    saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+    process.env.GATE_LAWN_WATERING_SMS = 'true';
+    process.env.GATE_LAWN_WATERING_RULE = 'true';
+    process.env.GATE_LAWN_WATERING_TEXT_HOURS = 'true';
+    process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify(ORDER);
+    jest.clearAllMocks();
+    jest.spyOn(Date, 'now').mockReturnValue(NOW.getTime());
+    loadWateringHome.mockResolvedValue({ prefs: {}, county: 'Manatee', moveStamp: null, home: HOME });
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+    }
+  });
+
+  const frozen = (over = {}) => ({
+    state: 'water_in',
+    lines: ['Water in today\u2019s treatment with about \u00bc inch by Fri 12 PM.'],
+    completedAt: NOW.toISOString(),
+    waterInBy: parseETDateTime('2026-11-13T12:00').toISOString(),
+    waterInByLabel: 'Fri 12 PM',
+    waterInInches: 0.25,
+    amountOnly: true,
+    ...over,
+  });
+  async function send({ instruction = frozen(), svc = {}, forecast = false } = {}) {
+    const getTemplate = jest.fn(async (key, vars) => `Lawn watering: ${vars.watering_lines}`);
+    const state = {
+      record: { id: 'rec-h', structured_notes: {} },
+      svc: { id: 'svc-h', customer_id: 'cust-h', cust_phone: '+19415550100', city: 'Bradenton', customer_zip: '34205', service_address_line1: null, ...svc },
+      notes: { lawnWateringFreeze: { wateringInstruction: instruction } },
+      isBackfill: false,
+      deliveryMode: 'auto_send',
+      internalOnly: false,
+      completionTextRequested: true,
+    };
+    const deps = { db: {}, sendCustomerMessage: jest.fn(async () => ({ sent: true })), getTemplate, mergeNotes: jest.fn(async () => {}), throwIfDeliveryUnverified: (r) => r };
+    const result = await sendLawnWateringSms(state, deps);
+    return { result, body: deps.sendCustomerMessage.mock.calls[0]?.[0].body, lines: getTemplate.mock.calls[0]?.[1].watering_lines, deps };
+  }
+  const TODAY = 'Water about 1/4 inch by Fri 12 PM, even on an off day.';
+  const TONIGHT = 'Water about 1/4 inch tonight between 8 PM and midnight, even on an off day.';
+
+  test('gate on: the text names tonight\'s window', async () => {
+    const out = await send();
+    expect(out.result).toEqual({ status: 'sent' });
+    expect(out.body).toBe(`Lawn watering: ${TONIGHT}`);
+    expect(loadWateringHome).toHaveBeenCalledWith({ id: 'cust-h', city: 'Bradenton', zip: '34205' });
+  });
+
+  test('gate on, a timed hold first: the window is the evening of the hold end', async () => {
+    const out = await send({ instruction: frozen({
+      state: 'hold_then_water_in',
+      holdUntil: parseETDateTime('2026-11-13T13:00').toISOString(),
+      holdUntilLabel: 'Fri 1 PM',
+      waterInBy: parseETDateTime('2026-11-14T13:00').toISOString(),
+      waterInByLabel: 'Sat 1 PM',
+    }) });
+    expect(out.lines).toBe('Skip lawn watering until Fri 1 PM. Then water about 1/4 inch Fri between 8 PM and midnight, even on an off day.');
+  });
+
+  test('gate off: no read of the home and today\'s text, byte for byte', async () => {
+    delete process.env.GATE_LAWN_WATERING_TEXT_HOURS;
+    const off = await send();
+    expect(off.lines).toBe(TODAY);
+    expect(loadWateringHome).not.toHaveBeenCalled();
+    process.env.GATE_LAWN_WATERING_TEXT_HOURS = '1';
+    expect((await send()).lines).toBe(TODAY);
+    expect(loadWateringHome).not.toHaveBeenCalled();
+  });
+
+  test('a text with no plain run clause reads nothing', async () => {
+    const out = await send({ instruction: { ...HOLD, completedAt: NOW.toISOString() } });
+    expect(out.result).toEqual({ status: 'sent' });
+    expect(loadWateringHome).not.toHaveBeenCalled();
+    await send({ instruction: frozen({ longWindow: true }) });
+    expect(loadWateringHome).not.toHaveBeenCalled();
+  });
+
+  test('a text that carries the rain sentence keeps today\'s wording', async () => {
+    process.env.GATE_LAWN_WATERING_FORECAST = 'true';
+    process.env.GATE_LAWN_WATERING_TEXT_FORECAST = 'true';
+    try {
+      const out = await send({ instruction: frozen({ forecast: { line: 'About 1/2 inch of rain is forecast by Fri 6 AM. If at least 1/4 inch has fallen by then, skip the run.', inches: 0.5, checkpointLabel: 'Fri 6 AM', source: 'open_meteo', agreement: { source: 'nws', peakChance: 70, hours: 3 } } }) });
+      expect(out.lines).toMatch(/^Water about 1\/4 inch by Fri 12 PM, even on an off day\. Rain forecast/);
+      expect(out.lines).not.toMatch(/between 8 PM/);
+      expect(loadWateringHome).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_LAWN_WATERING_FORECAST;
+      delete process.env.GATE_LAWN_WATERING_TEXT_FORECAST;
+    }
+  });
+
+  test('a failed home read keeps today\'s wording, warns once and still sends', async () => {
+    loadWateringHome.mockRejectedValue(new Error('address changed while the watering inputs were being read'));
+    const out = await send();
+    expect(out.result).toEqual({ status: 'sent' });
+    expect(out.lines).toBe(TODAY);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn.mock.calls[0][0]).toMatch(/evening window lookup failed/);
+  });
+
+  test('a visit stamped at another address keeps today\'s wording', async () => {
+    const out = await send({ svc: { service_address_line1: '99 Other Rd', service_address_line2: null, service_address_city: 'Sarasota', service_address_zip: '34236' } });
+    expect(out.lines).toBe(TODAY);
+    // The same stamp at the customer's own home still gets the window.
+    const home = await send({ svc: { service_address_line1: '1 Test Street', service_address_city: 'Bradenton', service_address_zip: '34205' } });
+    expect(home.lines).toBe(TONIGHT);
+  });
+
+  test('a row without the stamp columns is read once by id', async () => {
+    const getStamp = jest.fn(async () => ({ service_address_line1: '99 Other Rd', service_address_city: 'Sarasota', service_address_zip: '34236' }));
+    const where = jest.fn(() => ({ first: getStamp }));
+    const getTemplate = jest.fn(async (key, vars) => `Lawn watering: ${vars.watering_lines}`);
+    const svc = { id: 'svc-h', customer_id: 'cust-h', cust_phone: '+19415550100', city: 'Bradenton', customer_zip: '34205' };
+    await sendLawnWateringSms({
+      record: { id: 'rec-h', structured_notes: {} }, svc, notes: { lawnWateringFreeze: { wateringInstruction: frozen() } },
+      isBackfill: false, deliveryMode: 'auto_send', internalOnly: false, completionTextRequested: true,
+    }, { db: jest.fn(() => ({ where })), sendCustomerMessage: jest.fn(async () => ({ sent: true })), getTemplate, mergeNotes: jest.fn(async () => {}), throwIfDeliveryUnverified: (r) => r });
+    expect(where).toHaveBeenCalledWith({ id: 'svc-h' });
+    expect(getTemplate.mock.calls[0][1].watering_lines).toBe(TODAY);
+  });
+
+  test.each([
+    ['no policy in force (expired)', { ...ORDER, expiresOn: '2026-11-01' }],
+    ['a county the order does not cover', { ...ORDER, coverage: { counties: ['Sarasota'], partial: [] } }],
+    ['an order with no evening window', { ...ORDER, allowedHours: [{ start: '00:01', end: '04:00' }] }],
+    ['no hour restriction', { ...ORDER, allowedHours: undefined, noHourRestriction: true }],
+  ])('%s keeps today\'s wording', async (_name, policy) => {
+    process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify(policy);
+    expect((await send()).lines).toBe(TODAY);
+  });
+
+  test('a shape the window would push past two segments keeps today\'s wording', async () => {
+    const { shortWateringText } = require('../services/service-report/lawn-watering-short-text');
+    const lead = 'Lawn watering: '.length;
+    const fit = (pad) => frozen({
+      state: 'hold_then_water_in',
+      holdUntil: parseETDateTime('2026-11-13T13:00').toISOString(),
+      holdUntilLabel: `Fri 1 PM${'x'.repeat(pad)}`,
+      waterInBy: parseETDateTime('2026-11-14T13:00').toISOString(),
+      waterInByLabel: 'Sat 1 PM',
+      amountOnly: false,
+      minutes: { spray: 12, rotor: 30 },
+    });
+    const sized = (instruction, eveningDay) => lead + shortWateringText(instruction, { eveningDay }).length;
+    let pad = 0;
+    while (sized(fit(pad), null) < 303) pad += 1;
+    const instruction = fit(pad);
+    expect(sized(instruction, null)).toBeLessThanOrEqual(306);
+    expect(sized(instruction, 'Fri')).toBeGreaterThan(306);
+    const out = await send({ instruction });
+    expect(out.lines).toBe(lawnWateringSmsPlan(planArgs({ instruction, completedAt: instruction.completedAt })).vars.watering_lines);
+    expect(out.lines).not.toMatch(/between 8 PM/);
+    expect(out.lines).toMatch(/Then water by Sat 1 PM: spray zones/);
   });
 });

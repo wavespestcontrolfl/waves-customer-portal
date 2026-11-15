@@ -1,5 +1,6 @@
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
-const { shortWateringText, shortForecastSentence } = require('../services/service-report/lawn-watering-short-text');
+const { shortWateringText, shortForecastSentence, eveningWindowDay } = require('../services/service-report/lawn-watering-short-text');
+const { parseETDateTime } = require('../utils/datetime-et');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { PURPOSE_POLICY } = require('../services/messaging/policy');
 
@@ -97,5 +98,146 @@ describe('shortForecastSentence', () => {
   });
   test('no full sentence due: none', () => {
     expect(shortForecastSentence({ ...water, forecast: { inches: 0.4, checkpointLabel: 'Sat 1 PM' } }, null)).toBeNull();
+  });
+});
+
+// GATE_LAWN_WATERING_TEXT_HOURS (owner 2026-11-15): only the "by <label>" phrase of the plain run clause becomes the
+// evening window. Default (no option, or null) = today's text, byte for byte.
+describe('shortWateringText with the evening window', () => {
+  const base = { state: 'water_in', waterInByLabel: 'Thu 12 PM', waterInInches: 0.25, amountOnly: true };
+  const TONIGHT = { eveningDay: 'tonight' };
+  const FRI = { eveningDay: 'Fri' };
+
+  test.each([
+    ['amount only', base, 'Water about 1/4 inch by Thu 12 PM, even on an off day.',
+      'Water about 1/4 inch tonight between 8 PM and midnight, even on an off day.',
+      'Water about 1/4 inch Fri between 8 PM and midnight, even on an off day.'],
+    ['measured minutes', { ...base, amountOnly: false, minutes: { measured: 20 } }, 'Water by Thu 12 PM, about 20 min per zone, even on an off day.',
+      'Water tonight between 8 PM and midnight, about 20 min per zone, even on an off day.',
+      'Water Fri between 8 PM and midnight, about 20 min per zone, even on an off day.'],
+    ['spray and rotor', { ...base, amountOnly: false, minutes: { spray: 12, rotor: 30 } }, 'Water by Thu 12 PM: spray zones about 12 min, rotor zones about 30 min, even on an off day.',
+      'Water tonight between 8 PM and midnight: spray zones about 12 min, rotor zones about 30 min, even on an off day.',
+      'Water Fri between 8 PM and midnight: spray zones about 12 min, rotor zones about 30 min, even on an off day.'],
+    ['one kind of head', { ...base, amountOnly: false, minutes: { rotor: 30 } }, 'Water by Thu 12 PM, about 30 min per zone, even on an off day.',
+      'Water tonight between 8 PM and midnight, about 30 min per zone, even on an off day.',
+      'Water Fri between 8 PM and midnight, about 30 min per zone, even on an off day.'],
+    ['unknown heads', { ...base, amountOnly: false, minutes: { unknown: true } }, 'Water by Thu 12 PM, one full cycle on each zone, even on an off day.',
+      'Water tonight between 8 PM and midnight, one full cycle on each zone, even on an off day.',
+      'Water Fri between 8 PM and midnight, one full cycle on each zone, even on an off day.'],
+  ])('%s', (_name, instruction, today, tonight, weekday) => {
+    expect(shortWateringText(instruction)).toBe(today);
+    expect(shortWateringText(instruction, {})).toBe(today);
+    expect(shortWateringText(instruction, { eveningDay: null })).toBe(today);
+    expect(shortWateringText(instruction, TONIGHT)).toBe(tonight);
+    expect(shortWateringText(instruction, FRI)).toBe(weekday);
+  });
+
+  test('a hold first keeps the hold sentence and names the evening window after it', () => {
+    const held = { ...base, state: 'hold_then_water_in', holdUntil: '2026-11-13T18:00:00.000Z', holdUntilLabel: 'Fri 1 PM' };
+    expect(shortWateringText(held)).toBe('Skip lawn watering until Fri 1 PM. Then water about 1/4 inch by Thu 12 PM, even on an off day.');
+    expect(shortWateringText(held, FRI)).toBe('Skip lawn watering until Fri 1 PM. Then water about 1/4 inch Fri between 8 PM and midnight, even on an off day.');
+  });
+
+  test('the long window, the hold-only and the no-change texts ignore the option', () => {
+    const long = { ...base, longWindow: true, waterInByLabel: 'Fri, Nov 20 at 6 PM' };
+    expect(shortWateringText(long, TONIGHT)).toBe(shortWateringText(long));
+    const hold = { state: 'hold', holdUntil: '2026-11-13T18:00:00.000Z', holdUntilLabel: 'Fri 1 PM' };
+    expect(shortWateringText(hold, TONIGHT)).toBe('Skip lawn watering until Fri 1 PM.');
+    expect(shortWateringText({ state: 'none' }, TONIGHT)).toBe('No change. Keep your usual schedule.');
+  });
+
+  test('the later total sentence keeps its own deadline', () => {
+    const withLater = { ...base, completedAt: '2026-11-12T23:00:00.000Z', later: { waterInInches: 0.5, waterInBy: '2026-11-19T23:00:00.000Z' } };
+    const text = shortWateringText(withLater, TONIGHT);
+    expect(text).toMatch(/^Water about 1\/4 inch tonight between 8 PM and midnight, even on an off day\. Get about 1\/2 inch total by /);
+    expect(text.endsWith(shortWateringText(withLater).split('even on an off day. ')[1])).toBe(true);
+  });
+
+  test('every evening sentence is GSM-7 and fits the purpose within two segments with the lead-in', () => {
+    const { maxSegments } = PURPOSE_POLICY.lawn_watering_instruction;
+    const shapes = [base, { ...base, amountOnly: false, minutes: { spray: 12, rotor: 30 } }, { ...base, state: 'hold_then_water_in', holdUntil: '2026-11-13T18:00:00.000Z', holdUntilLabel: 'Fri 1 PM' }];
+    shapes.forEach((shape) => {
+      const { encoding, segmentCount } = countSegments(`Lawn watering: ${shortWateringText(shape, { eveningDay: 'Wed' })}`);
+      expect(encoding).toBe('GSM_7');
+      expect(segmentCount).toBeLessThanOrEqual(maxSegments);
+    });
+  });
+});
+
+describe('eveningWindowDay', () => {
+  const et = (s) => parseETDateTime(s).toISOString();
+  const ORDER = Object.freeze({ allowedHours: [{ start: '00:01', end: '04:00' }, { start: '20:00', end: '23:59' }], noHourRestriction: false });
+  const inForce = () => ORDER;
+  const at = (completed, deadline, hold = null) => ({
+    state: hold ? 'hold_then_water_in' : 'water_in', completedAt: et(completed), waterInBy: et(deadline), ...(hold ? { holdUntil: et(hold) } : {}),
+  });
+
+  test('the same evening is tonight', () => {
+    expect(eveningWindowDay(at('2026-11-12T14:00', '2026-11-13T12:00'), inForce)).toBe('tonight');
+  });
+
+  test('a timed hold ending Friday 1 PM names Friday', () => {
+    expect(eveningWindowDay(at('2026-11-12T14:00', '2026-11-14T13:00', '2026-11-13T13:00'), inForce)).toBe('Fri');
+  });
+
+  test('a hold ending after 8 PM moves to the next evening when that still ends by the deadline, else nothing', () => {
+    expect(eveningWindowDay(at('2026-11-12T14:00', '2026-11-15T12:00', '2026-11-13T21:00'), inForce)).toBe('Sat');
+    expect(eveningWindowDay(at('2026-11-12T14:00', '2026-11-14T22:00', '2026-11-13T21:00'), inForce)).toBeNull();
+  });
+
+  test('a completion after 8 PM has no window that evening', () => {
+    expect(eveningWindowDay(at('2026-11-12T20:30', '2026-11-13T12:00'), inForce)).toBeNull();
+    expect(eveningWindowDay(at('2026-11-12T20:30', '2026-11-13T23:59'), inForce)).toBe('Fri');
+  });
+
+  test('a deadline before 11:59 PM that night has no window', () => {
+    expect(eveningWindowDay(at('2026-11-12T14:00', '2026-11-12T23:00'), inForce)).toBeNull();
+    expect(eveningWindowDay(at('2026-11-12T14:00', '2026-11-12T23:59'), inForce)).toBe('tonight');
+  });
+
+  test('a window six or more days out keeps the deadline wording', () => {
+    expect(eveningWindowDay(at('2026-11-12T14:00', '2026-11-20T00:00', '2026-11-18T09:00'), inForce)).toBeNull();
+    expect(eveningWindowDay(at('2026-11-12T14:00', '2026-11-20T00:00', '2026-11-17T09:00'), inForce)).toBe('Tue');
+  });
+
+  test.each([
+    ['no policy', () => null],
+    ['no hours on the policy', () => ({ allowedHours: null, noHourRestriction: false })],
+    ['no hour restriction', () => ({ allowedHours: null, noHourRestriction: true })],
+    ['no hour restriction beside windows', () => ({ allowedHours: ORDER.allowedHours, noHourRestriction: true })],
+    ['an overnight window only', () => ({ allowedHours: [{ start: '00:01', end: '04:00' }], noHourRestriction: false })],
+    ['an evening window that ends early', () => ({ allowedHours: [{ start: '20:00', end: '23:00' }], noHourRestriction: false })],
+    ['an evening window that starts late', () => ({ allowedHours: [{ start: '21:00', end: '23:59' }], noHourRestriction: false })],
+  ])('%s', (_name, policyAt) => {
+    expect(eveningWindowDay(at('2026-11-12T14:00', '2026-11-13T12:00'), policyAt)).toBeNull();
+  });
+
+  test('a policy that is not in force at the window gives nothing', () => {
+    const lapses = (when) => (instant) => (instant.getTime() < parseETDateTime(when).getTime() ? ORDER : null);
+    const friday = at('2026-11-12T14:00', '2026-11-14T12:00', '2026-11-13T09:00');
+    expect(eveningWindowDay(friday, lapses('2026-11-13T20:01'))).toBe('Fri');
+    expect(eveningWindowDay(friday, lapses('2026-11-13T20:00'))).toBeNull();
+    expect(eveningWindowDay(friday, lapses('2026-11-13T12:00'))).toBeNull();
+  });
+
+  test('the policy is read at the window start, built on the ET wall clock across a fall-back and a spring-forward', () => {
+    const seen = [];
+    const spy = (instant) => { seen.push(instant.toISOString()); return ORDER; };
+    // Sat Oct 31 2026 2 PM, hold to Sun Nov 1 (the fall-back Sunday): 8 PM is EST, 01:00Z the next day.
+    expect(eveningWindowDay(at('2026-10-31T14:00', '2026-11-02T12:00', '2026-11-01T13:00'), spy)).toBe('Sun');
+    // Sat Mar 13 2027 2 PM, hold to Sun Mar 14 (the spring-forward Sunday): 8 PM is EDT, 00:00Z the next day.
+    expect(eveningWindowDay(at('2027-03-13T14:00', '2027-03-15T12:00', '2027-03-14T13:00'), spy)).toBe('Sun');
+    expect(seen).toEqual(['2026-11-02T01:00:00.000Z', '2027-03-15T00:00:00.000Z']);
+    // Tonight on the fall-back Sunday itself.
+    expect(eveningWindowDay(at('2026-11-01T14:00', '2026-11-02T12:00'), inForce)).toBe('tonight');
+  });
+
+  test.each([
+    ['no instruction', null, inForce],
+    ['no policy reader', at('2026-11-12T14:00', '2026-11-13T12:00'), undefined],
+    ['no deadline', { state: 'water_in', completedAt: '2026-11-12T19:00:00.000Z' }, inForce],
+    ['no completion time', { state: 'water_in', waterInBy: '2026-11-13T19:00:00.000Z' }, inForce],
+  ])('%s', (_name, instruction, policyAt) => {
+    expect(eveningWindowDay(instruction, policyAt)).toBeNull();
   });
 });
