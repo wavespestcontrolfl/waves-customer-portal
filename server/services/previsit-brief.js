@@ -63,6 +63,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
+const { labelAnimalWarningsForVisit } = require('./lawn-label-animal-lines');
 const { compilePropertyAlerts } = require('./nextstop-alerts');
 // The shared deterministic access-code redactor (context-aggregator's own
 // layer) — re-applied here to EVERY free-text slice at the LLM boundary.
@@ -155,6 +156,9 @@ async function deterministicVisitFacts(svc, dbh = db) {
       products,
     };
   }
+  // Label warnings for the animal kinds on the Pets form (owner 2026-11-15, no gate: it sends nothing). Additive: the key
+  // is present only for a lawn treatment member at the customer's home with such a kind on file. Never throws.
+  const animalWarnings = prefsUnavailable ? [] : await labelAnimalWarningsForVisit(svc, prefs, dbh);
   // customerFlagged (PR 3a — customer photos before a visit, dark behind
   // GATE_VISIT_PREP_PHOTOS): present ONLY when the gate is live AND the
   // stop's CURRENT membership has submissions — visitPrepPhotosLive() is
@@ -178,6 +182,7 @@ async function deterministicVisitFacts(svc, dbh = db) {
     last_visit: lastVisit,
     ...(history.available ? {} : { history_unavailable: true }),
     ...(customerFlagged ? { customerFlagged } : {}),
+    ...(animalWarnings.length ? { labelAnimalWarnings: animalWarnings } : {}),
   };
 }
 

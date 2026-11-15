@@ -271,6 +271,28 @@ function AccessSection({ alerts, access, gate = null }) {
   );
 }
 
+// Label warnings for the animal kinds on the customer's Pets form (facts.labelAnimalWarnings, lawn treatment visits
+// only; the server picks the fixed lines). Shown as given; a shape this panel does not know renders nothing.
+function firstLabelWarnings(memberBits) {
+  return memberBits.map((m) => m.facts?.labelAnimalWarnings).find((w) => Array.isArray(w) && w.length) || null;
+}
+
+function LabelWarningsSection({ warnings }) {
+  const rows = (Array.isArray(warnings) ? warnings : []).filter((w) => w && typeof w.label === 'string' && Array.isArray(w.lines) && w.lines.length);
+  if (!rows.length) return null;
+  return (
+    <div data-testid="visit-brief-label-warnings">
+      <SectionLabel>Label warnings</SectionLabel>
+      {rows.map((w) => (
+        <div key={w.kind || w.label} style={{ margin: '6px 0 0' }}>
+          <p style={{ ...factRowStyle, fontWeight: 500 }}>{w.label} on file ({(Array.isArray(w.names) ? w.names : []).join(', ') || 'no name'})</p>
+          {w.lines.map((line) => <p key={line} style={factRowStyle}>{line}</p>)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // Access codes the customer gave (access codes section, read only): the
 // active standing codes plus one-visit codes tied to a visit of this stop.
 // Read per visit (owner 2026-10-05: a technician sees the codes of a visit
@@ -1214,6 +1236,8 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   // code changed since generation would otherwise show stale next to the
   // freshly-built alert text.
   const access = memberBits.map((m) => m.facts?.access || m.visitBrief?.access).find(Boolean) || null;
+  // Label warnings ride the lawn member's own facts (a grouped stop's other members carry none): the first that has them.
+  const labelWarnings = firstLabelWarnings(memberBits);
   // Customer-sent photos before the visit — same "first member that
   // answered carries it" dedup as access (deterministicVisitFacts resolves
   // ONE stop-level list, identical on every member's own facts). Keep the
@@ -1265,6 +1289,8 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         visitIds={stop.services.map((m) => m.id).filter(Boolean)}
         shownCodes={CODE_LABELS.map(([key]) => [PROFILE_CODE_KIND[key], access?.codes?.[key]]).filter(([, v]) => Boolean(v))}
       />
+
+      <LabelWarningsSection warnings={labelWarnings} />
 
       {awayWatchLines && (
         <div data-testid="visit-brief-away-watch">
