@@ -144,6 +144,19 @@ test('the app plan card carries the watering-time line the email carries (hours 
   expect(result.restrictionNote).toBe(decision.payload.restriction_note);
 });
 
+test('hours set after Monday keep this week\'s card and add the line to it at once', async () => {
+  const { decision } = fixture(); // decided under the rule without hours
+  expect(decision.payload.restriction_note).not.toContain('12:01');
+  process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({
+    maxDaysPerWeek: 1, expiresOn: '2099-12-31', label: 'Synthetic test policy', hoursNote: 'on your assigned day', coverage: 'all',
+    allowedHours: [{ start: '00:01', end: '04:00' }, { start: '20:00', end: '23:59' }],
+  });
+  const result = await loadCustomerWateringPlan('fixture-customer', { now });
+  expect(result).not.toBeNull();
+  expect(result.instruction).toBe(decision.payload.week_plan);
+  expect(result.restrictionNote).toBe(`${decision.payload.restriction_note} On your watering day, use the 12:01 to 4 AM window, not the evening one. A lawn that stays wet all night gets more fungus.`);
+});
+
 test('the app plan card keeps today\'s note when the policy has no hours', async () => {
   const { decision } = fixture();
   const result = await loadCustomerWateringPlan('fixture-customer', { now });

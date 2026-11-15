@@ -264,9 +264,8 @@ function restrictionNote(restriction) {
   const hours = restriction.hoursNote ? `, ${restriction.hoursNote}` : '';
   const base = `${restriction.label}: lawn watering is limited to ${dayWord} a week${hours}, through ${restriction.expiresOn}. Water on your assigned ${days === 1 ? 'day' : 'days'} only.`;
   // The watering-time line (owner 2026-11-14, decision 1A, ungated), the same sentence as the visit card and the lawn
-  // prep guide. It needs allowedHours or noHourRestriction in the rule; no snapshot decided before the hours went into
-  // the live rule (2026-11-15) carries either, so those keep today's note byte for byte. The restriction may be the
-  // policy frozen with the plan, read back from JSON.
+  // prep guide. It needs allowedHours or noHourRestriction in the rule in force; without either the note is today's,
+  // byte for byte.
   const timeLine = wateringTimeLine(restriction);
   return timeLine ? `${base} ${timeLine}` : base;
 }
@@ -922,8 +921,9 @@ function etDateStringPlusDays(ymd, days) {
 // label, county: an operator changing hoursNote alone must retire Monday's
 // snapshot from the report just like a day-cap change would.
 // allowedHours is deliberately NOT in the identity: the watering-time line it feeds is advice inside the allowed
-// hours, the Monday snapshot keeps the rule it was decided under, and an hours-only change shows from the next
-// Monday. (Adding it would retire every current-week snapshot as "policy_changed" when the field was first set.)
+// hours, not part of the plan, so an hours-only change must not retire this week's plan (adding it would retire
+// every current-week snapshot as "policy_changed" the moment the field was first set). The app card re-renders the
+// note under the rule in force, so it shows an hours change at once; a sent email keeps the note it was sent with.
 const POLICY_IDENTITY_FIELDS = ['maxDaysPerWeek', 'effectiveFrom', 'expiresOn', 'label', 'hoursNote', 'county'];
 function policyIdentity(p) {
   return JSON.stringify(POLICY_IDENTITY_FIELDS.map((k) => (k === 'maxDaysPerWeek' ? Number(p?.[k]) : String(p?.[k] ?? ''))));

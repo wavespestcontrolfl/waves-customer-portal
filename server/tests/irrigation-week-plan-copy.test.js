@@ -369,6 +369,8 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
     expect(_private.samePolicy({ ...POLICY, hoursNote: 'x' }, { ...POLICY, hoursNote: 'y' })).toBe(false);
     expect(_private.samePolicy({ ...POLICY, effectiveFrom: '2026-08-27' }, { ...POLICY, effectiveFrom: '2026-09-01' })).toBe(false);
+    // allowedHours is not identity: setting the hours mid-week keeps this week's plan (the line it feeds is advice).
+    expect(_private.samePolicy(POLICY, { ...POLICY, allowedHours: [{ start: '00:01', end: '04:00' }, { start: '20:00', end: '23:59' }] })).toBe(true);
     stubSelect(row(POLICY));
     expect(await loadCurrentWeekPlan('c1', { now: new Date('2026-10-05T12:00:00Z') })).toBeNull(); // policy expired since Monday
     // A snapshot whose plan week straddles the expiry (recorded planWeekEnd) is no longer covered → null.
@@ -719,7 +721,7 @@ describe('restrictionNote: the watering-time line (owner 2026-11-14, decision 1A
     expect(note({ ...ONE_DAY, allowedHours: ORDER_HOURS })).toBe(`${TODAYS_NOTE} ${MIDNIGHT}`);
   });
 
-  test('without allowedHours (every older snapshot) the note is today\'s, byte for byte', () => {
+  test('without allowedHours (the rule before the hours were set) the note is today\'s, byte for byte', () => {
     expect(note(ONE_DAY)).toBe(TODAYS_NOTE);
     expect(note({ ...ONE_DAY, allowedHours: null })).toBe(TODAYS_NOTE);
     expect(note({ ...ONE_DAY, allowedHours: null, noHourRestriction: false })).toBe(TODAYS_NOTE);
@@ -728,11 +730,6 @@ describe('restrictionNote: the watering-time line (owner 2026-11-14, decision 1A
   test('a prohibited rule and a null restriction get no line', () => {
     expect(note({ ...ONE_DAY, maxDaysPerWeek: 0, allowedHours: ORDER_HOURS })).toBe('SWFWMD Modified Phase III water shortage order: lawn irrigation is not permitted, through 2026-10-01.');
     expect(note(null)).toBe('');
-  });
-
-  test('a restriction read back from stored JSON gives the same note', () => {
-    const stored = JSON.parse(JSON.stringify({ ...ONE_DAY, allowedHours: Object.freeze(ORDER_HOURS.map((w) => Object.freeze({ ...w }))) }));
-    expect(note(stored)).toBe(`${TODAYS_NOTE} ${MIDNIGHT}`);
   });
 
   test('a rule whose window covers 6 to 8 AM gets the 6 to 8 AM sentence', () => {
