@@ -263,10 +263,11 @@ function restrictionNote(restriction) {
   const dayWord = days === 1 ? 'one day' : `${days} days`;
   const hours = restriction.hoursNote ? `, ${restriction.hoursNote}` : '';
   const base = `${restriction.label}: lawn watering is limited to ${dayWord} a week${hours}, through ${restriction.expiresOn}. Water on your assigned ${days === 1 ? 'day' : 'days'} only.`;
-  // The watering-time line (owner 2026-11-14, decision 1A, ungated): only a restriction that carries allowedHours
-  // gets it, so every snapshot decided before the field existed keeps today's note byte for byte. The restriction
-  // may be the policy frozen with the plan, read back from JSON (plain arrays and objects).
-  const timeLine = Array.isArray(restriction.allowedHours) ? wateringTimeLine(restriction) : '';
+  // The watering-time line (owner 2026-11-14, decision 1A, ungated), the same sentence as the visit card and the lawn
+  // prep guide. It needs allowedHours or noHourRestriction in the rule; no snapshot decided before the hours went into
+  // the live rule (2026-11-15) carries either, so those keep today's note byte for byte. The restriction may be the
+  // policy frozen with the plan, read back from JSON.
+  const timeLine = wateringTimeLine(restriction);
   return timeLine ? `${base} ${timeLine}` : base;
 }
 

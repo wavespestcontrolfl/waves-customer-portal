@@ -745,6 +745,10 @@ describe('restrictionNote: the watering-time line (owner 2026-11-14, decision 1A
     expect(note({ ...ONE_DAY, allowedHours: [{ start: '09:00', end: '17:00' }] })).toBe(TODAYS_NOTE);
   });
 
+  test('a rule with no hour limits gets the 6 to 8 AM sentence, the same as the visit card and the prep guide', () => {
+    expect(note({ ...ONE_DAY, allowedHours: null, noHourRestriction: true })).toBe(`${TODAYS_NOTE} On your watering day, water between 6 and 8 AM.`);
+  });
+
   test('renderWeekPlanEmail carries the line in restriction_note and leaves the other fields alone', () => {
     const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY, ...SPRAY });
     const before = renderWeekPlanEmail(plan, CTX);
