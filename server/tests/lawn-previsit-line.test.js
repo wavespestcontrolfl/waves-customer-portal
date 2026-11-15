@@ -41,6 +41,12 @@ describe('the sentence table', () => {
     },
   );
 
+  test('emailLinks: the same words, the pets link with its full https address; the text form is unchanged', () => {
+    expect(buildLawnPrevisitLine({ petsStructured: [], emailLinks: true })).toBe(`${NORMAL('pets')}\n\nHave pets? Add them here: https://portal.wavespestcontrol.com/?tab=property#pets`);
+    expect(buildLawnPrevisitLine({ petsStructured: [dog('Biscuit')], emailLinks: true })).toBe(NORMAL('Biscuit'));
+    expect(buildLawnPrevisitLine({ petsStructured: [], emailLinks: false })).toBe(`${NORMAL('pets')}\n\n${LINK_LINE}`);
+  });
+
   test('a pet on file, even one that is not named, gets no link paragraph; a JSON string is read like an array', () => {
     expect(buildLawnPrevisitLine({ petsStructured: [{ name: 'Goldie', type: 'fish' }] })).not.toContain('Have pets?');
     expect(buildLawnPrevisitLine({ petsStructured: JSON.stringify([dog('Biscuit')]) })).toBe(NORMAL('Biscuit'));
@@ -161,6 +167,11 @@ describe('lawnPrevisitLineForVisit', () => {
   test('a visit stamped at another address: empty', async () => {
     const visit = { ...HOME, service_address_line1: '77 Other Street', service_address_zip: '34202', service_address_city: 'Bradenton' };
     expect(await ask(fakeKnex({ visit }))).toBe('');
+  });
+
+  test('emailLinks reaches the visit reader: the link keeps its https scheme', async () => {
+    const line = await ask(fakeKnex({ prefs: { pets_structured: [] } }), { emailLinks: true });
+    expect(line).toBe(`${DAY('pets')}\n\nHave pets? Add them here: https://portal.wavespestcontrol.com/?tab=property#pets`);
   });
 
   test('a customer with no pet on file gets the link paragraph', async () => {
