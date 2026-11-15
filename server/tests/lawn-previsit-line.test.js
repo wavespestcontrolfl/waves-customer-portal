@@ -10,6 +10,7 @@ const { countSegments } = require('../services/messaging/segment-counter');
 
 const dog = (name) => ({ name, type: 'dog' });
 const NORMAL = (who) => `Please keep sprinklers off tonight and tomorrow morning, unlock the gate, and keep ${who} inside while we treat.`;
+const BEFORE = (who) => `Please keep sprinklers off tomorrow morning, unlock the gate, and keep ${who} inside while we treat.`;
 const DAY = (who) => `Please unlock the gate and keep ${who} inside while we treat.`;
 const LINK_LINE = 'Have pets? Add them here: portal.wavespestcontrol.com/?tab=property#pets';
 
@@ -27,6 +28,17 @@ describe('the sentence table', () => {
 
   test('the home\'s watering day drops the sprinkler words', () => {
     expect(buildLawnPrevisitLine({ petsStructured: [dog('Biscuit')], wateringDayClash: true })).toBe(DAY('Biscuit'));
+  });
+
+  test('the day before the visit is the watering day: the morning-only sentence', () => {
+    expect(buildLawnPrevisitLine({ petsStructured: [dog('Biscuit')], wateringDayBefore: true })).toBe(BEFORE('Biscuit'));
+    expect(buildLawnPrevisitLine({ petsStructured: [], wateringDayBefore: true, emailLinks: true }))
+      .toBe(`${BEFORE('pets')}\n\nHave pets? Add them here: https://portal.wavespestcontrol.com/?tab=property#pets`);
+    expect(buildLawnPrevisitLine({ petsStructured: [], wateringDayBefore: true })).toBe(`${BEFORE('pets')}\n\n${LINK_LINE}`);
+  });
+
+  test('exactly one sentence: the visit-day row wins when both flags are set', () => {
+    expect(buildLawnPrevisitLine({ petsStructured: [dog('Biscuit')], wateringDayClash: true, wateringDayBefore: true })).toBe(DAY('Biscuit'));
   });
 
   test('a pet of any where is named, indoor or outdoor', () => {
@@ -60,7 +72,9 @@ describe('the sentence table', () => {
     const texts = [
       buildLawnPrevisitLine({ petsStructured: [] }),
       buildLawnPrevisitLine({ petsStructured: [], wateringDayClash: true }),
+      buildLawnPrevisitLine({ petsStructured: [], wateringDayBefore: true }),
       buildLawnPrevisitLine({ petsStructured: [dog('Biscuit'), dog('Mochi'), dog('Rex')] }),
+      buildLawnPrevisitLine({ petsStructured: [dog('Biscuit'), dog('Mochi'), dog('Rex')], wateringDayBefore: true }),
     ];
     for (const text of texts) {
       expect(text).not.toMatch(/safe/i);
@@ -140,6 +154,70 @@ describe('lawnPrevisitLineForVisit', () => {
   ])('%s: the normal sentence', async (_label, { policy }) => {
     process.env.IRRIGATION_RESTRICTION_POLICY = policy;
     expect(await ask(fakeKnex())).toBe(NORMAL('Biscuit'));
+  });
+
+  describe('the day before the visit is the home\'s watering day', () => {
+    // 1201 ends in 1: Monday. Tuesday 2026-11-17 9:00 AM ET is the day after.
+    const MONDAY_HOME = { ...HOME, address_line1: '1201 Example Loop' };
+    const withPolicy = (changes) => { process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({ ...JSON.parse(ONE_DAY_POLICY), ...changes }); };
+
+    test('the morning-only sentence, in the text form and the email form', async () => {
+      expect(await ask(fakeKnex({ visit: MONDAY_HOME }))).toBe(BEFORE('Biscuit'));
+      expect(await ask(fakeKnex({ visit: MONDAY_HOME, prefs: { pets_structured: [] } }), { emailLinks: true }))
+        .toBe(`${BEFORE('pets')}\n\nHave pets? Add them here: https://portal.wavespestcontrol.com/?tab=property#pets`);
+      expect(await ask(fakeKnex({ visit: MONDAY_HOME, prefs: { pets_structured: [] } }))).toBe(`${BEFORE('pets')}\n\n${LINK_LINE}`);
+    });
+
+    test('the visit day is the watering day: unchanged. Neither day: the normal sentence', async () => {
+      expect(await ask(fakeKnex())).toBe(DAY('Biscuit'));
+      expect(await ask(fakeKnex({ visit: { ...HOME, address_line1: '1204 Example Loop' } }))).toBe(NORMAL('Biscuit'));
+      expect(await ask(fakeKnex({ visit: { ...HOME, address_line1: '1205 Example Loop' } }))).toBe(NORMAL('Biscuit')); // Wednesday home, Tuesday visit
+    });
+
+    test.each([
+      ['a two-day policy', { maxDaysPerWeek: 2 }],
+      ['a policy that does not cover the county', { coverage: { counties: ['Sarasota'], partial: [] } }],
+      ['a policy that expired before the day before', { expiresOn: '2026-11-15' }],
+      ['a policy not yet in force on the day before', { effectiveFrom: '2026-11-17' }],
+    ])('%s: the normal sentence', async (_label, changes) => {
+      withPolicy(changes);
+      expect(await ask(fakeKnex({ visit: MONDAY_HOME }))).toBe(NORMAL('Biscuit'));
+    });
+
+    test('no policy in force: the normal sentence', async () => {
+      withPolicy({ expiresOn: '2026-10-01' });
+      expect(await ask(fakeKnex({ visit: MONDAY_HOME }))).toBe(NORMAL('Biscuit'));
+    });
+
+    test('a Monday visit: the day before is Sunday, never a watering day', async () => {
+      const monday = new Date('2026-11-16T14:00:00.000Z');
+      for (const line1 of ['1201 Example Loop', '1205 Example Loop', '1209 Example Loop']) {
+        expect(await ask(fakeKnex({ visit: { ...HOME, address_line1: line1 } }), { apptTime: monday })).not.toBe(BEFORE('Biscuit'));
+      }
+      expect(await ask(fakeKnex({ visit: MONDAY_HOME }), { apptTime: monday })).toBe(DAY('Biscuit'));
+      expect(await ask(fakeKnex({ visit: { ...HOME, address_line1: '1202 Example Loop' } }), { apptTime: monday })).toBe(NORMAL('Biscuit'));
+    });
+
+    test.each([
+      ['Tuesday after the fall-back Sunday, 12:30 AM EST', '2026-11-03T05:30:00.000Z'],
+      ['Tuesday after the fall-back Sunday, 11:30 PM EST', '2026-11-04T04:30:00.000Z'],
+      ['Tuesday after the spring-forward week, 12:30 AM EDT', '2027-03-16T04:30:00.000Z'],
+      ['Tuesday after the spring-forward week, 11:30 PM EDT', '2027-03-17T03:30:00.000Z'],
+    ])('across a DST change the right day is picked: %s', async (_label, iso) => {
+      withPolicy({ effectiveFrom: '2026-01-01', expiresOn: '2030-01-01' });
+      expect(await ask(fakeKnex({ visit: MONDAY_HOME }), { apptTime: new Date(iso) })).toBe(BEFORE('Biscuit'));
+      expect(await ask(fakeKnex({ visit: { ...HOME, address_line1: '1202 Example Loop' } }), { apptTime: new Date(iso) })).toBe(DAY('Biscuit'));
+      expect(await ask(fakeKnex({ visit: { ...HOME, address_line1: '1204 Example Loop' } }), { apptTime: new Date(iso) })).toBe(NORMAL('Biscuit'));
+    });
+
+    test('a failed read of the day before gives the normal sentence', async () => {
+      jest.resetModules();
+      jest.doMock('../utils/datetime-et', () => ({ ...jest.requireActual('../utils/datetime-et'), addETDays: () => { throw new Error('clock down'); } }));
+      const isolated = require('../services/lawn-previsit-line');
+      const line = await isolated.lawnPrevisitLineForVisit({ scheduledServiceId: 'svc-1', customerId: 'cust-1', apptTime: TUESDAY, knex: fakeKnex({ visit: MONDAY_HOME }) });
+      jest.dontMock('../utils/datetime-et');
+      expect(line).toBe(NORMAL('Biscuit'));
+    });
   });
 
   test('no house number: the normal sentence', async () => {
