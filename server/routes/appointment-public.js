@@ -49,6 +49,9 @@ const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const { stampedDivergesSql, VISIT_HOME_COLUMNS, visitAtCustomerHome } = require('../services/stamped-address');
 const { isLawnTreatmentVisit } = require('../services/lawn-treatment-visit');
+const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
+const { loadWateringHome } = require('../services/watering-home');
+const { wateringTimeLine } = require('../services/lawn-watering-time-line');
 const {
   arrivalWindowRange,
   formatSmsTimeRange,
@@ -689,11 +692,35 @@ async function prepPhotosField(svc, state, visitUnknown) {
   }
 }
 
-// "Before your lawn visit" card (owner 2026-11-14, no gate: a page card with no write). Additive: `{ lawnPrep: { petsOnFile } }`
-// only for an upcoming lawn treatment visit at the customer's home; any other visit leaves the key absent and the
-// payload byte-identical. A grouped stop passes each member's raw service type (one lawn member is enough).
-// `petsOnFile` is a yes/no: the public payload never carries a pet name, count or any other pet detail. Fails soft:
-// a lookup error omits the key and logs a warning, never a 500.
+// The card's watering-time line (owner 2026-11-14, decision 1A): the sentence wateringTimeLine picks from the rule in
+// force on the visit's date for the customer's county, or '' (no rule on file, a rule whose hours fit neither sentence,
+// or a failed read). The county comes from the same guarded snapshot the lawn prep guide uses (watering-home
+// loadWateringHome): the ACTIVE turf profile, the address re-read after the preferences and the move stamp re-read
+// after the address, so a move between loadByToken and this read never pairs the old address with the new stamp; a
+// snapshot that straddles a move throws, and the line is dropped (GH Codex #7885 r1). The visit is then rechecked
+// against the home that snapshot read: lawnPrepField's visitAtCustomerHome ran on loadByToken's older join, so a visit
+// stamped at the former home would otherwise get the new home's guidance (r2). The payload carries the sentence only,
+// never the county, the hours or the policy. Fails soft on its own: a failed read drops only the line.
+async function wateringLineFor(svc) {
+  try {
+    const { county, home } = await loadWateringHome({
+      id: svc.customer_id, address_line1: svc.address_line1, address_line2: svc.address_line2, city: svc.city, zip: svc.zip,
+    });
+    if (!visitAtCustomerHome({ ...svc, ...home })) return '';
+    const visitDay = apptDateStr(svc.scheduled_date);
+    return wateringTimeLine(currentRestrictionPolicy(visitDay ? parseETDateTime(`${visitDay}T12:00`) : new Date(), { county }));
+  } catch (err) {
+    logger.warn(`[appointment-public] lawnPrep watering line unavailable for ${svc.id}: ${err.message}`);
+    return '';
+  }
+}
+
+// "Before your lawn visit" card (owner 2026-11-14, no gate: a page card with no write). Additive: `{ lawnPrep: { petsOnFile,
+// wateringLine? } }` only for an upcoming lawn treatment visit at the customer's home; any other visit leaves the key absent
+// and the payload byte-identical. A grouped stop passes each member's raw service type (one lawn member is enough).
+// `petsOnFile` is a yes/no: the public payload never carries a pet name, count or any other pet detail. `wateringLine` is
+// the one approved sentence from wateringLineFor, present only when there is one. Fails soft: a lookup error omits the
+// key and logs a warning, never a 500.
 async function lawnPrepField(svc, state, members) {
   if (state !== 'upcoming') return {};
   try {
@@ -704,7 +731,8 @@ async function lawnPrepField(svc, state, members) {
     if (typeof pets === 'string') {
       try { pets = JSON.parse(pets); } catch { pets = null; }
     }
-    return { lawnPrep: { petsOnFile: Array.isArray(pets) && pets.length > 0 } };
+    const wateringLine = await wateringLineFor(svc);
+    return { lawnPrep: { petsOnFile: Array.isArray(pets) && pets.length > 0, ...(wateringLine ? { wateringLine } : {}) } };
   } catch (err) {
     logger.warn(`[appointment-public] lawnPrep lookup failed for ${svc.id}: ${err.message}`);
     return {};

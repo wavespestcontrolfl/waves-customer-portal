@@ -74,9 +74,10 @@ const PRIMARY_CTA = {
 };
 
 // "Before your lawn visit": the server sends `lawnPrep` only for an upcoming lawn treatment at the customer's home. It
-// says whether pets are on file, nothing more. The pets ask and its link (the portal's Pets section; sign-in happens
+// says whether pets are on file, plus `wateringLine` (one server-chosen, owner-approved sentence that follows the live
+// watering rule; the key is absent when there is none, and the page never builds hour words itself). The pets ask and its link (the portal's Pets section; sign-in happens
 // there) show only while no pet is on file: once pets are added, the card carries no pets link (owner 2026-11-14).
-function LawnPrepCard({ petsOnFile }) {
+function LawnPrepCard({ petsOnFile, wateringLine }) {
   return (
     <Card data-testid="lawn-prep-card">
       <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, lineHeight: 1.3, marginBottom: 8 }}>
@@ -84,6 +85,7 @@ function LawnPrepCard({ petsOnFile }) {
       </div>
       <ul style={{ margin: 0, paddingLeft: 20, fontSize: 16, color: S.body, lineHeight: 1.55 }}>
         {LAWN_PREP_COPY.lines.map((line) => <li key={line} style={{ marginBottom: 6 }}>{line}</li>)}
+        {typeof wateringLine === 'string' && wateringLine ? <li data-testid="lawn-prep-watering-line" style={{ marginBottom: 6 }}>{wateringLine}</li> : null}
       </ul>
       {petsOnFile ? null : (
         <div style={{ borderTop: `1px solid ${S.border}`, marginTop: 16, paddingTop: 16 }}>
@@ -593,7 +595,7 @@ export default function AppointmentPage() {
         </Card>
       ) : null}
 
-      {data.lawnPrep ? <LawnPrepCard petsOnFile={data.lawnPrep.petsOnFile === true} /> : null}
+      {data.lawnPrep ? <LawnPrepCard petsOnFile={data.lawnPrep.petsOnFile === true} wateringLine={data.lawnPrep.wateringLine} /> : null}
 
       {canPickOnline ? (
         <Card>

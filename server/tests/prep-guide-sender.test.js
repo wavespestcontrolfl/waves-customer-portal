@@ -1568,6 +1568,27 @@ describe('sprinkler timer guide', () => {
     expect(block).not.toMatch(/Wednesday|AM|PM/);
   });
 
+  // Owner 2026-11-14, decision 1A: the block ends with the one approved watering-time line, or nothing.
+  test('watering block: the watering-time line follows the rule\'s hours, one space after the block', async () => {
+    const { buildWateringBlock } = require('../services/prep-guide-sender');
+    const { MIDNIGHT_LINE, MORNING_LINE } = require('../services/lawn-watering-time-line');
+    prefsRow = { irrigation_run_minutes: 35 };
+    mockRestrictionPolicy = { ...ORDER, allowedHours: [{ start: '00:01', end: '04:00' }, { start: '20:00', end: '23:59' }], noHourRestriction: false };
+    expect((await buildWateringBlock(customerRow)).endsWith(`about 35 minutes. ${MIDNIGHT_LINE}`)).toBe(true);
+    mockRestrictionPolicy = { ...ORDER, maxDaysPerWeek: 2, allowedHours: [{ start: '05:00', end: '09:00' }], noHourRestriction: false };
+    expect((await buildWateringBlock(customerRow)).endsWith(`minutes. ${MORNING_LINE}`)).toBe(true);
+    // No windows on the policy (or hours that fit neither sentence): the block is unchanged, no line.
+    for (const policy of [ORDER, { ...ORDER, allowedHours: null }, { ...ORDER, maxDaysPerWeek: 2, allowedHours: [{ start: '00:01', end: '04:00' }, { start: '20:00', end: '23:59' }] }]) {
+      mockRestrictionPolicy = policy;
+      const block = await buildWateringBlock(customerRow);
+      expect(block).toMatch(/run each grass zone about 35 minutes\.$/);
+      expect(block).not.toMatch(/midnight|between 6 and 8/);
+    }
+    // No policy at all: the fail-closed copy, no line.
+    mockRestrictionPolicy = null;
+    expect(await buildWateringBlock(customerRow)).not.toMatch(/midnight|between 6 and 8/);
+  });
+
   test('watering block: no minutes on file → Monday\'s email carries the number', async () => {
     const { buildWateringBlock } = require('../services/prep-guide-sender');
     mockRestrictionPolicy = ORDER;

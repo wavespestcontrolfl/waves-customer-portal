@@ -18,6 +18,12 @@
  * inclusive), label, source, hoursNote, coverage } — coverage REQUIRED:
  * { counties: ['Manatee', …], partial: ['Charlotte'] } or the explicit
  * marker 'all'.
+ *
+ * Optional `allowedHours`: the hours the order allows watering, as 24-hour
+ * windows [{ start: '00:01', end: '04:00' }, { start: '20:00', end: '23:59' }]
+ * (start before end; the order's overnight span is written as two windows).
+ * The lawn watering-time line (lawn-watering-time-line.js) reads it. Absent
+ * or malformed = no line anywhere; a malformed value never voids the policy.
  */
 const logger = require('../services/logger');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
@@ -133,6 +139,25 @@ function logOnce(message) {
   logger.error(message);
 }
 
+const HHMM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+// `allowedHours` as a frozen, normalized copy, or null when it is absent or
+// malformed (not a non-empty array of { start, end } 24-hour HH:MM windows
+// with start before end). Malformed is logged once and never invalidates the
+// policy: only the hour-dependent copy goes quiet.
+function normalizeAllowedHours(raw) {
+  if (raw == null) return null;
+  const windows = Array.isArray(raw) ? raw : null;
+  const ok = windows && windows.length > 0 && windows.every((w) => (
+    w && typeof w === 'object' && HHMM_RE.test(w.start) && HHMM_RE.test(w.end) && w.start < w.end
+  ));
+  if (!ok) {
+    logOnce('[irrigation-restrictions] restriction policy allowedHours is malformed — watering-time lines stay off');
+    return null;
+  }
+  return Object.freeze(windows.map((w) => Object.freeze({ start: w.start, end: w.end })));
+}
+
 function parseEnvPolicy(raw) {
   if (!raw || !String(raw).trim()) return { configured: false, policy: null };
   try {
@@ -200,6 +225,8 @@ function currentRestrictionPolicy(now = new Date(), { env = process.env, county 
     label: String(candidate.label || 'local watering restrictions'),
     source: candidate.source || null,
     hoursNote: candidate.hoursNote || null,
+    allowedHours: normalizeAllowedHours(candidate.allowedHours),
+    noHourRestriction: candidate.noHourRestriction === true,
     county,
   };
 }
@@ -213,6 +240,6 @@ function wateringWeekdayForAddress(addressLine1) {
   return match ? WATERING_WEEKDAY_BY_LAST_DIGIT[Number(match[1].slice(-1))] : null;
 }
 
-module.exports = { currentRestrictionPolicy, resolveRestrictionCounty, DEFAULT_POLICY, _private: { validPolicy, validCoverage, parseEnvPolicy, coversCounty, CITY_COUNTY, ZIP_COUNTY, _lastLogged } };
+module.exports = { currentRestrictionPolicy, resolveRestrictionCounty, DEFAULT_POLICY, _private: { validPolicy, normalizeAllowedHours, validCoverage, parseEnvPolicy, coversCounty, CITY_COUNTY, ZIP_COUNTY, _lastLogged } };
 // wateringWeekdayForAddress export, on its own line so parallel PRs never conflict.
 module.exports.wateringWeekdayForAddress = wateringWeekdayForAddress;

@@ -9,6 +9,12 @@
 // number of days is fine), plain words, first-person plural. The card never
 // shows a pet name: the payload only says whether pets are on file.
 //
+// One approved exception to "no hour figures": the watering-time line. The
+// server picks it (server/services/lawn-watering-time-line.js, owner
+// 2026-11-14, decision 1A) from the watering rule in force, and the page shows
+// it as a fourth bullet only when the payload carries one. It is not in this
+// file, and the page never writes hour words of its own.
+//
 // The pets ask and its link show only while no pet is on file. Owner
 // 2026-11-14: "if they have added their pets we should not include the link
 // to pets", before and after the visit.
