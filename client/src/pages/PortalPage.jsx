@@ -8464,6 +8464,18 @@ function PasswordField({ value, onChange, placeholder, label }) {
   );
 }
 
+// Pets form kinds. Dog, Cat and Other stay as they were; the other four (owner 2026-11-15) store these exact values, and the
+// technician's lawn visit brief picks its label warnings from them (server/services/lawn-label-animal-lines.js: keep in step).
+const PET_TYPE_OPTIONS = [
+  { value: 'Dog', label: 'Dog' },
+  { value: 'Cat', label: 'Cat' },
+  { value: 'Other', label: 'Other' },
+  { value: 'Birds', label: 'Chickens or other birds' },
+  { value: 'Grass eater', label: 'Rabbit, tortoise or other grass eater' },
+  { value: 'Fish pond', label: 'Fish pond' },
+  { value: 'Beehives', label: 'Beehives' },
+];
+
 function PillSelector({ options, value, onChange, multiple = false }) {
   const selected = multiple ? (Array.isArray(value) ? value : (value ? [value] : [])) : value;
   const isActive = (v) => (multiple ? selected.includes(v) : selected === v);
@@ -9640,10 +9652,10 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
                       />
                     </div>
                   </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 16, marginTop: 16 }}>
-                    <div>
+                  <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))', gap: 16, marginTop: 16 }}>
+                    <div style={{ gridColumn: '1 / -1' }}>
                       <label style={labelStyle}>Type</label>
-                      <PillSelector value={pet.type} onChange={v => updatePet('type', v)} options={['Dog', 'Cat', 'Other'].map(t => ({ value: t, label: t }))} />
+                      <PillSelector value={pet.type} onChange={v => updatePet('type', v)} options={PET_TYPE_OPTIONS} />
                     </div>
                     <div>
                       <label style={labelStyle}><Icon name="map" size={14} strokeWidth={2} style={{ marginRight: 6 }} />Location</label>
