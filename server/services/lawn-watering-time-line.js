@@ -11,7 +11,8 @@
  * Phase III order (lawns one day a week; allowed hours 12:01-4 AM or 8-11:59
  * PM) makes 6-8 AM unlawful while it stands. So the line follows the rule:
  *   - the order's hours (one overnight window, one evening window): the
- *     midnight-to-4-AM sentence;
+ *     12:01-to-4-AM sentence (the order's window starts at 12:01, not
+ *     midnight: GH Codex #7885 r3);
  *   - a rule that permits 6 to 8 AM (a window covering it, or an explicit
  *     noHourRestriction with no windows): the 6-to-8-AM sentence;
  *   - no rule, or hours that fit neither: no line.
@@ -19,7 +20,7 @@
  * for the customer's county and the visit's date.
  */
 
-const MIDNIGHT_LINE = 'On your watering day, use the midnight to 4 AM window, not the evening one. A lawn that stays wet all night gets more fungus.';
+const MIDNIGHT_LINE = 'On your watering day, use the 12:01 to 4 AM window, not the evening one. A lawn that stays wet all night gets more fungus.';
 const MORNING_LINE = 'On your watering days, water between 6 and 8 AM.';
 // Grammar only: used when the rule allows one watering day a week.
 const MORNING_LINE_ONE_DAY = 'On your watering day, water between 6 and 8 AM.';

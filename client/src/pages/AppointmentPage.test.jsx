@@ -426,7 +426,7 @@ describe('AppointmentPage lawn prep card', () => {
 });
 
 describe('AppointmentPage lawn prep card watering line', () => {
-  const LINE = 'On your watering day, use the midnight to 4 AM window, not the evening one. A lawn that stays wet all night gets more fungus.';
+  const LINE = 'On your watering day, use the 12:01 to 4 AM window, not the evening one. A lawn that stays wet all night gets more fungus.';
 
   it('shows the server-chosen wateringLine as a fourth bullet after the three lines, with or without pets on file', async () => {
     for (const petsOnFile of [false, true]) {

@@ -972,7 +972,7 @@ describe('GET /api/public/appointment/:token — additive lawnPrep', () => {
       const body = await payload(VISIT, { petsRow: { pets_structured: [{ name: 'Biscuit', type: 'dog' }] } });
       expect(body.lawnPrep).toEqual({
         petsOnFile: true,
-        wateringLine: 'On your watering day, use the midnight to 4 AM window, not the evening one. A lawn that stays wet all night gets more fungus.',
+        wateringLine: 'On your watering day, use the 12:01 to 4 AM window, not the evening one. A lawn that stays wet all night gets more fungus.',
       });
       // The county, the hours and the policy never ride on the public payload.
       expect(JSON.stringify(body)).not.toMatch(/Manatee|allowedHours|noHourRestriction|maxDaysPerWeek|Phase III|00:01|23:59/);

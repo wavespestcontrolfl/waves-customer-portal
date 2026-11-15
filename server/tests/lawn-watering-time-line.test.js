@@ -10,7 +10,7 @@ const policy = (over = {}) => ({ maxDaysPerWeek: 1, allowedHours: ORDER_HOURS, n
 
 describe('wateringTimeLine: the approved words', () => {
   test('the sentences are exactly the owner-approved text', () => {
-    expect(MIDNIGHT_LINE).toBe('On your watering day, use the midnight to 4 AM window, not the evening one. A lawn that stays wet all night gets more fungus.');
+    expect(MIDNIGHT_LINE).toBe('On your watering day, use the 12:01 to 4 AM window, not the evening one. A lawn that stays wet all night gets more fungus.');
     expect(MORNING_LINE).toBe('On your watering days, water between 6 and 8 AM.');
     expect(MORNING_LINE_ONE_DAY).toBe('On your watering day, water between 6 and 8 AM.');
   });
