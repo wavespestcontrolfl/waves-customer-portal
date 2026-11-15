@@ -40,8 +40,6 @@ const TEMPLATE_KEY = 'lawn_watering_instruction';
 // or a missing short row, sends the full lines.
 const SHORT_TEMPLATE_KEY = 'lawn_watering_instruction_short';
 const PURPOSE = 'lawn_watering_instruction';
-// The short template's fixed lead-in, for the segment check on the rendered body.
-const SHORT_LEAD = 'Lawn watering: ';
 const SENDABLE_STATES = Object.freeze(['hold', 'water_in', 'hold_then_water_in']);
 // GATE_LAWN_WATERING_EVERY_VISIT (owner 2026-10-22, "for all combinations, a
 // text goes out"): a visit whose products need no watering change gets its
@@ -114,18 +112,16 @@ function wateringInstructionFresh(instruction, completedAt, nowMs) {
 // The short steps from the same frozen fields, and the short rain sentence
 // when the full one is due. Null = full lines. `eveningDay` (GATE_LAWN_WATERING_TEXT_HOURS)
 // names the evening window in the steps; a text with a rain sentence never uses it
-// (the rain checkpoint is before the deadline, after tonight's window), and one the
-// window would push past the purpose's segment target keeps today's wording.
+// (the rain checkpoint is before the deadline, after tonight's window). A plan that
+// names it carries `eveningDay`, so the send can measure the RENDERED body against
+// the purpose's segment target (renderWithinSegmentTarget).
 function shortPlan(instruction, forecastLine, eveningDay = null) {
-  const build = (day) => {
-    const short = shortWateringText(instruction, { eveningDay: day });
-    if (!short) return null;
-    const rain = forecastLine && (shortForecastSentence(instruction, forecastLine) || forecastLine);
-    return { send: true, templateKey: SHORT_TEMPLATE_KEY, vars: { watering_lines: [short, rain].filter(Boolean).map(smsSafe).join(' ') } };
-  };
-  const plan = !forecastLine && eveningDay ? build(eveningDay) : null;
-  if (plan && countSegments(`${SHORT_LEAD}${plan.vars.watering_lines}`).segmentCount <= PURPOSE_POLICY[PURPOSE].maxSegments) return plan;
-  return build(null);
+  const day = forecastLine ? null : eveningDay;
+  const short = shortWateringText(instruction, { eveningDay: day });
+  if (!short) return null;
+  const rain = forecastLine && (shortForecastSentence(instruction, forecastLine) || forecastLine);
+  const plan = { send: true, templateKey: SHORT_TEMPLATE_KEY, vars: { watering_lines: [short, rain].filter(Boolean).map(smsSafe).join(' ') } };
+  return day ? { ...plan, eveningDay: day } : plan;
 }
 
 // The evening window the text may name (GATE_LAWN_WATERING_TEXT_HOURS), or null for today's wording. Reads the
@@ -174,6 +170,16 @@ async function renderWateringBody(plan, planInput, record, deps) {
   logger.warn(`[lawn-watering-sms] template ${SHORT_TEMPLATE_KEY} missing or inactive; sending the full text for service_record ${record.id}`);
   const full = lawnWateringSmsPlan({ ...planInput, shortText: false });
   return { plan: full, body: full.send ? await render(full) : null };
+}
+
+// The evening wording must keep the purpose's segment target on the body as RENDERED (the selected template or variant,
+// as staff may have edited it; GH Codex #7889 r1). A body past it renders today's wording instead (planInput carries no
+// eveningDay). Rendering only reads: a variant pick writes nothing.
+async function renderWithinSegmentTarget(planned, planInput, record, deps) {
+  const rendered = await renderWateringBody(planned, planInput, record, deps);
+  if (!rendered.plan.eveningDay || !rendered.body) return rendered;
+  if (countSegments(rendered.body).segmentCount <= PURPOSE_POLICY[PURPOSE].maxSegments) return rendered;
+  return renderWateringBody(lawnWateringSmsPlan(planInput), planInput, record, deps);
 }
 
 function lawnWateringSmsPlan({
@@ -274,7 +280,7 @@ async function sendLawnWateringSms(args, deps) {
 
     // Fail closed on a missing/inactive template row: no body, no send. No
     // marker either, so a later retry after the row is fixed can still send.
-    const { plan, body } = await renderWateringBody(planned, planInput, record, deps);
+    const { plan, body } = await renderWithinSegmentTarget(planned, planInput, record, deps);
     const templateKey = plan.templateKey || TEMPLATE_KEY;
     if (!body) {
       logger.warn(`[lawn-watering-sms] template ${templateKey} missing, inactive or unrenderable; no text sent for service_record ${record.id}`);

@@ -848,8 +848,8 @@ describe('GATE_LAWN_WATERING_TEXT_HOURS: the short text names the evening window
     amountOnly: true,
     ...over,
   });
-  async function send({ instruction = frozen(), svc = {}, forecast = false } = {}) {
-    const getTemplate = jest.fn(async (key, vars) => `Lawn watering: ${vars.watering_lines}`);
+  async function send({ instruction = frozen(), svc = {}, template = 'Lawn watering: {watering_lines}' } = {}) {
+    const getTemplate = jest.fn(async (key, vars) => template.replace('{watering_lines}', () => vars.watering_lines));
     const state = {
       record: { id: 'rec-h', structured_notes: {} },
       svc: { id: 'svc-h', customer_id: 'cust-h', cust_phone: '+19415550100', city: 'Bradenton', customer_zip: '34205', service_address_line1: null, ...svc },
@@ -861,7 +861,8 @@ describe('GATE_LAWN_WATERING_TEXT_HOURS: the short text names the evening window
     };
     const deps = { db: {}, sendCustomerMessage: jest.fn(async () => ({ sent: true })), getTemplate, mergeNotes: jest.fn(async () => {}), throwIfDeliveryUnverified: (r) => r };
     const result = await sendLawnWateringSms(state, deps);
-    return { result, body: deps.sendCustomerMessage.mock.calls[0]?.[0].body, lines: getTemplate.mock.calls[0]?.[1].watering_lines, deps };
+    // `lines` = the render that was sent (the last one; a body past the segment target renders again).
+    return { result, body: deps.sendCustomerMessage.mock.calls[0]?.[0].body, lines: getTemplate.mock.calls.at(-1)?.[1].watering_lines, renders: getTemplate.mock.calls.length, deps };
   }
   const TODAY = 'Water about 1/4 inch by Fri 12 PM, even on an off day.';
   const TONIGHT = 'Water about 1/4 inch tonight between 8 PM and midnight, even on an off day.';
@@ -956,27 +957,53 @@ describe('GATE_LAWN_WATERING_TEXT_HOURS: the short text names the evening window
     expect((await send()).lines).toBe(TODAY);
   });
 
-  test('a shape the window would push past two segments keeps today\'s wording', async () => {
-    const { shortWateringText } = require('../services/service-report/lawn-watering-short-text');
-    const lead = 'Lawn watering: '.length;
-    const fit = (pad) => frozen({
-      state: 'hold_then_water_in',
-      holdUntil: parseETDateTime('2026-11-13T13:00').toISOString(),
-      holdUntilLabel: `Fri 1 PM${'x'.repeat(pad)}`,
-      waterInBy: parseETDateTime('2026-11-14T13:00').toISOString(),
-      waterInByLabel: 'Sat 1 PM',
-      amountOnly: false,
-      minutes: { spray: 12, rotor: 30 },
-    });
-    const sized = (instruction, eveningDay) => lead + shortWateringText(instruction, { eveningDay }).length;
+  // A hold-then-water shape whose length is tuned by padding the hold label (present in both wordings).
+  const { shortWateringText } = require('../services/service-report/lawn-watering-short-text');
+  const { countSegments } = require('../services/messaging/segment-counter');
+  const fit = (pad) => frozen({
+    state: 'hold_then_water_in',
+    holdUntil: parseETDateTime('2026-11-13T13:00').toISOString(),
+    holdUntilLabel: `Fri 1 PM${'x'.repeat(pad)}`,
+    waterInBy: parseETDateTime('2026-11-14T13:00').toISOString(),
+    waterInByLabel: 'Sat 1 PM',
+    amountOnly: false,
+    minutes: { spray: 12, rotor: 30 },
+  });
+  const segments = (template, instruction, eveningDay) => countSegments(template.replace('{watering_lines}', () => shortWateringText(instruction, { eveningDay }))).segmentCount;
+  // The largest padding at which today's wording still renders in two segments with this template.
+  const tightest = (template) => {
     let pad = 0;
-    while (sized(fit(pad), null) < 303) pad += 1;
-    const instruction = fit(pad);
-    expect(sized(instruction, null)).toBeLessThanOrEqual(306);
-    expect(sized(instruction, 'Fri')).toBeGreaterThan(306);
+    while (segments(template, fit(pad + 1), null) <= 2) pad += 1;
+    return fit(pad);
+  };
+
+  test('a shape the window would push past two segments keeps today\'s wording', async () => {
+    const instruction = tightest('Lawn watering: {watering_lines}');
+    expect(segments('Lawn watering: {watering_lines}', instruction, 'Fri')).toBe(3);
     const out = await send({ instruction });
     expect(out.lines).toBe(lawnWateringSmsPlan(planArgs({ instruction, completedAt: instruction.completedAt })).vars.watering_lines);
     expect(out.lines).not.toMatch(/between 8 PM/);
     expect(out.lines).toMatch(/Then water by Sat 1 PM: spray zones/);
+    expect(out.body).toBe(`Lawn watering: ${out.lines}`);
+    expect(out.renders).toBe(2);
+  });
+
+  test('the segment check measures the template as rendered, not a fixed lead-in (GH Codex #7889 r1)', async () => {
+    // Staff edited the row to a longer body: the evening wording fits two segments under "Lawn watering: " but not here.
+    const template = 'Lawn watering from your Waves technician: {watering_lines} Reply with any questions.';
+    const instruction = tightest(template);
+    expect(segments('Lawn watering: {watering_lines}', instruction, 'Fri')).toBe(2);
+    expect(segments(template, instruction, 'Fri')).toBe(3);
+    const out = await send({ instruction, template });
+    expect(out.result).toEqual({ status: 'sent' });
+    expect(out.lines).toMatch(/Then water by Sat 1 PM: spray zones/);
+    expect(out.body).toBe(template.replace('{watering_lines}', () => out.lines));
+    expect(out.renders).toBe(2);
+  });
+
+  test('an evening body within the target renders once', async () => {
+    const out = await send();
+    expect(out.body).toBe(`Lawn watering: ${TONIGHT}`);
+    expect(out.renders).toBe(1);
   });
 });
