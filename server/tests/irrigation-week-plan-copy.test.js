@@ -369,6 +369,8 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
     expect(_private.samePolicy({ ...POLICY, hoursNote: 'x' }, { ...POLICY, hoursNote: 'y' })).toBe(false);
     expect(_private.samePolicy({ ...POLICY, effectiveFrom: '2026-08-27' }, { ...POLICY, effectiveFrom: '2026-09-01' })).toBe(false);
+    // allowedHours is not identity: setting the hours mid-week keeps this week's plan (the line it feeds is advice).
+    expect(_private.samePolicy(POLICY, { ...POLICY, allowedHours: [{ start: '00:01', end: '04:00' }, { start: '20:00', end: '23:59' }] })).toBe(true);
     stubSelect(row(POLICY));
     expect(await loadCurrentWeekPlan('c1', { now: new Date('2026-10-05T12:00:00Z') })).toBeNull(); // policy expired since Monday
     // A snapshot whose plan week straddles the expiry (recorded planWeekEnd) is no longer covered → null.
@@ -706,5 +708,49 @@ describe('renderWeekPlanNotBefore', () => {
     expect(text).not.toMatch(/ordinance|county|blackout/i);
     // Only the hold's own time is named; no other weekday appears in the sentence.
     expect(card.detail.replace('{holdUntil}', '').match(WEEKDAY)).toBeNull();
+  });
+});
+
+describe('restrictionNote: the watering-time line (owner 2026-11-14, decision 1A)', () => {
+  const ORDER_HOURS = [{ start: '00:01', end: '04:00' }, { start: '20:00', end: '23:59' }];
+  const TODAYS_NOTE = 'SWFWMD Modified Phase III water shortage order: lawn watering is limited to one day a week, on your assigned day, during your area\'s allowed hours, through 2026-10-01. Water on your assigned day only.';
+  const MIDNIGHT = 'On your watering day, use the 12:01 to 4 AM window, not the evening one. A lawn that stays wet all night gets more fungus.';
+  const note = (r) => _private.restrictionNote(r);
+
+  test('the order\'s hours add the 12:01 sentence as the last sentence', () => {
+    expect(note({ ...ONE_DAY, allowedHours: ORDER_HOURS })).toBe(`${TODAYS_NOTE} ${MIDNIGHT}`);
+  });
+
+  test('without allowedHours (the rule before the hours were set) the note is today\'s, byte for byte', () => {
+    expect(note(ONE_DAY)).toBe(TODAYS_NOTE);
+    expect(note({ ...ONE_DAY, allowedHours: null })).toBe(TODAYS_NOTE);
+    expect(note({ ...ONE_DAY, allowedHours: null, noHourRestriction: false })).toBe(TODAYS_NOTE);
+  });
+
+  test('a prohibited rule and a null restriction get no line', () => {
+    expect(note({ ...ONE_DAY, maxDaysPerWeek: 0, allowedHours: ORDER_HOURS })).toBe('SWFWMD Modified Phase III water shortage order: lawn irrigation is not permitted, through 2026-10-01.');
+    expect(note(null)).toBe('');
+  });
+
+  test('a rule whose window covers 6 to 8 AM gets the 6 to 8 AM sentence', () => {
+    expect(note({ ...ONE_DAY, allowedHours: [{ start: '05:00', end: '10:00' }] })).toBe(`${TODAYS_NOTE} On your watering day, water between 6 and 8 AM.`);
+    expect(note({ ...ONE_DAY, maxDaysPerWeek: 2, allowedHours: [{ start: '05:00', end: '10:00' }] }))
+      .toMatch(/Water on your assigned days only\. On your watering days, water between 6 and 8 AM\.$/);
+  });
+
+  test('hours that fit neither sentence add nothing', () => {
+    expect(note({ ...ONE_DAY, allowedHours: [{ start: '09:00', end: '17:00' }] })).toBe(TODAYS_NOTE);
+  });
+
+  test('a rule with no hour limits gets the 6 to 8 AM sentence, the same as the visit card and the prep guide', () => {
+    expect(note({ ...ONE_DAY, allowedHours: null, noHourRestriction: true })).toBe(`${TODAYS_NOTE} On your watering day, water between 6 and 8 AM.`);
+  });
+
+  test('renderWeekPlanEmail carries the line in restriction_note and leaves the other fields alone', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    const before = renderWeekPlanEmail(plan, CTX);
+    const after = renderWeekPlanEmail(plan, { ...CTX, restriction: { ...ONE_DAY, allowedHours: ORDER_HOURS } });
+    expect(after.restriction_note).toBe(`${before.restriction_note} ${MIDNIGHT}`);
+    expect({ ...after, restriction_note: before.restriction_note }).toEqual(before);
   });
 });
