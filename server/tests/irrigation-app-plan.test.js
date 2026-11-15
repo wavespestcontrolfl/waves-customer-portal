@@ -132,3 +132,21 @@ test('an unavailable current snapshot stays absent and storage failures propagat
   loadCurrentWeekPlan.mockRejectedValue(new Error('snapshot unavailable'));
   await expect(loadCustomerWateringPlan('fixture-customer', { now })).rejects.toThrow('snapshot unavailable');
 });
+
+test('the app plan card carries the watering-time line the email carries (hours set in the policy)', async () => {
+  process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({
+    maxDaysPerWeek: 1, expiresOn: '2099-12-31', label: 'Synthetic test policy', hoursNote: 'on your assigned day', coverage: 'all',
+    allowedHours: [{ start: '00:01', end: '04:00' }, { start: '20:00', end: '23:59' }],
+  });
+  const { decision } = fixture();
+  const result = await loadCustomerWateringPlan('fixture-customer', { now });
+  expect(decision.payload.restriction_note).toMatch(/ On your watering day, use the 12:01 to 4 AM window, not the evening one\. A lawn that stays wet all night gets more fungus\.$/);
+  expect(result.restrictionNote).toBe(decision.payload.restriction_note);
+});
+
+test('the app plan card keeps today\'s note when the policy has no hours', async () => {
+  const { decision } = fixture();
+  const result = await loadCustomerWateringPlan('fixture-customer', { now });
+  expect(result.restrictionNote).toBe(decision.payload.restriction_note);
+  expect(result.restrictionNote).not.toContain('12:01');
+});

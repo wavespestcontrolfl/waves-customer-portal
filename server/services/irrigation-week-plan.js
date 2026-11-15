@@ -29,6 +29,7 @@ const { resolveRateTable, ratesForTable, rateTableInputs } = require('./irrigati
 const { irrigationWaterSavedLive, waterSavedForDecision, waterSavedSentence } = require('./irrigation-water-saved');
 const { queuedRowInFlight, QUEUED_IN_FLIGHT_MS, ABORTED_BEFORE_DISPATCH } = require('./email-template-library');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
+const { wateringTimeLine } = require('./lawn-watering-time-line');
 const { lastCompletedWeekEndingET } = require('../utils/datetime-et');
 const { recommendedFromEt0, recommendedInchesPerWeek, _private: advicePrivate } = require('./service-report/irrigation-advice');
 const { etParts } = require('../utils/datetime-et');
@@ -261,7 +262,12 @@ function restrictionNote(restriction) {
   }
   const dayWord = days === 1 ? 'one day' : `${days} days`;
   const hours = restriction.hoursNote ? `, ${restriction.hoursNote}` : '';
-  return `${restriction.label}: lawn watering is limited to ${dayWord} a week${hours}, through ${restriction.expiresOn}. Water on your assigned ${days === 1 ? 'day' : 'days'} only.`;
+  const base = `${restriction.label}: lawn watering is limited to ${dayWord} a week${hours}, through ${restriction.expiresOn}. Water on your assigned ${days === 1 ? 'day' : 'days'} only.`;
+  // The watering-time line (owner 2026-11-14, decision 1A, ungated): only a restriction that carries allowedHours
+  // gets it, so every snapshot decided before the field existed keeps today's note byte for byte. The restriction
+  // may be the policy frozen with the plan, read back from JSON (plain arrays and objects).
+  const timeLine = Array.isArray(restriction.allowedHours) ? wateringTimeLine(restriction) : '';
+  return timeLine ? `${base} ${timeLine}` : base;
 }
 
 function comparisonClause(plan, runMinutes) {
@@ -914,6 +920,9 @@ function etDateStringPlusDays(ymd, days) {
 // Every field that shapes the instruction must match — days, dates, hours,
 // label, county: an operator changing hoursNote alone must retire Monday's
 // snapshot from the report just like a day-cap change would.
+// allowedHours is deliberately NOT in the identity: the watering-time line it feeds is advice inside the allowed
+// hours, the Monday snapshot keeps the rule it was decided under, and an hours-only change shows from the next
+// Monday. (Adding it would retire every current-week snapshot as "policy_changed" when the field was first set.)
 const POLICY_IDENTITY_FIELDS = ['maxDaysPerWeek', 'effectiveFrom', 'expiresOn', 'label', 'hoursNote', 'county'];
 function policyIdentity(p) {
   return JSON.stringify(POLICY_IDENTITY_FIELDS.map((k) => (k === 'maxDaysPerWeek' ? Number(p?.[k]) : String(p?.[k] ?? ''))));

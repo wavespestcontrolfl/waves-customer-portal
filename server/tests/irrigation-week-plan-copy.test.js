@@ -708,3 +708,48 @@ describe('renderWeekPlanNotBefore', () => {
     expect(card.detail.replace('{holdUntil}', '').match(WEEKDAY)).toBeNull();
   });
 });
+
+describe('restrictionNote: the watering-time line (owner 2026-11-14, decision 1A)', () => {
+  const ORDER_HOURS = [{ start: '00:01', end: '04:00' }, { start: '20:00', end: '23:59' }];
+  const TODAYS_NOTE = 'SWFWMD Modified Phase III water shortage order: lawn watering is limited to one day a week, on your assigned day, during your area\'s allowed hours, through 2026-10-01. Water on your assigned day only.';
+  const MIDNIGHT = 'On your watering day, use the 12:01 to 4 AM window, not the evening one. A lawn that stays wet all night gets more fungus.';
+  const note = (r) => _private.restrictionNote(r);
+
+  test('the order\'s hours add the 12:01 sentence as the last sentence', () => {
+    expect(note({ ...ONE_DAY, allowedHours: ORDER_HOURS })).toBe(`${TODAYS_NOTE} ${MIDNIGHT}`);
+  });
+
+  test('without allowedHours (every older snapshot) the note is today\'s, byte for byte', () => {
+    expect(note(ONE_DAY)).toBe(TODAYS_NOTE);
+    expect(note({ ...ONE_DAY, allowedHours: null })).toBe(TODAYS_NOTE);
+    expect(note({ ...ONE_DAY, allowedHours: null, noHourRestriction: false })).toBe(TODAYS_NOTE);
+  });
+
+  test('a prohibited rule and a null restriction get no line', () => {
+    expect(note({ ...ONE_DAY, maxDaysPerWeek: 0, allowedHours: ORDER_HOURS })).toBe('SWFWMD Modified Phase III water shortage order: lawn irrigation is not permitted, through 2026-10-01.');
+    expect(note(null)).toBe('');
+  });
+
+  test('a restriction read back from stored JSON gives the same note', () => {
+    const stored = JSON.parse(JSON.stringify({ ...ONE_DAY, allowedHours: Object.freeze(ORDER_HOURS.map((w) => Object.freeze({ ...w }))) }));
+    expect(note(stored)).toBe(`${TODAYS_NOTE} ${MIDNIGHT}`);
+  });
+
+  test('a rule whose window covers 6 to 8 AM gets the 6 to 8 AM sentence', () => {
+    expect(note({ ...ONE_DAY, allowedHours: [{ start: '05:00', end: '10:00' }] })).toBe(`${TODAYS_NOTE} On your watering day, water between 6 and 8 AM.`);
+    expect(note({ ...ONE_DAY, maxDaysPerWeek: 2, allowedHours: [{ start: '05:00', end: '10:00' }] }))
+      .toMatch(/Water on your assigned days only\. On your watering days, water between 6 and 8 AM\.$/);
+  });
+
+  test('hours that fit neither sentence add nothing', () => {
+    expect(note({ ...ONE_DAY, allowedHours: [{ start: '09:00', end: '17:00' }] })).toBe(TODAYS_NOTE);
+  });
+
+  test('renderWeekPlanEmail carries the line in restriction_note and leaves the other fields alone', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    const before = renderWeekPlanEmail(plan, CTX);
+    const after = renderWeekPlanEmail(plan, { ...CTX, restriction: { ...ONE_DAY, allowedHours: ORDER_HOURS } });
+    expect(after.restriction_note).toBe(`${before.restriction_note} ${MIDNIGHT}`);
+    expect({ ...after, restriction_note: before.restriction_note }).toEqual(before);
+  });
+});
