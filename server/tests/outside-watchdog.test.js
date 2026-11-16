@@ -326,6 +326,56 @@ describe('delivery: portal down', () => {
   });
 });
 
+describe('delivery: link worker stale leases (Codex r8 P2)', () => {
+  const stale = (extra = []) => report({ reasons: [deliver.LEASE_REASON, ...extra] });
+
+  test('a good poll that sees stale leases opens one row, keeps it while they stand, and closes it', async () => {
+    const state = deliver.defaultState();
+    const { io, calls } = fakeIo();
+    await step(state, stale(), io, 0);
+    expect(calls.resolves).toEqual([{ key: deliver.KEYS.lease, observedAt: at(0) }]);
+    expect(calls.posts).toHaveLength(1);
+    expect(calls.posts[0]).toMatchObject({ key: deliver.KEYS.lease, kind: 'FIX', audience: 'engineering', link: '/admin/agents?tab=queue' });
+    await step(state, stale(['job:x:failing']), io, 10);
+    expect(calls.posts).toHaveLength(1);
+    await step(state, report(), io, 20);
+    expect(calls.resolves[calls.resolves.length - 1]).toEqual({ key: deliver.KEYS.lease, observedAt: at(20) });
+    expect(state.lease).toMatchObject({ open: false, alertId: null });
+    expect(calls.mails).toEqual([]);
+  });
+
+  test('other non-runner reasons open nothing; a down or refused poll leaves the lease slot alone', async () => {
+    const state = deliver.defaultState();
+    const { io, calls } = fakeIo({ post: () => ({ ok: false, reason: 'unreachable:TimeoutError' }) });
+    await step(state, report({ reasons: ['job:x:failing', 'ops:email:failed'] }), io, 0);
+    expect(calls.posts).toEqual([]);
+    await step(state, stale(), fakeIo().io, 10);
+    expect(state.lease.open).toBe(true);
+    await step(state, down(1, 20), io, 20);
+    await step(state, report({ result: 'config', detail: 'HTTP 403: refused' }), io, 30);
+    expect(state.lease.open).toBe(true);
+  });
+
+  test('a lease alert that went by email sends its closing email', async () => {
+    const state = deliver.defaultState();
+    const { io, calls } = fakeIo({ post: () => ({ ok: false, reason: 'unreachable:TimeoutError' }) });
+    await step(state, stale(), io, 0);
+    expect(state.lease).toMatchObject({ via: 'email', emailed: true });
+    await step(state, report(), io, 10);
+    expect(calls.mails.map((m) => m.subject)).toEqual(['FIX: Waves link worker has stale leases (outside watchdog)', 'Waves link worker leases clear again (outside watchdog)']);
+  });
+
+  test('an old state file with no lease slot loads with one', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ow-lease-'));
+    tmpDirs.push(dir);
+    const file = path.join(dir, 'state.json');
+    const old = deliver.defaultState();
+    delete old.lease;
+    fs.writeFileSync(file, JSON.stringify(old));
+    expect(deliver.loadState(file, []).lease).toEqual(deliver.defaultState().lease);
+  });
+});
+
 describe('delivery: job runner', () => {
   const silent = (age = 74) => report({ reasons: ['scheduler:silent', 'job:x:failing'], scheduler: { age_minutes: age, silent_after_minutes: 60 } });
 
@@ -492,6 +542,19 @@ describe('delivery: setup and the outbox', () => {
     expect(ok2.calls.posts[0]).toMatchObject({ key: deliver.KEYS.setup });
   });
 
+  test('a clear owed for over 48 h is kept until it lands (Codex r8 P2)', async () => {
+    const state = deliver.defaultState();
+    const ok = fakeIo();
+    await step(state, report({ result: 'config', detail: 'HTTP 403: refused' }), ok.io, 0);
+    const failing = fakeIo({ resolve: () => ({ ok: false, reason: 'unreachable:TypeError' }) });
+    await step(state, report(), failing.io, 10);
+    expect(await deliver.flush(state, failing.io, new Date(at(10 + 49 * 60)))).toEqual(['clear:setup=owed']);
+    const back = fakeIo();
+    expect(await deliver.flush(state, back.io, new Date(at(10 + 50 * 60)))).toEqual(['clear:setup=row']);
+    expect(back.calls.resolves).toEqual([{ key: deliver.KEYS.setup, observedAt: at(10) }]);
+    expect(state.outbox).toEqual([]);
+  });
+
   test('a clear for a row that stands is retried until the resolve lands', async () => {
     const state = deliver.defaultState();
     const ok = fakeIo();
@@ -534,6 +597,7 @@ describe('row words', () => {
     ['runner never ticked', deliver.runnerAlert('scheduler:silent', { age_minutes: null })],
     ['runner off', deliver.runnerAlert('scheduler:disabled', {})],
     ['runner unreadable', deliver.runnerAlert('scheduler:unavailable', null)],
+    ['lease', deliver.leaseAlert()],
     ...['HTTP 401: x', 'HTTP 403: x', 'HTTP 404: x', 'HTTP 503: x', 'HTTP 418: x'].map((d) => [`setup ${d}`, deliver.setupAlert(d)]),
   ];
 

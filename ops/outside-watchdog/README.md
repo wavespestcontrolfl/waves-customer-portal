@@ -32,9 +32,14 @@ The portal's own check that the Air still polls (`agent-watchdog-liveness.js`)
 writes its row the same way. When the in-app digest gates are off or the row
 write fails, it emails the internal inbox once per silence episode.
 
-The snapshot's other reasons (one failing job, an ops-queue lane, the link
-worker) are not reported here. The portal's own checks report them, and the
-job-runner finding covers the case where those checks cannot run.
+Stale link-worker leases (`link_worker:stale_leases`) get their own row here,
+because no check inside the portal reports them. It closes on the first good
+poll that no longer sees them. The snapshot's other reasons (one failing job, an
+ops-queue lane) are not reported here. The portal's own checks report them, and
+the job-runner finding covers the case where those checks cannot run.
+
+An owed alert expires after 48 hours. A clear never expires: it is retried until
+the row is retired.
 
 ## The reciprocal check
 
@@ -84,7 +89,7 @@ ssh adams-air 'launchctl print gui/$(id -u)/com.waves.portal-watchdog | grep -E 
 A healthy line reads `poll=ok failures=0 runner=- wrote=- owed=0`. `owed=N`
 counts writes that failed and wait for the next run; a `note=` names a local
 error. `run.sh` adds `run.sh: exit N` after a failed run: 142 means the
-240-second run limit, and an exit with no deliver line before it means
+560-second run limit, and an exit with no deliver line before it means
 `railway run` itself failed. A "Not logged in" or "Unauthorized" line means the
 Air's Railway login expired. Only the owner can sign in again:
 `ssh -tt adams-air railway login --browserless`.

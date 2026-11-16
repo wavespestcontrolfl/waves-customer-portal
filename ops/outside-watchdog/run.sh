@@ -8,9 +8,11 @@ DIR=${OUTSIDE_WATCHDOG_DIR:-$HOME/waves-ops/portal-watchdog}
 # `railway run` reads the project link of this checkout (the Air's portal clone).
 RAILWAY_DIR=${OUTSIDE_WATCHDOG_RAILWAY_DIR:-$HOME/waves-customer-portal}
 RUNLOG=$DIR/run.log
-# A run polls once (15 s HTTP limit) and makes at most a few writes (20 s each) or
-# emails (60 s each); past this, the run is stuck and is killed.
-RUN_LIMIT_S=240
+# A run polls once (15 s HTTP limit), then each owed write can take a 20 s resolve, a
+# 20 s post and a 60 s email. A recovery poll can owe 5 at once (down clear, outage
+# alert, setup, runner, lease) = 515 s; past this, the run is stuck and is killed.
+# It stays under launchd's 10 min interval (launchd never starts a second run).
+RUN_LIMIT_S=560
 
 stamp() { date -u +%Y-%m-%dT%H:%M:%SZ }
 

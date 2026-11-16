@@ -15,8 +15,11 @@
  *     row; it closes itself on the first poll that no longer sees it.
  *   - setup: the portal refuses the poll (signature, key, lane off), so the watchdog is
  *     blind. A row that closes on the next good poll.
- * The snapshot's other reasons (one failing job, an ops-queue lane, the link worker) stay
- * with the portal's own checks. Those run inside a portal that answers; the runner check
+ *   - lease: the link worker holds a lease past its time (link_worker:stale_leases). No
+ *     check inside the portal reports it, so this is a Claude fault row; it closes
+ *     itself on the first good poll that no longer sees it.
+ * The snapshot's other reasons (one failing job, an ops-queue lane) stay with the
+ * portal's own checks. Those run inside a portal that answers; the runner check
  * covers the case where they cannot run at all.
  *
  * Each write is a row first: an engineering FIX row (Agents → Activity and the Claude
@@ -41,7 +44,11 @@ const DEFAULT_PORTAL_URL = 'https://portal.wavespestcontrol.com';
 const OPS_INBOX = 'contact@wavespestcontrol.com';
 const CHECK_ID = 'outside-watchdog';
 const QUEUE_LINK = '/admin/agents?tab=queue';
-const KEYS = { down: 'outside-watchdog-down', runner: 'outside-watchdog-runner', setup: 'outside-watchdog-setup' };
+const KEYS = { down: 'outside-watchdog-down', runner: 'outside-watchdog-runner', setup: 'outside-watchdog-setup', lease: 'outside-watchdog-lease' };
+// The one snapshot reason no portal check reports on its own (Codex r8): the link
+// worker holds a lease past its time. The other non-runner reasons have their own
+// in-portal alerts (failing jobs, ops-queue lanes).
+const LEASE_REASON = 'link_worker:stale_leases';
 const OUTAGE_KEY_PREFIX = 'outside-watchdog-outage';
 // watchdog_poll.py pages an outage at this many failed polls in a row.
 const PAGE_AFTER_FAILURES = 3;
@@ -187,6 +194,21 @@ function runnerAlert(reason, scheduler) {
   );
 }
 
+function leaseAlert() {
+  return alertParts(
+    faultSpec('check the link worker stale leases', 'The link worker holds a lease past its time, so its queued links do not move.', 'leases_clear'),
+    {
+      emailSubject: 'FIX: Waves link worker has stale leases (outside watchdog)',
+      body: [
+        'The portal answers the outside watchdog, and its snapshot reports link-worker leases held past their time (link_worker:stale_leases).',
+        'No check inside the portal reports this one. The Agents → Queue tab shows the link worker lease state; then read the link worker\'s logs.',
+        'Report the cause to the owner. Ask the owner before a restart or a lease reset.',
+        'This alert closes itself on the first good poll that no longer sees stale leases.',
+      ],
+    },
+  );
+}
+
 const SETUP_WHY = {
   401: 'The portal rejected the watchdog signature, so the outside check sees nothing.',
   403: 'The portal refused the watchdog key, so the outside check sees nothing.',
@@ -228,6 +250,12 @@ function clearedEmail(slot, { since, until } = {}) {
       ].join('\n'),
     };
   }
+  if (slot === 'lease') {
+    return {
+      subject: 'Waves link worker leases clear again (outside watchdog)',
+      body: ['The outside watchdog no longer sees stale link-worker leases. This closes the earlier email.', '', SIGNATURE].join('\n'),
+    };
+  }
   if (slot === 'runner') {
     return {
       subject: 'Waves portal crons running again (outside watchdog)',
@@ -252,6 +280,7 @@ function defaultState() {
     down: { open: false, since: null, failures: 0, via: null, emailed: false, alertId: null },
     runner: { seen: null, polls: 0, open: null, via: null, emailed: false, alertId: null },
     setup: { open: false, detail: null, via: null, emailed: false, alertId: null },
+    lease: { open: false, via: null, emailed: false, alertId: null },
     outbox: [],
   };
 }
@@ -285,6 +314,7 @@ function loadState(file, notes) {
       down: { ...base.down, ...plainObject(parsed.down) },
       runner: { ...base.runner, ...plainObject(parsed.runner) },
       setup: { ...base.setup, ...plainObject(parsed.setup) },
+      lease: { ...base.lease, ...plainObject(parsed.lease) },
       outbox: Array.isArray(parsed.outbox) ? parsed.outbox.filter(wellFormed) : [],
     };
   } catch {
@@ -417,13 +447,30 @@ function reconcileSetup(state, report, at) {
   }
 }
 
+// lease: called for a good poll only (the reasons come from the snapshot).
+function reconcileLease(state, report, at) {
+  const reasons = Array.isArray(report.reasons) ? report.reasons : [];
+  const lease = state.lease;
+  if (reasons.includes(LEASE_REASON)) {
+    if (lease.open && lease.alertId) return;
+    lease.open = true;
+    enqueueAlert(state, { slot: 'lease', key: KEYS.lease, at, replace: true, parts: leaseAlert() });
+  } else if (lease.open) {
+    enqueueClear(state, { slot: 'lease', key: KEYS.lease, at, email: clearedEmail('lease') });
+    lease.open = false;
+  }
+}
+
 /**
  * Fold one poll report into the state. Pure apart from `state`: no I/O.
  * `at` is the report's observation time (ISO).
  */
 function reconcile(state, report, at, { portalUrl = DEFAULT_PORTAL_URL } = {}) {
   reconcileDown(state, report, at, portalUrl);
-  if (report.result === 'ok') reconcileRunner(state, report, at);
+  if (report.result === 'ok') {
+    reconcileRunner(state, report, at);
+    reconcileLease(state, report, at);
+  }
   reconcileSetup(state, report, at);
   return state;
 }
@@ -477,7 +524,10 @@ async function flush(state, io, now) {
   for (const item of state.outbox) {
     const label = `${item.kind}:${item.slot || 'outage'}`;
     const age = now.getTime() - Date.parse(item.at);
-    if (!Number.isFinite(age) || age > OWED_MAX_MS) {
+    // Only an alert expires. A clear is kept until it lands: its slot is already reset,
+    // so nothing would queue the resolve again and the row would stand for good. Its
+    // retire is idempotent, and its closing email is sent once.
+    if (item.kind !== 'clear' && (!Number.isFinite(age) || age > OWED_MAX_MS)) {
       reopenExpiredSlot(state, item);
       wrote.push(`${label}=dropped`);
       continue;
@@ -653,6 +703,6 @@ if (require.main === module) {
 
 module.exports = {
   runOnce, reconcile, flush, defaultState, loadState, saveState, settings, parseReport, sendEmail, runPoll,
-  downAlert, outageAlert, runnerAlert, setupAlert, clearedEmail, rowFor, etTime,
-  KEYS, CHECK_ID, OPS_INBOX, RUNNER_REASONS, RUNNER_CONFIRM_POLLS, PAGE_AFTER_FAILURES, OWED_MAX_MS, SIGNATURE,
+  downAlert, outageAlert, runnerAlert, setupAlert, leaseAlert, clearedEmail, rowFor, etTime,
+  KEYS, LEASE_REASON, CHECK_ID, OPS_INBOX, RUNNER_REASONS, RUNNER_CONFIRM_POLLS, PAGE_AFTER_FAILURES, OWED_MAX_MS, SIGNATURE,
 };
