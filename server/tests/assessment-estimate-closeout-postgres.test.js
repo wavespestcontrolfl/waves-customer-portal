@@ -14,6 +14,13 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
 jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn() }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => null) }));
+// Job costing is not under test here, and the completion starts it without waiting (void calculateJobCost).
+// Every db call goes to the current test's transaction (mockPg), so a costing that outlived its test ran in
+// the next test's transaction and that test's fixture rows went missing (the standard costing path reads more).
+jest.mock('../services/job-costing', () => ({
+  ...jest.requireActual('../services/job-costing'),
+  calculateJobCost: jest.fn(async () => ({})),
+}));
 // Race injection: a test may run a hook right before the completion claim
 // (after the sweep's own reads, before the record transaction's locks).
 const mockRace = { beforeClaim: null };

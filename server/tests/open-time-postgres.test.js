@@ -45,7 +45,7 @@ postgres('open time on the migrated schema', () => {
       customer_id: customerId,
       technician_id: techId,
       scheduled_date: '2026-10-26',
-      service_type: 'Quarterly Pest Control Service',
+      service_type: 'Quarterly Termite Monitoring',
       status: 'completed',
       estimated_price: 129,
       actual_start_time: '2026-10-26T14:00:00Z',
@@ -123,7 +123,7 @@ postgres('open time on the migrated schema', () => {
     expect(row.charged_on_job_minutes).toBeNull();
     expect(row.charged_drive_minutes).toBeNull();
     expect(Number(row.labor_cost)).toBe(35);
-    expect(Number(row.drive_cost)).toBe(6);
+    expect(Number(row.drive_cost)).toBe(11.67);
   });
 
   it('two completed visits costed with a card: the charged minutes are stored, and a re-cost without a card clears them', async () => {
@@ -217,7 +217,7 @@ postgres('open time on the migrated schema', () => {
     // Its service record carries the revenue the re-cost keeps (keepRecordedRevenue).
     await trx('service_records').insert({
       scheduled_service_id: id, customer_id: customerId, technician_id: techId, service_date: '2026-10-26',
-      service_type: 'Quarterly Pest Control Service', status: 'completed', revenue: 117,
+      service_type: 'Quarterly Termite Monitoring', status: 'completed', revenue: 117,
     });
     await jobCosting.calculateJobCost(id, trx);
     expect(Number((await jobCost(id)).charged_drive_minutes)).toBe(24);

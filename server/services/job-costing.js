@@ -12,20 +12,22 @@
  *                              filters `whereNotNull('revenue')` rendered "—".
  *
  * Data sources:
- *   revenue       — see deriveRevenue(): mirrors the completion handler's
- *                   invoiceAmount (estimated_price → monthly_rate, callbacks $0)
- *   labor_cost    — time_entries.duration_minutes (else actual_start/end span,
- *                   else, for a completed visit nothing measured, its scheduled
- *                   estimated_duration_minutes)
+ *   revenue       — see deriveRevenueFromOwnSources(): the visit's own prepay share,
+ *                   recorded revenue, price or linked invoice (callbacks $0)
+ *   labor_cost    — the standard on-site minutes for the service type (see
+ *                   JOB_COST_STANDARD), else time_entries.duration_minutes (else
+ *                   actual_start/end span, else, for a completed visit nothing
+ *                   measured, its scheduled estimated_duration_minutes)
  *                   × loaded_labor_rate of the company_financials row in
  *                   effect on the visit's scheduled date
  *   material_cost — product_inventory_movements.cost_used, plus
  *                   property_application_history fallback costs priced by the
  *                   same per-unit rule as the inventory deduction
  *                   (inventory-cost.js)
- *   drive_cost    — drive_cost_per_stop of the company_financials row in
- *                   effect on the visit's scheduled date (once per physical
- *                   stop when a combined-closeout allocation marker is present)
+ *   drive_cost    — the Average Drive Time at the loaded labor rate of the
+ *                   company_financials row in effect on the visit's scheduled
+ *                   date (once per physical stop when a combined-closeout
+ *                   allocation marker is present)
  *   expenses      — expenses WHERE scheduled_service_id=?
  *
  * GATE_TECH_COST_RATES (L11a) on, AND a cost card in effect for the visit's
@@ -42,11 +44,11 @@
  * technician's paid day. NULL = no card applied. They are written only when those columns exist, and
  * they change no cost figure.
  *
- * GATE_JOB_COST_STANDARD_MINUTES (owner ruling 2026-10-31) on: a completed lawn visit books 20 on-site
+ * Standard minutes (owner ruling 2026-10-31): a completed lawn visit books 20 on-site
  * minutes and a pest control visit 25 (JOB_COST_STANDARD), a measured span over 480 minutes books the
  * visit's scheduled estimate, the drive to a stop is the Average Drive Time at the loaded labor rate, and
  * revenue falls back to the visit's own annual-prepay share or linked invoice (never today's monthly
- * rate under keepRecordedRevenue). Cost and margin figures only. Off = everything above, unchanged.
+ * rate under keepRecordedRevenue). Cost and margin figures only.
  *
  * Idempotent: re-running replaces the prior job_costs row and re-writes the
  * service_records financials for the same scheduled_service_id.
@@ -74,7 +76,7 @@ const DEFAULT_DRIVE_MILES_PER_STOP = 11;
 // The largest margin percent a decimal(5,2) column holds.
 const MARGIN_PCT_LIMIT = 999.99;
 
-// GATE_JOB_COST_STANDARD_MINUTES. Owner ruling 2026-10-31: measured check-in-to-report spans are inflated
+// Standard minutes. Owner ruling 2026-10-31: measured check-in-to-report spans are inflated
 // by on-site conversation and by writing the report in the van, and one lawn visit closed weeks after
 // check-in carried 528 hours. So a lawn care visit is costed at 20 on-site minutes and a pest control
 // visit at 25, whatever the clock says. A service type that also names a specialty or one-off job has no
@@ -194,22 +196,24 @@ function techCostRatesOn() {
   }
 }
 
-// GATE_JOB_COST_STANDARD_MINUTES, read at call time with the same guard as techCostRatesOn.
-function jobCostStandardOn() {
-  try {
-    const gates = require('../config/feature-gates');
-    return typeof gates.jobCostStandardMinutesLive === 'function' && gates.jobCostStandardMinutesLive() === true;
-  } catch {
-    return false;
-  }
-}
-
 // The standard on-job minutes for a service type name, or null when none applies.
 function standardLaborMinutesFor(serviceType) {
   const name = String(serviceType || '');
   if (JOB_COST_STANDARD.excluded.test(name)) return null;
   const rule = JOB_COST_STANDARD.rules.find((r) => r.pattern.test(name));
   return rule ? rule.minutes : null;
+}
+
+// The Average Drive Time is a pricing_config row that an admin edit loads only into the worker that handled the edit.
+// Refresh it when the pricing bridge's interval is due, as the other pricing readers do (needsSync, then
+// syncConstantsFromDB(db)). A refresh that fails keeps the value this worker holds: it never stops a costing.
+async function refreshDriveTimeSetting(db) {
+  try {
+    const engine = require('./pricing-engine');
+    if (typeof engine.needsSync === 'function' && engine.needsSync()) await engine.syncConstantsFromDB(db);
+  } catch (err) {
+    logger.warn(`[job-costing] drive time refresh failed, costing with the value this worker holds: ${err.message}`);
+  }
 }
 
 // The Average Drive Time (pricing_config global_drive_time) in minutes, read at call time.
@@ -258,8 +262,8 @@ async function chargedMinuteColumns(db) {
 
 // The drive one visit is charged (GATE_TECH_COST_RATES). None for a visit
 // that is not completed (it has driven nowhere) or that does not own the
-// stop's drive (`ownsDriveCost`, the combined-closeout owner rule
-// drive_cost_per_stop follows). Else its matched GPS leg when there is one,
+// stop's drive (`ownsDriveCost`, the combined-closeout owner rule the
+// no-card stop drive also follows). Else its matched GPS leg when there is one,
 // else the measured per-stop defaults; a matched leg with no miles (a trip
 // without a mileage log) takes the default miles, no minutes the default
 // minutes. A stop that served several physical visits (one parking spot,
@@ -296,79 +300,6 @@ async function loadDriveLeg(db, svc, { ownsDriveCost, marked }) {
   }
 }
 
-/**
- * deriveRevenue — the per-visit revenue, mirroring the completion handler's
- * `invoiceAmount` (admin-dispatch.js): an explicit visit price wins, else a
- * recurring customer's monthly_rate, else $0. Free visits NEVER fall back to
- * monthly_rate — only an operator-set positive price gives them revenue. Two
- * kinds are free: callbacks/re-services, and INCLUDED follow-ups, which the
- * scheduler creates with estimated_price=0 + followup_included=true and which
- * the completion handler's shouldInvoice gate skips (admin-dispatch.js) — their
- * revenue was already booked on the originating visit, so attributing a full
- * monthly_rate here would double-count. A revenue already written on the record
- * short-circuits so the live recompute stays idempotent — EXCEPT under
- * ignoreExistingRevenue (the backfill mode): historical records were never
- * written by completion, so any existing positive revenue on them is a stale
- * synthetic seed (migration 20260401000027 seeded random revenue), and the
- * backfill must re-derive from the scheduled-service/customer truth rather than
- * compute cost/margin around a fake number. Pure (no I/O), unit-testable.
- */
-function deriveRevenue({
-  serviceRecord, scheduledService, customer, ignoreExistingRevenue = false, keepRecordedRevenue = false,
-} = {}) {
-  // A cost-only re-run (keepRecordedRevenue) keeps whatever revenue is already
-  // written, $0 included: the positive-only short-circuit below would re-derive
-  // a recorded $0 from today's price or plan and rewrite historical revenue.
-  if (keepRecordedRevenue && serviceRecord?.revenue != null) {
-    const recorded = Number(serviceRecord.revenue);
-    if (Number.isFinite(recorded) && recorded >= 0) return round2(recorded);
-  }
-  if (!ignoreExistingRevenue) {
-    const recordRevenue = Number(serviceRecord?.revenue);
-    if (Number.isFinite(recordRevenue) && recordRevenue > 0) return round2(recordRevenue);
-  }
-
-  // Always-free visit TYPES (re-service / follow-up / appointment / estimate) and
-  // included follow-ups are $0 even with a stale/inherited positive
-  // estimated_price — the shared no-cost classifier (no-cost-visit-types.js) and
-  // the dispatch auto-invoice gate (admin-dispatch.js) both refuse to bill them.
-  // So this MUST precede the explicit-price check.
-  const serviceType = scheduledService?.service_type || serviceRecord?.service_type;
-  if (scheduledService?.followup_included === true || isAlwaysFreeServiceType(serviceType)) {
-    return 0;
-  }
-
-  const visitPrice = Number(scheduledService?.estimated_price);
-  if (Number.isFinite(visitPrice) && visitPrice > 0) return round2(visitPrice);
-
-  // An unpriced consultation (Waves Assessment) bills nothing, so it books $0
-  // — never the monthly_rate fallback below (completionInvoiceAmount).
-  if (isConsultationServiceType(serviceType)) return 0;
-
-  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): a stamped 0 (as
-  // opposed to a genuinely blank row) records $0 revenue, never the
-  // monthly_rate fallback below — same predicate the completion resolver
-  // uses (completionInvoiceAmount). Guarded explicitly by the live gate
-  // (not just the predicate's own internal check) because this function
-  // never consulted the predicate at all before, so it must stay
-  // byte-identical while the gate is off.
-  if (stampedZeroFreeLive()
-    && hasAuthoritativeZeroPrice(scheduledService?.estimated_price, scheduledService?.primary_line_price)) {
-    return 0;
-  }
-
-  // A callback is free unless the operator set an explicit price (handled above).
-  // Detect it from EITHER side: the callback backfill (20260618000002) flags
-  // completed re-services on service_records.is_callback but leaves the terminal
-  // scheduled_services row false, so checking only the scheduled_service would
-  // book a full monthly rate for historical free re-services.
-  const isCallback = !!scheduledService?.is_callback || serviceRecord?.is_callback === true;
-  const monthly = Number(customer?.monthly_rate);
-  if (!isCallback && Number.isFinite(monthly) && monthly > 0) return round2(monthly);
-
-  return 0;
-}
-
 function positiveMoney(value) {
   const n = Number(value);
   return value != null && Number.isFinite(n) && n > 0 ? round2(n) : null;
@@ -392,7 +323,7 @@ function prepaidVisitRevenue(svc, rec, serviceType, ownRevenue) {
   return positiveMoney(ownRevenue.prepayShare);
 }
 
-// GATE_JOB_COST_STANDARD_MINUTES revenue (owner ruling 2026-10-31). Order:
+// The visit's revenue (owner ruling 2026-10-31). Order:
 //   1. the visit's share of its paid annual-prepay term (prepaidVisitRevenue), even over a recorded amount and
 //      before its price: a covered visit is not billed on its own, so a recorded amount came from the old
 //      fallback (today's monthly rate), and annual prepay keeps the full estimated_price beside the discounted
@@ -400,7 +331,7 @@ function prepaidVisitRevenue(svc, rec, serviceType, ownRevenue) {
 //   2. a recorded revenue above $0 is kept under keepRecordedRevenue; a recorded $0 falls through to the
 //      visit's OWN sources below, never to customers.monthly_rate (today's plan, not this visit's);
 //   3. always-free types and included follow-ups are $0;
-//   4. the explicit visit price, then an unpriced consultation or a callback is $0 (today's order), then its
+//   4. the explicit visit price, then an unpriced consultation or a callback is $0, then its
 //      linked invoice's service money, $0 included (a fully discounted or fees-only invoice is still the
 //      visit's billing; null = no linked invoice);
 //   5. a stamped zero is $0; the monthly_rate fallback runs only when nothing recorded is being kept.
@@ -514,7 +445,7 @@ async function loadLinkedInvoiceTotal(db, svc, record) {
   }
 }
 
-// The visit's own revenue sources (GATE_JOB_COST_STANDARD_MINUTES). The prepay share is always read: it wins
+// The visit's own revenue sources. The prepay share is always read: it wins
 // over a recorded amount, and a visit with no term returns at once. The invoice is read only when no share, no
 // recorded revenue that wins (kept, or not recomputed) and no visit price comes first.
 async function loadOwnRevenueSources(db, svc, record, { keepRecordedRevenue = false, recomputeRevenue = false } = {}) {
@@ -662,7 +593,7 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
 // 641.1234 matches the 641.123 the ledger kept.
 const refusedLineKey = (productId, amount, unit) => `${productId}|${Number(amount).toFixed(3)}|${baseQuantityUnit(unit) || ''}`;
 
-// GATE_JOB_COST_STANDARD_MINUTES labor (owner ruling 2026-10-31), applied to the measured result of
+// Standard labor (owner ruling 2026-10-31), applied to the measured result of
 // calcLaborCost. Order: an admin time-on-site correction (overrideLaborMinutes, resolved by the caller) wins;
 // else the standard for the service type of a completed visit, which replaces measured time, time entries,
 // backfill minutes and a combined-closeout allocation; else the measured result, where one over the
@@ -966,16 +897,12 @@ async function calculateJobCost(scheduledServiceId, db, {
     intentionallyFree = disposition?.disposition === 'intentionally_free';
   } catch { /* table may be absent before 20260619000001 */ }
 
-  const { laborRate, driveCostPerStop } = await getFinancials(db, svc.scheduled_date);
-  // GATE_JOB_COST_STANDARD_MINUTES, read once for this call: standard labor minutes, the standard drive
-  // cost and the visit's own revenue sources. Off = today's path below, untouched.
-  const standardOn = jobCostStandardOn();
-  const ownRevenue = standardOn && !intentionallyFree
-    ? await loadOwnRevenueSources(db, svc, record, { keepRecordedRevenue, recomputeRevenue })
-    : null;
-  // With the visit's own sources loaded, the standard revenue rules; otherwise today's deriveRevenue, untouched.
-  const deriveVisitRevenue = ownRevenue ? deriveRevenueFromOwnSources : deriveRevenue;
-  const revenue = intentionallyFree ? 0 : deriveVisitRevenue({
+  const { laborRate } = await getFinancials(db, svc.scheduled_date);
+  // The visit's own revenue sources (owner ruling 2026-10-31); an intentionally-free visit books $0 and reads none.
+  const ownRevenue = intentionallyFree
+    ? null
+    : await loadOwnRevenueSources(db, svc, record, { keepRecordedRevenue, recomputeRevenue });
+  const revenue = intentionallyFree ? 0 : deriveRevenueFromOwnSources({
     serviceRecord: record, scheduledService: svc, customer, ignoreExistingRevenue: recomputeRevenue, keepRecordedRevenue, ownRevenue,
   });
   // The scheduled estimate is a last resort for COMPLETED visits only: a
@@ -996,9 +923,7 @@ async function calculateJobCost(scheduledServiceId, db, {
   );
   const {
     laborCost: baseLaborCost, laborHours, laborEstimated, laborMinutes,
-  } = standardOn
-    ? applyStandardLabor(measuredLabor, { svc, rate: laborRate, overrideLaborMinutes, estimatedLaborMinutes })
-    : measuredLabor;
+  } = applyStandardLabor(measuredLabor, { svc, rate: laborRate, overrideLaborMinutes, estimatedLaborMinutes });
   const { productsCost, breakdown } = record?.id
     ? await calcProductsCost(db, record.id, record.structured_notes)
     : { productsCost: 0, breakdown: [] };
@@ -1012,8 +937,9 @@ async function calculateJobCost(scheduledServiceId, db, {
   const marked = driveAllocation?.version === 1;
   const ownsDriveCost = marked ? svc.id === driveAllocation.ownerServiceId : true;
   let laborCost = baseLaborCost;
-  // GATE_JOB_COST_STANDARD_MINUTES: the stop's drive is the Average Drive Time at the loaded labor rate.
-  const stopDriveCost = standardOn ? (standardDriveMinutes() / 60) * laborRate : driveCostPerStop;
+  // The stop's drive is the Average Drive Time at the loaded labor rate (owner ruling 2026-10-31).
+  await refreshDriveTimeSetting(db);
+  const stopDriveCost = (standardDriveMinutes() / 60) * laborRate;
   let driveCost = ownsDriveCost ? stopDriveCost : 0;
   let costRatesApplied = null;
   // The vehicle fixed cost inside drive_cost (NULL = no cost card applied).
@@ -1246,7 +1172,7 @@ async function backfillServiceRecordFinancials(db, { onError, since = null, keep
   for (const id of ids) {
     try {
       // Default: re-derive instead of trusting any existing (possibly
-      // synthetic-seeded) service_records.revenue — see deriveRevenue. A
+      // synthetic-seeded) service_records.revenue — see deriveRevenueFromOwnSources. A
       // costing-fix re-run keeps the written revenue instead.
       const res = await calculateJobCost(
         id, db, keepRecordedRevenue ? { keepRecordedRevenue: true } : { recomputeRevenue: true },
@@ -1271,7 +1197,6 @@ module.exports = {
   resolveServiceRecord,
   parseJsonObject,
   backfillServiceRecordFinancials,
-  deriveRevenue,
   deriveRevenueFromOwnSources,
   computeServiceRecordFinancials,
   JOB_COST_STANDARD,

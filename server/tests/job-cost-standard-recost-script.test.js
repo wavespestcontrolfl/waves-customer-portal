@@ -1,4 +1,4 @@
-// server/scripts/job-cost-standard-recost.js: needs GATE_JOB_COST_STANDARD_MINUTES (dry run too); a dry run
+// server/scripts/job-cost-standard-recost.js: a dry run
 // rolls every visit back; --write commits; the report names service types, never customers.
 const fs = require('fs');
 const os = require('os');
@@ -42,16 +42,9 @@ const calc = (failId) => jest.fn(async (id) => {
 });
 const ARGS = ['--from', '2026-08-01', '--to', '2026-10-30'];
 // The price settings load and each visit's record comes from the injected stand-ins.
-const BASE = { gateOn: () => true, syncPricing: async () => true, loadRecord: async (trx, id) => RECORDS[id] };
+const BASE = { syncPricing: async () => true, loadRecord: async (trx, id) => RECORDS[id] };
 
 describe('job-cost-standard-recost script', () => {
-  test('refuses, dry run included, when the gate is off', async () => {
-    const conn = fakeConn(['a']);
-    await expect(run(ARGS, { conn, log: jest.fn(), gateOn: () => false, calculateJobCost: calc() }))
-      .rejects.toThrow('GATE_JOB_COST_STANDARD_MINUTES is not "true"');
-    expect(conn.trxs).toHaveLength(0);
-  });
-
   test('dry run rolls every visit back and prints before and after by service type', async () => {
     const conn = fakeConn(['a', 'b', 'c']);
     const log = jest.fn();

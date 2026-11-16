@@ -5319,8 +5319,19 @@ postgres('visit completion packet records on PostgreSQL', () => {
         subtotal: '240.00', discount_amount: '0.00', total: '240.00' });
       expect(invoice.line_items.map((line) => Number(line.amount))).toEqual([120, 120]);
       const financials = await trx('company_financials').orderBy('effective_date', 'desc').first();
-      expect(costs.reduce((sum, row) => sum + Number(row.drive_cost), 0)).toBe(Number(financials.drive_cost_per_stop));
-      expect(costs.reduce((sum, row) => sum + Number(row.labor_cost), 0)).toBe(Number(financials.loaded_labor_rate));
+      // Standard job costing (owner ruling 2026-10-31): each member books its service type's standard on-site
+      // minutes, not its share of the closeout, and the stop's drive is the Average Drive Time at the loaded
+      // labor rate, charged once (to the drive-owning member).
+      const rate = Number(financials.loaded_labor_rate);
+      const cents = (value) => Math.round(value * 100) / 100;
+      const memberTypes = await trx('scheduled_services').whereIn('id', fixture.serviceIds).pluck('service_type');
+      expect(memberTypes.map((type) => require('../services/job-costing').standardLaborMinutesFor(type)).sort())
+        .toEqual([20, 25]);
+      const driveMinutes = Number(require('../services/pricing-engine/constants').GLOBAL.DRIVE_TIME);
+      expect(costs.filter((row) => Number(row.drive_cost) > 0)).toHaveLength(1);
+      expect(costs.reduce((sum, row) => sum + Number(row.drive_cost), 0)).toBeCloseTo(cents((driveMinutes / 60) * rate), 2);
+      expect(costs.reduce((sum, row) => sum + Number(row.labor_cost), 0))
+        .toBeCloseTo(cents((20 / 60) * rate) + cents((25 / 60) * rate), 2);
       expect(effects).toEqual(expect.arrayContaining([
         expect.objectContaining({ effect_type: 'completion_sms', status: 'sent' }),
         // The test's provider stub exercises the handoff but deliberately

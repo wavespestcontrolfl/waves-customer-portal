@@ -1,6 +1,6 @@
-// GATE_JOB_COST_STANDARD_MINUTES (owner ruling 2026-10-31): standard on-site minutes per lawn and pest
-// visit, the Average Drive Time per stop, and revenue from the visit's own sources. Gate off = today's
-// numbers. Synthetic ids and numbers only.
+// Standard job costing (owner ruling 2026-10-31): standard on-site minutes per lawn and pest
+// visit, the Average Drive Time per stop, and revenue from the visit's own sources.
+// Synthetic ids and numbers only.
 jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
@@ -8,6 +8,11 @@ jest.mock('../services/ad-attribution-sync', () => ({
   syncCustomerAdAttribution: jest.fn().mockResolvedValue({}),
 }));
 jest.mock('../services/tech-cost-rates', () => ({ loadVisitRates: jest.fn() }));
+// The pricing bridge: another worker's admin edit of the drive time is loaded when its interval is due.
+jest.mock('../services/pricing-engine', () => ({
+  needsSync: jest.fn(() => false),
+  syncConstantsFromDB: jest.fn(async () => true),
+}));
 // Stand-in for the canonical paid-coverage query: a term is paid-covered when its test row says covered: true.
 jest.mock('../services/annual-prepay-renewals', () => ({
   ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
@@ -24,13 +29,13 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 const logger = require('../services/logger');
 const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
 const { loadVisitRates } = require('../services/tech-cost-rates');
+const pricingEngine = require('../services/pricing-engine');
 const { GLOBAL } = require('../services/pricing-engine/constants');
 const jobCosting = require('../services/job-costing');
 
 const {
-  calculateJobCost, deriveRevenue, deriveRevenueFromOwnSources, standardLaborMinutesFor,
+  calculateJobCost, deriveRevenueFromOwnSources, standardLaborMinutesFor,
 } = jobCosting;
-const GATE = 'GATE_JOB_COST_STANDARD_MINUTES';
 const STAMPED = 'GATE_STAMPED_ZERO_FREE';
 const CARDS = 'GATE_TECH_COST_RATES';
 
@@ -112,12 +117,11 @@ const withSvc = (patch) => ({ scheduled_services: [{ ...SVC, ...patch }] });
 const withRecord = (patch) => ({ service_records: [{ ...RECORD, ...patch }] });
 const cost = (db, opts) => calculateJobCost('svc-1', db, opts);
 
-describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
-  const OLD = { [GATE]: process.env[GATE], [STAMPED]: process.env[STAMPED], [CARDS]: process.env[CARDS] };
+describe('standard job costing', () => {
+  const OLD = { [STAMPED]: process.env[STAMPED], [CARDS]: process.env[CARDS] };
   const oldDriveTime = GLOBAL.DRIVE_TIME;
   beforeEach(() => {
     jest.clearAllMocks();
-    delete process.env[GATE];
     delete process.env[STAMPED];
     delete process.env[CARDS];
     GLOBAL.DRIVE_TIME = oldDriveTime;
@@ -127,35 +131,7 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
     GLOBAL.DRIVE_TIME = oldDriveTime;
   });
 
-  describe('gate off: today, byte for byte', () => {
-    test('measured hour, drive_cost_per_stop, and no revenue lookups', async () => {
-      const db = fakeDb();
-      const res = await cost(db, { keepRecordedRevenue: true });
-      expect(res.labor_cost).toBe(35);
-      expect(res.laborHours).toBe(1);
-      expect(res.drive_cost).toBe(6);
-      expect(res.revenue).toBe(89);
-      expect(db.writes.queried.has('annual_prepay_terms')).toBe(false);
-      expect(db.writes.queried.has('invoices')).toBe(false);
-    });
-
-    test('the gate is strict: "1", "TRUE" and "yes" leave it off', async () => {
-      for (const value of ['1', 'TRUE', 'yes', '']) {
-        process.env[GATE] = value;
-        const res = await cost(fakeDb());
-        expect(res.labor_cost).toBe(35);
-        expect(res.drive_cost).toBe(6);
-      }
-    });
-
-    test('a recorded $0 with a price still keeps the $0 under keepRecordedRevenue', async () => {
-      const res = await cost(fakeDb(withRecord({ revenue: 0 })), { keepRecordedRevenue: true });
-      expect(res.revenue).toBe(0);
-    });
-  });
-
-  describe('gate on: labor minutes', () => {
-    beforeEach(() => { process.env[GATE] = 'true'; });
+  describe('labor minutes', () => {
 
     test('a lawn care visit books 20 minutes, a pest control visit 25, whatever the clock says', async () => {
       const lawn = await cost(fakeDb());
@@ -226,8 +202,7 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
     });
   });
 
-  describe('gate on: drive', () => {
-    beforeEach(() => { process.env[GATE] = 'true'; });
+  describe('drive', () => {
 
     test('the drive owner books the Average Drive Time at the labor rate, other members book 0', async () => {
       const owner = await cost(fakeDb());
@@ -244,6 +219,24 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
       expect((await cost(fakeDb())).drive_cost).toBe(17.5);
     });
 
+    test('the Average Drive Time is refreshed from pricing_config before it is read, when the sync is due', async () => {
+      const db = fakeDb();
+      pricingEngine.needsSync.mockReturnValueOnce(true);
+      pricingEngine.syncConstantsFromDB.mockImplementationOnce(async () => { GLOBAL.DRIVE_TIME = 30; return true; });
+      expect((await cost(db)).drive_cost).toBe(17.5); // the 30 minutes another worker saved, not this worker's 20
+      expect(pricingEngine.syncConstantsFromDB).toHaveBeenCalledTimes(1);
+      expect(pricingEngine.syncConstantsFromDB).toHaveBeenCalledWith(db);
+    });
+
+    test('no refresh runs while the sync is not due, and a failed refresh never stops the costing', async () => {
+      await cost(fakeDb());
+      expect(pricingEngine.syncConstantsFromDB).not.toHaveBeenCalled();
+      pricingEngine.needsSync.mockReturnValueOnce(true);
+      pricingEngine.syncConstantsFromDB.mockRejectedValueOnce(new Error('pricing read down'));
+      expect((await cost(fakeDb())).drive_cost).toBe(11.67);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('drive time refresh failed'));
+    });
+
     test('a cost card keeps its own drive path but charges the same on-job minutes', async () => {
       process.env[CARDS] = 'true';
       loadVisitRates.mockResolvedValue({
@@ -258,8 +251,7 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
     });
   });
 
-  describe('gate on: revenue', () => {
-    beforeEach(() => { process.env[GATE] = 'true'; });
+  describe('revenue', () => {
     const KEEP = { keepRecordedRevenue: true };
     const unpriced = { estimated_price: null };
 
@@ -427,11 +419,11 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
       const feesOnly = { service_record_id: 'rec-1', status: 'paid', line_items: [{ description: 'One-time setup fee', amount: 99 }] };
       expect((await cost(fakeDb(tables([fullyDiscounted])))).revenue).toBe(0);
       expect((await cost(fakeDb(tables([feesOnly])))).revenue).toBe(0);
-      // No linked invoice at all: today's monthly_rate fallback.
+      // No linked invoice at all: the monthly_rate fallback.
       expect((await cost(fakeDb(tables([])))).revenue).toBe(99);
     });
 
-    test('monthly_rate is never used under keepRecordedRevenue, and is the old fallback without it', async () => {
+    test('monthly_rate is never used under keepRecordedRevenue, and is the fallback without it', async () => {
       const tables = { ...withSvc(unpriced), ...withRecord({ revenue: 0 }) };
       expect((await cost(fakeDb(tables), KEEP)).revenue).toBe(0);
       expect((await cost(fakeDb(tables))).revenue).toBe(99);
@@ -466,10 +458,29 @@ describe('GATE_JOB_COST_STANDARD_MINUTES', () => {
   });
 
   describe('revenue rules stay pure', () => {
-    test('deriveRevenue is exactly today\'s function', () => {
-      expect(deriveRevenue({
-        serviceRecord: { revenue: 0 }, scheduledService: { estimated_price: 149 }, customer: { monthly_rate: 99 }, keepRecordedRevenue: true,
-      })).toBe(0);
+    // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): a stamped 0 records $0 revenue, never the monthly_rate.
+    describe('a stamped $0 visit', () => {
+      afterEach(() => { delete process.env[STAMPED]; });
+      const none = { prepayShare: 0, invoiceTotal: null };
+      const stampedRevenue = (scheduledService) => deriveRevenueFromOwnSources({
+        serviceRecord: {}, scheduledService, customer: { monthly_rate: 99 }, ownRevenue: none,
+      });
+
+      test('with the stamped-zero gate off, a bare stamped 0 still records monthly_rate', () => {
+        expect(stampedRevenue({ estimated_price: 0, is_callback: false })).toBe(99);
+      });
+
+      test('with it on, a bare stamped 0 records $0, a blank row still records monthly_rate', () => {
+        process.env[STAMPED] = 'true';
+        expect(stampedRevenue({ estimated_price: 0, is_callback: false })).toBe(0);
+        expect(stampedRevenue({ estimated_price: null, is_callback: false })).toBe(99);
+      });
+
+      test('a callback stamped $0 is $0 and a positive price always wins', () => {
+        process.env[STAMPED] = 'true';
+        expect(stampedRevenue({ estimated_price: 0, is_callback: true })).toBe(0);
+        expect(stampedRevenue({ estimated_price: 60, is_callback: false })).toBe(60);
+      });
     });
 
     test('the own-source rules: the prepay share outranks the invoice, which outranks nothing', () => {

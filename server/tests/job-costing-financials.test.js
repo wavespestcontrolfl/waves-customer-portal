@@ -6,217 +6,11 @@ jest.mock('../services/ad-attribution-sync', () => ({
 }));
 
 const {
-  deriveRevenue,
   computeServiceRecordFinancials,
   calculateJobCost,
   calcProductsCost,
   backfillServiceRecordFinancials,
 } = require('../services/job-costing');
-
-describe('deriveRevenue — mirrors the completion handler invoiceAmount', () => {
-  test('keepRecordedRevenue keeps a written $0 even when the visit now carries a price', () => {
-    expect(deriveRevenue({
-      serviceRecord: { revenue: 0 },
-      scheduledService: { estimated_price: 149, is_callback: false },
-      customer: { monthly_rate: 99 },
-      keepRecordedRevenue: true,
-    })).toBe(0);
-    // Without the mode, the positive-only short-circuit re-derives the $0.
-    expect(deriveRevenue({
-      serviceRecord: { revenue: 0 },
-      scheduledService: { estimated_price: 149, is_callback: false },
-      customer: { monthly_rate: 99 },
-    })).toBe(149);
-  });
-
-  test('keepRecordedRevenue still derives when nothing was ever written', () => {
-    expect(deriveRevenue({
-      serviceRecord: { revenue: null },
-      scheduledService: { estimated_price: 149, is_callback: false },
-      customer: { monthly_rate: 99 },
-      keepRecordedRevenue: true,
-    })).toBe(149);
-  });
-
-  test('an explicit visit price (estimated_price) wins over monthly_rate', () => {
-    const rev = deriveRevenue({
-      serviceRecord: { revenue: null },
-      scheduledService: { estimated_price: 149, is_callback: false },
-      customer: { monthly_rate: 99 },
-    });
-    expect(rev).toBe(149);
-  });
-
-  test('non-callback with no visit price falls back to monthly_rate', () => {
-    const rev = deriveRevenue({
-      serviceRecord: {},
-      scheduledService: { estimated_price: null, is_callback: false },
-      customer: { monthly_rate: 99 },
-    });
-    expect(rev).toBe(99);
-  });
-
-  test('an unpriced consultation (Waves Assessment) books $0, never monthly_rate; a priced one books its price', () => {
-    expect(deriveRevenue({
-      serviceRecord: {},
-      scheduledService: { estimated_price: null, is_callback: false, service_type: 'Waves Assessment' },
-      customer: { monthly_rate: 47 },
-    })).toBe(0);
-    expect(deriveRevenue({
-      serviceRecord: {},
-      scheduledService: { estimated_price: 75, is_callback: false, service_type: 'Waves Assessment' },
-      customer: { monthly_rate: 47 },
-    })).toBe(75);
-  });
-
-  test('a callback with no explicit price is free ($0), never monthly_rate', () => {
-    const rev = deriveRevenue({
-      serviceRecord: {},
-      scheduledService: { estimated_price: null, is_callback: true },
-      customer: { monthly_rate: 99 },
-    });
-    expect(rev).toBe(0);
-  });
-
-  test('a callback the operator priced uses that explicit price', () => {
-    const rev = deriveRevenue({
-      serviceRecord: {},
-      scheduledService: { estimated_price: 75, is_callback: true },
-      customer: { monthly_rate: 99 },
-    });
-    expect(rev).toBe(75);
-  });
-
-  test('a revenue already written on the record short-circuits (idempotent recompute)', () => {
-    const rev = deriveRevenue({
-      serviceRecord: { revenue: 120 },
-      scheduledService: { estimated_price: 149, is_callback: false },
-      customer: { monthly_rate: 99 },
-    });
-    expect(rev).toBe(120);
-  });
-
-  test('ignoreExistingRevenue (backfill) re-derives, bypassing a stale seeded revenue', () => {
-    // 20260401000027 seeded synthetic revenue; the backfill must recompute from
-    // source rather than preserve it and build margin around a fake number.
-    const rev = deriveRevenue({
-      serviceRecord: { revenue: 87.34 }, // synthetic seed
-      scheduledService: { estimated_price: 149, is_callback: false },
-      customer: { monthly_rate: 99 },
-      ignoreExistingRevenue: true,
-    });
-    expect(rev).toBe(149);
-  });
-
-  test('an included follow-up is free ($0), never monthly_rate (no double-count)', () => {
-    // Scheduler creates included follow-ups with estimated_price=0 +
-    // followup_included=true; the originating visit already booked the revenue.
-    const rev = deriveRevenue({
-      serviceRecord: {},
-      scheduledService: { estimated_price: 0, is_callback: false, followup_included: true },
-      customer: { monthly_rate: 99 },
-    });
-    expect(rev).toBe(0);
-  });
-
-  test('an always-free type with a STALE positive price is still $0 (never bills)', () => {
-    // no-cost-visit-types + the dispatch invoice gate treat these as $0 even with
-    // an inherited estimated_price, so the always-free check precedes the price.
-    const rev = deriveRevenue({
-      serviceRecord: {},
-      scheduledService: { service_type: 'Re-Service', estimated_price: 120, is_callback: false },
-      customer: { monthly_rate: 99 },
-    });
-    expect(rev).toBe(0);
-  });
-
-  test('a completed free re-service flagged on the RECORD is $0, not monthly', () => {
-    // 20260618000002 backfills service_records.is_callback but leaves the terminal
-    // scheduled_services row is_callback=false — so the record flag must be honored.
-    const rev = deriveRevenue({
-      serviceRecord: { is_callback: true },
-      scheduledService: { is_callback: false, estimated_price: null },
-      customer: { monthly_rate: 99 },
-    });
-    expect(rev).toBe(0);
-  });
-
-  test('an always-free service type (re-service / follow-up) is $0, not monthly', () => {
-    const reService = deriveRevenue({
-      serviceRecord: {},
-      scheduledService: { service_type: 'Free Re-Service', estimated_price: null },
-      customer: { monthly_rate: 99 },
-    });
-    expect(reService).toBe(0);
-    const followUp = deriveRevenue({
-      serviceRecord: { service_type: 'Follow-up Visit' },
-      scheduledService: { estimated_price: null },
-      customer: { monthly_rate: 99 },
-    });
-    expect(followUp).toBe(0);
-  });
-
-  test('no price anywhere yields $0', () => {
-    expect(deriveRevenue({ serviceRecord: {}, scheduledService: {}, customer: {} })).toBe(0);
-  });
-
-  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): a STAMPED 0 (as
-  // opposed to the genuinely blank estimated_price the test above and
-  // "non-callback with no visit price" above cover) records $0 revenue, not
-  // the customer's monthly_rate. Off is byte-identical to today.
-  describe('a stamped $0 visit — GATE_STAMPED_ZERO_FREE', () => {
-    afterEach(() => { delete process.env.GATE_STAMPED_ZERO_FREE; });
-
-    test('off: a bare stamped 0 still records monthly_rate as revenue, same as today', () => {
-      const rev = deriveRevenue({
-        serviceRecord: {},
-        scheduledService: { estimated_price: 0, is_callback: false },
-        customer: { monthly_rate: 99 },
-      });
-      expect(rev).toBe(99);
-    });
-
-    test('on: a bare stamped 0 records $0 revenue, never the monthly_rate', () => {
-      process.env.GATE_STAMPED_ZERO_FREE = 'true';
-      const rev = deriveRevenue({
-        serviceRecord: {},
-        scheduledService: { estimated_price: 0, is_callback: false },
-        customer: { monthly_rate: 99 },
-      });
-      expect(rev).toBe(0);
-    });
-
-    test('on: a genuinely blank (never-priced) row is unaffected — still records monthly_rate', () => {
-      process.env.GATE_STAMPED_ZERO_FREE = 'true';
-      const rev = deriveRevenue({
-        serviceRecord: {},
-        scheduledService: { estimated_price: null, is_callback: false },
-        customer: { monthly_rate: 99 },
-      });
-      expect(rev).toBe(99);
-    });
-
-    test('on: a callback stamped $0 is unaffected ($0 revenue either way)', () => {
-      process.env.GATE_STAMPED_ZERO_FREE = 'true';
-      const rev = deriveRevenue({
-        serviceRecord: {},
-        scheduledService: { estimated_price: 0, is_callback: true },
-        customer: { monthly_rate: 99 },
-      });
-      expect(rev).toBe(0);
-    });
-
-    test('on: a POSITIVE price always wins, gate or not', () => {
-      process.env.GATE_STAMPED_ZERO_FREE = 'true';
-      const rev = deriveRevenue({
-        serviceRecord: {},
-        scheduledService: { estimated_price: 60, is_callback: false },
-        customer: { monthly_rate: 99 },
-      });
-      expect(rev).toBe(60);
-    });
-  });
-});
 
 describe('computeServiceRecordFinancials', () => {
   test('rolls up costs, margin, and revenue-per-man-hour', () => {
@@ -298,7 +92,8 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
     id: 'svc-1',
     customer_id: 'cust-1',
     technician_id: 'tech-1',
-    service_type: 'Quarterly Pest Control Service',
+    // A specialty name has no standard minutes (job-costing.js JOB_COST_STANDARD), so these cases keep pinning the measured labor paths.
+    service_type: 'Quarterly Termite Monitoring',
     scheduled_date: '2026-06-20',
     status: 'completed',
     estimated_price: 129,
@@ -521,12 +316,15 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
     expect(db.writes.windowQueried).toBe(false);
   });
 
-  test('hazard control: without the marker the same recalc books the whole stale span', async () => {
-    // This is the exact overwrite the durable marker exists to prevent.
-    const db = fakeCostingDb({ svc: STALE_SVC, record: NORMAL_RECORD });
-    const res = await calculateJobCost('svc-1', db);
-    expect(res.laborHours).toBe(698);
-    expect(res.labor_cost).toBe(24430);
+  test('hazard control: without the marker the same recalc books the scheduled estimate, never the whole stale span', async () => {
+    // A measured span over 480 minutes is a stale span (owner ruling 2026-10-31): the estimate, else 0.
+    const withEstimate = fakeCostingDb({ svc: { ...STALE_SVC, estimated_duration_minutes: 60 }, record: NORMAL_RECORD });
+    const res = await calculateJobCost('svc-1', withEstimate);
+    expect(res.laborHours).toBe(1);
+    expect(res.labor_cost).toBe(35);
+    const noEstimate = await calculateJobCost('svc-1', fakeCostingDb({ svc: STALE_SVC, record: NORMAL_RECORD }));
+    expect(noEstimate.laborHours).toBe(0);
+    expect(noEstimate.labor_cost).toBe(0);
   });
 
   test('a normal record still uses the span fallback (live behavior unchanged)', async () => {
@@ -534,7 +332,7 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
     const res = await calculateJobCost('svc-1', db);
     expect(res.laborHours).toBe(1.5);
     expect(res.labor_cost).toBe(52.5);
-    expect(res.drive_cost).toBe(6);
+    expect(res.drive_cost).toBe(11.67); // the Average Drive Time (20 min) at the $35 labor rate
   });
 
   test.each([
@@ -575,7 +373,7 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
     expect(res.labor_cost).toBe(26.25);
   });
 
-  test('the marked drive owner gets exactly one configured stop cost in the record and ledger', async () => {
+  test('the marked drive owner gets exactly one stop cost in the record and ledger', async () => {
     const record = {
       ...NORMAL_RECORD,
       structured_notes: {
@@ -585,17 +383,17 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
     const db = fakeCostingDb({
       svc: NORMAL_SVC,
       record,
-      financials: { loaded_labor_rate: 35, drive_cost_per_stop: 8.75 },
+      financials: { loaded_labor_rate: 35 },
     });
 
     const res = await calculateJobCost('svc-1', db);
 
-    expect(res.drive_cost).toBe(8.75);
-    expect(res.total_cost).toBe(61.25);
-    expect(db.writes.currentJobCost).toMatchObject({ drive_cost: 8.75, total_cost: 61.25 });
+    expect(res.drive_cost).toBe(11.67);
+    expect(res.total_cost).toBe(64.17);
+    expect(db.writes.currentJobCost).toMatchObject({ drive_cost: 11.67, total_cost: 64.17 });
     expect(db.writes.serviceRecordUpdates[0]).toMatchObject({
-      drive_cost: 8.75,
-      total_job_cost: 61.25,
+      drive_cost: 11.67,
+      total_job_cost: 64.17,
     });
   });
 
@@ -760,13 +558,13 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
   });
 
   test.each([
-    ['a positive', 120],
-    ['a $0', 0],
-  ])('a dated costing re-run keeps %s written revenue and asks only for visits since the date', async (_label, written) => {
+    ['a positive', 120, 120],
+    ['a $0', 0, 129], // a recorded $0 falls to the visit's own price (owner ruling 2026-10-31)
+  ])('a dated costing re-run keeps %s written revenue and asks only for visits since the date', async (_label, written, booked) => {
     const db = fakeCostingDb({ svc: NORMAL_SVC, record: { ...NORMAL_RECORD, revenue: written } });
     const res = await backfillServiceRecordFinancials(db, { since: '2026-04-01', keepRecordedRevenue: true });
     expect(res).toEqual({ processed: 1, updated: 1, skipped: 0 });
-    expect(db.writes.serviceRecordUpdates[0].revenue).toBe(written); // never re-derived to the $129 visit price
+    expect(db.writes.serviceRecordUpdates[0].revenue).toBe(booked); // a positive written amount is never re-derived to the $129 visit price
     expect(db.writes.plucks).toEqual(expect.arrayContaining([
       expect.objectContaining({
         table: 'scheduled_services',
@@ -786,9 +584,9 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
     ];
 
     test.each([
-      { label: 'before the new row', date: '2026-10-31', labor: 52.5, drive: 6 },
-      { label: 'on the new row date', date: '2026-11-01', labor: 45, drive: 12 },
-      { label: 'before every row (oldest row)', date: '2025-12-15', labor: 52.5, drive: 6 },
+      { label: 'before the new row', date: '2026-10-31', labor: 52.5, drive: 11.67 },
+      { label: 'on the new row date', date: '2026-11-01', labor: 45, drive: 10 }, // 20 drive minutes at the row's labor rate
+      { label: 'before every row (oldest row)', date: '2025-12-15', labor: 52.5, drive: 11.67 },
     ])('a visit $label ($date) is costed at the row in effect that day', async ({ date, labor, drive }) => {
       const db = fakeCostingDb({
         svc: { ...NORMAL_SVC, scheduled_date: date },
