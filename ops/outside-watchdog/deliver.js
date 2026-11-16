@@ -15,9 +15,10 @@
  *     row; it closes itself on the first poll that no longer sees it.
  *   - setup: the portal refuses the poll (signature, key, lane off), so the watchdog is
  *     blind. A row that closes on the next good poll.
- *   - lease: the link worker holds a lease past its time (link_worker:stale_leases). No
- *     check inside the portal reports it, so this is a Claude fault row; it closes
- *     itself on the first good poll that no longer sees it.
+ *   - lease: the link worker holds a lease past its time (link_worker:stale_leases), or
+ *     the portal cannot read the link worker (link_worker:unavailable). No check inside
+ *     the portal reports either, so this is a Claude fault row; it closes itself on the
+ *     first good poll that reads the link worker and sees no stale leases.
  * The snapshot's other reasons (one failing job, an ops-queue lane) stay with the
  * portal's own checks. Those run inside a portal that answers; the runner check
  * covers the case where they cannot run at all.
@@ -49,6 +50,9 @@ const KEYS = { down: 'outside-watchdog-down', runner: 'outside-watchdog-runner',
 // worker holds a lease past its time. The other non-runner reasons have their own
 // in-portal alerts (failing jobs, ops-queue lanes).
 const LEASE_REASON = 'link_worker:stale_leases';
+// The portal could not read the link worker (its audit or lease query failed): the
+// lease state is unknown, so this opens the slot too, and never clears a stale alert.
+const LEASE_UNAVAILABLE_REASON = 'link_worker:unavailable';
 const OUTAGE_KEY_PREFIX = 'outside-watchdog-outage';
 // watchdog_poll.py pages an outage at this many failed polls in a row.
 const PAGE_AFTER_FAILURES = 3;
@@ -198,7 +202,21 @@ function runnerAlert(reason, scheduler) {
   );
 }
 
-function leaseAlert() {
+function leaseAlert(reason = LEASE_REASON) {
+  if (reason === LEASE_UNAVAILABLE_REASON) {
+    return alertParts(
+      faultSpec('check the link worker health read', 'The portal could not read the link worker state, so stale leases cannot be seen.', 'link_worker_readable'),
+      {
+        emailSubject: 'FIX: the Waves portal cannot read its link worker state (outside watchdog)',
+        body: [
+          'The portal answers the outside watchdog, but its snapshot could not read the link worker state (link_worker:unavailable).',
+          'Until it can, nobody sees whether the link worker holds stale leases.',
+          'Check the portal logs for "[agent-watchdog]" read errors and the database.',
+          'This alert closes itself on the first good poll that reads the link worker with no stale leases.',
+        ],
+      },
+    );
+  }
   return alertParts(
     faultSpec('check the link worker stale leases', 'The link worker holds a lease past its time, so its queued links do not move.', 'leases_clear'),
     {
@@ -284,7 +302,8 @@ function defaultState() {
     down: { open: false, since: null, failures: 0, via: null, emailed: false, alertId: null },
     runner: { seen: null, polls: 0, open: null, via: null, emailed: false, alertId: null },
     setup: { open: false, detail: null, via: null, emailed: false, alertId: null },
-    lease: { open: false, via: null, emailed: false, alertId: null },
+    // open: null, or the reason the slot's alert reports (stale leases, or the read failed).
+    lease: { open: null, via: null, emailed: false, alertId: null },
     outbox: [],
   };
 }
@@ -456,17 +475,23 @@ function reconcileSetup(state, report, at) {
   }
 }
 
-// lease: called for a good poll only (the reasons come from the snapshot).
+// lease: called for a good poll only (the reasons come from the snapshot). Stale leases
+// open (or rewrite) the alert. A failed link-worker read opens its own alert when none
+// is open, and never closes a stale-lease alert: the state is unknown. Only a read
+// that works and sees no stale leases closes the slot.
 function reconcileLease(state, report, at) {
   const reasons = Array.isArray(report.reasons) ? report.reasons : [];
   const lease = state.lease;
-  if (reasons.includes(LEASE_REASON)) {
-    if (lease.open && lease.alertId) return;
-    lease.open = true;
-    enqueueAlert(state, { slot: 'lease', key: KEYS.lease, at, replace: true, parts: leaseAlert() });
+  let want = null;
+  if (reasons.includes(LEASE_REASON)) want = LEASE_REASON;
+  else if (reasons.includes(LEASE_UNAVAILABLE_REASON)) want = lease.open || LEASE_UNAVAILABLE_REASON;
+  if (want) {
+    if (lease.open === want && lease.alertId) return;
+    lease.open = want;
+    enqueueAlert(state, { slot: 'lease', key: KEYS.lease, at, replace: true, parts: leaseAlert(want) });
   } else if (lease.open) {
     enqueueClear(state, { slot: 'lease', key: KEYS.lease, at, email: clearedEmail('lease') });
-    lease.open = false;
+    lease.open = null;
   }
 }
 
@@ -719,5 +744,5 @@ if (require.main === module) {
 module.exports = {
   runOnce, reconcile, flush, defaultState, loadState, saveState, settings, parseReport, sendEmail, runPoll,
   downAlert, outageAlert, runnerAlert, setupAlert, leaseAlert, clearedEmail, rowFor, etTime,
-  KEYS, LEASE_REASON, CHECK_ID, OPS_INBOX, RUNNER_REASONS, RUNNER_CONFIRM_POLLS, PAGE_AFTER_FAILURES, OWED_MAX_MS, FLUSH_BUDGET_MS, SIGNATURE,
+  KEYS, LEASE_REASON, LEASE_UNAVAILABLE_REASON, CHECK_ID, OPS_INBOX, RUNNER_REASONS, RUNNER_CONFIRM_POLLS, PAGE_AFTER_FAILURES, OWED_MAX_MS, FLUSH_BUDGET_MS, SIGNATURE,
 };

@@ -340,7 +340,7 @@ describe('delivery: link worker stale leases (Codex r8 P2)', () => {
     expect(calls.posts).toHaveLength(1);
     await step(state, report(), io, 20);
     expect(calls.resolves[calls.resolves.length - 1]).toEqual({ key: deliver.KEYS.lease, observedAt: at(20) });
-    expect(state.lease).toMatchObject({ open: false, alertId: null });
+    expect(state.lease).toMatchObject({ open: null, alertId: null });
     expect(calls.mails).toEqual([]);
   });
 
@@ -350,10 +350,10 @@ describe('delivery: link worker stale leases (Codex r8 P2)', () => {
     await step(state, report({ reasons: ['job:x:failing', 'ops:email:failed'] }), io, 0);
     expect(calls.posts).toEqual([]);
     await step(state, stale(), fakeIo().io, 10);
-    expect(state.lease.open).toBe(true);
+    expect(state.lease.open).toBe(deliver.LEASE_REASON);
     await step(state, down(1, 20), io, 20);
     await step(state, report({ result: 'config', detail: 'HTTP 403: refused' }), io, 30);
-    expect(state.lease.open).toBe(true);
+    expect(state.lease.open).toBe(deliver.LEASE_REASON);
   });
 
   test('a lease alert that went by email sends its closing email', async () => {
@@ -363,6 +363,31 @@ describe('delivery: link worker stale leases (Codex r8 P2)', () => {
     expect(state.lease).toMatchObject({ via: 'email', emailed: true });
     await step(state, report(), io, 10);
     expect(calls.mails.map((m) => m.subject)).toEqual(['FIX: Waves link worker has stale leases (outside watchdog)', 'Waves link worker leases clear again (outside watchdog)']);
+  });
+
+  test('a failed link-worker read opens its own alert, and never closes a stale-lease alert (Codex r10 P2s)', async () => {
+    const unread = report({ reasons: [deliver.LEASE_UNAVAILABLE_REASON] });
+    const a = deliver.defaultState();
+    const ioA = fakeIo();
+    await step(a, unread, ioA.io, 0);
+    expect(a.lease.open).toBe(deliver.LEASE_UNAVAILABLE_REASON);
+    expect(ioA.calls.posts).toHaveLength(1);
+    expect(ioA.calls.posts[0].headline).toBe('System — check the link worker health read');
+    await step(a, unread, ioA.io, 10);
+    expect(ioA.calls.posts).toHaveLength(1);
+    // Stale leases seen later rewrite the alert.
+    await step(a, stale(), ioA.io, 20);
+    expect(ioA.calls.posts).toHaveLength(2);
+    expect(a.lease.open).toBe(deliver.LEASE_REASON);
+    // The read fails while stale leases are open: the alert stays, nothing is queued.
+    await step(a, unread, ioA.io, 30);
+    expect(a.lease.open).toBe(deliver.LEASE_REASON);
+    expect(ioA.calls.posts).toHaveLength(2);
+    expect(a.outbox).toEqual([]);
+    // A working read with no stale leases closes it.
+    await step(a, report(), ioA.io, 40);
+    expect(a.lease).toMatchObject({ open: null, alertId: null });
+    expect(ioA.calls.resolves[ioA.calls.resolves.length - 1]).toEqual({ key: deliver.KEYS.lease, observedAt: at(40) });
   });
 
   test('an old state file with no lease slot loads with one', () => {
@@ -633,6 +658,7 @@ describe('row words', () => {
     ['runner off', deliver.runnerAlert('scheduler:disabled', {})],
     ['runner unreadable', deliver.runnerAlert('scheduler:unavailable', null)],
     ['lease', deliver.leaseAlert()],
+    ['lease read failed', deliver.leaseAlert(deliver.LEASE_UNAVAILABLE_REASON)],
     ...['HTTP 401: x', 'HTTP 403: x', 'HTTP 404: x', 'HTTP 503: x', 'HTTP 418: x'].map((d) => [`setup ${d}`, deliver.setupAlert(d)]),
   ];
 

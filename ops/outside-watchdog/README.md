@@ -30,11 +30,14 @@ stands after that, the next run queues a fresh alert for it.
 
 The portal's own check that the Air still polls (`agent-watchdog-liveness.js`)
 writes its row the same way. When the in-app digest gates are off or the row
-write fails, it emails the internal inbox once per silence episode.
+write fails, it emails the internal inbox once per silence episode, and sends
+one closing email when polling resumes.
 
-Stale link-worker leases (`link_worker:stale_leases`) get their own row here,
-because no check inside the portal reports them. It closes on the first good
-poll that no longer sees them. The snapshot's other reasons (one failing job, an
+Stale link-worker leases (`link_worker:stale_leases`) and a failed link-worker
+read (`link_worker:unavailable`) get their own row here, because no check inside
+the portal reports them. A failed read never closes a stale-lease row. The row
+closes on the first good poll that reads the link worker and sees no stale
+leases. The snapshot's other reasons (one failing job, an
 ops-queue lane) are not reported here. The portal's own checks report them, and
 the job-runner finding covers the case where those checks cannot run.
 

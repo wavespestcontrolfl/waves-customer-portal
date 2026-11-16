@@ -129,6 +129,35 @@ test('digest gates off -> the email fallback reports the silence; the tick does 
   expect(mockMailer.sendOne).toHaveBeenCalledTimes(2);
 });
 
+test('an emailed silence gets one closing email when polling resumes; a failed send retries (Codex r10 P2)', async () => {
+  lastRow = { at: minutesBefore(90) };
+  mockDeliver.mockImplementation(async ({ sendEmail }) => {
+    const result = await sendEmail();
+    return { ok: result.ok !== false, channel: 'email', result };
+  });
+  await runWatchdogLivenessCheck({ now: NOW, mailer: mockMailer });
+  expect(mockMailer.sendOne).toHaveBeenCalledTimes(1);
+  lastRow = { at: minutesBefore(5) };
+  mockMailer.sendOne.mockResolvedValueOnce({ ok: false, error: 'smtp' });
+  await expect(runWatchdogLivenessCheck({ now: NOW, mailer: mockMailer })).resolves.toMatchObject({ silent: false, closingEmail: 'failed' });
+  await expect(runWatchdogLivenessCheck({ now: NOW, mailer: mockMailer })).resolves.toMatchObject({ silent: false, closingEmail: 'sent' });
+  expect(mockMailer.sendOne).toHaveBeenCalledTimes(3);
+  expect(mockMailer.sendOne.mock.calls[2][0]).toMatchObject({ to: OPS_INBOX, subject: 'Outside watchdog polling again' });
+  // Closed: the next fresh tick sends nothing.
+  const r = await runWatchdogLivenessCheck({ now: NOW, mailer: mockMailer });
+  expect(r).not.toHaveProperty('closingEmail');
+  expect(mockMailer.sendOne).toHaveBeenCalledTimes(3);
+});
+
+test('a row-only silence sends no closing email', async () => {
+  lastRow = { at: minutesBefore(90) };
+  await runWatchdogLivenessCheck({ now: NOW, mailer: mockMailer });
+  lastRow = { at: minutesBefore(5) };
+  const r = await runWatchdogLivenessCheck({ now: NOW, mailer: mockMailer });
+  expect(r).not.toHaveProperty('closingEmail');
+  expect(mockMailer.sendOne).not.toHaveBeenCalled();
+});
+
 test('digest gates off and the mailer is not configured -> THROWS, so job_health marks the job failing', async () => {
   lastRow = { at: minutesBefore(90) };
   mockMailer.isConfigured.mockReturnValue(false);

@@ -91,6 +91,35 @@ function composeSilentRow(last, limit) {
   return { alert, text };
 }
 
+// The silence went out by email (the row could not land): the inbox gets one closing
+// email when polling resumes. A failed send keeps the episode, so the next fresh tick
+// tries again. In memory, as the episode key: a redeploy mid-episode loses it.
+async function sendClosingEmail(mailer, last) {
+  if (emailedEpisode === null) return null;
+  if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) return 'mailer not configured';
+  let sent;
+  try {
+    sent = await mailer.sendOne({
+      to: OPS_INBOX,
+      fromEmail: fromEmail(),
+      fromName: FROM_NAME,
+      subject: 'Outside watchdog polling again',
+      text: [
+        `The outside watchdog on the MacBook Air polls the portal again (last poll ${etStamp(last)} ET).`,
+        'This closes the earlier "outside watchdog silent" email.',
+      ].join('\n'),
+      categories: ['ops', OPS_KEY],
+      suppressErrorLog: true,
+    });
+  } catch (err) {
+    logger.warn(`[hermes-watchdog-liveness] closing email failed: ${err.message}`);
+    return 'failed';
+  }
+  if (sent && sent.ok === false) return 'failed';
+  emailedEpisode = null;
+  return 'sent';
+}
+
 async function runWatchdogLivenessCheck({ now = new Date(), mailer = sendgrid } = {}) {
   // The endpoint sits behind BOTH gates (linkWorkerAuth answers 403 while the
   // shared worker integration is off, so no observed row can land); a
@@ -101,7 +130,8 @@ async function runWatchdogLivenessCheck({ now = new Date(), mailer = sendgrid } 
   const limit = staleMinutes();
   if (last && ageMinutes <= limit) {
     const closed = await retireIfClean(OPS_KEY, { resolvedBy: 'outside-watchdog:polling' });
-    return { skipped: false, silent: false, closed, ageMinutes, limit };
+    const closingEmail = await sendClosingEmail(mailer, last);
+    return { skipped: false, silent: false, closed, ageMinutes, limit, ...(closingEmail ? { closingEmail } : {}) };
   }
 
   const { alert, text } = composeSilentRow(last, limit);
