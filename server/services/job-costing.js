@@ -204,6 +204,18 @@ function standardLaborMinutesFor(serviceType) {
   return rule ? rule.minutes : null;
 }
 
+// The Average Drive Time is a pricing_config row that an admin edit loads only into the worker that handled the edit.
+// Refresh it when the pricing bridge's interval is due, as the other pricing readers do (needsSync, then
+// syncConstantsFromDB(db)). A refresh that fails keeps the value this worker holds: it never stops a costing.
+async function refreshDriveTimeSetting(db) {
+  try {
+    const engine = require('./pricing-engine');
+    if (typeof engine.needsSync === 'function' && engine.needsSync()) await engine.syncConstantsFromDB(db);
+  } catch (err) {
+    logger.warn(`[job-costing] drive time refresh failed, costing with the value this worker holds: ${err.message}`);
+  }
+}
+
 // The Average Drive Time (pricing_config global_drive_time) in minutes, read at call time.
 function standardDriveMinutes() {
   try {
@@ -926,6 +938,7 @@ async function calculateJobCost(scheduledServiceId, db, {
   const ownsDriveCost = marked ? svc.id === driveAllocation.ownerServiceId : true;
   let laborCost = baseLaborCost;
   // The stop's drive is the Average Drive Time at the loaded labor rate (owner ruling 2026-10-31).
+  await refreshDriveTimeSetting(db);
   const stopDriveCost = (standardDriveMinutes() / 60) * laborRate;
   let driveCost = ownsDriveCost ? stopDriveCost : 0;
   let costRatesApplied = null;

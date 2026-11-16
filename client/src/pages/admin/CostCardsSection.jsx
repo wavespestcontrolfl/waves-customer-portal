@@ -276,7 +276,7 @@ function VehicleCardForm({ vehicle, today, onSaved }) {
 }
 
 function cardSummary(card) {
-  if (!card) return "No card yet. Costing uses the company labor rate and drive cost per stop.";
+  if (!card) return "No card yet. Costing uses the company labor rate, and the Average Drive Time at that rate for each stop.";
   const kind = card.kind === "imputed"
     ? `stated rate $${plain(card.imputedHourlyRate)} an hour`
     : card.hourlyWage != null ? `W-2 at $${plain(card.hourlyWage)} an hour` : "W-2";

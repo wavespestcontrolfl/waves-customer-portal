@@ -118,7 +118,7 @@ describe("Cost cards section", () => {
     it("a technician with no card says costing keeps the company rate", async () => {
       render(<CostCardsSection />);
       await screen.findByText("Second Sample");
-      expect(screen.getByText(/No card yet\. Costing uses the company labor rate and drive cost per stop\./)).toBeInTheDocument();
+      expect(screen.getByText(/No card yet\. Costing uses the company labor rate, and the Average Drive Time at that rate for each stop\./)).toBeInTheDocument();
     });
 
     it("shows each vehicle's card and its fixed cost per worked hour", async () => {

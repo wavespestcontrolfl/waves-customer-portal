@@ -8,6 +8,11 @@ jest.mock('../services/ad-attribution-sync', () => ({
   syncCustomerAdAttribution: jest.fn().mockResolvedValue({}),
 }));
 jest.mock('../services/tech-cost-rates', () => ({ loadVisitRates: jest.fn() }));
+// The pricing bridge: another worker's admin edit of the drive time is loaded when its interval is due.
+jest.mock('../services/pricing-engine', () => ({
+  needsSync: jest.fn(() => false),
+  syncConstantsFromDB: jest.fn(async () => true),
+}));
 // Stand-in for the canonical paid-coverage query: a term is paid-covered when its test row says covered: true.
 jest.mock('../services/annual-prepay-renewals', () => ({
   ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
@@ -24,6 +29,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 const logger = require('../services/logger');
 const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
 const { loadVisitRates } = require('../services/tech-cost-rates');
+const pricingEngine = require('../services/pricing-engine');
 const { GLOBAL } = require('../services/pricing-engine/constants');
 const jobCosting = require('../services/job-costing');
 
@@ -211,6 +217,24 @@ describe('standard job costing', () => {
     test('the Average Drive Time is read when the visit is costed', async () => {
       GLOBAL.DRIVE_TIME = 30;
       expect((await cost(fakeDb())).drive_cost).toBe(17.5);
+    });
+
+    test('the Average Drive Time is refreshed from pricing_config before it is read, when the sync is due', async () => {
+      const db = fakeDb();
+      pricingEngine.needsSync.mockReturnValueOnce(true);
+      pricingEngine.syncConstantsFromDB.mockImplementationOnce(async () => { GLOBAL.DRIVE_TIME = 30; return true; });
+      expect((await cost(db)).drive_cost).toBe(17.5); // the 30 minutes another worker saved, not this worker's 20
+      expect(pricingEngine.syncConstantsFromDB).toHaveBeenCalledTimes(1);
+      expect(pricingEngine.syncConstantsFromDB).toHaveBeenCalledWith(db);
+    });
+
+    test('no refresh runs while the sync is not due, and a failed refresh never stops the costing', async () => {
+      await cost(fakeDb());
+      expect(pricingEngine.syncConstantsFromDB).not.toHaveBeenCalled();
+      pricingEngine.needsSync.mockReturnValueOnce(true);
+      pricingEngine.syncConstantsFromDB.mockRejectedValueOnce(new Error('pricing read down'));
+      expect((await cost(fakeDb())).drive_cost).toBe(11.67);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('drive time refresh failed'));
     });
 
     test('a cost card keeps its own drive path but charges the same on-job minutes', async () => {
