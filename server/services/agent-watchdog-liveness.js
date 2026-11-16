@@ -31,6 +31,15 @@ const { composeAdminAlert } = require('./admin-alert-compose');
 const { deliverOpsDigest } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const { formatETDayDate, formatETTime } = require('../utils/datetime-et');
+const sendgrid = require('./sendgrid-mail');
+
+const OPS_INBOX = 'contact@wavespestcontrol.com';
+const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || OPS_INBOX;
+const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
+
+// One fallback email per silence episode (keyed by the last poll time), not
+// one per 23-min tick. In memory: a redeploy mid-episode sends one more.
+let emailedEpisode = null;
 
 const DEFAULT_STALE_MINUTES = 45;
 const OPS_KEY = 'outside-watchdog-silent';
@@ -82,7 +91,7 @@ function composeSilentRow(last, limit) {
   return { alert, text };
 }
 
-async function runWatchdogLivenessCheck({ now = new Date() } = {}) {
+async function runWatchdogLivenessCheck({ now = new Date(), mailer = sendgrid } = {}) {
   // The endpoint sits behind BOTH gates (linkWorkerAuth answers 403 while the
   // shared worker integration is off, so no observed row can land); a
   // "watchdog silent" row then would report a deliberate state.
@@ -110,18 +119,38 @@ async function runWatchdogLivenessCheck({ now = new Date() } = {}) {
     refreshOnDedupe: true,
     fallOff: true,
     metadata: { ...alert.metadata, last_observed_at: last ? last.toISOString() : null, limit_minutes: limit },
-    // Claude's fault queue only: no email path, so a row that cannot be
-    // written must fail the tick instead of reading as a healthy run.
-    sendEmail: async () => ({ ok: false, error: 'the outside watchdog silent row has no email path' }),
+    // Fallback only (the in-app digest gates are off, or the row write
+    // failed): the office inbox gets the same words, so the silence is
+    // still reported. No customer address is ever used here.
+    sendEmail: async () => {
+      const episode = last ? last.toISOString() : 'never';
+      if (emailedEpisode === episode) return { ok: true, skipped: 'already emailed this episode' };
+      if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) {
+        return { ok: false, error: 'mailer not configured' };
+      }
+      const sent = await mailer.sendOne({
+        to: OPS_INBOX,
+        fromEmail: fromEmail(),
+        fromName: FROM_NAME,
+        subject: 'FIX: outside watchdog silent',
+        text,
+        categories: ['ops', OPS_KEY],
+        suppressErrorLog: true,
+      });
+      if (!sent || sent.ok !== false) emailedEpisode = episode;
+      return sent;
+    },
   });
-  if (result?.channel !== 'in_app') {
+  if (!result || result.ok === false || (result.channel !== 'in_app' && result.channel !== 'email')) {
     // Throw, don't just log: runExclusive then records THIS job as failing in
     // job_health (the Agents → Queue tab), so a broken reciprocal alarm is
     // not silent twice.
-    logger.error('[hermes-watchdog-liveness] the silent row did not persist — silence is unannounced');
+    logger.error('[hermes-watchdog-liveness] neither the silent row nor its email landed — silence is unannounced');
     throw new Error('outside watchdog silent row did not persist');
   }
-  return { skipped: false, silent: true, ageMinutes, limit };
+  return { skipped: false, silent: true, ageMinutes, limit, channel: result.channel };
 }
 
-module.exports = { runWatchdogLivenessCheck, DEFAULT_STALE_MINUTES, OPS_KEY };
+function resetEmailedEpisodeForTests() { emailedEpisode = null; }
+
+module.exports = { runWatchdogLivenessCheck, DEFAULT_STALE_MINUTES, OPS_KEY, OPS_INBOX, resetEmailedEpisodeForTests };

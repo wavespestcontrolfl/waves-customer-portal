@@ -450,6 +450,48 @@ describe('delivery: setup and the outbox', () => {
     expect(state.outbox).toEqual([]);
   });
 
+  test('an alert dropped after 48 h while the portal is still down is queued again and lands (Codex r7 P2)', async () => {
+    const state = deliver.defaultState();
+    const failing = fakeIo({ post: () => ({ ok: false, reason: 'x' }), mail: () => ({ ok: false, reason: 'y' }) });
+    await step(state, down(3, 20), failing.io, 20);
+    const later = 20 + 49 * 60;
+    expect(await deliver.flush(state, failing.io, new Date(at(later)))).toEqual(['alert:down=dropped']);
+    // The slot stays open, so a recovery would still queue its clear.
+    expect(state.down).toMatchObject({ open: true, alertId: null });
+    const ok = fakeIo({ post: () => ({ ok: false, reason: 'unreachable:TimeoutError' }) });
+    await step(state, down(300, later + 10), ok.io, later + 10);
+    expect(ok.calls.mails).toHaveLength(1);
+    expect(state.down).toMatchObject({ open: true, via: 'email', emailed: true });
+    expect(state.down.alertId).toBeTruthy();
+    // Delivered now: the next down poll queues nothing new.
+    await step(state, down(301, later + 20), ok.io, later + 20);
+    expect(ok.calls.mails).toHaveLength(1);
+  });
+
+  test('a runner or setup alert dropped after 48 h is queued again while its condition stands', async () => {
+    const silent = report({ reasons: ['scheduler:silent'], scheduler: { age_minutes: 74, silent_after_minutes: 60 } });
+    const state = deliver.defaultState();
+    const failing = fakeIo({ post: () => ({ ok: false, reason: 'x' }), mail: () => ({ ok: false, reason: 'y' }) });
+    await step(state, silent, failing.io, 0);
+    await step(state, silent, failing.io, 10);
+    expect(state.runner.open).toBe('scheduler:silent');
+    const later = 10 + 49 * 60;
+    expect(await deliver.flush(state, failing.io, new Date(at(later)))).toEqual(['alert:runner=dropped']);
+    const ok = fakeIo();
+    await step(state, silent, ok.io, later + 10);
+    expect(ok.calls.posts).toHaveLength(1);
+    expect(ok.calls.posts[0]).toMatchObject({ key: deliver.KEYS.runner });
+
+    const s2 = deliver.defaultState();
+    const refused = report({ result: 'config', detail: 'HTTP 403: refused' });
+    await step(s2, refused, failing.io, 0);
+    expect(await deliver.flush(s2, failing.io, new Date(at(49 * 60)))).toEqual(['alert:setup=dropped']);
+    const ok2 = fakeIo();
+    await step(s2, refused, ok2.io, 49 * 60 + 10);
+    expect(ok2.calls.posts).toHaveLength(1);
+    expect(ok2.calls.posts[0]).toMatchObject({ key: deliver.KEYS.setup });
+  });
+
   test('a clear for a row that stands is retried until the resolve lands', async () => {
     const state = deliver.defaultState();
     const ok = fakeIo();

@@ -358,9 +358,11 @@ function reconcileDown(state, report, at, portalUrl) {
   const down = state.down;
   if (report.result === 'down') {
     if (failures < PAGE_AFTER_FAILURES) return;
-    if (!down.open) {
-      down.open = true;
-      down.since = report.down_since || at;
+    if (!down.open || !down.alertId) {
+      if (!down.open) {
+        down.open = true;
+        down.since = report.down_since || at;
+      }
       enqueueAlert(state, {
         slot: 'down', key: KEYS.down, at, replace: true,
         parts: downAlert({ since: down.since, failures, detail: report.detail, portalUrl }),
@@ -395,7 +397,7 @@ function reconcileRunner(state, report, at) {
   }
   runner.polls = runner.seen === reason ? (Number(runner.polls) || 0) + 1 : 1;
   runner.seen = reason;
-  if (runner.polls >= RUNNER_CONFIRM_POLLS && runner.open !== reason) {
+  if (runner.polls >= RUNNER_CONFIRM_POLLS && (runner.open !== reason || !runner.alertId)) {
     runner.open = reason;
     enqueueAlert(state, { slot: 'runner', key: KEYS.runner, at, replace: true, parts: runnerAlert(reason, report.scheduler) });
   }
@@ -405,7 +407,7 @@ function reconcileRunner(state, report, at) {
 function reconcileSetup(state, report, at) {
   const setup = state.setup;
   if (report.result === 'config') {
-    if (setup.open && setup.detail === report.detail) return;
+    if (setup.open && setup.detail === report.detail && setup.alertId) return;
     setup.open = true;
     setup.detail = report.detail;
     enqueueAlert(state, { slot: 'setup', key: KEYS.setup, at, replace: true, parts: setupAlert(report.detail) });
@@ -458,6 +460,17 @@ async function flushClear(item, io) {
   return { ok: true, via: item.email ? 'email' : 'row' };
 }
 
+// An alert owed past OWED_MAX_MS is dropped, but its condition may still be active.
+// The slot stays open (so a recovery still queues its clear, which retires any row a
+// timed-out POST left), and loses its alertId: the next poll that still sees the
+// condition queues a fresh alert with a fresh 48 h clock instead of reading the
+// dropped one as announced. `emailed` stays: an earlier alert of the episode that
+// went by email still owes its closing email.
+function reopenExpiredSlot(state, item) {
+  if (item.kind !== 'alert' || !item.slot || !state[item.slot] || state[item.slot].alertId !== item.id) return;
+  Object.assign(state[item.slot], { alertId: null, via: null });
+}
+
 async function flush(state, io, now) {
   const wrote = [];
   const keep = [];
@@ -465,6 +478,7 @@ async function flush(state, io, now) {
     const label = `${item.kind}:${item.slot || 'outage'}`;
     const age = now.getTime() - Date.parse(item.at);
     if (!Number.isFinite(age) || age > OWED_MAX_MS) {
+      reopenExpiredSlot(state, item);
       wrote.push(`${label}=dropped`);
       continue;
     }

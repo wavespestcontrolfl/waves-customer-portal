@@ -25,7 +25,12 @@ Agents → Activity, carry `who: claude` and `severity: broken`, and the Claude
 fault launcher on the office Mac opens a tab for them. They never reach the
 owner's bell. An email goes out only when the row cannot be written, through
 `~/waves-ops/heartbeat/send-email.js` (internal inbox only). A write that fails
-both ways is retried on the next run, for up to 48 hours.
+both ways is retried on the next run, for up to 48 hours. If the problem still
+stands after that, the next run queues a fresh alert for it.
+
+The portal's own check that the Air still polls (`agent-watchdog-liveness.js`)
+writes its row the same way. When the in-app digest gates are off or the row
+write fails, it emails the internal inbox once per silence episode.
 
 The snapshot's other reasons (one failing job, an ops-queue lane, the link
 worker) are not reported here. The portal's own checks report them, and the
