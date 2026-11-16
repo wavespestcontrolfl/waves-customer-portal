@@ -511,6 +511,19 @@ jest.setTimeout(30000);
       expect(await hit()).toBe(true);
     });
 
+    test('no message is proven, never assumed: a recording without a length, a recording-less call inside the voicemail grace, or a failed screen with a real message does not count (Codex #7893 r1)', async () => {
+      const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+      await database('call_log').insert([
+        officeCall('+19412360101', 60),
+        officeCall('+19412360202', 60, { recording_sid: 'RE3', recording_duration_seconds: null }),
+        officeCall('+19412360404', 2, { updated_at: twoMinutesAgo }),
+        officeCall('+19412360505', 60, { recording_sid: 'RE4', recording_duration_seconds: 58, metadata: { preconnect_screen: 'failed' } }),
+      ]);
+      expect(await hit()).toBe(false);
+      await database('call_log').where({ from_phone: '+19412360202' }).update({ recording_duration_seconds: 2 });
+      expect(await hit()).toBe(true);
+    });
+
     test('only the last 14 days count', async () => {
       await database('call_log').insert([officeCall('+19412360101', 60 * 24 * 15), officeCall('+19412360202', 60)]);
       expect(await hit()).toBe(false);

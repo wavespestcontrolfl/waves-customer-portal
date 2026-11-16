@@ -204,11 +204,16 @@ async function classifySpamWave(row) {
 // B-only screen stopped 86% of silent hang-ups in the week of Aug 10 and 8% in
 // the week of Nov 9. A caller is a candidate when EXCHANGE_MIN_NUMBERS or more
 // OTHER unknown numbers from its 6-digit block (area code + exchange) hung up
-// on us in the last EXCHANGE_DAYS: nobody answered and no message was left
-// (a recording of MAX_SILENT_RECORDING_SECONDS or less), or the caller failed
-// the screen. A failed screen counts whatever its recording length: its
-// voicemail recorder captures a few silent seconds, and without it the rule
-// would stop counting the very calls it screens. A member whose number got
+// on us in the last EXCHANGE_DAYS: nobody answered (or the caller failed the
+// screen) and no message was left. "No message" is proven, never assumed
+// (Codex #7893 r1): no recording once the call ended and VOICEMAIL_GRACE_MS
+// passed (the bell's own rule), or a recording whose length is known and is
+// MAX_SILENT_RECORDING_SECONDS or less. A failed screen's recorder captures a
+// few silent seconds, so it counts up to FAILED_SCREEN_SILENT_SECONDS: in the
+// 110 days to 2026-11-16, 64 of its recordings ran 4-8 s and the 3 real
+// messages 58-94 s. Without failed screens the rule would stop counting the
+// very calls it screens. A recording still waiting for its length never
+// counts. A member whose number got
 // through later, is on a customer phone slot or is on a live lead is a real
 // caller and does not count. The caller itself must be on no live lead (the
 // webhook checks the customer slots). Any line. Read on the ring path, so
@@ -217,6 +222,8 @@ const EXCHANGE_MIN_NUMBERS = 2;
 const EXCHANGE_DAYS = 14;
 const EXCHANGE_TIMEOUT_MS = 1500;
 const MAX_SILENT_RECORDING_SECONDS = 3;
+const FAILED_SCREEN_SILENT_SECONDS = 10;
+const FAILED_SCREEN_SQL = "metadata->>'preconnect_screen' = 'failed'";
 const NOT_ON_LIVE_LEAD_SQL = `NOT EXISTS (SELECT 1 FROM leads ld WHERE ld.deleted_at IS NULL AND ${phoneKeySql('ld.phone')} = ${phoneKeySql('call_log.from_phone')})`;
 
 async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
@@ -234,11 +241,16 @@ async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
     .whereRaw(`substr(${LAST10_SQL('from_phone')}, 1, 6) = ?`, [digits.slice(0, 6)])
     .whereRaw(`${LAST10_SQL('from_phone')} <> ?`, [digits])
     .whereRaw("COALESCE(call_outcome, '') NOT IN ('ai_handled', 'ai_transferred')")
-    .where((member) => member
-      .whereRaw("metadata->>'preconnect_screen' = 'failed'")
-      .orWhere((silent) => silent
-        .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
-        .whereRaw('COALESCE(recording_duration_seconds, 0) <= ?', [MAX_SILENT_RECORDING_SECONDS])))
+    .where((outcome) => outcome
+      .whereRaw(FAILED_SCREEN_SQL)
+      .orWhereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES]))
+    .where((noMessage) => noMessage
+      .where((none) => none
+        .whereNull('recording_sid').whereNull('recording_url')
+        .whereIn('status', TERMINAL_STATUSES)
+        .whereRaw('COALESCE(updated_at, created_at) < ?', [new Date(at.getTime() - VOICEMAIL_GRACE_MS)]))
+      .orWhere('recording_duration_seconds', '<=', MAX_SILENT_RECORDING_SECONDS)
+      .orWhere((screened) => screened.whereRaw(FAILED_SCREEN_SQL).where('recording_duration_seconds', '<=', FAILED_SCREEN_SILENT_SECONDS)))
     .whereRaw(calledBackSql({ retire: true }))
     .whereRaw(NOT_ON_CUSTOMER_SLOT_SQL)
     .whereRaw(NOT_ON_LIVE_LEAD_SQL)
