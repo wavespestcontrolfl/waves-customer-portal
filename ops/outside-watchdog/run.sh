@@ -11,7 +11,9 @@ RUNLOG=$DIR/run.log
 # A run polls once (15 s HTTP limit), then each owed write can take a 20 s resolve, a
 # 20 s post and a 60 s email. A recovery poll can owe 5 at once (down clear, outage
 # alert, setup, runner, lease) = 515 s; past this, the run is stuck and is killed.
-# It stays under launchd's 10 min interval (launchd never starts a second run).
+# deliver.js starts no new write after 420 s (FLUSH_BUDGET_MS), so a backlog waits for
+# the next run instead of hitting this limit. It stays under launchd's 10 min interval
+# (launchd never starts a second run).
 RUN_LIMIT_S=560
 
 stamp() { date -u +%Y-%m-%dT%H:%M:%SZ }

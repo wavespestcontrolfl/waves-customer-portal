@@ -555,6 +555,41 @@ describe('delivery: setup and the outbox', () => {
     expect(state.outbox).toEqual([]);
   });
 
+  test('a run starts no new write after its budget; the rest wait untouched (Codex r9 P2)', async () => {
+    const state = deliver.defaultState();
+    const failing = fakeIo({ post: () => ({ ok: false, reason: 'x' }), mail: () => ({ ok: false, reason: 'y' }) });
+    await step(state, down(3, 20), failing.io, 20);
+    await step(state, report({ result: 'config', detail: 'HTTP 403: refused' }), failing.io, 30);
+    // The down clear landed (resolve works); the outage and setup alerts are owed.
+    expect(state.outbox.map((i) => i.slot)).toEqual([null, 'setup']);
+    let t = 0;
+    const ok = fakeIo();
+    // The first write runs; the clock then passes the deadline.
+    const wrote = await deliver.flush(state, { ...ok.io, postRow: async (row) => { t = 10; return ok.io.postRow(row); } }, new Date(at(40)), { deadline: 5, clock: () => t });
+    expect(wrote).toEqual(['alert:outage=row', 'alert:setup=deferred']);
+    // The deferred write keeps its try count: it was not attempted.
+    expect(state.outbox.map((i) => [i.kind, i.slot, i.tries])).toEqual([['alert', 'setup', 1]]);
+    expect(deliver.FLUSH_BUDGET_MS).toBeLessThanOrEqual(460 * 1000);
+  });
+
+  test('a failing clear folds into the next clear for its key, keeping one closing email', async () => {
+    const state = deliver.defaultState();
+    const noResolve = fakeIo({ post: () => ({ ok: false, reason: 'unreachable:TimeoutError' }), resolve: () => ({ ok: false, reason: 'r' }), mail: (m) => (/again/.test(m.subject) ? { ok: false, reason: 'm' } : { ok: true }) });
+    const refused = (d) => report({ result: 'config', detail: d });
+    await step(state, refused('HTTP 403: a'), noResolve.io, 0);
+    await step(state, report(), noResolve.io, 10);
+    await step(state, refused('HTTP 403: b'), noResolve.io, 20);
+    await step(state, report(), noResolve.io, 30);
+    const clears = state.outbox.filter((i) => i.kind === 'clear');
+    expect(clears).toHaveLength(1);
+    expect(clears[0]).toMatchObject({ key: deliver.KEYS.setup, at: at(30), emailed: false });
+    expect(clears[0].email.subject).toBe('Outside watchdog poll working again');
+    const ok = fakeIo();
+    await deliver.flush(state, ok.io, new Date(at(40)));
+    expect(ok.calls.resolves).toEqual([{ key: deliver.KEYS.setup, observedAt: at(30) }]);
+    expect(ok.calls.mails).toHaveLength(1);
+  });
+
   test('a clear for a row that stands is retried until the resolve lands', async () => {
     const state = deliver.defaultState();
     const ok = fakeIo();

@@ -61,6 +61,10 @@ const DEFAULT_SILENT_AFTER_MINUTES = 60;
 // A dropped clear can leave its row standing; the next alert for that key retires it
 // first (`replace`), and an outage row is meant to stand until someone closes it.
 const OWED_MAX_MS = 48 * 60 * 60 * 1000;
+// One run starts no new write after this long (run.sh kills it at 560 s; the slowest
+// write is 100 s: a 20 s resolve, a 20 s post, a 60 s email). Writes not started wait,
+// untouched, for the next run, so a backlog never runs past the kill before saveState.
+const FLUSH_BUDGET_MS = 420 * 1000;
 const POLL_TIMEOUT_MS = 60 * 1000;
 const HTTP_TIMEOUT_MS = 20 * 1000;
 const EMAIL_TIMEOUT_MS = 60 * 1000;
@@ -373,8 +377,13 @@ function enqueueAlert(state, { slot = null, key, parts, at, replace }) {
 // not prove that no row stands. A closing email goes when any alert of the episode
 // went out by email (`emailed`), even if a later replacement landed as a row.
 function enqueueClear(state, { slot, key, at, email }) {
-  state.outbox = state.outbox.filter((i) => !(i.kind === 'alert' && i.slot === slot));
-  const owesEmail = state[slot].emailed === true;
+  // A clear still owed for the same key folds into this one (the newer time retires
+  // every older row too), so failing clears never pile up. Its unsent closing email
+  // carries over: one closing email, with the newest words.
+  const prior = state.outbox.filter((i) => i.kind === 'clear' && i.key === key);
+  const priorOwesEmail = prior.some((i) => i.email && !i.emailed);
+  state.outbox = state.outbox.filter((i) => !(i.kind === 'alert' && i.slot === slot) && !(i.kind === 'clear' && i.key === key));
+  const owesEmail = state[slot].emailed === true || priorOwesEmail;
   Object.assign(state[slot], { alertId: null, via: null, emailed: false });
   state.outbox.push({
     id: `clear:${key}:${at}`, kind: 'clear', slot, key, at, tries: 0, resolved: false,
@@ -518,11 +527,16 @@ function reopenExpiredSlot(state, item) {
   Object.assign(state[item.slot], { alertId: null, via: null });
 }
 
-async function flush(state, io, now) {
+async function flush(state, io, now, { deadline = null, clock = () => Date.now() } = {}) {
   const wrote = [];
   const keep = [];
   for (const item of state.outbox) {
     const label = `${item.kind}:${item.slot || 'outage'}`;
+    if (deadline !== null && clock() >= deadline) {
+      keep.push(item);
+      wrote.push(`${label}=deferred`);
+      continue;
+    }
     const age = now.getTime() - Date.parse(item.at);
     // Only an alert expires. A clear is kept until it lands: its slot is already reset,
     // so nothing would queue the resolve again and the row would stand for good. Its
@@ -665,6 +679,7 @@ function logLine({ at, report, state, wrote, notes }) {
 async function runOnce({ env = process.env, io = null, now = () => new Date() } = {}) {
   const cfg = settings(env);
   const deps = io || liveIo(cfg);
+  const deadline = Date.now() + FLUSH_BUDGET_MS;
   const notes = [];
   const state = loadState(cfg.deliverState, notes);
   let exitCode = 0;
@@ -684,7 +699,7 @@ async function runOnce({ env = process.env, io = null, now = () => new Date() } 
   }
 
   // Owed writes go out even when this run's poll failed.
-  const wrote = await flush(state, deps, now());
+  const wrote = await flush(state, deps, now(), { deadline });
   try {
     saveState(cfg.deliverState, state);
   } catch (err) {
@@ -704,5 +719,5 @@ if (require.main === module) {
 module.exports = {
   runOnce, reconcile, flush, defaultState, loadState, saveState, settings, parseReport, sendEmail, runPoll,
   downAlert, outageAlert, runnerAlert, setupAlert, leaseAlert, clearedEmail, rowFor, etTime,
-  KEYS, LEASE_REASON, CHECK_ID, OPS_INBOX, RUNNER_REASONS, RUNNER_CONFIRM_POLLS, PAGE_AFTER_FAILURES, OWED_MAX_MS, SIGNATURE,
+  KEYS, LEASE_REASON, CHECK_ID, OPS_INBOX, RUNNER_REASONS, RUNNER_CONFIRM_POLLS, PAGE_AFTER_FAILURES, OWED_MAX_MS, FLUSH_BUDGET_MS, SIGNATURE,
 };

@@ -39,7 +39,8 @@ ops-queue lane) are not reported here. The portal's own checks report them, and
 the job-runner finding covers the case where those checks cannot run.
 
 An owed alert expires after 48 hours. A clear never expires: it is retried until
-the row is retired.
+the row is retired. A new clear for the same alert folds into one still owed, and a
+run starts no new write after 420 seconds, so a backlog waits for the next run.
 
 ## The reciprocal check
 
