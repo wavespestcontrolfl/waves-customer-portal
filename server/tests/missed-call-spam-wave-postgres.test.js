@@ -32,13 +32,13 @@ jest.mock('../services/admin-alert-compose', () => ({ raiseAdminAlert: jest.fn(a
 const { isEnabled } = require('../config/feature-gates');
 const { triggerNotification } = require('../services/notification-triggers');
 const { raiseAdminAlert } = require('../services/admin-alert-compose');
-const { ringMissedCallIfUnanswered, isRobodialerWave, isRobodialerBurst } = require('../services/missed-call-bell');
+const { ringMissedCallIfUnanswered, isRobodialerWave, isRobodialerBurst, exchangeHangupScreenHit } = require('../services/missed-call-bell');
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('missed-call bell: robodialer wave on PostgreSQL', () => {
   let database;
   const schema = `missed_call_wave_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['call_log', 'scheduled_services', 'invoices', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts'];
+  const tables = ['call_log', 'scheduled_services', 'invoices', 'customers', 'leads', 'notifications', 'blocked_numbers', 'blocked_call_attempts'];
 
   beforeAll(async () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
@@ -480,6 +480,110 @@ jest.setTimeout(30000);
       } finally {
         mockConn = original;
       }
+    });
+  });
+
+  // The press-1 screen's exchange trigger and the failed-screen push quiet
+  // (GATE_CALL_SCREEN_EXCHANGE_HISTORY, owner 2026-11-16 "build").
+  describe('press-1 screen exchange trigger', () => {
+    const CALLER = '+19412360303';
+    const officeCall = (fromPhone, minutesAgo, extra = {}) => call(fromPhone, minutesAgo, { to_phone: OFFICE_LINE, ...extra });
+    const hit = () => exchangeHangupScreenHit(CALLER, new Date());
+    const lead = (phone, extra = {}) => database('leads').insert({ id: randomUUID(), phone, created_at: new Date(), ...extra });
+
+    test('two OTHER unknown numbers from the exchange that hung up with no message make a candidate; one does not', async () => {
+      await database('call_log').insert(officeCall('+19412360101', 60 * 24 * 3));
+      expect(await hit()).toBe(false);
+      await database('call_log').insert(officeCall('+19412360202', 60 * 24));
+      expect(await hit()).toBe(true);
+    });
+
+    test('a failed screen counts despite its silent recording; an answered call, a message, the same number and another exchange do not', async () => {
+      await database('call_log').insert([
+        officeCall('+19412360101', 60, { recording_duration_seconds: 6, recording_sid: 'RE1', metadata: { preconnect_screen: 'failed' } }),
+        officeCall('+19412360202', 60, { answered_by: 'human' }),
+        officeCall('+19412360404', 60, { recording_duration_seconds: 20, recording_sid: 'RE2' }),
+        officeCall(CALLER, 60),
+        officeCall('+19412370505', 60),
+      ]);
+      expect(await hit()).toBe(false);
+      await database('call_log').insert(officeCall('+19412360606', 30));
+      expect(await hit()).toBe(true);
+    });
+
+    test('no message is proven, never assumed: a recording without a length, a recording-less call inside the voicemail grace, or a failed screen with a real message does not count (Codex #7893 r1)', async () => {
+      const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+      await database('call_log').insert([
+        officeCall('+19412360101', 60),
+        officeCall('+19412360202', 60, { recording_sid: 'RE3', recording_duration_seconds: null }),
+        officeCall('+19412360404', 2, { updated_at: twoMinutesAgo }),
+        officeCall('+19412360505', 60, { recording_sid: 'RE4', recording_duration_seconds: 58, metadata: { preconnect_screen: 'failed' } }),
+      ]);
+      expect(await hit()).toBe(false);
+      await database('call_log').where({ from_phone: '+19412360202' }).update({ recording_duration_seconds: 2 });
+      expect(await hit()).toBe(true);
+    });
+
+    test('only the last 14 days count', async () => {
+      await database('call_log').insert([officeCall('+19412360101', 60 * 24 * 15), officeCall('+19412360202', 60)]);
+      expect(await hit()).toBe(false);
+    });
+
+    test('a member on a live lead or a customer slot, or one that got through later, is a real caller and does not count', async () => {
+      await database('call_log').insert([officeCall('+19412360101', 120), officeCall('+19412360202', 120), officeCall('+19412360404', 120)]);
+      await lead('(941) 236-0101');
+      await database('customers').insert({ id: randomUUID(), first_name: 'Test', service_contact_phone: '941-236-0202', created_at: new Date(), updated_at: new Date() });
+      expect(await hit()).toBe(false);
+      await database('call_log').insert(officeCall('+19412360707', 90));
+      expect(await hit()).toBe(true);
+      await database('call_log').insert(officeCall('+19412360707', 30, { answered_by: 'human' }));
+      expect(await hit()).toBe(false);
+    });
+
+    test('a caller on a live lead is never a candidate; a deleted lead does not count', async () => {
+      await database('call_log').insert([officeCall('+19412360101', 120), officeCall('+19412360202', 120)]);
+      await lead('+19412360303', { deleted_at: new Date() });
+      expect(await hit()).toBe(true);
+      await lead('941.236.0303');
+      expect(await hit()).toBe(false);
+    });
+
+    test('a non-North-American caller is never a candidate', async () => {
+      await database('call_log').insert([officeCall('+4922123401', 120), officeCall('+4922123402', 120)]);
+      expect(await exchangeHangupScreenHit('+4922123403', new Date())).toBe(false);
+    });
+
+    test('gate on: an unknown caller who failed the screen keeps the bell row, sends no push, and is stamped screen_quiet', async () => {
+      const row = officeCall('+15125550101', 10, { metadata: { preconnect_screen: 'failed' } });
+      await database('call_log').insert(row);
+      reports({ bellWritten: true, push: { sent: 0, skipped: 'superseded_before_push' } });
+      expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+      const { beforePush } = triggerNotification.mock.calls[0][2];
+      expect(await beforePush({ dispatching: true })).toBe(false);
+      expect((await stored(row)).metadata.missed_call_spam_wave).toBe('screen_quiet');
+    });
+
+    test('gate off: the failed-screen call pushes as before and is stamped for the shadow read', async () => {
+      isEnabled.mockImplementation((name) => name !== 'callScreenExchangeHistory');
+      const row = officeCall('+15125550101', 10, { metadata: { preconnect_screen: 'failed' } });
+      await database('call_log').insert(row);
+      reports({ bellWritten: true, push: { sent: 1, subscriptions: 1 } });
+      await ringMissedCallIfUnanswered(row.twilio_call_sid);
+      const { beforePush } = triggerNotification.mock.calls[0][2];
+      expect(await beforePush({ dispatching: true })).toBe(true);
+      const { metadata } = await stored(row);
+      expect(metadata.missed_call_spam_wave).toBeUndefined();
+      expect(metadata.missed_call_screen_quiet_shadow).toBe(true);
+    });
+
+    test('a caller who passed the screen is never quieted', async () => {
+      const row = officeCall('+15125550101', 10, { metadata: { preconnect_screen: 'passed' } });
+      await database('call_log').insert(row);
+      reports({ bellWritten: true, push: { sent: 1, subscriptions: 1 } });
+      await ringMissedCallIfUnanswered(row.twilio_call_sid);
+      const { metadata } = await stored(row);
+      expect(metadata.missed_call_spam_wave).toBeUndefined();
+      expect(metadata.missed_call_screen_quiet_shadow).toBeUndefined();
     });
   });
 });

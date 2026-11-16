@@ -3,8 +3,10 @@
 // (GATE_CALL_PRECONNECT_SCREEN; off = shadow 'would_gate' stamping only).
 // These tests pin the two safety-critical invariants:
 //   1. The decision NEVER gates a known customer, and NEVER gates on
-//      attestation A/C/missing — absence of attestation is where most real
-//      leads arrive and is NOT suspicion.
+//      attestation A/C/missing alone — absence of attestation is where most
+//      real leads arrive and is NOT suspicion. Only the exchange trigger
+//      (GATE_CALL_SCREEN_EXCHANGE_HISTORY, owner 2026-11-16) gates an A caller,
+//      and its read fails open.
 //   2. The challenge TwiML never rings staff (<Dial>) and never hangs up —
 //      the no-input path redirects back into /voice as a screen failure,
 //      which routes to the Waves voicemail recorder.
@@ -20,7 +22,10 @@ jest.mock('../services/conversations', () => ({
 jest.mock('../models/db', () => jest.fn());
 
 const voiceRouter = require('../routes/twilio-voice-webhook');
-const { preconnectScreenDecision, buildPreconnectChallengeTwiML, knownCallerPhoneExists } = voiceRouter._test;
+const { preconnectScreenDecision, exchangeTriggerHit, screenCandidate, buildPreconnectChallengeTwiML, knownCallerPhoneExists } = voiceRouter._test;
+const db = require('../models/db');
+const missedCallBell = require('../services/missed-call-bell');
+const logger = require('../services/logger');
 
 function makeDbLike(rows) {
   const calls = { whereRaw: [] };
@@ -61,6 +66,64 @@ describe('preconnectScreenDecision', () => {
 
   test('a bare "B" without the attestation prefix does not match', () => {
     expect(preconnectScreenDecision({ knownCaller: false, stirVerstat: 'B', gateOn: true })).toBe('none');
+  });
+
+  test('the exchange trigger gates an unknown caller on attestation A, or shadow-stamps with the screen gate off', () => {
+    const A = 'TN-Validation-Passed-A';
+    expect(preconnectScreenDecision({ knownCaller: false, stirVerstat: A, gateOn: true, exchangeHit: true })).toBe('gate');
+    expect(preconnectScreenDecision({ knownCaller: false, stirVerstat: null, gateOn: false, exchangeHit: true })).toBe('would_gate');
+  });
+
+  test('the exchange trigger never gates a known caller', () => {
+    expect(preconnectScreenDecision({ knownCaller: true, stirVerstat: 'TN-Validation-Passed-A', gateOn: true, exchangeHit: true })).toBe('none');
+  });
+});
+
+describe('exchangeTriggerHit (ring-path read)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  test('returns the exchange classifier verdict', async () => {
+    jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(true);
+    await expect(exchangeTriggerHit('+19412360101')).resolves.toBe(true);
+    expect(missedCallBell.exchangeHangupScreenHit).toHaveBeenCalledWith('+19412360101');
+  });
+
+  test('fails open: a query error or timeout never challenges the caller', async () => {
+    jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockRejectedValue(new Error('canceling statement due to statement timeout'));
+    await expect(exchangeTriggerHit('+19412360101')).resolves.toBe(false);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('failing open'));
+  });
+});
+
+describe('screenCandidate (who the screen may challenge)', () => {
+  const A = 'TN-Validation-Passed-A';
+  const B = 'TN-Validation-Passed-B';
+  const slotRows = (rows) => db.mockImplementation(makeDbLike(rows));
+  afterEach(() => { jest.restoreAllMocks(); db.mockReset(); });
+
+  test('attestation A with no exchange hit: no candidate, and no customer-slot query', async () => {
+    jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
+    await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: false, exchangeTrigger: false });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('an exchange hit on an unknown number is a candidate', async () => {
+    jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(true);
+    slotRows([]);
+    await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: false, exchangeTrigger: true });
+  });
+
+  test('an exchange hit on a spouse or tenant slot phone is a known caller, never challenged', async () => {
+    jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(true);
+    slotRows([{ id: 'c1' }]);
+    await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: true, exchangeTrigger: false });
+  });
+
+  test('attestation B skips the exchange read; a slot-check failure fails open', async () => {
+    const spy = jest.spyOn(missedCallBell, 'exchangeHangupScreenHit');
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(screenCandidate('+19412360303', B)).resolves.toEqual({ knownCaller: true, exchangeTrigger: false });
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 

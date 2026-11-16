@@ -758,9 +758,48 @@ const VOICEMAIL_COMPLETE_ACTION = '/api/webhooks/twilio/voicemail-complete';
 // metadata.preconnect_screen='would_gate' so daily volume is judgeable
 // before any caller ever hears the prompt. Lifecycle stamps: 'gated' at the
 // challenge, then 'passed' (key pressed) or 'failed' (fell to voicemail).
-function preconnectScreenDecision({ knownCaller, stirVerstat, gateOn }) {
-  if (knownCaller || !/-B$/.test(String(stirVerstat || ''))) return 'none';
+//
+// Exchange trigger (GATE_CALL_SCREEN_EXCHANGE_HISTORY, owner 2026-11-16
+// "build"): robodialers moved to attestation A, so an unknown caller on any
+// attestation is also challenged when 2+ other unknown numbers from its
+// 6-digit exchange hung up on us in 14 days (missed-call-bell.js
+// exchangeHangupScreenHit). `exchangeHit` is true only with that gate on; off,
+// the webhook stamps metadata.preconnect_screen_exchange='shadow' instead.
+function preconnectScreenDecision({ knownCaller, stirVerstat, gateOn, exchangeHit = false }) {
+  if (knownCaller) return 'none';
+  if (!/-B$/.test(String(stirVerstat || '')) && !exchangeHit) return 'none';
   return gateOn ? 'gate' : 'would_gate';
+}
+
+// The exchange trigger's read, on the ring path before any TwiML. Fails OPEN:
+// a slow or broken query never challenges a caller.
+async function exchangeTriggerHit(from) {
+  try {
+    return await require('../services/missed-call-bell').exchangeHangupScreenHit(from);
+  } catch (err) {
+    logger.warn(`[preconnect-screen] exchange check failed (failing open, no challenge): ${err.message}`);
+    return false;
+  }
+}
+
+// Who the screen may challenge, for a caller with no primary-phone customer
+// match on a first (non-re-entry) delivery: attestation B, or the exchange
+// trigger where B does not already screen. Service-contact slot phones
+// (spouse/tenant — the canonical inbound identity set) also bypass the
+// screen; checked only when it could change the outcome, so the extra query
+// never runs on ordinary calls. A check failure fails OPEN — never challenge
+// a caller because Postgres hiccupped.
+async function screenCandidate(from, stirVerstat) {
+  const attestationB = /-B$/.test(String(stirVerstat || ''));
+  const exchangeHit = !attestationB && await exchangeTriggerHit(from);
+  if (!attestationB && !exchangeHit) return { knownCaller: false, exchangeTrigger: false };
+  try {
+    const knownCaller = await knownCallerPhoneExists(db, from);
+    return { knownCaller, exchangeTrigger: exchangeHit && !knownCaller };
+  } catch (err) {
+    logger.warn(`[preconnect-screen] known-caller check failed (failing open, no challenge): ${err.message}`);
+    return { knownCaller: true, exchangeTrigger: false };
+  }
 }
 
 // Pass/fail re-enter THIS route via query params (?screened=1 / ?screenfail=1)
@@ -1301,23 +1340,15 @@ router.post('/voice', async (req, res) => {
     const langReentry = req.query.lang === 'menu';
     const spanishChosen = langReentry && spanishSelected(req.body);
     let knownCaller = customerPhoneMatches.length > 0;
-    // Service-contact slot phones (spouse/tenant — the canonical inbound
-    // identity set) also bypass the screen. Checked only when it could
-    // change the outcome (no primary match, B attestation, not a re-entry)
-    // so the extra query never runs on ordinary calls; a check failure
-    // fails OPEN — never challenge a caller because Postgres hiccupped.
-    if (!knownCaller && !screenReentry && !langReentry && /-B$/.test(String(req.body.StirVerstat || ''))) {
-      try {
-        knownCaller = await knownCallerPhoneExists(db, From);
-      } catch (err) {
-        logger.warn(`[preconnect-screen] known-caller check failed (failing open, no challenge): ${err.message}`);
-        knownCaller = true;
-      }
+    let exchangeTrigger = false;
+    if (!knownCaller && !screenReentry && !langReentry) {
+      ({ knownCaller, exchangeTrigger } = await screenCandidate(From, req.body.StirVerstat));
     }
     const screenDecision = (screenReentry || langReentry) ? 'none' : preconnectScreenDecision({
       knownCaller,
       stirVerstat: req.body.StirVerstat,
       gateOn: isEnabled('callPreconnectScreen'),
+      exchangeHit: exchangeTrigger && isEnabled('callScreenExchangeHistory'),
     });
 
     // No caller-name lookup here. One used to run on every unknown inbound
@@ -1353,9 +1384,15 @@ router.post('/voice', async (req, res) => {
         addons: parseAddOnsForAudit(req.body.AddOns),
         // Pre-connect screen lifecycle: 'would_gate' (shadow, gate off) or
         // 'gated' (challenge issued) → later 'passed'/'failed'. Absent for
-        // known customers and non-B attestation.
+        // known customers and non-B attestation without the exchange trigger.
         ...(screenDecision !== 'none'
           ? { preconnect_screen: screenDecision === 'gate' ? 'gated' : 'would_gate' }
+          : {}),
+        // Exchange trigger: 'gated' when it challenged this caller, 'shadow'
+        // when it would have (its gate or the screen gate off). The shadow
+        // week reads these rows before the gate flips.
+        ...(exchangeTrigger
+          ? { preconnect_screen_exchange: screenDecision === 'gate' ? 'gated' : 'shadow' }
           : {}),
         ...promiseChaserEligibilityStamp(),
       });
@@ -1453,7 +1490,8 @@ router.post('/voice', async (req, res) => {
       await stampPreconnectScreen(CallSid, 'passed');
       logger.info(`[preconnect-screen] caller ${maskPhone(From)} passed (${maskSid(CallSid)}) — continuing normal routing`);
     } else if (screenDecision === 'gate') {
-      logger.info(`[preconnect-screen] challenging unknown B-attestation caller ${maskPhone(From)} (${maskSid(CallSid)})`);
+      // The trigger (B or exchange) is on the row: metadata.preconnect_screen_exchange.
+      logger.info(`[preconnect-screen] challenging unknown caller ${maskPhone(From)} (${maskSid(CallSid)})`);
       return res.type('text/xml').send(buildPreconnectChallengeTwiML());
     }
 
@@ -3836,6 +3874,8 @@ router._test = {
   findCustomerPhoneMatches,
   knownCallerPhoneExists,
   preconnectScreenDecision,
+  exchangeTriggerHit,
+  screenCandidate,
   connectingAnnouncement,
   appendStaffRingDial,
   parseHandoffData,
