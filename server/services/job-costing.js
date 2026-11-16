@@ -262,8 +262,8 @@ async function chargedMinuteColumns(db) {
 
 // The drive one visit is charged (GATE_TECH_COST_RATES). None for a visit
 // that is not completed (it has driven nowhere) or that does not own the
-// stop's drive (`ownsDriveCost`, the combined-closeout owner rule
-// drive_cost_per_stop follows). Else its matched GPS leg when there is one,
+// stop's drive (`ownsDriveCost`, the combined-closeout owner rule the
+// no-card stop drive also follows). Else its matched GPS leg when there is one,
 // else the measured per-stop defaults; a matched leg with no miles (a trip
 // without a mileage log) takes the default miles, no minutes the default
 // minutes. A stop that served several physical visits (one parking spot,
