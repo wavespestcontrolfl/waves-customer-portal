@@ -199,6 +199,61 @@ async function classifySpamWave(row) {
   return { block, burst };
 }
 
+// The press-1 screen's exchange trigger (owner 2026-11-16 "build", after the
+// spam-call audit): robodialers moved from STIR attestation B to A, so the
+// B-only screen stopped 86% of silent hang-ups in the week of Aug 10 and 8% in
+// the week of Nov 9. A caller is a candidate when EXCHANGE_MIN_NUMBERS or more
+// OTHER unknown numbers from its 6-digit block (area code + exchange) hung up
+// on us in the last EXCHANGE_DAYS: nobody answered and no message was left
+// (a recording of MAX_SILENT_RECORDING_SECONDS or less), or the caller failed
+// the screen. A failed screen counts whatever its recording length: its
+// voicemail recorder captures a few silent seconds, and without it the rule
+// would stop counting the very calls it screens. A member whose number got
+// through later, is on a customer phone slot or is on a live lead is a real
+// caller and does not count. The caller itself must be on no live lead (the
+// webhook checks the customer slots). Any line. Read on the ring path, so
+// bounded by a statement timeout; the webhook fails open on any error.
+const EXCHANGE_MIN_NUMBERS = 2;
+const EXCHANGE_DAYS = 14;
+const EXCHANGE_TIMEOUT_MS = 1500;
+const MAX_SILENT_RECORDING_SECONDS = 3;
+const NOT_ON_LIVE_LEAD_SQL = `NOT EXISTS (SELECT 1 FROM leads ld WHERE ld.deleted_at IS NULL AND ${phoneKeySql('ld.phone')} = ${phoneKeySql('call_log.from_phone')})`;
+
+async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
+  const raw = String(fromPhone || '').replace(/\D/g, '');
+  const plus = String(fromPhone || '').trim().startsWith('+');
+  if (!(plus ? /^1[2-9]\d{9}$/ : /^1?[2-9]\d{9}$/).test(raw)) return false;
+  const digits = raw.slice(-10);
+  const found = await db('call_log')
+    .modify((qb) => whereNotSandboxCall(qb))
+    .where('direction', 'inbound')
+    .whereNull('customer_id')
+    .where('created_at', '>=', new Date(at.getTime() - EXCHANGE_DAYS * 86400 * 1000))
+    .where('created_at', '<', at)
+    .whereRaw(NANP_DIGITS_SQL('from_phone'))
+    .whereRaw(`substr(${LAST10_SQL('from_phone')}, 1, 6) = ?`, [digits.slice(0, 6)])
+    .whereRaw(`${LAST10_SQL('from_phone')} <> ?`, [digits])
+    .whereRaw("COALESCE(call_outcome, '') NOT IN ('ai_handled', 'ai_transferred')")
+    .where((member) => member
+      .whereRaw("metadata->>'preconnect_screen' = 'failed'")
+      .orWhere((silent) => silent
+        .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
+        .whereRaw('COALESCE(recording_duration_seconds, 0) <= ?', [MAX_SILENT_RECORDING_SECONDS])))
+    .whereRaw(calledBackSql({ retire: true }))
+    .whereRaw(NOT_ON_CUSTOMER_SLOT_SQL)
+    .whereRaw(NOT_ON_LIVE_LEAD_SQL)
+    .select(db.raw(`COUNT(DISTINCT ${LAST10_SQL('from_phone')}) AS n`))
+    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
+    .first();
+  if (Number(found?.n || 0) < EXCHANGE_MIN_NUMBERS) return false;
+  const lead = await db('leads')
+    .whereNull('deleted_at')
+    .whereRaw(`${phoneKeySql('phone')} = ?`, [`1${digits}`])
+    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
+    .first('id');
+  return !lead;
+}
+
 const spamGateOn = (name) => require('../config/feature-gates').isEnabled(name);
 
 // What the recording processor writes when a recording holds no speech: the
@@ -425,22 +480,37 @@ function leaseStale(token, now = Date.now()) {
 // cluster on one length). Returns true when the push must be skipped.
 //  - Block wave with GATE_MISSED_CALL_SPAM_WAVE on: stamped missed_call_spam_wave: 'block_quiet'.
 //  - Burst with GATE_MISSED_CALL_SPAM_BURST on: stamped 'burst_quiet'.
-//  - A flagged call whose gate is off rings as before, stamped
-//    missed_call_spam_wave_shadow (block) or missed_call_spam_burst_shadow (burst).
+//  - An unknown caller who failed the press-1 screen (no key; owner 2026-11-16
+//    "build") with GATE_CALL_SCREEN_EXCHANGE_HISTORY on: stamped 'screen_quiet'.
+//    Since October 12 of 16 such calls pushed; the screen kept them off the
+//    staff phones but not off the admin app.
+//  - A flagged call whose gate is off rings as before, stamped with the rule's
+//    shadow key below.
 // The row settles normally after delivery. `fenced` is the caller's lease-fenced update.
+// One row per rule, in precedence order: the flag, its gate, the quiet stamp, the shadow stamp.
+const QUIET_RULES = [
+  { flag: 'block', gate: 'missedCallSpamWave', quiet: 'block_quiet', shadow: 'missed_call_spam_wave_shadow' },
+  { flag: 'burst', gate: 'missedCallSpamBurst', quiet: 'burst_quiet', shadow: 'missed_call_spam_burst_shadow' },
+  { flag: 'screen', gate: 'callScreenExchangeHistory', quiet: 'screen_quiet', shadow: 'missed_call_screen_quiet_shadow' },
+];
+
 async function quietRobodialerPush(row, fenced) {
-  const flags = await classifySpamWave(row); // fails open inside
-  const block = flags.block && spamGateOn('missedCallSpamWave');
-  const burst = flags.burst && spamGateOn('missedCallSpamBurst');
+  const flags = {
+    ...(await classifySpamWave(row)), // fails open inside
+    screen: !row.customer_id && parseMeta(row.metadata).preconnect_screen === 'failed',
+  };
   const stamps = {};
-  if (flags.block && !block) stamps.missed_call_spam_wave_shadow = true;
-  if (flags.burst && !burst) stamps.missed_call_spam_burst_shadow = true;
-  if (block || burst) stamps.missed_call_spam_wave = block ? 'block_quiet' : 'burst_quiet';
+  let quietAs = null;
+  for (const rule of QUIET_RULES.filter((r) => flags[r.flag])) {
+    if (!spamGateOn(rule.gate)) stamps[rule.shadow] = true;
+    else quietAs = quietAs || rule.quiet;
+  }
+  if (quietAs) stamps.missed_call_spam_wave = quietAs;
   if (!Object.keys(stamps).length) return false;
   // Quiet only when the marker is durable: the re-push recognises a quiet call by
   // it. A failed or empty stamp write fails open (the push goes as usual).
   const stamped = await fenced().update({ metadata: db.raw('metadata || ?::jsonb', [JSON.stringify(stamps)]) }).catch(() => 0);
-  return Boolean(block || burst) && stamped === 1;
+  return Boolean(quietAs) && stamped === 1;
 }
 
 // A quiet call writes its bell row but never pushes; every other call keeps the
@@ -951,6 +1021,7 @@ module.exports = {
   isRobodialerWave,
   isRobodialerBurst,
   classifySpamWave,
+  exchangeHangupScreenHit,
   sweepMissedCalls,
   outcomeUnanswered,
   calledBackSql,
