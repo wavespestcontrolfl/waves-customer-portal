@@ -1,28 +1,65 @@
 /**
- * Hermes watchdog liveness — the reciprocal check.
+ * Outside watchdog liveness — the reciprocal check.
  *
- * The external watchdog proves it is alive by polling
- * GET /api/integrations/watchdog-worker/status; each served poll finalizes a
- * seo_link_worker_requests row as endpoint='watchdog', result='observed'. This
- * cron asks "when did the watchdog last watch?" and rings ONE standing admin
- * bell per silence EPISODE (keyed to the last successful poll, not the
- * calendar day) when the answer is never / too long ago — otherwise a dead
- * Hermes cron would look exactly like a quiet, healthy portal, and a
- * multi-day outage would ring a fresh unread row every ET day.
+ * The outside watchdog (the MacBook Air job in ops/outside-watchdog/ since
+ * 2026-11-06; the Hostinger Hermes box until 2026-09-05) proves it is alive by
+ * polling GET /api/integrations/watchdog-worker/status. Each served poll
+ * finalizes a seo_link_worker_requests row as endpoint='watchdog',
+ * result='observed'. This cron asks "when did the watchdog last watch?". When
+ * the answer is never or too long ago, it writes ONE engineering fault row
+ * (Agents → Activity and Claude's fault queue, never the owner's bell: a
+ * broken alert, docs/admin-notifications.md section 7). Otherwise a dead
+ * outside watchdog would look exactly like a quiet, healthy portal.
+ *
+ * One row per silence episode: its text names the last poll, so it does not
+ * change while the watchdog stays silent, and the first fresh poll retires it
+ * (ops-digest-fall-off.js). A retired row drops its dedupe key, so the next
+ * silence opens a new row.
  *
  * Dark behind GATE_HERMES_WATCHDOG (call-time read) AND the shared
  * GATE_HERMES_WORKER the endpoint's auth requires. Kill = unset either.
- * Scheduled in scheduler.js every 23 min — coprime with the watchdog's 10-min
+ * Scheduled in scheduler.js every 23 min, coprime with the watchdog's 10-min
  * cadence so the sample walks through every phase offset (the call-stall
- * watchdog's '*\/7' reasoning).
+ * watchdog's '*\/7' reasoning). The same job's job_health row is the
+ * scheduler heartbeat the snapshot reads (agent-watchdog-snapshot.js).
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const NotificationService = require('./notification-service');
 const { gateEnvValue, isEnabled } = require('../config/feature-gates');
+const { composeAdminAlert } = require('./admin-alert-compose');
+const { deliverOpsDigest } = require('./ops-digest');
+const { retireIfClean } = require('./ops-digest-fall-off');
+const { formatETDayDate, formatETTime } = require('../utils/datetime-et');
+const sendgrid = require('./sendgrid-mail');
+
+const OPS_INBOX = 'contact@wavespestcontrol.com';
+const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || OPS_INBOX;
+const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
+
+// The silence episode (keyed by the last poll time) that went out by email: one
+// fallback email per episode, not one per 23-min tick, and one closing email when
+// polling resumes. Kept in system_settings so a deploy or restart mid-episode keeps
+// it. A read or write failure throws, so job_health shows the job failing.
+const EPISODE_SETTING = 'outside_watchdog.silence_emailed_episode';
+const settingsStore = {
+  async get() {
+    const row = await db('system_settings').where({ key: EPISODE_SETTING }).first('value');
+    return row && row.value ? String(row.value) : null;
+  },
+  async set(value) {
+    if (value === null) {
+      await db('system_settings').where({ key: EPISODE_SETTING }).del();
+      return;
+    }
+    await db('system_settings').insert({ key: EPISODE_SETTING, value, category: 'watchdog' })
+      .onConflict('key').merge({ value, updated_at: db.fn.now() });
+  },
+};
 
 const DEFAULT_STALE_MINUTES = 45;
+const OPS_KEY = 'outside-watchdog-silent';
+const QUEUE_LINK = '/admin/agents?tab=queue';
 
 function staleMinutes() {
   const n = Number(process.env.HERMES_WATCHDOG_STALE_MINUTES);
@@ -37,47 +74,127 @@ async function lastObservedAt() {
   return row && row.at ? new Date(row.at) : null;
 }
 
-async function runWatchdogLivenessCheck({ now = new Date() } = {}) {
+const etStamp = (at) => `${formatETDayDate(at)} at ${formatETTime(at)}`.replace(/\s+/g, ' ');
+
+// The row's words depend only on the last poll and the limit, never on the
+// age, so every tick of one silence episode writes the same row.
+function composeSilentRow(last, limit) {
+  const alert = composeAdminAlert({
+    area: 'System',
+    action: 'check the outside watchdog on the Air',
+    why: last
+      ? `Its last poll was ${etStamp(last)}; the limit is ${limit} min.`
+      : 'It has never polled the portal since its lane was turned on.',
+    severity: 'broken',
+    link: QUEUE_LINK,
+    subject: { type: 'check', id: 'outside-watchdog' },
+    doneWhen: 'watchdog_polling',
+    who: 'claude',
+  });
+  const text = [
+    last
+      ? `The outside watchdog has not polled the portal since ${etStamp(last)} ET (the limit is ${limit} min).`
+      : 'The outside watchdog has never polled the portal since its lane was turned on.',
+    'While it is silent, nothing outside the portal reports the portal down or its job runner stopped.',
+    'It runs on the office MacBook Air: launchd job com.waves.portal-watchdog, every 10 min (runbook: ops/outside-watchdog/README.md).',
+    'Check it from this Mac:',
+    "  ssh adams-air 'launchctl print gui/$(id -u)/com.waves.portal-watchdog | head -20'",
+    "  ssh adams-air 'tail -20 ~/waves-ops/portal-watchdog/run.log'",
+    'A "Not logged in" or "Unauthorized" line in that log means the Air\'s Railway login expired.',
+    'Only the owner can sign in again: ssh -tt adams-air railway login --browserless',
+    'This row closes itself on the first poll that arrives.',
+  ].join('\n');
+  return { alert, text };
+}
+
+// The silence went out by email (the row could not land): the inbox gets one closing
+// email when polling resumes. A failed send keeps the episode, so the next fresh tick
+// tries again.
+async function sendClosingEmail(mailer, store, last) {
+  if ((await store.get()) === null) return null;
+  if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) return 'mailer not configured';
+  let sent;
+  try {
+    sent = await mailer.sendOne({
+      to: OPS_INBOX,
+      fromEmail: fromEmail(),
+      fromName: FROM_NAME,
+      subject: 'Outside watchdog polling again',
+      text: [
+        `The outside watchdog on the MacBook Air polls the portal again (last poll ${etStamp(last)} ET).`,
+        'This closes the earlier "outside watchdog silent" email.',
+      ].join('\n'),
+      categories: ['ops', OPS_KEY],
+      suppressErrorLog: true,
+    });
+  } catch (err) {
+    logger.warn(`[hermes-watchdog-liveness] closing email failed: ${err.message}`);
+    return 'failed';
+  }
+  if (sent && sent.ok === false) return 'failed';
+  await store.set(null);
+  return 'sent';
+}
+
+async function runWatchdogLivenessCheck({ now = new Date(), mailer = sendgrid, store = settingsStore } = {}) {
   // The endpoint sits behind BOTH gates (linkWorkerAuth answers 403 while the
-  // shared worker integration is off, so no observed row can land); ringing
-  // "watchdog silent" then would page for a deliberate state.
+  // shared worker integration is off, so no observed row can land); a
+  // "watchdog silent" row then would report a deliberate state.
   if (!gateEnvValue('GATE_HERMES_WATCHDOG') || !isEnabled('hermesWorker')) return { skipped: true };
   const last = await lastObservedAt();
   const ageMinutes = last ? Math.round((now.getTime() - last.getTime()) / 60000) : null;
   const limit = staleMinutes();
-  if (last && ageMinutes <= limit) return { skipped: false, alerted: 0, ageMinutes, limit };
-
-  const detail = last
-    ? `Last successful poll ${ageMinutes} min ago (${last.toISOString()}); the limit is ${limit} min.`
-    : 'It has never polled since the lane was enabled.';
-  const notif = await NotificationService.notifyAdmin(
-    'alert',
-    'FIX: Hermes watchdog silent',
-    `The external agent watchdog on the Hermes box has stopped polling the portal. ${detail} `
-    + 'Check the Hermes cron on Hostinger and the LINK_WORKER_SECRET_HERMES_WATCHDOG secret file.',
-    {
-      link: '/admin/agents?tab=queue',
-      // Keyed per silence EPISODE (the last successful poll's timestamp),
-      // not per calendar day: the old `:${today}` key rang a fresh bell
-      // every ET day the watchdog stayed silent (7 days running for one
-      // outage). The key only changes when `last` changes — i.e. once the
-      // watchdog resumes polling and then goes silent again.
-      dedupeKey: `hermes-watchdog-silent:${last ? last.toISOString() : 'never'}`,
-      bell: true,
-      metadata: { last_observed_at: last ? last.toISOString() : null, age_minutes: ageMinutes, limit_minutes: limit },
-    },
-  );
-  if (!notif) {
-    // Throw, don't just log: runExclusive then records THIS job as failing in
-    // job_health, so the snapshot (and Hermes) can see that the reciprocal
-    // alarm itself is broken — otherwise silence would be unannounced twice.
-    logger.error('[hermes-watchdog-liveness] bell did not persist — silence is unannounced');
-    throw new Error('hermes watchdog silent bell did not persist');
+  if (last && ageMinutes <= limit) {
+    const closed = await retireIfClean(OPS_KEY, { resolvedBy: 'outside-watchdog:polling' });
+    const closingEmail = await sendClosingEmail(mailer, store, last);
+    return { skipped: false, silent: false, closed, ageMinutes, limit, ...(closingEmail ? { closingEmail } : {}) };
   }
-  // notifyAdmin returns the EXISTING row with deduped:true on every later
-  // tick of the same ET day; that is not a new alert (or the scheduler
-  // would log a warning every 23 min all day).
-  return { skipped: false, alerted: notif && !notif.deduped ? 1 : 0, ageMinutes, limit };
+
+  const { alert, text } = composeSilentRow(last, limit);
+  const result = await deliverOpsDigest({
+    key: OPS_KEY,
+    subject: 'FIX: outside watchdog silent',
+    headline: alert.headline,
+    summary: alert.why,
+    text,
+    audience: 'engineering',
+    link: alert.link,
+    // One standing row per episode, refreshed in place; no dedupeWindowMs (a
+    // retired row drops its key, so the next silence opens a new row).
+    dedupeKey: OPS_KEY,
+    refreshOnDedupe: true,
+    fallOff: true,
+    metadata: { ...alert.metadata, last_observed_at: last ? last.toISOString() : null, limit_minutes: limit },
+    // Fallback only (the in-app digest gates are off, or the row write
+    // failed): the office inbox gets the same words, so the silence is
+    // still reported. No customer address is ever used here.
+    sendEmail: async () => {
+      const episode = last ? last.toISOString() : 'never';
+      if ((await store.get()) === episode) return { ok: true, skipped: 'already emailed this episode' };
+      if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) {
+        return { ok: false, error: 'mailer not configured' };
+      }
+      const sent = await mailer.sendOne({
+        to: OPS_INBOX,
+        fromEmail: fromEmail(),
+        fromName: FROM_NAME,
+        subject: 'FIX: outside watchdog silent',
+        text,
+        categories: ['ops', OPS_KEY],
+        suppressErrorLog: true,
+      });
+      if (!sent || sent.ok !== false) await store.set(episode);
+      return sent;
+    },
+  });
+  if (!result || result.ok === false || (result.channel !== 'in_app' && result.channel !== 'email')) {
+    // Throw, don't just log: runExclusive then records THIS job as failing in
+    // job_health (the Agents → Queue tab), so a broken reciprocal alarm is
+    // not silent twice.
+    logger.error('[hermes-watchdog-liveness] neither the silent row nor its email landed — silence is unannounced');
+    throw new Error('outside watchdog silent row did not persist');
+  }
+  return { skipped: false, silent: true, ageMinutes, limit, channel: result.channel };
 }
 
-module.exports = { runWatchdogLivenessCheck, DEFAULT_STALE_MINUTES };
+module.exports = { runWatchdogLivenessCheck, DEFAULT_STALE_MINUTES, OPS_KEY, OPS_INBOX, EPISODE_SETTING };

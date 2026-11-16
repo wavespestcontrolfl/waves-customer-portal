@@ -24,6 +24,9 @@ Contract (must match server/middleware/link-worker-auth.js):
 Key ids: "hermes" (backlink claim/report) reads /data/workspace/.waves-link-worker-secret;
 "hermes_vendor" (vendor price/login) reads /data/workspace/.waves-link-worker-secret-vendor;
 "hermes_watchdog" (agent watchdog /status) reads /data/workspace/.waves-link-worker-secret-watchdog.
+A key's secret comes from the portal's own env name instead (SECRET_ENV) when that is
+set: a host that runs under `railway run --service waves-customer-portal`, like the
+outside watchdog on the MacBook Air (ops/outside-watchdog/), keeps no copy on disk.
 """
 import hashlib
 import hmac
@@ -38,6 +41,30 @@ SECRET_FILES = {
     "hermes_commitments": "/data/workspace/.waves-link-worker-secret-commitments",
     "hermes_watchdog": "/data/workspace/.waves-link-worker-secret-watchdog",
 }
+# The env names the portal reads for the same keys (KEY_RECORDS secretEnv in
+# server/middleware/link-worker-auth.js; a test pins the two together).
+SECRET_ENV = {
+    "hermes": "LINK_WORKER_SECRET_HERMES",
+    "hermes_vendor": "LINK_WORKER_SECRET_HERMES_VENDOR",
+    "hermes_commitments": "LINK_WORKER_SECRET_HERMES_COMMITMENTS",
+    "hermes_watchdog": "LINK_WORKER_SECRET_HERMES_WATCHDOG",
+}
+
+
+def _env_secret(key_id: str) -> str:
+    return (os.environ.get(SECRET_ENV.get(key_id, "")) or "").strip()
+
+
+def secret_available(key_id: str) -> bool:
+    return bool(_env_secret(key_id)) or os.path.exists(SECRET_FILES[key_id])
+
+
+def read_secret(key_id: str) -> str:
+    env_value = _env_secret(key_id)
+    if env_value:
+        return env_value
+    with open(SECRET_FILES[key_id]) as f:
+        return f.read().strip()
 
 
 def canonical_target(url: str) -> str:
@@ -51,7 +78,7 @@ def canonical_target(url: str) -> str:
 
 
 def signed_headers(method: str, url: str, body: bytes = b"", key_id: str = "hermes") -> dict:
-    secret = open(SECRET_FILES[key_id]).read().strip()
+    secret = read_secret(key_id)
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     nonce = secrets.token_hex(16)
     body_hash = hashlib.sha256(body or b"").hexdigest()

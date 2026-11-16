@@ -313,7 +313,7 @@
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
  *   GATE_ESTIMATE_LEAD_SERVICE_SEND=true (send-time lead-with-one-service: the second of exactly two recurring lines on a new customer's estimate is parked as a staff opt-out event before delivery; STRICT opt-in, needs opt-out + add)
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
- *   GATE_HERMES_WATCHDOG=true (external agent watchdog: GET /api/integrations/watchdog-worker/status serves the PII-free health snapshot to the hermes_watchdog key and the 23-min liveness cron bells when the watchdog stops polling; off = 404 + cron no-op; kill = unset)
+ *   GATE_HERMES_WATCHDOG=true (external agent watchdog: GET /api/integrations/watchdog-worker/status serves the PII-free health snapshot to the hermes_watchdog key and the 23-min liveness cron writes an engineering fault row when the outside watchdog stops polling; off = 404 + cron no-op; kill = unset)
  *   GATE_ADMIN_OPS_QUEUE=true (Agents hub "Queue" tab: one read-only view of every long-running lane's pending / parked / failed rows — jobs, call processing, content parks, email approvals, IB confirmations, report delivery, follow-ups, open alerts; off = tab hidden, /api/admin/agents/queue 404)
  *   GATE_IB_MERGE_CUSTOMERS=true (Intelligence Bar merge_customers: the confirmed duplicate-merge write is offered in admin tool lists and executes; off = the tool is not offered on either the legacy or the platform path and a forced call refuses; the admin duplicates-queue route is unaffected; kill = unset)
  *   GATE_IB_DELETE_CUSTOMER=true (Intelligence Bar delete_duplicate_customer, owner ruling 2026-10-07: an admin can ARCHIVE ONLY (soft-delete, nothing merged or moved, the other record untouched) ONE empty duplicate customer record - one that holds only the fields the unknown-caller stub creator writes, no linked rows, and that the duplicate queue lists as a confirmed same-identity duplicate of a record sharing its phone (a possible match, such as a different name, goes to merge_customers) - from a confirm card, through the customer page's own DELETE /api/admin/customers/:id handler; restorable via PATCH /api/admin/customers/:id/restore; never owner-direct; sends nothing to a customer. Strict opt-in: exactly 'true', read at call time via ibDeleteCustomerLive(). Ships DARK; off = the tool is not offered on either path and a forced call refuses; kill = unset)
@@ -4275,7 +4275,9 @@ const gates = {
   // services/agent-watchdog-liveness.js. ON: the hermes_watchdog key can read
   // GET /api/integrations/watchdog-worker/status (job_health classes, ops-queue
   // COUNTS, link-worker lease state — never item titles), and the 23-min
-  // liveness cron rings one bell per ET day when the watchdog stops polling.
+  // liveness cron writes one engineering fault row per silence episode when
+  // the outside watchdog (the MacBook Air job, ops/outside-watchdog/) stops
+  // polling.
   // OFF (default, dev AND prod): /status answers 404 { error: 'watchdog lane
   // disabled' } and the cron is a no-op. Kill switch: unset. This entry is for
   // logGateStatus; both readers use gateEnvValue('GATE_HERMES_WATCHDOG') at

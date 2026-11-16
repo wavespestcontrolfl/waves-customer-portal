@@ -1,20 +1,34 @@
 #!/usr/bin/env python3
 """Waves agent watchdog — one poll of the portal health snapshot.
 
-Runs on the Hostinger Hermes box from a cron job every 10 minutes (see
-waves-agent-watchdog-skill.md). Standard library only (no requests). No model call: it signs one GET, diffs the
-portal's `reasons` against the last poll, and prints a page ONLY when
-something changed. Silence is the normal output.
+Runs every 10 minutes from outside Railway: on the office MacBook Air since
+2026-11-06 (launchd, ops/outside-watchdog/deliver.js), on the Hostinger Hermes
+box until 2026-09-05 (waves-agent-watchdog-skill.md). Standard library only
+(no requests). No model call: it signs one GET, diffs the portal's `reasons`
+against the last poll, and prints a page ONLY when something changed.
+Silence is the normal output.
 
     python3 watchdog_poll.py            # prints a page or nothing; exit 0
+    python3 watchdog_poll.py --json     # always prints ONE JSON line: the result,
+                                        # the typed pages and the current reasons
+
+--json is for a host whose runner decides delivery itself (the MacBook Air):
+{"result": "ok"|"down"|"config", "detail", "pages": [{"type": "down"|"back"|
+"config"|"attention", "text", "since"?}], "reasons", "consecutive_failures",
+"down_since", "scheduler", "observed_at"}. The paging rules are the same in
+both modes; a "back" page carries `since`, the start of the outage it ends.
+
+The secret comes from LINK_WORKER_SECRET_HERMES_WATCHDOG when that is set (the
+portal's own env name, e.g. under `railway run`), else from the secret file.
 
 Exit code is always 0 on a completed poll (an unreachable portal is a
 FINDING, not a script failure). Exit 2 only for a local misconfiguration
-(signer module missing, secret file missing, non-http PORTAL_URL, unbuildable
+(signer module missing, no secret, non-http PORTAL_URL, unbuildable
 request, unwritable state file) so the cron's own error path surfaces it. A page assembled before
 a state-write failure is still printed first.
 
-State lives in /data/workspace/.waves-watchdog-state.json:
+State lives in /data/workspace/.waves-watchdog-state.json (WAVES_WATCHDOG_STATE
+overrides the path; the Air keeps it in ~/waves-ops/portal-watchdog/poll-state.json):
   { "consecutive_failures": n, "last_reasons": [...], "last_paged_at": iso|null,
     "down_since": iso|null, "config_paged_at": iso|null }
 
@@ -44,7 +58,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    from sign_request import signed_headers, SECRET_FILES  # noqa: E402
+    from sign_request import signed_headers, secret_available, SECRET_ENV, SECRET_FILES  # noqa: E402
 except ImportError as _e:  # the rollout copies sign-request.py AS sign_request.py — a common miss
     print(f"watchdog_poll: sign_request.py not importable next to this script ({_e}); "
           "copy the portal's sign-request.py as sign_request.py", file=sys.stderr)
@@ -200,9 +214,26 @@ def safe_describe(reason, snap):
         return reason
 
 
+def json_report(result, detail, pages, state, snap):
+    # One line for a runner that delivers by itself (--json). Counts, state
+    # words and reason keys only: the snapshot carries no customer data.
+    sched = snap.get("scheduler") if isinstance(snap, dict) else None
+    return json.dumps({
+        "result": result,
+        "detail": detail,
+        "pages": pages,
+        "reasons": list(state["last_reasons"]),
+        "consecutive_failures": state["consecutive_failures"],
+        "down_since": state["down_since"],
+        "scheduler": sched if isinstance(sched, dict) else None,
+        "observed_at": now_iso(),
+    })
+
+
 def main():
-    if not os.path.exists(SECRET_FILES[KEY_ID]):
-        print(f"watchdog_poll: secret file missing: {SECRET_FILES[KEY_ID]}", file=sys.stderr)
+    json_mode = "--json" in sys.argv[1:]
+    if not secret_available(KEY_ID):
+        print(f"watchdog_poll: no secret: set {SECRET_ENV[KEY_ID]} or create {SECRET_FILES[KEY_ID]}", file=sys.stderr)
         sys.exit(2)
     if not PORTAL_URL.startswith(("https://", "http://")):
         print(f"watchdog_poll: PORTAL_URL is not an http(s) URL: {PORTAL_URL!r}", file=sys.stderr)
@@ -210,7 +241,7 @@ def main():
 
     state = load_state()
     result, snap, detail = poll()
-    out = []
+    pages = []
 
     if result == "config":
         # Deliberate portal state (kill switch, key scope, secret). The portal
@@ -219,7 +250,8 @@ def main():
         if state["consecutive_failures"] >= PAGE_AFTER_FAILURES and state["last_paged_at"]:
             # A paged outage that recovers into a configuration answer still
             # owes the "back" page, or the DOWN alert would stand forever.
-            out.append(f"✅ Waves portal reachable again (down since {state['down_since']}) — now answering a configuration response.")
+            pages.append({"type": "back", "since": state["down_since"],
+                          "text": f"✅ Waves portal reachable again (down since {state['down_since']}) — now answering a configuration response."})
         state["consecutive_failures"] = 0
         state["down_since"] = None
         # No snapshots are observed while configured-off, so the reason
@@ -228,7 +260,7 @@ def main():
         state["last_reasons"] = []
         since = hours_since(state["config_paged_at"])
         if since is None or since >= REPAGE_CONFIG_HOURS:
-            out.append(f"🔧 Waves watchdog not configured: {detail}. Polls continue; nothing is down.")
+            pages.append({"type": "config", "text": f"🔧 Waves watchdog not configured: {detail}. Polls continue; nothing is down."})
             state["config_paged_at"] = now_iso()
     elif result == "down":
         state["consecutive_failures"] += 1
@@ -240,15 +272,16 @@ def main():
         n = state["consecutive_failures"]
         since_page = hours_since(state["last_paged_at"])
         if n == PAGE_AFTER_FAILURES or (n > PAGE_AFTER_FAILURES and (since_page is None or since_page >= REPAGE_DOWN_HOURS)):
-            out.append(
+            pages.append({"type": "down", "text": (
                 f"🚨 Waves portal DOWN or degraded since {state['down_since']} — {detail}. "
                 f"{n} consecutive failed polls. Check Railway (portal service + Postgres) and {PORTAL_URL}/api/health."
-            )
+            )})
             state["last_paged_at"] = now_iso()
     else:
         state["config_paged_at"] = None
         if state["consecutive_failures"] >= PAGE_AFTER_FAILURES and state["last_paged_at"]:
-            out.append(f"✅ Waves portal reachable again (down since {state['down_since']}).")
+            pages.append({"type": "back", "since": state["down_since"],
+                          "text": f"✅ Waves portal reachable again (down since {state['down_since']})."})
         state["consecutive_failures"] = 0
         state["down_since"] = None
 
@@ -258,7 +291,7 @@ def main():
             lines = [f"⚠️ Waves agents need attention ({len(new)} new):"]
             lines += [f"• {safe_describe(r, snap)}" for r in new]
             lines.append(QUEUE_LINK)
-            out.append("\n".join(lines))
+            pages.append({"type": "attention", "text": "\n".join(lines)})
             state["last_paged_at"] = now_iso()
         state["last_reasons"] = reasons
 
@@ -266,8 +299,10 @@ def main():
     # state file cannot be written. Then persist; an unwritable state path
     # (missing dir, full disk) is local configuration (exit 2, forwarded by
     # the cron) — without it every outage poll would restart at failure 1.
-    if out:
-        print("\n\n".join(out))
+    if json_mode:
+        print(json_report(result, detail, pages, state, snap), flush=True)
+    elif pages:
+        print("\n\n".join(p["text"] for p in pages), flush=True)
     try:
         save_state(state)
     except OSError as e:
