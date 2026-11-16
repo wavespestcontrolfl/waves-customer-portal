@@ -711,7 +711,11 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     // 7th: seriesNextOccurrencesUnbillable (the Intelligence Bar / customer-page
     // lane edit asks the top-up's own billable verdict for the next
     // occurrences) anchors its cadence walk on the same helper, read-only.
-    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(7);
+    // 8th: planReplacedVisits (a customer's frequency change) asks the same
+    // helper for the latest live visit BEFORE the pending ones it may replace
+    // (its exceptIds argument), read-only: the estimate that decides whether
+    // the first pending visit stays. The extension itself anchors as before.
+    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(8);
     // The occupied-dates preload is shared the same way — same 4th consumer.
     expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(4);
   });
@@ -1582,6 +1586,32 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     // reseed, owner ruling 2026-09-24) takes it before its comms lock +
     // customers FOR UPDATE — same order, same key.
     expect((src.match(/await acquireRecurringSeriesMaintenanceLock\(trx, parentId\);/g) || []).length).toBe(4);
+  });
+
+  test('a frequency change chooses which visits stay from rows it holds locked (source guard)', () => {
+    // The customer's own confirm of a visit (routes/schedule.js) takes the visit
+    // row, not this lock: a pending visit read first and locked after could be
+    // replaced on a status that changed in between (GitHub codex #7859 r1 P2).
+    // The interleaving cannot be run from a test, so the order is pinned here.
+    const locker = src.indexOf('async function lockPendingSeriesVisits(');
+    const plan = src.indexOf('async function planReplacedVisits(');
+    const guard = src.indexOf('async function guardReplacedVisits(');
+    expect(locker).toBeGreaterThan(-1);
+    expect(plan).toBeGreaterThan(locker);
+    expect(guard).toBeGreaterThan(plan);
+    const lockerBody = src.slice(locker, plan);
+    expect(lockerBody).toContain('.forUpdate()');
+    expect(lockerBody).toContain('.noWait()');
+    const planBody = src.slice(plan, guard);
+    const lockAt = planBody.indexOf('const pending = await lockPendingSeriesVisits(trx, root.id);');
+    expect(lockAt).toBeGreaterThan(-1);
+    // The anchor the new cadence counts from and the keep-or-replace choice
+    // both come after the locking read, and the step has no other read of
+    // the plan's visits.
+    for (const marker of ['await latestLiveSeriesVisit(trx, root.id,', 'keepsFirstPendingVisit({']) {
+      expect(planBody.indexOf(marker)).toBeGreaterThan(lockAt);
+    }
+    expect((planBody.match(/trx\('scheduled_services'\)/g) || []).length).toBe(0);
   });
 });
 

@@ -1,4 +1,4 @@
-// Bid kit Product List sync (GATE_BID_KIT_PRODUCT_LIST_SYNC): the snapshot and fingerprint, the diff, the auto sign-off decision
+// Bid kit Product List sync: the snapshot and fingerprint, the diff, the auto sign-off decision
 // table, the PDF, and the run itself. The database, the store, the file storage and the bell service are stand-ins here (the SQL
 // runs in bid-kit-product-list.db.test.js); every bell spec goes through the real notification rules. Synthetic products only.
 const mockTables = { 'service_products as sp': [], service_products: [], products_catalog: [], bid_products: [], purchase_receipt_lines: [] };
@@ -349,7 +349,6 @@ describe('runBidKitProductListSync', () => {
   let live;
   beforeEach(() => {
     jest.clearAllMocks();
-    process.env.GATE_BID_KIT_PRODUCT_LIST_SYNC = 'true';
     live = { rows: [...rowsBefore], bought: [] };
     mockTables['service_products as sp'] = live.rows;
     mockTables.purchase_receipt_lines = [];
@@ -374,14 +373,8 @@ describe('runBidKitProductListSync', () => {
     episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'n1', rang: true });
     run = () => lib.runBidKitProductListSync({ now: NOW });
   });
-  afterEach(() => { delete process.env.GATE_BID_KIT_PRODUCT_LIST_SYNC; });
   const setList = (rows, purchased = []) => { mockTables['service_products as sp'] = rows; mockTables.purchase_receipt_lines = purchased.map((n) => ({ product_id: ID(n) })); };
 
-  test('gate off = nothing is read', async () => {
-    delete process.env.GATE_BID_KIT_PRODUCT_LIST_SYNC;
-    expect(await run()).toEqual({ skipped: 'gate_off' });
-    expect(store.listItems).not.toHaveBeenCalled();
-  });
   test('no product list item on the kit = nothing is built', async () => {
     store.listItems.mockResolvedValue([]);
     expect(await run()).toEqual({ skipped: 'no_item' });

@@ -47,6 +47,26 @@ const { callBookingDateOnly } = require('./call-booking-catalog');
 const { isRecurringLineageVisit } = require('../utils/recurring-lineage');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isAmbiguousProviderOutcome } = require('./sms-auto-send');
+const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+const { dayOnlyIds, dayOnlyFields } = require('./time-display');
+
+// The page's hour field. It comes from the visit's CURRENT window_start (the same 2-hour arrival window every other
+// customer screen quotes), never from the stored window_display: no move updates that text, so it went stale (2026-11-06:
+// 1 of 151 visits in the next 30 days showed the wrong hour). GATE_DAY_ONLY_PROMISE (part C1): a visit the customer was
+// told only the day for shows no hour and carries day_only + the note (one read).
+async function cardWindowFields(visit) {
+  const dayOnly = visit ? (await dayOnlyIds(db, [visit])).has(String(visit.id)) : false;
+  return { windowDisplay: dayOnly ? null : arrivalWindowText(visit && visit.window_start), ...dayOnlyFields(dayOnly) };
+}
+
+// "9:00 AM - 11:00 AM": the customer-quoted arrival window of a visit starting at `start` ('09:00' / '09:00:00'), or null
+// when the start is missing or malformed. The shared formatter (utils/sms-time-format), same as the appointment page.
+function arrivalWindowText(start) {
+  const range = arrivalWindowRange(start);
+  if (!range) return null;
+  const text = formatSmsTimeRange(range);
+  return text === range ? null : text;
+}
 
 const TEMPLATE_KEY = 'secure_appointment_card';
 // Plan-choice copy variant (owner-approved 2026-07-24): used only when the
@@ -2300,7 +2320,7 @@ async function loadSecureCardPageData(token, { consentTextVersion = null } = {})
 
   const visit = await db('scheduled_services')
     .where({ id: request.scheduled_service_id })
-    .first('id', 'customer_id', 'status', 'scheduled_date', 'window_display', 'service_type', 'estimated_price', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
+    .first('id', 'customer_id', 'status', 'scheduled_date', 'window_start', 'service_type', 'estimated_price', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
   // Live price recheck (Codex #3077 P1): a request minted before the
   // $0/unpriced send guard existed — or a visit repriced to $0 after the
   // link went out — must not render the capture form, mint a SetupIntent,
@@ -2319,7 +2339,7 @@ async function loadSecureCardPageData(token, { consentTextVersion = null } = {})
     firstName: customer?.first_name || null,
     serviceType: visit?.service_type || null,
     dateDisplay: visit ? dateLineFor(visit.scheduled_date).replace(/^ on /, '') : null,
-    windowDisplay: visit?.window_display || null,
+    ...(await cardWindowFields(visit)),
     cancelFeeNote: visitPriced ? (feeDisclosure ? feeDisclosure.note : null) : null,
   };
   // Echo token for the completing tab: attached ONLY to the pending 'ready'

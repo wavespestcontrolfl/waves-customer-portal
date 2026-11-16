@@ -642,13 +642,116 @@ async function processDueWelcomes() {
   return results;
 }
 
+// ── Read-only audit: first plans that left no welcome on record ──────────
+// Lead-to-cash detector `new_plan_without_welcome`. Welcome-text traces
+// 2026-11-04 and 2026-11-09: of 94 first plans made Jul 25 to Oct 24, 27 got
+// no welcome text. 23 have a cause (the old history rule, two paths with no
+// welcome call, valid stops at send, silent-by-design cases); 4 have none, and
+// nothing watched for the next miss. This is the SQL twin of
+// isNewRecurringSignupCandidate above; keep the two in step.
+//
+// Plan = a recurring root (is_recurring, no parent). It started when its
+// earliest follow-up row was created, else when the root was: a visit that
+// staff make recurring weeks later keeps its old created_at, but its
+// follow-ups are new. Only the customer's EARLIEST plan is judged, and any
+// welcome row (queued, completed or cancelled) clears it: the booking path did
+// its job. Silent by design, so excluded: staff Mark Won
+// (estimates.price_locked_by = 'manual_accept'; the dialog promises no text),
+// commercial-only plans (customers.waveguard_tier = 'Commercial', stamped by
+// the converter's commercialOnlyRecurring), a customer with no phone and no
+// email (sendNewRecurringWelcome returns no_contact), a deleted customer and a
+// cancelled plan root. Not excluded, because no cheap column marks them (each
+// is rare, and a finding only lists the customer for a look): an estimate the
+// converter treated as one-time only (suppressRecurringConversion) for which
+// staff then booked a recurring visit by hand, and a self-booked plan whose
+// customer holds an auto label-only tier (appointment-tagger.js keeps that
+// stamp comms-silent; one such plan in the three months traced).
+//
+// The history and contact tests copy the send path's own predicates exactly,
+// NULLs included: a service_records row with a NULL status is not history for
+// whereNot('status', 'cancelled'), so `<> 'cancelled'` (not IS DISTINCT FROM)
+// keeps it out here too; and the contact test is sendNewRecurringWelcome's
+// (any non-empty phone, else a non-blank email).
+//
+// A plan is judged from WELCOME_AUDIT_GRACE_HOURS after its start (the welcome
+// is queued at booking and sent 60 min later) for WELCOME_AUDIT_WINDOW_DAYS.
+const WELCOME_AUDIT_WINDOW_DAYS = 14;
+const WELCOME_AUDIT_GRACE_HOURS = 3;
+// A Mark Won estimate is linked to a plan by source_estimate_id. When staff
+// book the visit before the win lands, or never stamp the link, the win must
+// land within this many days of the plan start to count.
+const WELCOME_AUDIT_MARK_WON_LINK_DAYS = 7;
+// Forward-only, like the fixes it guards (#7538, #7557). A plan that started
+// before #7557 went live (2026-11-04 15:59 ET) belongs to the traced backlog,
+// whose catch-up the owner put on hold (2026-11-03). Listing it again each
+// morning would repeat a question he answered.
+const WELCOME_AUDIT_STARTS_AT = new Date('2026-11-04T21:00:00Z');
+const FIRST_PLANS_WITHOUT_WELCOME_SQL = `
+  WITH plans AS (
+    SELECT r.id AS root_id, r.customer_id, r.status AS root_status, r.source_estimate_id,
+           COALESCE(MIN(f.created_at), r.created_at) AS plan_start
+      FROM scheduled_services r
+      LEFT JOIN scheduled_services f ON f.recurring_parent_id = r.id
+     WHERE r.is_recurring = true AND r.recurring_parent_id IS NULL AND r.customer_id IS NOT NULL
+     GROUP BY r.id
+  ), first_plan AS (
+    SELECT DISTINCT ON (customer_id) customer_id, root_id, root_status, source_estimate_id, plan_start
+      FROM plans
+     ORDER BY customer_id, plan_start, root_id
+  )
+  SELECT p.customer_id
+    FROM first_plan p
+    JOIN customers c ON c.id = p.customer_id
+   WHERE p.plan_start >= ? AND p.plan_start <= ?
+     AND p.root_status IS DISTINCT FROM 'cancelled'
+     AND c.deleted_at IS NULL
+     AND (COALESCE(c.phone, '') <> '' OR COALESCE(BTRIM(c.email), '') <> '')
+     AND c.waveguard_tier IS DISTINCT FROM 'Commercial'
+     AND NOT EXISTS (
+       SELECT 1 FROM sms_sequences q WHERE q.customer_id = p.customer_id AND q.sequence_type = ?
+     )
+     AND NOT EXISTS (
+       SELECT 1 FROM scheduled_services v
+        WHERE v.customer_id = p.customer_id AND v.status IN ('completed', 'on_site')
+          AND v.scheduled_date < (p.plan_start AT TIME ZONE 'America/New_York')::date - ?::int
+     )
+     AND NOT EXISTS (
+       SELECT 1 FROM service_records sr
+        WHERE sr.customer_id = p.customer_id AND sr.status <> 'cancelled'
+          AND sr.service_date < (p.plan_start AT TIME ZONE 'America/New_York')::date - ?::int
+     )
+     AND NOT EXISTS (
+       SELECT 1 FROM estimates e
+        WHERE e.price_locked_by = 'manual_accept'
+          AND (e.id = p.source_estimate_id
+               OR (e.customer_id = p.customer_id
+                   AND e.accepted_at BETWEEN p.plan_start - (?::int * INTERVAL '1 day')
+                                         AND p.plan_start + (?::int * INTERVAL '1 day')))
+     )
+   ORDER BY p.plan_start, p.customer_id`;
+
+// Customer ids only (PII-free). `conn` lets a test pass its own transaction.
+async function findFirstPlansWithoutWelcome(now = new Date(), conn = db) {
+  const since = new Date(Math.max(now.getTime() - WELCOME_AUDIT_WINDOW_DAYS * 24 * 60 * 60 * 1000, WELCOME_AUDIT_STARTS_AT.getTime()));
+  const until = new Date(now.getTime() - WELCOME_AUDIT_GRACE_HOURS * 60 * 60 * 1000);
+  const res = await conn.raw(FIRST_PLANS_WITHOUT_WELCOME_SQL, [
+    since, until, SEQUENCE_TYPE, NEW_CUSTOMER_HISTORY_DAYS, NEW_CUSTOMER_HISTORY_DAYS,
+    WELCOME_AUDIT_MARK_WON_LINK_DAYS, WELCOME_AUDIT_MARK_WON_LINK_DAYS,
+  ]);
+  return (Array.isArray(res?.rows) ? res.rows : []).map((row) => row.customer_id);
+}
+
 module.exports = {
   TEMPLATE_KEY,
   SEQUENCE_TYPE,
   EMAIL_SEQUENCE_TYPE,
   WELCOME_DELAY_MINUTES,
   NEW_CUSTOMER_HISTORY_DAYS,
+  WELCOME_AUDIT_WINDOW_DAYS,
+  WELCOME_AUDIT_GRACE_HOURS,
+  WELCOME_AUDIT_STARTS_AT,
   isNewRecurringSignupCandidate,
+  findFirstPlansWithoutWelcome,
   sendNewRecurringWelcome,
   processDueWelcomes,
   _internals: {

@@ -3186,6 +3186,32 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
   }
 });
 
+// POST /restock-requests/:id/vendor-cancellation — the Restock tab's "Record
+// vendor cancellation": after the office has cancelled a dispatched automatic
+// order with the vendor, record it, so the request closes and a replacement can
+// be ordered (services/procurement/order-revoke.js, the same rules as
+// ops/agents/auto-order-revoke.js). Owner-only: STAFF_INVENTORY_REQUEST above
+// does not list it. The body names the order the tab showed ({ orderId,
+// version }; a changed order is a 409) and carries the operator's confirmation
+// that the vendor cancelled it, because the record clears the way for a
+// replacement order. Nothing is sent to the vendor.
+router.post('/restock-requests/:id/vendor-cancellation', async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    if (body.cancelledWithVendor !== true) {
+      return res.status(400).json({ error: 'Confirm that the vendor has cancelled this order first.', code: 'not_confirmed' });
+    }
+    const result = await require('../services/procurement/order-revoke').recordVendorCancellation(req.params.id, {
+      orderId: body.orderId, version: body.version, actorId: req.technicianId || null,
+    });
+    logger.info('restock vendor cancellation recorded', { requestId: req.params.id, orderId: body.orderId, technicianId: req.technicianId, requestStatus: result.requestStatus });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, code: err.code || null });
+    next(err);
+  }
+});
+
 // GET/POST /restock-requests/:id/siteone-email — preview and send the pickup
 // order email to SiteOne for an open request (owner 2026-10-26, dark behind
 // GATE_SITEONE_EMAIL_ORDER). Owner-only: it emails a vendor and orders stock, and

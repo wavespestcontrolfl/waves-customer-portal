@@ -263,6 +263,28 @@ describe('a moved visit must still be movable under the fence', () => {
     expect(w.rowWrites()).toEqual([]);
   });
 
+  test('its 24-hour reminder was turned off meanwhile (read with the transaction handle)', async () => {
+    const off = new Set();
+    const loadReminder24hOffIds = jest.fn(async (_conn, rows) => new Set(rows.filter((r) => off.has(r.id)).map((r) => r.id)));
+    const w = plan4({ over: { loadReminder24hOffIds } });
+    w.lockDayRows.mockImplementationOnce(async () => { off.add('b'); });
+    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:reminder_24h_off', moved: 0 });
+    expect(w.rowWrites()).toEqual([]);
+    expect(loadReminder24hOffIds).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({ id: expect.any(String), customer_id: expect.any(String) })]);
+    expect(loadReminder24hOffIds.mock.calls[0][0]).toBe(w.acquireOccupancyLock.mock.calls[0][0]); // the transaction handle
+  });
+
+  test('its 24-hour reminder still on: the move is written', async () => {
+    const w = plan4({ over: { loadReminder24hOffIds: jest.fn(async () => new Set()) } });
+    expect((await w.run()).status).toBe('applied');
+  });
+
+  test('deps without the reminder read (older callers) skip the check', async () => {
+    const w = plan4();
+    expect(w.deps.loadReminder24hOffIds).toBeUndefined();
+    expect((await w.run()).status).toBe('applied');
+  });
+
   // GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a"): the move transaction re-reads the told-lock facts.
   const recurring = { a: { route_order: 1, is_recurring: true, recurring_parent_id: 'p-a' }, b: { route_order: 2, is_recurring: true, recurring_parent_id: 'p-b' },
     c: { route_order: 3, is_recurring: true, recurring_parent_id: 'p-c' }, d: { route_order: 4, is_recurring: true, recurring_parent_id: 'p-d' } };
@@ -451,5 +473,24 @@ describe('repair of a committed day', () => {
     const w = world({ visits: [['a', 8]], changes: [], reminders: [{ scheduled_service_id: 'a', appointment_time: etTime('12:00'), cancelled: false }] });
     await applyInternals.reconcileReminders(w.conn, w.deps, { ids: ['a'], skip: new Set(['a']) });
     expect(w.syncMovedReminders).not.toHaveBeenCalled();
+  });
+});
+
+describe('writeMoves: the initiator and reason code (booking make-room moves reuse the writer)', () => {
+  const move = (extra = {}) => ({ id: 'a', toStart: H(12), widthMin: 60, openEnd: false, ...extra });
+  const write = (w, extra = {}) => w.conn.transaction((trx) => applyInternals.writeMoves(trx, w.deps, { dateStr: DATE, moves: [move()], ...extra }));
+
+  test('a call without them logs day_replan, as before', async () => {
+    const w = plan4();
+    await write(w);
+    expect(w.logRows().map((l) => [l.initiated_by, l.reason_code])).toEqual([['day_replan', 'day_replan']]);
+  });
+
+  test('a custom initiator and reason code are logged; the window and the open end are written the same way', async () => {
+    const w = plan4();
+    const written = await write(w, { initiator: 'booking_make_room', reasonCode: 'booking_make_room', moves: [move({ openEnd: true })] });
+    expect(w.logRows().map((l) => [l.initiated_by, l.reason_code, l.new_window])).toEqual([['booking_make_room', 'booking_make_room', '12:00']]);
+    expect(written).toEqual([expect.objectContaining({ id: 'a', start: '12:00', end: '13:00' })]);
+    expect(w.rowWrites().find((u) => 'window_start' in u.patch).patch).toMatchObject({ window_start: '12:00', window_end: null });
   });
 });

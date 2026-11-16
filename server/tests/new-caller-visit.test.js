@@ -200,7 +200,7 @@ describe('GATE_NEW_CALLER_BOOKING wiring', () => {
     expect(link.indexOf('processing_token: claimFence.procToken')).toBeLessThan(link.indexOf('await ensurePrimaryProperty('));
   });
 
-  test('GATE_ROUTE_CHECK_BOOKING_SAVES: Book numbers the new visit inside its transaction, right after the insert, before the activity row', () => {
+  test('Book numbers the new visit inside its transaction, right after the insert, before the activity row', () => {
     const own = fs.readFileSync(path.join(__dirname, '../services/booking/new-caller-visit.js'), 'utf8');
     const book = own.slice(own.indexOf('async function bookNewCallerVisit('), own.indexOf('async function linkNewCallerVisit('));
     const insert = book.indexOf("const [visit] = await trx('scheduled_services').insert(data).returning('*');");
@@ -466,10 +466,10 @@ maybeDescribe('new-caller booking on Postgres', () => {
     expect(second.warnings).toHaveLength(1);
   });
 
-  test('GATE_ROUTE_CHECK_BOOKING_SAVES: gate on places the new visit once with source new_caller; gate off never; a throwing placement still books', async () => {
+  test('with arrival routing on, Book places the new visit once with source new_caller; a throwing placement still books', async () => {
     const arrivalRoute = require('../services/scheduling/arrival-route');
     const placeSpy = jest.spyOn(arrivalRoute, 'placeMovedVisit').mockResolvedValue([1]);
-    const saved = { booking: process.env.GATE_ROUTE_CHECK_BOOKING_SAVES, windows: process.env.GATE_ADMIN_ARRIVAL_WINDOWS };
+    const saved = { windows: process.env.GATE_ADMIN_ARRIVAL_WINDOWS };
     const svc = await db('services').whereNot('service_key', 'mosquito_one_time').whereNotNull('name').first('id');
     const book = async (date) => {
       const result = await service.bookNewCallerVisit({ input: validInput({ serviceId: svc.id, scheduledDate: date, windowStart: '13:00' }) });
@@ -477,12 +477,7 @@ maybeDescribe('new-caller booking on Postgres', () => {
       return result.visit;
     };
     try {
-      delete process.env.GATE_ROUTE_CHECK_BOOKING_SAVES;
       process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
-      await book('2031-03-10');
-      expect(placeSpy).not.toHaveBeenCalled();
-
-      process.env.GATE_ROUTE_CHECK_BOOKING_SAVES = 'true';
       const visit = await book('2031-03-11');
       expect(placeSpy).toHaveBeenCalledTimes(1);
       expect(placeSpy).toHaveBeenCalledWith(expect.any(Function), { serviceId: visit.id, staffSave: true, source: 'new_caller' });
@@ -492,8 +487,6 @@ maybeDescribe('new-caller booking on Postgres', () => {
       expect(await db('scheduled_services').where({ id: survivor.id }).first('id')).toBeTruthy();
     } finally {
       placeSpy.mockRestore();
-      if (saved.booking === undefined) delete process.env.GATE_ROUTE_CHECK_BOOKING_SAVES;
-      else process.env.GATE_ROUTE_CHECK_BOOKING_SAVES = saved.booking;
       if (saved.windows === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
       else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = saved.windows;
     }

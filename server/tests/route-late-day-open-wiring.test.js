@@ -1,7 +1,6 @@
 /**
- * GATE_ROUTE_CHECK_LATE_DAYS wiring in find-time.js (mocked arrival-route, like
- * find-time-rejections-by-date.test.js): the staff arrival-window finder reads the gate at CALL time and
- * only then asks the enumerator for late days; a flagged fit becomes a `day_already_late` slot. The night
+ * Late days wiring in find-time.js (mocked arrival-route, like
+ * find-time-rejections-by-date.test.js): the staff arrival-window finder asks the enumerator for late days; a flagged fit becomes a `day_already_late` slot. The night
  * auto-dispatch search (findCapacitySlots, opts.arrivalSearch) and booking never pass the option.
  */
 const fs = require('fs');
@@ -57,10 +56,8 @@ const fit = (over = {}) => ({
   arrivalDelayMinutes: 0, estimatedArrival: '15:00', arrivals: [{ id: 'candidate' }], finishMinute: 700, ...over,
 });
 
-const saved = process.env.GATE_ROUTE_CHECK_LATE_DAYS;
 beforeEach(() => {
   jest.clearAllMocks();
-  delete process.env.GATE_ROUTE_CHECK_LATE_DAYS;
   delete process.env.GATE_SCHEDULING_CAPACITY;
   db.mockImplementation((table) => (table === 'technicians' ? chain([{ id: 'tech-1', name: 'A' }]) : chain([])));
   enumerateArrivalPlacements.mockReturnValue({
@@ -68,22 +65,11 @@ beforeEach(() => {
   });
 });
 afterAll(() => {
-  if (saved === undefined) delete process.env.GATE_ROUTE_CHECK_LATE_DAYS; else process.env.GATE_ROUTE_CHECK_LATE_DAYS = saved;
   delete process.env.GATE_SCHEDULING_CAPACITY;
 });
 
 describe('the staff arrival-window finder', () => {
-  test('gate unset: the enumerator gets exactly the old limits and the slot has no flag', async () => {
-    const result = await findAvailableSlots(BASE);
-    for (const [, limits] of enumerateArrivalPlacements.mock.calls) {
-      expect(Object.keys(limits).sort()).toEqual(['durationMinutes', 'earliestStartMin', 'latestServiceEndMin']);
-    }
-    expect(result.slots).toHaveLength(1);
-    expect(result.slots[0]).not.toHaveProperty('day_already_late');
-  });
-
-  test('gate on: the enumerator is asked for late days, and a flagged fit becomes a flagged slot', async () => {
-    process.env.GATE_ROUTE_CHECK_LATE_DAYS = 'true';
+  test('the enumerator is asked for late days, and a flagged fit becomes a flagged slot', async () => {
     enumerateArrivalPlacements.mockReturnValue({
       placements: [
         { windowStart: '15:00', windowEnd: '16:00', fit: fit({ dayAlreadyLate: true }) },
@@ -97,29 +83,18 @@ describe('the staff arrival-window finder', () => {
     expect(result.slots[0]).toMatchObject({ route_mode: 'arrival_windows', technician: { id: 'tech-1' }, estimated_arrival: '15:00' });
   });
 
-  test('gate on: a clean day\'s slot carries no flag and the limits are otherwise the old ones', async () => {
-    process.env.GATE_ROUTE_CHECK_LATE_DAYS = 'true';
+  test('a clean day\'s slot carries no flag and the limits are otherwise the old ones', async () => {
     const result = await findAvailableSlots(BASE);
     expect(result.slots[0]).not.toHaveProperty('day_already_late');
     const limits = enumerateArrivalPlacements.mock.calls[0][1];
     expect(Object.keys(limits).sort()).toEqual(['durationMinutes', 'earliestStartMin', 'lateDays', 'latestServiceEndMin']);
-  });
-
-  test('the gate is read at call time: flipping it between requests changes the next request', async () => {
-    await findAvailableSlots(BASE);
-    process.env.GATE_ROUTE_CHECK_LATE_DAYS = 'true';
-    await findAvailableSlots(BASE);
-    delete process.env.GATE_ROUTE_CHECK_LATE_DAYS;
-    await findAvailableSlots(BASE);
-    expect(enumerateArrivalPlacements.mock.calls.map(([, limits]) => limits.lateDays === true)).toEqual([false, true, false]);
   });
 });
 
 describe('the night auto-dispatch search and booking never ask for late days', () => {
   const NIGHT = { ...BASE, arrivalWindow: undefined, serviceType: 'pest_control', slotStepMinutes: 60, arrivalSearch: true, providerTravel: false, techStartPoints: true };
 
-  test('with the gate on, findCapacitySlots (arrivalSearch) evaluates every hour with the old options and never enumerates late days', async () => {
-    process.env.GATE_ROUTE_CHECK_LATE_DAYS = 'true';
+  test('findCapacitySlots (arrivalSearch) evaluates every hour with the old options and never enumerates late days', async () => {
     const { slots } = await findAvailableSlots(NIGHT);
     expect(slots.length).toBeGreaterThan(0);
     expect(evaluateArrivalPlacement).toHaveBeenCalled();
@@ -128,15 +103,7 @@ describe('the night auto-dispatch search and booking never ask for late days', (
     for (const slot of slots) expect(slot).not.toHaveProperty('day_already_late');
   });
 
-  test('the night result is the same with the gate on and off', async () => {
-    const off = await findAvailableSlots(NIGHT);
-    process.env.GATE_ROUTE_CHECK_LATE_DAYS = 'true';
-    const on = await findAvailableSlots(NIGHT);
-    expect(on).toEqual(off);
-  });
-
   test('a booking request under the capacity gate never gets the option either', async () => {
-    process.env.GATE_ROUTE_CHECK_LATE_DAYS = 'true';
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     await findAvailableSlots({ ...NIGHT, arrivalSearch: undefined, customerFacing: true });
     for (const [, options] of evaluateArrivalPlacement.mock.calls) expect(options).not.toHaveProperty('lateDays');

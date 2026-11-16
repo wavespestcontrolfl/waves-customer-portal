@@ -474,9 +474,9 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
   );
 }
 
-// The "~" legend. GATE_PICKER_ROAD_LIMIT_NOTICE: when Google road times are
-// stopped by a spending limit the server says so (`roadLimit`), and the one
-// line sits under the legend. No line = the legend alone, as before.
+// The "~" legend. When Google road times are stopped by a spending limit the
+// server says so (`roadLimit`), and the one line sits under the legend. No
+// line = the legend alone.
 export function EstimateLegend({ roadLimit }) {
   const legend = <div style={{ color: '#52525B' }}>~ = straight-line estimate, not a road time.</div>;
   if (!roadLimit) return legend;

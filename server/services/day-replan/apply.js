@@ -198,7 +198,7 @@ async function promiseLevelFacts(trx, deps, id) {
 async function recheckVisit(trx, deps, { id, dateStr, toStart }) {
   const toldLock = typeof deps.toldLockOn === 'function' && deps.toldLockOn() === true;
   const row = await trx('scheduled_services').where({ id }).first(
-    'id', 'status', 'window_start', 'customer_id', 'visit_id', 'reservation_expires_at', 'auto_dispatch_locked', 'auto_dispatch_excluded',
+    'id', 'status', 'window_start', 'customer_id', 'property_id', 'visit_id', 'reservation_expires_at', 'auto_dispatch_locked', 'auto_dispatch_excluded',
     ...(toldLock ? TOLD_ROW_COLUMNS : []),
   );
   if (!row) throw coded('NOT_MOVABLE', 'the visit no longer exists');
@@ -216,6 +216,8 @@ async function recheckVisit(trx, deps, { id, dateStr, toStart }) {
     visitCounts: new Map(row.visit_id != null ? [[row.visit_id, mate ? 2 : 1]] : []),
     customerCounts: new Map(row.customer_id != null ? [[row.customer_id, sameCustomer ? 2 : 1]] : []),
     sent24: new Set(reminder && reminder.reminder_24h_sent === true ? [id] : []),
+    // Whether the 24-hour reminder will still go out (it carries the new hour), read with the transaction; fails closed.
+    ...(typeof deps.loadReminder24hOffIds === 'function' ? { reminder24hOff: await deps.loadReminder24hOffIds(trx, [row]) } : {}),
     ...(toldLock ? await toldLockFacts(trx, deps, { row, id, dateStr }) : {}),
   };
   const why = deps.fixedReason(row, ctx) || deps.fixedReason({ ...row, window_start: minToHhmm(toStart) }, ctx);
@@ -243,7 +245,7 @@ const WRITE_COLUMNS = ['id', 'customer_id', 'visit_id', 'scheduled_date', 'windo
  * Writes every moved visit and its reschedule_log row. The columns are the rebooker's for a same-day, same-technician
  * window change by a night writer; the CAS is the row as it was read under the locks.
  */
-async function writeMoves(trx, deps, { dateStr, moves }) {
+async function writeMoves(trx, deps, { dateStr, moves, initiator = INITIATOR, reasonCode = REASON_CODE }) {
   const rows = await trx('scheduled_services').whereIn('id', moves.map((m) => m.id)).select(...WRITE_COLUMNS);
   const byId = new Map(rows.map((r) => [String(r.id), r]));
   const written = [];
@@ -269,8 +271,8 @@ async function writeMoves(trx, deps, { dateStr, moves }) {
       customer_id: row.customer_id ?? null,
       original_date: dateStr,
       new_date: dateStr,
-      reason_code: REASON_CODE,
-      initiated_by: INITIATOR,
+      reason_code: reasonCode,
+      initiated_by: initiator,
       original_window: row.window_start ? `${row.window_start}${row.window_end ? `-${row.window_end}` : ''}` : null,
       new_window: end ? `${start}-${end}` : start,
       occurrence_service_type: row.service_type || null,

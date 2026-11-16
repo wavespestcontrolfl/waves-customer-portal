@@ -364,8 +364,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
               </span>
             )}
           </span>
-          {/* The stop's gate and access codes (GATE_SCHEDULE_ACCESS_CODES,
-              owner ruling 2026-10-26), inside the button so a tap opens the stop. */}
+          {/* The stop's gate and access codes (owner ruling 2026-10-26), inside the button so a tap opens the stop. */}
           <ScheduleAccessLine service={service} />
         </button>
         <DispatchReadinessStrip readiness={service.readiness} onOpen={onProtocol ? () => onProtocol(service) : null} className="mt-2" />

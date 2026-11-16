@@ -16,7 +16,6 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const mockGates = { cronJobs: true, dayAgreementShadow: true };
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((name) => !!mockGates[name]), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
-  neighborhoodAccessLive: jest.fn(() => false),
 }));
 // Mirrors runExclusive's contract: the body's failure is recorded for job health, then rethrown.
 const mockHealth = [];

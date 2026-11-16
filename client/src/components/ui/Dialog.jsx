@@ -109,6 +109,7 @@ export function Dialog({
       />
       <div
         ref={panelRef}
+        data-modal-panel="true"
         tabIndex={-1}
         className={cn(
           'relative w-full bg-white rounded-md border-hairline border-zinc-200',

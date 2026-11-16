@@ -12,10 +12,10 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
-const { gateEnvValue, ibAcceptEstimateLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibPrepaySwitchLive, ibScheduleSmsLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibComposeEmailLive, ibSetBillToLive, ibResolveDispatchAlertLive, ibUnblockSenderLive, ibAgentReviewDraftsLive } = require('../../config/feature-gates');
+const { gateEnvValue, ibAcceptEstimateLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibPrepaySwitchLive, ibScheduleSmsLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibComposeEmailLive, ibSetBillToLive, ibUnblockSenderLive, ibAgentReviewDraftsLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
-const { adminReadLive, officeReadLive, ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL } = require('./admin-read-tools');
+const { adminReadLive, ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL } = require('./admin-read-tools');
 const OFFICE_READ_TOOL_NAMES = new Set([ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL]);
 const { adminWriteLive } = require('./admin-write-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
@@ -176,7 +176,8 @@ const GATED_ACTIONS = {
   approve_agent_review_draft: () => ibAgentReviewDraftsLive(),
   revise_agent_review_draft: () => ibAgentReviewDraftsLive(),
   ignore_agent_review_draft: () => ibAgentReviewDraftsLive(),
-  resolve_dispatch_alert: () => ibResolveDispatchAlertLive(),
+  // No gate of its own; like the gated tools above it exists only on the platform path.
+  resolve_dispatch_alert: () => gateEnvValue('GATE_IB_PLATFORM'),
   unblock_sender: () => ibUnblockSenderLive(),
   find_admin_reads: () => adminReadLive(),
   read_admin_data: () => adminReadLive(),
@@ -201,10 +202,10 @@ function allowed(action, { role, context, fullAccess } = {}) {
   // their own check here rather than the blanket approval-kind refusal.
   if (FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action.id) && fullAccess !== true) return false;
   // General admin reads (owner ruling 2026-10-12): owner login only.
-  // GATE_IB_GENERAL_READ_OFFICE (owner ruling 2026-10-28): the office login (a non-owner admin; technicians returned above) is offered
-  // exactly the two general-read tools, and only while that gate is on. find_admin_edits stays owner-only. The tools themselves limit
+  // Office login (owner ruling 2026-10-28): the office login (a non-owner admin; technicians returned above) is offered
+  // exactly the two general-read tools. find_admin_edits stays owner-only. The tools themselves limit
   // that login to reviewed office rows (admin-read-tools.js).
-  if (FULL_ACCESS_READ_TOOL_NAMES.has(action.id) && fullAccess !== true && !(OFFICE_READ_TOOL_NAMES.has(action.id) && officeReadLive())) return false;
+  if (FULL_ACCESS_READ_TOOL_NAMES.has(action.id) && fullAccess !== true && !OFFICE_READ_TOOL_NAMES.has(action.id)) return false;
   return true;
 }
 
@@ -279,10 +280,11 @@ const EVERY_PAGE_TOOL_NAMES = Object.freeze([
   // so a request on any page can search the reviewed read list and call the
   // result on the next round without a discover_capabilities detour (words like
   // "show blocked numbers" match neither static description). Still subject to
-  // allowed(): GATE_IB_GENERAL_READ on AND the owner login (full access), so
-  // other admins, technicians, the tech rail and a gate-off deploy never see
-  // them. With GATE_IB_TOOL_SEARCH the eager page list is built without full
-  // access, so they are deferred and searchable there instead.
+  // allowed(): GATE_IB_GENERAL_READ on AND an admin login (the owner, or the
+  // office login limited to reviewed office rows), so technicians, the tech
+  // rail and a gate-off deploy never see them. With GATE_IB_TOOL_SEARCH the
+  // eager page list is built without full access, which still offers them to
+  // an admin, so they stay in the eager list there too.
   'find_admin_reads', 'read_admin_data',
 ]);
 

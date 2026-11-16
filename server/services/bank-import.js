@@ -17,7 +17,6 @@ const { parse } = require('csv-parse/sync');
 const db = require('../models/db');
 const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
-const { gateEnvValue } = featureGates;
 const payrollMatch = require('./payroll-bank-match');
 const { taxPeriodFor } = require('../utils/tax-period');
 const { categoryDeductibleAmount } = require('./expense-categorizer');
@@ -1406,31 +1405,23 @@ function hasUnresolvedBankChange(row) {
 // and no owner ruling. An Inbox decision (suggestion.decision) is the
 // owner's explicit word and always holds. An owner RULE's override
 // ('examined' without a decision: tax-ledger-rules replaced the flag with the
-// rule's classification) holds only while GATE_TAX_LEDGER is on: with the
-// ledger off its classification is hidden, so the matcher's warning comes
-// back rather than leaving a card payment as a plain debit. The human
-// actions on the row are still refreshed. The UPDATE repeats the check so a
-// ruling made after the read wins too.
-function transferFlagWanted(sug, ledgerOn) {
+// rule's classification) holds too. The human actions on the row are still
+// refreshed. The UPDATE repeats the check so a ruling made after the read
+// wins too.
+function transferFlagWanted(sug) {
   if (!sug) return true;
   if (sug.decision) return false;
   const matcherIgnore = !!sug.ignore && !sug.rule; // this pass's own flag
-  const ruleIgnore = !!sug.ignore && !!sug.rule;   // a transfer RULE's flag: hidden from Bank Import while the ledger is off
-  return !matcherIgnore && !(ledgerOn && (ruleIgnore || sug.examined));
+  const ruleIgnore = !!sug.ignore && !!sug.rule;   // a transfer RULE's flag
+  return !matcherIgnore && !(ruleIgnore || sug.examined);
 }
-// With the ledger off, the matcher's flag REPLACES a rule's reading: every
-// key a rule owns goes with it (tax-ledger-rules CLASSIFICATION_KEYS minus
-// the flag the matcher is writing and the decision keys a rule never
-// writes; the stamp too, so the rule pass re-applies the rule when the
-// ledger is on again). A category only goes when a rule wrote it: a model's
+// The keys a ledger rule owns (tax-ledger-rules CLASSIFICATION_KEYS minus the
+// flag the matcher writes and the decision keys a rule never writes). The
+// Inbox and the AI suggester drop them when an owner decision replaces a rule's
+// reading. A category only goes when a rule wrote it: a model's
 // (categorySource 'ai') is not the ledger's.
 const LEDGER_RULE_KEYS = ['rule', 'rulesAt', 'examined', 'personal', 'income', 'review', 'note'];
 const LEDGER_RULE_CATEGORY_KEYS = ['categoryId', 'categoryName', 'irsLine', 'categorySource'];
-function ruleKeysToDrop(sug, ledgerOn) {
-  if (ledgerOn || !sug || !sug.rule) return [];
-  return sug.categorySource === 'rule' ? [...LEDGER_RULE_KEYS, ...LEDGER_RULE_CATEGORY_KEYS] : LEDGER_RULE_KEYS;
-}
-const NO_DECISION_SQL = "(suggestion is null or (suggestion -> 'decision') is null)";
 // An Income decision from the ledger Inbox holds against the matcher: the
 // row stays open on its shelf, is never read by a pass, and every per-row
 // write of a pass already in flight (claims, parked candidates, flags,
@@ -1440,7 +1431,6 @@ const NO_DECISION_SQL = "(suggestion is null or (suggestion -> 'decision') is nu
 // would explain it.
 const NO_INCOME_DECISION_SQL = "coalesce(suggestion ->> 'decision', '') <> 'income'";
 const NO_OWNER_RULING_SQL = "(suggestion is null or ((suggestion -> 'decision') is null and not jsonb_exists(suggestion, 'examined')))";
-function ledgerRulesOn() { return !!(gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_LEDGER')); }
 // A row whose link is the owner's call: the ledger import parks a row that
 // may already be an expense in the portal with suggestion.manualLink. A
 // pass offers its candidates in Bank Import and never claims one, however
@@ -2122,8 +2112,6 @@ async function runDeterministicMatching({ limit } = {}) {
   // caller's "more rows pending" surface must not read as done
   moreRemaining = moreRemaining || reconciliation.morePending;
   const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, linksReverted: reconciliation.linksReverted, linksRemarked: reconciliation.linksRemarked, orphanRefundsReverted: reconciliation.orphanRefundsReverted, expenseLinksReverted: reconciliation.expenseLinksReverted, claimVerifyReverted: reconciliation.claimVerifyReverted, payoutVerifyReverted: reconciliation.payoutVerifyReverted };
-  const ledgerOn = ledgerRulesOn();
-  const rulingGuardSql = ledgerOn ? NO_OWNER_RULING_SQL : NO_DECISION_SQL;
   await payroll.loadContext(summary);
 
   for (const row of unmatched) {
@@ -2179,11 +2167,11 @@ async function runDeterministicMatching({ limit } = {}) {
       const staleActionKeys = row.direction === 'credit'
         ? ['refundCandidates', 'refundCandidatesTotal']
         : ['candidates', 'candidatesTotal'];
-      if (transferFlagWanted(row.suggestion, ledgerOn)) {
+      if (transferFlagWanted(row.suggestion)) {
         // merged, not replaced — suggestion also carries durable identity
         // records (forceToken/forcedFor, lastUnlink) that must survive
-        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).whereRaw(rulingGuardSql).update({
-          suggestion: suggestionMerge({ ...transfer, ...actionPatch }, [...(hasActions ? ['noMatch'] : []), ...ruleKeysToDrop(row.suggestion, ledgerOn)]),
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).whereRaw(NO_INCOME_DECISION_SQL).whereRaw(NO_OWNER_RULING_SQL).update({
+          suggestion: suggestionMerge({ ...transfer, ...actionPatch }, hasActions ? ['noMatch'] : []),
           updated_at: new Date(),
         });
         summary.transferFlagged++;

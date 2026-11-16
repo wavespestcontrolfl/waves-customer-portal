@@ -69,23 +69,25 @@ async function loadToldVisitIds(conn, ids, now = new Date(), { anyPromise = fals
   }));
 }
 
+/** The level of ONE resolved promise (resolvePromises): 'none' = no promise at all. 'day' = a day-only promise (explicit
+ *  metadata.promise_level 'day' marker, no slot). 'hour' = anything else: a known slot, OR an unknown window without the day
+ *  marker (a legacy move notice, "at a time we'll confirm", a call with no time). Unknown counts as 'hour' on purpose: it
+ *  fails closed, since we cannot prove the customer was not told an hour. THE one rule: loadPromiseLevels and the office's
+ *  told badge (time-promise.loadOfficeToldFields) both use it. */
+function promiseLevelOf(promise) {
+  if (!promise) return 'none';
+  if (promise.start_at == null && promise.level === 'day') return 'day';
+  return 'hour';
+}
+
 /** Map<id, 'none' | 'day' | 'hour'>: what the customer was told about each visit (same stop-wide resolution as
- *  loadToldVisitIds). 'none' = no promise at all. 'day' = the latest promise is a day-only promise (explicit
- *  metadata.promise_level 'day' marker, no slot). 'hour' = anything else: a known slot, OR an unknown window
- *  without the day marker (a legacy move notice, "at a time we'll confirm", a call with no time). Unknown counts
- *  as 'hour' on purpose: it fails closed, since we cannot prove the customer was not told an hour. Throws when a
- *  read fails; every caller must fail closed. */
+ *  loadToldVisitIds; the rule is promiseLevelOf). Throws when a read fails; every caller must fail closed. */
 async function loadPromiseLevels(conn, ids, now = new Date()) {
   const levels = new Map();
   if (!ids || ids.length === 0) return levels;
   const promises = await resolvePromises(conn, ids, now);
-  for (const id of ids) {
-    const promise = promises.get(id);
-    if (!promise) levels.set(id, 'none');
-    else if (promise.start_at == null && promise.level === 'day') levels.set(id, 'day');
-    else levels.set(id, 'hour');
-  }
+  for (const id of ids) levels.set(id, promiseLevelOf(promises.get(id)));
   return levels;
 }
 
-module.exports = { loadToldVisitIds, loadPromiseLevels };
+module.exports = { loadToldVisitIds, loadPromiseLevels, resolvePromises, promiseLevelOf };

@@ -639,7 +639,7 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
     quote_promised: quotePromised === true,
     lane: lane || null,
     estimateId,
-    // GATE_CUSTOMER_ALERTS_RING: a quote we promised is a promise we owe the customer; a quote the customer asked
+    // A quote we promised is a promise we owe the customer; a quote the customer asked
     // for is the customer reaching us. Either one rings once the gate is on (muted by the bell policy before).
     ...(quotePromised === true ? { promise: true } : { contact: true }),
   };

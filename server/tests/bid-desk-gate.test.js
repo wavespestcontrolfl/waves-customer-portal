@@ -1,5 +1,5 @@
-// Bid Desk dark gate (GATE_BID_DESK): off = no job work, every route answers 404, the nav flag is absent.
-// On = the same routes validate input before touching the database. No database is used here.
+// Bid Desk routes validate input before touching the database, and the feature-flag answer still carries bid_desk.
+// No database is used here.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const mockDb = jest.fn(() => { throw new Error('the database must not be touched'); });
@@ -33,7 +33,6 @@ jest.mock('../services/visual-service-notes', () => ({
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
-const service = require('../services/bid-desk');
 
 const ID = '11111111-2222-4333-8444-555555555555';
 const admin = { Authorization: 'Bearer admin', 'Content-Type': 'application/json' };
@@ -57,69 +56,10 @@ beforeAll(async () => {
 afterAll(async () => {
   if (server) await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 });
-beforeEach(() => { mockDb.mockClear(); delete process.env.GATE_BID_DESK; delete process.env.GATE_BID_DESK_AUTO_DATES; });
-afterEach(() => { delete process.env.GATE_BID_DESK; delete process.env.GATE_BID_DESK_AUTO_DATES; });
+beforeEach(() => { mockDb.mockClear(); });
 
-describe('gate off', () => {
-  test('the job, the reminders and the backfill do nothing and touch no table', async () => {
-    expect(await service.runBidDeskTick()).toEqual({ skipped: 'gate_off' });
-    expect(await service.sendDueReminders()).toBe(0);
-    expect(await service.runBackfill({ dryRun: false })).toEqual({ skipped: 'gate_off' });
-    expect(mockDb).not.toHaveBeenCalled();
-  });
-
-  test.each(['true ', '1', 'TRUE', 'on', 'yes'])('only the exact string "true" turns it on (%j)', async (value) => {
-    process.env.GATE_BID_DESK = value;
-    expect(await service.runBidDeskTick()).toEqual({ skipped: 'gate_off' });
-  });
-
-  test('every route answers 404 for an admin and still refuses everyone else', async () => {
-    for (const [method, url, body] of [['GET', '/api/admin/bid-desk'], ['GET', `/api/admin/bid-desk/${ID}`],
-      ['PATCH', `/api/admin/bid-desk/${ID}`, { status: 'bid' }], ['POST', '/api/admin/bid-desk/from-email', { email_id: ID }]]) {
-      expect((await call(method, url, body)).status).toBe(404);
-    }
-    expect((await call('GET', '/api/admin/bid-desk', undefined, {})).status).toBe(401);
-    expect((await call('GET', '/api/admin/bid-desk', undefined, { Authorization: 'Bearer tech' })).status).toBe(403);
-    expect(mockDb).not.toHaveBeenCalled();
-  });
-
-  test('the feature-flag response carries no bid_desk key (nav hidden)', async () => {
-    mockDb.mockImplementation(() => ({ where: () => ({ select: async () => [] }) }));
-    const res = await call('GET', '/api/admin/feature-flags');
-    expect(res.status).toBe(200);
-    expect(res.body.flags).not.toHaveProperty('bid_desk');
-    mockDb.mockReset();
-  });
-});
-
-describe('GATE_BID_DESK_AUTO_DATES', () => {
-  const { bidDeskAutoDatesLive } = require('../config/feature-gates');
-
-  test('it is dark by default and strict: only the exact string "true", and only with the Bid Desk on', () => {
-    expect(bidDeskAutoDatesLive()).toBe(false);
-    process.env.GATE_BID_DESK = 'true';
-    expect(bidDeskAutoDatesLive()).toBe(false);
-    for (const value of ['true ', '1', 'TRUE', 'on', 'yes']) {
-      process.env.GATE_BID_DESK_AUTO_DATES = value;
-      expect(bidDeskAutoDatesLive()).toBe(false);
-    }
-    process.env.GATE_BID_DESK_AUTO_DATES = 'true';
-    expect(bidDeskAutoDatesLive()).toBe(true);
-    delete process.env.GATE_BID_DESK;
-    expect(bidDeskAutoDatesLive()).toBe(false);
-  });
-
-  test('with it off, the Bid Desk on closes nothing and touches no table', async () => {
-    process.env.GATE_BID_DESK = 'true';
-    expect(await service.closeLapsedBids()).toBe(0);
-    expect(mockDb).not.toHaveBeenCalled();
-  });
-});
-
-describe('gate on', () => {
-  beforeEach(() => { process.env.GATE_BID_DESK = 'true'; });
-
-  test('the feature-flag response shows the nav entry', async () => {
+describe('routes', () => {
+  test('the feature-flag response still carries bid_desk for older client builds', async () => {
     mockDb.mockImplementation(() => ({ where: () => ({ select: async () => [] }) }));
     const res = await call('GET', '/api/admin/feature-flags');
     expect(res.body.flags.bid_desk).toBe(true);
@@ -143,12 +83,11 @@ describe('gate on', () => {
   });
 });
 
-test('the scheduler runs the job under the cron lock and checks the gate first', () => {
+test('the scheduler runs the job under the cron lock', () => {
   const source = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
   const at = source.indexOf("'0 3,18,33,48 * * * *'");
   expect(at).toBeGreaterThan(-1);
   const block = source.slice(at, at + 900);
-  expect(block.indexOf('bidDeskLive()')).toBeGreaterThan(-1);
-  expect(block.indexOf('bidDeskLive()')).toBeLessThan(block.indexOf("runExclusive('bid-desk-intake'"));
+  expect(block).toContain("runExclusive('bid-desk-intake'");
   expect(block).toContain('runBidDeskTick');
 });

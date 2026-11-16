@@ -6,7 +6,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ServiceOutlinePage from './ServiceOutlinePage';
 
-// The v13 outline sections carry a `visual` (GATE_LAWN_OUTLINE_V13, server/services/lawn-service-outline.js);
+// The v13 outline sections carry a `visual` (the v13 program, server/services/lawn-service-outline.js);
 // their bullets are the text for readers that draw none. Shapes below mirror what the builder writes.
 const LABELS = {
   inspection: 'Inspection', feeding: 'Fertilizer', barrier: 'Pre-emergent', micros: 'Micronutrients',

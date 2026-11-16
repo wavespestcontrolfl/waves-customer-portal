@@ -74,7 +74,6 @@ jest.mock('../middleware/admin-auth', () => ({
 
 let mockGateEnabled = true;
 jest.mock('../config/feature-gates', () => ({
-  staffEditLockStartOnlyLive: () => false,
   isEnabled: jest.fn(() => true),
   gateEnvValue: jest.fn(() => false),
   discountStackingLive: () => mockGateEnabled,

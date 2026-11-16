@@ -4,9 +4,9 @@
 const { detectServiceLine } = require('./service-line-configs');
 const { TREE_SHRUB_MAIN_REPORT_PROMPT, RECURRING_PEST_MAIN_REPORT_PROMPT } = require('./pest-tree-copy-prompt');
 const {
-  selectRemainingServicePrompt, resolveRemainingServiceModules, REMAINING_SERVICE_PROMPT_VERSION, REMAINING_SERVICE_MODIFIERS,
+  selectRemainingServicePrompt, resolveRemainingServiceModules, REMAINING_SERVICE_PROMPT_VERSION,
 } = require('./remaining-service-copy-prompts');
-const { WRITER_RULES_EXCLUDED_MODULES, composeWriterRulesPrompt, PEST_WRITER_ADAPTER } = require('./report-writer-rules');
+const { WRITER_RULES_EXCLUDED_MODULES, composeWriterRulesPrompt } = require('./report-writer-rules');
 const { pestReportVoicePrompt } = require('./pest-report-voice');
 const { specialtyReportVoicePrompt, SPECIALTY_VOICE_MODULES } = require('./specialty-report-voice');
 
@@ -213,11 +213,11 @@ function writerRulesInScope(serviceType, context = {}) {
   return resolveDedicatedWriter(serviceType, context) === 'pest';
 }
 
-// Whether selectReportCopyPrompt serves the one-voice pest prompt
-// (GATE_PEST_REPORT_VOICE) for this context. The generate route trims its
-// pest inputs for GATE_PEST_QUIET_VISIT only then, so both read this.
+// Whether selectReportCopyPrompt serves the one-voice pest prompt for this
+// context: under the writer rules, for the recurring pest writer. The generate
+// route trims its empty pest inputs only then, so both read this.
 function pestVoiceServes(serviceType, context = {}) {
-  return context.writerRules === true && context.pestVoice === true
+  return context.writerRules === true
     && writerRulesInScope(serviceType, context)
     && !selectRemainingServicePrompt(context, 'main')
     && resolveDedicatedWriter(serviceType, context) === 'pest';
@@ -264,19 +264,12 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
     : modules[writer];
   if (!selected) return null;
   const reservice = context.isCallback === true || context.serviceKey === 'pest_re_service';
-  // GATE_PEST_REPORT_VOICE (pest-report-voice.js): under the writer rules the
-  // recurring pest writer gets one prompt in one voice in place of the
-  // stacked blocks below. Output screens stay the same. GATE_PEST_QUIET_VISIT
-  // picks its v2, and the route then trims its empty inputs (pestVoiceServes).
-  if (pestVoiceServes(serviceType, context)) return pestReportVoicePrompt({ reservice, quietVisit: context.pestQuietVisit === true });
-  // Under the writer rules a pest re-service gets the remaining-service
-  // callback modifier, which the pest writer never received.
-  const callback = writerRules && writer === 'pest' && reservice
-    ? [REMAINING_SERVICE_MODIFIERS.callback] : [];
-  // The pest writer's own fill-in block comes last, after the constraints
-  // and the module it builds on (owner 2026-10-09).
-  const adapter = writerRules && writer === 'pest' ? [PEST_WRITER_ADAPTER] : [];
-  return compose([selected[0], sharedSafety, ...selected.slice(1), ...callback, ...adapter]);
+  // Under the writer rules the recurring pest writer gets one prompt in one
+  // voice (pest-report-voice.js) in place of the stacked blocks below. Output
+  // screens stay the same, and the route then trims its empty inputs
+  // (pestVoiceServes).
+  if (pestVoiceServes(serviceType, context)) return pestReportVoicePrompt({ reservice });
+  return compose([selected[0], sharedSafety, ...selected.slice(1)]);
 }
 
 module.exports = {

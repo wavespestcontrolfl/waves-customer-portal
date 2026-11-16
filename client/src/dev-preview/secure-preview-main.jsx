@@ -10,6 +10,7 @@
  *   onetime       — one-time visit: price panel, no choice
  *   prepaySelected— returning visitor with an unpaid prepay invoice
  *   gateoff       — no planContext: the original card-only page
+ *   dayonly       — GATE_DAY_ONLY_PROMISE: no hour, the arrival note instead
  * Demo persona is fictional — never real customer data.
  */
 import React from 'react';
@@ -91,6 +92,9 @@ const PAYLOADS = {
     },
   }),
   gateoff: () => ({ state: 'ready', ...BASE }),
+  dayonly: () => ({
+    state: 'ready', ...BASE, windowDisplay: null, day_only: true, arrival_note: 'Arrival window texted the day before',
+  }),
 };
 
 // ── fetch stub ─────────────────────────────────────────────────────────────

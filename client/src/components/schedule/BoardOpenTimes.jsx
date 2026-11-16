@@ -1,5 +1,4 @@
-// Open times on the Dispatch board (owner 2026-10-26, "start step 4";
-// GATE_BOARD_OPEN_TIMES): while a visit is dragged on the day or week grid,
+// Open times on the Dispatch board (owner 2026-10-26, "start step 4"): while a visit is dragged on the day or week grid,
 // the hours that fit it light up, each with what it adds to the day's
 // driving ("adds N min"), amber over 30 min, and the best one tagged. It is
 // the open-times search the staff time box uses (find-time summary with
@@ -47,12 +46,12 @@ export function boardFits(data) {
  * the visit's technician, so only that route is searched, and an unassigned
  * visit lights nothing. `durationOf` is the board's own duration rule.
  */
-export function useBoardOpenTimes({ enabled, service, durationOf, dates, ownRoute = false }) {
+export function useBoardOpenTimes({ service, durationOf, dates, ownRoute = false }) {
   const [answer, setAnswer] = useState(null);
   const technicianId = ownRoute ? service?.technicianId : undefined;
   const dateFrom = dates[0];
   const dateTo = dates[dates.length - 1];
-  const key = enabled && service?.id && dateFrom && (!ownRoute || technicianId)
+  const key = service?.id && dateFrom && (!ownRoute || technicianId)
     ? [service.id, durationOf(service), dateFrom, dateTo, technicianId || ''].join('|') : '';
   useEffect(() => {
     if (!key) return undefined;

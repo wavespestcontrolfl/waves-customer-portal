@@ -388,7 +388,7 @@ function inboundConfirmedMessage(result) {
   return "Referral confirmed. The credit step posted nothing; check the referral in the queue below.";
 }
 
-// GATE_REFERRAL_INBOUND_CONFIRM: one plan customer who came in through a
+// One plan customer who came in through a
 // referral link or named a referrer. The office picks the referrer (a
 // suggestion or a search result), then confirms; or marks "not a referral".
 function InboundReferralCard({ item, onDone, flash }) {
@@ -671,7 +671,7 @@ export default function ReferralsPageV2() {
   const [stats, setStats] = useState(null);
   const [promoters, setPromoters] = useState([]);
   const [queue, setQueue] = useState([]);
-  const [inbound, setInbound] = useState({ enabled: false, items: [] });
+  const [inbound, setInbound] = useState({ items: [] });
   const [payouts, setPayouts] = useState([]);
   const [settings, setSettings] = useState(null);
   const [analytics, setAnalytics] = useState(null);
@@ -772,12 +772,7 @@ export default function ReferralsPageV2() {
       searchSeen.current = "";
       setQueue(q === FAILED ? [] : q.referrals || []);
       setPayouts(pay === FAILED ? [] : pay.payouts || []);
-      // A failed inbound read says nothing about whether inbound is on.
-      setInbound(
-        inb === FAILED
-          ? { enabled: false, items: [] }
-          : { enabled: Boolean(inb.enabled), items: inb.items || [] },
-      );
+      setInbound({ items: inb === FAILED ? [] : inb.items || [] });
       setLoading(false);
     });
   }, []);
@@ -1291,7 +1286,7 @@ export default function ReferralsPageV2() {
           {loadErrors.inbound && (
             <ErrorRow what="inbound referrals needing confirmation" onRetry={load} />
           )}
-          {inbound.enabled && inbound.items.length > 0 && (
+          {inbound.items.length > 0 && (
             <div
               style={{
                 background: D.card,

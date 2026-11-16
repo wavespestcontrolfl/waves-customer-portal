@@ -10,7 +10,7 @@ const numbers = require('../config/twilio-numbers');
 const { runExclusive } = require('../utils/cron-lock');
 const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
-const { raiseAdminAlert, cutAtWord, breaksAlertRules, MAX_WHY_CHARS } = require('./admin-alert-compose');
+const { raiseAdminAlert, validStructuredFields, cutAtWord, breaksAlertRules, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { validate: isUuid } = require('uuid');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
@@ -848,7 +848,12 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
             'The SMS agent could not finish processing this conversation after its retries. Open the customer profile to check the requested work.',
             { trx, bell: true, dedupeKey: `sms-operations-failed:${message.id}`,
               link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
-              metadata: { triggerKey: 'sms_operational_exception', customerId: message.customer_id, sms_log_id: message.id } });
+              // The bell labels (area, severity, who, done-when, subject). This row is written here, not through the
+              // trigger registry, so no registry rule supplies them. No `text_note_checked`: the text-note close rule
+              // (admin-alert-relevance.js) must never match the failure bell.
+              metadata: { triggerKey: 'sms_operational_exception', customerId: message.customer_id, sms_log_id: message.id,
+                ...validStructuredFields({ area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'message_reviewed',
+                  subject: { type: 'customer', id: String(message.customer_id || '') } }) } });
           if (!notification?.id) throw new Error('sms_operations_bell_not_persisted');
         });
         logger.warn(`[sms-operations] extraction failed for sms_log ${message.id}`);
@@ -974,7 +979,7 @@ async function settleCommitmentAlert(trx, initial, id, { action, reviewedBy }) {
   else await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [`email-commitment:${id}`]).update(update);
 }
 
-// GATE_SMS_FOLLOWUP_WITNESS_FIX (docs/admin-notifications.md: the emitter that
+// Done on a text follow-up bell (docs/admin-notifications.md: the emitter that
 // raises a row owns clearing it). A person's Done on a text follow-up bell
 // used to write only the notifications row, so the next sweep tick saw the
 // commitment still open and rang again. Done now also marks every open
@@ -985,7 +990,7 @@ async function settleCommitmentAlert(trx, initial, id, { action, reviewedBy }) {
 // moved) is skipped and logged, never a failure for the Done click.
 const SMS_ALERT_KEY = /^sms-commitment(?:-source)?:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 async function settleCommitmentsForDoneAlert(conn, notificationId, { reviewedBy }) {
-  if (!require('../config/feature-gates').smsFollowupWitnessFixLive() || !reviewedBy) return 0;
+  if (!reviewedBy) return 0;
   const alert = await conn('notifications').where({ id: notificationId, recipient_type: 'admin' }).first('metadata');
   let metadata = alert?.metadata;
   if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch (_) { metadata = null; } }
@@ -1308,7 +1313,7 @@ function overdueBellCopy({ row, message, verdict, customerName, channelWord, pro
       subject: { type: 'customer', id: message.customer_id },
       doneWhen: 'promise_fulfilled',
       who: 'person',
-      // Called back on a text call-back promise only (admin-alert-buttons.js, GATE_ALERT_CLOSE_BUTTONS): the bell's
+      // Called back on a text call-back promise only (admin-alert-buttons.js): the bell's
       // own Done with that note, which also settles the follow-up. It places no call. An email follow-up gets
       // none: Done's settle step settles text follow-ups only, so the email promise would ring again. Call comes
       // first: the customer page's own Call (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
@@ -1345,7 +1350,7 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
   // a new row. With no open row (first time, or a person marked it done and
   // the promise is still overdue) the insert is fresh: one new row, one bell.
   const ringOnce = require('../config/feature-gates').alertRingOnceLive?.();
-  // promise: a follow-up we owe the customer (GATE_CUSTOMER_ALERTS_RING; it already rings through bell: true).
+  // promise: a follow-up we owe the customer (it already rings through bell: true).
   const notification = await raiseAdminAlert('alert', { ...spec, promise: true }, ringOnce || refreshOnly
     ? { ...ringOpts, dedupeWindowMs: undefined, dedupeOpenOnly: true, ringOnRefresh: () => false }
     : ringOpts);

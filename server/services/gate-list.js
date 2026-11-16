@@ -63,6 +63,74 @@ function readGateIndex() {
   return names;
 }
 
+// Whether Settings → Features may flip a gate, and if not, the one-line
+// reason the row shows. The same check the Intelligence Bar's
+// set_railway_gate applies (a plain on/off gate with a description line), plus
+// the page's own exclusions: the flip switch itself stays Railway-only.
+const FLIP_SWITCH = 'GATE_SETTINGS_GATE_FLIP';
+function flipStatus(name, entry) {
+  if (name === FLIP_SWITCH) return { flippable: false, notFlippableReason: 'This switch turns gate flipping on and off, so it is set in Railway only.' };
+  if (!entry) return { flippable: false, notFlippableReason: 'Not in the gate catalogue (no description line in feature-gates.js yet). Set it in Railway.' };
+  if (entry.kind === 'mode') return { flippable: false, notFlippableReason: 'Takes a mode, timestamp or list, not just on/off. Set it in Railway.' };
+  if (!entry.boolean) return { flippable: false, notFlippableReason: 'The code does not show it is a plain on/off switch. Set it in Railway.' };
+  if (!entry.description) return { flippable: false, notFlippableReason: 'No description line in feature-gates.js yet, so it cannot be flipped here. Set it in Railway.' };
+  return { flippable: true, notFlippableReason: null };
+}
+
+// How the code parses each gate, across EVERY file that reads it (the reader
+// files docs/gate-index.md lists), not only feature-gates.js (codex #7732):
+// 'strict' = every reader compares to exactly 'true'; 'loose' = every reader
+// uses gateEnvValue (1 / true / on, any case); 'mixed' = both. Built once per
+// process from the source files; a file that cannot be read adds nothing.
+let readerKindCache = null;
+function readerKinds() {
+  if (readerKindCache) return readerKindCache;
+  const root = path.join(__dirname, '..', '..');
+  const sources = new Map();
+  const source = (file) => {
+    if (!sources.has(file)) {
+      try { sources.set(file, fs.readFileSync(path.join(root, file), 'utf8')); } catch { sources.set(file, ''); }
+    }
+    return sources.get(file);
+  };
+  const kinds = new Map();
+  try {
+    for (const line of fs.readFileSync(GATE_INDEX, 'utf8').split('\n')) {
+      const m = line.match(/^- `(GATE_[A-Z0-9_]+)` — ((?:`[^`]+`(?:, )?)+)/);
+      if (!m) continue;
+      const name = m[1];
+      let strict = false;
+      let loose = false;
+      for (const [, file] of m[2].matchAll(/`([^`]+)`/g)) {
+        const src = source(file);
+        if (src.includes(`process.env.${name} === 'true'`)) strict = true;
+        if (src.includes(`gateEnvValue('${name}')`)) loose = true;
+      }
+      kinds.set(name, strict && loose ? 'mixed' : loose ? 'loose' : 'strict');
+    }
+  } catch {
+    // unreadable index → every gate falls back to the catalogue's reader
+  }
+  readerKindCache = kinds;
+  return kinds;
+}
+
+// Whether the code reads the variable as on. 'true' is on and an unset
+// variable is off for every reader; any other value is on only when every
+// reader takes it (a gateEnvValue-only gate: 1 / true / on, any case).
+function readsOnFor(name, entry) {
+  const raw = process.env[name];
+  if (raw === undefined) return false;
+  if (raw === 'true') return true;
+  const kind = readerKinds().get(name) || entry?.reader || 'strict';
+  return kind === 'loose' && ['1', 'true', 'on'].includes(String(raw).toLowerCase());
+}
+
+// GATE_* names a gate's description says it depends on ("needs GATE_Y").
+function mentionedGates(name, description) {
+  return [...new Set(String(description || '').match(/GATE_[A-Z0-9_]*[A-Z0-9]/g) || [])].filter((n) => n !== name);
+}
+
 function listGates() {
   let catalog = new Map();
   try {
@@ -81,8 +149,11 @@ function listGates() {
       ...gateSetting(name),
       readByCode: read.has(name),
       description: catalog.get(name)?.description || read.get(name) || null,
+      inverted: catalog.get(name)?.inverted === true,
+      readsOn: readsOnFor(name, catalog.get(name)),
+      ...flipStatus(name, catalog.get(name)),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-module.exports = { listGates, gateSetting };
+module.exports = { listGates, gateSetting, flipStatus, mentionedGates, readsOnFor, FLIP_SWITCH };

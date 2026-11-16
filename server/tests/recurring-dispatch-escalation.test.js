@@ -180,6 +180,20 @@ describe('recurring visit with no arrival time and no due date', () => {
     );
   });
 
+  // Dispatch audit Fix 1 (owner 2026-11-08): the words change once, 7 days before the visit, so a
+  // notice closed while the visit still has no time (a Done, or the 72-hour quiet close) rings one
+  // more time. A later visit keeps the old words byte for byte, so the deploy re-rings no standing notice.
+  test('a visit 7 days away or less gets the soon words; one 8 days away keeps the old words', async () => {
+    const soon = { ...windowless, id: 's7', scheduled_date: '2026-08-12' };
+    const later = { ...windowless, id: 's8', scheduled_date: '2026-08-13' };
+    query.select = jest.fn().mockResolvedValueOnce([soon, later]).mockResolvedValue([]);
+    notifications.notifyAdmin.mockResolvedValue({ id: 'noticeX' });
+    expect(await flagUnplacedVisits({ lockWindowDays: 14 }, now)).toBe(2);
+    const whyOf = (key) => notifications.notifyAdmin.mock.calls.find((call) => call[3].dedupeKey === key)[2];
+    expect(whyOf('recurring-no-window:s7:2026-08-12')).toBe('The Aug 12 visit, 7 days away or less, has no arrival time; set one in dispatch so it can be placed.');
+    expect(whyOf('recurring-no-window:s8:2026-08-13')).toBe('The Aug 13 visit has no arrival time; set one in dispatch so it can be placed.');
+  });
+
   test('re-checks the row under its lock: a visit given a time meanwhile raises nothing', async () => {
     scanFindsOnlyWindowless();
     query.first.mockResolvedValue(null);
@@ -456,17 +470,18 @@ test('missing-pin upkeep closes a standing notice whose visit now has a pin', as
   expect(retireSql.sql).toContain('c.active IS NOT FALSE');
 });
 
-// A lapsed plan gets no placement, and a locked or excluded visit is out of
-// auto-dispatch: neither is skipped for its pin (Codex #6208 r18, r21 P2).
+// A lapsed plan gets no placement, and a locked or excluded recurring child is out of
+// auto-dispatch: neither is skipped for its pin (Codex #6208 r18, r21 P2). A visit that is
+// not a recurring child keeps its notice: its pin serves the route check.
 test('missing-pin upkeep closes a standing notice whose plan lapsed or whose visit staff locked or excluded', async () => {
   const audit = require('../services/auto-dispatch/audit');
   existingNoticeKeys = ['v1', 'v2', 'v3', 'v4', 'v5'].map((id) => `auto-dispatch-missing-geo:${id}:2026-08-20`);
   query.select = jest.fn().mockResolvedValue([
-    { id: 'v1', customer_id: 'c1', recurring_parent_id: 'p1' },
-    { id: 'v2', customer_id: 'c2', recurring_parent_id: 'p2' },
-    { id: 'v3', customer_id: 'c3', recurring_parent_id: 'p3', auto_dispatch_locked: true },
-    { id: 'v4', customer_id: 'c4', recurring_parent_id: 'p4', auto_dispatch_excluded: true },
-    { id: 'v5', customer_id: 'c5', recurring_parent_id: 'p5', customer_confirmed: true },
+    { id: 'v1', customer_id: 'c1', is_recurring: true, recurring_parent_id: 'p1' },
+    { id: 'v2', customer_id: 'c2', is_recurring: true, recurring_parent_id: 'p2' },
+    { id: 'v3', customer_id: 'c3', is_recurring: true, recurring_parent_id: 'p3', auto_dispatch_locked: true },
+    { id: 'v4', customer_id: 'c4', is_recurring: true, recurring_parent_id: 'p4', auto_dispatch_excluded: true },
+    { id: 'v5', customer_id: 'c5', is_recurring: true, recurring_parent_id: 'p5', customer_confirmed: true },
   ]);
   query.leftJoin = jest.fn(() => query);
   eligibility.lapsedPlanKeys.mockResolvedValue(new Set(['c1:p1']));

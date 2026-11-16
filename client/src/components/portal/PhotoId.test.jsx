@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-// Photo ID (GATE_CUSTOMER_PHOTO_ID) — the FAB/More-sheet entry points and the
-// gate hook they share must never disagree about whether the feature is
-// live; the sheet's picker -> photos -> analyzing -> result flow must send
+// Photo ID (GATE_CUSTOMER_PHOTO_ID) — the entry points and the gate hook they
+// share must never disagree about whether the feature is live (the floating
+// pill is PortalPage's Help pill, covered in PortalPage.help-pill.test.jsx); the sheet's picker -> photos -> analyzing -> result flow must send
 // the contract's exact payload shape and render every result type + next
 // step kind the server can hand back.
 import React, { useState } from 'react';
@@ -33,18 +33,18 @@ vi.mock('../../lib/timezone', async () => {
 
 import api from '../../utils/api';
 import { formatETDateTime } from '../../lib/timezone';
-import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from './PhotoId';
+import { PhotoIdSheet, usePhotoIdGate } from './PhotoId';
 
-// Mirrors how PortalPage wires the two entry points to one shared gate read
-// (usePhotoIdGate) — the FAB and the sheet must always read the same status
-// so a 404 hides both together.
+// Mirrors how PortalPage wires an entry point to the one shared gate read
+// (usePhotoIdGate) — the opener and the sheet must always read the same
+// status so a 404 hides both together.
 function Harness({ onOpenRequest = () => {} }) {
   const gate = usePhotoIdGate();
   const [open, setOpen] = useState(false);
   const available = gate.status === 'available';
   return (
     <>
-      {available && <PhotoIdFab onOpen={() => setOpen(true)} hasBottomNav hidden={open} />}
+      {available && <button type="button" onClick={() => setOpen(true)} hidden={open}>Photo ID</button>}
       <PhotoIdSheet
         open={open && available}
         onClose={() => setOpen(false)}
@@ -87,8 +87,8 @@ afterEach(() => {
 
 const photoFile = () => new File(['photo'], 'bug.jpg', { type: 'image/jpeg' });
 
-describe('gate: FAB + More-sheet entry point', () => {
-  it('hides the floating button entirely when GET /api/photo-id 404s (feature dark)', async () => {
+describe('gate: entry point', () => {
+  it('hides the entry point entirely when GET /api/photo-id 404s (feature dark)', async () => {
     const err = new Error('Not found');
     err.status = 404;
     api.getPhotoIds.mockRejectedValueOnce(err);
@@ -102,14 +102,9 @@ describe('gate: FAB + More-sheet entry point', () => {
       items: [{ id: 'h1', type: 'pest', created_at: '2026-09-01T12:00:00Z', headline: 'Ghost ant', next_step_kind: 'reservice' }],
     });
     render(<Harness />);
-    const fab = await screen.findByRole('button', { name: /Photo ID/i });
-    expect(fab.style.bottom).toContain('--portal-bottom-nav-height');
-    fireEvent.click(fab);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
 
     expect(screen.getByRole('dialog', { name: 'Photo ID' })).toBeInTheDocument();
-    expect(fab).toBeInTheDocument();
-    expect(fab).toHaveAttribute('hidden');
-    expect(fab).toHaveStyle({ display: 'none' });
     expect(screen.getByText('Bug or pest')).toBeInTheDocument();
     expect(screen.getByText('Lawn spot')).toBeInTheDocument();
     expect(screen.getByText('Tree or shrub')).toBeInTheDocument();

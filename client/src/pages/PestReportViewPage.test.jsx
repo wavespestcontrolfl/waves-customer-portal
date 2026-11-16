@@ -31,17 +31,9 @@ function serve(body) {
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-describe('PestReportViewPage shared customer header (GATE_REPORT_SHARED_TEMPLATE)', () => {
-  it('shared template off (no key): the page keeps its own header', async () => {
+describe('PestReportViewPage shared customer header', () => {
+  it('the template class and the shared header with the first name and city', async () => {
     serve({ success: true, report: REPORT });
-    const { container } = renderAt();
-    expect(await screen.findByRole('heading', { level: 1, name: /Dana, here's what we identified/i })).toBeInTheDocument();
-    expect(container.querySelector('.pest-report-page')).not.toHaveClass('customer-report-template');
-    expect(container.querySelector('.report-header')).toBeNull();
-  });
-
-  it('shared template on (reportTemplate beside report): the template class and the shared header with the first name and city', async () => {
-    serve({ success: true, report: REPORT, reportTemplate: true });
     const { container } = renderAt();
     expect(await screen.findByRole('heading', { level: 1, name: /Dana, here's what we identified/i })).toBeInTheDocument();
     expect(container.querySelector('.pest-report-page')).toHaveClass('customer-report-template');

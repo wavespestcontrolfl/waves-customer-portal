@@ -612,6 +612,27 @@ describe('applyGisParcelGuards (extracted from lookupPropertyFromAITrio)', () =>
     const inside = applyGisParcelGuards(aggregate, ctx({ searchAddress: '13510 LUXE AVE, X, FL', address: '13510 LUXE AVE, X, FL' }));
     expect(inside.parcel).toBe(aggregate);
   });
+
+  // A home's rooftop point can land on the community's common tract (new
+  // plats). The tract's road-only situs passes the mismatch guard, and the
+  // home was then recorded as the association's commercial land.
+  test('a numbered address on association common land drops unless the situs confirms it', () => {
+    const home = ctx({ searchAddress: '7001 SAMPLE TIDE ST, PARRISH, FL 34219', address: '7001 Sample Tide St, Parrish, FL 34219' });
+    const tract = { parcelId: 'C1', landUseDescription: 'Vacant Residential Common Area (1554)', dorUseCode: '09', situsAddress: 'SAMPLE FARM RD' };
+    expect(applyGisParcelGuards(tract, home)).toMatchObject({ parcel: null, dropReason: 'common_area_unconfirmed', parentParcel: null });
+    // The DOR code alone (statewide layer, no county description) and a blank situs.
+    const byCode = { parcelId: 'C2', dorUseCode: '009', situsAddress: '' };
+    expect(applyGisParcelGuards(byCode, home)).toMatchObject({ parcel: null, dropReason: 'common_area_unconfirmed' });
+    // A clubhouse sited at the typed address is the association's own lookup.
+    const clubhouse = { ...tract, parcelId: 'C3', situsAddress: '7001 SAMPLE TIDE ST' };
+    expect(applyGisParcelGuards(clubhouse, home).parcel).toBe(clubhouse);
+    // No house number typed: the association asking about its own land.
+    const unnumbered = ctx({ searchAddress: 'SAMPLE FARM RD, PARRISH, FL 34219', address: 'Sample Farm Rd, Parrish, FL 34219' });
+    expect(applyGisParcelGuards(tract, unnumbered).parcel).toBe(tract);
+    // An ordinary home parcel with a blank situs is untouched.
+    const lot = { parcelId: 'H1', landUseDescription: 'Single Family Residential', dorUseCode: '01', situsAddress: '' };
+    expect(applyGisParcelGuards(lot, home).parcel).toBe(lot);
+  });
 });
 
 describe('county GIS diag out-param', () => {

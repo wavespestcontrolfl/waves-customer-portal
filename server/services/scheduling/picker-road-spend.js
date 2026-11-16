@@ -1,6 +1,6 @@
 /**
  * Durable spend ceilings for the staff pickers' Google road times
- * (GATE_PICKER_ROAD_CHECK; owner 2026-10-27: "the dispatcher needs to run
+ * (owner 2026-10-27: "the dispatcher needs to run
  * every time we create, reschedule, etc, we just have to make sure costs are
  * appropriate").
  *
@@ -117,7 +117,7 @@ async function reserveRoadSpend({ spender, pro = 0, plain = 0, now = new Date(),
     limitNotice.noteRoadRefusal('counter_unavailable');
     return { allowed: false, reason: 'counter_unavailable' };
   }
-  // GATE_PICKER_ROAD_LIMIT_NOTICE: the month's one 80% notice (never throws,
+  // The month's one 80% notice (never throws,
   // and outside the transaction so a failed write never refuses a purchase).
   await limitNotice.noteMonthSpend({ day, monthMills, capMills: limits.monthMills });
   return { allowed: true, day };

@@ -75,8 +75,8 @@ export default function EstimateSendDialog({ request, onClose }) {
       scheduled = when.toISOString();
     }
     // A satellite palm count is a suggestion until the admin types the real
-    // count (GATE_SATELLITE_PALM_COUNT_TYPED). A different count means the quote
-    // is rebuilt first; it is refused here, before an attempt is recorded.
+    // count. A different count means the quote is rebuilt first; it is
+    // refused here, before an attempt is recorded.
     const palmsToCount = preview.satellitePalmCount;
     let confirmedPalmCount = null;
     if (palmsToCount != null && !attempt.current) {

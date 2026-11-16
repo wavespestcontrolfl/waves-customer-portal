@@ -195,6 +195,18 @@ describe('moveVisitAsUnit', () => {
     expect(firstPatchIdx).toBeGreaterThan(-1);
   });
 
+  test('the day-only intent (customerAskedTime, sourceSurface) reaches EVERY member\'s own rebooker call, so each member\'s UPDATE records it', async () => {
+    db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })], landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00' },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '14:00', window_end: '15:00' },
+    ] });
+    const rebooker = fakeRebooker();
+    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00', reason: 'rain', initiatedBy: 'admin', options: { allowLive: false, sourceSurface: 'dispatch_board', customerAskedTime: false } });
+    const [pCall, sCall] = rebooker.reschedule.mock.calls;
+    expect(pCall[5]).toMatchObject({ customerAskedTime: false, sourceSurface: 'dispatch_board' });
+    expect(sCall[5]).toMatchObject({ customerAskedTime: false, sourceSurface: 'dispatch_board' });
+  });
+
   test('date-only move keeps every member window; explicit technicianId null unassigns the visit', async () => {
     db.__script = script({ members: [member('a'), member('b')], maxSeq: 2, landed: [
       { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' },

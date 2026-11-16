@@ -374,7 +374,7 @@ const isTownTitled = (title) => {
 /**
  * The live hub post each tip names (tip-library `blog.path`), by tip id, for
  * the office form to fill an empty blog slot when the tip is picked (tips
- * with facts, GATE_TECH_TIP_SOURCES, owner 2026-10-24). A tip whose path has
+ * with facts, owner 2026-10-24). A tip whose path has
  * no live post is absent, and so is one whose post is titled for a town.
  */
 async function tipBlogPosts(knex, tips) {

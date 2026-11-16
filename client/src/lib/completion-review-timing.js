@@ -322,10 +322,10 @@ export function completionWillReview({
 
 // The path of the server preview of the "Automatic" send time (GET /admin/reviews/send-time-preview).
 // `serviceId` (optional) lets the server say whether this visit's customer was never asked
-// (`firstReviewAsk`, GATE_REVIEW_FIRST_ASK_LOCK); without it the path is unchanged.
+// (`firstReviewAsk`); without it the path is unchanged.
 export const reviewSendPreviewPath = (serviceType, serviceId) => `/admin/reviews/send-time-preview?${new URLSearchParams({ serviceType: serviceType || "", ...(serviceId ? { serviceId: String(serviceId) } : {}) })}`;
 
-// First review ask (GATE_REVIEW_FIRST_ASK_LOCK, owner 2026-10-26): a customer never asked for a
+// First review ask (owner 2026-10-26): a customer never asked for a
 // review sees the box as "First review ask", on and kept on. The tech may turn it off only with a
 // confirmed reason: "Complaint on site", and (GATE_REVIEW_ALREADY_REVIEWED, owner 2026-11-04)
 // "Already left a review", which also marks the customer reviewed. The server keeps the ask on without one.
@@ -353,7 +353,7 @@ export function reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firs
   return firstAsk ? FIRST_REVIEW_ASK_LABEL : "Send review request";
 }
 
-// The preview's own verdict on the first ask, only when the server sent one (gate off: no key).
+// The preview's own verdict on the first ask, only when the server sent one (no visit named: no key).
 export const firstReviewAskFrom = (preview) => (typeof preview?.firstReviewAsk === "boolean" ? preview.firstReviewAsk : null);
 
 // GATE_REVIEW_ALREADY_REVIEWED: the server's read that the customer is marked as already reviewed,

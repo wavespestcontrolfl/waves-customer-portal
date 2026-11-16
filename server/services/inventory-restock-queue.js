@@ -66,7 +66,7 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
         'c.last_name',
         'c.address_line1',
         'c.city',
-        ...(hasOrders ? ['vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter', db.raw("vo.evidence->>'revokedAt' as order_revoked_at"), db.raw("vo.evidence->>'landedAfterReceive' as order_landed_after_receive"), db.raw("vo.request_payload->>'orderedQuantity' as order_ordered_quantity")] : []),
+        ...(hasOrders ? ['vo.id as order_id', 'vo.updated_at as order_updated_at', 'vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter', db.raw("vo.evidence->>'revokedAt' as order_revoked_at"), db.raw("vo.evidence->>'landedAfterReceive' as order_landed_after_receive"), db.raw("vo.request_payload->>'orderedQuantity' as order_ordered_quantity")] : []),
       )
       .modify((q) => { if (hasOrders) q.leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id'); })
       // The order email to SiteOne (GATE_SITEONE_EMAIL_ORDER; the table ships with its migration):
@@ -139,6 +139,12 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
 function restockOrderView(row, showSpend, officeDetail = true) {
   if (!row.order_status) return null;
   return {
+    // The ledger row and its last write, which "Record vendor cancellation"
+    // sends back so the server refuses an order that changed since the tab
+    // loaded (services/procurement/order-revoke.js). Office detail, like the
+    // action itself.
+    id: officeDetail ? row.order_id || null : null,
+    version: officeDetail ? require('./procurement/order-revoke').versionOf({ updated_at: row.order_updated_at }) : null,
     status: row.order_status,
     // The adapter key names the vendor (siteone, …) and the order number is
     // the vendor's: both are office detail (Codex #5847 r1).

@@ -1,5 +1,5 @@
 import { Fragment, useState, useEffect, useRef, useCallback, useMemo, useId, createContext, useContext } from 'react';
-import { createPortal } from 'react-dom';
+import { createPortal, flushSync } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, tokenCustomerId } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
@@ -31,10 +31,11 @@ import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard'
 import MistingSystemCard from '../components/portal/MistingSystemCard';
 import YardWrappedCard from '../components/portal/YardWrappedCard';
 import PetNameAskCard from '../components/portal/PetNameAskCard';
-import PortalMessages, { usePortalMessagesGate } from '../components/portal/PortalMessages';
+import PortalMessages, { MESSAGES_COPY, usePortalMessagesGate } from '../components/portal/PortalMessages';
+import PestFrequencyChange, { usePestFrequency } from '../components/portal/PestFrequencyChange';
 import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
-import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
+import { PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
 import YardMonthCard, { useYardMonth } from '../components/portal/YardMonthCard';
 import { etDateString, formatETDateTime, formatETTime } from '../lib/timezone';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
@@ -737,6 +738,40 @@ function usePropertyRecommendations() {
 }
 
 // =========================================================================
+// MY PLAN "ADD A SERVICE" HOOK (owner 2026-11-11) — one priced offer for each
+// service the customer does not have, bought through the same one-tap
+// purchase as the Home card. Dark behind GATE_ONE_TAP_PURCHASE: gate-off
+// answers an empty list and the card renders nothing. Best-effort: a failed
+// load just hides the card. `enabled` is false for a cancelled account,
+// whose session may not read it.
+// =========================================================================
+function usePlanOffers(enabled) {
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    if (!enabled) return undefined;
+    let cancelled = false;
+    api.oneTapOffers()
+      .then((d) => {
+        if (cancelled || !d?.offers?.length) return;
+        setData({
+          oneTap: true,
+          cards: d.offers.map((offer) => ({
+            ...offer,
+            id: `plan_offer_${offer.serviceKey}`,
+            kind: 'offer',
+            title: offer.label,
+            // "9 applications/yr" reads "9 applications a year." on the card.
+            body: offer.option?.cadence ? `${String(offer.option.cadence).replace(/\/(yr|year)$/, ' a year')}.` : '',
+          })),
+        });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [enabled]);
+  return data;
+}
+
+// =========================================================================
 // PROPERTY ALERTS HOOK — recent advisories from the daily alerts sweep
 // (dark behind GATE_PROPERTY_ALERTS; gate-off answers available:false and
 // the card renders nothing). Best-effort: a failed load just hides the card.
@@ -1044,14 +1079,27 @@ const RECOMMENDATION_PRIORITY_CHIPS = {
 const RECOMMENDATION_ICONS = {
   irrigation_advice: 'droplet',
   mosquito_note: 'bug',
-  // Offer icon by service family (matrix targets only).
+  // Offer icon by service family: the matrix targets, and the two families
+  // only the My Plan list offers.
   pest_control: 'shield',
   lawn_care: 'leaf',
   tree_shrub: 'tree',
   termite: 'shield',
+  mosquito: 'bug',
+  rodent_bait: 'rat',
 };
 
-function RecommendationsCard({ data, customer }) {
+// The Home stack's heading, and the My Plan "Add a service" list's.
+const RECOMMENDATIONS_HEADING = {
+  icon: 'sparkles', label: 'Recommendations', title: 'For your property',
+  subtitle: 'Services that fit this property and your current plan.',
+};
+const ADD_SERVICE_HEADING = {
+  icon: 'plus', label: 'Add a service', title: 'Add to your plan',
+  subtitle: 'Priced for this property. You pay per application, after each visit.',
+};
+
+function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
   // Per-card request state: idle → sending → sent | stale | failed.
   const [requestStates, setRequestStates] = useState({});
   // One-tap purchase overlay target (bet 3) — a priced offer card while the
@@ -1173,10 +1221,10 @@ function RecommendationsCard({ data, customer }) {
   return (
     <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 20 }}>
       <div data-glass="chip" style={CUSTOMER_SECTION_LABEL}>
-        <Icon name="sparkles" size={14} strokeWidth={2} />Recommendations
+        <Icon name={heading.icon} size={14} strokeWidth={2} />{heading.label}
       </div>
-      <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>For your property</div>
-      <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.45 }}>Services that fit this property and your current plan.</div>
+      <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>{heading.title}</div>
+      <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.45 }}>{heading.subtitle}</div>
       <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
         {visibleCards.map((card) => {
           const chip = RECOMMENDATION_PRIORITY_CHIPS[card.priority] || RECOMMENDATION_PRIORITY_CHIPS.low;
@@ -1371,6 +1419,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
         perVisit: resume.perVisit,
         cadenceLabel: resume.cadenceLabel || '',
         visitsPerYear: resume.visitsPerYear,
+        pricing: resume.pricing || null,
         terms: resume.terms,
         hasCardOnFile: resume.hasCardOnFile,
         holdMinutes: resume.holdMinutes,
@@ -1608,6 +1657,70 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
       <span style={{ fontWeight: 700, color: B.glassNavy, textAlign: 'right' }}>{value}</span>
     </div>
   );
+  // WaveGuard discount (owner 2026-11-11). The server composes every figure
+  // (`pricing` on init, resume and confirm); a purchase without one renders
+  // the rows it always did.
+  const tierName = (pricing) => `WaveGuard${pricing?.tierLabel ? ` ${pricing.tierLabel}` : ''}`;
+  const priceRows = (pricing, perVisit) => (
+    <>
+      {pricing?.newService ? (
+        <>
+          {summaryRow('List price', `${fmtMoney(pricing.newService.listPerVisit)} per application`)}
+          <div style={{ height: 6 }} />
+          {summaryRow(`${tierName(pricing)} discount`, `−${fmtMoney(pricing.newService.savingsPerVisit)} (${pricing.newService.discountPct}%)`)}
+          <div style={{ height: 6 }} />
+        </>
+      ) : null}
+      {summaryRow(pricing?.newService ? 'Your price' : 'Price', `${fmtMoney(perVisit)} per application`)}
+    </>
+  );
+  // The services the customer already has, at the price the new tier gives
+  // them. Before confirm these are the frozen plan; on the done screen only
+  // the ones the purchase actually repriced.
+  const existingServicesBox = (pricing, { done = false } = {}) => {
+    const rows = pricing?.existingServices || [];
+    if (!rows.length && !(done && pricing?.existingPending)) return null;
+    return (
+      <div style={softBox}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy }}>
+          {done ? `Your current services at the ${tierName(pricing)} price` : `Your current services get the ${tierName(pricing)} price too`}
+        </div>
+        {rows.map((svc) => {
+          const days = (svc.upcomingVisitDates || []).map(formatScoreDate);
+          return (
+            <div key={svc.key || svc.label} style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy }}>{svc.label}</div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginTop: 2, fontVariantNumeric: 'tabular-nums' }}>
+                <s style={{ fontSize: 14, color: muted }}>{fmtMoney(svc.currentPerVisit)}</s>
+                <span style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{fmtMoney(svc.newPerVisit)}</span>
+                <span style={{ fontSize: 14, color: muted }}>per application</span>
+              </div>
+              {days.length ? (
+                <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+                  {days.length === 1 ? 'Upcoming visit: ' : 'Upcoming visits: '}{days.join(' · ')}
+                </div>
+              ) : null}
+              {svc.prepaid === true ? (
+                <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+                  This service is prepaid, so the difference is credited to your account instead.
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+        {done && pricing?.existingPending ? (
+          <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.5 }}>
+            We are moving {rows.length ? 'the rest of your' : 'your'} current services to the {tierName(pricing)} price.
+          </div>
+        ) : null}
+        {!done ? (
+          <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.5 }}>
+            Applied automatically when you confirm. Your visit schedule does not change.
+          </div>
+        ) : null}
+      </div>
+    );
+  };
 
   // Portaled to <body>: the launch button lives inside a data-glass card
   // whose backdrop-filter makes it the fixed-position containing block —
@@ -1704,9 +1817,10 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
               <div style={softBox}>
                 {summaryRow('Service', init.label)}
                 <div style={{ height: 6 }} />
-                {summaryRow('Price', `${fmtMoney(init.perVisit)} per application`)}
+                {priceRows(init.pricing, init.perVisit)}
                 {init.cadenceLabel ? (<><div style={{ height: 6 }} />{summaryRow('Visits', init.cadenceLabel)}</>) : null}
               </div>
+              {existingServicesBox(init.pricing)}
               <div style={softBox}>
                 <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10, }}>
                   <Icon name="clipboard" size={14} strokeWidth={2} />Terms
@@ -1780,12 +1894,13 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
               <div style={softBox}>
                 {summaryRow('Service', init.label)}
                 <div style={{ height: 6 }} />
-                {summaryRow('Price', `${fmtMoney(init.perVisit)} per application`)}
+                {priceRows(init.pricing, init.perVisit)}
                 <div style={{ height: 6 }} />
                 {summaryRow('First visit', selectedSlot
                   ? `${oneTapDayLabel(selectedSlot.date)}, ${oneTapTime12(selectedSlot.windowStart)}–${oneTapTime12(selectedSlot.windowEnd)}`
                   : '—')}
               </div>
+              {existingServicesBox(init.pricing)}
               <div style={{ fontSize: 14, color: muted }}>
                 Your time is held for {init.holdMinutes || 15} minutes.{' '}
                 {/* Locked while confirming: reserving a replacement slot
@@ -1847,7 +1962,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
                 {result?.label || init.label} is confirmed
               </div>
               <div style={softBox}>
-                {summaryRow('Price', `${fmtMoney(result?.perVisit ?? init.perVisit)} per application`)}
+                {priceRows(result?.pricing, result?.perVisit ?? init.perVisit)}
                 {result?.firstVisit?.date ? (
                   <>
                     <div style={{ height: 6 }} />
@@ -1855,6 +1970,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
                   </>
                 ) : null}
               </div>
+              {existingServicesBox(result?.pricing, { done: true })}
               <div style={{ fontSize: 14, color: muted, lineHeight: 1.5, textAlign: 'center' }}>
                 {/* Only promise what can send: email is nullable on
                     phone-authenticated accounts (server says emailQueued). */}
@@ -2684,6 +2800,8 @@ function SavedVisitDetails({ visits }) {
       <strong>{visit.serviceType || visit.type || 'Service visit'}</strong>
       <div>{parseDate(visit.date).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</div>
       {visit.windowStart && <div>Arrival {formatTime(visit.windowStart)} – {formatTime(arrivalWindowEnd(visit.windowStart))}</div>}
+      {/* GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour. */}
+      {!visit.windowStart && visit.day_only && visit.arrival_note && <div>{visit.arrival_note}</div>}
     </li>)}
   </ul>;
 }
@@ -3142,6 +3260,12 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
                     {formatTime(nextService.windowStart)} - {formatTime(arrivalWindowEnd(nextService.windowStart))}
                   </div>
                 )}
+                {/* GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour. */}
+                {!nextService?.windowStart && nextService?.day_only && nextService.arrival_note && (
+                  <div data-testid="next-visit-day-only-note" style={{ marginTop: 2, fontSize: 14, color: muted }}>
+                    {nextService.arrival_note}
+                  </div>
+                )}
               </div>
             </div>
             {daysUntilNextService != null && (
@@ -3331,7 +3455,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
         <PropertyScoreCard data={propertyScore} compact={compact} />
       )}
 
-      <RecommendationsCard data={propertyRecommendations} customer={customer} />
+      <RecommendationsCard data={propertyRecommendations} />
 
       {!dashboardSecondarySelection && <PropertyAlertsCard data={propertyAlerts} />}
 
@@ -4451,7 +4575,9 @@ function nextVisitLabel(next) {
   if (!next) return 'No visit scheduled';
   if (next.customerPickBy) return `${PICK_DAY_LABEL} · Pick a time`;
   const day = parseDate(next.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-  const time = next.windowStart ? `${formatTime(next.windowStart)} – ${formatTime(arrivalWindowEnd(next.windowStart))}` : 'Time TBD';
+  const time = next.windowStart
+    ? `${formatTime(next.windowStart)} – ${formatTime(arrivalWindowEnd(next.windowStart))}`
+    : (next.day_only && next.arrival_note ? next.arrival_note : 'Time TBD');
   return `${day} · ${time}`;
 }
 
@@ -4888,12 +5014,6 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
   // nothing here may read as texts switched back on (codex #6363 r3 P2).
   const stopped = data.smsOptin === 'declined';
   const channelOptions = data.emailAvailable ? CONTACT_CHANNEL_OPTIONS : CONTACT_CHANNEL_OPTIONS.filter((o) => o.value !== 'email');
-  // The service report reaches a contact by text only while the contact
-  // report text is on (server: contactReportTexts); otherwise "Text" would
-  // just hold the email (codex #6363 r9 P2).
-  const optionsFor = (row) => (row.key === 'serviceCompleted' && data.contactReportTexts !== true
-    ? channelOptions.filter((o) => o.value !== 'sms')
-    : channelOptions);
   return (
     <section data-glass="card" style={{ ...card, overflow: 'hidden' }} data-testid="contact-notification-card">
       <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
@@ -4947,7 +5067,7 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
                   disabled={holderOff || !isOn || busy}
                   aria-label={`Delivery method for ${p.label}`}
                 >
-                  {optionsFor(p).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  {channelOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </CustomerSelect>
                 <GoldSwitch on={isOn} disabled={holderOff || busy} onChange={() => save({ [p.key]: !isOn })} label={p.label} />
               </div>
@@ -5013,28 +5133,21 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const perPropertyTexts = savedScope && propertyPrefs.some((p) => p.propertyId);
   const shownTextsEntry = perPropertyTexts ? propertyPrefs.find((p) => p.id === activePropertyId) || null : null;
   const [propertyPrefsError, setPropertyPrefsError] = useState(false);
-  // What an on-location contact is told they get. The server says when the
-  // report text is on (GATE_CONTACT_REPORT_TEXT).
-  // The report text follows the account holder's own visit-complete text, so
-  // the wording carries that condition.
-  const contactTextsFor = (entry) => (entry?.contactReportTexts === true
-    ? 'appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit'
-    : 'appointment texts');
+  // What an on-location contact is told they get. The report text follows the
+  // account holder's own visit-complete text, so the wording carries that condition.
+  const CONTACT_TEXTS_COPY = 'appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit';
   // The report text never goes to a contact our records mark as a tenant, or
   // to any contact on a property manager's account
   // (customer-contact.js slotWithheldFromReports). A contact added here has
   // no recorded role, so the copy promises only what the records decide.
-  const contactReportExceptionFor = (entry) => (entry?.contactReportTexts === true
-    ? ' Contacts our records list as tenants, and contacts on a property manager\'s account other than a manager or landlord, get appointment texts only.'
-    : '');
+  const CONTACT_REPORT_EXCEPTION_COPY = ' Contacts our records list as tenants, and contacts on a property manager\'s account other than a manager or landlord, get appointment texts only.';
   // The entries the contact card renders (one house, or the profile list).
   const contactCardEntries = perPropertyTexts
     ? propertyPrefs.filter((p) => p.id === activePropertyId)
     : propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === customer?.id) : propertyPrefs;
-  // The card's header copy promises the report text only when every entry under it gets it.
-  const contactCardReportTexts = { contactReportTexts: contactCardEntries.length > 0 && contactCardEntries.every((p) => p.contactReportTexts === true) };
-  const contactTexts = contactTextsFor(contactCardReportTexts);
-  const contactReportException = contactReportExceptionFor(contactCardReportTexts);
+  // The card's header copy promises the report text once the card has an entry.
+  const contactTexts = contactCardEntries.length > 0 ? CONTACT_TEXTS_COPY : 'appointment texts';
+  const contactReportException = contactCardEntries.length > 0 ? CONTACT_REPORT_EXCEPTION_COPY : '';
 
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
@@ -5413,6 +5526,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   // Time TBD note helper
   const renderTimeTBD = (s) => {
     if (s.windowStart) return null;
+    // GATE_DAY_ONLY_PROMISE: the time line above already says the window is texted the day before.
+    if (s.day_only) return null;
     if (s.customerPickBy) {
       return (
         <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
@@ -5519,7 +5634,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
         <div style={{ padding: '16px 18px' }}>
           <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{s.serviceType}</div>
           <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
-            {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : (s.customerPickBy ? 'Pick a time' : 'Time TBD')}
+            {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : (s.customerPickBy ? 'Pick a time' : (s.day_only && s.arrival_note ? s.arrival_note : 'Time TBD'))}
           </div>
 
           {/* Service description */}
@@ -5620,7 +5735,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
         <div style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy }}>{s.serviceType}</div>
         {s.customerPickBy && <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginTop: 2 }}>{PICK_DAY_LABEL}</div>}
         <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
-          {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : (s.customerPickBy ? 'Pick a time' : 'Time TBD')}
+          {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : (s.customerPickBy ? 'Pick a time' : (s.day_only && s.arrival_note ? s.arrival_note : 'Time TBD'))}
         </div>
         <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           Visit #{s.visitNum} — {s.description}
@@ -6223,7 +6338,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     </label>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                       <div style={{ fontSize: 14, color: muted, lineHeight: 1.4, flex: compact ? '1 1 100%' : 1, minWidth: 0 }}>
-                        These people receive {contactTextsFor(property)} for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}).{contactReportExceptionFor(property)} {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
+                        These people receive {CONTACT_TEXTS_COPY} for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}).{CONTACT_REPORT_EXCEPTION_COPY} {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
                       </div>
                       <button
                         type="button"
@@ -8349,6 +8464,18 @@ function PasswordField({ value, onChange, placeholder, label }) {
   );
 }
 
+// Pets form kinds. Dog, Cat and Other stay as they were; the other four (owner 2026-11-15) store these exact values, and the
+// technician's lawn visit brief picks its label warnings from them (server/services/lawn-label-animal-lines.js: keep in step).
+const PET_TYPE_OPTIONS = [
+  { value: 'Dog', label: 'Dog' },
+  { value: 'Cat', label: 'Cat' },
+  { value: 'Other', label: 'Other' },
+  { value: 'Birds', label: 'Chickens or other birds' },
+  { value: 'Grass eater', label: 'Rabbit, tortoise or other grass eater' },
+  { value: 'Fish pond', label: 'Fish pond' },
+  { value: 'Beehives', label: 'Beehives' },
+];
+
 function PillSelector({ options, value, onChange, multiple = false }) {
   const selected = multiple ? (Array.isArray(value) ? value : (value ? [value] : [])) : value;
   const isActive = (v) => (multiple ? selected.includes(v) : selected === v);
@@ -8696,9 +8823,6 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   // email suppress derivation until the customer's next irrigation edit
   // stamps it on, so the card must not claim a figure they aren't counting.
   const [irrigationSuppressed, setIrrigationSuppressed] = useState(false);
-  // GATE_IRRIGATION_OWNER_RATES: the server says which head rate table its emails use (key present only while the gate
-  // is live), so the line under Minutes per Zone shows the number the server would use.
-  const [ownerRates, setOwnerRates] = useState(false);
   // GATE_AWAY_WATCH: the server says whether the Away Watch section shows (key present only while the gate is live).
   const [awayWatchEnabled, setAwayWatchEnabled] = useState(false);
   const irrigationEditRevision = useRef(0);
@@ -8720,7 +8844,6 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         // Inches, so the field never renders and then drops on save.
         if (typeof d.hasLawnCare === 'boolean') setServerHasLawnCare(d.hasLawnCare);
         setIrrigationSuppressed(d.irrigationSuppressed === true);
-        setOwnerRates(d.irrigationOwnerRates === true);
         setAwayWatchEnabled(d.awayWatchEnabled === true);
         setLoading(false);
       })
@@ -9167,7 +9290,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
     runMinutes: prefs.irrigationRunMinutes,
     wateringDays: prefs.wateringDays,
     systemType: prefs.irrigationSystemType,
-  }, ownerRates ? { rates: OWNER_HEAD_RATE_IN_PER_HR } : undefined);
+  }, { rates: OWNER_HEAD_RATE_IN_PER_HR });
   const explicitInchesEntered = Number.isFinite(Number(prefs.irrigationInchesPerWeek)) && Number(prefs.irrigationInchesPerWeek) > 0;
   // Stored "off" from the retired toggle: the report and Monday email
   // suppress a prefs-only schedule — typed inches AND a derived figure alike
@@ -9181,7 +9304,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
       const inches = derivedIrrigation.inchesPerWeek.toFixed(2).replace(/\.?0+$/, '');
       return explicitInchesEntered
         ? `Your ${describeRuntimeBasis(derivedIrrigation)} works out to about ${inches}" a week — your Weekly Inches entry above is what we'll use.`
-        : `About ${inches}" a week from ${describeRuntimeBasis(derivedIrrigation)} — typical head rates${ownerRates ? '' : ' from University of Florida turf guidance'}. If your controller runs more than one cycle a day, enter the total minutes; enter Weekly Inches if you know your system's actual output.`;
+        : `About ${inches}" a week from ${describeRuntimeBasis(derivedIrrigation)} — typical head rates. If your controller runs more than one cycle a day, enter the total minutes; enter Weekly Inches if you know your system's actual output.`;
     }
     // An explicit Weekly Inches entry is already authoritative — a decline
     // prompt asking for what's filled in above would never be satisfiable.
@@ -9529,10 +9652,10 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
                       />
                     </div>
                   </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 16, marginTop: 16 }}>
-                    <div>
+                  <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))', gap: 16, marginTop: 16 }}>
+                    <div style={{ gridColumn: '1 / -1' }}>
                       <label style={labelStyle}>Type</label>
-                      <PillSelector value={pet.type} onChange={v => updatePet('type', v)} options={['Dog', 'Cat', 'Other'].map(t => ({ value: t, label: t }))} />
+                      <PillSelector value={pet.type} onChange={v => updatePet('type', v)} options={PET_TYPE_OPTIONS} />
                     </div>
                     <div>
                       <label style={labelStyle}><Icon name="map" size={14} strokeWidth={2} style={{ marginRight: 6 }} />Location</label>
@@ -10751,9 +10874,22 @@ function LearnTab({ customer, onOpenPhotoId = null, scope = null }) {
 // =========================================================================
 // SERVICE CATALOG — pricing & details for My Plan
 // =========================================================================
+// The pest card's cadence line. My Plan used to render the first of the pest
+// frequencies for every customer, so a plan on every two months or monthly
+// read "Quarterly (4x)". The plan's own cadence is in its catalog name
+// ("Bi-Monthly Pest Control Service"); a name that states none keeps the first.
+export function pestCadenceLine(planName, frequencies) {
+  const name = String(planName || '').toLowerCase();
+  if (/bi-?monthly|every (two|2) months/.test(name)) return frequencies[1];
+  if (/monthly|every month/.test(name)) return frequencies[2];
+  return frequencies[0];
+}
+
 const SERVICE_CATALOG = [
   {
     id: 'pest_control', name: 'Pest Control', icon: 'bug',
+    // The three general pest cadences, in this order: pestCadenceLine picks
+    // the customer's own from the plan's catalog name.
     frequencies: ['Quarterly (4x)', 'Bi-Monthly (6x)', 'Monthly (12x)'],
     basePrice: 55, description: 'Interior + exterior treatment, granular perimeter band, bait station check, cobweb sweep on all eaves',
     // Advion granules are not used on pest visits (owner 2026-10-24); its catalog row is retired.
@@ -11650,7 +11786,7 @@ function PlanStationMap({ map, onOpen = null, onImageError = null }) {
   );
 }
 
-function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null }) {
+function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null, messagesEnabled = false }) {
   const portalGlass = usePortalGlass();
   // focusService pre-expands a row on mount — set by the home-page lawn
   // teaser and by ?tab=plan&service=<catalog id> deep-links.
@@ -11679,6 +11815,10 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
   // API client's retry traffic for data the cancelled panel never renders
   // (codex GH r17 P2).
   const lawnHealth = useLawnHealth(customer?.cancelled === true ? null : customer.id, { currentEntry, savedScope, selectedPropertyId: selectedProperty?.propertyId || null, onSavedScopeUnavailable });
+  const planOffers = usePlanOffers(customer?.cancelled !== true);
+  // "Change how often we visit" (pest control): the server's read decides
+  // whether the entry shows at all.
+  const pestFrequency = usePestFrequency(customer?.cancelled !== true);
   const compact = useIsMobile(760);
   // Real billing mode (owner 2026-07-11): per-application / prepaid plans
   // must not present a "$X per month" plan rate — same source of truth as
@@ -11835,6 +11975,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
     return null;
   };
   const detectedServiceIds = [];
+  const planRowName = (service) => service.serviceDisplayName || service.serviceType || service.service_type || service.type;
   // Real catalog name of the visit that matched each card ("Seasonal Mosquito
   // Control Service"), so the card never states the wrong program — the
   // SERVICE_CATALOG names are family placeholders for tier padding only.
@@ -11847,7 +11988,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
     // when catalog identity overrode a stale label's family (codex #3591
     // r79 P2) — prefer it so the card title matches the card's program
     // (a repointed "Rodent Trapping" label never titles the bait card).
-    const realName = service.serviceDisplayName || service.serviceType || service.service_type || service.type;
+    const realName = planRowName(service);
     if (realName && !detectedServiceNames[id]) detectedServiceNames[id] = realName;
   };
   // Only recurring, non-callback visits represent WaveGuard plan coverage. One-time
@@ -11879,6 +12020,15 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
     return true;
   };
   [nextService, ...upcomingServices].filter(isPlanCoverageRow).forEach(addDetectedService);
+  // The pest card names the plan as it goes on: its LAST upcoming visit (the
+  // schedule read is in date order). After a frequency change the next visit
+  // can be one that stays as booked on the old plan
+  // (pest-frequency-change.js), and a card titled by it would still read
+  // "Quarterly" right after the customer chose monthly. The other cards keep
+  // the name of their first visit.
+  const lastPestVisit = upcomingServices.filter(isPlanCoverageRow)
+    .filter((service) => detectCatalogServiceId(service) === 'pest_control').pop();
+  const pestPlanName = (lastPestVisit && planRowName(lastPestVisit)) || detectedServiceNames.pest_control;
 
   // For a tier'd member, the included-services list reflects the tier ENTITLEMENT, not
   // just the rows that happen to be on the visible schedule: surface detected recurring
@@ -11979,6 +12129,8 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
     const windowEnd = clockLabel(arrivalWindowEnd(event.windowStart || event.window_start));
     if (windowStart && windowEnd) return `${windowStart} - ${windowEnd}`;
     if (windowStart) return windowStart;
+    // GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour.
+    if (event.day_only && event.arrival_note) return event.arrival_note;
 
     const checkIn = clockLabel(event.checkInTime || event.check_in_time);
     const checkOut = clockLabel(event.checkOutTime || event.check_out_time);
@@ -12110,6 +12262,19 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
     minHeight: 44,
   };
   const iconName = (name) => (typeof name === 'string' && /^[a-z]/i.test(name) ? name : 'shield');
+  const pestFrequencyEntry = (
+    <PestFrequencyChange
+      data={pestFrequency.data}
+      ui={{ shell: PORTAL_SHELL, subtle: GLASS_SUBTLE, primaryAction: PORTAL_PRIMARY_ACTION, secondaryAction: PORTAL_SECONDARY_ACTION, CloseButton: ShellCloseButton, IconTile: ShellIconTile }}
+      messagesEnabled={messagesEnabled}
+      onChanged={() => {
+        loadPlan();
+        pestFrequency.reload();
+        if (typeof refreshCustomer === 'function') Promise.resolve(refreshCustomer()).catch(() => {});
+      }}
+    />
+  );
+  const pestFrequencyInServiceRow = pestFrequency.data?.available === true && displayedServices.some((s) => s.id === 'pest_control');
 
   // C4: the cancelled state replaces every live plan card (and the cancel
   // flow) — one "Restart my plan" action that lands on a fresh estimate.
@@ -12284,9 +12449,11 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                           <span style={{ minWidth: 0 }}>
                             <span data-glass="chip" style={{ ...CUSTOMER_SECTION_LABEL, marginLeft: 0 }}>
                               <Icon name={iconName(svc.icon)} size={15} strokeWidth={1.8} />
-                              {detectedServiceNames[svc.id] || svc.name}
+                              {(svc.id === 'pest_control' && pestPlanName) || detectedServiceNames[svc.id] || svc.name}
                             </span>
-                            <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: muted }}>{svc.frequencies[0]}</span>
+                            <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: muted }}>
+                              {svc.id === 'pest_control' ? pestCadenceLine(pestPlanName, svc.frequencies) : svc.frequencies[0]}
+                            </span>
                             {svc.id === 'lawn_care' && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
                               const avg = Math.round(lawnHealth.scores.overallScore);
                               const initialAvg = Math.round(lawnHealth.initialScores.overallScore);
@@ -12332,6 +12499,10 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                         background: B.yellow,
                       }} />
                     </div>
+
+                    {svc.id === 'pest_control' && pestFrequencyInServiceRow && (
+                      <div style={{ marginTop: 12 }}>{pestFrequencyEntry}</div>
+                    )}
 
                     {expanded && (
                       <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E7E2D7' }}>
@@ -12414,6 +12585,10 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
             </div>
           </section>
 
+          {pestFrequency.data?.available === true && !pestFrequencyInServiceRow && (
+            <section data-glass="card" style={{ ...card, padding: 20 }}>{pestFrequencyEntry}</section>
+          )}
+
           {/* A lawn customer whose visible schedule has no qualifying lawn
               row (paused plan, tier slice) still gets their health card —
               without this, moving it off Home would lose it entirely. */}
@@ -12443,6 +12618,8 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
               </section>
             )
           )}
+
+          <RecommendationsCard data={planOffers} heading={ADD_SERVICE_HEADING} />
 
           <WavesAiPricingPanel
             compact={compact}
@@ -16923,6 +17100,130 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
   );
 }
 
+// Help pill (owner 2026-11-05 mockups; 2026-11-13 "yes i want this to be
+// chat"): the one floating pill, bottom-right above the bottom nav. It opens
+// the Help sheet (Chat = the Messages thread, and Photo ID), or the single
+// feature this customer has, with no menu. A red dot shows an unread answer.
+// It stays mounted (hidden) while Photo ID is open so focus returns to it.
+function HelpFab({ onOpen, hasBottomNav, hidden = false, unread = 0, buttonRef = null }) {
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      onClick={onOpen}
+      hidden={hidden}
+      aria-label={unread > 0 ? `Help, ${unreadLabel(unread)}` : 'Help'}
+      data-glass-accent=""
+      style={{
+        position: 'fixed',
+        right: 'calc(14px + env(safe-area-inset-right, 0px))',
+        // The mobile nav includes the home-indicator inset in its height.
+        // Keep the whole button above that bar, including its bottom gap.
+        bottom: hasBottomNav
+          ? 'calc(var(--portal-bottom-nav-height, calc(70px + env(safe-area-inset-bottom, 0px))) + 20px)'
+          : 'calc(20px + env(safe-area-inset-bottom, 0px))',
+        zIndex: 97,
+        minHeight: 48,
+        padding: '0 18px 0 14px',
+        borderRadius: 999,
+        display: hidden ? 'none' : 'inline-flex',
+        alignItems: 'center',
+        gap: 8,
+        border: 'none',
+        cursor: 'pointer',
+        fontFamily: FONTS.body,
+        fontSize: 15,
+        fontWeight: 700,
+        boxShadow: '0 12px 30px rgba(15,23,42,0.24)',
+      }}
+    >
+      <Icon name="message" size={19} strokeWidth={2.25} />
+      Help
+      {unread > 0 && (
+        <span aria-hidden="true" data-help-unread-dot="" style={{
+          position: 'absolute', top: 2, right: 2, width: 12, height: 12, borderRadius: 999,
+          background: B.red, border: '2px solid #fff', boxSizing: 'border-box',
+        }} />
+      )}
+    </button>
+  );
+}
+
+// The Help pill's menu. A row is listed only while its handler is passed
+// (the Messages probe answered 200 / Photo ID is available).
+function HelpSheet({ onClose, onChat, onOpenPhotoId, unread = 0 }) {
+  // Rendered only while open — lock the page behind the sheet.
+  useLockBodyScroll(true);
+  const dialogRef = useModalFocus(true, onClose);
+  const row = (key, icon, label, description, onClick, badge = null) => (
+    <button key={key} type="button" onClick={onClick} style={{
+      width: '100%', minHeight: 56, display: 'flex', alignItems: 'center', gap: 12, padding: '11px 10px',
+      border: 'none', background: 'transparent', borderRadius: 8, cursor: 'pointer', textAlign: 'left',
+      color: B.grayDark, fontFamily: FONTS.body,
+    }}>
+      <span style={{
+        width: 38, height: 38, borderRadius: 8, background: PORTAL_SHELL.soft, color: PORTAL_SHELL.text,
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+      }}>
+        <Icon name={icon} size={18} strokeWidth={2} />
+      </span>
+      <span style={{ minWidth: 0, flex: 1 }}>
+        <span style={{ display: 'block', fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text }}>{label}</span>
+        <span style={{ display: 'block', marginTop: 2, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.35 }}>{description}</span>
+      </span>
+      {badge}
+      <Icon name="chevronRight" size={17} strokeWidth={2} style={{ color: PORTAL_SHELL.muted }} />
+    </button>
+  );
+
+  return (
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      data-glass-scrim=""
+      style={{
+        position: 'fixed', inset: 0, zIndex: 150,
+        background: 'rgba(15,23,42,0.42)',
+        backdropFilter: 'blur(5px)',
+        display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
+      }}
+    >
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Help" data-help-sheet="" data-glass="modal" style={{
+        background: PORTAL_SHELL.page,
+        borderRadius: '8px 8px 0 0',
+        position: 'relative',
+        padding: '12px calc(14px + env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px))',
+        boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
+        animation: 'helpSheetUp 0.25s ease',
+        borderTop: `1px solid ${PORTAL_SHELL.border}`,
+        // dvh: 100vh over-measures behind the iOS Safari toolbar.
+        maxHeight: `calc(100${DVH} - 16px - env(safe-area-inset-top, 0px))`,
+        boxSizing: 'border-box',
+        overflowY: 'auto',
+        WebkitOverflowScrolling: 'touch',
+        overscrollBehavior: 'contain',
+        fontFamily: FONTS.body,
+      }}>
+        <style>{`@keyframes helpSheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) {
+  [data-help-sheet] { animation: none !important; }
+}`}</style>
+        <div style={{ width: 36, height: 4, borderRadius: 999, background: '#D8D0C0', margin: '0 auto 12px' }} />
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
+          <div style={{ fontSize: 20, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.15 }}>How can we help?</div>
+          <ShellCloseButton onClick={onClose} label="Close help menu" />
+        </div>
+        <section data-glass="soft" style={{
+          background: PORTAL_SHELL.surface, border: `1px solid ${PORTAL_SHELL.border}`, borderRadius: 8,
+          boxShadow: PORTAL_SHELL.shadowSoft, position: 'relative', padding: 8,
+        }}>
+          {onChat && row('chat', 'message', 'Chat with Waves', MESSAGES_COPY.help, onChat, unread > 0 ? <UnreadCount count={unread} /> : null)}
+          {onOpenPhotoId && row('photoid', 'camera', 'Photo ID', 'Bugs, lawn, trees & shrubs', onOpenPhotoId)}
+        </section>
+      </div>
+    </div>
+  );
+}
+
 // Wraps ScheduleTab (upcoming) + ServicesTab (completed) behind a single
 // "Visits" surface — a visit is one object moving from upcoming → completed,
 // so customers shouldn't have to know which tab holds which state.
@@ -17684,6 +17985,25 @@ export default function PortalPage() {
     return () => { current = false; clearTimeout(timer); };
   }, [appRatingQuiet]);
   const photoIdAvailable = photoIdGate.status === 'available' && !cancelledAccount && !contactSession;
+  // Help pill: Chat is the Messages thread (never probed for a cancelled or
+  // contact session, so `enabled` is already false there). With both features
+  // the pill opens the Help sheet; with one it opens that feature directly.
+  const [showHelp, setShowHelp] = useState(false);
+  const helpButtonRef = useRef(null);
+  const chatAvailable = messagesGate.enabled;
+  const helpAvailable = chatAvailable || photoIdAvailable;
+  // The pill is hidden on the Messages page, so keyboard focus moves to the
+  // page content there instead of being dropped with the hidden pill.
+  // flushSync: the Help sheet's own focus restore (to the pill) runs first.
+  const openChatPage = () => {
+    flushSync(() => { setShowHelp(false); switchTab('messages'); });
+    document.getElementById('portal-main')?.focus({ preventScroll: true });
+  };
+  const openHelp = () => {
+    if (chatAvailable && photoIdAvailable) setShowHelp(true);
+    else if (chatAvailable) openChatPage();
+    else setShowPhotoId(true);
+  };
   // reportIssuePrefill lives here, above the keyed PortalReadProvider, so a
   // property/account switch (sessionEpoch — another tab, or this one) does
   // NOT clear it on its own. Left alone, a still-open Photo ID handoff would
@@ -18367,9 +18687,11 @@ export default function PortalPage() {
           float) plus the iOS home-indicator inset — a flat 92px left the last
           card underneath the bar on notched phones. */}
       <main id="portal-main" tabIndex={-1} style={{
+        // The Help pill floats 20px above the nav (or the page bottom) and is
+        // 48px tall: with it on screen the last card ends above the pill.
         padding: isMobileShell
-          ? '24px calc(16px + env(safe-area-inset-right, 0px)) calc(var(--portal-bottom-nav-height, 78px) + 30px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))'
-          : '24px calc(16px + env(safe-area-inset-right, 0px)) 32px calc(16px + env(safe-area-inset-left, 0px))',
+          ? `24px calc(16px + env(safe-area-inset-right, 0px)) calc(var(--portal-bottom-nav-height, 78px) + ${helpAvailable ? 78 : 30}px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))`
+          : `24px calc(16px + env(safe-area-inset-right, 0px)) ${helpAvailable ? 80 : 32}px calc(16px + env(safe-area-inset-left, 0px))`,
         // shellMaxWidth is the content cap. Preserve the existing 760px
         // desktop content column now that safe-area padding is border-box.
         maxWidth: shellMaxWidth + 32,
@@ -18409,7 +18731,7 @@ export default function PortalPage() {
         <PortalRefreshArea available={['dashboard', 'visits', 'documents'].includes(activeTab)}
           onlineContent={!cancelledAccount && !contactSession && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
         {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} onOpenPets={() => navigate('/?tab=property#pets')} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties}  focusRequestId={new URLSearchParams(location.search).get('requestId')} />}
-        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} currentEntry={activeProperty} savedScope={portalProperties.some((p) => p.key)} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} />}
+        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} currentEntry={activeProperty} savedScope={portalProperties.some((p) => p.key)} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} messagesEnabled={messagesGate.enabled} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);
           // Keep the URL's legacy token in step so refresh/share restores the
@@ -18459,11 +18781,24 @@ export default function PortalPage() {
         />
       )}
 
-      {/* Photo ID — floating button + sheet (GATE_CUSTOMER_PHOTO_ID; hidden
-          entirely on a 404 from GET /api/photo-id, see usePhotoIdGate). */}
-      {photoIdAvailable && (
-        <PhotoIdFab onOpen={() => setShowPhotoId(true)} hasBottomNav={isMobileShell} hidden={showPhotoId} />
+      {/* Help pill + its sheet. Hidden while Photo ID or Ask Waves AI is on
+          screen, and on the Messages page (the chat it leads to). Behind its
+          own sheet it stays focusable: the Photo ID row hands focus back to
+          the pill first, so closing Photo ID returns there (as More does). */}
+      {helpAvailable && (
+        <HelpFab onOpen={openHelp} hasBottomNav={isMobileShell} unread={messagesGate.unread} buttonRef={helpButtonRef}
+          hidden={showPhotoId || showChat || activeTab === 'messages'} />
       )}
+      {showHelp && (
+        <HelpSheet
+          onClose={() => setShowHelp(false)}
+          onChat={chatAvailable ? openChatPage : null}
+          onOpenPhotoId={photoIdAvailable ? () => { helpButtonRef.current?.focus({ preventScroll: true }); setShowPhotoId(true); setShowHelp(false); } : null}
+          unread={messagesGate.unread}
+        />
+      )}
+      {/* Photo ID sheet (GATE_CUSTOMER_PHOTO_ID; unavailable on a 404 from
+          GET /api/photo-id, see usePhotoIdGate). */}
       <PhotoIdSheet
         open={showPhotoId && photoIdAvailable}
         onClose={() => setShowPhotoId(false)}

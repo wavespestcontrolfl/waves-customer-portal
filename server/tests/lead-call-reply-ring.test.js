@@ -1,5 +1,5 @@
 /**
- * services/lead-call-reply-ring.js (GATE_LEAD_CALL_REPLY_RING): a lead's bare
+ * services/lead-call-reply-ring.js (owner 2026-10-24): a lead's bare
  * CALL in answer to our lead text rings Adam's cell with the press-1 bridge,
  * 8 AM-8 PM ET, once per phone per 24 h; a ring that ends without press 1
  * raises one "Missed call request" bell. Synthetic db; the bridge and the
@@ -8,7 +8,6 @@
 const mockState = {};
 function resetState() {
   Object.assign(mockState, {
-    gate: true,
     quoteGate: false,
     quoteText: null,
     quoteReads: [],
@@ -67,7 +66,7 @@ mockDb.transaction = async (fn) => {
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
-  isEnabled: (key) => (key === 'leadCallReplyRing' && mockState.gate) || (key === 'currentCustomerQuoteText' && mockState.quoteGate),
+  isEnabled: (key) => key === 'currentCustomerQuoteText' && mockState.quoteGate,
 }));
 const mockBridge = jest.fn(async () => ({ callSid: 'CA-ring', callLogId: 'log-1' }));
 const mockInsertRow = jest.fn(async () => 'log-1');
@@ -122,7 +121,6 @@ test('a CALL reply to our lead text in the day rings the cell with the press-1 b
 });
 
 test.each([
-  ['gate off', () => { mockState.gate = false; }, {}, 'gate_off'],
   ['a TEXT reply', () => {}, { body: 'text' }, 'not_call'],
   ['a longer message', () => {}, { body: 'call me tomorrow about ants' }, 'not_call'],
   ['after 8 PM', () => {}, { now: NIGHT }, 'after_hours'],

@@ -295,7 +295,7 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
     expect((await mockConn('scheduled_services').where({ id: PARENT }).first()).technician_id).toBe(OLD_TECH);
   });
 
-  // GATE_STAFF_ROUTE_INSERTION (owner 2026-10-25, "save order"): an Edit
+  // Staff route insertion (owner 2026-10-25, "save order"): an Edit
   // appointment save that moves a visit onto a numbered day checks it between
   // the stops and numbers the day in that order.
   describe('staff route insertion', () => {
@@ -305,9 +305,7 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
     const move = (extra = {}) => save({ scheduledDate: DAY, windowStart: '09:00', windowEnd: '10:00', ...extra }, MOVER);
     const numbers = async () => Object.fromEntries((await mockConn('scheduled_services')
       .whereIn('id', [NORTH_STOP, SOUTH_STOP, MOVER]).select('id', 'route_order')).map(row => [row.id, row.route_order]));
-    let savedGate;
     beforeEach(async () => {
-      savedGate = process.env.GATE_STAFF_ROUTE_INSERTION;
       await mockConn.raw('CREATE TEMP TABLE ?? ON COMMIT DROP AS SELECT * FROM public.?? WITH NO DATA', ['audit_log', 'audit_log']);
       // Only TECH's own day: another technician's stop is a fixed block here.
       await mockConn('scheduled_services').whereIn('id', [PARENT, CHILD]).delete();
@@ -319,21 +317,7 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
         { ...stop, id: MOVER, scheduled_date: LATER, window_start: '09:00', window_end: '10:00', lat: 27.545 },
       ]);
     });
-    afterEach(() => {
-      if (savedGate === undefined) delete process.env.GATE_STAFF_ROUTE_INSERTION;
-      else process.env.GATE_STAFF_ROUTE_INSERTION = savedGate;
-    });
-
-    test('gate off: the move saves with the arrival warning and no route number', async () => {
-      delete process.env.GATE_STAFF_ROUTE_INSERTION;
-      const result = await move();
-      expect(result.status).toBe(200);
-      expect(result.body.warnings).toEqual([expect.stringContaining(DAY)]);
-      expect(await numbers()).toEqual({ [NORTH_STOP]: 1, [SOUTH_STOP]: 2, [MOVER]: null });
-    });
-
-    test('gate on: the save fits the visit between the stops and numbers the day', async () => {
-      process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
+    test('the save fits the visit between the stops and numbers the day', async () => {
       const result = await move();
       expect(result.status).toBe(200);
       expect(result.body.warnings).toBeUndefined();
@@ -341,15 +325,13 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
       expect(await mockConn('audit_log').where({ action: 'schedule.route_order_placed', resource_id: MOVER })).toHaveLength(1);
     });
 
-    test('gate on: the stored number the form sends back is not a typed one', async () => {
-      process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
+    test('the stored number the form sends back is not a typed one', async () => {
       await mockConn('scheduled_services').where({ id: MOVER }).update({ scheduled_date: DAY, window_start: '13:00', window_end: '14:00', route_order: 3 });
       expect((await move({ scheduledDate: DAY, routeOrder: 3 })).status).toBe(200);
       expect(await numbers()).toEqual({ [NORTH_STOP]: 1, [MOVER]: 2, [SOUTH_STOP]: 3 });
     });
 
-    test('gate on: a new number the office typed is kept, and checked where it puts the visit', async () => {
-      process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
+    test('a new number the office typed is kept, and checked where it puts the visit', async () => {
       await mockConn('scheduled_services').where({ id: MOVER }).update({ scheduled_date: DAY, window_start: '13:00', window_end: '14:00', route_order: 3 });
       const result = await move({ scheduledDate: DAY, routeOrder: 7 });
       expect(result.status).toBe(200);

@@ -13,6 +13,9 @@ const { RESCHEDULABLE_STATUSES } = require('../reschedule-eligibility');
 const { listPortalPayments } = require('../portal-payment-history');
 const { listPortalServiceHistory } = require('../portal-service-history');
 const portalOpen = require('./portal-open');
+const threadLane = require('./thread-lane');
+const { DAY_ONLY_ARRIVAL_NOTE, loadDayOnlyCheck } = require('../day-only-ai-context');
+const { dayOnlyPromiseOn } = require('../time-promise');
 const runQuery = (query, turn, stage) => turn ? turn.query(query, stage) : query;
 
 // Tool definitions in Anthropic format
@@ -214,6 +217,11 @@ function portalToolsFor({ payments = false, visits = false, reservice = false, r
   ];
 }
 const PORTAL_FACTS_TOOLS = portalToolsFor({ payments: true });
+// The Messages thread's turn (GATE_PORTAL_MESSAGES_NIGHT_AI, thread-lane.js): the visit read, the reschedule
+// check, the no-reply move and escalate. Nothing that builds a button or a card, gives advice or files an item.
+const THREAD_TOOLS = [TOOLS[0], threadLane.RESCHEDULE_TOOL, threadLane.STAY_SILENT_TOOL, PORTAL_TOOLS[4]];
+// The same four for the office-hours turn (GATE_PORTAL_MESSAGES_DAY_AI): only stay_silent's description differs.
+const THREAD_DAY_TOOLS = THREAD_TOOLS.map((tool) => (tool === threadLane.STAY_SILENT_TOOL ? threadLane.STAY_SILENT_DAY_TOOL : tool));
 
 const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments', 'get_recent_visits', 'offer_reservice', 'request_email_change', 'request_quote', 'request_move']);
 const TOOL_CANCELLATION_CODES = new Set(['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014']);
@@ -226,7 +234,7 @@ function isToolCancellation(err) {
 const TOOL_EXECUTORS = new Map([
   ['get_upcoming_services', ({ customerId, turn }) => getUpcomingServices(customerId, turn)],
   ['get_pest_advice', ({ input, turn }) => getPestAdvice(input.topic, turn)],
-  ['offer_reschedule_link', ({ customerId, actions, turn }) => offerRescheduleLink(customerId, actions, turn)],
+  ['offer_reschedule_link', ({ customerId, actions, context, turn }) => offerRescheduleLink(customerId, actions, turn, context)],
   ['open_portal_section', ({ input, actions, turn }) => openPortalSection(input.section, actions, turn)],
   ['show_recent_payments', ({ customerId, actions, cards, turn }) => showRecentPayments(customerId, actions, cards, turn)],
   ['get_recent_visits', ({ customerId, actions, cards, turn }) => getRecentVisits(customerId, actions, cards, turn)],
@@ -234,6 +242,8 @@ const TOOL_EXECUTORS = new Map([
   ['request_email_change', ({ customerId, input, context, turn }) => requestEmailChange(customerId, input, context, turn)],
   ['request_quote', ({ customerId, input, context, turn }) => portalOpen.requestQuote(customerId, input, context, turn)],
   ['request_move', ({ input, context }) => portalOpen.requestMove(input, context)],
+  // The Messages thread's no-reply move, for that turn only: assistant.js ends the turn on it (thread-lane.js).
+  ['stay_silent', ({ input, context }) => (context.thread === true ? { silent: true, why: input.why || null } : { error: 'Unknown tool: stay_silent' })],
   // Handled in assistant.js before reaching here.
   ['escalate', ({ input }) => ({ escalated: true, reason: input.reason })],
 ]);
@@ -278,11 +288,31 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
 
     const execute = TOOL_EXECUTORS.get(toolName);
     if (!execute) return { error: `Unknown tool: ${toolName}` };
-    return await execute({ input, customerId: contextCustomerId, actions, cards, context, turn });
+    const result = await execute({ input, customerId: contextCustomerId, actions, cards, context, turn });
+    // The Messages thread's turn: note that a schedule tool returned something the reply may state.
+    if (context.thread === true && threadLane.grounds(toolName, result)) context.grounded = true;
+    return result;
   } catch (err) {
     if (isToolCancellation(err)) throw err;
     logger.error(`Tool ${toolName} failed: ${err.message}`);
     return { error: `Tool failed: ${err.message}` };
+  }
+}
+
+// GATE_DAY_ONLY_PROMISE (part D): which of these visit rows (id, scheduled_date, window_start) must be stated as the day
+// only? One bulk read inside the turn's transaction when there is one (so a cancelled turn stops here, not after).
+// loadDayOnlyCheck never throws, but a SQL error it swallowed still leaves the transaction ABORTED, and turn.transaction's
+// closing query then rejects. So a non-cancellation failure is caught HERE, outside the transaction, and answers day-only
+// for every row (the same wording loadDayOnlyCheck gives a failed read). A cancellation still propagates.
+async function dayOnlyCheck(rows, turn) {
+  if (!dayOnlyPromiseOn()) return () => false; // gate off: no transaction, no read
+  if (!turn) return loadDayOnlyCheck(db, rows);
+  try {
+    return await turn.transaction('day-only promise', (database) => loadDayOnlyCheck(database, rows));
+  } catch (err) {
+    if (isToolCancellation(err)) throw err;
+    logger.warn(`[ai-assistant] day-only promise read failed, saying only the day: ${err.message}`);
+    return () => true;
   }
 }
 
@@ -292,11 +322,14 @@ async function getUpcomingServices(customerId, turn) {
     .where('customer_id', customerId)
     .where('scheduled_date', '>=', etDateString())
     .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
-    .select('scheduled_services.scheduled_date', 'scheduled_services.service_type',
+    .select('scheduled_services.id', 'scheduled_services.scheduled_date', 'scheduled_services.service_type',
       'scheduled_services.window_start', 'scheduled_services.status')
     .orderBy('scheduled_date')
     .limit(5);
   const services = await runQuery(query, turn, 'upcoming services');
+  // GATE_DAY_ONLY_PROMISE (part D): one bulk read; a visit whose customer was told only the day gets the date and a plain
+  // instruction instead of an hour. Gate off: no read, today's result.
+  const isDayOnly = await dayOnlyCheck(services, turn);
 
   return {
     services: services.map(s => ({
@@ -305,7 +338,7 @@ async function getUpcomingServices(customerId, turn) {
       // window_end is the internal job-duration block, not the promised
       // customer arrival window. Derive the same start + 2h window used by
       // customer SMS and the portal tracker.
-      window: arrivalWindowRange(String(s.window_start || '')) || 'TBD',
+      window: isDayOnly(s) ? DAY_ONLY_ARRIVAL_NOTE : (arrivalWindowRange(String(s.window_start || '')) || 'TBD'),
       status: s.status,
     })),
   };
@@ -332,12 +365,15 @@ async function movableVisit(id, database = db) {
   return verdict?.ok ? svc : null;
 }
 
-async function offerRescheduleLink(customerId, actions, turn) {
+// `context.thread` (thread-lane.js): the Messages thread shows no button, so the same check only tells the
+// model to point the customer to the Reschedule button their Visits tab already shows.
+async function offerRescheduleLink(customerId, actions, turn, context = {}) {
   const NO_LINK = {
     available: false,
     instruction: 'No visit of this customer can be moved online right now. Use the escalate tool so the team moves it.',
   };
-  if (!customerId || !Array.isArray(actions)) return NO_LINK;
+  const thread = context.thread === true;
+  if (!customerId || (!thread && !Array.isArray(actions))) return NO_LINK;
   // A button only for a visit the reschedule page itself will accept: its own
   // loader and GET verdict (account state, status, dispatch review, grouped or
   // frozen visit, the self-serve move notice window), never a mirror of it.
@@ -383,6 +419,7 @@ async function offerRescheduleLink(customerId, actions, turn) {
   // goes on the server-built label only: the tool result below is sent to
   // the model, which is given no account data.
   const multiProperty = new Set(movable.map((m) => m.property)).size > 1;
+  const isDayOnly = await dayOnlyCheck(movable.map((m) => m.row), turn);
   turn?.assertActive('reschedule buttons');
   const visits = movable.map(({ row, property }) => {
     const dateKey = dateKeyOf(row.scheduled_date);
@@ -393,12 +430,14 @@ async function offerRescheduleLink(customerId, actions, turn) {
       label: `Reschedule ${type}, ${shortDateLabel(dateKey)}${where}`.slice(0, 80),
       href: `/reschedule/${row.reschedule_token}`,
     });
-    return { date: dateKey, type, window: arrivalWindowRange(String(row.window_start || '')) || 'TBD' };
+    return { date: dateKey, type, window: isDayOnly(row) ? DAY_ONLY_ARRIVAL_NOTE : (arrivalWindowRange(String(row.window_start || '')) || 'TBD') };
   });
   return {
     available: true,
     visits,
-    instruction: `A Reschedule button for each listed visit is now shown under your reply${multiProperty ? ', each naming its property' : ''}. Tell the customer to tap it to see the open times and pick one. Do not state or promise a new time yourself.`,
+    instruction: thread
+      ? threadLane.RESCHEDULE_INSTRUCTION
+      : `A Reschedule button for each listed visit is now shown under your reply${multiProperty ? ', each naming its property' : ''}. Tell the customer to tap it to see the open times and pick one. Do not state or promise a new time yourself.`,
   };
 }
 
@@ -570,16 +609,26 @@ function reservicePageSwitchesOn() {
 
 // A re-service already open in the line: its date and window for the model,
 // and a button to move it only when the reschedule page would accept it.
-async function bookedReserviceResult(customerId, line, booked, database = db) {
+// This read runs inside the turn's transaction; the day-only check does NOT (dayOnlyCheck, outside it), because a failed
+// query there would abort the transaction this one still has to commit.
+async function bookedReserviceMove(customerId, booked, database = db) {
   // The reschedule route's own token format: any other token is a 404 there.
   const token = /^\/reschedule\/([^/]+)$/.exec(String(booked.rescheduleUrl || ''))?.[1];
   const { TOKEN_RE: RESCHEDULE_TOKEN_RE } = require('../../routes/reschedule-public')._internals;
-  if (token && !RESCHEDULE_TOKEN_RE.test(token)) return { result: bookedReserviceFacts(line, booked, false) };
+  // Without a readable visit id the gate-on answer is the day only (nothing to judge the hour by).
+  if (token && !RESCHEDULE_TOKEN_RE.test(token)) return { movable: false, visit: null };
   // The button is optional: a failed lookup keeps the booked visit's facts.
   const row = token && await database('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id');
   const movable = Boolean(row && await movableVisit(row.id, database));
+  return { movable, visit: row ? bookedVisitRow(row.id, booked) : null };
+}
+
+async function bookedReserviceResult(customerId, line, booked, turn) {
+  const read = (database) => bookedReserviceMove(customerId, booked, database);
+  const { movable, visit } = turn ? await turn.transaction('booked re-service move', read) : await read();
+  const dayOnly = visit ? (await dayOnlyCheck([visit], turn))(visit) : dayOnlyPromiseOn();
   return {
-    result: bookedReserviceFacts(line, booked, movable),
+    result: bookedReserviceFacts(line, booked, movable, dayOnly),
     action: movable ? {
       type: 'link',
       label: `Reschedule ${booked.serviceType}, ${shortDateLabel(booked.date)}`.slice(0, 80),
@@ -588,10 +637,15 @@ async function bookedReserviceResult(customerId, line, booked, database = db) {
   };
 }
 
-function bookedReserviceFacts(line, booked, movable) {
+// The booked re-service as a visit row for the day-only read (window_start is 'HH:MM' on the booked entry).
+function bookedVisitRow(id, booked) {
+  return { id, scheduled_date: booked.date, window_start: booked.windowStart ? `${booked.windowStart}:00`.slice(0, 8) : null };
+}
+
+function bookedReserviceFacts(line, booked, movable, dayOnly = false) {
   return {
     offered: false,
-    already_booked: { date: longDateLabel(booked.date), window: arrivalWindowRange(String(booked.windowStart || '')) || 'TBD' },
+    already_booked: { date: longDateLabel(booked.date), window: dayOnly ? DAY_ONLY_ARRIVAL_NOTE : (arrivalWindowRange(String(booked.windowStart || '')) || 'TBD') },
     instruction: `A free ${RESERVICE_LINE_WORDS[line]} re-service is already on the schedule (date and window above). Do not offer another one or a paid visit. Acknowledge what the customer is seeing and refer to that visit${movable ? '; a button to move it is shown under your reply' : ''}.`,
   };
 }
@@ -659,13 +713,11 @@ async function offerReservice(customerId, input, actions, { secondaryProperty = 
   }
   if (decision.booked) {
     try {
-      decision = turn
-        ? await turn.transaction('booked re-service move', (database) => bookedReserviceResult(customerId, line, decision.booked, database))
-        : await bookedReserviceResult(customerId, line, decision.booked);
+      decision = await bookedReserviceResult(customerId, line, decision.booked, turn);
     } catch (err) {
       if (isToolCancellation(err)) throw err;
       logger.warn(`[ai-assistant] booked re-service move read failed, no button: ${err.message}`);
-      decision = { result: bookedReserviceFacts(line, decision.booked, false) };
+      decision = { result: bookedReserviceFacts(line, decision.booked, false, dayOnlyPromiseOn()) };
     }
   }
   if (decision.action) {
@@ -878,4 +930,4 @@ async function getPestAdvice(topic, turn) {
   }
 }
 
-module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall, reservicePageSwitchesOn, withoutEmails, emailReadBackAwaitingAnswer };
+module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, THREAD_TOOLS, THREAD_DAY_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall, reservicePageSwitchesOn, withoutEmails, emailReadBackAwaitingAnswer };

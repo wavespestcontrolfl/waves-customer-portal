@@ -27,7 +27,6 @@ jest.mock('../config/feature-gates', () => ({
   buildingUseTaxLive: jest.fn(() => false),
   commercialFirstVisitLive: jest.fn(() => false),
   lawnSprayNoTaxLive: jest.fn(() => true),
-  satellitePalmCountTypedLive: jest.fn(() => false),
 }));
 jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: jest.fn(() => false) }));
 jest.mock('../services/sendgrid-mail', () => ({
@@ -798,22 +797,15 @@ describe('group publication navigation', () => {
   }
 
   test('a grouped sibling priced from the satellite needs its own typed palm count: the anchor\'s count never clears it', async () => {
-    const gates = require('../config/feature-gates');
     const { sibling } = prepareGroup();
     sibling.estimate_data = { ...sibling.estimate_data, engineResult: { lineItems: [{ service: 'tree_shrub', palmCount: 9, palmCountFromLookup: true }] } };
-    gates.satellitePalmCountTypedLive.mockReturnValue(true);
-    try {
-      await expect(router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true, confirmedPalmCount: 9 }))
-        .rejects.toMatchObject({ code: 'PALM_COUNT_REQUIRED', message: expect.stringContaining('palm count from the satellite image') });
-    } finally {
-      gates.satellitePalmCountTypedLive.mockReturnValue(false);
-    }
+    await expect(router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true, confirmedPalmCount: 9 }))
+      .rejects.toMatchObject({ code: 'PALM_COUNT_REQUIRED', message: expect.stringContaining('palm count from the satellite image') });
     expect(email.sendTemplate).not.toHaveBeenCalled();
     expect(sibling.status).toBe('draft');
   });
 
   test('a scheduled sibling is held to the palm count its own schedule recorded (pre-push audit P1)', async () => {
-    const gates = require('../config/feature-gates');
     const { sibling } = prepareGroup();
     const scheduledAt = new Date('2099-01-03T15:00:00.000Z');
     Object.assign(sibling, {
@@ -825,13 +817,8 @@ describe('group publication navigation', () => {
         manualSendAttempts: [{ key: 'sibling-schedule', binding: '[]', channels: {}, scheduleReview: { scheduledAt: scheduledAt.toISOString(), confirmedPalmCount: 14 } }],
       },
     });
-    gates.satellitePalmCountTypedLive.mockReturnValue(true);
-    try {
-      await expect(router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true }))
-        .rejects.toMatchObject({ code: 'PALM_COUNT_MISMATCH', message: expect.stringContaining('palm count from the satellite image') });
-    } finally {
-      gates.satellitePalmCountTypedLive.mockReturnValue(false);
-    }
+    await expect(router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true }))
+      .rejects.toMatchObject({ code: 'PALM_COUNT_MISMATCH', message: expect.stringContaining('palm count from the satellite image') });
     expect(email.sendTemplate).not.toHaveBeenCalled();
     expect(sibling.status).toBe('scheduled');
   });
@@ -1400,15 +1387,12 @@ describe('annual provider delivery receipts', () => {
   });
 });
 
-describe('satellite palm count typed before the first send (GATE_SATELLITE_PALM_COUNT_TYPED)', () => {
-  const gates = require('../config/feature-gates');
+describe('satellite palm count typed before the first send', () => {
   const satelliteLine = (palmCount) => ({ engineResult: { lineItems: [{ service: 'tree_shrub', palmCount, palmCountFromLookup: true }] } });
   beforeEach(() => {
-    gates.satellitePalmCountTypedLive.mockReturnValue(true);
     row.status = 'draft';
     row.estimate_data = satelliteLine(14);
   });
-  afterEach(() => gates.satellitePalmCountTypedLive.mockReturnValue(false));
 
   test('the preview asks for the count without blocking; the send needs exactly the priced count', async () => {
     const preview = await invoke('/:id/send-preview', 'get');
@@ -1451,7 +1435,7 @@ describe('satellite palm count typed before the first send (GATE_SATELLITE_PALM_
   });
 
   test('with nothing to count, an unreviewed immediate send claims as before (no snapshot pin)', async () => {
-    gates.satellitePalmCountTypedLive.mockReturnValue(false);
+    row.estimate_data = {};
     const response = await invoke('/:id/send', 'post', { sendMethod: 'email' });
     expect(response.body.sent).toBe(true);
     expect(casClaims()).toHaveLength(0);

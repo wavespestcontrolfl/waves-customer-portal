@@ -1,6 +1,6 @@
 'use strict';
 
-// Bid kit Product List sync (GATE_BID_KIT_PRODUCT_LIST_SYNC, dark). Once a day, right after the expiry
+// Bid kit Product List sync. Once a day, right after the expiry
 // check in the 6 a.m. ET compliance slot, the kit's "Product list" paper is rebuilt from the visit records: every product
 // applied on a visit in the last 12 months, with active ingredient, EPA Reg. No., and Label and SDS links (a PDF, built in
 // services/pdf/product-list-pdf.js). Same list as last time = nothing happens (no file, no bell).
@@ -22,7 +22,6 @@
 // rows and the admin bell. Gate off = the job returns before any query.
 const crypto = require('node:crypto');
 const db = require('../models/db');
-const { bidKitProductListSyncLive } = require('../config/feature-gates');
 const store = require('./bid-kit-store');
 const files = require('./bid-kit-files');
 const episodes = require('./admin-alert-episodes');
@@ -508,10 +507,9 @@ async function settlePending(item) {
   }
 }
 
-// Daily. Returns { skipped } with the gate off or nothing to do; otherwise { changed: false } or
+// Daily. Returns { changed: false } or
 // { changed: true, signedOff, rang }. A failure is logged with a fixed line and returned as { failed }; it never throws.
 async function runBidKitProductListSync({ now = new Date() } = {}) {
-  if (!bidKitProductListSyncLive()) return { skipped: 'gate_off' };
   try {
     let item = (await store.listItems()).find((row) => row.kind === 'document' && row.item_key === ITEM_KEY);
     try {

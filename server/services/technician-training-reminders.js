@@ -1,6 +1,6 @@
 'use strict';
 
-// Technician ID-card and training reminders (GATE_TECH_TRAINING_DATES, dark). Once a day, in the 6 a.m. ET compliance slot,
+// Technician ID-card and training reminders. Once a day, in the 6 a.m. ET compliance slot,
 // this raises ONE admin bell per technician per deadline and stage, and closes the bell when the matching date is entered.
 // Deadlines (services/technician-training-dates.js; F.S. 482.091):
 //   ID card application   14 days before, 3 days before, overdue   (30 days after the hire date)
@@ -8,10 +8,8 @@
 //   Renewal training      30 days before the license expiry
 // A deadline holds one stage at a time: the earlier stage's bell closes when the next one rings. The audience is the admin
 // bell only. Nothing is sent to a technician or a customer, and nothing here touches who may be assigned field work.
-// Gate off = every entry point returns before any query.
 const db = require('../models/db');
 const logger = require('./logger');
-const { techTrainingDatesLive } = require('../config/feature-gates');
 const { composeAdminAlert } = require('./admin-alert-compose');
 const { closeAdminAlertKeys, openAdminAlertKeys, raiseAdminAlertWithReopen } = require('./admin-alert-episodes');
 const { fitAction, shortDateET } = require('./admin-alert-names');
@@ -117,7 +115,6 @@ async function closeStale(conn, wanted, technicianId) {
 
 // closeOnly (used right after a save on the Licenses tab): close what the entered dates settled, raise nothing.
 async function runTechnicianTrainingReminders({ conn = db, today = etDateString(), technicianId = null, closeOnly = false } = {}) {
-  if (!techTrainingDatesLive()) return { skipped: 'gate_off' };
   const techs = await candidates(conn, technicianId);
   const wanted = new Set();
   const reminders = [];

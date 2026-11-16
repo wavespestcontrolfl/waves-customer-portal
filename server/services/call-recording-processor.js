@@ -119,7 +119,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, spelledLettersSettleEmailDisagreement, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards, thirdPartyCustomerOnlyCards, thirdPartyCallMakesNoServiceAsk } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, CALLBACK_SPAM_MOOT_CODES, applyEmailDisagreementHold, spelledLettersSettleEmailDisagreement, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone, isExplicitlyNonOwner, UNIT_LEVEL_WORDING_RE, EXISTING_SERVICE_INTENTS, noActionCallCards, callEndedWithNothingToDo, thirdPartyCustomerOnlyCards, thirdPartyCallMakesNoServiceAsk } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -140,7 +140,7 @@ function recoveryMarkerPayload(db, passStamp) {
 }
 const { detectContactDictationSignals, spellingCollapseSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingCardDecision, spouseCallerIsNotAccountHolder, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
-const { callEmailChecksLive, screenCallEmail, deadDomainQuestion } = require('./call-email-checks');
+const { screenCallEmail, deadDomainQuestion } = require('./call-email-checks');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled, callApplicantHandlingLive } = require('../config/feature-gates');
@@ -1547,7 +1547,7 @@ function isFreshInboundCall(call = {}, now = Date.now()) {
 }
 
 // Single source of truth for whether implied SMS/email consent may apply to
-// THIS call (owner ruling 2026-09-26, GATE_CALL_OUTBOUND_RETURN_MESSAGES):
+// THIS call (owner ruling 2026-09-26):
 // inbound always qualifies; outbound qualifies only once the caller's own
 // `outboundEligible` (outboundReturnMessagesEligible — prior contact
 // confirmed) has cleared. Every checkTcpaConsent call site on this call
@@ -1621,6 +1621,20 @@ function outboundPriorContactCustomerId({ call, knownCaller, callMeta, before, c
     return knownCaller.id;
   }
   return null;
+}
+
+// missing_last_name files no CARD when the call's customer was on file BEFORE this call and
+// already has a real last name (2026-11-09 audit: the office had nothing to do on 24 of 57
+// cards). "Before this call" reuses outboundPriorContactCustomerId's proof on the phone
+// pre-lookup customer: not the customer this call's own earlier pass created
+// (metadata.created_customer_id) and a row older than the call, so a reprocess answers the same
+// as the first pass. A call whose row is already linked to a DIFFERENT customer than the one the
+// lookup read keeps the card (the last name read is not that customer's). `lastNameOnFile` is the
+// pre-lookup row's non-placeholder last name, false on a failed read (fail closed).
+function lastNameOnFileBeforeCall({ call, knownCaller, callMeta, before, lastNameOnFile } = {}) {
+  if (lastNameOnFile !== true || !knownCaller?.id) return false;
+  if (call?.customer_id && String(call.customer_id) !== String(knownCaller.id)) return false;
+  return outboundPriorContactCustomerId({ call: {}, knownCaller, callMeta, before }) === knownCaller.id;
 }
 
 function phoneDigits(value) {
@@ -1856,8 +1870,8 @@ async function eitherSpellingSuppressed({ email, otherSpelling }) {
   }
 }
 
-// GATE_CALL_EMAIL_CHECKS: an address whose domain has no mail server was set
-// aside before the upserts (email_raw). Its read-back reason becomes
+// An address whose domain has no mail server was set aside before the
+// upserts (email_raw). Its read-back reason becomes
 // email_invalid, and the card carries the domain and the question to ask, so
 // the office sees why instead of a plain "check this email". Mutates `reasons`.
 function applyDeadDomainReason(reasons, callEmailCheck) {
@@ -4225,7 +4239,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     // contacts often have no opt-in row): if a later edit clears the stamp,
     // the held person's YES can still restore it.
     //
-    // officeConfirmedBy (the family-account card's Attach as contact, GATE_CALL_ADDRESS_FAMILY_CARD): the office
+    // officeConfirmedBy (the family-account card's Attach as contact): the office
     // tapping Attach IS the human confirmation that this person belongs to the account, so their next call may
     // link (owner 2026-10-24; that is how the duplicate stops). That is recorded as an explicit, separate fact,
     // service_preferences.office_confirmed_slot_phones [{ phone_key, by, at, source }], read by
@@ -4601,11 +4615,10 @@ function slotOnlyLinkAllowed(customer, phone, extracted = {}) {
   return !!extractedFirst && !!slotFirst && sameFirstName(extractedFirst, slotFirst);
 }
 
-// A slot the family-account card's Attach filed (GATE_CALL_ADDRESS_FAMILY_CARD) is identity only on the office's own
+// A slot the family-account card's Attach filed is identity only on the office's own
 // confirmation: its service_preferences.office_confirmed_slot_phones entry must name who confirmed it and when. A
-// slot with no such entry (every pre-existing slot) and the gate off are untouched.
+// slot with no such entry (every pre-existing slot) is untouched.
 function attachSlotOfficeConfirmed(customer, phone) {
-  if (!require('../config/feature-gates').callAddressFamilyCardLive()) return true;
   let prefs = customer.service_preferences;
   if (typeof prefs === 'string') {
     try { prefs = JSON.parse(prefs); } catch { prefs = null; }
@@ -5165,6 +5178,24 @@ async function callbackSpokenNumberSuggested({ call, extracted, customerLinkOver
     throw callbackSpokenNumberUnresolved(`card_${cardReport.failed || 'not_filed'}`);
   }
   return true;
+}
+
+// GATE_BOOKING_TEXT_COVERS_DAY_BEFORE: this pipeline registers the reminder row with the confirmation already marked
+// (sendConfirmation:false) and sends its own text afterwards, so a delivered text for a visit booked for today or tomorrow
+// left the 24-hour "is tomorrow" reminder armed (it went out 3 to 12 minutes later). Called only after the primary text was
+// delivered, with the number it went to (smsRecipient: the caller's number when implied consent redirected it); the shared
+// rule, the recipient check and the fenced write live in appointment-reminders. Best-effort: never throws into the pass.
+async function closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate, windowStart, customerId = null, recipientPhone = null }) {
+  try {
+    // dateOnlyString: a pg DATE can arrive as a UTC-midnight Date, which String().slice would turn into 'Mon Nov 09'.
+    const day = require('../utils/date-only').dateOnlyString(scheduledDate);
+    if (!scheduledServiceId || !day) return false;
+    const apptTime = parseETDateTime(`${day}T${windowStart ? String(windowStart).slice(0, 5) : '08:00'}`);
+    return await require('./appointment-reminders').closeDayBeforeForBookingText({ scheduledServiceId, apptTime, sent: true, dayOnly: false, customerId, recipientPhone });
+  } catch (err) {
+    logger.warn(`[call-proc] day-before close after the booking text failed for visit ${scheduledServiceId}: ${err.code || err.name || 'error'}`);
+    return false;
+  }
 }
 
 async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType, closeReminderWindows = false, callbackNumberHoldActive = false, disclaimedPhone = null, callLogId = null }) {
@@ -6580,26 +6611,17 @@ async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadS
   }
 }
 
-// Phone agent stop order (GATE_CALL_BOOKING_STOP_ORDER, owner 2026-10-26
-// "go d"): a fresh call booking numbers its technician's day in the order the
-// staff route check certifies (placeMovedVisit, the writer New Appointment and
-// staff moves use), so the tech app and the board list it in its place, not
-// last. A street-level pending row (its address waits on the office) stays as
-// it was. The writer is a no-op unless GATE_STAFF_ROUTE_INSERTION is on, runs
-// under a savepoint and never fails the booking. Read at call time; a partial
-// test mock of the gates module reads as off.
-// The shared auto-save helper (owner 2026-10-29, Route Check Everywhere 2b) is
-// the placement for the automatic writers: with the gate above off it places the
-// same booking through that helper (source 'call_booking'). With
-// the gate above on, THIS call is the only placement, so the helper never adds
-// a second one.
+// Phone agent stop order (owner 2026-10-26 "go d"): a fresh call booking
+// numbers its technician's day in the order the staff route check certifies
+// (placeMovedVisit, the writer New Appointment and staff moves use), so the
+// tech app and the board list it in its place, not last. A street-level
+// pending row (its address waits on the office) stays as it was. The writer
+// runs under a savepoint and never fails the booking. THIS call is the only
+// placement for a call booking, so the shared auto-save helper never adds a
+// second one.
 async function placeCallBookingInRoute(trx, created, { streetLevelPending = false } = {}) {
   if (streetLevelPending || !created?.id) return null;
-  const gates = require('../config/feature-gates');
-  if (typeof gates.gateEnvValue === 'function' && gates.gateEnvValue('GATE_CALL_BOOKING_STOP_ORDER')) {
-    return require('./scheduling/arrival-route').placeMovedVisit(trx, { serviceId: created.id, source: 'phone_call' });
-  }
-  return require('./scheduling/staff-save-route-check').placeAutoSavedVisit(trx, { visit: created, source: 'call_booking' });
+  return require('./scheduling/arrival-route').placeMovedVisit(trx, { serviceId: created.id, source: 'phone_call' });
 }
 
 // Convert the call's lead to won when the pipeline books an appointment,
@@ -7930,8 +7952,7 @@ function commercialQuoteBookableFor({ extracted = {}, preAdoptionExtracted = nul
   };
 }
 
-// Whole-structure unit waiver for one call (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT;
-// caller checks the gate). Resolves the call's service the way the booking
+// Whole-structure unit waiver for one call. Resolves the call's service the way the booking
 // resolves it and hands the verdict to the pure waiver in call-triage-flags.js.
 // The service must resolve to a bookable CATALOG row on the allowlist — a
 // coarse label alone never waives, since that booking would carry no service_id.
@@ -7940,7 +7961,7 @@ function commercialQuoteBookableFor({ extracted = {}, preAdoptionExtracted = nul
 // gate, and the V2-overridden view the approved booking will book. Returns the
 // SAME verdict object unless the waiver applies.
 function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, preAdoptionExtracted = null, transcription = '', services = [], property = null, v2Extraction = null, unclearServiceAssessment = false } = {}) {
-  // Both gates on and the call carries the unclear-service signal: routing may
+  // The call carries the unclear-service signal (with the Assessment gate on): routing may
   // force the Waves Assessment row, which is not a whole-structure service.
   if (unclearServiceAssessment && serviceMayForceAssessment(v2Extraction)) return addressValidation;
   const prop = property || v2Extraction?.property || {};
@@ -7958,7 +7979,6 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
       coarseServiceLabel: coarse.ok ? coarse.service : null,
     });
     const waived = applyWholeStructureUnitWaiver(addressValidation, {
-      enabled: true,
       serviceKey: row?.service_key || null,
       propertyType: prop.property_type,
       commercial: prop.property_type === 'commercial' || prop.hoa_common_area_service === true,
@@ -9170,14 +9190,12 @@ Rules:
 
 // Why the contact pass / decoder runs for this transcript, or null when it does not.
 // 'signals' = the dictation detector (always on). 'collapse:<signal>' = a collapsed
-// spelling's marks (GATE_CALL_SPELLING_COLLAPSE_TRIGGER, dark): the ONLY case the new
-// trigger adds a pass, so it is the one that is logged. `ctx` carries { extracted,
-// knownCustomer } once the extraction exists; the second pass runs before it, so the
-// near-miss signal can only fire at the decoder gate.
+// spelling's marks: the ONLY case the collapse trigger adds a pass, so it is the one that is
+// logged. `ctx` carries { extracted, knownCustomer } once the extraction exists; the second
+// pass runs before it, so the near-miss signal can only fire at the decoder gate.
 function contactPassTrigger(transcription, ctx = {}) {
   if (!transcription) return null;
   if (detectContactDictationSignals(transcription).any) return 'signals';
-  if (!require('../config/feature-gates').callSpellingCollapseTriggerLive()) return null;
   // The name-only trigger feeds the name-spelling card, which never files on an outbound call
   // (outbound diarization can swap the labels): no paid pass for it there.
   if (ctx.call && isOutboundCall(ctx.call)) return null;
@@ -9247,12 +9265,11 @@ async function quarantineLatePanPass(call, panCount) {
   return panCount;
 }
 
-// Whether the late (post-extraction) pass may run at all: gate on, contact dictation not switched
+// Whether the late (post-extraction) pass may run at all: contact dictation not switched
 // off, an inbound call whose recording is still there, and an extraction with a name to work with.
 // The wrapper already bought (and may have lost) the pass for the transcript-only signals; only the
 // near miss, which needs the extraction, is new after it, and the near miss needs a last name.
 function lateContactPassAllowed({ call, extracted, contactPassAttempted }) {
-  if (!require('../config/feature-gates').callSpellingCollapseTriggerLive()) return false;
   if (process.env.CONTACT_DICTATION_ENABLED === 'false') return false;
   if (!call.recording_url || isOutboundCall(call)) return false;
   if (!extracted?.first_name && !extracted?.last_name) return false;
@@ -9275,7 +9292,7 @@ async function lateContactPassTrigger({ call, contactPhone, transcription, extra
 }
 
 // The decoder gate. Runs when a second-pass transcript exists or the dictation detector fires
-// (as before). With GATE_CALL_SPELLING_COLLAPSE_TRIGGER on it also runs for a collapsed spelling the
+// (as before). It also runs for a collapsed spelling the
 // wrapper could not see before the extraction existed (the near miss): one late second pass on a
 // fresh, verified download. A pass that hears a card number is quarantined and nothing is decoded.
 // Fail-open: any failure leaves the decoder off. `late` carries what the caller must persist;
@@ -10385,8 +10402,145 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   });
 }
 
+// ── Lead synopsis: the gate sentence and the record facts ──
+// ONE constant for the prompt's Step 0 refusal, the current-customer skip and
+// the call site's gate-refusal test, so the three cannot drift. A gate refusal
+// is written to call_log and never to the lead (the call site below).
+const LEAD_SYNOPSIS_GATE_SENTENCE = 'Not a new lead — no analysis needed.';
+const LEAD_SYNOPSIS_GATE_REFUSAL_RE = /^\s*\**\s*not a new lead/i;
+
+// A fact value that may reach the prompt: short, plain words only. An email,
+// a phone-like digit run or a street-style string is dropped, so the facts add
+// state to the prompt and never more personal data (the transcript already
+// carries what was said).
+const LEAD_SYNOPSIS_STREET_RE = /\b\d{1,5}\s+[A-Za-z]+(?:\s+[A-Za-z]+)?\s+(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|way|blvd|boulevard|court|ct|circle|cir|place|pl|terrace|ter)\b/i;
+function leadSynopsisSafeWords(value) {
+  const text = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  if (!text || text.length > 80) return null;
+  if (text.includes('@') || /\d[\d\s().-]{5,}\d/.test(text) || LEAD_SYNOPSIS_STREET_RE.test(text)) return null;
+  return /^[A-Za-z0-9 :,.&()'/+-]+$/.test(text) ? text : null;
+}
+
+// The name fact has three states: a partial name still leaves something for the
+// office to complete (the booking path files missing_first_name / missing_last_name
+// cards for it), so only a complete name may suppress name follow-up.
+const LEAD_SYNOPSIS_NAME_LINES = Object.freeze({ complete: 'complete', first: 'first name only', last: 'last name only', none: 'none' });
+
+// The "Record facts" block for the synopsis prompt. Pure. Each known fact is
+// one short line; an unknown fact (undefined) is left out, never guessed; an
+// empty object renders no block at all. Booleans and states only, no name,
+// email, phone or address. Ends with a blank line when it is not empty, so it
+// slots in ahead of "Step 0".
+function leadSynopsisFactsBlock(facts) {
+  const f = facts && typeof facts === 'object' ? facts : {};
+  const lines = [];
+  if (typeof f.callerOnFile === 'boolean') {
+    lines.push(`- Caller on file before this call: ${f.callerOnFile ? 'yes (a prospect or past account)' : 'no'}`);
+  }
+  if (f.visit && typeof f.visit === 'object') {
+    if (f.visit.booked === true) {
+      const detail = [leadSynopsisSafeWords(f.visit.when), leadSynopsisSafeWords(f.visit.service)].filter(Boolean).join(', ');
+      lines.push(`- A visit was booked on this call: ${detail || 'yes (day and time not available here)'}`);
+    } else if (f.visit.booked === false) {
+      lines.push('- A visit was booked on this call: none');
+    }
+  }
+  if (typeof f.quotePromised === 'boolean') lines.push(`- A quote was promised on this call: ${f.quotePromised ? 'yes' : 'no'}`);
+  if (LEAD_SYNOPSIS_NAME_LINES[f.name]) lines.push(`- The customer's name on the record: ${LEAD_SYNOPSIS_NAME_LINES[f.name]}`);
+  if (f.email === 'yes' || f.email === 'held' || f.email === 'no') {
+    lines.push(`- An email is on the record: ${f.email === 'held' ? 'held for review' : f.email}`);
+  }
+  if (!lines.length) return '';
+  return `Record facts (from our system):
+${lines.join('\n')}
+These record facts come from our system and outrank the transcript.
+- Do not tell the office to capture, confirm or verify a detail the record facts show as complete or on the record.
+- Do not describe how a name or an email is spelled.
+- When a visit is booked, the office follow-up (Step 3C) is about that visit, not about booking one.
+
+`;
+}
+
+// The facts object, from values the call pass already holds. Pure. An unknown
+// value stays undefined (and so is left out of the block):
+//  - callerOnFile: an explicit boolean wins; else the pre-lookup read (an object
+//    = on file, null = no match, undefined or a thrown lookup = unknown).
+//  - visit: booked only when the booking result carries a schedule row id (the
+//    test the rest of the pass uses); the day and start come from the same
+//    result. appointmentResult undefined = unknown (no line); null = none booked.
+//  - quotePromised / emailOnRecord: booleans when the caller knows them; nameState is
+//    'complete' | 'first' | 'last' | 'none' (see readLeadSynopsisRecordState).
+//  - emailHeld: the pass put the email under read-back review.
+function buildLeadSynopsisFacts({ knownCaller, lookupFailed = false, callerOnFile, appointmentResult, quotePromised, nameState, emailOnRecord, emailHeld = false } = {}) {
+  const facts = {};
+  if (typeof callerOnFile === 'boolean') facts.callerOnFile = callerOnFile;
+  else if (knownCaller) facts.callerOnFile = true;
+  else if (knownCaller === null && !lookupFailed) facts.callerOnFile = false;
+  if (appointmentResult !== undefined) {
+    facts.visit = appointmentResult?.scheduledServiceId
+      ? {
+        booked: true,
+        when: spokenVisitWhen(appointmentResult.scheduledDate, appointmentResult.windowStart) || null,
+        service: typeof appointmentResult.service === 'string' ? appointmentResult.service : null,
+      }
+      : { booked: false };
+  }
+  if (typeof quotePromised === 'boolean') facts.quotePromised = quotePromised;
+  if (Object.hasOwn(LEAD_SYNOPSIS_NAME_LINES, nameState)) facts.name = nameState;
+  if (emailHeld === true) facts.email = 'held';
+  else if (typeof emailOnRecord === 'boolean') facts.email = emailOnRecord ? 'yes' : 'no';
+  return facts;
+}
+
+// Whether the customer record holds a complete name (first AND last), a partial one or none, and an email. The pass writes the
+// record in many branches, so this is one small read of the final row (not
+// derivable from the extraction alone). Fails to {} (both facts left out) on a
+// missing id or any read error.
+async function readLeadSynopsisRecordState(customerId) {
+  if (!customerId) return {};
+  try {
+    const row = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('first_name', 'last_name', 'email');
+    if (!row) return {};
+    // A real name part: not blank and not an intake placeholder ("Unknown",
+    // "Caller", ...), the same test the rest of the call lane uses.
+    const { isMissingName } = require('./call-commitments');
+    const first = !isMissingName(row.first_name);
+    const last = !isMissingName(row.last_name);
+    return {
+      nameState: first && last ? 'complete' : first ? 'first' : last ? 'last' : 'none',
+      emailOnRecord: String(row.email || '').trim().length > 0,
+    };
+  } catch {
+    return {};
+  }
+}
+
+// What this pass knew about the caller BEFORE the call, bound to the account the
+// pass finally resolved. The pre-lookup is phone-only; on a shared household
+// number it can pick one person while Step 3's name-aware resolution lands on
+// another. So the skip and the "on file before this call" fact hold only when the
+// pre-lookup customer IS the resolved customer. A different (or no) resolved
+// customer is unknown, never a guess: the model runs. Pure.
+//  - knownCaller: summarizeKnownCaller result, null = no match, undefined = unknown.
+function leadSynopsisCallerState({ knownCaller, customerId, lookupFailed = false } = {}) {
+  if (lookupFailed || knownCaller === undefined) return { currentCustomer: false, callerOnFile: undefined };
+  if (knownCaller === null) return { currentCustomer: false, callerOnFile: false };
+  const sameCustomer = !!customerId && String(knownCaller.id) === String(customerId);
+  if (!sameCustomer) return { currentCustomer: false, callerOnFile: undefined };
+  return { currentCustomer: knownCaller.isExistingCustomer === true, callerOnFile: true };
+}
+
+// The synopsis for one call. A CURRENT customer is never a new lead, so the
+// model is not called: the prompt's own gate sentence is the synopsis and the
+// call site's gate-refusal path handles it as it does a model refusal. Everyone
+// else gets the model, with the record facts.
+async function resolveLeadSynopsis(transcription, { currentCustomer = false, facts = {} } = {}) {
+  if (currentCustomer === true) return LEAD_SYNOPSIS_GATE_SENTENCE;
+  return generateLeadSynopsis(transcription, facts);
+}
+
 // ── Lead Synopsis via Claude (Sales Strategist prompt) ──
-async function generateLeadSynopsis(transcription) {
+async function generateLeadSynopsis(transcription, facts = {}) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -10410,9 +10564,9 @@ You are a Sales Strategist and Customer Experience Analyst for Waves Pest Contro
 Analyze the following lead interaction (call transcription or SMS thread):
 ${transcription}
 
-Step 0 — Qualify the Lead (Gate Check):
+${leadSynopsisFactsBlock(facts)}Step 0 — Qualify the Lead (Gate Check):
 Before any analysis, determine whether this interaction is a new inbound lead — someone reaching out for the first time via website, phone, or text requesting services or information.
-If the interaction is any of the following, respond with only: "Not a new lead — no analysis needed." and stop.
+If the interaction is any of the following, respond with only: "${LEAD_SYNOPSIS_GATE_SENTENCE}" and stop.
 - An existing customer calling about a scheduled service, billing, or account issue
 - A vendor, solicitor, robocall, or spam
 - An internal team conversation
@@ -10536,7 +10690,7 @@ async function writeCallDisposition({ callId, disposition, reason, callSid, prio
 // disposition layer stamps the terminal enum on call_log.disposition; the
 // enrichment writer persists gate codes / pets / internal color. Order
 // matters: the classifier verdict feeds the disposition decision.
-async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult = null, customerId = null, transcript = null }) {
+async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult = null, customerId = null, transcript = null, procGeneration }) {
   try {
     const v2ForDisposition = v2Result?.status === 'valid' ? v2Result.extraction : null;
     let spamVerdictResult = null;
@@ -10579,7 +10733,8 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
         },
         thirdPartyNatureDefault: callApplicantHandlingLive(),
       });
-      await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
+      const written = await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
+      await keepComplaintCallAlert({ written, disposition, call, callSid, customerId, v2Extraction: v2ForDisposition, procGeneration });
       // ...and once more after the write: a confirm that landed between the read
       // and the write found nothing to flip, so flip it now (compare-and-swap on
       // the pending value we just wrote).
@@ -10914,12 +11069,21 @@ async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v
   }
 }
 
+// The heartbeat beat matched no row. That is a LOST claim only while this pass still owned
+// the work: the pass's own terminal write clears processing_token on a normal finish, and the
+// steps after it (commitments, alerts) run with the timer still on. `claimReleased` is set by
+// each of the pass's own token-clearing writes, so a beat after a normal finish stays quiet and
+// a beat that misses before any terminal write (a peer reclaimed the call) still warns.
+function shouldWarnOwnershipLost(rows, claimReleased) {
+  return rows === 0 && !claimReleased;
+}
+
 // Terminal write for a tech follow-up call: the transcript is already
 // stored; this lands the extraction, summary and sentiment the Calls tab
 // reads, marks the call processed and releases the claim in one
 // token-fenced statement, then records commitments. No lead, booking,
 // automation, SMS, interaction or CSR write ever runs for the call.
-async function finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result }) {
+async function finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result, onClaimReleased = null }) {
   const written = await db('call_log')
     .where({ id: call.id })
     .where('processing_token', procToken)
@@ -10948,6 +11112,7 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
     logger.warn(`[call-proc] Skipped tech follow-up terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
     return { success: false, skipped: true, reason: 'terminal_write_ownership_lost', callSid };
   }
+  if (onClaimReleased) onClaimReleased();
   await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
   logger.info(`[call-proc] Completed tech follow-up processing for ${maskSid(callSid)}: customer=${call.customer_id || null}`);
   return { success: true, callSid, customerId: call.customer_id || null, extracted, techFollowUp: true };
@@ -10963,6 +11128,9 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
 // No customer, lead, appointment, estimate, automation, text or email is written or
 // sent. Any other blocker (spam_or_wrong_number, do_not_contact_requested), alone or
 // beside out_of_service_area, keeps today's silent return.
+// The disposition: no_action_needed when the call ended with nothing to do and nobody asked for
+// or was promised a callback or quote (outOfAreaHoldDisposition), else callback_task_created for a
+// lead, a hot or warm caller, a quote ask or a Waves promise.
 const OUT_OF_AREA_HOLD_REASON = 'out_of_service_area_hold';
 
 function isOutOfAreaOnlyHold(finalFlags) {
@@ -10972,9 +11140,19 @@ function isOutOfAreaOnlyHold(finalFlags) {
 
 const isHotOrWarm = (extracted) => extracted?.lead_quality === 'hot' || extracted?.lead_quality === 'warm';
 
-// A lead or a quote/callback ask gets callback_task_created, anything else no_action_needed.
+// callback_task_created reads as "a callback is owed". A call the model itself closed as
+// no_action_needed, with no open thread (callEndedWithNothingToDo: no agreed time, no follow-up,
+// no promised quote, not a voicemail), and with no quote asked or promised and no recorded Waves
+// promise, owes nothing, even though is_lead is true (2026-11-09: two callers were told on the
+// call that Waves does not go there). Otherwise a lead, a hot or warm caller, a quote ask or a
+// Waves promise gets callback_task_created, anything else no_action_needed. With no valid V2
+// extraction the old rule stands. The alert for a hot or warm caller is not changed.
 function outOfAreaHoldDisposition({ extracted, v2Extraction = null, wavesPromiseRecorded = false }) {
   const { quoteRequested, quotePromised } = resolveCallQuoteSignals(extracted || {}, v2Extraction);
+  const askedNothing = wavesPromiseRecorded !== true && !quoteRequested && !quotePromised;
+  if (askedNothing && callEndedWithNothingToDo(v2Extraction)) {
+    return { disposition: 'no_action_needed', reason: OUT_OF_AREA_HOLD_REASON };
+  }
   const callbackOwed = extracted?.is_lead === true || isHotOrWarm(extracted)
     || quoteRequested || quotePromised || wavesPromiseRecorded === true;
   return { disposition: callbackOwed ? 'callback_task_created' : 'no_action_needed', reason: OUT_OF_AREA_HOLD_REASON };
@@ -11045,6 +11223,102 @@ async function keepOutOfAreaHoldRecords({ call, callSid, transcription, extracte
       await require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, alert.opts);
     }
   } catch (err) { failed('alert', err); }
+}
+
+// The complaint's words from a validated V2 extraction: its objections and its call summary (empty strings without).
+function complaintWordsFromV2(v2Extraction) {
+  const objections = v2Extraction?.sentiment_and_lead?.objections_raised;
+  const summary = v2Extraction?.meta?.call_summary;
+  return {
+    points: (Array.isArray(objections) ? objections : []).filter((p) => typeof p === 'string' && p.trim()).join('; '),
+    summary: typeof summary === 'string' ? summary : '',
+  };
+}
+
+// The one Comms alert for a call whose final label is complaint_escalated (the label alone rang nothing). The
+// customer's name is the one on file: the extraction's caller name is sometimes the staff member's. Composed from the
+// validated V2 extraction only (never the V1 flat view): the quote is V2's sentiment_and_lead.objections_raised, else
+// its meta.call_summary, masked like every bell body; a quote that would break the copy rules is left out of the why
+// and stays in the detail. No valid V2 (the label came from the V1 fallback rules) means no quote and no V1 text. The
+// raw transcript is kept out: telling the caller's turns from the agent's needs speaker parsing this file has no
+// safe helper for. The why carries no clock time (docs/admin-notifications.md
+// section 3): "today's call", else the short date a person would say; the exact ET time rides in the detail.
+function buildComplaintCallAlert({ call, customerId, name = null, v2Extraction = null, now = new Date() }) {
+  const { fitAction, redactedWords, whyWithQuote, shortDateET } = require('./admin-alert-names');
+  const { firstSentence, breaksAlertRules } = require('./admin-alert-compose');
+  const who = name || 'the customer';
+  const { points, summary } = complaintWordsFromV2(v2Extraction);
+  const said = redactedWords(firstSentence(points || summary)).replace(/[.\s]+$/u, '');
+  const startedAt = callStartedAt(call);
+  const day = startedAt && etDateString(startedAt) !== etDateString(now) ? `the ${shortDateET(startedAt)}` : 'today\'s';
+  const clock = callTimeETString(startedAt)?.replace(/\s/g, ' ');
+  const lead = `Complained on ${day} call: `;
+  const why = said && !breaksAlertRules(said)
+    ? whyWithQuote({ lead, quote: said, tail: '.' })
+    : `Complained on ${day} call.`;
+  const buttons = require('./alert-call-button').callButtons({ callLogId: call.id });
+  return {
+    category: 'customer',
+    spec: {
+      area: 'Comms',
+      action: fitAction('Comms', who, [(n) => `call ${n} about a complaint`, (n) => `call ${n}`]),
+      why,
+      severity: 'needs-you',
+      link: `/admin/communications#tab=calls&call=${encodeURIComponent(call.id)}`,
+      subject: { type: 'call', id: String(call.id) },
+      doneWhen: 'complaint_answered',
+      who: 'person',
+      contact: true,
+      ...(buttons ? { buttons } : {}),
+    },
+    opts: {
+      bell: true,
+      dedupeKey: `call-complaint:${call.id}`,
+      detail: [
+        `The call${clock ? ` at ${clock} ET` : ''} was labeled a complaint from a known customer. Call them back. Nothing was sent to the customer.`,
+        points && `Objections raised: ${redactedWords(points)}`,
+        summary && `Summary: ${redactedWords(summary)}`,
+        !points && !summary && 'The summary is on the call record.',
+      ].filter(Boolean).join('\n'),
+      metadata: { callLogId: call.id, customerId: String(customerId), source: 'call_complaint' },
+    },
+  };
+}
+
+// Raise it once per call, right after the label is written. All of these must hold, or nothing rings: this pass
+// wrote complaint_escalated, a customer is known and is not a test customer, the call is not a voice-relay
+// sandbox or tech-line call, it ended in the last 24 hours by the call timeline's own end time (a row inserted
+// after the call with no stamped end has none, so it never rings), and this pass still owns the call: one
+// locked read, in the same transaction as the bell's insert, finds the call at this pass's processing_generation with
+// the label still complaint_escalated (a newer force-reprocess, or no generation known, rings nothing). One bell per call ever: dedupeKey with no dedupeOpenOnly, so a reprocess neither rings again nor re-opens a closed
+// bell. A failure is logged by code and never fails the call. Sends nothing to the customer.
+async function keepComplaintCallAlert({ written, disposition, call, callSid, customerId, v2Extraction, procGeneration, now = new Date() }) {
+  if (written !== true || disposition !== 'complaint_escalated') return null;
+  try {
+    const id = customerId || call.customer_id;
+    if (!id || require('./internal-test-customers').isInternalTestCustomerId(id)) return null;
+    if (require('./voice-agent/relay-protocol').isInternalCallSource(call.source)) return null;
+    if (procGeneration == null) return null;
+    const endedAt = require('../utils/call-timeline').callEndedAt(call);
+    if (!endedAt || Number.isNaN(endedAt.getTime()) || now.getTime() - endedAt.getTime() > 24 * 60 * 60 * 1000) return null;
+    const customer = await db('customers').where({ id }).first('first_name', 'last_name').catch(() => null);
+    const alert = buildComplaintCallAlert({ call, customerId: id, name: require('./admin-alert-names').realName(customer), v2Extraction, now });
+    // The ownership check and the bell are ONE transaction: the call row is locked and re-read at this pass's generation
+    // and label, and the notification is written on the same transaction (opts.trx: its dedupe lock, read and insert),
+    // so a force-reprocess cannot change the call between the check and the bell. Short and last: the name read and the
+    // alert build above stay outside it. Locks the call row, then the alert key's advisory lock (the order notifyAdmin's
+    // own relay path uses); nothing else takes that key while holding a call row.
+    return await db.transaction(async (trx) => {
+      await trx.raw("SET LOCAL statement_timeout = '3s'");
+      await trx.raw("SET LOCAL idle_in_transaction_session_timeout = '5s'");
+      const stillOurs = await trx('call_log').where({ id: call.id, processing_generation: procGeneration, disposition: 'complaint_escalated' }).forUpdate().first('id');
+      if (!stillOurs) return null;
+      return require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, { ...alert.opts, trx });
+    });
+  } catch (err) {
+    logger.warn(`[call-proc] complaint call alert failed for ${maskSid(callSid)}: ${err?.code || err?.name || 'error'}`);
+    return null;
+  }
 }
 
 const CallRecordingProcessor = {
@@ -11131,6 +11405,8 @@ const CallRecordingProcessor = {
     // every 60s while the pass runs, token-fenced so a pass that lost its
     // claim beats into 0 rows. Cleared in the outer finally on every exit.
     let heartbeatTimer = null;
+    // Set by each of THIS pass's own token-clearing writes (see shouldWarnOwnershipLost).
+    let claimReleased = false;
     // This pass's MONOTONIC generation — assigned by the claim write below
     // (processing_generation + 1). The token is the claim MUTEX; the
     // generation is the pass IDENTITY that survives finalization: a cleared
@@ -11416,7 +11692,7 @@ const CallRecordingProcessor = {
           // dead. Say so loudly: every terminal write from here is
           // token-fenced and will no-op, so the pass finishes into nothing,
           // and this line is the only trace of why.
-          if (rows === 0) {
+          if (shouldWarnOwnershipLost(rows, claimReleased)) {
             logger.warn(`[call-proc] ownership LOST mid-pass for ${maskSid(callSid)} — a peer reclaimed the claim; this pass's terminal writes will no-op`);
           }
         })
@@ -11837,7 +12113,7 @@ const CallRecordingProcessor = {
       // (processAllPending skips both), so it goes back to pending instead
       // (Codex #3736 r13 P2).
       const preClaimStatus = (call.processing_status === 'processing' || recordingChangedBeforeClaim) ? null : (call.processing_status || null);
-      await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+      const deferredRows = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
         processing_status: preClaimStatus,
         // The claim cleared the verdict time; a restored terminal status gets
         // its own stamp back, a NULL / pending status none (Codex #6269 r2).
@@ -11845,6 +12121,7 @@ const CallRecordingProcessor = {
         processing_token: null,
         updated_at: new Date(),
       });
+      if (deferredRows) claimReleased = true;
       logger.info(`[call-proc] Deferred ${maskSid(callSid)} — recording not fully propagated yet (status restored to ${preClaimStatus || 'pending'})`);
       return { success: false, skipped: true, reason: 'recording_not_ready' };
     }
@@ -12163,6 +12440,7 @@ const CallRecordingProcessor = {
         // (codex P1).
         return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      claimReleased = true;
       // At the cap the lane has ended: the call produced no lead, customer or
       // routing decision and no pass will try again, so the same permanent
       // processing-failure card the extraction lane files is owed here
@@ -12182,6 +12460,9 @@ const CallRecordingProcessor = {
     // coordinating a visit, complaining, or asking about billing.
     let knownCaller = null;
     let knownCallerLookupFailed = false;
+    // The pre-lookup row's last name is a real one (read here once, no new query): feeds
+    // lastNameOnFileBeforeCall at the card filter. False until proven, so a failed read keeps the card.
+    let knownCallerLastNameOnFile = false;
     try {
       // The operator's link outranks the phone lookup here too (Codex #3764
       // r2 P1): a relink exists because the phone identity was wrong or
@@ -12194,6 +12475,8 @@ const CallRecordingProcessor = {
           : null)
         : await findCustomerForCallContact(contactPhone, {});
       knownCaller = summarizeKnownCaller(knownCustomer);
+      knownCallerLastNameOnFile = !!knownCustomer
+        && !require('./call-commitments').isMissingName(knownCustomer.last_name);
     } catch (e) {
       knownCallerLookupFailed = true;
       logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);
@@ -12308,6 +12591,7 @@ const CallRecordingProcessor = {
           updated_at: new Date(),
         }).returning(['extraction_attempts']);
       if (failedRow) {
+        claimReleased = true;
         const attempts = Number(failedRow?.extraction_attempts) || 0;
         await fileExtractionExhaustedTriage(call.id, attempts, err, callSid);
       } else {
@@ -12691,7 +12975,7 @@ const CallRecordingProcessor = {
         noTextHoldArming = true;
         if (!(await armCallbackNumberHoldAtDecision({ cardExtraction: v2Result.extraction }))) return abandonToPeer('the disclaimed-number hold write');
       }
-      return finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result });
+      return finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result, onClaimReleased: () => { claimReleased = true; } });
     }
 
     // ── Voicemail routing ──
@@ -12856,6 +13140,7 @@ const CallRecordingProcessor = {
           lost.fenceLost = true;
           throw lost;
         }
+        claimReleased = true;
         return true;
       }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!terminalSettled) {
@@ -12924,7 +13209,7 @@ const CallRecordingProcessor = {
       // verdicts + terminal dispositions — it's the population the live
       // accrual exists to measure. Customer resolution hasn't run on this
       // path; enrichment keys on the webhook's pre-linked customer if any.
-      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, customerId: call.customer_id || null, transcript: transcription });
+      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, customerId: call.customer_id || null, transcript: transcription, procGeneration });
 
       // GATE_CALL_APPLICANT_HANDLING: an applicant's voicemail (name + callback
       // number, no service ask) ends on this path too; the step skips spam and
@@ -13036,8 +13321,7 @@ const CallRecordingProcessor = {
       logger.info(`[call-proc] Voicemail ${callSid} has workable lead signal — continuing to lead creation`);
     }
 
-    // Outbound return-message eligibility (GATE_CALL_OUTBOUND_RETURN_MESSAGES,
-    // owner ruling 2026-09-26): whether the four customer-facing features
+    // Outbound return-message eligibility (owner ruling 2026-09-26): whether the four customer-facing features
     // #4912 kept inbound-only below (booking-confirmation implied consent,
     // the dropped-mid-intake address text, customer-less lead creation, the
     // clarify draft) may run the same on THIS outbound call. Requires prior
@@ -13053,11 +13337,11 @@ const CallRecordingProcessor = {
     // lead signal, the drop detector's MIN_CALL_SECONDS floor — and the
     // clarify-draft site alone ALSO requires hasRealTwoWayConversation,
     // since nothing else there rules out an early drop (see its own call
-    // site). Gate off, or inbound, or a probe failure ⇒ false, and every
+    // site). Inbound, or a probe failure ⇒ false, and every
     // `!isOutboundCall(call)` check downstream stays exactly as it reads
     // today.
     let outboundReturnMessagesEligible = false;
-    if (isOutboundCall(call) && isEnabled('callOutboundReturnMessages')) {
+    if (isOutboundCall(call)) {
       try {
         // outboundPriorContactCustomerId (above): call.customer_id, or
         // knownCaller.id (the phone pre-lookup) as a fallback for a row
@@ -13361,32 +13645,32 @@ const CallRecordingProcessor = {
       }
     }
 
-    // GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): a DNS check on the address this
+    // Owner 2026-10-29: a DNS check on the address this
     // pass is about to save, after every adopt and hold above. A domain with no
     // mail server is set aside exactly like an unconfirmed dictation
     // (email_raw), so no write or send path can use it, and the card says why.
     // A DNS hiccup is unknown, never a block.
-    if (extracted.email && callEmailChecksLive()) {
+    if (extracted.email) {
       callEmailCheck = await screenCallEmail(extracted);
       if (callEmailCheck?.dead_domain) {
         logger.info(`[call-proc] Set aside a call email whose domain has no mail server for ${maskSid(callSid)}`);
       }
     }
 
-    // Whole-structure calls (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT, owner ruling
+    // Whole-structure calls (owner ruling
     // 2026-09-30): a WDO inspection or termite pre-treat/perimeter job is not
     // held for a missing unit number. The verdict is rewritten HERE, once,
     // after the shadow row persisted the ORIGINAL — so the enforce gate, the
     // shadow bridge and the audit path all read the same waived verdict. The
     // service is resolved the way the booking below resolves it (catalog row
-    // first, coarse label only when no catalog row matched). Gate off, or any
-    // non-qualifying call, returns the verdict object untouched.
+    // first, coarse label only when no catalog row matched). Any
+    // non-qualifying call returns the verdict object untouched.
     // Business whole building (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT, owner
     // ruling 2026-10-06): the same rewrite for a business address when the
     // caller says they own or occupy the WHOLE building. It rides the same
     // open-card guard and persisted marker (reason 'business_whole_building'),
     // and runs only when the whole-structure rule did not already waive the call.
-    if (v2AddressValidation && (isEnabled('callWholeStructureNoUnit') || isEnabled('callBusinessWholeBuildingNoUnit')) && isMissingUnitNumber(v2AddressValidation)) {
+    if (v2AddressValidation && isMissingUnitNumber(v2AddressValidation)) {
       try {
         // A reprocess of a call an earlier pass parked on the unit ask: the
         // open missing_unit_number card (and its clarify draft and merged
@@ -13401,18 +13685,16 @@ const CallRecordingProcessor = {
         if (openUnitCard) {
           logger.info(`[call-proc] Whole-structure unit waiver skipped for ${maskSid(callSid)}: an open missing_unit_number card still owes a human verdict`);
         } else {
-          let wsAv = isEnabled('callWholeStructureNoUnit')
-            ? wholeStructureUnitWaiverForCall({
-              addressValidation: v2AddressValidation,
-              extracted,
-              preAdoptionExtracted,
-              transcription,
-              services: bookableCallServices,
-              property: v2Result?.extraction?.property,
-              v2Extraction: v2Result?.extraction,
-              unclearServiceAssessment: unclearServiceAssessmentActive(),
-            })
-            : v2AddressValidation;
+          let wsAv = wholeStructureUnitWaiverForCall({
+            addressValidation: v2AddressValidation,
+            extracted,
+            preAdoptionExtracted,
+            transcription,
+            services: bookableCallServices,
+            property: v2Result?.extraction?.property,
+            v2Extraction: v2Result?.extraction,
+            unclearServiceAssessment: unclearServiceAssessmentActive(),
+          });
           if (wsAv === v2AddressValidation && isEnabled('callBusinessWholeBuildingNoUnit')) {
             wsAv = businessWholeBuildingUnitWaiverForCall({
               addressValidation: v2AddressValidation,
@@ -13744,6 +14026,11 @@ const CallRecordingProcessor = {
                 extracted, preAdoptionExtracted, v2Extraction, transcription, v2Valid,
                 services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
               }),
+            // The record already has a last name: no "missing last name" card (card only).
+            lastNameOnFile: finalFlags.includes('missing_last_name') && lastNameOnFileBeforeCall({
+              call, knownCaller, lastNameOnFile: knownCallerLastNameOnFile,
+              callMeta: parseJsonObjectSafe(call.metadata), before: callStartedAt(call) || call.created_at,
+            }),
           }).dropped);
           // A call that ended with nothing to do files no booking-hold card
           // (2026-10-10 audit). Codes, not flags: not_confirmed is the
@@ -13775,16 +14062,14 @@ const CallRecordingProcessor = {
           // Those alternate recipients still require explicit sms_consent_given
           // (v2SmsConsentExplicit, captured mode-independently above) and are
           // enforced at the send site.
-          // Outbound return calls count too (owner ruling 2026-09-26,
-          // GATE_CALL_OUTBOUND_RETURN_MESSAGES): they contacted Waves first,
+          // Outbound return calls count too (owner ruling 2026-09-26):
+          // they contacted Waves first,
           // so the SAME implied consent covers the dialed number
           // (contactPhone above is already resolveCallContactPhone's
           // outbound leg — the customer's number, never a staff line).
           // outboundImpliedConsentEligible is the shared predicate every
           // checkTcpaConsent call site on this call reads (see its own
-          // comment) — outboundReturnMessagesEligible is false whenever the
-          // gate is off, so this stays exactly `!isOutboundCall(call)`
-          // off-gate.
+          // comment).
           const tcpa = checkTcpaConsent(v2Extraction, {
             impliedConsent: isEnabled('callInboundImpliedConsent')
               && outboundImpliedConsentEligible(call, outboundReturnMessagesEligible),
@@ -14604,6 +14889,7 @@ const CallRecordingProcessor = {
           lost.fenceLost = true;
           throw lost;
         }
+        claimReleased = true;
         return true;
       }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!vetoSettled) {
@@ -14795,15 +15081,14 @@ const CallRecordingProcessor = {
     // could be written (a failed card write must never turn into a duplicate customer).
     let spokenNumberSuggested = false;
     let phoneMatchedThisPass = false;
-    // GATE_CALL_ADDRESS_FAMILY_CARD (owner 2026-10-24): an unknown-number caller whose stated address (or
-    // name) an account already has got a suggest-only family-account card above. With the gate on, that card
+    // Owner 2026-10-24: an unknown-number caller whose stated address (or
+    // name) an account already has got a suggest-only family-account card above. That card
     // is the pass's whole answer: no new customer is minted around it (the duplicate the card exists to
     // stop), the call stays customer-less like the shared-phone case, and the workable-lead path below still
     // captures the prospect. The card's New customer action closes it and reprocesses, which mints the old
     // way. A card an operator already closed is never filed again, so it holds nothing.
     let familyCardHold = false;
-    const familyCardCovers = !!familyCardReport.filed && familyCardReport.filed !== 'callback_spoken_number'
-      && require('../config/feature-gates').callAddressFamilyCardLive();
+    const familyCardCovers = !!familyCardReport.filed && familyCardReport.filed !== 'callback_spoken_number';
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic
@@ -16979,16 +17264,12 @@ const CallRecordingProcessor = {
     // An operator's explicit UNLINK covers the lead too (Codex #3736 r8
     // P2): the call belongs to no one, so a reprocess must not mint or
     // reuse a customer-less lead from its phone and stamp the call with it.
-    // Cold/sales outbound calls (owner ruling 2026-09-26,
-    // GATE_CALL_OUTBOUND_RETURN_MESSAGES): blocks ONLY when the gate is
-    // explicitly on and this outbound call has no prior contact — a no-op
-    // whenever the gate is off, so this stays exactly today's (direction-
-    // blind) behavior off-gate. A return call that clears
+    // Cold/sales outbound calls (owner ruling 2026-09-26): blocks an outbound
+    // call that has no prior contact. A return call that clears
     // outboundReturnMessagesEligible still mints/reuses the lead below the
     // same as inbound, which is also what lets an existing lead record for
     // this phone (itself evidence of prior contact) get found and reused.
     const outboundColdCallBlocksLead = isOutboundCall(call)
-      && isEnabled('callOutboundReturnMessages')
       && !outboundReturnMessagesEligible;
     const workableUnnamedLead = !customerId && !nonLeadCall && !explicitUnlink
       && !outboundColdCallBlocksLead
@@ -17354,12 +17635,10 @@ const CallRecordingProcessor = {
         // the claim-race recovery below needs it to re-judge suppression
         // against the replacement row (codex P2 r8).
         let droppedDetectorFired = false;
-        // Owner ruling 2026-09-26 (GATE_CALL_OUTBOUND_RETURN_MESSAGES): an
+        // Owner ruling 2026-09-26: an
         // outbound return call that dropped mid-conversation gets the same
         // "sorry we got cut off" text as inbound, but only once prior
-        // contact is confirmed — outboundReturnMessagesEligible is false
-        // whenever the gate is off, so this stays exactly
-        // `!isOutboundCall(call)` off-gate.
+        // contact is confirmed (outboundReturnMessagesEligible).
         if (leadId && !voicemailLeadPath && !extracted.is_voicemail && !extracted.is_spam
           && (!isOutboundCall(call) || outboundReturnMessagesEligible) && transcription) {
           try {
@@ -18669,7 +18948,7 @@ const CallRecordingProcessor = {
                 `${callerName}: the agent promised to send a quote (${servicesText}${propertyCount > 1 ? `, ${propertyCount} properties` : ''}). Send it before end of day — the lead stays open in the pipeline until it goes out.`,
                 {
                   link: `/admin/leads?lead=${leadId}`,
-                  // promise: a quote we owe the caller (GATE_CUSTOMER_ALERTS_RING rings it; the bell policy mutes 'lead').
+                  // promise: a quote we owe the caller (it rings; the bell policy mutes 'lead').
                   metadata: { leadId, callSid: call.twilio_call_sid, quote_promised: true, promise: true, property_count: propertyCount },
                 },
               );
@@ -18810,13 +19089,12 @@ const CallRecordingProcessor = {
         // Both DNC shapes gate it — the V2 consent object AND the legacy
         // flat extractor field (V2 off / unavailable / schema-failed still
         // sets the flat one) (codex r5 P1).
-        // Owner ruling 2026-09-26 (GATE_CALL_OUTBOUND_RETURN_MESSAGES)
+        // Owner ruling 2026-09-26
         // resolved the pending outbound-SMS-consent decision: an approved
         // draft is sent under the voice channel's transactional consent
         // (admin-drafts.js), and a call WE placed carries that consent too
-        // once the person contacted Waves first — outboundReturnMessagesEligible
-        // is false whenever the gate is off, so this stays exactly
-        // `!isOutboundCall(call)` off-gate. clarifyAskTargetPhone already
+        // once the person contacted Waves first (outboundReturnMessagesEligible).
+        // clarifyAskTargetPhone already
         // resolves the customer leg for both directions.
         // hasRealTwoWayConversation is required HERE, on the outbound leg
         // ONLY (codex pre-push r1 P2 + r4 P1): nothing else at this site
@@ -19008,7 +19286,7 @@ const CallRecordingProcessor = {
               customerId: customerId || null,
               callSid: call.twilio_call_sid,
               quote_promised: true,
-              // promise: a quote we owe the caller (GATE_CUSTOMER_ALERTS_RING rings it; the bell policy mutes 'lead').
+              // promise: a quote we owe the caller (it rings; the bell policy mutes 'lead').
               promise: true,
               property_count: propertyCount,
               no_lead: true,
@@ -19502,8 +19780,8 @@ const CallRecordingProcessor = {
     const outboundAutoBooking = isOutboundCall(call) && outboundAutoBookingEnabled();
     // The v2 TCPA verdict is only computed in ENFORCE routing mode — but
     // outbound consent is never implied UNLESS this outbound call cleared
-    // the return-message eligibility gate above (owner ruling 2026-09-26,
-    // GATE_CALL_OUTBOUND_RETURN_MESSAGES), and the removed review hold used
+    // the return-message eligibility check above (owner ruling 2026-09-26),
+    // and the removed review hold used
     // to be the backstop that kept a shadow/legacy-mode outbound booking
     // from texting. Recompute the verdict for outbound bookings regardless
     // of routing mode, fail-closed: with no extraction/consent data,
@@ -23193,6 +23471,7 @@ const CallRecordingProcessor = {
                     };
                   } else {
                     logger.info(`[call-proc] Appointment SMS sent to customer ${customerId}`);
+                    await closeDayBeforeAfterBookingText({ scheduledServiceId, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog, customerId, recipientPhone: smsRecipient });
                     appointmentResult = { smsSent: true, scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog };
                   }
                   // Gated fan-out to the OTHER appointment contacts: the same
@@ -24040,7 +24319,19 @@ const CallRecordingProcessor = {
     let synopsis = null;
     if (transcription && !extracted.is_spam && !extracted.is_voicemail) {
       try {
-        synopsis = await generateLeadSynopsis(transcription);
+        // A CURRENT customer (this pass's pre-lookup, and the SAME customer the
+        // pass resolved) skips the model and gets the gate sentence; everyone else gets the model plus the record
+        // facts this pass already holds (customer name / email: one small
+        // read of the final row, since the pass writes it in many branches).
+        const synopsisCaller = leadSynopsisCallerState({ knownCaller, customerId, lookupFailed: knownCallerLookupFailed });
+        const synopsisRecord = synopsisCaller.currentCustomer ? {} : await readLeadSynopsisRecordState(customerId);
+        synopsis = await resolveLeadSynopsis(transcription, {
+          currentCustomer: synopsisCaller.currentCustomer,
+          facts: buildLeadSynopsisFacts({
+            callerOnFile: synopsisCaller.callerOnFile, appointmentResult, quotePromised: callQuotePromised,
+            ...synopsisRecord, emailHeld: emailReviewHeldThisRun,
+          }),
+        });
         if (synopsis) {
           // generateLeadSynopsis's Step 0 gate answers with the literal
           // "Not a new lead — no analysis needed." for, among others, "a
@@ -24050,7 +24341,7 @@ const CallRecordingProcessor = {
           // lead destroyed the strategist analysis the substantive call
           // produced (2026-08-31). The column sits outside
           // STAMPED_LEAD_RESTORE_FIELDS, so that loss is not even rollback-able.
-          const synopsisIsGateRefusal = /^\s*\**\s*not a new lead/i.test(synopsis);
+          const synopsisIsGateRefusal = LEAD_SYNOPSIS_GATE_REFUSAL_RE.test(synopsis);
           // The gate above ran BEFORE this provider await, so ownership can
           // have moved while the synopsis was generating. The write itself is
           // TOKEN-FENCED rather than preceded by a check: a check-then-write
@@ -24628,6 +24919,10 @@ const CallRecordingProcessor = {
           ),
           updated_at: new Date(),
         });
+      // The token is cleared in this transaction: from here the heartbeat's missed beat is this
+      // pass's own finish, not a lost claim. Set before commit so a beat that waited on the row
+      // lock and then matched nothing finds the flag already up.
+      if (written > 0) claimReleased = true;
       // codex #4815 r5 P1: the durable price-agreed quarantine-retry
       // marker commits ATOMICALLY with the terminal status it protects —
       // either both land or neither does. Fenced on `written > 0`: if this
@@ -24974,7 +25269,7 @@ const CallRecordingProcessor = {
     // peer reclaimed the processing_token — this attempt's extraction is
     // stale and must not record verdicts, stamp a disposition, or enrich.
     if (finalized > 0) {
-      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId, transcript: transcription });
+      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId, transcript: transcription, procGeneration });
 
       // Commitments (recordCommitmentsStep): after finalization, generation-fenced, never blocking.
       await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
@@ -25226,6 +25521,7 @@ const CallRecordingProcessor = {
         if (!releasedRows.length) {
           logger.warn(`[call-proc] Skipped lock release for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
         } else {
+          claimReleased = true;
           const attempts = Number(releasedRows[0]?.extraction_attempts) || 0;
           await fileExtractionExhaustedTriage(call.id, attempts, procErr, callSid);
         }
@@ -25705,7 +26001,15 @@ const CallRecordingProcessor = {
     if (!call) throw new Error(`Call not found: ${callSid}`);
     if (!call.transcription) throw new Error('No transcription available');
 
-    const synopsis = await generateLeadSynopsis(call.transcription);
+    // An explicit staff action: the model always runs. The stored known_caller
+    // stamp is the phone-only pre-lookup, not the customer the pass resolved (on a
+    // shared number it can name a different person), and it carries no customer id
+    // to check, so it decides nothing here: no skip and no on-file fact. The facts
+    // are only what the call's own customer row says (name and email state).
+    const synopsis = await generateLeadSynopsis(
+      call.transcription,
+      buildLeadSynopsisFacts(await readLeadSynopsisRecordState(call.customer_id)),
+    );
     if (synopsis) {
       await db('call_log').where({ id: call.id }).update({ lead_synopsis: synopsis }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
     }
@@ -26023,9 +26327,12 @@ CallRecordingProcessor._test = {
   isTechFollowUpCall,
   finalizeTechFollowUpCall,
   isOutOfAreaOnlyHold,
+  lastNameOnFileBeforeCall,
   outOfAreaHoldDisposition,
   buildOutOfAreaHoldAlert,
   keepOutOfAreaHoldRecords,
+  buildComplaintCallAlert,
+  keepComplaintCallAlert,
   recordCommitmentsStep,
   fileApplicantCareersRowStep,
   applyCallRescheduleStep,
@@ -26128,8 +26435,17 @@ CallRecordingProcessor._test = {
   transcribeRecording,
   extractCallData,
   extractCallDataV2,
+  generateLeadSynopsis,
+  resolveLeadSynopsis,
+  leadSynopsisFactsBlock,
+  buildLeadSynopsisFacts,
+  leadSynopsisCallerState,
+  readLeadSynopsisRecordState,
+  LEAD_SYNOPSIS_GATE_SENTENCE,
+  LEAD_SYNOPSIS_GATE_REFUSAL_RE,
   CALL_EXTRACTION_V1_BACKUP_ROUTE,
   callTimeETString,
+  closeDayBeforeAfterBookingText,
   CALL_EXTRACTION_ROUTE,
   CALL_EXTRACTION_MODEL_FOR,
   v1BackupTimingsJson,
@@ -26159,6 +26475,7 @@ CallRecordingProcessor._test = {
   resolveCallSecondaryContacts,
   withoutAnsweringStaffName,
   isFreshInboundCall,
+  shouldWarnOwnershipLost,
   resolveCallBillingPayer,
   persistCallSecondaryContact,
   onSiteOptinAskTrigger,

@@ -96,6 +96,7 @@ const {
   recordTrackTransitionFailure,
   recordTrackTransitionResultFailure,
 } = require('../services/track-transition-alerts');
+const { loadGpsOnSiteMinutes, resolveVisitTimeOnSite } = require('../services/visit-time-on-site');
 const { finiteDate, positiveNumber, buildOnSiteLifecycleUpdates, buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 
 // Haversine ETA for the dispatch board tech cards. Returns a whole
@@ -749,29 +750,23 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         .first('reviewed_findings', 'added_details')
         .catch(() => null)
       : null;
-    // Tips with facts (GATE_TECH_TIP_SOURCES, read at call time): the picker
-    // shows the words the completion freezes and only the tips that fit this
-    // yard (grass, irrigation, the visit address's county and city).
-    const tipSources = require('../config/feature-gates').techTipSourcesLive?.() === true;
-    const yard = tipSources
-      ? await loadTechTipYard(db, {
-        customerId: svc.customer_id,
-        zip: svc.service_address_zip || svc.current_property_zip,
-        city: svc.service_address_city || svc.current_property_city,
-      })
-      : null;
+    // Tips with facts: the picker shows the words the completion freezes and
+    // only the tips that fit this yard (grass, irrigation, the visit
+    // address's county and city).
+    const yard = await loadTechTipYard(db, {
+      customerId: svc.customer_id,
+      zip: svc.service_address_zip || svc.current_property_zip,
+      city: svc.service_address_city || svc.current_property_city,
+    });
     // The live post each tip names, for the office form to fill an empty
-    // blog slot on a pick (gate on only; a failed read offers none).
-    const blogPosts = tipSources
-      ? await require('../services/service-report/report-blog-post').tipBlogPosts(db, TIPS).catch(() => ({}))
-      : null;
+    // blog slot on a pick (a failed read offers none).
+    const blogPosts = await require('../services/service-report/report-blog-post').tipBlogPosts(db, TIPS).catch(() => ({}));
     const library = tipsForVisit({
       serviceLine,
       serviceKey,
       serviceKeys: addonKeys,
       findings: [...lawnFindingsFromAssessment(lawnAssessment), ...lawnFindingsFromRun(lawnRun)],
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
-      sourced: tipSources,
       yard,
     });
     // The 90-day window is ET calendar days: the database's own current
@@ -820,14 +815,13 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       lastSent,
       conditions: { irrigation_on_file: irrigationSettingsOnFile(prefs) },
       ...(completionChoicesEnabled ? { previousRecommendations } : {}),
-      // Tips with facts (gate on): what the tips were matched to, for the
-      // picker's one-line note, and the post each tip fills in. The flag also
-      // offers the blog post on a lawn visit (owner 2026-10-24, decision 6).
-      ...(tipSources ? {
-        tipSources: true,
-        ...(yard ? { yard: { grass: yard.grassTrusted ? yard.grassLabel : null, irrigationSystem: yard.irrigationSystem, county: yard.county } } : {}),
-        blogPosts,
-      } : {}),
+      // Tips with facts: what the tips were matched to, for the picker's
+      // one-line note, and the post each tip fills in. `tipSources` stays on
+      // the wire for an older cached client; it also offers the blog post on
+      // a lawn visit (owner 2026-10-24, decision 6).
+      tipSources: true,
+      yard: { grass: yard.grassTrusted ? yard.grassLabel : null, irrigationSystem: yard.irrigationSystem, county: yard.county },
+      blogPosts,
     });
   } catch (err) { next(err); }
 });
@@ -1542,6 +1536,8 @@ router.get('/:date?', async (req, res, next) => {
       )
       .orderByRaw('COALESCE(route_order, 999), window_start');
 
+    // Truck-GPS time on site for the completed visits (one query); the visit card marks its source.
+    const gpsOnSite = await loadGpsOnSiteMinutes(db, services.filter((s) => s.status === 'completed').map((s) => s.id));
     // Enrich with property preferences and last service
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
@@ -1762,6 +1758,10 @@ router.get('/:date?', async (req, res, next) => {
         actualStartTime: s.actual_start_time,
         actualEndTime: s.actual_end_time,
         serviceTimeMinutes: s.service_time_minutes,
+        // { minutes, evidence }: hand correction, else truck GPS, else the number above (evidence 'not_gps').
+        timeOnSite: s.status === 'completed' ? resolveVisitTimeOnSite({
+          adjustedMinutes: s.time_on_site_adjusted_minutes, gpsMinutes: gpsOnSite.get(s.id), fallbackMinutes: s.service_time_minutes,
+        }) : null,
         checkInTime: s.check_in_time || s.actual_start_time,
         checkOutTime: s.check_out_time || s.actual_end_time,
         statusLog: statusLog.map(l => ({ status: l.status, at: l.at, notes: l.notes || null })),
@@ -2583,9 +2583,25 @@ router.get('/:serviceId/card-hold', async (req, res, next) => {
     const CardHolds = require('../services/estimate-card-holds');
     const holdPreview = await CardHolds.cardHoldCancelPreview(req.params.serviceId);
     const ApptCardRequests = require('../services/appointment-card-request');
-    res.json(await mergeCardHoldPreviews(holdPreview, () => ApptCardRequests.appointmentCardCancelPreview(req.params.serviceId)));
+    const preview = await mergeCardHoldPreviews(holdPreview, () => ApptCardRequests.appointmentCardCancelPreview(req.params.serviceId));
+    // `?skip=1` (the schedule sidebar's cancel window) also asks whether the office may skip this visit instead. Every
+    // other caller of this preview gets the answer it always got, and pays for no skip check.
+    res.json(req.query.skip === '1' ? { ...preview, skip: await skipPreviewForCancelWindow(req) } : preview);
   } catch (err) { next(err); }
 });
+// The cancel window's "Skip this visit" choice (visit-skip.js): whether this visit may be skipped, the plan's next
+// visit and, for a lawn plan on rounds, the round the skip drops. Best-effort: a failed check answers null, the
+// window then offers no skip, and the fee preview above is never held up by it.
+async function skipPreviewForCancelWindow(req) {
+  try {
+    return await require('../services/visit-skip').skipPreview(req.params.serviceId, {
+      isAdmin: req.techRole === 'admin', actorId: req.technicianId || null,
+    });
+  } catch (e) {
+    logger.warn(`[admin-dispatch] skip preview failed for ${req.params.serviceId}: ${e.message}`);
+    return null;
+  }
+}
 
 router.put('/:serviceId/status', serviceStatusHandler);
 // The cancellation text step (or the no-text suppression) of a post-commit cancel, under the request's fence when it has one.
@@ -2671,6 +2687,22 @@ function ibRecoveryReplyFlags(req) {
   };
 }
 
+// The office skipped one plan visit (visit-skip.js): no customer text, no make-up visit, and the reminder trigger
+// has already cancelled its reminder row. The assigned technician hears it like a cancel (the notice a plan-hold
+// skip sends); a resend of an already skipped visit is not a new skip. The committed row names the holder: a
+// reassignment can land between the route's read and the transition.
+function notifyTechOfSkippedVisit({ req, svc, transition, fromStatus }) {
+  const row = transition?.adminPayload || null;
+  const technicianId = row?.tech_id || svc.technician_id;
+  if (fromStatus === 'skipped' || !technicianId) return;
+  const schedule = row || svc;
+  void require('../services/tech-visit-notifications').notifyVisitCancelled({
+    visitId: svc.id, technicianId, actorId: req.technicianId || null,
+    snapshot: { date: schedule.scheduled_date, windowStart: schedule.window_start || null, windowEnd: schedule.window_end || null },
+    previousStatus: fromStatus,
+  });
+}
+
 async function serviceStatusHandler(req, res, next) {
   try {
     const { status: toStatus, notes, lat, lng, notifyCustomer, scope = 'this_only' } = req.body;
@@ -2713,8 +2745,10 @@ async function serviceStatusHandler(req, res, next) {
     // and no_show (invoice void + card-on-file fee charge) — stay admin-only
     // even on the tech's own visit; the mobile UI never renders a manual
     // no-show button (removed 2026-07-31) and reaches series/following cancel
-    // only from the office-facing schedule surfaces.
-    if (req.techRole !== 'admin' && (toStatus === 'no_show' || (toStatus === 'cancelled' && ['following', 'series'].includes(scope)))) {
+    // only from the office-facing schedule surfaces. A skip takes one visit
+    // out of a customer's plan with no make-up visit: the office's call
+    // (owner decision 2026-11-13).
+    if (req.techRole !== 'admin' && (toStatus === 'no_show' || toStatus === 'skipped' || (toStatus === 'cancelled' && ['following', 'series'].includes(scope)))) {
       return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
     }
 
@@ -2942,6 +2976,15 @@ async function serviceStatusHandler(req, res, next) {
         code: 'street_level_hold',
       });
     }
+    // A skip is only for an open plan visit with no invoice, card or linked visit on it (visit-skip.js). Judged here
+    // first, before the transaction: a refusal holds no row lock, and any PaymentIntent the invoice read looks up
+    // lands in this cache. Judged again under the row lock below. A resend of an already skipped visit is not judged.
+    let skipPiCache = null;
+    if (toStatus === 'skipped' && fromStatus !== 'skipped') {
+      skipPiCache = new Map();
+      const skip = await require('../services/visit-skip').skipVerdict(svc, { isAdmin: req.techRole === 'admin', actorId: req.technicianId || null, piCache: skipPiCache });
+      if (!skip.eligible) return res.status(409).json({ error: skip.message, code: `skip_${skip.code}` });
+    }
     // Hoisted: the post-commit activation below must key skipCardRequest on
     // the SAME row-locked verification — a technician token alone is not
     // proof, and passing skipCardRequest for an unowned confirm permanently
@@ -3017,6 +3060,11 @@ async function serviceStatusHandler(req, res, next) {
             && ['pending', 'confirmed'].includes(String(locked.status));
         }
         const isFieldLifecycleTakeover = takeoverCandidate && fieldConfirmVerified;
+        // The skip rule again, under the row lock: an invoice, a card or a change to the visit that landed since the
+        // check above refuses the skip. It reads PaymentIntents from that check's cache, never from Stripe.
+        if (skipPiCache) {
+          await require('../services/visit-skip').assertSkippable(trx, svc.id, { isAdmin: req.techRole === 'admin', actorId: req.technicianId || null, piCache: skipPiCache });
+        }
         // Set only by cancelServiceFromBar: the Intelligence Bar cancel card re-checks what it showed, under this lock.
         if (typeof req.ibBeforeCancelCommit === 'function') await req.ibBeforeCancelCommit(trx);
         // Lifecycle timestamps live on the same row as status; flip
@@ -3278,6 +3326,8 @@ async function serviceStatusHandler(req, res, next) {
       await require('../services/recurring-series-cancel-reseed').runPostCancelSeriesReseed({
         db, serviceId: svc.id, source: 'admin-dispatch-status-cancel',
       });
+    } else if (toStatus === 'skipped') {
+      notifyTechOfSkippedVisit({ req, svc, transition, fromStatus });
     } else if (toStatus === 'no_show') {
       // Free the tech on the dispatch roster. A no-show marked after the
       // job already went en_route/on_site leaves tech_status.current_job_id
@@ -4550,7 +4600,7 @@ async function rearmRescheduleReminderWindows(guards, unguardedFallback) {
 // GET /api/admin/dispatch/:serviceId/reschedule-options
 router.get('/:serviceId/reschedule-options', async (req, res, next) => {
   try {
-    // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees why.
+    // A technician whose Team tab switch is off sees why.
     const refusal = await techMoveRefusal(req);
     if (refusal) return res.status(refusal.status).json(refusal.payload);
     // Route-checked day list: only an admin's list may buy Google road
@@ -4575,7 +4625,7 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
       .where({ id: req.params.serviceId })
       .first('id', 'scheduled_date', 'is_recurring');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees
+    // A technician whose Team tab switch is off sees
     // why, not move choices the commit would refuse (plus the customer-pick
     // offer while GATE_QUICKMOVE_CUSTOMER_PICK is on).
     {
@@ -5238,7 +5288,7 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       });
       if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
     }
-    // GATE_TECH_MOVE_SWITCH: the commit is the enforcer.
+    // The commit is the enforcer.
     {
       const refusal = await techMoveRefusal(req);
       if (refusal) return res.status(refusal.status).json(refusal.payload);
@@ -5320,7 +5370,7 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       // the lock above releases still makes the write miss and 409, instead
       // of silently letting the former technician's move commit.
       requireAssignedTechnicianId: req.techRole !== 'admin' ? req.technicianId : null,
-      // GATE_SAVE_ROAD_BUY: only an admin's Quick Move buys road times.
+      // Save road buy: only an admin's Quick Move buys road times.
       ...(req.techRole === 'admin' && req.technicianId ? { roadSpender: req.technicianId } : {}),
     });
 
@@ -5513,6 +5563,30 @@ function seriesNoticeIdentity({ result, newDate, startForText }) {
     messageType: placement ? 'appointment_recurring_placement_confirmed' : 'reschedule_series_confirmation',
     slotMeta: renderedSlotMs ? { rendered_slot_ms: renderedSlotMs } : {},
   };
+}
+
+// GATE_DAY_ONLY_PROMISE part B2: may this series notice promise only the first date (and say each arrival window comes the
+// day before)? The anchor's recorded/inferred intent decides (an office move or a system placement: day only; a time the
+// customer picked: its window). The date must change, the quoted start must be more than 24.25 h out, and a date-only move
+// (no start) keeps today's copy. Gate off: false, nothing read. Never throws.
+async function seriesNoticeDayOnly({ result, serviceId, customerId, newDate, startForText }) {
+  if (!startForText) return false;
+  return require('../services/day-only-move-notice').moveNoticeDayOnly({
+    serviceId,
+    customerId,
+    newStartAt: parseETDateTime(rescheduleReminderTime(String(newDate).split('T')[0], { start: startForText })),
+    oldDate: result.originalDate,
+    newDate: String(newDate).split('T')[0],
+  });
+}
+
+// The day-only series row's body, or null (then today's row renders). Resets `state` to the window copy when the row fails.
+async function renderSeriesDayBody({ state, templateKey, vars, serviceId }) {
+  const dayMove = require('../services/day-only-move-notice');
+  const key = state.dayOnly ? dayMove.seriesDayKey(templateKey) : null;
+  const body = key ? await dayMove.renderDayRow(key, vars, { workflow: 'dispatch_series_reschedule', entity_type: 'scheduled_service', entity_id: serviceId }) : null;
+  if (state.dayOnly && !body) dayMove.dayFellBack(state, state.keep);
+  return body;
 }
 
 async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, notify: notifyArg, actorId, reasonText, qualityDates = null }) {
@@ -5952,8 +6026,13 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           // label the reminders use; "visit" when the visit has no clean name.
           // The series-moved copy has no {service_name}, so it is not looked up.
           const nameVars = await seriesNoticeNameVars(notice.templateKey, serviceId, svc.service_type);
+          const dayState = { dayOnly: await seriesNoticeDayOnly({ result, serviceId, customerId: customer.id, newDate, startForText }), keep: {} };
           notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
+            const dayBody = await renderSeriesDayBody({
+              state: dayState, templateKey: notice.templateKey, serviceId, vars: { first_name: firstName, start_date: displayDate, ...nameVars },
+            });
+            if (dayBody) return dayBody;
             return renderRequiredTemplate(notice.templateKey, {
               first_name: firstName,
               start_date: displayDate,
@@ -5965,7 +6044,9 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
               entity_id: serviceId,
             });
           }, notice.messageType, 'appointment',
-          { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText, ...notice.slotMeta }, {
+          require('../services/day-only-move-notice').withDayMeta(
+            { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText, ...notice.slotMeta }, dayState, notice.slotMeta.rendered_slot_ms,
+          ), {
             // Authenticated staff explicitly asked to notify the customer of
             // the series move — exempt from the 8AM-8PM send window like the
             // neighboring rain-out and quick-move actions. A CUSTOMER-driven
@@ -6399,7 +6480,7 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
   rescheduleOptions.overlapAdvisory = true;
   rescheduleOptions.adminWindowRules = !keepSlot;
-  // GATE_SAVE_ROAD_BUY: an ADMIN's move buys the Google road times its check
+  // Save road buy: an ADMIN's move buys the Google road times its check
   // and route number read, before the rebooker's transaction (the staff user
   // pays). A technician never buys: no spender, no purchase.
   if (actor.techRole === 'admin' && actor.technicianId) rescheduleOptions.roadSpender = actor.technicianId;
@@ -6407,6 +6488,9 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   // a move may override a live visit, a reassignment may not.
   if (keepSlot) Object.assign(rescheduleOptions, { keepStatus: true, allowLive: false });
   rescheduleOptions.sourceSurface = sourceSurface;
+  // GATE_DAY_ONLY_PROMISE part B2/B3: the office's "customer asked for this time" (or day only) for the new slot. The rebooker writes it
+  // in the same UPDATE that moves each visit (per member of a grouped stop), so it belongs to this move alone. Gate off: no key.
+  if (require('../services/time-promise').dayOnlyPromiseOn()) rescheduleOptions.customerAskedTime = body?.customerAskedTime === true;
   rescheduleOptions.notifyRequested = notifyCustomer !== false;
   if (operationKey) rescheduleOptions.operationKey = operationKey;
   const expectVisit = body.expectVisit;
@@ -6414,7 +6498,7 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   if (shownStopRefusal) return shownStopRefusal;
   const disclosureRefusal = await planCollectiveDisclosure({ serviceId, newDate, observedForMove, body, actor, rescheduleOptions });
   if (disclosureRefusal) return disclosureRefusal;
-  return { plan: { rescheduleOptions, effectiveWindow, expectVisit, qualityDates } };
+  return { plan: { rescheduleOptions, effectiveWindow, expectVisit, qualityDates, customerAskedTime: body?.customerAskedTime === true } };
 }
 
 // Effects: the collective choke point widened this move to the series.
@@ -6510,7 +6594,7 @@ function partialVisitMoveReply(result, serviceId) {
 }
 
 // Effects: the one customer notice for a completed move.
-async function sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow }) {
+async function sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow, plan }) {
   // Shared notice path (recipient routing incl. appointment_notify_primary
   // and service contacts, arrival-window copy, terminal/slot recheck at
   // the provider handoff, guarded reminder close/re-arm) — replaces this
@@ -6531,7 +6615,9 @@ async function sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow
     // One notice for the WHOLE stop: recorded as stop-wide so the no-show
     // detector treats it as superseding every member's own promise rather
     // than only the tapped service's (codex P1, PR #4403 round 26).
-    { stopWideFor: result.visitMove?.visitId || null },
+    // previousDate / customerAskedTime: the day-only decision (GATE_DAY_ONLY_PROMISE part B2) judges the date change and
+    // the office's "customer asked for this time".
+    { stopWideFor: result.visitMove?.visitId || null, previousDate: result.originalDate, customerAskedTime: plan?.customerAskedTime },
   );
   return moveReply(200, { ...result, notificationSent: notice.sent, notificationError: notice.error });
 }
@@ -6570,7 +6656,7 @@ async function applyVisitMoveEffects({ result, plan, serviceId, newDate, notifyC
   if (partialVisitMove) return partialVisitMoveReply(result, serviceId);
   if (repeatNotice) return moveReply(200, { ...result, notificationSent: false, ...repeatNotice });
   if (notifyCustomer === false) return moveReply(200, result);
-  return sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow });
+  return sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow, plan });
 }
 
 // The staff single-visit move: plan, move (stage 2, the rebooker's own
@@ -6592,7 +6678,7 @@ async function runPlannedVisitMove({ plan, serviceId, newDate, reasonCode, reaso
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
-    // GATE_TECH_MOVE_SWITCH: the commit is the enforcer. First, so a refused
+    // The commit is the enforcer. First, so a refused
     // technician takes no row lock below.
     {
       const refusal = await techMoveRefusal(req);
@@ -6668,7 +6754,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         // Staff surface: occupancy clashes commit with a warning instead of
         // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
         overlapAdvisory: true,
-        // GATE_SAVE_ROAD_BUY: the admin's anchor hour buys its road times
+        // Save road buy: the admin's anchor hour buys its road times
         // before the series transaction (a technician is refused above).
         ...(req.techRole === 'admin' && req.technicianId ? { roadSpender: req.technicianId } : {}),
         // Same staleness fence via the series writer's own expectAnchor
@@ -7675,4 +7761,6 @@ module.exports._test = {
   reentryEditPlan,
   rearmRescheduleReminderWindows,
   captureReminderGuards,
+  seriesNoticeDayOnly,
+  renderSeriesDayBody,
 };

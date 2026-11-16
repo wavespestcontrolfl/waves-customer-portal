@@ -9,7 +9,7 @@ import { DOC_EYEBROW, DOC_FONT, FS } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import DocumentActionBar from '../components/DocumentActionBar';
-import CustomerReportHeader, { sharedReportTemplateActive } from '../components/report/CustomerReportHeader';
+import CustomerReportHeader from '../components/report/CustomerReportHeader';
 import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -184,7 +184,8 @@ function formatAppointmentWindow(appt) {
   const end = endMins != null
     ? formatAppointmentTime(`${Math.floor(endMins / 60)}:${String(endMins % 60).padStart(2, '0')}`)
     : '';
-  const window = start && end ? `${start}-${end}` : start;
+  // GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour.
+  const window = start && end ? `${start}-${end}` : (start || (appt.day_only ? appt.arrival_note : ''));
   return [date, window].filter(Boolean).join(' ');
 }
 
@@ -388,8 +389,8 @@ export default function ProjectReportViewPage() {
   // PDF is a server-side artifact linked below, never rendered here.)
   const isCertificate = data?.projectType === 'pre_treatment_termite_certificate';
   const isPaperDocument = isCertificate || data?.projectType === 'wdo_inspection';
-  // GATE_REPORT_SHARED_TEMPLATE: the shared customer header and the stacked layout, never on a paper document.
-  const sharedTemplate = !isPaperDocument && sharedReportTemplateActive(data);
+  // The shared customer header and the stacked layout, never on a paper document (those keep their own header).
+  const sharedTemplate = !isPaperDocument;
   // The applicator is the tech who PERFORMED the linked visit, which can
   // differ from the project's creator (technicianName) — Codex r2 #5032.
   const applicatorLine = applicatorIdLine(data?.applicatorName || data?.technicianName, data?.applicatorFdacsId);

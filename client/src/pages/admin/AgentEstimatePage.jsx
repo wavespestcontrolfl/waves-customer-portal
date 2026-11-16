@@ -607,7 +607,7 @@ export function LearningPanel({ leadId, user, memories, onReload }) {
 
 // Yellow-lane drafts 409 their FIRST send until the operator acknowledges the
 // engine's review reasons, and a satellite palm count 409s until the operator
-// types the count from the aerial photo (GATE_SATELLITE_PALM_COUNT_TYPED) — the
+// types the count from the aerial photo — the
 // same confirm-and-retry contract as the estimates pipeline page. Returns the
 // answers with the new one added; throws on a cancel or any other error.
 export function answerSendGate(error, answers) {

@@ -165,10 +165,10 @@ function shownPhone(phone) {
   return digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : phone;
 }
 
-// bundle_quote_requested's `alert` (GATE_PORTAL_ITEM_CLOSE): the request row and its customer at the top of the
-// bell's metadata. Gate off, or a bell with no request row (a self-applied bundle): nothing, as before.
+// bundle_quote_requested's `alert`: the request row and its customer at the top of the
+// bell's metadata. A bell with no request row (a self-applied bundle): nothing.
 function bundleRequestAlert(p) {
-  if (!p.requestId || !p.customerId || !require('../config/feature-gates').portalItemCloseLive?.()) return {};
+  if (!p.requestId || !p.customerId) return {};
   return { alert: { requestId: String(p.requestId), customerId: String(p.customerId) } };
 }
 
@@ -478,7 +478,7 @@ const TRIGGER_REGISTRY = {
       link: p.threadId
         ? `/admin/communications?thread=${p.threadId}${p.twilioSid ? `&message=${encodeURIComponent(p.twilioSid)}` : ''}`
         : (p.twilioSid ? `/admin/communications?message=${encodeURIComponent(p.twilioSid)}` : '/admin/communications'),
-      // Handled: the bell's own Done with that note (admin-alert-buttons.js, GATE_ALERT_CLOSE_BUTTONS). No reply.
+      // Handled: the bell's own Done with that note (admin-alert-buttons.js). No reply.
       // A lead's bare CALL reply also gets Call first, for the text that carried it: the next text's emission sets
       // the row's buttons again (alert-call-button.js, GATE_ALERT_CALL_BUTTON).
       alert: { buttons: p.leadPreference === 'call' && p.threadId
@@ -670,7 +670,7 @@ const TRIGGER_REGISTRY = {
       // SMS conversation instead (same destination as the voicemail bell).
       link: callLink(p),
       // Call: the Call Log's own "Call back" for this call (alert-call-button.js, GATE_ALERT_CALL_BUTTON). Called back:
-      // the bell's own Done with that note (admin-alert-buttons.js, GATE_ALERT_CLOSE_BUTTONS); it places no call.
+      // the bell's own Done with that note (admin-alert-buttons.js); it places no call.
       alert: { buttons: require('./alert-call-button').callButtons({ callLogId: p.callLogId, close: 'called_back' }) },
     }),
   },
@@ -1100,7 +1100,7 @@ const TRIGGER_REGISTRY = {
         : p.estimateId
           ? `/admin/estimates?estimateId=${encodeURIComponent(p.estimateId)}`
           : '/admin/estimates',
-      // GATE_PORTAL_ITEM_CLOSE: the request row and its customer at the TOP of the bell's metadata (the
+      // The request row and its customer at the TOP of the bell's metadata (the
       // payload nests under `payload`), so the Portal tab's Mark handled and the relevance sweep find this bell
       // by metadata->>'requestId'. A bell with no request row (a self-applied bundle) carries neither.
       ...bundleRequestAlert(p),
@@ -1588,7 +1588,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // silenced categories) still buzzed the phone — and a push-only admin
     // bypassed it entirely (hook P1). Category overrides re-enable both.
     let policySilenced = false;
-    // GATE_CUSTOMER_ALERTS_RING: a customer alert (the type's rule declares `contact`/`promise`, or it is
+    // A customer alert (the type's rule declares `contact`/`promise`, or it is
     // bill_payment_error) passes the policy, and its bell write below carries `bell: true` so
     // NotificationService.create's own policy check, which sees only the category and the trigger key, agrees.
     let declaredCustomerAlert = false;
@@ -1597,7 +1597,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       if (bellPolicy.isBellPolicyEnabled()) {
         // bellAuthorized (pushOnly only): the banner for a bell row its writer already rang (bell-banners.js; each writer
         // tags bell: true). The push keeps that answer instead of judging the event again without the tag, so the
-        // banner does not depend on GATE_CUSTOMER_ALERTS_RING.
+        // banner does not depend on the customer-alert ring.
         const authorized = pushOnly && bellAuthorized ? { options: { bell: true } } : {};
         policySilenced = !(await bellPolicy.bellAllowed({ category: trigger.category, triggerKey, declared: trigger.rule, ...authorized }));
         // Guarded: a test that mocks the policy module without the helper keeps today's bell write.

@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Bid Desk admin notifications (GATE_BID_DESK). The specs are pure; raise() sends them through raiseAdminAlert
+ * Bid Desk admin notifications. The specs are pure; raise() sends them through raiseAdminAlert
  * (docs/admin-notifications.md). Nothing here writes to a buyer, a contractor or a customer: the audience is the
  * admin bell only.
  */

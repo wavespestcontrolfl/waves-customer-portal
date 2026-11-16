@@ -57,7 +57,6 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
     if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } });
     mockPg = database;
-    process.env.GATE_BID_DESK = 'true';
     const app = express();
     app.use(express.json());
     app.use('/api/admin/bid-desk', require('../routes/admin-bid-desk'));
@@ -73,7 +72,6 @@ describeDb('Bid Desk checklist (PostgreSQL)', () => {
   });
   afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => {
-    delete process.env.GATE_BID_DESK;
     if (server) await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     if (database) await database.destroy();
   });

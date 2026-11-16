@@ -99,6 +99,8 @@
       "what": "terminal 404 JSON for unmatched routes — never serves data" },
     { "name": "errorHandler", "module": "server/middleware/errors.js",
       "what": "terminal error shaper (redacted log + status JSON) — never serves data" },
+    { "name": "uploadHangUp", "module": "server/middleware/errors.js",
+      "what": "error middleware: a client that hung up mid-upload gets a bodyless 400 (nothing on a closed socket), every other error goes to next(err) — never serves data" },
     { "name": "*", "module": "cors", "package": true,
       "what": "CORS headers; terminates only OPTIONS preflights with header-only responses" },
     { "name": "*", "module": "morgan", "package": true,

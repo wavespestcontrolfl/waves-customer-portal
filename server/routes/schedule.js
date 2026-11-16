@@ -23,9 +23,10 @@ function portalRowWaveGuardFamily(row) {
 function portalRowQualifiesForWaveGuard(row) {
   return portalRowWaveGuardFamily(row) !== null;
 }
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const { calendarIcsAvailable, arrivalWindowEndsAt, UPCOMING_STATUSES, groupedIcsVerdict } = require('../services/appointment-ics-eligibility');
+const { dayOnlyIds, dayOnlyFields, shownSlotFor } = require('../services/time-display');
 
 // Add-to-calendar link for a visit row, or null. The eligibility verdict is
 // NOT re-derived here — services/appointment-ics-eligibility.js owns it and
@@ -137,6 +138,28 @@ function customerPickByIso(row) {
   return Number.isNaN(at.getTime()) ? null : at.toISOString();
 }
 
+// GATE_DAY_ONLY_PROMISE (part C1): a visit the customer was told only the DAY for shows no hour. `hidden` is the
+// Set of row ids from ONE dayOnlyIds() call per payload. The server blanks the hour fields (an older app bundle then
+// renders the date alone) and adds day_only + arrival_note. Not in the set (gate off, hour told, inside the 24-hour
+// cutoff, any lookup failure): the fields are exactly today's, and no key is added.
+const hourOf = (hidden, row, field) => (hidden.has(String(row.id)) ? null : row[field]);
+
+// The calendar link's expiry carries the arrival window's end (an hour). A day-only visit gets the end of its ET day,
+// so the link stays offered and no hour rides the payload.
+function calendarExpiryFor(hidden, row, expiresAt) {
+  if (!expiresAt || !hidden.has(String(row.id))) return expiresAt;
+  const endOfDay = parseETDateTime(`${dateOnlyStamp(row.scheduled_date)}T23:59`);
+  return endOfDay && !Number.isNaN(endOfDay.getTime()) ? endOfDay.toISOString() : null;
+}
+
+/** The hour fields and day-only fields of one visit entry, spread into the entry (nothing is added for a shown hour). */
+function timeFieldsFor(hidden, row) {
+  return {
+    windowStart: hourOf(hidden, row, 'window_start'),
+    windowEnd: hourOf(hidden, row, 'window_end'),
+  };
+}
+
 // =========================================================================
 // GET /api/schedule — Upcoming scheduled services
 // =========================================================================
@@ -199,6 +222,8 @@ router.get('/', async (req, res, next) => {
     // 'rescheduled' rebook intents, dispatch-owned pending follow-ups) and
     // says nothing about billing.
     const cancellable = await hasCancellableWork(req.customerId);
+    // GATE_DAY_ONLY_PROMISE (part C1): ONE bulk read for this payload (both branches below).
+    const hidden = await dayOnlyIds(db, upcoming);
 
     if (allProperties) {
       // Coverage projection only (see listQuerySchema): nothing actionable —
@@ -214,9 +239,8 @@ router.get('/', async (req, res, next) => {
           id: s.id,
           date: s.scheduled_date,
           // Arrival windows stay: the Year-at-a-glance calendar prints them
-          // (a time of day is not a cross-house action).
-          windowStart: s.window_start,
-          windowEnd: s.window_end,
+          // (a time of day is not a cross-house action). Day-only visits show the day alone.
+          ...timeFieldsFor(hidden, s),
           serviceType: normalizeServiceType(s.service_type),
           status: s.status,
           isRecurring: s.is_recurring === true,
@@ -244,6 +268,7 @@ router.get('/', async (req, res, next) => {
             const labelOnly = portalRowWaveGuardFamily({ service_type: s.service_type });
             return withCatalog && withCatalog !== labelOnly ? normalizeServiceType(s.catalog_service_name) : null;
           })(),
+          ...dayOnlyFields(hidden.has(String(s.id))),
         })),
       });
     }
@@ -325,8 +350,7 @@ router.get('/', async (req, res, next) => {
       upcoming: upcoming.map(s => ({
         id: s.id,
         date: s.scheduled_date,
-        windowStart: s.window_start,
-        windowEnd: s.window_end,
+        ...timeFieldsFor(hidden, s),
         // Set only while the visit waits for the customer's pick (see above).
         customerPickBy: customerPickByIso(s),
         serviceType: normalizeServiceType(s.service_type),
@@ -392,9 +416,10 @@ router.get('/', async (req, res, next) => {
         calendarUrl: calendarVerdictById.get(String(s.id))
           ? groupedCalendarUrl(s, calendarVerdictById.get(String(s.id)))
           : calendarUrlFor(s),
-        calendarExpiresAt: calendarVerdictById.get(String(s.id))
+        calendarExpiresAt: calendarExpiryFor(hidden, s, calendarVerdictById.get(String(s.id))
           ? (groupedCalendarUrl(s, calendarVerdictById.get(String(s.id))) ? calendarVerdictById.get(String(s.id)).endsAt.toISOString() : null)
-          : calendarExpiresAtFor(s),
+          : calendarExpiresAtFor(s)),
+        ...dayOnlyFields(hidden.has(String(s.id))),
       })),
     };
     res.json(req.contactSession ? contactSchedulePayload(payload) : payload);
@@ -455,7 +480,8 @@ router.post('/:id/confirm', async (req, res, next) => {
     // on one a move wrote after the page loaded. Required for a confirmed
     // row (that path never worked, so no older client relies on it);
     // checked for a pending row whenever the client sends it.
-    const shown = req.body || {};
+    // A day-only visit shows no hour, so the app echoes none: shownSlotFor fills the row's current start in (part C1).
+    const shown = await shownSlotFor(db, service, req.body || {});
     if ((officeConfirmed || shown.date != null)
       && !require('./appointment-public').slotMatchesShown(service, shown)) {
       return res.status(409).json({
@@ -790,6 +816,8 @@ router.get('/account-next', async (req, res, next) => {
       const key = String(row.customer_id);
       if (!nextByCustomer.has(key)) nextByCustomer.set(key, row);
     }
+    // GATE_DAY_ONLY_PROMISE (part C1): ONE bulk read, for the visits this payload shows.
+    const hidden = await dayOnlyIds(db, [...nextByCustomer.values()]);
     res.json({
       properties: properties.map((p) => {
         const n = nextByCustomer.get(String(p.id)) || null;
@@ -801,12 +829,12 @@ router.get('/account-next', async (req, res, next) => {
           next: n ? {
             id: n.id,
             date: n.scheduled_date,
-            windowStart: n.window_start,
-            windowEnd: n.window_end,
+            ...timeFieldsFor(hidden, n),
             customerPickBy: customerPickByIso(n),
             serviceType: normalizeServiceType(n.service_type),
             status: n.status,
             customerConfirmed: n.customer_confirmed === true,
+            ...dayOnlyFields(hidden.has(String(n.id))),
           } : null,
         };
       }),
@@ -850,6 +878,8 @@ router.get('/properties-next', async (req, res, next) => {
       .orderBy('scheduled_services.scheduled_date', 'asc')
       .orderBy('scheduled_services.window_start', 'asc') : [];
     const nextByKey = assignVisitsToEntries(entries, rows);
+    // GATE_DAY_ONLY_PROMISE (part C1): ONE bulk read, for the visits this payload shows.
+    const hidden = await dayOnlyIds(db, [...nextByKey.values()].filter(Boolean));
     res.json({
       properties: entries.map((e) => {
         const n = nextByKey.get(e.key) || null;
@@ -860,12 +890,12 @@ router.get('/properties-next', async (req, res, next) => {
           next: n ? {
             id: n.id,
             date: n.scheduled_date,
-            windowStart: n.window_start,
-            windowEnd: n.window_end,
+            ...timeFieldsFor(hidden, n),
             customerPickBy: customerPickByIso(n),
             serviceType: normalizeServiceType(n.service_type),
             status: n.status,
             customerConfirmed: n.customer_confirmed === true,
+            ...dayOnlyFields(hidden.has(String(n.id))),
           } : null,
         };
       }),
@@ -937,6 +967,8 @@ router.get('/next', async (req, res, next) => {
       const empty = { propertyScope: allProperties ? undefined : resolvedScopePayload(scope), next: null };
       return res.json(req.contactSession ? contactNextPayload(empty) : empty);
     }
+    // GATE_DAY_ONLY_PROMISE (part C1): ONE read for this payload (both branches below).
+    const hidden = await dayOnlyIds(db, [nextService]);
     if (allProperties) {
       // Coverage projection only — no reschedule/calendar bearer links.
       return res.json({
@@ -944,12 +976,12 @@ router.get('/next', async (req, res, next) => {
         next: {
           id: nextService.id,
           date: nextService.scheduled_date,
-          windowStart: nextService.window_start,
-          windowEnd: nextService.window_end,
+          ...timeFieldsFor(hidden, nextService),
           serviceType: normalizeServiceType(nextService.service_type),
           status: nextService.status,
           isRecurring: nextService.is_recurring === true,
           isCallback: nextService.is_callback === true,
+          ...dayOnlyFields(hidden.has(String(nextService.id))),
         },
       });
     }
@@ -964,8 +996,7 @@ router.get('/next', async (req, res, next) => {
       next: {
         id: nextService.id,
         date: nextService.scheduled_date,
-        windowStart: nextService.window_start,
-        windowEnd: nextService.window_end,
+        ...timeFieldsFor(hidden, nextService),
         customerPickBy: customerPickByIso(nextService),
         serviceType: normalizeServiceType(nextService.service_type),
         status: nextService.status,
@@ -979,12 +1010,13 @@ router.get('/next', async (req, res, next) => {
         rescheduleUrl: nextService.reschedule_token && !nextGrouped ? `/reschedule/${nextService.reschedule_token}` : null,
         // Same contract as the list payload above.
         calendarUrl: nextCalVerdict ? groupedCalendarUrl(nextService, nextCalVerdict) : calendarUrlFor(nextService),
-        calendarExpiresAt: nextCalVerdict
+        calendarExpiresAt: calendarExpiryFor(hidden, nextService, nextCalVerdict
           ? (groupedCalendarUrl(nextService, nextCalVerdict) ? nextCalVerdict.endsAt.toISOString() : null)
-          : calendarExpiresAtFor(nextService),
+          : calendarExpiresAtFor(nextService)),
         // GATE_VISIT_PREP_PHOTOS (dark): additive only. Gate off = key
         // absent, payload byte-identical to before this lane.
         ...(await appPrepPhotosField(nextService, req.customer?.active === true)),
+        ...dayOnlyFields(hidden.has(String(nextService.id))),
       },
     };
     res.json(req.contactSession ? contactNextPayload(payload) : payload);

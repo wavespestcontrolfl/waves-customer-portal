@@ -1,11 +1,10 @@
 /**
- * /admin/tax/tax-years and /return-engine/status (GATE_TAX_RETURN_ENGINE,
- * nested under GATE_BANK_IMPORT).
+ * /admin/tax/tax-years (nested under GATE_BANK_IMPORT).
  *
  * Locked-down behaviors:
- *  1. Gate off (or GATE_BANK_IMPORT off) -> /return-engine/status answers
- *     {enabled:false}; every /tax-years route is a 404 and touches nothing.
- *  2. Gate on -> list, detail, save, file, unfile and return go to the
+ *  1. GATE_BANK_IMPORT off -> every /tax-years route is a 404 and touches
+ *     nothing.
+ *  2. GATE_BANK_IMPORT on -> list, detail, save, file, unfile and return go to the
  *     services; a service error keeps its status and message; anything else is
  *     a 500.
  *  3. PUT refuses bad numbers and unknown fields with a 400 before any write;
@@ -96,13 +95,12 @@ beforeEach(() => {
   mockDb.mockClear();
   for (const fn of [ty.listYears, ty.getYearDetail, ty.upsertYear, ty.unmarkFiled, engine.computeYear, engine.fileYear]) fn.mockReset();
   process.env.GATE_BANK_IMPORT = 'true';
-  delete process.env.GATE_TAX_RETURN_ENGINE;
 });
-afterAll(() => { delete process.env.GATE_BANK_IMPORT; delete process.env.GATE_TAX_RETURN_ENGINE; });
+afterAll(() => { delete process.env.GATE_BANK_IMPORT; });
 
-describe('gate darkness', () => {
-  test('status answers enabled:false and every other route is a 404 that touches nothing', async () => {
-    expect(await (await get(`${P}/return-engine/status`)).json()).toEqual({ enabled: false });
+describe('bank import off', () => {
+  test('every route is a 404 that touches nothing', async () => {
+    delete process.env.GATE_BANK_IMPORT;
     const calls = [
       ['GET', '/tax-years'], ['GET', '/tax-years/2025'], ['PUT', '/tax-years/2025'], ['POST', '/tax-years/2025/file'],
       ['POST', '/tax-years/2025/unfile'], ['GET', '/tax-years/2025/return'],
@@ -115,21 +113,9 @@ describe('gate darkness', () => {
     expect(mockDb).not.toHaveBeenCalled();
     for (const fn of [ty.listYears, ty.getYearDetail, ty.upsertYear, ty.unmarkFiled, engine.computeYear, engine.fileYear]) expect(fn).not.toHaveBeenCalled();
   });
-
-  test('the engine gate alone is not enough without GATE_BANK_IMPORT', async () => {
-    process.env.GATE_TAX_RETURN_ENGINE = 'true';
-    delete process.env.GATE_BANK_IMPORT;
-    expect(await (await get(`${P}/return-engine/status`)).json()).toEqual({ enabled: false });
-    expect((await get(`${P}/tax-years`)).status).toBe(404);
-  });
 });
 
-describe('gate on', () => {
-  beforeEach(() => { process.env.GATE_TAX_RETURN_ENGINE = 'true'; });
-
-  test('status says enabled', async () => {
-    expect(await (await get(`${P}/return-engine/status`)).json()).toEqual({ enabled: true });
-  });
+describe('bank import on', () => {
 
   test('list answers the years and the years with constants', async () => {
     ty.listYears.mockResolvedValue([{ tax_year: 2025, status: 'draft' }]);

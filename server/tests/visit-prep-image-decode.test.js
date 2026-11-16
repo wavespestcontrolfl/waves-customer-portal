@@ -54,6 +54,14 @@ describe('normalizeToJpeg', () => {
     const truncated = realJpeg.subarray(0, Math.floor(realJpeg.length / 2));
     await expect(normalizeToJpeg(truncated)).rejects.toMatchObject({ statusCode: 400, code: 'PREP_INVALID_PHOTO' });
   });
+
+  test('a PNG with a damaged checksum is refused as an invalid photo (sharp 0.35 reads PNG with a checksum check)', async () => {
+    // sharp 0.34 decoded such a file; 0.35 throws on it. The route must answer 400, never 500, and store nothing.
+    const idatAt = realPng.indexOf(Buffer.from('IDAT'));
+    const damaged = Buffer.from(realPng);
+    damaged[idatAt + 4 + realPng.readUInt32BE(idatAt - 4)] ^= 0xff; // first byte of the IDAT chunk's CRC
+    await expect(normalizeToJpeg(damaged)).rejects.toMatchObject({ statusCode: 400, code: 'PREP_INVALID_PHOTO' });
+  });
 });
 
 describe('prepareUploadFile', () => {

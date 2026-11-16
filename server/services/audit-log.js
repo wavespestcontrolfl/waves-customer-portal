@@ -527,7 +527,7 @@ async function auditLawnSqftFromEstimate({ customer_id, estimate_id, sqft, befor
 }
 
 /**
- * What the relevance sweep WOULD have closed (GATE_ALERT_CONTACT_CLOSE=shadow,
+ * What the relevance sweep WOULD have closed (a contact rule whose own gate is `shadow`,
  * admin-alert-relevance.js). One row per notification per class per Eastern
  * day, so a sweep every ten minutes records a bell once a day, not 144 times.
  * Nothing on the bell changes; this row is the only trace. List them with
@@ -695,8 +695,31 @@ async function auditCardDetailsSynced({ payment_method_row_id, source, changed_f
   });
 }
 
+/**
+ * A customer changed how often we visit for pest control, in the portal
+ * (services/pest-frequency-change.js). The consent record of a price change:
+ * who, from where, and exactly which plan, prices and visits. Critical, and
+ * written in the change's own transaction: a change with no record of the
+ * customer's consent does not commit.
+ */
+async function auditPestFrequencyChange({ customerId, seriesRootId, metadata = {}, ip = null, userAgent = null, trx = null }) {
+  return recordAuditEvent({
+    actor_type: 'customer',
+    actor_id: customerId,
+    action: 'pest_frequency_change',
+    resource_type: 'scheduled_service',
+    resource_id: seriesRootId,
+    metadata,
+    ip_address: ip,
+    user_agent: userAgent,
+    critical: true,
+    trx,
+  });
+}
+
 module.exports = {
   recordAuditEvent,
+  auditPestFrequencyChange,
   auditEstimateExpiredOpen,
   auditEstimateBookingStep,
   auditCardDetailsSynced,

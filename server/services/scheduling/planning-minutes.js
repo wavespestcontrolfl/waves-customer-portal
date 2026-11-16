@@ -129,4 +129,27 @@ function placedVisitMinutes(target, allowanceMinutes, { preserveCapacity = false
   return tableMinutes(target);
 }
 
-module.exports = { PLANNING_MINUTES, plannedWorkMinutes, placedVisitMinutes, planningTableLive };
+/** Planned minutes for the NEW visit a customer books online (the estimate
+ *  page, /book, a text booking), for the travel-gap credit the offer and its
+ *  booking check share (expected-service-minutes.js `newVisit`; owner
+ *  2026-11-09, picker audit option A): every service the table names plans
+ *  at the one-time 45, whatever its plan's cadence. A first visit is a full
+ *  first service; a "Quarterly" label would otherwise read the recurring 35.
+ *  The service's FAMILY decides, never its cadence words: the estimate page's
+ *  label ("Lawn Care (Every 6 weeks)", or a bare "Lawn Care"), a combined
+ *  hold's mix key ('lawn_care') and the hold row's name must all read alike,
+ *  or a booking check could refuse the hour its offer showed. So the name is
+ *  probed as recurring (a one-time lawn visit, which the table does not
+ *  name, stays on the catalog) with engine-key underscores read as spaces.
+ *  Null keeps the catalog: the table not live, a service it does not name,
+ *  or an allowance above the legacy hour (real long work never shrinks). */
+function newVisitMinutes(name, allowanceMinutes) {
+  if (!planningTableLive()) return null;
+  const allowance = Number(allowanceMinutes);
+  if (!(allowance > 0) || allowance > LEGACY_DEFAULT_MINUTES) return null;
+  const family = String(name || '').replace(/_/g, ' ');
+  if (tableMinutes({ service_type: family, is_recurring: true }) == null) return null;
+  return Math.min(PLANNING_MINUTES.oneTimePest, allowance);
+}
+
+module.exports = { PLANNING_MINUTES, plannedWorkMinutes, placedVisitMinutes, newVisitMinutes, planningTableLive };

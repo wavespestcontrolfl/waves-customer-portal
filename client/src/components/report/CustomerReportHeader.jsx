@@ -3,10 +3,10 @@ import './reportTemplate.css';
 // WDO inspections and pre-treatment certificates keep their own paper documents.
 const PAPER_DOCUMENT_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_certificate']);
 
-// GATE_REPORT_SHARED_TEMPLATE: the server adds reportTemplate:true to a live report payload while the
-// gate is on. Absent key = the page as it was before.
-export function sharedReportTemplateActive(data) {
-  if (!data || data.reportTemplate !== true) return false;
+// Every regular customer report on the live web view takes this header and the stacked layout
+// (reportTemplate.css) (owner 2026-10-24). A WDO inspection or a pre-treatment certificate does not.
+export function usesSharedReportTemplate(data) {
+  if (!data) return false;
   return !PAPER_DOCUMENT_TYPES.has(data.projectType || data.typedReport?.type);
 }
 

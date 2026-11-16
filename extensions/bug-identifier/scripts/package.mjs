@@ -13,7 +13,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const archiver = require('archiver');
+// archiver 8 has no factory function: it exports one class per format.
+const { ZipArchive } = require('archiver');
 
 const EXT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const FILES = ['background.js', 'panel.html', 'panel.css', 'panel.js'];
@@ -51,7 +52,7 @@ await mkdir(join(EXT, 'dist'), { recursive: true });
 const zipPath = join(EXT, 'dist', `bug-identifier-${FIREFOX ? 'firefox-' : ''}${manifest.version}.zip`);
 
 const output = createWriteStream(zipPath);
-const archive = archiver('zip', { zlib: { level: 9 } });
+const archive = new ZipArchive({ zlib: { level: 9 } });
 const written = new Promise((resolve, reject) => {
   output.on('close', resolve);
   archive.on('error', reject);

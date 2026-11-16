@@ -1,5 +1,5 @@
 /**
- * services/tax-years (GATE_TAX_RETURN_ENGINE): the strict validation on the
+ * services/tax-years: the strict validation on the
  * year record, the carry-in resolution, and the filed / unfiled guards
  * (database mocked).
  *

@@ -1,6 +1,6 @@
 /**
  * IB resolve_dispatch_alert (IB gap #4): the Dispatch board's single-card Resolve run in process behind a card, dark
- * behind GATE_IB_RESOLVE_DISPATCH_ALERT (needs GATE_IB_PLATFORM). What the card shows (type, text, raised time, visit,
+ * on the platform path (needs GATE_IB_PLATFORM). What the card shows (type, text, raised time, visit,
  * customer, technician, every effect of the Resolve), the refusals (resolved, gone, decision-only, ambiguous or missing
  * selector), pin drift (including drift between the pre-check and the row lock), gate off, admin only, and that the
  * confirmed run calls the SAME shared function the board's route calls (resolveAlertAsDispatcher) once, inside a
@@ -120,8 +120,8 @@ function makeDb() {
 }
 
 function envGate(on) {
-  if (on) { process.env.GATE_IB_RESOLVE_DISPATCH_ALERT = 'true'; process.env.GATE_IB_PLATFORM = 'true'; }
-  else { delete process.env.GATE_IB_RESOLVE_DISPATCH_ALERT; delete process.env.GATE_IB_PLATFORM; }
+  if (on) process.env.GATE_IB_PLATFORM = 'true';
+  else delete process.env.GATE_IB_PLATFORM;
 }
 
 const alert = () => S.tables.dispatch_alerts[0];
@@ -150,14 +150,12 @@ describe('registration', () => {
     expect(DISPATCH_ALERT_TOOLS[0]._sideEffects).toBe(true);
   });
 
-  test('offered on the dispatch page while on; gone with either gate off; never for a technician', () => {
+  test('offered on the dispatch page while the platform path is on; gone with it off; never for a technician', () => {
     const offered = (context) => registry.initialTools(context, { role: 'admin', fullAccess: false }).map((d) => d.name);
     expect(offered('dispatch')).toContain('resolve_dispatch_alert');
     expect(offered('schedule')).toContain('resolve_dispatch_alert');
-    delete process.env.GATE_IB_RESOLVE_DISPATCH_ALERT;
-    expect(offered('dispatch')).not.toContain('resolve_dispatch_alert');
-    envGate(true);
     delete process.env.GATE_IB_PLATFORM;
+    expect(offered('dispatch')).not.toContain('resolve_dispatch_alert');
     expect(registry.allowed(registry.actions.get('resolve_dispatch_alert'), { role: 'admin', context: 'dispatch' })).toBe(false);
     envGate(true);
     expect(registry.allowed(registry.actions.get('resolve_dispatch_alert'), { role: 'technician', context: 'tech' })).toBe(false);
@@ -170,7 +168,7 @@ describe('registration', () => {
 });
 
 describe('gate and login', () => {
-  test('gate off: every call refuses and nothing is written', async () => {
+  test('platform path off: every call refuses and nothing is written', async () => {
     envGate(false);
     expect(await preview()).toMatchObject({ code: 'gate_off' });
     expect(await executeDispatchAlertTool('resolve_dispatch_alert', { alert_id: ALERT, confirmed: true, _verified_dispatch_alert_version: {} }, ADMIN)).toMatchObject({ code: 'gate_off' });

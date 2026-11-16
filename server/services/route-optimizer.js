@@ -40,7 +40,7 @@ const SCHEDULING_TRAVEL_BUDGET_MS = 15 * 60 * 1000;
 // The admin picker's own allowance (best-times chips, GATE_BEST_TIMES_ROAD_TIMES):
 // separate from the one above, so staff picks never spend customer booking's.
 const hintTravelBudget = { resetAt: 0, requests: 0, elements: 0, maxRequests: 240, maxElements: 600 };
-// The staff pickers' route check (GATE_PICKER_ROAD_CHECK) has its own, so it
+// The staff pickers' route check has its own, so it
 // never raises the chips' ceiling. Per process and reset on a deploy, so it
 // only smooths bursts: both are also counted against the durable daily and
 // monthly ceilings (scheduling/picker-road-spend.js). Past it, searches fall
@@ -48,7 +48,7 @@ const hintTravelBudget = { resetAt: 0, requests: 0, elements: 0, maxRequests: 24
 const pickerTravelBudget = { resetAt: 0, requests: 0, elements: 0, maxRequests: 600, maxElements: 1500 };
 
 // How a matrix source asks Google and keys its answers. `traffic: false`
-// (the pickers' later days, GATE_PICKER_ROAD_CHECK): road times without
+// (the staff pickers' later days): road times without
 // traffic (routingPreference TRAFFIC_UNAWARE, Google's Essentials price, half
 // the traffic-aware one); the answer does not depend on the hour, so one
 // lookup per pair of places serves every departure.
@@ -65,7 +65,7 @@ const MATRIX_MODES = {
   },
 };
 
-// `signal` (the staff pickers' request, GATE_PICKER_ROAD_CHECK): once it
+// `signal` (the staff pickers' route check request): once it
 // aborts (the picker closed or searched again), no queued request is sent.
 function createSchedulingTravel({
   maxRequests = 40, maxElements = 800, budgetMs = 6000, fetchImpl = fetch, now = () => Date.now(),
@@ -107,7 +107,8 @@ function createSchedulingTravel({
   function lookupRaw(leg) {
     return results.get(keyFor(leg)) || fallback(leg, apiKey ? 'request_budget' : 'provider_unconfigured');
   }
-  // GATE_DRIVE_CLOCK: a Google leg carries the park minutes, added at read time.
+  // With the drive clock on (drive-time calibration), a Google leg carries the
+  // park minutes, added at read time.
   function lookup(leg) {
     return driveClock.withDriveClockPark(lookupRaw(leg));
   }
@@ -280,8 +281,10 @@ const CALIBRATED_MINUTES_PER_MILE = 2.35;
 // slots with no parking time at all.
 const SAME_PLACE_MILES = 1e-6;
 
-// The calibrated model's minutes for a leg (unrounded). GATE_DRIVE_CLOCK swaps
-// in the GPS-fitted pair (scheduling/drive-clock.js); off = the constants above.
+// The calibrated model's minutes for a leg (unrounded). With drive-time
+// calibration on, the GPS-fitted drive clock pair (scheduling/drive-clock.js)
+// is the model. The constants above are read only with calibration off, by the
+// conservative_model fallback of the scheduling travel provider.
 function calibratedMinutes(miles) {
   if (driveClock.driveClockLive()) return driveClock.driveClockMinutes(miles);
   return CALIBRATED_FIXED_MINUTES + (miles * CALIBRATED_MINUTES_PER_MILE);

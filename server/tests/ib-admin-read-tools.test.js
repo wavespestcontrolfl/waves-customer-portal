@@ -535,11 +535,11 @@ describe('access', () => {
   const action = name => registry.actions.get(name);
   const scope = (extra = {}) => ({ role: 'admin', context: 'customers', fullAccess: true, ...extra });
 
-  test('are offered and allowed only to the owner login with the gate on', () => {
+  test('are offered and allowed to an admin login (owner, or the office login) with the gate on, never to a technician or the tech and estimate rails', () => {
     for (const name of [READ, FIND]) {
       expect(registry.allowed(action(name), scope())).toBe(true);
-      expect(registry.allowed(action(name), scope({ fullAccess: false }))).toBe(false);
-      expect(registry.allowed(action(name), scope({ fullAccess: undefined }))).toBe(false);
+      expect(registry.allowed(action(name), scope({ fullAccess: false }))).toBe(true);
+      expect(registry.allowed(action(name), scope({ fullAccess: undefined }))).toBe(true);
       expect(registry.allowed(action(name), scope({ role: 'technician' }))).toBe(false);
       expect(registry.allowed(action(name), scope({ context: 'tech' }))).toBe(false);
       expect(registry.allowed(action(name), scope({ context: 'agent_estimate' }))).toBe(false);
@@ -551,21 +551,21 @@ describe('access', () => {
     }
   });
 
-  test('discovery finds them for the owner login only, and only with the gate on', () => {
+  test('discovery finds them for an admin login, and only with the gate on', () => {
     const found = discovery => registry.discover({ query: 'read admin screen data endpoint' }, discovery).definitions.map(d => d.name);
     expect(found(scope())).toEqual(expect.arrayContaining([READ]));
-    expect(found(scope({ fullAccess: false }))).not.toContain(READ);
-    expect(found(scope({ fullAccess: false }))).not.toContain(FIND);
+    expect(found(scope({ fullAccess: false }))).toContain(READ);
+    expect(found(scope({ fullAccess: false }))).toContain(FIND);
     process.env.GATE_IB_GENERAL_READ = 'false';
     expect(found(scope())).not.toContain(READ);
     expect(found(scope())).not.toContain(FIND);
   });
 
-  test('no starting tool list carries them for a login without full access, a technician or the tech and estimate rails', () => {
+  test('no starting tool list carries them for a technician or the tech and estimate rails; an admin login without full access (the office login) gets them', () => {
     for (const context of ['customers', 'dashboard', 'ops', 'revenue']) {
       const names = registry.initialTools(context, { role: 'admin', context, fullAccess: false }).map(t => t.name);
-      expect(names).not.toContain(READ);
-      expect(names).not.toContain(FIND);
+      expect(names).toContain(READ);
+      expect(names).toContain(FIND);
     }
     for (const [role, context] of [['technician', 'tech'], ['admin', 'tech'], ['technician', 'customers'], ['admin', 'agent_estimate']]) {
       const names = registry.initialTools(context, { role, context, fullAccess: true }).map(t => t.name);

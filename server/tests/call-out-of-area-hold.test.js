@@ -102,6 +102,46 @@ describe('outOfAreaHoldDisposition', () => {
   ])('%s -> callback_task_created', (_n, extracted, v2Extraction, wavesPromiseRecorded) => {
     expect(outOfAreaHoldDisposition({ extracted, v2Extraction, wavesPromiseRecorded })).toEqual({ disposition: 'callback_task_created', reason: 'out_of_service_area_hold' });
   });
+
+  // 2026-11-09: staff told two callers Waves does not go there; V2 closed both as no_action_needed.
+  describe('a call that ended with nothing to do', () => {
+    const lead = { first_name: 'Pat', lead_quality: 'cold', is_lead: true };
+    const closed = (over = {}) => ({
+      recommended_disposition: 'no_action_needed',
+      scheduling: { status: 'none', follow_up_mentioned: false },
+      service_request: { quote_requested: false, quote_promised: false },
+      ...over,
+    });
+    const NO_ACTION = { disposition: 'no_action_needed', reason: 'out_of_service_area_hold' };
+    const CALLBACK = { disposition: 'callback_task_created', reason: 'out_of_service_area_hold' };
+
+    test('a lead the model closed with no open thread and no promise is no_action_needed', () => {
+      expect(outOfAreaHoldDisposition({ extracted: lead, v2Extraction: closed(), wavesPromiseRecorded: false })).toEqual(NO_ACTION);
+      expect(outOfAreaHoldDisposition({ extracted: lead, v2Extraction: closed() })).toEqual(NO_ACTION);
+    });
+    test('a hot or warm caller on such a call is no_action_needed too (the alert is raised elsewhere)', () => {
+      expect(outOfAreaHoldDisposition({ extracted: { ...lead, lead_quality: 'hot' }, v2Extraction: closed() })).toEqual(NO_ACTION);
+    });
+    test('a recorded Waves promise keeps callback_task_created', () => {
+      expect(outOfAreaHoldDisposition({ extracted: lead, v2Extraction: closed(), wavesPromiseRecorded: true })).toEqual(CALLBACK);
+    });
+    test('a quote promised or requested keeps callback_task_created', () => {
+      expect(outOfAreaHoldDisposition({ extracted: lead, v2Extraction: closed({ service_request: { quote_promised: true } }) })).toEqual(CALLBACK);
+      expect(outOfAreaHoldDisposition({ extracted: lead, v2Extraction: closed({ service_request: { quote_requested: true } }) })).toEqual(CALLBACK);
+      expect(outOfAreaHoldDisposition({ extracted: { ...lead, quote_requested: true }, v2Extraction: closed() })).toEqual(CALLBACK);
+    });
+    test('a hot caller whose call did NOT end with nothing to do keeps callback_task_created', () => {
+      const hot = { ...lead, lead_quality: 'hot' };
+      expect(outOfAreaHoldDisposition({ extracted: hot, v2Extraction: closed({ recommended_disposition: 'callback_task_created' }) })).toEqual(CALLBACK);
+      expect(outOfAreaHoldDisposition({ extracted: hot, v2Extraction: closed({ scheduling: { status: 'none', follow_up_mentioned: true } }) })).toEqual(CALLBACK);
+    });
+    test('no valid V2 extraction keeps the old rule', () => {
+      expect(outOfAreaHoldDisposition({ extracted: lead, v2Extraction: null })).toEqual(CALLBACK);
+    });
+    test('a voicemail keeps the old rule', () => {
+      expect(outOfAreaHoldDisposition({ extracted: lead, v2Extraction: closed({ meta: { is_voicemail: true } }) })).toEqual(CALLBACK);
+    });
+  });
 });
 
 describe('buildOutOfAreaHoldAlert', () => {

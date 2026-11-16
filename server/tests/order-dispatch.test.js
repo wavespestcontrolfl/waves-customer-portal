@@ -543,7 +543,7 @@ test('vendor call outlives a stale park the operator already REVOKED and cancell
   expect(reopen).toMatchObject({ status: 'ordered', closed_at: null });
   expect(auditVendorOrder.mock.calls[0][0].reason).toMatch(/and revoked/);
   expect(notify.mock.calls[0][3].detail).toMatch(/landed after revoke/);
-  expect(notify.mock.calls[0][3].detail).toMatch(/record the revoke again/);
+  expect(notify.mock.calls[0][3].detail).toMatch(/use Record vendor cancellation on the Restock tab again/);
 });
 
 test('request cancelled mid-flight: ledger placed, request back to ordered (receive / revoke can close it), one reconcile bell (Codex r23 P1)', async () => {

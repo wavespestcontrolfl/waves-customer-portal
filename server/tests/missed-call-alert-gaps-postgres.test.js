@@ -33,7 +33,8 @@ jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('missed-call alert gaps on PostgreSQL', () => {
   let database;
   const schema = `call_gaps_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['call_log', 'scheduled_services', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts'];
+  // sms_log, estimates, message_drafts and leads: the contact-close clauses retireCalledBackMissedCalls also runs read them.
+  const tables = ['call_log', 'scheduled_services', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'sms_log', 'estimates', 'message_drafts', 'leads'];
   let now;
   const gateNames = ['missedCallUnknownCallers', 'missedCallEmptyVmCustomer', 'missedCallNoOutcomeCustomer', 'callbackNeedsAnswer', 'missedCallPushCheck'];
   const savedGates = Object.fromEntries(gateNames.map((key) => [key, gates[key]]));

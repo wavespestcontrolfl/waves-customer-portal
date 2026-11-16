@@ -598,6 +598,17 @@ describe('instant meta refresh (reported, never followed)', () => {
     expect(result).toMatchObject({ live_status: 'noindex', refresh_target_url: 'https://www.wavespestcontrol.com/inspections/' });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
+
+  test('checkUrlLiveStatus says which body signal made a soft_404', async () => {
+    const txt = 'https://www.wavespestcontrol.com/llms.txt';
+    const page = 'https://www.wavespestcontrol.com/missing/';
+    const fetchImpl = jest.fn(fetchMap({
+      [txt]: response(200, '# Waves Pest Control\n\n> Pest control in Southwest Florida.\n', { 'content-type': 'text/plain; charset=utf-8' }),
+      [page]: response(200, '<html><head><title>Page Not Found</title></head><body>Page Not Found</body></html>', { 'content-type': 'text/html' }),
+    }));
+    expect(await checkUrlLiveStatus(txt, { fetchImpl })).toMatchObject({ live_status: 'soft_404', non_html: true, soft_not_found: false });
+    expect(await checkUrlLiveStatus(page, { fetchImpl })).toMatchObject({ live_status: 'soft_404', non_html: false, soft_not_found: true });
+  });
 });
 
 describe('soft-404 heading detector (shared with the citation auditor)', () => {

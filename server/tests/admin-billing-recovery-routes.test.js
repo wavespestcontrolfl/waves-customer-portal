@@ -777,6 +777,88 @@ describe('admin billing-recovery routes', () => {
     });
   });
 
+  // Owner 2026-11-06 "fix": an unpaid annual prepay bill covers visits its term
+  // has not stamped yet (a term links its visits only once it is paid).
+  describe('GET /leaks and an unpaid prepay bill', () => {
+    const leakRow = (id, customerId) => ({
+      scheduled_service_id: id, service_record_id: `sr-${id}`, service_type: 'Quarterly Pest Control Service',
+      estimated_price: '117.00', prepaid_amount: '0', completed_at: '2026-11-05', customer_id: customerId,
+      first_name: 'Pat', last_name: 'Example', monthly_rate: '0', waveguard_tier: null,
+    });
+    const rows = [leakRow('ss-1', 'cust-1'), leakRow('ss-2', 'cust-1'), leakRow('ss-3', 'cust-2')];
+    const neverPaid = { id: 'term-1', customer_id: 'cust-1', status: 'payment_pending', prepay_invoice_number: 'WPC-TEST-0646', has_linked_visit: false };
+    const relinked = { id: 'term-2', customer_id: 'cust-2', status: 'payment_pending', prepay_invoice_number: 'WPC-TEST-0647', has_linked_visit: true };
+    const fetchLeaks = () => withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/leaks?days=90`, { headers: { Authorization: 'Bearer admin' } });
+      expect(res.status).toBe(200);
+      return res.json();
+    });
+    const pairs = (list) => list.map((r) => [r.scheduled_service_id, r.prepay_invoice_number]);
+    let bought;
+    afterEach(() => bought?.mockRestore());
+
+    test('names the bill that bought a visit and lists that visit for review, never as a one-click leak', async () => {
+      let termQuery;
+      db.mockImplementation((arg) => {
+        if (typeof arg === 'object' && arg.ss) return makeQB({ rows });
+        if (arg === 'annual_prepay_terms as t') { termQuery = makeQB({ rows: [neverPaid, relinked] }); return termQuery; }
+        throw new Error(`unexpected table ${JSON.stringify(arg)}`);
+      });
+      // ss-2 is past the term's sold count (or its window), so the term did not buy it.
+      bought = jest.spyOn(require('../services/annual-prepay-renewals'), 'termBoughtVisit')
+        .mockImplementation(async (term, visit) => term.id === 'term-1' && visit.id === 'ss-1');
+
+      const body = await fetchLeaks();
+
+      expect(pairs(body.needs_review)).toEqual([['ss-1', 'WPC-TEST-0646']]);
+      expect(pairs(body.leaks)).toEqual([['ss-2', null], ['ss-3', null]]);
+      // the schedule guard's unpaid picks, kept to a bill the Billed elsewhere step accepts
+      expect(termQuery.join).toHaveBeenCalledWith('invoices as inv', 'inv.id', 't.prepay_invoice_id');
+      expect(termQuery.whereIn).toHaveBeenCalledWith('t.customer_id', ['cust-1', 'cust-2']);
+      expect(termQuery.where).toHaveBeenCalledWith('t.status', 'payment_pending');
+      expect(termQuery.whereNotIn).toHaveBeenCalledWith('inv.status', ['void', 'refunded', 'canceled', 'cancelled', 'draft']);
+      expect(termQuery.whereNull).toHaveBeenCalledWith('t.dispute_suspended_at');
+      // A never-linked term counts on the window first activation would give a payment today; a linked one on
+      // its own. Each term is asked only about its own customer's visits.
+      const day = expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/);
+      expect(bought).toHaveBeenCalledWith(neverPaid, { id: 'ss-1', customer_id: 'cust-1' }, db, { projectFirstActivationOn: day, activationWindow: true });
+      expect(bought).toHaveBeenCalledWith(neverPaid, { id: 'ss-2', customer_id: 'cust-1' }, db, { projectFirstActivationOn: day, activationWindow: true });
+      expect(bought).toHaveBeenCalledWith(relinked, { id: 'ss-3', customer_id: 'cust-2' }, db, {});
+      expect(bought).toHaveBeenCalledTimes(3);
+    });
+
+    test('a lookup that fails names no bill for those visits, and the list still loads', async () => {
+      const logger = require('../services/logger');
+      db.mockImplementation((arg) => {
+        if (typeof arg === 'object' && arg.ss) return makeQB({ rows });
+        if (arg === 'annual_prepay_terms as t') return makeQB({ rows: [neverPaid, relinked] });
+        throw new Error(`unexpected table ${JSON.stringify(arg)}`);
+      });
+      bought = jest.spyOn(require('../services/annual-prepay-renewals'), 'termBoughtVisit')
+        .mockImplementation(async (term) => {
+          if (term.id === 'term-1') throw new Error('coverage read failed');
+          return true;
+        });
+
+      const body = await fetchLeaks();
+
+      // one term's coverage failed: its visits keep the plain wording; the other term still names its bill
+      expect(pairs(body.leaks)).toEqual([['ss-1', null], ['ss-2', null]]);
+      expect(pairs(body.needs_review)).toEqual([['ss-3', 'WPC-TEST-0647']]);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('coverage of visit ss-1 by prepay term term-1 could not be read'));
+
+      // the term read itself fails: no bill named anywhere
+      db.mockImplementation((arg) => {
+        if (typeof arg === 'object' && arg.ss) return makeQB({ rows });
+        throw new Error('annual_prepay_terms is unreadable');
+      });
+      const failed = await fetchLeaks();
+      expect(pairs(failed.leaks)).toEqual([['ss-1', null], ['ss-2', null], ['ss-3', null]]);
+      expect(failed.needs_review).toEqual([]);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('unpaid prepay bills could not be read'));
+    });
+  });
+
   test('GET /aging proxies the dashboard outstanding-balances tool', async () => {
     executeDashboardTool.mockResolvedValue({ total_outstanding: 500, aging: { current: 100, days_30: 400, days_60: 0, days_90_plus: 0 } });
     await withServer(async (baseUrl) => {

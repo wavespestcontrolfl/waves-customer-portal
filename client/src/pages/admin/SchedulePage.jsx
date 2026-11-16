@@ -159,7 +159,10 @@ import termiteTreatmentMethods from "../../../../shared/termite-treatment-method
 import AREA_SCOPES from "../../../../shared/treatment-area-scopes.json";
 import legacyCompletionAreas from "../../../../shared/legacy-completion-areas.json";
 import completionMarkerGrammar from "../../../../shared/completion-marker-grammar.json";
-import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
+import { useFeatureFlag, useFeatureFlagReady } from "../../hooks/useFeatureFlag";
+import { AskedTimeBoxLegacy, ToldBadgeLegacy } from "../../components/schedule/DayOnlyPromiseLegacy";
+import { usePropertyReminderAnswer } from "../../components/schedule/useHydratedOfficeService";
+import { askedTimeMoveFields } from "../../components/schedule/dayOnlyPromise";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import useDictationPending from "../../hooks/dictationPending";
 import { Mic, MicOff } from "lucide-react";
@@ -196,6 +199,12 @@ import { NEXT_VISIT_NOTE_MAX, nextVisitNoteFields } from "../../lib/completion-n
 import { rankTechTips, techTipSubtext, techTipSentLabel, pickableTipIds, rotatedTipGroups, techTipYardLine, techTipSourceLabels } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 import { directionsHref } from "../../lib/directionsHref";
+// The marker under "Time on site" on a completed visit (server timeOnSite.evidence).
+const TIME_ON_SITE_SOURCE_LABEL = {
+  gps_measured: "Measured by truck GPS",
+  operator_corrected: "Corrected by hand",
+  not_gps: "Not measured by GPS (closeout time)",
+};
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
@@ -1909,10 +1918,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // rows: actualDuration); the seed doubles as the dirty check so an
   // untouched field never PATCHes.
   const timeOnSiteSeed = (() => {
-    const v = service.serviceTimeMinutes ?? service.actualDuration ?? null;
+    const v = service.timeOnSite?.minutes ?? service.serviceTimeMinutes ?? service.actualDuration ?? null;
     return v != null && Number(v) > 0 ? String(Math.round(Number(v))) : "";
   })();
   const [timeOnSiteMinutes, setTimeOnSiteMinutes] = useState(timeOnSiteSeed);
+  // Where the seeded number came from (server: hand correction, else truck GPS, else the closeout minutes).
+  const timeOnSiteSource = TIME_ON_SITE_SOURCE_LABEL[service.timeOnSite?.evidence] || "";
   const isCompletedVisit =
     String(service.status || "").toLowerCase() === "completed";
   // Terminal rows (completed / cancelled / skipped / no_show) are records,
@@ -1938,6 +1949,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // arrival time — admin chooses per save; default matches the drag-and-drop
   // reschedule modal (no text).
   const [notificationType, setNotificationType] = useState("none");
+  // GATE_DAY_ONLY_PROMISE (flag `day_only_promise`): "Customer asked for this time" for a save that moves the visit,
+  // pre-filled from the stored choice (true = checked). Gate off: no box and no field in the request.
+  const dayOnlyPromiseOn = useFeatureFlag("day_only_promise");
+  const [customerAskedTime, setCustomerAskedTime] = useState(service.customerAskedTime === true);
   // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE, owner ruling
   // 2026-08-28): a DATE change on a recurring visit moves its later sister
   // visits. The server's preview renders as one line under the date, and
@@ -2065,6 +2080,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [addressOptions, setAddressOptions] = useState([]);
   const [addressState, setAddressState] = useState("loading");
   const [selectedPropertyId, setSelectedPropertyId] = useState("");
+  // GATE_DAY_ONLY_PROMISE part E: the 24-hour-reminder answer for the property the save will use (the phone-script hint).
+  const reminder24hOn = usePropertyReminderAnswer(service, selectedPropertyId, dayOnlyPromiseOn);
   // Advisory drive-detour suggestions for the same fixed day — picking a
   // chip only fills the window fields (never saves). A terminal visit's
   // date/window edit is a record correction: there is no route to price,
@@ -3510,6 +3527,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             : undefined,
           ...(selectedPropertyId ? { propertyId: selectedPropertyId } : {}),
           notifyCustomer: notifyOnMove || undefined,
+          // GATE_DAY_ONLY_PROMISE: the office's choice for the new slot; only a moving save with the gate on.
+          ...askedTimeMoveFields(dayOnlyPromiseOn && moveNotifyOffered, customerAskedTime),
           // Collective-move ack — bound to the previewed occurrence set the
           // modal showed (empty when this save is not a collective move).
           ...(comboTogether ? {} : seriesAckPayload(seriesPreview.preview)),
@@ -4892,6 +4911,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               >
                 {customerName}
               </span>{" "}
+              {dayOnlyPromiseOn && (
+                <ToldBadgeLegacy told={service.told} currentDate={service.scheduledDate} colors={D} />
+              )}{" "}
             </div>{" "}
           </div>{" "}
           <div
@@ -6021,6 +6043,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 <div style={{ marginBottom: 14 }}>
                   {" "}
                   <label style={labelStyle}>Time on site (minutes)</label>{" "}
+                  {timeOnSiteSource && timeOnSiteSeed && (
+                    <div
+                      style={{
+                        fontSize: 14,
+                        color: D.muted,
+                        marginBottom: 6,
+                        fontWeight: service.timeOnSite.evidence === "not_gps" ? 400 : 600,
+                      }}
+                    >
+                      {timeOnSiteSource}
+                    </div>
+                  )}{" "}
                   <input
                     type="number"
                     inputMode="numeric"
@@ -6103,6 +6137,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     messages are sent.
                   </div>{" "}
                 </div>
+              )}{" "}
+              {dayOnlyPromiseOn && moveNotifyOffered && (
+                <AskedTimeBoxLegacy id="edit-appt-asked-time" checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={saving} colors={D} style={{ marginBottom: 14 }} slot={{ date: form.scheduledDate, start: form.windowStart, reminder24hOn, originalDate: service.scheduledDate }} />
               )}{" "}
               {moveNotifyOffered && (
                 <div style={{ marginBottom: 14 }}>
@@ -9262,6 +9299,11 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   // Immediate reschedule text — admin chooses per move ('none' | 'sms'),
   // matching the drag-and-drop RescheduleConfirmModal's default of no text.
   const [notificationType, setNotificationType] = useState("none");
+  // GATE_DAY_ONLY_PROMISE (flag `day_only_promise`): "Customer asked for this time" for the new slot, pre-filled from the
+  // stored choice. Gate off: no box and no field in the request.
+  const dayOnlyPromiseOn = useFeatureFlag("day_only_promise");
+  const [customerAskedTime, setCustomerAskedTime] = useState(service.customerAskedTime === true);
+  const askedTimeFields = askedTimeMoveFields(dayOnlyPromiseOn, customerAskedTime);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [showManual, setShowManual] = useState(false);
@@ -9435,6 +9477,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       reasonCode: reason,
       reasonText: notes,
       notifyCustomer,
+      ...askedTimeFields,
       ...seriesAckPayload(seriesConfirm.preview),
     });
   };
@@ -9474,6 +9517,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       reasonCode: reason,
       reasonText: notes,
       notifyCustomer,
+      ...askedTimeFields,
     });
   };
 
@@ -9502,6 +9546,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       reasonCode: reason,
       reasonText: notes,
       notifyCustomer,
+      ...askedTimeFields,
     });
   };
 
@@ -9529,6 +9574,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       setNotes={setNotes}
       notificationType={notificationType}
       setNotificationType={setNotificationType}
+      dayOnlyPromiseOn={dayOnlyPromiseOn}
+      customerAskedTime={customerAskedTime}
+      setCustomerAskedTime={setCustomerAskedTime}
       sending={sending}
       seriesConfirm={seriesConfirm}
       seriesConfirmDate={seriesConfirmDate}
@@ -12446,7 +12494,7 @@ export function CompletionPanel({
   // identically.
   const [offerInspectionCredit, setOfferInspectionCredit] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
-  // First review ask (GATE_REVIEW_FIRST_ASK_LOCK): the server's read that this visit's customer was
+  // First review ask: the server's read that this visit's customer was
   // never asked, and the reason the tech confirmed for turning the box off.
   const [reviewFirstAsk, setReviewFirstAsk] = useState(false);
   const [reviewOptOutReason, setReviewOptOutReason] = useState(null);
@@ -14277,7 +14325,7 @@ export function CompletionPanel({
       // as fail-closed; re-enabling the controls re-fetches.
       setReviewSendPreview(null);
       if (oneTimeRecapOnly) return undefined;
-      // One read still names the first ask (GATE_REVIEW_FIRST_ASK_LOCK), so a box restored off from a
+      // One read still names the first ask, so a box restored off from a
       // draft knows the server will keep that ask on. No poll, and the timing preview stays unknown.
       let gone = false;
       fetchReviewSendPreview().then((data) => {
@@ -14726,12 +14774,9 @@ export function CompletionPanel({
   // empty query reads nothing but the visit): only where /complete keeps the
   // pick, every service but WDO, termite pre-treat and tree, shrub & palm
   // (blogPostAllowedFor). The tree, shrub & palm forms never ask: another
-  // lane owns those completions. Lawn asks only with tips with facts on
-  // (GATE_TECH_TIP_SOURCES, as the tips payload says; owner 2026-10-24,
-  // decision 6).
-  const tipSourcesOn = techTips?.tipSources === true;
-  const blogPostLineExcluded = ["tree_shrub", "palm"].includes(serviceLineForCloseout)
-    || (serviceLineForCloseout === "lawn" && !tipSourcesOn);
+  // lane owns those completions. Lawn asks too (tips with facts, owner
+  // 2026-10-24, decision 6).
+  const blogPostLineExcluded = ["tree_shrub", "palm"].includes(serviceLineForCloseout);
   useEffect(() => {
     setBlogPost(null);
     setBlogPostFrom(null);
@@ -14770,13 +14815,13 @@ export function CompletionPanel({
   const pickTechTips = useCallback((ids) => {
     const added = ids.find((id) => !selectedTipIds.includes(id));
     setSelectedTipIds(ids);
-    const post = added && tipSourcesOn ? techTips?.blogPosts?.[added] : null;
+    const post = added ? techTips?.blogPosts?.[added] : null;
     if (!post || blogPost || blogPostOffer !== "yes") return;
     const tip = [...(techTips.groups || []).flatMap((group) => group.tips || []), ...(techTips.more || [])]
       .find((candidate) => candidate.id === added);
     setBlogPost(post);
     setBlogPostFrom({ id: post.id, label: tip?.label || "" });
-  }, [selectedTipIds, tipSourcesOn, techTips, blogPost, blogPostOffer]);
+  }, [selectedTipIds, techTips, blogPost, blogPostOffer]);
   // A post the technician picks or removes is their own.
   const changeBlogPost = useCallback((post) => {
     setBlogPost(post);
@@ -15358,7 +15403,7 @@ export function CompletionPanel({
         sendSms,
         includePayLink,
         requestReview,
-        // The confirmed "Complaint on site" reason (GATE_REVIEW_FIRST_ASK_LOCK): without it a restored
+        // The confirmed "Complaint on site" reason: without it a restored
         // draft's box re-arms on.
         reviewOptOutReason,
         clientPestRating,
@@ -20274,6 +20319,7 @@ export function CompletionPanel({
               <div style={noteBoxPhotos ? { border: `1px solid ${M.hairline}`, borderRadius: 12, background: M.card, overflow: "hidden" } : undefined}>
               <div style={{ position: "relative" }}>
                 <textarea
+                  data-own-mic="true"
                   value={notes}
                   onChange={handleNotesInput}
                   rows={quickComplete ? 3 : 5}
@@ -20560,7 +20606,6 @@ export function CompletionPanel({
                   value={blogPost}
                   onChange={changeBlogPost}
                   note={blogPostNote}
-                  canChange={tipSourcesOn}
                   disabled={generating || submitting}
                   tokens={{ ink: M.ink, muted: M.ink3, border: M.hairline, card: M.card, font, inputStyle: mInput }}
                 />
@@ -22782,6 +22827,7 @@ export function CompletionPanel({
           <div style={noteBoxPhotos ? { border: `1px solid ${D.border}`, borderRadius: 10, background: D.input, overflow: "hidden" } : undefined}>
           <div style={{ position: "relative" }}>
             <textarea
+              data-own-mic="true"
               value={notes}
               onChange={handleNotesInput}
               rows={quickComplete ? 3 : 5}
@@ -23068,7 +23114,6 @@ export function CompletionPanel({
                   value={blogPost}
                   onChange={changeBlogPost}
                   note={blogPostNote}
-                  canChange={tipSourcesOn}
                   disabled={generating || submitting}
                   tokens={{ ink: D.text, muted: D.muted, border: D.border, card: D.card, inputStyle }}
                 />
@@ -25102,7 +25147,7 @@ function TechTipPicker({
   const ranked = q ? rankTechTips(searchTips, q) : null;
   const lastSent = library?.lastSent || {};
   const conditions = library?.conditions || {};
-  // Tips with facts: what the list was matched to (null with the gate off).
+  // Tips with facts: what the list was matched to (null when the server sent no yard).
   const yardLine = techTipYardLine(library?.yard);
   const inactive = disabled || loading || !!error;
 

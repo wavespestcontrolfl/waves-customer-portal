@@ -87,6 +87,44 @@ describe('My Plan tree & shrub card does not invent the retired quarterly cadenc
   });
 });
 
+describe('My Plan pest card names the plan\'s own cadence', () => {
+  // Dates run from the real clock: the card only needs upcoming recurring pest visits in date order.
+  const dayFromNow = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+  const pestVisit = (daysOut, serviceType) => ({
+    id: `visit-${daysOut}`, date: dayFromNow(daysOut), serviceType, status: 'pending', isRecurring: true, isCallback: false,
+  });
+  const renderPlan = async (upcoming) => {
+    api.getSchedule.mockResolvedValue({ upcoming });
+    api.getNextService.mockResolvedValue({ next: upcoming[0] });
+    render(<MyPlanTab customer={customer} />);
+    await screen.findByText('Included Services');
+  };
+
+  it.each([
+    ['Quarterly Pest Control Service', 'Quarterly (4x)'],
+    ['Bi-Monthly Pest Control Service', 'Bi-Monthly (6x)'],
+    ['Monthly Pest Control Service', 'Monthly (12x)'],
+    // A label that states no cadence keeps the first, as before.
+    ['Pest Control', 'Quarterly (4x)'],
+  ])('a plan of "%s" reads %s, not the catalog\'s first cadence for everyone', async (serviceType, line) => {
+    await renderPlan([pestVisit(20, serviceType), pestVisit(80, serviceType)]);
+    expect(screen.getByRole('button', { name: new RegExp(`${serviceType}\\s*${line.replace(/[()]/g, '\\$&')}`) })).toBeInTheDocument();
+    for (const other of ['Quarterly (4x)', 'Bi-Monthly (6x)', 'Monthly (12x)'].filter((label) => label !== line)) {
+      expect(screen.queryByText(other)).not.toBeInTheDocument();
+    }
+  });
+
+  it('after a frequency change the card names the new plan, not the next visit that stays as booked on the old one', async () => {
+    await renderPlan([
+      pestVisit(5, 'Quarterly Pest Control Service'),
+      pestVisit(35, 'Monthly Pest Control Service'),
+      pestVisit(65, 'Monthly Pest Control Service'),
+    ]);
+    expect(screen.getByRole('button', { name: /Monthly Pest Control Service\s*Monthly \(12x\)/ })).toBeInTheDocument();
+    expect(screen.queryByText('Quarterly (4x)')).not.toBeInTheDocument();
+  });
+});
+
 describe('cancelled visit tracker', () => {
   const cancelledTracker = {
     currentStep: 7,

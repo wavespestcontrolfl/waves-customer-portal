@@ -3,6 +3,7 @@ const { staffEditLockPatch, autoDispatchBoxPatch } = require('../services/auto-d
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { loadGpsOnSiteMinutes, resolveVisitTimeOnSite } = require('../services/visit-time-on-site');
 const { applyAssignable, assertAssignableTechnician, isAssignable, absentTechDays } = require('../services/technician-eligibility');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = require('../services/scheduling/occupancy');
@@ -16,7 +17,6 @@ const { MISTING_SERVICE_CATALOG_KEY: MISTING_SERVICE_KEY, MISTING_REFILL_CATALOG
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
-const { pestReportVoiceLive, pestQuietVisitLive } = require('../config/feature-gates');
 const { specialtyReportVoiceLive, techWorkDaysLive } = require('../config/feature-gates');
 const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive, reserviceAsksLive } = require('../config/feature-gates');
 const { isReserviceVisit } = require('../services/reservice-asks');
@@ -890,6 +890,36 @@ function fastForwardCadenceAnchor(baseDateStr, pattern, rOpts) {
   return anchor >= today ? anchor : today;
 }
 
+// A month cadence puts each visit on the series' own day of a month (the nth
+// weekday in rOpts) and counts the next visit from the MONTH of the latest
+// one. A weekend shift or a holiday nudge can carry a visit over a month end
+// (Sat Feb 27 -> Mon Mar 1; a back shift: Sat Aug 1 -> Fri Jul 31). Counted
+// from the month it landed in, the next monthly visit went to April and March
+// got none, and a back shift made one bimonthly or quarterly gap a month
+// short. Such a visit still fills the slot it was moved from: when the series
+// day of the month before or after is at most MONTH_SLOT_SHIFT_DAYS from the
+// visit's date, that day is its cadence position. Seven days covers a weekend
+// shift and a short closure, and it keeps the next monthly visit 21 or more
+// days after the real date (recurringCandidateTooCloseToAnchor's own floor).
+// A date in the same month as its slot comes back unchanged, as does every
+// other pattern.
+const MONTH_SLOT_SHIFT_DAYS = 7;
+function monthCadenceSlot(dateStr, pattern, rOpts) {
+  if (!MONTH_RECURRENCE_INTERVALS[pattern] && pattern !== 'monthly_nth_weekday') return dateStr;
+  const nth = parseInt(rOpts?.nth, 10);
+  const weekday = parseInt(rOpts?.weekday, 10);
+  if (isNaN(nth) || isNaN(weekday)) return dateStr;
+  const at = parseETDateTime(`${dateStr}T12:00`);
+  if (isNaN(at.getTime())) return dateStr;
+  const { year, month } = etParts(at);
+  for (const offset of [-1, 1]) {
+    const slot = etDateString(etNthWeekdayOfMonth(year, month + offset, nth, weekday));
+    const gap = etDateDiffDays(slot, dateStr);
+    if (gap != null && Math.abs(gap) <= MONTH_SLOT_SHIFT_DAYS) return slot;
+  }
+  return dateStr;
+}
+
 function seriesExtendAnchor(latest, pattern, rOpts) {
   // A "this visit only" exception row (rebooker.dateExceptionStamp) still
   // occupies its ORIGINAL cadence slot — date_exception_cadence_date — even
@@ -909,9 +939,11 @@ function seriesExtendAnchor(latest, pattern, rOpts) {
   // that due date — the night tool never stamps an exception — so the next
   // extension projects from the due date, not the placement; otherwise every
   // hand-off could shift the plan by up to three days, compounding.
+  // A visit a weekend shift or a holiday nudge carried over a month end
+  // keeps the month it was moved from (monthCadenceSlot).
   const latestStr = seriesCadencePosition(latest);
   if (!latestStr) return etDateString();
-  return fastForwardCadenceAnchor(latestStr, pattern, rOpts);
+  return fastForwardCadenceAnchor(monthCadenceSlot(latestStr, pattern, rOpts), pattern, rOpts);
 }
 
 // Compute booster appointment dates for a recurring series. Booster months
@@ -1528,6 +1560,50 @@ function noticeOptions(options = {}, dateStr, startHHMM) {
   return { expectedPhone: options.expectedPhone, stopWide: stopWideMeta(options.stopWideFor, dateStr, startHHMM) };
 }
 
+// GATE_DAY_ONLY_PROMISE part B2: records the office's choice for a visit's NEW slot on the moved row(s): true = "the customer
+// asked for this time" (a set time, never promised as day only), anything else = day only. Gate off: nothing is written, so
+// every UPDATE stays exactly today's. Throws on a failed write (inside a transaction the move fails with it).
+async function recordOfficeMoveIntent(conn, ids, body) {
+  return require('../services/time-promise').recordCustomerAskedTime(conn, ids, body?.customerAskedTime === true);
+}
+
+// GATE_DAY_ONLY_PROMISE part E: stamps each office row with what the customer was told (`told: { level, dayOnly }`, visits of
+// the next 14 days) and the stored "customer asked for this time" choice (`customerAskedTime`), for the visit card and the
+// edit window, plus whether the customer's 24-hour reminder will go out (`reminder24hOn`, for the phone-script hint). ONE bulk read
+// per fact for the whole payload (time-promise.loadOfficeToldFields), never per row. Gate off: no read and
+// no field. A technician's feed is the field view and gets neither. Never throws: a failed read leaves the payload as is.
+async function attachOfficeToldFields(req, rows) {
+  try {
+    if (isTechnicianRequest(req) || !Array.isArray(rows) || !rows.length) return;
+    const fields = await require('../services/time-promise').loadOfficeToldFields(db, rows);
+    for (const row of rows) {
+      const found = fields.get(row.id);
+      if (!found) continue;
+      if (found.customerAskedTime !== undefined) row.customerAskedTime = found.customerAskedTime;
+      if (found.told) row.told = found.told;
+      if (found.reminder24hOn !== undefined) row.reminder24hOn = found.reminder24hOn;
+    }
+  } catch (err) {
+    logger.warn(`[admin-schedule] told fields failed (${err.code || err.name || 'error'})`);
+  }
+}
+
+// GATE_DAY_ONLY_PROMISE part E: { office } for ONE visit (the same fields attachOfficeToldFields stamps on a feed row), or {} with
+// the gate off, for a technician, or when the visit is gone. Never throws: a failed read leaves the reply as it was.
+async function officeFieldsForVisit(id) {
+  try {
+    const timePromise = require('../services/time-promise');
+    if (!timePromise.dayOnlyPromiseOn()) return {};
+    const row = await db('scheduled_services').where({ id }).first('id', 'scheduled_date', 'status');
+    if (!row) return {};
+    const found = (await timePromise.loadOfficeToldFields(db, [row])).get(row.id);
+    return found ? { office: found } : {};
+  } catch (err) {
+    logger.warn(`[admin-schedule] office fields failed (${err.code || err.name || 'error'})`);
+    return {};
+  }
+}
+
 // The operator's line for a reschedule text that reached nobody. The email
 // version goes first (GATE_MOVE_NOTICE_EMAIL): an email that went out is said
 // plainly, so staff do not chase a customer who was told.
@@ -1614,11 +1690,21 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
         .first('service_type')
         .catch(() => null);
       const serviceLabel = AppointmentReminders.smsServiceLabelStored(reminderRow?.service_type || svc.service_type) || 'service';
+      // GATE_DAY_ONLY_PROMISE part B2: a move to another date more than 24.25 h out promises only the new day, unless the
+      // office marked "customer asked for this time" (options.customerAskedTime). Gate off: false, nothing read.
+      const dayMove = require('../services/day-only-move-notice');
+      const dayState = { dayOnly: await dayMove.moveNoticeDayOnly({
+        serviceId, customerId: customer.id, newStartAt: apptTime, oldDate: options.previousDate, newDate: dateStr,
+        intent: require('../services/time-promise').officeMoveIntent(options.customerAskedTime),
+      }) };
+      const noticeSlotMs = dayMove.slotMsOf(apptTime);
       // Built once for every recipient, after the move landed, so the link
       // checks see the new slot.
       const differentTimeLine = await require('../services/reschedule-link').rescheduledTextLine(serviceId, { customerId: customer.id });
       sent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
         const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
+        const dayBody = await dayMove.renderDayRescheduled({ state: dayState, serviceId, customerId: customer.id, firstName, serviceLabel, apptTime });
+        if (dayBody) return dayBody;
         return renderRequiredSmsTemplate('appointment_rescheduled', {
           first_name: firstName,
           service_type: serviceLabel,
@@ -1633,7 +1719,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
           entity_type: 'scheduled_service',
           entity_id: serviceId,
         });
-      }, 'appointment_rescheduled', 'appointment_confirmation', {
+      }, 'appointment_rescheduled', 'appointment_confirmation', dayMove.withDayMeta({
         scheduled_service_id: serviceId,
         ...stopWide,
         // ABA guard input (codex #3609 r48): the slot this notice quotes —
@@ -1644,7 +1730,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
           return at && !Number.isNaN(at.getTime()) ? at.getTime() : undefined;
         })(),
         move_notice_at: noticeAt.toISOString(),
-      }, {
+      }, dayState, noticeSlotMs), {
         // Final recheck at the provider handoff: a concurrent move or a
         // terminal transition (cancel/complete/skip/no-show) means this
         // message is stale — abort; the winning writer owns the messaging.
@@ -1674,6 +1760,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
         error = await rescheduleTextNotSentError(noticeOutcome, {
           kind: 'rescheduled', customerId: customer.id, scheduledServiceId: serviceId, apptTime, serviceLabel,
           arrivalWindow: spokenArrivalWindow(start), notificationEventKey: stopWide.notificationEventKey, noticeAt, sendOutcome: noticeOutcome,
+          ...dayMove.dayOnlyArg(dayState),
         });
       }
     }
@@ -6708,7 +6795,7 @@ router.get('/', async (req, res, next) => {
 
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
     const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
-    // Neighborhood gate-code directory (dark behind GATE_NEIGHBORHOOD_ACCESS):
+    // Neighborhood gate-code directory:
     // the shared entry for a visit whose customer has no gate code. A failed
     // read just shows no fallback.
     let neighborhoodGateByVisit = new Map();
@@ -6717,20 +6804,14 @@ router.get('/', async (req, res, next) => {
     // a pin have a key, so every other row is byte-identical to before.
     let gateWaypointByVisit = new Map();
     // Visits whose stop is in an active neighborhood, when a visit's assigned
-    // technician may add a gate code or mark one wrong
-    // (GATE_NEIGHBORHOOD_TECH_ACTIONS); empty = the field screen offers neither.
+    // technician may add a gate code or mark one wrong;
+    // an empty set = the field screen offers neither.
     let gateActionVisits = new Set();
-    const neighborhoodTechActions = require('../config/feature-gates').neighborhoodTechActionsLive();
-    // GATE_SCHEDULE_ACCESS_CODES: the office schedule draws each row's gate
-    // lines (propertyAlerts) only while this is on; read once per request.
-    const scheduleAccessCodes = require('../config/feature-gates').scheduleAccessCodesLive();
     try {
-      if (require('../config/feature-gates').neighborhoodAccessLive()) {
-        const neighborhoodAccess = require('../services/neighborhood-access');
-        neighborhoodGateByVisit = await neighborhoodAccess.neighborhoodGateEntriesForVisits(db, services);
-        gateWaypointByVisit = await neighborhoodAccess.neighborhoodGateWaypointsForVisits(db, services);
-        if (neighborhoodTechActions) gateActionVisits = await neighborhoodAccess.gateActionVisitIds(db, services);
-      }
+      const neighborhoodAccess = require('../services/neighborhood-access');
+      neighborhoodGateByVisit = await neighborhoodAccess.neighborhoodGateEntriesForVisits(db, services);
+      gateWaypointByVisit = await neighborhoodAccess.neighborhoodGateWaypointsForVisits(db, services);
+      gateActionVisits = await neighborhoodAccess.gateActionVisitIds(db, services);
     } catch (err) {
       logger.warn(`[admin-schedule] neighborhood gate lookup failed (${err.code || err.name || 'error'})`);
     }
@@ -6861,6 +6942,8 @@ router.get('/', async (req, res, next) => {
       deferredPrepayCustomerIds = await require('../services/annual-prepay-renewals')
         .deferredPrepayHoldCustomerIds(db, services.map((s) => s.customer_id));
     } catch { deferredPrepayCustomerIds = null; }
+    // Truck-GPS time on site for the completed visits (one query); the visit card marks its source.
+    const gpsOnSite = await loadGpsOnSiteMinutes(db, services.filter((s) => s.status === 'completed').map((s) => s.id));
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
       // Any-line latest keeps the "Last:" card + new-customer detection
@@ -7206,7 +7289,6 @@ router.get('/', async (req, res, next) => {
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
         ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
-        ...(scheduleAccessCodes ? { scheduleAccessEnabled: true } : {}),
         ...(gateWaypointByVisit.has(s.id) ? { gateWaypoint: gateWaypointByVisit.get(s.id) } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
@@ -7225,6 +7307,10 @@ router.get('/', async (req, res, next) => {
         // With checkInTime/checkOutTime: the drive line finds where the tech is now.
         enRouteAt: s.en_route_at || null,
         actualDuration: s.actual_duration_minutes,
+        // { minutes, evidence }: hand correction, else truck GPS, else actualDuration (evidence 'not_gps').
+        timeOnSite: s.status === 'completed' ? resolveVisitTimeOnSite({
+          adjustedMinutes: s.time_on_site_adjusted_minutes, gpsMinutes: gpsOnSite.get(s.id), fallbackMinutes: s.actual_duration_minutes,
+        }) : null,
         weatherAdvisory: s.weather_advisory,
         isRecurring: s.is_recurring,
         recurringParentId: s.recurring_parent_id || null,
@@ -7358,19 +7444,14 @@ router.get('/', async (req, res, next) => {
       attachStopRain(enriched, date, hourlyByZone);
     } catch { /* rain outlook is optional */ }
 
+    await attachOfficeToldFields(req, enriched);
     stripTechOwnerOnlyMoney(req, enriched);
 
     res.json({
       date, services: enriched,
       visitCloseout: legacyCloseoutEnabled,
-      // GATE_NEW_APPT_ADDRESS_TIMES: New Appointment's time box answers on a new caller's address alone.
-      addressFirstTimes: isEnabled('newApptAddressTimes'),
-      // GATE_NEW_APPT_PHONE_MATCH: New Appointment matches a new caller's phone as it is typed, and one Save adds and books them.
-      newCustomerPhoneMatch: isEnabled('newApptPhoneMatch'),
       // GATE_NEW_CALLER_BOOKING: New Appointment's Book saves a new caller's visit by address, no customer yet.
       newCallerBooking: isEnabled('newCallerBooking'),
-      // GATE_BOARD_OPEN_TIMES: a drag on the Dispatch day or week grid lights the hours that fit the visit.
-      boardOpenTimes: isEnabled('boardOpenTimes'),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
@@ -7904,18 +7985,16 @@ router.get('/week', async (req, res, next) => {
     // (owner 2026-10-24, #6653): the mobile dispatch list and appointment
     // sheet route Directions through it before the house. One lookup for the
     // week; only a visit with a pin gets the key, so every other row is
-    // byte-identical. Dark behind GATE_NEIGHBORHOOD_ACCESS; a failed read
-    // routes plainly.
+    // byte-identical. A failed read routes plainly.
     try {
-      if (require('../config/feature-gates').neighborhoodAccessLive()) {
-        const pins = await require('../services/neighborhood-access').neighborhoodGateWaypointsForVisits(db, weekGateVisits);
-        days.flatMap((day) => day.services).filter((row) => pins.has(row.id))
-          .forEach((row) => { row.gateWaypoint = pins.get(row.id); });
-      }
+      const pins = await require('../services/neighborhood-access').neighborhoodGateWaypointsForVisits(db, weekGateVisits);
+      days.flatMap((day) => day.services).filter((row) => pins.has(row.id))
+        .forEach((row) => { row.gateWaypoint = pins.get(row.id); });
     } catch (err) {
       logger.warn(`[admin-schedule] week gate waypoint lookup failed (${err.code || err.name || 'error'})`);
     }
 
+    await attachOfficeToldFields(req, days.flatMap((day) => day.services));
     stripTechOwnerOnlyMoney(req, days.flatMap((day) => day.services));
     if (isTechnicianRequest(req)) {
       // Coworker absences are the office's view; the caller's own stays.
@@ -8592,14 +8671,13 @@ async function assertNoCallBookingConflict(guard) {
   if (conflict) throw Object.assign(new Error('The phone agent already booked this visit for this customer.'), { callBookingConflict: conflict });
 }
 
-// New Appointment stop order (GATE_NEW_APPT_STOP_ORDER), read at call time. A
-// partial test mock of the gates module reads as off.
-const newApptStopOrderLive = () => {
-  const gates = require('../config/feature-gates');
-  return typeof gates.gateEnvValue === 'function' && !!gates.gateEnvValue('GATE_NEW_APPT_STOP_ORDER');
-};
-
 router.post('/', requireAdmin, scheduleCreateHandler);
+// GATE_DAY_ONLY_PROMISE: the column the office's "customer asked for this time" box writes. True only when the request
+// said exactly true and the column exists; otherwise nothing (NULL = not recorded).
+function askedTimeStamp(cols, customerAskedTime) {
+  return cols.customer_asked_time && customerAskedTime === true ? { customer_asked_time: true } : {};
+}
+
 async function scheduleCreateHandler(req, res, next) {
   try {
     const {
@@ -8614,6 +8692,9 @@ async function scheduleCreateHandler(req, res, next) {
       primaryLinePrice, estimatedPrice, estimatedDuration, urgency, internalNotes, customerNotes, isCallback,
       parentServiceId, sendConfirmationSms, sendTechNotification, sourceEstimateId,
       sendCardOnFileLink,
+      // GATE_DAY_ONLY_PROMISE: the office marked "the customer asked for this time" (a set time). Stored on the created
+      // visits only when the body says exactly true; anything else leaves NULL (not recorded). Changes no response.
+      customerAskedTime,
       // The operator's explicit service address for a multi-property customer
       // (customer_properties.id). Absent → the sole-property anchor below.
       propertyId,
@@ -9552,8 +9633,7 @@ async function scheduleCreateHandler(req, res, next) {
     // The linked estimate as the booking transaction read it under its lock (see assertLockedEstimateAddOns); the preflight copy
     // until that read.
     let lockedLinkedEstimate = linkedEstimate;
-    // Road times for the booked hour (GATE_SAVE_ROAD_BUY; unset = nothing
-    // runs): bought BEFORE the transaction, so the save's route check and
+    // Road times for the booked hour (save road buy): bought BEFORE the transaction, so the save's route check and
     // route number below read the same Google road times the Edit dialog's
     // check does. This is an admin route (requireAdmin): the staff user pays.
     // A parent with a time, a technician and a location only; any refusal,
@@ -9824,6 +9904,7 @@ async function scheduleCreateHandler(req, res, next) {
       if (cols.urgency) insertData.urgency = urgency || 'routine';
       if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
       if (cols.is_callback) insertData.is_callback = resolvedIsCallback || false;
+      Object.assign(insertData, askedTimeStamp(cols, customerAskedTime));
       if (officeCustomerRequest && cols.customer_request && cols.customer_request_source) {
         insertData.customer_request = officeCustomerRequest.text;
         insertData.customer_request_source = officeCustomerRequest.source;
@@ -9997,6 +10078,7 @@ async function scheduleCreateHandler(req, res, next) {
         // operator turns a re-service into a repeating cadence, every future
         // visit must stay free and report as a callback (not bill monthly dues).
         if (cols.is_callback) childData.is_callback = resolvedIsCallback || false;
+        Object.assign(childData, askedTimeStamp(cols, customerAskedTime));
         if (cols.estimated_price) {
           if (zeroCallbackPrice) childData.estimated_price = 0;
           else if (memberSeriesCovered) {
@@ -10091,6 +10173,7 @@ async function scheduleCreateHandler(req, res, next) {
           const boosterRestack = restackLiveVisitFinancials(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
           if (cols.is_callback) boosterData.is_callback = resolvedIsCallback || false;
+          Object.assign(boosterData, askedTimeStamp(cols, customerAskedTime));
           // Booster rows are is_recurring:false — completion treats them as
           // one-off visits that BILL their own price, never as dues-covered
           // plan visits, so the member-series stripping must not touch them:
@@ -10302,16 +10385,13 @@ async function scheduleCreateHandler(req, res, next) {
         });
       }
 
-      // New Appointment stop order (GATE_NEW_APPT_STOP_ORDER, owner 2026-10-26
-      // "OK GO"): like a staff move, number the booked visit's technician day
-      // in the order the route check certifies, so the board and the tech app
-      // list it in its place, not last. The staff writer is a no-op unless
-      // GATE_STAFF_ROUTE_INSERTION is on, runs under a savepoint and never
-      // fails the booking; an unassigned, untimed or shared visit stays as it
-      // was. Recurring children and boosters keep today's behavior.
-      if (newApptStopOrderLive()) {
-        await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: svc.id, source: 'new_appointment', staffSave: true, lateDays: true });
-      }
+      // New Appointment stop order (owner 2026-10-26 "OK GO"): like a staff
+      // move, number the booked visit's technician day in the order the route
+      // check certifies, so the board and the tech app list it in its place,
+      // not last. The staff writer runs under a savepoint and never fails the
+      // booking; an unassigned, untimed or shared visit stays as it was.
+      // Recurring children and boosters keep today's behavior.
+      await require('../services/scheduling/arrival-route').placeMovedVisit(trx, { serviceId: svc.id, source: 'new_appointment', staffSave: true, lateDays: true });
       // Route check (owner 2026-10-29; a no-op when arrival-window routing is
       // off): AFTER the stop-order placement above (the check reads the
       // visit where it is saved, so it must see the placed order), the booked
@@ -11130,6 +11210,8 @@ router.get('/list', async (req, res, next) => {
       ...(s._approximate ? { approximate: true, matchReasons: s._matchReasons } : {}),
     }));
 
+    // GATE_DAY_ONLY_PROMISE part E: the list, and the client search that reads it, open the same edit window as the day feed.
+    await attachOfficeToldFields(req, mapped);
     res.json({
       services: mapped,
       ...(customerSearchFuzzy && search ? { approximateCount: approximateServices.length } : {}),
@@ -11239,6 +11321,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // The visit's real arrival start (no 08:00 fallback) — null for
             // date-only rows, which never get an immediate text.
             let bulkNoticeStart = null;
+            let bulkPreviousDate = null;
             let callFollowUpShiftFrom = null;
             // Collected inside the trx, applied only after a successful commit.
             let liveMoveRow = null;
@@ -11585,8 +11668,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // Route check (owner 2026-10-29; a no-op when arrival-window
                 // routing is off): a row whose slot moved has its technician's
                 // day numbered first in the order the arrival-window check
-                // certifies (inside this transaction; needs
-                // GATE_STAFF_ROUTE_INSERTION too), THEN gets the check Edit's
+                // certifies (inside this transaction), THEN gets the check Edit's
                 // save runs, on the road times the pickers already bought.
                 // Placement first: the check reads the row where it is saved, so
                 // a moved row not yet placed can read late in a stale order.
@@ -11652,6 +11734,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               if (nextDate && (nextDate !== prevDate || normalizeHHMM(nextStart) !== normalizeHHMM(svc.window_start))) {
                 reminderSyncTime = `${nextDate}T${normalizeHHMM(nextStart) || '08:00'}`;
                 bulkNoticeStart = normalizeHHMM(nextStart) || null;
+                bulkPreviousDate = prevDate;
+                // GATE_DAY_ONLY_PROMISE part B2: the office's choice for the new slot, in the moving transaction.
+                await recordOfficeMoveIntent(trx, [id], payload);
               }
             });
             // Tech-facing move notice (tech-visit-notifications.js): this
@@ -11727,7 +11812,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                     .update({ confirmation_sent: false, confirmation_sent_at: null });
                 }
                 if (notifyThisRow) {
-                  const notice = await sendRescheduleNoticeForVisit(id, bulkTargetDate, bulkNoticeStart);
+                  const notice = await sendRescheduleNoticeForVisit(id, bulkTargetDate, bulkNoticeStart, {
+                    previousDate: bulkPreviousDate, customerAskedTime: payload?.customerAskedTime,
+                  });
                   if (!notice.sent) {
                     notificationFailures.push({ id, reason: notice.error || 'reschedule text was not sent' });
                   }
@@ -12319,6 +12406,9 @@ async function comboTargetElapsed(row, changes, newDate, newWindow) {
 }
 
 // 'together': every refusal comes before any write.
+// { customerAskedTime } for a planner body that moves a shared stop, or {} with the gate off (the body stays exactly today's).
+const comboAskedTimeBody = (body) => (require('../services/time-promise').dayOnlyPromiseOn() ? { customerAskedTime: body.customerAskedTime === true } : {});
+
 async function planComboTogetherMove(req, row, changes, shown) {
   const body = req.body;
   const refuse = (status, message, code) => {
@@ -12360,6 +12450,10 @@ async function planComboTogetherMove(req, row, changes, shown) {
     notifyCustomer,
     body: {
       ...(changes.technician ? { technicianId: body.technicianId || null } : {}),
+      // GATE_DAY_ONLY_PROMISE part E: the office's "customer asked for this time" for the stop's new slot. The mover writes it in
+      // each member's own UPDATE (B3), the only write for this move: the per-row edit below never moves (its date and time keys
+      // are removed), so recordOfficeMoveIntent does not fire a second time. Gate off: the planner body is exactly today's.
+      ...comboAskedTimeBody(body),
       expectVisit: { id: shown.id, memberIds: shown.memberIds.map(String), liveCount: shown.liveCount, liveMemberIds: shown.liveMemberIds.map(String) },
     },
     actor,
@@ -12518,7 +12612,7 @@ async function planCollectiveEditDateMove(req) {
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
-        // GATE_SAVE_ROAD_BUY: this route is requireAdmin; the anchor's hour
+        // Save road buy: this route is requireAdmin; the anchor's hour
         // buys its road times before the series transaction.
         ...(req.techRole === 'admin' && req.technicianId ? { roadSpender: req.technicianId } : {}),
         // Never carries grouped partners (refuseCarriedStopInEditMove's
@@ -15248,7 +15342,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         await preloadServiceLocations(db, assignmentPlan?.targetIds || [req.params.id]);
       }
     }
-    // Road times for the saved hour (GATE_SAVE_ROAD_BUY; unset = nothing runs):
+    // Road times for the saved hour (save road buy):
     // bought BEFORE the transaction, so the save's route check and route
     // number read the same Google road times the Edit dialog's slot check
     // does (this route is requireAdmin: the staff user pays). A save that
@@ -16527,7 +16621,10 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
               nextDate,
               updates.window_start !== undefined ? updates.window_start : reminderBefore.window_start,
             );
-            scheduleMoveForNotice = { date: nextDate, start: nextStart || null };
+            scheduleMoveForNotice = { date: nextDate, start: nextStart || null, previousDate: prevDate };
+            // GATE_DAY_ONLY_PROMISE part B2: the office's "customer asked for this time" (or day only) for the new slot,
+            // written in the same transaction that moved the visit. Gate off: nothing is written.
+            await recordOfficeMoveIntent(trx, [req.params.id], req.body);
           }
           // The tech's card covers any slot change — date, start, OR end
           // (the customer reminder above keys on date/start only).
@@ -17782,7 +17879,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           }
         }
       }
-      // Staff route insertion (GATE_STAFF_ROUTE_INSERTION; a no-op when off):
+      // Staff route insertion:
       // an edit that moved this visit (another day, start or technician)
       // numbers its technician's day in the order the save check certified,
       // unless the office typed a new route number (the form sends the stored
@@ -18143,7 +18240,9 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         } catch (e) {
           logger.warn(`[schedule/update-details] reminder cover before reschedule notice failed for ${req.params.id}: ${e.message}`);
         }
-        const notice = await sendRescheduleNoticeForVisit(req.params.id, scheduleMoveForNotice.date, scheduleMoveForNotice.start);
+        const notice = await sendRescheduleNoticeForVisit(req.params.id, scheduleMoveForNotice.date, scheduleMoveForNotice.start, {
+          previousDate: scheduleMoveForNotice.previousDate, customerAskedTime: req.body.customerAskedTime,
+        });
         notificationSent = notice.sent;
         notificationError = notice.error;
       }
@@ -20104,12 +20203,16 @@ async function acquireRecurringSeriesMaintenanceLock(conn, parentId, wait = true
 // share recurring_parent_id but have is_recurring=false; excluded so the
 // next-date math keys off the true cadence. Shared by the maintenance
 // auto-extend and the recurring-alert extend/convert actions so the two
-// anchors can never drift apart again.
-function latestLiveSeriesVisit(conn, parentId) {
-  return conn('scheduled_services')
+// anchors can never drift apart again. `exceptIds` leaves rows out of the
+// search: a frequency change asks for the latest live visit BEFORE the
+// pending ones it may replace (changeSeriesFrequencyWithLocks).
+function latestLiveSeriesVisit(conn, parentId, exceptIds = []) {
+  const query = conn('scheduled_services')
     .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
     .where('is_recurring', true)
-    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    .whereNotIn('status', ['cancelled', 'rescheduled']);
+  if (exceptIds.length) query.whereNotIn('id', exceptIds);
+  return query
     // Order by cadence POSITION, not the raw (possibly moved) date — a "this
     // visit only" exception row occupies date_exception_cadence_date in the
     // series, same as rescheduleSeries.readSiblings (rebooker.js) and
@@ -21235,6 +21338,10 @@ async function runRecurringSeriesMaintenance(conn, svc) {
 // billable-amount gate, checked against this ACTUAL candidate date; omitted
 // (the completion path), the gate is never consulted, byte-identical to
 // before this extraction (owner ruling: warn at completion, don't block it).
+// `opts.minDate` (ET date string), when set, steps past any candidate before
+// it: the lead time of a customer's frequency change (changeSeriesFrequencyWithLocks
+// through topUpRecurringSeriesLocked), so the first visit of the new schedule
+// is never placed a day or two out. Omitted, nothing changes.
 // `opts.normalizeOffHourStart` (bool), when true, floors an off-hour
 // parent.window_start to the hour and recomputes the end from duration for
 // this insert only — topUp's guard against minting a stack of off-hour
@@ -21308,7 +21415,7 @@ async function walkExtensionCandidates(ctx) {
     conn, parent, parentId, cols, opts, latestStr, rOpts, skipParent, dirParent,
     blackoutDates: autoExtendBlackoutDates, existingDates, clashProbeTemplate,
   } = ctx;
-  const { maxDate = null } = opts;
+  const { maxDate = null, minDate = null } = opts;
   // Advance until we find an open date or give up. Each step
   // moves one cadence interval forward from latestStr; capped to
   // avoid runaway loops on degenerate patterns.
@@ -21334,6 +21441,11 @@ async function walkExtensionCandidates(ctx) {
     }
     // Never seed a past-dated visit (+ its reminder) off a stale anchor.
     if (candidate <= etDateString()) {
+      attempt++;
+      continue;
+    }
+    // A frequency change's lead time: no visit nearer than minDate.
+    if (minDate && candidate < minDate) {
       attempt++;
       continue;
     }
@@ -22063,7 +22175,7 @@ function advisoryTryLockAcquired(rawResult) {
   return !!(row && (row.locked === true || row.locked === 't'));
 }
 
-async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } = {}) {
+async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365, minDate } = {}) {
   const cols = await conn('scheduled_services').columnInfo();
   let parent = await conn('scheduled_services').where({ id: parentId }).first();
   if (!parent) return { spawnedVisits: [], skipped: 'not_found' };
@@ -22234,7 +22346,7 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
     // guess — a series can fill partway then stop exactly where billability
     // breaks down, same as running out of horizon or hitting the cap.
     const spawned = await extendSeriesOnceLocked(conn, parent, parentId, cols, parent, {
-      maxDate: effectiveHorizon, checkUnbillable: true, normalizeOffHourStart: true, onSkip,
+      maxDate: effectiveHorizon, minDate, checkUnbillable: true, normalizeOffHourStart: true, onSkip,
     });
     if (!spawned) break;
     spawnedVisits.push(spawned);
@@ -22322,10 +22434,21 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
     throw new Error('topUpRecurringSeries must not be called with an already-open transaction — it registers a reminder for each spawned visit through a FRESH connection right after commit, and a nested savepoint on your transaction would not make its inserts visible outside it. Call with the plain db handle, or drive topUpRecurringSeriesWithLocks/topUpRecurringSeriesLocked yourself inside your own transaction and register reminders after your own commit.');
   }
   const result = await conn.transaction((trx) => topUpRecurringSeriesWithLocks(trx, parentId, opts));
+  await registerExtensionReminders(conn, result.spawnedVisits, 'recurring-topup');
   for (const spawnedVisit of result.spawnedVisits) {
-    // No confirmation SMS (sendConfirmation:false, matching every other
-    // spawned/extended child) and no other customer comms — this only
-    // registers the visit for the existing 72h/24h reminder cron.
+    logger.info(`[recurring-topup] Topped up ongoing plan parent=${parentId} → ${spawnedVisit.scheduledDate}`);
+  }
+  return result;
+}
+
+// The reminder of every visit an extension minted, registered once the
+// minting transaction has COMMITTED (the insert goes through a fresh
+// connection with a foreign key to the new visit). No confirmation SMS
+// (sendConfirmation:false, matching every other spawned/extended child) and
+// no other customer comms — this only registers the visit for the existing
+// 72h/24h reminder cron.
+async function registerExtensionReminders(conn, spawnedVisits, logContext) {
+  for (const spawnedVisit of spawnedVisits) {
     await registerSpawnedVisitReminder({
       scheduledServiceId: spawnedVisit.scheduledServiceId,
       customerId: spawnedVisit.customerId,
@@ -22334,10 +22457,270 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
       serviceType: spawnedVisit.serviceType,
       source: 'recurring_auto_extend',
     });
-    await cancelSpawnedReminderIfVisitTerminal(conn, spawnedVisit.scheduledServiceId, 'recurring-topup');
-    logger.info(`[recurring-topup] Topped up ongoing plan parent=${parentId} → ${spawnedVisit.scheduledDate}`);
+    await cancelSpawnedReminderIfVisitTerminal(conn, spawnedVisit.scheduledServiceId, logContext);
   }
-  return result;
+}
+
+// ---- Frequency change of an ongoing series --------------------------------
+//
+// A customer changes how often we visit (services/pest-frequency-change.js,
+// GATE_PEST_FREQUENCY_CHANGE; owner 2026-11-12). No writer could do this for
+// a plan whose first visit is long past: the Edit-appointment cadence rewrite
+// runs only from the series root and re-dates from the root's own date. This
+// one re-books the plan with the pieces that exist:
+//   1. the template: the new cadence on the root, and the new service and
+//      per-visit price as series template overrides (the stamp a 'following'
+//      edit writes), so every later extension keeps them;
+//   2. the pending visits the new schedule replaces are cancelled as a plan
+//      trim (transitionJobStatus with the notice suppressed, then the
+//      plan-reduction ledger — reconcileRecurringSeriesVisitCount's recipe);
+//   3. the top-up's own loop (topUpRecurringSeriesLocked) books the new
+//      visits to its horizon, counting from the series' latest live visit.
+// Which visits are replaced: all pending ones, so the new cadence counts from
+// the last visit we made. The first pending visit is instead KEPT exactly as
+// booked (its date, its price, its service) when its date is inside the lead
+// time, when its date was agreed (a confirmed visit or a one-off move), when
+// the series has no earlier live visit to count from, or when counting from
+// the last visit would not bring the next visit `soonerByDays` sooner. The
+// new cadence then counts from the kept visit, and no new visit is placed
+// before it or nearer to it than two visits of the cadence may be.
+// No existing visit is moved or re-priced here: a price edit of a live visit
+// belongs to update-details and its invoice locks.
+//
+// Takes the per-parent maintenance lock and the customer-comms fence first,
+// like topUpRecurringSeriesWithLocks, then every pending visit's row
+// (lockPendingSeriesVisits), and runs in the CALLER's transaction.
+// A preview calls it with dryRun and rolls back (the top-up's shadow-run
+// pattern); a dry run cancels with a plain update, because nothing of a real
+// transitionJobStatus is needed in a transaction that never commits. A real
+// change commits and then calls settleSeriesFrequencyChange.
+const FREQUENCY_CHANGE_PATTERNS = new Set(['monthly', 'bimonthly', 'quarterly']);
+const FREQUENCY_CHANGE_NOTE = 'Visit frequency changed: the new schedule replaces this visit';
+
+function frequencyChangeRefusal(code, message, detail = {}) {
+  return Object.assign(httpError(409, message), { code, isOperational: true, ...detail });
+}
+const frequencyChangeBusy = () => frequencyChangeRefusal('VISIT_BUSY_RETRY', 'Another change to a visit of this plan is in progress — try again in a moment.');
+
+// The first date `pattern` gives when it counts from `latest` (a live visit
+// of the series): the extension walk's own steps from the same anchor,
+// without its weekend, blackout and taken-date handling. A planning estimate
+// only, for the keep-or-replace choice; the walk itself places every visit.
+function estimateFirstCadenceDate(latest, pattern, rOpts, minDate) {
+  const anchor = seriesExtendAnchor(latest, pattern, rOpts);
+  const today = etDateString();
+  for (let attempt = 1; attempt <= 12; attempt += 1) {
+    const candidate = nextRecurringDate(anchor, pattern, attempt, rOpts);
+    const usable = candidate > today && candidate >= minDate && !recurringCandidateTooCloseToAnchor(anchor, pattern, candidate);
+    if (usable) return candidate;
+  }
+  return null;
+}
+
+// Whether the first pending visit stays as booked (see the section header).
+function keepsFirstPendingVisit({ first, fromLast, minDate, soonerByDays, hasExceptionColumn }) {
+  const firstDate = dateOnly(first.scheduled_date);
+  const agreedDate = first.status === 'confirmed' || (hasExceptionColumn && first.date_exception === true);
+  return !fromLast || firstDate < minDate || agreedDate || etDateDiffDays(fromLast, firstDate) < soonerByDays;
+}
+
+// Step 0: both locks, then the root read under them, or a refusal.
+async function lockSeriesForFrequencyChange(trx, rootId, pattern, cols) {
+  await acquireRecurringSeriesMaintenanceLock(trx, rootId);
+  const peek = await trx('scheduled_services').where({ id: rootId }).first('customer_id');
+  if (!peek) throw frequencyChangeRefusal('SERIES_CHANGED_RETRY', 'This plan changed while saving — reload and try again.');
+  await lockCustomerComms(trx, peek.customer_id);
+  // Read again under both locks: a merge undo can repoint the root while
+  // this call waited on the comms fence (topUpRecurringSeriesWithLocks).
+  const root = await trx('scheduled_services').where({ id: rootId }).first();
+  if (!root || root.customer_id !== peek.customer_id) {
+    throw frequencyChangeRefusal('SERIES_CHANGED_RETRY', 'This plan changed while saving — reload and try again.');
+  }
+  // An ongoing series root on a month cadence, moving to another one. And the
+  // series template overlay must be live: the new service and price reach
+  // later visits only through it, so without it the plan would keep its old price.
+  const changeable = [
+    root.is_recurring, !root.recurring_parent_id, root.recurring_ongoing === true,
+    FREQUENCY_CHANGE_PATTERNS.has(root.recurring_pattern), FREQUENCY_CHANGE_PATTERNS.has(pattern), pattern !== root.recurring_pattern,
+    !!cols.recurring_template_overrides, isEnabled('editApptPriceServiceScope'),
+  ].every(Boolean);
+  if (!changeable) throw frequencyChangeRefusal('FREQUENCY_CHANGE_UNSUPPORTED', 'This plan cannot change its visit frequency here.');
+  return root;
+}
+
+// The plan's pending visits, each locked FOR UPDATE NOWAIT, in date order.
+// Nothing about them is decided from an unlocked read: the customer's own
+// confirm of a visit (routes/schedule.js) and a staff edit take the visit row,
+// not the series maintenance lock, so a visit read first and locked after
+// could be kept or replaced on a status that changed in between. A caller
+// that reads the plan before changeSeriesFrequencyWithLocks takes these locks
+// first, with the same call (the locks are this transaction's own, so the
+// second call returns the same rows). Contention is a refusal to retry, never
+// a wait: a wait could close a lock cycle with a save that already holds one
+// of these rows.
+async function lockPendingSeriesVisits(trx, rootId) {
+  return trx('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', rootId).orWhere('id', rootId); })
+    .where('is_recurring', true)
+    .whereIn('status', UPCOMING_VISIT_STATUSES)
+    .where('scheduled_date', '>=', etDateString())
+    .orderBy('scheduled_date', 'asc')
+    .orderBy('created_at', 'asc')
+    .forUpdate()
+    .noWait()
+    .catch((err) => { throw err?.code === '55P03' ? frequencyChangeBusy() : err; });
+}
+
+// Step 1: which pending visit stays and which ones the new schedule replaces
+// (the section header's rule), chosen from the locked rows. The replaced ones
+// are then judged for money (guardReplacedVisits).
+async function planReplacedVisits(trx, root, cols, { pattern, minDate, soonerByDays }) {
+  const pending = await lockPendingSeriesVisits(trx, root.id);
+  if (!pending.length) return { kept: null, replaced: [] };
+  const lastEarlier = await latestLiveSeriesVisit(trx, root.id, pending.map((row) => row.id));
+  const fromLast = lastEarlier ? estimateFirstCadenceDate(lastEarlier, pattern, seriesRecurrenceOptions(root), minDate) : null;
+  const keepFirst = keepsFirstPendingVisit({
+    first: pending[0], fromLast, minDate, soonerByDays, hasExceptionColumn: !!cols.date_exception,
+  });
+  const replaced = keepFirst ? pending.slice(1) : pending;
+  // The root carries the cadence and the template every later visit reads,
+  // and a cancelled root fails the series price guard closed: never trim it.
+  if (replaced.some((row) => String(row.id) === String(root.id))) {
+    throw frequencyChangeRefusal('FREQUENCY_CHANGE_UNSUPPORTED', 'This plan cannot change its visit frequency here.');
+  }
+  await guardReplacedVisits(trx, replaced);
+  return { kept: keepFirst ? pending[0] : null, replaced };
+}
+
+// The replaced visits (rows this transaction holds locked), judged for money
+// the way a 'following' re-price guards its siblings
+// (lockAndGuardFollowingSiblings): each visit's invoice-mint lock, tried in id
+// order, then the money check. Every mint path takes the mint lock and then
+// the visit row, so no invoice can be minted for one of these visits between
+// the money check here and its cancel.
+async function guardReplacedVisits(trx, replaced) {
+  if (!replaced.length) return;
+  const ids = replaced.map((row) => String(row.id)).sort();
+  const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+  for (const id of ids) {
+    if (!(await tryAcquireScheduledInvoiceMintLock(trx, id))) throw frequencyChangeBusy();
+  }
+  // liveInvoice: any live invoice refuses, as for a re-price. The schedule
+  // the customer confirmed replaces these visits; none may carry a bill.
+  const [coveredVisit] = await findBillingCoveredVisits(trx, replaced, { liveInvoice: true });
+  if (coveredVisit) {
+    const [coveredId, reason] = coveredVisit;
+    const when = replaced.find((row) => String(row.id) === String(coveredId));
+    throw frequencyChangeRefusal('FREQUENCY_CHANGE_BLOCKED_MONEY', `The ${dateOnly(when.scheduled_date)} visit is ${reason}, so the new schedule cannot replace it.`);
+  }
+  // A /secure card confirmation mid-finish on one of them (the re-price guard's own check).
+  if (await findCompletingCardRequestVisitId(trx, ids)) throw frequencyChangeBusy();
+}
+
+// Step 2: the replaced visits leave the calendar as a plan trim.
+async function cancelReplacedVisits(trx, root, replaced, { actorId, claimToken, dryRun }) {
+  const replacedIds = replaced.map((row) => row.id);
+  if (!replacedIds.length) return;
+  if (dryRun) {
+    await trx('scheduled_services').whereIn('id', replacedIds).update({ status: 'cancelled' });
+    return;
+  }
+  const { transitionJobStatus } = require('../services/job-status');
+  for (const visit of replaced) {
+    await transitionJobStatus({
+      jobId: visit.id,
+      fromStatus: visit.status,
+      toStatus: 'cancelled',
+      transitionedBy: actorId,
+      notes: FREQUENCY_CHANGE_NOTE,
+      trx,
+      // Caller-owned and silent: settleSeriesFrequencyChange adopts exactly
+      // these claims with sendNotification:false. The customer asked for the
+      // new schedule on the screen that showed it.
+      notifyCustomer: 'caller_suppress',
+      cancelNoticeToken: claimToken,
+    });
+  }
+  // A deliberate replacement: on the plan-reduction ledger in the SAME
+  // transaction, so a later replay of one of these cancels can never add
+  // the visit back (recordReseedDeclines).
+  await recordReseedDeclines(trx, {
+    customerId: root.customer_id, rootId: root.id, cancelledIds: replacedIds, reason: 'frequency_change', source: 'frequency_change',
+  });
+}
+
+async function changeSeriesFrequencyWithLocks(trx, rootId, {
+  pattern, templateFields, keepDays, soonerByDays, horizonDays, actorId, claimToken, dryRun,
+}) {
+  const cols = await trx('scheduled_services').columnInfo();
+  const root = await lockSeriesForFrequencyChange(trx, rootId, pattern, cols);
+  const minDate = etDateString(addETDays(parseETDateTime(`${etDateString()}T12:00`), keepDays));
+  const { kept, replaced } = await planReplacedVisits(trx, root, cols, { pattern, minDate, soonerByDays });
+  await cancelReplacedVisits(trx, root, replaced, { actorId, claimToken, dryRun });
+
+  // Step 3: the template. The kept visit takes the new cadence too (a
+  // schedule fact; its date, price and service stay).
+  const patternIds = [rootId, ...(kept ? [kept.id] : [])];
+  await trx('scheduled_services').whereIn('id', patternIds).update({ recurring_pattern: pattern, updated_at: new Date() });
+  await stampRecurringTemplateOverrides(trx, rootId, templateFields, cols);
+
+  // Step 4: the new visits, by the top-up's own loop. None nearer than the
+  // lead time. And none nearer to the kept visit's ACTUAL date than the
+  // cadence allows between two visits (recurringCandidateTooCloseToAnchor's
+  // own threshold): the walk counts from a moved visit's cadence slot
+  // (seriesExtendAnchor), which can sit weeks before the day it was moved to.
+  const keptGapDays = MONTH_RECURRENCE_INTERVALS[pattern] * 21;
+  const afterKept = kept && etDateString(addETDays(parseETDateTime(`${dateOnly(kept.scheduled_date)}T12:00`), keptGapDays));
+  const firstNewDate = afterKept && afterKept > minDate ? afterKept : minDate;
+  const topUp = await topUpRecurringSeriesLocked(trx, rootId, { horizonDays, minDate: firstNewDate });
+  if (!topUp.spawnedVisits.length) {
+    throw frequencyChangeRefusal('FREQUENCY_CHANGE_NOT_PLACED', 'The new schedule could not be booked for this plan.', { skipped: topUp.skipped });
+  }
+  return {
+    rootId,
+    customerId: root.customer_id,
+    fromPattern: root.recurring_pattern,
+    pattern,
+    kept: kept && { id: kept.id, date: dateOnly(kept.scheduled_date) },
+    cancelled: replaced.map((row) => ({ id: row.id, date: dateOnly(row.scheduled_date) })),
+    spawnedVisits: topUp.spawnedVisits,
+    claimToken,
+  };
+}
+
+// The post-commit half of a frequency change: the new visits' reminders, and
+// what cancelling the replaced visits owes (their reminders and notice claims
+// closed with no text, then the cancellation follow-through the plan trim
+// runs). Best-effort per step: the change is committed.
+async function settleSeriesFrequencyChange(change, { actorId = null } = {}) {
+  try {
+    await registerExtensionReminders(db, change.spawnedVisits, 'frequency-change');
+  } catch (e) {
+    logger.error(`[schedule/frequency-change] reminder registration failed for parent ${change.rootId}: ${e.message}`);
+  }
+  const cancelledIds = change.cancelled.map((visit) => visit.id);
+  if (!cancelledIds.length) return;
+  try {
+    const AppointmentReminders = require('../services/appointment-reminders');
+    await AppointmentReminders.handleSeriesCancellation(
+      cancelledIds,
+      cancelledIds[0],
+      { sendNotification: false, scope: 'following', claimToken: change.claimToken },
+    );
+  } catch (e) {
+    logger.error(`[schedule/frequency-change] reminder cleanup failed for replaced visits (${cancelledIds.join(', ')}): ${e.message}`);
+  }
+  try {
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    // linkedChildren: [] — the cancel cascade takes no linked follow-up visit
+    // with it: none was on the screen the customer confirmed (the plan reader
+    // refuses a plan that has one).
+    await runVisitCancellationFollowThrough({
+      targetIds: cancelledIds, actorId, waiveFee: false, reason: FREQUENCY_CHANGE_NOTE, source: 'schedule/frequency-change', linkedChildren: [],
+    });
+  } catch (e) {
+    logger.error(`[schedule/frequency-change] cancellation follow-through failed for replaced visits (${cancelledIds.join(', ')}): ${e.message}`);
+  }
 }
 
 // ---- Post-cancel reseed (owner ruling 2026-09-24) -------------------------
@@ -22905,6 +23288,10 @@ async function readBulkPlanReductionIntent(conn, serviceIds) {
 // commit together — no extra lock is needed for that, and none is taken
 // here (the bulk route's per-row transaction holds no series locks to
 // order against).
+const RESEED_DECLINE_TEXT = {
+  visit_count_trim: 'Recurring plan shortened from Edit appointment — the removed visit will not be added back automatically',
+  frequency_change: 'Visit frequency changed — the new schedule replaces this visit; it will not be added back automatically',
+};
 async function recordReseedDeclines(conn, { customerId, rootId, cancelledIds, batchIds = null, reductionKey = null, reason, source }) {
   const { cancelEpisodeSourceStatus } = require('../services/recurring-series-cancel-reseed');
   const ids = [...new Set((cancelledIds || []).map(String))];
@@ -22930,9 +23317,8 @@ async function recordReseedDeclines(conn, { customerId, rootId, cancelledIds, ba
     action: 'recurring_cancel_reseed_declined',
     // Staff see these in the dashboard's Recent activity feed (the gate does
     // not hide them), so the text says what it means in plain words.
-    description: reason === 'visit_count_trim'
-      ? 'Recurring plan shortened from Edit appointment — the removed visit will not be added back automatically'
-      : `${group.length} visits of one recurring plan cancelled together — treated as a plan reduction; this visit will not be added back automatically`,
+    description: RESEED_DECLINE_TEXT[reason]
+      || `${group.length} visits of one recurring plan cancelled together — treated as a plan reduction; this visit will not be added back automatically`,
     metadata: JSON.stringify({
       cancelled_service_id: id, recurring_parent_id: String(rootId), episode_key: episodeKeyFor(id),
       reason, source, batch_ids: group, reduction_key: key,
@@ -23068,10 +23454,10 @@ async function reseedNewBatchCancels(conn, { ids, source, results, skippedRoots 
 // stamping a reschedule outside the reschedule engine's side effects is not
 // a supported transition here — self-serve/staff reschedule always goes
 // through SmartRebooker), and neither is any value outside the DB's
-// scheduled_services status enum. 'completed' / 'cancelled' / 'no_show' are
-// syntactically valid but redirected to their own routes by the explicit
-// guards just below; every other enum member routes through this handler
-// (the V2 dispatch board's row actions, including Skip, run through here).
+// scheduled_services status enum. 'completed' / 'cancelled' / 'skipped' /
+// 'no_show' are syntactically valid but redirected to their own routes by the
+// explicit guards just below; every other enum member (confirmed, en_route,
+// on_site) routes through this handler.
 // The set lives in services/job-status.js so the sibling dispatch status
 // route enforces the identical closed set (pre-push fallback audit, PR #4673).
 router.put('/:id/status', async (req, res, next) => {
@@ -23121,6 +23507,19 @@ router.put('/:id/status', async (req, res, next) => {
       return res.status(409).json({
         error: 'Cancel visits through the dispatch status route (it owns the series scope and the cancellation follow-through).',
         code: 'USE_DISPATCH_CANCEL',
+      });
+    }
+
+    // ⛔ 'skipped' is not accepted here either (owner decision 2026-11-13).
+    // PUT /admin/dispatch/:id/status is the ONE staff skip writer: it keeps a
+    // skip to the office and to an open plan visit with no invoice, card or
+    // linked visit on it (services/visit-skip.js). This route's skip lost its
+    // last caller with the V2 dispatch cards (#3858); left open, a technician
+    // token could still skip its own visit here, past that rule.
+    if (toStatus === 'skipped') {
+      return res.status(409).json({
+        error: 'Skip a visit from the Cancel appointment window (the dispatch status route owns the skip rule).',
+        code: 'USE_DISPATCH_SKIP',
       });
     }
 
@@ -24372,7 +24771,10 @@ router.get('/:id/series-summary', async (req, res, next) => {
 // membership, whatever its own feed carries.
 router.get('/:id/visit-summary', requireAdmin, async (req, res, next) => {
   try {
-    res.json({ visit: await require('../services/visit-groups').visitSummaryForService(db, req.params.id) });
+    const visit = await require('../services/visit-groups').visitSummaryForService(db, req.params.id);
+    // GATE_DAY_ONLY_PROMISE part E: the office fields (customerAskedTime, told, reminder24hOn) for a visit opened from a row that
+    // does not carry them (month, customer pages, any feed). Gate off: the reply is exactly today's, and nothing more is read.
+    res.json({ visit, ...(await officeFieldsForVisit(req.params.id)) });
   } catch (err) { next(err); }
 });
 
@@ -28017,17 +28419,14 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       ? {
         ...reportPromptContext,
         writerRules: true,
-        pestVoice: pestReportVoiceLive(),
-        pestQuietVisit: pestQuietVisitLive(),
         specialtyVoice: specialtyReportVoiceLive(),
       }
       : reportPromptContext;
     const selectedSystemPrompt = selectReportCopyPrompt(systemPrompt, groundingServiceType, promptContext);
-    // GATE_PEST_QUIET_VISIT trims empty inputs under the one-voice pest prompt,
-    // and GATE_SPECIALTY_REPORT_VOICE the same lines under its one-voice prompt.
+    // The one-voice pest prompt trims empty inputs, and GATE_SPECIALTY_REPORT_VOICE
+    // the same lines under its one-voice prompt.
     const inputLines = observedAndReportedLines({
-      quiet: (promptContext.pestQuietVisit === true && pestVoiceServes(groundingServiceType, promptContext))
-        || specialtyVoiceServes(promptContext),
+      quiet: pestVoiceServes(groundingServiceType, promptContext) || specialtyVoiceServes(promptContext),
       observations: promptObs,
       stationObserved: stationLines.observed,
       interaction: customerInteraction,
@@ -29969,6 +30368,9 @@ module.exports.acquireRecurringSeriesMaintenanceLock = acquireRecurringSeriesMai
 module.exports.topUpRecurringSeries = topUpRecurringSeries;
 module.exports.topUpRecurringSeriesLocked = topUpRecurringSeriesLocked;
 module.exports.topUpRecurringSeriesWithLocks = topUpRecurringSeriesWithLocks;
+module.exports.lockPendingSeriesVisits = lockPendingSeriesVisits;
+module.exports.changeSeriesFrequencyWithLocks = changeSeriesFrequencyWithLocks;
+module.exports.settleSeriesFrequencyChange = settleSeriesFrequencyChange;
 // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — consumed lazily
 // by services/recurring-series-cancel-reseed.js from the four single-visit
 // cancel surfaces, same avoid-a-route-load-cycle reason as above.
@@ -29979,6 +30381,8 @@ module.exports.reseedRecurringSeriesAfterCancelBatch = reseedRecurringSeriesAfte
 // lazily by the IB move_stops_to_day tool so its opt-in customer texts go
 // through the exact same path as update-details and the bulk reschedule.
 module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
+module.exports.recordOfficeMoveIntent = recordOfficeMoveIntent;
+module.exports.attachOfficeToldFields = attachOfficeToldFields;
 // Shared "is money already taken for this visit" guard — the plan-length
 // trim's refusal contract, consumed lazily by the admin-dispatch series
 // cancel so a 'following' / 'series' cancel refuses prepaid visits the same

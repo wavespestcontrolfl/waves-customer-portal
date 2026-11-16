@@ -112,6 +112,37 @@ describe('AppointmentPage upcoming visit', () => {
     expect(screen.queryByText(/no waiting on a whole morning/)).not.toBeInTheDocument();
   });
 
+  it('day-only (GATE_DAY_ONLY_PROMISE): shows the date and "Arrival window: texted the day before", no hour, and the confirm still posts', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(upcomingPayload({
+        appointment: {
+          date: '2026-08-05', windowStart: null, arrivalWindow: null, day_only: true, arrival_note: 'Arrival window texted the day before',
+        },
+      })),
+      post: jsonResponse({ success: true, confirmed: true }),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/Wednesday, August 5/)).toBeInTheDocument();
+    expect(screen.getByText('Arrival window: texted the day before')).toBeInTheDocument();
+    expect(screen.queryByText(/2-hour arrival window/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/no waiting on a whole morning/)).not.toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm this appointment' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Confirm this appointment' })).not.toBeInTheDocument());
+    const posted = fetchMock.mock.calls.find(([, o]) => o?.method === 'POST');
+    // The page holds no hour, so it echoes none; the server fills the visit's current slot in.
+    expect(JSON.parse(posted[1].body)).toEqual({ date: '2026-08-05', windowStart: null, membershipKey: null });
+  });
+
+  it('an older payload (no day_only) with no window shows no day-only note', async () => {
+    stubFetch({ get: jsonResponse(upcomingPayload({ appointment: { date: '2026-08-05', windowStart: null, arrivalWindow: null } })) });
+    renderPage();
+    expect(await screen.findByText(/Wednesday, August 5/)).toBeInTheDocument();
+    expect(screen.queryByText(/texted the day before/)).not.toBeInTheDocument();
+  });
+
   it('names the service in the heading and shows the tech with the tracking promise', async () => {
     stubFetch();
 
@@ -354,6 +385,73 @@ describe('AppointmentPage visit prep photos block', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 
     expect(await screen.findByText('Please try again in a moment.')).toBeInTheDocument();
+  });
+});
+
+describe('AppointmentPage lawn prep card', () => {
+  it('renders nothing when the payload has no lawnPrep key', async () => {
+    stubFetch();
+    renderPage();
+    await screen.findByText(/Wednesday, August 5/);
+    expect(screen.queryByTestId('lawn-prep-card')).not.toBeInTheDocument();
+    expect(screen.queryByText('Before your lawn visit')).not.toBeInTheDocument();
+  });
+
+  it('petsOnFile false: the three lines and an Add your pets link to the portal Pets section', async () => {
+    stubFetch({ get: jsonResponse(upcomingPayload({ lawnPrep: { petsOnFile: false } })) });
+    renderPage();
+    const card = await screen.findByTestId('lawn-prep-card');
+    expect(card).toHaveTextContent('Before your lawn visit');
+    expect(card.querySelectorAll('li')).toHaveLength(3);
+    expect(card).toHaveTextContent('Keep sprinklers off the night before and the morning of your visit. We treat a dry lawn.');
+    expect(card).toHaveTextContent('Mowing due? Mow at least 2 days before your visit, and wait 2 days after.');
+    expect(card).toHaveTextContent('Clear the lawn: toys, hoses, pet bowls and pet waste. Unlock the gate. Keep pets and kids inside while we treat.');
+    expect(card).toHaveTextContent('Tell us about your pets, so we can plan each visit around them.');
+    expect(screen.getByRole('link', { name: 'Add your pets' })).toHaveAttribute('href', '/?tab=property#pets');
+    expect(screen.queryByRole('link', { name: 'Update your pets' })).not.toBeInTheDocument();
+  });
+
+  // Owner 2026-11-14: once the customer has added pets, no pets link before or after the visit.
+  it('petsOnFile true: the three lines and no pets ask or pets link', async () => {
+    stubFetch({ get: jsonResponse(upcomingPayload({ lawnPrep: { petsOnFile: true } })) });
+    renderPage();
+    const card = await screen.findByTestId('lawn-prep-card');
+    expect(card.querySelectorAll('li')).toHaveLength(3);
+    expect(card).toHaveTextContent('Keep pets and kids inside while we treat.');
+    expect(card).not.toHaveTextContent('Your pets');
+    expect(card).not.toHaveTextContent('Tell us about your pets');
+    expect(card.querySelector('a')).toBeNull();
+    expect(document.querySelector('a[href*="#pets"]')).toBeNull();
+  });
+});
+
+describe('AppointmentPage lawn prep card watering line', () => {
+  const LINE = 'On your watering day, use the 12:01 to 4 AM window, not the evening one. A lawn that stays wet all night gets more fungus.';
+
+  it('shows the server-chosen wateringLine as a fourth bullet after the three lines, with or without pets on file', async () => {
+    for (const petsOnFile of [false, true]) {
+      stubFetch({ get: jsonResponse(upcomingPayload({ lawnPrep: { petsOnFile, wateringLine: LINE } })) });
+      const { unmount } = renderPage();
+      const card = await screen.findByTestId('lawn-prep-card');
+      const bullets = [...card.querySelectorAll('li')];
+      expect(bullets).toHaveLength(4);
+      expect(bullets[3]).toHaveTextContent(LINE);
+      expect(bullets[3]).toBe(screen.getByTestId('lawn-prep-watering-line'));
+      expect(bullets[2]).toHaveTextContent('Clear the lawn');
+      unmount();
+    }
+  });
+
+  it('shows no fourth bullet and no hour words when the payload has no wateringLine (or an empty or non-text one)', async () => {
+    for (const lawnPrep of [{ petsOnFile: false }, { petsOnFile: false, wateringLine: '' }, { petsOnFile: false, wateringLine: 42 }]) {
+      stubFetch({ get: jsonResponse(upcomingPayload({ lawnPrep })) });
+      const { unmount } = renderPage();
+      const card = await screen.findByTestId('lawn-prep-card');
+      expect(card.querySelectorAll('li')).toHaveLength(3);
+      expect(screen.queryByTestId('lawn-prep-watering-line')).not.toBeInTheDocument();
+      expect(card).not.toHaveTextContent(/\bAM\b|\bPM\b/);
+      unmount();
+    }
   });
 });
 

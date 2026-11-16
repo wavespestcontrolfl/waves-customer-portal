@@ -18,6 +18,12 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
   ...jest.requireActual('../services/auto-dispatch/eligibility'),
   isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
 }));
+// The reminders-off lock's own reads (auto-dispatch/reminder-off.js) have their own suite:
+// auto-dispatch-reminder-off-lock.test.js. This fake trx does not model them.
+jest.mock('../services/auto-dispatch/reminder-off', () => ({
+  ...jest.requireActual('../services/auto-dispatch/reminder-off'),
+  assertRemindersOn: jest.fn(async () => {}),
+}));
 jest.mock('../services/auto-dispatch/route-tiers', () => ({
   ...jest.requireActual('../services/auto-dispatch/route-tiers'),
   loadReminderFreeze: jest.fn(),

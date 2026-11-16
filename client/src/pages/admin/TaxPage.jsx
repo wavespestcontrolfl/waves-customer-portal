@@ -6896,41 +6896,19 @@ export default function TaxPage() {
         ? new URLSearchParams(window.location.search).get("tab")
         : "overview",
   );
-  // GATE_BANK_IMPORT: the leaf only exists when the server says the gate is
-  // on (status is the one bank-import endpoint that answers while dark).
+  // GATE_BANK_IMPORT: the Bank Import, Inbox, Return, Sales tax and 1099s
+  // leaves only exist when the server says the gate is on (status is the one
+  // bank-import endpoint that answers while dark).
   const [bankImportOn, setBankImportOn] = useState(false);
-  // GATE_TAX_LEDGER (nested under GATE_BANK_IMPORT): the Inbox leaf exists
-  // only when the ledger status says so, so the dark feature fails closed;
-  // /bank-import/ledger/status is the one ledger endpoint that answers while
-  // dark, and a failed read keeps the leaf hidden.
-  const [ledgerOn, setLedgerOn] = useState(false);
-  // GATE_TAX_RETURN_ENGINE (nested under GATE_BANK_IMPORT): the Return leaf
-  // exists only when its status says so; a failed read keeps it hidden.
-  const [returnOn, setReturnOn] = useState(false);
-  // GATE_TAX_WORKSHEETS (nested under GATE_BANK_IMPORT): the Sales tax and 1099s leaves exist only when its status says so; a failed read keeps them hidden.
-  const [worksheetsOn, setWorksheetsOn] = useState(false);
-  const tabGroups = (bankImportOn
+  const tabGroups = bankImportOn
     ? TAX_TAB_GROUPS.map((g) =>
         g.key === "expenses"
-          ? {
-              ...g,
-              tabs: [...g.tabs, "bankimport", ...(ledgerOn ? ["ledger"] : [])],
-            }
-          : g,
+          ? { ...g, tabs: [...g.tabs, "bankimport", "ledger"] }
+          : g.key === "reports"
+            ? { ...g, tabs: [...g.tabs, "return", "salestax", "form1099"] }
+            : g,
       )
-    : TAX_TAB_GROUPS
-  ).map((g) =>
-    g.key === "reports" && (returnOn || worksheetsOn)
-      ? {
-          ...g,
-          tabs: [
-            ...g.tabs,
-            ...(returnOn ? ["return"] : []),
-            ...(worksheetsOn ? ["salestax", "form1099"] : []),
-          ],
-        }
-      : g,
-  );
+    : TAX_TAB_GROUPS;
   const activeGroup =
     tabGroups.find((g) => g.tabs.includes(activeTab)) || tabGroups[0];
   const [dashboard, setDashboard] = useState(null);
@@ -6947,19 +6925,7 @@ export default function TaxPage() {
   }, []);
   useEffect(() => {
     adminFetch("/admin/tax/bank-import/status")
-      .then((s) => {
-        setBankImportOn(!!s?.enabled);
-        if (!s?.enabled) return null;
-        return adminFetch("/admin/tax/bank-import/ledger/status").then((l) =>
-          setLedgerOn(!!l?.enabled),
-        );
-      })
-      .catch(() => {});
-    adminFetch("/admin/tax/return-engine/status")
-      .then((r) => setReturnOn(!!r?.enabled))
-      .catch(() => {});
-    adminFetch("/admin/tax/worksheets/status")
-      .then((r) => setWorksheetsOn(!!r?.enabled))
+      .then((s) => setBankImportOn(!!s?.enabled))
       .catch(() => {});
     loadDashboard();
   }, [loadDashboard]);
@@ -7445,7 +7411,7 @@ export default function TaxPage() {
         </>
       )}
       {activeTab === "rates" && <TaxRatesTab />}
-      {activeTab === "rates" && <SharedBillsPanel />}
+      {activeTab === "rates" && bankImportOn && <SharedBillsPanel />}
       {activeTab === "services" && <ServiceTaxabilityTab />}
       {activeTab === "exemptions" && <ExemptionsTab />}
       {activeTab === "equipment" && <EquipmentTab />}

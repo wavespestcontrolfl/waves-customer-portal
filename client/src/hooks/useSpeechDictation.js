@@ -604,6 +604,23 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // modal closes mid-dictation) so the mic isn't left recording and stale
   // callbacks can't fire against an unmounted notes setter.
   const mountedRef = useRef(true);
+  // Abandon, don't upload: the field is gone. Lets go of a running recorder, its
+  // page guard and the app-wide slot; its clip is never sent. No-op when nothing records.
+  const dropRecorder = useCallback(() => {
+    const recorder = recorderRef.current;
+    if (!recorder) return;
+    unguardRef.current?.();
+    recorder.ondataavailable = null;
+    recorder.onstop = null;
+    recorder.onerror = null;
+    try {
+      recorder.stream?.getTracks?.().forEach((t) => t.stop());
+      recorder.stop();
+    } catch {
+      /* no-op */
+    }
+    recorderRef.current = null;
+  }, []);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -623,23 +640,9 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       }
       liveRef.current?.abort();
       liveRef.current = null;
-      const recorder = recorderRef.current;
-      if (recorder) {
-        // Abandon, don't upload: the field is gone.
-        unguardRef.current?.();
-        recorder.ondataavailable = null;
-        recorder.onstop = null;
-        recorder.onerror = null;
-        try {
-          recorder.stream?.getTracks?.().forEach((t) => t.stop());
-          recorder.stop();
-        } catch {
-          /* no-op */
-        }
-        recorderRef.current = null;
-      }
+      dropRecorder();
     };
-  }, []);
+  }, [dropRecorder]);
 
   // Ends a live SPEECH session for a consumer that has gone busy (e.g. a
   // disabled mic while its field is being rewritten) and drops any result
@@ -660,5 +663,15 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     }
   }, [clearLive]);
 
-  return { listening, supported, toggle, cancel, mode, starting, uploading, liveText };
+  // The field this mic serves is gone while it records (or still opening): stop, send nothing, no
+  // transcription. Unlike cancel(), this also ends a running clip recording (the unmount path, kept mounted).
+  const abandon = useCallback(() => {
+    if (startingRef.current) openingSlotRef.current?.cancel();
+    clearLive();
+    if (!recorderRef.current) return;
+    dropRecorder();
+    if (mountedRef.current) setListening(false);
+  }, [clearLive, dropRecorder]);
+
+  return { listening, supported, toggle, cancel, abandon, mode, starting, uploading, liveText };
 }

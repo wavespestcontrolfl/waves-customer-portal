@@ -1,7 +1,7 @@
 /**
  * External job heartbeat watch — one standing bell per silence EPISODE when an
  * outside daily job has no complete run today (ET) by its due time; closes
- * itself when a complete run lands; nothing when the lane is dark.
+ * itself when a complete run lands.
  */
 let jobRow = null;
 const mockDb = jest.fn(() => {
@@ -13,14 +13,12 @@ const mockDb = jest.fn(() => {
 });
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => true) }));
 jest.mock('../services/admin-alert-episodes', () => ({
   raiseAdminAlertWithReopen: jest.fn(),
   closeAdminAlertKeys: jest.fn(async () => 0),
   openAdminAlertKeys: jest.fn(async () => []),
 }));
 
-const { gateEnvValue } = require('../config/feature-gates');
 const alertEpisodes = require('../services/admin-alert-episodes');
 const { runExternalHeartbeatWatch, EXTERNAL_JOBS, sanitizeError } = require('../services/external-job-heartbeat-watch');
 
@@ -34,7 +32,6 @@ let standing;
 
 beforeEach(() => {
   jest.clearAllMocks();
-  gateEnvValue.mockReturnValue(true);
   jobRow = null;
   standing = new Set();
   alertEpisodes.openAdminAlertKeys.mockImplementation(async () => [...standing]);
@@ -61,20 +58,9 @@ test('registry: first entry is the office Mac appt-sweep due 07:00', () => {
   });
 });
 
-test('gate off -> skipped, no DB read, nothing raised or closed', async () => {
-  gateEnvValue.mockReturnValue(false);
-  const r = await runExternalHeartbeatWatch({ now: AFTER_DUE });
-  expect(r).toEqual({ skipped: true });
-  expect(gateEnvValue).toHaveBeenCalledWith('GATE_EXTERNAL_HEARTBEAT_WATCH');
-  expect(mockDb).not.toHaveBeenCalled();
-  expect(alertEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
-  expect(alertEpisodes.closeAdminAlertKeys).not.toHaveBeenCalled();
-});
-
 test('before 07:00 ET with no row -> nothing raised, nothing closed', async () => {
   standing.add(`${PREFIX}never`);
   const r = await runExternalHeartbeatWatch({ now: BEFORE_DUE });
-  expect(r.skipped).toBe(false);
   expect(r.alerted).toBe(0);
   expect(alertEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   expect(alertEpisodes.closeAdminAlertKeys).not.toHaveBeenCalled();
@@ -149,7 +135,7 @@ test('complete today -> no alert and every open alert of the job is closed', asy
   standing.add(`${PREFIX}never`);
   standing.add(`${PREFIX}2026-10-26T11:00:00.000Z`);
   const r = await runExternalHeartbeatWatch({ now: AFTER_DUE });
-  expect(r).toMatchObject({ skipped: false, alerted: 0, closed: 2 });
+  expect(r).toMatchObject({ alerted: 0, closed: 2 });
   expect(alertEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   expect(alertEpisodes.openAdminAlertKeys).toHaveBeenCalledWith(mockDb, PREFIX);
   expect(alertEpisodes.closeAdminAlertKeys).toHaveBeenCalledTimes(1);

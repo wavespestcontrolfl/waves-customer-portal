@@ -22,7 +22,7 @@ const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
 const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes, selfServeArrivalGraceMinutes } = require('./policy');
-const { zoneRouteDaysLive, gateEnvValue, schedulingPlanMinutesOnly } = require('../../config/feature-gates');
+const { zoneRouteDaysLive, schedulingPlanMinutesOnly } = require('../../config/feature-gates');
 const { readZoneRouteDays } = require('./zone-route-days');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
 const { travelGapEnabled, violatesTravelGap, travelGapConflicts, isHoldStop } = require('./travel-gap');
@@ -100,11 +100,11 @@ function enumerateDates(from, to, { includeWeekends = false } = {}) {
   return dates;
 }
 
-// Staff existing-appointment pickers (and New Appointment's box, a new stop,
-// under GATE_NEW_APPT_ROUTE_TIMES) can use the slack in each promised
+// Staff existing-appointment pickers (and New Appointment's box, a new stop)
+// can use the slack in each promised
 // arrival window. Evaluate every on-the-hour promise against the COMPLETE
 // resulting route, not just the gap between two stored service-end blocks.
-// Staff pickers under GATE_PICKER_ROAD_CHECK (owner 2026-10-26: Google
+// Staff pickers' route check (owner 2026-10-26: Google
 // inside the check, "Next 7 days"; 2026-10-27: "make sure costs are
 // appropriate"): today and the next days (hint-road-times.js roadWindows:
 // traffic-aware for two days, road times without traffic for five) are
@@ -120,7 +120,7 @@ async function preloadRouteLegs(travel, items, collect) {
   }
 }
 
-// GATE_PICKER_ROAD_BAND (owner 2026-10-28 cost plan, step 2: "Google only
+// The road band (owner 2026-10-28 cost plan, step 2: "Google only
 // for near-best hours"): each road day's route buys Google road times only for
 // its hours near its best. The hours are ranked first on what is already known
 // (the road times cached for them, else the model); those within BAND_MINUTES
@@ -177,13 +177,10 @@ function arrivalSlot({ date, tech, dateFrom, windowStart, windowEnd, fit }) {
     route_mode: 'arrival_windows', stops_that_day: fit.arrivals.length - 1,
     latest_start_min: timeToMinutes(windowStart),
     ...(fit.travelSource ? { drive_source: GOOGLE_SOURCES.has(fit.travelSource) ? 'google' : 'estimate' } : {}),
-    // GATE_ROUTE_CHECK_LATE_DAYS: this day's existing stops already arrive late; the hour adds no new late stop.
+    // This day's existing stops already arrive late; the hour adds no new late stop.
     ...(fit.dayAlreadyLate ? { day_already_late: true } : {}),
   };
 }
-
-// GATE_ROUTE_CHECK_LATE_DAYS, read at call time: the enumerator's `lateDays` option, or nothing (byte-identical).
-const lateDayLimits = () => (gateEnvValue('GATE_ROUTE_CHECK_LATE_DAYS') ? { lateDays: true } : {});
 
 async function findArrivalWindowSlots(opts) {
   const { dateFrom, dateTo, durationMinutes = 60, technicianId, topN = 10 } = opts;
@@ -202,10 +199,9 @@ async function findArrivalWindowSlots(opts) {
   // driven on Google or re-checked (the source itself asks Google for
   // nothing until a route preloads through it).
   const roadCheck = opts.pickerRoadCheck === true;
-  // GATE_ROUTE_CHECK_LATE_DAYS (owner 2026-10-29): a day whose existing stops already break an arrival
-  // promise still lists the hours that add no new late stop, flagged day_already_late. Read at call time;
-  // every caller of this finder is a staff or technician list. Off: no limit added, byte-identical.
-  const lateLimits = lateDayLimits();
+  // (Owner 2026-10-29): a day whose existing stops already break an arrival promise still lists the
+  // hours that add no new late stop, flagged day_already_late. Every caller of this finder is a staff
+  // or technician list.
   const roads = require('./hint-road-times');
   const windows = roads.roadWindows();
   const roadTravel = roads.createPickerTravel({ spender: opts.roadSpender, budget: opts.pickerBudget });
@@ -225,7 +221,7 @@ async function findArrivalWindowSlots(opts) {
       // checker, so the ranking simulates the visit being saved, not the
       // one stored.
       const context = await loadArrivalRouteContext({
-        // A new visit (New Appointment, GATE_NEW_APPT_ROUTE_TIMES) is a new
+        // A new visit (New Appointment) is a new
         // stop at the searched address; an existing one loads its saved row.
         ...(opts.arrivalWindow.prospective ? { prospective: opts.arrivalWindow.prospective } : {
           serviceId: opts.arrivalWindow.serviceId, changes: opts.arrivalWindow.changes,
@@ -237,9 +233,9 @@ async function findArrivalWindowSlots(opts) {
         date, technicianId: tech.id, excludeServiceIds: opts.excludeServiceIds, now,
         // Staff callers only (GATE_TECH_START_POINTS; tech-start-point.js).
         startPoints: opts.techStartPoints === true,
-        // GATE_PICKER_ROAD_CHECK: today's route under way continues from
+        // The route check: today's route under way continues from
         // the tech's current stop. `fromActiveStop` asks for that alone, on
-        // the model (the tech Quick Move, GATE_TECH_MOVE_ROUTE_TIMES).
+        // the model (the tech Quick Move).
         fromActiveStop: roadCheck || opts.fromActiveStop === true,
       });
       if (!context) continue;
@@ -248,18 +244,14 @@ async function findArrivalWindowSlots(opts) {
       if (context.target.memberServices && (await require('../technician-capabilities')
         .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices)).length) continue;
       const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
-      routes.push({ date, tech, context, limits: { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES, ...lateLimits } });
+      routes.push({ date, tech, context, limits: { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES, lateDays: true } });
     }
   }
-  // The road days' routes are driven on Google (GATE_PICKER_ROAD_CHECK):
-  // every hour, or only each route's hours near its best (GATE_PICKER_ROAD_BAND).
+  // The road days' routes are driven on Google, only each route's hours near
+  // its best (the road band).
   const onRoads = routes.filter((route) => roadCheck && roads.onRoads(route.date, today, windows));
   onRoads.forEach((route) => { route.context.travel = roadTravel; });
-  if (onRoads.length && gateEnvValue('GATE_PICKER_ROAD_BAND')) await preloadBandLegs(roadTravel, onRoads);
-  else {
-    await preloadRouteLegs(roadTravel, onRoads,
-      (route, legs) => enumerateArrivalPlacements(route.context, { ...route.limits, collectLegs: legs }));
-  }
+  if (onRoads.length) await preloadBandLegs(roadTravel, onRoads);
   for (const route of routes) {
     const { date, tech, context, limits } = route;
     const candidates = enumerateArrivalPlacements(context, limits);
@@ -352,7 +344,7 @@ async function findCapacitySlots(opts) {
         // The van's departure (GATE_AUTO_DISPATCH_DAY_RULES): the night tool
         // passes the Settings time; every other caller keeps 08:00.
         vanDepartureMin: opts.arrivalSearch === true ? opts.departureMinutes : undefined,
-        // The tech Quick Move (GATE_TECH_MOVE_ROUTE_TIMES): today's route
+        // The tech Quick Move: today's route
         // continues from the current stop, as on the non-capacity path above.
         fromActiveStop: opts.fromActiveStop === true,
         ...(opts.arrivalWindow?.serviceId ? {
@@ -1320,6 +1312,10 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
       'scheduled_services.service_type',
       'scheduled_services.service_key_snapshot',
       'scheduled_services.estimated_duration_minutes',
+      // Planning-minute inputs: stopCreditResolver credits a stop the owner
+      // table names at the router's minutes, as the booking check does.
+      'scheduled_services.is_recurring',
+      'scheduled_services.is_callback',
       // Version-2 combined allocations (visit-capacity.js's occupiedRows,
       // the same expansion occupancy.js's shared anchor loader runs) need
       // this to know a row is one member of a summed allocation — without
@@ -1495,7 +1491,7 @@ module.exports = {
     // EXACT same entity shape the offer side does, never a hand-rolled one.
     expandRowsWithCredit,
     capacityNeighbourEntity,
-    // GATE_PICKER_ROAD_BAND: the road days' Google purchase, near each route's best.
+    // The road days' Google purchase, near each route's best.
     preloadBandLegs,
   },
 };

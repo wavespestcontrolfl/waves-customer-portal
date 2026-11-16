@@ -95,6 +95,7 @@ maybeDescribe('portal messages (live Postgres)', () => {
     const threads = await db('conversations').whereIn('customer_id', ids.customers).where({ channel: 'portal' }).pluck('id');
     await db('notifications').whereRaw("title like ? or metadata->>'portalConversationId' = any(?) or recipient_id = any(?)", [`%${RUN}%`, threads, ids.customers]).del();
     await db('conversations').whereIn('id', threads).del();
+    await db('sms_log').whereIn('customer_id', ids.customers).del();
     await db('service_requests').whereIn('id', ids.requests).del();
     await db('agent_sessions').whereIn('id', ids.sessions).del();
     await db('customers').whereIn('id', ids.customers).del();
@@ -554,6 +555,62 @@ maybeDescribe('portal messages (live Postgres)', () => {
     expect(bells[0].detail).toBe('Never mind, Tuesday is better.');
     expect(portalAskPush.pushPortalAsk).not.toHaveBeenCalled();
   });
+
+  // The Messages page promises an answer "usually within one business hour". The late re-ring
+  // (portal-late-rering.js) read chat hand-offs and requests only, so a message nobody answered never rang again.
+  test('an unanswered portal message rings once more after its business hour: not before, not with the gate off, not over a person\'s text, not once the thread is answered, never twice', async () => {
+    const { runPortalLateRering, dueAtFor, STILL_WAITING } = require('../services/portal-late-rering');
+    const { bellEventAt } = require('../services/admin-alert-relevance');
+    const { DONE_CLEARED } = require('../services/notification-service')._private;
+    const cases = { waiting: await customer('Wait'), texted: await customer('Text'), answered: await customer('Done') };
+    const rows = {};
+    for (const [key, c] of Object.entries(cases)) {
+      await PortalMessages.customerPost({ customer: c, body: 'Can you come Friday?' });
+      const [row] = await thread(c.id);
+      const [bell] = await openAdminBells('portalConversationId', row.id);
+      rows[key] = { threadId: row.id, bellId: bell.id, askedAt: bellEventAt(bell), dueAt: dueAtFor(bellEventAt(bell)) };
+    }
+    const bellNow = (key) => db('notifications').where({ id: rows[key].bellId }).first();
+    const stamped = async () => (await Promise.all(Object.keys(rows).map(async (key) => ((await bellNow(key)).metadata.lateReRungAt ? key : null)))).filter(Boolean);
+    const dues = Object.values(rows).map((r) => r.dueAt.getTime());
+    const beforeDue = new Date(Math.min(...dues) - 60 * 1000);
+    const afterDue = new Date(Math.max(...dues) + 60 * 1000);
+
+    // A person texted this customer after their message: reached, so not "still waiting".
+    await db('sms_log').insert({
+      direction: 'outbound', from_phone: '+15555559100', to_phone: cases.texted.phone, customer_id: cases.texted.id,
+      message_body: 'Yes, Friday works.', message_type: 'manual', status: 'delivered', twilio_sid: `SMO${RUN}${randomUUID().slice(0, 8)}`,
+      metadata: JSON.stringify({ human_authored: true }), created_at: new Date(rows.texted.askedAt.getTime() + 60 * 1000),
+    });
+    // The office answered in the portal and the bell is open all the same (a person pressed Reopen on it).
+    await PortalMessages.staffReply({ kind: 'message', id: rows.answered.threadId, body: 'Friday at 9.', actor });
+    await db('notifications').where({ id: rows.answered.bellId }).update(DONE_CLEARED);
+
+    await runPortalLateRering({ now: beforeDue });
+    expect(await stamped()).toEqual([]);
+    process.env.GATE_PORTAL_MESSAGES = 'false';
+    await runPortalLateRering({ now: afterDue });
+    expect(await stamped()).toEqual([]);
+
+    process.env.GATE_PORTAL_MESSAGES = 'true';
+    await db('notifications').where({ id: rows.waiting.bellId }).update({ read_at: new Date() });
+    await runPortalLateRering({ now: afterDue });
+    expect(await stamped()).toEqual(['waiting']);
+    const rung = await bellNow('waiting');
+    expect(rung.body).toBe(`${STILL_WAITING}. They wrote in the portal: “Can you come Friday?”`);
+    expect([rung.read_at, rung.done_at]).toEqual([null, null]);
+    // The same row, still the thread's bell: its identity is intact and the ask stays its boundary.
+    expect(rung.metadata).toMatchObject({
+      customerId: cases.waiting.id, portalConversationId: rows.waiting.threadId, dedupeKey: `portal-message:${rows.waiting.threadId}`,
+      askedAt: rows.waiting.askedAt.toISOString(), lateReRungAt: afterDue.toISOString(), contact: true,
+    });
+
+    // Never a second time, and an answer still closes the bell that rang twice.
+    await runPortalLateRering({ now: new Date(afterDue.getTime() + 3 * 60 * 60 * 1000) });
+    expect((await bellNow('waiting')).created_at.getTime()).toBe(rung.created_at.getTime());
+    await PortalMessages.staffReply({ kind: 'message', id: rows.waiting.threadId, body: 'Yes, Friday at 10.', actor });
+    expect(await openAdminBells('portalConversationId', rows.waiting.threadId)).toHaveLength(0);
+  }, 60000);
 
   test('the office reads the whole thread behind a message item, every body whole', async () => {
     process.env.GATE_PORTAL_INBOX = 'true';

@@ -89,11 +89,7 @@ function effectiveContactPreferences(accountRow, ownRow, { emailAvailable = true
     // An email-only choice with no address on file (the holder removed it)
     // is nothing — the save clears it; a row from before that reads as the
     // default rather than as an option the card no longer offers (codex r6).
-    // So does a text-only report choice from before the contact report text
-    // was switched off — the senders read it the same way (codex r10,
-    // effectiveChannelChoice).
-    const unavailable = (chosen === 'email' && !emailAvailable)
-      || (col === 'service_complete_channel' && chosen === 'sms' && !reportTextLive());
+    const unavailable = chosen === 'email' && !emailAvailable;
     preferences[key] = unavailable ? 'both' : chosen;
   }
   preferences.smsEnabled = own.sms_enabled !== false;
@@ -172,31 +168,12 @@ function contactPrefsLive() {
   }
 }
 
-function reportTextLive() {
-  try {
-    return require('../config/feature-gates').contactReportTextLive();
-  } catch {
-    return false;
-  }
-}
-
 function phoneKey(value) {
   return String(value || '').replace(/\D/g, '').slice(-10);
 }
 
 function columnForEmailEvent(eventType) {
   return EMAIL_EVENT_COLUMN[String(eventType || '')] || null;
-}
-
-// The delivery choice a stored row means TODAY. A text-only service-report
-// choice exists only while the contact report text (GATE_CONTACT_REPORT_TEXT)
-// does: the route refuses a new one with the gate off, and one stored before
-// a rollback reads as the default — otherwise the gate flip would end both of
-// that contact's report legs at once (codex #6363 r10 P2).
-function effectiveChannelChoice(row, column) {
-  const chosen = CHANNEL_COLUMN_FOR[column] ? row[CHANNEL_COLUMN_FOR[column]] : null;
-  if (column === 'service_completed' && chosen === 'sms' && !reportTextLive()) return 'both';
-  return chosen;
 }
 
 // Pure: does this contact's row allow `column` (a purpose; null = a purpose
@@ -207,7 +184,7 @@ function contactAllows(row, column, channel = 'sms') {
   if (channel === 'email' && row.email_enabled === false) return false;
   if (!column) return true;
   if (row[column] === false) return false;
-  const chosen = effectiveChannelChoice(row, column);
+  const chosen = CHANNEL_COLUMN_FOR[column] ? row[CHANNEL_COLUMN_FOR[column]] : null;
   if (chosen === 'sms' && channel === 'email') return false;
   if (chosen === 'email' && channel === 'sms') return false;
   return true;

@@ -84,23 +84,17 @@ describe('contactAllows (pure)', () => {
     expect(ContactPrefs.contactAllows({ en_route_channel: null }, 'tech_en_route', 'email')).toBe(true);
   });
 
-  test('a text-only service-report choice exists only while the contact report text does: gate off, it reads as the default and the email leg stays (codex r10)', () => {
+  test('a text-only service-report choice holds the email leg like every other purpose', () => {
     const row = { service_complete_channel: 'sms' };
-    delete process.env.GATE_CONTACT_REPORT_TEXT;
-    expect(ContactPrefs.contactAllows(row, 'service_completed', 'email')).toBe(true);
-    expect(ContactPrefs.contactAllows(row, 'service_completed', 'sms')).toBe(true);
-    // Every other purpose keeps its text-only choice; so does the report with the gate on.
-    expect(ContactPrefs.contactAllows({ en_route_channel: 'sms' }, 'tech_en_route', 'email')).toBe(false);
-    process.env.GATE_CONTACT_REPORT_TEXT = 'true';
     expect(ContactPrefs.contactAllows(row, 'service_completed', 'email')).toBe(false);
-    delete process.env.GATE_CONTACT_REPORT_TEXT;
+    expect(ContactPrefs.contactAllows(row, 'service_completed', 'sms')).toBe(true);
+    expect(ContactPrefs.contactAllows({ en_route_channel: 'sms' }, 'tech_en_route', 'email')).toBe(false);
   });
 
   test('effectiveContactPreferences overlays the contact\'s row on the account\'s: holder-off reads off and locked; unavailable channel choices read as the default', () => {
     const own = { tech_en_route: false, en_route_channel: 'sms', tech_arrived_channel: 'email', service_complete_channel: 'sms', sms_enabled: false };
-    delete process.env.GATE_CONTACT_REPORT_TEXT;
     const { preferences, accountOff } = ContactPrefs.effectiveContactPreferences({ service_reminder_72h: false }, own, { emailAvailable: false });
-    expect(preferences).toMatchObject({ serviceReminder72h: false, techEnRoute: false, appointmentConfirmation: true, enRouteChannel: 'sms', techArrivedChannel: 'both', serviceCompleteChannel: 'both', smsEnabled: false, emailEnabled: true });
+    expect(preferences).toMatchObject({ serviceReminder72h: false, techEnRoute: false, appointmentConfirmation: true, enRouteChannel: 'sms', techArrivedChannel: 'both', serviceCompleteChannel: 'sms', smsEnabled: false, emailEnabled: true });
     expect(accountOff).toMatchObject({ serviceReminder72h: true, techEnRoute: false });
     expect(ContactPrefs.effectiveContactPreferences(null, null).preferences.enRouteChannel).toBe('both');
     expect(ContactPrefs.contactPrefPatchFromBody({ techEnRoute: false, enRouteChannel: 'email', smsEnabled: true, unknown: 1 }))
@@ -178,14 +172,9 @@ describe('filterReportEmailRecipientsByContactPrefs (service-report email)', () 
       { customer_id: 'cust-1', phone_key: '9415550202', service_completed: false },
       { customer_id: 'cust-1', phone_key: '9415550303', service_complete_channel: 'sms' },
     ];
-    // A text-only report choice holds the email only while the contact
-    // report text exists (codex r10): with it off the choice reads as the
-    // default and Terry's email stays.
-    process.env.GATE_CONTACT_REPORT_TEXT = 'true';
+    // A text-only report choice holds the email.
     const kept = await ContactPrefs.filterReportEmailRecipientsByContactPrefs(reportRecipients, CUSTOMER);
     expect(kept.map((r) => r.role)).toEqual(['primary']);
-    delete process.env.GATE_CONTACT_REPORT_TEXT;
-    expect((await ContactPrefs.filterReportEmailRecipientsByContactPrefs(reportRecipients, CUSTOMER)).map((r) => r.role)).toEqual(['service_contact_2', 'primary']);
   });
 
   test('an email-only slot (no phone, so no row) and a slot with no row pass through', async () => {

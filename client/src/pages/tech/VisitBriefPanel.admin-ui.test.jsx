@@ -58,6 +58,54 @@ describe('open visit screen — admin look', () => {
     expect(onLead).toHaveBeenCalledWith(SERVICE);
   });
 
+  it('shows the Estimate button next to the flag only when the estimate tool handler is given', () => {
+    renderVisit();
+    expect(screen.queryByRole('button', { name: 'Estimate' })).not.toBeInTheDocument();
+    cleanup();
+    const onEstimate = vi.fn();
+    renderVisit({ onEstimate });
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate' }));
+    expect(onEstimate).toHaveBeenCalledWith(SERVICE);
+  });
+
+  // The estimate tool quotes through a visit the server still calls his. On a grouped stop the one button belongs to the
+  // first member that is not skipped, cancelled, rescheduled or a no-show; a completed member still counts.
+  describe('which service the Estimate button quotes through', () => {
+    const member = (id, status) => ({ ...SERVICE, id, status });
+    const groupedVisit = (services) => {
+      const grouped = { ...stop, isVisit: true, services, primary: services.find((s) => s.status === 'confirmed') || services[0], liveCount: services.length };
+      const onEstimate = vi.fn();
+      render(<VisitBriefPanel stop={grouped} detail={detail} onPhotos={() => {}} onProject={() => {}} onZone={() => {}} onLead={() => {}} onEstimate={onEstimate} />);
+      return onEstimate;
+    };
+
+    it.each([['skipped'], ['no_show'], ['cancelled'], ['canceled'], ['rescheduled']])('a first member that is %s is passed over', (dead) => {
+      const live = member('visit-live', 'confirmed');
+      const onEstimate = groupedVisit([member('visit-dead', dead), live]);
+      const buttons = screen.getAllByRole('button', { name: 'Estimate' });
+      expect(buttons).toHaveLength(1);
+      fireEvent.click(buttons[0]);
+      expect(onEstimate).toHaveBeenCalledWith(live);
+    });
+
+    it('a completed first member is still quoted through', () => {
+      const done = member('visit-done', 'completed');
+      const onEstimate = groupedVisit([done, member('visit-live', 'confirmed')]);
+      fireEvent.click(screen.getByRole('button', { name: 'Estimate' }));
+      expect(onEstimate).toHaveBeenCalledWith(done);
+    });
+
+    it('no member the server would accept: no Estimate button', () => {
+      groupedVisit([member('visit-a', 'skipped'), member('visit-b', 'no_show')]);
+      expect(screen.queryByRole('button', { name: 'Estimate' })).not.toBeInTheDocument();
+    });
+
+    it('the list matches the server scope rule', async () => {
+      const { DEAD_ASSIGNMENT_STATUSES } = await import('./routeStops');
+      expect([...DEAD_ASSIGNMENT_STATUSES].sort()).toEqual(['canceled', 'cancelled', 'no_show', 'rescheduled', 'skipped']);
+    });
+  });
+
   it('uses line icons, not emoji, on every action and contact button', () => {
     renderVisit({ onOutcome: vi.fn() });
     const panel = screen.getByTestId('visit-brief-panel');

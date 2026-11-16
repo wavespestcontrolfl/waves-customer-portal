@@ -23,7 +23,6 @@ const LOCAL = (() => { try { return ['localhost', '127.0.0.1', '[::1]'].includes
   let customerId;
 
   beforeAll(async () => {
-    process.env.GATE_IB_RESOLVE_DISPATCH_ALERT = 'true';
     process.env.GATE_IB_PLATFORM = 'true';
     db = require('../models/db');
     ({ executeDispatchAlertTool } = require('../services/intelligence-bar/dispatch-alert-tools'));
@@ -37,7 +36,6 @@ const LOCAL = (() => { try { return ['localhost', '127.0.0.1', '[::1]'].includes
   });
 
   afterAll(async () => {
-    delete process.env.GATE_IB_RESOLVE_DISPATCH_ALERT;
     delete process.env.GATE_IB_PLATFORM;
     if (!db) return;
     if (created.alerts.length) await db('dispatch_alerts').whereIn('id', created.alerts).del();

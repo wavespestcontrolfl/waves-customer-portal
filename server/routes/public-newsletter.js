@@ -18,7 +18,7 @@ const {
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 const {
-  subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE,
+  subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE, whereOptOutNeedsWrite, hasLiveConfirmation,
   WAITLIST_SOURCE, applyWaitlistTags,
 } = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
@@ -110,9 +110,8 @@ router.post('/unsubscribe/:token', async (req, res) => {
     // token correctly matches nothing.
     let unsubRows = [];
     if (isUuid) {
-      unsubRows = await db('newsletter_subscribers')
-        .where({ unsubscribe_token: req.params.token })
-        .whereNot({ status: 'unsubscribed' })
+      unsubRows = await whereOptOutNeedsWrite(db('newsletter_subscribers')
+        .where({ unsubscribe_token: req.params.token }))
         .update({
           status: 'unsubscribed',
           unsubscribed_at: new Date(),
@@ -167,7 +166,9 @@ router.get('/unsubscribe/:token', async (req, res) => {
     // rejects HTML-special characters.
     const email = sub ? escapeHtml(sub.email) : '';
     let heading; let bodyHtml;
-    if (sub?.status === 'unsubscribed') {
+    // An unsubscribed row that holds a live re-signup token (sweep #7765 B5)
+    // still gets the form: the POST revokes that emailed confirmation link.
+    if (sub?.status === 'unsubscribed' && !hasLiveConfirmation(sub)) {
       heading = "You're already unsubscribed.";
       bodyHtml = `<p>No more newsletters will be sent${email ? ` to <span class="email">${email}</span>` : ' to this address'}.</p>`;
     } else if (sub) {
@@ -445,6 +446,9 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
       source: req.body.source || 'public_form',
       strict: true,
       requireConfirmation: true,
+      // Anonymous form: repeat submits are throttled and an opted-out row
+      // stays opted out until the emailed link is clicked (sweep #7765 B5).
+      publicSignup: true,
     });
 
     // Out-of-area waitlist signups carry zip/city tags so the office can see
@@ -467,7 +471,9 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
     // can't be used as an enumeration oracle to learn which addresses are
     // confirmed subscribers. We still only SEND a confirmation email when the
     // row is genuinely pending; an already-active address is a silent no-op
-    // and an attacker can't tell the two apart from the response.
+    // and an attacker can't tell the two apart from the response. A repeat
+    // submit inside the resend cooldown ('confirmation_throttled') sends
+    // nothing and answers the same way.
     if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
       try {
         await sendConfirmationEmail(result.subscriber);

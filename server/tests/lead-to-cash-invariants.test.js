@@ -45,6 +45,7 @@ jest.mock('../config/completion-lane-registry', () => ({
   classifyCatalogRow: jest.fn(),
 }));
 jest.mock('../services/closeout-status', () => ({ getCloseoutStatus: jest.fn() }));
+jest.mock('../services/new-recurring-welcome-sms', () => ({ findFirstPlansWithoutWelcome: jest.fn(), WELCOME_AUDIT_WINDOW_DAYS: 14, WELCOME_AUDIT_GRACE_HOURS: 3 }));
 jest.mock('../services/customer-properties', () => ({
   customersWithStreetLineHoldingLocality: jest.fn(), customersWithUnpinnedSavedAddress: jest.fn(), customersWithIncompleteAddress: jest.fn(),
 }));
@@ -423,6 +424,14 @@ describe('detector adapters', () => {
     expect(out.count).toBe(1);
     expect(out.ids).toEqual([`[truncated: 7 completed visit(s) beyond the ${CLOSEOUT_VISIT_CAP}-visit cap were not evaluated]`]);
     expect(out.detail).toMatchObject({ checked: CLOSEOUT_VISIT_CAP, truncated: true });
+  });
+
+  test('new_plan_without_welcome delegates to the welcome service audit and lists customer ids only', async () => {
+    const welcome = require('../services/new-recurring-welcome-sms');
+    welcome.findFirstPlansWithoutWelcome.mockResolvedValueOnce(['cust-1', 'cust-2']);
+    const out = await byKey('new_plan_without_welcome').run({ now: NOW });
+    expect(welcome.findFirstPlansWithoutWelcome).toHaveBeenCalledWith(NOW);
+    expect(out).toEqual({ count: 2, ids: ['cust-1', 'cust-2'], detail: { windowDays: 14, graceHours: 3 } });
   });
 
   test('completion-record predicates are registered one adapter each and delegate by key', async () => {

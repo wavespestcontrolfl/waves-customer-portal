@@ -10,7 +10,8 @@
  * W-2 card, per year:
  *   paid hours   = paid_hours_per_week x 52
  *   wages        = the card's hourly_wage x paid hours (a card made before cards kept a
- *                  wage reads technicians.pay_rate, which is not dated)
+ *                  wage reads technicians.pay_rate as it stood in the pay week of the date
+ *                  asked for: payroll-rate-steps.js keeps what a pay rate step replaced)
  *   health money = health_money_monthly x 12
  *   employer Social Security + Medicare = 7.65% of (wages + health money)
  *   FUTA and Florida reemployment tax = their rates on the first $7,000 of wages
@@ -37,6 +38,7 @@
  * card: callers fall back to company_financials, never to the oldest card.
  */
 const { RATES } = require('./payroll-calc');
+const { payRatesOn } = require('./payroll-rate-steps');
 const { payrollUnits } = require('../utils/payroll-units');
 
 const WEEKS_PER_YEAR = 52;
@@ -221,7 +223,9 @@ async function loadVisitRates(conn, technicianId, onDate) {
     let payRate = null;
     if (card.kind === 'w2' && !(Number(card.hourly_wage) > 0)) {
       const tech = await conn('technicians').where({ id: technicianId }).first('pay_rate');
-      payRate = tech ? tech.pay_rate : null;
+      // The rate of the visit's own pay week: a pay rate step applied later must not re-price this visit.
+      const dated = tech && await payRatesOn(conn, [{ id: technicianId, pay_rate: tech.pay_rate }], dateString(onDate));
+      payRate = dated ? dated.get(technicianId) : null;
     }
     const labor = computeTechnicianRate(card, payRate);
     if (!labor.ok) return null;
@@ -256,11 +260,13 @@ async function loadVisitRates(conn, technicianId, onDate) {
 async function loadRatesForDate(conn, onDate) {
   const dateStr = dateString(onDate);
   const technicians = await conn('technicians').orderBy('name').select('id', 'name', 'pay_rate', 'employment_type', 'employment_status');
+  // Each pay rate as it stood in that date's pay week (no usable date: no card is in effect, nothing reads it).
+  const payRates = dateStr ? await payRatesOn(conn, technicians, dateStr) : new Map();
   const out = { date: dateStr, technicians: [], vehicles: [] };
   for (const tech of technicians) {
     const card = await cardInEffect(conn, 'technician_cost_cards', 'technician_id', tech.id, dateStr);
     if (!card) continue;
-    const labor = computeTechnicianRate(card, tech.pay_rate);
+    const labor = computeTechnicianRate(card, payRates.get(tech.id));
     out.technicians.push({
       technicianId: tech.id,
       name: tech.name,

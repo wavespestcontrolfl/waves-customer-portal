@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-// GATE_NEW_APPT_PHONE_MATCH (owner 2026-10-24): a complete phone in the New customer block offers
+// New Appointment phone match (owner 2026-10-24): a complete phone in the New customer block offers
 // the customers already on it with one tap (never an automatic pick); one Save adds a new caller
 // and books the visit; a known phone stops at the Attach / Separate account choice; a picked
-// address suggestion scrolls the best times into view. Gate off: today's two-step flow.
+// address suggestion scrolls the best times into view.
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -113,11 +113,11 @@ describe('quickAddPhoneDigits', () => {
   });
 });
 
-describe('New customer phone match (gate on)', () => {
+describe('New customer phone match', () => {
   it('offers the customer on a complete phone, and one tap selects them with nothing written', async () => {
     // The search also matches names and partial numbers: only the exact phone is offered.
     const fetcher = installFetch({ search: { 9415550100: [ON_FILE, { id: 'other', firstName: 'Lee', lastName: 'Other', phone: '9415550100 ext 2 9', address: 'x' }] } });
-    mount({ newCustomerPhoneMatch: true });
+    mount();
     const { phone } = quickAddInputs();
     fireEvent.change(phone, { target: { value: '941 555 010' } });
     await act(async () => { await new Promise((r) => setTimeout(r, 400)); });
@@ -141,7 +141,7 @@ describe('New customer phone match (gate on)', () => {
 
   it('one Save adds the new caller, then books the visit for them', async () => {
     const fetcher = installFetch();
-    mount({ newCustomerPhoneMatch: true });
+    mount();
     expect(screen.queryByRole('button', { name: 'Add customer' })).toBeNull();
     await fillCaller();
     await addService();
@@ -157,7 +157,7 @@ describe('New customer phone match (gate on)', () => {
 
   it('a note typed while one Save waits for the form to settle is booked as shown', async () => {
     const fetcher = installFetch();
-    mount({ newCustomerPhoneMatch: true });
+    mount();
     await fillCaller();
     await addService();
     const save = screen.getByRole('button', { name: 'Schedule appointment' });
@@ -176,7 +176,7 @@ describe('New customer phone match (gate on)', () => {
     // can never confirm: Save must still add the caller, then book once it does.
     const CREDIT = { id: 'd-credit', name: 'Neighbor credit', discount_type: 'percentage', amount: 10, is_active: true, show_in_invoices: true, is_stackable: true };
     const fetcher = installFetch({ discounts: [CREDIT] });
-    mount({ newCustomerPhoneMatch: true });
+    mount();
     await fillCaller();
     await addService();
     const discountBox = await screen.findByPlaceholderText(/^Search discounts/);
@@ -200,7 +200,7 @@ describe('New customer phone match (gate on)', () => {
       quickAdd: () => json({ error: 'This phone belongs to an existing customer', code: 'PHONE_MATCH_CONFIRM', match: { accountId: 'acct-1', name: 'Robin Sample', address: '200 Sample St' } }, { ok: false, status: 409 }),
     });
     const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
-    mount({ newCustomerPhoneMatch: true });
+    mount();
     await fillCaller();
     await addService();
     const save = screen.getByRole('button', { name: 'Schedule appointment' });
@@ -217,7 +217,7 @@ describe('New customer phone match (gate on)', () => {
     // A one-time mosquito line with no typed price is priced from the property's lot
     // size, which exists only once the customer does: staff see it before it books.
     const fetcher = installFetch({ catalog: [{ id: 'svc-m', service_key: 'mosquito_one_time', name: 'One-Time Mosquito Treatment', billing_type: 'one_time', base_price: 0, default_duration_minutes: 30 }] });
-    mount({ newCustomerPhoneMatch: true });
+    mount();
     await fillCaller();
     fireEvent.change(screen.getByPlaceholderText('Search services'), { target: { value: 'Mosquito' } });
     fireEvent.click(await screen.findByRole('button', { name: /One-Time Mosquito Treatment/i }));
@@ -231,24 +231,10 @@ describe('New customer phone match (gate on)', () => {
 
   it('scrolls the best times into view after a picked suggestion, not after a blur geocode', async () => {
     installFetch();
-    mount({ newCustomerPhoneMatch: true, addressFirstTimes: true });
+    mount();
     fireEvent.click(screen.getByText('geocode typed'));
     expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText('pick suggestion'));
     expect(Element.prototype.scrollIntoView).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('gate off', () => {
-  it('no phone lookup, Add customer stays, and Save waits for a customer', async () => {
-    const fetcher = installFetch({ search: { 9415550100: [ON_FILE] } });
-    mount({ addressFirstTimes: true });
-    await fillCaller('(941) 555-0100');
-    await addService();
-    await act(async () => { await new Promise((r) => setTimeout(r, 400)); });
-    expect(phoneSearches(fetcher)).toEqual([]);
-    expect(screen.getByRole('button', { name: 'Add customer' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Schedule appointment' }).disabled).toBe(true);
-    expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
   });
 });

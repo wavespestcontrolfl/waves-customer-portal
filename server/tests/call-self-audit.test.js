@@ -16,6 +16,7 @@ const { typedDecisionsLive, typedDecisionsClefLive } = require('../config/featur
 const { askPackage } = require('../services/typed-decisions/jev');
 const { recordDecisions } = require('../services/typed-decisions/shadow-recorder');
 const { callSubjectHash } = require('../services/typed-decisions/subject-hash');
+const { CALL_TRANSCRIPT_CHARS } = require('../services/typed-decisions/packages');
 const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, shadowVoicemails } = require('../services/call-self-audit');
 
 // Each sampled call is asked call_judge.v5 and call_gate_checks.v1; these
@@ -363,13 +364,30 @@ describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision besid
   });
 
   test('a call longer than the span the models and reviewer see is counted, never asked the gate checks', async () => {
-    const long = SAMPLE({ transcription: 'Agent: Waves. Caller: I need pest control at my house. '.repeat(120) });
-    expect(long.transcription.length).toBeGreaterThan(5000);
+    const long = SAMPLE({ transcription: 'Agent: Waves. Caller: I need pest control at my house. '.repeat(500) });
+    expect(long.transcription.length).toBeGreaterThan(CALL_TRANSCRIPT_CHARS);
     mockDb({ calls: [long] });
     const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
     expect(asksFor('call_gate_checks.v1')).toHaveLength(0);
     expect(asksFor('call_judge.v5')).toHaveLength(1); // call_judge unchanged
     expect(res.jev.gateChecks).toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 1 });
+  });
+
+  test('a 9,000-character call reaches every nightly reader whole: the booking at its end is in the audit, call_judge and the gate checks', async () => {
+    const ending = 'Agent: Thursday at 9 works. Caller: Yes, book it.';
+    const call = SAMPLE({ transcription: `${'Agent: Waves. Caller: I need pest control at my house. '.repeat(165)}${ending}` });
+    expect(call.transcription.length).toBeGreaterThan(9000);
+    expect(call.transcription.length).toBeLessThan(CALL_TRANSCRIPT_CHARS);
+    mockDb({ calls: [call] });
+    let auditorRead = '';
+    const res = await runSelfAudit({ createMessage: async ({ messages }) => { auditorRead = messages[0].content; return { content: [{ type: 'text', text: '{}' }] }; } });
+
+    expect(auditorRead.endsWith(ending)).toBe(true);
+    const [judge] = asksFor('call_judge.v5');
+    const [gates] = asksFor('call_gate_checks.v1');
+    expect(judge[1].transcript).toBe(call.transcription);
+    expect(gates[1].transcript).toBe(call.transcription);
+    expect(res.jev.gateChecks).toEqual({ asked: 1, recorded: 1, failed: 0, skippedLong: 0 });
   });
 
   test('no reading means no baseline, never a false one: invalid v2 extraction, commitments off', () => {
@@ -607,7 +625,7 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
   });
 
   test('reads only terminal, quiet, inbound voicemails whose row changed in the last 7 days; a long one is counted, never asked', async () => {
-    const seen = vmDb({ rows: [VM({ id: 'vm-long', transcription: 'Hi please call me back about the termites. '.repeat(200) })] });
+    const seen = vmDb({ rows: [VM({ id: 'vm-long', transcription: 'Hi please call me back about the termites. '.repeat(600) })] });
     const tally = await shadowVoicemails({ now: new Date('2026-10-03T08:00:00Z') });
     expect(tally).toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 1 });
     expect(askPackage).not.toHaveBeenCalled();

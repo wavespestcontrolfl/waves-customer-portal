@@ -382,6 +382,23 @@ describe('candidateFromRegistryRow', () => {
     });
   });
 
+  // The post-publish visibility check re-stamps a recently published or
+  // refreshed post 'live_visible' each day. That is a live post: astro PR #859
+  // waited 15 hours because its rail named a post refreshed the day before.
+  test('accepts the post-publish check\'s live_visible exactly like the daily sweep\'s live', () => {
+    for (const reconciliation_status of ['astro_only', 'astro_changed_since_sync']) {
+      expect(candidateFromRegistryRow({ ...liveAstroOnly, reconciliation_status, live_status: 'live_visible' })).toMatchObject({
+        path: '/termite/direct-astro-post/',
+        astroStatus: 'live',
+        pathVerified: true,
+      });
+    }
+  });
+
+  test('rejects the post-publish check\'s visibility_review (a blocking finding is open)', () => {
+    expect(candidateFromRegistryRow({ ...liveAstroOnly, live_status: 'visibility_review' })).toBeNull();
+  });
+
   test('still rejects an astro_changed_since_sync row that is no longer live/present/published/indexable', () => {
     for (const override of [
       { live_status: 'missing' },
@@ -626,6 +643,24 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
     const database = fakeDb({ registryRows });
     expect([...(await getLiveRelatedPaths(['/termite/moved-post/'], { database, hosts: ['wavespestcontrol.com'] }))]).toEqual([]);
     expect([...(await getLiveRelatedPaths(['/termite/moved-post/'], { database, hosts: ['sarasotaflpestcontrol.com'] }))]).toEqual(['/termite/moved-post/']);
+  });
+
+  test('getLiveRelatedPaths keeps a frozen path whose registry row reads live_visible, and drops visibility_review', async () => {
+    const base = {
+      content_type: 'blog', reconciliation_status: 'astro_changed_since_sync', workflow_status: 'published',
+      astro_status: 'present', noindex_detected: false, metadata: { frontmatter: { domains: ['wavespestcontrol.com'] } },
+    };
+    const registryRows = [
+      { ...base, id: 'refreshed', canonical_url_normalized: '/pest-control/refreshed-yesterday/', live_url: 'https://www.wavespestcontrol.com/pest-control/refreshed-yesterday/', live_status: 'live_visible' },
+      { ...base, id: 'review', canonical_url_normalized: '/pest-control/under-review/', live_status: 'visibility_review' },
+      { ...base, id: 'noindex', canonical_url_normalized: '/pest-control/noindexed/', live_status: 'live_visible', noindex_detected: true },
+    ];
+    const database = fakeDb({ registryRows });
+    const live = await getLiveRelatedPaths(
+      ['/pest-control/refreshed-yesterday/', '/pest-control/under-review/', '/pest-control/noindexed/'],
+      { database, hosts: ['wavespestcontrol.com'] }
+    );
+    expect([...live]).toEqual(['/pest-control/refreshed-yesterday/']);
   });
 
   test('matches current registry health to an absolute spoke URL by domain and path', async () => {

@@ -1,5 +1,5 @@
 /**
- * GATE_IRRIGATION_SETUP_ASK_CADENCE (owner 2026-10-24): the setup ask goes out
+ * Irrigation setup ask cadence (owner 2026-10-24): the setup ask goes out
  * on a customer's first 3 setup emails, then at most once every 4 weeks. The
  * weeks between send irrigation.weekly_rain_report: the same rain report with
  * no callout and no button.
@@ -20,7 +20,6 @@ const {
   buildWeeklyEmailDecision,
   weeklyInputsForCustomer,
   setupAskDue,
-  irrigationSetupAskCadenceLive,
   loadSetupAskHistory,
   TEMPLATE_SETUP_SCHEDULE,
   TEMPLATE_SETUP_SYSTEM,
@@ -71,19 +70,6 @@ describe('setupAskDue', () => {
     expect(setupAskDue(null, NOW)).toBe(true);
     expect(setupAskDue({ count: 5, lastAskAt: null }, NOW)).toBe(true);
     expect(setupAskDue({ count: 5, lastAskAt: 'not a date' }, NOW)).toBe(true);
-  });
-});
-
-describe('gate reader', () => {
-  const prior = process.env.GATE_IRRIGATION_SETUP_ASK_CADENCE;
-  afterEach(() => { if (prior === undefined) delete process.env.GATE_IRRIGATION_SETUP_ASK_CADENCE; else process.env.GATE_IRRIGATION_SETUP_ASK_CADENCE = prior; });
-  test('strict opt-in: only exactly "true"', () => {
-    delete process.env.GATE_IRRIGATION_SETUP_ASK_CADENCE;
-    expect(irrigationSetupAskCadenceLive()).toBe(false);
-    process.env.GATE_IRRIGATION_SETUP_ASK_CADENCE = '1';
-    expect(irrigationSetupAskCadenceLive()).toBe(false);
-    process.env.GATE_IRRIGATION_SETUP_ASK_CADENCE = 'true';
-    expect(irrigationSetupAskCadenceLive()).toBe(true);
   });
 });
 

@@ -8,9 +8,9 @@
  *      (Virginia/Adam's real replies, sent through the comms UI), each paired
  *      with the most recent inbound customer message it answered. Intent
  *      comes from classifyCustomerSmsTriageIntent — the same classes the
- *      shadow judge and the graduation ladder key on. With GATE_SMS_EDIT_LEARNING
- *      on it also mines the legacy draft queue's edited sends ('ai_revised') and
- *      skips a composer send of a suggestion sent unchanged (its own text).
+ *      shadow judge and the graduation ladder key on. It also mines the legacy
+ *      draft queue's edited sends ('ai_revised') and skips a composer send of a
+ *      suggestion sent unchanged (its own text).
  *
  *   2. call_transcript — inbound call_log rows whose transcription carries
  *      diarized Agent:/Caller: speaker labels (the high-quality
@@ -44,7 +44,6 @@ const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { redactText } = require('./agent-decision-training');
 const { redact: redactPii } = require('./content/pii-redactor');
 const { classifyCustomerSmsTriageIntent } = require('./estimate-conversion-agent');
-const { smsEditLearningLive } = require('../config/feature-gates');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const SCHEMA_VERSION = 'voice-corpus.v1';
@@ -155,16 +154,11 @@ async function mineSmsPairs({ since, until, skipped }) {
   // human-authored reply and fed into voice distillation.
   // excludeUnresolvedSendReservations is applied BEFORE orderBy/select so
   // it can never let a reservation displace a real reply.
-  const editLearning = smsEditLearningLive();
   const replies = await excludeUnresolvedSendReservations(
     db('sms_log')
       .where('direction', 'outbound')
       .modify((qb) => {
-        if (!editLearning) {
-          qb.where('message_type', 'manual');
-          return;
-        }
-        // GATE_SMS_EDIT_LEARNING (owner 2026-10-24). The Comms composer sends a suggestion, edited or not, as
+        // Edit learning (owner 2026-10-24). The Comms composer sends a suggestion, edited or not, as
         // message_type 'manual' and stamps metadata.agent_decision_id; the decision's human_verdict says which
         // ('corrected' = edited, 'accepted' = sent unchanged). The legacy draft queue sends 'ai_approved' (unchanged)
         // and 'ai_revised' (edited). So: mine 'manual' AND 'ai_revised' (the edited sends), never 'ai_approved', and

@@ -1,13 +1,12 @@
 /**
  * ANNUAL PREPAY SEEDS: THE SERIES TECHNICIAN AND TIME (owner 2026-11-01,
- * "fix seeder"). Dark behind GATE_PREPAY_SEED_SERIES_SLOT
- * (feature-gates.js prepaySeedSeriesSlotLive, read at call time).
+ * "fix seeder").
  *
  * ensureCoverageRowsForTerm (annual-prepay-renewals.js) seeds the visits a
  * prepaid year still owes. It wrote every one with technician_id = null and no
  * time, and the night auto-dispatch tool only places an untimed visit that has
  * a technician: a customer's 8 prepaid monthly visits sat for two months with
- * no technician and no time. Gate on, a seed copies the technician and the
+ * no technician and no time. A seed copies the technician and the
  * usual start time of the customer's existing visit of the SAME service, by the
  * rules the recurring follow-up seeder applies to its follow-ups
  * (recurring-appointment-seeder.js seedFollowUpsForParent):
@@ -158,7 +157,7 @@ function seriesSlotPatch(slot, { scheduledDate, absentDays = new Set(), timed = 
   return { technicianId: techId, windowStart: timed ? null : slot.windowStart };
 }
 
-// The fields that drop a copied time and nothing else (the seed is written as before the gate).
+// The fields that drop a copied time and nothing else (the seed is written as before the series slot).
 function clearedWindow(cols) {
   const fields = { window_start: null, window_end: null };
   return cols ? Object.fromEntries(Object.entries(fields).filter(([key]) => cols[key])) : fields;

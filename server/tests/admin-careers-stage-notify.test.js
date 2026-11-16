@@ -52,6 +52,10 @@ function makeDb() {
   let rows = [];
   // Staff names for History (null = the read fails).
   let staff = [];
+  // The detail's same-phone read: the raw SQL + binding it sent, and a switch that fails it.
+  let samePhoneQueries = [];
+  let samePhoneFails = false;
+  const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
   function tableApi(table) {
     if (table === 'technicians') {
       if (staff === null) throw new Error('technicians read failed');
@@ -64,9 +68,22 @@ function makeDb() {
     }
     if (table !== 'job_applications') throw new Error(`unexpected table ${table}`);
     let whereCond = {};
+    const samePhone = { excludeId: null, phoneKey: null, order: null, limit: null };
     const builder = {
       where(cond) { whereCond = { ...whereCond, ...cond }; return builder; },
       forUpdate() { return builder; },
+      // Same-phone list (GET /:id): whereNot -> whereRaw -> orderBy -> limit -> select.
+      whereNot(cond) { samePhone.excludeId = cond.id; return builder; },
+      whereRaw(sql, bindings) { samePhone.phoneKey = bindings[0]; samePhoneQueries.push({ sql, bindings }); return builder; },
+      orderBy(column, direction) { samePhone.order = [column, direction]; return builder; },
+      limit(n) { samePhone.limit = n; return builder; },
+      select: () => {
+        if (samePhoneFails) return Promise.reject(Object.assign(new Error('same-phone read failed'), { code: 'XX000' }));
+        const matches = rows
+          .filter((r) => r.id !== samePhone.excludeId && lastTen(r.contact_snapshot && r.contact_snapshot.phone) === samePhone.phoneKey)
+          .sort((a, b) => (samePhone.order && samePhone.order[1] === 'desc' ? new Date(b.created_at) - new Date(a.created_at) : 0));
+        return Promise.resolve(matches.slice(0, samePhone.limit == null ? matches.length : samePhone.limit).map((r) => ({ ...r })));
+      },
       first: () => Promise.resolve((() => {
         const row = rows.find((r) => Object.entries(whereCond).every(([k, v]) => r[k] === v));
         return row ? { ...row } : undefined;
@@ -92,6 +109,9 @@ function makeDb() {
   db.__rows = () => rows;
   db.__setRows = (r) => { rows = r; };
   db.__setStaff = (list) => { staff = list; };
+  db.__samePhoneQueries = () => samePhoneQueries;
+  db.__setSamePhoneFails = (fails) => { samePhoneFails = fails; };
+  db.__resetSamePhone = () => { samePhoneQueries = []; samePhoneFails = false; };
   db.schema = { hasTable: jest.fn(async () => true) };
   return db;
 }
@@ -152,6 +172,7 @@ beforeEach(() => {
   mockSendStageComms.mockResolvedValue({ sms: 'sent', email: 'sent' });
   mockDb.__setRows([]);
   mockDb.__setStaff([]);
+  mockDb.__resetSamePhone();
 });
 
 async function patch(id, payload) {
@@ -593,6 +614,59 @@ describe('GET /:id detail never exposes the raw token', () => {
     const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`);
     const body = await res.json();
     expect(body.application.interview_url).toBeNull();
+  });
+});
+
+// A person who calls and later fills in the form has two records: the texts
+// stay on one and the answers are on the other. The detail names the others.
+describe('GET /:id lists the same person\'s other records (same phone number)', () => {
+  const { CONTACT_PHONE_LAST_TEN_SQL } = require('../services/job-applications');
+  const OPEN = 'aaaaaaaa-0000-4000-8000-000000000001';
+  const detail = async () => (await fetch(`${base}/api/admin/careers/${OPEN}`)).json();
+
+  test('the other records with the same last ten digits come back newest first, each as id, status, name, origin and date only', async () => {
+    mockDb.__setRows([
+      appRow({ id: OPEN, status: 'new', contact_snapshot: { name: 'Jane Doe', phone: '+19415550142', email: 'jane@example.com' }, source: { page_url: 'https://www.wavespestcontrol.com/careers/apply/' } }),
+      appRow({ id: 'aaaaaaaa-0000-4000-8000-000000000002', status: 'new', contact_snapshot: { name: 'Jane D', phone: '(941) 555-0142' }, source: { channel: 'phone_call', call_log_id: 'c-1', call_summary: 'asked about the job' }, interview_token: 'f'.repeat(64), created_at: new Date('2026-11-04T18:31:00.000Z') }),
+      appRow({ id: 'aaaaaaaa-0000-4000-8000-000000000003', status: 'new', contact_snapshot: { name: 'Other Person', phone: '9415550199' }, created_at: new Date('2026-11-05T00:00:00.000Z') }),
+      appRow({ id: 'aaaaaaaa-0000-4000-8000-000000000004', status: 'rejected', contact_snapshot: { name: 'Jane Doe', phone: '9415550142' }, source: null, created_at: new Date('2026-11-06T12:00:00.000Z') }),
+    ]);
+
+    const body = await detail();
+
+    expect(body.same_phone).toEqual([
+      { id: 'aaaaaaaa-0000-4000-8000-000000000004', status: 'rejected', name: 'Jane Doe', origin: null, created_at: '2026-11-06T12:00:00.000Z' },
+      { id: 'aaaaaaaa-0000-4000-8000-000000000002', status: 'new', name: 'Jane D', origin: 'phone_call', created_at: '2026-11-04T18:31:00.000Z' },
+    ]);
+    // The read is the shared phone match, bound to the ten-digit key.
+    expect(mockDb.__samePhoneQueries()).toEqual([{ sql: CONTACT_PHONE_LAST_TEN_SQL, bindings: ['9415550142'] }]);
+    // The opened application itself is unchanged by the list.
+    expect(body.application.id).toBe(OPEN);
+  });
+
+  test('an online-form record reads as web_form', async () => {
+    mockDb.__setRows([
+      appRow({ id: OPEN, contact_snapshot: { name: 'Jane D', phone: '9415550142' }, source: { channel: 'phone_call' } }),
+      appRow({ id: 'aaaaaaaa-0000-4000-8000-000000000002', contact_snapshot: { name: 'Jane Doe', phone: '+19415550142' }, source: { page_url: 'https://www.wavespestcontrol.com/careers/apply/' } }),
+    ]);
+    expect((await detail()).same_phone.map((r) => r.origin)).toEqual(['web_form']);
+  });
+
+  test('a record with no ten-digit phone answers an empty list and makes no same-phone read', async () => {
+    mockDb.__setRows([appRow({ id: OPEN, contact_snapshot: { name: 'Jane Doe', phone: '555-0142' } })]);
+    const body = await detail();
+    expect(body.same_phone).toEqual([]);
+    expect(mockDb.__samePhoneQueries()).toEqual([]);
+  });
+
+  test('a failed same-phone read still answers the detail, with an empty list', async () => {
+    mockDb.__setRows([appRow({ id: OPEN })]);
+    mockDb.__setSamePhoneFails(true);
+    const res = await fetch(`${base}/api/admin/careers/${OPEN}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.application.id).toBe(OPEN);
+    expect(body.same_phone).toEqual([]);
   });
 });
 

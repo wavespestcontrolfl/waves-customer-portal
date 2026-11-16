@@ -82,9 +82,10 @@
  * The sweep consults canAutoOrder() and skips its "order manually" bell for
  * a vendor this module will order from, so every request ends either
  * silently ordered or with exactly one bell naming why it parked.
- * Revoke = ops/agents/auto-order-revoke.js (ledger → needs_review, request →
- * open; the unique claim keeps it from ever re-dispatching — a fresh request
- * is the way back in).
+ * Revoke = the Restock tab's Record vendor cancellation, or
+ * ops/agents/auto-order-revoke.js (both procurement/order-revoke.js: ledger →
+ * needs_review, request → cancelled; the unique claim keeps it from ever
+ * re-dispatching — a fresh request is the way back in).
  */
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -312,7 +313,8 @@ async function assertNoLiveAutoOrder(trx, productId) {
  *     premature. Placed / parked claims are what the actions reconcile.
  *   - dispatched (placed_at set: placed, or a post-submit park whose money
  *     may have moved) → 'cancel' refuses until the operator has RECORDED a
- *     revoke (evidence.revokedAt, ops/agents/auto-order-revoke.js). A
+ *     revoke (evidence.revokedAt: Record vendor cancellation on the Restock
+ *     tab, or ops/agents/auto-order-revoke.js; procurement/order-revoke.js). A
  *     cancelled request drops out of the sweep's dedupe and the next tick
  *     would raise a fresh request and order AGAIN on top of an order that
  *     may already be on its way. Receive stays open (the stock arrived);
@@ -331,7 +333,7 @@ async function assertManualActionAllowed(trx, requestId, action) {
   if (!row) return {};
   if (row.status === 'placing') refuse('auto_order_placing', 'An automatic order for this request is being placed right now — wait for it to place or park (Restock tab), then act.');
   if (action === 'cancel' && row.placed_at && !meta(row.evidence).revokedAt) {
-    refuse('auto_order_out', `An automatic order for this request${row.external_order_number ? ` (#${row.external_order_number})` : ''} may already have gone out. Receive it when it arrives, or cancel it with the vendor and record the revoke (ops/agents/auto-order-revoke.js --order=${row.id}) — only then cancel the request.`);
+    refuse('auto_order_out', `An automatic order for this request${row.external_order_number ? ` (#${row.external_order_number})` : ''} may already have gone out. Receive it when it arrives, or cancel it with the vendor and then use Record vendor cancellation on the Restock tab, which closes the request.`);
   }
   // Returned so both receive paths can admit ONE more receive on a received
   // request whose automatic order landed after that receipt (Codex r27 P1).
@@ -636,7 +638,7 @@ function parkBellText({ reason, status, product, vendor, request, amountCents, m
   }
   const title = `Auto-order ${status === 'failed' ? 'failed' : 'needs review'}: ${product.name} (${vendor.name})`;
   if (POST_SUBMIT_REASONS.has(reason)) {
-    return { title, body: `${message} Do NOT re-order: check the ${vendor.name} account${placed?.externalOrderNumber ? ` (order ${placed.externalOrderNumber})` : ''} and reconcile by hand — cancel with the vendor or receive the stock; ops/agents/auto-order-revoke.js records the revoke.` };
+    return { title, body: `${message} Do NOT re-order: check the ${vendor.name} account${placed?.externalOrderNumber ? ` (order ${placed.externalOrderNumber})` : ''} and reconcile by hand — receive the stock, or cancel with the vendor and then use Record vendor cancellation on the Restock tab.` };
   }
   return { title, body: `${message} The restock request stays open — order manually, then mark it ordered.` };
 }
@@ -866,9 +868,10 @@ async function lockedProductGuards(trx, { request }) {
 // A re-armed dry-run row still has its "nothing was submitted — turn dry run
 // off to order for real" bell out: retire it in the claim's own transaction,
 // before this claim can submit, or staff act on it beside a real order
-// (pre-push P0). The versioned key is auto-order:<ledger>[:<v>].
-function retireLedgerBells(trx, ledgerId) {
-  return require('../notification-service')._private.openToCloser(trx('notifications').whereRaw("(metadata->>'dedupeKey' = ? OR metadata->>'dedupeKey' LIKE ?)", [`auto-order:${ledgerId}`, `auto-order:${ledgerId}:%`]), 'procurement').update(require('../notification-service')._private.doneColumns({ by: 'procurement', resolution: 'The order is being placed for real, so the dry-run note no longer applies', keepExisting: true, conn: trx }));
+// (pre-push P0). The versioned key is auto-order:<ledger>[:<v>]. A revoke
+// (procurement/order-revoke.js) retires the same bells with its own resolution.
+function retireLedgerBells(trx, ledgerId, resolution = 'The order is being placed for real, so the dry-run note no longer applies') {
+  return require('../notification-service')._private.openToCloser(trx('notifications').whereRaw("(metadata->>'dedupeKey' = ? OR metadata->>'dedupeKey' LIKE ?)", [`auto-order:${ledgerId}`, `auto-order:${ledgerId}:%`]), 'procurement').update(require('../notification-service')._private.doneColumns({ by: 'procurement', resolution, keepExisting: true, conn: trx }));
 }
 
 // The Restock tab renders the request's OWN vendorSku / vendorProductUrl as
@@ -1060,7 +1063,7 @@ async function attachLatePlacement(trx, conn, { ctx, placed, orderFacts, quoteCe
   const landed = placed.ambiguous ? 'MAY have been placed (the submit outcome is unknown — check the account)' : 'was confirmed';
   const bell = versioned({
     title: `Auto-order ${placed.ambiguous ? 'may have landed' : 'landed'} after ${wasRevoked ? 'revoke' : 'stale recovery'}: ${product.name}`,
-    body: `${vendor.name} order ${placed.externalOrderNumber || '(number unknown)'} (${dollars(orderFacts.amount_cents ?? quoteCents)}) ${landed} after ${after}. ${receivedMeanwhile ? 'The stock counted at that receipt was not this order: receive the request once more when it arrives (the tab allows it for this order), or cancel with the vendor and record the revoke; new requests for the product are blocked until then.' : 'The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke again.'}`,
+    body: `${vendor.name} order ${placed.externalOrderNumber || '(number unknown)'} (${dollars(orderFacts.amount_cents ?? quoteCents)}) ${landed} after ${after}. ${receivedMeanwhile ? 'The stock counted at that receipt was not this order: receive the request once more when it arrives (the tab allows it for this order), or cancel with the vendor and then use Record vendor cancellation on the Restock tab; new requests for the product are blocked until then.' : 'The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and then use Record vendor cancellation on the Restock tab again.'}`,
   });
   await trx('vendor_orders').where({ id: ledger.id }).update({
     ...orderFacts,
@@ -1086,7 +1089,7 @@ async function attachLatePlacement(trx, conn, { ctx, placed, orderFacts, quoteCe
 async function parkOnReceivedLocked(trx, { ctx, placed, finalCents }) {
   const { ledger, request, product, vendor, adapterKey } = ctx;
   const reason = 'placed_on_received_request';
-  const message = `${vendor.name} order ${placed.externalOrderNumber || '?'} (${dollars(finalCents)}) landed after the restock request was received by hand — the stock counted was not this order. Receive the request once more when it arrives (the tab allows it for this order), or cancel with the vendor and record the revoke; new requests for the product are blocked until then.`;
+  const message = `${vendor.name} order ${placed.externalOrderNumber || '?'} (${dollars(finalCents)}) landed after the restock request was received by hand — the stock counted was not this order. Receive the request once more when it arrives (the tab allows it for this order), or cancel with the vendor and then use Record vendor cancellation on the Restock tab; new requests for the product are blocked until then.`;
   const bell = parkBell({ reason, status: 'needs_review', product, vendor, request, amountCents: finalCents, message, placed });
   const patch = parkPatch({ status: 'needs_review', reason, message, evidence: { ...(placed.evidence || {}), landedAfterReceive: new Date().toISOString() }, bell, amountCents: finalCents, postSubmit: true, placed });
   await trx('vendor_orders').where({ id: ledger.id, status: 'placing' }).update(patch);
@@ -1112,7 +1115,7 @@ async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
   // The office closed the request while the vendor call was in flight: an
   // order exists that the tab no longer expects — say so once. A cancelled
   // request is put back to ordered (requestToOrdered).
-  const closedMidFlightBell = (freshStatus) => versioned({ title: `Auto-order placed on a ${freshStatus || 'missing'} request: ${product.name}`, body: `${vendor.name} order ${placed.externalOrderNumber || ''} (${dollars(finalCents)}) landed after the restock request was marked ${freshStatus || 'missing'}. ${freshStatus === 'cancelled' ? 'The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke.' : 'Reconcile by hand.'}` });
+  const closedMidFlightBell = (freshStatus) => versioned({ title: `Auto-order placed on a ${freshStatus || 'missing'} request: ${product.name}`, body: `${vendor.name} order ${placed.externalOrderNumber || ''} (${dollars(finalCents)}) landed after the restock request was marked ${freshStatus || 'missing'}. ${freshStatus === 'cancelled' ? 'The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and then use Record vendor cancellation on the Restock tab.' : 'Reconcile by hand.'}` });
   const outcome = await conn.transaction(async (trx) => {
     // The cap lock FIRST — the reservation's own order (cap lock → ledger
     // row): the amount this commit records lands while no concurrent
@@ -1551,6 +1554,7 @@ async function runVendorOrderDispatch({ conn = db, notify = null, adapters = nul
 module.exports = {
   RECEIVED_SETTLES_SQL,
   settleRequestLedgerBells,
+  retireLedgerBells,
   retireRequestBell,
   cancelAtClaim,
   findLiveAutoOrder,

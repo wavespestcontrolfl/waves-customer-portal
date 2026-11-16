@@ -383,26 +383,7 @@ describe('POST /admin/triage/:id/confirm-email', () => {
     expect(tables.first_touch_holds[0].held_email).toBe('');
   });
 
-  test('a card with no email_disagreement evidence refuses — action not applicable', async () => {
-    const { conn, tables } = fixture({
-      triage_items: [{
-        id: CARD_ID, call_log_id: CALL_ID, reason_code: 'email_unverified', status: 'open',
-        category: 'lead_intake', severity: 'advisory',
-        payload: { flag: 'email_unverified', email_candidates: [{ value: 'plain@example.com' }] },
-        created_at: CARD_CREATED_AT, updated_at: CARD_UPDATED_AT,
-      }],
-    });
-    wireDb(db, { conn });
-    await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
-        email: 'plain@example.com', expected_updated_at: CARD_UPDATED_AT,
-      });
-      expect(res.status).toBe(400);
-    });
-    expect(tables.triage_items[0].status).toBe('open');
-  });
-
-  describe('GATE_CALL_EMAIL_CHECKS on: any email read-back card takes the form (owner 2026-10-29)', () => {
+  describe('any email read-back card takes the form (owner 2026-10-29)', () => {
     const PLAIN_PAYLOAD = { flag: 'email_unverified', email_release_target: 'heard@example.com' };
     const plainFixture = () => fixture({
       triage_items: [{
@@ -412,8 +393,6 @@ describe('POST /admin/triage/:id/confirm-email', () => {
       }],
       first_touch_holds: [{ id: 'hold-1', call_log_id: CALL_ID, customer_id: CUSTOMER_ID, status: 'pending', held_email: 'heard@example.com' }],
     });
-    beforeEach(() => { process.env.GATE_CALL_EMAIL_CHECKS = 'true'; });
-    afterEach(() => { delete process.env.GATE_CALL_EMAIL_CHECKS; });
 
     test('a typed correction on a plain card retargets the hold, writes the customer email and resolves the card', async () => {
       const { conn, tables } = plainFixture();
@@ -441,19 +420,6 @@ describe('POST /admin/triage/:id/confirm-email', () => {
         expect((await res.json()).confirmed_source).toBe('candidate');
       });
       expect(tables.triage_items[0].status).toBe('resolved');
-    });
-
-    test('gate off again: the same plain card still refuses', async () => {
-      delete process.env.GATE_CALL_EMAIL_CHECKS;
-      const { conn, tables } = plainFixture();
-      wireDb(db, { conn });
-      await withServer(async (baseUrl) => {
-        const res = await post(baseUrl, `/${CARD_ID}/confirm-email`, {
-          email: 'right@example.com', expected_updated_at: CARD_UPDATED_AT,
-        });
-        expect(res.status).toBe(400);
-      });
-      expect(tables.triage_items[0].status).toBe('open');
     });
   });
 

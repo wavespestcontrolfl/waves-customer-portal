@@ -129,7 +129,7 @@ describe('processRecording wiring', () => {
 
   test('the block sits after the decoder and arbiter, and before the DNS check and the card decision', () => {
     expect(src.indexOf('[quarantine-arbiter] review verdict')).toBeLessThan(holdStart);
-    expect(holdStart).toBeLessThan(src.indexOf('if (extracted.email && callEmailChecksLive()) {'));
+    expect(holdStart).toBeLessThan(src.indexOf('callEmailCheck = await screenCallEmail(extracted);'));
     expect(holdStart).toBeLessThan(src.indexOf('if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail: normalizedEmail })) {'));
   });
 });

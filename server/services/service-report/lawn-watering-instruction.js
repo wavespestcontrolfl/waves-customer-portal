@@ -906,5 +906,5 @@ module.exports = {
   isValidMowHold,
   GENERIC_MINUTES_PER_QUARTER_INCH,
   LONG_WINDOW_HOURS,
-  _private: { ceilToHour, floorToHour, formatWhen, minutesFor, deadlineAfter, buildMowHold },
+  _private: { ceilToHour, floorToHour, formatWhen, WEEKDAYS, minutesFor, deadlineAfter, buildMowHold },
 };

@@ -1621,7 +1621,7 @@ function notDeductibleInputWarning(inventoryProduct, amount, amountUnit) {
 }
 
 // The usage movement for a visit done before the product's latest count: the same quantity and cost a deduction
-// writes, with stock_before = stock_after and no products_catalog update (GATE_STOCK_COUNT_AWARE_USAGE).
+// writes, with stock_before = stock_after and no products_catalog update.
 async function recordCountedUsage(trx, {
   snapshot, inventoryProduct, productInput, serviceProduct, serviceRecord, scheduledService,
   amount, amountUnit, deductedAmount, inventoryUnit, stockBefore, countHold,
@@ -1846,7 +1846,7 @@ async function deductProductInventory(trx, {
       warning: 'Product inventory_on_hand is not numeric, so inventory was not deducted.',
     };
   }
-  // GATE_STOCK_COUNT_AWARE_USAGE: a visit done before the product's latest physical count was already
+  // A visit done before the product's latest physical count was already
   // counted out of stock. Record the use (cost and forecasts keep seeing it); leave stock and the lockout alone.
   const countHold = await require('./inventory-count-guard').stockHoldFor(trx, inventoryProduct.id, { scheduledService, serviceRecord });
   if (countHold) {
@@ -2520,13 +2520,6 @@ function completionOwnershipError({ role, actorTechnicianId, assignedTechnicianI
 // shape read this as off — today's behaviour — instead of throwing.
 function techTipsGateOn() {
   return typeof gateEnvValue === 'function' && gateEnvValue('GATE_TECH_TIPS') === true;
-}
-
-// GATE_TECH_TIP_SOURCES at call time (tips with facts, owner 2026-10-24): on,
-// a sourced tip freezes its sourced words and its citations; off, the freeze
-// is what it was. A partial feature-gates mock reads as off.
-function techTipSourcesOn() {
-  return require('../config/feature-gates').techTipSourcesLive?.() === true;
 }
 
 // POST /api/admin/dispatch/:serviceId/complete
@@ -3292,7 +3285,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // completion profile and both dark gates are known.
       customerRecapMode,
       requestReview: requestReviewPosted,
-      // "Complaint on site" (GATE_REVIEW_FIRST_ASK_LOCK), or "Already left a review" (GATE_REVIEW_ALREADY_REVIEWED):
+      // "Complaint on site" (the first review ask), or "Already left a review" (GATE_REVIEW_ALREADY_REVIEWED):
       // the reasons a never-asked customer's review ask may be turned off. Read only below, through
       // ReviewService.firstAskLockChoice.
       reviewOptOutReason,
@@ -3399,11 +3392,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Re-checked under the visit row lock against the registry's active stations.
       stationRosterSeen,
     } = completionInput.body;
-    // First review ask (GATE_REVIEW_FIRST_ASK_LOCK, owner 2026-10-26): a never-asked customer's ask turned off
+    // First review ask (owner 2026-10-26): a never-asked customer's ask turned off
     // WITHOUT an off reason ("Complaint on site"; "Already left a review" under GATE_REVIEW_ALREADY_REVIEWED) stays on. Only a tech's explicit requestReview:false on a real,
     // completed, loud, non-re-service visit is looked at; system closeouts, backdated, incomplete, concern and
-    // declined visits, the fixed re-service text and re-services (firstAskLockVisit) keep today's behavior. Gate
-    // off: no read at all, requestReview is the posted value.
+    // declined visits, the fixed re-service text and re-services (firstAskLockVisit) keep today's behavior.
     let requestReview = requestReviewPosted;
     let reviewFirstAskLock = null;
     let reviewTimingBody = completionInput.body || {};
@@ -3412,8 +3404,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && customerRecapMode !== require('./reservice-fixed-recap').MODE
       && !completionInput.issuedInvoiceCloseout && completionInput.systemQuietCloseout !== true
       // A sheet that pins every customer text off (no completion text, no pay link, no ask) means "send nothing".
-      && !(sendCompletionSmsRequested === false && includePayLink === false)
-      && require('../config/feature-gates').reviewFirstAskLockLive()) {
+      && !(sendCompletionSmsRequested === false && includePayLink === false)) {
       const reviewRequest = require('./review-request');
       // `db` is the packet transaction in a visit-closeout records phase: the reads ride it.
       const lockVisit = await reviewRequest.firstAskLockVisit(completionInput.serviceId, db);
@@ -4722,7 +4713,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Gated at the freeze too: with the kill switch unset a stale or crafted
     // client cannot keep the feature alive through the completion body.
     const techTipsFreeze = techTipsGateOn()
-      ? freezeTechTips(completionInput.body?.techTips, { sourced: techTipSourcesOn() })
+      ? freezeTechTips(completionInput.body?.techTips)
       : { tips: [], dropped: [] };
     // T&S tech findings (GATE_TS_TECH_FINDINGS_COPY): freeze the technician's
     // keep / confirm / hide / edit decisions on the service record whether or
@@ -4884,7 +4875,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const activityScoresAvailable = await failSoftRead(db, (k) => k.schema.hasTable('service_activity_scores'), false);
     const useServiceReportV1 = true;
     let conditionsAtApplication = null;
-    // GATE_PEST_RAIN_OUTLOOK: the frozen 48-hour forecast summary, or null (gate off, not pest, unavailable).
+    // The frozen 48-hour forecast summary, or null (not pest, unavailable).
     let rainOutlookAtCompletion = null;
 
     const canLinkLawnAssessmentRecord = !isIncompleteVisit
@@ -6371,12 +6362,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
         ? resumedStructuredNotes.customerRequestedReview
         : null;
       // A kept-on first review ask was frozen with the record: a resumed retry (the customer may have been
-      // asked since) finishes the choice the record holds (GATE_REVIEW_FIRST_ASK_LOCK).
+      // asked since) finishes the choice the record holds (the first review ask).
       if (resumedStructuredNotes.reviewFirstAskLock?.forcedOn === true) {
         requestReview = true;
         completionReviewDelayMinutes = undefined;
       } else if (reviewFirstAskLock?.forcedOn) {
-        // The committed record decides. It holds no kept-on marker (the gate was off then, or the customer
+        // The committed record decides. It holds no kept-on marker (it was saved before the first-ask rule, or the customer
         // was asked since), so this run's preflight override is undone: the posted choice and the posted
         // timing stand, as for any committed retry.
         requestReview = requestReviewPosted;
@@ -7353,7 +7344,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             requestReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion) ? false : requestReview !== false && !(wrapUpReviewAsk === true && !reviewAskAllowed),
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
-            // GATE_REVIEW_FIRST_ASK_LOCK audit: a never-asked customer's "no ask" was kept on (forcedOn) or
+            // First review ask audit: a never-asked customer's "no ask" was kept on (forcedOn) or
             // turned off with the "Complaint on site" reason. Absent when the lock did not act.
             ...(reviewFirstAskLock && (reviewFirstAskLock.forcedOn || reviewFirstAskLock.optOutReason)
               ? { reviewFirstAskLock: { neverAsked: true, forcedOn: reviewFirstAskLock.forcedOn, optOutReason: reviewFirstAskLock.optOutReason } }
@@ -11386,8 +11377,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
               .forUpdate()
               .select('id', 'status', 'line_items', 'notes')
             : [];
-          // GATE_SETUP_FEE_SETTLED_ANYWHERE: re-read the customer-wide settlement HERE, locked
-          // on this transaction, instead of trusting the earlier unlocked lookup (gate off: no read).
+          // Re-read the customer-wide settlement HERE, locked
+          // on this transaction, instead of trusting the earlier unlocked lookup.
           const SetupFeeObligationNow = require('../services/setup-fee-obligation');
           const settledNowTerm = unmintedSetupFeeObligation
             ? await SetupFeeObligationNow.setupFeeSettledElsewhere(trx, {
@@ -11401,7 +11392,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const liveFeeCentsOnVisit = termFeeRows
             .filter((r) => !terminalResolvedAway.includes(r.status) && r.status !== 'void')
             .reduce((sum, r) => sum + terminalFeeCents(r), 0)
-            // GATE_SETUP_FEE_SETTLED_ANYWHERE: fee money paid on other invoices (0 when off).
+            // Fee money paid on other invoices.
             + require('../services/setup-fee-obligation').partialElsewhereCents(settledNowTerm.partial, termFeeRows);
           const refundedFeeCentsTerm = termFeeRows
             .filter((r) => String(r.status || '').toLowerCase() === 'refunded')
@@ -11648,7 +11639,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
             return true;
           }
-          // GATE_SETUP_FEE_SETTLED_ANYWHERE: fresh, locked customer-wide re-read under the mint
+          // Fresh, locked customer-wide re-read under the mint
           // locks. The fee may have been paid or waived on an unrelated invoice since the
           // unlocked lookup; its settled result and partial cents replace the carried ones.
           const SetupFeeObligationFresh = require('../services/setup-fee-obligation');
@@ -11718,7 +11709,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             [...liveStampedRows, ...liveOnVisitRows].map((r) => [String(r.id), r]),
           ).values()];
           const liveFeeCentsNow = uniqueLiveNow.reduce((sum, r) => sum + sumPositiveSetupFeeCents(r), 0)
-            // GATE_SETUP_FEE_SETTLED_ANYWHERE: fee money paid on other invoices (0 when off).
+            // Fee money paid on other invoices.
             + require('../services/setup-fee-obligation').partialElsewhereCents(settledNow.partial, [...liveStampedRows, ...liveOnVisitRows, ...stampedNowRows, ...onVisitLockedRows]);
           const feeCovered = feeSettledNow || (expectedSetupFeeCents > 0 && liveFeeCentsNow >= expectedSetupFeeCents);
           const feeCoveredBy = feeCovered
@@ -15071,7 +15062,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // (GitHub Codex r3 P1).
       let completionSmsProviderAccepted = false;
       // On-location contacts get a plain report text when this completion
-      // text goes out (GATE_CONTACT_REPORT_TEXT, contact-report-text.js). Set
+      // text goes out (contact-report-text.js). Set
       // only when the text carries a real report link. Called on every path
       // that records the text as sent or queued, the accepted-send recovery
       // included; a repeat for the same record queues nothing. Never throws.

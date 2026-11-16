@@ -20,12 +20,9 @@
 //
 // Window: visits completed in the last 30 days (the page opens on 90). Both of
 // the page's lists count: the one-click leaks and the needs-review rows.
-//
-// GATE_UNBILLED_VISITS_LIST (strict 'true', read at call time). Off = the daily
-// cron returns before any read.
 
 const db = require('../models/db');
-const { unbilledVisitsListLive, alertEpisodesLive } = require('../config/feature-gates');
+const { alertEpisodesLive } = require('../config/feature-gates');
 const { MAX_WHY_CHARS, breaksAlertRules, composeAdminAlert, raiseAdminAlert } = require('./admin-alert-compose');
 const { fitAction, shortDateET } = require('./admin-alert-names');
 
@@ -66,15 +63,21 @@ function listItems(result) {
       billable: r.billable !== false,
       voidedInvoiceNumber: r.voided_invoice_number || null,
       billedElsewhereInvoiceNumber: r.billed_elsewhere_invoice_number || null,
+      prepayInvoiceNumber: r.prepay_invoice_number || null,
     });
   }
   return items.sort((a, b) => a.completedAt - b.completedAt || a.visitId.localeCompare(b.visitId));
 }
 
+// A visit an unpaid annual prepay bill covers is recorded on that bill (Billed
+// elsewhere), never billed again (owner 2026-11-06, "fix").
+const onPrepayBill = (item) => item.billable && Boolean(item.prepayInvoiceNumber);
+
 // What the office reads beside each visit (the detail list only).
 function nextStepWords(item) {
   const parts = [];
   if (!item.billable) parts.push('finish its completion first');
+  else if (onPrepayBill(item)) parts.push(`prepay bill ${item.prepayInvoiceNumber} covers it, so mark it billed elsewhere on that bill`);
   else parts.push(item.review ? 'check, then bill or mark free' : 'bill or mark free');
   if (item.voidedInvoiceNumber) parts.push(`invoice ${item.voidedInvoiceNumber} was voided`);
   if (item.billedElsewhereInvoiceNumber) parts.push(`it was marked billed on ${item.billedElsewhereInvoiceNumber}, which is no longer live`);
@@ -84,10 +87,31 @@ function nextStepWords(item) {
 // One visit names its customer; a name the rule cannot carry falls back to the plain wording.
 function whyFor(items, total) {
   const oldest = items[0];
+  if (items.length > 1 && items.every(onPrepayBill)) return `${items.length} visits have no invoice of their own; their prepay bills cover them, and the oldest was done ${shortDateET(oldest.completedAt)}.`;
   if (items.length > 1) return `${items.length} visits have no invoice, ${moneyWhole(total)} in all; the oldest was done ${shortDateET(oldest.completedAt)}.`;
-  const named = `${oldest.customerName}'s ${oldest.serviceType} on ${shortDateET(oldest.completedAt)} has no invoice; ${moneyCents(total)} is not billed.`;
+  const done = shortDateET(oldest.completedAt);
+  const tail = onPrepayBill(oldest)
+    ? `has no invoice of its own; prepay bill ${oldest.prepayInvoiceNumber} covers it.`
+    : `has no invoice; ${moneyCents(total)} is not billed.`;
+  const named = `${oldest.customerName}'s ${oldest.serviceType} on ${done} ${tail}`;
   if (named.length <= MAX_WHY_CHARS && !breaksAlertRules(named)) return named;
-  return `One visit done ${shortDateET(oldest.completedAt)} has no invoice; ${moneyCents(total)} is not billed.`;
+  return `One visit done ${done} ${tail}`;
+}
+
+// The headline's ask. One visit names its customer (fitAction shortens a long
+// name); a list asks for prepay records only when every visit is one.
+function actionFor(items) {
+  const count = items.length;
+  const onPrepay = items.every(onPrepayBill);
+  if (count === 1) {
+    const templates = onPrepay
+      ? [(name) => `mark ${name}'s visit billed on its prepay bill`, (name) => `mark ${name}'s visit billed elsewhere`]
+      : [(name) => `bill or mark free ${name}'s visit`, (name) => `bill ${name}'s visit`];
+    const named = fitAction('Billing', items[0].customerName, templates);
+    if (!breaksAlertRules(`Billing — ${named}`)) return named;
+  }
+  if (onPrepay) return count === 1 ? 'mark 1 visit billed on its prepay bill' : `mark ${count} visits billed on their prepay bills`;
+  return `bill or mark free ${count} unbilled visit${count === 1 ? '' : 's'}`;
 }
 
 // The bell for a non-empty list (pure): the composeAdminAlert spec plus the
@@ -99,10 +123,7 @@ function composeList(items) {
   // One visit names its customer in the headline. A name the rule cannot carry
   // (brackets, an exclamation mark, an emoji, a second sentence) would make
   // composeAdminAlert throw and fail every run, so it falls back to the count.
-  const named = count === 1
-    ? fitAction('Billing', items[0].customerName, [(name) => `bill or mark free ${name}'s visit`, (name) => `bill ${name}'s visit`])
-    : null;
-  const action = named && !breaksAlertRules(`Billing — ${named}`) ? named : `bill or mark free ${count} unbilled visit${plural}`;
+  const action = actionFor(items);
   const toReview = items.filter((item) => item.review).length;
   const lines = items.slice(0, DETAIL_MAX_LINES).map((item) => (
     `${item.customerName} · ${item.serviceType} · done ${shortDateET(item.completedAt)} · ${moneyCents(item.price)} · ${nextStepWords(item)}`
@@ -112,7 +133,9 @@ function composeList(items) {
     `${count} visit${plural} done in the last ${WINDOW_DAYS} days ${count === 1 ? 'has' : 'have'} no invoice, ${moneyCents(total)} in all.${toReview ? ` ${toReview} need${toReview === 1 ? 's' : ''} a check first (a monthly plan, a prepay, a per-application customer or an inspection or rodent visit).` : ''} This check billed nothing and sent nothing.`,
     'Oldest first:',
     ...lines,
-    'Open Billing recovery to bill each visit or mark it free.',
+    items.some(onPrepayBill)
+      ? 'Open Billing recovery to bill each visit, mark it free, or mark it billed elsewhere on its prepay bill.'
+      : 'Open Billing recovery to bill each visit or mark it free.',
   ].join('\n');
   const spec = {
     area: 'Billing',
@@ -170,14 +193,12 @@ function loadPageList(days) {
 }
 
 /**
- * Daily cron entry point. Returns { skipped } when the gate is off, otherwise
- * { count, total, outcome }: raised | refreshed | unchanged | suppressed |
+ * Daily cron entry point. Returns { count, total, outcome }: raised | refreshed | unchanged | suppressed |
  * closed | clear. A read failure throws (runExclusive records it in
  * job_health) and never closes the row. `loadList` is the list source and
  * `dedupeKey` the row's key (tests set both).
  */
-async function runUnbilledVisitsList({ database = db, gateEnabled, loadList = loadPageList, dedupeKey = DEDUPE_KEY } = {}) {
-  if (!(gateEnabled ?? unbilledVisitsListLive())) return { skipped: 'disabled' };
+async function runUnbilledVisitsList({ database = db, loadList = loadPageList, dedupeKey = DEDUPE_KEY } = {}) {
   const items = listItems(await loadList(WINDOW_DAYS));
   if (!items.length) {
     const closed = Number(await closeList(database, dedupeKey)) || 0;
@@ -197,5 +218,5 @@ async function runUnbilledVisitsList({ database = db, gateEnabled, loadList = lo
 module.exports = {
   runUnbilledVisitsList,
   DEDUPE_KEY,
-  _private: { listItems, composeList, ringOnNewVisit, nextStepWords, whyFor, WINDOW_DAYS, DETAIL_MAX_LINES },
+  _private: { listItems, composeList, ringOnNewVisit, nextStepWords, whyFor, actionFor, WINDOW_DAYS, DETAIL_MAX_LINES },
 };

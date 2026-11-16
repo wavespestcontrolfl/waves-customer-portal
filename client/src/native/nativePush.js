@@ -23,6 +23,7 @@ import { isNativeApp, nativePlatform } from './platform';
 import { navigateToCustomerUrl } from './nativeLinks';
 import { reportError } from '../lib/reportError';
 import { reportPushOpen } from '../lib/portalActivity';
+import { reportVisitCard } from './visitCard';
 
 export { isNativeApp };
 
@@ -92,6 +93,9 @@ async function postToken(token) {
     });
     if (authToken() !== jwt && !sameRequestSession(tokenSessionIdentity(jwt), tokenSessionIdentity(authToken()))) return false;
     pendingToken = null;
+    // The Lock Screen visit card rides on this registration: the server keeps the card's start token on
+    // the row this request just wrote. iPhone only; a no-op in an app version without the card.
+    if (platform === 'ios') void reportVisitCard(token);
     return true;
   } catch (err) {
     console.warn('[nativePush] token registration failed:', err?.message || err);

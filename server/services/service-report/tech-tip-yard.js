@@ -1,6 +1,6 @@
 /**
  * The yard the tip picker matches against (tips with facts,
- * GATE_TECH_TIP_SOURCES, owner 2026-10-24): the grass and whether it can be
+ * owner 2026-10-24): the grass and whether it can be
  * trusted, whether there is an irrigation system, and the county and city of
  * the visit's address.
  *

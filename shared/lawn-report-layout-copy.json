@@ -1,5 +1,5 @@
 {
-  "_note": "Fixed customer sentences for the lawn report layout (GATE_LAWN_REPORT_LAYOUT; storySummaryToggle: GATE_LAWN_REPORT_STORY). Read by the web report (client/src/components/report/lawnV2/lawnLayoutRules.js) and screened by server/tests/lawn-report-layout.test.js with the same customer-copy rules every report sentence passes. {phone} {grass} {min} {max} are filled from the report's own office number and the mowing table.",
+  "_note": "Fixed customer sentences for the lawn report layout (GATE_LAWN_REPORT_LAYOUT; storySummaryToggle: the story order's Visit Summary toggle). Read by the web report (client/src/components/report/lawnV2/lawnLayoutRules.js) and screened by server/tests/lawn-report-layout.test.js with the same customer-copy rules every report sentence passes. {phone} {grass} {min} {max} are filled from the report's own office number and the mowing table.",
   "yourPartTitle": "Your part",
   "walkOnLabel": "Walking on the lawn",
   "alsoLabel": "Other steps",

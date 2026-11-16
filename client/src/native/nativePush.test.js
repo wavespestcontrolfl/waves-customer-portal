@@ -21,6 +21,7 @@ const nativeMocks = vi.hoisted(() => {
 const navigateToCustomerUrl = vi.hoisted(() => vi.fn());
 const reportError = vi.hoisted(() => vi.fn());
 const reportPushOpen = vi.hoisted(() => vi.fn());
+const reportVisitCard = vi.hoisted(() => vi.fn());
 
 vi.mock('./platform', () => ({
   isNativeApp: () => true,
@@ -29,6 +30,7 @@ vi.mock('./platform', () => ({
 vi.mock('./nativeLinks', () => ({ navigateToCustomerUrl }));
 vi.mock('../lib/reportError', () => ({ reportError }));
 vi.mock('../lib/portalActivity', () => ({ reportPushOpen }));
+vi.mock('./visitCard', () => ({ reportVisitCard }));
 vi.mock('../utils/api', async (importOriginal) => ({ ...await importOriginal(), default: { request: vi.fn(async () => ({})) } }));
 vi.mock('@capacitor/push-notifications', () => ({
   PushNotifications: nativeMocks.PushNotifications,
@@ -52,6 +54,7 @@ beforeEach(() => {
   navigateToCustomerUrl.mockClear();
   reportError.mockClear();
   reportPushOpen.mockReset();
+  reportVisitCard.mockReset();
   nativeMocks.PushNotifications.then.mockClear();
   nativeMocks.PushNotifications.checkPermissions.mockClear();
   nativeMocks.PushNotifications.requestPermissions.mockClear();
@@ -180,6 +183,24 @@ describe('nativePush permission and tap handling', () => {
     accept({ success: true });
     await registration;
     await expect(enrollment).resolves.toBe('granted');
+  });
+
+  it('reports the phone for the Lock Screen visit card only after the server confirmed its push registration', async () => {
+    // Signed out: the token is held for the login flow, and nothing is reported.
+    await initNativePush();
+    nativeMocks.state.permission = 'granted';
+    await initNativePush();
+    expect(reportVisitCard).not.toHaveBeenCalled();
+
+    // A failed registration writes no row for the card's token to ride on.
+    localStorage.setItem('waves_token', 'test-customer-session');
+    api.request.mockRejectedValueOnce(new Error('offline'));
+    await nativeMocks.state.listeners.registration({ value: 'test-native-device' });
+    expect(reportVisitCard).not.toHaveBeenCalled();
+
+    await nativeMocks.state.listeners.registration({ value: 'test-native-device' });
+    expect(reportVisitCard).toHaveBeenCalledTimes(1);
+    expect(reportVisitCard).toHaveBeenCalledWith('test-native-device');
   });
 
   it('releases the enable action when the native register call never settles', async () => {

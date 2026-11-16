@@ -20,6 +20,7 @@ const {
 } = require('./eligibility');
 const { getCustomerSchedulingPreferences } = require('./preferences');
 const { findValidCandidateSlots, SCORE_CAP } = require('./candidate-slots');
+const southDayKept = require('./south-day-kept');
 const { resolveGeo } = require('./geo');
 const { scoreAppointmentPlacement } = require('./scoring');
 const {
@@ -38,6 +39,7 @@ const dryTime = require('./dry-time');
 const mowingDays = require('./mowing-days');
 const roadCheck = require('./road-check');
 const moveLimit = require('./move-limit');
+const reminderOff = require('./reminder-off');
 const needsPerson = require('./needs-person-notice');
 const moveCheck = require('./proofreader/nightly');
 const checkDown = require('./check-down-notice');
@@ -244,9 +246,21 @@ async function findSlotsOrSkip(service, prefs, ctx) {
 function noSlotReason(drops, skipped) {
   if (skipped) return skipped;
   const prefDropped = !!drops && (drops.preferred_day > 0 || drops.preferred_time > 0);
-  return prefDropped
-    ? { code: 'NO_SLOT_MATCHING_PREFERENCE', description: 'No candidate slot honored the customer\'s explicit day/time preference' }
+  if (prefDropped) return { code: 'NO_SLOT_MATCHING_PREFERENCE', description: 'No candidate slot honored the customer\'s explicit day/time preference' };
+  return southKept(drops)
+    ? { code: southDayKept.CODE, description: `No candidate slot left: ${drops.south_day_kept} slot(s) on dates that hold a far-south stop were not offered (a visit outside the far-south zones stays off those days)` }
     : { code: 'NO_VALID_SLOT', description: 'No valid candidate slot found' };
+}
+
+// Slots the far-south day rule (south-day-kept.js) kept out of this evaluation's candidates.
+const southKept = (drops) => !!drops && drops.south_day_kept > 0;
+
+// A no-move reason with the far-south day rule's part named: the code stays, since a score or drive reason
+// still says why the best remaining date did not win.
+function withSouthNote(reason, drops) {
+  return southKept(drops)
+    ? { ...reason, reason_description: `${reason.reason_description}; ${drops.south_day_kept} slot(s) on far-south days were not offered (${southDayKept.CODE})` }
+    : reason;
 }
 
 // A flex visit whose window collapsed for a stale anchor and found no same-day
@@ -426,6 +440,8 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   } = buildPlacementAudit({
     current, currentScore, candidate: best, candidateScore: ranked.bestScore, service, prefs, lockBoundary, ctx, threshold,
   });
+  // Far-south day rule: the audit row names the slots it kept out, move or not (south-day-kept.js).
+  if (southKept(drops)) constraints.south_day_kept = drops.south_day_kept;
   const shadowPool = dryShadowCandidates.length ? candidates.concat(dryShadowCandidates) : candidates;
   const live = ranked.qualifies ? best : null;
   Object.assign(constraints, dryTimeConstraint(prefs, {
@@ -445,7 +461,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
 
   if (!ranked.qualifies) {
     return {
-      kind: 'no_change', ...noMoveReason(ranked, improvement, threshold, routeMetrics, config), conflict: current.conflict || null, audit: auditCtx,
+      kind: 'no_change', ...withSouthNote(noMoveReason(ranked, improvement, threshold, routeMetrics, config), drops), conflict: current.conflict || null, audit: auditCtx,
     };
   }
   return {
@@ -977,6 +993,14 @@ async function loadRunMoveCounts(run, services) {
   if (!run.moveCounts) run.guardReadDegraded = true;
 }
 
+// REMINDERS-OFF LOCK (owner 2026-11-07, reminder-off.js): pass 1's one bulk read of
+// every loaded visit's 24-hour reminder answer. A failed read leaves null:
+// every placed visit then skips, and the run is degraded.
+async function loadRunReminderOff(run, services) {
+  run.reminderOffIds = await reminderOff.loadRunOffIds(db, services);
+  if (!run.reminderOffIds) run.guardReadDegraded = true;
+}
+
 // Pass 2's recheck: a fresh count for this one visit, so a move another run
 // landed since pass 1 is seen. Returns the skip row or null.
 async function recheckMoveLimit(pm, run) {
@@ -1093,7 +1117,7 @@ function stillLiveOn(row, date) {
     && row.customer_active !== false && !row.customer_deleted_at
     // Locked, excluded or customer-confirmed after pass 1: eligibility denies
     // it outright, so it is no longer skipped for its pin (r21, r24 P2). A visit that is not a
-    // recurring child (GATE_ROUTE_WARNING_DETAIL) keeps its notice: the pin serves its route check.
+    // recurring child keeps its notice: the pin serves its route check.
     && !(require('../scheduling/route-warning-detail').pinServesRouteCheckOnly(row) ? null : heldOutOfAutoDispatch(row));
 }
 
@@ -1115,15 +1139,13 @@ async function stillMissingPin(run, picked) {
 }
 
 async function raiseMissingGeoNotices(run) {
-  // GATE_ROUTE_WARNING_DETAIL: visits in the next week the run never loads (one-time, rodent, project,
+  // Visits in the next week the run never loads (one-time, rodent, project,
   // locked or confirmed) join the same lane when they have no pin. Read failure = the lane as before.
-  if (require('../scheduling/route-warning-detail').routeWarningDetailLive()) {
-    try {
-      const known = new Set([...run.missingGeoWanted.map((row) => String(row.id)), ...run.pinOkIds]);
-      run.missingGeoWanted.push(...await audit.nearTermPinlessVisits(run.nowDate, known));
-    } catch (err) {
-      logger.warn(`[auto-dispatch] near-term pin read failed: ${err.message}`);
-    }
+  try {
+    const known = new Set([...run.missingGeoWanted.map((row) => String(row.id)), ...run.pinOkIds]);
+    run.missingGeoWanted.push(...await audit.nearTermPinlessVisits(run.nowDate, known));
+  } catch (err) {
+    logger.warn(`[auto-dispatch] near-term pin read failed: ${err.message}`);
   }
   if (!run.missingGeoWanted.length) return;
   try {
@@ -1215,6 +1237,9 @@ async function evaluateServiceForRun(service, run) {
   if (gate.skip) return logLapsedPlanSkip(run, service, gate.skip);
   notePinOk(run, service, gate.elig);
   if (!gate.elig.eligible) return logIneligible(run, service, gate.elig, gate.planCheck);
+  // REMINDERS-OFF LOCK: a visit whose 24-hour reminder will not go out never moves (reminder-off.js).
+  const offSkip = reminderOff.skipFor(run.reminderOffIds, service);
+  if (offSkip) return logSkip(run, service, offSkip);
 
   // ── Day-move guard (only when a guard mode is active) ──
   const guard = dayMoveGuarded(guardMode, service)
@@ -1242,6 +1267,8 @@ async function evaluateServiceForRun(service, run) {
     lookaheadDays: config.lookaheadDays,
     dateToleranceDays: config.dateToleranceDays,
     capabilityFor: run.capabilityFor,
+    // Far-south stop dates, read once per run (south-day-kept.js).
+    southDays: run.southDays,
     // GATE_TECH_START_POINTS: the run's technician start points, read once
     // per technician (candidate-slots.js loadStartPoints); unused gate off.
     startPoints: run.startPoints,
@@ -1249,7 +1276,7 @@ async function evaluateServiceForRun(service, run) {
     // GATE_AUTO_DISPATCH_CONFLICT_MOVES: read the visit's current conflict.
     conflictMoves: config.conflictMovesEnabled === true,
     // GATE_AUTO_DISPATCH_ROAD_CHECK: the run's one road-time reader (null = off).
-    // ..._AT_APPLY: null here in apply mode; pass 2 sets it (holdBeforeRoadCheck).
+    // Null here in apply mode; pass 2 sets it (holdBeforeRoadCheck).
     roadTravel: roadCheck.pass1Travel(config, run.roadTravel),
     // GATE_AUTO_DISPATCH_ARRIVAL_SEARCH='true': the candidate search uses
     // find-time's arrival-window engine (candidate-slots.js); pass 2 reuses
@@ -1357,6 +1384,13 @@ function movedDescription(appliedAudit) {
 // necessarily changed date and 409s). Refreshes the planned move's ctx on
 // success; returns the skip otherwise (a read failure degrades the run).
 async function recheckPlannedMove(pm, run) {
+  // REMINDERS-OFF LOCK (reminder-off.js), in every guard mode: the customer may
+  // have turned the 24-hour reminder off while the run scored the move.
+  const off = await reminderOff.recheckFor(db, pm.service);
+  if (off) {
+    if (off.degraded) run.guardReadDegraded = true;
+    return off;
+  }
   if (!dayMoveGuarded(run.guardMode, pm.service)) return null;
   const recheckNow = new Date();
   const recheck = await recheckDayMoveWindow(run.guardMode, pm.service, pm.ctx.tierMeta, recheckNow, run.config.nightLock24h === true, toldLockOf(run.config), dayOnlyOf(run.config));
@@ -1404,11 +1438,11 @@ function groupedNote(unitSize) {
   return unitSize > 1 ? `, grouped visit of ${unitSize}` : '';
 }
 
-// GATE_AUTO_DISPATCH_ROAD_CHECK_AT_APPLY (owner 2026-10-28): before the live
-// re-evaluation, a move the per-run cap already holds is logged as cap-held
-// without one, so no road check is bought for it. Any other move gets the
-// run's road reader, so Google is asked only for a move about to be written.
-// True = held and logged. Gate off (or a dry run): does nothing.
+// Owner 2026-10-28: before the live re-evaluation, a move the per-run cap
+// already holds is logged as cap-held without one, so no road check is bought
+// for it. Any other move gets the run's road reader, so Google is asked only
+// for a move about to be written. True = held and logged. A dry run or a run
+// with the road check off: does nothing.
 async function holdBeforeRoadCheck(pm, run) {
   const { config, totals, runId } = run;
   if (!roadCheck.deferredToApply(config)) return false;
@@ -1530,6 +1564,7 @@ async function applyPlannedMove(pm, run, attempt) {
     }),
   });
   totals.changed += result.movedCount || 1;
+  run.southDays.invalidate(); // a move changed which dates hold a far-south stop; the next re-evaluation reads them again
   // A SLOT_TAKEN fallback (Codex pre-push P1) can land on a DIFFERENT
   // candidate than `fresh.best` — re-derive the audit from whichever one
   // `result.applied` says actually moved, never the first-tried placement.
@@ -1558,6 +1593,7 @@ async function applyPlannedMove(pm, run, attempt) {
 async function recordApplyFailure(pm, fresh, applyErr, run) {
   run.totals.failed++;
   run.totals.changed += applyErr.movedCount || 0;
+  if (applyErr.movedCount > 0) run.southDays.invalidate();
   // A partial grouped move onto a Sunday still put rows there.
   if (applyErr.movedCount > 0) run.sundays.note(pm.service, applyErr.lastAttempted || (fresh && fresh.best));
   const failedMembers = Array.isArray(applyErr.failedMembers) ? applyErr.failedMembers : [];
@@ -1673,6 +1709,7 @@ async function runAutoDispatch(opts = {}) {
     runId,
     config,
     startPoints: new Map(),
+    southDays: new southDayKept.SouthDays(), // far-south stop dates for the run (south-day-kept.js)
     guardMode: config.guardMode,
     nowDate,
     today,
@@ -1690,6 +1727,7 @@ async function runAutoDispatch(opts = {}) {
     // Visits auto-dispatch cannot fix alone; raised once at run end (needs-person-notice.js).
     needsPerson: new Map(),
     moveCounts: new Map(),
+    reminderOffIds: null, // pass 1's 24-hour reminder answers (loadRunReminderOff); null = unreadable
     // DAY RULES: visits this run may still move onto a Sunday (sundayBudget).
     sundays: sundayBudget(config),
     guardReadDegraded: false, // a failed guard read must not report a green run
@@ -1726,6 +1764,7 @@ async function runAutoDispatch(opts = {}) {
     run.guardCtx = await loadGuardContext(run.guardMode, services, nowDate, config.nightLock24h === true, toldLockOf(config), dayOnlyOf(config));
     run.guardReadDegraded = run.guardCtx.degraded;
     await loadRunMoveCounts(run, services);
+    await loadRunReminderOff(run, services);
 
     for (const service of services) {
       try {

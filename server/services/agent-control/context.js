@@ -119,9 +119,19 @@ function withWorkload(workload, fn) {
   return enter({ workload }, fn);
 }
 
+// Process-level default workload (AGENT_CONTEXT_WORKLOAD), for jobs that run
+// portal code off-box and cannot wrap every entry point in withWorkload (the
+// Max-plan runner sets max_runner). Read at call time; an unknown value is
+// ignored. A withWorkload scope always wins.
+function defaultWorkload() {
+  const w = process.env.AGENT_CONTEXT_WORKLOAD;
+  return WORKLOAD.includes(w) ? w : null;
+}
+
 function current() {
-  const s = store.getStore();
-  return s ? { ...s } : { ...EMPTY };
+  const s = { ...(store.getStore() || EMPTY) };
+  s.workload = s.workload || defaultWorkload();
+  return s;
 }
 
 function withPromptVersion(promptVersion, fn) {

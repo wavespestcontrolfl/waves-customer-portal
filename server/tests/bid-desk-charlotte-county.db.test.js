@@ -1,4 +1,4 @@
-// Bid Desk Charlotte County due dates (GATE_BID_DESK_CHARLOTTE_DATES) through PostgreSQL: which bids the run reads the
+// Bid Desk Charlotte County due dates through PostgreSQL: which bids the run reads the
 // county for, the fill and its confirmed flag, and every row it must leave alone. A fake fetch stands in for the
 // county's list; no test calls the real site. Every write runs in a transaction that is rolled back. Synthetic bids
 // only. Skips without DATABASE_URL (CI runs it).
@@ -42,13 +42,9 @@ describeDb('Bid Desk Charlotte County due dates (PostgreSQL)', () => {
   });
   beforeEach(async () => {
     mockPg = await database.transaction();
-    process.env.GATE_BID_DESK = 'true';
-    process.env.GATE_BID_DESK_CHARLOTTE_DATES = 'true';
-    process.env.GATE_BID_DESK_AUTO_DATES = 'true';
   });
   afterEach(async () => {
     const trx = mockPg; mockPg = database; await trx.rollback();
-    delete process.env.GATE_BID_DESK; delete process.env.GATE_BID_DESK_CHARLOTTE_DATES; delete process.env.GATE_BID_DESK_AUTO_DATES;
   });
   afterAll(async () => { if (database) await database.destroy(); });
 
@@ -69,18 +65,6 @@ describeDb('Bid Desk Charlotte County due dates (PostgreSQL)', () => {
   const openBells = async (bidId) => (await mockPg('notifications').whereRaw("metadata->>'dedupeKey' like ?", [`bid-desk:%${bidId}%`])
     .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'").select('id')).length;
 
-  test('gate off: nothing is read, nothing is fetched, nothing is written', async () => {
-    const row = await bid('26-601');
-    const fetchImpl = fakeFetch([countyRow('26-601')]);
-    delete process.env.GATE_BID_DESK_CHARLOTTE_DATES;
-    expect(await county.runCharlotteDates({ fetchImpl })).toEqual({ skipped: 'gate_off' });
-    process.env.GATE_BID_DESK_CHARLOTTE_DATES = 'true';
-    delete process.env.GATE_BID_DESK;
-    expect(await county.runCharlotteDates({ fetchImpl })).toEqual({ skipped: 'gate_off' });
-    expect(fetchImpl).not.toHaveBeenCalled();
-    expect((await rowOf(row.id)).due_at).toBeNull();
-  });
-
   test('no open dateless Charlotte bid: the county is not called', async () => {
     const fetchImpl = fakeFetch([countyRow('26-601')]);
     expect(await county.runCharlotteDates({ fetchImpl })).toEqual({ skipped: 'nothing_to_fill' });
@@ -95,7 +79,7 @@ describeDb('Bid Desk Charlotte County due dates (PostgreSQL)', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  test('a fill sets the date, its source line, confirmed (AUTO_DATES on), a clean flag and cleared reminder stamps', async () => {
+  test('a fill sets the date, its source line, confirmed, a clean flag and cleared reminder stamps', async () => {
     const row = await bid('26-601', { reminder_14d_sent_at: new Date(), reminder_7d_sent_at: new Date(), reminder_2d_sent_at: new Date(), decision_note: 'keep', project_title: 'Keep Title' });
     const fetchImpl = fakeFetch([countyRow('26-601'), countyRow('26-999')]);
     const before = await rowOf(row.id);
@@ -110,16 +94,6 @@ describeDb('Bid Desk Charlotte County due dates (PostgreSQL)', () => {
       status: 'new', project_title: 'Keep Title', decision_note: 'keep',
     });
     expect(after.updated_at.getTime()).toBeGreaterThan(before.updated_at.getTime());
-  });
-
-  test('AUTO_DATES off: the date is filled but not confirmed, so no reminder is owed', async () => {
-    delete process.env.GATE_BID_DESK_AUTO_DATES;
-    const row = await bid('26-601');
-    expect(await county.runCharlotteDates({ fetchImpl: fakeFetch([countyRow('26-601')]) })).toMatchObject({ filled: 1 });
-    const after = await rowOf(row.id);
-    expect(after).toMatchObject({ due_confirmed: false, needs_date_confirmation: false });
-    expect(after.due_at.getTime()).toBe(NOV4);
-    expect(reminderDue(after, new Date(NOV4 - 6 * DAY))).toBeNull();
   });
 
   test('after a fill the existing reminder logic sees a confirmed date', async () => {

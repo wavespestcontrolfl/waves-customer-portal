@@ -4,7 +4,7 @@
  * effect (reportTextAnchorForVisit, covered in review-ask-after-report.test.js).
  */
 jest.mock('../models/db', () => jest.fn());
-jest.mock('../services/review-request', () => ({
+jest.mock('../services/review-request', () => ({firstAskLockVisit: jest.fn(async () => null), 
   enrollPostService: jest.fn(async () => ({ started: true })),
   completionReviewDelay: jest.fn(() => undefined),
   reportTextAnchorForVisit: jest.fn(async () => null),

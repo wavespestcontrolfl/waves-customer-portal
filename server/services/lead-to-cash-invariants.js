@@ -248,6 +248,17 @@ const DETECTORS = Object.freeze([
       return { count: ids.length, ids };
     },
   },
+  {
+    key: 'new_plan_without_welcome',
+    label: 'New customers whose first recurring plan started in the last 14 days with no welcome text queued',
+    href: '/admin/customers',
+    provenance: 'welcome-text traces 2026-11-04 and 2026-11-09 — 27 of 94 first plans (Jul 25 to Oct 24) got no welcome text; 4 had no known cause',
+    async run({ now }) {
+      const { findFirstPlansWithoutWelcome, WELCOME_AUDIT_WINDOW_DAYS, WELCOME_AUDIT_GRACE_HOURS } = require('./new-recurring-welcome-sms');
+      const ids = await findFirstPlansWithoutWelcome(now);
+      return { count: ids.length, ids, detail: { windowDays: WELCOME_AUDIT_WINDOW_DAYS, graceHours: WELCOME_AUDIT_GRACE_HOURS } };
+    },
+  },
   // History-wide completion ↔ report record invariants (integrity audit
   // 2026-09-02). closeout_failed_facts above reads yesterday only and skips
   // `pending` facts, so a missing record / token / tracker stamp / customer

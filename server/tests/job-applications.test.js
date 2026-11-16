@@ -295,6 +295,42 @@ describe('AI screen prompt-injection posture', () => {
   });
 });
 
+// The stored key is `physical_limitations`, but the form asks "Can you perform
+// these essential functions, with or without reasonable accommodation?". Under
+// the stored key the model read "Yes" as "has physical limitations".
+describe('AI screen reads the essential-functions answer as asked', () => {
+  const { SCREEN_SYSTEM_PROMPT, buildUserMessage } = screenPrivate;
+  const application = (answers) => buildUserMessage({
+    role: 'technician',
+    language: 'en',
+    contact_snapshot: { name: 'Jane Doe', city: 'Venice' },
+    answers,
+  });
+
+  test('the answer reaches the model under a name that says what "Yes" means, never the stored key', () => {
+    const user = application({
+      physical_limitations: 'Yes (with or without reasonable accommodation)',
+      experience: 'lawn crew',
+    });
+    expect(user).toContain('can_perform_essential_functions: Yes (with or without reasonable accommodation)');
+    expect(user).not.toContain('physical_limitations');
+    // Every other answer keeps its stored name.
+    expect(user).toContain('experience: lawn crew');
+  });
+
+  test('the Spanish answer goes under the same name', () => {
+    expect(application({ physical_limitations: 'Sí (con o sin adaptaciones razonables)' }))
+      .toContain('can_perform_essential_functions: Sí (con o sin adaptaciones razonables)');
+  });
+
+  test('the system prompt states the question and forbids a limitation or accommodation flag', () => {
+    expect(SCREEN_SYSTEM_PROMPT).toContain('"can_perform_essential_functions"');
+    expect(SCREEN_SYSTEM_PROMPT).toContain('Can you perform these essential functions, with or without reasonable accommodation?');
+    expect(SCREEN_SYSTEM_PROMPT).toContain('A "Yes" means the applicant can do the work');
+    expect(SCREEN_SYSTEM_PROMPT).toContain('Never infer, mention or flag a disability, a physical limitation or a need for accommodation');
+  });
+});
+
 describe('AI screen mapping', () => {
   const { mapScreen } = screenPrivate;
 

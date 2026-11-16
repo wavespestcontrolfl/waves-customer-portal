@@ -133,6 +133,8 @@ const DOCX = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from('
 const DOCX_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 let server;
 let baseUrl;
+let lastAppError = null; // the last error a route passed to the app's error chain
+let lastFileUploadReq = null; // the last POST …/file request, so a test can see when multer starts to read it
 let mockCredentialRows = [];
 
 async function call(method, url, body, headers = admin) {
@@ -169,10 +171,11 @@ async function signed(over = {}) {
 beforeAll(async () => {
   const app = express();
   app.use(express.json());
+  app.use((req, _res, next) => { if (req.method === 'POST' && req.path.endsWith('/file')) lastFileUploadReq = req; next(); });
   app.use('/api/admin/bid-kit', require('../routes/admin-bid-kit'));
   app.use('/api/admin/feature-flags', require('../routes/admin-feature-flags'));
   app.use('/api/public/credentials', require('../routes/public-credentials'));
-  app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
+  app.use((err, _req, res, _next) => { lastAppError = err; res.status(500).json({ error: err.message }); });
   server = await new Promise((resolve) => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
@@ -778,6 +781,49 @@ describe('files', () => {
     const exact = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(15 * 1024 * 1024 - 9)]);
     expect(exact.length).toBe(15 * 1024 * 1024);
     expect((await upload(item.id, { bytes: exact })).status).toBe(200);
+  });
+
+  test('a file one byte over 15 MB is refused with the same 413 line, and nothing is stored', async () => {
+    const item = await create();
+    const oneOver = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(15 * 1024 * 1024 - 9 + 1)]);
+    expect(oneOver.length).toBe(15 * 1024 * 1024 + 1);
+    const res = await upload(item.id, { bytes: oneOver });
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ error: 'The file is larger than 15 MB' });
+    expect(mockSent).toHaveLength(0);
+    expect(store.rows.get(item.id).file_s3_key).toBeNull();
+  });
+
+  test('a client that hangs up mid-upload is passed on as the hang-up itself, not as a scrubbed error', async () => {
+    // The app's hang-up guard (middleware/errors.js) reads multer's own message; a scrubbed copy would look like a
+    // server fault and reach the error log and Sentry.
+    const http = require('http');
+    const { isUploadHangUp } = require('../middleware/errors');
+    const item = await create();
+    lastAppError = null;
+    lastFileUploadReq = null;
+    const boundary = 'bidkithangup';
+    const head = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="license.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4\n`;
+    const { port } = new URL(baseUrl);
+    const client = http.request({
+      host: '127.0.0.1', port, path: `/api/admin/bid-kit/${item.id}/file`, method: 'POST',
+      // Promise far more bytes than are sent, so the server is still reading when the socket is cut.
+      headers: { Authorization: 'Bearer admin', 'content-type': `multipart/form-data; boundary=${boundary}`, 'content-length': String(head.length + 1024 * 1024) },
+    });
+    client.on('error', () => {});
+    client.write(head);
+    client.write(Buffer.alloc(16 * 1024, 1));
+    // Cut the socket only once multer is reading the body (it pipes the request), so the cut lands
+    // mid-upload on a slow machine too. No fixed wait.
+    for (let i = 0; i < 1000 && !(lastFileUploadReq && lastFileUploadReq.readableFlowing); i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(lastFileUploadReq && lastFileUploadReq.readableFlowing).toBe(true);
+    client.destroy();
+    for (let i = 0; i < 250 && !lastAppError; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(lastAppError).toBeInstanceOf(Error);
+    expect(['Request aborted', 'Request closed']).toContain(lastAppError.message);
+    expect(isUploadHangUp(lastAppError, { destroyed: true })).toBe(true);
+    expect(mockSent).toHaveLength(0);
+    expect(store.rows.get(item.id).file_s3_key).toBeNull();
   });
 
   test('an upload with no file storage configured is refused before anything is stored, and says so', async () => {

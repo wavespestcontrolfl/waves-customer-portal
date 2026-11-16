@@ -147,7 +147,6 @@
     "services/reschedule-sms.js": 1,
     "services/scheduler.js": 1,
     "services/scheduling/arrival-route.js": 1,
-    "services/scheduling/assistant-route-times.js": 2,
     "services/scheduling/customer-move-limits.js": 1,
     "services/scheduling/customer-route-check.js": 1,
     "services/scheduling/route-performance.js": 1,

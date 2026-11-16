@@ -1,12 +1,11 @@
-// GATE_PEST_REPORT_VOICE (owner 2026-10-22, "rewrite pest"): under the writer
-// rules the recurring pest writer gets one prompt in one voice in place of its
-// stacked blocks. Off, and for every other writer, the prompt is byte-identical.
+// Owner 2026-10-22, "rewrite pest": under the writer rules the recurring pest
+// writer gets one prompt in one voice in place of its stacked blocks. Every
+// other writer, and the pest writer without the writer rules, is unchanged.
 const fs = require('fs');
 const path = require('path');
 const { selectReportCopyPrompt } = require('../services/service-report/lawn-report-copy-prompt');
 const {
   PEST_REPORT_VOICE_PROMPT, PEST_REPORT_VOICE_VERSION, PEST_VOICE_EXAMPLES, pestReportVoicePrompt,
-  PEST_REPORT_VOICE_V2_PROMPT, PEST_REPORT_VOICE_V2_VERSION, PEST_VOICE_V2_EXAMPLES,
 } = require('../services/service-report/pest-report-voice');
 const {
   OWNER_RULES, groundedTimeframePhrases, noteAbsenceHint, writerRulesRejection,
@@ -29,7 +28,7 @@ describe('which writer gets the one-voice prompt', () => {
     ['one_time_pest_control', { serviceKey: 'one_time_pest_control', findingsType: null }],
     ['a legacy pest label', {}],
   ])('%s, under the writer rules', (_name, context) => {
-    const prompt = selectReportCopyPrompt(V4_SHARED, 'Quarterly Pest Control Service', { ...context, writerRules: true, pestVoice: true });
+    const prompt = selectReportCopyPrompt(V4_SHARED, 'Quarterly Pest Control Service', { ...context, writerRules: true });
     expect(prompt).toBe(PEST_REPORT_VOICE_PROMPT);
     expect(prompt).not.toContain(OWNER_RULES);
     expect(prompt).not.toContain(CALLBACK);
@@ -40,28 +39,22 @@ describe('which writer gets the one-voice prompt', () => {
       { serviceKey: 'pest_re_service', findingsType: null },
       { serviceKey: 'pest_general_quarterly', findingsType: null, isCallback: true },
     ]) {
-      const prompt = selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, writerRules: true, pestVoice: true });
+      const prompt = selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, writerRules: true });
       expect(prompt).toBe(pestReportVoicePrompt({ reservice: true }));
       expect(prompt.endsWith(RESERVICE_LINE)).toBe(true);
       expect(prompt).not.toContain(CALLBACK);
     }
   });
 
-  test('off, the pest prompt is byte-identical to the stacked writer', () => {
+  test('without the writer rules the pest writer keeps its module prompt', () => {
     for (const context of [
       { serviceKey: 'pest_general_quarterly', findingsType: null },
       { serviceKey: 'pest_re_service', findingsType: null },
     ]) {
-      const before = selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, writerRules: true });
-      expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, writerRules: true, pestVoice: false })).toBe(before);
-      expect(before).toContain(OWNER_RULES);
+      const prompt = selectReportCopyPrompt(V4_SHARED, 'Old label', context);
+      expect(prompt).toContain('RECURRING PEST v1');
+      expect(prompt).not.toContain(`# ${PEST_REPORT_VOICE_VERSION}`);
     }
-  });
-
-  test('without the writer rules the flag changes nothing', () => {
-    const context = { serviceKey: 'pest_general_quarterly', findingsType: null };
-    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, pestVoice: true }))
-      .toBe(selectReportCopyPrompt(V4_SHARED, 'Old label', context));
   });
 
   test.each([
@@ -72,10 +65,10 @@ describe('which writer gets the one-voice prompt', () => {
     ['lawn_care_6week', null],
     ['tree_shrub_program', 'tree_shrub'],
     ['palm_injection', 'palm_injection'],
-  ])('%s keeps its own writer with the flag on', (serviceKey, findingsType) => {
-    const context = { serviceKey, findingsType, writerRules: true };
-    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, pestVoice: true }))
-      .toBe(selectReportCopyPrompt(V4_SHARED, 'Old label', context));
+  ])('%s keeps its own writer under the writer rules', (serviceKey, findingsType) => {
+    const prompt = selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey, findingsType, writerRules: true });
+    expect(prompt).not.toBe(PEST_REPORT_VOICE_PROMPT);
+    expect(prompt).not.toContain(`# ${PEST_REPORT_VOICE_VERSION}`);
   });
 });
 
@@ -165,8 +158,7 @@ describe('the one-voice prompt', () => {
     else process.env.GATE_REPORT_WRITER_RULES = savedRules;
   });
 
-  // v1's examples, then v2's quiet-visit example (its other two are v1's).
-  test.each([...PEST_VOICE_EXAMPLES, PEST_VOICE_V2_EXAMPLES[0]].map((example, i) => [i + 1, example]))(
+  test.each(PEST_VOICE_EXAMPLES.map((example, i) => [i + 1, example]))(
     'example %i passes the writer screen and the report parser with its own EXPECTATIONS',
     (_n, example) => {
       expect(writerRulesRejection(example.report, { allowedPhrases: groundedTimeframePhrases(example.expectations) })).toBeNull();
@@ -178,38 +170,20 @@ describe('the one-voice prompt', () => {
   );
 });
 
-// GATE_PEST_QUIET_VISIT (owner 2026-10-24): v1's first example modeled "you
-// didn't mention anything new when we talked" on a quiet visit; v2 opens it on
-// what we saw and where we worked, and never claims a talk.
-describe('pest_report_voice_v2', () => {
-  const context = { serviceKey: 'pest_general_quarterly', findingsType: null, writerRules: true, pestVoice: true };
-
-  test('the selector serves v2 only on the voice prompt with the quiet-visit flag', () => {
-    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, pestQuietVisit: true })).toBe(PEST_REPORT_VOICE_V2_PROMPT);
-    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', context)).toBe(PEST_REPORT_VOICE_PROMPT);
-    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey: 'pest_re_service', findingsType: null, writerRules: true, pestVoice: true, pestQuietVisit: true }))
-      .toBe(pestReportVoicePrompt({ reservice: true, quietVisit: true }));
-    const stacked = { ...context, pestVoice: false };
-    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...stacked, pestQuietVisit: true })).toBe(selectReportCopyPrompt(V4_SHARED, 'Old label', stacked));
+// Owner 2026-10-24: a quiet visit opens on what we saw and where we worked,
+// and the prompt never claims a talk or says what the customer did not say.
+describe('the quiet-visit rules', () => {
+  test('the prompt carries the two quiet-visit rules and the v2 version', () => {
+    expect(PEST_REPORT_VOICE_PROMPT).toContain('# pest_report_voice_v2');
+    expect(PEST_REPORT_VOICE_PROMPT).toContain('- Never say we talked with, spoke with or met the customer unless the note says so, and never say what the customer did not mention, report or ask about.');
+    expect(PEST_REPORT_VOICE_PROMPT).toContain('When the customer told us nothing, start with what we saw today or with where we worked, never with what they did not say. ');
   });
 
-  test('v2 keeps every v1 rule and adds the two quiet-visit rules', () => {
-    const rules = (prompt) => prompt.slice(0, prompt.indexOf('THREE GOOD REPORTS'));
-    const quietFound = 'When the customer told us nothing, start with what we saw today or with where we worked, never with what they did not say. ';
-    expect(PEST_REPORT_VOICE_V2_PROMPT).toContain(`# ${PEST_REPORT_VOICE_V2_VERSION}`);
-    expect(PEST_REPORT_VOICE_V2_PROMPT).toContain('- Never say we talked with, spoke with or met the customer unless the note says so, and never say what the customer did not mention, report or ask about.');
-    expect(PEST_REPORT_VOICE_V2_PROMPT).toContain(quietFound);
-    const v2Lines = new Set(rules(PEST_REPORT_VOICE_V2_PROMPT).replace(quietFound, '').split('\n'));
-    for (const line of rules(PEST_REPORT_VOICE_PROMPT).split('\n')) {
-      if (line !== `# ${PEST_REPORT_VOICE_VERSION}`) expect(v2Lines.has(line)).toBe(true);
-    }
-  });
-
-  test('no v2 example opens on what the customer did not say or claims a talk', () => {
-    for (const example of PEST_VOICE_V2_EXAMPLES) {
+  test('no example opens on what the customer did not say or claims a talk', () => {
+    for (const example of PEST_VOICE_EXAMPLES) {
       expect(example.report).not.toMatch(/didn['’]t mention|did not mention|didn['’]t report|when we talked|when we spoke|spoke with|talked with/i);
     }
-    expect(PEST_REPORT_VOICE_V2_PROMPT).not.toContain("you didn't mention anything new");
+    expect(PEST_REPORT_VOICE_PROMPT).not.toContain("you didn't mention anything new");
   });
 });
 
@@ -218,12 +192,13 @@ describe('pest_report_voice_v2', () => {
 // report passes on; aftercare for a treated area or a bait stays out.
 describe('owner rulings 2026-10-23 and 2026-10-25', () => {
   test('german takes a small g, in the rule and in every example report', () => {
-    expect(PEST_REPORT_VOICE_V2_PROMPT).toContain('- Write "german cockroaches" and "german roaches" with a small g, except as the first word of a sentence.');
-    for (const example of PEST_VOICE_V2_EXAMPLES) expect(example.report).not.toMatch(/\bGerman\b/);
+    expect(PEST_REPORT_VOICE_PROMPT).toContain('- Write "german cockroaches" and "german roaches" with a small g, except as the first word of a sentence.');
+    for (const example of PEST_VOICE_EXAMPLES) expect(example.report).not.toMatch(/\bGerman\b/);
   });
 
   test('a recorded cleaning step is passed on; aftercare for a treated area stays out', () => {
-    expect(PEST_REPORT_VOICE_V2_PROMPT).toContain('A cleaning or sanitation step the note or Recommendations give ("wipe the counters dry before bed") is the customer\'s own task: say it in WHAT\'S NEXT.');
-    expect(PEST_REPORT_VOICE_V2_PROMPT).not.toContain('never tell the customer to leave, clean, water or avoid anything');
+    expect(PEST_REPORT_VOICE_PROMPT).toContain('A cleaning or sanitation step the note or Recommendations give ("wipe the counters dry before bed") is the customer\'s own task: say it in WHAT\'S NEXT.');
+    expect(PEST_REPORT_VOICE_PROMPT).not.toContain('never tell the customer to leave, clean, water or avoid anything');
+    expect(PEST_REPORT_VOICE_PROMPT).toContain('No re-entry, drying, rainfast or waiting time, no safety steps and no aftercare: never tell the customer to leave, clean, water or avoid a treated area or a bait. A cleaning or sanitation step');
   });
 });

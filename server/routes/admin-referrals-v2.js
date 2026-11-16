@@ -9,7 +9,6 @@ const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
 const inbound = require('../services/referral-inbound');
 const { form1099ThresholdCents } = require('../services/form-1099-threshold');
-const { referralInboundConfirmLive } = require('../config/feature-gates');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -165,14 +164,15 @@ router.get('/queue', async (req, res, next) => {
 });
 
 // =========================================================================
-// Inbound referrals (GATE_REFERRAL_INBOUND_CONFIRM, dark): plan customers who
+// Inbound referrals: plan customers who
 // came in through a referral link or named a referrer, waiting for the office
 // to confirm the referrer. services/referral-inbound.js holds the rules.
 // =========================================================================
 router.get('/inbound', async (req, res, next) => {
   try {
-    if (!referralInboundConfirmLive()) return res.json({ enabled: false, items: [] });
     const items = await inbound.listInboundReferrals();
+    // `enabled` stays in the answer only for an installed app shell still running a build that reads it
+    // (the service worker keeps old builds); the current page ignores it.
     res.json({ enabled: true, items });
   } catch (err) { next(err); }
 });
@@ -185,7 +185,6 @@ function sendInboundError(res, err, next) {
 // POST /inbound/:customerId/confirm — the office names the referrer.
 router.post('/inbound/:customerId/confirm', async (req, res, next) => {
   try {
-    if (!referralInboundConfirmLive()) return res.status(404).json({ error: 'Not found' });
     const { customerId } = req.params;
     const referrerCustomerId = String(req.body?.referrerCustomerId || '');
     if (!UUID_RE.test(customerId) || !UUID_RE.test(referrerCustomerId)) {
@@ -203,7 +202,6 @@ router.post('/inbound/:customerId/confirm', async (req, res, next) => {
 // POST /inbound/:customerId/dismiss — not a referral; leaves the list for good.
 router.post('/inbound/:customerId/dismiss', async (req, res, next) => {
   try {
-    if (!referralInboundConfirmLive()) return res.status(404).json({ error: 'Not found' });
     const { customerId } = req.params;
     if (!UUID_RE.test(customerId)) return res.status(400).json({ error: 'customerId is required' });
     const result = await inbound.dismissInboundReferral({

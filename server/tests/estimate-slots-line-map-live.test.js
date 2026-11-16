@@ -224,6 +224,16 @@ describe('lineOfferRankingFor', () => {
     expect(lineTechnician.lineOfferRanking).toHaveBeenLastCalledWith(db, { lines: ['general'], place: null });
   });
 
+  test('live, inside a make-room hold\'s transaction: both map reads ride the caller\'s connection', async () => {
+    process.env[GATE] = 'live';
+    const trx = jest.fn();
+    lineTechnician.serviceLineFor.mockResolvedValue({ line: 'general', lineFrom: 'name' });
+    lineTechnician.lineOfferRanking.mockResolvedValue(RANKING);
+    await lineOfferRankingFor({ services: [{ service: 'pest_control', label: 'Pest Control' }] }, null, trx);
+    expect(lineTechnician.serviceLineFor).toHaveBeenCalledWith(trx, expect.any(Object));
+    expect(lineTechnician.lineOfferRanking).toHaveBeenCalledWith(trx, { lines: ['general'], place: null });
+  });
+
   test('live but the map is unreadable: today\'s list (null)', async () => {
     process.env[GATE] = 'live';
     lineTechnician.serviceLineFor.mockResolvedValue({ line: 'general', lineFrom: 'name' });

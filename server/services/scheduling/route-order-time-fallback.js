@@ -1,5 +1,5 @@
 /**
- * GATE_ROUTE_ORDER_TIME_FALLBACK (owner 2026-11-01, "build fixes", dispatch lane F1).
+ * Route order time fallback (owner 2026-11-01, "build fixes", dispatch lane F1).
  *
  * When the save's route check REFUSES to place a visit (arrival_window,
  * route_unverified, ...), the visit used to keep route_order NULL, and every

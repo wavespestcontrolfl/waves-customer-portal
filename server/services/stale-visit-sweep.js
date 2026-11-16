@@ -17,6 +17,12 @@
  * backlog summary differs from the last bell's, or when that bell is older
  * than REMIND_DAYS (a frozen backlog shouldn't go silent forever).
  *
+ * One open row: a new bell closes the older open ones (their list is out of
+ * date), and a clean sweep clears them all, dismissed ones too. Before, each changed night left
+ * its own row open for 3 days (2026-11: three rows with one title, the
+ * counts 61, 64 and 67). Through admin-alert-episodes.js, as the WDO
+ * attention sweep does; ALERT_EPISODES off = no close.
+ *
  * Gate: staleVisitSweep (GATE_STALE_VISIT_SWEEP). Reads scheduled_services;
  * writes nothing but admin notifications.
  */
@@ -31,6 +37,9 @@ const { etDateString } = require('../utils/datetime-et');
 const OPEN_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
 const REMIND_DAYS = 7;
 const CATEGORY = 'stale_visit_sweep';
+const SUPERSEDED_RESOLUTION = 'Replaced by a newer list of stale visits';
+const CLEARED_RESOLUTION = 'Cleared: no past-dated visit is still open';
+const CLEAR_REASON = 'stale_visits_clear';
 
 // Query failures propagate — a schema/connection outage must surface as a
 // failed sweep in the scheduler's error log, never as clean:true (this sweep
@@ -110,7 +119,38 @@ async function lastBell() {
   if (!prior) return null;
   let meta = prior.metadata;
   if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+  // A row a clean sweep closed is no baseline: the backlog went to zero after it, so the same visits open
+  // again are a new backlog and must ring, not read as the list the owner was already told about.
+  if (meta?.autoClearedReason === CLEAR_REASON) return null;
   return { signature: meta?.summary_signature || null, createdAt: prior.created_at };
+}
+
+// This sweep's rows nobody has closed. Read BEFORE a new bell is written, so the new row is never in the list.
+// Empty while ALERT_EPISODES is off (the close kill switch every episodes caller reads): nothing is closed then.
+async function openRowIds() {
+  if (!require('../config/feature-gates').alertEpisodesLive()) return [];
+  const rows = await db('notifications')
+    .where({ recipient_type: 'admin', category: CATEGORY })
+    .whereNull('done_at')
+    .select('id');
+  return rows.map((r) => r.id);
+}
+
+// A newer list replaced these rows. By id: only the rows that were open before the new bell.
+async function closeSuperseded(ids, now) {
+  if (!ids.length) return 0;
+  return Number(await require('./admin-alert-episodes').closeAdminAlertIds(db, ids, 'stale_visits_superseded', { now, resolution: SUPERSEDED_RESOLUTION })) || 0;
+}
+
+// Nothing is stale: stamp every row of this sweep that is not yet cleared, done or not, as the WDO attention
+// sweep does. A row a person (or the 3-day rule) already closed keeps its own done stamps and still gets the
+// clear stamp, so lastBell stops reading it as the baseline and the same visits open again ring.
+async function closeCleared(now) {
+  if (!require('../config/feature-gates').alertEpisodesLive()) return 0;
+  const episodes = require('./admin-alert-episodes');
+  const keys = await episodes.openAdminAlertKeys(db, `${CATEGORY}:`);
+  if (!keys.length) return 0;
+  return Number(await episodes.closeAdminAlertKeys(db, keys, CLEAR_REASON, { now, resolution: CLEARED_RESOLUTION })) || 0;
 }
 
 function etDayNumber(value) {
@@ -136,13 +176,16 @@ async function runStaleVisitSweep({ now = new Date() } = {}) {
   const { runExclusive } = require('../utils/cron-lock');
   return runExclusive('stale-visit-sweep', async () => {
     const visits = await findStaleVisits(now);
-    if (!visits.length) return { ok: true, clean: true };
+    if (!visits.length) {
+      return { ok: true, clean: true, closed: await closeCleared(now) };
+    }
 
     const signature = summarySignature(visits);
     if (priorBellCovers(await lastBell(), signature, now)) {
       return { ok: true, deduped: true, items: visits.length };
     }
 
+    const standing = await openRowIds();
     const summary = summarize(visits);
     const bell = await NotificationService.notifyAdmin(
       CATEGORY,
@@ -165,7 +208,9 @@ async function runStaleVisitSweep({ now = new Date() } = {}) {
     // suppression returns a truthy sentinel and correctly counts as rung.)
     if (!bell) throw new Error('admin notification insert failed — bell not recorded');
     logger.info(`[stale-visit-sweep] rang: ${summary}`);
-    return { ok: true, rang: true, items: visits.length };
+    // A suppressed write (the sentinel { id: null, suppressed: true }) left no new row: the older rows stay.
+    const closed = bell.suppressed === true ? 0 : await closeSuperseded(standing, now);
+    return { ok: true, rang: true, items: visits.length, closed };
   });
 }
 

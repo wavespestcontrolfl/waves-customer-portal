@@ -62,7 +62,7 @@ export function useNextVisit({ enabled, customerId, requestRef }) {
 // reviewed ({ reviewedOn } or null). Once it says so, no review goes out, so the poll stops as for a box off.
 export function useReviewPreview({ enabled, willReview, firstAskOpen = true, serviceId, serviceType, requestRef }) {
   const [preview, setPreview] = useState(null);
-  // GATE_REVIEW_FIRST_ASK_LOCK: the server's read that this customer was never asked. Kept when the
+  // First review ask: the server's read that this customer was never asked. Kept when the
   // preview is cleared (box off), since the box still needs its label and its reason then.
   const [firstAsk, setFirstAsk] = useState(false);
   // GATE_REVIEW_ALREADY_REVIEWED: the marked-reviewed read and the off reasons a first ask may carry, kept the same way.

@@ -1,7 +1,6 @@
 /**
- * Technician training reminders in the 6:52 ET cron (server/services/scheduler.js, '52 6 * * *'; GATE_TECH_TRAINING_DATES, dark).
- * The gate is read per tick: off returns before the lease and the sweep; on runs the sweep under runExclusive so a Railway
- * deploy overlap cannot raise the same bells twice; a failed sweep is logged and never thrown out of the tick.
+ * Technician training reminders in the 6:52 ET cron (server/services/scheduler.js, '52 6 * * *').
+ * The tick runs the sweep under runExclusive so a Railway deploy overlap cannot raise the same bells twice; a failed sweep is logged and never thrown out of the tick.
  *
  * Mock baseline copied from scheduler-bid-kit-expiry-cron.test.js.
  */
@@ -19,7 +18,6 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
   recurringSeriesTopUpLive: jest.fn(() => false),
-  techTrainingDatesLive: jest.fn(() => false),
 }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
@@ -36,7 +34,7 @@ jest.mock('../services/technician-training-reminders', () => ({ runTechnicianTra
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
-const { isEnabled, techTrainingDatesLive } = require('../config/feature-gates');
+const { isEnabled } = require('../config/feature-gates');
 const { runTechnicianTrainingReminders } = require('../services/technician-training-reminders');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
@@ -52,31 +50,21 @@ function trainingTick() {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  techTrainingDatesLive.mockReturnValue(false);
 });
 
-test('gate off: the tick returns before the lease and the sweep', async () => {
-  await trainingTick();
-  expect(runExclusive).not.toHaveBeenCalledWith('technician-training-dates', expect.any(Function));
-  expect(runTechnicianTrainingReminders).not.toHaveBeenCalled();
-});
-
-test('gate on: the sweep runs inside runExclusive', async () => {
-  techTrainingDatesLive.mockReturnValue(true);
+test('the sweep runs inside runExclusive', async () => {
   await trainingTick();
   expect(runExclusive).toHaveBeenCalledWith('technician-training-dates', expect.any(Function));
   expect(runTechnicianTrainingReminders).toHaveBeenCalledTimes(1);
 });
 
 test('a tick another instance already holds never runs a second sweep', async () => {
-  techTrainingDatesLive.mockReturnValue(true);
   runExclusive.mockImplementationOnce(async () => ({ skipped: true, reason: 'lease_held' }));
   await trainingTick();
   expect(runTechnicianTrainingReminders).not.toHaveBeenCalled();
 });
 
 test('a failed sweep is logged, never thrown out of the tick', async () => {
-  techTrainingDatesLive.mockReturnValue(true);
   runTechnicianTrainingReminders.mockRejectedValueOnce(new Error('sweep failed'));
   await expect(trainingTick()).resolves.toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith('[technician-training-reminders] tick failed: sweep failed');

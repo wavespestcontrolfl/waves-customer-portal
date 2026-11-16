@@ -275,7 +275,7 @@ it('open times, Quick Move: asks for the box on the visit\'s own route', async (
   hooks.availability = openTimesAt();
   render(<RainOutSheet service={{ id: 'svc-1', technicianId: 'tech-1', customerId: 'cust-1', scheduledDate: '2035-01-01' }} onClose={vi.fn()} onDone={vi.fn()} />);
   await screen.findByTestId('open-times-box');
-  // The server decides whether Quick Move gets the route check (GATE_PICKER_ROAD_CHECK).
+  // The server decides whether Quick Move gets the route check.
   expect(hooks.bestTimesArgs).toMatchObject({ openTimes: true, technicianId: 'tech-1', quickMove: true });
   expect(hooks.bestTimesArgs.techPick).toBeFalsy();
 });
@@ -306,7 +306,7 @@ it('open times, New Appointment: every route is listed, and a row books its tech
   await waitFor(() => expect(screen.getAllByTestId('open-time-row').find((row) => row.textContent.includes('11 AM'))).toHaveAttribute('aria-pressed', 'true'));
 });
 
-// GATE_ROUTE_CHECK_LATE_DAYS: a Quick Move day whose booked stops already arrive late is offered with a small tag.
+// Late days: a Quick Move day whose booked stops already arrive late is offered with a small tag.
 it('rain-out: a day option the server marks dayAlreadyLate shows the "already late" tag; the other day shows none', async () => {
   vi.stubGlobal('fetch', vi.fn(async (url) => (String(url).includes('/rain-out-options')
     ? json({

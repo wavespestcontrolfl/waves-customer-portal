@@ -45,7 +45,7 @@ beforeEach(() => {
     'GET /admin/referrals/promoters': () => json(200, { promoters: [] }),
     'GET /admin/referrals/queue': () => json(200, { referrals: QUEUE }),
     'GET /admin/referrals/payouts': () => json(200, { payouts: PAYOUTS }),
-    'GET /admin/referrals/inbound': () => json(200, { enabled: false, items: [] }),
+    'GET /admin/referrals/inbound': () => json(200, { items: [] }),
     'GET /admin/referrals/settings': () => json(200, { settings: SETTINGS }),
     'GET /admin/customers': () => json(200, { customers: [CUSTOMER] }),
   };

@@ -19,6 +19,7 @@ const { loadTemplateByKey } = require('../services/email-template-library');
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
+const { dayOnlyIds, dayOnlyFields } = require('../services/time-display');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { getServiceContactSlots } = require('../services/customer-contact');
 const { applyOutlinkTracking } = require('../services/outlink-tracking');
@@ -121,12 +122,18 @@ async function fetchUpcomingFamilyVisits(customerId, projectType) {
       .orderBy('scheduled_date', 'asc')
       .orderBy('window_start', 'asc')
       .limit(2)
-      .select('scheduled_date', 'window_start', 'service_type');
-    return rows.map((row) => ({
-      dateLabel: formatDisplayDate(row.scheduled_date, { fallback: '' }),
-      windowLabel: formatArrivalWindow(row.window_start),
-      serviceLabel: String(row.service_type || '').trim() || null,
-    })).filter((visit) => visit.dateLabel);
+      .select('id', 'scheduled_date', 'window_start', 'service_type');
+    // GATE_DAY_ONLY_PROMISE (part C1): ONE bulk read for these rows. A day-only visit shows the date and no hour.
+    const hidden = await dayOnlyIds(db, rows);
+    return rows.map((row) => {
+      const dayOnly = hidden.has(String(row.id));
+      return {
+        dateLabel: formatDisplayDate(row.scheduled_date, { fallback: '' }),
+        windowLabel: dayOnly ? null : formatArrivalWindow(row.window_start),
+        serviceLabel: String(row.service_type || '').trim() || null,
+        ...dayOnlyFields(dayOnly),
+      };
+    }).filter((visit) => visit.dateLabel);
   } catch (err) {
     logger.warn(`[prep-public] upcoming-visits lookup failed: ${err.message}`);
     return [];
@@ -468,7 +475,7 @@ router.get('/:token/pdf', async (req, res) => {
   }
 });
 
-router._test = { resolvePrepSource };
+router._test = { resolvePrepSource, fetchUpcomingFamilyVisits };
 
 module.exports = router;
 // The public page's own resolver (token → source, expiry enforced), re-run

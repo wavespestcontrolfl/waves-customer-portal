@@ -183,12 +183,9 @@ describe('bank lines with the gate off', () => {
 
   test('the ledger inbox drops them too', async () => {
     delete process.env.GATE_PAYROLL_BANK_MATCH;
-    process.env.GATE_TAX_LEDGER = 'true';
-    try {
-      state.seen = [stored()];
-      const body = await listed('/bank-import/ledger/inbox');
-      expect(body.rows[0].suggestion).toEqual({ noMatch: true });
-    } finally { delete process.env.GATE_TAX_LEDGER; }
+    state.seen = [stored()];
+    const body = await listed('/bank-import/ledger/inbox');
+    expect(body.rows[0].suggestion).toEqual({ noMatch: true });
   });
 
   test('with the gate on the payroll keys reach the client', async () => {

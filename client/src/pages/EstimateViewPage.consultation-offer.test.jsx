@@ -92,7 +92,7 @@ describe('carryRefreshProjections', () => {
   });
 });
 
-// "Book a free Waves Assessment first" (GATE_ESTIMATE_ASSESSMENT_FIRST): renders only from the server-composed
+// "Book a free Waves Assessment first": renders only from the server-composed
 // `assessmentFirst` field, as a glass card with a real heading and the centered gold link to the estimate-token
 // booking page.
 describe('AssessmentFirstSection', () => {

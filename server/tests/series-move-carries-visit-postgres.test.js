@@ -463,7 +463,8 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
       });
       const firstDay = addDays(dateOnly(anchor.scheduled_date), 1);
       expect(result.arrivalWindowDates || []).toContain(firstDay);
-      expect((result.warnings || []).join(' ')).toContain('Review the route before driving it');
+      // A staff move's route warning is always worded: it names the stop and why the route could not be checked.
+      expect((result.warnings || []).join(' ')).toContain('is booked with another service at the same stop, so its route cannot be checked');
     } finally {
       delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
     }

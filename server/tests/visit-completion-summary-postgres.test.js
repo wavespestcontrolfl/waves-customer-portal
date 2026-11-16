@@ -127,7 +127,7 @@ postgres('visit summary recipient recovery', () => {
     const date = etDateString();
     await mockPg.transaction(async (trx) => {
       await trx('customers').insert({ id: fixture.customerId, first_name: 'Fixture', email: fixture.primaryEmail,
-        phone: '+12025550123', service_contact_email: fixture.serviceEmail, service_contact_name: 'Service Fixture',
+        phone: '', service_contact_email: fixture.serviceEmail, service_contact_name: 'Service Fixture',
         service_contact_phone: '+12025550124', service_contacts_consent_at: trx.fn.now() });
       await trx('technicians').insert({ id: fixture.techId, name: 'Fixture Technician', role: 'technician', active: true });
       await trx('service_visits').insert({ id: fixture.visitId, customer_id: fixture.customerId, technician_id: fixture.techId,
@@ -982,7 +982,7 @@ postgres('visit summary recipient recovery', () => {
   test('SMS recipient honors service-contact consent and its ambiguous handoff is never reclaimed', async () => {
     fixture.payload.items[0].body.sendCompletionSms = true;
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
-    await mockPg('customers').where({ id: fixture.customerId }).update({ service_contacts_consent_at: null });
+    await mockPg('customers').where({ id: fixture.customerId }).update({ phone: '+12025550123', service_contacts_consent_at: null });
     sendCustomerMessage.mockImplementationOnce(async ({ withSmsHandoff }) => {
       await withSmsHandoff(async (_trx, onProviderStart) => { await onProviderStart(); throw new Error('provider response unavailable'); });
     });
@@ -4820,6 +4820,15 @@ postgres('visit summary recipient recovery', () => {
   // One text for a combined stop: when the summary text can carry the invoice's pay link
   // (unpaid) or receipt link (paid), the coordinator sets the invoice or receipt up
   // EMAIL-ONLY from the start, and the summary text is the only text with the link.
+  test('an account holder with a phone gets the summary text, not the consented slot-1 contact', async () => {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    await mockPg('customers').where({ id: fixture.customerId }).update({ phone: '+12025550123' });
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0].to).toBe('+12025550123');
+  });
+
   describe('one text for the stop', () => {
     const MARKER = 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED:visit_summary';
     const PLANNED = 'SUMMARY_TEXT_PLANNED';
@@ -4829,7 +4838,9 @@ postgres('visit summary recipient recovery', () => {
     async function stop({ status = 'draft', sameRecipient = true, invoice = {} } = {}) {
       fixture.payload.items[0].body.sendCompletionSms = true;
       await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
-      if (sameRecipient) await mockPg('customers').where({ id: fixture.customerId }).update({ service_contact_phone: null });
+      // The account holder gets the summary text and the invoice text; without a holder phone the summary falls back to
+      // the slot-1 contact (the fixture default), a different phone from the invoice's.
+      if (sameRecipient) await mockPg('customers').where({ id: fixture.customerId }).update({ phone: '+12025550123', service_contact_phone: null });
       const invoiceId = randomUUID();
       await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
         customer_id: fixture.customerId, status, total: 120, visit_completion_packet_id: fixture.packetId,
@@ -4941,7 +4952,7 @@ postgres('visit summary recipient recovery', () => {
     });
 
     describe.each([
-      ['a different phone for the invoice than for the summary', { sameRecipient: false }, async () => {}],
+      ['no phone on the account holder (the summary falls to the slot-1 contact, a different phone from the invoice\'s)', { sameRecipient: false }, async () => {}],
       ['a payer assigned to the customer', {}, async () => {
         const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
         fixture.payerId = payer.id;
@@ -5057,7 +5068,8 @@ postgres('visit summary recipient recovery', () => {
     });
 
     test('paid and not eligible: the receipt job texts as today', async () => {
-      const invoiceId = await stop({ status: 'paid', sameRecipient: false });
+      const invoiceId = await stop({ status: 'paid' });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: true });
       await coordinate();
       expect(await recorded()).toBeUndefined();
       expect((await jobRow(invoiceId)).sms_result).toBeNull();
@@ -5849,7 +5861,10 @@ postgres('visit summary recipient recovery', () => {
       const deferJob = (invoiceId) => mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ next_attempt_at: new Date(Date.now() + 3 * 60000) });
 
       test('a paid stop that does not fold: the job is due now and drained right after the coordinator finishes', async () => {
-        const invoiceId = await stop({ status: 'paid', sameRecipient: false });
+        const invoiceId = await stop({ status: 'paid' });
+        // No summary text was asked for, so nothing folds (the account holder has a phone, the summary text is off).
+        fixture.payload.items[0].body.sendCompletionSms = false;
+        await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
         await deferJob(invoiceId);
         await coordinate();
         expect(await recorded()).toBeUndefined();

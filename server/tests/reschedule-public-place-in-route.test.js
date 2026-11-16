@@ -1,9 +1,9 @@
 /**
- * POST /:token — GATE_ROUTE_CHECK_BOOKING_SAVES (owner 2026-10-30, Route Check
+ * POST /:token — booking route numbers (owner 2026-10-30, Route Check
  * Everywhere follow-up): the customer reschedule page passes `placeInRoute` to
  * the rebooker, so its existing placement numbers the moved visit (single move)
  * or each moved occurrence (series re-anchor). Pins the option on both calls,
- * gate on and off, and that nothing else about the call changes: no
+ * with arrival-window routing on and off, and that nothing else about the call changes: no
  * `roadSpender` (so no Google road purchase) and no `overlapAdvisory` (so the
  * placement is not a staff save). The placement itself is covered in
  * rebooker-staff-route-placement.test.js.
@@ -91,7 +91,7 @@ beforeEach(() => {
 });
 
 
-const GATES = ['GATE_ROUTE_CHECK_BOOKING_SAVES', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_COLLECTIVE_SERIES_ANCHOR', 'GATE_SCHEDULING_CAPACITY'];
+const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_COLLECTIVE_SERIES_ANCHOR', 'GATE_SCHEDULING_CAPACITY'];
 let savedEnv;
 beforeEach(() => {
   savedEnv = Object.fromEntries(GATES.map(name => [name, process.env[name]]));
@@ -104,7 +104,6 @@ afterEach(() => {
   });
 });
 const gateOn = () => {
-  process.env.GATE_ROUTE_CHECK_BOOKING_SAVES = 'true';
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
 };
 const stopCommit = () => Object.assign(new Error('stop after the call'), { statusCode: 409, code: 'SLOT_TAKEN', isOperational: true });
@@ -117,8 +116,8 @@ const postSeriesCommit = () => fetch(`${base}/api/public/reschedule/${TOKEN}`, {
 const seriesRow = () => ({ ...svcRow(), is_recurring: true });
 const optionsOf = (mock) => mock.mock.calls[0][5];
 
-describe('POST /:token — placeInRoute follows GATE_ROUTE_CHECK_BOOKING_SAVES', () => {
-  test('single move, gate on: placeInRoute true, and no road spender or staff-save option rides with it', async () => {
+describe('POST /:token — placeInRoute follows arrival-window routing', () => {
+  test('single move, routing on: placeInRoute true, and no road spender or staff-save option rides with it', async () => {
     gateOn();
     mockReschedule.mockRejectedValue(stopCommit());
     await postCommit();
@@ -130,17 +129,13 @@ describe('POST /:token — placeInRoute follows GATE_ROUTE_CHECK_BOOKING_SAVES',
     expect(options.overlapAdvisory).toBeUndefined();
   });
 
-  test('single move, gate off (or without the arrival-window check): placeInRoute false', async () => {
+  test('single move, without the arrival-window check: placeInRoute false', async () => {
     mockReschedule.mockRejectedValue(stopCommit());
-    await postCommit();
-    expect(optionsOf(mockReschedule).placeInRoute).toBe(false);
-    mockReschedule.mockClear();
-    process.env.GATE_ROUTE_CHECK_BOOKING_SAVES = 'true';
     await postCommit();
     expect(optionsOf(mockReschedule).placeInRoute).toBe(false);
   });
 
-  test('series re-anchor, gate on: placeInRoute true on rescheduleSeries; gate off: false', async () => {
+  test('series re-anchor, routing on: placeInRoute true on rescheduleSeries; routing off: false', async () => {
     const { rescheduleSeries } = require('../services/rebooker');
     process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
     wireSvc(seriesRow());
@@ -155,7 +150,7 @@ describe('POST /:token — placeInRoute follows GATE_ROUTE_CHECK_BOOKING_SAVES',
     expect(options.roadSpender).toBeUndefined();
     expect(options.overlapAdvisory).toBeUndefined();
     rescheduleSeries.mockClear();
-    delete process.env.GATE_ROUTE_CHECK_BOOKING_SAVES;
+    delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
     await postSeriesCommit();
     expect(rescheduleSeries.mock.calls[0][5].placeInRoute).toBe(false);
   });

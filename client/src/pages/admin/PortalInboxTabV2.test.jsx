@@ -567,6 +567,32 @@ describe("Portal inbox tab: answers in the portal", () => {
     expect(within(thread).queryByRole("button", { name: "Show earlier messages" })).toBeNull();
   });
 
+  it("labels the Waves AI's answer in the item and in the whole thread, and says the item stays open", async () => {
+    const answered = { ...message, aiReply: { handOff: false, body: "Yes, once it dries it is safe for pets." } };
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/portal-inbox") return withReplies({ items: [answered, { ...message, id: "thread-2", customer: { ...message.customer, id: "cust-4", firstName: "Kim", lastName: "Sample" }, aiReply: { handOff: true, body: "Thanks for your message. A member of our team will answer here after 8 AM." } }], total: 2 });
+      if (url === "/admin/portal-inbox/messages/thread-1") {
+        return { messages: [
+          { id: "msg-9", direction: "inbound", body: "Is it safe?", createdAt: "2026-11-04T03:00:00.000Z", adminUserId: null },
+          { id: "msg-10", direction: "outbound", body: "Yes, once it dries it is safe for pets.", createdAt: "2026-11-04T03:01:00.000Z", adminUserId: null, ai: true },
+          { id: "msg-11", direction: "outbound", body: "Staff note.", createdAt: "2026-11-04T13:01:00.000Z", adminUserId: "admin-1" },
+        ], hasMore: false };
+      }
+      return updated(url);
+    });
+    mount();
+    const row = (await screen.findByText("Lee Sample")).closest("[data-testid]");
+    expect(within(row).getByTestId("portal-ai-reply-thread-1")).toHaveTextContent("Waves AI answered: Yes, once it dries it is safe for pets.");
+    expect(within(row).getByTestId("portal-ai-reply-thread-1")).toHaveTextContent("This item stays open until you answer or mark it handled.");
+    const handOffRow = screen.getByText("Kim Sample").closest("[data-testid]");
+    expect(within(handOffRow).getByTestId("portal-ai-reply-thread-2")).toHaveTextContent("Waves AI told them the team will answer after 8 AM.");
+    fireEvent.click(within(row).getByRole("button", { name: "Show whole thread" }));
+    const thread = await within(row).findByTestId("portal-thread-thread-1");
+    expect(within(thread).getByText(/^Waves AI · /)).toBeInTheDocument();
+    expect(within(thread).getByText(/^Waves · /)).toBeInTheDocument();
+    expect(within(thread).getByText(/^Customer · /)).toBeInTheDocument();
+  });
+
   it("marks a portal message handled through the message it showed; a newer message reloads the row with its words", async () => {
     let open = true;
     let listed = message;

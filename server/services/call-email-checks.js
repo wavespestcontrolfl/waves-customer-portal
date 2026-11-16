@@ -1,17 +1,10 @@
 // Deterministic checks on an email heard on a call (owner 2026-10-29, after the
-// call-agent audit; dark behind GATE_CALL_EMAIL_CHECKS, reader
-// callEmailChecksLive() in server/config/feature-gates.js). No AI, and nothing
-// here sends anything:
+// call-agent audit). No AI, and nothing here sends anything:
 //   - checkEmailDomain / screenCallEmail: does the domain have a mail server at
 //     all? Reuses the quarantine arbiter's DNS evidence (MX, implicit A/AAAA,
 //     RFC 7505 null MX). A dead domain is set aside before the upserts.
 //   - isNoMailServerReason: a SendGrid failure that says the domain has no mail
 //     server, which SendGrid files as a "blocked" bounce.
-
-// Safe against suites that mock feature-gates with a partial object.
-function callEmailChecksLive() {
-  return require('../config/feature-gates').callEmailChecksLive?.() === true;
-}
 
 // { domain, deliverable: true | false | null, dns_error } or null. `false` only
 // on an authoritative answer (no such domain, or no MX and no address record,
@@ -64,7 +57,6 @@ function isNoMailServerReason(text) {
 }
 
 module.exports = {
-  callEmailChecksLive,
   checkEmailDomain,
   screenCallEmail,
   deadDomainQuestion,

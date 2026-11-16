@@ -2,7 +2,8 @@
  * Admin API for the recruiting queue (/admin/recruiting).
  *
  *   GET   /                  list (status/role filters, newest first, ai fields)
- *   GET   /:id                full application detail
+ *   GET   /:id                full application detail, plus same_phone: the
+ *                             person's other applications (same phone number)
  *   GET   /:id/stage-preview  rendered notify preview for a candidate status
  *   PATCH /:id/status         owner status transition + optional notify/resend;
  *                             optional expected_status refuses a stale decision (409)
@@ -23,7 +24,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { ROLES, STATUSES } = require('../services/job-applications');
+const { ROLES, STATUSES, lastTenDigits, CONTACT_PHONE_LAST_TEN_SQL } = require('../services/job-applications');
 const { isEnabled } = require('../config/feature-gates');
 const RecruitingComms = require('../services/recruiting-comms');
 
@@ -79,6 +80,41 @@ async function withHistoryActors(application) {
 // staff names on its history.
 function presentApplication(row) {
   return withHistoryActors(withoutToken(row));
+}
+
+// The person's other applications (same phone number), newest first. Someone
+// who called and later filled in the form has two records: the text thread
+// stays on the record that holds the newest text and the answers are on the
+// other, so the detail names the other record. A failed read answers the
+// detail without the list.
+const SAME_PHONE_LIMIT = 5;
+
+function recordOrigin(source) {
+  if (source && source.channel === 'phone_call') return 'phone_call';
+  return source && source.page_url ? 'web_form' : null;
+}
+
+async function samePhoneApplications(row) {
+  const phoneKey = lastTenDigits(row.contact_snapshot && row.contact_snapshot.phone);
+  if (!phoneKey) return [];
+  try {
+    const others = await db('job_applications')
+      .whereNot({ id: row.id })
+      .whereRaw(CONTACT_PHONE_LAST_TEN_SQL, [phoneKey])
+      .orderBy('created_at', 'desc')
+      .limit(SAME_PHONE_LIMIT)
+      .select('id', 'status', 'contact_snapshot', 'source', 'created_at');
+    return others.map((other) => ({
+      id: other.id,
+      status: other.status,
+      name: (other.contact_snapshot && other.contact_snapshot.name) || null,
+      origin: recordOrigin(other.source),
+      created_at: other.created_at,
+    }));
+  } catch (err) {
+    logger.warn(`[admin-careers] same-phone read failed (application ${row.id}): ${RecruitingComms.errorSummary(err)}`);
+    return [];
+  }
 }
 
 router.get('/', async (req, res) => {
@@ -152,7 +188,7 @@ router.get('/:id', async (req, res) => {
       logger.warn(`[admin-careers] reply media signing failed (application ${req.params.id}): ${RecruitingComms.errorSummary(err)}`);
       replyMedia = {};
     }
-    res.json({ application: await presentApplication(row), reply_media: replyMedia });
+    res.json({ application: await presentApplication(row), reply_media: replyMedia, same_phone: await samePhoneApplications(row) });
     // Opening the application IS reading its replies (Codex r7 P2): clear the
     // unread flags on the applicant's reply rows in both message stores so
     // the shared unread counts do not stay lit for messages the owner has

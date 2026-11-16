@@ -186,3 +186,71 @@ describe('MobileAppointmentDetailSheet cancel scope', () => {
     expect(statusCall()).toBeNull();
   });
 });
+
+// Owner decision 2026-11-13: the office can skip one plan visit. A skip marks
+// the visit skipped, books no make-up visit and sends no customer text. The
+// cancel panel shows the same SkipVisitOption the desktop Cancel window shows;
+// the panel's own cancel controls are unchanged.
+describe('MobileAppointmentDetailSheet skip this visit', () => {
+  const eligible = { eligible: true, code: 'ok', message: '', nextVisitDate: '2027-02-22', lawnRound: null };
+  const previewAsked = () => global.fetch.mock.calls.some(([url]) => /\/admin\/dispatch\/55\/card-hold\?skip=1$/.test(url));
+  // The cancel preview answers `skip`; every other request keeps the file's default empty answer.
+  function answerPreview(skip, statusReply = { ok: true, json: async () => ({}) }) {
+    global.fetch = vi.fn(async (url, opts) => {
+      if (/card-hold\?skip=1$/.test(url)) return { ok: true, json: async () => ({ skip }) };
+      if (/\/status$/.test(url) && opts?.method === 'PUT') return statusReply;
+      return { ok: true, json: async () => ({}) };
+    });
+  }
+
+  it('the office skips an eligible plan visit: next visit shown, one request, no fee step, the sheet closes', async () => {
+    answerPreview(eligible);
+    const onCancelled = vi.fn();
+    const onClose = vi.fn();
+    render(<MobileAppointmentDetailSheet service={{ ...baseService, isRecurring: true }} onClose={onClose} onCancelled={onCancelled} />);
+    fireEvent.click(screen.getByText('Cancel appointment'));
+    const button = await screen.findByRole('button', { name: 'Skip this visit' });
+    expect(screen.getByText('Next visit: Mon, Feb 22, 2027')).toBeTruthy();
+    fireEvent.click(button);
+    await waitFor(() => expect(onCancelled).toHaveBeenCalledTimes(1));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(statusCall()).toEqual({ status: 'skipped', notes: 'Skipped from appointment sheet' });
+    expect(confirmCardHoldFeeChoice).not.toHaveBeenCalled();
+  });
+
+  it('a refused skip shows the server sentence and keeps the panel open', async () => {
+    const refusal = 'This visit has an invoice, a card or a linked visit on it. Cancel it instead.';
+    answerPreview(eligible, { ok: false, status: 409, json: async () => ({ error: refusal, code: 'skip_has_money_or_links' }) });
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const onCancelled = vi.fn();
+    render(<MobileAppointmentDetailSheet service={{ ...baseService, isRecurring: true }} onClose={() => {}} onCancelled={onCancelled} />);
+    fireEvent.click(screen.getByText('Cancel appointment'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Skip this visit' }));
+    await waitFor(() => expect(alert).toHaveBeenCalledWith(`Failed to skip visit: ${refusal}`));
+    expect(onCancelled).not.toHaveBeenCalled();
+    expect(screen.getByText('Confirm cancellation')).toBeTruthy();
+    alert.mockRestore();
+  });
+
+  it('a paid visit shows the sentence to move it and no skip button; a cancel is sent as before', async () => {
+    const message = 'This visit is paid for already. Move it to a new date instead of skipping it.';
+    answerPreview({ eligible: false, code: 'prepaid', message, nextVisitDate: null, lawnRound: null });
+    render(<MobileAppointmentDetailSheet service={{ ...baseService, isRecurring: true }} onClose={() => {}} />);
+    fireEvent.click(screen.getByText('Cancel appointment'));
+    expect(await screen.findByText(message)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Skip this visit' })).toBeNull();
+    fireEvent.click(screen.getByText('Confirm cancellation'));
+    await waitFor(() => expect(statusCall()).not.toBeNull());
+    expect(statusCall()).toMatchObject({ status: 'cancelled', scope: 'this_only' });
+    expect(confirmCardHoldFeeChoice).toHaveBeenCalledWith(55, { scope: 'this_only' });
+  });
+
+  it('a technician login never asks for the verdict and never shows the choice', async () => {
+    answerPreview(eligible);
+    render(<MobileAppointmentDetailSheet service={{ ...baseService, isRecurring: true }} adminActions={false} onClose={() => {}} />);
+    fireEvent.click(screen.getByText('Cancel appointment'));
+    await screen.findByText('Client booking notifications');
+    expect(previewAsked()).toBe(false);
+    expect(screen.queryByRole('button', { name: 'Skip this visit' })).toBeNull();
+  });
+});

@@ -646,7 +646,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
     // The open-times box (GATE_OPEN_TIMES_BOX), on the visit's own route.
     openTimes: true,
     // Edit appointment's route check, on Google road times this week
-    // (GATE_PICKER_ROAD_CHECK, decided server-side).
+    // (decided server-side).
     quickMove: true,
   });
 

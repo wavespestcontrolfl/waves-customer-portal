@@ -1503,7 +1503,7 @@ describe('an open card read against its visit as it is now (owner 2026-11-04)', 
 
   test.each([
     ['admin', 'by the office'], ['admin_ib', 'by the office'], ['auto_dispatch', 'by auto-dispatch'],
-    ['day_replan', 'by the route re-plan'], ['weather_auto', 'by the rain-out sweep'], ['customer_self_serve', 'by the customer'],
+    ['day_replan', 'by the route re-plan'], ['booking_make_room', 'to fit a new booking'], ['weather_auto', 'by the rain-out sweep'], ['customer_self_serve', 'by the customer'],
     ['tech', 'by the technician'], ['machine', 'automatically'], [null, 'by the office'],
   ])('mover %s reads "%s"', (initiatedBy, text) => {
     expect(moverText(initiatedBy)).toBe(text);

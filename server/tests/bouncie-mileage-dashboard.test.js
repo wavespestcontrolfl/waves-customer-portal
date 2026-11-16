@@ -1,6 +1,5 @@
 /**
- * Mileage dashboard: GATE_TRUCK_VIEWS_PER_VEHICLE (tech roadmap build 6).
- * Off = the response is byte for byte today's. On = a per-vehicle list built
+ * Mileage dashboard (tech roadmap build 6): a per-vehicle list built
  * from the SAME two mileage_log reads, plus every live Bouncie vehicle.
  */
 
@@ -32,8 +31,6 @@ jest.mock('../services/bouncie', () => mockBouncie);
 
 const { getDashboard } = require('../services/bouncie-mileage');
 
-const GATE = 'GATE_TRUCK_VIEWS_PER_VEHICLE';
-const saved = process.env[GATE];
 const today = '2026-10-29';
 const monthStart = '2026-10-01';
 
@@ -69,32 +66,8 @@ beforeEach(() => {
 
 afterEach(() => jest.useRealTimers());
 
-afterAll(() => {
-  if (saved === undefined) delete process.env[GATE];
-  else process.env[GATE] = saved;
-});
-
-describe('getDashboard with GATE_TRUCK_VIEWS_PER_VEHICLE', () => {
-  test('off: today, mtd and live_vehicle are today\'s, no new keys, no technician read', async () => {
-    delete process.env[GATE];
-    const dash = await getDashboard();
-    expect(Object.keys(dash)).toEqual(['today', 'mtd', 'live_vehicle']);
-    expect(JSON.stringify(dash)).toBe(JSON.stringify({
-      today: {
-        date: today, total_miles: 44.5, business_miles: 40.5, trip_count: 3, drive_minutes: 80,
-        idle_minutes: 7, customer_stops: 2, irs_deduction: 29.36,
-      },
-      mtd: {
-        month: monthStart, total_miles: 150.5, business_miles: 146.5, trip_count: 5,
-        irs_deduction: 106.21, fuel_consumed_gal: 6.5, drive_days: 2, avg_daily_miles: 75.3,
-      },
-      live_vehicle: { id: 'imei-1', imei: 'imei-1', nickname: 'Truck One', isRunning: false },
-    }));
-    expect(mockState.calls.map(c => c.table)).toEqual(['mileage_log', 'mileage_log']);
-  });
-
-  test('on: vehicles are grouped from the same two reads, MTD miles first, with the technician', async () => {
-    process.env[GATE] = 'true';
+describe('getDashboard per vehicle', () => {
+  test('vehicles are grouped from the same two reads, MTD miles first, with the technician', async () => {
     const dash = await getDashboard();
     expect(Object.keys(dash)).toEqual(['today', 'mtd', 'live_vehicle', 'vehicles', 'live_vehicles']);
     expect(dash.today.total_miles).toBe(44.5);
@@ -115,8 +88,7 @@ describe('getDashboard with GATE_TRUCK_VIEWS_PER_VEHICLE', () => {
     expect(mockState.calls.map(c => c.table)).toEqual(['mileage_log', 'mileage_log', 'technicians']);
   });
 
-  test('on: a vehicle id that is not a Bouncie vehicle still gets a row; a missing name falls back to the id', async () => {
-    process.env[GATE] = 'true';
+  test('a vehicle id that is not a Bouncie vehicle still gets a row; a missing name falls back to the id', async () => {
     mockState.todayRows = [];
     mockState.mtdRows = [row({ vehicle_id: 'imei-9', vehicle_name: null, trip_date: monthStart })];
     mockBouncie.getVehicles.mockResolvedValue([]);
@@ -126,11 +98,5 @@ describe('getDashboard with GATE_TRUCK_VIEWS_PER_VEHICLE', () => {
     expect(dash.vehicles[0].today.trip_count).toBe(0);
     expect(dash.live_vehicles).toEqual([]);
     expect(dash.live_vehicle).toBeNull();
-  });
-
-  test('any value but the exact string true keeps the gate off', async () => {
-    process.env[GATE] = 'TRUE';
-    const dash = await getDashboard();
-    expect(Object.keys(dash)).toEqual(['today', 'mtd', 'live_vehicle']);
   });
 });

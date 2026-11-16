@@ -1,4 +1,4 @@
-// Bid Desk (GATE_BID_DESK) through PostgreSQL: the migration (up, down, up), filing and grouping, the addendum rule,
+// Bid Desk through PostgreSQL: the migration (up, down, up), filing and grouping, the addendum rule,
 // the 15-minute job and its watermark, reminders, the backfill, the manual mark and the admin routes' writes.
 // Every write runs in a transaction that is rolled back. Synthetic senders, projects and addresses only.
 // Skips without DATABASE_URL (CI runs it against the migrated database).
@@ -60,7 +60,6 @@ describeDb('Bid Desk (PostgreSQL)', () => {
     if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } });
     mockPg = database;
-    process.env.GATE_BID_DESK = 'true';
     const app = express();
     app.use(express.json());
     app.use('/api/admin/bid-desk', require('../routes/admin-bid-desk'));
@@ -77,7 +76,6 @@ describeDb('Bid Desk (PostgreSQL)', () => {
   });
   afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => {
-    delete process.env.GATE_BID_DESK;
     if (server) await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     if (database) await database.destroy();
   });
@@ -127,13 +125,13 @@ describeDb('Bid Desk (PostgreSQL)', () => {
   });
 
   describe('filing', () => {
-    test('a template invite files one bid with its fields, an unconfirmed date and the line it came from', async () => {
+    test('a template invite files one bid with its fields, a confirmed date and the line it came from', async () => {
       const email = await storeEmail();
       const out = await service.ingestEmail(email);
       expect(out).toMatchObject({ created: true, kind: 'invite' });
       const bid = await bidRow(out.bidId);
       expect(bid).toMatchObject({
-        source: 'buildingconnected', status: 'new', historical: false, due_confirmed: false, needs_date_confirmation: false,
+        source: 'buildingconnected', status: 'new', historical: false, due_confirmed: true, needs_date_confirmation: false,
         gc_or_agency: 'Fixture Build Co', project_title: 'Sample Ridge Residences', package_name: 'Pest Control', buyer_email: 'pat.sample@fixture-gc.example',
         due_source_line: 'Bid Due: October 20, 2026', first_email_id: email.id, gmail_thread_id: email.gmail_thread_id,
       });
@@ -333,7 +331,7 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       const link = await mockPg('bid_opportunity_emails').where({ email_id: signed.id }).first();
       expect(await bidRow(link.bid_id)).toMatchObject({
         source: 'bluebook', gc_or_agency: 'Fixture Build Co.', project_title: 'Gas Station Project in Sampleton, FL',
-        package_name: 'Pest Control--Exterminating', location: 'Sampleton, FL', due_confirmed: false,
+        package_name: 'Pest Control--Exterminating', location: 'Sampleton, FL', due_confirmed: true,
         due_source_line: 'Bid is due by 2:00 PM (Eastern) on October 20, 2026',
       });
       expect((await bidRow(link.bid_id)).due_at.toISOString()).toBe('2026-10-20T18:00:00.000Z');
@@ -725,29 +723,12 @@ describeDb('Bid Desk (PostgreSQL)', () => {
     });
   });
 
-  describe('GATE_BID_DESK_AUTO_DATES', () => {
-    beforeEach(() => { process.env.GATE_BID_DESK_AUTO_DATES = 'true'; });
-    afterEach(() => { delete process.env.GATE_BID_DESK_AUTO_DATES; });
-
+  describe('automatic dates', () => {
     describe('a template date counts as confirmed when the bid is first filed', () => {
-      test('gate on: a BuildingConnected invite with Bid Due is filed confirmed, and still rings its one bell', async () => {
+      test('a BuildingConnected invite with Bid Due is filed confirmed, and still rings its one bell', async () => {
         const out = await service.ingestEmail(await storeEmail());
         expect(await bidRow(out.bidId)).toMatchObject({ due_confirmed: true, needs_date_confirmation: false, due_source_line: 'Bid Due: October 20, 2026' });
         expect(rung('new')).toHaveLength(1);
-      });
-
-      test('gate off: the same invite is filed unconfirmed', async () => {
-        delete process.env.GATE_BID_DESK_AUTO_DATES;
-        const out = await service.ingestEmail(await storeEmail());
-        expect(await bidRow(out.bidId)).toMatchObject({ due_confirmed: false });
-      });
-
-      test('the Bid Desk gate off turns it off too (the reader needs both)', async () => {
-        const reading = require('../config/feature-gates').bidDeskAutoDatesLive;
-        delete process.env.GATE_BID_DESK;
-        expect(reading()).toBe(false);
-        process.env.GATE_BID_DESK = 'true';
-        expect(reading()).toBe(true);
       });
 
       test('history (the backfill) is never auto-confirmed', async () => {
@@ -839,14 +820,6 @@ describeDb('Bid Desk (PostgreSQL)', () => {
         expect((await bidRow(bidId)).status).toBe('no_bid');
       });
 
-      test('gate off: nothing closes and the tick reports no count', async () => {
-        delete process.env.GATE_BID_DESK_AUTO_DATES;
-        const bidId = await openBid();
-        expect(await service.closeLapsedBids({ now: NOW })).toBe(0);
-        expect((await service.runBidDeskTick({ now: NOW })).autoClosed).toBeUndefined();
-        expect(await bidRow(bidId)).toMatchObject({ status: 'new', decision_note: null });
-      });
-
       test('a bid marked bid, a submitted bid, a bid with no date and a decided bid are left alone', async () => {
         const marked = await openBid({ status: 'bid' });
         const submitted = await openBid({ submitted_at: DUE_PAST(3) });
@@ -892,7 +865,7 @@ describeDb('Bid Desk (PostgreSQL)', () => {
     });
   });
 
-  describe('GATE_BID_DESK_NOT_OUR_WORK', () => {
+  describe('not our work', () => {
     const NOTE = 'Not our work: mowing, edging or trimming (owner 2026-10-29).';
     const CC_AUTH = 'mx.google.com; dkim=permerror (no key for signature) header.i=@charlottecountyfl.gov header.s=s1; spf=pass (google.com: domain of bounces+1-2@em1.charlottecountyfl.gov designates 192.0.2.1 as permitted sender) smtp.mailfrom="bounces+1-2@em1.charlottecountyfl.gov"; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=charlottecountyfl.gov';
     const ccNotice = (number, project, threadId = `t-cc-${randomUUID()}`) => storeEmail({
@@ -909,9 +882,6 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       subject: `Fixture Build Co has invited you to bid on ${project}`,
       body_text: BC_BODY(project).replace(': Pest Control', ''),
     });
-    beforeEach(() => { process.env.GATE_BID_DESK_NOT_OUR_WORK = 'true'; });
-    afterEach(() => { delete process.env.GATE_BID_DESK_NOT_OUR_WORK; });
-
     test('a county notice for mowing is filed as no bid with the note, rings no bell and owes none', async () => {
       const out = await service.ingestEmail(await ccNotice('26-694', 'Lot Mowing for Code Compliance - Annual Contract'));
       expect(out).toMatchObject({ created: true });
@@ -924,13 +894,6 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(raiseAdminAlertWithReopen).not.toHaveBeenCalled();
       await service.deliverOwedAlerts();
       expect(raiseAdminAlert).not.toHaveBeenCalled();
-    });
-
-    test('with the gate off the same notice is filed as new and rings, exactly as before', async () => {
-      delete process.env.GATE_BID_DESK_NOT_OUR_WORK;
-      const out = await service.ingestEmail(await ccNotice('26-694', 'Lot Mowing for Code Compliance - Annual Contract'));
-      expect(await bidRow(out.bidId)).toMatchObject({ status: 'new', decision_note: null });
-      expect(rung('new')).toHaveLength(1);
     });
 
     test('a BuildingConnected invite for grounds maintenance is filed as no bid', async () => {
@@ -974,11 +937,10 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(raiseAdminAlertWithReopen).not.toHaveBeenCalled();
     });
 
-    test('an existing open mowing bid is left alone when the gate comes on', async () => {
-      delete process.env.GATE_BID_DESK_NOT_OUR_WORK;
+    test('an open mowing bid filed before the rule is left alone by a later notice', async () => {
       const open = await service.ingestEmail(await ccNotice('26-674', 'Facilities Grounds Maintenance - Annual Contract'));
-      expect((await bidRow(open.bidId)).status).toBe('new');
-      process.env.GATE_BID_DESK_NOT_OUR_WORK = 'true';
+      // Put the row back as it stood before the rule: open, no note.
+      await mockPg('bid_opportunities').where({ id: open.bidId }).update({ status: 'new', decision_note: null });
       await service.ingestEmail(await ccNotice('26-674', 'Facilities Grounds Maintenance - Annual Contract'));
       expect(await bidRow(open.bidId)).toMatchObject({ status: 'new', decision_note: null });
     });
@@ -996,7 +958,7 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       const { bidId, first } = await filed();
       const list = await call('GET', '/');
       const row = list.body.bids.find((b) => b.id === bidId);
-      expect(row).toMatchObject({ due_confirmed: false, needs_date_confirmation: true, due_source_line: 'Bid Due: October 20, 2026', email_count: 2, first_subject: first.subject });
+      expect(row).toMatchObject({ due_confirmed: true, needs_date_confirmation: true, due_source_line: 'Bid Due: October 20, 2026', email_count: 2, first_subject: first.subject });
       expect(typeof row.days_left).toBe('number');
       const detail = await call('GET', `/${bidId}`);
       expect(detail.body.emails.map((e) => e.kind)).toEqual(['invite', 'addendum']);
@@ -1026,6 +988,8 @@ describeDb('Bid Desk (PostgreSQL)', () => {
 
     test('confirm_due confirms the date as read; with no date it is refused', async () => {
       const { bidId } = await filed();
+      // A date the operator has not confirmed yet (a template date arrives confirmed, so put it back).
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ due_confirmed: false });
       // The page sends the version it showed; a bid changed since then (an addendum filed) is refused.
       const seen = await version(bidId);
       expect((await call('PATCH', `/${bidId}`, { confirm_due: true })).status).toBe(409);
@@ -1097,6 +1061,7 @@ describeDb('Bid Desk (PostgreSQL)', () => {
 
     test('an unconfirmed date serves No bid only; a confirmed one serves Bid too; a decided bid serves none', async () => {
       const { bidId } = await service.ingestEmail(await storeEmail());
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ due_confirmed: false });
       const id = await bellFor(bidId);
       expect(await served(id)).toEqual(['no_bid']);
       expect((await call('PATCH', `/${bidId}`, { confirm_due: true, expected_updated_at: await version(bidId) })).status).toBe(200);
@@ -1121,6 +1086,7 @@ describeDb('Bid Desk (PostgreSQL)', () => {
 
     test('Bid before the date is confirmed saves nothing and leaves the row open; after it, Bid saves', async () => {
       const { bidId } = await service.ingestEmail(await storeEmail());
+      await mockPg('bid_opportunities').where({ id: bidId }).update({ due_confirmed: false });
       const id = await bellFor(bidId);
       await expect(tap(id, 'bid')).resolves.toEqual({ status: 409, body: { error: 'date_not_confirmed', message: 'Confirm the due date on the Bid desk first.' } });
       expect((await bidRow(bidId)).status).toBe('new');

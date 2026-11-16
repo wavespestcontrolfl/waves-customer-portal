@@ -6,7 +6,6 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
-  accessCodesFoundBellLive: jest.fn(() => true),
   alertEpisodesLive: jest.fn(() => true),
 }));
 jest.mock('../services/admin-alert-episodes', () => ({
@@ -16,7 +15,7 @@ jest.mock('../services/admin-alert-episodes', () => ({
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'n2', deduped: false })),
 }));
-jest.mock('../services/access-code-capture', () => ({ enabled: jest.fn(() => true), listFound: jest.fn(), listFoundWaiting: jest.fn() }));
+jest.mock('../services/access-code-capture', () => ({ listFound: jest.fn(), listFoundWaiting: jest.fn() }));
 jest.mock('../services/notification-bell-policy', () => ({
   isBellPolicyEnabled: jest.fn(() => true),
   bellAllowed: jest.fn(async () => true),
@@ -58,7 +57,7 @@ const run = (items, over = {}) => {
     .map((code) => (typeof code === 'string' ? { id: code, sentAt: sent.get(code) || '2026-10-24T11:00:00.000Z' } : code));
   const readWaiting = jest.fn(async () => waiting);
   const list = jest.fn(async () => ({ total: waiting.length, items }));
-  return { conn, trx, readWaiting, list, result: Bell.syncFoundCodesBell({ now: NOW, conn, gateEnabled: true, sectionOn: true, waitingCodes: readWaiting, list, ...over }) };
+  return { conn, trx, readWaiting, list, result: Bell.syncFoundCodesBell({ now: NOW, conn, waitingCodes: readWaiting, list, ...over }) };
 };
 
 const neverLeaks = (composed) => {
@@ -70,7 +69,6 @@ const neverLeaks = (composed) => {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  gates.accessCodesFoundBellLive.mockReturnValue(true);
   gates.alertEpisodesLive.mockReturnValue(true);
   bellPolicy.isBellPolicyEnabled.mockReturnValue(true);
   bellPolicy.bellAllowed.mockResolvedValue(true);
@@ -180,14 +178,6 @@ describe('when a refresh rings', () => {
 });
 
 describe('syncFoundCodesBell', () => {
-  test('the gate off reads nothing and writes nothing', async () => {
-    gates.accessCodesFoundBellLive.mockReturnValue(false);
-    const { conn } = fakeConn();
-    await expect(Bell.syncFoundCodesBell({ now: NOW, conn })).resolves.toEqual({ skipped: 'disabled' });
-    expect(conn.transaction).not.toHaveBeenCalled();
-    expect(capture.listFound).not.toHaveBeenCalled();
-  });
-
   test('waiting codes raise one row under the lock, through the reopen helper, with its item keys and count', async () => {
     const { trx, readWaiting, list, result } = run([item({ id: 'f2' }), item({ id: 'f1' })]);
     await expect(result).resolves.toEqual({ count: 2, outcome: 'raised' });
@@ -251,14 +241,6 @@ describe('syncFoundCodesBell', () => {
     await expect(run([]).result).resolves.toEqual({ count: 0, outcome: 'clear' });
   });
 
-  test('the access codes section off closes the row without reading the codes', async () => {
-    const { readWaiting, list, result } = run([item()], { sectionOn: false });
-    await expect(result).resolves.toEqual({ count: 0, outcome: 'clear' });
-    expect(readWaiting).not.toHaveBeenCalled();
-    expect(list).not.toHaveBeenCalled();
-    expect(episodes.closeAdminAlertKeys.mock.calls[0][2]).toBe('section_off');
-  });
-
   test('a category silenced in Settings reads no codes and closes the row, so a refresh or a reopen never rings', async () => {
     bellPolicy.bellAllowed.mockResolvedValue(false);
     episodes.closeAdminAlertKeys.mockResolvedValueOnce(1);
@@ -307,12 +289,11 @@ describe('syncFoundCodesBell', () => {
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 
-  test('by default it reads the Gate codes page list, its waiting ids and its section gate', async () => {
+  test('by default it reads the Gate codes page list, and its waiting ids', async () => {
     capture.listFoundWaiting.mockResolvedValueOnce([{ id: 'f1', sentAt: '2026-10-24T11:16:45.000Z' }]);
     capture.listFound.mockResolvedValueOnce({ total: 1, items: [item()] });
     const { conn, trx } = fakeConn();
     await expect(Bell.syncFoundCodesBell({ now: NOW, conn })).resolves.toMatchObject({ count: 1, outcome: 'raised' });
-    expect(capture.enabled).toHaveBeenCalled();
     expect(capture.listFoundWaiting).toHaveBeenCalledWith(trx);
     expect(capture.listFound).toHaveBeenCalledWith(trx, { limit: 50, offset: 0 });
   });

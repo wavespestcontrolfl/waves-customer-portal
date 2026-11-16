@@ -1,5 +1,5 @@
 /**
- * Tax ledger rules (GATE_TAX_LEDGER): the pure pieces, the seed table, and
+ * Tax ledger rules: the pure pieces, the seed table, and
  * the suggestion-only pass + inbox decisions against a recording db stub.
  *
  * Locked-down behaviors:
@@ -85,7 +85,6 @@ const SEEDED_CATEGORY_NAMES = [
 beforeEach(() => {
   Object.assign(state, { rules: [], bankRows: [], bankRow: null, updates: [], ruleUpdates: [], inserted: [], seeded: [], categories: [], category: null, casResult: 1 });
   mockDb.mockClear(); logger.warn.mockClear();
-  delete process.env.GATE_BANK_IMPORT; delete process.env.GATE_TAX_LEDGER;
 });
 
 describe('compileRules / matchRule', () => {
@@ -494,7 +493,6 @@ describe('applyRules (suggestion-only)', () => {
   });
 
   test('a pass whose page matching ran out of time stamps nothing and reports the page\'s own start as the cursor (more, no cursor for the first page); the loops run it again', async () => {
-    process.env.GATE_BANK_IMPORT = 'true'; process.env.GATE_TAX_LEDGER = 'true';
     const ten = Array.from({ length: 10 }, (_, i) => 'z'.repeat(i + 1)).join('|');
     state.rules = ['e1', 'e2', 'e3', 'e4'].map((id) => ({ id, pattern: `(${ten})(${ten})z?z?z?.*z.*x`, kind: 'personal', priority: 1, enabled: true, source: 'owner' }));
     state.bankRows = [{ id: 'b1', txn_date: '2026-01-02', description: `${'z'.repeat(290)} WAWA`, direction: 'debit', suggestion: { noMatch: true } }];
@@ -507,7 +505,6 @@ describe('applyRules (suggestion-only)', () => {
   }, 60000);
 
   test('a pass matches its page in the worker: the evil rule above is disabled mid-pass and the page is still classified by the rules that answer', async () => {
-    process.env.GATE_BANK_IMPORT = 'true'; process.env.GATE_TAX_LEDGER = 'true';
     const ten = Array.from({ length: 10 }, (_, i) => 'z'.repeat(i + 1)).join('|');
     state.rules = [
       { id: 'evil', pattern: `(${ten})(${ten})z?z?z?.*z.*x`, kind: 'personal', priority: 1, enabled: true, source: 'owner', note: 'typo' },
@@ -731,13 +728,7 @@ describe('applyRules (suggestion-only)', () => {
 });
 
 describe('applyAfterImport', () => {
-  test('is a no-op when the ledger gate is off, even with bank import on', async () => {
-    process.env.GATE_BANK_IMPORT = 'true';
-    expect(await svc.applyAfterImport('upload')).toBeNull();
-    expect(mockDb).not.toHaveBeenCalled();
-  });
-  test('runs the pass when both gates are on and swallows a failure with a warning', async () => {
-    process.env.GATE_BANK_IMPORT = 'true'; process.env.GATE_TAX_LEDGER = 'true';
+  test('runs the pass and swallows a failure with a warning', async () => {
     state.rules = [{ id: 'r', pattern: 'x', kind: 'personal', priority: 100, enabled: true }];
     // the pass follows its cursor through the matching budget and reports the totals
     expect(await svc.applyAfterImport('upload')).toEqual({ examined: 0, suggested: 0, cleared: 0 });
@@ -994,32 +985,5 @@ describe('views', () => {
     expect(svc.hasLiveCandidates({ suggestion: { payoutCandidates: [{ id: 1 }] } })).toBe(true);
     expect(svc.hasLiveCandidates({ suggestion: { candidates: [], noMatch: true } })).toBe(false);
     expect(svc.hasLiveCandidates({ suggestion: null })).toBe(false);
-  });
-});
-
-describe('visibleSuggestion (the kill switch)', () => {
-  const ruleSug = { rule: { id: 'r', kind: 'expense' }, categoryId: 'c', categoryName: 'Supplies', irsLine: '22', categorySource: 'rule', rulesAt: 't', noMatch: true, candidates: [{ id: 1 }] };
-  test('with the gate on, a suggestion passes through untouched', () => {
-    process.env.GATE_BANK_IMPORT = 'true'; process.env.GATE_TAX_LEDGER = 'true';
-    expect(svc.visibleSuggestion(ruleSug)).toBe(ruleSug);
-  });
-  test('with the gate off, what a rule wrote is removed; the matcher keys and owner decisions stay', () => {
-    process.env.GATE_BANK_IMPORT = 'true'; delete process.env.GATE_TAX_LEDGER;
-    expect(svc.visibleSuggestion(ruleSug)).toEqual({ noMatch: true, candidates: [{ id: 1 }] });
-    expect(svc.visibleSuggestion({ rule: { id: 'r', kind: 'transfer' }, ignore: true, reason: 'transfer per ledger rule', rulesAt: 't' })).toEqual({});
-    // a Later decision on a transfer-rule row affirms nothing: the rule's flag and reason go with the rule; a Transfer decision keeps its own
-    expect(svc.visibleSuggestion({ rule: { id: 'r', kind: 'transfer' }, ignore: true, reason: 'transfer per ledger rule', rulesAt: 't', later: true, decision: 'later', decidedAt: 'd' })).toEqual({ later: true, decision: 'later', decidedAt: 'd' });
-    expect(svc.visibleSuggestion({ rule: { id: 'r', kind: 'transfer' }, ignore: true, reason: 'transfer per the owner', rulesAt: 't', decision: 'transfer', decidedAt: 'd' })).toEqual({ ignore: true, reason: 'transfer per the owner', decision: 'transfer', decidedAt: 'd' });
-    // the matcher's own transfer flag (no rule key) is not a rule's
-    const matcher = { ignore: true, reason: 'internal transfer?' };
-    expect(svc.visibleSuggestion(matcher)).toBe(matcher);
-    // an owner decision survives the gate: the Income shelf flag and the decision itself
-    expect(svc.visibleSuggestion({ rule: { id: 'r', kind: 'review' }, income: true, decision: 'income', decidedAt: 'd', reason: 'x', noMatch: true }))
-      .toEqual({ income: true, decision: 'income', decidedAt: 'd', reason: 'x', noMatch: true });
-    // a review rule's pre-filled category is rule-owned too
-    expect(svc.visibleSuggestion({ rule: { id: 'r', kind: 'review' }, review: true, note: 'n', categoryId: 'c', categorySource: 'rule', noMatch: true })).toEqual({ noMatch: true });
-    // an AI category (not categorySource rule) stays
-    expect(svc.visibleSuggestion({ rule: { id: 'r', kind: 'review' }, categoryId: 'ai', categorySource: 'ai' })).toEqual({ categoryId: 'ai', categorySource: 'ai' });
-    expect(svc.visibleSuggestion(null)).toBeNull();
   });
 });

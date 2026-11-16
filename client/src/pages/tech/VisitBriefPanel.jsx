@@ -29,8 +29,8 @@
 // Tech portal style rule (CLAUDE.md): inline styles, no Tailwind, no
 // components/ui.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Camera, ClipboardCheck, FileText, Flag, Map, MessageSquare, Phone } from 'lucide-react';
-import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
+import { Camera, ClipboardCheck, ClipboardList, FileText, Flag, Map, MessageSquare, Phone } from 'lucide-react';
+import { DEAD_ASSIGNMENT_STATUSES, stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import { withPassLinks } from './passLinks';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
 import { isMlUnit, mlToFlOz } from '../../lib/measure-units';
@@ -127,7 +127,7 @@ const gateBtnStyle = {
 const passButtonStyle = { ...gateBtnStyle, display: 'inline-flex', alignItems: 'center', textDecoration: 'none', margin: '0 2px' };
 const passLinks = (text) => withPassLinks(text, { style: passButtonStyle });
 
-// Neighborhood gate codes from the visit (GATE_NEIGHBORHOOD_TECH_ACTIONS).
+// Neighborhood gate codes from the visit.
 // `gate` ({ visitId, request, onChanged }) is set when this stop's
 // neighborhood can take them: a neighborhood code alert then offers "Wrong
 // code" (the office checks it; it is never removed here) and the section
@@ -271,10 +271,32 @@ function AccessSection({ alerts, access, gate = null }) {
   );
 }
 
+// Label warnings for the animal kinds on the customer's Pets form (facts.labelAnimalWarnings, lawn treatment visits
+// only; the server picks the fixed lines). Shown as given; a shape this panel does not know renders nothing.
+function firstLabelWarnings(memberBits) {
+  return memberBits.map((m) => m.facts?.labelAnimalWarnings).find((w) => Array.isArray(w) && w.length) || null;
+}
+
+function LabelWarningsSection({ warnings }) {
+  const rows = (Array.isArray(warnings) ? warnings : []).filter((w) => w && typeof w.label === 'string' && Array.isArray(w.lines) && w.lines.length);
+  if (!rows.length) return null;
+  return (
+    <div data-testid="visit-brief-label-warnings">
+      <SectionLabel>Label warnings</SectionLabel>
+      {rows.map((w) => (
+        <div key={w.kind || w.label} style={{ margin: '6px 0 0' }}>
+          <p style={{ ...factRowStyle, fontWeight: 500 }}>{w.label} on file ({(Array.isArray(w.names) ? w.names : []).join(', ') || 'no name'})</p>
+          {w.lines.map((line) => <p key={line} style={factRowStyle}>{line}</p>)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // Access codes the customer gave (access codes section, read only): the
 // active standing codes plus one-visit codes tied to a visit of this stop.
 // Read per visit (owner 2026-10-05: a technician sees the codes of a visit
-// assigned to them); a section that is off answers 404 and the block hides.
+// assigned to them); a 404 or 403 hides the block.
 const ACCESS_KIND_LABELS = {
   neighborhood_gate: 'Neighborhood gate', property_gate: 'Property gate', door: 'Door or lock',
   lockbox: 'Lockbox', garage: 'Garage', call_box: 'Call box', pass: 'Visitor pass', other: 'Access code',
@@ -294,7 +316,7 @@ function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
     let cancelled = false;
     const ids = visitKey ? visitKey.split(',') : [];
     setFailed(false);
-    // Off (404) or not this technician's visit (403) hides the block; any
+    // Not found (404) or not this technician's visit (403) hides the block; any
     // other failure says so, so a technician never takes "no codes" for an
     // outage and can try again.
     Promise.all(ids.map((id) => request(`/admin/access-codes/visits/${encodeURIComponent(id)}`)
@@ -913,7 +935,7 @@ function ConsultationOutcomeAction({ service, onOutcome, style }) {
 
 // Per-service actions keep terminal reports read-only and preserve the
 // trace-eligibility guard — one row per member service on a grouped stop.
-function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead, onOutcome }) {
+function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead, onOutcome, onEstimate = null }) {
   const closeoutAvailable = !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service);
   const reportDisabled = !closeoutAvailable
     && (TERMINAL_STATUSES.has(service.status) || ['sent', 'closed'].includes(service.linkedProject?.status));
@@ -957,6 +979,8 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
           <button className="tf-button" onClick={() => onZone(service)} aria-label="Trace treatment zone" style={btn}><Map aria-hidden="true" />Zone</button>
         )}
         <button className="tf-button" onClick={() => onLead(service)} style={btn}><Flag aria-hidden="true" />Flag opportunity</button>
+        {/* The technician estimate tool (GATE_TECH_ESTIMATES): present only when the tool's setup answered. */}
+        {onEstimate && <button className="tf-button" onClick={() => onEstimate(service)} style={btn}><ClipboardList aria-hidden="true" />Estimate</button>}
         <ConsultationOutcomeAction service={service} onOutcome={onOutcome} style={btn} />
       </div>
     </div>
@@ -1119,8 +1143,9 @@ function SetTextsSection({ line, service, visitIds, request, onBusyChange }) {
 // second tap cannot originate a second bridge (codex #4072 r6 P2).
 const CALL_LOCK_MS = 45000;
 
-export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, onOutcome = null, techLine = null, request = null, onBusyChange = null, onGateChanged = null }) {
+export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, onOutcome = null, onEstimate = null, techLine = null, request = null, onBusyChange = null, onGateChanged = null }) {
   const service = stop.primary;
+  const estimateService = stop.services.find((member) => !DEAD_ASSIGNMENT_STATUSES.has(member.status));
   const phone = service.customerPhone || service.customer_phone || null;
   // Own-line mode: Call bridges through the line, Text composes from it.
   // `{ unknown: true }` = the line lookup has not succeeded (it failed on
@@ -1211,6 +1236,8 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   // code changed since generation would otherwise show stale next to the
   // freshly-built alert text.
   const access = memberBits.map((m) => m.facts?.access || m.visitBrief?.access).find(Boolean) || null;
+  // Label warnings ride the lawn member's own facts (a grouped stop's other members carry none): the first that has them.
+  const labelWarnings = firstLabelWarnings(memberBits);
   // Customer-sent photos before the visit — same "first member that
   // answered carries it" dedup as access (deterministicVisitFacts resolves
   // ONE stop-level list, identical on every member's own facts). Keep the
@@ -1262,6 +1289,8 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         visitIds={stop.services.map((m) => m.id).filter(Boolean)}
         shownCodes={CODE_LABELS.map(([key]) => [PROFILE_CODE_KIND[key], access?.codes?.[key]]).filter(([, v]) => Boolean(v))}
       />
+
+      <LabelWarningsSection warnings={labelWarnings} />
 
       {awayWatchLines && (
         <div data-testid="visit-brief-away-watch">
@@ -1344,6 +1373,9 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       {stop.services.map((s) => (
         <ServiceActions
           key={s.id}
+          // One estimate button for the visit's customer, on the first service of the stop the server still calls his
+          // (a skipped or cancelled member cannot be quoted through: the tool would answer "not on your route").
+          onEstimate={s.id === estimateService?.id ? onEstimate : null}
           service={s}
           showType={grouped}
           onPhotos={onPhotos}

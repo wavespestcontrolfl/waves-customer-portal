@@ -98,10 +98,9 @@ const HANDED_OFF = {
 const TECH = '/api/tech/services';
 const DISPATCH = '/api/admin/dispatch';
 
-const prevGates = { pick: process.env.GATE_QUICKMOVE_CUSTOMER_PICK, sw: process.env.GATE_TECH_MOVE_SWITCH };
+const prevPickGate = process.env.GATE_QUICKMOVE_CUSTOMER_PICK;
 beforeEach(() => {
   process.env.GATE_QUICKMOVE_CUSTOMER_PICK = 'true';
-  delete process.env.GATE_TECH_MOVE_SWITCH;
   mockCaller.id = 'tech-1';
   mockCaller.role = 'technician';
   db.__state.scheduledServices = [
@@ -116,10 +115,8 @@ beforeEach(() => {
   flushDispatchQualityDates.mockClear();
 });
 afterAll(() => {
-  for (const [key, name] of [['pick', 'GATE_QUICKMOVE_CUSTOMER_PICK'], ['sw', 'GATE_TECH_MOVE_SWITCH']]) {
-    if (prevGates[key] === undefined) delete process.env[name];
-    else process.env[name] = prevGates[key];
-  }
+  if (prevPickGate === undefined) delete process.env.GATE_QUICKMOVE_CUSTOMER_PICK;
+  else process.env.GATE_QUICKMOVE_CUSTOMER_PICK = prevPickGate;
 });
 
 async function post(path, body = { reasonCode: 'weather_rain' }) {
@@ -178,7 +175,6 @@ describe.each([
   });
 
   test('a technician whose "Can move visits" switch is off may hand the visit to the customer, and still may not move it', async () => {
-    process.env.GATE_TECH_MOVE_SWITCH = 'true';
     const pick = await post(`${base}/svc-own/customer-pick`);
     expect(pick.status).toBe(200);
     expect(mockHandOff).toHaveBeenCalledTimes(1);

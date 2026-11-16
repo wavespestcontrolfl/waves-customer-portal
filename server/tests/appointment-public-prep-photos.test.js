@@ -123,7 +123,7 @@ function chain(table) {
   api.forUpdate = () => { lockRead = true; return api; };
   api.forShare = () => { lockRead = true; return api; };
   api.count = () => { countMode = table.indexOf('visit_prep_photos') === 0 ? 'photos' : 'submissions'; return api; };
-  api.first = async () => {
+  api.first = async (...cols) => {
     // The locked recheck's FOR UPDATE on the token row (Codex r1 P1) — a
     // lock read, not a loadByToken read, so it never advances the
     // first-vs-second loadByToken accounting below.
@@ -137,7 +137,29 @@ function chain(table) {
     // The office feed item's own unlocked name lookup (PR 3b,
     // notifyOfficeVisitPrepSubmission) — a plain read, never under the
     // stop/customer lock, and never on the write's own transaction.
+    // The watering line's address re-read (watering-home loadWateringHome, after the preferences): the CURRENT home,
+    // which is the token row's address unless a test models a move with `homeRow`.
+    if (!lockRead && table === 'customers' && cols.includes('zip')) {
+      if (dbState.homeRow !== undefined) return dbState.homeRow;
+      const s = dbState.svcRow || {};
+      return { address_line1: s.address_line1, address_line2: s.address_line2, city: s.city, zip: s.zip };
+    }
     if (!lockRead && table === 'customers') return dbState.customerNameRow;
+    // lawnPrepField's pets-on-file read (a yes/no only reaches the payload), and loadWateringHome's two reads: the
+    // whole row first, then the move stamp alone after the address (`stampAfter` models a move between the reads).
+    if (table === 'property_preferences') {
+      if (dbState.prefsThrow) throw new Error('prefs lookup failed');
+      dbState.prefsReads += 1;
+      if (cols.length === 1 && cols[0] === 'irrigation_home_changed_at' && dbState.stampAfter !== undefined) {
+        return { irrigation_home_changed_at: dbState.stampAfter };
+      }
+      return dbState.petsRow;
+    }
+    // lawnPrepField's watering-line read (the active turf profile's county and city).
+    if (table === 'customer_turf_profiles') {
+      if (dbState.turfThrow) throw new Error('turf lookup failed');
+      return dbState.turfRow;
+    }
     if (countMode === 'photos') return { count: dbState.photoCount + dbState.inserted.photos.length };
     if (countMode === 'submissions') return { count: dbState.submissionCount + dbState.inserted.submissions.length };
     if (table.startsWith('scheduled_services')) {
@@ -230,6 +252,11 @@ function resetDbState(overrides = {}) {
     // customer name (no customer names in the repo).
     customerNameRow: { first_name: 'Jordan', last_name: 'Reyes' },
     groupedMembersForPreCheck: null,
+    petsRow: null,
+    turfRow: null,
+    turfThrow: false,
+    prefsThrow: false,
+    prefsReads: 0,
     inserted: { submissions: [], photos: [], notifications: [] },
     notificationsInsertThrows: false,
     notificationsInsertHangs: false,
@@ -430,6 +457,18 @@ describe('POST /api/public/appointment/:token/photos', () => {
       const res = await postPhotos(baseUrl, { files: [{ bytes: huge, mimetype: 'image/jpeg' }] });
       expect(res.status).toBe(413);
       expect(mockUploadFunnelPhotoToS3).not.toHaveBeenCalled();
+    });
+  });
+
+  test('photos sent under a wrong field name: multer 400 "Could not read", nothing stored', async () => {
+    await withServer(async (baseUrl) => {
+      const form = new FormData();
+      form.append('image', new Blob([JPEG_BYTES], { type: 'image/jpeg' }), 'photo.jpg');
+      const res = await fetch(`${baseUrl}/api/public/appointment/${TOKEN}/photos`, { method: 'POST', body: form });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'Could not read the uploaded photos.' });
+      expect(mockUploadFunnelPhotoToS3).not.toHaveBeenCalled();
+      expect(dbState.inserted.submissions).toHaveLength(0);
     });
   });
 
@@ -842,6 +881,196 @@ describe('GET /api/public/appointment/:token — additive prepPhotos', () => {
       const body = await res.json();
       expect(body.prepPhotos).toEqual({ eligible: true, photoCount: 2, photosRemaining: 4 });
     });
+  });
+});
+
+// "Before your lawn visit" card (owner 2026-11-14): additive lawnPrep, no gate.
+describe('GET /api/public/appointment/:token — additive lawnPrep', () => {
+  const prevAppt = process.env.GATE_APPOINTMENT_PAGE;
+  const LAWN = 'Every 6 Weeks Lawn Care Service';
+  const AT_HOME = {
+    service_address_line1: null, address_line1: '12 Palm Way', address_line2: null, city: 'Bradenton', zip: '34202',
+  };
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.clearAllMocks();
+    process.env.GATE_APPOINTMENT_PAGE = 'true';
+    router = require('../routes/appointment-public');
+  });
+  afterAll(() => {
+    if (prevAppt === undefined) delete process.env.GATE_APPOINTMENT_PAGE; else process.env.GATE_APPOINTMENT_PAGE = prevAppt;
+  });
+
+  async function payload(rowOverrides = {}, stateOverrides = {}) {
+    resetDbState(stateOverrides);
+    dbState.svcRow = { ...dbState.svcRow, ...AT_HOME, ...rowOverrides };
+    return withServer(async (baseUrl) => {
+      const res = await getAppointment(baseUrl);
+      expect(res.status).toBe(200);
+      return res.json();
+    });
+  }
+
+  test('an upcoming lawn treatment at home carries petsOnFile true when a pet is on file', async () => {
+    const body = await payload({ service_type: LAWN }, { petsRow: { pets_structured: [{ name: 'Biscuit', type: 'dog' }] } });
+    expect(body.state).toBe('upcoming');
+    expect(body.lawnPrep).toEqual({ petsOnFile: true });
+    // No pet name, count or detail ever rides on the public payload.
+    expect(JSON.stringify(body)).not.toMatch(/Biscuit|dog/i);
+  });
+
+  test('petsOnFile is false for no row, an empty list or a list stored as text', async () => {
+    for (const petsRow of [null, { pets_structured: null }, { pets_structured: [] }, { pets_structured: '[]' }, { pets_structured: 'not json' }]) {
+      const body = await payload({ service_type: LAWN }, { petsRow });
+      expect(body.lawnPrep).toEqual({ petsOnFile: false });
+    }
+    const asText = await payload({ service_type: LAWN }, { petsRow: { pets_structured: '[{"name":"Rex"}]' } });
+    expect(asText.lawnPrep).toEqual({ petsOnFile: true });
+  });
+
+  test('the key is absent for a non-lawn visit, a non-upcoming page and a visit stamped at another address', async () => {
+    const pest = await payload({}, { petsRow: { pets_structured: [{ name: 'Rex' }] } });
+    expect(pest.state).toBe('upcoming');
+    expect(pest).not.toHaveProperty('lawnPrep');
+    expect(dbState.prefsReads).toBe(0);
+
+    const done = await payload({ service_type: LAWN, status: 'completed' });
+    expect(done.state).toBe('completed');
+    expect(done).not.toHaveProperty('lawnPrep');
+
+    const away = await payload({ service_type: LAWN, service_address_line1: '9 Elsewhere Rd', service_address_city: 'Sarasota', service_address_zip: '34236' });
+    expect(away.state).toBe('upcoming');
+    expect(away).not.toHaveProperty('lawnPrep');
+    expect(dbState.prefsReads).toBe(0);
+  });
+
+  test('a lookup error fails soft: the key is omitted and the page still loads', async () => {
+    const body = await payload({ service_type: LAWN }, { prefsThrow: true });
+    expect(body.state).toBe('upcoming');
+    expect(body).not.toHaveProperty('lawnPrep');
+  });
+
+  // Owner 2026-11-14, decision 1A: the watering-time line follows the policy in force on the visit's date.
+  describe('wateringLine', () => {
+    const prevPolicy = process.env.IRRIGATION_RESTRICTION_POLICY;
+    const VISIT = { service_type: LAWN, scheduled_date: '2026-12-01' };
+    const ORDER_HOURS = [{ start: '00:01', end: '04:00' }, { start: '20:00', end: '23:59' }];
+    const setPolicy = (extra = {}) => {
+      process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({
+        maxDaysPerWeek: 1, effectiveFrom: '2026-10-02', expiresOn: '2027-03-31', label: 'SWFWMD Modified Phase III order',
+        hoursNote: 'on your assigned day, during your area\'s allowed hours', coverage: { counties: ['Manatee', 'Sarasota'], partial: ['Charlotte'] },
+        allowedHours: ORDER_HOURS, ...extra,
+      });
+    };
+    afterEach(() => {
+      if (prevPolicy === undefined) delete process.env.IRRIGATION_RESTRICTION_POLICY; else process.env.IRRIGATION_RESTRICTION_POLICY = prevPolicy;
+    });
+
+    test('the order\'s hours: the midnight sentence, with petsOnFile, and nothing else about the rule', async () => {
+      setPolicy();
+      const body = await payload(VISIT, { petsRow: { pets_structured: [{ name: 'Biscuit', type: 'dog' }] } });
+      expect(body.lawnPrep).toEqual({
+        petsOnFile: true,
+        wateringLine: 'On your watering day, use the 12:01 to 4 AM window, not the evening one. A lawn that stays wet all night gets more fungus.',
+      });
+      // The county, the hours and the policy never ride on the public payload.
+      expect(JSON.stringify(body)).not.toMatch(/Manatee|allowedHours|noHourRestriction|maxDaysPerWeek|Phase III|00:01|23:59/);
+    });
+
+    test('a rule that permits 6 to 8 AM: the morning sentence (singular for one day, plural for more)', async () => {
+      setPolicy({ allowedHours: [{ start: '05:00', end: '09:00' }] });
+      expect((await payload(VISIT)).lawnPrep.wateringLine).toBe('On your watering day, water between 6 and 8 AM.');
+      setPolicy({ maxDaysPerWeek: 2, allowedHours: [{ start: '05:00', end: '09:00' }] });
+      expect((await payload(VISIT)).lawnPrep.wateringLine).toBe('On your watering days, water between 6 and 8 AM.');
+    });
+
+    test('the policy is judged on the visit\'s date: expired, or not yet effective, leaves the key out', async () => {
+      setPolicy({ expiresOn: '2026-11-30' });
+      expect((await payload(VISIT)).lawnPrep).toEqual({ petsOnFile: false });
+      setPolicy({ effectiveFrom: '2026-12-02' });
+      expect((await payload(VISIT)).lawnPrep).toEqual({ petsOnFile: false });
+      setPolicy({ expiresOn: '2026-12-01' });
+      expect((await payload(VISIT)).lawnPrep).toHaveProperty('wateringLine');
+    });
+
+    test('no allowedHours, malformed allowedHours or a hoursNote-only policy: the key is absent and petsOnFile stays', async () => {
+      for (const extra of [{ allowedHours: undefined }, { allowedHours: 'midnight' }, { allowedHours: [{ start: '4am', end: '8pm' }] }]) {
+        setPolicy(extra);
+        const body = await payload(VISIT, { petsRow: { pets_structured: [{ name: 'Rex' }] } });
+        expect(body.lawnPrep).toEqual({ petsOnFile: true });
+      }
+      delete process.env.IRRIGATION_RESTRICTION_POLICY; // the checked-in default expired 2026-10-01 and carries no hours
+      expect((await payload(VISIT)).lawnPrep).toEqual({ petsOnFile: false });
+    });
+
+    test('no county established (partial Charlotte, or an unknown address): no line', async () => {
+      setPolicy();
+      expect((await payload({ ...VISIT, city: 'Port Charlotte', zip: '33948' }, { turfRow: { county: 'Charlotte', city: 'Port Charlotte' } })).lawnPrep).toEqual({ petsOnFile: false });
+      expect((await payload({ ...VISIT, city: 'Tampa', zip: '33602' })).lawnPrep).toEqual({ petsOnFile: false });
+    });
+
+    test('a moved home whose county was never re-confirmed uses the current address, not the old profile county', async () => {
+      setPolicy();
+      const petsRow = { pets_structured: [], irrigation_home_changed_at: '2026-11-01T00:00:00Z', irrigation_confirmed_fields: '[]' };
+      // Profile says Charlotte (the former home); the current address is Bradenton (Manatee): covered.
+      expect((await payload(VISIT, { petsRow, turfRow: { county: 'Charlotte', city: 'Englewood' } })).lawnPrep).toHaveProperty('wateringLine');
+      // The current address cannot name a county: no line, never the old profile's county.
+      expect((await payload({ ...VISIT, city: 'Englewood', zip: '34223' }, { petsRow, turfRow: { county: 'Manatee', city: 'Bradenton' } })).lawnPrep).toEqual({ petsOnFile: false });
+    });
+
+    // GH Codex #7885 r1: the token row's address predates the preferences read, so the line re-reads the address after
+    // the preferences and the move stamp after the address. A move between the reads drops the line (fail closed).
+    test('a move between the reads drops only the line: never the old address paired with the new move stamp', async () => {
+      setPolicy();
+      const petsRow = { pets_structured: [{ name: 'Rex' }], irrigation_home_changed_at: null, irrigation_confirmed_fields: '[]' };
+      const moved = await payload(VISIT, { petsRow, stampAfter: '2026-11-14T23:00:00Z', homeRow: { city: 'Englewood', zip: '34223' } });
+      expect(moved.state).toBe('upcoming');
+      expect(moved.lawnPrep).toEqual({ petsOnFile: true });
+      // The same reads with no move in between keep the line.
+      expect((await payload(VISIT, { petsRow })).lawnPrep).toHaveProperty('wateringLine');
+    });
+
+    test('the county comes from the address re-read after the preferences, not the token row', async () => {
+      setPolicy();
+      // The token row says Bradenton (Manatee, covered); the current home is Tampa: no county, so no line.
+      expect((await payload(VISIT, { homeRow: { city: 'Tampa', zip: '33602' } })).lawnPrep).toEqual({ petsOnFile: false });
+      // The token row says Tampa; the current home is Bradenton: the line.
+      expect((await payload({ ...VISIT, city: 'Tampa', zip: '33602' }, { homeRow: { city: 'Bradenton', zip: '34202' } })).lawnPrep).toHaveProperty('wateringLine');
+    });
+
+    // GH Codex #7885 r2: lawnPrepField's at-home check ran on loadByToken's join. A visit stamped at the former home
+    // must not get the new home's line once the re-read shows the customer moved.
+    test('a visit stamped at the former home gets no line once the re-read home is elsewhere', async () => {
+      setPolicy();
+      const STAMPED_AT_OLD_HOME = { ...VISIT, service_address_line1: '12 Palm Way', service_address_city: 'Bradenton', service_address_zip: '34202' };
+      const movedHome = { address_line1: '400 Harbor Ln', address_line2: null, city: 'Sarasota', zip: '34236' };
+      const moved = await payload(STAMPED_AT_OLD_HOME, { homeRow: movedHome });
+      expect(moved.state).toBe('upcoming');
+      expect(moved.lawnPrep).toEqual({ petsOnFile: false });
+      // The same stamped visit while the home is still that address keeps the line.
+      expect((await payload(STAMPED_AT_OLD_HOME)).lawnPrep).toHaveProperty('wateringLine');
+      // An unstamped visit follows the customer to the new home: the new home's line.
+      expect((await payload(VISIT, { homeRow: movedHome })).lawnPrep).toHaveProperty('wateringLine');
+    });
+
+    test('a failed read of the watering inputs drops only the line, never petsOnFile or the card', async () => {
+      setPolicy();
+      const body = await payload(VISIT, { turfThrow: true, petsRow: { pets_structured: [{ name: 'Rex' }] } });
+      expect(body.state).toBe('upcoming');
+      expect(body.lawnPrep).toEqual({ petsOnFile: true });
+    });
+  });
+
+  test('a grouped stop is judged by each member raw service type', async () => {
+    const { lawnPrepField } = router._test;
+    resetDbState({ petsRow: { pets_structured: [{ name: 'Rex' }] } });
+    const svc = { id: 'svc-1', customer_id: 'cust-1', service_type: 'Quarterly Pest Control Service', ...AT_HOME };
+    expect(await lawnPrepField(svc, 'upcoming', [{ service_type: 'Quarterly Pest Control Service' }, { service_type: LAWN }]))
+      .toEqual({ lawnPrep: { petsOnFile: true } });
+    expect(await lawnPrepField(svc, 'upcoming', [{ service_type: 'Quarterly Pest Control Service' }, { service_type: 'Termite Inspection' }]))
+      .toEqual({});
+    expect(await lawnPrepField(svc, 'past', [{ service_type: LAWN }])).toEqual({});
   });
 });
 

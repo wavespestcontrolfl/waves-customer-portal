@@ -60,7 +60,7 @@ const freshRow = () => ({
   id: 'contract-1', customer_id: 'cust-1', contract_type: 'document_template', status: 'viewed', title: 'Lawn & Ornamental Service Agreement',
   recipient_name: 'Pat Owner', document_template_key: 'service_agreement.lawn_ornamental', contract_text_snapshot: 'agreement text',
   document_template_requires_signature: true, requires_signature_snapshot: true, share_token_hash: hashContractToken(TOKEN),
-  share_token_expires_at: new Date(Date.now() + 86400000), document_variables_snapshot: { estimate: { id: 'est-1', source: 'estimate_service_agreement' } },
+  share_token_expires_at: new Date(Date.now() + 86400000), document_variables_snapshot: {},
 });
 
 const png = async ({ ink = true, width = 240, height = 64 } = {}) => {

@@ -13,8 +13,8 @@ const outline = require('../services/lawn-service-outline');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 const { validateCustomerCopy } = require('../services/service-report/premium-experience');
 
-const GATE_NAMES = ['GATE_LAWN_V13', 'GATE_LAWN_OUTLINE_V13', 'GATE_LAWN_OUTLINE_DETAIL', 'GATE_LAWN_BERMUDA_REMOVAL'];
-const DETAIL = { GATE_LAWN_V13: 'true', GATE_LAWN_OUTLINE_V13: 'true', GATE_LAWN_OUTLINE_DETAIL: 'true' };
+const GATE_NAMES = ['GATE_LAWN_V13', 'GATE_LAWN_OUTLINE_DETAIL', 'GATE_LAWN_BERMUDA_REMOVAL'];
+const DETAIL = { GATE_LAWN_V13: 'true', GATE_LAWN_OUTLINE_DETAIL: 'true' };
 const OCT_26 = new Date('2026-10-26T12:00:00Z');
 
 async function withGates(values, fn) {
@@ -120,7 +120,7 @@ describe('the stamp', () => {
       expect((await build({ line: ROUNDS_LINE })).meta.contentLibraryVersion).toBe('lawn-v13-visual-2');
       expect(outline.contentLibraryVersion()).toBe('lawn-v13-visual-2');
     });
-    await withGates({ GATE_LAWN_V13: 'true', GATE_LAWN_OUTLINE_V13: 'true' }, async () => {
+    await withGates({ GATE_LAWN_V13: 'true' }, async () => {
       const plain = await build({ line: ROUNDS_LINE });
       expect(section(plain, 'year_bar')).toBeUndefined();
       expect(plain.content.property.planLabel).toBeUndefined();

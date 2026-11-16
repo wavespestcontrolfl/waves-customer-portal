@@ -89,13 +89,7 @@ describe('matchTitleToProduct', () => {
   });
 });
 
-describe('GATE_PRODUCT_INTAKE_GUARD — near-name guard on the containment step', () => {
-  const originalGate = process.env.GATE_PRODUCT_INTAKE_GUARD;
-  afterEach(() => {
-    if (originalGate === undefined) delete process.env.GATE_PRODUCT_INTAKE_GUARD;
-    else process.env.GATE_PRODUCT_INTAKE_GUARD = originalGate;
-  });
-  const gateOn = () => { process.env.GATE_PRODUCT_INTAKE_GUARD = 'true'; };
+describe('near-name guard on the containment step', () => {
   const catalogOf = (...names) => makeConn({ aliases: [], products: names.map((name, i) => ({ id: `p${i}`, name, active: true })) });
 
   const MUST_MATCH = [
@@ -104,14 +98,12 @@ describe('GATE_PRODUCT_INTAKE_GUARD — near-name guard on the containment step'
     ['SYNGENTA HERITAGE G AZOXYSTROBIN 0.31% BROAD SPECTRUM GRANULAR FUNGICIDE 30 LB. BAG', 'Heritage G'],
     ['Atticus Talak 7.9 F Bifenthrin Insecticide Concentrate (96oz) | Control Ants, Mosquitoes, Cockroaches, Spiders, Fleas, Ticks & More', 'Atticus Talak 7.9 F'],
   ];
-  test.each(MUST_MATCH)('gate on: the real containment title still matches (%s)', async (title, name) => {
-    gateOn();
+  test.each(MUST_MATCH)('the real containment title still matches (%s)', async (title, name) => {
     const result = await matchTitleToProduct(title, catalogOf(name));
     expect(result).toMatchObject({ matched: true, matchType: 'containment', product: { name } });
   });
 
-  test('gate on: an alias match is never guarded ("Antapex WSG is same as alpine", owner 2026-10-09)', async () => {
-    gateOn();
+  test('an alias match is never guarded ("Antapex WSG is same as alpine", owner 2026-10-09)', async () => {
     const conn = makeConn({
       aliases: [{ alias_name: 'ANTAPEX WSG BROAD SPECTURM WATER DISPERSIBLE GRANULE (WDG/WG) INSECTICIDE 500 GM. BOTTLE', id: 'p-alpine', name: 'Alpine WSG', active: true }],
       products: [{ id: 'p-alpine', name: 'Alpine WSG', active: true }],
@@ -126,28 +118,17 @@ describe('GATE_PRODUCT_INTAKE_GUARD — near-name guard on the containment step'
     ['Maxforce FC Magnum Roach Bait Gel 4 x 30 g', 'Maxforce FC', ['magnum']],
     ['PGF Complete 16-4-8 Plus Fertilizer 50 lb', 'PGF Complete 16-4-8', ['plus']],
   ];
-  test.each(MUST_NOT_MATCH)('gate on: "%s" no longer matches catalog "%s"', async (title, name, variantWords) => {
-    gateOn();
+  test.each(MUST_NOT_MATCH)('"%s" no longer matches catalog "%s"', async (title, name, variantWords) => {
     const result = await matchTitleToProduct(title, catalogOf(name));
     expect(result).toEqual({ matched: false, reason: 'variant_word', matchType: 'containment', candidates: ['p0'], variantWords });
   });
 
-  test.each(MUST_NOT_MATCH)('gate off: "%s" still matches "%s" exactly as before', async (title, name) => {
-    delete process.env.GATE_PRODUCT_INTAKE_GUARD;
-    const result = await matchTitleToProduct(title, catalogOf(name));
-    expect(result).toMatchObject({ matched: true, matchType: 'containment', product: { name } });
-    process.env.GATE_PRODUCT_INTAKE_GUARD = 'false';
-    expect((await matchTitleToProduct(title, catalogOf(name))).matched).toBe(true);
-  });
-
-  test('gate on: two containment hits stay ambiguous, as today', async () => {
-    gateOn();
+  test('two containment hits stay ambiguous, as today', async () => {
     const result = await matchTitleToProduct('Generic Bifen IT Insecticide 32oz', catalogOf('Bifen', 'Bifen IT'));
     expect(result).toMatchObject({ matched: false, reason: 'ambiguous' });
   });
 
-  test('gate on: a size such as "4 x 30 g" or "500 g" never triggers the guard by itself', async () => {
-    gateOn();
+  test('a size such as "4 x 30 g" or "500 g" never triggers the guard by itself', async () => {
     expect((await matchTitleToProduct('Advion Cockroach Gel Bait 4 x 30 g', catalogOf('Advion Cockroach Gel Bait'))).matched).toBe(true);
     expect((await matchTitleToProduct('Alpine WSG Insecticide 500 g Bottle', catalogOf('Alpine WSG'))).matched).toBe(true);
   });

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, configure, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import SalesTaxTab from './SalesTaxTab.jsx';
 
-// Locked-down behaviors: hidden (and silent) while the gate is off; the nine
+// Locked-down behaviors: the nine
 // DR-15 lines, the due date and the Late badge; a changed period re-reads the
 // sheet; Mark filed puts the right body on the filing row and reloads; a filed
 // row shows its facts and no button; a failed read shows the server's message.
@@ -13,7 +13,6 @@ import SalesTaxTab from './SalesTaxTab.jsx';
 configure({ asyncUtilTimeout: 10000 });
 
 let calls;
-let status;
 let sheet;
 let sheetError;
 
@@ -25,7 +24,6 @@ const openFiling = { id: 'f-1', status: 'upcoming', period_label: 'Oct 2026', du
 
 beforeEach(() => {
   calls = [];
-  status = { enabled: true };
   sheetError = null;
   sheet = {
     period: { kind: 'month', year: 2026, index: 9, label: 'Sep 2026', start: '2026-09-01', end: '2026-09-30', in_progress: false },
@@ -42,7 +40,6 @@ beforeEach(() => {
     const u = String(url);
     const method = opts.method || 'GET';
     calls.push({ url: u, method, body: opts.body ? JSON.parse(opts.body) : undefined });
-    if (u.includes('/worksheets/status')) return json(status);
     if (u.includes('/worksheets/sales-tax')) return sheetError ? json({ error: sheetError }, false) : json(sheet);
     if (method === 'PUT') return json({ success: true });
     return json({});
@@ -51,15 +48,6 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 const sheetCalls = () => calls.filter((c) => c.url.includes('/worksheets/sales-tax'));
-
-it('renders nothing and makes only the status request while the gate is off', async () => {
-  status = { enabled: false };
-  const { container } = render(<SalesTaxTab />);
-  await waitFor(() => expect(calls.length).toBe(1));
-  expect(calls[0].url).toContain('/admin/tax/worksheets/status');
-  expect(container).toBeEmptyDOMElement();
-  expect(calls.length).toBe(1);
-});
 
 it('shows the DR-15 lines with their values, the due date, the Late badge and the warnings', async () => {
   render(<SalesTaxTab />);

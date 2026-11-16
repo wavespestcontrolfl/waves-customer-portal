@@ -535,9 +535,11 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
     });
   } else {
     try {
+      // GATE_DAY_ONLY_PROMISE part B2: the slot came from the customer's call, so it is the customer's chosen time (the
+      // window stays), the same as this surface's series moves. Recorded even though this sync sends no notice.
       await require('./appointment-reminders').handleReschedule(
         visit.id, `${plan.newDate}T${plan.newWindow.start}`,
-        { sendNotification: false, expectSchedule: { date: plan.newDate, windowStart: plan.newWindow.start } },
+        { sendNotification: false, expectSchedule: { date: plan.newDate, windowStart: plan.newWindow.start }, timePromise: 'set_time' },
       );
     } catch (err) {
       logger.warn(`[call-reschedule] reminder sync failed for ${visit.id}: ${err.message}`);

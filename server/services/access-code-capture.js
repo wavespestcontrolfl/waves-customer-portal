@@ -23,30 +23,27 @@
  * home) and the office links it to a customer before it can be accepted. An
  * active standing visitor pass is SHARED at read time: the visit read adds the
  * active standing passes of other live customers whose home is in the visit
- * home's neighborhood (GATE_NEIGHBORHOOD_ACCESS), so a pass follows the home's
+ * home's neighborhood, so a pass follows the home's
  * current neighborhood and leaves with its owner's retirement. Nothing is
  * copied into the neighborhood directory.
  *
- * Dark behind GATE_ACCESS_CODES_SECTION (read at call time); the sweep also
- * needs GATE_ACCESS_CODES_SECTION_SINCE (an offset ISO instant) so turning the
- * gate on never reads history. Nothing here rings a bell or sends a message.
+ * The sweep needs GATE_ACCESS_CODES_SECTION_SINCE (an offset ISO instant) so
+ * it never reads history. Nothing here rings a bell or sends a message.
  * The one admin row for the codes waiting on the office lives in
  * access-code-found-bell.js (owner ruling 2026-10-24); differing codes in one
  * neighborhood still never ring (owner ruling 2026-10-03).
  *
  * Call transcripts feed the same list (owner 2026-10-23: a customer gave the
  * community gate code to a technician on a 19-second outbound call and nothing
- * was saved). Dark behind GATE_ACCESS_CODES_CALLS (read at call time, needs
- * GATE_ACCESS_CODES_SECTION too) and GATE_ACCESS_CODES_CALLS_SINCE (an offset
- * ISO instant: calls before it are never read). The calls pass runs in the same
+ * was saved). GATE_ACCESS_CODES_CALLS_SINCE (an offset ISO instant) is the
+ * activation time: calls before it are never read. The calls pass runs in the same
  * sweep after the texts, with its own batch and receipts; its failure never
  * blocks the texts. Spoken numbers ("pound, four four one seven") are
  * normalized in code before the verifier compares them with the model's code.
  *
- * Inbound customer emails feed the same list (owner 2026-10-24). Dark behind
- * GATE_ACCESS_CODES_EMAILS (exactly `true`, read at call time, needs
- * GATE_ACCESS_CODES_SECTION too) and GATE_ACCESS_CODES_EMAILS_SINCE (an offset
- * ISO instant: emails before it are never read). The emails pass runs after the
+ * Inbound customer emails feed the same list (owner 2026-10-24).
+ * GATE_ACCESS_CODES_EMAILS_SINCE (an offset ISO instant) is the activation
+ * time: emails before it are never read. The emails pass runs after the
  * calls, with its own batch and receipts; its failure never blocks the texts or
  * the calls. Only the customer's NEW words are read (quoted history and
  * signature stripped), and a quote that repeats text we sent never counts.
@@ -60,7 +57,7 @@ const Ajv = require('ajv/dist/2020');
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { gateEnvValue, gateEnvTimestamp, neighborhoodAccessLive } = require('../config/feature-gates');
+const { gateEnvTimestamp } = require('../config/feature-gates');
 const { dispatchWithFallback } = require('./llm/call');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { domainFromAddress, domainMatches, isOperationalDomain } = require('./email/spam-blocker');
@@ -121,12 +118,6 @@ const HISTORY_FOR_MODEL = 6;
 // A visit that is not coming (or already came) no longer carries its code.
 const ENDED_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-const enabled = () => gateEnvValue('GATE_ACCESS_CODES_SECTION');
-// Calls need the section gate AND their own gate (read at call time).
-const callsEnabled = () => enabled() && gateEnvValue('GATE_ACCESS_CODES_CALLS');
-// Emails need the section gate AND their own, which must be exactly `true`.
-const emailsEnabled = () => enabled() && process.env.GATE_ACCESS_CODES_EMAILS === 'true';
 
 // ---- the keyword net -------------------------------------------------------------
 
@@ -908,13 +899,13 @@ async function reconcileSource(trx, message, items) {
 }
 
 // Every write the sweep makes about a text (filing, or clearing what an older
-// version filed) first proves, under locks, that the gate and its activation
-// time still hold, the customer row is locked in the office writers' order,
+// version filed) first proves, under locks, that its activation
+// time still holds, the customer row is locked in the office writers' order,
 // and the text still belongs to that customer with the words this pass read.
 async function sourceStillCurrent(trx, message, receipt, opts) {
   if (message.source_kind) return ownerSourceStillCurrent(trx, message, receipt, opts);
   const since = gateEnvTimestamp('GATE_ACCESS_CODES_SECTION_SINCE');
-  if (!enabled() || !since || new Date(message.created_at) < since) return false;
+  if (!since || new Date(message.created_at) < since) return false;
   // A text with no customer has none to lock: the text row itself is the lock.
   if (message.customer_id && !(await lockCustomer(trx, message.customer_id))) return false;
   const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_type', 'to_phone', 'from_phone', 'message_body');
@@ -979,8 +970,8 @@ async function fileUnlinkedItems(trx, message, items, receipt) {
 
 async function fileFoundItems(conn, { message }, items, receipt) {
   return conn.transaction(async (trx) => {
-    // The model call ran outside any lock. Before a write: the gate and its
-    // activation time still hold, the customer is locked (the same order as
+    // The model call ran outside any lock. Before a write: its
+    // activation time still holds, the customer is locked (the same order as
     // the office writers), and the text still belongs to that customer with
     // the same words. A merge or an edit in between leaves no receipt, so the
     // next pass reads the text again from its current state.
@@ -1067,12 +1058,8 @@ const degraded = (tally) => !!(tally.failed || tally.mirror?.failed || tally.cal
 
 async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccessCodes, readCall = readCallAccessCodes, readEmail = readEmailAccessCodes } = {}) {
   const reads = { calls: readCall, emails: readEmail };
-  // Ownership cleanup runs whatever the gate says: a merge undone while the
-  // section is off (or just before a rollback turns it off) must still take a
-  // moved code and its profile copy off the wrong account.
-  if (!enabled()) return runExclusive('access-code-net', async () => ({ skipped: 'gate_off', movedRetired: await retireMovedSources(conn) }));
   const since = gateEnvTimestamp('GATE_ACCESS_CODES_SECTION_SINCE');
-  // The profile mirror reads no text, so it needs the gate and nothing else.
+  // The profile mirror reads no text, so it needs no activation time.
   if (!since) {
     return runExclusive('access-code-net', async () => {
       const tally = { skipped: 'activation_time_required', movedRetired: await retireMovedSources(conn), mirror: await mirrorProfileCodes(conn) };
@@ -1111,7 +1098,6 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
       .select(...SOURCE_COLUMNS.map((column) => `s.${column}`));
     const tally = { scanned: candidates.length, read: 0, found: 0, failed: 0, skipped: 0, movedRetired, mirror };
     for (const message of candidates) {
-      if (!enabled()) break;
       const receipt = { source_type: 'message', source_id: message.id, extractor_version: VERSION,
         source_hash: sourceHash(message) };
       try {
@@ -1514,14 +1500,14 @@ const emailCandidates = (conn, since, now) => conn('emails as e')
 const OWNER_SOURCES = {
   call: {
     key: 'calls', table: 'call_log', type: 'call_log', version: CALL_VERSION, sinceGate: 'GATE_ACCESS_CODES_CALLS_SINCE',
-    enabled: callsEnabled, maxBody: MAX_TRANSCRIPT, flags: callFlagsAccess,
+    maxBody: MAX_TRANSCRIPT, flags: callFlagsAccess,
     load: loadCall, ownerId: callOwnerId, eligible: callEligible, candidates: callCandidates, asMessage: callAsMessage,
     hash: (row, ownerId) => callSourceHash(callAsMessage(row, null, ownerId)),
     verify: async (items, context) => verifyCallItems(items, context.message, context),
   },
   email: {
     key: 'emails', table: 'emails', type: 'email', version: EMAIL_VERSION, sinceGate: 'GATE_ACCESS_CODES_EMAILS_SINCE',
-    enabled: emailsEnabled, maxBody: MAX_EMAIL_BODY, flags: flagsAccess,
+    maxBody: MAX_EMAIL_BODY, flags: flagsAccess,
     load: loadEmail, ownerId: emailOwnerId, eligible: emailEligible, candidates: emailCandidates, asMessage: emailAsMessage,
     hash: emailSourceHash,
     verify: (items, context, conn, row) => withoutOurOwnWords(conn, row, verifyEmailItems(items, context.message, context)),
@@ -1535,7 +1521,7 @@ const OWNER_SOURCES = {
 async function ownerSourceStillCurrent(trx, message, receipt, { clearing = false } = {}) {
   const spec = OWNER_SOURCES[message.source_kind];
   const since = gateEnvTimestamp(spec.sinceGate);
-  if (!spec.enabled() || !since || new Date(message.created_at) < since) return false;
+  if (!since || new Date(message.created_at) < since) return false;
   if (message.customer_id && !(await lockCustomer(trx, message.customer_id))) return false;
   const live = await spec.load(trx, message.id, true);
   if (!live) return false;
@@ -1580,7 +1566,6 @@ async function runOwnerPass(spec, { now, conn, read, since }) {
   const candidates = await spec.candidates(conn, since, now);
   tally.scanned = candidates.length;
   for (const row of candidates) {
-    if (!spec.enabled()) break;
     let message = spec.asMessage(row, row.customer_id);
     let receipt = { source_type: spec.type, source_id: row.id, extractor_version: spec.version, source_hash: spec.hash(row, row.customer_id) };
     try {
@@ -1626,7 +1611,7 @@ async function ownerSourcePasses({ now, conn, reads }) {
   const out = {};
   for (const spec of Object.values(OWNER_SOURCES)) {
     const since = gateEnvTimestamp(spec.sinceGate);
-    if (!spec.enabled() || !since) continue;
+    if (!since) continue;
     try {
       out[spec.key] = await runOwnerPass(spec, { now, conn, read: reads[spec.key], since });
     } catch (err) {
@@ -1661,8 +1646,6 @@ async function mirrorCustomer(conn, customerId) {
   return conn.transaction(async (trx) => {
     const out = { created: 0, retired: 0 };
     if (!(await lockCustomer(trx, customerId))) return out;
-    // The kill switch holds under the locks too: off now means no write.
-    if (!enabled()) return out;
     const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
     const prefs = await trx('property_preferences').where({ customer_id: customerId }).forUpdate()
       .first(...PROFILE_KINDS.map((k) => PROFILE_FIELD[k]));
@@ -1798,7 +1781,6 @@ async function mirrorProfileCodes(conn = db, { limit = MIRROR_BATCH } = {}) {
     })
     .orderByRaw('m.mirrored_at ASC NULLS FIRST').limit(limit).select('p.customer_id');
   for (const { customer_id: customerId } of candidates) {
-    if (!enabled()) break;
     try {
       const out = await mirrorCustomer(conn, customerId);
       tally.checked += 1;
@@ -2005,7 +1987,7 @@ async function listForVisit(conn, req, visitId) {
   // OTHER live customers whose home sits in this home's neighborhood, read now
   // (never copied), so a pass follows its home's current neighborhood and
   // leaves when its owner retires it. Only the pass text is projected.
-  const shared = visitHood && neighborhoodAccessLive() ? await neighborPasses(conn, visit.customer_id, visitHood, visitHome) : [];
+  const shared = visitHood ? await neighborPasses(conn, visit.customer_id, visitHood, visitHome) : [];
   // The visit may have been reassigned or moved to another home while the
   // codes were read: answer only if it is still in scope with the same home
   // and neighborhood.
@@ -2581,7 +2563,6 @@ module.exports = {
   VERSION,
   KINDS,
   LIVES,
-  enabled,
   flagsAccess,
   callFlagsAccess,
   verifyItems,
@@ -2592,8 +2573,6 @@ module.exports = {
   callOwnerId,
   CALL_HASH_SQL,
   CALL_VERSION,
-  callsEnabled,
-  emailsEnabled,
   emailAsMessage,
   emailSourceHash,
   emailOwnerId,

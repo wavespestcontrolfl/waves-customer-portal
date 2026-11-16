@@ -1,5 +1,5 @@
 /**
- * First review ask (GATE_REVIEW_FIRST_ASK_LOCK; owner 2026-10-26, option B), through the real completeScheduledService
+ * First review ask (owner 2026-10-26, option B), through the real completeScheduledService
  * transaction. A customer never asked for a review (no review request texted or emailed, not marked as reviewed) keeps the
  * ask when the tech turns it off WITHOUT the "Complaint on site" reason; with that reason the ask is off and the reason is
  * saved on the record. Gate off, asked-before and already-reviewed customers, re-service visits and a sheet that pins every
@@ -123,23 +123,20 @@ async function complete(f, extra) {
 }
 
 postgres('the first review ask lock', () => {
-  const lockWas = process.env.GATE_REVIEW_FIRST_ASK_LOCK;
   const alreadyWas = process.env.GATE_REVIEW_ALREADY_REVIEWED;
   beforeAll(async () => {
     process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
     mockPg = knex({ client: 'pg', connection: testUrl, pool: { min: 0, max: 4 } });
   });
   afterEach(() => {
-    if (lockWas === undefined) delete process.env.GATE_REVIEW_FIRST_ASK_LOCK; else process.env.GATE_REVIEW_FIRST_ASK_LOCK = lockWas;
     if (alreadyWas === undefined) delete process.env.GATE_REVIEW_ALREADY_REVIEWED; else process.env.GATE_REVIEW_ALREADY_REVIEWED = alreadyWas;
   });
   afterAll(async () => { if (mockPg) await mockPg.destroy(); });
 
   // One completion. Returns how many review asks were enrolled, the saved record's notes and the customer's
   // reviewed mark. `already` turns GATE_REVIEW_ALREADY_REVIEWED on.
-  async function run({ gate = true, already = false, seed, extra }) {
+  async function run({ already = false, seed, extra }) {
     ReviewService.enrollPostService.mockClear();
-    if (gate) process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true'; else delete process.env.GATE_REVIEW_FIRST_ASK_LOCK;
     if (already) process.env.GATE_REVIEW_ALREADY_REVIEWED = 'true'; else delete process.env.GATE_REVIEW_ALREADY_REVIEWED;
     const f = await seedVisit(seed);
     try {
@@ -154,27 +151,20 @@ postgres('the first review ask lock', () => {
   const OFF = { requestReview: false };
   const COMPLAINT = { requestReview: false, reviewOptOutReason: 'complaint_on_site' };
 
-  test('gate off, never asked, box off: no ask and nothing recorded (unchanged)', async () => {
-    const out = await run({ gate: false, extra: COMPLAINT });
-    expect(out.asks).toBe(0);
-    expect(out.notes.requestReview).toBe(false);
-    expect(out.notes.reviewFirstAskLock).toBeUndefined();
-  });
-
-  test('gate on, never asked, box off with no reason: the ask stays on and the record says so', async () => {
+  test('never asked, box off with no reason: the ask stays on and the record says so', async () => {
     const out = await run({ extra: OFF });
     expect(out.asks).toBe(1);
     expect(out.notes.requestReview).toBe(true);
     expect(out.notes.reviewFirstAskLock).toEqual({ neverAsked: true, forcedOn: true, optOutReason: null });
   });
 
-  test('gate on, never asked, box off with another reason: the ask stays on', async () => {
+  test('never asked, box off with another reason: the ask stays on', async () => {
     const out = await run({ extra: { requestReview: false, reviewOptOutReason: 'customer_busy' } });
     expect(out.asks).toBe(1);
     expect(out.notes.reviewFirstAskLock.forcedOn).toBe(true);
   });
 
-  test('gate on, never asked, box off with the complaint reason: no ask and the reason is saved', async () => {
+  test('never asked, box off with the complaint reason: no ask and the reason is saved', async () => {
     const out = await run({ extra: COMPLAINT });
     expect(out.asks).toBe(0);
     expect(out.notes.requestReview).toBe(false);
@@ -184,7 +174,7 @@ postgres('the first review ask lock', () => {
   // GATE_REVIEW_ALREADY_REVIEWED (owner 2026-11-04): the second off reason marks the customer as reviewed.
   const ALREADY = { requestReview: false, reviewOptOutReason: 'already_left_review' };
 
-  test('both gates on, never asked, box off with "Already left a review": no ask, the reason saved, the customer marked reviewed', async () => {
+  test('with the already-reviewed gate on, never asked, box off with "Already left a review": no ask, the reason saved, the customer marked reviewed', async () => {
     const out = await run({ already: true, extra: ALREADY });
     expect(out.asks).toBe(0);
     expect(out.notes.requestReview).toBe(false);
@@ -193,76 +183,76 @@ postgres('the first review ask lock', () => {
     expect(out.customer.review_marked_at).not.toBeNull();
   });
 
-  test('the new gate off: "Already left a review" is no reason, the ask stays on and the customer is not marked', async () => {
+  test('the already-reviewed gate off: "Already left a review" is no reason, the ask stays on and the customer is not marked', async () => {
     const out = await run({ already: false, extra: ALREADY });
     expect(out.asks).toBe(1);
     expect(out.notes.reviewFirstAskLock).toEqual({ neverAsked: true, forcedOn: true, optOutReason: null });
     expect(out.customer.has_left_google_review).toBe(false);
   });
 
-  test('both gates on, the complaint reason: no ask and the customer is not marked reviewed', async () => {
+  test('with the already-reviewed gate on, the complaint reason: no ask and the customer is not marked reviewed', async () => {
     const out = await run({ already: true, extra: COMPLAINT });
     expect(out.asks).toBe(0);
     expect(out.notes.reviewFirstAskLock.optOutReason).toBe('complaint_on_site');
     expect(out.customer.has_left_google_review).toBe(false);
   });
 
-  test('gate on, never asked, box left on: asks as before and adds nothing to the record', async () => {
+  test('never asked, box left on: asks as before and adds nothing to the record', async () => {
     const out = await run({ extra: { requestReview: true } });
     expect(out.asks).toBe(1);
     expect(out.notes.reviewFirstAskLock).toBeUndefined();
   });
 
-  test('gate on, asked before: box off is honored, no marker', async () => {
+  test('asked before: box off is honored, no marker', async () => {
     const out = await run({ seed: { asked: true }, extra: OFF });
     expect(out.asks).toBe(0);
     expect(out.notes.reviewFirstAskLock).toBeUndefined();
   });
 
-  test('gate on, asked before by email only: box off is honored', async () => {
+  test('asked before by email only: box off is honored', async () => {
     const out = await run({ seed: { asked: 'email' }, extra: OFF });
     expect(out.asks).toBe(0);
     expect(out.notes.reviewFirstAskLock).toBeUndefined();
   });
 
-  test('gate on, an ask row that was created but never texted or emailed is not an ask', async () => {
+  test('an ask row that was created but never texted or emailed is not an ask', async () => {
     const out = await run({ seed: { asked: 'unsent' }, extra: OFF });
     expect(out.asks).toBe(1);
     expect(out.notes.reviewFirstAskLock.forcedOn).toBe(true);
   });
 
-  test('gate on, marked as already reviewed: box off is honored, no marker', async () => {
+  test('marked as already reviewed: box off is honored, no marker', async () => {
     const out = await run({ seed: { reviewed: true }, extra: OFF });
     expect(out.asks).toBe(0);
     expect(out.notes.reviewFirstAskLock).toBeUndefined();
   });
 
-  test('gate on, a re-service (callback) visit stays off', async () => {
+  test('a re-service (callback) visit stays off', async () => {
     const out = await run({ seed: { callback: true }, extra: OFF });
     expect(out.asks).toBe(0);
     expect(out.notes.reviewFirstAskLock).toBeUndefined();
   });
 
-  test('gate on, a re-service without the callback flag stays off too', async () => {
+  test('a re-service without the callback flag stays off too', async () => {
     // 5 of 49 re-service visits from June to October 2026 carried is_callback false (services/re-service.js isReService).
     const out = await run({ seed: { serviceType: 'Pest Control Re-Service' }, extra: OFF });
     expect(out.asks).toBe(0);
     expect(out.notes.reviewFirstAskLock).toBeUndefined();
   });
 
-  test('gate on, a sheet that pins every customer text off sends nothing and asks for nothing', async () => {
+  test('a sheet that pins every customer text off sends nothing and asks for nothing', async () => {
     const out = await run({ extra: { sendCompletionSms: false, includePayLink: false, requestReview: false } });
     expect(out.asks).toBe(0);
     expect(out.notes.reviewFirstAskLock).toBeUndefined();
   });
 
-  test('gate on, a customer concern keeps its own suppression and is not overridden', async () => {
+  test('a customer concern keeps its own suppression and is not overridden', async () => {
     const out = await run({ extra: { requestReview: false, reviewSuppression: 'customer_concern' } });
     expect(out.asks).toBe(0);
     expect(out.notes.reviewFirstAskLock).toBeUndefined();
   });
 
-  test('gate on, forced on: a custom time left in the form does not block the completion', async () => {
+  test('forced on: a custom time left in the form does not block the completion', async () => {
     const out = await run({ extra: { requestReview: false, reviewTiming: 'custom', reviewScheduledFor: '2020-01-01T08:00', reviewDelayMinutes: 5 } });
     expect(out.asks).toBe(1);
     expect(out.notes.reviewFirstAskLock.forcedOn).toBe(true);
@@ -270,7 +260,7 @@ postgres('the first review ask lock', () => {
   });
 
   // A committed completion handed back for a resume (side_effects_pending), retried under the same key and body.
-  async function runThenResume({ firstGate, resumeGate, askedBefore = false, extra }) {
+  async function runThenResume({ stripMarker = false, askedBefore = false, extra }) {
     const f = await seedVisit();
     const key = randomUUID();
     const { completeScheduledService } = require('../services/complete-scheduled-service');
@@ -279,15 +269,18 @@ postgres('the first review ask lock', () => {
       body: { visitOutcome: 'completed', products: [], areasServiced: ['Outside'], technicianNotes: 'Treated the entry points.',
         sendCompletionSms: true, includePayLink: true, ...extra } });
     try {
-      if (firstGate) process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true'; else delete process.env.GATE_REVIEW_FIRST_ASK_LOCK;
       const first = await completeScheduledService(input());
       expect(first.status).toBe(200);
+      if (stripMarker) {
+        // A record saved before the first-ask rule: "no ask", and no marker.
+        await mockPg('service_records').where({ scheduled_service_id: f.serviceId })
+          .update({ structured_notes: mockPg.raw("(structured_notes - 'reviewFirstAskLock') || '{\"requestReview\": false}'::jsonb") });
+      }
       if (askedBefore) {
         await mockPg('review_requests').insert({ customer_id: f.customerId, token: randomUUID().replace(/-/g, ''), status: 'sent', sms_sent_at: new Date() });
       }
       await mockPg('service_completion_attempts').where({ service_id: f.serviceId, idempotency_key: key }).update({ status: 'side_effects_pending' });
       ReviewService.enrollPostService.mockClear();
-      if (resumeGate) process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true'; else delete process.env.GATE_REVIEW_FIRST_ASK_LOCK;
       const second = await completeScheduledService(input());
       expect(second.status).toBe(200);
       const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first('structured_notes');
@@ -296,21 +289,21 @@ postgres('the first review ask lock', () => {
     } finally { await cleanup(f); }
   }
 
-  test('a committed retry: the record saved "no ask" with the gate off, the gate is on at the retry: still no ask', async () => {
-    const out = await runThenResume({ firstGate: false, resumeGate: true, extra: OFF });
+  test('a committed retry: the record saved "no ask" with no marker (saved before the rule): still no ask', async () => {
+    const out = await runThenResume({ stripMarker: true, extra: OFF });
     expect(out.asks).toBe(0);
     expect(out.notes.requestReview).toBe(false);
     expect(out.notes.reviewFirstAskLock).toBeUndefined();
   });
 
   test('a committed retry: the record kept the ask on; the customer was asked since, the retry still asks', async () => {
-    const out = await runThenResume({ firstGate: true, resumeGate: true, askedBefore: true, extra: OFF });
+    const out = await runThenResume({ askedBefore: true, extra: OFF });
     expect(out.asks).toBe(1);
     expect(out.notes.reviewFirstAskLock.forcedOn).toBe(true);
   });
 
   test('a committed retry: the record saved the complaint reason, the retry sends no ask', async () => {
-    const out = await runThenResume({ firstGate: true, resumeGate: true, extra: COMPLAINT });
+    const out = await runThenResume({ extra: COMPLAINT });
     expect(out.asks).toBe(0);
     expect(out.notes.reviewFirstAskLock).toEqual({ neverAsked: true, forcedOn: false, optOutReason: 'complaint_on_site' });
   });

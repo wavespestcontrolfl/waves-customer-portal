@@ -599,7 +599,7 @@ export function PropertyRoleEvidence({ payload }) {
 // "Confirm email" action satisfies it in-band. Controlled: draft state
 // (which radio, the typed value) lives in the parent, keyed by item id, so
 // multiple open disagreement cards never share a draft.
-// typedConfirm (GATE_CALL_EMAIL_CHECKS, owner 2026-10-29): the server flags every
+// typedConfirm (owner 2026-10-29): the server flags every
 // email read-back card for an admin, and the same form confirms the held address
 // or a typed correction in place.
 export function EmailConfirmForm({ itemId, payload, draft, onChange, onConfirm, busy, typedConfirm = false }) {
@@ -1135,7 +1135,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
       });
   };
 
-  // GATE_CALL_ADDRESS_FAMILY_CARD card actions. Attach files the caller in the account's first free contact slot and
+  // Family-account card actions. Attach files the caller in the account's first free contact slot and
   // links the call; New customer closes the card and reprocesses the call. Both are version-bound like the other
   // card actions: a card refreshed since it was displayed is a 409.
   const familyCardAction = (item, path, body, failText) => {

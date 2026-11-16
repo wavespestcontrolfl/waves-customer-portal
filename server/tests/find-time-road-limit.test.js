@@ -1,12 +1,10 @@
 /**
  * POST /admin/schedule/find-time: the staff line for a stopped Google
- * spending limit (GATE_PICKER_ROAD_LIMIT_NOTICE, owner 2026-10-29, route-
- * dispatcher audit fix F). The real spend counter (picker-road-spend.js) runs
+ * spending limit (owner 2026-10-29, route-dispatcher audit fix F). The real spend counter (picker-road-spend.js) runs
  * inside the mocked search, so the refusal reaches the answer through the
  * route's request scope, not through a hand-set field.
  *
- * What this locks down: gate off = the answer is exactly what it was (no
- * `road_limit`); gate on = each refusal adds `road_limit: { reason, note }`
+ * What this locks down: each refusal adds `road_limit: { reason, note }`
  * and nothing else changes; a normal search, and the request after a stopped
  * one, carry none.
  */
@@ -74,7 +72,7 @@ beforeAll((done) => {
 });
 afterAll((done) => { server.close(done); });
 
-const GATES = ['GATE_BEST_TIME_HINTS', 'GATE_OPEN_TIMES_BOX', 'GATE_PICKER_ROAD_LIMIT_NOTICE', 'PICKER_ROAD_DAILY_CAP_CENTS'];
+const GATES = ['GATE_BEST_TIME_HINTS', 'GATE_OPEN_TIMES_BOX', 'PICKER_ROAD_DAILY_CAP_CENTS'];
 const ORIGINAL = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 afterAll(() => {
   for (const name of GATES) {
@@ -135,22 +133,12 @@ const answer = async (body = LIST) => {
   return json;
 };
 
-describe('GATE_PICKER_ROAD_LIMIT_NOTICE on the find-time answer', () => {
-  test('gate off: a stopped limit changes nothing in the answer', async () => {
-    const quiet = await answer();
-    purchase = buying.dayCap;
-    process.env.PICKER_ROAD_DAILY_CAP_CENTS = '100';
-    const stopped = await answer();
-    expect(stopped).toEqual(quiet);
-    expect(stopped).not.toHaveProperty('road_limit');
-  });
-
+describe('the road limit notice on the find-time answer', () => {
   test.each([
     ['the account\'s day', 'dayCap', 'daily_cap', 'Google road times paused: daily limit reached. Times marked ~ use the estimate.'],
     ['no counter', 'noCounter', 'counter_unavailable', 'Google road times paused: the spending counter is unavailable. Times marked ~ use the estimate.'],
-  ])('gate on, %s: the answer carries the staff line, and nothing else changes', async (_name, key, reason, note) => {
+  ])('%s: the answer carries the staff line, and nothing else changes', async (_name, key, reason, note) => {
     const quiet = await answer();
-    process.env.GATE_PICKER_ROAD_LIMIT_NOTICE = 'true';
     process.env.PICKER_ROAD_DAILY_CAP_CENTS = '100';
     purchase = buying[key];
     const stopped = await answer();
@@ -159,8 +147,7 @@ describe('GATE_PICKER_ROAD_LIMIT_NOTICE on the find-time answer', () => {
     expect(rest).toEqual(quiet);
   });
 
-  test('gate on, the month limit: the line says month', async () => {
-    process.env.GATE_PICKER_ROAD_LIMIT_NOTICE = 'true';
+  test('the month limit: the line says month', async () => {
     process.env.PICKER_ROAD_MONTHLY_CAP_CENTS = '0';
     purchase = buying.monthCap;
     try {
@@ -172,16 +159,14 @@ describe('GATE_PICKER_ROAD_LIMIT_NOTICE on the find-time answer', () => {
     }
   });
 
-  test('gate on, a normal search: no new field', async () => {
-    process.env.GATE_PICKER_ROAD_LIMIT_NOTICE = 'true';
+  test('a normal search: no new field', async () => {
     purchase = buying.fine;
     expect(await answer()).not.toHaveProperty('road_limit');
     purchase = buying.nothing;
     expect(await answer()).not.toHaveProperty('road_limit');
   });
 
-  test('gate on: one request\'s stopped limit never shows on the next', async () => {
-    process.env.GATE_PICKER_ROAD_LIMIT_NOTICE = 'true';
+  test('one request\'s stopped limit never shows on the next', async () => {
     process.env.PICKER_ROAD_DAILY_CAP_CENTS = '100';
     purchase = buying.dayCap;
     expect(await answer()).toHaveProperty('road_limit');

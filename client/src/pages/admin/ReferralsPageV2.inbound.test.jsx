@@ -28,7 +28,7 @@ const response = (body, status = 200) => ({ ok: status < 400, status, json: asyn
 let inboundBody;
 let confirmResponse;
 beforeEach(() => {
-  inboundBody = { enabled: true, items: [item] };
+  inboundBody = { items: [item] };
   confirmResponse = () => response({ success: true, converted: true, creditsNow: true, credited: { referrerDollars: 25, refereeDollars: 25 }, error: null });
   localStorage.setItem("waves_admin_token", "fixture-token");
   vi.stubGlobal("fetch", vi.fn(async (url) => {
@@ -56,7 +56,7 @@ async function openQueue(label) {
   fireEvent.click(await screen.findByRole("button", { name: label }));
 }
 
-describe("Referrals queue: inbound referrals (GATE_REFERRAL_INBOUND_CONFIRM)", () => {
+describe("Referrals queue: inbound referrals", () => {
   it("confirms the code owner after one choice, and says the credits post now with no text", async () => {
     await openQueue(/Queue \(1\)/);
     expect(screen.getByText("Needs confirmation (1)")).toBeInTheDocument();
@@ -76,7 +76,7 @@ describe("Referrals queue: inbound referrals (GATE_REFERRAL_INBOUND_CONFIRM)", (
   });
 
   it("with no completed plan visit, says the credits wait for the next one", async () => {
-    inboundBody = { enabled: true, items: [{ ...item, creditsNow: false }] };
+    inboundBody = { items: [{ ...item, creditsNow: false }] };
     await openQueue(/Queue \(1\)/);
     expect(screen.getByText(/no completed plan visit yet/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Choose" }));
@@ -114,8 +114,8 @@ describe("Referrals queue: inbound referrals (GATE_REFERRAL_INBOUND_CONFIRM)", (
     expect(screen.queryByText("Needs confirmation (1)")).not.toBeInTheDocument();
   });
 
-  it("gate off: no section and no count", async () => {
-    inboundBody = { enabled: false, items: [] };
+  it("no cards waiting: no section and no count", async () => {
+    inboundBody = { items: [] };
     await openQueue(/Queue \(0\)/);
     expect(screen.queryByText(/Needs confirmation/)).not.toBeInTheDocument();
   });

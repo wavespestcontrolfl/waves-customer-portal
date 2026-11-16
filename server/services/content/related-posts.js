@@ -270,6 +270,14 @@ function registryFrontmatterSites(frontmatter) {
   return direct.length ? direct : normalizeSpokeSites(frontmatter?.tracking?.domains);
 }
 
+// The registry's two words for a live post: the daily sweep's 'live', and the
+// post-publish visibility check's 'live_visible' (the page answered live,
+// indexable and with no blocking finding; that check re-stamps a recently
+// published or refreshed post each day, so its row reads 'live_visible' for
+// most of the day). The check's other word, 'visibility_review', is not live.
+// report-blog-post.js reads the same pair.
+const REGISTRY_LIVE_STATUSES = ['live', 'live_visible'];
+
 function registryRowLivePath(row) {
   const safeRow = row || {};
   const rawPath = registryCheckedUrl(safeRow);
@@ -277,9 +285,9 @@ function registryRowLivePath(row) {
     [safeRow.content_type, 'blog'],
     [safeRow.workflow_status, 'published'],
     [safeRow.astro_status, 'present'],
-    [safeRow.live_status, 'live'],
   ];
-  if (!rawPath || !requiredStates.every(([actual, expected]) => actual === expected) || safeRow.noindex_detected === true) return null;
+  if (!rawPath || !requiredStates.every(([actual, expected]) => actual === expected)
+    || !REGISTRY_LIVE_STATUSES.includes(safeRow.live_status) || safeRow.noindex_detected === true) return null;
   const pathSites = normalizeSpokeSites([rawPath]);
   if (/^https?:\/\//i.test(rawPath) && pathSites.length === 0) return null;
   return normalizePathForCompare(rawPath);

@@ -99,6 +99,16 @@ const RETIRED_POLICIES = new Set(['visitBrief', 'jobCardParagraph']);
 //                           only while Gemini refuses (2026-10-24..31)
 const BACKUP_ONLY_POLICIES = new Set(['callExtractionV1Backup']);
 
+// Event-driven policies run only when their trigger happens, so a zero day is
+// normal even after a busy week. They never get the one-zero-day alarm; they
+// alarm only after SILENT_CONSECUTIVE_DAYS silent days, like a bursty lane.
+//   imageScreen     blog hero-image screen (lane image_screen)
+//   visionAnalysis  hero-image alt text (hero_alt) + visit photo reads
+// Both run only on a day the content pipeline makes a hero image. Prod
+// 10-22, 10-31 and 11-06 had none: each alarmed "made ZERO calls
+// yesterday", and both lanes ran again the next day.
+const EVENT_DRIVEN_POLICIES = new Set(['imageScreen', 'visionAnalysis']);
+
 // Silence is expected for both lists above; absence detection reads them as
 // one set.
 const SILENCE_EXPECTED_POLICIES = new Set([...RETIRED_POLICIES, ...BACKUP_ONLY_POLICIES]);
@@ -996,8 +1006,8 @@ function detectExceptions(yesterdayStats, priorWeekStats, recorderIssue = null, 
     // window silent. `recentActivePolicies` = policies with >=1 call in the
     // last SILENT_CONSECUTIVE_DAYS ET days; null (legacy caller/tests) means
     // no recent-window evidence, which falls back to the immediate alarm.
-    const nearDaily = w.activeDays == null
-      || (w.activeDays >= DAILY_CADENCE_MIN_DAYS && w.total >= DAILY_CADENCE_MIN_CALLS_PER_DAY * 7);
+    const nearDaily = !EVENT_DRIVEN_POLICIES.has(w.policy) && (w.activeDays == null
+      || (w.activeDays >= DAILY_CADENCE_MIN_DAYS && w.total >= DAILY_CADENCE_MIN_CALLS_PER_DAY * 7));
     if (nearDaily) {
       exceptions.push({
         policy: w.policy,
@@ -1023,6 +1033,11 @@ async function loadStats(db, start, end) {
     // but describe legs, not outcomes, and would double-count every chain.
     .where('row_kind', 'chain')
     .whereNot('policy', HEARTBEAT_POLICY)
+    // Max-plan runner jobs run portal code off-box with every paid key
+    // removed, so their OpenAI leg stops at no_key by design. They are not
+    // production route traffic: they must not move a route's fallback or
+    // failure rate, or make a quiet lane look active. NULL workload stays in.
+    .whereRaw('workload IS DISTINCT FROM ?', ['max_runner'])
     .groupBy('policy')
     .select('policy')
     .count({ total: '*' })
@@ -1346,6 +1361,7 @@ module.exports = {
   DAILY_CADENCE_MIN_CALLS_PER_DAY,
   RETIRED_POLICIES,
   BACKUP_ONLY_POLICIES,
+  EVENT_DRIVEN_POLICIES,
   SILENT_CONSECUTIVE_DAYS,
-  _private: { emailExceptions, missedDigestDays, DIGEST_BOOKMARK_KEY, MAX_BACKFILL_DAYS },
+  _private: { loadStats, emailExceptions, missedDigestDays, DIGEST_BOOKMARK_KEY, MAX_BACKFILL_DAYS },
 };

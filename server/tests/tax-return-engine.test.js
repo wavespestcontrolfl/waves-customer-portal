@@ -1,5 +1,5 @@
 /**
- * services/tax-return-engine (GATE_TAX_RETURN_ENGINE): computeReturn is pure,
+ * services/tax-return-engine: computeReturn is pure,
  * so the money rules are pinned against hand-computed figures with synthetic
  * numbers. gatherInputs runs against a mocked database.
  *

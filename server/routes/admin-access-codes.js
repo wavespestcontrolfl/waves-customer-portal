@@ -14,8 +14,7 @@
  * POST   /:id/dismiss       — found → dismissed
  * POST   /:id/retire        — active → retired
  *
- * Staff-only (full admin) and no-store. Dark behind GATE_ACCESS_CODES_SECTION
- * (read at call time): off answers 404 { enabled: false } on every route.
+ * Staff-only (full admin) and no-store.
  *
  * Never echo a code in an error and never log one: ids and error codes only
  * (knex errors carry bindings, so err.message is never logged either).
@@ -29,9 +28,7 @@ const access = require('../services/access-code-capture');
 const router = express.Router();
 router.use(adminAuthenticate);
 router.use((req, res, next) => {
-  // no-store first, so the disabled answer is never cached past a gate flip.
   res.set('Cache-Control', 'no-store');
-  if (!access.enabled()) return res.status(404).json({ enabled: false });
   return next();
 });
 

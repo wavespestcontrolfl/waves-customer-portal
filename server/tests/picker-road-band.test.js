@@ -1,5 +1,5 @@
 /**
- * The staff pickers' Google band (GATE_PICKER_ROAD_BAND; owner 2026-10-28 cost
+ * The staff pickers' Google band (owner 2026-10-28 cost
  * plan, step 2: "Google only for near-best hours").
  *
  * What this locks down, on a real route check (arrival-route.js) and a travel

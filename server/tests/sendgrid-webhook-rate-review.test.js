@@ -202,21 +202,16 @@ describe('SendGrid event webhook → rate review letter reconciliation', () => {
   });
 });
 
-// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): SendGrid files "no mail server for
-// this domain" as a blocked bounce. Gate off it stays on the sender-retry rail;
-// gate on it is a bad address and goes to people only (the bounced-contact
-// alert and the recording re-check card), never to recovery, rescue or a
-// resend. Another template than the rate review letter.
+// Owner 2026-10-29: SendGrid files "no mail server for this domain" as a
+// blocked bounce. It is a bad address and goes to people only (the
+// bounced-contact alert and the recording re-check card), never to recovery,
+// rescue or a resend. Another template than the rate review letter.
 describe('SendGrid event webhook → a blocked bounce for a domain with no mail server', () => {
   const deadDomainBounce = () => event({ type: 'blocked', reason: 'unable to get mx info: failed to get IPs from PTR record: lookup <nil>: unrecognized address' });
-  afterEach(() => { delete process.env.GATE_CALL_EMAIL_CHECKS; });
 
-  test('the message row: gate off schedules a provider retry; gate on records a bounce with no retry', () => {
+  test('the message row records a bounce with no provider retry', () => {
     const { computeEmailMessageEventUpdates } = require('../routes/webhooks-sendgrid');
     const message = { ...MESSAGE, template_key: 'appointment.confirmation' };
-    const off = computeEmailMessageEventUpdates(deadDomainBounce(), message);
-    expect(off.status).toBe('failed');
-    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
     const on = computeEmailMessageEventUpdates(deadDomainBounce(), message);
     expect(on.status).toBe('bounced');
     expect(on.bounced_at).toBeInstanceOf(Date);
@@ -224,12 +219,9 @@ describe('SendGrid event webhook → a blocked bounce for a domain with no mail 
   });
 
   test.each([
-    ['tracked, gate off: the sender-retry rail, nothing else', 'appointment.confirmation', undefined, { retry: 1, alert: 0, rescue: 0, recheck: 0 }],
-    ['tracked, gate on: people only (the alert and the recording re-check), never an automatic recovery, rescue or resend', 'appointment.confirmation', 'true', { retry: 0, alert: 1, rescue: 0, recheck: 1 }],
-    ['untracked send, gate off: nothing (not a hard bounce)', null, undefined, { retry: 0, alert: 0, rescue: 0, recheck: 0 }],
-    ['untracked send, gate on: the same people-only path', null, 'true', { retry: 0, alert: 1, rescue: 0, recheck: 1 }],
-  ])('%s', async (_label, templateKey, gate, want) => {
-    if (gate) process.env.GATE_CALL_EMAIL_CHECKS = gate;
+    ['tracked: people only (the alert and the recording re-check), never an automatic recovery, rescue or resend', 'appointment.confirmation', { retry: 0, alert: 1, rescue: 0, recheck: 1 }],
+    ['untracked send: the same people-only path', null, { retry: 0, alert: 1, rescue: 0, recheck: 1 }],
+  ])('%s', async (_label, templateKey, want) => {
     const recovery = require('../services/email-bounce-recovery');
     const rescue = require('../services/email-bounce-rescue');
     const reverify = require('../services/email-bounce-reverify');

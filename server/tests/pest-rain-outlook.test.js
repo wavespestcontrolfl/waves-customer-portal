@@ -1,4 +1,4 @@
-// GATE_PEST_RAIN_OUTLOOK (owner 2026-10-24): the frozen 48-hour rain outlook, its
+// Pest rain outlook (owner 2026-10-24): the frozen 48-hour rain outlook, its
 // completion-time capture, and the pest report's Weather call card.
 // Synthetic data only.
 
@@ -60,15 +60,8 @@ const FIPRONIL = app('Fipronil', 'perimeter_spray', 'Test fipronil');
 const BIFENTHRIN = app('Bifenthrin', 'perimeter_spray', 'Test bifenthrin');
 const DINOTEFURAN = app('Dinotefuran', 'perimeter_spray', 'Test dinotefuran');
 
-let savedGate;
 beforeEach(() => {
-  savedGate = process.env.GATE_PEST_RAIN_OUTLOOK;
-  process.env.GATE_PEST_RAIN_OUTLOOK = 'true';
   fetchPropertyForecast.mockReset();
-});
-afterEach(() => {
-  if (savedGate === undefined) delete process.env.GATE_PEST_RAIN_OUTLOOK;
-  else process.env.GATE_PEST_RAIN_OUTLOOK = savedGate;
 });
 
 const card = (rec, applications) => buildWeatherCallContext({ record: rec, applications });
@@ -212,26 +205,6 @@ describe('Weather call card with the frozen rain outlook', () => {
     expect(card(rec, []).body).toBe(withLine(DRY_LINE));
   });
 
-  test('gate off (unset, "1", "on", "false", "TRUE"): today\'s card, same keys and values', () => {
-    const recs = [record(outlook({ totalIn: 0, firstRainAt: null })), record(outlook())];
-    for (const value of [undefined, '1', 'on', 'false', 'TRUE']) {
-      if (value === undefined) delete process.env.GATE_PEST_RAIN_OUTLOOK;
-      else process.env.GATE_PEST_RAIN_OUTLOOK = value;
-      recs.forEach((rec) => {
-        const c = card(rec, [FIPRONIL]);
-        expect(c).toMatchObject(BASE_CARD);
-        expect(Object.keys(c)).toEqual(['headline', 'body', 'factsLine', 'sourceLabel', 'sourceKeys']);
-      });
-    }
-  });
-
-  test('a record with no outlook key renders the same with the gate on and off', () => {
-    const rec = record(undefined);
-    const on = JSON.stringify(card(rec, [FIPRONIL]));
-    delete process.env.GATE_PEST_RAIN_OUTLOOK;
-    expect(JSON.stringify(card(rec, [FIPRONIL]))).toBe(on);
-  });
-
   test('non-pest lines: today\'s card', () => {
     for (const line of ['lawn', 'tree_shrub', 'mosquito', 'termite']) {
       unchanged(record(outlook({ totalIn: 0, firstRainAt: null }), { service_line: line }), [FIPRONIL]);
@@ -317,11 +290,9 @@ describe('the "when" phrase, in Eastern time', () => {
 });
 
 describe('buildRainOutlookLine', () => {
-  test('is null for the gate off and for a non-pest line, whatever the outlook', () => {
+  test('is null for a non-pest line, whatever the outlook', () => {
     expect(buildRainOutlookLine({ outlook: outlook(), serviceLine: 'pest', applications: [FIPRONIL] })).not.toBeNull();
     expect(buildRainOutlookLine({ outlook: outlook(), serviceLine: 'lawn', applications: [FIPRONIL] })).toBeNull();
-    process.env.GATE_PEST_RAIN_OUTLOOK = 'false';
-    expect(buildRainOutlookLine({ outlook: outlook(), serviceLine: 'pest', applications: [FIPRONIL] })).toBeNull();
     expect(buildRainOutlookLine()).toBeNull();
   });
 
@@ -419,15 +390,7 @@ describe('capturePestRainOutlook', () => {
     status: 'ok', fetchedAt: COMPLETED, precipitationInTotal: 0.4, hourly: [{ at: at(6), precipitation_in: 0.4 }],
   };
 
-  test('gate off: no forecast call, nothing stored', async () => {
-    delete process.env.GATE_PEST_RAIN_OUTLOOK;
-    expect(await capturePestRainOutlook({ svc, now })).toBeNull();
-    process.env.GATE_PEST_RAIN_OUTLOOK = '1';
-    expect(await capturePestRainOutlook({ svc, now })).toBeNull();
-    expect(fetchPropertyForecast).not.toHaveBeenCalled();
-  });
-
-  test('gate on, pest line: one forecast call over the next 48 hours with a 2.5 s deadline', async () => {
+  test('pest line: one forecast call over the next 48 hours with a 2.5 s deadline', async () => {
     fetchPropertyForecast.mockResolvedValue(okForecast);
     const summary = await capturePestRainOutlook({ svc, now });
     expect(fetchPropertyForecast).toHaveBeenCalledTimes(1);

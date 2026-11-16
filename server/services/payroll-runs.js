@@ -74,6 +74,7 @@ const {
 } = require('../utils/staff-time-work-date');
 const { WAVES_BUSINESS_NAME, WAVES_ADDRESS_LINE } = require('../constants/business');
 const { PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY, lockPayrollMutations } = require('./payroll-lock');
+const { applyDueSteps, hasDueSteps, withWeekRates } = require('./payroll-rate-steps');
 const { shiftCloseReviewLive, payrollTimeOffLive, payrollBankMatchLive, payrollMercuryStatusLive } = require('../config/feature-gates');
 const {
   payLinesOn, openLinesFor, priceLines, totalsOf, markLinesPaid, reopenLinesOfRun,
@@ -654,7 +655,9 @@ async function evaluate(conn, run, { lock = false } = {}) {
   const linesOnlyRows = [...lineMap.values()]
     .filter(({ tech }) => !haveCheck.has(tech.technician_id))
     .map(({ tech }) => ({ ...tech, regular_minutes: 0, overtime_minutes: 0, pto_minutes: 0, holiday_minutes: 0 }));
-  const payable = [...withHours, ...timeOffOnlyRows, ...linesOnlyRows].filter((row) => !waitingIds.has(row.technician_id));
+  // Each check pays the rate of ITS week (payroll-rate-steps.js); with no pay rate step the rows are unchanged.
+  const payable = await withWeekRates(conn,
+    [...withHours, ...timeOffOnlyRows, ...linesOnlyRows].filter((row) => !waitingIds.has(row.technician_id)), start);
   const payableIds = payable.map((row) => row.technician_id);
   const ytd = await ytdBefore(conn, payableIds, run.pay_date, start);
   const simpleYtd = await simpleYtdBefore(conn, payableIds, run.pay_date, start);
@@ -823,9 +826,17 @@ const syncReviewBonuses = (trx, weekStart, actorId) => syncReviewBonusLines(trx,
 });
 
 // Commission lines follow the commission ledger (GATE_PAYROLL_COMMISSION_LEDGER), at the same three points.
+// Pay rate steps that are due are applied at those points too (applyDueSteps, payroll-rate-steps.js).
 const syncCommission = (trx, weekStart, actorId) => syncCommissionLines(trx, {
   weekEnd: addStaffWorkDays(weekStart, 6), lock: true, actorId,
 });
+
+// The payroll lock comes before the run row, the order finalizeRun uses. Pay lines need it, and so does a pay
+// rate step that is due (applyDueSteps changes technicians.pay_rate). `today` is read once per run write, so
+// the answer here and in applyDueSteps is the same. With no step due and pay lines off, no lock is taken.
+async function lockRunWrite(trx, today) {
+  if (payLinesOn() || await hasDueSteps(trx, today)) await lockPayrollMutations(trx);
+}
 
 async function draftRun(input, actor, conn = db) {
   const v = validate(createSchema, input);
@@ -833,16 +844,18 @@ async function draftRun(input, actor, conn = db) {
   const payDate = resolvePayDate(start, end, v.payDate);
   const actorId = actorOf(actor);
   const taken = new PayrollError(409, 'That week already has a pay run. Open it, or void it first.');
+  const today = etDateString();
   let runId;
   try {
     runId = await conn.transaction(async (trx) => {
-      if (payLinesOn()) await lockPayrollMutations(trx);
+      await lockRunWrite(trx, today);
       if (await trx('payroll_runs').where({ week_start: start }).whereNot({ status: 'voided' }).forUpdate().first('id')) throw taken;
       const [inserted] = await trx('payroll_runs').insert({ week_start: start, pay_date: payDate, created_by: actorId }).returning('id');
       const id = inserted && inserted.id ? inserted.id : inserted;
       const run = await loadRun(trx, id);
       await syncReviewBonuses(trx, start, actorId);
       await syncCommission(trx, start, actorId);
+      await applyDueSteps(trx, { today });
       const evaluation = await evaluate(trx, run, { lock: true });
       if (!evaluation.checks.length && !evaluation.blocked.length && !evaluation.waiting.length) {
         throw new PayrollError(409, 'No W-2 hours to pay for that week.');
@@ -861,12 +874,14 @@ async function draftRun(input, actor, conn = db) {
 async function recomputeRun(runId, actor, conn = db) {
   requireUuid(runId, 'Pay run');
   const actorId = actorOf(actor);
+  const today = etDateString();
   await conn.transaction(async (trx) => {
-    if (payLinesOn()) await lockPayrollMutations(trx);
+    await lockRunWrite(trx, today);
     const run = await loadRun(trx, runId, { lock: true });
     if (run.status !== 'draft') throw new PayrollError(409, 'Only a draft pay run can be recomputed.');
     await syncReviewBonuses(trx, run.week_start, actorId);
     await syncCommission(trx, run.week_start, actorId);
+    await applyDueSteps(trx, { today });
     const evaluation = await evaluate(trx, run, { lock: true });
     await replaceDraftChecks(trx, runId, evaluation.checks);
     await audit(trx, actorId, 'payroll.run_recomputed', 'payroll_runs', runId, { run_id: runId });
@@ -919,6 +934,7 @@ async function finalizeRun(runId, input, actor, conn = db) {
     if (run.status !== 'draft') throw new PayrollError(409, `This pay run is already ${run.status}.`);
     await syncReviewBonuses(trx, run.week_start, actorId);
     await syncCommission(trx, run.week_start, actorId);
+    await applyDueSteps(trx);
     const evaluation = await evaluate(trx, run, { lock: true });
     if (evaluation.blocked.length || evaluation.waiting.length) throw new PayrollError(409, describeProblems(evaluation));
     if (!evaluation.checks.length) throw new PayrollError(409, 'There are no paychecks to finalize.');

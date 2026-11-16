@@ -1,6 +1,6 @@
-// GATE_SMS_VOICE_PROFILE_PIN + GATE_SMS_EDIT_LEARNING: gate readers and the prompt-version identity (no DB needed).
+// GATE_SMS_VOICE_PROFILE_PIN + edit learning: the pin reader and the prompt-version identity (no DB needed).
 // The Postgres contract (pin resolution, miner, exemplar ranking) is in sms-voice-pin-edit-learning-postgres.test.js.
-const GATES = ['GATE_SMS_VOICE_PROFILE_PIN', 'GATE_SMS_EDIT_LEARNING', 'GATE_SMS_REAL_ANSWERS', 'GATE_SMS_OFFERS_SCHEDULER',
+const GATES = ['GATE_SMS_VOICE_PROFILE_PIN', 'GATE_SMS_REAL_ANSWERS', 'GATE_SMS_OFFERS_SCHEDULER',
   'GATE_SMS_AGENT_COMPLAINTS', 'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL',
   'SHADOW_VOICE_PROFILE', 'SHADOW_FEWSHOT', 'SHADOW_DRAFT_VERIFY'];
 
@@ -33,22 +33,21 @@ describe('smsVoiceProfilePinVersion', () => {
   });
 });
 
-describe('prompt version follows the pin and edit-learning gates', () => {
-  test('both gates off: identities are exactly what they were before', () => {
+describe('prompt version follows the pin and edit learning', () => {
+  test('no pin: every identity carries the e tag alone', () => {
     const d = freshDrafter();
-    expect(d.currentPromptVersion()).toBe(d.PROMPT_VERSION);
+    expect(d.currentPromptVersion()).toBe(`${d.PROMPT_VERSION}+e`);
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
-    expect(d.currentPromptVersion()).toBe(d.REAL_ANSWERS_PROMPT_VERSION);
+    expect(d.currentPromptVersion()).toBe(`${d.REAL_ANSWERS_PROMPT_VERSION}+e`);
     process.env.GATE_SMS_OFFERS_SCHEDULER = 'true';
-    expect(d.currentPromptVersion()).toBe(d.NEXT_OF_SERIES_PROMPT_VERSION);
+    expect(d.currentPromptVersion()).toBe(`${d.NEXT_OF_SERIES_PROMPT_VERSION}+e`);
   });
 
-  test('a pin adds the v tag, edit learning the e tag, both sort together; real-answers on', () => {
+  test('a pin adds the v tag beside the e tag, both sort together; real-answers on', () => {
     const d = freshDrafter();
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    expect(d.currentPromptVersion()).toBe(`${d.REAL_ANSWERS_PROMPT_VERSION}+e`);
     process.env.GATE_SMS_VOICE_PROFILE_PIN = '4';
-    expect(d.currentPromptVersion()).toBe(`${d.REAL_ANSWERS_PROMPT_VERSION}+v`);
-    process.env.GATE_SMS_EDIT_LEARNING = 'true';
     expect(d.currentPromptVersion()).toBe(`${d.REAL_ANSWERS_PROMPT_VERSION}+ev`);
     delete process.env.GATE_SMS_VOICE_PROFILE_PIN;
     expect(d.currentPromptVersion()).toBe(`${d.REAL_ANSWERS_PROMPT_VERSION}+e`);
@@ -58,7 +57,6 @@ describe('prompt version follows the pin and edit-learning gates', () => {
     const d = freshDrafter();
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
     process.env.GATE_SMS_OFFERS_SCHEDULER = 'true';
-    process.env.GATE_SMS_EDIT_LEARNING = 'true';
     process.env.GATE_SMS_AGENT_COMPLAINTS = 'true';
     expect(d.currentPromptVersion()).toBe(`${d.NEXT_OF_SERIES_PROMPT_VERSION}+ce`);
   });
@@ -76,7 +74,7 @@ describe('prompt version follows the pin and edit-learning gates', () => {
     process.env.GATE_SMS_VOICE_PROFILE_PIN = '2';
     process.env.GATE_SMS_AGENT_LEGAL = 'true';
     expect(d.currentPromptVersion()).toBe(first);
-    expect(first).toBe(`${d.REAL_ANSWERS_PROMPT_VERSION}+blv`);
+    expect(first).toBe(`${d.REAL_ANSWERS_PROMPT_VERSION}+belv`);
   });
 
   test('every gate on at once still fits the varchar(40) prompt_version columns', () => {
@@ -84,7 +82,6 @@ describe('prompt version follows the pin and edit-learning gates', () => {
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
     process.env.GATE_SMS_OFFERS_SCHEDULER = 'true';
     process.env.GATE_SMS_VOICE_PROFILE_PIN = '99';
-    process.env.GATE_SMS_EDIT_LEARNING = 'true';
     for (const k of ['GATE_SMS_AGENT_COMPLAINTS', 'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL']) process.env[k] = 'true';
     const v = d.currentPromptVersion();
     expect(v).toBe(`${d.NEXT_OF_SERIES_PROMPT_VERSION}+bcelmv`);
@@ -92,18 +89,16 @@ describe('prompt version follows the pin and edit-learning gates', () => {
     expect(`${d.REAL_ANSWERS_PROMPT_VERSION}+bcelmv`.length).toBeLessThanOrEqual(40);
   });
 
-  test('the bare v11 identity (real answers off) also follows the gates', () => {
+  test('the bare v11 identity (real answers off) also follows the pin', () => {
     const d = freshDrafter();
+    expect(d.currentPromptVersion()).toBe('house_voice_v11+e');
     process.env.GATE_SMS_VOICE_PROFILE_PIN = '3';
-    expect(d.currentPromptVersion()).toBe('house_voice_v11+v');
-    process.env.GATE_SMS_EDIT_LEARNING = 'true';
     expect(d.currentPromptVersion()).toBe('house_voice_v11+ev');
   });
 
   test('the tag follows the input: no v with the profile kill switch off, no e when exemplars cannot reach the prompt', () => {
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
     process.env.GATE_SMS_VOICE_PROFILE_PIN = '3';
-    process.env.GATE_SMS_EDIT_LEARNING = 'true';
     process.env.SHADOW_VOICE_PROFILE = 'false';
     let d = freshDrafter();
     expect(d.currentPromptVersion()).toBe(`${d.REAL_ANSWERS_PROMPT_VERSION}+e`);

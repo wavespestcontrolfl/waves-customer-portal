@@ -1,7 +1,6 @@
 // Real PostgreSQL transactions (rolled back): the text-thread lead reader's
 // sweep with a stubbed model read. All names, addresses, phones and emails
 // are synthetic.
-process.env.GATE_SMS_LEAD_EXTRACTION = 'true';
 const postgres = process.env.DATABASE_URL ? describe : describe.skip;
 let mockConnection;
 jest.mock('../models/db', () => new Proxy((...args) => mockConnection(...args), {

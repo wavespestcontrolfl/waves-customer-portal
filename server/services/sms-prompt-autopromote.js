@@ -32,7 +32,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { gateEnvValue, smsJudgeV2Live } = require('../config/feature-gates');
+const { gateEnvValue } = require('../config/feature-gates');
 const { DRAFT_VOICE_PROFILE_SQL, voiceProfileKey, resolveVoiceProfilePin } = require('./sms-graduation');
 const patchLib = require('./sms-prompt-patch');
 
@@ -640,13 +640,12 @@ async function modalDraftModel(cohort) {
   return row ? row.m : null;
 }
 
-// Both groups are read with the ruler graduation reads (sms-graduation.js): with GATE_SMS_JUDGE_V2 on,
-// only the stricter judge's rows count, so a prior group graded by the old judge never reads as a rise.
+// Both groups are read with the ruler graduation reads (sms-graduation.js): only the stricter judge's rows count, so a prior group graded by the old judge never reads as a rise.
 const liveJudgeCohort = (dbi, version, from, to) => dbi({ j: 'shadow_draft_judgments' })
   .join({ md: 'message_drafts' }, 'md.id', 'j.draft_id')
   .where('md.prompt_version', version)
   .whereNotNull('j.scores')
-  .modify((q) => { if (smsJudgeV2Live()) q.where('j.judge_version', 'j2'); })
+  .where('j.judge_version', 'j2')
   .where('md.created_at', '>=', from)
   .where('md.created_at', '<', to);
 

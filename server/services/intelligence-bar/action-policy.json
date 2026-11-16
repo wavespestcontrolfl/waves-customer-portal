@@ -679,6 +679,14 @@
     "approval": null,
     "scope": "record"
   },
+  "get_customer_text_status": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "record"
+  },
   "get_dataforseo_balance": {
     "module": "dataforseo-ops-tools.js",
     "domain": "dataforseo-ops",

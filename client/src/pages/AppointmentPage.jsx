@@ -29,6 +29,7 @@ import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand
 import Icon from '../components/Icon';
 import VanScene from '../components/VanScene';
 import VisitPrepPhotoForm from '../components/visit-prep/VisitPrepPhotoForm';
+import { LAWN_PREP_COPY, LAWN_PREP_PETS_HREF } from '../components/visit-prep/lawnPrepCopy';
 import { useGlassSurface } from '../glass/glass-engine';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -71,6 +72,33 @@ const PRIMARY_CTA = {
   cursor: 'pointer',
   textDecoration: 'none',
 };
+
+// "Before your lawn visit": the server sends `lawnPrep` only for an upcoming lawn treatment at the customer's home. It
+// says whether pets are on file, plus `wateringLine` (one server-chosen, owner-approved sentence that follows the live
+// watering rule; the key is absent when there is none, and the page never builds hour words itself). The pets ask and its link (the portal's Pets section; sign-in happens
+// there) show only while no pet is on file: once pets are added, the card carries no pets link (owner 2026-11-14).
+function LawnPrepCard({ petsOnFile, wateringLine }) {
+  return (
+    <Card data-testid="lawn-prep-card">
+      <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, lineHeight: 1.3, marginBottom: 8 }}>
+        {LAWN_PREP_COPY.heading}
+      </div>
+      <ul style={{ margin: 0, paddingLeft: 20, fontSize: 16, color: S.body, lineHeight: 1.55 }}>
+        {LAWN_PREP_COPY.lines.map((line) => <li key={line} style={{ marginBottom: 6 }}>{line}</li>)}
+        {typeof wateringLine === 'string' && wateringLine ? <li data-testid="lawn-prep-watering-line" style={{ marginBottom: 6 }}>{wateringLine}</li> : null}
+      </ul>
+      {petsOnFile ? null : (
+        <div style={{ borderTop: `1px solid ${S.border}`, marginTop: 16, paddingTop: 16 }}>
+          <div style={{ fontSize: 16, fontWeight: 600, color: S.text, marginBottom: 4 }}>{LAWN_PREP_COPY.petsHeading}</div>
+          <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>{LAWN_PREP_COPY.noPets.text}</div>
+          <a href={LAWN_PREP_PETS_HREF} data-glass-accent="" data-glass-size="primary" style={{ ...PRIMARY_CTA, marginTop: 12 }}>
+            {LAWN_PREP_COPY.noPets.button}
+          </a>
+        </div>
+      )}
+    </Card>
+  );
+}
 
 function Page({ children }) {
   return (
@@ -462,6 +490,12 @@ export default function AppointmentPage() {
                 2-hour arrival window · {appt.arrivalWindow}
               </small>
             ) : null}
+            {/* GATE_DAY_ONLY_PROMISE: the customer was told only the day, so the server sends no hour. */}
+            {!appt.arrivalWindow && appt.day_only ? (
+              <small data-testid="appointment-day-only-note" style={{ display: 'block', fontSize: 14, fontWeight: 500, color: S.body }}>
+                Arrival window: texted the day before
+              </small>
+            ) : null}
           </span>
           <WeatherChip weather={data.weather} />
         </div>
@@ -560,6 +594,8 @@ export default function AppointmentPage() {
           />
         </Card>
       ) : null}
+
+      {data.lawnPrep ? <LawnPrepCard petsOnFile={data.lawnPrep.petsOnFile === true} wateringLine={data.lawnPrep.wateringLine} /> : null}
 
       {canPickOnline ? (
         <Card>

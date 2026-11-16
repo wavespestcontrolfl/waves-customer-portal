@@ -255,6 +255,33 @@ describe('specific-date browse horizon (parity with reserveSlot)', () => {
   });
 });
 
+// The slot cache key carries opts.timeOfDay: a free-form value gave every new string its own
+// cache entry (a fresh list build per request) and filtered like 'afternoon'.
+describe('timeOfDay: only a known value reaches the slot lookup', () => {
+  const VIEWABLE = { id: 'est-1', status: 'sent', expires_at: null, archived_at: null };
+
+  test.each([
+    ['morning', 'morning'],
+    [' Afternoon ', 'afternoon'],
+    ['EVENING', 'evening'],
+  ])('%j is passed on as %j', async (raw, expected) => {
+    currentEstimate = VIEWABLE;
+    getAvailableSlots.mockResolvedValue({ primary: [], expander: [], metadata: {} });
+    const res = await fetch(`${base}/${TOKEN}/available-slots?timeOfDay=${encodeURIComponent(raw)}`);
+    expect(res.status).toBe(200);
+    expect(getAvailableSlots).toHaveBeenCalledWith('est-1', expect.objectContaining({ timeOfDay: expected }));
+  });
+
+  test.each(['any', 'cache-buster-123', 'night', ''])('%j applies no filter and adds no cache variant', async (raw) => {
+    currentEstimate = VIEWABLE;
+    getAvailableSlots.mockResolvedValue({ primary: [], expander: [], metadata: {} });
+    const res = await fetch(`${base}/${TOKEN}/available-slots?timeOfDay=${encodeURIComponent(raw)}`);
+    expect(res.status).toBe(200);
+    expect(getAvailableSlots).toHaveBeenCalled();
+    for (const [, opts] of getAvailableSlots.mock.calls) expect(opts).not.toHaveProperty('timeOfDay');
+  });
+});
+
 describe('slot endpoints privacy/cache headers (parity with /:token/data)', () => {
   test.each(['available-slots', 'find-slots'])('%s returns a safe recoverable conflict for catalog failures', async endpoint => {
     currentEstimate = { id: 'est-1', status: 'sent', expires_at: null, archived_at: null };
@@ -1426,6 +1453,20 @@ describe('offerableEstimateSlots — the page\'s default selection axes', () => 
       serviceMode: 'recurring', selectedFrequency: 'quarterly', bypassCache: true, expanderMaxResults: 0,
     }));
     expect(getAvailableSlots.mock.calls[0][1]).not.toHaveProperty('serviceCadences');
+  });
+
+  // The daily no-time-soon check reads the page through the same helper (estimate-no-time-soon-check.js judge).
+  test('pageSlotPicker: the page picker\'s mode and default selection; null when the page shows no picker', async () => {
+    const { pageSlotPicker } = require('../routes/estimate-slots-public')._internals;
+    const { resolveEstimateAcceptance } = require('../routes/estimate-public');
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [freq('monthly'), freq('quarterly', { recommended: true })],
+      services: [{ key: 'pest_control', isRecurring: true, defaultFrequencyKey: 'quarterly', frequencies: [freq('monthly'), freq('quarterly')] }],
+    });
+    await expect(pageSlotPicker('est-1')).resolves.toEqual({ serviceMode: 'recurring', selection: { selectedFrequency: 'quarterly' } });
+    resolveEstimateAcceptance.mockResolvedValueOnce({ acceptance: { mode: 'existing_appointment' } });
+    await expect(pageSlotPicker('est-1')).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 
   test('a section default the combined list does not offer falls back to frequencies[0], exactly as the page does', async () => {

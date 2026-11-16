@@ -98,6 +98,9 @@ function fakeDb({
       whereNot: () => chain,
       whereNotNull: () => chain,
       whereBetween: () => chain,
+      // The pay rate step read (payroll-rate-steps.js): no table here, so select() answers no steps.
+      whereIn: () => chain,
+      whereNull: () => chain,
       leftJoin: () => chain,
       // A store table answers distinct(col) with its matching rows' distinct values (the shared
       // vehicle read); any other table keeps chaining.
@@ -150,6 +153,7 @@ function fakeDb({
     },
   };
   db.transaction = async (fn) => fn(db);
+  db.raw = (sql) => sql;
   db.writes = writes;
   return db;
 }

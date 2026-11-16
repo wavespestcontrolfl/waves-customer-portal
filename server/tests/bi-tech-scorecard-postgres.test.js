@@ -1,5 +1,5 @@
 /**
- * GATE_BI_TECH_SCORECARD against REAL Postgres: the review ask count in
+ * The tech scorecard against REAL Postgres: the review ask count in
  * services/bi-tech-scorecard.js (the technician and visit-date filter, delivery evidence by text or
  * email, the no-link check-in exclusion from ASK_TOUCH_SQL, the grouping).
  *

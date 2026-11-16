@@ -83,7 +83,6 @@ import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
 import CommercialAgreementSign from '../components/estimate/CommercialAgreementSign';
 import { firstVisitLabel } from '../components/estimate/CommercialFirstVisitPicker';
 import ConsumerNoticeSign, { ConsumerNoticeHint, CONSUMER_NOTICE_HINT } from '../components/estimate/ConsumerNoticeSign';
-import ServiceAgreementSign from '../components/estimate/ServiceAgreementSign';
 import EstimateProposalDocument, { proposalGuaranteeScope } from './EstimateProposalDocument';
 import { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope, withoutClaimsOutsideScope } from '@estimate-copy-claims';
 import { estimateCopyFor } from '../lib/estimate-copy';
@@ -236,6 +235,7 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '16px 0 24px' }}>
       <button
         type="button"
+        className="gc-main-cta"
         onClick={slotMeta ? scrollToPaymentSection : onPickTime}
         style={{
           minHeight: 44,
@@ -268,7 +268,7 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
           tone; the demotion logic in glassCtaMicroForKeys already keeps
           them truthful per category. */}
       {showGuaranteeMicro ? (
-        <div style={{ marginTop: 12, fontSize: 14, color: ESTIMATE_MUTED, textAlign: 'center', lineHeight: 1.5 }}>
+        <div className="gc-cta-micro" style={{ marginTop: 12, fontSize: 14, color: ESTIMATE_MUTED, textAlign: 'center', lineHeight: 1.5 }}>
           {microText || GLASS_COPY.ctaMicro}
         </div>
       ) : null}
@@ -1000,7 +1000,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         </h2>
       </div>
 
-      <p style={{
+      <p className="gc-lead" style={{
         margin: satelliteUrl || showMisting || metrics.length ? '0 0 14px' : '0',
         color: '#3F4A65',
         fontSize: 14,
@@ -1035,7 +1035,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       ) : null}
 
       {metrics.length ? (
-        <div style={{
+        <div className="gc-ai-metrics" style={{
           display: 'grid',
           // 3 metrics = one row of 3 (owner 2026-07-10 — auto-fit orphaned
           // the third tile onto its own row); any other count keeps the
@@ -2794,7 +2794,8 @@ function formatAppointmentLabel(appointment = {}) {
       timeZone: 'America/New_York',
     })
     : '';
-  const time = appointment.windowDisplay || appointment.windowStart || '';
+  // GATE_DAY_ONLY_PROMISE: a day-only visit has no hour; the note stands in its place.
+  const time = appointment.windowDisplay || appointment.windowStart || (appointment.day_only ? appointment.arrival_note : '') || '';
   return [date, time].filter(Boolean).join(' · ') || 'Your scheduled appointment';
 }
 
@@ -4951,8 +4952,8 @@ export function carryRefreshProjections(prev, body, isRefresh) {
   if (prev?.returnVisit && !body.returnVisit) carried.returnVisit = prev.returnVisit;
   // The offer is bound to the property it was matched against (GH codex
   // #4853 r3 P0): a staff revision to another address drops it. A refresh
-  // that now offers the free Waves Assessment (GATE_ESTIMATE_ASSESSMENT_FIRST,
-  // composed on every load) drops it too: the page carries one offer, never two.
+  // that now offers the free Waves Assessment (composed on
+  // every load) drops it too: the page carries one offer, never two.
   if (prev?.consultationOffer && !body.consultationOffer && !body.assessmentFirst
     && prev?.estimate?.address === body?.estimate?.address) carried.consultationOffer = prev.consultationOffer;
   return Object.keys(carried).length ? { ...body, ...carried } : body;
@@ -4986,7 +4987,7 @@ export function ConsultationOfferSection({ consultationOffer }) {
   );
 }
 
-// "Book a free Waves Assessment first" (GATE_ESTIMATE_ASSESSMENT_FIRST, owner 2026-10-26 decision page choice 3A):
+// "Book a free Waves Assessment first" (owner 2026-10-26 decision page choice 3A):
 // renders ONLY from /data's `assessmentFirst` ({ url }); the server decides eligibility (an open estimate the customer
 // is viewing, a customer account at the estimate's property, no open assessment). It links to the estimate-token
 // booking page (/estimate/:token/assessment) in a new tab, so a customer mid-configuration keeps their choices. It
@@ -10051,9 +10052,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             appointmentServiceType={existingAppointment?.serviceType || null}
           />
           <AcceptanceRecordCard acceptance={data.acceptance} />
-          {/* Residential service agreement(s) (GATE_ESTIMATE_SERVICE_AGREEMENT): only when /data carries
-              cta.serviceAgreements — absent with the gate off, so the accepted page is unchanged. */}
-          <ServiceAgreementSign token={token} serviceAgreements={cta?.serviceAgreements} />
           {data.referral ? <EstimateReferralCard referral={data.referral} token={token} staffView={readOnlyPreview} /> : null}
           <AppShowcaseCard />
           <EstimateAddServiceRequestCard

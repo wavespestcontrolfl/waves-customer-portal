@@ -116,10 +116,9 @@ const PREPAY_HOLD_OPEN_STATUSES = ['completed', 'rescheduled'];
 const NEVER_RAN_STATUSES = ['cancelled', 'canceled', 'skipped', 'no_show'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// GATE_ACCEPTED_PLAN_RING_ON_CHANGE: an accepted-plan bell is versioned `finding:<findingKey>`,
-// and only a move from one finding version to another rings the standing row again. A row still
-// on an evidenceKey version takes the finding version quietly (the first run after the flip rings
-// nothing), and a refresh that leaves the finding as it was stays quiet, so a person's read and
+// An accepted-plan bell is versioned `finding:<findingKey>`, and only a move from one finding
+// version to another rings the standing row again. A stored row still on an old evidenceKey
+// version takes the finding version quietly, and a refresh that leaves the finding as it was stays quiet, so a person's read and
 // Done stand. A reopen after an auto-clear still rings: raiseAdminAlertWithReopen replaces
 // ringOnRefresh for a comeback.
 const FINDING_VERSION_PREFIX = 'finding:';
@@ -766,17 +765,14 @@ async function runInner({ now = new Date() } = {}) {
     acceptedScheduleCheckFailed = true;
     logger.error(`[schedule-integrity] accepted-plan check failed: ${err.message}`);
   }
-  // GATE_ACCEPTED_PLAN_RING_ON_CHANGE, read at call time: the bell's version is its finding
-  // (findingKey: issues, pattern, planned and recorded counts), so a standing bell rings again only
-  // when the finding changes. Off: the evidenceKey, which moves with every routine visit edit (it
-  // hashes each row's xmin), so the same standing gap rang again, unread and no longer Done.
-  const ringOnChange = require('../config/feature-gates').acceptedPlanRingOnChangeLive();
+  // The bell's version is its finding (findingKey: issues, pattern, planned and recorded counts),
+  // so a standing bell rings again only when the finding changes. (The evidenceKey moves with every
+  // routine visit edit, so it rang the same standing gap again, unread and no longer Done.)
   alerts.push(...acceptedGaps.map((gap) => [
       // Stable per estimate+family — NOT the evidenceKey (that hashes every
       // family row's row_revision/scheduled_date and churns on every
       // routine edit, which minted a fresh row daily for the same standing
-      // gap). evidenceKey now rides as dedupeVersion below (the findingKey
-      // under GATE_ACCEPTED_PLAN_RING_ON_CHANGE): a version change
+      // gap). The findingKey rides as dedupeVersion below: a version change
       // re-surfaces this ONE row unread instead of adding a second.
       `accepted-schedule:${gap.estimateId}:${gap.serviceFamily}`,
       'Accepted recurring plan needs schedule review',
@@ -786,7 +782,7 @@ async function runInner({ now = new Date() } = {}) {
       { estimate_id: gap.estimateId, customer_id: gap.customerId, issues: gap.issues,
         expected_pattern: gap.pattern, expected_visits: gap.expectedVisits, appointment_ids: gap.appointmentIds },
       { link: `/admin/customers?customerId=${encodeURIComponent(gap.customerId)}`, refreshOnDedupe: true,
-        ...(ringOnChange ? findingVersion(gap.findingKey) : { dedupeVersion: gap.evidenceKey }) },
+        ...findingVersion(gap.findingKey) },
   ]));
 
   // Last: a churned customer's leftover work never starves the money pages

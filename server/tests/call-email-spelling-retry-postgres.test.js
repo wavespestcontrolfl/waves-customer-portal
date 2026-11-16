@@ -799,42 +799,32 @@ describeOrSkip('automation hard bounce: resend to the other spelling the call se
   const settleTicks = (ms = 350) => new Promise((resolve) => setTimeout(resolve, ms));
   const sleepMs = settleTicks;
   test('outcome table, automation: a dead-domain "blocked" event on the BOUND retry send fails the claim, releases the enrollments, one alert, no card, no rescue', async () => {
-    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
-    try {
-      ctx = await setup({ sent: 1 });
-      await webhook.handleEvent(bounce(ctx.send));
-      const sibling = await followingSibling();
-      await runner.sendStep(ctx.enrollment.id);
-      await retrySendOf(ctx.enrollment.id, 'dead-domain-1');
-      jest.clearAllMocks();
-      await webhook.handleEvent({ event: 'blocked', email: OTHER, reason: 'unable to get mx info: no such domain', sg_event_id: `ev-${randomUUID()}`, sg_message_id: 'dead-domain-1.f' });
-      await sleepMs();
-      expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'failed', reason: 'retry_address_no_mail_server' });
-      expect(await enrollmentRow(sibling.enrollment.id)).toMatchObject({ status: 'cancelled' });
-      expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledTimes(1);
-      expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledWith(BOUNCED, expect.anything());
-      expect(bounceRescue.rescueBouncedAddress).not.toHaveBeenCalled();
-      expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
-    } finally {
-      delete process.env.GATE_CALL_EMAIL_CHECKS;
-    }
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    const sibling = await followingSibling();
+    await runner.sendStep(ctx.enrollment.id);
+    await retrySendOf(ctx.enrollment.id, 'dead-domain-1');
+    jest.clearAllMocks();
+    await webhook.handleEvent({ event: 'blocked', email: OTHER, reason: 'unable to get mx info: no such domain', sg_event_id: `ev-${randomUUID()}`, sg_message_id: 'dead-domain-1.f' });
+    await sleepMs();
+    expect((await ledger(ctx.customerId))[0]).toMatchObject({ status: 'failed', reason: 'retry_address_no_mail_server' });
+    expect(await enrollmentRow(sibling.enrollment.id)).toMatchObject({ status: 'cancelled' });
+    expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledTimes(1);
+    expect(bounceRecovery.alertBouncedContactAddress).toHaveBeenCalledWith(BOUNCED, expect.anything());
+    expect(bounceRescue.rescueBouncedAddress).not.toHaveBeenCalled();
+    expect(reverify.reverifyBouncedEmailFromCall).not.toHaveBeenCalled();
   });
 
   test('outcome table, automation: a dead-domain event on a send that is NOT the bound retry send keeps the alert and card (the claim is untouched)', async () => {
-    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
-    try {
-      ctx = await setup({ sent: 1 });
-      await webhook.handleEvent(bounce(ctx.send));
-      await runner.sendStep(ctx.enrollment.id);
-      const stray = await strayAutomationSend(ctx.enrollment.id, ctx.last.id, 'dead-domain-2');
-      jest.clearAllMocks();
-      await webhook.handleEvent({ event: 'blocked', email: OTHER, reason: 'unable to get mx info: no such domain', sg_event_id: `ev-${randomUUID()}`, sg_message_id: `${stray.sendgrid_message_id}.f` });
-      await sleepMs();
-      expect((await ledger(ctx.customerId))[0].status).toBe('resending');
-      expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledTimes(1);
-    } finally {
-      delete process.env.GATE_CALL_EMAIL_CHECKS;
-    }
+    ctx = await setup({ sent: 1 });
+    await webhook.handleEvent(bounce(ctx.send));
+    await runner.sendStep(ctx.enrollment.id);
+    const stray = await strayAutomationSend(ctx.enrollment.id, ctx.last.id, 'dead-domain-2');
+    jest.clearAllMocks();
+    await webhook.handleEvent({ event: 'blocked', email: OTHER, reason: 'unable to get mx info: no such domain', sg_event_id: `ev-${randomUUID()}`, sg_message_id: `${stray.sendgrid_message_id}.f` });
+    await sleepMs();
+    expect((await ledger(ctx.customerId))[0].status).toBe('resending');
+    expect(reverify.reverifyBouncedEmailFromCall).toHaveBeenCalledTimes(1);
   });
 
   // ── Provenance never outlives its claim, in any enrollment status (P1-I) ─────────────────────────────────────────────────

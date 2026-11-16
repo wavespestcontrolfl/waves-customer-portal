@@ -13,6 +13,14 @@
  *                                    { participant, deferralPercent | deferralDollars, signedOn,
  *                                    effectiveOn?, note? } (201 with the new row). A correction is a
  *                                    new row. No gate of its own: no row, no change to any pay run.
+ * GET  /technicians/:id/rate-steps  that technician's pay rate steps, newest first, each with a status
+ *                                    (scheduled, applied, cancelled), and suggestedDay90Monday (the first
+ *                                    Monday after day 90 from the hire date; null without one).
+ * POST /technicians/:id/rate-steps  { effectiveOn (a future Monday), hourlyRate, note? } record a future
+ *                                    rate (201 with the step). The portal changes the pay rate on that
+ *                                    Monday by itself; a pay run for an earlier week keeps the old rate.
+ *                                    409 on a second step for the same date. No gate: no step, no change.
+ * DELETE /rate-steps/:stepId         cancel a step that has not been applied (409 once it has).
  * PUT  /technicians/:id/pay-method   { payMethod: 'check' | 'bank_transfer', consentOn }
  *                                    bank_transfer needs the date the employee's written
  *                                    OK was received (Florida law).
@@ -99,6 +107,7 @@ const {
 } = require('../config/feature-gates');
 const payrollW4 = require('../services/payroll-w4');
 const payrollSimple = require('../services/payroll-simple');
+const payrollRateSteps = require('../services/payroll-rate-steps');
 const payrollRuns = require('../services/payroll-runs');
 const payrollFormFigures = require('../services/payroll-form-figures');
 const payrollTimeOff = require('../services/payroll-time-off');
@@ -307,6 +316,25 @@ router.post('/technicians/:id/simple-ira', async (req, res) => {
     const election = await payrollSimple.recordSimple(req.params.id, req.body, req.technicianId);
     res.status(201).json({ election });
   } catch (err) { fail(res, 'record SIMPLE IRA', err); }
+});
+
+router.get('/technicians/:id/rate-steps', async (req, res) => {
+  try {
+    res.json(await payrollRateSteps.listSteps(req.params.id));
+  } catch (err) { fail(res, 'list pay rate steps', err); }
+});
+
+router.post('/technicians/:id/rate-steps', async (req, res) => {
+  try {
+    const step = await payrollRateSteps.createStep(req.params.id, req.body, req.technicianId);
+    res.status(201).json({ step });
+  } catch (err) { fail(res, 'record pay rate step', err); }
+});
+
+router.delete('/rate-steps/:stepId', async (req, res) => {
+  try {
+    res.json({ step: await payrollRateSteps.cancelStep(req.params.stepId, req.technicianId) });
+  } catch (err) { fail(res, 'cancel pay rate step', err); }
 });
 
 router.put('/technicians/:id/pay-method', async (req, res) => {

@@ -33,7 +33,7 @@ const REGISTRY_ONLY = new Set(['add_customer_property', 'set_primary_property', 
 const LEGACY_CORE = CORE.filter(name => !REGISTRY_ONLY.has(name));
 const names = tools => tools.map(t => t.name);
 
-// The general admin read rides every page for the owner login only, behind its gate.
+// The general admin read rides every page for an admin login (the owner, and the office login limited to office rows), behind its gate.
 const GENERAL_READ = ['find_admin_reads', 'read_admin_data'];
 
 test('the shared list names exactly the core tools and the general read pair, each with a reviewed policy', () => {
@@ -61,10 +61,11 @@ describe('the general admin read on every page', () => {
     for (const name of GENERAL_READ) expect(offered.filter(n => n === name)).toHaveLength(1);
   });
 
-  test.each(['customers', 'dashboard'])('another admin on %s is not offered either', (context) => {
-    const offered = names(registry.initialTools(context, { role: 'admin', context, fullAccess: false }));
-    for (const name of GENERAL_READ) expect(offered).not.toContain(name);
-    expect(names(registry.initialTools(context, { role: 'admin', context }))).not.toContain('find_admin_reads');
+  test.each(['customers', 'dashboard'])('another admin (the office login) on %s is offered the finder and the read too, once each', (context) => {
+    for (const scope of [{ role: 'admin', context, fullAccess: false }, { role: 'admin', context }]) {
+      const offered = names(registry.initialTools(context, scope));
+      for (const name of GENERAL_READ) expect(offered.filter(n => n === name)).toHaveLength(1);
+    }
   });
 
   test.each(['customers', 'dashboard', 'ops'])('with the gate off the owner login on %s is not offered either', (context) => {
@@ -83,10 +84,12 @@ describe('the general admin read on every page', () => {
     ]) for (const name of GENERAL_READ) expect(names(list)).not.toContain(name);
   });
 
-  test('with tool search the owner finds them deferred, not eager', () => {
+  test('with tool search the owner still gets them in the eager list, not deferred (the eager list is built without full access, which still offers them to an admin)', () => {
     const list = registry.initialTools('dashboard', { ...owner('dashboard'), toolSearch: true });
     for (const name of GENERAL_READ) {
-      expect(list.find(t => t.name === name)).toMatchObject({ defer_loading: true });
+      const entries = list.filter(t => t.name === name);
+      expect(entries).toHaveLength(1);
+      expect(entries[0].defer_loading).toBeUndefined();
     }
   });
 });

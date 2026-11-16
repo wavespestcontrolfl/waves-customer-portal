@@ -32,7 +32,10 @@ const {
   _private,
 } = require('../services/irrigation-weekly-email');
 
+// Pinned to the package table: these figures (2" from 20 min x 4 days on spray) are a stored plan decided before the
+// owner table went live. The owner table's own figures are covered in irrigation-owner-rates.test.js.
 const BASE = {
+  rateTable: 'package',
   firstName: 'Sam',
   grassType: 'st_augustine',
   weekEnding: '2026-08-23',

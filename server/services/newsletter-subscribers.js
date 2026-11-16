@@ -20,6 +20,10 @@ const { EMAIL_RE } = require('../utils/workable-lead-signal');
 // email's eligibility for a fresh signup) doesn't accrue dead pending rows.
 const CONFIRM_TTL_MS = 7 * 24 * 60 * 60 * 1000;       // 7 days — link still confirms
 const PENDING_PURGE_MS = 30 * 24 * 60 * 60 * 1000;    // 30 days — then delete the row
+// Sweep #7765 B5: a public signup form may not trigger another confirmation
+// email for the same address while the last one is younger than this. The
+// form is open to anyone, so without a cooldown it mail-bombs any address.
+const CONFIRM_RESEND_COOLDOWN_MS = 10 * 60 * 1000;    // 10 minutes
 
 
 // A 'waitlist' row (the out-of-area consultation prompt) meeting a later
@@ -102,6 +106,10 @@ async function transitionWaitlistRow(existing, {
  *                           the prior link)
  *   'confirmed'           — pending row was auto-confirmed without
  *                           sending an email (admin/quote bypass path)
+ *   'confirmation_throttled' — publicSignup caller, but the last
+ *                           confirmation for this address is under
+ *                           CONFIRM_RESEND_COOLDOWN_MS old: nothing changed,
+ *                           the caller must NOT send an email
  *
  * Validation tier:
  *   strict=true (default) — full email regex; throws if invalid
@@ -118,6 +126,11 @@ async function transitionWaitlistRow(existing, {
  * confirmation email keyed off subscriber.confirmation_token. When
  * false, paths land directly at status='active' (admin add only; public
  * website and quote-wizard signups must pass requireConfirmation=true).
+ *
+ * `publicSignup` (default false; only meaningful with requireConfirmation):
+ * the anonymous public forms pass it. Their repeat submits are throttled
+ * (CONFIRM_RESEND_COOLDOWN_MS) and an unsubscribed/inactive row is NOT moved
+ * to pending — only confirmByToken brings it back (sweep #7765 B5).
  */
 async function subscribeOrResubscribe(params = {}) {
   return subscribeOrResubscribeOnce(params, { retried: false });
@@ -131,6 +144,13 @@ async function subscribeOrResubscribeOnce({
   strict = true,
   linkCustomer = true,
   requireConfirmation = false,
+  // Sweep #7765 B5: true only for the anonymous public double-opt-in forms
+  // (the newsletter form and the quote wizard opt-in), where nobody has
+  // proven they own the address yet. It (a) throttles a repeat confirmation
+  // for the same address and (b) leaves an unsubscribed/inactive row exactly
+  // as it is until the confirm click. Every other caller keeps its old
+  // behavior (see deferResignupToConfirm below).
+  publicSignup = false,
   // An operator's explicit single add (admin-newsletter.js POST
   // /subscribers) may promote a waitlist row straight to active; bulk and
   // automatic trusted flows never do (Codex #4737 r3 P2).
@@ -169,16 +189,7 @@ async function subscribeOrResubscribeOnce({
     // trusted (admin add) on a previously public-form-pending row.
     if (existing.status === 'pending') {
       if (requireConfirmation) {
-        await conn('newsletter_subscribers').where({ id: existing.id }).update({
-          source,
-          first_name: firstName !== null ? firstName : existing.first_name,
-          last_name: lastName !== null ? lastName : existing.last_name,
-          confirmation_sent_at: new Date(),
-          updated_at: new Date(),
-        });
-        if (linkCustomer) await linkToCustomer(lc, conn);
-        const fresh = await conn('newsletter_subscribers').where({ id: existing.id }).first();
-        return { subscriber: fresh, action: 'confirmation_resent' };
+        return resendPendingConfirmation(existing, { source, firstName, lastName, linkCustomer, lc, conn, throttle: publicSignup });
       }
       // Trusted-context promotion: flip pending to active.
       await conn('newsletter_subscribers').where({ id: existing.id }).update({
@@ -195,7 +206,7 @@ async function subscribeOrResubscribeOnce({
       // Its own status-specific transition (Codex #4737 r9 P2) — see
       // transitionWaitlistRow below.
       return waitlistBranch(existing, {
-        email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, promoteWaitlist, lc, dbh,
+        email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, publicSignup, promoteWaitlist, lc, dbh,
       }, retried);
     }
 
@@ -208,6 +219,9 @@ async function subscribeOrResubscribeOnce({
       // wholesale — skip, leaving the row untouched.
       if (existing.status === 'inactive' && !requireConfirmation) {
         return { subscriber: existing, action: 'skipped_inactive' };
+      }
+      if (requireConfirmation && publicSignup) {
+        return deferResignupToConfirm(existing, { source, firstName, lastName, linkCustomer, lc, conn });
       }
       const updates = {
         source,
@@ -260,8 +274,71 @@ async function subscribeOrResubscribeOnce({
   return insertNewSubscriber({ lc, firstName, lastName, source, requireConfirmation, linkCustomer, dbh }, () => (retried
     ? null
     : subscribeOrResubscribeOnce({
-      email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, promoteWaitlist, dbh,
+      email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, publicSignup, promoteWaitlist, dbh,
     }, { retried: true })));
+}
+
+// An existing 'pending' row met a requireConfirmation signup: refresh the
+// stamp and resend the SAME token (the reader may already hold that link).
+// With `throttle` (the anonymous public forms) the refresh is one conditional
+// UPDATE that only lands when the last confirmation is older than the
+// cooldown, so two concurrent submits cannot both pass the check. A refused
+// refresh returns 'confirmation_throttled' and the caller sends nothing.
+async function resendPendingConfirmation(existing, { source, firstName, lastName, linkCustomer, lc, conn, throttle }) {
+  const query = conn('newsletter_subscribers').where({ id: existing.id, status: 'pending' });
+  if (throttle) whereConfirmationCooldownElapsed(query);
+  const refreshed = await query.update({
+    source,
+    first_name: firstName !== null ? firstName : existing.first_name,
+    last_name: lastName !== null ? lastName : existing.last_name,
+    confirmation_sent_at: new Date(),
+    updated_at: new Date(),
+  });
+  if (throttle && !refreshed) {
+    const current = await conn('newsletter_subscribers').where({ id: existing.id }).first();
+    return { subscriber: current || existing, action: 'confirmation_throttled' };
+  }
+  if (linkCustomer) await linkToCustomer(lc, conn);
+  const fresh = await conn('newsletter_subscribers').where({ id: existing.id }).first();
+  return { subscriber: fresh, action: 'confirmation_resent' };
+}
+
+// Cooldown predicate: no confirmation yet, or the last one is old enough.
+function whereConfirmationCooldownElapsed(query) {
+  const cutoff = new Date(Date.now() - CONFIRM_RESEND_COOLDOWN_MS);
+  return query.where(function cooldownElapsed() {
+    this.whereNull('confirmation_sent_at').orWhere('confirmation_sent_at', '<=', cutoff);
+  });
+}
+
+// Sweep #7765 B5 — an anonymous public signup met an 'unsubscribed' or
+// 'inactive' row. Nobody has proven they own the address, so this must NOT
+// undo the opt-out: it only mints a fresh confirmation token and stamps
+// confirmation_sent_at (plus the name/source the old code also took). Status,
+// unsubscribed_at, resubscribed_at, the sunset markers, confirmed_at and the
+// re-engagement tag stay as they are; confirmByToken applies the comeback
+// when the reader clicks the emailed link, and lookupByToken knows this token
+// is a live re-signup (confirmation_sent_at later than every opt-out stamp).
+// The update is a CAS on the status the caller read plus the cooldown, so a
+// concurrent opt-out, confirm or second submit is never overwritten.
+async function deferResignupToConfirm(existing, { source, firstName, lastName, linkCustomer, lc, conn }) {
+  const query = conn('newsletter_subscribers').where({ id: existing.id, status: existing.status });
+  whereConfirmationCooldownElapsed(query);
+  const minted = await query.update({
+    source,
+    first_name: firstName !== null ? firstName : existing.first_name,
+    last_name: lastName !== null ? lastName : existing.last_name,
+    confirmation_sent_at: new Date(),
+    confirmation_token: conn.raw('gen_random_uuid()'),
+    updated_at: new Date(),
+  });
+  if (!minted) {
+    const current = await conn('newsletter_subscribers').where({ id: existing.id }).first();
+    return { subscriber: current || existing, action: 'confirmation_throttled' };
+  }
+  if (linkCustomer) await linkToCustomer(lc, conn);
+  const fresh = await conn('newsletter_subscribers').where({ id: existing.id }).first();
+  return { subscriber: fresh, action: 'confirmation_sent' };
 }
 
 // Inserts a brand-new subscriber. If another writer created the same email
@@ -360,9 +437,11 @@ function sanitizeWaitlistTags(rawTags, fields = {}) {
 }
 
 // Writes the sanitized waitlist tags onto the signup's own mid-DOI row,
-// replacing any zip:/city: tag from an earlier attempt. Only a 'pending' row is
-// touched (this signup just created or re-armed it), so an anonymous post can't
-// rewrite tags on an already-confirmed subscriber. Returns the update count.
+// replacing any zip:/city: tag from an earlier attempt. Only a 'pending' row,
+// or an opted-out row still holding THIS signup's freshly minted re-signup
+// token (sweep #7765 B5: such a row stays unsubscribed/inactive until the
+// confirm click), is touched, so an anonymous post can't rewrite tags on an
+// already-confirmed subscriber. Returns the update count.
 async function applyWaitlistTags(subscriber, rawTags, fields = {}, dbh = null) {
   if (!subscriber || !subscriber.id) return 0;
   const conn = dbh || db;
@@ -383,8 +462,10 @@ async function applyWaitlistTags(subscriber, rawTags, fields = {}, dbh = null) {
               OR NOT ((e #>> '{}') ~* '^(zip|city):' OR (e #>> '{}') = ?)
         ) || ?::jsonb,
             updated_at = NOW()
-      WHERE id = ? AND status = 'pending'`,
-    [WAITLIST_SOURCE, JSON.stringify(fresh), subscriber.id],
+      WHERE id = ?
+        AND (status = 'pending'
+             OR (status IN ('unsubscribed', 'inactive') AND confirmation_token = ?::uuid))`,
+    [WAITLIST_SOURCE, JSON.stringify(fresh), subscriber.id, subscriber.confirmation_token || null],
   );
   return result?.rowCount ?? 0;
 }
@@ -396,9 +477,12 @@ async function applyWaitlistTags(subscriber, rawTags, fields = {}, dbh = null) {
  * confirmByToken (POST only).
  *
  * Returns { subscriber, action } where action is one of:
- *   'pending'        — row exists at status='pending', ready to confirm
+ *   'pending'        — ready to confirm: a 'pending' row, or an
+ *                      unsubscribed/inactive row holding a live public
+ *                      re-signup token (deferResignupToConfirm)
  *   'already_active' — row was already active (idempotent re-visit)
- *   'unsubscribed'   — row is unsubscribed; nothing to do
+ *   'unsubscribed'   — unsubscribed/inactive row and a stale link; nothing to do
+ *   'expired'        — the link is past CONFIRM_TTL_MS
  *   'not_found'      — token doesn't match any row
  */
 async function lookupByToken(token) {
@@ -406,7 +490,15 @@ async function lookupByToken(token) {
   const sub = await db('newsletter_subscribers').where({ confirmation_token: token }).first();
   if (!sub) return { subscriber: null, action: 'not_found' };
   if (sub.status === 'active') return { subscriber: sub, action: 'already_active' };
-  if (sub.status === 'unsubscribed') return { subscriber: sub, action: 'unsubscribed' };
+  if (sub.status === 'unsubscribed' || sub.status === 'inactive') {
+    // A public re-signup leaves the row as it was and only mints a token
+    // (deferResignupToConfirm), so a live token on such a row is confirmable.
+    // Any other token on it is the old pre-opt-out link: nothing to do.
+    const state = resignupTokenState(sub);
+    if (state === 'live') return { subscriber: sub, action: 'pending' };
+    if (state === 'expired') return { subscriber: sub, action: 'expired' };
+    return { subscriber: sub, action: 'unsubscribed' };
+  }
   // pending — but reject an aged-out confirmation link (double-opt-in TTL) so a
   // months-old link can't silently activate the subscription. confirmByToken
   // returns this without flipping to active; the confirm page shows the
@@ -418,19 +510,81 @@ async function lookupByToken(token) {
   return { subscriber: sub, action: 'pending' };
 }
 
+// Is the confirmation token on an unsubscribed/inactive row a re-signup token?
+// It is when confirmation_sent_at is LATER than every opt-out/confirm stamp on
+// the row. The original signup token (stamped before the reader confirmed and
+// later opted out) is older than confirmed_at / unsubscribed_at /
+// deactivated_at, so it stays a plain stale link. Returns 'live', 'expired'
+// (a re-signup token past CONFIRM_TTL_MS) or 'stale'. The SQL twin of the
+// ordering test is whereResignupTokenLive.
+function resignupTokenState(sub) {
+  if (!sub.confirmation_sent_at) return 'stale';
+  const sentMs = new Date(sub.confirmation_sent_at).getTime();
+  for (const stamp of [sub.unsubscribed_at, sub.deactivated_at, sub.confirmed_at]) {
+    if (stamp && sentMs <= new Date(stamp).getTime()) return 'stale';
+  }
+  return (Date.now() - sentMs) > CONFIRM_TTL_MS ? 'expired' : 'live';
+}
+
+// Does this subscriber hold a confirmation that is still waiting for its
+// click: a pending row, or an unsubscribed/inactive row with a live public
+// re-signup token? Callers that ride extra state on the outstanding
+// confirmation (the quote wizard's lead) use it after a throttled repeat.
+function hasLiveConfirmation(sub) {
+  if (!sub) return false;
+  if (sub.status === 'pending') return true;
+  return (sub.status === 'unsubscribed' || sub.status === 'inactive') && resignupTokenState(sub) === 'live';
+}
+
+// For the opt-out writers (one-click unsubscribe, SendGrid unsubscribe events)
+// that used to skip rows already at status='unsubscribed': a row that is
+// unsubscribed but holds a live public re-signup token (confirmation_sent_at
+// later than unsubscribed_at) is NOT done yet. The opt-out must land on it
+// too, advancing unsubscribed_at so the emailed link stops confirming.
+// Rows with no outstanding re-signup stay skipped, so their opt-out date is
+// never rewritten.
+function whereOptOutNeedsWrite(query) {
+  return query.where(function optOutNeedsWrite() {
+    this.whereNot({ status: 'unsubscribed' }).orWhere(function liveResignup() {
+      this.where({ status: 'unsubscribed' })
+        .whereNotNull('confirmation_sent_at')
+        .whereRaw('(unsubscribed_at IS NULL OR confirmation_sent_at > unsubscribed_at)');
+    });
+  });
+}
+
+function whereResignupTokenLive(query) {
+  return query
+    .where('confirmation_sent_at', '>', new Date(Date.now() - CONFIRM_TTL_MS))
+    .whereRaw('(unsubscribed_at IS NULL OR confirmation_sent_at > unsubscribed_at)')
+    .whereRaw('(deactivated_at IS NULL OR confirmation_sent_at > deactivated_at)')
+    .whereRaw('(confirmed_at IS NULL OR confirmation_sent_at > confirmed_at)');
+}
+
 /**
  * Delete stale 'pending' subscribers whose confirmation link aged past the
  * purge window and never confirmed. Frees the email for a fresh signup and
  * keeps the table from accruing dead double-opt-in rows. Called from a daily
  * cron. Returns the number of rows removed.
+ *
+ * A stale pending row that still carries unsubscribed_at or deactivated_at is
+ * an opt-out record, and deleting it would let a later trusted import insert a
+ * fresh 'active' row and mail the reader who opted out (sweep #7765 B5). Those
+ * rows are put back to what they were ('unsubscribed', or 'inactive' when only
+ * the sunset stamp is set) with the dead token cleared, never deleted. A row
+ * whose history the old resubscribe code already wiped (both stamps null) has
+ * nothing left to protect and is deleted as before.
  */
 async function purgeStalePendingSubscribers() {
   const cutoff = new Date(Date.now() - PENDING_PURGE_MS);
-  return db('newsletter_subscribers')
+  const stale = () => db('newsletter_subscribers')
     .where({ status: 'pending' })
     .whereNotNull('confirmation_sent_at')
-    .where('confirmation_sent_at', '<', cutoff)
-    .del();
+    .where('confirmation_sent_at', '<', cutoff);
+  const revertTo = (status) => ({ status, confirmation_token: null, updated_at: new Date() });
+  await stale().whereNotNull('unsubscribed_at').update(revertTo('unsubscribed'));
+  await stale().whereNotNull('deactivated_at').update(revertTo('inactive'));
+  return stale().del();
 }
 
 /**
@@ -453,6 +607,7 @@ async function purgeStalePendingSubscribers() {
 async function confirmByToken(token) {
   const initial = await lookupByToken(token);
   if (initial.action !== 'pending') return initial;
+  if (initial.subscriber.status !== 'pending') return confirmResignupToken(token, initial.subscriber);
   // status === 'pending' — flip to active. The flip is an atomic CAS on
   // the token AND the pending status (Codex #3084 r41): an email
   // correction can rotate this row's tokens between the lookup and this
@@ -472,6 +627,35 @@ async function confirmByToken(token) {
   if (!flipped) return lookupByToken(token);
   await linkToCustomer(initial.subscriber.email);
   const fresh = await db('newsletter_subscribers').where({ id: initial.subscriber.id }).first();
+  return { subscriber: fresh, action: 'confirmed' };
+}
+
+// The confirm click for a public re-signup on an unsubscribed/inactive row
+// (see deferResignupToConfirm): this is where the comeback is applied, the
+// updates the old code made at submit time. Same CAS discipline as the
+// pending flip: token + the status the lookup saw + the live-token ordering,
+// so a stale link, a concurrent opt-out or a rotated token flips nothing and
+// the re-lookup reports the current truth.
+async function confirmResignupToken(token, sub) {
+  const now = new Date();
+  const flipped = await whereResignupTokenLive(
+    db('newsletter_subscribers').where({ id: sub.id, confirmation_token: token, status: sub.status }),
+  ).update({
+    status: 'active',
+    confirmed_at: now,
+    resubscribed_at: now,
+    unsubscribed_at: null,
+    // Sunset hygiene markers and the win-back tag go on every comeback — the
+    // same reasoning the trusted resubscribe branch documents.
+    deactivated_at: null,
+    deactivated_reason: null,
+    reengagement_flagged_at: null,
+    tags: db.raw("COALESCE(tags, '[]'::jsonb) - ?", [REENGAGEMENT_TAG]),
+    updated_at: now,
+  });
+  if (!flipped) return lookupByToken(token);
+  await linkToCustomer(sub.email);
+  const fresh = await db('newsletter_subscribers').where({ id: sub.id }).first();
   return { subscriber: fresh, action: 'confirmed' };
 }
 
@@ -704,4 +888,4 @@ async function relinkArchivedLinkedSubscribers(conn = db) {
   });
 }
 
-module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS, WAITLIST_SOURCE, sanitizeWaitlistTags, applyWaitlistTags };
+module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS, CONFIRM_RESEND_COOLDOWN_MS, whereOptOutNeedsWrite, hasLiveConfirmation, WAITLIST_SOURCE, sanitizeWaitlistTags, applyWaitlistTags };

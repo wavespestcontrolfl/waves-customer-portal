@@ -26,9 +26,12 @@ import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { TIMEZONE } from '../../lib/timezone';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import CancelFeeNotice from './CancelFeeNotice';
+import SkipVisitOption from './SkipVisitOption';
 import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
 import RainOutSheet from './RainOutSheet';
 import { formatTimeWindow } from './timeWindow';
+import { Badge } from '../ui';
+import { toldBadgeText } from './dayOnlyPromise';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
 import BillingLaneCard from './BillingLaneCard';
 import ConsultationOutcomeSheet from '../ConsultationOutcomeSheet';
@@ -138,7 +141,7 @@ export default function MobileAppointmentDetailSheet({
   // address offers Link customer; onCustomerLinked refetches the day.
   newCallerBooking = false,
   onCustomerLinked,
-  // GATE_SCHEDULE_ACCESS_CODES: after Wrong code or Add gate code, refetch the
+  // After Wrong code or Add gate code, refetch the
   // day and resolve to this visit's fresh row (or null) for the Access section.
   onAccessChanged,
 }) {
@@ -517,6 +520,14 @@ export default function MobileAppointmentDetailSheet({
     } catch (err) {
       alert('Failed to cancel: ' + err.message);
     } finally { setActionBusy(''); }
+  };
+
+  // After the office skipped this visit from the cancel panel (SkipVisitOption):
+  // the sheet closes as it does after a cancel.
+  const afterSkip = () => {
+    setConfirmingCancel(false);
+    onCancelled?.(service);
+    onClose?.();
   };
 
   const completeService = async () => {
@@ -930,6 +941,12 @@ export default function MobileAppointmentDetailSheet({
               {timeWindow}{hrs ? ` (${hrs})` : ''}
             </div>
           )}
+          {/* GATE_DAY_ONLY_PROMISE: what the customer was told (the feed carries `told` only with the gate on). */}
+          {toldBadgeText(service.told, service.scheduledDate) && (
+            <div style={{ marginTop: 6 }}>
+              <Badge density="comfortable" data-testid="told-badge">{toldBadgeText(service.told, service.scheduledDate)}</Badge>
+            </div>
+          )}
         </section>
 
         {/* Location */}
@@ -961,8 +978,7 @@ export default function MobileAppointmentDetailSheet({
           </section>
         )}
 
-        {/* Access — the stop's gate and access codes (GATE_SCHEDULE_ACCESS_CODES,
-            owner ruling 2026-10-26), with Wrong code and Add gate code. */}
+        {/* Access — the stop's gate and access codes (owner ruling 2026-10-26), with Wrong code and Add gate code. */}
         <ScheduleAccessSection service={service} variant="sheet" actions onChanged={onAccessChanged} />
 
         {/* Appointment note — editable */}
@@ -1050,6 +1066,7 @@ export default function MobileAppointmentDetailSheet({
                       </div>
                     </div>
                   )}
+                  <SkipVisitOption key={service.id} service={service} enabled={adminActions} origin="appointment sheet" onSkipped={afterSkip} />
                   <div className="mt-4">
                     <div className="text-14 font-medium text-zinc-900 mb-2">Client booking notifications</div>
                     <div className="space-y-2">

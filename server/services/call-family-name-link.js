@@ -51,7 +51,7 @@
  * call-recording-processor findCustomerViaCallbackSpokenNumber). Same suggest-only card; the pass also mints no
  * customer around it. Anyone can name any number in a voicemail, so nothing is linked.
  *
- * A service address an account already has (GATE_CALL_ADDRESS_FAMILY_CARD, dark; basis stated_address_on_account, owner
+ * A service address an account already has (basis stated_address_on_account, owner
  * 2026-10-24 "yes build"). A daughter called from her own number for her mother; the names came through spelled a little
  * differently, so no name basis fired and the pass minted a third record for one house. After the bases above find nothing,
  * a LIVE account at the same house number and street (the existing sameHouseNumberStreet rules: a stated unit must equal the
@@ -347,7 +347,7 @@ const ATTACH_ROLES = ['family_member', 'spouse_partner', 'tenant', 'landlord', '
 const STATED_ADDRESS_SKIPPED_NATURES = new Set(['job_applicant', 'vendor_or_partner']);
 
 /**
- * Basis stated_address_on_account (GATE_CALL_ADDRESS_FAMILY_CARD): live accounts at the street address the caller
+ * Basis stated_address_on_account: live accounts at the street address the caller
  * stated, from the extraction alone. { basis, candidates, more_accounts, attach } or null. `attach` is what the Attach
  * action files (name, number, role). Never one of this pass's own customer or the call's linked one.
  */
@@ -359,7 +359,7 @@ async function matchStatedAddressAccounts({ call, extracted, v2CanonicalExtracti
   // The house number; sameHouseNumberStreet below judges the whole line, so a bare number is enough to narrow the query.
   const house = (street.match(/\d+/) || [])[0];
   const skip = [
-    !require('../config/feature-gates').callAddressFamilyCardLive(), isOutbound, extracted.is_voicemail,
+    isOutbound, extracted.is_voicemail,
     STATED_ADDRESS_SKIPPED_NATURES.has(text(v2CanonicalExtraction?.call_nature)), !callerFirst, !house,
   ];
   if (skip.some(Boolean)) return null;

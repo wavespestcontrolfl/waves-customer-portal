@@ -448,8 +448,12 @@ function providerLabel(provider) {
   return DECISION_PROVIDER_LABELS[provider];
 }
 
-// How much of a call transcript call_judge is given (call-self-audit.js). The
-// admin review route shows the reviewer the same span.
-const CALL_TRANSCRIPT_CHARS = 5000;
+// How much of a call transcript the nightly readers are given (call-self-audit.js:
+// the deep auditor, call_judge, call_gate_checks, voicemail). The admin review
+// route shows the reviewer the same span. 24,000 covers every call of the 30
+// days to 2026-11-13 (longest 21,893). At 5,000, 6% of calls lost their end,
+// where a booking is agreed: re-read whole, the auditor's appointment
+// disagreements with production on 30 such calls fell from 9 to 2.
+const CALL_TRANSCRIPT_CHARS = 24000;
 
 module.exports = { PACKAGES, packageFor, packageHash, MAX_IMAGE_SLOTS, validImageSlots, OUTCOME_SOURCES, answerInDomain, CALL_TRANSCRIPT_CHARS, DECISION_PROVIDERS, DEFAULT_DECISION_PROVIDER, DECISION_PROVIDER_LABELS, providerLabel };

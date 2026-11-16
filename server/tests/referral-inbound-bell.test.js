@@ -4,7 +4,6 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   referralInboundBellLive: jest.fn(() => true),
-  referralInboundConfirmLive: jest.fn(() => true),
 }));
 jest.mock('../services/referral-inbound', () => ({
   // The service's own rule for the one sure referrer (the Postgres suite runs it on real rows).
@@ -90,7 +89,6 @@ beforeEach(() => {
   mockPromoters = {};
   mockLocks.length = 0;
   gates.referralInboundBellLive.mockReturnValue(true);
-  gates.referralInboundConfirmLive.mockReturnValue(true);
   inbound.listInboundReferrals.mockResolvedValue([]);
   episodes.openAdminAlertKeys.mockResolvedValue([]);
   episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'n-1', rang: true });
@@ -189,15 +187,6 @@ describe('syncReferralInboundBells: the fifteen-minute sweep', () => {
     expect(inbound.listInboundReferrals).not.toHaveBeenCalled();
   });
 
-  test('with the Queue\'s own gate off, every open row closes', async () => {
-    gates.referralInboundConfirmLive.mockReturnValue(false);
-    episodes.openAdminAlertKeys.mockResolvedValue([`referral-inbound:${AMES}`]);
-    await expect(bell.syncReferralInboundBells()).resolves.toMatchObject({ closed: 1, raised: 0 });
-    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(expect.anything(), [`referral-inbound:${AMES}`], 'referral_queue_off',
-      expect.objectContaining({ resolution: 'The Referrals Queue confirm step is off' }));
-    expect(inbound.listInboundReferrals).not.toHaveBeenCalled();
-  });
-
   test('a listed card rings under its own lock, read again inside it; a row whose card was answered closes', async () => {
     episodes.openAdminAlertKeys.mockResolvedValue([`referral-inbound:${OTHER}`]);
     inbound.listInboundReferrals.mockImplementation(async (_conn, opts = {}) => {
@@ -281,9 +270,9 @@ describe('a tap', () => {
     inbound.listInboundReferrals.mockResolvedValue([card()]);
   });
 
-  test('the buttons are live only while both gates are on', () => {
+  test('the buttons are live only while the bell gate is on', () => {
     expect(bell.buttonHandler.live()).toBe(true);
-    gates.referralInboundConfirmLive.mockReturnValue(false);
+    gates.referralInboundBellLive.mockReturnValue(false);
     expect(bell.buttonHandler.live()).toBe(false);
   });
 

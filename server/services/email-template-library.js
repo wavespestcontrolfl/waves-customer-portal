@@ -832,9 +832,14 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   // or a persisted one written before the hooks existed — still falls back to
   // the light card and keeps its contrast.
   const darkAwareBody = bodyIsDarkAware(bodyHtml);
+  // previewText is the plain-text arm (it is returned as-is below). The
+  // wrappers put the preheader into the HTML verbatim, so escape it here like
+  // every other HTML interpolation: a payload value (a customer-typed name in
+  // referral.friend_invite) must not close the hidden preheader div.
+  const preheader = previewText ? escapeHtml(previewText) : undefined;
   const html = mode === 'marketing'
-    ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined, darkAwareBody })
-    : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote, darkAwareBody });
+    ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader, darkAwareBody })
+    : wrapServiceEmail({ body: bodyHtml, preheader, footerNote, darkAwareBody });
   const textBody = version.text_body
     ? [renderInline(version.text_body, payload, { html: false }), defaultCta.bodyText, bodyAppend?.text].filter(Boolean).join('\n\n')
     : [bodyText, bodyAppend?.text].filter(Boolean).join('\n\n');
@@ -2087,6 +2092,7 @@ module.exports = {
   productionPlaceholderPayloadValues,
   productionPlaceholderRenderedValues,
   activeSuppressionFor,
+  alertBlockedOperationalSend,
   resolveTemplateForSend,
   activeSuppressionsFor,
   isMarketingSend,

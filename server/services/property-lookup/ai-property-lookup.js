@@ -1285,6 +1285,18 @@ function isMobileHomeParkParcel(parcel) {
   return major === 28 && Number(parcel.residentialUnits) > 0;
 }
 
+// Association common land (greenbelt, pond, entry tract): FL DOR code 09
+// "Residential Common Elements/Areas", or the county's own land-use text.
+// No resident's home stands on it, so a home address whose geocode point
+// lands inside one has matched the wrong parcel (live miss 2026-11-11: a
+// new-plat Parrish home landed on the community's 18-acre common tract,
+// sited to a bare road name, and the lead was saved as commercial).
+function isCommonAreaParcel(parcel) {
+  if (!parcel || parcel.aggregated === true) return false;
+  if (/common\s*(?:area|element)/i.test(String(parcel.landUseDescription || ''))) return true;
+  return parseInt(dorMajorCategory(parcel.dorUseCode), 10) === 9;
+}
+
 // The multiSitusParcel signal a park GIS parcel contributes once its
 // parcel-level facts are dropped — mirrors the address-search marker so
 // both paths converge on the same panel flag.
@@ -2446,6 +2458,18 @@ function applyGisParcelGuards(inputParcel, { searchAddress, address, gisPrecisio
     parentParcel = parentParcelContext(parcel, { address, gisPrecision, point });
     parcel = null;
     dropReason = 'situs_house_number_mismatch';
+  } else if (parcel && isCommonAreaParcel(parcel) && leadingHouseNumber(address)
+      && !situsHouseNumberExactMatch(searchAddress, parcel.situsAddress, address)) {
+    // A numbered address on association common land: the mismatch guard above
+    // fails open on the tract's blank or road-only situs, so the parcel is
+    // kept only when its situs POSITIVELY confirms the typed number and
+    // street (a clubhouse sited at its own address). Otherwise the typed
+    // address search decides — the home's own roll row, not the association's
+    // land. An address typed without a number (the association itself) keeps
+    // the parcel.
+    logger.warn('[county-property] GIS parcel is association common area without a confirming situs — degrading to address search');
+    parcel = null;
+    dropReason = 'common_area_unconfirmed';
   } else if (parcel && gisPrecision === 'interpolated'
       && !situsHouseNumberExactMatch(searchAddress, parcel.situsAddress, address)) {
     // An interpolated point is a guess along the street — keep the parcel

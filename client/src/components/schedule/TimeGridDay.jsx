@@ -750,7 +750,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
             takesNew={takesNewWork(tech)}
           />
         ))}
-        {/* GATE_BOARD_OPEN_TIMES: while a visit is dragged, the hours that fit it on this route. */}
+        {/* While a visit is dragged, the hours that fit it on this route. */}
         {fits && <LitHours fits={fits} best={best} minutesToTopPx={minutesToTopPx} hourHeight={(60 / SLOT_MIN) * SLOT_HEIGHT} />}
         {sel && (
           <div
@@ -1222,9 +1222,6 @@ export default function TimeGridDay({
   showOpenHours = true,
   // The server's enforced booking hours (day feed `bookingHours`), if any.
   bookingHours = null,
-  // GATE_BOARD_OPEN_TIMES (day feed `boardOpenTimes`): a drag lights the
-  // hours that fit the visit in every technician's column.
-  openTimesOnDrag,
 }) {
   const todayIso = toISODate(new Date());
   const hourClock = useHourClock();
@@ -1264,7 +1261,6 @@ export default function TimeGridDay({
   // The visit in flight, and the hours that fit it on every route this day.
   const [dragging, setDragging] = useState(null);
   const { fits: dragFits, best: bestFit } = useBoardOpenTimes({
-    enabled: openTimesOnDrag,
     service: dragging,
     durationOf: effectiveDuration,
     dates: [date],

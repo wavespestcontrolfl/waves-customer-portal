@@ -63,6 +63,13 @@ jest.mock('../models/db', () => {
   return dbFn;
 });
 
+// The per-technician move switch has its own suite (tech-move-switch.test.js): here every caller may move.
+jest.mock('../services/scheduling/tech-move-permission', () => ({
+  techMoveRefusal: jest.fn(async () => null),
+  moveRefusalBody: jest.fn(async (refusal) => refusal.payload),
+  MOVE_NOT_ALLOWED: { error: 'Ask the office to move this visit.', code: 'move_not_allowed' },
+}));
+
 const express = require('express');
 const db = require('../models/db');
 const dispatchRouter = require('../routes/admin-dispatch');

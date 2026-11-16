@@ -111,7 +111,7 @@ export function usablePick(options, reason) {
 }
 
 // The options a technician whose "Can move visits" switch is off gets when the
-// options GET answers 403 with customerPickOnly (GATE_TECH_MOVE_SWITCH): the
+// options GET answers 403 with customerPickOnly: the
 // hand-off only, no day rows.
 export function pickOnlyOptions(data) {
   return {

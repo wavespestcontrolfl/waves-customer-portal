@@ -71,14 +71,14 @@ describe('ONE rate table: the banner\'s (spray 15 min, rotor 40 min per quarter 
     expect(rotor.lines.join(' ')).toMatch(/80 minutes/);
   });
 
-  test('the package default table is NOT changed (portal preview, weekly email, move guard)', () => {
+  test('the package default table is NOT changed (stored plans); the portal figure reads the owner table', () => {
     expect(irrigation.HEAD_PRECIP_RATE_IN_PER_HR).toEqual({ spray: 1.5, rotor: 0.5 });
     const input = { runMinutes: 45, wateringDays: ['Mon'], systemType: ['spray'] };
     expect(irrigation.deriveIrrigationInchesPerWeek(input).inchesPerWeek).toBe(1.13);
     expect(irrigation.deriveIrrigationInchesPerWeek({ ...input, systemType: ['rotor'] }).inchesPerWeek).toBe(0.38);
     // drip still counts as a head type by default
     expect(irrigation.deriveIrrigationInchesPerWeek({ ...input, systemType: ['rotor', 'drip'] }).reason).toBe('mixed_head_types');
-    expect(portalIrrigationInches({ irrigation_run_minutes: 45, watering_days: ['Mon'], irrigation_system_type: ['spray'] })).toBe(1.13);
+    expect(portalIrrigationInches({ irrigation_run_minutes: 45, watering_days: ['Mon'], irrigation_system_type: ['spray'] })).toBe(0.75);
   });
 
   test('the opt-in: the owner table and drip ignored, old to new for 45 minutes one day a week', () => {
@@ -134,9 +134,9 @@ describe('the label-line half needs the facts gate; the Water card half does not
 describe('the report\'s irrigation figure while the gate is live', () => {
   const prefs = (extra) => ({ irrigation_run_minutes: 45, watering_days: ['Mon'], irrigation_system_type: ['rotor'], irrigation_system: true, ...extra });
 
-  test('gate off: the report\'s own resolver (the package table) and no polish key', () => {
+  test('gate off: the report\'s own resolver (the owner table) and no polish key', () => {
     gateOff();
-    expect(polish.prefsInchesFor(prefs(), portalIrrigationInches)).toBe(0.38);
+    expect(polish.prefsInchesFor(prefs(), portalIrrigationInches)).toBe(0.28);
     expect(buildLawnWaterContext({ propertyPrefs: prefs(), serviceDate: '2026-10-09' })).not.toHaveProperty('scheduleKind');
   });
 

@@ -170,7 +170,7 @@ function SuggestBlock({ phrase, suggestion, disabled, buttonStyle, muted }) {
   );
 }
 
-export default function BlogPostPicker({ search, suggest = null, value = null, onChange, disabled = false, tokens = {}, note = null, canChange = false }) {
+export default function BlogPostPicker({ search, suggest = null, value = null, onChange, disabled = false, tokens = {}, note = null }) {
   const inputId = useId();
   // Change (tips with facts): the search opens under the kept pick, and a
   // post picked there replaces it.
@@ -215,17 +215,15 @@ export default function BlogPostPicker({ search, suggest = null, value = null, o
           <div style={{ fontSize: 14, color: muted, overflowWrap: "anywhere" }}>Picked · {blogPostPath(value.url)}</div>
           {note && <div style={{ fontSize: 14, color: muted }}>{note}</div>}
           <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-            {canChange && (
-              <button
-                type="button"
-                onClick={() => setChanging((open) => !open)}
-                disabled={disabled}
-                aria-expanded={changing}
-                style={{ padding: "6px 12px", borderRadius: 999, border: `1px solid ${border}`, background: card, color: ink, fontSize: 14, cursor: disabled ? "default" : "pointer" }}
-              >
-                Change
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => setChanging((open) => !open)}
+              disabled={disabled}
+              aria-expanded={changing}
+              style={{ padding: "6px 12px", borderRadius: 999, border: `1px solid ${border}`, background: card, color: ink, fontSize: 14, cursor: disabled ? "default" : "pointer" }}
+            >
+              Change
+            </button>
             <button
               type="button"
               onClick={() => { setChanging(false); onChange(null); }}
@@ -237,7 +235,7 @@ export default function BlogPostPicker({ search, suggest = null, value = null, o
           </div>
         </div>
       )}
-      {(!value || (canChange && changing)) && (
+      {(!value || changing) && (
         <>
           <input
             id={inputId}

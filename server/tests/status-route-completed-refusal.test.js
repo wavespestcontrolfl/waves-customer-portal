@@ -10,6 +10,12 @@
  * the schedule route's cancel branch was retired with no live caller.
  * admin-dispatch keeps accepting it (asserted here so the retirement can't
  * silently spread to the live writer).
+ *
+ * admin-schedule refuses { status: 'skipped' } the same way (owner decision
+ * 2026-11-13): the dispatch status route is the one staff skip writer, and it
+ * keeps a skip to the office and to a plan visit with nothing on it
+ * (services/visit-skip.js, admin-dispatch-status-skip.test.js). Left open
+ * here, a technician token could skip its own visit past that rule.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -124,6 +130,15 @@ test("admin-schedule PUT /:id/status refuses 'cancelled' with USE_DISPATCH_CANCE
   const { status, body } = await put('/api/admin/schedule/svc-1/status', { status: 'cancelled' });
   expect(status).toBe(409);
   expect(body.code).toBe('USE_DISPATCH_CANCEL');
+  expect(body.error).toMatch(/dispatch status route/i);
+  expect(db.__state.writes).toHaveLength(0);
+});
+
+test("admin-schedule PUT /:id/status refuses 'skipped' with USE_DISPATCH_SKIP and zero writes", async () => {
+  db.__state.scheduledServices[0].status = 'pending';
+  const { status, body } = await put('/api/admin/schedule/svc-1/status', { status: 'skipped' });
+  expect(status).toBe(409);
+  expect(body.code).toBe('USE_DISPATCH_SKIP');
   expect(body.error).toMatch(/dispatch status route/i);
   expect(db.__state.writes).toHaveLength(0);
 });

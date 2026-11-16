@@ -84,15 +84,15 @@ const REANCHOR_PULLFORWARD_DAYS = Math.max(
   Number(process.env.RESCHEDULE_REANCHOR_PULLFORWARD_DAYS) || 14
 );
 
-// GATE_ROUTE_CHECK_BOOKING_SAVES: the rebooker numbers a moved visit's day
-// (placeMovedVisit) when its caller passes placeInRoute. Stop numbers only: a
-// customer call has no road spender, so nothing buys road times, and
-// overlapAdvisory stays off, so the placement is not a staff save. Gate off or
-// any reader failure: false, the options are exactly as before.
+// The rebooker numbers a moved visit's day (placeMovedVisit) when its caller
+// passes placeInRoute, whenever arrival-window routing is on. Stop numbers
+// only: a customer call has no road spender, so nothing buys road times, and
+// overlapAdvisory stays off, so the placement is not a staff save. Routing off
+// or any reader failure: false.
 function bookingPlacesInRoute() {
   try {
-    const { routeCheckBookingSavesLive } = require('../services/scheduling/arrival-route');
-    return typeof routeCheckBookingSavesLive === 'function' && routeCheckBookingSavesLive() === true;
+    const { arrivalWindowRoutingEnabled } = require('../services/scheduling/arrival-route');
+    return typeof arrivalWindowRoutingEnabled === 'function' && arrivalWindowRoutingEnabled() === true;
   } catch (_err) {
     return false;
   }
@@ -319,6 +319,29 @@ async function rescheduleNoticeOptions(svc) {
   return await moveLimits.repeatMoveInWindow(svc, { database: db })
     ? [{ deferNoticeMinutes: moveLimits.CORRECTION_MINUTES }]
     : [];
+}
+
+// GATE_DAY_ONLY_PROMISE part B2: what the customer chose for the new slot, as handleReschedule options. The picker's slots are
+// hour picks, so they pass 'set_time' (a later part adds an "any time that day" choice that passes 'day'); previousDate is the
+// date the visit moved from. Gate off: nothing, so the call keeps today's exact arguments.
+function dayPromiseMoveOptions(svc, timePromise) {
+  return require('../services/time-promise').dayOnlyPromiseOn()
+    ? { timePromise, previousDate: apptDateStr(svc.scheduled_date) }
+    : {};
+}
+
+// GATE_DAY_ONLY_PROMISE part B3: the rebooker option that records the customer's own hour for a single move. A later "any time
+// that day" choice (timePromise 'day') passes customerAskedTime: false here instead. Gate off: nothing.
+function dayPromiseMoveIntent() {
+  return require('../services/time-promise').dayOnlyPromiseOn() ? { customerAskedTime: true } : {};
+}
+
+// handleReschedule's options for a customer move: the repeat-move deferral and the day-promise choice, as a spread (none
+// when both are absent).
+async function moveNoticeArgs(svc, timePromise) {
+  const deferral = await rescheduleNoticeOptions(svc);
+  const dayOptions = dayPromiseMoveOptions(svc, timePromise);
+  return Object.keys(dayOptions).length ? [{ ...dayOptions, ...(deferral[0] || {}) }] : deferral;
 }
 
 // True when committing `targetDateStr` for this visit re-anchors the series.
@@ -1430,8 +1453,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             sourceSurface: 'customer_web',
             disclosedFuturePlacementDays: req.body.disclosed_future_placement_days ?? null,
             travelGap: true,
-            // GATE_ROUTE_CHECK_BOOKING_SAVES: number each moved visit's day (stop
-            // numbers only; no road purchase, no message). Gate off: false.
+            // Number each moved visit's day (stop numbers only; no road
+            // purchase, no message). Arrival routing off: false.
             placeInRoute: bookingPlacesInRoute(),
             // The confirmation is the series pass's durable text (below).
             notifyRequested: true,
@@ -1462,7 +1485,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             expect: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
             beforeMove: noticeRecheck,
             moveGuard: officeApprovalRecheck,
-            placeInRoute: bookingPlacesInRoute(), // GATE_ROUTE_CHECK_BOOKING_SAVES
+            placeInRoute: bookingPlacesInRoute(),
+            // GATE_DAY_ONLY_PROMISE part B3: the picker's slots are hours the customer chose, recorded by this move's own UPDATE
+            // (rebooker.js moveIntentColumns). Gate off: no key, so the call keeps today's exact arguments.
+            ...dayPromiseMoveIntent(),
             // No arrivalGraceMinutes (owner ruling 2026-09-28, scope cut
             // Codex r1 P1 #5314): this page's own commit runs a STRICT
             // pre-verify travel probe that a grace-kept slot would fail
@@ -1557,7 +1583,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         await AppointmentReminders.handleReschedule(
           svc.id,
           `${date}T${slot.start_time}`,
-          ...await rescheduleNoticeOptions(svc),
+          ...await moveNoticeArgs(svc, 'set_time'),
         );
       } catch (err) {
         logger.error(`[reschedule-public] reminder sync failed for ${svc.id}: ${err.message}`);

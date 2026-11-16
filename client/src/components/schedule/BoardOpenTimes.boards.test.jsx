@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Open times on the Dispatch day and week grids (GATE_BOARD_OPEN_TIMES): a
+// Open times on the Dispatch day and week grids a
 // drag lights the hours that fit the visit (the day grid on every route, the
 // week grid on the visit's own route); the drop path is unchanged.
 import React from 'react';
@@ -50,7 +50,7 @@ describe('day grid', () => {
   });
 
   it('a drag lights each technician\'s fitting hours in place of the Open blocks; a cancel puts them back', async () => {
-    render(<TimeGridDay date={DATE} services={[VISIT]} technicians={TECHS} onCreateSlot={vi.fn()} openTimesOnDrag />);
+    render(<TimeGridDay date={DATE} services={[VISIT]} technicians={TECHS} onCreateSlot={vi.fn()} />);
     expect(screen.getAllByRole('button', { name: /Book open hour/ }).length).toBeGreaterThan(0);
     dragStart(VISIT);
     await waitFor(() => expect(screen.getAllByTestId('board-open-time')).toHaveLength(2));
@@ -67,13 +67,6 @@ describe('day grid', () => {
     expect(screen.getAllByRole('button', { name: /Book open hour/ }).length).toBeGreaterThan(0);
   });
 
-  it('gate off: a drag asks nothing and lights nothing', async () => {
-    render(<TimeGridDay date={DATE} services={[VISIT]} technicians={TECHS} onCreateSlot={vi.fn()} />);
-    dragStart(VISIT);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(findBodies()).toHaveLength(0);
-    expect(screen.queryAllByTestId('board-open-time')).toHaveLength(0);
-  });
 });
 
 describe('week grid', () => {
@@ -94,7 +87,7 @@ describe('week grid', () => {
   });
 
   it('a drag lights the visit\'s own route day by day; an unassigned visit lights nothing', async () => {
-    render(<TimeGridDays date="2035-01-01" dayCount={7} openTimesOnDrag />);
+    render(<TimeGridDays date="2035-01-01" dayCount={7} />);
     await screen.findByText('First Customer');
     dragStart(VISIT);
     await waitFor(() => expect(screen.getAllByTestId('board-open-time')).toHaveLength(1));

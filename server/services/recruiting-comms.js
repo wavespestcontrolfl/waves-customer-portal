@@ -236,8 +236,8 @@ function buildEmailContent(app, stage, vars) {
   if (stage === 'application_received') {
     const subject = isEs ? 'Recibimos tu solicitud' : 'We received your application';
     const intro = isEs
-      ? `Hola ${first}, gracias por postularte a Waves Pest Control. Revisamos cada solicitud y te contactaremos en un plazo de 2 dias habiles.`
-      : `Hi ${first}, thanks for applying to Waves Pest Control. We read every application and will reach out within 2 business days.`;
+      ? `Hola ${first}, gracias por postularte a Waves Pest Control. Adam, el dueño, lee cada solicitud personalmente y te llamará o enviará un mensaje directamente si parece una buena opción.`
+      : `Hi ${first}, thanks for applying to Waves Pest Control. Adam, the owner, reads every application himself and will call or text you directly if it looks like a fit.`;
     const contactLine = isEs
       ? `Si tienes preguntas, llama o envia un mensaje de texto al ${WAVES_SUPPORT_PHONE_DISPLAY}.`
       : `If you have questions, call or text ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
@@ -506,7 +506,7 @@ async function sendRawEmail({ app, stage, to, subject, html, text, beforeProvide
   return sendEmailToProvider({ app, stage, to, subject, html, text, templateKey, messageRow, sendAttemptToken, beforeProvider });
 }
 
-// The application receipt ("we'll reach out within 2 business days") is only
+// The application receipt ("we received your application") is only
 // worth sending while the owner has not moved on (Codex r20 P2): the
 // application is still new/reviewed and no later-stage or owner text is
 // live in the ledger — the same rule the replay recheck applies to a queued

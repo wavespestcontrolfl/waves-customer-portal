@@ -19,7 +19,6 @@ jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((name) => name === 'cronJobs'), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
-  neighborhoodAccessLive: jest.fn(() => false),
 }));
 jest.mock('../utils/cron-lock', () => ({
   runExclusive: jest.fn(async () => {}),

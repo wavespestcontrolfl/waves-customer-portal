@@ -22,7 +22,6 @@ jest.setTimeout(30000);
 postgres('caller-linked homes and shared visitor passes', () => {
   let database;
   let trx;
-  const OLD_GATE = process.env.GATE_NEIGHBORHOOD_ACCESS;
   const LINK = 'https://pass.example.com/v/abc';
 
   const hood = async () => {
@@ -60,14 +59,11 @@ postgres('caller-linked homes and shared visitor passes', () => {
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
   });
   beforeEach(async () => {
-    process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
     trx = await database.transaction();
     mockConnection = trx;
   });
   afterEach(async () => {
     await trx.rollback();
-    if (OLD_GATE === undefined) delete process.env.GATE_NEIGHBORHOOD_ACCESS;
-    else process.env.GATE_NEIGHBORHOOD_ACCESS = OLD_GATE;
   });
   afterAll(() => database.destroy());
 

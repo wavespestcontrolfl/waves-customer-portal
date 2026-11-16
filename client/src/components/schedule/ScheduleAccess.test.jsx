@@ -9,7 +9,6 @@ const json = (status, body) => ({ ok: status < 400, status, json: async () => bo
 
 const SERVICE = {
   id: 'visit-1',
-  scheduleAccessEnabled: true,
   neighborhoodGateActions: true,
   propertyAlerts: [
     { type: 'gate', text: 'Gate: #4821 (neighborhood)', neighborhoodEntryId: 'entry-1', neighborhoodEntryCode: '#4821', reportedWrong: false },
@@ -41,10 +40,8 @@ describe('ScheduleAccessLine', () => {
     expect(screen.getByTestId('schedule-access-line')).toHaveTextContent('Gate#2424confirm on site');
   });
 
-  it('draws nothing while the gate is off or the stop has no code', () => {
-    const { container, rerender } = render(<ScheduleAccessLine service={{ ...SERVICE, scheduleAccessEnabled: undefined }} />);
-    expect(container).toBeEmptyDOMElement();
-    rerender(<ScheduleAccessLine service={{ ...SERVICE, propertyAlerts: [{ type: 'pet', text: '1 dog' }] }} />);
+  it('draws nothing when the stop has no code', () => {
+    const { container } = render(<ScheduleAccessLine service={{ ...SERVICE, propertyAlerts: [{ type: 'pet', text: '1 dog' }] }} />);
     expect(container).toBeEmptyDOMElement();
   });
 });
@@ -67,7 +64,7 @@ describe('ScheduleAccessSection (Details)', () => {
     expect(screen.getByText('Gate · neighborhood')).toBeInTheDocument();
   });
 
-  it('shows the lines alone when the access codes section is off (404)', async () => {
+  it('shows the lines alone when the accepted codes answer 404', async () => {
     fetch.mockResolvedValueOnce(json(404, { error: 'Not found' }));
     render(<ScheduleAccessSection service={SERVICE} variant="sheet" actions />);
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
@@ -153,11 +150,6 @@ describe('ScheduleAccessSection (Details)', () => {
     expect(screen.queryByRole('button', { name: 'Add gate code' })).not.toBeInTheDocument();
   });
 
-  it('draws nothing and reads nothing while the gate is off', () => {
-    const { container } = render(<ScheduleAccessSection service={{ ...SERVICE, scheduleAccessEnabled: false }} variant="sheet" actions />);
-    expect(container).toBeEmptyDOMElement();
-    expect(fetch).not.toHaveBeenCalled();
-  });
 });
 
 describe('ScheduleAccessSection (desktop panel)', () => {

@@ -87,6 +87,26 @@ describeOrSkip('llm call ledger schema', () => {
     }
   });
 
+  test('the daily digest stats leave max_runner chains out (NULL workload stays in)', async () => {
+    // 2026-11-09: 168 Max-plan runner chains (OpenAI leg stops at no_key by design) beside
+    // 58 production chains read as "fallback provider answered 176 of 226 calls".
+    const POLICY = '__schema_max_runner__';
+    const day = '2001-01-02T15:00:00Z';
+    const chain = (n, fallback, workload) => Array.from({ length: n }, (_, i) => ({
+      policy: POLICY, ok: true, row_kind: 'chain', fallback_used: i < fallback, workload, created_at: day,
+    }));
+    const { _private, detectExceptions } = require('../services/llm-dispatch-metrics');
+    try {
+      await knex('llm_dispatch_log').insert([...chain(168, 168, 'max_runner'), ...chain(50, 8, null), ...chain(8, 0, 'live')]);
+      const rows = await _private.loadStats(knex, new Date('2001-01-02T00:00:00Z'), new Date('2001-01-03T00:00:00Z'));
+      const mine = rows.find((r) => r.policy === POLICY);
+      expect(mine).toMatchObject({ total: 58, fallbacks: 8, failed: 0 });
+      expect(detectExceptions([mine], []).filter((e) => e.kind === 'fallback_rate')).toHaveLength(0);
+    } finally {
+      await knex('llm_dispatch_log').where({ policy: POLICY }).del();
+    }
+  });
+
   test('a chain-era insert (no row_kind) still lands as a chain row', async () => {
     const [row] = await knex('llm_dispatch_log')
       .insert({ policy: '__schema_test__', ok: false, failure_reasons: JSON.stringify([]) })

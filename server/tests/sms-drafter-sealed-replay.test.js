@@ -155,7 +155,7 @@ describe('fetchVoiceExemplars — sealed holdout exclusion', () => {
         return b;
       };
       for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw',
-        'orderBy', 'limit', 'select']) b[m] = rec(m);
+        'orderBy', 'orderByRaw', 'limit', 'select']) b[m] = rec(m);
       b.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
       return b;
     };

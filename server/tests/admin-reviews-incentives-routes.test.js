@@ -1,6 +1,6 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/google-business', () => ({}));
-jest.mock('../services/review-request', () => ({ sendGatedAsk: jest.fn() }));
+jest.mock('../services/review-request', () => ({ firstAskLockVisit: jest.fn(async () => null), sendGatedAsk: jest.fn() }));
 jest.mock('../services/review-incentives', () => ({}));
 jest.mock('../services/review-reply/publisher', () => ({}));
 jest.mock('../services/review-reply/drafter', () => ({}));

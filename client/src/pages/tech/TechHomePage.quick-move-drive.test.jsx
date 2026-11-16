@@ -38,7 +38,7 @@ vi.mock('./VisitBriefPanel', () => ({ default: ({ stop, detail, onRetry, onPhoto
 import TechHomePage from './TechHomePage';
 
 // Quick Move sheet: a "Later today" option the server priced with
-// GATE_TECH_MOVE_ROUTE_TIMES carries its added drive minutes; the guesses
+// the route check carries its added drive minutes; the guesses
 // (no driveMinutes) read as before.
 const row = (id) => ({ id, technicianId: 'tech-fixture', customerName: `Fixture ${id}`, address: '100 Example Lane', serviceType: 'Lawn care', scheduledDate: '2099-01-01', status: 'confirmed', windowStart: '09:00:00', windowEnd: '10:00:00' });
 let sameDay;

@@ -83,8 +83,6 @@ postgres('setup-fee alert reconcile: an application billed by a prepay year or t
     const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
       && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
     if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
-    // As in prod since 10-24: the fee side reads the customer's own invoices.
-    process.env.GATE_SETUP_FEE_SETTLED_ANYWHERE = 'true';
     database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 4 } });
     require('../models/db').connection = database;
   });
@@ -101,7 +99,6 @@ postgres('setup-fee alert reconcile: an application billed by a prepay year or t
   afterAll(async () => {
     delete process.env[GATE];
     delete process.env[NOTICE];
-    delete process.env.GATE_SETUP_FEE_SETTLED_ANYWHERE;
     await database?.destroy();
   });
 

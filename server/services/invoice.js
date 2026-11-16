@@ -6614,7 +6614,7 @@ const InvoiceService = {
         const stampedIds = new Set(stampedCoverage.map((row) => String(row.id)));
         const unstampedOwners = [...new Map(packetOwners.map((row) => [String(row.id), row])).values()]
           .filter((row) => !stampedIds.has(String(row.id)) && !['void', 'canceled', 'cancelled'].includes(row.status));
-        // GATE_SETUP_FEE_SETTLED_ANYWHERE: the obligation's remainder already
+        // The obligation's remainder already
         // credits fee money on unstamped invoices (settledElsewherePartial);
         // subtract only what it has not credited, so nothing counts twice.
         const creditedElsewhere = new Map((obligation.settledElsewherePartial || []).map((p) => [String(p.id), p.cents]));

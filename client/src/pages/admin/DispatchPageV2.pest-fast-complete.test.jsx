@@ -25,7 +25,7 @@ vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({ default: ({ serv
 vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({
   default: ({ service, onFullForm }) => (
     <div>
-      Lawn re-service sheet for {service.id} <span data-testid="sheet-access">{service.scheduleAccessEnabled === true ? service.propertyAlerts.map((a) => a.text).join('|') : 'off'}</span>
+      Lawn re-service sheet for {service.id} <span data-testid="sheet-access">{(service.propertyAlerts || []).map((a) => a.text).join('|')}</span>
       <button type="button" onClick={onFullForm}>Full form</button>
     </div>
   ),
@@ -33,7 +33,7 @@ vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
   default: ({ service, voiceFillEnabled, onClose, onCompleted, onFullForm }) => (
     <div data-reservice-asks={String(service.reserviceAsksEnabled)}>
-      Pest sheet for {service.id} (flow {String(service.reportFlow)}, trace {String(service.traceEligible)}, key {String(service.routedServiceKey)}, voice {String(voiceFillEnabled)}) <span data-testid="sheet-access">{service.scheduleAccessEnabled === true ? service.propertyAlerts.map((a) => a.text).join('|') : 'off'}</span>
+      Pest sheet for {service.id} (flow {String(service.reportFlow)}, trace {String(service.traceEligible)}, key {String(service.routedServiceKey)}, voice {String(voiceFillEnabled)}) <span data-testid="sheet-access">{(service.propertyAlerts || []).map((a) => a.text).join('|')}</span>
       <button type="button" onClick={() => onClose()}>Sheet close</button>
       <button type="button" onClick={() => onClose({ refresh: true })}>Sheet close refresh</button>
       <button type="button" onClick={() => onCompleted()}>Sheet completed</button>
@@ -230,9 +230,9 @@ describe('Dispatch completion routing for regular pest visits', () => {
   });
 });
 
-// GATE_SCHEDULE_ACCESS_CODES (owner ruling 2026-10-26): the sheet's copy of the row
+// Schedule access codes (owner ruling 2026-10-26): the sheet's copy of the row
 // keeps the codes, so the Complete service header can show them (Codex P2 on #6784).
-const ACCESS = { scheduleAccessEnabled: true, propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)' }, { type: 'pet', text: '1 dog' }] };
+const ACCESS = { propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)' }, { type: 'pet', text: '1 dog' }] };
 
 describe('Dispatch Fast Complete sheets get the row\'s gate codes', () => {
   it('pest sheet', async () => {
@@ -250,11 +250,5 @@ describe('Dispatch Fast Complete sheets get the row\'s gate codes', () => {
     })]);
     await open('svc-lawn-re-codes');
     expect(await screen.findByTestId('sheet-access')).toHaveTextContent('Gate: #4821 (neighborhood)|1 dog');
-  });
-
-  it('a row without the gate gives the sheet none', async () => {
-    mount([visit('svc-pest-nocodes', { propertyAlerts: ACCESS.propertyAlerts })]);
-    await open('svc-pest-nocodes');
-    expect(await screen.findByTestId('sheet-access')).toHaveTextContent('off');
   });
 });

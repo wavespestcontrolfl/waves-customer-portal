@@ -120,7 +120,7 @@ describe('the one-voice specialty prompt', () => {
     }
   });
 
-  // GATE_PEST_QUIET_VISIT's two rules: a quiet visit opens on what we saw, and no talk is claimed.
+  // The pest report's two quiet-visit rules: a quiet visit opens on what we saw, and no talk is claimed.
   test('a quiet visit opens on what we saw, and no talk is claimed', () => {
     expect(SPECIALTY_REPORT_VOICE_PROMPT).toContain('- Never say we talked with, spoke with or met the customer unless the note says so, and never say what the customer did not mention, report or ask about.');
     expect(SPECIALTY_REPORT_VOICE_PROMPT).toContain('When the customer told us nothing, start with what we saw today or with where we worked, never with what they did not say.');

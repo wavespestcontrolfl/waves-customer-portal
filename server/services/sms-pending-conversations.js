@@ -13,7 +13,6 @@ const {
 const { personCallBackSql } = require('./staff-contact');
 const { VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
 const { POST_CALL_ROW_SOURCES, TERMINAL_CALL_STATUSES } = require('../utils/call-timeline');
-const { staffActionAnswersMode } = require('../config/feature-gates');
 const { staffActionExistsSql } = require('./sms-staff-action-answers');
 
 // Owner ruling 2026-09-28: the Messages "needs a reply" badge and its
@@ -113,19 +112,16 @@ async function loadPendingSmsConversations({
   // sides of that link fall in or out of the window together.
   const inSinceWindow = (column) => `(CAST(:since AS timestamptz) IS NULL
     OR ${column} > CAST(:since AS timestamptz) - ${REPLY_LOOKBACK})`;
-  // GATE_SMS_STAFF_ACTION_ANSWERS=true only (read at call time): a text is also answered once a
-  // person booked a visit or recorded a payment for the text's customer within 24 hours after it
-  // (sms-staff-action-answers.js, by customer id and never by phone). In every other mode the
-  // CTE, its join and its filter are absent: the SQL below is byte-identical to before.
-  const staffAnswers = staffActionAnswersMode?.() === 'true';
-  const staffActionCte = staffAnswers ? `, staff_action_inbound AS MATERIALIZED (
+  // A text is also answered once a person booked a visit or recorded a payment for the text's
+  // customer within 24 hours after it (sms-staff-action-answers.js, by customer id and never by phone).
+  const staffActionCte = `, staff_action_inbound AS MATERIALIZED (
       SELECT li.id AS inbound_id
       FROM enriched_inbound li
       WHERE li.customer_id IS NOT NULL
         AND ${staffActionExistsSql('li.customer_id', 'li.created_at')}
-    )` : '';
-  const staffActionJoin = staffAnswers ? '\n    LEFT JOIN staff_action_inbound staff_action ON staff_action.inbound_id = li.id' : '';
-  const staffActionFilter = staffAnswers ? '\n      AND staff_action.inbound_id IS NULL' : '';
+    )`;
+  const staffActionJoin = '\n    LEFT JOIN staff_action_inbound staff_action ON staff_action.inbound_id = li.id';
+  const staffActionFilter = '\n      AND staff_action.inbound_id IS NULL';
   const { rows = [] } = await db.raw(`
     WITH canonical_sms AS MATERIALIZED (
       SELECT 'canonical'::text AS source, m.id, m.direction, m.body AS message_body,

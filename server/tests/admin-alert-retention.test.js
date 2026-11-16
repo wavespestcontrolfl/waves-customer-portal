@@ -1,6 +1,6 @@
 /**
  * Admin alert retention (server/services/admin-alert-retention.js): the rule
- * boundaries, the last-activity signal, the three gate states, the re-ring
+ * boundaries, the last-activity signal, the sweep, the re-ring
  * accounting and the pin that keeps the re-ring list complete. The SQL runs
  * against Postgres in admin-alert-retention-db.test.js.
  */
@@ -140,14 +140,14 @@ describe('re-ring list', () => {
 });
 
 // A fake database edge: pages by cursor over the given rows (oldest first).
-function fakeIo(rows, { live = {}, backlog = 0, cursors = {} } = {}) {
+function fakeIo(rows, { live = {}, cursors = {} } = {}) {
   const sorted = [...rows].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   const calls = { expire: [], record: [], live: [], pageCursors: [] };
   return {
     calls,
     cursors,
-    loadCursor: async (mode) => cursors[mode] || null,
-    saveCursor: async (mode, cursor) => { cursors[mode] = cursor; },
+    loadCursor: async () => cursors.true || null,
+    saveCursor: async (cursor) => { cursors.true = cursor; },
     page: async ({ cursor, limit }) => {
       calls.pageCursors.push(cursor ? cursor.id : null);
       const start = cursor ? sorted.findIndex((r) => r.id === cursor.id) + 1 : 0;
@@ -155,12 +155,11 @@ function fakeIo(rows, { live = {}, backlog = 0, cursors = {} } = {}) {
     },
     live: async (name, subset) => { calls.live.push(name); return new Set(subset.filter((r) => live[r.id]).map((r) => r.id)); },
     expire: async (batch, rule) => { calls.expire.push({ rule, ids: batch.map((r) => r.id) }); return batch.length; },
-    activityBacklog: async () => backlog,
     record: async (summary) => { calls.record.push(summary); },
   };
 }
 
-describe('runAdminAlertRetention: gate states', () => {
+describe('runAdminAlertRetention: the sweep', () => {
   const rows = () => [
     row({ created_at: ago(60), category: 'alert' }),
     row({ created_at: ago(35), category: 'billing', read_at: ago(34) }),
@@ -169,32 +168,14 @@ describe('runAdminAlertRetention: gate states', () => {
     row({ created_at: ago(90), category: 'alert', metadata: { rungAt: ago(1).toISOString() } }),
   ];
 
-  test('off (and any other value): no database call at all', async () => {
-    const io = fakeIo(rows());
-    io.page = jest.fn(io.page);
-    for (const mode of ['off', undefined, false, 'false', '']) {
-      expect(await retention.runAdminAlertRetention({ now: NOW, mode, io })).toEqual({ skipped: true, reason: 'gate_off' });
-    }
-    expect(io.page).not.toHaveBeenCalled();
-    expect(io.calls.record).toHaveLength(0);
-  });
-
-  test('shadow: counts what would expire, records one summary, writes nothing', async () => {
-    const io = fakeIo(rows(), { backlog: 7 });
-    const summary = await retention.runAdminAlertRetention({ now: NOW, mode: 'shadow', io });
-    expect(io.calls.expire).toHaveLength(0);
-    expect(io.calls.record).toHaveLength(1);
-    expect(summary).toMatchObject({
-      mode: 'shadow', scanned: 5, written: 0, activityOnlyOpenOlderThan30: 7,
-      kept: { refreshed: 1 }, expire: { total: 3, unread: 2, byRule: { age30: 2, fyi7: 1 }, byCategory: { alert: 1, billing: 1, lead: 1 } },
-    });
-  });
-
-  test('true: expires by rule and records the run', async () => {
+  test('expires by rule and records the run', async () => {
     const data = rows();
     const io = fakeIo(data);
-    const summary = await retention.runAdminAlertRetention({ now: NOW, mode: 'true', io });
-    expect(summary).toMatchObject({ mode: 'true', written: 3, expire: { total: 3 } });
+    const summary = await retention.runAdminAlertRetention({ now: NOW, io });
+    expect(summary).toMatchObject({
+      scanned: 5, written: 3, kept: { refreshed: 1 },
+      expire: { total: 3, unread: 2, byRule: { age30: 2, fyi7: 1 }, byCategory: { alert: 1, billing: 1, lead: 1 } },
+    });
     expect(io.calls.expire.map((c) => c.rule).sort()).toEqual(['age30', 'fyi7']);
     expect(io.calls.expire.find((c) => c.rule === 'age30').ids).toEqual([data[0].id, data[1].id]);
     expect(io.calls.expire.find((c) => c.rule === 'fyi7').ids).toEqual([data[3].id]);
@@ -204,7 +185,7 @@ describe('runAdminAlertRetention: gate states', () => {
   test('a row its emitter keeps refreshing is counted as kept, not expired', async () => {
     const data = [row({ created_at: ago(90), metadata: { rungAt: ago(1).toISOString() } })];
     const io = fakeIo(data);
-    const summary = await retention.runAdminAlertRetention({ now: NOW, mode: 'true', io });
+    const summary = await retention.runAdminAlertRetention({ now: NOW, io });
     expect(summary.kept.refreshed).toBe(1);
     expect(io.calls.expire).toHaveLength(0);
   });
@@ -212,7 +193,7 @@ describe('runAdminAlertRetention: gate states', () => {
   test('pages through a backlog larger than one batch', async () => {
     const data = Array.from({ length: 25 }, (_, i) => row({ created_at: ago(100 - i * 0.1) }));
     const io = fakeIo(data);
-    const summary = await retention.runAdminAlertRetention({ now: NOW, mode: 'true', io, batchSize: 10 });
+    const summary = await retention.runAdminAlertRetention({ now: NOW, io, batchSize: 10 });
     expect(summary.batches).toBe(3);
     expect(summary.written).toBe(25);
     expect(io.calls.expire.map((c) => c.ids.length)).toEqual([10, 10, 5]);
@@ -222,12 +203,12 @@ describe('runAdminAlertRetention: gate states', () => {
 describe('runAdminAlertRetention: re-ring accounting', () => {
   const keyed = (dedupeKey, over = {}) => row({ created_at: ago(40), metadata: { dedupeKey }, ...over });
 
-  test('shadow counts, per emitter, the rows that could ring again', async () => {
+  test('counts, per emitter, the rows that could ring again', async () => {
     const data = [
       keyed('lead-repeat-form:a'), keyed('lead-repeat-form:b'), keyed('stock-shortfall:p'),
       keyed('sms-draft-canary:smsDraftDefault'), keyed('plain:1'), row({ created_at: ago(40) }),
     ];
-    const summary = await retention.runAdminAlertRetention({ now: NOW, mode: 'shadow', io: fakeIo(data) });
+    const summary = await retention.runAdminAlertRetention({ now: NOW, io: fakeIo(data) });
     expect(summary.ringRisk.couldRingAgain).toBe(4);
     expect(summary.ringRisk.ringsWithoutNewEvent).toBe(1);
     expect(summary.ringRisk.emitters['lead-repeat-form']).toMatchObject({ kind: 'event', expire: 2, couldRingAgain: 2, ringsWithoutNewEvent: 0 });
@@ -238,7 +219,7 @@ describe('runAdminAlertRetention: re-ring accounting', () => {
   test('periodic emitters are capped per run (oldest first); the rest wait for the next run', async () => {
     const data = Array.from({ length: 14 }, (_, i) => keyed(`sms-draft-canary:r${i}`, { created_at: ago(100 - i) }));
     const io = fakeIo(data);
-    const summary = await retention.runAdminAlertRetention({ now: NOW, mode: 'true', io });
+    const summary = await retention.runAdminAlertRetention({ now: NOW, io });
     expect(summary.written).toBe(10);
     expect(summary.deferred.ringRiskCap).toBe(4);
     expect(summary.ringRisk.emitters['sms-draft-canary']).toMatchObject({ expire: 10, deferred: 4 });
@@ -247,7 +228,7 @@ describe('runAdminAlertRetention: re-ring accounting', () => {
 
   test('event emitters are not capped', async () => {
     const data = Array.from({ length: 30 }, (_, i) => keyed(`lead-repeat-form:${i}`));
-    const summary = await retention.runAdminAlertRetention({ now: NOW, mode: 'true', io: fakeIo(data) });
+    const summary = await retention.runAdminAlertRetention({ now: NOW, io: fakeIo(data) });
     expect(summary.written).toBe(30);
     expect(summary.deferred.ringRiskCap).toBe(0);
   });
@@ -256,7 +237,7 @@ describe('runAdminAlertRetention: re-ring accounting', () => {
     const open = keyed('sms-commitment-source:1');
     const closed = keyed('sms-commitment-source:2');
     const io = fakeIo([open, closed], { live: { [open.id]: true } });
-    const summary = await retention.runAdminAlertRetention({ now: NOW, mode: 'true', io });
+    const summary = await retention.runAdminAlertRetention({ now: NOW, io });
     expect(io.calls.live).toEqual(['promiseOpen']);
     expect(summary.held.livePromise).toBe(1);
     expect(io.calls.expire[0].ids).toEqual([closed.id]);
@@ -274,7 +255,7 @@ describe('scan budget and the continuation cursor', () => {
   };
   const nightly = (ctx, extra = {}) => {
     const io = fakeIo([...ctx.held, ctx.eligible], { live: ctx.live, cursors: ctx.cursors });
-    return retention.runAdminAlertRetention({ now: NOW, mode: 'true', io, batchSize: 10, maxBatches: 1, ...extra }).then((summary) => ({ summary, io }));
+    return retention.runAdminAlertRetention({ now: NOW, io, batchSize: 10, maxBatches: 1, ...extra }).then((summary) => ({ summary, io }));
   };
 
   test('repeated capped runs walk past rows that are kept for now and reach the eligible alert', async () => {
@@ -311,14 +292,6 @@ describe('scan budget and the continuation cursor', () => {
     const second = await nightly(ctx, { batchSize: 1, maxBatches: 1 });
     expect(second.summary.cursor).toBe('reset');
   });
-
-  test('shadow and live keep separate places', async () => {
-    const ctx = setup();
-    const io = fakeIo([...ctx.held, ctx.eligible], { live: ctx.live, cursors: ctx.cursors });
-    await retention.runAdminAlertRetention({ now: NOW, mode: 'shadow', io, batchSize: 10, maxBatches: 1 });
-    expect(ctx.cursors.shadow.id).toBe(ctx.held[9].id);
-    expect(ctx.cursors.true).toBeUndefined();
-  });
 });
 
 describe('the sweep never takes a row lock', () => {
@@ -326,19 +299,5 @@ describe('the sweep never takes a row lock', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'services', 'admin-alert-retention.js'), 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
     expect(source).not.toMatch(/forUpdate|forShare|FOR UPDATE|FOR SHARE|skipLocked/);
-  });
-});
-
-describe('gate reader', () => {
-  const { alertRetentionMode } = require('../config/feature-gates');
-  const saved = process.env.GATE_ALERT_RETENTION;
-  afterEach(() => { if (saved === undefined) delete process.env.GATE_ALERT_RETENTION; else process.env.GATE_ALERT_RETENTION = saved; });
-
-  test.each([
-    [undefined, 'off'], ['', 'off'], ['false', 'off'], ['1', 'off'], ['on', 'off'],
-    ['shadow', 'shadow'], [' Shadow ', 'shadow'], ['true', 'true'], ['TRUE', 'true'],
-  ])('GATE_ALERT_RETENTION=%p reads as %s', (value, expected) => {
-    if (value === undefined) delete process.env.GATE_ALERT_RETENTION; else process.env.GATE_ALERT_RETENTION = value;
-    expect(alertRetentionMode()).toBe(expected);
   });
 });

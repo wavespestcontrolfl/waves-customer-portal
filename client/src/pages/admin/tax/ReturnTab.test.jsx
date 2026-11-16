@@ -6,7 +6,7 @@ import { cleanup, configure, fireEvent, render, screen, waitFor } from '@testing
 import ReturnTab from './ReturnTab.jsx';
 import { etParts } from '../../../lib/timezone';
 
-// Locked-down behaviors: hidden (and silent) while the gate is off; the
+// Locked-down behaviors: the
 // server's lines on screen with each carry-in's source; Save year, Mark filed
 // and Unmark post what they should; a failed return shows its message.
 
@@ -16,7 +16,6 @@ configure({ asyncUtilTimeout: 10000 });
 const YEAR = etParts().year;
 
 let calls;
-let status;
 let detail;
 let ret;
 let retError;
@@ -29,7 +28,6 @@ const baseRow = { tax_year: YEAR, filing_status: 'single', status: 'draft', file
 
 beforeEach(() => {
   calls = [];
-  status = { enabled: true };
   retError = null;
   detail = {
     year: YEAR, exists: true, row: baseRow,
@@ -61,21 +59,12 @@ beforeEach(() => {
     const u = String(url);
     const method = opts.method || 'GET';
     calls.push({ url: u, method, body: opts.body ? JSON.parse(opts.body) : undefined });
-    if (u.includes('/return-engine/status')) return json(status);
     if (u.endsWith('/return')) return retError ? json({ error: retError }, false) : json(ret);
     if (u.includes('/tax-years/') && method === 'GET') return json(detail);
     return json(detail);
   }));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
-
-it('renders nothing and reads nothing else while the gate is off', async () => {
-  status = { enabled: false };
-  const { container } = render(<ReturnTab />);
-  await waitFor(() => expect(calls.length).toBeGreaterThan(0));
-  expect(container).toBeEmptyDOMElement();
-  expect(calls.some((c) => c.url.includes('/tax-years'))).toBe(false);
-});
 
 it('shows the Schedule C lines, the tax, the carryovers, the warnings and each carry-in source', async () => {
   render(<ReturnTab />);

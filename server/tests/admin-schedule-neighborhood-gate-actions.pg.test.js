@@ -1,7 +1,7 @@
 /**
  * GET /api/admin/schedule: what the day feed gives the field screen so a
  * technician can add a neighborhood gate code or mark one wrong
- * (GATE_NEIGHBORHOOD_TECH_ACTIONS, owner ruling 2026-10-03).
+ * (owner ruling 2026-10-03).
  *
  * Real migrated PostgreSQL, real router, real adminAuthenticate with a signed
  * staff token (the admin-schedule-customer-sent-photos.pg.test.js pattern).
@@ -21,7 +21,6 @@ const DATE = '2099-04-16';
 
 describeOrSkip('neighborhood gate actions on GET /api/admin/schedule', () => {
   let db, server, baseUrl, admin, token, customerId, propertyId, neighborhoodId, entryId, visitId;
-  const OLD = { access: process.env.GATE_NEIGHBORHOOD_ACCESS, actions: process.env.GATE_NEIGHBORHOOD_TECH_ACTIONS };
 
   beforeAll(async () => {
     db = require('../models/db');
@@ -61,13 +60,6 @@ describeOrSkip('neighborhood gate actions on GET /api/admin/schedule', () => {
     });
   });
 
-  afterEach(() => {
-    for (const [key, value] of [['GATE_NEIGHBORHOOD_ACCESS', OLD.access], ['GATE_NEIGHBORHOOD_TECH_ACTIONS', OLD.actions]]) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  });
-
   afterAll(async () => {
     if (server) await new Promise((r) => server.close(r));
     if (db) {
@@ -87,43 +79,22 @@ describeOrSkip('neighborhood gate actions on GET /api/admin/schedule', () => {
   };
   const gateAlerts = (row) => row.propertyAlerts.filter((a) => a.type === 'gate');
 
-  test('actions gate on: the stop is marked and its neighborhood code carries its entry', async () => {
-    process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
-    process.env.GATE_NEIGHBORHOOD_TECH_ACTIONS = 'true';
+  test('the stop is marked and its neighborhood code carries its entry', async () => {
     const row = await feedRow();
     expect(row.neighborhoodGateActions).toBe(true);
     expect(gateAlerts(row)).toEqual([
       { type: 'gate', text: 'Gate: 4242 (neighborhood)', neighborhoodEntryId: entryId, neighborhoodEntryCode: '4242', reportedWrong: false },
     ]);
-  });
-
-  test('actions gate off: the feed is what it was (the code line only, no action data)', async () => {
-    process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
-    delete process.env.GATE_NEIGHBORHOOD_TECH_ACTIONS;
-    const row = await feedRow();
-    expect(row).not.toHaveProperty('neighborhoodGateActions');
-    expect(gateAlerts(row)).toEqual([{ type: 'gate', text: 'Gate: 4242 (neighborhood)' }]);
     // No pin on the gate: the row carries no waypoint (the plain address link).
     expect(row).not.toHaveProperty('gateWaypoint');
   });
 
-  test("the neighborhood's pinned gate reaches the row as gateWaypoint, numbers only; off with the directory", async () => {
+  test("the neighborhood's pinned gate reaches the row as gateWaypoint, numbers only", async () => {
     await db('neighborhood_access').where({ id: entryId }).update({ gate_lat: 27.4321, gate_lng: -82.4567 });
     try {
-      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
       expect((await feedRow()).gateWaypoint).toEqual({ lat: 27.4321, lng: -82.4567 });
-      delete process.env.GATE_NEIGHBORHOOD_ACCESS;
-      expect(await feedRow()).not.toHaveProperty('gateWaypoint');
     } finally {
       await db('neighborhood_access').where({ id: entryId }).update({ gate_lat: null, gate_lng: null });
     }
-  });
-
-  test('the actions gate alone does nothing while the directory is off', async () => {
-    delete process.env.GATE_NEIGHBORHOOD_ACCESS;
-    process.env.GATE_NEIGHBORHOOD_TECH_ACTIONS = 'true';
-    const row = await feedRow();
-    expect(row).not.toHaveProperty('neighborhoodGateActions');
-    expect(gateAlerts(row)).toEqual([]);
   });
 });

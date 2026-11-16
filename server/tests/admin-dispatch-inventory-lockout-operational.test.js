@@ -3,9 +3,11 @@ const { errorHandler } = require('../middleware/errors');
 
 // Fake knex trx whose forUpdate lock finds no row, so deductProductInventory
 // falls back to the passed-in product snapshot (no DB needed for the guard).
+// The product has never been counted, so the count read answers no rows.
 const fakeTrx = () => ({
   where: () => ({
     forUpdate: () => ({ first: async () => null }),
+    orderBy: () => ({ limit: () => ({ select: async () => [] }) }),
   }),
 });
 

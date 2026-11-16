@@ -14,6 +14,11 @@ jest.mock('../services/admin-alert-episodes', () => ({
   openAdminAlertKeys: jest.fn(async () => []),
   closeAdminAlertKeys: jest.fn(async () => 0),
 }));
+// Nothing here reaches the county: the by-address search answers no lot unless a test passes its own.
+jest.mock('../services/property-lookup/county-parcel-gis', () => ({
+  ...jest.requireActual('../services/property-lookup/county-parcel-gis'),
+  lookupCountyParcelsByAddress: jest.fn(async () => []),
+}));
 const { randomUUID } = require('node:crypto');
 const { sweepSavedGateCodes } = require('../services/neighborhood-access');
 const { runNamingPass, linkFromCaller } = require('../services/neighborhood-naming');
@@ -22,7 +27,6 @@ jest.setTimeout(30000);
 postgres('neighborhood naming pass', () => {
   let database;
   let trx;
-  const OLD = { access: process.env.GATE_NEIGHBORHOOD_ACCESS, naming: process.env.GATE_NEIGHBORHOOD_NAMING };
 
   // A Manatee street address the county stub will "find" under the pin.
   const parcelFor = (street, extra = {}) => ({
@@ -71,16 +75,11 @@ postgres('neighborhood naming pass', () => {
   });
   beforeEach(async () => {
     jest.clearAllMocks();
-    process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
-    process.env.GATE_NEIGHBORHOOD_NAMING = 'true';
     trx = await database.transaction();
     mockConnection = trx;
   });
   afterEach(async () => {
     await trx.rollback();
-    for (const [k, v] of [['GATE_NEIGHBORHOOD_ACCESS', OLD.access], ['GATE_NEIGHBORHOOD_NAMING', OLD.naming]]) {
-      if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    }
   });
   afterAll(() => database.destroy());
 
@@ -503,16 +502,6 @@ postgres('neighborhood naming pass', () => {
       expect(await accessRows(p.neighborhood_id)).toEqual([{ code: '#8888', status: 'active', source: 'profile' }]);
     });
 
-    test('with GATE_NEIGHBORHOOD_NAMING off the sweep never runs the pass', async () => {
-      process.env.GATE_NEIGHBORHOOD_NAMING = 'false';
-      const { propertyId } = await home({ code: '#6666', checked: true });
-      const lookup = jest.fn();
-      const r = await sweepSavedGateCodes({ lookup });
-      expect(r.naming).toBeUndefined();
-      expect(lookup).not.toHaveBeenCalled();
-      expect(await hoodOf(propertyId)).toMatchObject({ name: null });
-    });
-
     test('a pass that crashes counts as a failed step and the filing still runs', async () => {
       const n = await neighborhood('Willow Grande');
       await home({ code: '#7777', neighborhoodId: n, source: 'county', checked: true });
@@ -524,13 +513,7 @@ postgres('neighborhood naming pass', () => {
     });
   });
 
-  describe('address lookup (GATE_NEIGHBORHOOD_ADDRESS_LOOKUP)', () => {
-    const OLD_ADDRESS = process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP;
-    beforeEach(() => { process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP = 'true'; });
-    afterEach(() => {
-      if (OLD_ADDRESS === undefined) delete process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP;
-      else process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP = OLD_ADDRESS;
-    });
+  describe('address lookup', () => {
     const lots = (...list) => jest.fn(async () => list);
     const runWith = (lookup, addressLookup, extra = {}) => runNamingPass({ lookup, platLookup: async () => [], addressLookup, ...extra });
 
@@ -581,16 +564,6 @@ postgres('neighborhood naming pass', () => {
       expect((await runWith(queue([parcelFor('500 Sample Loop')]), addressLookup)).county).toEqual({ linked: 1 });
       expect(addressLookup).not.toHaveBeenCalled();
       expect((await hoodOf(propertyId)).name).toBe('Heron Pointe');
-    });
-
-    test('off: the pin alone decides, and the county is never asked by address', async () => {
-      process.env.GATE_NEIGHBORHOOD_ADDRESS_LOOKUP = 'false';
-      await home({ street: '600 Synthetic Way', lat: 27.41 });
-      await home({ street: '500 Sample Loop #201', lat: 27.42 });
-      const lookup = jest.fn(async (lat) => (Math.abs(lat - 27.41) < 1e-6 ? parcelFor('100 Synthetic Way') : parcelFor('500 Sample Loop')));
-      const addressLookup = lots(parcelFor('600 Synthetic Way'));
-      expect((await runWith(lookup, addressLookup)).county).toEqual({ situs_mismatch: 2 });
-      expect(addressLookup).not.toHaveBeenCalled();
     });
 
     test('the saved-code sweep links a home by its own address and files its code', async () => {

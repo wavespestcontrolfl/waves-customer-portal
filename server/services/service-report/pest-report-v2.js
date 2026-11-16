@@ -25,7 +25,6 @@
 const { validateCustomerCopy } = require('./premium-experience');
 const { detectServiceLine } = require('./service-line-configs');
 const { pestReportExpectationsGateOn, buildPestExpectations } = require('./pest-report-expectations');
-const { pestRainOutlookGateOn } = require('./pest-rain-outlook');
 
 // propertyDefenseStatus.overallLabel → the customer-facing protection status.
 // tone drives the client accent (good = green, watch = amber, attention = red).
@@ -391,11 +390,12 @@ function pestReportV2PdfSignature(service = {}) {
   // '-pex4' (owner 2026-10-05): Gentrol's line gained its 4-month label duration.
   // '-pex5' (owner 2026-10-12): Alpine WSG with no ant tag lost its timeframe sentence.
   const pexSuffix = pestReportExpectationsGateOn() ? '-pex5' : '';
-  // '-rain1' rides every pest-line key while the rain outlook gate is on
-  // (owner 2026-10-24): the Weather call card may then add the frozen
-  // outlook's forecast sentence after its own text, so cached pest PDFs
-  // re-render once. Same append-not-switch pattern, independent of PEST_REPORT_V2.
-  const rainSuffix = pestRainOutlookGateOn() ? '-rain1' : '';
+  // '-rain1' rides every pest-line key (owner 2026-10-24): the Weather call
+  // card may add the frozen rain outlook's forecast sentence after its own
+  // text, so PDFs cached before that re-rendered once. Kept after the gate
+  // came out, so PDFs cached under it stay valid. Same append pattern,
+  // independent of PEST_REPORT_V2.
+  const rainSuffix = '-rain1';
   // '-noarea1' rides every pest-line key, gate or not: the pest PDF dropped
   // its Areas serviced section and per-product Areas / Target lines (owner
   // 2026-10-05), so PDFs cached before that re-render once.

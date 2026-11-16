@@ -4,22 +4,16 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const ComplianceService = require('../services/compliance');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { techTrainingDatesLive } = require('../config/feature-gates');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const LICENSE_UPDATE_FIELDS = new Set([
-  'fl_applicator_license',
-  'license_expiry',
-  'license_categories',
-]);
 
 const { validDateOnly } = require('../utils/date-only');
 const { etDateString, etCalendarDaysUntil } = require('../utils/datetime-et');
 const training = require('../services/technician-training-dates');
 
-// GATE_TECH_TRAINING_DATES (dark): four more dates a license update may carry (F.S. 482.091; docs/gates-and-env.md).
+// Four more dates a license update may carry (F.S. 482.091).
 const TRAINING_DATE_FIELDS = ['id_card_applied_on', 'id_card_issued_on', 'classroom_hours_done_on', 'renewal_training_done_on'];
-const TRAINING_UPDATE_FIELDS = new Set([...LICENSE_UPDATE_FIELDS, ...TRAINING_DATE_FIELDS]);
+const LICENSE_UPDATE_FIELDS = new Set(['fl_applicator_license', 'license_expiry', 'license_categories', ...TRAINING_DATE_FIELDS]);
 const dateText = (column) => db.raw(`to_char(${column}, 'YYYY-MM-DD') as ${column}`);
 
 function parseLicenseCategories(value) {
@@ -109,7 +103,7 @@ router.get('/dashboard', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GATE_TECH_TRAINING_DATES: per technician with a hire date, the dates and statuses the Licenses tab shows
+// Per technician with a hire date, the dates and statuses the Licenses tab shows
 // (services/technician-training-dates.js). A technician with no hire date (the owner's row) gets nothing new.
 async function trainingBlocksFor(ids) {
   const techs = await db('technicians').whereIn('id', ids).whereNotNull('hire_date')
@@ -130,7 +124,7 @@ router.get('/licenses', async (req, res, next) => {
     const techs = await db('technicians')
       .select('id', 'name', 'email', 'phone', 'fl_applicator_license', dateText('license_expiry'), 'license_categories', 'active');
     const now = new Date();
-    const trainingBlocks = techTrainingDatesLive() ? await trainingBlocksFor(techs.map(t => t.id)) : new Map();
+    const trainingBlocks = await trainingBlocksFor(techs.map(t => t.id));
     res.json({
       technicians: techs.map(t => {
         let licenseStatus = 'none';
@@ -164,7 +158,7 @@ router.get('/licenses', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GATE_TECH_TRAINING_DATES: the four dates on a license update (YYYY-MM-DD, or null / '' to clear).
+// The four dates on a license update (YYYY-MM-DD, or null / '' to clear).
 // Each records something that already happened (applied, issued, completed), so a date after today
 // (Eastern) is refused: a planned date would read as done and close its reminder.
 function parseTrainingDates(body, today = etDateString()) {
@@ -208,10 +202,8 @@ async function updateLicense(req, res, next) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       return res.status(400).json({ error: 'License update body must be an object' });
     }
-    const trainingOn = techTrainingDatesLive();
-    const allowedFields = trainingOn ? TRAINING_UPDATE_FIELDS : LICENSE_UPDATE_FIELDS;
     const fields = Object.keys(body);
-    if (!fields.length || fields.some((field) => !allowedFields.has(field))) {
+    if (!fields.length || fields.some((field) => !LICENSE_UPDATE_FIELDS.has(field))) {
       return res.status(400).json({ error: 'Only license fields may be updated' });
     }
 
@@ -243,33 +235,26 @@ async function updateLicense(req, res, next) {
       updates.license_categories = categories === null ? null : JSON.stringify(categories);
     }
 
-    if (trainingOn) {
-      const parsed = parseTrainingDates(body);
-      if (parsed.error) return res.status(400).json({ error: parsed.error });
-      Object.assign(updates, parsed.updates);
-    }
+    const parsed = parseTrainingDates(body);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+    Object.assign(updates, parsed.updates);
 
     const [tech] = await db('technicians')
       .where({ id: techId })
       .update(updates)
-      .returning(trainingOn
-        ? ['id', 'fl_applicator_license', 'license_expiry', 'license_categories', ...TRAINING_DATE_FIELDS.map(dateText)]
-        : ['id', 'fl_applicator_license', 'license_expiry', 'license_categories']);
+      .returning(['id', 'fl_applicator_license', 'license_expiry', 'license_categories', ...TRAINING_DATE_FIELDS.map(dateText)]);
     if (!tech) return res.status(404).json({ error: 'Technician not found' });
 
-    if (trainingOn) return res.json({ success: true, technician: await trainingLicenseResponse(tech, techId) });
-
-    res.json({ success: true, technician: licenseResponse(tech) });
+    res.json({ success: true, technician: await trainingLicenseResponse(tech, techId) });
   } catch (err) { next(err); }
 }
 
 router.put('/licenses/:techId', requireAdmin, updateLicense);
 
-// ---- GATE_TECH_TRAINING_DATES (dark): the dated record of the initial five-day (40-hour) training ----
+// ---- The dated record of the initial five-day (40-hour) training ----
 // Rule 5E-14.1421, F.A.C.: keep a written record of the initial training for 2 years (FDACS-13665, or a record of 40 hours
-// with a written syllabus and the training materials). Off, these routes do not exist: the request falls through the router.
+// with a written syllabus and the training materials).
 const TRAINING_DAY_FIELDS = new Set(['training_date', 'hours', 'category', 'topics', 'trainer_name', 'materials']);
-const trainingGate = (req, res, next) => (techTrainingDatesLive() ? next() : next('router'));
 const dayView = (row) => ({
   id: row.id,
   trainingDate: row.training_date,
@@ -329,7 +314,7 @@ function parseTrainingDay(body, today) {
 }
 
 // GET /api/admin/compliance-v2/licenses/:techId/training-days — the technician's dated training entries
-router.get('/licenses/:techId/training-days', trainingGate, requireAdmin, async (req, res, next) => {
+router.get('/licenses/:techId/training-days', requireAdmin, async (req, res, next) => {
   try {
     const techId = techIdParam(req, res);
     if (!techId) return;
@@ -339,7 +324,7 @@ router.get('/licenses/:techId/training-days', trainingGate, requireAdmin, async 
 });
 
 // POST /api/admin/compliance-v2/licenses/:techId/training-days — add a training day (one per technician, date and category)
-router.post('/licenses/:techId/training-days', trainingGate, requireAdmin, async (req, res, next) => {
+router.post('/licenses/:techId/training-days', requireAdmin, async (req, res, next) => {
   try {
     const techId = techIdParam(req, res);
     if (!techId) return;
@@ -358,7 +343,7 @@ router.post('/licenses/:techId/training-days', trainingGate, requireAdmin, async
 });
 
 // DELETE /api/admin/compliance-v2/licenses/:techId/training-days/:dayId — remove an entry (delete and add again to correct one)
-router.delete('/licenses/:techId/training-days/:dayId', trainingGate, requireAdmin, async (req, res, next) => {
+router.delete('/licenses/:techId/training-days/:dayId', requireAdmin, async (req, res, next) => {
   try {
     const techId = techIdParam(req, res);
     if (!techId) return;
@@ -371,7 +356,7 @@ router.delete('/licenses/:techId/training-days/:dayId', trainingGate, requireAdm
 });
 
 // GET /api/admin/compliance-v2/licenses/:techId/training-record — the printable 40-hour record
-router.get('/licenses/:techId/training-record', trainingGate, requireAdmin, async (req, res, next) => {
+router.get('/licenses/:techId/training-record', requireAdmin, async (req, res, next) => {
   try {
     const techId = techIdParam(req, res);
     if (!techId) return;

@@ -15,10 +15,9 @@ import {
 } from "../../../components/ui";
 import { etParts } from "../../../lib/timezone";
 
-// 1099-NEC list, GATE_TAX_WORKSHEETS: who was paid enough for the year to need
+// 1099-NEC list: who was paid enough for the year to need
 // a 1099-NEC, from contract labor and legal and professional expenses in the
-// books. Reads the books only; no writes. Renders nothing while the gate is
-// off. Same shared V2 primitives and fetch idiom as ReturnTab.
+// books. Reads the books only; no writes. Same shared V2 primitives and fetch idiom as ReturnTab.
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const FIRST_YEAR = 2024;
@@ -119,7 +118,6 @@ function PayeeRows({ payee, threshold, open, onToggle }) {
 
 export default function Form1099Tab() {
   const thisYear = etParts().year;
-  const [enabled, setEnabled] = useState(false);
   const [year, setYear] = useState(thisYear - 1);
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
@@ -127,14 +125,6 @@ export default function Form1099Tab() {
   // only the newest year's answer may land: a slow answer for a year the
   // owner already left must not fill the screen under the new year
   const seq = useRef(0);
-
-  useEffect(() => {
-    let live = true;
-    adminFetch(`${T}/worksheets/status`)
-      .then((d) => { if (live) setEnabled(!!d?.enabled); })
-      .catch(() => { if (live) setEnabled(false); });
-    return () => { live = false; };
-  }, []);
 
   const load = useCallback(() => {
     const mine = ++seq.current;
@@ -145,9 +135,8 @@ export default function Form1099Tab() {
       .then((d) => { if (mine === seq.current) setData(d); })
       .catch((e) => { if (mine === seq.current) setError(e.message); });
   }, [year]);
-  useEffect(() => { if (enabled) load(); }, [enabled, load]);
+  useEffect(() => { load(); }, [load]);
 
-  if (!enabled) return null;
   const years = [];
   for (let y = thisYear; y >= FIRST_YEAR; y -= 1) years.push(y);
   const left = data?.left_out;

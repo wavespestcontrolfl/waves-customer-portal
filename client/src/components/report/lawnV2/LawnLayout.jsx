@@ -11,13 +11,11 @@
 // Hidden here, not deleted: the Visit Timeline, the Weather call block, "Your documents", the
 // re-entry card (its sentence moves into "Your part"). The PDF document never uses this file.
 //
-// GATE_LAWN_REPORT_STORY (owner 2026-10-23/24) adds a second order, STORY_LAYOUT_ORDER, used while the
-// payload's lawnLayout key carries story:true: the review invitation and the technician's note lead, each
+// The order is the story order (owner 2026-10-23/24): the review invitation and the technician's note lead, each
 // applied product is explained inside "what we did" (visible, with its Poison Control note), Ask Waves sits
 // in the page, and the plan, the next visit, the re-service card and the blog follow the lawn sections.
-// Without the key the page prints LAYOUT_ORDER exactly as before.
 
-import { Fragment, cloneElement, useEffect, useState } from 'react';
+import { cloneElement, useEffect, useState } from 'react';
 import ReportText, { reportSectionsForText } from '../ReportSections';
 import { COLORS, FONTS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
@@ -163,7 +161,7 @@ function NextVisit({ data, slots }) {
 }
 
 // ── (c) what we did + why now ───────────────────────────────────────────────
-// The parts both orders print: the lead's "since last visit" lines, the technician paragraph (less an applied
+// The parts this section prints: the lead's "since last visit" lines, the technician paragraph (less an applied
 // sentence the lead says in full) and the Visit Summary card.
 function whatWeDidParts(data, slots) {
   const v2 = data.reportV2;
@@ -194,24 +192,7 @@ function whatWeDidParts(data, slots) {
   return { v2, lead, sinceLastBox, tech, visitSummary };
 }
 
-function WhatWeDid({ data, slots }) {
-  const { v2, lead, sinceLastBox, tech, visitSummary } = whatWeDidParts(data, slots);
-  return (
-    <>
-      {sinceLastBox || lead.applied || tech ? (
-        <Card style={{ background: TAN, display: 'grid', gap: 10 }}>
-          {sinceLastBox}
-          {lead.applied ? <LeadBox label="What we applied today">{lead.applied}</LeadBox> : null}
-          {tech ? <LeadBox label="From your technician" testId="lawn-lead-tech">{tech}</LeadBox> : null}
-        </Card>
-      ) : null}
-      {visitSummary}
-      <LawnProgramLine snapshot={v2.snapshot} />
-    </>
-  );
-}
-
-// GATE_LAWN_REPORT_STORY (owner 2026-10-23: "we dont incorporate the products along with the content"): the
+// Owner 2026-10-23: "we dont incorporate the products along with the content". The
 // applied sentence opens the products section, which explains each product where the customer reads about the
 // visit ("Your treatment, explained", visible, with its Poison Control note). An applied sentence with no
 // product cards to open stays in the card. The Visit Summary card is collapsed under one line.
@@ -259,14 +240,14 @@ function PhotosAndFindings({ data, slots, nowMs, printing }) {
 }
 
 // ── (e) score, collapsed ────────────────────────────────────────────────────
-function ScoreSection({ data, story = false }) {
+function ScoreSection({ data }) {
   const v2 = data.reportV2;
   const { lead } = v2;
   const snapshot = v2.snapshot || {};
   const status = snapshot.status || scoreStatus(snapshot.overallScore);
   const explanation = snapshot.scoreExplanation && snapshot.scoreExplanation !== lead.why ? snapshot.scoreExplanation : null;
   const hasNext = Boolean(snapshot.nextVisit?.label && snapshot.nextVisit.label !== 'Invalid Date');
-  const scoreShownAbove = story && Number.isFinite(snapshot.overallScore);
+  const scoreShownAbove = Number.isFinite(snapshot.overallScore);
   const summary = scoreShownAbove ? (
     <div data-testid="lawn-layout-score" className="lawn-story-summary-label">
       {LAYOUT_COPY.scoreToggle} <Icon name="chevronDown" size={20} className="lawn-story-chevron" aria-hidden="true" />
@@ -340,50 +321,9 @@ function WaterAndMowing({ data }) {
   );
 }
 
-// ── (i) products, collapsed ─────────────────────────────────────────────────
-// The wrapper follows the verdict AppliedProductsSection prints from (appliedProductsKind):
-//   products  the product cards in a collapsed block; the Poison Control note stays visible below it
-//   poison    the Poison Control section alone, visible under its own heading (never a "Products" label)
-//   none      nothing
-function Products({ slots }) {
-  if (slots.productsKind === 'none') return null;
-  if (slots.productsKind === 'poison') return slots.products;
-  return (
-    <>
-      <Collapsible summary={<span style={{ fontFamily: FONTS.serif, fontSize: 21, fontWeight: 500, color: TEXT }}>Products Applied <span aria-hidden="true" style={{ fontSize: 14 }}>▾</span></span>} className="lawn-layout-products">
-        {slots.products}
-      </Collapsible>
-      {slots.poisonNote}
-    </>
-  );
-}
-
-// The ordered list. Each key names one section; the page prints them top to bottom.
-//   a  done + the next lawn visit    status, blog (the Waves blog post), reservice, plan, upcoming, nextVisit
-//   b  Your part                     yourPart
-//   c  what we did + why now         whatWeDid
-//   c  (also)                         the Visit Summary card holds the recorded findings list, as on the standard page
-//   d  photos + findings             photos (+ marked photos, service highlights, recommendations), recap, treatmentMap
-//   e  score (collapsed)             score
-//   f  what to expect + when to call expect, whenToCall, crossSell
-//   g  water this week (+ mowing)    water, techNote, nearYou
-//   h  rate us                       review, referral
-//   i  products (collapsed)          products
-export const LAYOUT_ORDER = [
-  'status', 'blog', 'reservice', 'plan', 'upcoming', 'nextVisit',
-  'yourPart', 'newSod',
-  'whatWeDid',
-  'photos', 'recap', 'treatmentMap',
-  'score',
-  'expect', 'whenToCall', 'crossSell',
-  'water', 'techNote', 'nearYou',
-  'review', 'referral',
-  'products',
-];
-
-// GATE_LAWN_REPORT_STORY (owner 2026-10-23: "How did Adam do today ... towards the top", the technician's note
-// "near the top", products with "why are we doing this"; 2026-10-24 "keep both": Ask Waves in the page, the plan
-// and the next visit after the lawn sections):
+// The ordered list. Each key names one section; the page prints them top to bottom (owner 2026-10-23: "How did
+// Adam do today ... towards the top", the technician's note "near the top", products with "why are we doing
+// this"; 2026-10-24 "keep both": Ask Waves in the page, the plan and the next visit after the lawn sections):
 //   status, then the review invitation and the technician's note together (personal)
 //   Your part, new sod
 //   what we did with each product explained, the program line, the Visit Summary (collapsed)
@@ -391,7 +331,7 @@ export const LAYOUT_ORDER = [
 //   score (collapsed), what to expect, water this week, Ask Waves
 //   plan, upcoming visits, the next lawn visit, re-service
 //   when to call, near you, the blog post, cross-sell, referral
-export const STORY_LAYOUT_ORDER = [
+export const LAYOUT_ORDER = [
   'status', 'personal',
   'yourPart', 'newSod',
   'whatWeDidStory',
@@ -414,7 +354,6 @@ const SECTIONS = {
   nextVisit: (props) => <NextVisit {...props} />,
   newSod: ({ slots }) => slots.newSod,
   yourPart: ({ data, slots, nowMs, printing }) => cloneElement(slots.yourPart, { othersCarryInstruction: pageCarriesInstruction(data, nowMs, printing) }),
-  whatWeDid: (props) => <WhatWeDid {...props} />,
   photos: (props) => <PhotosAndFindings {...props} />,
   recap: ({ slots }) => slots.recap,
   treatmentMap: ({ data, slots }) => (data.treatmentMap?.traced?.snapshotUrl ? slots.tracedMap : null),
@@ -423,11 +362,8 @@ const SECTIONS = {
   whenToCall: ({ data, slots }) => <WhenToCall treated={treatmentMayHaveBeenApplied(data, slots.productsKind)} />,
   crossSell: ({ slots }) => slots.crossSell,
   water: (props) => <WaterAndMowing {...props} />,
-  techNote: ({ slots }) => slots.techNote,
   nearYou: ({ slots }) => slots.nearYou,
-  review: ({ slots }) => slots.review,
   referral: ({ slots }) => slots.referral,
-  products: (props) => <Products {...props} />,
 };
 
 const LAYOUT_CSS = `
@@ -438,13 +374,7 @@ const LAYOUT_CSS = `
      banner (bannerRepeatsAftercare). The "After today's visit" note also carries the label's re-entry
      text, so it is never hidden. */
   .lawn-layout-banner [data-testid="lawn-week-plan-condition"] > div { display: none; }
-  /* The products section's own heading is the summary line above it. */
-  .lawn-layout-products .applied-products-header { display: none; }
-  /* The Poison Control note is printed outside the collapsed block (safety content), so the copy inside
-     it is not shown a second time. */
-  .lawn-layout-products .poison-control-note { display: none; }
   .lawn-layout-collapse > summary::-webkit-details-marker { display: none; }
-  /* GATE_LAWN_REPORT_STORY: every rule below names a class only the story order prints. */
   .lawn-story-summary-label { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 16px; font-weight: 600; color: ${COLORS.glassNavy}; }
   .lawn-story-chevron { flex: none; }
   .lawn-layout-collapse[open] > summary .lawn-story-chevron { transform: rotate(180deg); }
@@ -492,8 +422,7 @@ function useBannerClock(banner) {
   return nowMs;
 }
 
-// story: GATE_LAWN_REPORT_STORY (lawnStoryActive on the page) picks STORY_LAYOUT_ORDER.
-export function LawnLayoutBody({ data, slots, story = false }) {
+export function LawnLayoutBody({ data, slots }) {
   const nowMs = useBannerClock(data.reportV2?.banner);
   // The same signal LawnWateringBanner reads (usePrintRequested: the browser's print pass): while printing, the
   // banner prints its lines even after expiry, so the dedupe must follow it.
@@ -501,11 +430,9 @@ export function LawnLayoutBody({ data, slots, story = false }) {
   const banner = bannerRepeatsAftercare(data.reportV2?.banner, data.reportV2?.aftercare, nowMs, printing) ? ' lawn-layout-banner' : '';
   return (
     <PrintContext.Provider value={false}>
-      <div className={`lawn-layout${banner}${story ? ' lawn-story-layout' : ''}`} style={{ display: 'contents' }}>
+      <div className={`lawn-layout${banner} lawn-story-layout`} style={{ display: 'contents' }}>
         <style>{LAYOUT_CSS}</style>
-        {story
-          ? STORY_LAYOUT_ORDER.map((key) => <div className="lawn-story-section" data-story-section={key} id={`lawn-section-${key}`} key={key}>{SECTIONS[key]({ data, slots, nowMs, printing, story })}</div>)
-          : LAYOUT_ORDER.map((key) => <Fragment key={key}>{SECTIONS[key]({ data, slots, nowMs, printing })}</Fragment>)}
+        {LAYOUT_ORDER.map((key) => <div className="lawn-story-section" data-story-section={key} id={`lawn-section-${key}`} key={key}>{SECTIONS[key]({ data, slots, nowMs, printing })}</div>)}
       </div>
     </PrintContext.Provider>
   );

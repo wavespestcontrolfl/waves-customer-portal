@@ -149,7 +149,8 @@ class AvailabilityEngine {
           pin = { lat: cust?.latitude ?? null, lng: cust?.longitude ?? null };
         }
         await ensureCatalogLoaded(db);
-        const candidateExpectedMinutes = expectedMinutesSync({ serviceType: candidateServiceType, windowMinutes: slotDuration });
+        // The visit being booked (confirmBooking reads the same new-visit minutes).
+        const candidateExpectedMinutes = expectedMinutesSync({ serviceType: candidateServiceType, windowMinutes: slotDuration, newVisit: true });
         travelMirror = { pin, expectedMinutes: candidateExpectedMinutes };
       } catch (mirrorErr) {
         logger.warn(`[availability] travel-gap mirror unavailable — serving unfiltered slots: ${mirrorErr.message}`);
@@ -536,8 +537,7 @@ class AvailabilityEngine {
 
   // The zone-scoped occupied set confirmBooking's zone check reads: zone services,
   // unlinked live self-bookings and live estimate holds, as [{ start, end }]
-  // minutes. Shared with the assistant's offer filter
-  // (scheduling/assistant-route-times.js), so an offer and its commit read one set.
+  // minutes.
   async loadZoneOccupied(conn, zone, dateStr, options = {}) {
     // Mirror getAvailableSlots' occupied set: zone services + live
     // self-bookings. Any overlap means the slot was taken since the
@@ -802,7 +802,7 @@ class AvailabilityEngine {
       // to zero candidate padding, so a short job's legitimate credit
       // dropped between offer and commit. Gate off: no catalog read.
       const candidateExpectedMinutes = travelGapEnabled()
-        ? await expectedServiceMinutes(trx, { serviceType, windowMinutes: slotDuration })
+        ? await expectedServiceMinutes(trx, { serviceType, windowMinutes: slotDuration, newVisit: true })
         : null;
       const occupancyClash = await findConflictingVisits({
         db: trx,
@@ -853,11 +853,6 @@ class AvailabilityEngine {
         self_booking_id: bookingRow.id,
         zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
       }).returning('*');
-
-      // GATE_ASSISTANT_ROUTE_TIMES (a no-op unless 'true'): number the visit in its
-      // technician's day with the placement helper New Appointment and the phone
-      // agent use, inside this transaction (a visit with no technician stays as is).
-      await require('./scheduling/assistant-route-times').placeAssistantBooking(trx, scheduledRow.id);
 
       // Inspection credit: this is a REAL customer booking (AI assistant /
       // confirmed call path), so record durable evidence in-transaction —

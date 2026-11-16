@@ -34,7 +34,7 @@ postgres('access codes section', () => {
   let trx;
   let server;
   let baseUrl;
-  const OLD_ENV = { gate: process.env.GATE_ACCESS_CODES_SECTION, since: process.env.GATE_ACCESS_CODES_SECTION_SINCE };
+  const OLD_ENV = { since: process.env.GATE_ACCESS_CODES_SECTION_SINCE };
   const SINCE = '2040-01-01T00:00:00Z';
   const OUR_NUMBER = numbers.locations.parrish.number;
   const ADMIN_ID = randomUUID();
@@ -111,41 +111,21 @@ postgres('access codes section', () => {
   });
   beforeEach(async () => {
     jest.clearAllMocks();
-    process.env.GATE_ACCESS_CODES_SECTION = 'true';
     process.env.GATE_ACCESS_CODES_SECTION_SINCE = SINCE;
     trx = await database.transaction();
     mockConnection = trx;
   });
   afterEach(async () => {
     await trx.rollback();
-    for (const [key, value] of [['GATE_ACCESS_CODES_SECTION', OLD_ENV.gate], ['GATE_ACCESS_CODES_SECTION_SINCE', OLD_ENV.since]]) {
-      if (value === undefined) delete process.env[key]; else process.env[key] = value;
-    }
+    if (OLD_ENV.since === undefined) delete process.env.GATE_ACCESS_CODES_SECTION_SINCE; else process.env.GATE_ACCESS_CODES_SECTION_SINCE = OLD_ENV.since;
   });
   afterAll(async () => {
     await new Promise((resolve) => { server.close(resolve); });
     await database.destroy();
   });
 
-  describe('gate', () => {
-    test('off: the sweep reads nothing and every route answers 404 with no-store', async () => {
-      process.env.GATE_ACCESS_CODES_SECTION = 'false';
-      const c = await customer();
-      await text(c.id, 'The gate code is #4821');
-      const read = stub([gateItem()]);
-      expect(await sweep(read)).toEqual({ skipped: 'gate_off', movedRetired: 0 });
-      expect(read).not.toHaveBeenCalled();
-      const probes = [
-        ['GET', `/?customerId=${c.id}`], ['GET', '/found'], ['POST', '/', {}],
-        ['POST', `/${randomUUID()}/accept`, {}], ['POST', `/${randomUUID()}/link`, {}], ['POST', `/${randomUUID()}/dismiss`], ['POST', `/${randomUUID()}/retire`],
-      ];
-      for (const [method, path, body] of probes) {
-        const res = await call(method, path, body);
-        expect([res.status, res.body, res.cache]).toEqual([404, { enabled: false }, 'no-store']);
-      }
-    });
-
-    test('on without a valid SINCE instant: the sweep waits for an activation time', async () => {
+  describe('activation time', () => {
+    test('without a valid SINCE instant: the sweep waits for an activation time', async () => {
       const read = stub([gateItem()]);
       for (const bad of [undefined, '', '2040-01-01', '2040-01-01T00:00:00', 'soon']) {
         if (bad === undefined) delete process.env.GATE_ACCESS_CODES_SECTION_SINCE; else process.env.GATE_ACCESS_CODES_SECTION_SINCE = bad;
@@ -464,15 +444,6 @@ postgres('access codes section', () => {
       expect(await sweep(read)).toMatchObject({ found: 1 });
       // (the profile's own #4821 is mirrored as an active `profile` row beside it)
       expect((await rows(c.id)).filter((r) => r.source_type === 'sms')).toMatchObject([{ code: '#4821', instructions: 'press 2 first', status: 'found' }]);
-    });
-
-    test('a gate turned off during the model call files nothing and leaves no receipt', async () => {
-      const c = await customer();
-      await text(c.id, 'The gate code is #4821');
-      const read = jest.fn(async () => { delete process.env.GATE_ACCESS_CODES_SECTION; return { items: [gateItem()] }; });
-      expect(await sweep(read)).toMatchObject({ found: 0 });
-      expect(await rows(c.id)).toHaveLength(0);
-      expect(await trx('data_hygiene_source_extractions').where({ extractor_version: 'access-net-v1' })).toHaveLength(0);
     });
 
     test('a text moved to another customer during the model call files nothing for the old owner', async () => {
@@ -909,21 +880,6 @@ postgres('access codes section', () => {
       expect(await rows(owner.id)).toEqual([]);
       const unlinked = await trx('customer_access_codes').whereNull('customer_id').where({ source_id: id });
       expect(unlinked.map((r) => [r.status, r.code])).toEqual([['found', '1357']]);
-    });
-
-    test('with the gate off the sweep still retires a code whose text moved', async () => {
-      const winner = await customer();
-      const loser = await customer();
-      const id = await text(winner.id, 'The garage code is 1357');
-      await sweep(stub([gateItem({ kind: 'garage', code: '1357', quote: 'The garage code is 1357' })]));
-      const [row] = await rows(winner.id);
-      await access.accept(trx, row.id, {});
-      await trx('sms_log').where({ id }).update({ customer_id: loser.id });
-      process.env.GATE_ACCESS_CODES_SECTION = 'false';
-      const read = stub([]);
-      expect(await sweep(read)).toEqual({ skipped: 'gate_off', movedRetired: 1 });
-      expect(read).not.toHaveBeenCalled();
-      expect((await trx('property_preferences').where({ customer_id: winner.id }).first()).garage_code).toBeNull();
     });
 
     test('a text that is no longer an inbound text cannot be accepted', async () => {
@@ -1583,15 +1539,7 @@ postgres('access codes section', () => {
       expect((await live(odd.id)).map((r) => r.code)).toEqual(['1357']);
     });
 
-    test('gate off: the tick mirrors nothing', async () => {
-      process.env.GATE_ACCESS_CODES_SECTION = 'false';
-      const c = await customer({ prefs: { garage_code: '2468' } });
-      expect(await sweep(stub([]))).toMatchObject({ skipped: 'gate_off' });
-      expect(await live(c.id)).toEqual([]);
-      expect(await trx('access_code_profile_mirror').where({ subject_id: c.id })).toEqual([]);
-    });
-
-    test('the tick mirrors with the gate on, and a failure fails the job', async () => {
+    test('the tick mirrors, and a failure fails the job', async () => {
       const c = await customer({ prefs: { garage_code: '2468' } });
       expect(await sweep(stub([]))).toMatchObject({ mirror: { checked: 1, created: 1, failed: 0 } });
       expect((await live(c.id)).map((r) => r.source_type)).toEqual(['profile']);
@@ -1849,8 +1797,6 @@ postgres('access codes section', () => {
       return id;
     };
     const unlinked = (extra = {}) => trx('customer_access_codes').whereNull('customer_id').where(extra).orderBy('created_at');
-    const OLD_HOOD_GATE = process.env.GATE_NEIGHBORHOOD_ACCESS;
-    afterEach(() => { if (OLD_HOOD_GATE === undefined) delete process.env.GATE_NEIGHBORHOOD_ACCESS; else process.env.GATE_NEIGHBORHOOD_ACCESS = OLD_HOOD_GATE; });
 
     test('a pass link texted from a number with no customer is filed unlinked, with the one home it names suggested', async () => {
       const home = await customer();
@@ -2040,7 +1986,6 @@ postgres('access codes section', () => {
     const passLinkOf = (text) => (String(text).match(/https:\/\/\S+/) || [null])[0];
 
     test('a switched-off neighborhood shares no pass, and more than twenty passes all come back', async () => {
-      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
       const neighbor = await customer({ house: '4460' });
       const hoodId = await hood();
       await inHood(neighbor, hoodId);
@@ -2056,7 +2001,6 @@ postgres('access codes section', () => {
     });
 
     test('a pass is shared with the neighbors at read time, never copied into the directory', async () => {
-      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
       const owner = await customer();
       const neighbor = await customer({ house: '4460' });
       const hoodId = await hood();
@@ -2075,17 +2019,12 @@ postgres('access codes section', () => {
       expect((await readVisit(await visitAtHome(owner))).codes.map((r) => [r.id, r.shared])).toEqual([[passId, undefined]]);
       expect(await directoryRows()).toEqual([]);
       expect(await trx('information_schema.columns').where({ table_name: 'customer_access_codes', column_name: 'neighborhood_access_id' })).toEqual([]);
-      // The directory gate off: the pass is the owner's alone.
-      process.env.GATE_NEIGHBORHOOD_ACCESS = 'false';
-      expect((await readVisit(atNeighbor)).codes).toEqual([]);
-      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
       // Retired by its owner: gone for the neighbor at once.
       await call('POST', `/${passId}/retire`);
       expect((await readVisit(atNeighbor)).codes).toEqual([]);
     });
 
     test('a shared pass follows the home\'s current neighborhood', async () => {
-      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
       const owner = await customer();
       const neighbor = await customer({ house: '4460' });
       const hoodA = await hood('Alpha Glen');
@@ -2106,7 +2045,6 @@ postgres('access codes section', () => {
     });
 
     test('only an active standing pass with no keypad code, of a live customer with an active home, is shared', async () => {
-      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
       const hoodId = await hood();
       const neighbor = await customer({ house: '4460' });
       await inHood(neighbor, hoodId);
@@ -2128,7 +2066,6 @@ postgres('access codes section', () => {
     });
 
     test('the same pass from two neighbors, or already the customer\'s own, is listed once', async () => {
-      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
       const hoodId = await hood();
       const [one, two, me] = [await customer(), await customer({ house: '4460' }), await customer({ house: '4470' })];
       for (const c of [one, two, me]) await inHood(c, hoodId);
@@ -2151,7 +2088,6 @@ postgres('access codes section', () => {
     });
 
     test('a pass in the neighborhood is not shown when the visit moves to another neighborhood while it is read', async () => {
-      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
       const hoodA = await hood('Alpha Glen');
       const hoodB = await hood('Beta Glen');
       const owner = await customer();
@@ -2180,7 +2116,6 @@ postgres('access codes section', () => {
     });
 
     test('a multi-home pass needs its home and shows at that home\'s visit only', async () => {
-      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
       const c = await customer({ properties: 2 });
       const [a, b] = c.propertyIds;
       const hoodA = await hood('Alpha Glen');
@@ -2205,7 +2140,6 @@ postgres('access codes section', () => {
     });
 
     test('a newer pass with the same code replaces the older one, and the older leaves the shared read', async () => {
-      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
       const hoodId = await hood();
       const owner = await customer();
       const neighbor = await customer({ house: '4460' });
@@ -2336,15 +2270,12 @@ postgres('access codes section', () => {
     const FAR = '+19415550177';
     const GATE_CALL = "Agent: Hey, Sam, it's Adam with Waves. I'm at your gate.\nCaller: Hi, yeah, it's pound, four four one seven.\nAgent: Four four one seven. Awesome";
     const GATE_CALL_QUOTE = "Hi, yeah, it's pound, four four one seven.";
-    const OLD_CALLS = { gate: process.env.GATE_ACCESS_CODES_CALLS, since: process.env.GATE_ACCESS_CODES_CALLS_SINCE };
+    const OLD_CALLS = { since: process.env.GATE_ACCESS_CODES_CALLS_SINCE };
     beforeEach(() => {
-      process.env.GATE_ACCESS_CODES_CALLS = 'true';
       process.env.GATE_ACCESS_CODES_CALLS_SINCE = SINCE;
     });
     afterEach(() => {
-      for (const [key, value] of [['GATE_ACCESS_CODES_CALLS', OLD_CALLS.gate], ['GATE_ACCESS_CODES_CALLS_SINCE', OLD_CALLS.since]]) {
-        if (value === undefined) delete process.env[key]; else process.env[key] = value;
-      }
+      if (OLD_CALLS.since === undefined) delete process.env.GATE_ACCESS_CODES_CALLS_SINCE; else process.env.GATE_ACCESS_CODES_CALLS_SINCE = OLD_CALLS.since;
     });
     // The customer helper gives every customer one shared phone; a call is matched by phone, so each gets its own.
     const owner = async (phone = FAR, opts = {}) => {
@@ -2367,27 +2298,16 @@ postgres('access codes section', () => {
     const callRows = (extra = {}) => trx('customer_access_codes').where({ source_type: 'call', ...extra }).orderBy('created_at');
 
     describe('gates', () => {
-      test('off, or with no activation time, a call is never read; the texts still are', async () => {
+      test('with no activation time, a call is never read; the texts still are', async () => {
         const c = await owner();
         await phoneCall(GATE_CALL, { customerId: c.id });
         const readCall = stub([callItem()]);
-        process.env.GATE_ACCESS_CODES_CALLS = 'false';
-        expect(await sweepCalls(readCall)).not.toHaveProperty('calls');
-        process.env.GATE_ACCESS_CODES_CALLS = 'true';
         delete process.env.GATE_ACCESS_CODES_CALLS_SINCE;
         expect(await sweepCalls(readCall)).not.toHaveProperty('calls');
         process.env.GATE_ACCESS_CODES_CALLS_SINCE = 'yesterday';
         expect(await sweepCalls(readCall)).not.toHaveProperty('calls');
         expect(readCall).not.toHaveBeenCalled();
         expect(await callRows()).toEqual([]);
-      });
-      test('the section gate off stops the calls too', async () => {
-        const c = await owner();
-        await phoneCall(GATE_CALL, { customerId: c.id });
-        process.env.GATE_ACCESS_CODES_SECTION = 'false';
-        const readCall = stub([callItem()]);
-        expect(await sweepCalls(readCall)).toEqual({ skipped: 'gate_off', movedRetired: 0 });
-        expect(readCall).not.toHaveBeenCalled();
       });
       test('calls before the activation time are never read', async () => {
         const c = await owner();
@@ -2816,15 +2736,12 @@ postgres('access codes section', () => {
     const AUTH = 'mx.google.com; dkim=pass header.d=example.invalid header.s=s1; spf=pass smtp.mailfrom=example.invalid';
     const BODY = 'Hi, the gate code is #4821. Thanks, Pat';
     const QUOTE = 'the gate code is #4821';
-    const OLD_EMAILS = { gate: process.env.GATE_ACCESS_CODES_EMAILS, since: process.env.GATE_ACCESS_CODES_EMAILS_SINCE };
+    const OLD_EMAILS = { since: process.env.GATE_ACCESS_CODES_EMAILS_SINCE };
     beforeEach(() => {
-      process.env.GATE_ACCESS_CODES_EMAILS = 'true';
       process.env.GATE_ACCESS_CODES_EMAILS_SINCE = SINCE;
     });
     afterEach(() => {
-      for (const [key, value] of [['GATE_ACCESS_CODES_EMAILS', OLD_EMAILS.gate], ['GATE_ACCESS_CODES_EMAILS_SINCE', OLD_EMAILS.since]]) {
-        if (value === undefined) delete process.env[key]; else process.env[key] = value;
-      }
+      if (OLD_EMAILS.since === undefined) delete process.env.GATE_ACCESS_CODES_EMAILS_SINCE; else process.env.GATE_ACCESS_CODES_EMAILS_SINCE = OLD_EMAILS.since;
     });
     // The Gmail sync links an email to the customer whose email is the sender; a customer gets the sender's address here.
     const owner = async (address = SENDER, opts = {}) => {
@@ -2852,32 +2769,16 @@ postgres('access codes section', () => {
       .update({ last_attempted_at: trx.raw("now() + interval '1 minute'") });
 
     describe('gates', () => {
-      test('off, not exactly true, or with no activation time, an email is never read; the texts still are', async () => {
+      test('with no activation time, an email is never read; the texts still are', async () => {
         const c = await owner();
         await mail(BODY, { customerId: c.id });
         const readEmail = stub([emailItem()]);
-        process.env.GATE_ACCESS_CODES_EMAILS = 'false';
-        expect(await sweepEmails(readEmail)).not.toHaveProperty('emails');
-        for (const value of ['1', 'on', 'TRUE']) {
-          process.env.GATE_ACCESS_CODES_EMAILS = value;
-          expect(await sweepEmails(readEmail)).not.toHaveProperty('emails');
-        }
-        process.env.GATE_ACCESS_CODES_EMAILS = 'true';
         delete process.env.GATE_ACCESS_CODES_EMAILS_SINCE;
         expect(await sweepEmails(readEmail)).not.toHaveProperty('emails');
         process.env.GATE_ACCESS_CODES_EMAILS_SINCE = 'yesterday';
         expect(await sweepEmails(readEmail)).not.toHaveProperty('emails');
         expect(readEmail).not.toHaveBeenCalled();
         expect(await emailRows()).toEqual([]);
-      });
-
-      test('the section gate off stops the emails too', async () => {
-        const c = await owner();
-        await mail(BODY, { customerId: c.id });
-        process.env.GATE_ACCESS_CODES_SECTION = 'false';
-        const readEmail = stub([emailItem()]);
-        expect(await sweepEmails(readEmail)).toEqual({ skipped: 'gate_off', movedRetired: 0 });
-        expect(readEmail).not.toHaveBeenCalled();
       });
 
       test('emails before the activation time, or more than 30 days before the sweep, are never read', async () => {
@@ -3331,7 +3232,6 @@ postgres('access codes section', () => {
       });
 
       test('the calls and emails passes are independent: a failed calls pass does not stop the emails', async () => {
-        process.env.GATE_ACCESS_CODES_CALLS = 'true';
         process.env.GATE_ACCESS_CODES_CALLS_SINCE = SINCE;
         try {
           const c = await owner();
@@ -3346,7 +3246,6 @@ postgres('access codes section', () => {
           await expect(access.runAccessCodeNet({ now: NOW, conn: guarded, read: stub([]), readCall: stub([]), readEmail: stub([emailItem()]) }))
             .rejects.toMatchObject({ tally: { calls: { failed: 1 }, emails: { found: 1, failed: 0 } } });
         } finally {
-          delete process.env.GATE_ACCESS_CODES_CALLS;
           delete process.env.GATE_ACCESS_CODES_CALLS_SINCE;
         }
       });

@@ -586,7 +586,7 @@ async function onAutomationHardBounce({ ev, sendRow }, client = db) {
 }
 
 /**
- * A "blocked" event whose reason is a domain with no mail server (GATE_CALL_EMAIL_CHECKS) for the BOUND retry send: the retry
+ * A "blocked" event whose reason is a domain with no mail server for the BOUND retry send: the retry
  * address is dead, exactly as if it had hard-bounced. The claim fails and the provenance enrollments are released; the
  * webhook raises the one existing alert and no read-back card. Any other blocked / dropped event, and any send that is not the
  * bound retry send, is left to the webhook as before.

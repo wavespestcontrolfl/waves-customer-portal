@@ -6,6 +6,8 @@
  * the phone agent (selfServeNotice unset), get no zone and make no zone
  * queries. Mocking style follows booking-availability-insertion.test.js.
  */
+// The south-zone day funnel's gate resolves at feature-gates require time (the assessment-link block below).
+process.env.GATE_SOUTH_ZONE_DAY_FUNNEL = 'true';
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/scheduling/find-time', () => ({ findAvailableSlots: jest.fn() }));
@@ -40,6 +42,14 @@ function wireDb() {
     return generic;
   });
   db.raw = jest.fn((sql) => sql);
+}
+function wireDbGeneric() {
+  return {
+    whereNot: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis(), whereNotIn: jest.fn().mockReturnThis(),
+    whereBetween: jest.fn().mockReturnThis(), whereRaw: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(),
+    count: jest.fn().mockReturnThis(), groupBy: jest.fn().mockReturnThis(), groupByRaw: jest.fn().mockReturnThis(),
+    then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
+  };
 }
 const tablesQueried = () => db.mock.calls.map((c) => c[0]);
 
@@ -96,5 +106,92 @@ describe('buildBookingAvailability — zone route day wiring', () => {
     });
     const availability = await build({ selfServeNotice: true });
     expect(availability.days.flatMap((d) => d.slots).map((s) => s.start_time)).toContain('10:00');
+  });
+});
+
+// The lead assessment link (inspection-public.js buildAvailabilityForLead) hands its booking address to the
+// builder; GATE_SOUTH_ZONE_DAY_FUNNEL narrows the pool exactly as the estimate page does (zone-day-funnel.js).
+describe('buildAvailabilityForLead — south-zone day funnel', () => {
+  const D1 = etDateString(addETDays(parseETDateTime(`${D}T12:00`), 1));
+  const D2 = etDateString(addETDays(parseETDateTime(`${D}T12:00`), 2));
+  const slotOn = (date, rank) => ({
+    date, start_time: '10:00', end_time: null, technician: { id: 'tech-1' },
+    detour_minutes: 5, stops_that_day: 1, rank, score: rank, insertion: { after_stop_id: 'stop-1' },
+  });
+  const VENICE = { line1: '9 Test Palm Way', city: 'Venice', state: 'FL', zip: '34285' };
+  const SARASOTA = { line1: '2 Test Oak Ct', city: 'Sarasota', state: 'FL', zip: '34231' };
+  const buildLead = (address) => require('../routes/inspection-public')._test.buildAvailabilityForLead(
+    { lat: 27.12, lng: -82.44 },
+    { rangeFrom: D, rangeTo: D2, config: CONFIG, duration: 60, offer: true, ...(address ? { address } : {}) },
+  );
+  const datesOf = (availability) => availability.days.map((d) => d.date);
+  let stopRows;
+  let stopLookups;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    delete process.env.GATE_ZONE_ROUTE_DAYS;
+    stopRows = [];
+    stopLookups = 0;
+    wireDb();
+    const generic = db('scheduled_services');
+    db.mockImplementation((table) => {
+      if (table === 'service_zones') return { select: jest.fn().mockResolvedValue(ZONES) };
+      if (table === 'system_settings') return { where: () => ({ first: async () => undefined }) };
+      if (table === 'scheduled_services') {
+        return {
+          ...generic,
+          leftJoin: () => ({
+            whereBetween: () => ({
+              whereNotIn: () => ({ andWhere: () => ({ select: async () => { stopLookups++; return stopRows; } }) }),
+            }),
+          }),
+        };
+      }
+      return generic;
+    });
+    listOccupiedWindows.mockResolvedValue([]);
+    findAvailableSlots.mockResolvedValue({ slots: [slotOn(D, 1), slotOn(D1, 2), slotOn(D2, 3)], total_feasible: 3 });
+  });
+
+  test('a far-south address with a zone stop on one day is offered that day only', async () => {
+    stopRows = [{ scheduled_date: D1, zone: 'venice', service_city: 'Venice', customer_city: null }];
+    expect(datesOf(await buildLead(VENICE))).toEqual([D1]);
+  });
+
+  test('a far-south address with no zone stop in the window is offered the best-ranked day only (seeded)', async () => {
+    expect(datesOf(await buildLead(VENICE))).toEqual([D]);
+  });
+
+  test('a lead outside the funneled zones, and a build with no address, get the full list with no zone-stop read', async () => {
+    stopRows = [{ scheduled_date: D1, zone: 'venice', service_city: 'Venice', customer_city: null }];
+    const sarasota = await buildLead(SARASOTA);
+    const bare = await buildLead(null);
+    expect(datesOf(sarasota)).toEqual([D, D1, D2]);
+    const unsigned = (a) => JSON.parse(JSON.stringify(a), (k, v) => (k === 'slot_sig' ? undefined : v));
+    expect(unsigned(sarasota)).toEqual(unsigned(bare));
+    expect(stopLookups).toBe(0);
+  });
+
+  test('a zone-stop lookup failure serves the full list', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'service_zones') return { select: jest.fn().mockResolvedValue(ZONES) };
+      if (table === 'scheduled_services') {
+        return { leftJoin: () => ({ whereBetween: () => ({ whereNotIn: () => ({ andWhere: () => ({ select: async () => { throw new Error('down'); } }) }) }) }) };
+      }
+      return { ...wireDbGeneric() };
+    });
+    expect(datesOf(await buildLead(VENICE))).toEqual([D, D1, D2]);
+  });
+
+  test('every list the route OFFERS passes the address; the commit and re-validation rebuilds omit it', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/inspection-public.js'), 'utf8');
+    const calls = [...src.matchAll(/await buildAvailabilityForLead\(([^;]*?)\);/gs)].map((m) => m[1]);
+    const withAddress = calls.filter((c) => /\baddress\b/.test(c));
+    // GET, /availability, /find-slots, the email block's slots and the SLOT_TAKEN refresh.
+    expect(withAddress).toHaveLength(5);
+    // The commit's single-day anti-forgery build and revalidateSlotAt: unfunneled, like the estimate page's redeem side.
+    expect(calls.filter((c) => !/\baddress\b/.test(c))).toHaveLength(2);
+    expect(calls.filter((c) => !/\baddress\b/.test(c)).every((c) => /rangeFrom: date, rangeTo: date/.test(c))).toBe(true);
   });
 });

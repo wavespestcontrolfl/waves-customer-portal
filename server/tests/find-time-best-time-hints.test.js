@@ -328,13 +328,13 @@ test.each([undefined, false, true])('existing-visit arrival routing requires exp
 });
 
 // Owner 2026-10-26: Quick Move used the gap check (no start after 4 PM, and
-// straight-line drive only). With GATE_PICKER_ROAD_CHECK it asks for the
-// route check Edit appointment uses, driven on Google this week.
-test.each([false, true])('Quick Move gets the route check on Google only with GATE_PICKER_ROAD_CHECK: %s', async (gateOn) => {
+// straight-line drive only). It now asks for the route check Edit
+// appointment uses, driven on Google this week (not under capacity mode).
+test.each([true, false])('Quick Move gets the route check on Google unless GATE_SCHEDULING_CAPACITY is on: %s', async (gateOn) => {
   process.env.GATE_BEST_TIME_HINTS = 'true';
   const saved = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
   process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
-  if (gateOn) process.env.GATE_PICKER_ROAD_CHECK = 'true';
+  if (!gateOn) process.env.GATE_SCHEDULING_CAPACITY = 'true';
   const db = require('../models/db');
   db.raw = jest.fn(sql => sql);
   db.mockReturnValue({
@@ -366,7 +366,7 @@ test.each([false, true])('Quick Move gets the route check on Google only with GA
       expect(opts).not.toHaveProperty('pickerBudget');
     }
   } finally {
-    delete process.env.GATE_PICKER_ROAD_CHECK;
+    delete process.env.GATE_SCHEDULING_CAPACITY;
     if (saved === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
     else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = saved;
   }
@@ -377,7 +377,6 @@ test.each([false, true])('Quick Move gets the route check on Google only with GA
 // live check never disagree (Codex #6881 pre-push audit).
 test('the picker road check stays off under GATE_SCHEDULING_CAPACITY', async () => {
   process.env.GATE_BEST_TIME_HINTS = 'true';
-  process.env.GATE_PICKER_ROAD_CHECK = 'true';
   process.env.GATE_SCHEDULING_CAPACITY = 'true';
   const { pickerRoadCheckLive } = jest.requireActual('../services/scheduling/arrival-route');
   try {
@@ -385,7 +384,6 @@ test('the picker road check stays off under GATE_SCHEDULING_CAPACITY', async () 
     delete process.env.GATE_SCHEDULING_CAPACITY;
     expect(pickerRoadCheckLive()).toBe(true);
   } finally {
-    delete process.env.GATE_PICKER_ROAD_CHECK;
     delete process.env.GATE_SCHEDULING_CAPACITY;
   }
 });

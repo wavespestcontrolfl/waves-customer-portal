@@ -405,5 +405,6 @@ module.exports = {
   noteAcceptRefused,
   noteExpiredReturn,
   closeSettledStuckAlerts,
+  categorySilenced,
   _private: { holdLabel, refusalWhy, expiredWhy, settledReason, ROUTINE_ACCEPT_CODES },
 };

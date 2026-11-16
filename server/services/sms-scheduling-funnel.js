@@ -112,7 +112,7 @@ function summarizeOffers(offers, { moveTimes, bookingTimes, now, observedAt }) {
 // NOT in this list: the customer asked for them, so they are real accepts for
 // recall. Precision never scores one as staff's confirmation, because a
 // decision the executor moved is left out of that comparison.
-const AUTOMATIC_MOVE_INITIATORS = Object.freeze(['system', 'machine', 'auto_dispatch', 'weather_auto', 'admin_bulk', 'day_replan']);
+const AUTOMATIC_MOVE_INITIATORS = Object.freeze(['system', 'machine', 'auto_dispatch', 'weather_auto', 'admin_bulk', 'day_replan', 'booking_make_room']);
 
 // A logged move of `visitId` into date + start, inside [t0, t0 + 48h].
 function movedInto(movesByVisit, visitId, t0, date, start) {

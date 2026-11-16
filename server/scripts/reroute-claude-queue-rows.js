@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 /**
- * One-time mover for GATE_ALERT_CLAUDE_QUEUE (owner 2026-10-26): open admin bell rows written before
- * the gate went on that the routing table sends to Claude's queue (services/admin-alert-routing.js:
+ * One-time mover for Claude's queue routing (owner 2026-10-26): open admin bell rows written before
+ * the routing went live that the routing table sends to Claude's queue (services/admin-alert-routing.js:
  * a Mac reminder job's row except an owner ask, and our own engineering-fault classes) move to the
  * Activity feed and are stamped who=claude, severity and class. Visibility only: read state, done
  * state, text and link stay, so nothing rings. Sends nothing to anyone.
  *
- * Usage (prod: through the Railway env so the Postgres connection and the gate are the live ones):
+ * Usage (prod: through the Railway env so the Postgres connection is the live one):
  *   railway run --service <portal> node server/scripts/reroute-claude-queue-rows.js            # DRY RUN
  *   railway run --service <portal> node server/scripts/reroute-claude-queue-rows.js --execute  # write
  *
- * Refuses to run while GATE_ALERT_CLAUDE_QUEUE is not exactly `true`. Safe to re-run: a stamped row is
+ * Safe to re-run: a stamped row is
  * skipped. Undo for one class: remove the feed, who, severity and claudeQueue keys from the rows' metadata.
  */
 const db = require('../models/db');

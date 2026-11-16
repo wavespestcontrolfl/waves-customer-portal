@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Bid Desk detector and parser (GATE_BID_DESK). PURE: no database, no network, NO LLM.
+ * Bid Desk detector and parser. PURE: no database, no network, NO LLM.
  *
  * detectBidEmail(email)  is this stored email a bid invite, an addendum or a reminder for one?
  * parseBidEmail(email)   the fields we may read from it.

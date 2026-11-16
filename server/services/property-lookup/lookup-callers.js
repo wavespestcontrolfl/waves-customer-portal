@@ -64,6 +64,10 @@ const CALLERS = freezeEntries({
   // lookup of the new address per move, priced only on the county-assessed home and lot of
   // a single-family house; no answer surface, the office prices anything else.
   moving_auto_estimate: { surface: 'automation', suiteSizing: false, calls: 1, file: 'services/moving-auto-estimate.js', why: 'one lookup per move; county home and lot only; the office prices anything else' },
+  // The technician estimate tool's price preview (GATE_TECH_ESTIMATES): a free cache-only read of the visit's or the
+  // typed address, then at most one live lookup on a miss (counted against the technician's daily budget), priced
+  // at list price. A technician cannot answer a suite or whole-building question.
+  tech_estimate_tool: { surface: 'staff', suiteSizing: false, calls: 2, file: 'services/tech-estimate-price.js', why: 'technician price preview: a cache-only read, then one live lookup on a miss; no way to answer the scope question' },
 });
 
 function freezeEntries(registry) {

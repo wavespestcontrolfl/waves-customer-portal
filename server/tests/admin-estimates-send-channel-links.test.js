@@ -846,3 +846,38 @@ describe('sendEstimateNow — the app-sent new-home estimate (GATE_MOVING_AUTO_S
     expect(result.channels.sms).toMatchObject({ ok: false, code: 'QUIET_HOURS_HOLD' });
   });
 });
+
+describe('sendEstimateNow — a technician\'s send from the phone (tech_estimate_send, GATE_TECH_ESTIMATES)', () => {
+  const smsLeg = () => sendCustomerMessage.mock.calls.at(-1)[0];
+  const CAPTURED = '2026-03-10T15:00:00.000Z';
+  const send = async (row, options) => {
+    db.mockImplementation(() => makeBuilder(row));
+    return router.sendEstimateNow(row, 'sms', options);
+  };
+
+  test('a new person: the text carries the tech entry point and the on-site request as its consent basis, at the time handed in', async () => {
+    const result = await send(estimateRow({ customer_id: null }), { techEstimateSend: { consentCapturedAt: CAPTURED } });
+    expect(result.sent).toBe(true);
+    expect(smsLeg()).toMatchObject({
+      entryPoint: 'tech_estimate_send',
+      audience: 'lead',
+      consentBasis: { status: 'transactional_allowed', source: 'tech_estimate_on_site_request', capturedAt: CAPTURED },
+      metadata: { original_message_type: 'estimate_sent' },
+    });
+  });
+
+  test('a customer on his route: the tech entry point and no consent basis (the customer already has a record)', async () => {
+    await send(estimateRow(), { techEstimateSend: {} });
+    expect(smsLeg().entryPoint).toBe('tech_estimate_send');
+    expect(smsLeg().consentBasis).toBeUndefined();
+    expect(smsLeg().audience).toBe('customer');
+  });
+
+  test('without the option nothing changes: the office\'s entry point and consent source, for a customer and for a new person', async () => {
+    await send(estimateRow({ customer_id: null }), {});
+    expect(smsLeg()).toMatchObject({ entryPoint: 'admin_estimate_send', consentBasis: { status: 'transactional_allowed', source: 'admin_estimate_send' } });
+    await send(estimateRow(), {});
+    expect(smsLeg().entryPoint).toBe('admin_estimate_send');
+    expect(smsLeg().consentBasis).toBeUndefined();
+  });
+});

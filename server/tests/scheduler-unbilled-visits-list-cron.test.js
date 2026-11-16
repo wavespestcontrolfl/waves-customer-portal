@@ -1,6 +1,6 @@
 /**
  * Unbilled visits in its own daily 7:23 ET cron (server/services/scheduler.js, '23 7 * * *'):
- * gate off reads nothing; on, the list runs under runExclusive, so a deploy overlap never raises it twice,
+ * the list runs under runExclusive, so a deploy overlap never raises it twice,
  * and a failed run is logged, never thrown out of the tick.
  *
  * Mock baseline copied from scheduler-quiet-overdue-invoices-cron.test.js.
@@ -18,7 +18,7 @@ jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
-  recurringSeriesTopUpLive: jest.fn(() => false), unbilledVisitsListLive: jest.fn(() => false),
+  recurringSeriesTopUpLive: jest.fn(() => false),
 }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
@@ -35,7 +35,7 @@ jest.mock('../services/unbilled-visits-list', () => ({ runUnbilledVisitsList: je
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
-const { isEnabled, unbilledVisitsListLive } = require('../config/feature-gates');
+const { isEnabled } = require('../config/feature-gates');
 const { runUnbilledVisitsList } = require('../services/unbilled-visits-list');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
@@ -51,17 +51,9 @@ function unbilledListTick() {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  unbilledVisitsListLive.mockReturnValue(false);
 });
 
-test('gate off: the tick returns before the lock or any read', async () => {
-  await unbilledListTick();
-  expect(runExclusive).not.toHaveBeenCalledWith('unbilled-visits-list', expect.any(Function));
-  expect(runUnbilledVisitsList).not.toHaveBeenCalled();
-});
-
-test('gate on: the list runs once inside runExclusive and its outcome is logged', async () => {
-  unbilledVisitsListLive.mockReturnValue(true);
+test('the list runs once inside runExclusive and its outcome is logged', async () => {
   await unbilledListTick();
   expect(runExclusive).toHaveBeenCalledWith('unbilled-visits-list', expect.any(Function));
   expect(runUnbilledVisitsList).toHaveBeenCalledTimes(1);
@@ -69,7 +61,6 @@ test('gate on: the list runs once inside runExclusive and its outcome is logged'
 });
 
 test('a failed run is logged, never thrown out of the tick', async () => {
-  unbilledVisitsListLive.mockReturnValue(true);
   runUnbilledVisitsList.mockRejectedValueOnce(new Error('connection reset'));
   await expect(unbilledListTick()).resolves.toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith('Unbilled visits failed: connection reset');

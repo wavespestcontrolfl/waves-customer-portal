@@ -24,6 +24,8 @@ jest.mock('../models/db', () => {
     c.first = jest.fn(async () => {
       if (table === 'scheduled_services') return mockVisit;
       if (table === 'service_records') return mockRecord;
+      // The move switch (tech-move-switch.test.js has its own suite): this caller may move visits.
+      if (table === 'technicians') return { id: 'tech-1', can_move_visits: true };
       if (table === 'customers') return { id: 'c1', first_name: 'Pat', last_name: 'Sample', phone: '(941) 555-0100' };
       return null;
     });
@@ -72,7 +74,6 @@ jest.mock('../services/call-bridge', () => ({
 }));
 jest.mock('../services/lead-estimate-link', () => ({ stampFirstResponseByContact: jest.fn(async () => 1) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true, providerMessageId: `SM${'a'.repeat(32)}` })) }));
-// gateEnvValue off: the move switch (GATE_TECH_MOVE_SWITCH) has its own suite, tech-move-switch.test.js.
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvTimestamp: jest.fn(() => null), gateEnvValue: jest.fn(() => false), techSetTextsLive: jest.fn(() => false) }));
 jest.mock('../services/sms-suggest-mode', () => ({
   reserveHumanReply: jest.fn(async () => ({ parkedDecisionIds: [], reservationId: '22222222-2222-4222-8222-222222222222', autoSendInFlight: false })),

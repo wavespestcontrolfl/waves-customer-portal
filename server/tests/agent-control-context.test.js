@@ -115,6 +115,30 @@ describe('agent-control context', () => {
     expect(() => ctx.withWorkload('bogus', () => {})).toThrow(/unknown workload/);
   });
 
+  describe('AGENT_CONTEXT_WORKLOAD process default', () => {
+    const ORIGINAL = process.env.AGENT_CONTEXT_WORKLOAD;
+    afterEach(() => {
+      if (ORIGINAL === undefined) delete process.env.AGENT_CONTEXT_WORKLOAD; else process.env.AGENT_CONTEXT_WORKLOAD = ORIGINAL;
+    });
+
+    it('answers a known workload whenever no scope set one, read at call time', () => {
+      expect(ctx.current().workload).toBeNull();
+      process.env.AGENT_CONTEXT_WORKLOAD = 'max_runner';
+      expect(ctx.current().workload).toBe('max_runner');
+      // a lane scope that sets no workload still gets the default
+      expect(ctx.runInLane('pest_id', () => ctx.current().workload)).toBe('max_runner');
+      expect(ctx.runInLane('pest_id', () => ctx.current().laneId)).toBe('pest_id');
+    });
+
+    it('lets a withWorkload scope win and ignores an unknown value', () => {
+      process.env.AGENT_CONTEXT_WORKLOAD = 'max_runner';
+      expect(ctx.withWorkload('replay', () => ctx.current().workload)).toBe('replay');
+      process.env.AGENT_CONTEXT_WORKLOAD = 'bogus';
+      expect(ctx.current().workload).toBeNull();
+      expect(ctx.runInLane('pest_id', () => ctx.current().workload)).toBeNull();
+    });
+  });
+
   it('concurrent scopes do not leak into each other', async () => {
     const seen = {};
     await Promise.all([

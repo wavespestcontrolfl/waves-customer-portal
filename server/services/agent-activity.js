@@ -10,7 +10,7 @@
 //   notifications            → ops_digest rows (services/ops-digest.js, the
 //                              in-app form of the owner FIX:/ACT: emails),
 //                              and the rows routed to Claude's queue
-//                              (metadata.claudeQueue, GATE_ALERT_CLAUDE_QUEUE)
+//                              (metadata.claudeQueue)
 //
 // Read-only. Behind GATE_AGENT_ACTIVITY (feature-gates.js `agentActivity`):
 // the route answers { available: false } while the gate is off.
@@ -367,7 +367,7 @@ function digestItem(row) {
   };
 }
 
-// A row routed to Claude's queue (services/admin-alert-routing.js, GATE_ALERT_CLAUDE_QUEUE): written
+// A row routed to Claude's queue (services/admin-alert-routing.js): written
 // Activity-only, so this feed is where it shows. It renders as a digest item (the client's Review / Done /
 // focus handling is keyed on kind 'digest' and a notification id; Done is the same fenced PUT), labelled
 // "Claude's queue". Its stamped severity sets the status: broken reads failed, needs-you awaiting review,

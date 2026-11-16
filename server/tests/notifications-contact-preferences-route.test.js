@@ -290,24 +290,15 @@ describe('PUT /contact-preferences', () => {
     expect(res.body.preferences.techEnRoute).toBe(true);
   });
 
-  test('text-only delivery of the service report is refused while the contact report text is off (codex r9)', async () => {
-    delete process.env.GATE_CONTACT_REPORT_TEXT;
-    const res = await put({ serviceCompleteChannel: 'sms' });
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('REPORT_TEXT_UNAVAILABLE');
-    expect(tables.service_contact_notification_prefs).toEqual([]);
-    // Text + email (whatever the account sends) stays available.
+  test('text-only delivery of the service report is saved, and text + email stays available', async () => {
+    expect((await put({ serviceCompleteChannel: 'sms' })).status).toBe(200);
+    expect(tables.service_contact_notification_prefs[0].service_complete_channel).toBe('sms');
     expect((await put({ serviceCompleteChannel: 'both' })).status).toBe(200);
   });
 
-  test('a text-only report choice stored while the contact report text was on reads as the default once it is off (codex r10)', async () => {
+  test('a stored text-only report choice reads as text', async () => {
     tables.service_contact_notification_prefs.push({ customer_id: 'cust-1', phone_key: '9415550202', service_complete_channel: 'sms' });
-    process.env.GATE_CONTACT_REPORT_TEXT = 'true';
     expect((await get()).body.preferences.serviceCompleteChannel).toBe('sms');
-    delete process.env.GATE_CONTACT_REPORT_TEXT;
-    expect((await get()).body.preferences.serviceCompleteChannel).toBe('both');
-    // The stored row is left as it is: the choice returns with the gate.
-    expect(tables.service_contact_notification_prefs[0].service_complete_channel).toBe('sms');
   });
 
   test('email-only delivery is decided against the slot under the row lock: an address the holder removed since the token was issued refuses it (codex r11)', async () => {

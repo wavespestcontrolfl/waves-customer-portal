@@ -873,6 +873,15 @@ const CANONICAL_WRITE_BLOCKING_FLAGS = new Set([
 //      cleared upstream by isAuthorizedFamilyMemberBooking /
 //      isAuthorizedWdoArrangerBooking). Tenants, property managers, HOA
 //      members and "other" keep the card.
+//   6. missing_last_name when the customer the call is linked to was on file
+//      before the call and already has a real last name (2026-11-09 audit: 24
+//      of 57 cards in 60 days; the extraction took the staff member's first
+//      name, matched the customer's own first name, or a spouse called from
+//      the customer's number). The record has a last name, so the card is
+//      nobody's work. The caller decides lastNameOnFile (the pass's pre-call
+//      customer, not one this call created, with a non-placeholder last name;
+//      a failed read says false). Card only: the flag, the route decision and
+//      the routing verdict are untouched.
 const SCHEDULING_NO_ASK_STATUSES = new Set(['none', 'canceled']);
 const EXISTING_SERVICE_INTENTS = new Set(['follow_up_existing_service', 'complaint_or_callback', 'cancellation_request']);
 const NO_ASK_ADDRESS_CARDS = new Set(['address_unverifiable', 'missing_service_address']);
@@ -912,6 +921,12 @@ function callMakesNoServiceAsk(extraction) {
 // decision out of dropUnneededCallCards' complexity.
 function pretreatDroppedCards(preConstructionPretreat) {
   return preConstructionPretreat ? ['missing_unit_number'] : [];
+}
+
+// Rule 6 above, kept out of dropUnneededCallCards' complexity. The caller decides
+// lastNameOnFile; only a literal true drops the card.
+function lastNameOnFileDroppedCards(lastNameOnFile) {
+  return lastNameOnFile === true ? ['missing_last_name'] : [];
 }
 
 // The cards that say the same thing as address_unverified: the model's own
@@ -1020,7 +1035,7 @@ function thirdPartyCustomerOnlyCards(extraction, { gateOn = false } = {}) {
 }
 
 function dropUnneededCallCards(flags, extraction, options) {
-  const { canonicalStreet, preConstructionPretreat } = options || {};
+  const { canonicalStreet, preConstructionPretreat, lastNameOnFile } = options || {};
   const list = Array.isArray(flags) ? flags : [];
   const dropped = new Set(noTextDroppedCards(extraction));
   const has = (f) => list.includes(f);
@@ -1055,6 +1070,7 @@ function dropUnneededCallCards(flags, extraction, options) {
     dropped.add('caller_not_authorized');
   }
   pretreatDroppedCards(preConstructionPretreat).forEach((f) => dropped.add(f));
+  lastNameOnFileDroppedCards(lastNameOnFile).forEach((f) => dropped.add(f));
   const kept = list.filter((f) => !dropped.has(f));
   return { flags: kept, dropped: list.filter((f) => dropped.has(f)) };
 }
@@ -1247,12 +1263,11 @@ function isWholeStructureService({ serviceKey = null } = {}) {
 }
 
 /**
- * GATE_CALL_WHOLE_STRUCTURE_NO_UNIT: rewrite an Address Validation verdict whose
+ * Whole-structure unit waiver: rewrite an Address Validation verdict whose
  * ONLY problem is the missing unit into the accepted verdict it would have been
  * for a building-level job. Returns the SAME object untouched unless every
- * condition holds, so gate-off (and every non-qualifying call) is
- * byte-identical:
- *   - the gate is on and the call's resolved service is on the allowlist;
+ * condition holds, so every non-qualifying call is byte-identical:
+ *   - the call's resolved service is on the allowlist;
  *   - the verdict is exactly "PREMISE resolved, only subpremise missing"
  *     (isMissingUnitNumber) — no other missing component;
  *   - every other address check that deriveStatus would have applied still
@@ -1266,7 +1281,6 @@ function isWholeStructureService({ serviceKey = null } = {}) {
  * re-raises the unit ask. Persisted ai_address_validation keeps the ORIGINAL.
  */
 function applyWholeStructureUnitWaiver(av, opts = {}) {
-  if (!opts.enabled) return av;
   if (!isWholeStructureService(opts)) return av;
   if (!isMissingUnitNumber(av)) return av;
   if (av.inServiceArea !== true || av.hasUnconfirmed || av.hasReplaced) return av;
@@ -2511,7 +2525,7 @@ function onFileAddressSatisfaction(flags, extraction, opts = {}) {
   return { flags: list.filter((f) => !FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f)), satisfied };
 }
 
-// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT x GATE_CALL_WHOLE_STRUCTURE_NO_UNIT: true
+// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT x the whole-structure unit waiver: true
 // when the extraction carries the service-unclear signal the Assessment gate
 // demotes (the model's ambiguous_pest_or_service flag). With the Assessment gate
 // on, such a call books the Waves Assessment row — a service OFF the whole-

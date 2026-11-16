@@ -1,5 +1,5 @@
 /**
- * GATE_CALL_ADDRESS_FAMILY_CARD (owner 2026-10-24, "yes build"). A caller on a number no account carries
+ * The stated-address family card (owner 2026-10-24, "yes build"). A caller on a number no account carries
  * who states the service address a live customer already has gets ONE suggest-only
  * `family_account_candidates` card (basis stated_address_on_account) instead of a new customer record, with
  * two admin actions: Attach as contact (first free service-contact slot + relink) and New customer (close the
@@ -38,53 +38,23 @@ const fs = require('fs');
 const knex = require('knex');
 const express = require('express');
 const { randomUUID } = require('crypto');
-const gates = require('../config/feature-gates');
 const {
   matchStatedAddressAccounts, fileFamilyAccountCard, operatorClosedCard, ATTACH_ROLES,
 } = require('../services/call-family-name-link');
 
-const GATE = 'GATE_CALL_ADDRESS_FAMILY_CARD';
 const processor = require('../services/call-recording-processor');
 const processorSource = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
-describe('GATE_CALL_ADDRESS_FAMILY_CARD reader', () => {
-  const saved = process.env[GATE];
-  afterEach(() => { if (saved === undefined) delete process.env[GATE]; else process.env[GATE] = saved; });
-  test('strict true only: unset, 1, TRUE and yes are all off', () => {
-    delete process.env[GATE];
-    expect(gates.callAddressFamilyCardLive()).toBe(false);
-    for (const v of ['1', 'TRUE', 'yes', 'on', '']) { process.env[GATE] = v; expect(gates.callAddressFamilyCardLive()).toBe(false); }
-    process.env[GATE] = 'true';
-    expect(gates.callAddressFamilyCardLive()).toBe(true);
-  });
-  test('gate off: the matcher returns before any query', async () => {
-    delete process.env[GATE];
-    const conn = jest.fn(() => { throw new Error('queried'); });
-    await expect(matchStatedAddressAccounts({
-      call: { id: 'c', from_phone: '+19415550101' }, extracted: { first_name: 'Dana' },
-      statedAddress: { street_line_1: '100 Example Loop', city: 'Sarasota', postal_code: '34240' }, conn,
-    })).resolves.toBeNull();
-    expect(conn).not.toHaveBeenCalled();
-  });
-});
-
 describe('which cards offer the two actions (the server decides; the screen holds no copy)', () => {
   const { stampFamilyCardActions } = require('../routes/admin-triage').__private;
-  const saved = process.env[GATE];
-  afterEach(() => { if (saved === undefined) delete process.env[GATE]; else process.env[GATE] = saved; });
   const card = (payload, status = 'open') => ({ reason_code: 'family_account_candidates', status, payload });
   const address = () => card({ match_basis: 'stated_address_on_account', caller_first_name: 'Dana', contact_phone: '+19415550101' });
-  test('gate off, or not an admin: no card is stamped', () => {
-    delete process.env[GATE];
-    const off = [address()];
-    stampFamilyCardActions(off, true);
-    process.env[GATE] = 'true';
+  test('not an admin: no card is stamped', () => {
     const tech = [address()];
     stampFamilyCardActions(tech, false);
-    for (const [item] of [off, tech]) expect(item.can_attach_contact).toBeUndefined();
+    expect(tech[0].can_attach_contact).toBeUndefined();
   });
-  test('gate on, admin: Attach only on an open address card that carries the caller; New customer on every basis but the callback voicemail one', () => {
-    process.env[GATE] = 'true';
+  test('admin: Attach only on an open address card that carries the caller; New customer on every basis but the callback voicemail one', () => {
     const items = [address(), card({ match_basis: 'caller_full_name' }), card({ match_basis: 'callback_spoken_number' }),
       card(JSON.stringify({ match_basis: 'stated_address_on_account' })), { reason_code: 'ambiguous_scheduling', status: 'open', payload: {} }, { ...address(), status: 'resolved' }];
     stampFamilyCardActions(items, true);
@@ -95,29 +65,23 @@ describe('which cards offer the two actions (the server decides; the screen hold
 
 describe('an Attach-filed slot is identity only on the office confirmation (owner 2026-10-24)', () => {
   const identity = processor._test;
-  const saved = process.env[GATE];
-  afterEach(() => { if (saved === undefined) delete process.env[GATE]; else process.env[GATE] = saved; });
   const customer = (entry) => ({
     phone: '+19415550102', service_contact_name: 'Dana Bronner', service_contact_phone: '+19415550101', service_contact_role: 'family_member',
     service_preferences: { unconsented_slot_phone_keys: ['9415550101'], office_confirmed_slot_phones: entry ? [entry] : [] },
   });
   const confirmed = { phone_key: '9415550101', by: 'admin-1', at: '2026-10-24T12:00:00Z', source: 'family_card_attach' };
-  test('a confirmed Attach slot links the caller\'s next call; one with no confirmation named does not (gate on)', () => {
-    process.env[GATE] = 'true';
+  test('a confirmed Attach slot links the caller\'s next call; one with no confirmation named does not', () => {
     expect(identity.slotOnlyLinkAllowed(customer(confirmed), '+19415550101', {})).toBe(true);
     expect(identity.slotOnlyLinkAllowed(customer({ ...confirmed, by: null }), '+19415550101', {})).toBe(false);
     expect(identity.slotOnlyLinkAllowed(customer({ ...confirmed, at: undefined }), '+19415550101', {})).toBe(false);
   });
-  test('every other slot, and the gate off, are untouched: no entry links as before', () => {
-    process.env[GATE] = 'true';
+  test('every other slot is untouched: no entry links as before', () => {
     expect(identity.slotOnlyLinkAllowed(customer(null), '+19415550101', {})).toBe(true);
-    delete process.env[GATE];
-    expect(identity.slotOnlyLinkAllowed(customer({ ...confirmed, by: null }), '+19415550101', {})).toBe(true);
   });
 });
 
 describe('processor wiring (processRecording cannot run end to end in a test)', () => {
-  test('a filed card holds the customer create, only with the gate on and for a pass that would have created one', () => {
+  test('a filed card holds the customer create, for a pass that would have created one', () => {
     const covers = processorSource.indexOf('const familyCardCovers = !!familyCardReport.filed');
     const hold = processorSource.indexOf('} else if (familyCardCovers && (extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {');
     const mint = processorSource.indexOf('} else if ((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {');
@@ -126,7 +90,6 @@ describe('processor wiring (processRecording cannot run end to end in a test)', 
     expect(processorSource.indexOf("require('./call-family-name-link').fileFamilyAccountCard({")).toBeLessThan(covers);
     expect(hold).toBeGreaterThan(processorSource.indexOf('} else if (spokenNumberSuggested) {'));
     expect(hold).toBeLessThan(mint);
-    expect(processorSource.slice(covers, covers + 400)).toContain('callAddressFamilyCardLive()');
     expect(processorSource.slice(covers, covers + 400)).toContain("!== 'callback_spoken_number'");
   });
   test('the held call is not a creation failure and its lead stays unclaimed, like the shared-phone case', () => {
@@ -138,7 +101,6 @@ describe('processor wiring (processRecording cannot run end to end in a test)', 
 const SKIP = !process.env.DATABASE_URL;
 (SKIP ? describe.skip : describe)('stated address family card on PostgreSQL', () => {
   let database; let trx; let server; let base;
-  const savedGate = process.env[GATE];
 
   beforeAll(async () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
@@ -152,11 +114,9 @@ const SKIP = !process.env.DATABASE_URL;
   afterAll(async () => {
     await new Promise((resolve) => server.close(resolve));
     await database.destroy();
-    if (savedGate === undefined) delete process.env[GATE]; else process.env[GATE] = savedGate;
   });
   beforeEach(async () => {
     jest.clearAllMocks();
-    process.env[GATE] = 'true';
     trx = await database.transaction();
     mockConn = trx;
   });
@@ -281,16 +241,6 @@ const SKIP = !process.env.DATABASE_URL;
       expect(report.filed).toBeUndefined();
     });
 
-    test('gate off: the same call files nothing and reports nothing filed (byte-identical to before)', async () => {
-      await customer();
-      delete process.env[GATE];
-      const callLogId = await call();
-      const report = {};
-      await fileFamilyAccountCard({ ...input(callLogId), report });
-      expect(report.filed).toBeUndefined();
-      expect(await cardsFor(callLogId)).toHaveLength(0);
-    });
-
     test('a filed card of the older bases is reported too, so the processor holds the create for them as well', async () => {
       const mom = await customer();
       const callLogId = await call();
@@ -383,15 +333,12 @@ const SKIP = !process.env.DATABASE_URL;
       expect((await cardsFor(callLogId))[0].status).toBe('open');
     });
 
-    test('Attach refuses a stale card, an account the card does not list, a non-admin, and a gate that is off', async () => {
+    test('Attach refuses a stale card, an account the card does not list, and a non-admin', async () => {
       const { mom, card } = await filed();
       const other = await customer({ address_line1: '9 Somewhere Ct' });
       expect((await post(`${card.id}/attach-contact`, { customer_id: mom, expected_updated_at: '2020-01-01T00:00:00Z' })).status).toBe(409);
       expect((await post(`${card.id}/attach-contact`, { customer_id: other, expected_updated_at: card.updated_at })).status).toBe(400);
       expect((await post(`${card.id}/attach-contact`, { customer_id: mom, expected_updated_at: card.updated_at }, { 'x-test-role': 'tech' })).status).toBe(403);
-      delete process.env[GATE];
-      expect((await post(`${card.id}/attach-contact`, { customer_id: mom, expected_updated_at: card.updated_at })).status).toBe(404);
-      expect((await post(`${card.id}/new-customer`, { expected_updated_at: card.updated_at })).status).toBe(404);
       expect((await trx('customers').where({ id: mom }).first()).service_contact_name).toBeNull();
     });
 

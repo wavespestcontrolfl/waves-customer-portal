@@ -1279,6 +1279,7 @@ function moverText(initiatedBy) {
   const label = String(initiatedBy || '');
   if (label === 'auto_dispatch') return AUTO_DISPATCH_ACTOR_TEXT;
   if (label === 'day_replan') return 'by the route re-plan';
+  if (label === 'booking_make_room') return 'to fit a new booking';
   if (label === 'weather_auto' || label.startsWith('rain')) return 'by the rain-out sweep';
   if (label === 'system' || label === 'machine') return 'automatically';
   if (label === 'tech') return 'by the technician';

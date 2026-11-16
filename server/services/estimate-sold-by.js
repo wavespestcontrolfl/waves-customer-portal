@@ -5,11 +5,13 @@
  * 3b-2 and reads only estimates.sold_by_technician_id. Nothing here pays, texts, emails or
  * charges anyone.
  *
- * Three ways the column gets its value:
+ * Four ways the column gets its value:
  *  - 'flag': a GPS-verified field lead of an active W-2 technician that the office built this
  *    estimate from (leads.estimate_id), for the place the GPS proved (the visited customer, or
  *    the Neighbor's typed address); one flag credits one estimate. The auto-fill runs from
  *    createOrReuseAdminEstimate and reviseAdminEstimate;
+ *  - 'creator': an active W-2 technician made the estimate with the technician estimate tool
+ *    (GATE_TECH_ESTIMATES, owner 2026-11-05: "Sold by = the creator"); written by creditCreator;
  *  - 'office': an admin chose the technician;
  *  - 'cleared': an admin chose no one. Auto-fill never refills a cleared estimate.
  * Once the customer accepts (accepted_at set) the value is locked.
@@ -132,6 +134,33 @@ async function autoFillSoldBy(trx, estimate, { now = () => new Date() } = {}) {
     })
     .returning(SOLD_BY_COLUMNS);
   return filled ? { ...current, ...filled } : current;
+}
+
+/**
+ * The technician estimate tool's credit, inside the tool's own write transaction (routes/tech-estimates.js):
+ * the technician who made the estimate is the seller. It does NOT read GATE_COMMISSION_SOLD_BY on purpose:
+ * the tool has its own gate (GATE_TECH_ESTIMATES) and the owner ruled the creator is the seller, so the
+ * credit is recorded from the first tool estimate; the commission ledger keeps its own gate and pays
+ * nothing until that is on. Only an active W-2 technician, only an estimate that is not accepted and has
+ * no Sold by yet (an earlier flag, an office choice or a clear stays); the guards ride the UPDATE so a
+ * concurrent accept or admin choice wins. Returns the estimate row, with the Sold by columns when this
+ * call filled them.
+ */
+async function creditCreator(trx, estimate, { technicianId, now = () => new Date() } = {}) {
+  if (!estimate?.id || !technicianId || estimate.accepted_at) return estimate;
+  const [filled] = await trx('estimates')
+    .where({ id: estimate.id })
+    .whereNull('accepted_at')
+    .whereNull('sold_by_source')
+    .whereExists(function activeW2Technician() {
+      this.select(trx.raw('1')).from('technicians')
+        .where('technicians.id', technicianId)
+        .where('technicians.employment_type', 'w2')
+        .where('technicians.active', true);
+    })
+    .update({ sold_by_technician_id: technicianId, sold_by_source: 'creator', sold_by_set_at: now() })
+    .returning(SOLD_BY_COLUMNS);
+  return filled ? { ...estimate, ...filled } : estimate;
 }
 
 // A save may move a flag-filled estimate to another place (a revised address or customer), or the
@@ -257,6 +286,7 @@ module.exports = {
   LOCKED_MESSAGE,
   soldByLive,
   autoFillSoldBy,
+  creditCreator,
   setEstimateSoldBy,
   listSellerCandidates,
   loadSoldByForList,

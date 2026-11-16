@@ -1,5 +1,5 @@
 /**
- * Deadline math for a technician's ID card and training (GATE_TECH_TRAINING_DATES, F.S. 482.091, rule 5E-14.1421).
+ * Deadline math for a technician's ID card and training (F.S. 482.091, rule 5E-14.1421).
  * Pure functions: the observable results are the dates and the done / due / due_soon / overdue statuses the Licenses
  * tab shows and the daily reminder sweep keys on. Regression guarded: Date day math on a date-only string, and month-end
  * overflow (Aug 31 + 6 months must be Feb 28, not Mar 3).

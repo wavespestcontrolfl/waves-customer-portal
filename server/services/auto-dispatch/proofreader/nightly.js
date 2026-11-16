@@ -29,6 +29,10 @@
  * (closeNotices). A notice a person marked done before then still holds its
  * visit on that placement (personHeld).
  *
+ * KEPT HOLDS (owner 2026-11-08, dispatch audit Fix 2): a hold is kept for the
+ * very same question (questionPrint, keptHold). Later runs ask no model about
+ * it until the record's words, either slot, the prompt or the model change.
+ *
  * Behind GATE_AUTO_DISPATCH_PROOFREADER (config.proofreaderEnabled).
  */
 const logger = require('../../logger');
@@ -64,9 +68,10 @@ const firstName = (name) => String(name || '').trim().split(/\s+/)[0] || null;
 // night the model could not be asked (Codex #6313 r7).
 const CHECK_BROKE = new Set(['model_failed', 'bad_answer', 'check_failed']);
 // Answers that are not the model's: it was never asked (the deadline, a
-// record too long to send) or the check broke. Every other answer is a usable
-// one, the proof that the check works (check-down-notice.js reads `answered`).
-const NOT_ANSWERED = new Set([...CHECK_BROKE, 'deadline', 'record_too_long']);
+// record too long to send, a hold kept from an earlier run: keptHold) or the
+// check broke. Every other answer is a usable one, the proof that the check
+// works (check-down-notice.js reads `answered`).
+const NOT_ANSWERED = new Set([...CHECK_BROKE, 'deadline', 'record_too_long', 'kept_hold']);
 
 // A broken check, and the first cause the run saw: a failed call's reason
 // (`anthropic_400`, `anthropic_timeout`, …) or the check's own why, for the
@@ -130,6 +135,8 @@ function auditOf(answer) {
   return {
     verdict: answer.verdict, why: answer.why, entry_id: answer.entry_id || null, model: answer.model || null, prompt_version: answer.prompt_version || null,
     ...(answer.unread && answer.unread.length ? { unread: answer.unread } : {}),
+    // A hold's question (questionPrint): the key a later run finds it by (keptHold).
+    ...(answer.question ? { question: answer.question } : {}),
   };
 }
 
@@ -196,12 +203,15 @@ async function ask({ service, best }, { conn, proofreader, state }) {
     const move = proofreader.moveFacts(planned);
     const skip = notAskable(record, state);
     if (skip) return { answer: withUnread(skip, record) };
+    const question = questionPrint(move, record);
+    const kept = await keptHold(conn, service, question);
+    if (kept) return { answer: withUnread(kept, record) };
     // Only a call that goes to the model spends the run's call limit: a
     // record that cannot be read, or one too long to send, asks nobody
     // (Codex #6313 r2).
     if (!record.tooLong) state.calls += 1;
     const answer = await recordStillAsRead(await proofreader.proofreadMove({ move, record }), record, { service, conn, proofreader });
-    return { answer: withUnread(answer, record), recordPrint: recordPrint(record) };
+    return { answer: withUnread(answer.verdict === 'hold' ? { ...answer, question } : answer, record), recordPrint: recordPrint(record) };
   } catch (err) {
     // Never allow on an error: the visit stays and the next run asks again.
     logger.warn(`[auto-dispatch] move proofreader failed for ${service.id}: ${safeError(err)}`);
@@ -217,6 +227,43 @@ function recordPrint(record) {
   for (const row of record.entries) hash.update(`${row.channel}|${row.from}|${row.at}|${row.text}\n`);
   for (const row of record.unread) hash.update(`unread|${row.channel}|${row.reason}|${row.at || ''}\n`);
   return `${record.entries.length}:${record.unread.length}:${hash.digest('hex')}`;
+}
+
+// The exact question the model is asked, as one comparable value: the model,
+// the prompt and the user turn (the move with both slots, the record's words).
+// A change to any of them is a new question.
+function questionPrint(move, record) {
+  const { SYSTEM_PROMPT, PROMPT_VERSION, buildText } = require('./prompt');
+  const { model } = require('../../../config/models').ROUTES.autoDispatchProofreader;
+  return require('crypto').createHash('sha256')
+    .update(`${model}\n${PROMPT_VERSION}\n${SYSTEM_PROMPT}\n${buildText({ move, record })}`)
+    .digest('hex');
+}
+
+// KEPT HOLDS (owner 2026-11-08, "fix": dispatch audit, Fix 2). A visit held on
+// the very same question by an earlier run keeps its hold and no model is
+// asked: the same visit was asked the same thing on 11 of 14 nights. Only a
+// hold is kept; an allow, an unsure answer and a broken check are asked again.
+// Read from the run's own decision rows (constraints_checked.proofreader,
+// auditOf). A failed read asks the model, as before. The kept answer's why is
+// 'kept_hold': the audit row says no model was asked, and it is not counted
+// as an answer (NOT_ANSWERED).
+async function keptHold(conn, service, question) {
+  try {
+    const row = await conn('auto_dispatch_audit_logs')
+      .where({ scheduled_service_id: service.id, reason_code: REASON_CODE.hold })
+      .whereRaw("constraints_checked->'proofreader'->>'question' = ?", [question])
+      .orderBy('created_at', 'desc')
+      .first('constraints_checked');
+    const was = row && row.constraints_checked && row.constraints_checked.proofreader;
+    if (!was || was.verdict !== 'hold') return null;
+    return {
+      verdict: 'hold', why: 'kept_hold', entry_id: was.entry_id || null, model: was.model || null, prompt_version: was.prompt_version || null, question,
+    };
+  } catch (err) {
+    logger.warn(`[auto-dispatch] move proofreader could not read the earlier holds of ${service.id}: ${safeError(err)}`);
+    return null;
+  }
 }
 
 // A model call takes up to two minutes. An allow stands only when the record

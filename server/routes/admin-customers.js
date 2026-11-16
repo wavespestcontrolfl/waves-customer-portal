@@ -3221,6 +3221,20 @@ router.get('/:id/comms', requireAdmin, async (req, res, next) => {
   }
 });
 
+// { reminder24hOn, reminder24hByProperty } for ONE customer (appointment-reminders.loadBookingReminder24hAnswers, the senders'
+// own rule, read-only): the customer row's answer, and while property texts are enforced each saved property's own. {} with the
+// gate off or on a failed read: the client reads a missing field as "the reminder will not go out", which is what the senders
+// do with unreadable preferences.
+async function reminder24hField(customerId) {
+  try {
+    if (!require('../services/time-promise').dayOnlyPromiseOn()) return {};
+    const answers = await require('../services/appointment-reminders').loadBookingReminder24hAnswers(db, customerId);
+    return { reminder24hOn: answers.customer, reminder24hByProperty: answers.properties };
+  } catch {
+    return {};
+  }
+}
+
 // GET /api/admin/customers/:id/schedule-estimates — bookable estimates
 // formatted for the New Appointment modal. Surfaces accepted estimates plus
 // still-open quotes the customer has been sent (sent / viewed) so a phone
@@ -3393,7 +3407,9 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         } : null,
       };
     }));
-    res.json({ estimates: out });
+    // GATE_DAY_ONLY_PROMISE part E: will this customer's 24-hour reminder go out? The booking window's phone-script hint needs
+    // it (a day-only promise is made only when that text will go out). Gate off: the reply is exactly today's, nothing read.
+    res.json({ estimates: out, ...(await reminder24hField(customer.id)) });
   } catch (err) { next(err); }
 });
 
@@ -5200,13 +5216,6 @@ router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, re
     if (error) return res.status(400).json({ error: error.message });
     const patch = ContactPrefs.contactPrefPatchFromBody(updates);
     const asksEmailOnly = Object.values(patch).includes('email');
-    // Text-only report delivery exists only while the contact report text
-    // (GATE_CONTACT_REPORT_TEXT) does — the same refusal as the contact's own
-    // PUT (codex #6364 r2 P2): stored anyway, the choice would read as the
-    // default today and go live unseen at a later gate flip.
-    if (patch.service_complete_channel === 'sms' && !require('../config/feature-gates').contactReportTextLive()) {
-      return res.status(400).json({ error: 'Service reports are delivered by email for this property.', code: 'REPORT_TEXT_UNAVAILABLE' });
-    }
     // Every input the save depends on is read under the comms lock, as the
     // contact's own PUT reads it (codex #6364 r1 P2): the slot (a holder
     // replacing it meanwhile must not have the pruned row recreated), the
@@ -7251,3 +7260,4 @@ function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, verify
   });
 }
 module.exports.setCustomerBillToFromBar = setCustomerBillToFromBar;
+module.exports.reminder24hField = reminder24hField;

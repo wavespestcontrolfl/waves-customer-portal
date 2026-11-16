@@ -64,12 +64,13 @@ function capRouteQualityCards(expected, limit = MAX_CARDS_PER_DATE) {
   return expected;
 }
 
-// Drive models whose minutes can back a lateness claim: the calibrated
-// estimate and its GPS-fitted drive clock (GATE_DRIVE_CLOCK, owner 2026-10-28).
-const TIMED_DRIVE_MODELS = new Set(['calibrated', 'drive_clock']);
+// The drive model whose minutes can back a lateness claim: the GPS-fitted
+// drive clock (owner 2026-10-28), live whenever drive-time calibration is on.
+// The legacy estimate cannot back one.
+const TIMED_DRIVE_MODEL = 'drive_clock';
 
 // One technician's unresolved exceptions for a day, plus the modeled-late
-// count: lateness is a claim about timing, so it needs a calibrated drive
+// count: lateness is a claim about timing, so it needs the drive clock
 // model AND a known duration for every stop before it can be made.
 function technicianRouteIssues(quality, driveModel) {
   const issues = [];
@@ -88,7 +89,7 @@ function technicianRouteIssues(quality, driveModel) {
   if (quality.uncertaintyReasons.includes('grouped_work_requires_review')) {
     issues.push('Grouped services need a combined duration check before route timing can be verified.');
   }
-  const late = TIMED_DRIVE_MODELS.has(driveModel) && !unknownDurations ? quality.modeledLateVisits?.length : 0;
+  const late = driveModel === TIMED_DRIVE_MODEL && !unknownDurations ? quality.modeledLateVisits?.length : 0;
   if (late) issues.push(`${late} visit${late === 1 ? '' : 's'} modeled after the promised arrival window. Review the running order and appointment commitments.`);
   return { issues, late, doubleBookings };
 }

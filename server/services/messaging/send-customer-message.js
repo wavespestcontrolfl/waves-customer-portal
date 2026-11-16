@@ -1747,6 +1747,11 @@ async function recordSmsOfferAfterSend(input, sendInput, providerOutcome, preSen
 // told. The sid rides along in the row so the detector can still drop the
 // promise if the carrier later reports the message undelivered. Never
 // blocking: the text is already out.
+// 'day' for a day-only send (GATE_DAY_ONLY_PROMISE), else null.
+function promiseLevelOf(metadata) {
+  return metadata?.promise_level === 'day' ? 'day' : null;
+}
+
 async function recordPromiseEvidenceFallback(sendInput, providerOutcome, audit) {
   if (audit.id || !sendInput.appointmentId) return;
   // A SERIES confirmation is recorded even with no window of its own: a
@@ -1783,6 +1788,8 @@ async function recordPromiseEvidenceFallback(sendInput, providerOutcome, audit) 
     // recording it as per-service would leave the siblings on their pre-move
     // windows (codex P1, PR #4403 round 26).
     stopWide: !!sendInput.metadata?.notificationEventKey,
+    // A day-only send is recorded as a DAY promise, not an unknown window (which the readers count as an hour).
+    promiseLevel: promiseLevelOf(sendInput.metadata),
   }).catch(() => {});
 }
 

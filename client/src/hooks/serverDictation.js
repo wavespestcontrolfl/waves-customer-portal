@@ -34,7 +34,8 @@ export function checkServerDictation(token) {
     .then((d) => {
       if (!d) return false;
       const value = d.available === true;
-      answered = { token, value, liveWords: value && d.liveWords === true };
+      // `everyBox` (GATE_DICTATION_EVERY_BOX) rides beside it: the staff-wide mic on text boxes with none.
+      answered = { token, value, everyBox: value && d.everyBox === true, liveWords: value && d.liveWords === true };
       return value;
     })
     .catch(() => false)
@@ -43,6 +44,19 @@ export function checkServerDictation(token) {
     });
   inFlight = { token, promise };
   return promise;
+}
+
+/** True when the server also wants the one Waves mic on every staff text box (FocusedBoxMic). Never rejects. */
+export async function checkEveryBoxDictation(token) {
+  await checkServerDictation(token);
+  return Boolean(token && answered && answered.token === token && answered.everyBox === true);
+}
+
+/** Asks the server again (the gate may have changed). The every-box answer, or null when the server could not be reached. */
+export async function refreshEveryBoxDictation(token) {
+  forgetServerDictation();
+  await checkServerDictation(token);
+  return answered && answered.token === token ? answered.everyBox === true : null;
 }
 
 /** Drop the remembered answer (the server said 404: the gate went off mid-session). */

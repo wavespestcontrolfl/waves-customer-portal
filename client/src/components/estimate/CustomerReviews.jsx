@@ -167,7 +167,7 @@ export default function CustomerReviews({ onJoinNeighbors = null, commercial = f
       }}>
         {commercial ? 'What our customers say' : glassCopyActive() ? GLASS_COPY.reviewsTitle : 'Customer reviews'}
       </h2>
-      <p style={{ fontSize: 14, color: W.textCaption, margin: '0 0 16px', lineHeight: 1.5 }}>
+      <p className="gc-lead" style={{ fontSize: 14, color: W.textCaption, margin: '0 0 16px', lineHeight: 1.5 }}>
         {commercial
           ? 'Real Google reviews from Waves customers across our service area.'
           : glassCopyActive()

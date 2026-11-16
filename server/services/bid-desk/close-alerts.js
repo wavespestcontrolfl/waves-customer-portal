@@ -2,8 +2,7 @@
 
 /**
  * Bid Desk bells that a saved change has finished (docs/admin-notifications.md 4.3). One function, used by the
- * operator's save (routes/admin-bid-desk.js) and by the bid that closes itself (index.js closeLapsedBids,
- * GATE_BID_DESK_AUTO_DATES), so both close exactly the same bells.
+ * operator's save (routes/admin-bid-desk.js) and by the bid that closes itself (index.js closeLapsedBids), so both close exactly the same bells.
  */
 const { openAdminAlertKeys, closeAdminAlertKeys } = require('../admin-alert-episodes');
 const { OPEN_STATUSES } = require('./rules');

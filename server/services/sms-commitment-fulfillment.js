@@ -15,7 +15,7 @@ const { operatorReply, personCallBack, smsDelivered, smsContactSelects, callCont
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 const { personSentFilter, resolveEmailCustomerLink } = require('./email/email-customer-link');
 const { stripQuotedAndSignature, emailPlainText, ownSubjectsInThreads } = require('./email/email-strip');
-const { gateEnvValue, gateEnvTimestamp, smsFollowupWitnessFixLive, promiseRecordEvidenceMode } = require('../config/feature-gates');
+const { gateEnvValue, gateEnvTimestamp, promiseRecordEvidenceMode } = require('../config/feature-gates');
 
 const LIMIT = 50;
 // email_reply reads this many raw candidates before resolving them to the
@@ -359,11 +359,9 @@ async function loadCustomerEvidence(conn, commitment, message, now) {
         conn.raw("sms_log.metadata->>'property_id' as linked_property_id")),
     call: conn('call_log').where({ customer_id: customerId, direction: 'outbound' })
       .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
-      // GATE_SMS_FOLLOWUP_WITNESS_FIX: a call back reaches the customer on ANY
-      // of their phones (primary, alternate, service contact). The query is
-      // already scoped to the customer's own call rows, so the texting number
-      // is not required. Off = the call must go to the number that texted.
-      .modify(smsFollowupWitnessFixLive() ? (q) => q : toPeer)
+      // A call back reaches the customer on ANY of their phones (primary,
+      // alternate, service contact). The query is already scoped to the
+      // customer's own call rows, so the texting number is not required.
       .where('created_at', '>', after).where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
       // Who placed the call and whether it reached the customer (personCallBack).
       .select('id', 'status', 'duration_seconds', 'transcription', 'created_at', ...callContactSelects(conn)),
@@ -874,11 +872,11 @@ function scopedToProperty(record, commitment) {
   // only an invoice of that property (INVOICE_PROPERTY_SQL, or the customer's
   // only property); one naming no property takes any of the customer's own.
   if (record.type === 'invoice') return !propertyId || (!!witnessProperty && String(witnessProperty) === String(propertyId));
-  // GATE_SMS_FOLLOWUP_WITNESS_FIX: a request that names no property (the
-  // customer has two or more) is answered by any estimate sent to that
-  // customer after it; the evidence query is customer-scoped and the model
-  // still judges whether the estimate covers the requested service.
-  if (!propertyId && record.type === 'estimate' && smsFollowupWitnessFixLive()) return true;
+  // A request that names no property (the customer has two or more) is
+  // answered by any estimate sent to that customer after it; the evidence
+  // query is customer-scoped and the model still judges whether the estimate
+  // covers the requested service.
+  if (!propertyId && record.type === 'estimate') return true;
   return !!propertyId && witnessProperty === propertyId;
 }
 
@@ -1148,10 +1146,10 @@ function fulfillmentFingerprint(commitment, evidence, { eventOnly = false } = {}
     fulfillmentPolicy: extended ? FULFILLMENT_POLICY_PROMISE_RECORDS : FULFILLMENT_POLICY, policy: MODELS.TEXT_POLICIES.highStakes,
     obligation, records: [...evidence.records].sort((a, b) => a.ref.localeCompare(b.ref)),
     failures: [...evidence.failures].sort(), ...(eventOnly ? { eventOnly: true } : {}),
-    // GATE_SMS_FOLLOWUP_WITNESS_FIX changes which records are admissible, so a
-    // verdict cached under one policy must not answer under the other. Gate
-    // off adds nothing: today's hashes (and cached verdicts) stay as they are.
-    ...(smsFollowupWitnessFixLive() ? { witnessFix: true } : {}) })) };
+    // The witness policy changes which records are admissible, so a verdict
+    // cached before it must not answer under it. Keep this key: removing it
+    // would change every hash and re-judge every cached verdict.
+    witnessFix: true })) };
 }
 
 // An unowned commercial proposal belongs to the customer only through live

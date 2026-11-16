@@ -72,6 +72,17 @@ if [ "${1:-}" = "--assets-only" ]; then
   exit 0
 fi
 
+# A project generated with the Lock Screen visit card (WAVES_IOS_VISIT_CARD=1, near the end of this script)
+# keeps its extension target, while `npx cap sync` drops the plugin's registration. Reusing it for a build
+# without the card would ship the card half wired, so stop before anything is installed or built.
+if [ "${WAVES_IOS_VISIT_CARD:-0}" != "1" ] && grep -qs 'WavesVisitCard' ios/App/App.xcodeproj/project.pbxproj; then
+  echo "ERROR: client/ios/App was generated with the Lock Screen visit card." >&2
+  echo "       To keep the card:   WAVES_IOS_VISIT_CARD=1 bash scripts/mobile/bootstrap-ios.sh" >&2
+  echo "       To build without it: git clean -fdX client/ios   (removes only the generated project)," >&2
+  echo "                            then run this script again." >&2
+  exit 1
+fi
+
 echo "==> 1/5  Installing lockfile-pinned native dependencies…"
 # Run from client/ intentionally: npm resolves the workspace root lockfile.
 # `npm ci` refuses drift instead of silently moving Capacitor/plugin versions
@@ -475,6 +486,20 @@ fi
 # aps-environment. Configure every App target build configuration so a fresh
 # native project cannot silently depend on a manual Push Notifications step.
 python3 "$ROOT/scripts/mobile/ios_push.py" configure "$ROOT/client/ios/App" --badge
+
+# Lock Screen visit card (an iOS Live Activity; docs/mobile/live-activity.md). Only when the caller names it:
+# the card adds a widget extension target, which needs its own App ID and signing, so a release build takes
+# it on deliberately (WAVES_IOS_VISIT_CARD=1). Without the variable the generated project has no card and is
+# what it was before. Runs last: it copies the App target's version and team, and the plugin's registration
+# goes into the capacitor.config.json that `npx cap sync` just rewrote.
+if [ "${WAVES_IOS_VISIT_CARD:-0}" = "1" ]; then
+  if xcodeproj_ruby "$ROOT/scripts/mobile/ios_visit_card.rb" "$ROOT/client/ios/App" "$ROOT/client/resources/visit-card"; then
+    echo "==> Lock Screen visit card is in the project ✓"
+  else
+    echo "ERROR: could not add the Lock Screen visit card to App.xcodeproj." >&2
+    exit 1
+  fi
+fi
 
 echo
 echo "==> 5/5  Manual steps in Xcode (opening now):"

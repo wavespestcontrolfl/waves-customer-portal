@@ -20,7 +20,7 @@ jest.mock('@anthropic-ai/sdk', () => (function AnthropicMock() { return {}; }));
 jest.mock('../services/llm/deep', () => ({
   createDeepMessage: jest.fn(async () => ({
     model: 'claude-test-judge',
-    content: [{ type: 'text', text: '{"voice":8,"safety":9,"actions":8,"overall":8,"verdict":"equivalent","notes":"test"}' }],
+    content: [{ type: 'text', text: '{"voice":8,"safety":9,"actions":8,"overall":8,"verdict":"equivalent","notes":"test","could_send_instead":"yes"}' }],
   })),
 }));
 

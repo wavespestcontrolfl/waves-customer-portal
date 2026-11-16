@@ -1,6 +1,6 @@
 # Bid Desk checklist
 
-Part of the Bid Desk (`GATE_BID_DESK`). The row in `docs/gates-and-env.md` has the full contract; this page is the working guide.
+Part of the Bid Desk. The row in `docs/gates-and-env.md` has the full contract; this page is the working guide.
 
 Nothing here is sent to a buyer, a general contractor or an agency. The only output is the admin bell.
 

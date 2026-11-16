@@ -93,8 +93,46 @@ async function visitProperty(customerId, scheduledServiceId, knex = db) {
   const property = await knex('customer_properties')
     .where({ id: visit.property_id, customer_id: customerId })
     .first('id', 'customer_id', 'is_primary', 'active', 'relationship', 'label', 'address_line1', 'city');
+  return qualifyingProperty(property);
+}
+
+// The property a visit's texts follow: active and NOT the primary one. Anything else keeps the customer row.
+function qualifyingProperty(property) {
   if (!property || property.active === false || property.is_primary === true) return null;
   return property;
+}
+
+// The customer's prefs row with the property's five appointment toggles (and notify-primary) laid over it: THE overlay both
+// the senders (resolveAppointmentPrefs, enforced) and the office's bulk reminder answer (loadVisitProperties) apply. Pure.
+function overlayPropertyPrefs(property, row, customerPrefs) {
+  return { ...(customerPrefs || {}), ...effectivePropertyToggles(property, row, customerPrefs || {}) };
+}
+
+/**
+ * READ-ONLY bulk twin of visitProperty + propertyPrefsRow for many visits: Map<visit id, { property, row }> for the visits
+ * stamped with an active NON-primary saved property of their own customer (same filter as visitProperty), `row` being the
+ * property's property_notification_prefs row or undefined. TWO reads however many visits (customer_properties, then the prefs
+ * rows), none when no visit is stamped. Writes nothing (no decision log). `visits`: [{ id, customer_id, property_id }].
+ * Throws on a failed read.
+ */
+async function loadVisitProperties(conn, visits) {
+  const out = new Map();
+  const stamped = (visits || []).filter((v) => v && v.id != null && v.customer_id && v.property_id);
+  if (!stamped.length) return out;
+  const propertyIds = [...new Set(stamped.map((v) => String(v.property_id)))];
+  const properties = await conn('customer_properties').whereIn('id', propertyIds)
+    .select('id', 'customer_id', 'is_primary', 'active', 'relationship', 'label', 'address_line1', 'city');
+  const propertyOf = new Map(properties.map((p) => [String(p.id), p]));
+  const live = stamped.filter((v) => {
+    const property = propertyOf.get(String(v.property_id));
+    return property && String(property.customer_id) === String(v.customer_id) && qualifyingProperty(property);
+  });
+  if (!live.length) return out;
+  const rows = await conn('property_notification_prefs').whereIn('property_id', [...new Set(live.map((v) => String(v.property_id)))])
+    .select('property_id', ...PROPERTY_PREF_COLUMNS);
+  const rowOf = new Map(rows.map((r) => [String(r.property_id), r]));
+  for (const v of live) out.set(v.id, { property: propertyOf.get(String(v.property_id)), row: rowOf.get(String(v.property_id)) });
+  return out;
 }
 
 async function propertyPrefsRow(propertyId, knex = db) {
@@ -179,7 +217,7 @@ async function resolveAppointmentPrefs({ customerId, scheduledServiceId = null, 
   const effective = effectivePropertyToggles(property, row, prefs || {});
   await recordDecision({ customerId, property, scheduledServiceId, source, customer, effective, row, enforced });
   if (!enforced) return { ...unchanged, property, propertyToggles: effective };
-  return { prefs: { ...(prefs || {}), ...effective }, property, propertyDecided: true, propertyToggles: effective };
+  return { prefs: overlayPropertyPrefs(property, row, prefs), property, propertyDecided: true, propertyToggles: effective };
 }
 
 // Convenience for the senders that hold a prefs row and a visit id: the row
@@ -221,4 +259,7 @@ module.exports = {
   propertyPrefsRow,
   resolveAppointmentPrefs,
   prefsForVisit,
+  overlayPropertyPrefs,
+  loadVisitProperties,
+  qualifyingProperty,
 };

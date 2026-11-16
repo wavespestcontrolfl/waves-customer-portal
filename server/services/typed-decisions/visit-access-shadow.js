@@ -210,11 +210,10 @@ async function loadSavedFacts(svc, dbh, day) {
     'neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code',
     'access_notes', 'parking_notes', 'special_instructions', 'chemical_sensitivities', 'chemical_sensitivity_details',
   ) || {};
-  // The neighborhood gate directory (GATE_NEIGHBORHOOD_ACCESS) shows a
+  // The neighborhood gate directory shows a
   // technician a shared gate entry for a customer with no code of their own:
   // the same reader the day feed uses says WHETHER one applies. Never its code.
-  const neighborhoodGate = require('../../config/feature-gates').neighborhoodAccessLive()
-    && (await require('../neighborhood-access').neighborhoodGateEntriesForVisits(dbh, [svc])).has(svc.id);
+  const neighborhoodGate = (await require('../neighborhood-access').neighborhoodGateEntriesForVisits(dbh, [svc])).has(svc.id);
   const hasCodes = Boolean(prefs.neighborhood_gate_code || prefs.property_gate_code || prefs.garage_code || prefs.lockbox_code || neighborhoodGate);
   const petCount = Number.isInteger(prefs.pet_count) ? prefs.pet_count : 0;
   const notes = [

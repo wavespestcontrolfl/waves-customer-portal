@@ -1,8 +1,7 @@
-// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29, after the call-agent audit): the
+// Owner 2026-10-29, after the call-agent audit: the
 // deterministic checks on an email heard on a call. Fixtures are synthetic.
 const {
-  callEmailChecksLive, checkEmailDomain, screenCallEmail,
-  deadDomainQuestion, isNoMailServerReason,
+  checkEmailDomain, screenCallEmail, deadDomainQuestion, isNoMailServerReason,
 } = require('../services/call-email-checks');
 
 const dnsError = (code) => Object.assign(new Error(code), { code });
@@ -13,17 +12,6 @@ const deadDomain = {
   resolve6: async () => { throw dnsError('ENOTFOUND'); },
 };
 const flakyDns = { resolveMx: async () => { throw dnsError('ETIMEOUT'); } };
-
-describe('callEmailChecksLive', () => {
-  afterEach(() => { delete process.env.GATE_CALL_EMAIL_CHECKS; });
-  test('off unless exactly "true"', () => {
-    expect(callEmailChecksLive()).toBe(false);
-    process.env.GATE_CALL_EMAIL_CHECKS = '1';
-    expect(callEmailChecksLive()).toBe(false);
-    process.env.GATE_CALL_EMAIL_CHECKS = 'true';
-    expect(callEmailChecksLive()).toBe(true);
-  });
-});
 
 describe('checkEmailDomain', () => {
   test('a domain with a mail server is deliverable', async () => {

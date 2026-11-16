@@ -1,4 +1,4 @@
-// GATE_NEIGHBORHOOD_ADDRESS_LOOKUP: when a home's stored pin sits on another
+// Address lookup: when a home's stored pin sits on another
 // lot, the county roll is asked for the home's own address. All addresses are
 // synthetic; nothing here reaches the network (fetch and the lot search are stubbed).
 jest.mock('../models/db', () => jest.fn());
@@ -6,36 +6,13 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { homeParcel, sameHouse } = require('../services/neighborhood-access');
 const { lookupCountyParcelsByAddress } = require('../services/property-lookup/county-parcel-gis');
-const gates = require('../config/feature-gates');
-
-const GATES = ['GATE_NEIGHBORHOOD_ACCESS', 'GATE_NEIGHBORHOOD_NAMING', 'GATE_NEIGHBORHOOD_ADDRESS_LOOKUP'];
-const saved = Object.fromEntries(GATES.map((k) => [k, process.env[k]]));
-const setGates = (values) => GATES.forEach((k, i) => {
-  if (values[i] === undefined) delete process.env[k]; else process.env[k] = values[i];
-});
-afterEach(() => setGates(GATES.map((k) => saved[k])));
 
 const lot = (situs, extra = {}) => ({
   county: 'Manatee', parcelId: `P-${situs}`, subdivision: 'HERON POINTE PH I PB1/1', situsAddress: situs, situsZip: '34202', ...extra,
 });
 const home = (street, zip = '34202') => ({ address_line1: street, city: 'Lakewood Ranch', zip });
 
-describe('neighborhoodAddressLookupLive', () => {
-  test.each([
-    ['true', 'true', 'true', true],
-    ['true', 'true', undefined, false],
-    ['true', 'true', 'yes', false],
-    ['true', undefined, 'true', false],
-    [undefined, 'true', 'true', false],
-  ])('access=%s naming=%s address=%s → %s', (access, naming, address, live) => {
-    setGates([access, naming, address]);
-    expect(gates.neighborhoodAddressLookupLive()).toBe(live);
-  });
-});
-
 describe('homeParcel', () => {
-  beforeEach(() => setGates(['true', 'true', 'true']));
-
   test('a pin on the home\'s own lot is used as is; the county is not asked again', async () => {
     const addressLookup = jest.fn();
     const pin = lot('104 SAMPLE WAY');
@@ -120,24 +97,13 @@ describe('homeParcel', () => {
     await expect(homeParcel(home('500 Sample Way'), null, { addressLookup: async () => { throw new Error('county down'); } }))
       .rejects.toThrow('county down');
   });
-
-  test('off: the pin alone decides and the county is never asked by address', async () => {
-    setGates(['true', 'true', undefined]);
-    const addressLookup = jest.fn();
-    const pin = lot('100 SAMPLE WAY');
-    expect(await homeParcel(home('104 Sample Way'), pin, { addressLookup })).toBe(pin);
-    expect(addressLookup).not.toHaveBeenCalled();
-  });
 });
 
 describe('a "#" unit tail', () => {
-  test('on, "#201" is a unit like UNIT 201; off, it stays a street word', () => {
-    setGates(['true', 'true', 'true']);
+  test('"#201" is a unit like UNIT 201', () => {
     expect(sameHouse('500 Sample Loop #201', '500 SAMPLE LOOP')).toBe(true);
     expect(sameHouse('500 Sample Loop # 201, Lakewood Ranch FL', '500 SAMPLE LOOP UNIT 101')).toBe(true);
     expect(sameHouse('500 Sample Loop #201', '500 SAMPLE CT')).toBe(false);
-    setGates(['true', 'true', undefined]);
-    expect(sameHouse('500 Sample Loop #201', '500 SAMPLE LOOP')).toBe(false);
   });
 });
 

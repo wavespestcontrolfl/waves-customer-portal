@@ -12,10 +12,15 @@
  *                                   on file — 402 {needsCard} routes the
  *                                   client to the existing save-card flow).
  *
+ * GET    /offers                  — My Plan "Add a service": one priced offer
+ *                                   per service the customer does not have.
+ *
  * Dark behind GATE_ONE_TAP_PURCHASE (request-time gateEnvValue — a Railway
- * flip needs no redeploy). This router has no browse GET: the availability
- * signal rides GET /api/property-recommendations as `oneTap`. Gate-off, every
- * endpoint here answers 404 {error:'Not available'} (the write-route idiom).
+ * flip needs no redeploy). The Home card's availability signal rides
+ * GET /api/property-recommendations as `oneTap`. Gate-off, every purchase
+ * endpoint here answers 404 {error:'Not available'} (the write-route idiom)
+ * and GET /offers answers 200 {offers: []}: My Plan asks for it on every
+ * load, so it follows the Home card's "nothing to render" contract.
  * Every handler verifies purchase ownership inside the service (404 on
  * mismatch, never a 403 leak).
  */
@@ -77,6 +82,16 @@ function sendServiceError(res, err) {
   res.status(err.status).json(body);
   return true;
 }
+
+// Registered before /:purchaseId so "offers" is never read as a purchase id.
+router.get('/offers', async (req, res, next) => {
+  try {
+    if (!gateEnvValue('GATE_ONE_TAP_PURCHASE')) return res.json({ offers: [] });
+    return res.json(await oneTapPurchase.listOffers({ customerId: req.customerId }));
+  } catch (err) {
+    return next(err);
+  }
+});
 
 router.post('/init', writeLimiter, async (req, res, next) => {
   try {

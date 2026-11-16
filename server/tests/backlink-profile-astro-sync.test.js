@@ -71,6 +71,11 @@ describe('sameAsRejectReason', () => {
     expect(sameAsRejectReason('https://notadsly.io/listing/waves-pest-control')).toBeNull();
   });
 
+  test('the brand-wide Pinterest handle stays out of an office bucket; another Pinterest page does not match', () => {
+    expect(sameAsRejectReason('https://www.pinterest.com/wavespestcontrol/')).toBe('excluded');
+    expect(sameAsRejectReason('https://www.pinterest.com/wavespestcontrol/waves-bradenton-office/')).toBeNull();
+  });
+
   test('a non-https or unparseable URL is invalid', () => {
     expect(sameAsRejectReason('http://toolfio.com/item/waves-pest-control')).toBe('invalid');
     expect(sameAsRejectReason('not a url')).toBe('invalid');

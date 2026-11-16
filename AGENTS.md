@@ -336,7 +336,8 @@ execute the workflows they describe.
   `text_number_differs` card binds per (line, arming) within ONE call;
   an owed ask auto-closes only on evidence answering THAT ask, never every
   open card because one later event was classified (`missing_unit_number` is
-  human-verdict-only, in `triage-auto-resolve.js`); auto-routing stays
+  human-verdict-only, in `triage-auto-resolve.js`; `quiet_aged` dismissal
+  proves nothing: no evidence, no office decision); auto-routing stays
   confidence-gated (address validates AND service maps AND no HOA/commercial
   flag, else triage — the ONE exception (owner 2026-09-24): the grounded
   agent commitment behind `GATE_CALL_AGENT_COMMIT_BOOKING` +
@@ -406,8 +407,8 @@ execute the workflows they describe.
   built-ins, e.g. `@waves/affiliate-registry`) must NOT be added — mark them
   SERVER-ONLY in their `package.json` description.
 - **Company name in copy** is "Waves Pest Control", never "Waves Lawn &
-  Pest". Texts say "Waves" (owner 2026-11-04); legal lines keep the full
-  name. The mascot artwork carrying the old name is intentional.
+  Pest". Texts and portal Messages say "Waves" (owner 2026-11-04, 11-12);
+  legal lines keep the full name. Keep the old-name mascot art.
 
 ## Implementation defaults
 

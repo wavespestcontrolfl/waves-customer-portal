@@ -144,6 +144,12 @@ test('pending-work SQL covers every customer and same-thread operational queue',
     '00000000-0000-4000-8000-000000000004',
   ]));
   expect(decision.sql).toContain('not "ad"."id" = ?');
+  // Contract clause (2) (triage-auto-resolve.js): a card the quiet_aged sweep dismissed is no
+  // longer tracked work, so only open and in_progress cards hold the courtesy reply.
+  const triage = queries.find((q) => q.table === 'triage_items as ti');
+  expect(triage.sql).toContain('"ti"."status" in (?, ?)');
+  expect(triage.bindings.slice(0, 2)).toEqual(['open', 'in_progress']);
+  expect(triage.bindings).not.toContain('dismissed');
   const sql = queries.map((q) => q.sql).join('\n');
   expect(sql).toContain('"ti"."sms_log_id" = "ti_sms"."id"');
   expect(sql).toContain('"oi"."customer_id"');

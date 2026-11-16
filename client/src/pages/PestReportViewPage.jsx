@@ -1,7 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
-import { DOC_EYEBROW } from '../theme-doc';
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
 import CustomerReportHeader from '../components/report/CustomerReportHeader';
@@ -162,8 +161,6 @@ function tierPerApplication(tier = {}) {
 export default function PestReportViewPage() {
   const { token } = useParams();
   const [report, setReport] = useState(null);
-  // GATE_REPORT_SHARED_TEMPLATE: the server sends reportTemplate:true beside the report while the gate is on.
-  const [sharedTemplate, setSharedTemplate] = useState(false);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [loadError, setLoadError] = useState(false);
@@ -182,7 +179,6 @@ export default function PestReportViewPage() {
       if (!res.ok) throw new Error(`pest report fetch failed: ${res.status}`);
       const body = await res.json();
       setReport(body.report || null);
-      setSharedTemplate(body.reportTemplate === true);
     } catch {
       setLoadError(true);
     } finally {
@@ -222,30 +218,13 @@ export default function PestReportViewPage() {
   const greeting = report.first_name ? `${report.first_name}, here` : 'Here';
   const safetyFlags = SAFETY_LABELS.filter(([key]) => report.safety && report.safety[key]);
   const recommendation = report.recommendation;
-  // GATE_REPORT_SHARED_TEMPLATE: the heading prints once, as the shared customer header above the
-  // first card or as the page's own eyebrow and title inside it.
   const title = `${greeting}'s what we identified`;
-  const heading = sharedTemplate
-    ? { above: <CustomerReportHeader eyebrow="Your pest report" title={title} customerName={report.first_name} address={report.city} />, inCard: null }
-    : {
-      above: null,
-      inCard: (
-        <>
-          {/* Eyebrow → h1 → headline (owner 2026-09-04: no status chips on customer pages). */}
-          <div data-gt="eyebrow" style={DOC_EYEBROW}>Your pest report</div>
-          <h1 style={{ fontFamily: FONTS.serif, fontSize: 26, fontWeight: 500, lineHeight: 1.18, color: TEXT, margin: '0 0 10px' }}>
-            {title}
-          </h1>
-        </>
-      ),
-    };
 
   return (
-    <Page template={sharedTemplate}>
-      {heading.above}
+    <Page template>
+      <CustomerReportHeader eyebrow="Your pest report" title={title} customerName={report.first_name} address={report.city} />
       {/* Hero */}
       <SectionCard>
-        {heading.inCard}
         <p style={{ margin: 0, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 20, lineHeight: 1.3, color: TEXT }}>
           {/* Generic labels arrive lowercase ("an ant species") and read as a
               sentence; named labels ("Ghost Ants", "Likely Ghost Ants") stand

@@ -42,6 +42,36 @@
  */
 
 const logger = require('../logger');
+const { DAY_ONLY_ARRIVAL_NOTE, loadDayOnlyCheck } = require('../day-only-ai-context');
+const { dayOnlyPromiseOn } = require('../time-promise');
+
+/** Was the customer told only the DAY of this already-booked re-service? Gate off: false, no read. Gate on: judged by the
+ *  visit the entry's reschedule token names; no readable visit id means the day only. Never throws. */
+async function bookedReserviceDayOnly(db, customerId, booked) {
+  if (!dayOnlyPromiseOn()) return false;
+  const token = /^\/reschedule\/([^/]+)$/.exec(String(booked.rescheduleUrl || ''))?.[1];
+  const row = token
+    ? await db('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id').catch(() => null)
+    : null;
+  if (!row) return true;
+  const visit = { id: row.id, scheduled_date: booked.date, window_start: booked.windowStart ? `${booked.windowStart}:00`.slice(0, 8) : null };
+  return (await loadDayOnlyCheck(db, [visit]))(visit);
+}
+
+/** The full-tier answer for an already-booked free re-service. GATE_DAY_ONLY_PROMISE (part D): a booking whose customer was
+ *  told only the day is stated as the date alone (bookedReserviceDayOnly). */
+async function bookedReserviceText(db, customerId, booked, when) {
+  const dayOnly = await bookedReserviceDayOnly(db, customerId, booked);
+  // Customer-facing arrival copy is the TWO-HOUR RANGE from the shared
+  // arrivalWindowRange() (AGENTS.md) — never the raw scheduling start, which
+  // reads as a promise to arrive exactly then.
+  const { arrivalWindowRange } = require('../../utils/sms-time-format');
+  const range = booked.windowStart && !dayOnly ? arrivalWindowRange(booked.windowStart) : null;
+  return `A free re-service visit is ALREADY on the schedule for this account${when ? ` on ${when}` : ''}`
+    + `${dayOnly ? ` (arrival window: ${DAY_ONLY_ARRIVAL_NOTE})` : (range ? ` (arrival window ${range})` : '')}. Do NOT file another request. `
+    + 'Tell the caller it is already booked. If they need to move it, a Waves team member can do that — '
+    + 'never read out a link or a code.';
+}
 
 // The portal's own vocabulary (routes/requests.js createSchema) — imported by
 // value here, not re-invented: a category outside this map would never render
@@ -216,16 +246,7 @@ async function requestReserviceText(input = {}, ctx = {}) {
         + 'account\'s own. Tell them it is already booked and that a Waves team member can go over the '
         + 'details with the account holder. Never read out a link or a code.';
     }
-    const when = speakDate(booked.date);
-    // Customer-facing arrival copy is the TWO-HOUR RANGE from the shared
-    // arrivalWindowRange() (AGENTS.md) — never the raw scheduling start, which
-    // reads as a promise to arrive exactly then.
-    const { arrivalWindowRange } = require('../../utils/sms-time-format');
-    const range = booked.windowStart ? arrivalWindowRange(booked.windowStart) : null;
-    return `A free re-service visit is ALREADY on the schedule for this account${when ? ` on ${when}` : ''}`
-      + `${range ? ` (arrival window ${range})` : ''}. Do NOT file another request. `
-      + 'Tell the caller it is already booked. If they need to move it, a Waves team member can do that — '
-      + 'never read out a link or a code.';
+    return bookedReserviceText(db, customerId, booked, speakDate(booked.date));
   }
 
   // Plan coverage, for the SCRIPT only (never for permission). Ownership rows

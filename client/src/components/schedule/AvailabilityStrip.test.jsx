@@ -198,7 +198,7 @@ describe('calendar facts on the days', () => {
     expect(screen.getByText('Wed Jan 3 (last resort)')).toBeTruthy();
   });
 
-  it('an already-late day (GATE_ROUTE_CHECK_LATE_DAYS) keeps its hours and says so in the day line, never as a verdict', () => {
+  it('an already-late day keeps its hours and says so in the day line, never as a verdict', () => {
     const late = { date: '2035-01-03', status: 'open', alreadyLate: true, hours: [hour('2035-01-03', '15:00', 4, { dayAlreadyLate: true })] };
     const availability = answer(null, [offDay, late, openDay]);
     const v = availabilityVerdict(availability, at('2035-01-02', '09:00'));
@@ -347,7 +347,7 @@ describe('best-times rows', () => {
   });
 });
 
-describe('the stopped-limit line (GATE_PICKER_ROAD_LIMIT_NOTICE)', () => {
+describe('the stopped-limit line', () => {
   const NOTE = 'Google road times paused: daily limit reached. Times marked ~ use the estimate.';
   const modelDays = [{ date: '2035-01-02', status: 'open', hours: [hour('2035-01-02', '09:00', 5)] }];
   const googleDays = [{ date: '2035-01-02', status: 'open', hours: [hour('2035-01-02', '09:00', 5, { driveSource: 'google' })] }];

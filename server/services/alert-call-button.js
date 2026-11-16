@@ -15,7 +15,7 @@
 //
 // A row may carry one close-only button after Call (Called back on a missed call, Handled on a text thread), so it
 // keeps the close button it had before this kind. Each button follows its own gate: Call GATE_ALERT_CALL_BUTTON,
-// the close button GATE_ALERT_CLOSE_BUTTONS (and its tap is the close_note step itself).
+// the close button is always served (its tap is the close_note step itself).
 //
 // The Waves Admin iPhone push carries the same Call (owner 2026-11-02, "A Call button on the phone push
 // notification itself"): pushCallAction names the row and its version, the app shows Call on the notification, and
@@ -123,17 +123,15 @@ async function placeCall({ item, technicianId }) {
 }
 
 const buttonHandler = {
-  live: () => gates().alertCallButtonLive() || gates().alertCloseButtonsLive(),
+  live: () => true,
   // Each stored button follows its own gate; no record is read here (the tap reads it).
   visibleItems(rows) {
     const call = gates().alertCallButtonLive();
-    const close = gates().alertCloseButtonsLive();
-    const served = (item) => (item?.id === 'call' ? call : close);
+    const served = (item) => (item?.id === 'call' ? call : true);
     return new Map(rows.map((row) => [row.id, (row.metadata?.buttons?.items || []).filter(served).map((item) => item.id)]));
   },
   async run(tap) {
     if (tap.item.id !== 'call') {
-      if (!gates().alertCloseButtonsLive()) return { ok: false, code: 'off', message: OFF_MESSAGE };
       return alertButtons()._private.closeNoteHandler.run(tap);
     }
     if (!gates().alertCallButtonLive()) return { ok: false, code: 'off', message: OFF_MESSAGE };

@@ -5,8 +5,8 @@
 //
 // Each fact is an owner ruling, the mosquito protocol, the Service Details guide, a fact-register source or an approved
 // service-report tip; the words are the reviewed draft 2 (mosquito-draft, after the Fable review). The nine library tips
-// are read by id at build time (the builder owns their words; GATE_TECH_TIP_SOURCES picks the sourced or the plain
-// wording, and a sourced-only tip drops with its tile when the gate is off). No rate, price, visit count, cadence or
+// are read by id at build time (the builder owns their words; the sourced wording is used, and a sourced-only tip
+// drops with its tile once a fact it cites has expired). No rate, price, visit count, cadence or
 // terms; product names only in the product list, read from the catalog. Bti dunks and mosquito stations are estimate
 // add-ons: their products and their "not included" tags follow the estimate's own counts. The page never says mist or
 // misting (GATE_MOSQUITO_MISTING is off).
@@ -211,10 +211,10 @@ function productsSection(productList) {
   return makeSection('products', MOSQUITO_COPY.productsTitle, MOSQUITO_COPY.productsBody, items.map((item) => `${item.label}: ${item.text}`), { type: 'categories', items });
 }
 
-// A library tip's words for this build: one call per id (a call caps at three tips), the sourced wording when
-// GATE_TECH_TIP_SOURCES is on. A sourced-only tip returns nothing with the gate off, and its tile or row drops.
+// A library tip's words for this build: one call per id (a call caps at three tips), the sourced wording.
+// A sourced-only tip whose fact has expired returns nothing, and its tile or row drops.
 function tipText(tipId, now) {
-  const tip = resolveTipIds([tipId], { sourced: featureGates.techTipSourcesLive?.() === true, date: now })[0];
+  const tip = resolveTipIds([tipId], { date: now })[0];
   return tip?.copy || null;
 }
 

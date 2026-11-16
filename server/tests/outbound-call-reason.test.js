@@ -456,8 +456,8 @@ describe('resolveOutboundCallReason', () => {
   });
 });
 
-// hasPriorContact backs the outbound return-message gate
-// (GATE_CALL_OUTBOUND_RETURN_MESSAGES, owner ruling 2026-09-26): UNBOUNDED,
+// hasPriorContact backs the outbound return-message eligibility check
+// (owner ruling 2026-09-26): UNBOUNDED,
 // unlike resolveOutboundCallReason's own 48h LOOKBACK_MS above — a lead from
 // months ago still counts as "they contacted us first".
 describe('hasPriorContact', () => {

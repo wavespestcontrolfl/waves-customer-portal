@@ -1,5 +1,5 @@
 /**
- * Lead call-reply ring (GATE_LEAD_CALL_REPLY_RING, off unless exactly 'true').
+ * Lead call-reply ring (owner 2026-10-24).
  *
  * Owner 2026-10-24: "if a customer text back CALL, lets ring my cell, like
  * we had before". Our lead text says "Reply CALL and we'll call you
@@ -202,7 +202,6 @@ async function raiseMissedBell({ customerId, name, firstName, leadId, callLogId,
  */
 async function ringForCallReply({ customer, body, fromPhone, smsLogId = null, now = new Date() }) {
   try {
-    if (!isEnabled('leadCallReplyRing')) return { rang: false, reason: 'gate_off' };
     if (parseCallTextReply(body) !== 'call') return { rang: false, reason: 'not_call' };
     if (!customer?.id) return { rang: false, reason: 'no_customer' };
     if (!inRingHours(now)) return { rang: false, reason: 'after_hours' };

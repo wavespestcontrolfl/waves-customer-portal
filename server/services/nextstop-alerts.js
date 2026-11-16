@@ -25,7 +25,7 @@ const { mowingAlertText } = require('../utils/mowing-schedule');
  *   the customer has no neighborhood gate code of their own
  * @param {boolean} args.neighborhoodActions   tag each neighborhood CODE alert
  *   with its directory entry (neighborhoodEntryId, neighborhoodEntryCode, reportedWrong) so the field
- *   screen can offer "Wrong code" on it (GATE_NEIGHBORHOOD_TECH_ACTIONS)
+ *   screen can offer "Wrong code" on it
  * @returns {Array<{type: string, text: string}>}
  */
 function compilePropertyAlerts({

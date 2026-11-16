@@ -355,19 +355,12 @@ describe('notification trigger push tags', () => {
     expect(withCustomer.link).toBe('/admin/customers?customerId=cust-789');
   });
 
-  test('GATE_PORTAL_ITEM_CLOSE: the add-service bell carries its request id and customer on top of its metadata; off, or with no request row, the build is exactly as before', () => {
+  test('the add-service bell carries its request id and customer on top of its metadata; with no request row, the build has none', () => {
     const payload = { customerName: 'Pat Fixture', suggestedService: 'Mosquito', previousTier: 'Bronze', customerId: 'cust-789', requestId: 'req-456' };
-    try {
-      delete process.env.GATE_PORTAL_ITEM_CLOSE;
-      expect(TRIGGER_REGISTRY.bundle_quote_requested.build(payload)).not.toHaveProperty('alert');
-      process.env.GATE_PORTAL_ITEM_CLOSE = 'true';
-      expect(TRIGGER_REGISTRY.bundle_quote_requested.build(payload).alert).toEqual({ requestId: 'req-456', customerId: 'cust-789' });
-      // a self-applied bundle has no request row; a request with no customer cannot be judged
-      expect(TRIGGER_REGISTRY.bundle_quote_requested.build({ ...payload, requestId: undefined })).not.toHaveProperty('alert');
-      expect(TRIGGER_REGISTRY.bundle_quote_requested.build({ ...payload, customerId: undefined })).not.toHaveProperty('alert');
-    } finally {
-      delete process.env.GATE_PORTAL_ITEM_CLOSE;
-    }
+    expect(TRIGGER_REGISTRY.bundle_quote_requested.build(payload).alert).toEqual({ requestId: 'req-456', customerId: 'cust-789' });
+    // a self-applied bundle has no request row; a request with no customer cannot be judged
+    expect(TRIGGER_REGISTRY.bundle_quote_requested.build({ ...payload, requestId: undefined })).not.toHaveProperty('alert');
+    expect(TRIGGER_REGISTRY.bundle_quote_requested.build({ ...payload, customerId: undefined })).not.toHaveProperty('alert');
   });
 
   test('notification body sanitizer redacts customer contact details across triggers', () => {
@@ -482,10 +475,10 @@ describe('triggerNotification bell outcome', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
-  // GATE_BELL_BANNERS: a banner for a bell row its writer rang under bell: true keeps that authorization, so it does
-  // not depend on GATE_CUSTOMER_ALERTS_RING (real policy on, that gate off).
-  test.each(['call_commitment_overdue', 'sms_operational_followup', 'messenger_reply'])(
-    'policy on, GATE_CUSTOMER_ALERTS_RING off: a %s banner pushes only as bellAuthorized pushOnly', async (key) => {
+  // GATE_BELL_BANNERS: a banner for a bell row its writer rang under bell: true keeps that authorization, so a type the
+  // policy would otherwise silence (one with no customer declaration) still gets its banner.
+  test.each(['dashboard_alert'])(
+    'policy on: a %s banner pushes only as bellAuthorized pushOnly', async (key) => {
       const PushService = require('../services/push-notifications');
       const bellPolicy = require('../services/notification-bell-policy');
       bellPolicy.clearOverrideCache();
@@ -493,7 +486,6 @@ describe('triggerNotification bell outcome', () => {
       db.mockImplementation((table) => (
         table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }]) : tableMock([])
       ));
-      delete process.env.GATE_CUSTOMER_ALERTS_RING;
       const payload = { alertRowId: 'n-1', alertTitle: 'Comms — follow up', alertBody: 'Body.', alertLink: '/admin', customerId: 'cust-1' };
       try {
         PushService.sendToAdminUsers.mockClear();
@@ -1275,10 +1267,10 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     bellPolicy.clearOverrideCache();
   });
 
-  // GATE_CUSTOMER_ALERTS_RING (owner 2026-10-29, "small" E1): a bundle quote request is declared a customer contact.
-  // Its 'estimate' category is muted by the bell policy; with the gate on it passes, and its bell write carries
+  // Owner 2026-10-29, "small" E1: a bundle quote request is declared a customer contact.
+  // Its 'estimate' category is muted by the bell policy; the declaration lets it pass, and its bell write carries
   // bell: true so NotificationService.create's own check (category + trigger key only) agrees.
-  test.each([[undefined, false], ['true', true]])('GATE_CUSTOMER_ALERTS_RING=%p: a bundle quote request rings: %p', async (mode, rings) => {
+  test('a bundle quote request rings', async () => {
     const NotificationService = require('../services/notification-service');
     const bellPolicy = require('../services/notification-bell-policy');
     bellPolicy.clearOverrideCache();
@@ -1295,35 +1287,29 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
           : tableMock([])
     ));
     NotificationService.notifyAdmin.mockClear();
-    if (mode) process.env.GATE_CUSTOMER_ALERTS_RING = mode;
     try {
       const stats = await triggerNotification('bundle_quote_requested', { customerName: 'Pat Bundle', customerId: 'cust-9' });
-      expect(Boolean(stats.policySilenced)).toBe(!rings);
-      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(rings ? 1 : 0);
-      if (rings) {
-        expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('estimate');
-        expect(NotificationService.notifyAdmin.mock.calls[0][3]).toMatchObject({ bell: true });
-      }
+      expect(Boolean(stats.policySilenced)).toBe(false);
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('estimate');
+      expect(NotificationService.notifyAdmin.mock.calls[0][3]).toMatchObject({ bell: true });
     } finally {
-      delete process.env.GATE_CUSTOMER_ALERTS_RING;
       gateSpy.mockRestore();
       bellPolicy.clearOverrideCache();
     }
   });
 
-  test('GATE_CUSTOMER_ALERTS_RING on: an undeclared type keeps today\'s answer and its bell write gets no bell tag', async () => {
+  test('an undeclared type keeps today\'s answer and its bell write gets no bell tag', async () => {
     const NotificationService = require('../services/notification-service');
     const bellPolicy = require('../services/notification-bell-policy');
     const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
     const allowSpy = jest.spyOn(bellPolicy, 'bellAllowed').mockResolvedValue(true);
     NotificationService.notifyAdmin.mockClear();
-    process.env.GATE_CUSTOMER_ALERTS_RING = 'true';
     try {
       await triggerNotification('dashboard_alert', { title: 'x', body: 'y' });
       expect(allowSpy).toHaveBeenCalledWith(expect.objectContaining({ triggerKey: 'dashboard_alert', declared: TRIGGER_REGISTRY.dashboard_alert.rule }));
       expect(NotificationService.notifyAdmin.mock.calls[0][3]).not.toHaveProperty('bell');
     } finally {
-      delete process.env.GATE_CUSTOMER_ALERTS_RING;
       gateSpy.mockRestore(); allowSpy.mockRestore();
     }
   });
@@ -1631,12 +1617,11 @@ describe('registry labels on the bell row (GATE_ALERT_REGISTRY_LABELS)', () => {
     }
   });
 
-  test('gate on: a customer contact row still passes the policy, keeps bell: true and still pushes', async () => {
+  test('GATE_ALERT_REGISTRY_LABELS on: a customer contact row still passes the policy, keeps bell: true and still pushes', async () => {
     const PushService = PushServiceHeld;
     const bellPolicy = require('../services/notification-bell-policy');
     bellPolicy.clearOverrideCache();
     spy(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
-    process.env.GATE_CUSTOMER_ALERTS_RING = 'true';
     PushService.sendToAdminUsers.mockClear();
     db.mockImplementation((table) => (
       table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }]) : tableMock([])
@@ -1651,16 +1636,12 @@ describe('registry labels on the bell row (GATE_ALERT_REGISTRY_LABELS)', () => {
         return { stats, options: NotificationService.notifyAdmin.mock.calls[0]?.[3], pushes: PushService.sendToAdminUsers.mock.calls.length };
       } finally { delete process.env.GATE_ALERT_REGISTRY_LABELS; }
     };
-    try {
-      const off = await rungWith(null);
-      const on = await rungWith('true');
-      expect(on.options.bell).toBe(true);
-      expect(on.options.metadata).toMatchObject({ contact: true, severity: 'needs-you', who: 'person' });
-      expect(on.stats.policySilenced).toBeUndefined();
-      expect(on.pushes).toBe(off.pushes);
-      expect(on.pushes).toBe(1);
-    } finally {
-      delete process.env.GATE_CUSTOMER_ALERTS_RING;
-    }
+    const off = await rungWith(null);
+    const on = await rungWith('true');
+    expect(on.options.bell).toBe(true);
+    expect(on.options.metadata).toMatchObject({ contact: true, severity: 'needs-you', who: 'person' });
+    expect(on.stats.policySilenced).toBeUndefined();
+    expect(on.pushes).toBe(off.pushes);
+    expect(on.pushes).toBe(1);
   });
 });

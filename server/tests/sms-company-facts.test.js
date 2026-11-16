@@ -50,7 +50,7 @@ describe('gate off — byte-identical to before COMPANY FACTS', () => {
     expect(sha(buildSystemPrompt())).toBe('8fc58d9bcd7cdf437f7f6d49290a01c375c696f31f346a2db121ed59e98da0f3');
     expect(sha(buildSystemPromptWithProfile('Warm and brief.').system)).toBe('7e35da9035dd011a3f0b6ab8596b9876926956fbaf1ca05139d59f4ef8248a9b');
     expect(buildSystemPrompt()).not.toContain('COMPANY FACTS');
-    expect(currentPromptVersion()).toBe(PROMPT_VERSION);
+    expect(currentPromptVersion()).toBe(`${PROMPT_VERSION}+e`); // edit learning's e tag is always on
   });
 
   // Re-pinned in the PR #5334 merge: COMPANY FACTS still leaves the verifier prompt
@@ -93,7 +93,7 @@ describe('gate on', () => {
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // '_cf' = COMPANY FACTS, '_cfl' = + LABEL FACTS (PR #5416), '_cflv' = + VISIT STATUS & OPEN LOOPS (PR #5499), 'cflvp' = + PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA) and #5416's 3_cfl (4 was the pre-contract claim checker, never merged); '7_m' (#5610) = the compact scheme: number 6 + one cumulative key 'm' (+ MISSED VISIT).
     expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers25_n');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers25_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers25_n+e');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');

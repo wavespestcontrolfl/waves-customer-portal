@@ -47,7 +47,7 @@ const closeNoteButtons = (id) => ({ kind: 'close_note', items: [{ id, label: CLO
 // like Done: only while the row is still the version this tap claimed, so a new text that rewrote the row
 // meanwhile is never marked handled unseen.
 const closeNoteHandler = {
-  live: () => require('../config/feature-gates').alertCloseButtonsLive(),
+  live: () => true,
   async run({ row, item, technicianId, claimedVersion }) {
     const resolution = Object.hasOwn(CLOSE_NOTES, item.id) ? CLOSE_NOTES[item.id] : null;
     if (!resolution) return { ok: false, code: 'unknown_action', message: 'This button is not known.' };

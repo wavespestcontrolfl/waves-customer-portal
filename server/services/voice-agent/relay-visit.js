@@ -52,6 +52,7 @@
  */
 
 const logger = require('../logger');
+const { DAY_ONLY_ARRIVAL_NOTE, loadDayOnlyCheck } = require('../day-only-ai-context');
 
 const SERVICE_REPORT_FINDING_LIMIT = 6;
 const SERVICE_REPORT_APPLICATION_LIMIT = 6;
@@ -88,6 +89,65 @@ function speakClock(value) {
 }
 
 // ── get_today_eta ──────────────────────────────────────────────────────────
+
+/**
+ * The spoken arrival window of today's visit: { windowStart, spokenEnd } (either may be null). Moved out of todayEtaText
+ * unchanged so the day-only branch (GATE_DAY_ONLY_PROMISE part D) can skip it without growing that function.
+ */
+async function spokenArrivalWindow(db, row, dayOnly = false) {
+  if (dayOnly) return { windowStart: null, spokenEnd: null }; // a day-only visit has no hour to speak
+  // ⭐ CUSTOMER-FACING ARRIVAL COPY IS window_start → +120 MIN, NEVER
+  // window_end (AGENTS.md): window_end is scheduling/overlap data — it carries
+  // the service's duration and can be anything from 30 minutes to a full day —
+  // and every other customer surface (reminders, the track page) derives the
+  // spoken range from the shared arrivalWindowRange() so they cannot drift.
+  // The phone is a customer surface, so it uses the same helper.
+  const { arrivalWindowRange } = require('../../utils/sms-time-format');
+  const arrivalRange = arrivalWindowRange(row.window_start);
+  let windowStart = speakClock(arrivalRange ? arrivalRange.split('-')[0] : row.window_start);
+  const windowEnd = arrivalRange ? speakClock(arrivalRange.split('-')[1]) : null;
+  let windowEndFromReminder = null;
+  if (!windowStart) {
+    // Fallback to the reminder rail's stamped clock time (the same
+    // appointment_time the confirmation/reminder messages speak).
+    //
+    // ⭐ IT IS A TIMESTAMP, NOT A CLOCK STRING. `appointment_time` comes back
+    // from pg as a Date (timestamptz), and speakClock parses only "HH:MM…"
+    // strings — so in production this fallback always produced null and the
+    // caller heard "no time window is set". The stamp is normalized to its
+    // AMERICA/NEW_YORK wall clock first (never the host TZ — the one rule
+    // every timestamp in this repo lives by), then goes through the SAME
+    // shared arrivalWindowRange as the primary path, so the fallback speaks
+    // the identical start-plus-two-hours the reminder texts promise.
+    const reminder = await db('appointment_reminders')
+      .where({ scheduled_service_id: row.id, cancelled: false })
+      .orderBy('appointment_time', 'asc')
+      .first('appointment_time')
+      .catch(() => null);
+    if (reminder && reminder.appointment_time) {
+      let hhmm = null;
+      const raw = reminder.appointment_time;
+      if (typeof raw === 'string' && /^\d{1,2}:\d{2}/.test(raw)) {
+        hhmm = raw.slice(0, 5); // legacy time-only value
+      } else {
+        const asDate = raw instanceof Date ? raw : new Date(raw);
+        if (!Number.isNaN(asDate.getTime())) {
+          hhmm = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit',
+          }).format(asDate);
+        }
+      }
+      const reminderRange = hhmm ? arrivalWindowRange(hhmm) : null;
+      if (reminderRange) {
+        windowStart = speakClock(reminderRange.split('-')[0]);
+        windowEndFromReminder = speakClock(reminderRange.split('-')[1]);
+      } else if (hhmm) {
+        windowStart = speakClock(hhmm);
+      }
+    }
+  }
+  return { windowStart, spokenEnd: windowEnd || windowEndFromReminder };
+}
 
 /**
  * Today's (ET) appointment for this customer, with a read-only peek at the
@@ -154,66 +214,20 @@ async function todayEtaText(customerId, { tier = 'redacted', recognisedContact =
       + 'claim a technician has left — check get_account_overview for the next scheduled visit instead.';
   }
 
-  // ⭐ CUSTOMER-FACING ARRIVAL COPY IS window_start → +120 MIN, NEVER
-  // window_end (AGENTS.md): window_end is scheduling/overlap data — it carries
-  // the service's duration and can be anything from 30 minutes to a full day —
-  // and every other customer surface (reminders, the track page) derives the
-  // spoken range from the shared arrivalWindowRange() so they cannot drift.
-  // The phone is a customer surface, so it uses the same helper.
-  const { arrivalWindowRange } = require('../../utils/sms-time-format');
-  const arrivalRange = arrivalWindowRange(row.window_start);
-  let windowStart = speakClock(arrivalRange ? arrivalRange.split('-')[0] : row.window_start);
-  const windowEnd = arrivalRange ? speakClock(arrivalRange.split('-')[1]) : null;
-  let windowEndFromReminder = null;
-  if (!windowStart) {
-    // Fallback to the reminder rail's stamped clock time (the same
-    // appointment_time the confirmation/reminder messages speak).
-    //
-    // ⭐ IT IS A TIMESTAMP, NOT A CLOCK STRING. `appointment_time` comes back
-    // from pg as a Date (timestamptz), and speakClock parses only "HH:MM…"
-    // strings — so in production this fallback always produced null and the
-    // caller heard "no time window is set". The stamp is normalized to its
-    // AMERICA/NEW_YORK wall clock first (never the host TZ — the one rule
-    // every timestamp in this repo lives by), then goes through the SAME
-    // shared arrivalWindowRange as the primary path, so the fallback speaks
-    // the identical start-plus-two-hours the reminder texts promise.
-    const reminder = await db('appointment_reminders')
-      .where({ scheduled_service_id: row.id, cancelled: false })
-      .orderBy('appointment_time', 'asc')
-      .first('appointment_time')
-      .catch(() => null);
-    if (reminder && reminder.appointment_time) {
-      let hhmm = null;
-      const raw = reminder.appointment_time;
-      if (typeof raw === 'string' && /^\d{1,2}:\d{2}/.test(raw)) {
-        hhmm = raw.slice(0, 5); // legacy time-only value
-      } else {
-        const asDate = raw instanceof Date ? raw : new Date(raw);
-        if (!Number.isNaN(asDate.getTime())) {
-          hhmm = new Intl.DateTimeFormat('en-US', {
-            timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit',
-          }).format(asDate);
-        }
-      }
-      const reminderRange = hhmm ? arrivalWindowRange(hhmm) : null;
-      if (reminderRange) {
-        windowStart = speakClock(reminderRange.split('-')[0]);
-        windowEndFromReminder = speakClock(reminderRange.split('-')[1]);
-      } else if (hhmm) {
-        windowStart = speakClock(hhmm);
-      }
-    }
-  }
+  // GATE_DAY_ONLY_PROMISE (part D): a visit whose customer was told only the day is stated as the day, never an hour.
+  // Gate off: no read, the window is spoken exactly as before. Gate on and a failed read: the day-only wording.
+  const dayOnly = (await loadDayOnlyCheck(db, [{ ...row, scheduled_date: today }]))(row);
+  const { windowStart, spokenEnd } = await spokenArrivalWindow(db, row, dayOnly);
 
   const { promptSafe } = require('./relay-context');
   const service = promptSafe(row.service_type, 60);
   const parts = [];
-  const spokenEnd = windowEnd || windowEndFromReminder;
-  if (windowStart && spokenEnd) parts.push(`Today's appointment window is ${windowStart} to ${spokenEnd}`);
+  if (dayOnly) parts.push('There is an appointment on the schedule for today');
+  else if (windowStart && spokenEnd) parts.push(`Today's appointment window is ${windowStart} to ${spokenEnd}`);
   else if (windowStart) parts.push(`Today's appointment starts around ${windowStart}`);
   else parts.push('There is an appointment on the schedule for today, but no time window is set on it');
   if (service) parts[0] += ` for ${service}`;
-  parts[0] += '.';
+  parts[0] += dayOnly ? `. Arrival window: ${DAY_ONLY_ARRIVAL_NOTE}.` : '.';
 
   // READ-ONLY tracker peek. Terminal operational status outranks a stale
   // track_state — a completed or cancelled visit is never "on the way".
@@ -233,7 +247,7 @@ async function todayEtaText(customerId, { tier = 'redacted', recognisedContact =
     parts.push('The technician is EN ROUTE right now — on the way to the property.');
   } else {
     parts.push('The technician has not started toward the property yet, so there is no live arrival time. '
-      + 'Give the window only; never invent a more precise ETA.');
+      + (dayOnly ? 'Do not state or guess an hour.' : 'Give the window only; never invent a more precise ETA.'));
   }
   return parts.join(' ');
 }

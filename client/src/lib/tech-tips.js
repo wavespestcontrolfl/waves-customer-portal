@@ -83,7 +83,7 @@ export function pickableTipIds(library) {
   return new Set([...(library?.groups || []).flatMap((group) => group.tips || []), ...(library?.more || [])].map((tip) => tip.id));
 }
 
-// What the picker matched its tips to (tips with facts, GATE_TECH_TIP_SOURCES,
+// What the picker matched its tips to (tips with facts,
 // owner 2026-10-24): the yard facts the server knows, as one line, or null
 // when it knows none.
 export function techTipYardLine(yard) {
@@ -97,7 +97,7 @@ export function techTipYardLine(yard) {
 }
 
 // A tip's sources as its chip prints them ("UF/IFAS, SWFWMD"), each label
-// once; empty without citations (the gate off).
+// once; empty without citations (a tip frozen before tips with facts).
 export function techTipSourceLabels(tip) {
   return [...new Set((tip?.citations || []).map((citation) => citation?.label).filter(Boolean))].join(", ");
 }

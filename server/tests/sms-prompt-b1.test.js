@@ -5,7 +5,7 @@
  */
 const GATES = ['GATE_SMS_PROMPT_B1', 'GATE_SMS_REAL_ANSWERS', 'GATE_SMS_OFFERS_SCHEDULER', 'GATE_SMS_AGENT_COMPLAINTS',
   'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL', 'GATE_SMS_VOICE_PROFILE_PIN',
-  'GATE_SMS_EDIT_LEARNING', 'SHADOW_VOICE_PROFILE', 'SHADOW_FEWSHOT', 'SHADOW_DRAFT_VERIFY'];
+  'SHADOW_VOICE_PROFILE', 'SHADOW_FEWSHOT', 'SHADOW_DRAFT_VERIFY'];
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
@@ -49,16 +49,16 @@ describe('gate reader', () => {
 });
 
 describe('version identity', () => {
-  test('gate off keeps 25_n / 26_n; on mints 27_n / 28_n following the scheduler gate', () => {
+  test('B1 off keeps 25_n / 26_n; on mints 27_n / 28_n following the scheduler gate (each with the e tag)', () => {
     const d = freshDrafter();
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
-    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers25_n');
+    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers25_n+e');
     process.env.GATE_SMS_OFFERS_SCHEDULER = 'true';
-    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers26_n');
+    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers26_n+e');
     process.env.GATE_SMS_PROMPT_B1 = 'true';
-    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers28_n');
+    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers28_n+e');
     delete process.env.GATE_SMS_OFFERS_SCHEDULER;
-    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers27_n');
+    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers27_n+e');
     expect(d.B1_PROMPT_VERSION).toBe('house_voice_v12_real_answers27_n');
     expect(d.B1_NEXT_OF_SERIES_PROMPT_VERSION).toBe('house_voice_v12_real_answers28_n');
   });
@@ -69,7 +69,6 @@ describe('version identity', () => {
     process.env.GATE_SMS_OFFERS_SCHEDULER = 'true';
     for (const c of d.REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
     process.env.GATE_SMS_VOICE_PROFILE_PIN = '3';
-    process.env.GATE_SMS_EDIT_LEARNING = 'true';
     const longest = d.currentPromptVersion();
     expect(longest).toBe('house_voice_v12_real_answers28_n+bcelmv');
     expect(longest.length).toBe(39);
@@ -79,7 +78,7 @@ describe('version identity', () => {
   test('B1 is only part of the real-answers prompt: real answers off stays v11', () => {
     const d = freshDrafter();
     process.env.GATE_SMS_PROMPT_B1 = 'true';
-    expect(d.currentPromptVersion()).toBe(d.PROMPT_VERSION);
+    expect(d.currentPromptVersion()).toBe(`${d.PROMPT_VERSION}+e`);
   });
 
   test('the sealed exam contract: 27_n / 28_n need the same facts as 25_n, so frozen items stay compatible', () => {

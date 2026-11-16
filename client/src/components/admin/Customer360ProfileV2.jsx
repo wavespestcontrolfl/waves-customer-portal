@@ -7866,7 +7866,7 @@ export function CustomerNeighborhoodBlock({ customerId }) {
       setProperties(Array.isArray(data?.properties) ? data.properties : null);
     } catch (err) {
       if (mine !== seq.current) return;
-      // Off (404) or not a full admin (403): the block is not shown at all.
+      // Not found (404) or not a full admin (403): the block is not shown at all.
       if (err?.status === 404 || err?.status === 403) {
         setLoadError("");
         setProperties(null);

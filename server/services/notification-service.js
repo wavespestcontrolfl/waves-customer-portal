@@ -430,7 +430,7 @@ function mergeRefreshMetadata(existingMeta, metadata, shouldRing) {
   if (!metadata.claudeQueue) {
     if (!existingMeta.claudeQueue) return merged;
     // The standing row was routed to Claude's queue, and this emission is not (a reminder that became an owner
-    // ask, or GATE_ALERT_CLAUDE_QUEUE turned off): drop the fields routing set, so the row returns to the bell.
+    // ask): drop the fields routing set, so the row returns to the bell.
     // Whatever this emission itself carries stands (its own feed / who / severity); a feed the emitter wrote
     // itself on a row that was never routed is not touched, because this branch needs claudeQueue.
     // A row the owner had sent to Claude drops that stamp too: it is back in the bell, and can be sent again.
@@ -566,7 +566,7 @@ const NotificationService = {
       // converted ex-raw-insert sites. Same truthy sentinel as the internal
       // test-customer gate above: intentional suppression must read as
       // success-without-a-row, never as an insert failure.
-      // Claude's queue (GATE_ALERT_CLAUDE_QUEUE, services/admin-alert-routing.js): a Mac reminder job's row or one of
+      // Claude's queue (services/admin-alert-routing.js): a Mac reminder job's row or one of
       // our own engineering faults is written Activity-only and stamped who 'claude'. It is no longer a ring, so the
       // bell policy below (which decides whether to ring) must not silence it: the row still has to be written.
       let rowMetadata = recipientType === 'admin' ? stampClaudeQueue({ category, metadata }) : metadata;
@@ -579,7 +579,7 @@ const NotificationService = {
               category,
               triggerKey: metadata?.triggerKey || null,
               options: { bell, bellDefault },
-              // A composed alert's declared customer contact / promise (GATE_CUSTOMER_ALERTS_RING reads it).
+              // A composed alert's declared customer contact / promise (the bell policy reads it).
               declared: { contact: metadata?.contact === true, promise: metadata?.promise === true },
             });
             if (!allowed) {

@@ -12,7 +12,7 @@ jest.mock('../services/tech-instant-answers', () => ({ pickStop: jest.fn(), answ
 jest.mock('../services/tech-line', () => ({ techLineContext: jest.fn() }));
 jest.mock('../services/tech-set-texts', () => ({ setTextReply: jest.fn() }));
 jest.mock('../services/tech-line-texts', () => ({ prepareSetText: jest.fn(), sendSetText: jest.fn(), visitCustomer: jest.fn() }));
-jest.mock('../services/access-code-capture', () => ({ listForVisit: jest.fn(), enabled: jest.fn(() => true) }));
+jest.mock('../services/access-code-capture', () => ({ listForVisit: jest.fn() }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 
 const mockRows = {};
@@ -32,7 +32,7 @@ const { pickStop, answer } = require('../services/tech-instant-answers');
 const { techLineContext } = require('../services/tech-line');
 const { setTextReply } = require('../services/tech-set-texts');
 const { prepareSetText, sendSetText, visitCustomer } = require('../services/tech-line-texts');
-const { listForVisit, enabled: accessCodesEnabled } = require('../services/access-code-capture');
+const { listForVisit } = require('../services/access-code-capture');
 const { recordAuditEvent } = require('../services/audit-log');
 const { TechVoiceConversation, _test: { SAY } } = require('../services/voice-agent/tech-voice-conversation');
 
@@ -197,15 +197,6 @@ describe('commands', () => {
     expect(sendSetText).not.toHaveBeenCalled();
     expect(await say('Yes.')).toBe(SAY.sent);
     expect(sendSetText).toHaveBeenCalledTimes(1);
-  });
-
-  test('with the access-code kill switch off, a code request reads and speaks nothing', async () => {
-    accessCodesEnabled.mockReturnValueOnce(false);
-    const { say } = await session();
-    expect(await say('what is the gate code')).toBe(SAY.codes_off);
-    expect(pickStop).not.toHaveBeenCalled();
-    expect(listForVisit).not.toHaveBeenCalled();
-    expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 
   test('"gate code" and "garage code" ask for codes, never a set text', async () => {

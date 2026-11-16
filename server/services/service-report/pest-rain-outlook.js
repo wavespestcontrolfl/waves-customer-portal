@@ -1,5 +1,5 @@
 /**
- * Pest rain outlook (owner 2026-10-24, dark behind GATE_PEST_RAIN_OUTLOOK).
+ * Pest rain outlook (owner 2026-10-24).
  *
  * Two halves, both pure apart from the one forecast call:
  *  - CAPTURE at completion: a 48-hour property forecast, frozen as a compact
@@ -74,17 +74,6 @@ function insideOnlyArea(area) {
   return chips.some((chip) => chip === 'garage' || chip === 'garage carport');
 }
 
-// Read at call time through the canonical reader. A suite that mocks
-// feature-gates with a partial surface reads as gate-dark, never a TypeError.
-function pestRainOutlookGateOn() {
-  try {
-    const gates = require('../../config/feature-gates');
-    return typeof gates.pestRainOutlookLive === 'function' && gates.pestRainOutlookLive() === true;
-  } catch {
-    return false;
-  }
-}
-
 // The frozen summary from a forecast result. Open-Meteo stamps an hour's rain
 // at the END of that hour (application-conditions.js sliceForecast), so a rain
 // hour STARTS one hour before its stamp. The capture asks for whole hours, from
@@ -122,12 +111,12 @@ function buildRainOutlookSummary(forecast, completedAt) {
   };
 }
 
-// Completion-time capture. Resolves to the summary, or null when the gate is
-// off, the visit is not the pest line, the forecast is unavailable, or anything
-// throws. With the gate off the forecast is never requested.
+// Completion-time capture. Resolves to the summary, or null when the visit is
+// not the pest line, the forecast is unavailable, or anything throws. A visit
+// that is not the pest line never requests a forecast.
 async function capturePestRainOutlook({ svc, now = new Date() } = {}) {
   try {
-    if (!pestRainOutlookGateOn() || detectServiceLine(svc?.service_type) !== 'pest') return null;
+    if (detectServiceLine(svc?.service_type) !== 'pest') return null;
     const { fetchPropertyForecast } = require('./application-conditions');
     // Whole hours (sliceForecast totals whole hours only): a shower in the
     // partial hour at either end of the 48 hours is then in the total.
@@ -205,10 +194,10 @@ function rainWhen(firstRainAt, completedAt) {
 }
 
 // The text the Weather call card adds after its body, or null for "today's
-// card, unchanged": gate off, not the pest line, no complete frozen outlook,
+// card, unchanged": not the pest line, no complete frozen outlook,
 // light rain, rain inside the drying time, or no supported line.
 function buildRainOutlookLine({ outlook, serviceLine, applications } = {}) {
-  if (!pestRainOutlookGateOn() || serviceLine !== 'pest') return null;
+  if (serviceLine !== 'pest') return null;
   if (!outlook || typeof outlook !== 'object' || outlook.v !== RAIN_OUTLOOK_VERSION || outlook.complete !== true) return null;
   if (typeof outlook.totalIn !== 'number' || !Number.isFinite(outlook.totalIn)) return null;
   if (outlook.totalIn < DRY_TOTAL_BELOW_IN) return outlook.firstRainAt == null ? DRY_LINE : null;
@@ -222,7 +211,6 @@ function buildRainOutlookLine({ outlook, serviceLine, applications } = {}) {
 }
 
 module.exports = {
-  pestRainOutlookGateOn,
   capturePestRainOutlook,
   buildRainOutlookSummary,
   buildRainOutlookLine,

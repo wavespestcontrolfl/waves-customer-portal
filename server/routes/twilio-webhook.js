@@ -8,6 +8,7 @@ const { recordSuppression, clearSuppression } = require('../services/messaging/v
 const { detectSmsOptCommand } = require('../services/messaging/opt-out-detector');
 const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
 const { updateByTwilioSid } = require('../services/conversations');
+const { onlyIfNotBehind } = require('../services/sms-delivery-status-order');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
 const {
@@ -17,9 +18,6 @@ const {
   isAffirmativeSmsReaction,
   reactionQuotedTarget,
   isCourtesyOnly,
-  courtesyTailWould,
-  courtesyTailMode,
-  courtesyTailShadowMetadata,
   hasRescheduleOrAwayIntent,
   outboundAsksForReply,
 } = require('../services/sms-intent');
@@ -351,15 +349,6 @@ router.post('/sms', async (req, res) => {
     if (!smsReaction && inboundMedia.length === 0 && isCourtesyOnly(Body, { awaitingAnswer: false })) {
       courtesyOnly = isCourtesyOnly(Body, { awaitingAnswer: await lastOutboundAskedQuestion(From, To) });
     }
-    // GATE_SMS_COURTESY_TAIL=shadow: the results above are unchanged; record on the row
-    // when the courtesy-tail rule WOULD have closed this text ("Perfect. Go browns"), so
-    // the owner can read the real hit rate before flipping. The DB read only runs for
-    // texts the new rule matches while our last text is assumed to ask nothing.
-    let courtesyTailMetadata = {};
-    if (typeof courtesyTailMode === 'function' && courtesyTailMode() === 'shadow' && !courtesyOnly && !smsReaction && inboundMedia.length === 0
-      && courtesyTailWould(Body, { awaitingAnswer: false })) {
-      courtesyTailMetadata = courtesyTailShadowMetadata('shadow', courtesyTailWould(Body, { awaitingAnswer: await lastOutboundAskedQuestion(From, To) }));
-    }
     // Quiet tapback = explicitly affirmative (Liked/Loved/👍/undo) AND its
     // quoted target asked nothing. "Reacted 👍 to \"Does 9am work?\"" is the
     // ANSWER; "Disliked …" / "Questioned …" / ❓ express concern — all loud
@@ -512,7 +501,7 @@ router.post('/sms', async (req, res) => {
       // Loud reactions are typed as ordinary inbound so the unanswered digest
       // and completion guard count them (codex r3).
       messageType: recruitingReply ? 'job_applicant_reply' : (quietReaction ? 'sms_reaction' : undefined),
-      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}), ...courtesyTailMetadata, ...(recruitingReply ? { job_application_id: recruitingReply.applicationId } : {}) },
+      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}), ...(recruitingReply ? { job_application_id: recruitingReply.applicationId } : {}) },
     }).catch(() => {});
 
     sourcePersistenceFailed = !inboundTouchpoint?.message?.id;
@@ -1026,7 +1015,6 @@ router.post('/sms', async (req, res) => {
         domain: numberConfig.domain,
         media: inboundMedia,
         ...(courtesyOnly ? { courtesyOnly: true } : {}),
-        ...courtesyTailMetadata,
       }),
     }).returning(['id', 'created_at']).catch(() => {
       sourcePersistenceFailed = true;
@@ -1196,7 +1184,7 @@ router.post('/sms', async (req, res) => {
     // A reschedule/away ask about an EXISTING visit must never be consumed
     // by the intake flow (codex #3232 r29) — consumption returns before
     // the durable reschedule flag below, silently dropping the guard.
-    // GATE_LEAD_CALL_TEXT_FOLLOWUP: a lead answering our "what time
+    // A lead answering our "what time
     // tomorrow" question is answering that, not the intake machine ("10 AM
     // works" reads as an address there); the follow-up below takes it.
     const pendingTimeAnswer = !!(customer && Body) && !isAiNumber && !TWILIO_NUMBERS.isTechLine(To)
@@ -1228,7 +1216,7 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
     }
 
-    // GATE_LEAD_CALL_REPLY_RING (owner 2026-10-24): a lead's bare CALL in
+    // Lead call-reply ring (owner 2026-10-24): a lead's bare CALL in
     // answer to our lead text rings Adam's cell with the press-1 bridge,
     // 8 AM-8 PM ET. Keyed on our sent text, not lead_intake_status, so a lead
     // whose intake state never seeded still counts. Post-ack, never awaited;
@@ -1241,7 +1229,7 @@ router.post('/sms', async (req, res) => {
       res.once('finish', () => {
         void require('../services/lead-call-reply-ring').ringForCallReply(ringInput)
           .catch((err) => logger.warn(`[lead-call-reply-ring] post-ack ring failed: ${err.code || err.name || 'error'}`));
-        // GATE_LEAD_CALL_TEXT_FOLLOWUP: the TEXT answer, the night CALL time
+        // Lead call/text follow-up: the TEXT answer, the night CALL time
         // ask and the time reply (services/lead-call-text-followup.js).
         void require('../services/lead-call-text-followup').handleLeadReply(ringInput)
           .catch((err) => logger.warn(`[lead-call-text-followup] post-ack follow-up failed: ${err.code || err.name || 'error'}`));
@@ -1580,8 +1568,12 @@ router.post('/status', async (req, res) => {
       // the webhook answers 200 regardless, so Twilio would never redeliver
       // and a bounce would be lost (codex P2).
       try {
-        await db('sms_log').where({ twilio_sid: MessageSid }).update({ status: MessageStatus });
-        await updateByTwilioSid(MessageSid, { delivery_status: MessageStatus, updated_at: new Date() });
+        // Callbacks can arrive out of order: a late `sent` must not undo `delivered`, so each UPDATE
+        // carries the guard itself (services/sms-delivery-status-order.js).
+        await onlyIfNotBehind(db('sms_log').where({ twilio_sid: MessageSid }), 'status', MessageStatus)
+          .update({ status: MessageStatus });
+        await updateByTwilioSid(MessageSid, { delivery_status: MessageStatus, updated_at: new Date() },
+          (query) => onlyIfNotBehind(query, 'delivery_status', MessageStatus));
       } catch (bookkeepingErr) {
         logger.error(`[twilio-status] status bookkeeping failed (continuing to handlers): ${bookkeepingErr.message}`);
       }

@@ -152,7 +152,9 @@ async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, service
       category: BOOKING_FUNNEL_SERVICE_CATEGORIES[key] || null,
       label: BOOKING_FUNNEL_SERVICE_LABELS[key] || key,
     }));
-    return expectedMinutesForServices(conn, services, durationMinutes);
+    // A funnel selection is the visit a customer is booking now (offer and
+    // confirm both land here): the new-visit planning minutes apply.
+    return expectedMinutesForServices(conn, services, durationMinutes, { newVisit: true });
   }
   if (serviceIdentity && (serviceIdentity.catalogServiceKey || serviceIdentity.serviceType)) {
     return expectedMinutesForServices(conn, [{
@@ -162,7 +164,7 @@ async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, service
   }
   return durationMinutes;
 }
-const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
+const { fallbackCenterZoneName, funnelOfferPool } = require('../services/scheduling/zone-day-funnel');
 const {
   CUSTOMER_HOUR_GRID, pastCustomerLastStart, customerWindowAdmits, refreshCustomerBookingWindowConfig,
 } = require('../services/scheduling/customer-windows');
@@ -1695,7 +1697,9 @@ function detachVoiceRouteCheck(plan, candidates) {
 // `technicianId`: opt-in. find-time searches that one technician's days only
 // (its own technicianId filter). Only reschedule-public.js passes it: a visit
 // that already has a technician keeps that technician.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, providerTravel, serviceLines, bestSlotCount, technicianId }) {
+// `zoneFunnelAddress`: opt-in address text. With GATE_SOUTH_ZONE_DAY_FUNNEL live and an address in a
+// funneled far-south zone, the offered pool is funneled exactly as the estimate page's (funnelOfferPool).
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -1807,9 +1811,6 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     bookArrivalGrace: graceBuild,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
-    // `false` = the model-only road clock, no paid road times (GATE_ASSISTANT_ROUTE_TIMES alone
-    // passes it, through availabilityForPin); undefined = today's allowance for every other caller.
-    providerTravel,
     // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer
     // against neighbouring stops; 0 when the gate is off.
     bufferMinutes: customerFacingBufferMinutes(),
@@ -2101,7 +2102,12 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // GATE_CUSTOMER_ROUTE_CHECK (customer-route-check.js): null with the gate
   // off or no surface named, and nothing below runs.
   const routeCheck = routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today });
-  const candidates = await applyRouteCheck(routeCheck, stampedCandidates);
+  // South-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL), opt-in per caller with the address text
+  // (the lead assessment link): the pool narrows BEFORE the customer route check, as on the estimate page.
+  const funneledCandidates = await funnelOfferPool(stampedCandidates, {
+    address: zoneFunnelAddress, dateFrom: rangeFrom, dateTo: rangeTo, routeDaySlug: zoneSlug, conn: db,
+  });
+  const candidates = await applyRouteCheck(routeCheck, funneledCandidates);
   const totalFeasible = result.total_feasible || 0;
   const { slots: curatedSlots, bestFitByDate, rankProfileFields } = applyReserviceProfile({
     rankProfile, candidates, today, totalFeasible, bestSlotCount,
@@ -2228,10 +2234,7 @@ function buildFunnelAvailability(args) {
   // capture-intent revalidation and both pin readers offer (and re-check) one technician set.
   // Gate off or shadow: nothing named, no query.
   const serviceLines = funnelServiceLines(args.serviceKey);
-  // `appendOnly` (the portal assistant's availabilityForPin call alone): its commit, confirmBooking, stores an
-  // unassigned visit with no certified route order, so a mid-route insertion offer could not be honored.
-  // Undefined for every other caller: the gate's value, as before.
-  return buildBookingAvailability({ ...args, selfServeNotice: true, capacityPlacement: bookInsertionOffersLive() && !args.appendOnly, ...(serviceLines ? { serviceLines } : {}) });
+  return buildBookingAvailability({ ...args, selfServeNotice: true, capacityPlacement: bookInsertionOffersLive(), ...(serviceLines ? { serviceLines } : {}) });
 }
 
 // The customer a /book offer may be made to, or null. The ONE eligibility
@@ -2282,7 +2285,7 @@ async function availabilityForExistingCustomer({ customerId, serviceKey }) {
 // (services/scheduling/text-offer-times.js, GATE_MULTI_TECH_TEXT_TIMES) share,
 // so a text-offered time and the website's come from one finder. Null when
 // /book is off, the service is no funnel service or the pin is missing.
-async function availabilityForPin({ lat, lng, serviceKey, internal = false, providerTravel, appendOnly }) {
+async function availabilityForPin({ lat, lng, serviceKey, internal = false }) {
   const funnelKey = normalizeBookingServiceKey(serviceKey);
   // A SQL NULL / blank must not read as 0 (Number(null) is 0: the Gulf of Guinea).
   const pin = [lat, lng].map((v) => (v == null || String(v).trim() === '' ? NaN : Number(v)));
@@ -2306,8 +2309,6 @@ async function availabilityForPin({ lat, lng, serviceKey, internal = false, prov
     // no-op while GATE_BOOK_ARRIVAL_GRACE is off): the texting AI offers
     // exactly what /book would show this customer, graced slots included.
     bookArrivalGrace: true,
-    providerTravel,
-    appendOnly,
   });
 }
 
@@ -2566,7 +2567,7 @@ async function customerBookingLocation(customer) {
   return storedBookingPin({ latitude: location?.lat, longitude: location?.lng });
 }
 
-// The placement source for a self-booked visit (GATE_ROUTE_CHECK_BOOKING_SAVES):
+// The placement source for a self-booked visit's route number:
 // /book itself is 'self_booking'; the internal callers pass callbackVisit: the
 // re-service page ('reservice'), the commercial first-visit page
 // ('commercial_first_visit', isCallback false with an estimateGuard) and the
@@ -4605,11 +4606,11 @@ async function createSelfBooking(payload = {}) {
         const { persistArrivalOrder } = require('../services/scheduling/arrival-route');
         await persistArrivalOrder(trx, capacityCommitFit, scheduledRow.id);
       } else {
-        // GATE_ROUTE_CHECK_BOOKING_SAVES: capacity did not number this visit
+        // Capacity did not number this visit
         // (capacity mode is off), so the dispatcher's placement does, in this
         // same transaction. The primary visit only: package visit 2 is placed
         // by package-followup-booking. Nothing below changes this row's date,
-        // window or technician. Gate off: touches nothing. Never throws.
+        // window or technician. Arrival routing off: touches nothing. Never throws.
         await require('../services/scheduling/staff-save-route-check').placeBookingSavedVisit(trx, {
           serviceId: scheduledRow.id, source: bookingPlacementSource(callbackVisit),
         });

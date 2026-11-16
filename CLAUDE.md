@@ -112,4 +112,5 @@ The catalogue of documented `GATE_*` flags and env vars (default, where it is re
 - Look a variable up by name: `grep -n 'GATE_NAME' docs/gates-and-env.md docs/gate-index.md`. Each entry is one paragraph on one line; never read the whole file.
 - Document a new or changed variable there, in the same PR. Not here.
 - After adding, renaming or removing a `GATE_*` variable, or reading one from a new file, run `npm run gates:index` and commit `docs/gate-index.md`; `npm run check:domain-rules` fails when that file is out of date.
+- Every new `GATE_*` gets a described header line in `server/config/feature-gates.js` (` *   GATE_X=true (what it does, owner date, kill)`), so Settings → Advanced → Features shows what it does and the owner can flip it there (owner 2026-11-06). `npm run check:domain-rules` fails a gate without one; `scripts/gate-catalogue-baseline.json` lists the older gaps and only shrinks.
 - This file has a 24 KB budget (`npm run check:domain-rules`); it loads into every session.

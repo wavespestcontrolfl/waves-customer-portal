@@ -259,8 +259,7 @@ function mergeSummary(source, target, preview) {
   return parts.join(" ");
 }
 
-// Merge one neighborhood into another of its county (GATE_NEIGHBORHOOD_MERGE,
-// owner 2026-10-25): find the entry it joins, read what moves (a dry run that
+// Merge one neighborhood into another of its county (owner 2026-10-25): find the entry it joins, read what moves (a dry run that
 // writes nothing), then merge.
 function MergeIntoPanel({ neighborhood, initialTarget = null, busy, error, onSearch, onPreview, onMerge, onCancel }) {
   const [search, setSearch] = useState("");
@@ -518,17 +517,14 @@ export default function NeighborhoodGateCodesPage() {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [readError, setReadError] = useState("");
-  const [disabled, setDisabled] = useState(false);
   const [toast, setToast] = useState("");
   const [actionError, setActionError] = useState("");
   const [busyKey, setBusyKey] = useState("");
   const [editingId, setEditingId] = useState("");
   const [addingTo, setAddingTo] = useState("");
   const [mergingFrom, setMergingFrom] = useState("");
-  const [mergeEnabled, setMergeEnabled] = useState(false);
   const [suggestions, setSuggestions] = useState([]);
   const [suggestionsFailed, setSuggestionsFailed] = useState(false);
-  const [unplacedEnabled, setUnplacedEnabled] = useState(false);
   const [unplaced, setUnplaced] = useState([]);
   const [unplacedFailed, setUnplacedFailed] = useState(false);
   // A refused action started from a help-list row, shown in that row: { key, message }.
@@ -609,15 +605,11 @@ export default function NeighborhoodGateCodesPage() {
       }
       const data = await api(`/admin/neighborhood-access?${params.toString()}`);
       if (seq !== readSeq.current) return;
-      setDisabled(false);
-      setMergeEnabled(data.mergeEnabled === true);
-      setUnplacedEnabled(data.unplacedEnabled === true);
       setNeighborhoods((prev) => (offset ? [...prev, ...(data.neighborhoods || [])] : data.neighborhoods || []));
       setTotal(data.total || 0);
     } catch (err) {
       if (seq !== readSeq.current) return;
-      if (err.status === 404 && err.body?.enabled === false) setDisabled(true);
-      else setReadError(err.message || "Could not load gate codes");
+      setReadError(err.message || "Could not load gate codes");
     } finally {
       if (seq === readSeq.current) setLoading(false);
     }
@@ -647,9 +639,8 @@ export default function NeighborhoodGateCodesPage() {
 
   // The two help lists beside the directory. A failed read keeps the rows
   // already shown and marks the list failed, so its panel says so with Try
-  // again (HelperListFailed); a panel hides only while its switch is off or
-  // after a read that answered empty. The latest read wins, and a switch that
-  // turns off drops a read still on its way.
+  // again (HelperListFailed); a panel hides only after a read that answered
+  // empty. The latest read wins.
   const suggestionsSeq = useRef(0);
   const loadSuggestions = useCallback(async () => {
     const seq = ++suggestionsSeq.current;
@@ -662,10 +653,7 @@ export default function NeighborhoodGateCodesPage() {
       if (seq === suggestionsSeq.current) setSuggestionsFailed(true);
     }
   }, []);
-  useEffect(() => {
-    if (mergeEnabled) loadSuggestions();
-    else { suggestionsSeq.current += 1; setSuggestions([]); setSuggestionsFailed(false); }
-  }, [mergeEnabled, loadSuggestions]);
+  useEffect(() => { loadSuggestions(); }, [loadSuggestions]);
 
   const unplacedSeq = useRef(0);
   const loadUnplaced = useCallback(async () => {
@@ -679,10 +667,7 @@ export default function NeighborhoodGateCodesPage() {
       if (seq === unplacedSeq.current) setUnplacedFailed(true);
     }
   }, []);
-  useEffect(() => {
-    if (unplacedEnabled) loadUnplaced();
-    else { unplacedSeq.current += 1; setUnplaced([]); setUnplacedFailed(false); }
-  }, [unplacedEnabled, loadUnplaced]);
+  useEffect(() => { loadUnplaced(); }, [loadUnplaced]);
 
   const mutate = async ({ key, path, method, body, successText, onError }) => {
     setBusyKey(key);
@@ -693,8 +678,8 @@ export default function NeighborhoodGateCodesPage() {
       const result = await api(path, { method, body: JSON.stringify(body) });
       closeForms();
       await loadRef.current();
-      if (mergeEnabled) await loadSuggestions();
-      if (unplacedEnabled) await loadUnplaced();
+      await loadSuggestions();
+      await loadUnplaced();
       setToast(typeof successText === "function" ? successText(result) : successText);
     } catch (err) {
       if (onError) onError(err.message || "Action failed");
@@ -786,7 +771,7 @@ export default function NeighborhoodGateCodesPage() {
     });
   };
 
-  const showEmpty = !loading && !readError && !disabled && neighborhoods.length === 0;
+  const showEmpty = !loading && !readError && neighborhoods.length === 0;
 
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1300px]">
@@ -817,10 +802,6 @@ export default function NeighborhoodGateCodesPage() {
         confirmed in 6 months shows as Stale.
       </div>
 
-      {disabled ? (
-        <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Gate codes are not turned on yet.</div>
-      ) : (
-        <>
           <UnplacedHomes
             items={unplaced}
             failed={unplacedFailed}
@@ -925,7 +906,7 @@ export default function NeighborhoodGateCodesPage() {
                       </span>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      {mergeEnabled && mergingFrom !== n.id && (
+                      {mergingFrom !== n.id && (
                         <Button
                           size="sm"
                           variant="ghost"
@@ -947,7 +928,7 @@ export default function NeighborhoodGateCodesPage() {
                       )}
                     </div>
                   </div>
-                  {mergeEnabled && <MergedIn merges={n.mergedIn} disabled={busyKey !== ""} onUndo={onUndoMerge} />}
+                  <MergedIn merges={n.mergedIn} disabled={busyKey !== ""} onUndo={onUndoMerge} />
                   {mergingFrom === n.id && (
                     <div className="mb-2">
                       <MergeIntoPanel
@@ -982,7 +963,7 @@ export default function NeighborhoodGateCodesPage() {
                       <EntryForm
                         idPrefix={`add-${n.id}`}
                         initial={BLANK_FORM}
-                        showUnconfirmed={unplacedEnabled}
+                        showUnconfirmed
                         submitLabel="Save entry"
                         busy={busyKey === `${n.id}:add`}
                         error={formError}
@@ -1003,8 +984,6 @@ export default function NeighborhoodGateCodesPage() {
               </Button>
             </div>
           )}
-        </>
-      )}
       </>
       )}
     </UiSurface>

@@ -9,7 +9,6 @@ const categories = [{ id: 'cat-1', name: 'Utilities' }];
 const bill = { id: 'b-1', pattern: 'VERIZON', label: 'Phone plan', business_pct: '50.00', category_id: null, enabled: true };
 
 let calls;
-let status;
 let bills;
 let home;
 
@@ -19,7 +18,6 @@ function json(body, ok = true) {
 
 beforeEach(() => {
   calls = [];
-  status = { enabled: true, actual_method: true };
   bills = [bill];
   home = { year: 2026, row: null, deduction: 0 };
   localStorage.setItem('waves_admin_token', 'test-token');
@@ -27,7 +25,6 @@ beforeEach(() => {
     const u = String(url);
     const method = opts.method || 'GET';
     calls.push({ url: u, method, body: opts.body ? JSON.parse(opts.body) : undefined });
-    if (u.includes('/shared-bills/status')) return json(status);
     if (u.includes('/expense-categories')) return json({ categories });
     if (u.includes('/home-office/')) {
       if (method === 'PUT') return json({ year: 2026, row: { tax_year: 2026, sq_ft: 300, months: 12 }, deduction: 1500 });
@@ -39,14 +36,6 @@ beforeEach(() => {
   }));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
-
-it('renders nothing and reads nothing else while the gate is off', async () => {
-  status = { enabled: false };
-  const { container } = render(<SharedBillsPanel />);
-  await waitFor(() => expect(calls.length).toBeGreaterThan(0));
-  expect(container).toBeEmptyDOMElement();
-  expect(calls.some((c) => c.url.endsWith('/shared-bills') || c.url.includes('/home-office/'))).toBe(false);
-});
 
 it('lists the bills and adds one with the typed values', async () => {
   render(<SharedBillsPanel />);
@@ -114,29 +103,6 @@ it('offers the actual method: no 300 sq ft limit, the year costs over the home s
   expect(calls.find((c) => c.method === 'PUT').body).toMatchObject({
     method: 'actual', sq_ft: '500', home_sq_ft: '1000', rent: '12000', utilities: '600', insurance: '', other: '',
   });
-});
-
-it('hides the method picker while the return engine is off', async () => {
-  status = { enabled: true, actual_method: false };
-  render(<SharedBillsPanel />);
-  await screen.findByText('Phone plan');
-  expect(screen.getByLabelText('Square feet')).toBeInTheDocument();
-  expect(screen.queryByLabelText('Home office method')).toBeNull();
-  expect(screen.getByRole('button', { name: 'Save home office' })).toBeInTheDocument();
-});
-
-it('shows a saved actual-method year read-only while the return engine is off', async () => {
-  status = { enabled: true, actual_method: false };
-  home = { year: 2026, row: { tax_year: 2026, method: 'actual', sq_ft: 300, months: 12, home_sq_ft: 1200, rent: '1000.00', utilities: '50.50', insurance: '0.00', other: null, notes: null }, deduction: 262.63 };
-  render(<SharedBillsPanel />);
-  await screen.findByText(/Actual method \(return engine off\)/);
-  await waitFor(() => expect(screen.getByLabelText('Home square feet')).toHaveValue('1200'));
-  expect(screen.getByLabelText('Square feet')).toBeDisabled();
-  expect(screen.getByLabelText('Rent for the year')).toBeDisabled();
-  expect(screen.queryByRole('button', { name: 'Save home office' })).toBeNull();
-  expect(screen.queryByLabelText('Home office method')).toBeNull();
-  expect(screen.getByRole('button', { name: /^Remove \d{4}$/ })).toBeInTheDocument();
-  expect(calls.some((c) => c.method === 'PUT')).toBe(false);
 });
 
 it('loads a saved actual-method row into the form', async () => {

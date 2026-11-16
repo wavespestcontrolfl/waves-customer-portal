@@ -1,4 +1,4 @@
-// Name handling for GATE_NEIGHBORHOOD_NAMING: Sarasota plat numbers → names, and
+// Name handling for the neighborhood naming pass: Sarasota plat numbers → names, and
 // the customer's own words → a community name. All names are synthetic or
 // public plat names; nothing here reaches the network (fetch is stubbed).
 jest.mock('../models/db', () => jest.fn());
@@ -7,7 +7,6 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { callerCommunityName } = require('../services/neighborhood-naming');
 const { withPlatName } = require('../services/neighborhood-access');
 const { lookupSarasotaPlatNames } = require('../services/property-lookup/county-parcel-gis');
-const gates = require('../config/feature-gates');
 
 describe('callerCommunityName', () => {
   test.each([
@@ -112,26 +111,5 @@ describe('lookupSarasotaPlatNames', () => {
     global.fetch = answer([]);
     expect(await lookupSarasotaPlatNames("1' OR '1'='1")).toEqual([]);
     expect(global.fetch).not.toHaveBeenCalled();
-  });
-});
-
-describe('GATE_NEIGHBORHOOD_NAMING', () => {
-  const saved = { a: process.env.GATE_NEIGHBORHOOD_ACCESS, n: process.env.GATE_NEIGHBORHOOD_NAMING };
-  afterEach(() => {
-    for (const [k, v] of [['GATE_NEIGHBORHOOD_ACCESS', saved.a], ['GATE_NEIGHBORHOOD_NAMING', saved.n]]) {
-      if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    }
-  });
-
-  test.each([
-    ['true', 'true', true],
-    ['true', undefined, false],
-    ['true', 'yes', false],
-    [undefined, 'true', false],
-  ])('access=%s naming=%s → %s', (access, naming, live) => {
-    for (const [k, v] of [['GATE_NEIGHBORHOOD_ACCESS', access], ['GATE_NEIGHBORHOOD_NAMING', naming]]) {
-      if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    }
-    expect(gates.neighborhoodNamingLive()).toBe(live);
   });
 });

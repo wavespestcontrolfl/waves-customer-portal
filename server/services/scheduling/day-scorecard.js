@@ -35,7 +35,7 @@ const MAX_RANGE_DAYS = 30; // Same 31-day inclusive cap as day-quality.
 // Only these evidence grades are corroborated recorded work (route-performance's
 // own distinction) — 'unverified_timing'/'unmatched_or_uncompleted_work' never
 // contribute a minute to the actual side.
-const RECORDED_EVIDENCE = new Set(['operator_corrected', 'operator_reported', 'recorded_lifecycle_interval']);
+const RECORDED_EVIDENCE = new Set(['operator_corrected', 'gps_measured', 'operator_reported', 'recorded_lifecycle_interval']);
 // measureRoutePerformance's arrivalOutcome values that mean the row was NOT
 // completed on this route (missing/moved/still open) — every other value,
 // including 'grouped_work_requires_review', only exists because row.status
@@ -203,7 +203,8 @@ function actualPastRow(plan, mileage, fallbackStops) {
   const completedStops = completedOnRoute.length + unbaselined;
   const physicalStops = actualPhysicalStops(plan, fallbackStops);
   return { stops: completedStops, physicalStops, onSiteMinutes,
-    onSiteCoverage: { covered: recorded.length, total: completedOnRoute.length, unbaselined },
+    onSiteCoverage: { covered: recorded.length, total: completedOnRoute.length, unbaselined,
+      gps: recorded.filter(stop => stop.durationEvidence === 'gps_measured').length },
     ...drive, ...actualSpan(spanStops, physicalStops != null) };
 }
 

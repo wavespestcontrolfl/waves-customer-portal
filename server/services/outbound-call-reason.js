@@ -392,7 +392,7 @@ async function existsQualifyingInboundText({ phoneLast10, before, conn = db }) {
  * — unlike resolveOutboundCallReason's own 48h LOOKBACK_MS above, which
  * answers a different question ("why did we place THIS call") and is too
  * narrow for "did they ever reach out first" (owner ruling 2026-09-26, the
- * outbound return-message gate: GATE_CALL_OUTBOUND_RETURN_MESSAGES). Reuses
+ * outbound return-message eligibility check). Reuses
  * the same qualifying rules this file already applies for the voicemail
  * text-back reason — an inbound call, an inbound text, or a lead record —
  * plus an existing customer link, through the EXISTS-style probes above

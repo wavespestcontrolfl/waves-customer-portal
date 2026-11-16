@@ -1179,6 +1179,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           <div style={{ flex: 1, position: "relative" }}>
             {" "}
             <textarea
+              data-own-mic="true"
               ref={inputRef}
               rows={1}
               aria-label="Ask Waves AI"
@@ -1726,6 +1727,7 @@ function MobileSheet({
           <div style={{ position: "relative" }}>
             {" "}
             <textarea
+              data-own-mic="true"
               ref={inputRef}
               rows={1}
               aria-label="Ask Waves AI"

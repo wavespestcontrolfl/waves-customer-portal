@@ -49,7 +49,7 @@ router.get('/people', handle(async (req, res) => {
   }).select('id', 'name', 'role').orderBy('name');
   res.json({ people, self_id: req.technicianId, can_manage: req.techRole === 'admin' });
 }));
-// Staff onboarding documents (GATE_STAFF_ONBOARDING_DOCS). Gate off = an empty answer, no reads.
+// Staff onboarding documents (services/staff-onboarding.js). Staff documents off = an empty answer, no reads.
 router.get('/onboarding', handle(async (req, res) => {
   res.json(await onboarding.onboardingFor(actor(req)));
 }));

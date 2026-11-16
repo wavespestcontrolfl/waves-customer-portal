@@ -50,7 +50,7 @@ maybeDescribe('found-codes bell (live Postgres)', () => {
     createdAt: '2026-10-24T11:17:00.000Z', suggestedCustomer: null, ...over,
   });
   const run = (items) => Bell.syncFoundCodesBell({
-    now: NOW, gateEnabled: true, sectionOn: true, dedupeKey: KEY,
+    now: NOW, dedupeKey: KEY,
     waitingCodes: async () => items.map((row) => ({ id: row.id, sentAt: row.sourceAt })), list: async () => ({ total: items.length, items }),
   });
 
@@ -152,7 +152,7 @@ maybeDescribe('found-codes bell (live Postgres)', () => {
       expect(new Date(mine.sentAt).toISOString()).toBe(NOW.toISOString());
       expect(waiting).toHaveLength(listed.total);
 
-      await expect(Bell.syncFoundCodesBell({ now: NOW, conn: trx, gateEnabled: true, sectionOn: true, dedupeKey: ownKey }))
+      await expect(Bell.syncFoundCodesBell({ now: NOW, conn: trx, dedupeKey: ownKey }))
         .resolves.toEqual({ count: listed.total, outcome: 'raised' });
       const [row] = await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [ownKey]);
       expect(row.category).toBe('access_codes');

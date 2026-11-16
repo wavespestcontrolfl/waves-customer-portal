@@ -25,7 +25,7 @@ maybeDescribe('admin alert retention (live Postgres)', () => {
     retention = require('../services/admin-alert-retention');
     NotificationService = require('../services/notification-service');
   });
-  const clearCursors = () => db('system_settings').whereIn('key', ['admin_alert_retention_cursor_shadow', 'admin_alert_retention_cursor_true']).del();
+  const clearCursors = () => db('system_settings').where({ key: 'admin_alert_retention_cursor_true' }).del();
   beforeEach(clearCursors);
   afterAll(async () => {
     await clearCursors();
@@ -93,7 +93,7 @@ maybeDescribe('admin alert retention (live Postgres)', () => {
     expect((await get(customer.id)).done_at).toBeNull();
   });
 
-  test('the sweep: shadow records one audit row and changes nothing; true expires and records; a refreshed row stays', async () => {
+  test('the sweep: expires and records; a refreshed row stays', async () => {
     // Fresh fixture set, scoped by a unique title.
     const mk = (over) => bell({ title: TITLE, ...over });
     const old1 = await mk({ created_at: ago(70) });
@@ -109,17 +109,10 @@ maybeDescribe('admin alert retention (live Postgres)', () => {
     runs.push(runNow.toISOString());
     const onlyMine = (q) => q.whereIn('id', mine);
 
-    const shadow = await retention.runAdminAlertRetention({ now: runNow, mode: 'shadow', scope: onlyMine });
-    expect(shadow).toMatchObject({ mode: 'shadow', written: 0, scanned: 6, kept: { refreshed: 1 } });
-    expect(shadow.expire.byRule).toEqual({ age30: 4, fyi7: 1 });
-    expect(shadow.ringRisk.emitters['sms-draft-canary'].ringsWithoutNewEvent).toBe(1);
-    expect((await db('notifications').whereIn('id', mine).whereNotNull('done_at').count('* as c').first()).c).toBe('0');
-    const shadowAudit = await db('audit_log').where({ action: 'admin_alert_retention.shadow' }).whereRaw("metadata->>'runId' = ?", [runNow.toISOString()]);
-    expect(shadowAudit).toHaveLength(1);
-    expect(shadowAudit[0].metadata.expire.total).toBe(5);
-
-    const live = await retention.runAdminAlertRetention({ now: runNow, mode: 'true', scope: onlyMine, batchSize: 2 });
-    expect(live).toMatchObject({ mode: 'true', written: 5, batches: 3 });
+    const live = await retention.runAdminAlertRetention({ now: runNow, scope: onlyMine, batchSize: 2 });
+    expect(live).toMatchObject({ written: 5, batches: 3, scanned: 6, kept: { refreshed: 1 } });
+    expect(live.expire.byRule).toEqual({ age30: 4, fyi7: 1 });
+    expect(live.ringRisk.emitters['sms-draft-canary'].ringsWithoutNewEvent).toBe(1);
     const done = await db('notifications').whereIn('id', mine).whereNotNull('done_at').pluck('id');
     expect(done.sort()).toEqual([old1.id, old2.id, old3.id, fyi.id, canary.id].sort());
     expect((await get(young.id)).done_at).toBeNull();
@@ -134,7 +127,7 @@ maybeDescribe('admin alert retention (live Postgres)', () => {
     expect((await db('notifications').whereIn('id', mine).count('* as c').first()).c).toBe('7');
 
     // A second run finds nothing more.
-    const again = await retention.runAdminAlertRetention({ now: runNow, mode: 'true', scope: onlyMine });
+    const again = await retention.runAdminAlertRetention({ now: runNow, scope: onlyMine });
     expect(again.written).toBe(0);
   });
 
@@ -148,7 +141,7 @@ maybeDescribe('admin alert retention (live Postgres)', () => {
     expect(page.map((r) => r.id)).toEqual([eligible.id, activityFyi.id]);
 
     // One row of budget a run, three Activity rows ahead: the first run already expires the eligible alert.
-    const out = await retention.runAdminAlertRetention({ now, mode: 'true', batchSize: 1, maxBatches: 1, scope: (q) => q.whereIn('id', mine) });
+    const out = await retention.runAdminAlertRetention({ now, batchSize: 1, maxBatches: 1, scope: (q) => q.whereIn('id', mine) });
     expect(out.written).toBe(1);
     expect((await get(eligible.id)).done_at).not.toBeNull();
     for (const r of activity) expect((await get(r.id)).done_at).toBeNull();
@@ -160,7 +153,7 @@ maybeDescribe('admin alert retention (live Postgres)', () => {
     for (let i = 0; i < 4; i += 1) kept.push(await bell({ created_at: ago(300 - i), metadata: { rungAt: ago(1).toISOString() } }));
     const eligible = await bell({ created_at: ago(120) });
     const ids = [...kept, eligible].map((r) => r.id);
-    const run = (extra = {}) => retention.runAdminAlertRetention({ now, mode: 'true', batchSize: 2, maxBatches: 1, scope: (q) => q.whereIn('id', ids), ...extra });
+    const run = (extra = {}) => retention.runAdminAlertRetention({ now, batchSize: 2, maxBatches: 1, scope: (q) => q.whereIn('id', ids), ...extra });
     const saved = async () => (await db('system_settings').where({ key: 'admin_alert_retention_cursor_true' }).first('value'))?.value;
 
     expect(await run()).toMatchObject({ scanned: 2, written: 0, cursor: 'saved' });
@@ -170,16 +163,6 @@ maybeDescribe('admin alert retention (live Postgres)', () => {
     expect(third).toMatchObject({ scanned: 1, written: 1, cursor: 'reset', resumedFrom: kept[3].id });
     expect((await get(eligible.id)).done_at).not.toBeNull();
     expect(await saved()).toBeNull();
-    // Shadow keeps its own place.
-    await run({ mode: 'shadow' });
-    expect(await db('system_settings').where({ key: 'admin_alert_retention_cursor_shadow' }).first('value')).toBeTruthy();
-  });
-
-  test('gate off writes nothing and records nothing', async () => {
-    const old = await bell({ created_at: ago(80) });
-    const out = await retention.runAdminAlertRetention({ now, mode: 'off', scope: (q) => q.where('id', old.id) });
-    expect(out).toEqual({ skipped: true, reason: 'gate_off' });
-    expect((await get(old.id)).done_at).toBeNull();
   });
 
   test('undo: dry run changes nothing; execute reopens one run exactly, keeping read state; other closers and runs stay', async () => {

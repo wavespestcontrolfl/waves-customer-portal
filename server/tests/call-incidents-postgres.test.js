@@ -213,7 +213,7 @@ describe('the two-model rule for a call finding', () => {
     const unknown = await finding(await call(), { detail: JSON.stringify({ audit_input_hash: AUDIT_INPUT_HASH, verdict: { appointment_agreed: true } }) });
     // The auditor never answered the field: its stored "false" is a coercion.
     const unanswered = await finding(await call(), { old_value: 'true', new_value: 'false', detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', audit_input_hash: AUDIT_INPUT_HASH, verdict: {} }) });
-    const longText = `${TRANSCRIPT}\n${'Agent: more.\n'.repeat(500)}`;
+    const longText = `${TRANSCRIPT}\n${'Agent: more.\n'.repeat(2000)}`;
     const long = await finding(await call({ transcription: longText }), {
       detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', auditor_provider: 'anthropic', audit_input_hash: auditInputHash({ direction: 'inbound', transcription: longText }), verdict: { appointment_agreed: true } }),
     });

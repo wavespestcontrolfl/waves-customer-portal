@@ -275,9 +275,9 @@ describe('MobileAppointmentDetailSheet consultation outcome', () => {
   });
 });
 
-// GATE_SCHEDULE_ACCESS_CODES (owner ruling 2026-10-26): Access under Location.
+// Schedule access codes (owner ruling 2026-10-26): Access under Location.
 describe('MobileAppointmentDetailSheet Access section', () => {
-  const gateService = { ...baseService, status: 'confirmed', scheduleAccessEnabled: true, propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)' }] };
+  const gateService = { ...baseService, status: 'confirmed', propertyAlerts: [{ type: 'gate', text: 'Gate: #4821 (neighborhood)' }] };
 
   it("shows the stop's codes between Location and the appointment note", async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}), clone() { return this; }, text: async () => '', headers: { get: () => null } })));

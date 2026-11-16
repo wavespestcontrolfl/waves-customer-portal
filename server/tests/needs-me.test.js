@@ -115,7 +115,7 @@ test('an engineering digest that is Activity-only appears under who=claude, flag
   expect(all.items.map((i) => [i.id, i.activityOnly])).toEqual([['eng', true], ['person-new', false]]);
 });
 
-test('a row routed to Claude\'s queue (GATE_ALERT_CLAUDE_QUEUE stamps) lists under who=claude, off the bell', async () => {
+test('a row routed to Claude\'s queue (the routing stamps) lists under who=claude, off the bell', async () => {
   mockRows = [
     row({ id: 'person-new', created_at: '2026-09-30T20:00:00Z' }),
     row({ id: 'canary', title: 'SMS draft route FAILING', created_at: '2026-09-30T10:00:00Z',

@@ -81,7 +81,7 @@ test('the pre-capacity arrival finder keeps its enumerator\'s refusal counts, pe
   });
 });
 
-test('a new stop (New Appointment, GATE_NEW_APPT_ROUTE_TIMES) runs the same finder on a prospective context', async () => {
+test('a new stop (New Appointment) runs the same finder on a prospective context', async () => {
   const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
   enumerateArrivalPlacements.mockReturnValue({ placements: [{ windowStart: '17:00', windowEnd: '18:00', fit }], evaluated: 12, rejections: {} });
   const prospective = { lat: 27.4, lng: -82.5, estimated_duration_minutes: 60 };
@@ -139,7 +139,7 @@ test('an advisory caller spends none of the shared Google drive-time allowance',
   expect(createSchedulingTravel).toHaveBeenCalledWith(undefined);
 });
 
-// GATE_PICKER_ROAD_CHECK (owner 2026-10-26, "Next 7 days"; 2026-10-27, "make
+// The picker road check (owner 2026-10-26, "Next 7 days"; 2026-10-27, "make
 // sure costs are appropriate"): the staff picker's route check drives the
 // road days on Google (hint-road-times.js roadWindows: today + 6 by default)
 // and checks later days on the model, with no Google re-check.
@@ -177,14 +177,12 @@ test('the picker road check: Google on the road days, later days the model', asy
     expect(evaluateArrivalPlacement).not.toHaveBeenCalled();
     // Three passes over the road days' routes, nothing more.
     expect(roadTravel.preload).toHaveBeenCalledTimes(3);
-    // GATE_PICKER_ROAD_BAND off: every hour of a road day is driven.
-    expect(enumerateArrivalPlacements.mock.calls.every(([, opts]) => opts.startsOnly === undefined)).toBe(true);
   } finally {
     spy.mockRestore();
   }
 });
 
-// GATE_PICKER_ROAD_BAND (owner 2026-10-28 cost plan, step 2: "Google only for
+// The picker road band (owner 2026-10-28 cost plan, step 2: "Google only for
 // near-best hours"): a road day buys Google only for its hours within 5
 // minutes of its best (always its 3 best); a later day is untouched.
 test('the picker road band: Google only for the hours near a road day\'s best', async () => {
@@ -206,7 +204,6 @@ test('the picker road band: Google only for the hours near a road day\'s best', 
     };
   });
   const [near, far] = [ymd(1), ymd(10)];
-  process.env.GATE_PICKER_ROAD_BAND = 'true';
   try {
     const result = await findAvailableSlots({ ...BASE, dateFrom: near, dateTo: far, pickerRoadCheck: true, roadSpender: 'staff-1' });
     const passes = enumerateArrivalPlacements.mock.calls.filter(([, opts]) => opts.collectLegs);
@@ -221,7 +218,6 @@ test('the picker road band: Google only for the hours near a road day\'s best', 
     expect(result.slots.filter((slot) => slot.date === near)).toHaveLength(5);
     expect(result.slots.filter((slot) => slot.date === far)).toHaveLength(5);
   } finally {
-    delete process.env.GATE_PICKER_ROAD_BAND;
     spy.mockRestore();
   }
 });
@@ -240,7 +236,8 @@ test('the road days follow PICKER_ROAD_TRAFFIC_DAYS + PICKER_ROAD_PLAIN_DAYS', a
   try {
     await findAvailableSlots({ ...BASE, dateFrom: ymd(1), dateTo: ymd(3), pickerRoadCheck: true, roadSpender: 'staff-1' });
     const enumerated = enumerateArrivalPlacements.mock.calls.filter(([, opts]) => !opts.collectLegs).map(([context]) => context);
-    expect(enumerated.filter((context) => context.travel === roadTravel).map((context) => context.date)).toEqual([ymd(1)]);
+    // The band ranks each road day's hours before it buys, so a day shows more than once.
+    expect([...new Set(enumerated.filter((context) => context.travel === roadTravel).map((context) => context.date))]).toEqual([ymd(1)]);
   } finally {
     delete process.env.PICKER_ROAD_TRAFFIC_DAYS;
     delete process.env.PICKER_ROAD_PLAIN_DAYS;
@@ -248,7 +245,7 @@ test('the road days follow PICKER_ROAD_TRAFFIC_DAYS + PICKER_ROAD_PLAIN_DAYS', a
   }
 });
 
-// The tech Quick Move (GATE_TECH_MOVE_ROUTE_TIMES) continues today's route
+// The tech Quick Move continues today's route
 // from the current stop on the model: no Google travel source, no re-check.
 test('fromActiveStop without the picker road check: the current stop, no Google', async () => {
   const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');

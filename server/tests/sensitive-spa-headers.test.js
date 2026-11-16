@@ -173,7 +173,7 @@ describe('sensitive SPA document headers', () => {
     expect(isEstimatePath('/estimate/termite')).toBe(false);
     expect(isEstimatePath('/estimate/bed-bug')).toBe(false);
     expect(isEstimatePath('/estimate/top-dressing')).toBe(false);
-    // The estimate's assessment booking page carries the same bearer token (GATE_ESTIMATE_ASSESSMENT_FIRST).
+    // The estimate's assessment booking page carries the same bearer token.
     expect(isEstimatePath(`/estimate/${ESTIMATE_TOKEN}/assessment`)).toBe(true);
     expect(isEstimatePath('/estimate/jane-doe-9f8e7d6c/assessment/')).toBe(true);
     expect(isEstimatePath(`/estimate/${ESTIMATE_TOKEN}/Assessment`)).toBe(true);

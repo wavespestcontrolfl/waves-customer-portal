@@ -26,7 +26,7 @@ jest.mock('../models/db', () => {
     const win = {};
     const chain = {};
     const self = () => chain;
-    for (const m of ['whereNot', 'select', 'sum', 'max', 'countDistinct']) chain[m] = self;
+    for (const m of ['whereNot', 'whereRaw', 'select', 'sum', 'max', 'countDistinct']) chain[m] = self;
     chain.where = (col, op, val) => {
       if (col === 'created_at' && val instanceof Date) win[op === '>=' ? 'start' : 'end'] = val;
       return chain;

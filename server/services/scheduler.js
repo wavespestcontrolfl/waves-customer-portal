@@ -1098,6 +1098,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 12:07 AM ET — pay rate steps (owner 2026-11-05: $23.00, then $25 in the first full pay week after day 90).
+  // Applies every step whose Monday has come, so the staff record shows the new rate that day. It catches up: any
+  // due step, not only today's. A pay run applies due steps too. No gate, no message to anyone.
+  cron.schedule('7 0 * * *', async () => {
+    try {
+      await runExclusive('payroll-rate-steps', async () => {
+        const applied = await require('./payroll-rate-steps').applyDueStepsDaily();
+        if (applied.length) logger.info(`[payroll-rate-steps] ${applied.length} pay rate step(s) applied`);
+      });
+    } catch (err) {
+      logger.error(`[payroll-rate-steps] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // BOOT (+60s, then EVERY 6H at :23) — SMS draft-route canary: probes the
   // routed reply-drafting providers (gpt mini default / Sonnet save-the-sale)
   // and alerts Adam the moment one stops answering (bad model ID, revoked key,
@@ -1212,11 +1226,10 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // EVERY 5 MIN — text-thread lead reader (GATE_SMS_LEAD_EXTRACTION, read in
-  // the sweep): a quiet thread from an unknown number becomes a lead. The
-  // durable per-thread claim fences overlapping ticks and instances.
+  // EVERY 5 MIN — text-thread lead reader: a quiet thread from an unknown
+  // number becomes a lead. The durable per-thread claim fences overlapping
+  // ticks and instances.
   cron.schedule('*/5 * * * *', async () => {
-    if (!isEnabled('smsLeadExtraction')) return;
     try {
       await runExclusive('sms-lead-extraction', async () => {
         await require('./sms-lead-extraction').sweepSmsLeadCandidates();
@@ -1226,11 +1239,9 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // EVERY 30 MIN — reply outcome signals (GATE_SMS_REPLY_OUTCOMES, read in the
-  // sweep too): records what each customer did after a Waves text reply.
-  // Measurement only; the unique reply key makes a repeated tick harmless.
+  // EVERY 30 MIN — reply outcome signals: records what each customer did
+  // after a Waves text reply. Measurement only; the unique reply key makes a repeated tick harmless.
   cron.schedule('13,43 * * * *', async () => {
-    if (!isEnabled('smsReplyOutcomes')) return;
     try {
       await runExclusive('sms-reply-outcomes', async () => {
         await require('./sms-reply-outcomes').sweepReplyOutcomes();
@@ -1252,6 +1263,24 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`[messenger-inbox] poll failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // EVERY 2 MIN — Lock Screen visit cards (GATE_VISIT_LIVE_ACTIVITY, read in the sweep): the repair pass
+  // behind the tracker's own pokes. Each live card is checked against its visit (a missed step is sent, a
+  // step past its time limit ends the card), a visit that just went live with no card gets one, and the
+  // Apple channels of long-ended cards are removed. Gate off = live cards are ended and nothing starts;
+  // with no card and the gate off it is two empty reads.
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      await runExclusive('visit-live-activity', async () => {
+        const result = await require('./visit-live-activity').sweep();
+        if (result.started || result.updated || result.ended || result.failed || result.channelsRemoved) {
+          logger.info(`[visit-live-activity] sweep: cards=${result.cards} started=${result.started} updated=${result.updated} ended=${result.ended} failed=${result.failed} channels_removed=${result.channelsRemoved}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[visit-live-activity] sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -1616,6 +1645,40 @@ function initScheduledJobs() {
   };
   cron.schedule('41 7 * * 1', () => runPermitSyncTick(), { timezone: 'America/New_York' });
   registerDeployKillRetry('permit-sync', () => runPermitSyncTick({ afterKill: true }));
+  // Catch-up: when this week's report step has not committed (2026-11-09:
+  // the county refused both downloads with HTTP 403 and the tables stayed a
+  // week old), run the report step again. Freshness is read before the
+  // lease, so a normal week takes no lock and writes no job_health row.
+  // Report step only (about 3 minutes); a deploy kill goes through the retry
+  // registered above.
+  // Four slots a day, not one (2026-11-10: the first catch-up started at
+  // 7:41:00 and a deploy stopped the server at 7:41:30; the retry at 7:48:03
+  // was stopped at 7:48:11; the third request, at 7:59, got HTTP 403, and
+  // nothing asked again that day). The slots are hours apart, so one bad
+  // slot costs hours, not a day, and no slot asks the county again within
+  // minutes of another:
+  //   - 7:41 AM on the six days that are not Monday (Monday 7:41 is the full
+  //     run above);
+  //   - 9:11 AM, 1:41 PM and 5:41 PM every day, Monday included, so a failed
+  //     Monday run is repaired the same day. On a Monday the 9:11 slot comes
+  //     after the detail step's 60-minute budget; a run that still holds the
+  //     lease makes the slot a no-op.
+  // 9:11, not 9:41: merges into this repo are held from 8:40 to 9:40 AM ET
+  // for the 9 AM content batch, so a deploy rarely lands between 9:00 and
+  // 9:45. The database work stays one upsert transaction about 3 minutes
+  // after the start, and it ends before the :18 and :48 groups.
+  const runPermitReportCatchUpTick = async () => {
+    try {
+      const permitRun = require('./property-lookup/permit-sync-run');
+      if (!(await permitRun.reportCatchUpDue())) return;
+      await runExclusive('permit-sync', () => permitRun.runPermitReportCatchUp());
+    } catch (err) {
+      logger.error(`Permit sync catch-up lease failed: ${err.message}`);
+    }
+  };
+  for (const slot of ['41 7 * * 0,2-6', '11 9 * * *', '41 13,17 * * *']) {
+    cron.schedule(slot, () => runPermitReportCatchUpTick(), { timezone: 'America/New_York' });
+  }
 
   // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural
@@ -1946,6 +2009,21 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Route-Tiers reorder run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // EVERY 15 MIN — make-room move repair (GATE_BOOKING_MAKE_ROOM = true, owner 2026-11-09). The accept's moves commit
+  // first; the moved customers' reminders and records follow right after (services/scheduling/booking-make-room-accept.js).
+  // This pass finishes any that a restart cut off. Reads the committed rows, writes only what differs, sends nothing, no
+  // paid call. Mode not on: returns at once.
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      if (require('./scheduling/booking-make-room').bookingMakeRoomMode() !== 'on') return;
+      await runExclusive('booking-make-room-repair', async () => {
+        await require('./scheduling/booking-make-room-accept').reconcileMakeRoomMoves(db, { today: etDateString(new Date()) });
+      });
+    } catch (err) {
+      logger.error(`[booking-make-room] repair tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -2558,7 +2636,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // DAILY 07:20 — agreement renewal reminder: one admin notification 45 days before each signed new
-  // construction warranty renews (and, with GATE_AGREEMENT_RENEWAL_REMINDER on, each signed Commercial Pest
+  // construction warranty renews (and each signed Commercial Pest
   // Service Agreement's 12-month term ends), closed when staff mark the notice sent. It sends nothing to a
   // customer. runExclusive records the job health.
   cron.schedule('20 7 * * *', async () => {
@@ -2572,12 +2650,10 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // DAILY 06:52 — technician ID-card and training reminders (GATE_TECH_TRAINING_DATES, dark): one admin bell per technician and
-  // deadline (ID card application, 4 classroom hours, renewal training; F.S. 482.091), closed when the date is entered. Admin bell
-  // only; it sends nothing to a technician or a customer. Gate off = returns before any query. The gate is read per tick, so a flip
-  // or an unset needs no restart. runExclusive records the job health and keeps a deploy overlap from running two sweeps.
+  // DAILY 06:52 — technician ID-card and training reminders (F.S. 482.091): one admin bell per technician and
+  // deadline (ID card application, 4 classroom hours, renewal training), closed when the date is entered. Admin bell
+  // only; it sends nothing to a technician or a customer. runExclusive records the job health and keeps a deploy overlap from running two sweeps.
   cron.schedule('52 6 * * *', async () => {
-    if (!require('../config/feature-gates').techTrainingDatesLive()) return;
     try {
       await runExclusive('technician-training-dates', async () => {
         await require('./technician-training-reminders').runTechnicianTrainingReminders();
@@ -2587,12 +2663,10 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // EVERY 15 MIN — Bid Desk intake (GATE_BID_DESK, dark): files bid invites found in new `emails` rows as
+  // EVERY 15 MIN — Bid Desk intake: files bid invites found in new `emails` rows as
   // bid opportunities and sends the 7-day and 2-day reminders for due dates the operator confirmed. No AI call; it
-  // posts admin notifications only and sends nothing to a buyer, contractor or customer. The gate is read per tick,
-  // so a flip or an unset needs no restart. runExclusive records the job health.
+  // posts admin notifications only and sends nothing to a buyer, contractor or customer. runExclusive records the job health.
   cron.schedule('0 3,18,33,48 * * * *', async () => {
-    if (!require('../config/feature-gates').bidDeskLive()) return;
     try {
       const lockRes = await runExclusive('bid-desk-intake', async () => {
         const result = await require('./bid-desk').runBidDeskTick();
@@ -2611,16 +2685,15 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // DAILY 7:25 AM ET — Bid Desk SAM.gov reader (needs GATE_BID_DESK and SAM_GOV_API_KEY):
+  // DAILY 7:25 AM ET — Bid Desk SAM.gov reader (needs SAM_GOV_API_KEY):
   // files federal pest control and grounds notices from the official SAM.gov Opportunities API as bid opportunities
   // and rings one admin notification per new bid. Two API calls a day. No AI call; it sends nothing to an agency,
-  // contractor or customer. GATE_BID_DESK is read per run, so a flip or an unset needs no restart.
+  // contractor or customer.
   cron.schedule('0 25 7 * * *', async () => {
-    if (!require('../config/feature-gates').bidDeskLive()) return;
     try {
       const lockRes = await runExclusive('bid-desk-sam', async () => {
         const result = await require('./bid-desk/sam-gov').runSamGovPoll();
-        // Both gates on with no key imports nothing: a failed run in job health, not a quiet success.
+        // No key imports nothing: a failed run in job health, not a quiet success.
         if (result.skipped === 'no_api_key') throw new Error('SAM_GOV_API_KEY is not set');
         if (result.filed > 0) logger.info(`[bid-desk-sam] ${result.filed} new federal bid(s)`);
         // Discovery was filed; a re-read that stopped on a SAM.gov error is still a failed run (HTTP status only).
@@ -2639,13 +2712,12 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // HOURLY 7:40 AM-6:40 PM ET — Bid Desk Charlotte County due dates (GATE_BID_DESK_CHARLOTTE_DATES, dark; needs GATE_BID_DESK):
+  // HOURLY 7:40 AM-6:40 PM ET — Bid Desk Charlotte County due dates:
   // Charlotte County's emailed notices carry no date, so an open Charlotte County bid with a bid number and no due date
   // reads it from the county's public bid list (one GET). The run first checks the database and calls the county only
   // while such a bid is waiting. A failed read is a failed run in job health and writes nothing. No AI call; it sends
-  // nothing to anyone and rings no bell. The gate is read per run, so a flip or an unset needs no restart.
+  // nothing to anyone and rings no bell.
   cron.schedule('0 40 7-18 * * *', async () => {
-    if (!require('../config/feature-gates').bidDeskCharlotteDatesLive()) return;
     try {
       const lockRes = await runExclusive('bid-desk-charlotte', async () => {
         const result = await require('./bid-desk/charlotte-county').runCharlotteDates();
@@ -2796,11 +2868,9 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // Neighborhood gate-code directory (PR 2): file every saved neighborhood
-  // gate code under its property's neighborhood; dark behind
-  // GATE_NEIGHBORHOOD_ACCESS, read at each tick. Logs counts and error codes
+  // gate code under its property's neighborhood. Logs counts and error codes
   // only — never a code.
   cron.schedule('0 7,22,37,52 * * * *', async () => {
-    if (!require('../config/feature-gates').neighborhoodAccessLive()) return;
     const tickStartedAt = Date.now();
     try {
       // A pass in which any customer's filing or a conflict step (the count,
@@ -2825,12 +2895,9 @@ function initScheduledJobs() {
 
   // Access codes section (PR 2a): read inbound texts for gate, door, lockbox,
   // garage, call-box and pass codes and file each as a `found` row for the
-  // office; dark behind GATE_ACCESS_CODES_SECTION (+ _SINCE), read at each
-  // tick. runAccessCodeNet takes its own cron lock. Logs counts and error
+  // office; needs GATE_ACCESS_CODES_SECTION_SINCE. runAccessCodeNet takes its own cron lock. Logs counts and error
   // codes only: never a code, a quote or a message body.
   cron.schedule('0 3,8,13,18,23,28,33,38,43,48,53,58 * * * *', async () => {
-    // No gate check here: with the section off the sweep still runs its
-    // ownership cleanup (merge undo), and reads nothing else.
     const capture = require('./access-code-capture');
     const tickStartedAt = Date.now();
     try {
@@ -2850,13 +2917,11 @@ function initScheduledJobs() {
   // The found-codes bell (owner ruling 2026-10-24): one standing admin row for
   // the codes waiting on Customers → Gate codes, 90 seconds after each sweep
   // tick so a code the sweep just filed is listed. It rings when a code joins,
-  // refreshes quietly when one leaves and closes itself when none wait. Dark
-  // behind GATE_ACCESS_CODES_FOUND_BELL, read at each tick. No cron lease: the
+  // refreshes quietly when one leaves and closes itself when none wait. No cron lease: the
   // sync holds the row's own advisory lock in one transaction (one pooled
   // connection). Logs the outcome and count only, never a code.
   cron.schedule('30 4,9,14,19,24,29,34,39,44,49,54,59 * * * *', async () => {
     try {
-      if (!require('../config/feature-gates').accessCodesFoundBellLive()) return;
       const result = await require('./access-code-found-bell').syncFoundCodesBell();
       if (!['unchanged', 'clear'].includes(result?.outcome)) logger.info(`[access-codes] found bell: ${result?.outcome} (${result?.count ?? 0})`);
     } catch (err) {
@@ -4715,10 +4780,9 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // EVERY MIN — booked lead calls (GATE_LEAD_CALL_TEXT_FOLLOWUP): the
+  // EVERY MIN — booked lead calls: the
   // 15-minute reminder, the press-1 ring at the booked time, and the 8 AM
   // bell for a time question never answered (lead-callback-scheduler.js).
-  // Gate off = no reads.
   cron.schedule('* * * * *', async () => {
     try {
       await runExclusive('lead-callback-scheduler', async () => {
@@ -5450,8 +5514,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKDAYS 11:47AM — Quiet overdue invoices (GATE_QUIET_OVERDUE_LIST; returns
-  // before any read when off). Owner 2026-10-24: one standing Billing bell
+  // WEEKDAYS 11:47AM — Quiet overdue invoices. Owner 2026-10-24: one standing Billing bell
   // lists the open self-pay invoices no reminder reaches (paused with no end,
   // stopped, finished, Auto Pay hold 7+ days, never set up); it rings only
   // when an invoice joins and closes itself when the list is empty. After the
@@ -5459,11 +5522,10 @@ function initScheduledJobs() {
   // listed as quiet; outside the 10am stagger plan. Sends nothing to a customer.
   // =========================================================================
   cron.schedule('47 11 * * 1-5', async () => {
-    if (!require('../config/feature-gates').quietOverdueListLive()) return;
     try {
       await runExclusive('quiet-overdue-invoices', async () => {
         const result = await require('./quiet-overdue-invoices').runQuietOverdueList();
-        logger.info(`Quiet overdue invoices: ${result.count ?? 0} listed (${result.outcome || result.skipped})`);
+        logger.info(`Quiet overdue invoices: ${result.count ?? 0} listed (${result.outcome})`);
       });
     } catch (err) {
       logger.error(`Quiet overdue invoices failed: ${err.message}`);
@@ -5520,6 +5582,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 7:35AM — Estimate no-time-soon check (owner 2026-11-09, option C). One
+  // Estimates bell per open estimate whose booking page shows no time within 7
+  // days; it closes itself when the problem is gone. Read-only: no paid call
+  // (paidCalls: false), nothing sent to a customer, writes only admin
+  // notification rows. No GATE_* (owner rule 2026-11-05).
+  // =========================================================================
+  cron.schedule('35 7 * * *', async () => {
+    try {
+      await runExclusive('estimate-no-time-soon-check', async () => {
+        const result = await require('./estimate-no-time-soon-check').runEstimateNoTimeSoonCheck();
+        logger.info(`Estimate no-time-soon check: ${result.candidates} open, ${result.raised} raised, ${result.closed} closed`);
+      });
+    } catch (err) {
+      logger.error(`Estimate no-time-soon check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // MONDAYS 9:20AM — Monday review bell (GATE_MONDAY_REVIEW_BELL; returns before
   // any read when off). Owner 2026-11-02 ("build all", B2): one needs-you bell a
   // week for the work that sits: needs-you alerts unread 14+ days, overdue
@@ -5558,8 +5638,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 7:23AM — Unbilled visits (GATE_UNBILLED_VISITS_LIST; returns before
-  // any read when off). Owner 2026-10-25 (Air Jobs Plan step 3): one standing
+  // DAILY 7:23AM — Unbilled visits. Owner 2026-10-25 (Air Jobs Plan step 3): one standing
   // Billing bell lists the visits done in the last 30 days with no invoice,
   // read from the Billing recovery page's own list, so the bell and the page
   // never disagree. It replaces the c02 check that ran on the owner's MacBook
@@ -5567,11 +5646,10 @@ function initScheduledJobs() {
   // empty. Bills nothing and sends nothing to a customer.
   // =========================================================================
   cron.schedule('23 7 * * *', async () => {
-    if (!require('../config/feature-gates').unbilledVisitsListLive()) return;
     try {
       await runExclusive('unbilled-visits-list', async () => {
         const result = await require('./unbilled-visits-list').runUnbilledVisitsList();
-        logger.info(`Unbilled visits: ${result.count ?? 0} listed (${result.outcome || result.skipped})`);
+        logger.info(`Unbilled visits: ${result.count ?? 0} listed (${result.outcome})`);
       });
     } catch (err) {
       logger.error(`Unbilled visits failed: ${err.message}`);
@@ -5674,6 +5752,30 @@ function initScheduledJobs() {
       logger.warn(`[sms-unanswered] sweep failed: ${[err?.name || 'Error', err?.code].filter(Boolean).join(' ')}`);
     } finally {
       unansweredSweepRunning = false;
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 5 MIN (offset four minutes) — Portal Messages: Waves AI step-in
+  // A portal message that waited 120 open minutes with no answer from a person gets the night step's turn
+  // (portal-messages-day-ai.js, GATE_PORTAL_MESSAGES_DAY_AI read at call time). Gate off: nothing is loaded
+  // or read. No cron lease: the claim on each message is one conditional UPDATE, so a second process does
+  // nothing with a message the first took; the in-process guard only skips an overlapping tick.
+  // =========================================================================
+  let portalDayAiRunning = false;
+  cron.schedule('4-59/5 * * * *', async () => {
+    if (!require('../config/feature-gates').portalMessagesDayAiLive?.() || portalDayAiRunning) return;
+    portalDayAiRunning = true;
+    try {
+      const counts = await require('./portal-messages-day-ai').answerWaitingMessages();
+      if (counts?.scanned > 0) {
+        logger.info(`[portal-day-ai] sweep: scanned=${counts.scanned} answered=${counts.answered} silent=${counts.silent} leftForTeam=${counts.leftForTeam} capped=${counts.capped} superseded=${counts.superseded} failed=${counts.failed}`);
+      }
+    } catch (err) {
+      // name/code only: knex errors can carry bound customer text (PII)
+      logger.warn(`[portal-day-ai] sweep failed: ${[err?.name || 'Error', err?.code].filter(Boolean).join(' ')}`);
+    } finally {
+      portalDayAiRunning = false;
     }
   }, { timezone: 'America/New_York' });
 
@@ -6539,6 +6641,9 @@ function initScheduledJobs() {
               // A deferred template send keeps the key of the row that rendered
               // its frozen body (complete-scheduled-service enqueue).
               ...(claimMeta.template_key ? { templateKey: String(claimMeta.template_key) } : {}),
+              // A deferred DAY-ONLY appointment body (appointment-reminders.js queueHeldNoticeContacts) keeps its promise
+              // fields, so the replay records a day promise rather than an unknown window.
+              ...require('./time-promise').promiseMetaOf(claimMeta),
               // Enqueue provenance survives the replay (codex #3607 r4): the
               // audit row is written under this worker's own entry point, so
               // the ORIGINAL one (e.g. autopay_completion_decline_deferred)
@@ -7476,6 +7581,8 @@ function initScheduledJobs() {
       }
       // The same for the stuck-booking alerts of estimates that settled (estimate-stuck-alert.js; never throws).
       await require('./estimate-stuck-alert').closeSettledStuckAlerts();
+      // And the no-time-soon bells (estimate-no-time-soon-check.js; no picker run, never throws).
+      await require('./estimate-no-time-soon-check').closeSettledNoTimeSoonAlerts();
     } catch (err) {
       logger.error(`[est-engage] cron failed: ${err.message}`);
     }
@@ -8664,9 +8771,9 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Bid kit expiry check failed: ${err.message}`);
     }
-    // Bid kit Product List (GATE_BID_KIT_PRODUCT_LIST_SYNC, dark): rebuilds the kit's product list PDF from the last 12 months of
-    // applied products. A SiteOne-only change signs itself off; anything else leaves it unsigned with one admin bell. Gate off =
-    // returns before any query. runExclusive: a deploy overlap must not build and store two files.
+    // Bid kit Product List: rebuilds the kit's product list PDF from the last 12 months of
+    // applied products. A SiteOne-only change signs itself off; anything else leaves it unsigned with one admin bell.
+    // runExclusive: a deploy overlap must not build and store two files.
     try {
       await runExclusive('bid-kit-product-list', async () => {
         const result = await require('./bid-kit-product-list').runBidKitProductListSync();
@@ -8790,27 +8897,10 @@ function initScheduledJobs() {
   cron.schedule('0 7 * * *', async () => {
     logger.info('Running: token credential health check');
     try {
-      const tokenHealth = require('./token-health');
-      const results = await tokenHealth.checkAll();
-      const failures = results.filter(r => r.status === 'expired' || r.status === 'error');
-      if (failures.length > 0) {
-        const msg = `Token Alert: ${failures.length} credential(s) need attention:\n` +
-          failures.map(f => `- ${f.platform}: ${f.status} — ${f.lastError || 'check dashboard'}`).join('\n');
-        // Was an internal text to the owner's phone, silenced since 2026-09
-        // (services/owner-alerts.js). One row per day; the failing platforms
-        // are its items, so a ringing alert rings again only on a new one.
-        const platforms = [...new Set(failures.map(f => String(f.platform)))].sort();
-        await require('./owner-alerts').recordOwnerAlert('credential-check', {
-          action: 'renew an expired credential',
-          why: `${failures.length} credential${failures.length === 1 ? '' : 's'} failed the 7 AM check.`,
-          subject: { type: 'check', id: 'credential-check' },
-          text: msg,
-          link: '/admin/settings?tab=integrations',
-          dedupeKey: `owner-alert:credential-check:${etDateString()}`,
-          itemKeys: platforms,
-        });
-      }
-      logger.info(`Token health check done: ${failures.length} failure(s) out of ${results.length}`);
+      // The checks and the owner's alert row (was an internal text to the owner's phone, silenced since
+      // 2026-09: services/owner-alerts.js) are in token-health.js runDailyCheck.
+      const { failures, total } = await require('./token-health').runDailyCheck();
+      logger.info(`Token health check done: ${failures} failure(s) out of ${total}`);
     } catch (err) {
       logger.error(`Token health check failed: ${err.message}`);
     }
@@ -9525,15 +9615,12 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 1:32AM — Admin alert retention (owner 2026-10-26, "ok go"). Marks done,
   // never deletes, an admin bell row idle 30 days and an FYI row idle 7 days
-  // (admin-alert-retention.js). GATE_ALERT_RETENTION: unset = no query, `shadow`
-  // = one audit_log summary row and no change, `true` = expire. Minute 32 of the
-  // 1am hour has no other job (#3208 rule). runExclusive: a deploy overlap must
-  // not run two sweeps over the same page of rows. A deploy that kills the run
-  // re-runs it: a second run finds nothing left to expire (shadow writes a
-  // second summary row, nothing else).
+  // (admin-alert-retention.js), with one audit_log summary row per run. Minute 32
+  // of the 1am hour has no other job (#3208 rule). runExclusive: a deploy overlap
+  // must not run two sweeps over the same page of rows. A deploy that kills the
+  // run re-runs it: a second run finds nothing left to expire.
   // =========================================================================
   const runAdminAlertRetentionTick = async () => {
-    if (require('../config/feature-gates').alertRetentionMode() === 'off') return;
     const tickStartedAt = Date.now();
     try {
       const lockRes = await runExclusive('admin-alert-retention', async () => {
@@ -10055,8 +10142,7 @@ function initScheduledJobs() {
   // Mac) upserts its job_health row at the end of each run; this rings ONE
   // standing admin bell when no complete run has landed today by the job's
   // due time (07:00 ET for the sweep), and closes it by itself when one does.
-  // Dark behind GATE_EXTERNAL_HEARTBEAT_WATCH (the service reads the gate
-  // itself); writes only admin notifications. See
+  // Writes only admin notifications. See
   // server/services/external-job-heartbeat-watch.js.
   // =========================================================================
   cron.schedule('5 7-22 * * *', async () => {
@@ -10064,7 +10150,7 @@ function initScheduledJobs() {
       await runExclusive('external-heartbeat-watch', async () => {
         const { runExternalHeartbeatWatch } = require('./external-job-heartbeat-watch');
         const result = await runExternalHeartbeatWatch();
-        if (!result.skipped && (result.alerted > 0 || result.closed > 0)) {
+        if (result.alerted > 0 || result.closed > 0) {
           logger.warn(`[external-heartbeat-watch] alerted=${result.alerted} closed=${result.closed}`);
         }
       });

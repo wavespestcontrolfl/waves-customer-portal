@@ -73,6 +73,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
 const { CUSTOMER_STAGES } = require('./customer-stages');
+const { QUIET_AGED_RULE, cardIsNewer } = require('./triage-auto-resolve');
 const { etParts, parseETDateTime, etDateString, addETDays, formatETTime } = require('../utils/datetime-et');
 
 // How far back each run looks. Four days: a Friday-evening call still sits
@@ -819,7 +820,7 @@ async function runInner({ now }) {
   const repeatable = new Set();
   const lastRung = new Map();
   if (repeatIds.length) {
-    const triageRows = await db('triage_items').whereIn('call_log_id', repeatIds).select('call_log_id', 'status', 'resolution_source');
+    const triageRows = await db('triage_items').whereIn('call_log_id', repeatIds).select('id', 'call_log_id', 'reason_code', 'status', 'resolution_source', 'resolution_rule', 'created_at');
     const rungRows = await db('notifications')
       .where({ recipient_type: 'admin' })
       .whereRaw("metadata->>'call_log_id' = ANY(?)", [repeatIds])
@@ -965,11 +966,22 @@ function repeatWindowOpen(slot, now = new Date()) {
 // its triage cards (resolution_source 'human') and none is still open. That
 // stops repeats (the first bell already rang). Cards the nightly sweep
 // ('auto'), the processor ('system') or event-driven resolvers (NULL) closed
-// are not an office decision and never silence the pager.
+// are not an office decision and never silence the pager. A card the quiet_aged
+// sweep dismissed (resolution_rule QUIET_AGED_RULE) proves nothing: it counts as
+// still open, so the answer for a call is the same before and after the sweep,
+// unless a person later settled a newer card of the same reason on that call
+// (resolved or dismissed, resolution_source 'human'; cardIsNewer orders them).
+// `triageRows` must carry id, reason_code, created_at, status, resolution_source
+// and resolution_rule; a row missing created_at or id fails closed (the quiet
+// dismissal stays open).
 function officeClosedCall(triageRows) {
   if (!triageRows.length) return false;
-  if (triageRows.some((r) => r.status === 'open' || r.status === 'in_progress')) return false;
-  return triageRows.some((r) => (r.status === 'resolved' || r.status === 'dismissed') && r.resolution_source === 'human');
+  const humanSettled = (r) => (r.status === 'resolved' || r.status === 'dismissed') && r.resolution_source === 'human';
+  const supersededQuiet = (q) => triageRows.some((r) => humanSettled(r) && r.reason_code === q.reason_code && cardIsNewer(r, q));
+  const stillOpen = (r) => r.status === 'open' || r.status === 'in_progress'
+    || (r.status === 'dismissed' && r.resolution_rule === QUIET_AGED_RULE && !supersededQuiet(r));
+  if (triageRows.some(stillOpen)) return false;
+  return triageRows.some(humanSettled);
 }
 
 module.exports = {

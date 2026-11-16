@@ -1,7 +1,7 @@
 /**
- * GATE_ROUTE_WARNING_DETAIL, the save side: the conflict row a staff save gets back carries the worded
+ * Route warning detail, the save side: the conflict row a staff save gets back carries the worded
  * warning plus `base_warning` (the unchanged sentence, so a snapshot compared between a review and its
- * apply does not drift with the clock), and one log line records why. Gate off: today's row.
+ * apply does not drift with the clock), and one log line records why.
  */
 const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 jest.mock('../services/logger', () => mockLogger);
@@ -31,7 +31,7 @@ test('a worded warning rides with its unchanged sentence, and the log line names
   expect(mockLogger.info).toHaveBeenCalledWith('[route-warning] service=svc-1 date=2026-11-04 reason=arrival_window placement=saved late=v6 travel=picker_cache');
 });
 
-test('gate off (no worded warning): the row has no base_warning, and the log line still records the reason', async () => {
+test('a failure with no worded warning: the row has no base_warning, and the log line still records the reason', async () => {
   mockCheck.mockResolvedValue({ feasible: false, reason: 'route_unverified', target: { id: 't' }, warning: 'Could not verify the route\'s arrival windows on 2026-11-04. Review the route before driving it.',
     diagnostics: { cause: 'no_pin' } });
   const rows = await findConflictingVisits(args({ serviceId: 'svc-1', roads: 'cache' }));

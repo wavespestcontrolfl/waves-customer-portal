@@ -1,4 +1,4 @@
-// Bid Desk rules (GATE_BID_DESK): the addendum / date rule, reminder eligibility and the notification copy.
+// Bid Desk rules: the addendum / date rule, reminder eligibility and the notification copy.
 // Pure: no database, no clock. Synthetic bids only.
 const { attachPatch, reminderDue, daysLeft, lapsedBid, notOurWork, NOT_OUR_WORK_NOTE } = require('../services/bid-desk/rules');
 const { newBidSpec, addendumSpec, reminderSpec } = require('../services/bid-desk/alerts');
@@ -173,7 +173,7 @@ describe('notification copy follows the admin notification rule', () => {
   });
 });
 
-describe('lapsedBid (GATE_BID_DESK_AUTO_DATES): a bid that closes itself', () => {
+describe('lapsedBid: a bid that closes itself', () => {
   const dueDaysAgo = (days) => new Date(NOW.getTime() - days * DAY);
   const lapsed = (over = {}) => bid({ due_at: dueDaysAgo(2), submitted_at: null, decision_note: null, ...over });
 
@@ -210,7 +210,7 @@ describe('lapsedBid (GATE_BID_DESK_AUTO_DATES): a bid that closes itself', () =>
   });
 });
 
-describe('notOurWork (GATE_BID_DESK_NOT_OUR_WORK, owner 2026-10-29: we do not mow)', () => {
+describe('notOurWork (owner 2026-10-29: we do not mow)', () => {
   test.each([
     'Lot Mowing for Code Compliance - Annual Contract',
     'Facilities Grounds Maintenance - Annual Contract',
@@ -262,24 +262,5 @@ describe('notOurWork (GATE_BID_DESK_NOT_OUR_WORK, owner 2026-10-29: we do not mo
 
   test('the note names the owner ruling', () => {
     expect(NOT_OUR_WORK_NOTE).toBe('Not our work: mowing, edging or trimming (owner 2026-10-29).');
-  });
-});
-
-describe('GATE_BID_DESK_NOT_OUR_WORK reader', () => {
-  const { bidDeskNotOurWorkLive } = require('../config/feature-gates');
-  afterEach(() => { delete process.env.GATE_BID_DESK; delete process.env.GATE_BID_DESK_NOT_OUR_WORK; });
-
-  test('dark by default, strict, and it needs the Bid Desk on', () => {
-    expect(bidDeskNotOurWorkLive()).toBe(false);
-    process.env.GATE_BID_DESK = 'true';
-    expect(bidDeskNotOurWorkLive()).toBe(false);
-    for (const value of ['true ', '1', 'TRUE', 'on', 'yes']) {
-      process.env.GATE_BID_DESK_NOT_OUR_WORK = value;
-      expect(bidDeskNotOurWorkLive()).toBe(false);
-    }
-    process.env.GATE_BID_DESK_NOT_OUR_WORK = 'true';
-    expect(bidDeskNotOurWorkLive()).toBe(true);
-    delete process.env.GATE_BID_DESK;
-    expect(bidDeskNotOurWorkLive()).toBe(false);
   });
 });

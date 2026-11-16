@@ -136,6 +136,7 @@ function visitSearchText(visit) {
     visit.service_type,
     visit.voided_invoice_number,
     visit.billed_elsewhere_invoice_number,
+    visit.prepay_invoice_number,
   ].filter(Boolean).join(" ").toLocaleLowerCase();
 }
 
@@ -165,6 +166,11 @@ function VisitRow({ visit, busy, billing, onBill, onFree, onElsewhere }) {
         {visit.billed_elsewhere_invoice_number && (
           <div className="text-ui-caption text-alert-fg mt-1">
             Marked as billed on {visit.billed_elsewhere_invoice_number}, which is now {visit.billed_elsewhere_invoice_status || "no longer live"} — bill this visit or mark it free
+          </div>
+        )}
+        {visit.prepay_invoice_number && (
+          <div className="text-ui-caption text-ink-secondary mt-1">
+            Prepay bill {visit.prepay_invoice_number} covers this visit — mark it billed elsewhere on that bill, do not bill it again
           </div>
         )}
         </div>
@@ -668,7 +674,8 @@ export default function BillingRecoveryPage() {
     setActionError(null);
     setActionNotice(null);
     setElsewhereFor(visit);
-    setElsewhereInvoice("");
+    // A visit an unpaid prepay bill covers opens with that bill's number filled in.
+    setElsewhereInvoice(visit.prepay_invoice_number || "");
     setElsewhereNote("");
     setElsewhereError(null);
   };

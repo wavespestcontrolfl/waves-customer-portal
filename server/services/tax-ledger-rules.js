@@ -1,6 +1,5 @@
 /**
- * Tax ledger rules + inbox decisions (GATE_TAX_LEDGER, nested under
- * GATE_BANK_IMPORT).
+ * Tax ledger rules + inbox decisions (nested under GATE_BANK_IMPORT).
  *
  * applyRules(): for every staged bank row still 'unmatched' that no rule
  * has looked at, the first enabled rule whose pattern matches the
@@ -24,7 +23,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const bankImport = require('./bank-import');
-const { gateEnvValue } = require('../config/feature-gates');
 const { SEED_RULES, CATEGORY_LINES } = require('./tax-ledger-seed-rules');
 
 const KINDS = ['expense', 'personal', 'transfer', 'income', 'review'];
@@ -132,10 +130,6 @@ const VIEW_SQL = {
   unexamined: `not ${MATCHER_EXAMINED_SQL}`,
 };
 const INCOME_REASON = 'customer receipt outside the processor: not in the P&L or any report until it is recorded as a sale';
-
-function isOn() {
-  return !!(gateEnvValue('GATE_BANK_IMPORT') && gateEnvValue('GATE_TAX_LEDGER'));
-}
 
 function httpError(status, message) {
   const e = new Error(message); e.status = status; return e;
@@ -791,34 +785,13 @@ async function applyRulesForPattern(pattern, { budget = MAX_EXAMINE, maxRounds =
   return { ...totals, complete: !more };
 }
 
-// The kill switch: with GATE_TAX_LEDGER off, nothing a RULE wrote drives
-// Bank Import. Owner decisions (suggestion.decision) are the owner's and
-// stay; the matcher's own keys stay. Used by the Bank Import transactions
-// list and by create-expense's suggested-category read.
-const RULE_OWNED_KEYS = ['rule', 'rulesAt', 'personal', 'income', 'review', 'note'];
-function visibleSuggestion(suggestion) {
-  if (!suggestion || typeof suggestion !== 'object' || !suggestion.rule || isOn()) return suggestion;
-  const out = { ...suggestion };
-  const decided = !!out.decision;
-  for (const k of RULE_OWNED_KEYS) if (!(decided && (k === 'income' || k === 'personal'))) delete out[k];
-  if (out.categorySource === 'rule') for (const k of ['categoryId', 'categoryName', 'irsLine', 'categorySource']) delete out[k];
-  // a transfer rule's flag and reason are the rule's: hidden unless the
-  // owner's own decision is Transfer. A Later decision defers the row and
-  // affirms nothing (the flag would otherwise read as the matcher's own,
-  // and a rescan never touches a decided row)
-  if (suggestion.rule.kind === 'transfer' && (!decided || out.decision === 'later')) { delete out.ignore; delete out.reason; }
-  else if (!decided) delete out.reason;
-  return out;
-}
-
 // Hook for the CSV upload and the Plaid sync: a rule pass right after the
-// matching pass, only when the gate is on, and never a reason the import fails.
+// matching pass, and never a reason the import fails.
 // The pass after a matching run follows its own cursor, so every row that
 // run examined gets its rule pre-fill now, not at the next sync: unstamped
 // rows only, oldest first, up to budget rows (the caller's matching budget;
 // a manual pass examines up to 2,000 rows, the page is 500).
 async function applyAfterImport(where, { budget = 2000, now = Date.now } = {}) {
-  if (!isOn()) return null;
   try {
     // bounded in rows AND time: what is left gets its pre-fill on the next
     // pass (the next sync, or Apply rules now), never a request that runs on
@@ -1003,7 +976,7 @@ async function decide({ id, decision, categoryId = null, always = false }) {
 
 module.exports = {
   KINDS, DECISIONS, OWNER_PRIORITY, VIEW_SQL, CLASSIFICATION_KEYS, INCOME_REASON, MAX_ENABLED_RULES, PASS_TIME_BUDGET_MS, LOOP_TIME_BUDGET_MS, PASS_CONCURRENCY, PASS_QUEUE, MATCH_HARD_CAP_MS, matchPage,
-  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, RULE_SNAPSHOT_SQL, NOT_DECIDED_SQL, NOT_DECIDED_OR_LATER_SQL, LATER_KEYS, ON_INCOME_SHELF_SQL, hasOpenDecision, assertPatternFast, probeStrings, PROBE_CONCURRENCY, PROBE_QUEUE, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern, visibleSuggestion,
-  isOn, compilePattern, compileRules, matchRule, suggestionFor, patternFromDescription,
+  NO_LIVE_CANDIDATES_SQL, MATCHER_EXAMINED_SQL, DECIDABLE_SQL, NO_MATCHER_FLAG_SQL, RULE_SNAPSHOT_SQL, NOT_DECIDED_SQL, NOT_DECIDED_OR_LATER_SQL, LATER_KEYS, ON_INCOME_SHELF_SQL, hasOpenDecision, assertPatternFast, probeStrings, PROBE_CONCURRENCY, PROBE_QUEUE, NO_RULE_MESSAGE, MAX_EXAMINE, hasLiveCandidates, matcherExamined, inboxBlock, ownerRuleFor, canonicalPattern,
+  compilePattern, compileRules, matchRule, suggestionFor, patternFromDescription,
   ensureSeedRules, applyRules, applyRulesForPattern, applyAfterImport, listRules, createRule, updateRule, decide,
 };

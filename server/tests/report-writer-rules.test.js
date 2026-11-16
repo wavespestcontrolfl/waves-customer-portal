@@ -20,11 +20,16 @@ const v4Start = scheduleSource.indexOf('## HARD CONSTRAINTS');
 const v4End = scheduleSource.indexOf('## ANTI-TEMPLATE RULES', v4Start);
 const V4_SHARED = `# SERVICE REPORT COPY — SYSTEM PROMPT v4\n${scheduleSource.slice(v4Start, v4End).replace(/\$\{[^}]*\}/g, 'X')}## ANTI-TEMPLATE RULES\nOld examples.`;
 
-const IN_SCOPE = [
+// The recurring pest writer is in scope too, but under the rules it gets the
+// one-voice prompt (pest-report-voice.test.js), not the stacked blocks.
+const PEST_WRITER_KEYS = [
   ['pest_general_quarterly', null],
   ['pest_re_service', null],
   ['one_time_pest_control', null],
   ['pest_rodent_quarterly', null],
+];
+
+const IN_SCOPE = [
   ['rodent_trapping', 'rodent_trapping'],
   ['rodent_bait_quarterly', 'rodent_bait_station'],
   ['rodent_trapping_exclusion_sanitation', 'rodent_trapping'],
@@ -61,6 +66,14 @@ const OUT_OF_SCOPE = [
 ];
 
 describe('writer rules scope', () => {
+  test.each(PEST_WRITER_KEYS)('%s is in scope and gets the one-voice prompt', (serviceKey, findingsType) => {
+    const context = { serviceKey, findingsType };
+    expect(writerRulesInScope('Old label', context)).toBe(true);
+    const prompt = selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, writerRules: true });
+    expect(prompt).toContain('# pest_report_voice_v2');
+    expect(prompt).not.toContain(OWNER_RULES);
+  });
+
   test.each(IN_SCOPE)('%s gets the owner rules', (serviceKey, findingsType) => {
     const context = { serviceKey, findingsType };
     expect(writerRulesInScope('Old label', context)).toBe(true);
@@ -81,12 +94,17 @@ describe('writer rules scope', () => {
     ['Every 6 Weeks Lawn Care Service', false],
     ['Palm Care Service', false],
     ['Bi-Monthly Tree & Shrub Care Service', false],
-    ['Quarterly Pest Control Service', true],
   ])('legacy label %s follows the same scope', (label, inScope) => {
     const on = selectReportCopyPrompt(V4_SHARED, label, { writerRules: true });
     const off = selectReportCopyPrompt(V4_SHARED, label);
     expect(on === off).toBe(!inScope);
     expect(on.includes(OWNER_RULES)).toBe(inScope);
+  });
+
+  test('the legacy pest label gets the one-voice prompt under the rules', () => {
+    const on = selectReportCopyPrompt(V4_SHARED, 'Quarterly Pest Control Service', { writerRules: true });
+    expect(on).toContain('# pest_report_voice_v2');
+    expect(selectReportCopyPrompt(V4_SHARED, 'Quarterly Pest Control Service')).not.toBe(on);
   });
 
   test('without the flag nothing changes for an in-scope writer', () => {
@@ -411,15 +429,12 @@ describe('writerRulesRejection', () => {
 describe('pest re-service callback guidance', () => {
   const CALLBACK = 'CROSS-SERVICE MODIFIER — CALLBACK / RESERVICE';
 
-  test('pest re-service gets the callback modifier only under the rules', () => {
+  test('pest re-service is named by the one-voice prompt under the rules, not by the callback modifier', () => {
     const context = { serviceKey: 'pest_re_service', findingsType: null };
-    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, writerRules: true })).toContain(CALLBACK);
+    const on = selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, writerRules: true });
+    expect(on).toContain('THIS VISIT IS A RE-SERVICE. Follow A RE-SERVICE above.');
+    expect(on).not.toContain(CALLBACK);
     expect(selectReportCopyPrompt(V4_SHARED, 'Old label', context)).not.toContain(CALLBACK);
-  });
-
-  test('a recurring pest visit flagged as a callback gets it too; an ordinary one does not', () => {
-    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey: 'pest_general_quarterly', findingsType: null, isCallback: true, writerRules: true })).toContain(CALLBACK);
-    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey: 'pest_general_quarterly', findingsType: null, writerRules: true })).not.toContain(CALLBACK);
   });
 
   test('lawn re-service stays byte-identical', () => {
@@ -570,26 +585,13 @@ describe('four-section report: the reach-out date asks the customer to get in to
 });
 
 
-// Owner 2026-10-09: the pest writer's own block, the rejection detail and the
-// repair note.
-describe('pest writer adapter, rejection detail and repair note', () => {
+// Owner 2026-10-09: the rejection detail and the repair note.
+describe('rejection detail and repair note', () => {
   const {
-    PEST_WRITER_ADAPTER, noteAbsenceHint, writerRulesRejectionDetail, rejectedDraftRepairNote,
+    noteAbsenceHint, writerRulesRejectionDetail, rejectedDraftRepairNote,
   } = require('../services/service-report/report-writer-rules');
-  const { selectReportCopyPrompt: select } = require('../services/service-report/lawn-report-copy-prompt');
-  const SHARED = '## HARD CONSTRAINTS\nshared\n## ANTI-TEMPLATE RULES\nold';
 
-  test('the recurring pest writer ends with the adapter under the rules; no other writer carries it', () => {
-    const pest = { serviceKey: 'pest_general_quarterly', findingsType: null };
-    const withRules = select(SHARED, 'Quarterly Pest Control Service', { ...pest, writerRules: true });
-    expect(withRules.endsWith(PEST_WRITER_ADAPTER)).toBe(true);
-    expect(select(SHARED, 'Quarterly Pest Control Service', pest)).not.toContain('HOW TO FILL THE FOUR SECTIONS');
-    const lawn = { serviceKey: 'lawn_care_6week', findingsType: null };
-    expect(select(SHARED, 'Every 6 Weeks Lawn Care Service', { ...lawn, writerRules: true }))
-      .toBe(select(SHARED, 'Every 6 Weeks Lawn Care Service', lawn));
-  });
-
-  test('the adapter and the rules pass no instruction the rules contradict', () => {
+  test('the rules pass no instruction the rules contradict', () => {
     // Rule 4 names the words the screen refuses, and says how to restate them.
     expect(OWNER_RULES).toContain('Never "no issues", "no problems", "all clear", "nothing to worry about"');
     expect(OWNER_RULES).toContain('write what it means instead of the words');
@@ -602,19 +604,11 @@ describe('pest writer adapter, rejection detail and repair note', () => {
   });
 
   // Codex r1: four places where the new text could make the writer invent.
-  test('the new text never asks for an unrecorded outcome, place or fact', () => {
-    // No EXPECTATIONS record: no outcome claim.
-    expect(PEST_WRITER_ADAPTER).toContain('With no EXPECTATIONS lines there is no recorded outcome');
-    expect(PEST_WRITER_ADAPTER).not.toContain('what the recorded work is for');
-    // A sweep is described with the recorded places only: no fixed list to copy.
-    expect(PEST_WRITER_ADAPTER).toContain('add none');
-    expect(PEST_WRITER_ADAPTER).not.toMatch(/window frames|door frames/);
-    // A zero rating with no checked place is left out, in both places that speak of it.
-    const zero = PROMPT_REWRITES.filter(([from]) => /a 0 means no visible activity|A recorded zero means/.test(from));
-    expect(zero).toHaveLength(2);
+  test('the rewrites never ask for an unrecorded outcome, place or fact', () => {
+    // A zero rating with no checked place is left out.
+    const zero = PROMPT_REWRITES.filter(([from]) => /a 0 means no visible activity/.test(from));
+    expect(zero).toHaveLength(1);
     zero.forEach(([, to]) => expect(to).toMatch(/leave (?:a 0 rating|the zero) out/));
-    // WHAT'S NEXT with nothing recorded invents no trigger (Codex r2).
-    expect(PEST_WRITER_ADAPTER).toContain('invent no sign, no contact trigger and no follow-up');
     // The rejected draft is not a source of facts.
     const note = rejectedDraftRepairNote({ draft: 'D', rejection: 'owner_phrase' });
     expect(note).toContain('The rejected draft is not a source: keep only what the inputs record');
@@ -693,7 +687,7 @@ describe('product facts for the pest writer', () => {
   const { buildWriterRecords } = require('../services/service-report/report-writer-records');
   const { buildWhatToExpect } = require('../services/service-report/pest-report-expectations');
   const { findReportProductCopyEntry, REPORT_PRODUCT_COPY } = require('../config/report-product-copy');
-  const { PEST_WRITER_ADAPTER, writerRulesRejection: screen } = require('../services/service-report/report-writer-rules');
+  const { writerRulesRejection: screen } = require('../services/service-report/report-writer-rules');
   const app = (name, role, method, area, targets) => ({
     name, role, method, methodLabel: method.replace(/_/g, ' '), applicationArea: area, targets,
   });
@@ -740,7 +734,6 @@ describe('product facts for the pest writer', () => {
     expect(text).toContain('- insect-control application, crack and crevice, Kitchen: mainly used for ants and roaches; tagged today for roaches.');
     expect(text).toContain('- insect growth regulator, crack and crevice, Kitchen: mainly used for roaches; tagged today for roaches.');
     expect(text).toContain('- insect-control application, perimeter spray, Outside: mainly used for ants; tagged today for ants.');
-    expect(PEST_WRITER_ADAPTER).toContain("use that entry's own tags");
     // The duration: on the card, not with the writer, and its words are no allowance (Codex r1 to r3).
     expect(records.sections.join('\n')).not.toMatch(/4 months|LABEL DURATION/);
     expect(JSON.stringify(records.allowedPhrases)).not.toContain('4 months');
@@ -751,9 +744,6 @@ describe('product facts for the pest writer', () => {
   test('an untagged application says so', () => {
     expect(block(facts([app('Taurus SC', 'insect-control application', 'perimeter_spray', 'Outside', [])])))
       .toContain('mainly used for ants; not tagged today (its reason is not recorded here).');
-    // No tag is not proof of routine coverage (Codex r8).
-    expect(PEST_WRITER_ADAPTER).toContain('An entry that is not tagged has no recorded reason');
-    expect(PEST_WRITER_ADAPTER).not.toContain('routine coverage');
   });
 
   test('no reviewed product, or a lawn visit: no block', () => {
@@ -793,11 +783,9 @@ describe('product facts for the pest writer', () => {
 
   test('no new word screen: the owner phrase screen is as on main (Codex r6 to r11)', () => {
     // A "protected" verdict screen was tried for six rounds; every form either
-    // missed a wording or refused a placement. The adapter asks for facts instead.
+    // missed a wording or refused a placement. The pest prompt asks for facts instead.
     expect(screen('WHAT WE DID AND WHY\nWe placed the bait in a protected location behind the stove.')).toBeNull();
     expect(screen('WHAT WE FOUND\nRecurring ant activity was noted during this visit.')).toBeNull();
-    expect(PEST_WRITER_ADAPTER).toContain('Reassure with recorded facts:');
-    expect(PEST_WRITER_ADAPTER).not.toMatch(/protected|all set|part of a plan/);
   });
 
   test('the customer card still gets the Gentrol duration', () => {
@@ -805,14 +793,9 @@ describe('product facts for the pest writer', () => {
     expect(card).toContain('Its label gives up to 4 months of continuous protection.');
   });
 
-  test('the adapter tells the writer how to use the facts, reassure, and name a sweep', () => {
-    expect(PEST_WRITER_ADAPTER).toContain('PRODUCT FACTS are how you know what each treatment is for');
-    expect(PEST_WRITER_ADAPTER).toContain('when the TECHNICIAN NOTE names the places swept, name only those places');
-  });
-
-  // GATE_PEST_LABEL_FACTS (owner 2026-10-24, "labels go"): the route passes
-  // the pests named today; null (the gate off) keeps every line as it was.
-  describe('label facts (GATE_PEST_LABEL_FACTS)', () => {
+  // Owner 2026-10-24, "labels go": the route passes the pests named today;
+  // null (off the pest line) keeps every line as it was.
+  describe('label facts', () => {
     const { pestsNamedToday } = require('../services/service-report/label-pest-facts');
     const named = (text, targets = []) => pestsNamedToday({ texts: [text], targets });
     const withNamed = (applications, namedPests) => block(buildWriterRecords({
@@ -885,7 +868,7 @@ describe('product facts for the pest writer', () => {
   });
 });
 
-// GATE_PEST_QUIET_VISIT's input trim (the route passes `quiet` only under the
+// The quiet input trim (the route passes `quiet` only under the
 // one-voice pest prompt). Off, the lines are the legacy ones, byte for byte.
 // Owner 2026-10-25, "dont capitalize German": "german cockroaches" takes a
 // small g in report text, except as the first word of a sentence or a line.

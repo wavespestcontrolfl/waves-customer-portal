@@ -1,6 +1,5 @@
 /**
- * Shared bills + home office (GATE_TAX_SHARED_BILLS, nested under
- * GATE_BANK_IMPORT).
+ * Shared bills + home office (nested under GATE_BANK_IMPORT).
  *
  * A shared bill is a payee that is part business (a phone plan with some
  * business lines, home internet). When Bank Import turns a staged row into an
@@ -18,15 +17,13 @@
  *
  * The home office is kept per tax year and computed on read. Simplified
  * method: $5 a square foot, 300 sq ft at most ($1,500 a year). Actual method
- * (Form 8829, GATE_TAX_RETURN_ENGINE; writes are refused while that gate is
- * off, an existing row still computes for the tax package): the year's rent, utilities, insurance
+ * (Form 8829): the year's rent, utilities, insurance
  * and other home costs times office sq ft over home sq ft, no 300 sq ft limit
  * and no proration by months. The simplified method is valid only on a timely
  * original return (Rev. Proc. 2013-13 section 4.03).
  */
 const db = require('../models/db');
 const { etParts } = require('../utils/datetime-et');
-const { taxSharedBillsLive, taxReturnEngineLive } = require('../config/feature-gates');
 
 const DESC_CAP = 300;
 const PATTERN_MIN = 3;
@@ -43,8 +40,6 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 function httpError(status, message) {
   const e = new Error(message); e.status = status; return e;
 }
-
-function isOn() { return !!taxSharedBillsLive(); }
 
 function normalize(text) {
   return String(text == null ? '' : text)
@@ -262,8 +257,6 @@ async function upsertHomeOffice(year, input = {}) {
   const method = input.method === undefined ? 'simplified' : input.method;
   if (method !== 'simplified' && method !== 'actual') throw httpError(400, 'method must be simplified or actual');
   const actual = method === 'actual';
-  // the actual method is only read by the return engine: no writes while it is off
-  if (actual && !taxReturnEngineLive()) throw httpError(400, 'the actual method needs the return engine');
   const sqFt = parseIntIn(input.sq_ft, 1, actual ? HOME_SQ_FT_MAX : HOME_OFFICE_MAX_SQ_FT, 'sq_ft');
   const months = parseIntIn(input.months === undefined ? 12 : input.months, 1, 12, 'months');
   let notes = null;
@@ -292,7 +285,7 @@ async function deleteHomeOffice(year) {
 }
 
 module.exports = {
-  isOn, normalize, patternMatches, matchBill, shareOf, sharedNote, bookedSharePct, homeOfficeDeduction,
+  normalize, patternMatches, matchBill, shareOf, sharedNote, bookedSharePct, homeOfficeDeduction,
   listBills, loadEnabledBills, createBill, updateBill, deleteBill,
   getHomeOffice, upsertHomeOffice, deleteHomeOffice,
   strictNumber, parseYear, httpError, FIRST_YEAR,

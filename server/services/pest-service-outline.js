@@ -4,8 +4,8 @@
 // shape, so the composer, the send route and the public page take it as they take a lawn packet.
 //
 // Each fact is an owner ruling (sms-company-facts.js, the 2026-10-03 stop walkthrough, the 2026-10-22 inside rule, the
-// 2026-10-24 rain rule), the pest protocol, the Service Details guide, an approved report tip (GATE_TECH_TIP_SOURCES is
-// on, so the tips' sourced wording) or a UF/IFAS fact; the draft went through a review against them (pest-draft
+// 2026-10-24 rain rule), the pest protocol, the Service Details guide, an approved report tip (the tips' sourced
+// wording) or a UF/IFAS fact; the draft went through a review against them (pest-draft
 // fable-attack-pest.md). No rate, price, visit count, band width, timing or terms; product names only in the product
 // list, read from the catalog. The plan's two opt-outs (estimate-public.js SERVICE_PREFS: interior spraying and the
 // eave sweep) change the words: an exterior-only plan never reads an inside promise.
@@ -79,7 +79,7 @@ const PEST_COPY = Object.freeze({
   ]),
   yearTitle: 'Your Year At A Glance',
   yearBody: 'Every visit follows the same routine, so each season shows what is active. This season is open; tap any season to see what to watch for and one thing to do at home.',
-  // Research §5 by season, with one approved tip each, word for word (sourced wording: GATE_TECH_TIP_SOURCES is on).
+  // Research §5 by season, with one approved tip each, word for word (sourced wording).
   seasons: Object.freeze([
     { months: [1, 2, 3], label: 'Winter', visit: 'January to March: Ghost ants trail in kitchens and baths. Subterranean termite swarms start; UF/IFAS gives one native species’ flights as early January to April.', atHome: 'The small ants in a Florida kitchen go for sweets first. A sticky ring under the honey jar, the syrup bottle, or the sugar bowl is enough to keep a trail coming, so wipe the bottoms and keep those in a sealed bin or the fridge.' },
     { months: [4, 5, 6], label: 'Spring', visit: 'April to June: Ants are at their busiest, paper wasps and mud daubers build, and termites swarm; UF/IFAS says termite activity is most visible from March to June.', atHome: 'Paper wasps and mud daubers build inside the hollow ends of patio chairs, swing sets, and umbrella poles. Push a rubber plug or a wad of foil into each open end so the tube is not a ready-made nest.' },

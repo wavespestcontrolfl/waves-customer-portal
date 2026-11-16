@@ -3151,7 +3151,7 @@ const EMPTY_TECH_FORM = {
   // Field eligibility is separate from employment: an office admin stays
   // active without ever appearing as a dispatch target.
   fieldDispatchable: false,
-  // GATE_TECH_MOVE_SWITCH: a technician added now cannot move visits until the
+  // A technician added now cannot move visits until the
   // owner ticks this (owner 2026-10-25).
   canMoveVisits: false,
   // GATE_STAFF_GOOGLE_SIGNIN: the company Google account this person signs
@@ -3555,6 +3555,8 @@ export function TeamTab({ showToast }) {
       // Unknown (an older response without the column) stays unsent, so an
       // ordinary edit can never switch moves off by accident.
       canMoveVisits: typeof tech.can_move_visits === "boolean" ? tech.can_move_visits : undefined,
+      // The estimate tool's switch (2026-11-09): same rule, an unknown value stays unsent.
+      canCreateEstimates: typeof tech.can_create_estimates === "boolean" ? tech.can_create_estimates : undefined,
       googleEmail: tech.google_email || "",
       autoFlipEnabled: tech.auto_flip_enabled !== false, // default true if undefined
       payRate: tech.pay_rate != null ? String(tech.pay_rate) : "",
@@ -3899,7 +3901,7 @@ export function TeamTab({ showToast }) {
               (off: never offered as a booking slot or a dispatch target)
             </span>{" "}
           </label>
-          {/* GATE_TECH_MOVE_SWITCH (owner 2026-10-25): may this person move
+          {/* (Owner 2026-10-25): may this person move
               their visits (Quick Move, Reschedule)? Admins always can. */}
           <label
             style={{
@@ -3926,6 +3928,35 @@ export function TeamTab({ showToast }) {
               (off: Quick Move and Reschedule say to ask the office)
             </span>{" "}
           </label>
+          {/* The estimate tool (GATE_TECH_ESTIMATES, 2026-11-09): may this person price and save an estimate from the
+              phone? Edit only: a new technician starts off, and the create route does not take it. */}
+          {editingId && (
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                marginBottom: 12,
+                cursor: "pointer",
+              }}
+            >
+              {" "}
+              <input
+                type="checkbox"
+                checked={form.canCreateEstimates === true}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, canCreateEstimates: e.target.checked }))
+                }
+                style={{ width: 14, height: 14, cursor: "pointer" }}
+              />{" "}
+              <span style={{ fontSize: 14, color: D.heading }}>
+                Can create estimates
+              </span>{" "}
+              <span style={{ fontSize: 14, color: D.muted }}>
+                (off: the Estimate screen does not show for this person)
+              </span>{" "}
+            </label>
+          )}
           {/* Auto-flip opt-out (Phase 2E). Default ON. When OFF, the
               vehicle-exit pipeline skips this tech entirely — useful
               for a tech generating false-positive auto-flip SMS while

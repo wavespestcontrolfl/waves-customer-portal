@@ -12,7 +12,7 @@ import { adminFetch } from "../../lib/adminFetch";
 import { etDatetimeLocalValue, formatETDate, formatETTime } from "../../lib/timezone";
 import BidChecklistPanel, { UNCONFIRMED_MESSAGE } from "./BidChecklistPanel";
 
-// Bid Desk (GATE_BID_DESK, dark). Bid invites the email sync stored, filed by a job. The page only reads them and
+// Bid Desk. Bid invites the email sync stored, filed by a job. The page only reads them and
 // records the operator's decisions; nothing here sends a message to a buyer or a contractor.
 
 const STATUS_LABEL = { new: "New", bid: "Bid", no_bid: "No bid", submitted: "Submitted", won: "Won", lost: "Lost" };

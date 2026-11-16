@@ -34,7 +34,6 @@ jest.setTimeout(30000);
   const tables = ['customers', 'emails', 'bid_opportunity_emails', 'call_log', 'notifications'];
   const gateNames = ['callbackNeedsAnswer', 'missedCallVisitUnderway'];
   const savedGates = Object.fromEntries(gateNames.map((key) => [key, gates[key]]));
-  const savedContactClose = process.env.GATE_ALERT_CONTACT_CLOSE;
 
   const indexesPresent = async () => (await database.raw(
     'SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ANY(?) ORDER BY 1',
@@ -59,8 +58,6 @@ jest.setTimeout(30000);
   });
   afterAll(async () => {
     Object.assign(gates, savedGates);
-    if (savedContactClose === undefined) delete process.env.GATE_ALERT_CONTACT_CLOSE;
-    else process.env.GATE_ALERT_CONTACT_CLOSE = savedContactClose;
     if (database) {
       await database.raw('DROP SCHEMA IF EXISTS ?? CASCADE', [schema]);
       await database.destroy();
@@ -101,7 +98,6 @@ jest.setTimeout(30000);
   test('the missed-call retire query joins call_log through call_log_id_text_idx', async () => {
     await migration.up(database);
     Object.assign(gates, { callbackNeedsAnswer: true, missedCallVisitUnderway: false });
-    delete process.env.GATE_ALERT_CONTACT_CLOSE;
     const callId = randomUUID();
     await database('call_log').insert([
       { id: callId, direction: 'inbound', from_phone: '+19415550100', created_at: new Date('2026-11-03T14:00:00Z') },

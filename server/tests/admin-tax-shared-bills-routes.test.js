@@ -1,18 +1,17 @@
 /**
  * /admin/tax/shared-bills, /home-office and the create-expense hook
- * (GATE_TAX_SHARED_BILLS, nested under GATE_BANK_IMPORT).
+ * (nested under GATE_BANK_IMPORT).
  *
  * Locked-down behaviors:
- *  1. Gate off → /shared-bills/status answers {enabled:false}; every other
- *     route is a 404 and touches no table.
- *  2. Gate on → CRUD hands the body to the service and maps its status
+ *  1. GATE_BANK_IMPORT off → every route is a 404 and touches no table.
+ *  2. GATE_BANK_IMPORT on → CRUD hands the body to the service and maps its status
  *     errors; /home-office/:year returns the row plus the computed deduction,
  *     or {year,row:null,deduction:0}.
- *  3. create-expense with the gate on and a matching bill books the business
+ *  3. create-expense with a matching bill books the business
  *     share (after the category's own partial rule), notes the share and takes
- *     the bill's category only when nothing else chose one. Gate off, the
- *     expense is byte-for-byte what it was.
- *  4. The tax package adds home-office.csv and shared-bills.csv only when on.
+ *     the bill's category only when nothing else chose one.
+ *  4. The tax package adds home-office.csv and shared-bills.csv only when
+ *     GATE_BANK_IMPORT is on.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -82,8 +81,8 @@ jest.mock('../services/bank-import', () => ({
   ...jest.requireActual('../services/bank-import'),
   resetDanglingLinks: jest.fn(() => Promise.resolve(0)),
 }));
-// The service has its own suite; here the gate, the wiring and the error
-// mapping. isOn / matchBill / shareOf / homeOfficeDeduction stay real.
+// The service has its own suite; here the wiring and the error
+// mapping. matchBill / shareOf / homeOfficeDeduction stay real.
 jest.mock('../services/tax-shared-bills', () => ({
   ...jest.requireActual('../services/tax-shared-bills'),
   listBills: jest.fn(), loadEnabledBills: jest.fn(), createBill: jest.fn(), updateBill: jest.fn(), deleteBill: jest.fn(),
@@ -116,13 +115,12 @@ beforeEach(() => {
   mockDb.mockClear();
   for (const fn of ['listBills', 'loadEnabledBills', 'createBill', 'updateBill', 'deleteBill', 'getHomeOffice', 'upsertHomeOffice', 'deleteHomeOffice']) sb[fn].mockReset();
   process.env.GATE_BANK_IMPORT = 'true';
-  delete process.env.GATE_TAX_SHARED_BILLS;
 });
-afterAll(() => { delete process.env.GATE_BANK_IMPORT; delete process.env.GATE_TAX_SHARED_BILLS; });
+afterAll(() => { delete process.env.GATE_BANK_IMPORT; });
 
-describe('gate darkness', () => {
-  test('status answers enabled:false and every other route is a 404 that touches nothing', async () => {
-    expect(await (await get(`${P}/shared-bills/status`)).json()).toEqual({ enabled: false, actual_method: false });
+describe('bank import off', () => {
+  test('every route is a 404 that touches nothing', async () => {
+    delete process.env.GATE_BANK_IMPORT;
     const calls = [
       ['GET', '/shared-bills'], ['POST', '/shared-bills'], ['PUT', '/shared-bills/b-1'], ['DELETE', '/shared-bills/b-1'],
       ['GET', '/home-office/2026'], ['PUT', '/home-office/2026'], ['DELETE', '/home-office/2026'],
@@ -135,23 +133,9 @@ describe('gate darkness', () => {
     expect(mockDb).not.toHaveBeenCalled();
     expect(sb.listBills).not.toHaveBeenCalled();
   });
-
-  test('the shared-bills gate alone is not enough without GATE_BANK_IMPORT', async () => {
-    process.env.GATE_TAX_SHARED_BILLS = 'true';
-    delete process.env.GATE_BANK_IMPORT;
-    expect(await (await get(`${P}/shared-bills/status`)).json()).toEqual({ enabled: false, actual_method: false });
-  });
 });
 
-describe('gate on', () => {
-  beforeEach(() => { process.env.GATE_TAX_SHARED_BILLS = 'true'; });
-
-  test('status says enabled, and offers the actual method only with the return engine on too', async () => {
-    expect(await (await get(`${P}/shared-bills/status`)).json()).toEqual({ enabled: true, actual_method: false });
-    process.env.GATE_TAX_RETURN_ENGINE = 'true';
-    expect(await (await get(`${P}/shared-bills/status`)).json()).toEqual({ enabled: true, actual_method: true });
-    delete process.env.GATE_TAX_RETURN_ENGINE;
-  });
+describe('bank import on', () => {
 
   test('list, create (201), update and delete go through the service', async () => {
     sb.listBills.mockResolvedValue([PHONE]);
@@ -212,8 +196,7 @@ describe('create-expense hook', () => {
     sb.loadEnabledBills.mockResolvedValue([PHONE]);
   });
 
-  test('gate on + matching bill: half the amount, the bill note, the bill category', async () => {
-    process.env.GATE_TAX_SHARED_BILLS = 'true';
+  test('matching bill: half the amount, the bill note, the bill category', async () => {
     state.category = { name: 'Utilities' };
     const res = await create();
     expect(res.status).toBe(200);
@@ -226,7 +209,6 @@ describe('create-expense hook', () => {
   });
 
   test('the operator pick wins over the bill category, and a category partial rule applies first', async () => {
-    process.env.GATE_TAX_SHARED_BILLS = 'true';
     state.category = { name: 'Meals & Entertainment' };
     await create({ categoryId: 'cat-meals' });
     const exp = state.insertedExpenses[0];
@@ -236,7 +218,6 @@ describe('create-expense hook', () => {
   });
 
   test('a visible suggestion keeps its category and the AI-verify note beside the share note', async () => {
-    process.env.GATE_TAX_SHARED_BILLS = 'true';
     state.category = { name: 'Utilities' };
     state.bankRow.suggestion = { categoryId: 'cat-sug', categoryName: 'Utilities' };
     await create();
@@ -245,25 +226,13 @@ describe('create-expense hook', () => {
     expect(exp.notes).toBe('[Bank import test-checking] [AI-categorized — verify] [Shared bill: Phone plan 50%]');
   });
 
-  test('gate on but no bill matches: unchanged', async () => {
-    process.env.GATE_TAX_SHARED_BILLS = 'true';
+  test('no bill matches: unchanged', async () => {
     state.bankRow.description = 'ACME HARDWARE 123';
     state.category = { name: 'Supplies' };
     await create({ categoryId: 'cat-sup' });
     const exp = state.insertedExpenses[0];
     expect(exp.tax_deductible_amount).toBe(200.01);
     expect(exp.notes).toBe('[Bank import test-checking]');
-  });
-
-  test('gate off: the full amount, no bill read, no note, no bill category', async () => {
-    state.category = null;
-    const res = await create();
-    expect(res.status).toBe(200);
-    const exp = state.insertedExpenses[0];
-    expect(exp.category_id).toBeNull();
-    expect(exp.tax_deductible_amount).toBe(200.01);
-    expect(exp.notes).toBe('[Bank import test-checking]');
-    expect(sb.loadEnabledBills).not.toHaveBeenCalled();
   });
 });
 
@@ -275,20 +244,19 @@ describe('tax package', () => {
     return ['pnl.csv', 'expenses.csv', 'home-office.csv', 'shared-bills.csv'].filter((n) => text.includes(n));
   };
 
-  test('gate off: neither file', async () => {
+  test('bank import off: neither file', async () => {
+    delete process.env.GATE_BANK_IMPORT;
     expect(await zipNames()).toEqual(['pnl.csv', 'expenses.csv']);
     expect(sb.getHomeOffice).not.toHaveBeenCalled();
   });
 
-  test('gate on: both files when the year has a home office and bills exist', async () => {
-    process.env.GATE_TAX_SHARED_BILLS = 'true';
+  test('both files when the year has a home office and bills exist', async () => {
     sb.getHomeOffice.mockResolvedValue({ tax_year: 2026, method: 'simplified', sq_ft: 300, months: 12 });
     sb.listBills.mockResolvedValue([{ ...PHONE, category_name: 'Utilities' }]);
     expect(await zipNames()).toEqual(['pnl.csv', 'expenses.csv', 'home-office.csv', 'shared-bills.csv']);
   });
 
-  test('gate on, nothing saved: no extra file', async () => {
-    process.env.GATE_TAX_SHARED_BILLS = 'true';
+  test('nothing saved: no extra file', async () => {
     sb.getHomeOffice.mockResolvedValue(null);
     sb.listBills.mockResolvedValue([]);
     expect(await zipNames()).toEqual(['pnl.csv', 'expenses.csv']);

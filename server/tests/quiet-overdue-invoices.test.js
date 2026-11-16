@@ -5,7 +5,6 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
-  quietOverdueListLive: jest.fn(() => true),
   alertEpisodesLive: jest.fn(() => true),
 }));
 jest.mock('../services/admin-alert-episodes', () => ({
@@ -59,7 +58,6 @@ function fakeDatabase(rows) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  gates.quietOverdueListLive.mockReturnValue(true);
   gates.alertEpisodesLive.mockReturnValue(true);
 });
 
@@ -159,14 +157,6 @@ describe('ringing', () => {
 });
 
 describe('runQuietOverdueList', () => {
-  test('gate off: no read, no bell', async () => {
-    gates.quietOverdueListLive.mockReturnValue(false);
-    const database = jest.fn();
-    await expect(Quiet.runQuietOverdueList({ now: NOW, database })).resolves.toEqual({ skipped: 'disabled' });
-    expect(database).not.toHaveBeenCalled();
-    expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
-  });
-
   test('a list raises one standing billing row that asks to ring and rings again only for a new invoice', async () => {
     const out = await Quiet.runQuietOverdueList({ now: NOW, database: fakeDatabase([row({ id: 'a' }), row({ id: 'b', seq_status: 'active', next_touch_at: NOW })]) });
     expect(out).toEqual({ count: 1, total: 100, outcome: 'raised' });

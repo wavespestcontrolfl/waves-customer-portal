@@ -1,8 +1,9 @@
 /**
- * GATE_ROUTE_WARNING_DETAIL (route-dispatcher audit, fix B): a staff route warning names the stop, its
+ * Route warning detail (route-dispatcher audit, fix B): a staff route warning names the stop, its
  * window, the predicted arrival and the minutes; a route that cannot be verified names its cause and stop.
  * REAL evaluator on an in-memory route (no DB, no Google); only the drive model is fixed: every leg is
- * 20 minutes. Arrival promises are 2 hours from the window start. Gate unset = today's strings, byte for byte.
+ * 20 minutes. Arrival promises are 2 hours from the window start. A check that does not ask for detail keeps
+ * the generic strings, byte for byte.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -43,13 +44,9 @@ const UNVERIFIED = `Could not verify the route's arrival windows on ${DATE}. Rev
 const LATE_CASE = () => run([stop('A', '09:00', 120), stop('B', '10:30', 60)], candidate('10:00', 60), { detail: true });
 
 beforeEach(() => {
-  delete process.env.GATE_ROUTE_WARNING_DETAIL;
-  delete process.env.GATE_STAFF_ROUTE_INSERTION;
   delete process.env.GATE_SCHEDULING_CAPACITY;
 });
 afterEach(() => {
-  delete process.env.GATE_ROUTE_WARNING_DETAIL;
-  delete process.env.GATE_STAFF_ROUTE_INSERTION;
   delete process.env.GATE_SCHEDULING_CAPACITY;
 });
 
@@ -67,45 +64,36 @@ describe('the words', () => {
   });
 });
 
-describe('gate off: every warning string is today\'s, byte for byte', () => {
-  test('arrival_window with or without a staff save asking for detail', () => {
-    for (const detail of [false, true]) {
-      const fit = run([stop('A', '09:00', 120), stop('B', '10:30', 60)], candidate('10:00', 60), { detail });
-      expect(fit).toMatchObject({ feasible: false, reason: 'arrival_window', warning: GENERIC });
-      expect(fit.baseWarning).toBeUndefined();
-    }
+describe('a check that does not ask for detail keeps the generic strings, byte for byte', () => {
+  test('arrival_window without a staff save asking for detail', () => {
+    const fit = run([stop('A', '09:00', 120), stop('B', '10:30', 60)], candidate('10:00', 60), { detail: false });
+    expect(fit).toMatchObject({ feasible: false, reason: 'arrival_window', warning: GENERIC });
+    expect(fit.baseWarning).toBeUndefined();
+    expect(fit).not.toHaveProperty('diagnostics');
   });
 
   test('route_unverified: no pin, no technician', () => {
-    expect(run([], stop('T', '08:00', 60, { lat: null }), { detail: true }).warning).toBe(UNVERIFIED);
-    expect(run([], stop('T', '08:00', 60, { technician_id: null }), { detail: true }).warning).toBe(UNVERIFIED);
-    expect(run([stop('A', '08:00', 60, { lat: null })], stop('T', '10:00', 60), { detail: true }).warning).toBe(UNVERIFIED);
+    expect(run([], stop('T', '08:00', 60, { lat: null })).warning).toBe(UNVERIFIED);
+    expect(run([], stop('T', '08:00', 60, { technician_id: null })).warning).toBe(UNVERIFIED);
+    expect(run([stop('A', '08:00', 60, { lat: null })], stop('T', '10:00', 60)).warning).toBe(UNVERIFIED);
   });
 
   test('arrival_margin and without detail the result has no diagnostics at all', () => {
-    process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
     const fit = run([stop('B', '10:00', 60)], candidate('08:00', 190), { durationMinutes: 190 });
     expect(fit.reason).toBe('arrival_margin');
     expect(fit.warning).toBe(`The route on ${DATE} fits this visit only by leaving a later stop less than 15 minutes before its arrival window closes. Choose another window.`);
     expect(fit).not.toHaveProperty('diagnostics');
   });
-
-  test('a staff save asking for detail with the gate off still gets the log diagnostics, and the old sentence', () => {
-    const fit = LATE_CASE();
-    expect(fit.warning).toBe(GENERIC);
-    expect(fit.diagnostics).toEqual({ placement: 'none', travelSource: 'conservative_model', lateStopIds: [] });
-  });
 });
 
-describe('gate on: arrival_window names the stop', () => {
-  beforeEach(() => { process.env.GATE_ROUTE_WARNING_DETAIL = 'true'; });
+describe('arrival_window names the stop', () => {
 
   test('a stop made late: its number, window, predicted arrival and minutes', () => {
     const fit = LATE_CASE();
     expect(fit).toMatchObject({ feasible: false, reason: 'arrival_window' });
     expect(fit.warning).toBe(`Route on ${DATE}: Stop 3 (10:30 AM–12:30 PM window) would arrive 12:40 PM, 10 min late.`);
     expect(fit.baseWarning).toBe(GENERIC);
-    expect(fit.diagnostics).toEqual({ placement: 'none', travelSource: 'conservative_model', lateStopIds: ['B'] });
+    expect(fit.diagnostics).toEqual({ placement: 'move', travelSource: 'conservative_model', lateStopIds: ['B'] });
   });
 
   test('the visit itself cannot reach its own window: its own sentence, nobody else blamed', () => {
@@ -128,7 +116,8 @@ describe('gate on: arrival_window names the stop', () => {
 
   test('a day already late without the visit says so, with the stop and minutes', () => {
     const fit = run([stop('A', '08:00', 240), stop('B', '08:30', 60)], candidate('15:00', 60), { detail: true });
-    expect(fit.warning).toBe(`Route on ${DATE}: Stop 2 (8:30–10:30 AM window) would already arrive 12:40 PM, 130 min late without this visit.`);
+    // Staff route insertion tries every place, so the certified order counts the new visit ahead of B.
+    expect(fit.warning).toBe(`Route on ${DATE}: Stop 3 (8:30–10:30 AM window) would already arrive 12:40 PM, 130 min late without this visit.`);
     expect(fit.diagnostics.lateStopIds).toEqual(['B']);
   });
 
@@ -239,7 +228,6 @@ describe('gate on: arrival_window names the stop', () => {
     });
 
     test('the tight later stop is numbered the same way', () => {
-      process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
       const fit = run([stop('U', '07:00', 30, { status: 'on_site', route_order: 1 }), stop('B', '10:00', 60, { route_order: 2 })],
         candidate('08:00', 210), { detail: true, durationMinutes: 210 }, { now: new Date(`${DATE}T07:00:00-05:00`), activeStop: { id: 'U', arrived_at: `${DATE}T06:50:00-05:00` } });
       expect(fit.reason).toBe('arrival_margin');
@@ -283,7 +271,6 @@ describe('gate on: arrival_window names the stop', () => {
   });
 
   test('the tightest later stop for an arrival_margin answer (staff route insertion)', () => {
-    process.env.GATE_STAFF_ROUTE_INSERTION = 'true';
     const fit = run([stop('B', '10:00', 60)], candidate('08:00', 190), { detail: true, durationMinutes: 190 });
     expect(fit.reason).toBe('arrival_margin');
     expect(fit.warning).toBe(`Route on ${DATE}: Stop 2 (10 AM–12 PM window) would arrive 11:50 AM, only 10 min before its window closes. Choose another window.`);
@@ -296,7 +283,7 @@ describe('gate on: arrival_window names the stop', () => {
     expect(fit).not.toHaveProperty('warning');
   });
 
-  test('without a staff save asking for detail the sentence stays generic even with the gate on', () => {
+  test('without a staff save asking for detail the sentence stays generic', () => {
     const fit = run([stop('A', '09:00', 120), stop('B', '10:30', 60)], candidate('10:00', 60));
     expect(fit.warning).toBe(GENERIC);
     expect(fit).not.toHaveProperty('diagnostics');
@@ -317,8 +304,7 @@ describe('gate on: arrival_window names the stop', () => {
   });
 });
 
-describe('gate on: route_unverified names the cause and the stop', () => {
-  beforeEach(() => { process.env.GATE_ROUTE_WARNING_DETAIL = 'true'; });
+describe('route_unverified names the cause and the stop', () => {
 
   test('the Oct 30 case: a stop with no map pin and no route number is named', () => {
     const fit = run([], stop('T', '08:00', 60, { lat: null, lng: null }), { detail: true }, { prospective: false });

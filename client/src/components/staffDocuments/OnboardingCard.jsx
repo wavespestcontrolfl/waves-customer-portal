@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { ClipboardCheck } from 'lucide-react';
 import { request } from './common';
 
-// Today-page card for staff onboarding documents (GATE_STAFF_ONBOARDING_DOCS). It sits in the
+// Today-page card for staff onboarding documents. It sits in the
 // page flow above the route, never over content. Hidden while staff documents are unavailable,
 // while the server says onboarding is off, on a failed read, and when nothing is outstanding.
 export function outstandingLabel(count) {

@@ -10,7 +10,7 @@ A route being listed as reachable means a technician may call it; routers still 
 
 Routers marked "router exemption gate" (admin-inventory, admin-estimates, admin-invoices, admin-drafts, admin-review-requests, …) run a router-level function that admits a technician only on the router's own named exemptions and otherwise requires admin; the static census cannot evaluate that condition, so their routes are listed with the flag and the allow-list match, not as open or closed.
 
-Allow-list buckets: session, own-visits, own-time, own-texts, promises, documents, pay-growth, knowledge-read, equipment-read, own-truck.
+Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promises, documents, pay-growth, knowledge-read, equipment-read, own-truck.
 
 ## Reachable by a technician after the flip
 
@@ -294,6 +294,12 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/tech/answers/:kind` | tech-answers |
 | POST | `/api/tech/dictation` | tech-dictation |
 | GET | `/api/tech/dictation/availability` | tech-dictation |
+| GET | `/api/tech/estimates` | tech-estimates |
+| POST | `/api/tech/estimates` | tech-estimates |
+| GET | `/api/tech/estimates/:id` | tech-estimates |
+| POST | `/api/tech/estimates/:id/send` | tech-estimates |
+| POST | `/api/tech/estimates/price` | tech-estimates |
+| GET | `/api/tech/estimates/setup` | tech-estimates |
 | POST | `/api/tech/field-lead` | tech-field-lead |
 | GET | `/api/tech/knowledge/lookup` | tech-knowledge |
 | POST | `/api/tech/knowledge/query` | tech-knowledge |
@@ -520,6 +526,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/inventory/restock-requests/:id/order-evidence` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/restock-requests/:id/siteone-email` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/restock-requests/:id/siteone-email` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
+| POST | `/api/admin/inventory/restock-requests/:id/vendor-cancellation` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/scrape-jobs` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/scrape-jobs/:vendorId/trigger` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/service-usage` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |

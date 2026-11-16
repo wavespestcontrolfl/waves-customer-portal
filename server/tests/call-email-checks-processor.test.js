@@ -1,4 +1,4 @@
-// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): the call processor's side of the
+// Owner 2026-10-29: the call processor's side of the
 // email checks. applyDeadDomainReason and callEmailCheckCardPayload turn a
 // domain with no mail server into an email_invalid card that says why.
 // Fixtures are synthetic.

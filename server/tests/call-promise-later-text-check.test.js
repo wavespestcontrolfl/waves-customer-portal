@@ -1,4 +1,4 @@
-// The later-text check (GATE_CALL_PROMISE_LATER_TEXT_CHECK) without a database: what reaches the model, what each
+// The later-text check without a database: what reaches the model, what each
 // answer means, what is cached, and every case that holds a proof without a model call. The human-message queries,
 // the card-number scrubber and the provider are mocked. Fixtures fictitious.
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));

@@ -1,5 +1,5 @@
-// GATE_STAFF_ONBOARDING_DOCS: dark = no reads and no records; the routes are admin-guarded and
-// reach the right service call with the caller's own identity.
+// Staff onboarding documents: with the staff documents gate dark = no reads and no records; the
+// routes are admin-guarded and reach the right service call with the caller's own identity.
 const express = require('express');
 jest.mock('../models/db', () => {
   const db = jest.fn(() => { throw new Error('the database must not be read'); });
@@ -23,7 +23,7 @@ const db = require('../models/db');
 const documents = require('../services/staff-documents');
 const realOnboarding = jest.requireActual('../services/staff-onboarding');
 
-const ENV = ['GATE_STAFF_ONBOARDING_DOCS', 'GATE_CONTROLLED_STAFF_DOCUMENTS'];
+const ENV = ['GATE_CONTROLLED_STAFF_DOCUMENTS'];
 const saved = Object.fromEntries(ENV.map(name => [name, process.env[name]]));
 afterAll(() => { for (const name of ENV) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 beforeEach(() => { for (const name of ENV) delete process.env[name]; jest.clearAllMocks(); });
@@ -33,10 +33,8 @@ describe('service while dark', () => {
   const empty = { enabled: false, documents: [], counts: { outstanding: 0, total: 0 } };
 
   test.each([
-    ['both gates unset', {}],
-    ['only the onboarding gate on', { GATE_STAFF_ONBOARDING_DOCS: 'true' }],
-    ['only the staff documents gate on', { GATE_CONTROLLED_STAFF_DOCUMENTS: 'true' }],
-    ['the onboarding gate set to a non-strict value', { GATE_STAFF_ONBOARDING_DOCS: '1', GATE_CONTROLLED_STAFF_DOCUMENTS: 'true' }],
+    ['the staff documents gate unset', {}],
+    ['the staff documents gate set to false', { GATE_CONTROLLED_STAFF_DOCUMENTS: 'false' }],
   ])('%s: both reads answer empty without touching the database', async (name, env) => {
     Object.assign(process.env, env);
     expect(await realOnboarding.onboardingFor(tech)).toEqual(empty);

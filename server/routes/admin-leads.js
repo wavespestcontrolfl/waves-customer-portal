@@ -1942,8 +1942,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // conflicts): collected in the trx, returned as `warnings`.
     const bookingWarnings = [];
 
-    // Road times for the booked hour (GATE_SAVE_ROAD_BUY; unset = nothing
-    // runs): bought BEFORE the transaction, so the booking's route number and
+    // Road times for the booked hour (save road buy): bought BEFORE the transaction, so the booking's route number and
     // route check read the same Google road times the Edit dialog's check
     // does. This router is requireAdmin: the staff user pays. A customer with
     // no saved location (a brand-new one) keeps the cache and the model.
@@ -2261,7 +2260,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // Route check (owner 2026-10-29; a no-op when arrival-window routing is
       // off): the booked visit's technician day is numbered first in the
       // order the arrival-window check certifies (placeMovedVisit, inside this
-      // transaction; it needs GATE_STAFF_ROUTE_INSERTION too), THEN the visit
+      // transaction), THEN the visit
       // gets the check Edit's save runs, on the road times the pickers already
       // bought. Placement first: the check reads the visit where it is saved,
       // so a visit not yet placed can read late in a stale order. WARN ONLY: a

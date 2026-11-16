@@ -259,7 +259,7 @@ describe('POST /restock-requests/:id/action', () => {
     });
   });
 
-  test('cancel while a dispatched automatic order is unreceived and unrevoked → 409 naming the revoke script (pre-push P0)', async () => {
+  test('cancel while a dispatched automatic order is unreceived and unrevoked → 409 naming Record vendor cancellation (pre-push P0)', async () => {
     const { statusUpdates } = wireRestock({
       id: 'req-1', product_id: 'prod-1', status: 'open', requested_quantity: 2, unit: 'gal',
       ledger: { id: 'vo-7', status: 'needs_review', placed_at: new Date(), external_order_number: null, evidence: {} },
@@ -269,7 +269,7 @@ describe('POST /restock-requests/:id/action', () => {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'cancel' }),
       });
       expect(res.status).toBe(409);
-      expect((await res.json()).error).toMatch(/may already have gone out.*auto-order-revoke\.js --order=vo-7/);
+      expect((await res.json()).error).toMatch(/may already have gone out.*Record vendor cancellation on the Restock tab/);
       expect(statusUpdates).toHaveLength(0);
     });
   });

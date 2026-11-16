@@ -21,9 +21,10 @@ customer's sentence carries the dollar range from the county table in
   `watering_days`, `irrigation_system_type` (spray / rotor / drip),
   `irrigation_zones`, optional `irrigation_inches_per_week`.
 - Head rates: `@waves/irrigation-runtime`, owner table (spray 15 min and rotor
-  40 min per ¼", i.e. 1.0 and 0.375 in/hr) behind `GATE_IRRIGATION_OWNER_RATES`,
-  package table (1.5 / 0.5 in/hr) otherwise. A stored plan renders with the table
-  frozen in its snapshot (`irrigation-rates.js`); nothing here changes that.
+  40 min per ¼", i.e. 1.0 and 0.375 in/hr) for every new decision; a stored plan
+  decided before that keeps the package table (1.5 / 0.5 in/hr). A stored plan
+  renders with the table frozen in its snapshot (`irrigation-rates.js`); nothing
+  here changes that.
 - Lawn area: `customer_turf_profiles.lawn_sqft`. The eligibility query in
   `irrigation-weekly-email.js` already LEFT JOINs the active turf profile, so the
   column is one select away. Coverage, measured 2026-10-22 against the sweep's own

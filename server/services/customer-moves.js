@@ -431,7 +431,7 @@ async function raiseMoveAlert({ move, customer, request, normalized, hasAddress,
     who: 'person',
     // A customer reached us: with GATE_ADMIN_BELL_POLICY on, a plain
     // 'service' alert is silenced; a declared contact rings
-    // (notification-bell-policy.js step 1b, GATE_CUSTOMER_ALERTS_RING).
+    // (notification-bell-policy.js step 1b).
     contact: true,
   }, {
     detail: `Category: moving\nSubject: ${request.subject}\n\n${description}`,

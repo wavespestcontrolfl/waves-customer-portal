@@ -87,6 +87,10 @@
   "engines": {
     "node": ">=20.9"
   },
+  "overrides": {
+    "axios": "1.21.0",
+    "joi": "17.13.9"
+  },
   "devDependencies": {
     "@babel/parser": "^7.29.8",
     "acorn": "^8.18.0",
@@ -105,7 +109,7 @@
     "@sentry/node": "^10.47.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
-    "archiver": "^7.0.1",
+    "archiver": "^8.0.0",
     "csv-parse": "^6.2.1",
     "fontkit": "^2.0.4",
     "google-ads-api": "^23.0.0",
@@ -116,7 +120,7 @@
     "nodemailer": "^10.2.1",
     "playwright": "^1.59.1",
     "psl": "^1.15.0",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.5",
     "stripe": "^22.0.0",
     "ws": "^8.20.0"
   }

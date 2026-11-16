@@ -1,12 +1,11 @@
 'use strict';
 
-// First review ask (GATE_REVIEW_FIRST_ASK_LOCK): "never asked" and the saved-choice rule, with a fake
+// First review ask: "never asked" and the saved-choice rule, with a fake
 // database. The real transaction is covered by complete-scheduled-service-first-review-ask-postgres.test.js.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const ReviewService = require('../services/review-request');
-const { reviewFirstAskLockLive } = require('../config/feature-gates');
 
 // customers row + review_requests rows; `fail` makes every read throw.
 function fakeDb({ customer, requests = [], fail = false }) {
@@ -55,46 +54,26 @@ describe('customerNeverAskedForReview', () => {
 });
 
 describe('firstAskLockChoice', () => {
-  const gateWas = process.env.GATE_REVIEW_FIRST_ASK_LOCK;
-  afterEach(() => { if (gateWas === undefined) delete process.env.GATE_REVIEW_FIRST_ASK_LOCK; else process.env.GATE_REVIEW_FIRST_ASK_LOCK = gateWas; });
   const neverAsked = fakeDb({ customer: { id: 'cust-1' } });
   const asked = fakeDb({ customer: { id: 'cust-1' }, requests: [{ id: 'r1', sms_sent_at: new Date() }] });
   const choose = (db, requestReview, optOutReason) => ReviewService.firstAskLockChoice({ customerId: 'cust-1', requestReview, optOutReason }, db);
 
-  test('the gate is strict: only the exact string true turns it on', () => {
-    for (const value of [undefined, '', 'TRUE', '1', 'yes', 'false']) {
-      if (value === undefined) delete process.env.GATE_REVIEW_FIRST_ASK_LOCK; else process.env.GATE_REVIEW_FIRST_ASK_LOCK = value;
-      expect(reviewFirstAskLockLive()).toBe(false);
-    }
-    process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true';
-    expect(reviewFirstAskLockLive()).toBe(true);
-  });
-
-  test('gate off: the lock never applies', async () => {
-    delete process.env.GATE_REVIEW_FIRST_ASK_LOCK;
-    expect(await choose(neverAsked, false)).toBeNull();
-  });
-
-  test('gate on, never asked: off without the reason stays on; off with the complaint reason is off', async () => {
-    process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true';
+  test('never asked: off without the reason stays on; off with the complaint reason is off', async () => {
     expect(await choose(neverAsked, false)).toEqual({ requestReview: true, forcedOn: true, optOutReason: null });
     expect(await choose(neverAsked, false, 'something_else')).toEqual({ requestReview: true, forcedOn: true, optOutReason: null });
     expect(await choose(neverAsked, false, 'complaint_on_site')).toEqual({ requestReview: false, forcedOn: false, optOutReason: 'complaint_on_site' });
     expect(await choose(neverAsked, true)).toEqual({ requestReview: true, forcedOn: false, optOutReason: null });
   });
 
-  test('gate on, asked before: the lock does not apply', async () => {
-    process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true';
+  test('asked before: the lock does not apply', async () => {
     expect(await choose(asked, false)).toBeNull();
   });
 });
 
 // GATE_REVIEW_ALREADY_REVIEWED (owner 2026-11-04): the second off reason, "Already left a review".
 describe('the second off reason (GATE_REVIEW_ALREADY_REVIEWED)', () => {
-  const lockWas = process.env.GATE_REVIEW_FIRST_ASK_LOCK;
   const gateWas = process.env.GATE_REVIEW_ALREADY_REVIEWED;
   afterEach(() => {
-    if (lockWas === undefined) delete process.env.GATE_REVIEW_FIRST_ASK_LOCK; else process.env.GATE_REVIEW_FIRST_ASK_LOCK = lockWas;
     if (gateWas === undefined) delete process.env.GATE_REVIEW_ALREADY_REVIEWED; else process.env.GATE_REVIEW_ALREADY_REVIEWED = gateWas;
   });
   const { reviewAlreadyReviewedLive } = require('../config/feature-gates');
@@ -113,24 +92,16 @@ describe('the second off reason (GATE_REVIEW_ALREADY_REVIEWED)', () => {
   });
 
   test('gate off: "Already left a review" is not a reason, so the first ask stays on', async () => {
-    process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true';
     delete process.env.GATE_REVIEW_ALREADY_REVIEWED;
     expect(await choose('already_left_review')).toEqual({ requestReview: true, forcedOn: true, optOutReason: null });
   });
 
   test('gate on: "Already left a review" turns the first ask off and is saved; the complaint still works', async () => {
-    process.env.GATE_REVIEW_FIRST_ASK_LOCK = 'true';
     process.env.GATE_REVIEW_ALREADY_REVIEWED = 'true';
     expect(await choose('already_left_review')).toEqual({ requestReview: false, forcedOn: false, optOutReason: 'already_left_review' });
     expect(await choose('complaint_on_site')).toEqual({ requestReview: false, forcedOn: false, optOutReason: 'complaint_on_site' });
     expect(await choose('customer_busy')).toEqual({ requestReview: true, forcedOn: true, optOutReason: null });
     expect(ReviewService.ALREADY_LEFT_REVIEW_REASON).toBe('already_left_review');
-  });
-
-  test('the first-ask lock off: the new gate alone changes nothing', async () => {
-    delete process.env.GATE_REVIEW_FIRST_ASK_LOCK;
-    process.env.GATE_REVIEW_ALREADY_REVIEWED = 'true';
-    expect(await choose('already_left_review')).toBeNull();
   });
 });
 

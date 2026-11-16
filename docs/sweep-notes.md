@@ -100,6 +100,20 @@ has no "Triage done" comment.
 
 ## Already-catalogued open findings (reference, don't re-report as new)
 
+- Sweep #7765 B4, owner decision pending: newsletter proof replies ("APPROVED",
+  "HOLD") are matched on the From header and the subject token only. Proposed
+  fix: also require `hasAlignedAuth(..., { strict: true })`, as the estimate
+  follow-up reply pause does. Effect: an approver reply without aligned
+  DKIM/SPF from Gmail's own Authentication-Results line is ignored. The
+  company domain publishes DMARC `p=reject`, so a spoofed From on it is
+  already refused upstream. (triaged 2026-11-08)
+- Sweep #7765 B5 residual, parked (P3): the B5 fix (#7778) keeps an opted-out
+  row opted out until the emailed link is clicked. A second SendGrid
+  unsubscribe event for a delivery that already has `unsubscribed_at` is
+  dropped before the subscriber write, so it does not revoke a live re-signup
+  link. The reader can still revoke it from the unsubscribe page or any
+  one-click POST, and the link only confirms what the reader asked for.
+  (triaged 2026-11-08)
 - A monthly autopay charge refused before Stripe (no usable payment method,
   sweep #6273 B1) and a wholly missed 8:00 AM billing run (#5874 B2) both end
   as "no dues payment row this month" with no retry. With 3 monthly-billing

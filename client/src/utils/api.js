@@ -791,6 +791,12 @@ export class ApiClient {
 
   // ---- One-tap purchase (GATE_ONE_TAP_PURCHASE; the CTA renders only when
   // the recommendations payload says oneTap:true) ----
+  // My Plan "Add a service": one priced offer per service the customer does
+  // not have (gate-off answers an empty list).
+  oneTapOffers() {
+    return this.request('/one-tap/offers');
+  }
+
   oneTapInit(payload) {
     return this.request('/one-tap/init', {
       method: 'POST',
@@ -823,6 +829,29 @@ export class ApiClient {
     return this.request(`/one-tap/${purchaseId}/confirm`, {
       method: 'POST',
       body: JSON.stringify(payload || { termsAccepted: true }),
+    });
+  }
+
+  // ---- Pest control visit frequency (GATE_PEST_FREQUENCY_CHANGE; the My Plan
+  // entry renders only when the read answers available:true) ----
+  getPestFrequency() {
+    return this.request('/pest-frequency');
+  }
+
+  // Writes nothing: the new schedule and prices for the chosen frequency.
+  previewPestFrequency(payload) {
+    return this.request('/pest-frequency/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  // payload = { frequency, version }; `version` is the one the preview
+  // returned, and the server refuses a stale one.
+  confirmPestFrequency(payload) {
+    return this.request('/pest-frequency/confirm', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     });
   }
 

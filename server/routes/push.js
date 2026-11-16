@@ -140,4 +140,52 @@ router.post('/native-unsubscribe', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// An ActivityKit push-to-start token is the hex form of the token data the iPhone hands the app.
+const LIVE_ACTIVITY_START_TOKEN = /^[0-9a-f]{32,512}$/i;
+
+// "18.5.1" -> 18. Anything else -> null (the phone then gets no card: channel updates need iOS 18).
+function iosMajorOf(osVersion) {
+  const major = Number.parseInt(String(osVersion || '').split('.')[0], 10);
+  return Number.isInteger(major) && major > 0 && major < 1000 ? major : null;
+}
+
+// POST /api/push/live-activity-token: the iPhone app reports what the server needs to start the Lock Screen
+// visit card on it (GATE_VISIT_LIVE_ACTIVITY): its ActivityKit push-to-start token and its iOS version.
+// Contract: docs/mobile/live-activity.md.
+//
+// The values are stored on THIS phone's own registration row, named by the APNs device token the same app
+// posted to /native-subscribe, so the card follows that row's whole life (sign-out, notification permission
+// off, a property switch). Only an active account-holder iPhone row inside the session's own device scope
+// (the scope every customer push uses) is written; a contact session cannot reach this route at all
+// (middleware/auth.js). `enabled: false` (Live Activities off in iOS Settings) or no start token clears the
+// stored token. Gate off = nothing is stored.
+router.post('/live-activity-token', async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    const { deviceToken, startToken, osVersion, enabled } = req.body || {};
+    if (!deviceToken || typeof deviceToken !== 'string' || deviceToken.length > 512) {
+      return res.status(400).json({ error: 'device token required' });
+    }
+    const clearing = enabled === false || startToken == null || startToken === '';
+    if (!clearing && (typeof startToken !== 'string' || !LIVE_ACTIVITY_START_TOKEN.test(startToken))) {
+      return res.status(400).json({ error: 'start token is not valid' });
+    }
+    if (!require('../config/feature-gates').visitLiveActivityLive()) return res.json({ ok: true, stored: false });
+
+    const context = await require('../services/push-notifications').customerPushContext(req.customerId);
+    if (!context) return res.json({ ok: true, stored: false });
+    const token = clearing ? null : startToken.toLowerCase();
+    const updated = await db('push_subscriptions')
+      .whereIn('customer_id', context.ids)
+      .where({ device_token: deviceToken, platform: 'ios', role: 'customer', active: true })
+      .whereNull('contact_phone_key')
+      .update({
+        live_activity_start_token: token,
+        live_activity_os_major: token ? iosMajorOf(osVersion) : null,
+        live_activity_token_at: db.fn.now(),
+      });
+    return res.json({ ok: true, stored: Boolean(token) && Number(updated) > 0 });
+  } catch (err) { return next(err); }
+});
+
 module.exports = router;

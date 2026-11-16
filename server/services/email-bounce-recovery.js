@@ -86,8 +86,8 @@ function isHardBounceEvent(ev) {
 }
 
 /**
- * GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): a send that failed because the
- * recipient's domain has no mail server. SendGrid files it as a "blocked"
+ * A send that failed because the recipient's domain has no mail server
+ * (owner 2026-10-29). SendGrid files it as a "blocked"
  * bounce ("unable to get mx info: ..."), which isHardBounceEvent rightly
  * leaves to the sender-retry rail for real IP blocks; a dead domain is a bad
  * address, so the webhook sends it to people instead (the bounced-contact
@@ -99,8 +99,7 @@ function isHardBounceEvent(ev) {
  * recordEmailSuppressionForEvent still keys on isHardBounceEvent.
  */
 function isNoMailServerEvent(ev) {
-  const { callEmailChecksLive, isNoMailServerReason } = require('./call-email-checks');
-  if (!callEmailChecksLive()) return false;
+  const { isNoMailServerReason } = require('./call-email-checks');
   if (!require('./transactional-email-provider-retry').isProviderBlockedEvent(ev)) return false;
   return isNoMailServerReason(ev?.reason || ev?.response || '');
 }
@@ -795,6 +794,13 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
   }
 }
 
+// Is this message's stored copy never re-sent? The shared no-replay categories, or a day-only appointment email the
+// delayed-send chokepoint no longer clears (time-promise.js dayOnlyStoredCopyStale): same skip, same status, nothing re-sent.
+async function storedCopyRefusedFor(bouncedMessage) {
+  if (staleStoredCopyReason(parseJsonArray(bouncedMessage.categories))) return true;
+  return require('./time-promise').dayOnlyStoredCopyStale(bouncedMessage);
+}
+
 /**
  * Everything after the one-shot ledger row exists: decide, stage the recovery row, send. Shared by
  * the bounce webhook (attemptRecovery) and the held-recovery sweep (retryHeldRecoveries), so a
@@ -823,7 +829,7 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
     averageCopy: parseJsonArray(bouncedMessage.categories).includes(ESTIMATE_FOLLOWUP_AVERAGE_CATEGORY),
     moveNoticeCopy: parseJsonArray(bouncedMessage.categories).includes(MOVE_NOTICE_CATEGORY),
     carbonCopy: parseJsonArray(bouncedMessage.categories).includes(CARBON_COPY_CATEGORY),
-    storedCopyRefused: !!staleStoredCopyReason(parseJsonArray(bouncedMessage.categories)),
+    storedCopyRefused: await storedCopyRefusedFor(bouncedMessage),
     min: minConfidence(),
   });
 

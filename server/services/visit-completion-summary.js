@@ -11,16 +11,15 @@ const {
 const { resolveServiceContactSmsRecipient } = require('./recipient-optin');
 const ContactReportText = require('./contact-report-text');
 
-// Who gets the summary text. GATE_CONTACT_REPORT_TEXT on: the account holder
-// (the text can carry a pay link), and each confirmed contact gets the plain
-// report text instead (contact-report-text.js). An account holder with no
-// phone, or the gate off: the slot-1 contact rule, except that a slot-1
-// contact the report is withheld from (a tenant, or an occupant on a
+// Who gets the summary text. The account holder (the text can carry a pay
+// link), and each confirmed contact gets the plain report text instead
+// (contact-report-text.js). An account holder with no phone: the slot-1
+// contact rule, except that a slot-1 contact the report is withheld from (a tenant, or an occupant on a
 // property-manager account) never gets the summary: the account holder does,
 // or nobody by text when the holder has no phone.
 async function summarySmsRecipient(customer, opts) {
   const primary = getPrimaryContact(customer);
-  if (ContactReportText.enabled() && primary.phone) return primary;
+  if (primary.phone) return primary;
   const recipient = await resolveServiceContactSmsRecipient(customer, opts);
   // Deny wins: the slot-1 phone is withheld when any slot carrying it is.
   const key = (v) => String(v || '').replace(/\D/g, '').slice(-10);

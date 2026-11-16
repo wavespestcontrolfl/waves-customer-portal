@@ -51,7 +51,6 @@ jest.mock('../services/previsit-brief', () => ({
 }));
 const mockVisitPrepPhotosLive = jest.fn(() => true);
 jest.mock('../config/feature-gates', () => ({
-  staffEditLockStartOnlyLive: () => false,
   visitPrepPhotosLive: (...args) => mockVisitPrepPhotosLive(...args),
 }));
 const mockStopPhotoViewUrls = jest.fn(async () => []);

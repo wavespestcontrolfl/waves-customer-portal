@@ -76,8 +76,8 @@ const TEMPLATE_ON_TRACK = 'irrigation.weekly_on_track';
 // just the handful who filled in the portal form).
 const TEMPLATE_SETUP_SCHEDULE = 'irrigation.weekly_setup_schedule';
 const TEMPLATE_SETUP_SYSTEM = 'irrigation.weekly_setup_system';
-// GATE_IRRIGATION_SETUP_ASK_CADENCE (owner 2026-10-24): 18 customers got the
-// same setup ask 12 Mondays running and never answered. With the gate on, a
+// Setup ask cadence (owner 2026-10-24): 18 customers got the
+// same setup ask 12 Mondays running and never answered. A
 // customer gets the ask on their first SETUP_ASK_FREE_SENDS setup emails, then
 // at most once every SETUP_ASK_SPACING_DAYS; the weeks between get this
 // variant: the same rain report with no callout and no button.
@@ -180,11 +180,6 @@ function roundHundredth(value) {
 // isn't complete until the day ends).
 const PORTAL_IRRIGATION_ASK = 'under Irrigation in your portal';
 const SETUP_CLOSER = "and these check-ins become real recommendations — ease back this week, add a few minutes, or you're right on track.";
-
-// Strict opt-in, read at call time: the gate changes customer copy.
-function irrigationSetupAskCadenceLive() {
-  return process.env.GATE_IRRIGATION_SETUP_ASK_CADENCE === 'true';
-}
 
 // Is the setup ask due this week? `history` is loadSetupAskHistory's result;
 // null (unreadable) keeps the ask, which is today's behavior.
@@ -396,7 +391,7 @@ function buildScheduleNote({ scheduleSource, derived, scheduleFmt, rainSensor = 
   const sensorClause = rainSensor
     ? ' Since you have a rain sensor, some of those runs may have been skipped after rain — this figure assumes the full schedule ran, so read it as the most your system would have applied.'
     : '';
-  // The owner table is not UF's: with GATE_IRRIGATION_OWNER_RATES on the sentence drops the attribution.
+  // The owner table is not UF's: the sentence drops the attribution for the owner table.
   const rateSource = rateTable === 'owner' ? '' : ' from University of Florida turf guidance';
   return `We worked that ${scheduleFmt}" out from what you entered under Irrigation in your portal — ${describeRuntimeBasis(derived)} — using the typical ${HEAD_LABELS[derived.headType] || derived.headType} rate${rateSource} (about ${formatInches(derived.rateInPerHr)}" per hour).${sensorClause} If you know your actual weekly inches, enter them there and we'll use your number instead.`;
 }
@@ -595,8 +590,8 @@ function decideWeeklyEmail({
   // Jurisdiction for the restriction policy (resolveRestrictionCounty).
   county = null,
   weekPlanEnabled = false,
-  // Head rate table ('owner' | 'package') for this decision. Omitted = a NEW decision, so the live
-  // GATE_IRRIGATION_OWNER_RATES picks it; a replay of a stored plan passes the stored table (storedRateTable).
+  // Head rate table ('owner' | 'package') for this decision. Omitted = a NEW decision, so the owner's
+  // table; a replay of a stored plan passes the stored table (storedRateTable).
   rateTable = undefined,
   // Lawn area on file for the plan's "water you saved" gallons (null = no sentence).
   lawnSqft = null,
@@ -604,7 +599,7 @@ function decideWeeklyEmail({
   waterSaved = undefined,
   // Phase 2: the portal's water-source answer ('county' | 'reclaimed' | 'well' | null), withheld after a move until re-saved.
   waterSource = null,
-  // GATE_IRRIGATION_SETUP_ASK_CADENCE: the sweep found the setup ask is not
+  // Setup ask cadence: the sweep found the setup ask is not
   // due this week, so a setup email goes out as the plain rain report.
   setupAskQuiet = false,
   // true = the sweep found the mowing ask due (mowingAskLive), or a replay's frozen answer.
@@ -1995,7 +1990,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         waterSaved: frozen ? (frozen.waterSaved ?? null) : undefined,
         // A published row keeps its own answer; a new decision asks the history once.
         setupAskQuiet: frozen ? frozen.setupAskQuiet === true
-          : (irrigationSetupAskCadenceLive() && !setupAskDue(await loadSetupAskHistory({ customerId: customer.id, weekEnding }), tick())),
+          : !setupAskDue(await loadSetupAskHistory({ customerId: customer.id, weekEnding }), tick()),
         mowingAsk: frozen ? frozen.mowingAsk === true : await mowingAskLive(customer, { weekEnding, now: tick() }),
       });
       // Replay already validated this premise and the current settings. Keep
@@ -2439,7 +2434,6 @@ module.exports = {
   TEMPLATE_RAIN_REPORT,
   SETUP_ASK_FREE_SENDS,
   SETUP_ASK_SPACING_DAYS,
-  irrigationSetupAskCadenceLive,
   setupAskDue,
   loadSetupAskHistory,
   MOWING_ASK,

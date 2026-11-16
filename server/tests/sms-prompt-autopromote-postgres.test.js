@@ -29,7 +29,7 @@ const GOOD_RULE = 'When the facts do not list an arrival window, say you will co
 const SECOND_RULE = 'When the facts do not name a technician, do not say who is coming to the visit.';
 const DAY = 24 * 3600 * 1000;
 const NOW = new Date('2026-10-26T15:00:00Z');
-const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE_SMS_EDIT_LEARNING', 'GATE_SMS_VOICE_PROFILE_PIN', 'GATE_SMS_JUDGE_V2', 'GATE_SMS_AGENT_COMPLAINTS', 'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL', 'GATE_SMS_OFFERS_SCHEDULER', 'GATE_SMS_LEDGER_STALL_FEED'];
+const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE_SMS_VOICE_PROFILE_PIN', 'GATE_SMS_AGENT_COMPLAINTS', 'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL', 'GATE_SMS_OFFERS_SCHEDULER', 'GATE_SMS_LEDGER_STALL_FEED'];
 
 (SKIP ? describe.skip : describe)('SMS prompt auto-promote', () => {
   let database;
@@ -288,7 +288,6 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       delete process.env.GATE_SMS_REAL_ANSWERS;
       await insertProposal({ prompt_version: drafter.PROMPT_VERSION });
       expect(await auto.createCandidate({ dbi: trx, now: NOW, distill: distillWith(GOOD_RULE) })).toEqual({ skipped: 'real_answers_off' });
-      process.env.GATE_SMS_EDIT_LEARNING = 'true';
       expect(baseVersion()).toBe(`${drafter.PROMPT_VERSION}+e`);
       await insertProposal({ prompt_version: drafter.currentPromptVersion(), failure_mode: 'invented_service_details' });
       const distill = distillWith(GOOD_RULE);
@@ -438,7 +437,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect(out).toMatchObject({ promoted: patch.id, patchNo: patch.patch_no });
 
       const row = await rowOf(patch.id);
-      const version = `${baseVersion()}+${patch.version_tag}`;
+      const version = `${baseVersion()}${patch.version_tag}`; // the base already carries the e tag, so the letter joins it
       expect(row).toMatchObject({ status: 'active', active_version: version, prior_version: baseVersion(), would_promote: true });
       expect(await eventsOf(patch.id)).toEqual(['exam_started', 'would_promote', 'promoted']);
 
@@ -874,8 +873,8 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
   });
 
   describe('rollback monitor', () => {
-    // judged drafts for a version: n judged, `unsafe` of them draft_unsafe, created at `at`.
-    const judged = async (version, n, unsafe, at, judgeVersion = null, profile = null) => {
+    // judged drafts for a version: n judged, `unsafe` of them draft_unsafe, created at `at`. Only judge-v2 ('j2') rows count.
+    const judged = async (version, n, unsafe, at, judgeVersion = 'j2', profile = null) => {
       for (let i = 0; i < n; i += 1) {
         const [draft] = await trx('message_drafts').insert({
           prompt_version: version, status: 'shadow', drafter: 'house_voice', created_at: at,
@@ -931,16 +930,16 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
     test('a voice-profile change between the prior and patched drafts does not retire a healthy patch; same-profile cohorts still do', async () => {
       // Prior drafts ran under profile 1 (5% unsafe); the patched drafts under profile 2 (20% unsafe). The patch is
       // unchanged across profiles: the rise belongs to the new profile. Profile 2 is the effective one now.
-      await judged(active.prior_version, 40, 2, before, null, 1);
-      await judged(active.active_version, 25, 5, after, null, 2);
+      await judged(active.prior_version, 40, 2, before, 'j2', 1);
+      await judged(active.active_version, 25, 5, after, 'j2', 2);
       await replies(active.prior_version, 40, { confused: 2 }, before, 'ai_approved', 1);
       await replies(active.active_version, 40, { confused: 20 }, after, 'ai_approved', 2);
       expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn(), voiceProfileVersion: 2 })).toEqual({ checked: active.id });
       // Too few prior drafts under the effective profile: skipped, not compared.
-      await judged(active.prior_version, 10, 0, before, null, 2);
+      await judged(active.prior_version, 10, 0, before, 'j2', 2);
       expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn(), voiceProfileVersion: 2 })).toEqual({ checked: active.id });
       // With a real prior cohort under the same profile, the same rise is the patch's and rolls back.
-      await judged(active.prior_version, 30, 2, before, null, 2);
+      await judged(active.prior_version, 30, 2, before, 'j2', 2);
       const out = await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn(), voiceProfileVersion: 2 });
       expect(out.rolledBack).toBe(active.id);
       expect((await rowOf(active.id)).retired_reason).toBe('live_unsafe_rise');
@@ -956,11 +955,10 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       expect((await rowOf(active.id)).retired_reason).toBe('reply_confusion_rise');
     });
 
-    test('live judge with GATE_SMS_JUDGE_V2 on: only the stricter judge counts, as in graduation', async () => {
-      process.env.GATE_SMS_JUDGE_V2 = 'true';
+    test('live judge: only the stricter judge counts, as in graduation', async () => {
       // The old judge passed every prior draft; the strict judge finds 20% unsafe on both sides. Mixed
       // together, the prior group would read 6.7% and the unchanged live group a 13-point rise.
-      await judged(active.prior_version, 60, 0, before);
+      await judged(active.prior_version, 60, 0, before, null);
       await judged(active.prior_version, 30, 6, before, 'j2'); // 20%
       await judged(active.active_version, 30, 6, after, 'j2'); // 20%
       expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify: jest.fn() })).toEqual({ checked: active.id });
@@ -1099,7 +1097,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
         expect(await monitor()).toEqual({ checked: active.id });
         await trx('sms_sealed_eval_runs').del();
         const items = await seedItems(24);
-        const baseline = await insertRun({ items, version: `${baseVersion()}Q`, unsafe: 0 });
+        const baseline = await insertRun({ items, version: `${drafter.REAL_ANSWERS_PROMPT_VERSION}Q`, unsafe: 0 });
         await insertRun({ items, version: active.active_version, baselineId: baseline.id, unsafe: 6, over: { significance: regressedSig } });
         expect(await monitor()).toEqual({ checked: active.id });
       });
@@ -1124,7 +1122,7 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
         for (let i = 0; i < n; i += 1) {
           const [draft] = await trx('message_drafts').insert({ prompt_version: version, status: 'shadow', drafter: 'house_voice', created_at: at, model }).returning('id');
           await trx('shadow_draft_judgments').insert({
-            draft_id: draft.id, verdict: i < unsafe ? 'draft_unsafe' : 'equivalent', scores: JSON.stringify({ safety: 8, voice: 8, actions: 8, overall: 8 }),
+            draft_id: draft.id, verdict: i < unsafe ? 'draft_unsafe' : 'equivalent', scores: JSON.stringify({ safety: 8, voice: 8, actions: 8, overall: 8 }), judge_version: 'j2',
           });
         }
       };

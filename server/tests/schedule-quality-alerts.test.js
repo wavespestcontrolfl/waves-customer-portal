@@ -8,19 +8,17 @@ const day = (quality = {}, extra = {}) => ({
     uncertaintyReasons: [], modeledLateVisits: [], assumptions: { departureMinutes: 480 }, ...quality }], ...extra,
 });
 
-test('only calibrated timing with known durations produces a lateness card', () => {
+test('only drive clock timing with known durations produces a lateness card', () => {
   const late = { modeledLateVisits: [{ id: 'job', lateMinutes: 10 }] };
   expect(buildRouteQualityAlerts(day(late), 'legacy')).toEqual([]);
-  expect(buildRouteQualityAlerts(day(late), 'calibrated')).toEqual([{ techId: 'tech', payload: {
+  expect(buildRouteQualityAlerts(day(late), 'drive_clock')).toEqual([{ techId: 'tech', payload: {
     date: '2040-09-10', departureMinutes: 480, issues: [expect.stringContaining('modeled after')],
   } }]);
-  // The GPS-fitted drive clock (GATE_DRIVE_CLOCK) times a day too.
-  expect(buildRouteQualityAlerts(day(late), 'drive_clock')).toEqual(buildRouteQualityAlerts(day(late), 'calibrated'));
-  const unknown = buildRouteQualityAlerts(day({ ...late, defaultDurations: ['job'] }), 'calibrated');
+  const unknown = buildRouteQualityAlerts(day({ ...late, defaultDurations: ['job'] }), 'drive_clock');
   expect(unknown[0].payload).toEqual({ date: '2040-09-10', issues: [expect.stringContaining('needs a service duration')] });
 });
 
-test('a double-booking is carded first, without a calibrated drive model, and never for a same-customer pair', () => {
+test('a double-booking is carded first, without the drive clock model, and never for a same-customer pair', () => {
   // Staff saves commit through a clash by owner ruling (advisory only), so
   // the planned-board card is the only place a second customer in the same
   // slot becomes visible before the reminder text goes out.
@@ -36,22 +34,22 @@ test('a double-booking is carded first, without a calibrated drive model, and ne
   expect(alerts[0].payload.issues[0]).not.toMatch(/reminder/);
   expect(alerts[0].payload).not.toHaveProperty('departureMinutes');
   // day-quality already drops same-customer pairs; an empty list makes no card.
-  expect(buildRouteQualityAlerts(day({ doubleBookedVisits: [] }), 'calibrated')).toEqual([]);
+  expect(buildRouteQualityAlerts(day({ doubleBookedVisits: [] }), 'drive_clock')).toEqual([]);
   // Older measurement rows without the field still build.
-  expect(buildRouteQualityAlerts(day({ doubleBookedVisits: undefined }), 'calibrated')).toEqual([]);
+  expect(buildRouteQualityAlerts(day({ doubleBookedVisits: undefined }), 'drive_clock')).toEqual([]);
 });
 
-test('location and grouped-work exceptions remain visible without a calibrated drive model', () => {
+test('location and grouped-work exceptions remain visible without the drive clock model', () => {
   const alerts = buildRouteQualityAlerts(day({ missingCoordinates: ['job'], uncertaintyReasons: ['grouped_work_requires_review'] }), 'legacy');
   expect(alerts).toHaveLength(1);
   expect(alerts[0].payload.issues).toEqual([expect.stringContaining('without a usable location'), expect.stringContaining('combined duration check')]);
 });
 
 test('unallocated work and a configured day off share the day card, with no empty-day noise', () => {
-  expect(buildRouteQualityAlerts(day({}, { unallocatedVisits: 2, closed: true }), 'calibrated')).toEqual([{ techId: null, payload: {
+  expect(buildRouteQualityAlerts(day({}, { unallocatedVisits: 2, closed: true }), 'drive_clock')).toEqual([{ techId: null, payload: {
     date: '2040-09-10', issues: [expect.stringContaining('2 visits need placement'), expect.stringContaining('configured day off')],
   } }]);
-  expect(buildRouteQualityAlerts(day({ scheduledVisits: 0 }, { closed: true }), 'calibrated')).toEqual([]);
+  expect(buildRouteQualityAlerts(day({ scheduledVisits: 0 }, { closed: true }), 'drive_clock')).toEqual([]);
 });
 
 test('a per-technician card names its technician so a live broadcast is not just a date', () => {

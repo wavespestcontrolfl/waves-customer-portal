@@ -45,6 +45,8 @@ const OWNER_ALERT_KINDS = Object.freeze({
   'sms-lead': Object.freeze({ area: 'Leads', severity: 'needs-you', doneWhen: 'estimate_sent' }),
   'web-lead': Object.freeze({ area: 'Leads', severity: 'needs-you', doneWhen: 'lead_contacted' }),
   'field-lead': Object.freeze({ area: 'Leads', severity: 'needs-you', doneWhen: 'lead_contacted' }),
+  // The technician estimate tool (GATE_TECH_ESTIMATES): a quiet line when a technician texts an estimate from the phone.
+  'tech-estimate-sent': Object.freeze({ area: 'Estimates', severity: 'fyi', doneWhen: 'report_read' }),
   'content-pr-stuck': Object.freeze({ area: 'Content', severity: 'needs-you', doneWhen: 'pr_resolved' }),
   'content-visibility': Object.freeze({ area: 'Content', severity: 'needs-you', doneWhen: 'page_fixed' }),
   'content-engine-error': Object.freeze({ area: 'Content', severity: 'needs-you', doneWhen: 'error_resolved' }),
@@ -91,7 +93,7 @@ function composeFor(kind, spec, { action, why = '', link, subject }) {
 }
 
 // The deliverOpsDigest call: quiet (fyi audience, Activity only) unless the owner chose the kind to ring.
-function digestFor(kind, spec, composed, { text, dedupeKey, itemKeys, metadata }) {
+function digestFor(kind, spec, composed, { text, dedupeKey, itemKeys, metadata, supersedePrior }) {
   const keys = Array.isArray(itemKeys) && itemKeys.length ? itemKeys.map(String) : null;
   return {
     key: `owner-alert:${kind}`,
@@ -107,6 +109,7 @@ function digestFor(kind, spec, composed, { text, dedupeKey, itemKeys, metadata }
     // different failure set) rewrites the row, so it never keeps old text. A ringing kind re-rings only on a new item.
     refreshOnDedupe: true,
     ...(keys ? { itemKeys: keys, count: keys.length } : {}),
+    ...(supersedePrior ? { supersedePrior: true } : {}),
     metadata: { ...(metadata || {}), ...composed.metadata, ownerAlert: kind },
     sendEmail: noEmail,
   };
@@ -123,6 +126,8 @@ function digestFor(kind, spec, composed, { text, dedupeKey, itemKeys, metadata }
  * @param {string} fields.dedupeKey  one row per key
  * @param {string[]} [fields.itemKeys]  record ids (never names or phones): a ringing kind rings when one is new
  * @param {object} [fields.metadata]  e.g. { customerId } so an internal test account's alert is dropped
+ * @param {boolean} [fields.supersedePrior]  a daily check that writes one row a day: this row closes the open
+ *                                    rows earlier days wrote (ops-digest.js supersedeOlderDigests)
  * @returns {Promise<{ ok: boolean, channel?: string, id?: string|null, error?: string }>}
  */
 async function recordOwnerAlert(kind, fields = {}) {

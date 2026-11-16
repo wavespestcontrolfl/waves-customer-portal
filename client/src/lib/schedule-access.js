@@ -1,5 +1,4 @@
-// Gate and access codes on the office schedule (GATE_SCHEDULE_ACCESS_CODES,
-// owner ruling 2026-10-26): the list row, the Complete service header, the
+// Gate and access codes on the office schedule (owner ruling 2026-10-26): the list row, the Complete service header, the
 // Details sheet and the desktop side panel. The lines come from the day
 // feed's `propertyAlerts` — the same alerts the tech app's stop brief shows
 // (server/services/nextstop-alerts.js compilePropertyAlerts) — so the two
@@ -8,8 +7,6 @@
 //   "<label>: #4821 (neighborhood)"             the neighborhood's code
 //   "<label>: #2424 (neighborhood, confirm on site)"  not confirmed yet
 //   "Yard: …", "Garage: …", "Lockbox: …"        the profile's other codes
-// The server sets `scheduleAccessEnabled` on each row while the gate is on;
-// without it nothing here draws.
 
 const NEIGHBORHOOD_TAG = /\s\((neighborhood(?:, confirm on site)?)\)$/;
 const PROFILE_KIND = { Yard: 'property_gate', Garage: 'garage', Lockbox: 'lockbox' };
@@ -17,16 +14,11 @@ const PROFILE_KIND = { Yard: 'property_gate', Garage: 'garage', Lockbox: 'lockbo
 // directions ("Call box: dial 102") and reads as text.
 const CODE_LIKE = /^[#*]?[A-Za-z0-9](?:[A-Za-z0-9 -]{0,12}[A-Za-z0-9])?[#*]?$/;
 
-export function scheduleAccessOn(service) {
-  return service?.scheduleAccessEnabled === true;
-}
-
 // One line per gate alert: { key, label, value, codeLike, kind, neighborhood,
 // unconfirmed, entryId, entryCode, reportedWrong }. `kind` is the access-code
 // kind the line stands for (for the dedupe against accepted codes).
 export function accessLinesOf(service) {
-  if (!scheduleAccessOn(service)) return [];
-  const alerts = Array.isArray(service.propertyAlerts) ? service.propertyAlerts : [];
+  const alerts = Array.isArray(service?.propertyAlerts) ? service.propertyAlerts : [];
   const seen = new Set();
   const lines = [];
   for (const alert of alerts) {
@@ -56,12 +48,11 @@ export function accessLinesOf(service) {
   return lines;
 }
 
-// The two row fields the codes are read from, for every builder that hands a
+// The row field the codes are read from, for every builder that hands a
 // Complete service sheet a trimmed copy of the schedule row (Dispatch →
-// Schedule and the tech app): without them the sheet's header shows nothing.
+// Schedule and the tech app): without it the sheet's header shows nothing.
 export function accessSheetFields(row) {
   return {
-    scheduleAccessEnabled: row?.scheduleAccessEnabled === true,
     propertyAlerts: Array.isArray(row?.propertyAlerts) ? row.propertyAlerts : [],
   };
 }

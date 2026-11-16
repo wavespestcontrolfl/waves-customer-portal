@@ -24,6 +24,7 @@ import {
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import ProductLabelReview from "../../components/admin/ProductLabelReview";
 import SiteOneEmailOrderDialog from "../../components/admin/SiteOneEmailOrderDialog";
+import VendorCancellationDialog from "../../components/admin/VendorCancellationDialog";
 import { etDateString } from "../../lib/timezone";
 import {
   ActionFeedback,
@@ -3047,6 +3048,8 @@ function RestockRequestsTab({
   // preview dialog is open.
   const [emailOrderEnabled, setEmailOrderEnabled] = useState(false);
   const [emailOrderFor, setEmailOrderFor] = useState(null);
+  // The request whose "Record vendor cancellation" dialog is open.
+  const [vendorCancelFor, setVendorCancelFor] = useState(null);
   // requestId → { screenshots: [{ label, url }], expiresAt } once fetched. The
   // server presigns for 1 h; the cell drops the links a little before that
   // and offers Refresh, so a tab left open can always re-request fresh URLs.
@@ -3272,6 +3275,7 @@ function RestockRequestsTab({
                       receivingId={receivingId}
                       runAction={runAction}
                       canAuthor={canAuthor}
+                      onVendorCancel={setVendorCancelFor}
                     />
                   </TR>
                 );
@@ -3290,6 +3294,22 @@ function RestockRequestsTab({
               result.requestMarked === false
                 ? "Email sent to SiteOne, but the request was not marked ordered. Use Mark Ordered."
                 : "Order emailed to SiteOne",
+            );
+            await load();
+            onUpdate && onUpdate();
+          }}
+        />
+      )}
+      {vendorCancelFor && (
+        <VendorCancellationDialog
+          request={vendorCancelFor}
+          onClose={() => setVendorCancelFor(null)}
+          onRecorded={async (result) => {
+            setVendorCancelFor(null);
+            showToast(
+              result.requestStatus === "received"
+                ? "Vendor cancellation recorded. The request stays received."
+                : "Vendor cancellation recorded. The request is cancelled.",
             );
             await load();
             onUpdate && onUpdate();
@@ -3479,6 +3499,7 @@ function RestockActionCell({
   receivingId,
   runAction,
   canAuthor,
+  onVendorCancel,
 }) {
   const setDraft = (patch) =>
     setReceiveDrafts((prev) => ({
@@ -3542,7 +3563,7 @@ function RestockActionCell({
             placeholder="Unit"
           />
         </div>
-        <div className="flex gap-[6px]">
+        <div className="flex flex-wrap gap-[6px]">
           <Button
             onClick={() => runAction(request, "receive")}
             disabled={receivingId === request.id}
@@ -3550,14 +3571,13 @@ function RestockActionCell({
           >
             Receive
           </Button>
-          {lateOrderReceive ? (
-            <span className="text-ink-secondary text-ui-body self-center">
-              Late auto-order — receive it, or revoke
-            </span>
-          ) : orderOut ? (
-            <span className="text-ink-secondary text-ui-body self-center">
-              Order out — receive, or revoke first
-            </span>
+          {lateOrderReceive || orderOut ? (
+            <VendorCancelControls
+              request={request}
+              late={lateOrderReceive}
+              busy={receivingId === request.id}
+              onVendorCancel={onVendorCancel}
+            />
           ) : (
             <Button
               onClick={() => runAction(request, "cancel")}
@@ -3570,6 +3590,27 @@ function RestockActionCell({
         </div>
       </div>
     </TD>
+  );
+}
+
+// An automatic order that is out (or one that landed after the request was
+// received by hand) cannot be cancelled: the stock may be on its way. The
+// office receives it, or records the cancellation once the vendor has
+// cancelled it (VendorCancellationDialog; the server checks the same rules).
+function VendorCancelControls({ request, late, busy, onVendorCancel }) {
+  return (
+    <>
+      {request.order.id && (
+        <Button onClick={() => onVendorCancel(request)} disabled={busy} variant="secondary">
+          Record vendor cancellation
+        </Button>
+      )}
+      <span className="basis-full text-ink-secondary text-ui-body">
+        {late
+          ? "Late auto-order — receive it, or record a vendor cancellation."
+          : "Order out — receive it when it arrives, or record a vendor cancellation."}
+      </span>
+    </>
   );
 }
 

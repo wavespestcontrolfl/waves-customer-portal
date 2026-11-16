@@ -440,6 +440,8 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     await seedHandEstimate(two.customerId, { sentAgeMin: 10 });
     const late = await seedStaffCall(SID.replace(/e2$/, 's4'), { reason: 'quote_promised', cardAges: [30 * 24 * 60] });
     await seedHandEstimate(late.customerId, { sentAgeMin: 10 * 24 * 60 });
+    // Touched since filing, so the quiet_aged clock (7 quiet days) stays out of this staff-work case.
+    await db('triage_items').where({ id: late.calls[0].cardId }).update({ updated_at: new Date() });
     // A suppressed send stamps sent_at but no delivery.
     const suppressed = await seedStaffCall(SID.replace(/e2$/, 's5'), { reason: 'quote_promised' });
     await seedHandEstimate(suppressed.customerId, { sentAgeMin: 10, deliveredAgeMin: null });
@@ -518,5 +520,143 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     expect(okRow.resolution_rule).toBe('staff_booked_at_account_address');
     expect((await cardRow(atProperty.calls[0].cardId)).status).toBe('resolved');
     for (const c of [elsewhere, multi, otherUnit, otherZip, noSnapshot, conflictingStamp]) expect((await cardRow(c.calls[0].cardId)).status).toBe('open');
+  });
+  // ── quiet_aged (owner 2026-11-09) ──────────────────────────────────────────
+  // seedQuietCard: one card on its own call. ageDays / updatedAgeDays set the
+  // two clocks; `dismissedAs` seeds a card already dismissed by a rule.
+  async function seedQuietCard(reason, { ageDays = 8, updatedAgeDays = ageDays, status = 'open', severity = 'advisory', dismissedAs = null } = {}) {
+    const { customerId } = await seedCustomer(`qa${ids.calls.length}`);
+    const sid = 'CA' + '8'.repeat(28) + String(ids.calls.length).padStart(4, '0');
+    const [call] = await db('call_log').insert({
+      twilio_call_sid: sid, direction: 'inbound', from_phone: PHONE, to_phone: '+15555550100',
+      status: 'completed', duration_seconds: 120, processing_status: 'processed',
+      customer_id: customerId, review_status: dismissedAs ? 'dismissed' : 'open', created_at: new Date(Date.now() - (ageDays + 1) * 86400000),
+    }).returning('id');
+    ids.calls.push(call.id);
+    const [card] = await db('triage_items').insert({
+      call_log_id: call.id, category: 'time_ambiguous', severity, reason_code: reason, status: dismissedAs ? 'dismissed' : status,
+      summary: 'fixture', payload: JSON.stringify({ flag: reason }),
+      created_at: new Date(Date.now() - ageDays * 86400000), updated_at: new Date(Date.now() - updatedAgeDays * 86400000),
+      ...(dismissedAs ? { resolution_source: dismissedAs.source || 'auto', resolution_rule: dismissedAs.rule, resolution_note: 'fixture', resolved_at: dismissedAs.at || new Date() } : {}),
+    }).returning('id');
+    return { callId: call.id, cardId: card.id };
+  }
+
+  test('quiet_aged: a listed card quiet for 7 days is dismissed (blocking too), review_status follows; everything else stays open', async () => {
+    const blocking = await seedQuietCard('rental_or_tenant_occupied', { severity: 'blocking' });
+    const advisory = await seedQuietCard('customer_email_missing');
+    const sixDays = await seedQuietCard('rental_or_tenant_occupied', { ageDays: 6 });
+    const claimed = await seedQuietCard('rental_or_tenant_occupied', { status: 'in_progress' });
+    const touched = await seedQuietCard('rental_or_tenant_occupied', { ageDays: 20, updatedAgeDays: 1 });
+    const stateful = [
+      await seedQuietCard('name_email_mismatch', { ageDays: 40 }),
+      await seedQuietCard('quote_promised', { ageDays: 40 }),
+      await seedQuietCard('not_confirmed', { ageDays: 40 }),
+      await seedQuietCard('email_unverified', { ageDays: 40 }),
+      await seedQuietCard('reschedule_or_cancel', { ageDays: 40, severity: 'blocking' }),
+      await seedQuietCard('missing_unit_number', { ageDays: 40 }),
+    ];
+    const result = await sweep.runTriageAutoResolve({ now: new Date() });
+    expect(result.counts.quiet_aged).toBeGreaterThanOrEqual(2);
+    for (const c of [blocking, advisory]) {
+      const row = await cardRow(c.cardId);
+      expect(row.status).toBe('dismissed');
+      expect(row.resolution_source).toBe('auto');
+      expect(row.resolution_rule).toBe('quiet_aged');
+      expect(row.resolution_note).toBe(sweep.RULE_NOTES.quiet_aged);
+      expect((await db('call_log').where({ id: c.callId }).first('review_status')).review_status).toBe('dismissed');
+    }
+    for (const c of [sixDays, claimed, touched, ...stateful]) expect((await cardRow(c.cardId)).status).not.toBe('dismissed');
+    expect((await cardRow(claimed.cardId)).status).toBe('in_progress');
+  });
+
+  test('quiet_aged: an evidence rule that applies to the same card wins', async () => {
+    const booked = await seedCall(SID.replace(/e2$/, 'qw'), { cardAgeMin: 9 * 24 * 60, bookingAgeMin: 10 });
+    await db('triage_items').where({ id: booked.cardId }).update({ updated_at: new Date(Date.now() - 9 * 86400000) });
+    await sweep.runTriageAutoResolve({ now: new Date() });
+    const row = await cardRow(booked.cardId);
+    expect(row.status).toBe('resolved');
+    expect(row.resolution_rule).toBe('booking_created');
+  });
+
+  test('quiet_aged dry run: planQuietAged counts by code and severity and writes nothing', async () => {
+    const card = await seedQuietCard('rental_or_tenant_occupied', { severity: 'blocking' });
+    const before = await db('triage_items').where({ id: card.cardId }).first();
+    const plan = await sweep.planQuietAged({ now: new Date() });
+    expect(plan.total).toBeGreaterThanOrEqual(1);
+    expect(plan.byReason.rental_or_tenant_occupied.bySeverity.blocking).toBeGreaterThanOrEqual(1);
+    expect(plan.wouldApplyNextRun).toBeLessThanOrEqual(sweep.MAX_TRANSITIONS_PER_RUN);
+    const after = await db('triage_items').where({ id: card.cardId }).first();
+    expect(after.status).toBe('open');
+    expect(after.updated_at.getTime()).toBe(before.updated_at.getTime());
+  });
+
+  test('reopenQuietAged: dry run writes nothing; apply reopens only the quiet_aged cards, clears the fields and re-syncs review_status', async () => {
+    const since = new Date(Date.now() - 60 * 1000);
+    const swept = await seedQuietCard('not_confirmed', { dismissedAs: { rule: 'quiet_aged' } });
+    const byHuman = await seedQuietCard('not_confirmed', { dismissedAs: { rule: null, source: 'human' } });
+    const otherRule = await seedQuietCard('voicemail', { dismissedAs: { rule: 'advisory_aged' } });
+    const older = await seedQuietCard('not_confirmed', { dismissedAs: { rule: 'quiet_aged', at: new Date(Date.now() - 3600 * 1000) } });
+    const withTwin = await seedQuietCard('customer_email_missing', { dismissedAs: { rule: 'quiet_aged' } });
+    await db('triage_items').insert({
+      call_log_id: withTwin.callId, category: 'time_ambiguous', severity: 'advisory', reason_code: 'customer_email_missing',
+      status: 'open', summary: 'fixture', payload: '{}',
+    });
+    const dry = await sweep.reopenQuietAged({ since });
+    expect(dry.reopened).toBe(0);
+    expect(dry.reopenable).toBeGreaterThanOrEqual(1);
+    expect(dry.skippedSuperseded).toBeGreaterThanOrEqual(1);
+    expect((await cardRow(swept.cardId)).status).toBe('dismissed');
+
+    const applied = await sweep.reopenQuietAged({ since, apply: true });
+    expect(applied.reopened).toBeGreaterThanOrEqual(1);
+    const row = await cardRow(swept.cardId);
+    expect(row.status).toBe('open');
+    expect(row.resolution_rule).toBeNull();
+    expect(row.resolution_source).toBeNull();
+    expect(row.resolution_note).toBeNull();
+    expect(row.resolved_at).toBeNull();
+    expect((await db('call_log').where({ id: swept.callId }).first('review_status')).review_status).toBe('open');
+    for (const c of [byHuman, otherRule, older, withTwin]) expect((await cardRow(c.cardId)).status).toBe('dismissed');
+    // A second apply finds nothing left to reopen for that card.
+    const again = await sweep.reopenQuietAged({ since, apply: true });
+    expect((await cardRow(swept.cardId)).status).toBe('open');
+    expect(again.reopened).toBe(0);
+  });
+
+  test('reopenQuietAged: a newer settled card of the same reason supersedes the dismissal; an older settled card does not', async () => {
+    const since = new Date(Date.now() - 60 * 1000);
+    const handled = await seedQuietCard('second_service_address', { dismissedAs: { rule: 'quiet_aged' } });
+    const resolvedTwin = { call_log_id: handled.callId, category: 'time_ambiguous', severity: 'advisory', reason_code: 'second_service_address', summary: 'fixture', payload: '{}' };
+    await db('triage_items').insert({ ...resolvedTwin, status: 'resolved', resolution_source: 'human', resolved_at: new Date(), created_at: new Date() });
+    const prior = await seedQuietCard('second_service_address', { dismissedAs: { rule: 'quiet_aged' } });
+    await db('triage_items').insert({ ...resolvedTwin, call_log_id: prior.callId, status: 'resolved', resolution_source: 'human', resolved_at: new Date(Date.now() - 20 * 86400000), created_at: new Date(Date.now() - 30 * 86400000) });
+    const dry = await sweep.reopenQuietAged({ since });
+    expect(dry.skippedSuperseded).toBeGreaterThanOrEqual(1);
+    await sweep.reopenQuietAged({ since, apply: true });
+    expect((await cardRow(handled.cardId)).status).toBe('dismissed');
+    expect((await db('call_log').where({ id: handled.callId }).first('review_status')).review_status).toBe('dismissed');
+    expect((await cardRow(prior.cardId)).status).toBe('open');
+  });
+
+  test('reopenQuietAged: a card of another call that turns eligible after the first read is not touched by that run', async () => {
+    const since = new Date(Date.now() - 60 * 1000);
+    const first = await seedQuietCard('not_confirmed', { dismissedAs: { rule: 'quiet_aged' } });
+    let late = null;
+    // Seeds the late card after the first (unlocked) plan read, before the locked re-plan.
+    const racing = (...a) => db(...a);
+    racing.transaction = async (fn) => {
+      late = await seedQuietCard('customer_email_missing', { dismissedAs: { rule: 'quiet_aged' } });
+      return db.transaction(fn);
+    };
+    const run = await sweep.reopenQuietAged({ since, apply: true, conn: racing });
+    expect(run.reopened).toBeGreaterThanOrEqual(1);
+    expect((await cardRow(first.cardId)).status).toBe('open');
+    expect((await cardRow(late.cardId)).status).toBe('dismissed');
+    expect((await db('call_log').where({ id: late.callId }).first('review_status')).review_status).toBe('dismissed');
+    // The next run plans and locks it.
+    await sweep.reopenQuietAged({ since, apply: true });
+    expect((await cardRow(late.cardId)).status).toBe('open');
+    expect((await db('call_log').where({ id: late.callId }).first('review_status')).review_status).toBe('open');
   });
 });

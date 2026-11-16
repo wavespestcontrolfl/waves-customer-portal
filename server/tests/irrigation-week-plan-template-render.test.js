@@ -58,4 +58,41 @@ describe('irrigation.weekly_plan template', () => {
       fs.writeFileSync(path.join(process.env.DUMP_DIR, `email-${reason}.html`), rendered.html || rendered.bodyHtml);
     }
   });
+  test('the watering-time line renders once in the email, text and HTML, escaped', () => {
+    const LINE = 'On your watering day, use the 12:01 to 4 AM window, not the evening one. A lawn that stays wet all night gets more fungus.';
+    process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({
+      maxDaysPerWeek: 1, expiresOn: '2027-12-31', label: 'test rule & order', hoursNote: 'on your assigned day', coverage: 'all',
+      allowedHours: [{ start: '00:01', end: '04:00' }, { start: '20:00', end: '23:59' }],
+    });
+    let decision;
+    try {
+      decision = buildWeeklyEmailDecision({ ...BASE, irrigationInchesPerWeek: null, rainfallInches7d: 0.6, forecastRainInches: 0.3 });
+    } finally {
+      delete process.env.IRRIGATION_RESTRICTION_POLICY;
+    }
+    expect(decision.payload.restriction_note).toMatch(/Water on your assigned day only\. On your watering day, use the 12:01 to 4 AM window/);
+    const { template, version } = seedRows();
+    const rendered = EmailTemplates.renderTemplate({ template, version, payload: decision.payload });
+    expect(rendered.missingPayload || []).toEqual([]);
+    expect(rendered.text.split(LINE)).toHaveLength(2);
+    expect(rendered.html.split(LINE)).toHaveLength(2);
+    // The label's ampersand is escaped in the HTML and left plain in the text.
+    expect(rendered.html).toContain('test rule &amp; order: lawn watering is limited');
+    expect(rendered.text).toContain('test rule & order: lawn watering is limited');
+    expect(rendered.html).not.toMatch(PLACEHOLDER_RE);
+  });
+
+  test('without allowedHours the email carries no watering-time line', () => {
+    process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({ maxDaysPerWeek: 1, expiresOn: '2027-12-31', label: 'test rule', hoursNote: 'on your assigned day', coverage: 'all' });
+    let decision;
+    try {
+      decision = buildWeeklyEmailDecision({ ...BASE, irrigationInchesPerWeek: null, rainfallInches7d: 0.6, forecastRainInches: 0.3 });
+    } finally {
+      delete process.env.IRRIGATION_RESTRICTION_POLICY;
+    }
+    const { template, version } = seedRows();
+    const rendered = EmailTemplates.renderTemplate({ template, version, payload: decision.payload });
+    expect(rendered.text).not.toContain('12:01');
+    expect(rendered.html).not.toContain('12:01');
+  });
 });

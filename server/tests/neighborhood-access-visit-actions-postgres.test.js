@@ -41,7 +41,6 @@ postgres('neighborhood gate codes from a visit', () => {
   let tech;
   let otherTech;
   let admin;
-  const OLD = { access: process.env.GATE_NEIGHBORHOOD_ACCESS, actions: process.env.GATE_NEIGHBORHOOD_TECH_ACTIONS };
   const TODAY = etDateString(new Date());
   const UUID = /^[0-9a-f-]{36}$/i;
 
@@ -112,8 +111,6 @@ postgres('neighborhood gate codes from a visit', () => {
     baseUrl = `http://127.0.0.1:${server.address().port}`;
   });
   beforeEach(async () => {
-    process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
-    process.env.GATE_NEIGHBORHOOD_TECH_ACTIONS = 'true';
     mockEmit.mockClear();
     trx = await database.transaction();
     mockConnection = trx;
@@ -124,27 +121,10 @@ postgres('neighborhood gate codes from a visit', () => {
   });
   afterEach(async () => {
     await trx.rollback();
-    for (const [key, value] of [['GATE_NEIGHBORHOOD_ACCESS', OLD.access], ['GATE_NEIGHBORHOOD_TECH_ACTIONS', OLD.actions]]) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
   });
   afterAll(async () => {
     await new Promise((resolve) => server.close(resolve));
     await database.destroy();
-  });
-
-  test('either gate off: both routes answer 404 enabled:false and write nothing', async () => {
-    const n = await neighborhood('Gate Off Glen');
-    const id = await entry(n);
-    const v = await visit(n);
-    for (const key of ['GATE_NEIGHBORHOOD_TECH_ACTIONS', 'GATE_NEIGHBORHOOD_ACCESS']) {
-      process.env[key] = 'false';
-      expect(await call('POST', `/visits/${v.id}/entries`, { code: '5555' })).toEqual({ status: 404, body: { enabled: false } });
-      expect(await wrong(v.id, id)).toEqual({ status: 404, body: { enabled: false } });
-      process.env[key] = 'true';
-    }
-    expect((await rows(n)).map((r) => [r.code, r.status])).toEqual([['1234', 'active']]);
   });
 
   test('a technician adds a code on their own visit: live at once, recorded as theirs, the other code needs confirming', async () => {

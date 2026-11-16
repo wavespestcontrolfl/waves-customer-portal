@@ -15,7 +15,6 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { closeRequestAlertsOnResolve } = require('../services/portal-inbox');
-const { portalItemCloseLive } = require('../config/feature-gates');
 const { requestProperty } = require('../services/service-request-property');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { convertHeicToJpeg, MAX_HEIC_BYTES } = require('../services/heic-to-jpeg');
@@ -55,8 +54,7 @@ const updateSchema = Joi.object({
   status: Joi.string().valid(...STATUSES).optional(),
   adminNotes: Joi.string().trim().allow('').max(2000).optional(),
   assignedTechnicianId: Joi.string().uuid().allow(null).optional(),
-  // GATE_PORTAL_ITEM_CLOSE: the Portal tab's "Mark handled" asks for a status change that emails
-  // the customer nothing. Ignored while the gate is off.
+  // The Portal tab's "Mark handled" asks for a status change that emails the customer nothing.
   quiet: Joi.boolean().optional(),
 }).min(1);
 
@@ -68,12 +66,12 @@ function validateUpdate(body) {
 }
 
 // Does this status change email the customer "Your Waves request was updated"? measurement_review rows
-// are office-only (below). GATE_PORTAL_ITEM_CLOSE: a quiet change (the Portal tab's Mark handled, which can
+// are office-only (below). A quiet change (the Portal tab's Mark handled, which can
 // close an item nobody answered) tells the customer nothing; only an explicit `true` from an admin counts
 // (a technician's quiet is ignored, so the customer still hears).
 function shouldEmailRequestUpdate(updated, statusChanged, value, role) {
   const lifecycleEmail = statusChanged && updated.category !== 'measurement_review';
-  return lifecycleEmail && !(value.quiet === true && role === 'admin' && portalItemCloseLive());
+  return lifecycleEmail && !(value.quiet === true && role === 'admin');
 }
 
 // GET /api/admin/requests — list service requests for staff triage.

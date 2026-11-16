@@ -151,6 +151,42 @@ describe("Admin billing failure and draft boundaries", () => {
     expect(JSON.parse(writes[1][1].body)).toEqual({ invoiceNumber: "WPC-2026-0600", note: "Two-home invoice" });
   });
 
+  // Owner 2026-11-06 "fix": a visit an unpaid annual prepay bill covers is recorded on that bill, never billed again.
+  it("names the prepay bill that covers a visit and opens Billed elsewhere with that bill filled in", async () => {
+    const fetch = vi.fn(async (url, options) => {
+      if (options?.method === "POST") return response({ ok: true, invoice: { id: "inv-p", invoice_number: "WPC-TEST-0646", status: "sent" } });
+      if (url.includes("/leaks?")) return response({ summary: {}, leaks: [
+        { scheduled_service_id: "visit-a", customer: "Avery Example", price: 120, billable: true },
+      ], needs_review: [
+        { scheduled_service_id: "visit-p", customer: "Pat Example", price: 117, billable: true, prepay_invoice_number: "WPC-TEST-0646" },
+      ] });
+      if (url.endsWith("/aging")) return response({ aging: {}, top_balances: [] });
+      return response({ accounts: [], count: 0, atRisk: 0 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    renderRecovery();
+    const hint = "Prepay bill WPC-TEST-0646 covers this visit — mark it billed elsewhere on that bill, do not bill it again";
+    await screen.findByText(hint);
+    expect(screen.getAllByText(/^Prepay bill /)).toHaveLength(1);
+
+    // The plain visit opens an empty dialog; the prepay visit opens with its bill's number.
+    const rowOf = (customer) => within(screen.getByText(customer).closest("tr"));
+    fireEvent.click(rowOf("Avery Example").getByRole("button", { name: "Billed elsewhere" }));
+    expect(within(screen.getByRole("dialog")).getByLabelText("Invoice number")).toHaveValue("");
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(rowOf("Pat Example").getByText(hint)).toBeInTheDocument();
+    fireEvent.click(rowOf("Pat Example").getByRole("button", { name: "Billed elsewhere" }));
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByText(/Pat Example/)).toBeInTheDocument();
+    expect(dialog.getByLabelText("Invoice number")).toHaveValue("WPC-TEST-0646");
+    fireEvent.click(dialog.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const writes = fetch.mock.calls.filter(([, options]) => options?.method === "POST");
+    expect(writes.map(([url]) => url)).toEqual(["/api/admin/billing-recovery/visit-p/billed-elsewhere"]);
+    expect(JSON.parse(writes[0][1].body)).toEqual({ invoiceNumber: "WPC-TEST-0646", note: null });
+  });
+
   it("distinguishes payer read failures from an empty directory and retries only the read", async () => {
     const fetch = vi.fn().mockResolvedValueOnce(response({ error: "Directory unavailable" }, 503)).mockResolvedValue(response({ payers: [payer] }));
     vi.stubGlobal("fetch", fetch);

@@ -69,11 +69,6 @@ const PROMPT_REWRITES = Object.freeze([
     'a 0 is an absence: state it only for a place the technician checked, named in the same clause (OWNER RULES rule 4), and do not imply a problem. When the record names no checked place, leave a 0 rating out of the report; it is the one rating the report does not have to reflect.',
   ],
   ['("light activity", "no visible activity")', '("light activity", "moderate activity")'],
-  // Recurring pest module: the same absence wording.
-  [
-    'A recorded zero means no visible activity was noted within the assessed scope; it is not a property-wide all-clear.',
-    'A recorded zero is an absence for the places the technician checked only, each named in the same clause (OWNER RULES rule 4); with no checked place recorded, leave the zero out.',
-  ],
   // v4 hard constraint 4 invited active-ingredient names.
   [
     '4. **No brand names for products.** Use active ingredient names (fipronil, bifenthrin, imidacloprid, prodiamine, etc.) or functional descriptions (non-repellent residual, insect growth regulator, pre-emergent herbicide, systemic drench). If the active ingredient is not provided in the inputs, use the functional description only. When the copy tells the homeowner to DO something with a product, lead with the plain-language role, not a bare chemical name — "water in today\'s grub treatment", never "water in the clothianidin".',
@@ -122,18 +117,6 @@ const PROMPT_REWRITES = Object.freeze([
     'Do not default to stock recovery windows like "7–14 days" or "10–14 days" — give a timeframe only when a specific product or the grounding context justifies one, and make it fit the situation.',
     'Give a recovery or response timeframe only in the words of an EXPECTATIONS line.',
   ],
-  // Recurring pest module: the four-section shape, length by the record.
-  [
-    'Return exactly the existing WHAT WE DID / WHAT WE FOUND plain-text structure. Usually write 2–3 sentences for completed work and 2–4 sentences for findings, expectations, and supported nonduplicative follow-up. Target about 80–140 words, but write less for thin records.',
-    'Return the four-section plain-text structure in the OWNER RULES. Length follows the record; write less for thin records.',
-  ],
-  // Recurring pest module: the next-step chip it names was retired, and the
-  // coverage block it waits for is never built.
-  [' Do not repeat the selected next-step line that the renderer appends after this copy.', ''],
-  [
-    '\n\nOnly when the separate PRODUCT LABELED COVERAGE block contains approved facts for products actually applied at the relevant site, add one concise capability sentence using this exact phrase: "also helps control other labeled crawling pests in the treated areas." Add at most a few supported examples. Keep them separate from organisms found and targets selected today. Never total overlapping lists or state a numeric coverage count. Never imply termite protection or a bond, rodent service, mosquito service, or another specialty service from a product label alone.',
-    '',
-  ],
   // Remaining-service core: actives and "explanatory contrasts" were allowed.
   [
     'Keep product brand names in the product table. In the main report, use a supplied active ingredient only when helpful; otherwise use an accurate functional description. More restrictive surface-specific naming rules take precedence.',
@@ -172,11 +155,6 @@ const PROMPT_REWRITES = Object.freeze([
     'Leave preparation and aftercare instructions to the report\'s own sections.',
   ],
   ['Relay approved site precautions and next steps.', 'Leave site precautions to the report\'s own sections; name a recorded next step without a date.'],
-  // Recurring pest module: aftercare belongs to the report's own sections.
-  [
-    'Explain a response, limitation, aftercare instruction, or conducive condition only from supplied approved context.',
-    'Explain a response, limitation, or conducive condition only from supplied approved context; leave aftercare instructions to the report\'s own sections.',
-  ],
   // Remaining-service main adapter: the four sections, length by the
   // record, and the owner rules name what the report prints on its own.
   ['OUTPUT ADAPTER — MAIN TWO-SECTION REPORT', 'OUTPUT ADAPTER — MAIN REPORT'],
@@ -200,31 +178,6 @@ function composeWriterRulesPrompt([header, ...parts]) {
   const joined = [header, `# ${REPORT_WRITER_RULES_VERSION}`, OWNER_RULES, ...parts].filter(Boolean).join('\n\n');
   return PROMPT_REWRITES.reduce((text, [from, to]) => text.split(from).join(to), joined);
 }
-
-// The recurring pest writer's own block, after the shared constraints and the
-// pest module (owner 2026-10-09: "the prompt that creates the end result is
-// weak"). The rules above say what the report refuses; this says what to put
-// in each section, from which input, so a thin dictated note still gives four
-// sentences from the record and not an invitation to "let us know".
-const PEST_WRITER_ADAPTER = `RECURRING PEST VISIT: HOW TO FILL THE FOUR SECTIONS
-
-First sort every sentence of the TECHNICIAN NOTE into one of: work done, seen today, what the customer said, advice for later. A sentence stays in its category.
-
-WHAT WE FOUND. Fill from, in this order: the customer's words (BOOKED REASON, Customer concern, WHAT THE CUSTOMER TOLD US, note sentences about what the customer said), attributed to the customer; then what the technician saw today (Observations, note sentences about what was seen, the Pest activity rating in words only, "Findings observed" lines); then one earlier visit, with its date and marked as past, only when the prior visits show the same pest or the same place. Lead with the customer's concern when there is one. Name the pest as the technician named it and the place as recorded. A target tagged on a product that the technician did not record seeing is not a finding.
-
-WHAT WE DID AND WHY. One clause for each piece of work, in the recorded order: what it was by its job (an insect-control treatment, a bait, an insect growth regulator, a sweep of webs), where (Areas serviced, the APPLICATION DETAILS area, the note), how (the APPLICATION DETAILS method), and why it fits what was found, taken from HOW IT WORKS. A sweep of webs is work: when the TECHNICIAN NOTE names the places swept, name only those places, even when Actions completed lists more; when the note names none, use the places Actions completed lists; add none.
-
-PRODUCT FACTS are how you know what each treatment is for. Write each treatment by its job words, never by a name. Each entry also says what that one treatment was "tagged today for": when you say what a treatment was for, use that entry's own tags ("the treatment along the foundation is the one for the ants you saw"). An entry that is not tagged has no recorded reason; the TECHNICIAN NOTE may give one. Take the "why" from HOW IT WORKS. A condition the technician note records ("dry and calm", "light rain earlier") may explain a choice the note also records; it never becomes a drying, rainfast or waiting claim.
-
-WHAT TO EXPECT. Restate the EXPECTATIONS lines that match today's work, tied to the pest and place found today ("the ants you saw along the lanai"). A timeframe appears only in the exact words of an EXPECTATIONS line. With no EXPECTATIONS lines there is no recorded outcome: write the one sentence rule 1 gives an empty section (from the record: the place worked or the service type), and claim no result, no effect on the pest and no timeframe.
-
-WHAT'S NEXT. In this order: what the note or the Recommendations say we will check or do next (never a visit, a day or a window); what the customer can do that the record names (never aftercare, cleaning, watering or re-entry); and when to contact us, tied to the REACH-OUT DATE when one is supplied, otherwise to an EXPECTATIONS timeframe, otherwise to a sign of the pest found today that the customer can notice. With none of these recorded (no next step, no pest found, no customer concern, no EXPECTATIONS, no REACH-OUT DATE), write the one sentence rule 1 gives an empty section, and invent no sign, no contact trigger and no follow-up.
-
-Reassure with recorded facts: what the treatment is for, what the EXPECTATIONS lines say the customer may see and that seeing it is expected, where the technician checked and found none, and when to contact us.
-
-A thin record gets one sentence per section, each one from the record. Write as the technician who was there would say it to the homeowner at the door.
-
-BEFORE YOU ANSWER, read your draft for these. The report is rejected if any appears: "no issues", "no problems", "all clear", "nothing to worry about"; an absence with no place named in the same clause; infestation, infested, eliminated, eradicated, exterminated, resolved, solved, gone, cleared, pest-free, any "-proof" word, guarantee, bond, the word "map"; safe, safely, unsafe, non-toxic, harmless, toxic, poison, dangerous, chemical; a product, brand or active ingredient name; an amount, rate, percentage or footage; a price, "free" or "included"; a timeframe that is not copied from an EXPECTATIONS line; a date, weekday or clock time other than an earlier visit's date and the REACH-OUT DATE; the activity rating as a number; a quotation of the customer's message; an instruction to leave, clean, water or avoid a treated area or a bait.`;
 
 // "german cockroaches" takes a small g in report text (owner 2026-10-25,
 // "dont capitalize German"), except as the first word of a sentence or a
@@ -291,7 +244,7 @@ function withheldProductsLine(count) {
 }
 
 // The writer's Observations line and REPORTED BY CUSTOMER block. `quiet`
-// (GATE_PEST_QUIET_VISIT, one-voice pest prompt only): an empty field sends no
+// (the one-voice pest and specialty prompts only): an empty field sends no
 // line ("Observations: None noted" is where quiet reports got "noted"), and the
 // customer-home choice is left out: the sheet opens on "home — spoke with them"
 // every time, so it is no proof we talked, and the visit timeline prints it.
@@ -849,7 +802,6 @@ module.exports = {
   OWNER_RULES,
   PROMPT_REWRITES,
   composeWriterRulesPrompt,
-  PEST_WRITER_ADAPTER,
   noteAbsenceHint,
   writerRulesRejectionDetail,
   rejectedDraftRepairNote,

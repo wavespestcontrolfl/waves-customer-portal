@@ -188,3 +188,74 @@ describe('listOccupiedWindows (offer-side mirrors) carries each stop\'s own cred
     expect(await findConflictingVisits({ date: '2026-09-03', windowStart: '13:00', windowEnd: '14:00', travel: { ...PALMETTO } })).toEqual([]);
   });
 });
+
+// Owner 2026-11-09 (picker audit option A): with the planning table live, the
+// offer mirror and the booking check both credit a booked recurring stop at the
+// router's 35 minutes. Its 25 spare minutes absorb the 15-minute buffer, so the
+// next hour fits a 19-minute drive on BOTH sides; with the table off both sides
+// keep the catalog 45 and refuse that hour together.
+describe('router minutes: the offer mirror and the booking check credit a stop from the planning table alike', () => {
+  const { listOccupiedWindows } = require('../services/scheduling/occupancy');
+  const { ensureCatalogLoaded, clearExpectedServiceMinutesCache } = require('../services/scheduling/expected-service-minutes');
+  const NEAR = { lat: 27.445, lng: -82.545 }; // 19 modeled minutes from PALMETTO
+  const catalog = (table) => ({
+    select: async () => (table === 'services'
+      ? [{ service_key: 'pest_general_quarterly', name: 'Quarterly Pest Control Service', min_duration_minutes: 30, max_duration_minutes: 60 }]
+      : []),
+  });
+  const booked = (extra = {}) => ({
+    id: 's1', customer_id: 'cust-1', technician_id: 'tech-1', scheduled_date: '2026-11-10',
+    window_start: '12:00:00', window_end: '13:00:00', status: 'scheduled',
+    service_type: 'Quarterly Pest Control Service', service_key_snapshot: 'pest_general_quarterly',
+    estimated_duration_minutes: 60, is_recurring: true, is_callback: false,
+    reservation_expires_at: null, reservation_service_mix: null, lat: PALMETTO.lat, lng: PALMETTO.lng, ...extra,
+  });
+  const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+  beforeEach(async () => { clearExpectedServiceMinutesCache(); await ensureCatalogLoaded(catalog); });
+  afterEach(() => {
+    clearExpectedServiceMinutesCache();
+    if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+    else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+  });
+
+  // The 13:00 hour right after the 12:00 stop, judged by the mirror and by the check.
+  async function nextHour(row) {
+    db.mockImplementation(() => makeQuery([row]));
+    const rows = await listOccupiedWindows({ dateFrom: '2026-11-10', dateTo: '2026-11-10', withCoords: true });
+    const offerFits = !violatesTravelGap({ startMin: 780, endMin: 840, windowMinutes: 60, expectedMinutes: 45, ...NEAR }, rows);
+    db.mockImplementation(() => makeQuery([row]));
+    const clash = await findConflictingVisits({
+      date: '2026-11-10', windowStart: '13:00', windowEnd: '14:00', travel: { ...NEAR, expectedMinutes: 45 },
+    });
+    return { credit: rows[0].expectedMinutes, offerFits, checkFits: clash.length === 0 };
+  }
+
+  test('plan mode: the stop credits 35 and both sides accept the next hour', async () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    expect(await nextHour(booked())).toEqual({ credit: 35, offerFits: true, checkFits: true });
+  });
+
+  test('plan mode: a re-service credits 15 on both sides', async () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    expect(await nextHour(booked({ is_callback: true }))).toEqual({ credit: 15, offerFits: true, checkFits: true });
+  });
+
+  test('the table off: both sides keep the catalog 45 and refuse the same hour', async () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    expect(await nextHour(booked())).toEqual({ credit: 45, offerFits: false, checkFits: false });
+  });
+
+  test('both readers select every planning input, so neither side credits a stop by its name alone', async () => {
+    const queries = [];
+    db.mockImplementation(() => { const query = makeQuery([booked()]); queries.push(query); return query; });
+    await listOccupiedWindows({ dateFrom: '2026-11-10', dateTo: '2026-11-10', withCoords: true });
+    await findConflictingVisits({ date: '2026-11-10', windowStart: '13:00', windowEnd: '14:00', travel: { ...NEAR, expectedMinutes: 45 } });
+    const selects = queries.map((query) => query.select.mock.calls.flat().map(String))
+      .filter((cols) => cols.includes('scheduled_services.window_start'));
+    expect(selects).toHaveLength(2);
+    for (const cols of selects) {
+      expect(cols).toEqual(expect.arrayContaining(['service_type', 'is_recurring', 'is_callback', 'estimated_duration_minutes']
+        .map((column) => `scheduled_services.${column}`)));
+    }
+  });
+});

@@ -75,7 +75,7 @@ function ErrorState({ kind, message, onRetry }) {
 }
 
 // The step and tile icon keys a v13 outline section draws with (server/services/lawn-service-outline.js,
-// GATE_LAWN_OUTLINE_V13). An unknown key draws no icon; its text still shows.
+// the v13 program). An unknown key draws no icon; its text still shows.
 const VISUAL_ICONS = {
   inspection: Search,
   feeding: Sprout,
@@ -721,7 +721,7 @@ function SnapshotAside({ content, today }) {
         </div>
         <div className="flex gap-3">
           <Sprout size={16} strokeWidth={1.75} className="mt-0.5 text-zinc-500" />
-          {/* The v13 outline names its one program, not a grass (GATE_LAWN_OUTLINE_V13). */}
+          {/* The v13 outline names its one program, not a grass. */}
           {content.property?.programLabel ? (
             <div>
               <dt className="text-zinc-500">Program</dt>

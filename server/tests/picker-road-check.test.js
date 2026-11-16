@@ -1,6 +1,5 @@
 /**
- * Google inside the staff pickers' route check (GATE_PICKER_ROAD_CHECK,
- * owner 2026-10-26: "we need to run Google inside the scheduling check
+ * Google inside the staff pickers' route check (owner 2026-10-26: "we need to run Google inside the scheduling check
  * itself" — "Next 7 days", "His current stop").
  *
  * What this locks down:
@@ -251,7 +250,7 @@ describe('createPickerTravel', () => {
     expect(logger.info).toHaveBeenCalledWith('[picker-road] 2 lookups sent, 2 answered by Google');
   });
 
-  // A staff save (GATE_SAVE_ROAD_TIMES) reads what the pickers bought and buys
+  // A staff save reads what the pickers bought and buys
   // nothing: no Google call inside a save's transaction.
   test('a cache-only source buys nothing and reads what a picker bought', async () => {
     await make().travel.preload([leg(plus(1), 9 * 60)]);
@@ -328,10 +327,12 @@ describe('createPickerTravel', () => {
   });
 });
 
-// GATE_DRIVE_CLOCK (owner 2026-10-28): a Google leg carries the park minutes
-// when it is READ, once, on every path; the caches keep Google's own minutes.
-describe('GATE_DRIVE_CLOCK park minutes on Google legs', () => {
-  const CLOCK = 'GATE_DRIVE_CLOCK';
+// Drive clock (owner 2026-10-28; on whenever GATE_DRIVE_TIME_CALIBRATION is
+// on): a Google leg carries the park minutes when it is READ, once, on every
+// path; the caches keep Google's own minutes.
+describe('drive clock park minutes on Google legs', () => {
+  // The drive clock's one switch: the calibrated drive model.
+  const CLOCK = 'GATE_DRIVE_TIME_CALIBRATION';
   const FROM = { lat: '27.5000', lng: '-82.4000' };
   const TO = { lat: 27.52, lng: -82.41 };
   const plus = (n) => {
@@ -341,7 +342,7 @@ describe('GATE_DRIVE_CLOCK park minutes on Google legs', () => {
   };
   const leg = (date, departureMin = 9 * 60) => ({ date, from: FROM, to: TO, departureMin });
   // Inner sources like createSchedulingTravel's: lookupRaw = Google's own
-  // minutes, lookup = the same with the park minutes added by the gate.
+  // minutes, lookup = the same with the park minutes added by the drive clock.
   const realSources = (fetchImpl) => {
     const RouteOptimizer = require('../services/route-optimizer');
     const budget = () => ({ resetAt: 0, requests: 0, elements: 0, maxRequests: 100, maxElements: 100 });
@@ -369,19 +370,19 @@ describe('GATE_DRIVE_CLOCK park minutes on Google legs', () => {
     };
   };
 
-  // The drive clock needs the calibrated model on, as it is live.
-  const savedCalibration = process.env.GATE_DRIVE_TIME_CALIBRATION;
+  // Each test starts with the calibrated model (and so the drive clock) off
+  // and turns it on itself.
+  const savedCalibration = process.env[CLOCK];
   beforeEach(() => {
     process.env.GOOGLE_MAPS_API_KEY = 'synthetic-test-key';
-    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+    delete process.env[CLOCK];
   });
   afterEach(() => {
-    if (savedCalibration === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
-    else process.env.GATE_DRIVE_TIME_CALIBRATION = savedCalibration;
+    if (savedCalibration === undefined) delete process.env[CLOCK];
+    else process.env[CLOCK] = savedCalibration;
     _test.roadCache.clear();
     _test.plainCache.clear();
     delete process.env.GOOGLE_MAPS_API_KEY;
-    delete process.env[CLOCK];
     delete process.env.DRIVE_CLOCK_PARK_MINUTES;
     delete process.env.PICKER_ROAD_TRAFFIC_DAYS;
     delete process.env.PICKER_ROAD_PLAIN_DAYS;

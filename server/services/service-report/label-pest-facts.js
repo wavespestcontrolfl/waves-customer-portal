@@ -1,8 +1,7 @@
 /**
  * Label pest facts for the pest report writer (owner 2026-10-24, "labels go":
  * "one reviewed line per product: what its label says it kills. The writer
- * uses it only for a pest you name in the note"). Dark behind
- * GATE_PEST_LABEL_FACTS.
+ * uses it only for a pest you name in the note").
  *
  * Each reviewed product in config/report-product-copy.js may carry
  * `labelPests`: the pests its current EPA label names, as the fixed terms

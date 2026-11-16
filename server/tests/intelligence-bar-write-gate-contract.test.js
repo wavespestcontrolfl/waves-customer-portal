@@ -91,7 +91,6 @@ beforeAll(() => {
   process.env.GATE_IB_COMPOSE_EMAIL = 'true';
   process.env.GATE_IB_SET_BILL_TO = 'true';
   process.env.GATE_IB_AGENT_REVIEW_DRAFTS = 'true';
-  process.env.GATE_IB_RESOLVE_DISPATCH_ALERT = 'true';
   process.env.GATE_IB_UNBLOCK_SENDER = 'true';
   // send_invoice is dark behind GATE_IB_INVOICE_ACTIONS; off, its preview refuses.
   process.env.GATE_IB_INVOICE_ACTIONS = 'true';
@@ -116,7 +115,6 @@ afterAll(() => {
   delete process.env.GATE_IB_COMPOSE_EMAIL;
   delete process.env.GATE_IB_SET_BILL_TO;
   delete process.env.GATE_IB_AGENT_REVIEW_DRAFTS;
-  delete process.env.GATE_IB_RESOLVE_DISPATCH_ALERT;
   delete process.env.GATE_IB_UNBLOCK_SENDER;
   delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
@@ -354,7 +352,7 @@ const READ_ONLY = [
   'check_customer_status', 'search_knowledge_base', 'get_weather_conditions',
   'get_review_stats', 'get_unresponded_reviews', 'draft_review_reply', 'get_outreach_candidates',
   'search_reviews', 'get_review_trends', 'get_velocity_pipeline',
-  'get_unanswered_threads', 'get_conversation_thread', 'search_messages', 'get_sms_stats',
+  'get_unanswered_threads', 'get_conversation_thread', 'get_customer_text_status', 'search_messages', 'get_sms_stats',
   'get_call_log', 'draft_sms_reply', 'get_csr_overview', 'get_todays_activity',
   'list_call_partners', 'get_partner_call_history', 'get_open_commitments', 'list_queued_messages', 'list_agent_review_drafts',
   'get_tax_dashboard', 'get_expenses', 'get_equipment_depreciation', 'get_filing_deadlines',

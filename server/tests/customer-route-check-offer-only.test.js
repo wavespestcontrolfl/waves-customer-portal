@@ -134,7 +134,7 @@ describe('every call site of a page builder is classified (offer lists opt in, c
       ['../services/sms-scheduling-act.js', 'buildAvailabilityForService(svc, { rangeFrom: slot.date'],
       ['../services/sms-shadow-drafter.js', 'buildAvailabilityForService(svc, { ...range, config })'],
       ['../routes/reservice-public.js', 'buildAvailabilityForCustomer(customer, { ...bookingRange(config), config, duration, lanes: browseLanes })'],
-      ['../routes/inspection-public.js', 'buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes })'],
+      ['../routes/inspection-public.js', 'buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address })'],
       ['../services/commercial-first-visit.js', 'availabilityFor(context, { rangeFrom: date, rangeTo: date, config })'],
     ]) {
       expect(read(file)).toContain(needle);

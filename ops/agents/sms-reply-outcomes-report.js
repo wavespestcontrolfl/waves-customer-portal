@@ -2,7 +2,7 @@
 // READ-ONLY
 //
 // sms-reply-outcomes-report.js — what customers did after each Waves text reply
-// (GATE_SMS_REPLY_OUTCOMES, services/sms-reply-outcomes.js), by AI prompt version
+// (services/sms-reply-outcomes.js), by AI prompt version
 // and by reply source (manual / ai_approved / ai_revised / ai_autosent / ai_gratitude).
 //
 //   railway run --service Postgres -- railway run --service waves-customer-portal \

@@ -1,5 +1,5 @@
 /**
- * Seed rules for the tax ledger (GATE_TAX_LEDGER). One row per payee
+ * Seed rules for the tax ledger. One row per payee
  * pattern: a case-insensitive regular expression tested against the bank
  * description, the kind of row it is, and the Schedule C category for
  * expenses. Merchant patterns only: a rule about a person (a helper, a

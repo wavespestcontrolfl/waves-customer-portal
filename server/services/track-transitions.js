@@ -34,6 +34,7 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
 const { sendTrackTextOnce } = require('./one-text-per-day');
+const visitLiveActivity = require('./visit-live-activity');
 
 const EN_ROUTE_GEOCODE_TIMEOUT_MS = 1200;
 const CUSTOMER_EVENT = 'customer:job_update';
@@ -216,6 +217,8 @@ function customerTrackState(row) {
 
 function emitCustomerTrackRefresh(svc, trackState, updatedAt = new Date()) {
   if (!svc?.customer_id) return;
+  // The Lock Screen visit card follows the same flips as the in-app tracker (GATE_VISIT_LIVE_ACTIVITY; off = nothing).
+  visitLiveActivity.poke(svc.id);
   const io = getIo();
   if (!io) {
     logger.warn('[track-transitions] io not initialized; skipping customer tracker refresh');

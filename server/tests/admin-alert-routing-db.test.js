@@ -1,5 +1,5 @@
 /**
- * Claude's queue routing against live Postgres (GATE_ALERT_CLAUDE_QUEUE): a routed row is written
+ * Claude's queue routing against live Postgres: a routed row is written
  * Activity-only and stamped for Claude, stays off the bell through refreshes (a refresh never
  * rings it back), `needs-me --who claude` lists it, and the one-time mover stamps only the rows
  * the routing table matches. The routing rules themselves are in admin-alert-routing.test.js.
@@ -24,9 +24,7 @@ maybeDescribe('claude queue routing (live Postgres)', () => {
     NotificationService = require('../services/notification-service');
     routing = require('../services/admin-alert-routing');
   });
-  beforeEach(() => { process.env.GATE_ALERT_CLAUDE_QUEUE = 'true'; });
   afterAll(async () => {
-    delete process.env.GATE_ALERT_CLAUDE_QUEUE;
     await db('notifications').whereRaw("starts_with(metadata->>'dedupeKey', ?)", [RUN]).del();
     await db.destroy();
   });
@@ -55,14 +53,6 @@ maybeDescribe('claude queue routing (live Postgres)', () => {
     expect((await bellRows('mac-owner-ask')).map((r) => r.id)).toContain(ask.id);
   });
 
-  test('gate off: the same fault lands in the bell as before', async () => {
-    delete process.env.GATE_ALERT_CLAUDE_QUEUE;
-    const f = await fault('fault-gate-off');
-    const stored = await get(f.id);
-    expect(stored.metadata.feed).toBeUndefined();
-    expect(stored.metadata.who).toBeUndefined();
-  });
-
   test('a refresh of a routed row stays off the bell and never un-reads or reopens it', async () => {
     const opts = { refreshOnDedupe: true, ringOnRefresh: () => false };
     const first = await fault('refresh-quiet', opts);
@@ -87,11 +77,13 @@ maybeDescribe('claude queue routing (live Postgres)', () => {
     expect(await bellRows('refresh-ring')).toHaveLength(0);
   });
 
-  test('a row already in the bell (written before the gate) moves off it on a quiet refresh, without a ring', async () => {
-    delete process.env.GATE_ALERT_CLAUDE_QUEUE;
+  test('a row already in the bell (written before the routing went live) moves off it on a quiet refresh, without a ring', async () => {
     const old = await fault('old-bell-row', { refreshOnDedupe: true, ringOnRefresh: () => false });
-    await db('notifications').where({ id: old.id }).update({ read_at: db.fn.now() });
-    process.env.GATE_ALERT_CLAUDE_QUEUE = 'true';
+    // Put it back the way a pre-routing row looked: no routing fields.
+    await db('notifications').where({ id: old.id }).update({
+      read_at: db.fn.now(),
+      metadata: db.raw("metadata - 'feed' - 'who' - 'severity' - 'claudeQueue'"),
+    });
     await fault('old-bell-row', { refreshOnDedupe: true, ringOnRefresh: () => false, metadata: { reason: 'gbp_sync_degraded', cause: 'new cause' } }, 'Changed body.');
     const stored = await get(old.id);
     expect(stored.metadata).toMatchObject({ feed: 'activity', who: 'claude' });
@@ -111,15 +103,6 @@ maybeDescribe('claude queue routing (live Postgres)', () => {
     expect(stored.metadata.opsWho).toBe('person');
     expect(stored.read_at).toBeNull();
     expect((await bellRows('to-person')).map((r) => r.id)).toEqual([first.id]);
-  });
-
-  test('Claude to person with the gate off at refresh time (rollback) also returns the row to the bell', async () => {
-    const opts = { refreshOnDedupe: true };
-    const first = await macRow('to-bell-gate-off', {}, opts);
-    delete process.env.GATE_ALERT_CLAUDE_QUEUE;
-    await macRow('to-bell-gate-off', {}, opts);
-    expect((await bellRows('to-bell-gate-off')).map((r) => r.id)).toEqual([first.id]);
-    expect((await get(first.id)).metadata).not.toHaveProperty('claudeQueue');
   });
 
   test('person to Claude still moves a bell row off the bell; an identical routed repeat is a plain dedupe', async () => {
@@ -179,9 +162,7 @@ maybeDescribe('claude queue routing (live Postgres)', () => {
     const ask = await macRow('feed-ask');
     const fyi = await macRow('feed-fyi', { opsKind: 'fyi' });
     const ownerAsk = await macRow('feed-owner-ask', { opsWho: 'person' });
-    delete process.env.GATE_ALERT_CLAUDE_QUEUE;
     const plain = await NotificationService.notifyAdmin('system', 'Plain bell row', 'Body.', { link: '/admin', bell: true, dedupeKey: key('feed-plain') });
-    process.env.GATE_ALERT_CLAUDE_QUEUE = 'true';
     try {
       const feed = await getActivity({ windowHours: 24 });
       const ids = feed.items.map((i) => i.notificationId);
@@ -269,11 +250,6 @@ maybeDescribe('claude queue routing (live Postgres)', () => {
       expect((await get(turned.id)).metadata).not.toHaveProperty('claudeQueue');
       expect((await get(turned.id)).metadata.feed).toBeUndefined();
       expect((await get(steady.id)).metadata).toMatchObject({ feed: 'activity', who: 'claude', claudeQueue: 'ops-job' });
-    });
-
-    test('refuses to run while the gate is off', async () => {
-      delete process.env.GATE_ALERT_CLAUDE_QUEUE;
-      await expect(routing.rerouteOpenRows(db, { execute: true })).rejects.toThrow(/GATE_ALERT_CLAUDE_QUEUE is off/);
     });
   });
 });

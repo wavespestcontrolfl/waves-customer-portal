@@ -24,7 +24,7 @@ vi.mock('../utils/api', () => {
 });
 
 import api from '../utils/api';
-import { DashboardTab } from './PortalPage';
+import { DashboardTab, MyPlanTab } from './PortalPage';
 
 const customer = {
   id: 'cust-1', firstName: 'Pat', lastName: 'Customer',
@@ -179,6 +179,79 @@ describe('one-tap purchase CTA gating', () => {
     expect(screen.getByText(/confirmation email and an app notification/)).toBeInTheDocument();
   });
 
+  // Owner 2026-11-11: the purchase screens show the discount on the service
+  // being added and the new price of the services the customer already has.
+  it('shows the WaveGuard discount on the new service and the new price of current services, then what the purchase applied', async () => {
+    api.getPropertyRecommendations.mockResolvedValue(recommendations());
+    const pest = {
+      key: 'pest_control', label: 'Pest Control', currentPerVisit: 119, newPerVisit: 107.1,
+      perVisitSavings: 11.9, upcomingVisitDates: ['2026-11-16', '2027-02-15'], prepaid: false,
+    };
+    const pricing = {
+      tierLabel: 'Silver',
+      newService: { listPerVisit: 93.33, savingsPerVisit: 9.33, discountPct: 10 },
+      existingServices: [pest],
+    };
+    api.oneTapInit.mockResolvedValue({
+      purchaseId: 'p-1', estimateId: 'est-1', serviceKey: 'lawn_care', label: 'Lawn Care',
+      perVisit: 84, cadenceLabel: '9 applications/yr', visitsPerYear: 9, pricing,
+      terms: { version: 'v1', text: 'Server terms text.' }, hasCardOnFile: true, holdMinutes: 15,
+      slots: {
+        primary: [{ slotId: 'slot-1', date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00', techFirstName: 'Adam', routeOptimal: true }],
+        expander: [], nearby: true,
+      },
+    });
+    api.oneTapReserve.mockResolvedValue({ scheduledServiceId: 'ss-1', expiresAt: new Date(Date.now() + 900000).toISOString(), holdMinutes: 15 });
+    // The accept repriced nothing yet: the plan parked for the office.
+    api.oneTapConfirm.mockResolvedValue({
+      success: true, perVisit: 84, label: 'Lawn Care', emailQueued: true,
+      firstVisit: { date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00' },
+      pricing: { ...pricing, existingServices: [], existingPending: true },
+    });
+
+    renderDashboard();
+    fireEvent.click(await screen.findByText('Add now — $84.00 per application'));
+
+    // TERMS: list price, the discount and the price paid; then current services.
+    expect(await screen.findByText('$93.33 per application')).toBeInTheDocument();
+    expect(screen.getByText('WaveGuard Silver discount')).toBeInTheDocument();
+    expect(screen.getByText('−$9.33 (10%)')).toBeInTheDocument();
+    expect(screen.getByText('Your price')).toBeInTheDocument();
+    expect(screen.getByText('Your current services get the WaveGuard Silver price too')).toBeInTheDocument();
+    expect(screen.getByText('$119.00')).toBeInTheDocument();
+    expect(screen.getByText('$107.10')).toBeInTheDocument();
+    expect(screen.getByText('Upcoming visits: Nov 16, 2026 · Feb 15, 2027')).toBeInTheDocument();
+    expect(screen.getByText('Applied automatically when you confirm. Your visit schedule does not change.')).toBeInTheDocument();
+
+    // CONFIRM repeats both, so the customer confirms the prices in view.
+    fireEvent.click(screen.getByText('Agree and choose a time'));
+    fireEvent.click(await screen.findByText(/Arrival 8:00 AM–10:00 AM/));
+    await screen.findByText(/held for 15 minutes/);
+    expect(screen.getByText('−$9.33 (10%)')).toBeInTheDocument();
+    expect(screen.getByText('$107.10')).toBeInTheDocument();
+
+    // DONE: a parked plan must not read as repriced.
+    fireEvent.click(screen.getByText('Confirm'));
+    expect(await screen.findByText('Lawn Care is confirmed')).toBeInTheDocument();
+    expect(screen.getByText('We are moving your current services to the WaveGuard Silver price.')).toBeInTheDocument();
+    expect(screen.queryByText('$107.10')).not.toBeInTheDocument();
+  });
+
+  it('a purchase with no discount figures keeps the plain Price row', async () => {
+    api.getPropertyRecommendations.mockResolvedValue(recommendations());
+    api.oneTapInit.mockResolvedValue({
+      purchaseId: 'p-1', estimateId: 'est-1', serviceKey: 'lawn_care', label: 'Lawn Care',
+      perVisit: 84, cadenceLabel: '9 applications/yr', visitsPerYear: 9,
+      terms: { version: 'v1', text: 'Server terms text.' }, hasCardOnFile: true, holdMinutes: 15,
+      slots: { primary: [], expander: [], nearby: false },
+    });
+    renderDashboard();
+    fireEvent.click(await screen.findByText('Add now — $84.00 per application'));
+    expect(await screen.findByText('Price')).toBeInTheDocument();
+    expect(screen.queryByText('List price')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Your current services/)).not.toBeInTheDocument();
+  });
+
   it('a SetupIntent-return resume renders the held purchase even when no recommendation cards load (GH r5 P2)', async () => {
     window.history.replaceState({}, '', '/?stripe_setup_flow=one_tap_card&setup_intent=si_1&redirect_status=succeeded&one_tap_resume=p-7');
     try {
@@ -282,5 +355,59 @@ describe('one-tap purchase CTA gating', () => {
     fireEvent.click(await screen.findByText('Add now — $84.00 per application'));
     expect(await screen.findByText('This offer changed')).toBeInTheDocument();
     expect(screen.getByText('Refresh the page')).toBeInTheDocument();
+  });
+});
+
+// Owner 2026-11-11 (option A): My Plan lists every service the customer does
+// not have, each bought through the same purchase as the Home card.
+describe('My Plan "Add a service"', () => {
+  const offer = (over) => ({
+    serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', relationship: 'add',
+    option: { id: 'lawn-enhanced', label: 'Lawn care — 9x applications/yr', cadence: '9 applications/yr', perVisit: 84, waveguardTier: 'Silver' },
+    fingerprint: 'fp-lawn',
+    ...over,
+  });
+  const TREE = offer({
+    serviceKey: 'tree_shrub', label: 'Tree & Shrub Care', fingerprint: 'fp-tree',
+    option: { id: 'tree-standard', label: 'Standard tree & shrub care', cadence: '6 visits/year', perVisit: 96, waveguardTier: 'Silver' },
+  });
+
+  // The rodent line's cadence has no "/year" to rewrite; it reads as written.
+  const RODENT = offer({
+    serviceKey: 'rodent_bait', label: 'Rodent Bait Stations', fingerprint: 'fp-rodent',
+    option: { id: 'rodent-bait', label: 'Rodent monitoring stations', cadence: 'Quarterly station service', perVisit: 80.1, waveguardTier: 'Silver' },
+  });
+
+  it('lists each service with its visits and price, and a tap buys THAT service', async () => {
+    api.oneTapOffers.mockResolvedValue({ offers: [offer(), TREE, RODENT] });
+    render(<MyPlanTab customer={customer} />);
+
+    expect(await screen.findByText('Add to your plan')).toBeInTheDocument();
+    expect(screen.getByText('9 applications a year.')).toBeInTheDocument();
+    expect(screen.getByText('6 visits a year.')).toBeInTheDocument();
+    expect(screen.getByText('Quarterly station service.')).toBeInTheDocument();
+    expect(screen.getByText('Add now — $80.10 per application')).toBeInTheDocument();
+    expect(screen.getByText('Add now — $84.00 per application')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Add now — $96.00 per application'));
+    expect(await screen.findByRole('dialog', { name: /Add Tree & Shrub Care/ })).toBeInTheDocument();
+    // The second card's identity, not the first's: the server prices and
+    // drift-checks the family named here.
+    expect(api.oneTapInit).toHaveBeenCalledWith({
+      fingerprint: 'fp-tree', serviceKey: 'tree_shrub', optionId: 'tree-standard', perApplication: 96,
+    });
+  });
+
+  it('nothing to sell (or the gate off) renders no card', async () => {
+    api.oneTapOffers.mockResolvedValue({ offers: [] });
+    render(<MyPlanTab customer={customer} />);
+    await vi.waitFor(() => expect(api.oneTapOffers).toHaveBeenCalled());
+    expect(screen.queryByText('Add to your plan')).not.toBeInTheDocument();
+  });
+
+  it('a cancelled account never asks for offers', () => {
+    // Mount effects have run by the time render returns.
+    render(<MyPlanTab customer={{ ...customer, cancelled: true }} />);
+    expect(api.oneTapOffers).not.toHaveBeenCalled();
   });
 });

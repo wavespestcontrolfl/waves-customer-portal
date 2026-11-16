@@ -135,7 +135,7 @@ describe('the blog post on the completion form', () => {
     expect(fetch.mock.calls.some(([url]) => String(url).includes(`/admin/dispatch/${service.id}/blog-posts`))).toBe(true);
   });
 
-  it.each([['Lawn Care'], ['Tree & Shrub Care'], ['Palm Injection']])('the %s form never asks (another lane owns it)', async (serviceType) => {
+  it.each([['Tree & Shrub Care'], ['Palm Injection']])('the %s form never asks (another lane owns it)', async (serviceType) => {
     await act(async () => {
       render(<CompletionPanel service={{ ...service, serviceType }} products={[]} onClose={vi.fn()} onSubmit={vi.fn().mockResolvedValue({})} />);
     });
@@ -179,7 +179,7 @@ describe('the blog post on the completion form', () => {
   });
 });
 
-describe('tips with facts on the completion form (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+describe('tips with facts on the completion form (owner 2026-10-24)', () => {
   const TIP = { id: 'water_bromeliads', label: 'Flush bromeliads weekly', copy: 'Bromeliad cups hold water.', citations: [{ label: 'UF/IFAS', url: 'https://blogs.ifas.ufl.edu/sarasotaco/2024/06/21/mosquito-faqs/' }] };
   const PLAIN = { id: 'seal_door_sweeps', label: 'Replace worn door sweeps', copy: 'A mouse fits through a small gap.' };
   const sourced = (overrides = {}) => ({
@@ -250,20 +250,7 @@ describe('tips with facts on the completion form (GATE_TECH_TIP_SOURCES, owner 2
     expect(screen.queryByText(NOTE)).toBeNull();
   });
 
-  it('gate off: a pick fills nothing, and the form shows no sources, no yard line and no Change', async () => {
-    tipsResponse = { available: true, line: 'pest', groups: [{ id: 'water', label: 'Standing water', tips: [{ ...TIP, citations: undefined }] }], more: [], lastSent: {}, conditions: {} };
-    await renderPanel();
-    await screen.findByLabelText('Search the Waves blog');
-    await pickTip(TIP.label);
-    expect(screen.getByLabelText('Search the Waves blog')).toBeTruthy();
-    expect(screen.queryByText(/Matched to this yard/)).toBeNull();
-    expect(screen.queryByText('· UF/IFAS')).toBeNull();
-    fireEvent.change(screen.getByLabelText('Search the Waves blog'), { target: { value: 'ghost ants' } });
-    fireEvent.click(await screen.findByRole('button', { name: new RegExp(POST.title) }));
-    expect(screen.queryByRole('button', { name: 'Change' })).toBeNull();
-  });
-
-  it('a lawn visit asks for the blog post with tips with facts on (decision 6); tree & shrub and palm still never ask', async () => {
+  it('a lawn visit asks for the blog post (tips with facts, decision 6); tree & shrub and palm still never ask', async () => {
     tipsResponse = sourced({ line: 'lawn' });
     await act(async () => {
       render(<CompletionPanel service={{ ...service, serviceType: 'Lawn Care' }} products={[]} onClose={vi.fn()} onSubmit={vi.fn().mockResolvedValue({})} />);

@@ -32,6 +32,7 @@
 
 const logger = require('../logger');
 const { maskPhone } = require('./relay-protocol');
+const { DAY_ONLY_ARRIVAL_NOTE } = require('../day-only-ai-context');
 
 // Fail-closed gate. Mirrors isRelayEnabled's style in relay-protocol.js but is
 // deliberately INDEPENDENT of VOICE_RELAY_ENABLED.
@@ -763,10 +764,13 @@ async function loadNextAppointment(customerId) {
       .orWhere('customer_confirmed', true))
     .where('scheduled_date', '>=', etDateString())
     .orderBy('scheduled_date', 'asc')
-    .select('scheduled_date', 'service_type', 'window_start', 'window_end', 'status')
+    .select('id', 'scheduled_date', 'service_type', 'window_start', 'window_end', 'status')
     .first();
   if (!row) return null;
   const { normalizeServiceType } = require('../../utils/service-normalizer');
+  // GATE_DAY_ONLY_PROMISE (part D): a visit whose customer was told only the day is stated as the date alone, never an
+  // hour (day-only-ai-context.js; gate off = no read, no extra key). A failed read with the gate on also says only the day.
+  const dayOnly = (await require('../day-only-ai-context').loadDayOnlyCheck(db, [row]))(row);
   return {
     date: speakDate(row.scheduled_date),
     service: promptSafeUntrusted(normalizeServiceType(row.service_type) || row.service_type, 60) || null,
@@ -775,7 +779,8 @@ async function loadNextAppointment(customerId) {
     // "report 'next appointment' displays follow the same +2h rule"). Same
     // helper the reminders, the track page and get_today_eta use, so the four
     // cannot drift.
-    window: (() => {
+    ...(dayOnly ? { windowDayOnly: true } : {}),
+    window: dayOnly ? null : (() => {
       const { arrivalWindowRange } = require('../../utils/sms-time-format');
       const range = arrivalWindowRange(row.window_start);
       if (!range) return null;
@@ -785,6 +790,15 @@ async function loadNextAppointment(customerId) {
       return spokenStart && spokenEnd ? promptSafe(`${spokenStart} to ${spokenEnd}`, 30) : null;
     })(),
   };
+}
+
+// The arrival-window clause of the "Next appointment" line. A day-only visit (GATE_DAY_ONLY_PROMISE part D) states the note
+// instead of an hour; every other visit keeps today's wording. `inBlock` = the KNOWN CALLER block's parenthesised form,
+// else the lookup tool's comma form.
+function nextAppointmentWindowClause(next, inBlock) {
+  if (next.windowDayOnly) return inBlock ? ` (arrival window: ${DAY_ONLY_ARRIVAL_NOTE})` : `, arrival window: ${DAY_ONLY_ARRIVAL_NOTE}`;
+  if (!next.window) return '';
+  return inBlock ? ` (window starts ${promptSafe(next.window, 20)})` : `, arrival window ${next.window}`;
 }
 
 // Completed service_records, newest first. "Completed" mirrors
@@ -942,7 +956,7 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
       + 'a date, or a window');
   } else if (nextAppointment && nextAppointment.date) {
     const svc = systemBlockSafe(nextAppointment.service, 60);
-    const win = nextAppointment.window ? ` (window starts ${promptSafe(nextAppointment.window, 20)})` : '';
+    const win = nextAppointmentWindowClause(nextAppointment, true);
     lines.push(`Next appointment: ${nextAppointment.date}${svc ? ` — ${svc}` : ''}${win}`);
   } else {
     lines.push('Next appointment: none scheduled');
@@ -1265,7 +1279,7 @@ async function accountOverviewText(customerId, { tier = 'redacted', attested = f
       : (!nextAppointmentR.ok
         ? 'The schedule could not be checked right now — do not say whether a visit is coming; a team member can confirm.'
         : (nextAppointment && nextAppointment.date
-          ? `Next appointment: ${nextAppointment.date}${nextAppointment.service ? ` for ${nextAppointment.service}` : ''}${nextAppointment.window ? `, arrival window ${nextAppointment.window}` : ''}.`
+          ? `Next appointment: ${nextAppointment.date}${nextAppointment.service ? ` for ${nextAppointment.service}` : ''}${nextAppointmentWindowClause(nextAppointment, false)}.`
           : 'No upcoming appointment on the schedule.')),
     visits === null
       ? 'Visit history could not be checked right now — do not say there are none; a team member can confirm.'

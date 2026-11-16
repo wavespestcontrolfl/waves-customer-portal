@@ -371,16 +371,14 @@ const listVersion = (rows) => crypto.createHash('sha1').update(rows.map((r) => `
 /**
  * Owner 2026-11-02 ("A"): the 9:15 AM blog-run job on the owner's Mac writes
  * the drafts on this list, so the daily item is Claude's work. While this
- * switch is on (the default) and Claude's queue is live, the item is stamped
+ * switch is on (the default), the item is stamped
  * for that queue (admin-alert-routing.js class content-terminal-due: Activity
  * only, fyi) and the owner's bell rings only for a list the terminal stopped
  * handling (raiseTerminalStalled). AUTONOMOUS_CONTENT_TERMINAL_DUE_QUIET=false
- * rings the daily item for the owner again, as before; so does Claude's queue
- * being off, since nothing would take the item off the bell.
+ * rings the daily item for the owner again, as before.
  */
 function dueItemQuiet() {
-  if (/^(0|false|no|off)$/i.test(String(process.env.AUTONOMOUS_CONTENT_TERMINAL_DUE_QUIET ?? '').trim())) return false;
-  return require('../admin-alert-routing').claudeQueueEnabled();
+  return !/^(0|false|no|off)$/i.test(String(process.env.AUTONOMOUS_CONTENT_TERMINAL_DUE_QUIET ?? '').trim());
 }
 
 /**

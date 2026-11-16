@@ -37,6 +37,10 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
     q._sql = '';
     q.whereRaw = (sql) => { q._sql += sql; return q; };
     q.forUpdate = () => q;
+    // The count read (inventory-count-guard latestCount): the product has never been counted.
+    q.orderBy = () => q;
+    q.limit = () => q;
+    q.select = async () => [];
     q.first = async () => {
       if (table === 'product_inventory_movements') return techLogged ? { id: 'mv-tech' } : null;
       // handedOff 'auto' = the only matching bell is one this module retired itself (metadata.autoRetired): the settled read's predicate excludes it.

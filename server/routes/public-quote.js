@@ -123,7 +123,7 @@ const { generateEstimate, normalizeRoachType, constants: pricingConstants } = re
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
-const { subscribeOrResubscribe } = require('../services/newsletter-subscribers');
+const { subscribeOrResubscribe, hasLiveConfirmation } = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
@@ -4174,8 +4174,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           source: 'quote_wizard',
           strict: true,
           requireConfirmation: true,
+          // Unverified public email: throttle repeats, keep an opted-out row
+          // opted out until the link is clicked (sweep #7765 B5).
+          publicSignup: true,
         });
-        if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
+        // A throttled repeat sends no second email, but while the earlier
+        // confirmation is still waiting for its click (a pending row, or an
+        // opted-out row holding a live re-signup token) the lead rides it:
+        // stamp it so the click enrolls this lead, not an older one.
+        if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent'
+            || (result.action === 'confirmation_throttled' && hasLiveConfirmation(result.subscriber))) {
           await db('newsletter_subscribers').where({ id: result.subscriber.id }).update({
             quote_lead_automation_pending: true,
             // Carried through double opt-in so the confirmed enrollment can
@@ -4185,7 +4193,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             updated_at: new Date(),
           });
           try {
-            await sendConfirmationEmail(result.subscriber);
+            if (result.action !== 'confirmation_throttled') await sendConfirmationEmail(result.subscriber);
           } catch (e) {
             logger.error(`[public-quote] confirmation email failed for subscriber id=${result.subscriber?.id}: ${e.message}`);
           }

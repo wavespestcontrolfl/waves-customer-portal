@@ -5323,6 +5323,21 @@ async function commitPendingAction(req, { id, contractHash }) {
       ? await PendingActions.recordResult(action.id, result, { onlyIfEmpty: true })
       : await PendingActions.recordResult(action.id, result, { keepRecoveryFinal: true });
     await recordConfirmedGaps(action.tool_name, result);
+    // Every confirmed gate write gets an audit_log row, the same as a flip
+    // from Settings → Features (owner 2026-11-06).
+    if (action.tool_name === 'set_railway_gate') {
+      await require('../services/intelligence-bar/ops-tools').recordGateFlipAudit({
+        via: 'intelligence_bar',
+        actorId: req.technicianId || req.technician?.id || null,
+        gate: execParams._verified_railway_gate_name,
+        value: execParams._verified_railway_gate_value,
+        priorKind: execParams._verified_railway_gate_prior_kind,
+        priorValue: execParams._verified_railway_gate_prior ?? null,
+        result,
+        ip: req.ip,
+        userAgent: req.get?.('user-agent') || null,
+      });
+    }
     if (receiptSaved === false) {
       // Some domains save the receipt atomically with their mutation.
       receiptSaved = !!(await PendingActions.getActionReceipt(action.id, getAdminActorId(req)).catch(() => null))?.result;

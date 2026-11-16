@@ -157,7 +157,26 @@ async function collectCitedOwnedUrls({ database = db, windowDays = CITATION_WIND
 // result onto owned-url-health's richer, cited-URL-specific verdicts.
 const CLEAN_LIVE_STATUSES = new Set(['live', 'redirected']);
 
+// A cited .txt file (llms.txt, robots.txt) is plain text by design. The shared
+// classifier calls a body with no HTML element "no document" (soft_404). That
+// is right for a page URL and wrong here: on 2026-11-07 it flagged the hub's
+// live llms.txt. Only that one signal is excused, and only for a .txt path
+// served as text/plain. A not-found phrase, a bot wall, noindex or an empty
+// body still fail.
+const PLAIN_TEXT_PATH_RE = /\.txt$/i;
+
+function effectiveLiveStatus(shared) {
+  if (shared.live_status !== 'soft_404' || shared.non_html !== true || shared.soft_not_found !== false) return shared.live_status;
+  if (!/^text\/plain\b/i.test(String(shared.content_type || ''))) return shared.live_status;
+  let pathname = '';
+  try { pathname = new URL(shared.final_url).pathname; } catch { return shared.live_status; }
+  if (!PLAIN_TEXT_PATH_RE.test(pathname)) return shared.live_status;
+  if (shared.noindex_detected) return 'noindex';
+  return shared.redirect_target_url ? 'redirected' : 'live';
+}
+
 function mapSharedResultToVerdict(shared) {
+  const liveStatus = effectiveLiveStatus(shared);
   const httpStatusNum = Number(shared.http_status);
   const detailBase = {
     requestedUrl: shared.target_url,
@@ -169,7 +188,7 @@ function mapSharedResultToVerdict(shared) {
     contentType: shared.content_type || null,
   };
 
-  switch (shared.live_status) {
+  switch (liveStatus) {
     case 'error':
       // A 429 is a rate-limit/block signal, not a random failure — surfaced
       // as challenge rather than the generic fetch_blocked bucket.
@@ -198,7 +217,7 @@ function mapSharedResultToVerdict(shared) {
       break;
   }
 
-  if (CLEAN_LIVE_STATUSES.has(shared.live_status)) {
+  if (CLEAN_LIVE_STATUSES.has(liveStatus)) {
     // A truncated body (the shared ~1.5MB cap tripped, or the socket closed
     // early) is never enough evidence to call a page healthy — the markers
     // above can all live past the cutoff point.

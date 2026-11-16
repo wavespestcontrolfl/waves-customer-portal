@@ -122,7 +122,7 @@ test('a failed day-count read keeps the labeled slots', async () => {
   expect(out.days[0].stops_booked).toBeNull();
 });
 
-test('a day listed through GATE_ROUTE_CHECK_LATE_DAYS says already_late; a clean day gets no flag and no note', async () => {
+test('an already-late day says already_late; a clean day gets no flag and no note', async () => {
   findAvailableSlots.mockResolvedValue({
     slots: [
       { rank: 1, date: '2026-10-28', start_time: '13:00', detour_minutes: 4, day_already_late: true },

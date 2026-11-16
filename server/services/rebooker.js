@@ -35,6 +35,8 @@ async function assertAssignableSlotTechnician(technicianId, trx, date, { initiat
   }
 }
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
+// Lazy: time-promise pulls the promise readers, which must not load while this module loads.
+const moveIntentColumns = (...args) => require('./time-promise').moveIntentColumns(...args);
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks, techScopedConfirmActive } = require('./scheduling/occupancy');
@@ -43,6 +45,7 @@ const { resolveStopCoords } = require('./scheduling/travel-gap');
 const { arrivalWindowRoutingEnabled, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, placeMovedVisit } = require('./scheduling/arrival-route');
 const { guardedCoordSelects, preloadServiceLocations } = require('./scheduling/day-stops');
 const { getIo } = require('../sockets');
+const visitLiveActivity = require('./visit-live-activity');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
   addETMonthsByWeekday, etNthWeekdayOfMonth, sameDayWindowElapsed,
@@ -125,6 +128,11 @@ function hhmm(value) {
   return value ? String(value).slice(0, 5) : null;
 }
 
+// Did this single move change the slot (the date or the window start)? Only then does it record an intent (moveIntentColumns).
+function slotChangedBy(service, updates, newDateStr) {
+  return dateOnlyString(service.scheduled_date) !== newDateStr || hhmm(updates.window_start) !== hhmm(service.window_start);
+}
+
 function conflictSnapshotItem(target, row) {
   // Give the target-shaped arrival/capacity verdict a stable synthetic id.
   const synthetic = row?.conflict_reason && String(row.id) === String(target.id);
@@ -140,7 +148,7 @@ function conflictSnapshotItem(target, row) {
     conflict_end: hhmm(row.window_end),
     conflict_duration: row.estimated_duration_minutes == null ? null : Number(row.estimated_duration_minutes),
     reason,
-    // base_warning: the unchanged sentence under GATE_ROUTE_WARNING_DETAIL, whose worded warning carries
+    // base_warning: the unchanged sentence beside the worded warning, which carries
     // clock times that can differ between a review and its apply.
     warning: row.base_warning || row.warning || null,
     // Target status may change when reviewed moves land pending.
@@ -219,7 +227,7 @@ async function probeMoveConflicts({
       serviceId: target.id,
       technicianId: target.technicianId || null,
       changes: target.changes,
-      // A staff move reads the road times its picker bought (GATE_SAVE_ROAD_TIMES).
+      // A staff move reads the road times its picker bought.
       roads: 'cache',
       ...(arrivalExcludeServiceIds ? { excludeServiceIds: arrivalExcludeServiceIds } : {}),
     } } : {}),
@@ -1172,6 +1180,8 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
 // see the PII BOUNDARY block there before adding fields.
 function emitCustomerJobRefresh(service, toStatus) {
   if (!service?.customer_id) return;
+  // A rewound visit takes its Lock Screen card down (GATE_VISIT_LIVE_ACTIVITY; off = nothing).
+  visitLiveActivity.poke(service.id);
   const io = getIo();
   if (!io) {
     logger.warn('[rebooker] io not initialized; skipping customer refresh broadcast');
@@ -2129,10 +2139,10 @@ class SmartRebooker {
     const offDayWarnings = new Set();
     const useArrivalWindows = overlapAdvisory && options.adminWindowRules === true && arrivalWindowRoutingEnabled();
     if (useArrivalWindows && updates.window_start) await preloadServiceLocations(db, [serviceId]);
-    // Road times for the landing hour (GATE_SAVE_ROAD_BUY; unset = nothing
-    // runs): an ADMIN caller (`options.roadSpender` = the staff user, set by
-    // the admin routes only) buys the legs the move's check and route number
-    // read, BEFORE the transaction, so no Google call runs under a lock.
+    // Road times for the landing hour (save road buy): an ADMIN caller
+    // (`options.roadSpender` = the staff user, set by the admin routes only)
+    // buys the legs the move's check and route number read, BEFORE the
+    // transaction, so no Google call runs under a lock.
     if ((useArrivalWindows || options.placeInRoute === true) && updates.window_start && options.roadSpender && keptTechId) {
       await require('./scheduling/save-road-buy').buyRoadsBeforeSave({
         spender: options.roadSpender, serviceId, changes: updates, date: newDateStr, technicianId: keptTechId,
@@ -2516,6 +2526,8 @@ class SmartRebooker {
           : {})
         .update({
           ...updates,
+          // Day-only promise (B3): the intent of this move, written by this same UPDATE (gate off: nothing added).
+          ...moveIntentColumns(trx, options, { slotChanged: slotChangedBy(service, updates, newDateStr) }),
           track_token_expires_at: scheduledServiceTrackTokenExpiry(trx, newDate, windowEnd),
           // The move's own change time (same stamp the series path writes):
           // SMS follow-up proves a move by the row changing after the request.
@@ -2557,13 +2569,12 @@ class SmartRebooker {
       if (capacityCommitFit) {
         await persistArrivalOrder(trx, capacityCommitFit, serviceId);
       } else if (placementWindowChanged && (useArrivalWindows || options.placeInRoute === true)) {
-        // Staff route insertion (GATE_STAFF_ROUTE_INSERTION; a no-op when
-        // off): the staff check placed this visit between stops, so number
+        // Staff route insertion: the staff check placed this visit between stops, so number
         // the day in that order and the board shows it where the box did.
         // A stop still shared with a live member is left as it was by the
         // placement itself (the check never placed it either).
         // overlapAdvisory = a staff move (the tech-out mover is none): its day is
-        // numbered on the road times its picker bought (GATE_SAVE_ROAD_TIMES).
+        // numbered on the road times its picker bought.
         await placeMovedVisit(trx, { serviceId, staffSave: overlapAdvisory, ...(overlapAdvisory === true ? { lateDays: true } : {}) });
       }
 
@@ -3041,8 +3052,8 @@ class SmartRebooker {
         .whereNotIn('status', TERMINAL).select('id');
       await preloadServiceLocations(db, arrivalRows.map(row => row.id));
     }
-    // Road times for the ANCHOR's landing hour (GATE_SAVE_ROAD_BUY; unset =
-    // nothing runs; `options.roadSpender` is set by the admin routes only),
+    // Road times for the ANCHOR's landing hour (save road buy;
+    // `options.roadSpender` is set by the admin routes only),
     // bought BEFORE the transaction. The later occurrences keep the cache.
     if (options.roadSpender && options.clearAnchorWindow !== true
       && (useArrivalWindows || options.placeInRoute === true)) {
@@ -3949,6 +3960,7 @@ class SmartRebooker {
           anyLivePartner = anyLivePartner || liveStatus;
           await fencePartner({ partner, pUpdate, dateStr, partnerDateChanges, techChanges, keptTech });
           pUpdate.track_token_expires_at = scheduledServiceTrackTokenExpiry(trx, date, pUpdate.window_end);
+          Object.assign(pUpdate, moveIntentColumns(trx, options, { series: true }));
           if (pUpdate.window_start) await probePartnerSlot(partner, pUpdate, keptTech, dateStr);
           const awaitingPlacement = applyPartnerPlacementPatch(partner, pUpdate);
           // A carried partner that lands on another day and carries a limited area add-on is judged for that day, as the
@@ -4086,6 +4098,8 @@ class SmartRebooker {
           // Day change invalidates the row's route sequence — clear it so the
           // destination day appends the stop (consumers sort NULLs last).
           ...(sibDateChanges ? { route_order: null } : {}),
+          // Day-only promise (B3): a customer-driven series move records its intent in this same UPDATE.
+          ...moveIntentColumns(trx, options, { series: true }),
         };
         // Rewound rows need the post-commit cleanup (tech pointer release +
         // customer tracker refresh) — collected here, applied after the trx
@@ -4433,8 +4447,7 @@ class SmartRebooker {
             code: 'SLOT_TAKEN',
           });
         }
-        // Staff route insertion (GATE_STAFF_ROUTE_INSERTION; a no-op when
-        // off): every occurrence this sweep moves was checked by the staff
+        // Staff route insertion: every occurrence this sweep moves was checked by the staff
         // rule, so number its day in the order that check certified.
         if (updateData.window_start
           && (useArrivalWindows || options.placeInRoute === true)

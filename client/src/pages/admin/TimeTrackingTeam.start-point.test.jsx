@@ -130,7 +130,7 @@ describe('TeamTab start point', () => {
   });
 });
 
-// GATE_TECH_MOVE_SWITCH (owner 2026-10-25): the per-technician "Can move visits"
+// (Owner 2026-10-25): the per-technician "Can move visits"
 // switch loads from the row and rides the Team save as canMoveVisits.
 describe('TeamTab Can move visits', () => {
   beforeEach(() => {

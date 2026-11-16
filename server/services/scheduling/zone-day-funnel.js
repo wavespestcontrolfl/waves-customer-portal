@@ -47,7 +47,7 @@
  */
 
 const logger = require('../logger');
-const { zoneSlugOf } = require('../slot-zone');
+const { zoneSlugOf, resolveEstimateZone } = require('../slot-zone');
 const { isEnabled } = require('../../config/feature-gates');
 
 // Funneled zone slugs (zoneSlugOf format — 'Venice / North Port' → 'venice').
@@ -227,9 +227,61 @@ function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [] } = 
   };
 }
 
+// The same funnel for an offer pool that is not built by the estimate page
+// (the lead assessment link: routes/booking.js buildBookingAvailability, fed
+// the lead's address text). Same helpers, same rules: the zone resolves from
+// the address text through resolveEstimateZone, the cluster days come from
+// getZoneFunnelDays over THIS request's window, and applyZoneDayFunnel keeps
+// the cluster days or seeds one day (the pool's score order, route day first).
+// Returns `pool` itself — same array — whenever the funnel does not apply
+// (gate off, no address, no funneled zone) or cannot be resolved (zone or
+// lookup failure: logged, fail open, exactly as the estimate page does).
+async function funnelOfferPool(pool, { address, dateFrom, dateTo, routeDaySlug = null, conn }) {
+  if (!address || !Array.isArray(pool) || !pool.length || !isEnabled('southZoneDayFunnel')) return pool;
+  let estimateZone = null;
+  try {
+    estimateZone = await resolveEstimateZone(conn, { address });
+  } catch (err) {
+    logger.warn(`[zone-day-funnel] offer zone resolution failed (failing open): ${err.message}`);
+    return pool;
+  }
+  const { days } = await getZoneFunnelDays(conn, { estimateZone, dateFrom, dateTo });
+  if (!days) return pool;
+  let preferredSeedDates = [...new Set(pool.map((s) => s?.date).filter(Boolean))];
+  if (routeDaySlug) {
+    const { preferRouteDayDates, readZoneRouteDays } = require('./zone-route-days');
+    preferredSeedDates = preferRouteDayDates(preferredSeedDates, {
+      zoneSlug: routeDaySlug, config: await readZoneRouteDays(conn),
+    });
+  }
+  return applyZoneDayFunnel(pool, days, { preferredSeedDates }).slots;
+}
+
+// The service_zones rows the funnel applies to right now (isFunnelZone: gate on AND slug in the funnel list). []
+// with the gate off, without a query. Throws on query failure; callers decide how to degrade.
+async function funnelZoneRows(dbc) {
+  if (!isEnabled('southZoneDayFunnel')) return [];
+  const zones = await dbc('service_zones').select('id', 'cities', 'zone_name');
+  return zones.filter(isFunnelZone);
+}
+
+// Is this visit/stop row ({zone, service_city, customer_city}, the shape zoneStopDates matches) in one of the funneled
+// zones (funnelZoneRows)? true / false, or null when the row carries no usable zone stamp and no city, so the funnel
+// has nothing to decide on. Same matcher as the cluster days: rowMatchesZone.
+function rowInFunnelZones(row, zones) {
+  const stamp = String(row?.zone || '').toLowerCase();
+  const city = String(row?.service_city || row?.customer_city || '').trim();
+  if ((!stamp || stamp === FALLTHROUGH_ZONE_STAMP) && !city) return null;
+  return zones.some((zone) => rowMatchesZone(row, zone, zoneSlugOf(zone),
+    new Set((zone?.cities || []).map((c) => String(c || '').toLowerCase()).filter(Boolean))));
+}
+
 module.exports = {
   getZoneFunnelDays,
   applyZoneDayFunnel,
+  funnelOfferPool,
+  funnelZoneRows,
+  rowInFunnelZones,
   isFunnelZone,
   funnelZoneSlugs,
   fallbackCenterZoneName,

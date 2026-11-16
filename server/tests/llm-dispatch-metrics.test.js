@@ -47,7 +47,7 @@ function load() {
 // it resolves `rows`, and .del() resolves `delCount` for the prune call.
 function makeChain(rows, delCount = 0, { insertError = null, first = null, selectError = null } = {}) {
   const chain = {};
-  for (const m of ['where', 'andWhere', 'whereNot', 'groupBy', 'select', 'count', 'sum', 'max', 'countDistinct']) {
+  for (const m of ['where', 'andWhere', 'whereNot', 'whereRaw', 'groupBy', 'select', 'count', 'sum', 'max', 'countDistinct']) {
     chain[m] = jest.fn(() => chain);
   }
   chain.del = jest.fn(() => Promise.resolve(delCount));
@@ -251,6 +251,78 @@ describe('llm-dispatch-metrics', () => {
     });
   });
 
+  describe('max_runner workload (Max-plan runner jobs)', () => {
+    const ORIGINAL_WORKLOAD = process.env.AGENT_CONTEXT_WORKLOAD;
+    afterEach(() => {
+      if (ORIGINAL_WORKLOAD === undefined) delete process.env.AGENT_CONTEXT_WORKLOAD; else process.env.AGENT_CONTEXT_WORKLOAD = ORIGINAL_WORKLOAD;
+    });
+
+    async function recordedWorkloads() {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      process.env.GATE_LLM_CALL_LEDGER = 'true';
+      // metrics and context must come from the SAME module registry (ALS store)
+      let metrics; let ctx;
+      jest.isolateModules(() => {
+        metrics = require('../services/llm-dispatch-metrics');
+        ctx = require('../services/agent-control/context');
+      });
+      const { recordDispatch, recordCall } = metrics;
+      const out = {};
+      const record = async (label) => {
+        mockInsert.mockClear();
+        recordDispatch(MODELS.TEXT_POLICIES.report, { ok: false, reason: 'no_key', failures: [{ provider: 'openai', model: 'm', reason: 'no_key' }] });
+        await recordCall({ provider: 'openai', requestedModel: 'm', ok: false, errorCode: 'no_key' });
+        const rows = mockInsert.mock.calls.map((c) => c[0]);
+        out[label] = rows.map((r) => ({ kind: r.row_kind, workload: r.workload, policy: r.policy }));
+      };
+      process.env.AGENT_CONTEXT_WORKLOAD = 'max_runner';
+      await record('env');
+      await ctx.withWorkload('replay', () => record('replay'));
+      await ctx.runInLane('pest_id', () => record('lane'));
+      process.env.AGENT_CONTEXT_WORKLOAD = 'bogus';
+      await record('unknown');
+      return out;
+    }
+
+    it('stamps chain and call rows with the process default, lets a scope win, ignores unknown values', async () => {
+      const out = await recordedWorkloads();
+      expect(out.env.length).toBeGreaterThan(0);
+      expect(out.env.filter((r) => r.kind === 'chain')).toHaveLength(1);
+      expect(out.env.every((r) => r.workload === 'max_runner')).toBe(true);
+      // max_runner is not replay: no :replay suffix on the policy label
+      expect(out.env.find((r) => r.kind === 'chain').policy).toBe('report');
+      expect(out.replay.every((r) => r.workload === 'replay')).toBe(true);
+      expect(out.lane.every((r) => r.workload === 'max_runner')).toBe(true);
+      expect(out.unknown.every((r) => r.workload === null)).toBe(true);
+    });
+
+    it('loadStats leaves max_runner chains out of the digest and keeps NULL-workload rows in', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      mockEmailSend.mockResolvedValue({ ok: true });
+      const stats = makeChain([{ policy: 'fastStructured', total: '58', fallbacks: '8', failed: '0' }]);
+      mockDb
+        .mockReturnValueOnce(makeChain([], 0))
+        .mockReturnValueOnce(stats)
+        .mockReturnValueOnce(makeChain([]))
+        .mockReturnValueOnce(makeChain([]))
+        .mockReturnValueOnce(makeChain([], 0, { first: { n: '24' } }))
+        .mockReturnValueOnce(makeChain([], 0, { first: { n: '168' } }));
+      const { runLlmDispatchDigest } = load();
+      const out = await runLlmDispatchDigest();
+      expect(stats.whereRaw).toHaveBeenCalledWith('workload IS DISTINCT FROM ?', ['max_runner']);
+      expect(out.exceptions.map((e) => e.kind)).not.toContain('fallback_rate');
+    });
+
+    it('reports a real production fallback rate once the runner chains are out of the counts', () => {
+      const { detectExceptions } = load();
+      // 11-09: 168 runner fallbacks + 58 production chains, 8 of them fallbacks.
+      const quiet = detectExceptions([{ policy: 'fastStructured', total: 58, fallbacks: 8, failed: 0 }], []);
+      expect(quiet.filter((e) => e.kind === 'fallback_rate')).toHaveLength(0);
+      const real = detectExceptions([{ policy: 'fastStructured', total: 58, fallbacks: 15, failed: 0 }], []);
+      expect(real.find((e) => e.kind === 'fallback_rate').detail).toMatch(/answered 15 of 58 calls/);
+    });
+  });
+
   describe('detectExceptions', () => {
     it('flags all-providers-failed chains at any volume', () => {
       const { detectExceptions } = load();
@@ -327,6 +399,26 @@ describe('llm-dispatch-metrics', () => {
       expect(outDaily).toHaveLength(1);
       expect(outDaily[0]).toMatchObject({ policy: 'customerCopy', kind: 'gone_silent' });
       expect(outDaily[0].detail).toMatch(/ZERO calls yesterday/);
+    });
+
+    it('gives event-driven policies the quiet-days grace even after a near-daily week', () => {
+      // 2026-11-06: no blog hero image was made, so imageScreen (6 of 7 days,
+      // ~59 calls) and visionAnalysis read "ZERO calls yesterday"; both ran
+      // again on 11-07. A busy week must not turn them into near-daily lanes.
+      const { detectExceptions, EVENT_DRIVEN_POLICIES, DAILY_CADENCE_MIN_DAYS } = load();
+      expect([...EVENT_DRIVEN_POLICIES]).toEqual(expect.arrayContaining(['imageScreen', 'visionAnalysis']));
+      const live = [{ policy: 'report', total: 30, fallbacks: 0, failed: 0 }];
+      const priorWeek = [
+        { policy: 'imageScreen', total: 59, activeDays: DAILY_CADENCE_MIN_DAYS + 1 },
+        { policy: 'visionAnalysis', total: 43, activeDays: DAILY_CADENCE_MIN_DAYS + 1 },
+        { policy: 'report', total: 200, activeDays: 7 },
+      ];
+      // One zero day inside an active recent window: no alarm.
+      expect(detectExceptions(live, priorWeek, null, true, new Set(['imageScreen', 'visionAnalysis', 'report']))).toEqual([]);
+      // Silent for the whole recent window: both alarm, as bursty lanes.
+      const out = detectExceptions(live, priorWeek, null, true, new Set(['report']));
+      expect(out.map((e) => e.policy).sort()).toEqual(['imageScreen', 'visionAnalysis']);
+      for (const e of out) expect(e.detail).toMatch(/silent for \d\+ days/);
     });
 
     it('never flags a retired policy as gone silent — its provider call was removed on purpose', () => {

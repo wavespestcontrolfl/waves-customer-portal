@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../models/db');
+const { dayOnlyIds, dayOnlyFields } = require('../services/time-display');
 const { createDefaultCustomerRows } = require('../services/customer-default-rows');
 const { greetingFirstToken, estimateGreetingFirstToken, estimateGreetingFirstName } = require('../utils/greeting-first-name');
 // TTL-aware "no LIVE delivery claim" predicate + marker fragments,
@@ -1284,24 +1285,35 @@ function existingAppointmentTitle(appointment = {}) {
       weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
     })
     : '';
-  const time = appointment.windowDisplay || appointment.windowStart || '';
+  // GATE_DAY_ONLY_PROMISE (part C1): a day-only visit has no hour; the note stands in its place.
+  const time = appointment.windowDisplay || appointment.windowStart || (appointment.day_only ? appointment.arrival_note : '') || '';
   return [date, time].filter(Boolean).join(' · ') || 'Your scheduled appointment';
+}
+
+// GATE_DAY_ONLY_PROMISE (part C1): tag the linked visit when the customer was told only the day, so
+// shapeLinkedAppointment blanks its hour. A customer-picked slot (the estimate page's own booking) keeps its hour:
+// loadTimeDisplay answers per visit. One read for the one row; any failure leaves the row untagged (hour shown).
+async function withDayOnlyDisplay(row) {
+  if (!row) return row;
+  return (await dayOnlyIds(db, [row])).has(String(row.id)) ? { ...row, day_only_display: true } : row;
 }
 
 function shapeLinkedAppointment(row) {
   if (!row) return null;
+  const dayOnly = row.day_only_display === true;
   return {
     id: row.id,
     scheduledDate: dateOnly(row.scheduled_date),
-    windowStart: hhmm(row.window_start),
-    windowEnd: hhmm(row.window_end),
+    windowStart: dayOnly ? null : hhmm(row.window_start),
+    windowEnd: dayOnly ? null : hhmm(row.window_end),
     // Derived 2h arrival range FIRST: prod window_display values are only ever
     // a bare start time ("9:00 AM" — the phone-booking writer) or NULL, never a
     // range, so stored text can only lose information vs deriving from
     // window_start. Stored text is the fallback for rows with no parseable start.
-    windowDisplay: customerArrivalWindowDisplay(row.window_start) || row.window_display || null,
+    windowDisplay: dayOnly ? null : (customerArrivalWindowDisplay(row.window_start) || row.window_display || null),
     serviceType: row.service_type || 'Service visit',
     status: row.status || null,
+    ...dayOnlyFields(dayOnly),
     // The estimate's OWN uncommitted hold is offered through this same shape
     // on a reload (customer picked a slot, then refreshed) — without the
     // expiry the client rendered it as a committed appointment with no
@@ -9960,9 +9972,9 @@ async function handleEstimateView(req, res, next) {
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
-    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData, {
+    const linkedAppointment = await withDayOnlyDisplay(await findLinkedUpcomingAppointment(estimate, estData, {
       serviceModes: adoptionServiceModesForContract(estimate, estData),
-    });
+    }));
     // Resolved ONCE for this request and handed to every consumer below (the
     // bundle's flags, the hero fork) — a second lookup could answer
     // differently and put contradictory billing units on the same page
@@ -19559,73 +19571,6 @@ router.post('/:token/consumer-notice', consumerNoticeLimiter, async (req, res, n
   }
 });
 
-// Residential service agreement (GATE_ESTIMATE_SERVICE_AGREEMENT): the same contract as commercial-agreement above, so
-// its privacy-header stamp is reused. Gate-aware limiter: a dark gate answers the generic 404 on every probe, never a 429.
-const serviceAgreementLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  skip: () => !featureGates.estimateServiceAgreementLive(),
-  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
-  message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
-});
-
-// Mounted in server/index.js on /api/estimates BEFORE the global /api/ limiter, like commercialAgreementPreGuard: the
-// privacy headers and the dark gate's generic 404 land ahead of any limiter. POST only.
-const SERVICE_AGREEMENT_PATH_RE = /^\/[^/]+\/service-agreement\/?$/i;
-function serviceAgreementPreGuard(req, res, next) {
-  if (req.method !== 'POST' || !SERVICE_AGREEMENT_PATH_RE.test(req.path || '')) return next();
-  stampCommercialAgreementHeaders(res);
-  if (!featureGates.estimateServiceAgreementLive()) return res.status(404).json({ error: 'Estimate not found' });
-  return next();
-}
-
-// The accepted estimate is still the customer's to read: viewable (not archived, not off the customer surface) and
-// accepted. The route's unlocked preflight.
-function serviceAgreementEstimateOpen(estimate) {
-  return isEstimateCustomerViewable(estimate) && estimate.status === 'accepted';
-}
-
-// Re-run by the issuer on the estimate row locked in its transaction: the preflight above plus the call-side verdict
-// and live linkage (estimateCallLinkageBlockedFor), so an identity rejection or a linkage correction landing while the
-// tap waited on the locks issues nothing. True = no longer open for online signing.
-async function serviceAgreementBlockedFor(trx, locked) {
-  if (!serviceAgreementEstimateOpen(locked)) return true;
-  return estimateCallLinkageBlockedFor(trx, locked);
-}
-
-// POST /api/estimates/:token/service-agreement — the accepted page's "Review and sign your service agreement" tap.
-// Body { lane: 'pest' | 'lawn' }. Issues, or re-opens, the lane's service agreement (Residential Pest, or Lawn &
-// Ornamental) for the estimate's customer and returns its public signing URL. The estimate, its visit, invoice and
-// charge are never changed. The generic 404 covers a dark gate, an unknown token, an estimate that is not accepted or
-// not viewable, a staff preview, a commercial estimate and a lane the plan does not carry; the distinct 409s (no
-// account, already signed, agreement unavailable) come only after the token has cleared every check.
-router.post('/:token/service-agreement', serviceAgreementLimiter, async (req, res, next) => {
-  stampCommercialAgreementHeaders(res);
-  const notFound = () => res.status(404).json({ error: 'Estimate not found' });
-  try {
-    if (!featureGates.estimateServiceAgreementLive() || req.query.adminPreview === '1') return notFound();
-    const lane = String(req.body?.lane || '').trim();
-    const serviceAgreement = require('../services/estimate-service-agreement');
-    if (!serviceAgreement.LANES[lane]) return notFound();
-    const estimate = await db('estimates').where({ token: req.params.token }).first();
-    if (!estimate) return notFound();
-    if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) return notFound();
-    if (!serviceAgreementEstimateOpen(estimate)) return notFound();
-    if (!serviceAgreement.estimateServiceAgreementLanes(estimate).includes(lane)) return notFound();
-    const result = await serviceAgreement.ensureEstimateServiceAgreement({ estimate, lane, req, blockedFor: serviceAgreementBlockedFor });
-    if (!result.ok) {
-      return res.status(result.status).json(result.status === 404 ? { error: 'Estimate not found' } : { error: result.error, code: result.code });
-    }
-    return res.status(result.status).json({ signingUrl: result.signingUrl });
-  } catch (err) {
-    // err.code only, never err.message (PG constraint errors can quote customer data).
-    logger.warn(`[estimate-public] service-agreement failed (code=${err?.code || 'none'})`);
-    next(err);
-  }
-});
-
 // Mirrors extensionRequestLimiter exactly (codex #3376 r2): the shared
 // add-service limiter runs BEFORE the handler's gate check, so a dark gate
 // would leak a distinctive 429 on the ninth probe instead of the promised
@@ -28381,9 +28326,9 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
 async function resolveEstimateAcceptance(estimate, estData, pricingBundle) {
   const defaultServiceMode = defaultServiceModeForEstimate(estData, estimate);
   const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
-  const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData, {
+  const linkedAppointment = await withDayOnlyDisplay(await findLinkedUpcomingAppointment(estimate, estData, {
     serviceModes: adoptionServiceModesForContract(estimate, estData),
-  });
+  }));
   // Narrow low-confidence commercial recurring estimate (the population whose
   // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
   // its accept, whatever the billing mode — invoice-mode holds the first-
@@ -31349,13 +31294,6 @@ async function composeEstimateDataPayload(estimate, {
       && isEstimateAcceptActive(estimate)
       ? await require('../services/estimate-consumer-notice').consumerNoticeCtaFor(estimate)
       : null;
-    // Residential service agreement (GATE_ESTIMATE_SERVICE_AGREEMENT): the ACCEPTED page offers the plan's service
-    // agreement(s) for signing. Nothing is read or added with the gate off; never a staff preview, a draft preview or
-    // the headless document render.
-    const serviceAgreementsCta = featureGates.estimateServiceAgreementLive()
-      && terminalState === 'accepted' && !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass
-      ? await require('../services/estimate-service-agreement').serviceAgreementCtaFor(estimate)
-      : null;
     // Public proposal view — the authored buildings/line items the customer's
     // emailed PDF already contains, projected for the on-page glass render.
     // Resolved with the SAME live billing lane as the PDF generator so the
@@ -31584,11 +31522,10 @@ async function composeEstimateDataPayload(estimate, {
     // on this page (returnVisit, softExit below) — never a staff draft/
     // preview or the headless document pass. Include-when-present; the
     // builder itself fails soft (never throws) on any ineligibility or error.
-    // "Book a free Waves Assessment first" (GATE_ESTIMATE_ASSESSMENT_FIRST, owner 2026-10-26 decision page choice 3A):
-    // every eligible open estimate, booked from the estimate itself (routes/estimate-assessment-public.js). Nothing is
-    // read with the gate off. When it is offered it replaces the lead-only consultation offer below, which links to the
-    // same Waves Assessment through the lead.
-    const assessmentFirst = includeConsultationOffer && require('../config/feature-gates').estimateAssessmentFirstLive()
+    // "Book a free Waves Assessment first" (owner 2026-10-26 decision page choice 3A):
+    // every eligible open estimate, booked from the estimate itself (routes/estimate-assessment-public.js). When it is
+    // offered it replaces the lead-only consultation offer below, which links to the same Waves Assessment through the lead.
+    const assessmentFirst = includeConsultationOffer
       ? await require('./estimate-assessment-public')._internals.assessmentFirstFor(estimate, {
         open: !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass && isEstimateAcceptActive(estimate),
         estimateData: estimateDataForIntelligence,
@@ -32077,7 +32014,6 @@ async function composeEstimateDataPayload(estimate, {
         ...(commercialAgreementCta ? { commercialAgreement: commercialAgreementCta } : {}),
         ...(commercialFirstVisitCta ? { commercialFirstVisit: commercialFirstVisitCta } : {}),
         ...(consumerNoticeCta ? { consumerNotice: consumerNoticeCta } : {}),
-        ...(serviceAgreementsCta ? { serviceAgreements: serviceAgreementsCta } : {}),
         // Auto-priced commercial (no quote-required proposal): React needs the
         // commercial identity too — its bundle card keeps the monthly contract
         // price, mirroring the SSR fork (codex #3128 r5).
@@ -32633,7 +32569,6 @@ module.exports.mapImagePreGuard = mapImagePreGuard;
 module.exports.contactPhonePreGuard = contactPhonePreGuard;
 module.exports.commercialAgreementPreGuard = commercialAgreementPreGuard;
 module.exports.consumerNoticePreGuard = consumerNoticePreGuard;
-module.exports.serviceAgreementPreGuard = serviceAgreementPreGuard;
 module.exports.commercialFirstVisitPreGuard = commercialFirstVisitPreGuard;
 module.exports.commercialAgreementBlockedFor = commercialAgreementBlockedFor;
 module.exports.sendEstimatePage = sendEstimatePage;
@@ -32671,6 +32606,7 @@ module.exports.hasRegulatedCertificateServiceMix = hasRegulatedCertificateServic
 module.exports.glassCategoryEligible = glassCategoryEligible;
 module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
+module.exports.withDayOnlyDisplay = withDayOnlyDisplay;
 module.exports.resolveEstimateAcceptance = resolveEstimateAcceptance;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;

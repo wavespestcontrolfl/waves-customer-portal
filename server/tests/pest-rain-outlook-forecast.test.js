@@ -1,4 +1,4 @@
-// GATE_PEST_RAIN_OUTLOOK with the real forecast slicer (application-conditions.js
+// The pest rain outlook with the real forecast slicer (application-conditions.js
 // sliceForecast): rain in the partial hour at either end of the 48 hours after a
 // 14:30 completion reaches the frozen total, so the card never reads it as dry.
 // Synthetic coordinates only; fetch is mocked (no network).
@@ -36,16 +36,11 @@ const svc = { service_type: 'Quarterly Pest Control', customer_latitude: 27.1234
 const FIPRONIL = { method: 'perimeter_spray', activeIngredient: 'Fipronil', productName: 'Test fipronil' };
 
 const realFetch = global.fetch;
-let savedGate;
 beforeEach(() => {
-  savedGate = process.env.GATE_PEST_RAIN_OUTLOOK;
-  process.env.GATE_PEST_RAIN_OUTLOOK = 'true';
   jest.resetModules();
 });
 afterEach(() => {
   global.fetch = realFetch;
-  if (savedGate === undefined) delete process.env.GATE_PEST_RAIN_OUTLOOK;
-  else process.env.GATE_PEST_RAIN_OUTLOOK = savedGate;
 });
 
 async function outlookFor(rainAt) {

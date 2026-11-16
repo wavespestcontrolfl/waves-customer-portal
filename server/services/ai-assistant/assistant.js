@@ -11,7 +11,8 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { TOOLS, portalToolsFor, executeToolCall, withoutEmails, emailReadBackAwaitingAnswer } = require('./tools');
+const { TOOLS, THREAD_TOOLS, THREAD_DAY_TOOLS, portalToolsFor, executeToolCall, withoutEmails, emailReadBackAwaitingAnswer } = require('./tools');
+const threadLane = require('./thread-lane');
 const { renderCompanyFactsSection } = require('../sms-company-facts');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { recordGap } = require('../agent-gap-reports');
@@ -273,6 +274,8 @@ function laneExtras(lane) {
   return {
     ...(lane.actions?.length ? { actions: lane.actions } : {}),
     ...(lane.cards?.length ? { cards: lane.cards } : {}),
+    // The Messages thread's turn: whether a schedule tool returned something the reply may state (tools.js).
+    ...(lane.thread ? { grounded: lane.context.grounded === true } : {}),
   };
 }
 
@@ -304,14 +307,36 @@ function answeredInsteadOfRun(toolUse, toolResults) {
 function openHandOffOptions(lane, input) {
   return lane.open ? { open: true, say: portalOpen.sanitizeSay(input.say) } : {};
 }
-// Tools that end the turn run last, in this order (every other tool first).
-const HAND_OFF_ORDER = ['request_email_change', 'escalate'];
+// Tools that end the turn run last, in this order (every other tool first). The Messages thread's no-reply
+// move is after escalate, so a response that asks for both hands off.
+const HAND_OFF_ORDER = ['request_email_change', 'escalate', 'stay_silent'];
+
+// Whether this turn's caller owns the hand-off (turn.holdHandOff, set by portal-messages-night-ai.js).
+const holdsHandOff = (turn) => turn?.holdHandOff === true;
+// Whether it is the office-hours step-in (turn.threadDay, set by portal-messages-day-ai.js): the day wording of the thread lane.
+const isDayThread = (turn) => turn?.threadDay === true;
 
 // `secondaryProperty`: the portal session is scoped to a non-primary saved
 // property (the route decides; anything but false withholds the re-service
 // button, which books at the primary address).
-function portalLane(channel, { secondaryProperty = true, replay = false } = {}) {
+// `thread` (GATE_PORTAL_MESSAGES_NIGHT_AI, portal-messages-night-ai.js): the turn answers inside the
+// customer's Messages thread, which shows text only and is itself the office's item. That turn has its own
+// short prompt and four tools (thread-lane.js), builds no button or card, and writes no hand-off item of its
+// own (see turn.holdHandOff). None of the portal chat's gates changes it. `day`: the same lane in its
+// office-hours wording (GATE_PORTAL_MESSAGES_DAY_AI, thread-lane.js THREAD_DAY_PROMPT).
+function portalLane(channel, { secondaryProperty = true, replay = false, thread = false, day = false } = {}) {
   if (!portalSelfServe(channel)) return { prompt: SYSTEM_PROMPT, tools: TOOLS, actions: null, cards: null, context: {} };
+  if (thread) {
+    return {
+      prompt: day ? threadLane.THREAD_DAY_PROMPT : threadLane.THREAD_PROMPT,
+      tools: day ? THREAD_DAY_TOOLS : THREAD_TOOLS,
+      actions: null,
+      cards: null,
+      portal: true,
+      thread: true,
+      context: { secondaryProperty: secondaryProperty !== false, holdHandOff: true, thread: true },
+    };
+  }
   const gates = require('../../config/feature-gates');
   // Three independent gates: the payment card, the past-visit facts and the
   // re-service offer.
@@ -434,6 +459,18 @@ RULES:
 - If the customer is frustrated, acknowledge it before solving
 - End with an offer to help with anything else`;
 
+// How the team's answer reaches a portal chat customer. With the Portal tab and portal messages both on
+// (GATE_PORTAL_INBOX, GATE_PORTAL_MESSAGES) the office can answer a hand-off inside the portal and the
+// customer reads it on their Messages page, so the reply names that page first (owner 2026-11-12). Either
+// one off: text or email, as before. Read at call time. Every portal chat session is an account holder's
+// (a contact session cannot reach the chat), and those are the sessions that have the Messages page.
+function teamReplyChannels() {
+  const gates = require('../../config/feature-gates');
+  return gates.portalInboxLive?.() && gates.portalMessagesLive?.()
+    ? 'on your Messages page here, or by text or email'
+    : 'by text or email';
+}
+
 // What the customer is told at a hand-off. Portal chat says the team was told
 // only when the bell exists; other channels keep the original wording (an SMS
 // hand-off reply is never sent).
@@ -449,11 +486,11 @@ function escalationReply({ isPortal, teamNotified, firstName, newEmail, say = ''
   // A confirmed email change: the team makes the change, the chat never does.
   if (newEmail) {
     return teamNotified
-      ? `${thanks}. I've sent your new email address, ${newEmail}, to our team. They'll update your account and reply by text or email, usually within one business hour between 8 AM and 8 PM. Until then our emails go to the address on file. Is there anything else you'd like me to pass along?`
+      ? `${thanks}. I've sent your new email address, ${newEmail}, to our team. They'll update your account and reply ${teamReplyChannels()}, usually within one business hour between 8 AM and 8 PM. Until then our emails go to the address on file. Is there anything else you'd like me to pass along?`
       : `${thanks}. I've saved your email change request for our team. If it can't wait, please call us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
   }
   return teamNotified
-    ? `${thanks}. I've sent this to our team, and they'll reply by text or email, usually within one business hour between 8 AM and 8 PM.${say ? ` ${say}` : ''} Is there anything else you'd like me to pass along?`
+    ? `${thanks}. I've sent this to our team, and they'll reply ${teamReplyChannels()}, usually within one business hour between 8 AM and 8 PM.${say ? ` ${say}` : ''} Is there anything else you'd like me to pass along?`
     : `${thanks}. I've saved your request for our team. If it can't wait, please call us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
 }
 
@@ -553,6 +590,53 @@ function portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange,
     PORTAL_PROMPTS.set(key, prompt);
   }
   return PORTAL_PROMPTS.get(key);
+}
+
+// GATE_PORTAL_AI_VOICE_PROFILE (owner 2026-11-13, "Use your approved texting voice for the portal AI"): a
+// portal turn's instructions with the owner-approved voice profile added as style guidance only. It is the
+// texting drafter's own read (sms-shadow-drafter.js fetchVoiceProfileForDrafter: the same pin, the same
+// SHADOW_VOICE_PROFILE kill switch, null on a failed read) in the phone agent's sanitized frame
+// (relay-conversation.js composeSystemPrompt: lines that give an instruction, a price or a policy are
+// dropped). Facts still come only from this lane's tools. Gate off, another channel, no approved profile or a
+// profile with nothing left after the filter: the lane's own prompt, byte for byte. Never throws.
+//
+// The profile is optional, so a turn never depends on its read. One read serves every turn for a minute
+// (a revoked or re-pinned profile is gone within that minute), one read runs at a time, and a turn waits for
+// a read at most PORTAL_VOICE_WAIT_MS; past that it answers on its own prompt and the read fills the cache
+// for the next turn.
+const PORTAL_VOICE_TTL_MS = 60 * 1000;
+const PORTAL_VOICE_WAIT_MS = 1000;
+let portalVoice = { text: '', at: 0 };
+let portalVoiceRead = null;
+function readPortalVoice() {
+  if (!portalVoiceRead) {
+    portalVoiceRead = Promise.resolve()
+      .then(() => require('../sms-shadow-drafter').fetchVoiceProfileForDrafter())
+      .then((profile) => { portalVoice = { text: profile?.profile_text || '', at: Date.now() }; })
+      .catch((err) => { logger.warn(`[ai-assistant] voice profile not read for the portal prompt: ${err.message}`); })
+      .finally(() => { portalVoiceRead = null; });
+  }
+  return portalVoiceRead;
+}
+async function portalVoiceText() {
+  if (Date.now() - portalVoice.at < PORTAL_VOICE_TTL_MS) return portalVoice.text;
+  let timer;
+  const waited = new Promise((resolve) => { timer = setTimeout(resolve, PORTAL_VOICE_WAIT_MS, false); });
+  const fresh = await Promise.race([readPortalVoice().then(() => true), waited]);
+  clearTimeout(timer);
+  // A read that failed or is still running: this turn has no profile (never an expired one).
+  return fresh && Date.now() - portalVoice.at < PORTAL_VOICE_TTL_MS ? portalVoice.text : '';
+}
+async function withPortalVoice(lane) {
+  try {
+    if (!lane.portal || !require('../../config/feature-gates').portalAiVoiceProfileLive?.()) return lane.prompt;
+    const text = await portalVoiceText();
+    if (!text) return lane.prompt;
+    return require('../voice-agent/relay-conversation').composeSystemPrompt(lane.prompt, text);
+  } catch (err) {
+    logger.warn(`[ai-assistant] voice profile not added to the portal prompt: ${err.message}`);
+    return lane.prompt;
+  }
 }
 
 // One bell per hand-off. A confirmed email change is one bell per chat and
@@ -666,7 +750,7 @@ class WavesAssistant {
     // 2. Check for escalation triggers in the raw message
     // Portal chat gets its own prompt and button tools; every other channel
     // (and the portal with its switch off) keeps the original pair.
-    const lane = portalLane(channel, { secondaryProperty, replay: Boolean(replay.cursor) });
+    const lane = portalLane(channel, { secondaryProperty, replay: Boolean(replay.cursor), thread: holdsHandOff(turn), day: isDayThread(turn) });
     turn?.registerFallbackExtras?.(() => laneExtras(lane));
     const trigger = this.matchedEscalationTrigger(turnMessage, channel);
 
@@ -741,6 +825,7 @@ class WavesAssistant {
 
     // 7. Call Claude with tools
     try {
+      lane.prompt = await withPortalVoice(lane);
       return await this.answerWithTools({ conversation, message: turnMessage, history, contextStr, lane, customerId, channel, turn });
     } catch (err) {
       logger.error(`[ai-assistant] processMessage failed: ${err.message}`, { stack: err.stack, model: MODEL, customerId, channel });
@@ -900,6 +985,10 @@ class WavesAssistant {
           execution.rethrowDeadline(err);
           logger.error(`[ai-assistant] Failed to log tool use: ${err.message}`);
         }
+
+        // The Messages thread's no-reply move (thread-lane.js stay_silent, which only that turn's tools can
+        // answer): the turn ends with nothing for the customer.
+        if (result.silent === true) return { reply: '', conversationId: conversation.id, escalated: false, generated: true, silent: true };
 
         // Only the email-change tool returns these three fields.
         noteEmailResult(email, result);
@@ -1070,6 +1159,9 @@ class WavesAssistant {
   // the original read: the first 20, which never reaches the latest turn once
   // a chat passes 20 (SMS keeps it unchanged).
   async buildHistory(conversationId, { newest = false, turn = null, through = null, isolate = false } = {}) {
+    // turn.threadHistory (portal-messages-night-ai.js): the caller supplies exactly what the customer can see in
+    // their Messages thread, so the assistant's private transcript is never read for that turn.
+    if (Array.isArray(turn?.threadHistory)) return turn.threadHistory;
     if (isolate) return [{ role: 'user', content: through.content }];
     const historyQuery = db('agent_messages')
       .where('conversation_id', conversationId)
@@ -1118,7 +1210,17 @@ class WavesAssistant {
   /**
    * Escalate to human — create escalation record, update conversation, notify Adam.
    */
-  async escalate(conversation, customerMessage, reason, { gap = false, topic, newEmail, emailReadBack, alsoAsked, emailUnchecked, turn = null, open = false, say = '' } = {}) {
+  async escalate(conversation, customerMessage, reason, options = {}) {
+    // turn.holdHandOff (portal-messages-night-ai.js): the caller owns the hand-off, because the customer's
+    // Messages thread already is the office's item. Nothing is filed or rung here and no reply is written:
+    // the decision goes back to the caller, whose turn result carries it.
+    if (holdsHandOff(options.turn)) {
+      return { reply: '', conversationId: conversation.id, escalated: true, handOffHeld: true, reason, ...(options.topic ? { topic: options.topic } : {}) };
+    }
+    return this.fileEscalation(conversation, customerMessage, reason, options);
+  }
+
+  async fileEscalation(conversation, customerMessage, reason, { gap = false, topic, newEmail, emailReadBack, alsoAsked, emailUnchecked, turn = null, open = false, say = '' } = {}) {
     // An opened portal chat keeps one hand-off item per chat. A confirmed
     // email change keeps its own bell and row.
     if (open && !newEmail && !emailReadBack && !alsoAsked && !emailUnchecked) {
@@ -1592,3 +1694,5 @@ class WavesAssistant {
 }
 
 module.exports = new WavesAssistant();
+// Test seam: empties the portal voice cache (GATE_PORTAL_AI_VOICE_PROFILE).
+module.exports.__resetPortalVoice = () => { portalVoice = { text: '', at: 0 }; };

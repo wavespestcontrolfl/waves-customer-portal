@@ -8362,7 +8362,7 @@ const ReviewService = {
   },
 };
 
-// "Never asked" (GATE_REVIEW_FIRST_ASK_LOCK, owner 2026-10-26): the customer has no
+// "Never asked" (the first review ask, owner 2026-10-26): the customer has no
 // review_requests row that was texted (sms_sent_at) or emailed (sent_at), and is not
 // marked customers.has_left_google_review. The ONE reader: the completion panel's
 // "First review ask" flag and the completion's saved review choice both call it.
@@ -8389,7 +8389,7 @@ async function customerNeverAskedForReview(customerId, database = db) {
   }
 }
 
-// The visit a first ask would follow (GATE_REVIEW_FIRST_ASK_LOCK), or null when the lock never
+// The visit a first ask would follow, or null when the lock never
 // applies to it. A re-service keeps today's choice whether it carries is_callback or only the
 // re-service key or name (services/re-service.js isReService; 5 of 49 re-service visits from
 // June to October 2026 had is_callback false). A read failure is null too: today's behavior.
@@ -8409,9 +8409,9 @@ async function firstAskLockVisit(serviceId, database = db) {
   }
 }
 
-// GATE_REVIEW_FIRST_ASK_LOCK, the rule for a saved review choice: with the gate on and a
+// The first review ask, the rule for a saved review choice: for a
 // never-asked customer, "no ask" is honored ONLY with one of the off reasons below; any other
-// "no ask" stays an ask. Returns null when the lock does not apply (gate off, or the customer
+// "no ask" stays an ask. Returns null when the lock does not apply (the customer
 // was asked before, is marked reviewed or cannot be read): the caller's choice stands as it was.
 // Otherwise { requestReview, forcedOn, optOutReason }. The one place the rule lives: the
 // completion calls it, and the visit-closeout packet reads the marker it leaves on the record.
@@ -8428,7 +8428,6 @@ function firstAskOptOutReasons() {
     : [FIRST_ASK_OPT_OUT_REASON];
 }
 async function firstAskLockChoice({ customerId, requestReview, optOutReason }, database = db) {
-  if (!require("../config/feature-gates").reviewFirstAskLockLive()) return null;
   if (!(await customerNeverAskedForReview(customerId, database))) return null;
   if (requestReview !== false) return { requestReview: true, forcedOn: false, optOutReason: null };
   const reasoned = firstAskOptOutReasons().includes(optOutReason);

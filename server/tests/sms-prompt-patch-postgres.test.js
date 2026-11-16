@@ -124,8 +124,8 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
       const live = drafter.buildSystemPromptWithProfile('');
       expect(live.system).toContain(row.patch_text);
       expect(live.system.replace(row.patch_text, '')).toBe(plain.system);
-      expect(live.promptPatchVersion).toBe(`${baseVersion()}+${row.version_tag}`);
-      expect(drafter.currentPromptVersion()).toBe(`${baseVersion()}+${row.version_tag}`);
+      expect(live.promptPatchVersion).toBe(`${baseVersion()}${row.version_tag}`);
+      expect(drafter.currentPromptVersion()).toBe(`${baseVersion()}${row.version_tag}`);
     });
 
     test('only one active and one candidate row can exist', async () => {

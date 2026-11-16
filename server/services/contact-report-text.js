@@ -1,4 +1,4 @@
-// Report text to on-location contacts (GATE_CONTACT_REPORT_TEXT, owner
+// Report text to on-location contacts (owner
 // 2026-10-03).
 //
 // The visit-complete text goes to ONE person: the account holder. It can
@@ -35,10 +35,6 @@ const EXPIRE_MS = 24 * 60 * 60 * 1000;
 // Stands in for {first_name} in the one render; plain ASCII so the renderer's
 // GSM normalization leaves it alone.
 const FIRST_NAME_MARKER = '__CONTACT_FIRST_NAME__';
-
-function enabled() {
-  return require('../config/feature-gates').contactReportTextLive();
-}
 
 function phoneKey(phone) {
   return String(phone || '').replace(/\D/g, '').slice(-10);
@@ -123,7 +119,7 @@ async function streetAddress(conn, scheduledServiceId, customer) {
 // `source`: what the link points at, for the send-time recheck:
 // { visitId, summaryTokenHash } for a combined-stop summary.
 async function queueContactReportTexts({ customerId, sourceKey, reportUrl, scheduledServiceId = null, notBefore = null, excludePhone = null, source = {} }) {
-  if (!enabled() || !customerId || !sourceKey || !reportUrl) return 0;
+  if (!customerId || !sourceKey || !reportUrl) return 0;
   // The body is rendered BEFORE the transaction: the template read uses the
   // root pool, and a held transaction must never wait on a second connection.
   // The street comes from the visit and the profile row, which a contact save
@@ -233,7 +229,6 @@ async function notifyContactsReportReady(args, { delaysMs = QUEUE_RETRY_DELAYS_M
 // to_phone (the executor merges them in). A failed read THROWS: the registry
 // maps that to a bounded retry, never to a send or a permanent drop.
 async function recheckContactReportText(meta = {}, { conn = db } = {}) {
-  if (!enabled()) return { eligible: false, reason: 'contact-report-gate-off' };
   const queuedAt = Date.parse(meta.contact_report_queued_at || '');
   if (Number.isFinite(queuedAt) && Date.now() - queuedAt > EXPIRE_MS) return { eligible: false, reason: 'contact-report-expired' };
   if (!meta.customer_id || !meta.to_phone) return { eligible: false, reason: 'contact-report-recipient-missing' };
@@ -268,7 +263,6 @@ module.exports = {
   TEMPLATE_KEY,
   MESSAGE_TYPE,
   ENTRY_POINT,
-  enabled,
   confirmedContacts,
   queueContactReportTexts,
   notifyContactsReportReady,

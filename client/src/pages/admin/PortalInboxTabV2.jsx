@@ -58,7 +58,7 @@ function handledStatus(item, res) {
 
 // Mark handled uses the existing update routes: chat -> the escalation PUT,
 // request -> the request PATCH, booking -> the bell's own Done. `quiet` asks that PATCH not to email the customer "Resolved"
-// (the server honors it only while GATE_PORTAL_ITEM_CLOSE is on; Customer 360 keeps its email).
+// (the server honors it for admins only; Customer 360 keeps its email).
 function markHandled(item) {
   if (item.kind === "message") {
     // Through the newest customer message this screen showed, so a newer one keeps the item open.
@@ -189,7 +189,7 @@ function WholeThread({ threadId }) {
       )}
       {thread.messages.map((m) => (
         <div key={m.id}>
-          <div className="text-14 text-ink-tertiary">{m.direction === "outbound" ? "Waves" : "Customer"} · {formatWhen(m.createdAt)}</div>
+          <div className="text-14 text-ink-tertiary">{m.direction === "outbound" ? (m.ai ? "Waves AI" : "Waves") : "Customer"} · {formatWhen(m.createdAt)}</div>
           <div className="text-14 text-zinc-900 whitespace-pre-wrap break-words">{m.body}</div>
         </div>
       ))}
@@ -207,6 +207,14 @@ function MessageDetails({ item }) {
       {item.lastAnswer && (
         <div className="text-14 text-ink-secondary mt-2">
           <span className="font-medium">Last answer:</span> {item.lastAnswer}
+        </div>
+      )}
+      {item.aiReply && (
+        <div className="text-14 text-ink-secondary mt-2" data-testid={`portal-ai-reply-${item.id}`}>
+          {item.aiReply.handOff
+            ? <span className="font-medium">Waves AI told them the team will answer after 8 AM.</span>
+            : (<><span className="font-medium">Waves AI answered:</span> {item.aiReply.body}</>)}
+          {" "}This item stays open until you answer or mark it handled.
         </div>
       )}
       <WholeThread threadId={item.id} />

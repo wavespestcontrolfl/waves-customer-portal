@@ -655,7 +655,7 @@ router.get('/:id/rain-out-options', async (req, res, next) => {
     if (!ownsTrackedVisit(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
-    // GATE_TECH_MOVE_SWITCH: a technician whose Team tab switch is off sees
+    // A technician whose Team tab switch is off sees
     // why, not move choices the commit would refuse (plus the customer-pick
     // offer while GATE_QUICKMOVE_CUSTOMER_PICK is on).
     {
@@ -701,7 +701,7 @@ router.post('/:id/rain-out', async (req, res, next) => {
     if (!ownsTrackedVisit(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
-    // GATE_TECH_MOVE_SWITCH: the commit is the enforcer.
+    // The commit is the enforcer.
     {
       const refusal = await techMoveRefusal(req);
       if (refusal) return res.status(refusal.status).json(refusal.payload);

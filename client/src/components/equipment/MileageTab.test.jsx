@@ -33,16 +33,7 @@ beforeEach(() => { localStorage.clear(); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('MileageTab dashboard, per vehicle', () => {
-  it('gate off (no vehicles lists): no vehicle table and today\'s headings', async () => {
-    mockDashboard(BASE);
-    render(<MileageTab />);
-    await screen.findByText('Today — 2026-10-29');
-    expect(screen.queryByText('Vehicles')).not.toBeInTheDocument();
-    expect(screen.queryByText(/All vehicles/)).not.toBeInTheDocument();
-    expect(screen.getByText('Live Vehicle Status')).toBeInTheDocument();
-  });
-
-  it('gate on: one row per vehicle with technician, miles, deduction and live state; totals read All vehicles', async () => {
+  it('one row per vehicle with technician, miles, deduction and live state; totals read All vehicles', async () => {
     mockDashboard(WITH_VEHICLES);
     render(<MileageTab />);
     await screen.findByText('Vehicles');
@@ -57,7 +48,7 @@ describe('MileageTab dashboard, per vehicle', () => {
     expect(screen.getByText('All vehicles — month to date')).toBeInTheDocument();
   });
 
-  it('gate on with no mileage rows yet: live vehicles alone make the rows', async () => {
+  it('with no mileage rows yet: live vehicles alone make the rows', async () => {
     mockDashboard({ ...BASE, vehicles: [], live_vehicles: [{ ...liveOne, technician: 'Sample Beta' }] });
     render(<MileageTab />);
     await screen.findByText('Vehicles');

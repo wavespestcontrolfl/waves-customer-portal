@@ -965,6 +965,7 @@ export default function ProjectFindingFieldInput({
           onChange={(event) => onChange(event.target.value)}
           placeholder={field.placeholder || ''}
           rows={3}
+          data-own-mic={suppressDictation ? undefined : 'true'}
           {...noDictationProps}
           style={{
             ...inputStyle,

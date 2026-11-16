@@ -118,7 +118,7 @@ test('the per-visit cap matches the registry cap', () => {
   expect(TECH_TIP_MAX).toBe(3);
 });
 
-describe('tips with facts (GATE_TECH_TIP_SOURCES, owner 2026-10-24)', () => {
+describe('tips with facts (owner 2026-10-24)', () => {
   test('techTipYardLine names only the yard facts the server knows', () => {
     expect(techTipYardLine({ grass: 'St. Augustine', irrigationSystem: true, county: 'Sarasota' }))
       .toBe('Matched to this yard: St. Augustine · irrigation system · Sarasota County');

@@ -54,6 +54,7 @@ const { currentConflict } = require('./current-conflict');
 const { capacityEnabled } = require('../scheduling/policy');
 const dryTime = require('./dry-time');
 const mowingDays = require('./mowing-days');
+const southDayKept = require('./south-day-kept');
 const territory = require('../territory');
 const logger = require('../logger');
 
@@ -860,6 +861,8 @@ async function movingUnitIds(service, ctx) {
 //     customer's preferred day + time window.
 //   mowing_day (GATE_AUTO_DISPATCH_MOWING_DAYS='true', mowing-days.js): a
 //     Lawn Care Service unit never lands on or next to a mowing day.
+//   south_day_kept (GATE_SOUTH_ZONE_DAY_FUNNEL, south-day-kept.js): a visit outside the
+//     funneled far-south zones never moves onto another DATE that holds a far-south stop.
 //   other_tech (GATE_AUTO_DISPATCH_KEEP_TECH, ctx.keepTech): a visit that has
 //     a technician stays with that technician. An unassigned visit is not
 //     filtered.
@@ -880,6 +883,7 @@ const HARD_FILTERS = [
   ['preferred_day', (slot, h) => violatesPreferredDay(slot.date, h.prefs)],
   ['preferred_time', (slot, h) => violatesPreferredTime(slot.start_time, h.prefs)],
   ['mowing_day', (slot, h) => mowingDays.blocksLive(slot.date, h.mowing)],
+  ['south_day_kept', (slot, h) => southDayKept.blocks(slot.date, h.south)],
   ['other_tech', (slot, h) => h.ctx.keepTech === true && !!h.service.technician_id && String(slotTechId(slot)) !== String(h.service.technician_id)],
   ['other_territory', (slot, h) => !!h.territoryTechId && !isTerritoryHolder(slotTechId(slot), h)],
 ];
@@ -1231,6 +1235,8 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // GATE_AUTO_DISPATCH_MOWING_DAYS: the unit's mowing rule (shadow or true),
   // or null — gate off, nothing is read.
   const mowing = await unitMowingRule(service, prefs, ctx);
+  // Far-south days stay far-south: null (rule off, a far-south visit, zone unresolved) = no filter.
+  const south = await southDayKept.ruleFor(service, ctx);
 
   const { dateFrom, dateTo } = searchWindow(service, ctx);
   if (dateFrom > dateTo) {
@@ -1306,6 +1312,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     ...(ctx.keepTech === true ? { other_tech: 0 } : {}),
     ...(territoryTechId ? { other_territory: 0 } : {}),
     ...(mowing && mowing.mode === 'true' ? { mowing_day: 0 } : {}),
+    ...(south ? { south_day_kept: 0 } : {}),
   };
   // The current placement is read first: a visit in overlap also gets every
   // free same-day hour (conflictSameDaySlots), through the same filters.
@@ -1315,7 +1322,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // re-checks both authoritatively, grouped members' derived starts included).
   const admitted = flexRules.admit(slots.concat(await conflictSameDaySlots(service, current, slots, findTimeArgs)), drops);
   const hard = {
-    service, prefs, ctx, category, siblingDates, drops, territoryTechId, territoryCoverId: ctx.territoryCoverId || null, mowing,
+    service, prefs, ctx, category, siblingDates, drops, territoryTechId, territoryCoverId: ctx.territoryCoverId || null, mowing, south,
   };
   const candidates = admitted.map((slot) => candidateFromSlot(slot, hard)).filter(Boolean);
 

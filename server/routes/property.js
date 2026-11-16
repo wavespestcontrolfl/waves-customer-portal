@@ -8,18 +8,10 @@ const AccountMembershipEmail = require('../services/account-membership-email');
 const TermiteStations = require('../services/termite-stations');
 const { signedMapImagePathFromLiveConfig } = require('../services/signed-map-image');
 const { appPlanEnabled, loadCustomerWateringPlan } = require('../services/irrigation-app-plan');
-const { irrigationOwnerRatesLive } = require('../services/irrigation-rates');
 const AwayWatch = require('../services/away-watch');
 const { yardPets } = require('../services/pet-name-line');
 const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
 const { movingPortalLive } = require('../config/feature-gates');
-
-// GATE_IRRIGATION_OWNER_RATES: the portal's "About N inches a week" line must use the table the emails use, and the
-// client cannot read the environment, so the preferences response carries the choice. The key exists only while the
-// gate is live: off = the response is byte-identical to before.
-function irrigationRatesPayload() {
-  return irrigationOwnerRatesLive() ? { irrigationOwnerRates: true } : {};
-}
 
 // GATE_AWAY_WATCH: the Property tab shows its Away Watch section only when the server says so: the gate is live and
 // the customer is a WaveGuard member (the perk is members-only). Off or a non-member = no key, byte-identical.
@@ -192,7 +184,6 @@ router.get('/preferences', async (req, res, next) => {
         },
         hasLawnCare,
         irrigationSuppressed: false,
-        ...irrigationRatesPayload(),
         ...awayWatchPayload(req),
       });
     }
@@ -222,7 +213,7 @@ router.get('/preferences', async (req, res, next) => {
     const irrigationSuppressed = fields.irrigation_system === false;
     camelFields.irrigationSystem = true;
 
-    res.json({ preferences: camelFields, hasLawnCare, irrigationSuppressed, ...irrigationRatesPayload(), ...awayWatchPayload(req) });
+    res.json({ preferences: camelFields, hasLawnCare, irrigationSuppressed, ...awayWatchPayload(req) });
   } catch (err) {
     next(err);
   }

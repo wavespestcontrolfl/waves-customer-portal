@@ -34,6 +34,7 @@ const { ringOverdueBell, keptLate, resolveDueDeadline } = require('./sms-operati
 const { resolveEmailCustomerLink, personSentFilter } = require('./email/email-customer-link');
 const { stripQuotedAndSignature, emailPlainText, ownSubjectsInThreads, settledSql } = require('./email/email-strip');
 const NotificationService = require('./notification-service');
+const { validStructuredFields } = require('./admin-alert-compose');
 
 const VERSION = `${EXTRACTOR_VERSION}:email`;
 const enabled = () => gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS');
@@ -215,7 +216,11 @@ async function recordFailedAttempt(conn, { source, emailId, customerId }) {
       'The email agent could not finish processing this message after its retries. Open the customer profile to check the requested work.',
       { trx, bell: true, dedupeKey: `email-operations-failed:${emailId}`,
         link: customerId ? `/admin/customers?customerId=${encodeURIComponent(customerId)}&tab=comms` : '/admin/communications',
-        metadata: { triggerKey: 'email_operational_exception', ...(customerId ? { customerId } : {}), email_id: emailId } });
+        // The bell labels (area, severity, who, done-when, subject when the sender is a known customer). This row is
+        // written here, not through the trigger registry, so no registry rule supplies them.
+        metadata: { triggerKey: 'email_operational_exception', ...(customerId ? { customerId } : {}), email_id: emailId,
+          ...validStructuredFields({ area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'message_reviewed',
+            subject: { type: 'customer', id: String(customerId || '') } }) } });
     if (!notification?.id) throw new Error('email_operations_bell_not_persisted');
   });
 }

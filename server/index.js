@@ -27,7 +27,7 @@ const path = require('path');
 
 const config = require('./config');
 const logger = require('./services/logger');
-const { errorHandler, notFound } = require('./middleware/errors');
+const { errorHandler, uploadHangUp, notFound } = require('./middleware/errors');
 const { initScheduledJobs, initBankingSync } = require('./services/scheduler');
 const { checkBootSecrets } = require('./utils/boot-secret-check');
 const { applySensitiveSpaHeaders } = require('./utils/sensitive-spa-headers');
@@ -559,13 +559,11 @@ app.use('/api/public/inspection', (req, res, next) => {
   }
   next();
 });
-// "Book a free Waves Assessment first" from an estimate (routes/estimate-assessment-public.js,
-// GATE_ESTIMATE_ASSESSMENT_FIRST): the inspection guard's contract above. Privacy headers first, then while the gate
-// is off, or the path's token is not an estimate token, every request is a uniform 404 before the global limiter and
-// the body parsers. Call-time gate read.
+// "Book a free Waves Assessment first" from an estimate (routes/estimate-assessment-public.js): the inspection
+// guard's contract above. Privacy headers first, then while the path's token is not an estimate token, every request
+// is a uniform 404 before the global limiter and the body parsers.
 app.use('/api/public/estimate-assessment', require('./middleware/no-store').noStore);
 app.use('/api/public/estimate-assessment', (req, res, next) => {
-  if (!require('./config/feature-gates').estimateAssessmentFirstLive()) return res.status(404).json({ error: 'not_found' });
   let token = String(req.path || '').split('/').filter(Boolean)[0] || '';
   try { token = decodeURIComponent(token); } catch { token = ''; }
   if (!require('./routes/estimate-public').ESTIMATE_TOKEN_RE.test(token)) return res.status(404).json({ error: 'not_found' });
@@ -629,8 +627,6 @@ app.use('/api/estimates', estimatePublicRoutes.contactPhonePreGuard);
 app.use('/api/estimates', estimatePublicRoutes.commercialAgreementPreGuard);
 // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): same reason, same shape.
 app.use('/api/estimates', estimatePublicRoutes.consumerNoticePreGuard);
-// Residential service agreement (GATE_ESTIMATE_SERVICE_AGREEMENT): same reason, same shape.
-app.use('/api/estimates', estimatePublicRoutes.serviceAgreementPreGuard);
 // Commercial first visit picker (GATE_COMMERCIAL_FIRST_VISIT): same reason, same shape.
 app.use('/api/estimates', estimatePublicRoutes.commercialFirstVisitPreGuard);
 
@@ -865,6 +861,8 @@ app.use('/api/property-recommendations', require('./routes/property-recommendati
 app.use('/api/property-alerts', require('./routes/property-alerts'));
 // One-tap purchase — dark behind GATE_ONE_TAP_PURCHASE (request-time read).
 app.use('/api/one-tap', require('./routes/one-tap-purchase'));
+// One-touch pest frequency change — dark behind GATE_PEST_FREQUENCY_CHANGE (request-time read).
+app.use('/api/pest-frequency', require('./routes/pest-frequency'));
 app.use('/api/customer-pricing', customerPricingAiRoutes);
 app.use('/api/service-preferences', require('./routes/service-preferences'));
 app.use('/api/referrals', referralRoutes);
@@ -991,7 +989,7 @@ app.use('/api/public/reservice', require('./routes/reservice-public'));
 // route 404s until GATE_LEAD_INSPECTION_LINK is on.
 app.use('/api/public/inspection', require('./routes/inspection-public'));
 // "Book a free Waves Assessment first" from an estimate: the estimate's own token, the same page contract as
-// /inspection. Every route 404s until GATE_ESTIMATE_ASSESSMENT_FIRST is on.
+// /inspection.
 app.use('/api/public/estimate-assessment', require('./routes/estimate-assessment-public'));
 // Customer appointment page (24h reminder + booking confirmation link
 // target). Token-gated on the same reschedule_token; every route 404s
@@ -1178,7 +1176,7 @@ app.use('/api/admin/banking', require('./routes/admin-banking'));
 app.use('/api/admin/dashboard-ops', require('./routes/admin-dashboard-ops'));
 app.use('/api/admin/sms-templates', require('./routes/admin-sms-templates'));
 app.use('/api/admin/email', require('./routes/admin-email'));
-// Bid Desk (GATE_BID_DESK, dark): the router answers 404 for every path while the gate is off.
+// Bid Desk: staff-only list, detail and decisions for bid invites.
 app.use('/api/admin/bid-desk', require('./routes/admin-bid-desk'));
 // Bid kit (admin only).
 app.use('/api/admin/bid-kit', require('./routes/admin-bid-kit'));
@@ -1191,6 +1189,8 @@ app.use('/api/admin/pricing-reality-check', require('./routes/admin-pricing-real
 app.use('/api/admin/rate-review', require('./routes/admin-rate-review'));
 app.use('/api/admin/route-scorecard', require('./routes/admin-route-scorecard'));
 app.use('/api/tech/field-lead', require('./routes/tech-field-lead'));
+// Technician estimate tool (GATE_TECH_ESTIMATES, dark): every path answers 404 {enabled:false} while the gate or the technician's switch is off.
+app.use('/api/tech/estimates', require('./routes/tech-estimates'));
 app.use('/api/tech/lawn-diagnostic', require('./routes/tech-lawn-diagnostic'));
 app.use('/api/tech/social', require('./routes/tech-social'));
 app.use('/api/notification-prefs', require('./routes/notification-prefs'));
@@ -1390,6 +1390,10 @@ if (config.nodeEnv !== 'production') {
     throw new Error("My first Sentry error!");
   });
 }
+
+// A client that hung up mid-upload is not a server fault: it stops here, before Sentry sees it
+// (middleware/errors.js uploadHangUp; multer 2 reports these, multer 1 was silent).
+app.use(uploadHangUp);
 
 // Sentry error handler — must be before other error middleware
 Sentry.setupExpressErrorHandler(app);

@@ -152,11 +152,10 @@ describe('summer potassium: the recipe and the catalog spec', () => {
 });
 
 describe('summer potassium: the customer outline', () => {
-  afterEach(() => { delete process.env.GATE_LAWN_V13; delete process.env.GATE_LAWN_OUTLINE_V13; });
+  afterEach(() => { delete process.env.GATE_LAWN_V13; });
 
   test('August and September read as the micronutrient pass, with no Fertilizer step drawn for the 0-0-K analysis', () => {
     process.env.GATE_LAWN_V13 = 'true';
-    process.env.GATE_LAWN_OUTLINE_V13 = 'true';
     const { customerProtocolBullets } = require('../services/lawn-service-outline');
     for (const grass of Object.keys(v13Recipe)) {
       for (const month of ['Aug', 'Sep']) {

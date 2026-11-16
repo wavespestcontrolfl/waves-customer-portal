@@ -1240,6 +1240,10 @@ async function buildCustomerPricingResponse({
   // longer opens that door (it previously did): an upgrade is a conversation,
   // routed to Waves, not a self-serve re-quote. The one-time keys stay
   // exempt — those are repeatable purchases, not an existing obligation.
+  // (Owner 2026-11-12: the one self-serve upgrade is the pest frequency
+  // change in My Plan, priced from the customer's OWN per-visit price and
+  // never from the profile — services/pest-frequency-change.js. This
+  // assistant still quotes nothing for a service the customer has.)
   // Computed BEFORE property resolution (codex #3253 r4 P2): an owned-only
   // request generates no quote, so it must not trigger the external
   // geocoding/AI property lookup (cache writes, provider cost, latency).

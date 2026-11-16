@@ -149,13 +149,6 @@ it("a gate's map point shows on its row, prefills Edit, and travels on Add as ga
   expect(JSON.parse(post[1].body)).toEqual({ gate_label: "Main gate", access_type: "keypad", code: "2468", gate_location: "https://www.google.com/maps/@27.5,-82.6,17z" });
 });
 
-it("shows the not-turned-on state when the API answers 404 enabled:false", async () => {
-  rawAdminFetch.mockImplementation(() => response({ enabled: false }, { ok: false, status: 404 }));
-  renderPage();
-  expect(await screen.findByText("Gate codes are not turned on yet.")).toBeInTheDocument();
-  expect(screen.queryByLabelText("Search neighborhoods")).not.toBeInTheDocument();
-});
-
 const ONE_ID = "5d1e0b64-8f4f-4c61-9f0e-2f6a7d1c3b11";
 
 it("?neighborhood= asks for just that neighborhood and Show all clears it", async () => {
@@ -228,7 +221,7 @@ function foundRoutes(over = {}) {
   };
 }
 
-it("has no Found in messages tab when the access codes section is off (404)", async () => {
+it("has no Found in messages tab when the found list answers 404", async () => {
   rawAdminFetch.mockImplementation((path) => (path.startsWith("/admin/access-codes/found")
     ? response({ enabled: false }, { ok: false, status: 404 })
     : response(ALL)));
@@ -480,7 +473,7 @@ it("a bell link (?view=found) opens Found in messages without a click", async ()
   expect(screen.queryByText("Synthetic Oaks")).toBeNull();
 });
 
-it("a bell link with the access codes section off shows the neighborhoods", async () => {
+it("a bell link when the found list answers 404 shows the neighborhoods", async () => {
   rawAdminFetch.mockImplementation((path) => (path.startsWith("/admin/access-codes/found")
     ? response({ enabled: false }, { ok: false, status: 404 })
     : response(ALL)));
@@ -510,10 +503,9 @@ it("a bell link on a page already open switches to Found in messages with a fres
   await waitFor(() => expect(foundReads()).toBe(3));
 });
 
-// Neighborhood merge (GATE_NEIGHBORHOOD_MERGE, owner 2026-10-25).
+// Neighborhood merge (owner 2026-10-25).
 const MERGE_LIST = {
   total: 1,
-  mergeEnabled: true,
   neighborhoods: [{ ...ALL.neighborhoods[0], mergedIn: [] }],
 };
 const PICKS = {
@@ -524,15 +516,6 @@ const PICKS = {
     { id: "n5", name: "Synthetic Oaks South", county: "Sarasota", propertyCount: 2, entries: [] },
   ],
 };
-
-it("shows no merge controls while the merge switch is off", async () => {
-  rawAdminFetch.mockImplementation(() => response(ALL));
-  renderPage();
-  await screen.findByText("Synthetic Oaks");
-  expect(screen.queryByRole("button", { name: "Merge into…" })).toBeNull();
-  expect(screen.queryByText("Also named:")).toBeNull();
-  expect(rawAdminFetch.mock.calls.some(([p]) => p.includes("merge-suggestions"))).toBe(false);
-});
 
 it("Merge into… offers only other neighborhoods of the same county, shows what moves from a dry run, then merges", async () => {
   rawAdminFetch.mockImplementation((path, options) => {
@@ -646,8 +629,8 @@ it("Not the same posts the pair, and the list reloads without it", async () => {
   await waitFor(() => expect(screen.queryByText("Possible duplicates (1)")).toBeNull());
 });
 
-// Homes not placed + Add as unconfirmed (GATE_NEIGHBORHOOD_UNPLACED, owner 2026-10-26).
-const UNPLACED_LIST = { ...ALL, unplacedEnabled: true };
+// Homes not placed + Add as unconfirmed (owner 2026-10-26).
+const UNPLACED_LIST = ALL;
 const UNPLACED = {
   homes: [
     { propertyId: "p1", customerId: "c1", customerName: "Sample Owner", address: "100 Synthetic Way, Lakewood Ranch", zip: "34211", savedCode: true,
@@ -697,17 +680,8 @@ it("Add entry offers 'I have not seen this work' only with the switch on, and se
   expect(JSON.parse(post[1].body)).toEqual({ gate_label: "Main gate", access_type: "keypad", code: "6413", gate_location: null, unconfirmed: true });
 });
 
-it("with the switch off there is no unconfirmed box and no list request", async () => {
-  rawAdminFetch.mockImplementation(() => response(ALL));
-  renderPage();
-  await screen.findByText("Synthetic Oaks");
-  fireEvent.click(screen.getAllByRole("button", { name: "Add entry" })[0]);
-  expect(screen.queryByLabelText("I have not seen this work (file it as Needs confirm)")).toBeNull();
-  expect(rawAdminFetch.mock.calls.some(([p]) => p.endsWith("/unplaced"))).toBe(false);
-});
-
 // The two help lists when a read fails, and refused actions from their rows.
-const BOTH_LISTS = { ...ALL, mergeEnabled: true, unplacedEnabled: true };
+const BOTH_LISTS = ALL;
 const UNAVAILABLE = () => response({}, { ok: false, status: 503 });
 const panelOf = (heading) => screen.getByText(heading).parentElement;
 // A list row: the nearest bordered box around one of its buttons.

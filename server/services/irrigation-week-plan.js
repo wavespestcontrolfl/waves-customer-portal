@@ -29,6 +29,7 @@ const { resolveRateTable, ratesForTable, rateTableInputs } = require('./irrigati
 const { irrigationWaterSavedLive, waterSavedForDecision, waterSavedSentence } = require('./irrigation-water-saved');
 const { queuedRowInFlight, QUEUED_IN_FLIGHT_MS, ABORTED_BEFORE_DISPATCH } = require('./email-template-library');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
+const { wateringTimeLine } = require('./lawn-watering-time-line');
 const { lastCompletedWeekEndingET } = require('../utils/datetime-et');
 const { recommendedFromEt0, recommendedInchesPerWeek, _private: advicePrivate } = require('./service-report/irrigation-advice');
 const { etParts } = require('../utils/datetime-et');
@@ -121,9 +122,9 @@ function decideWeekPlan({
   // Unconfirmed schedule after a move: carryover from observed RAIN only
   // (the former home's programmed irrigation is withheld).
   rainOnlyCarryover = false,
-  // Head rate table ('owner' | 'package') this decision uses. Omitted = a NEW decision: the live
-  // GATE_IRRIGATION_OWNER_RATES picks it. The snapshot freezes the choice (decisionInputs.rateTable, owner only), and a
-  // replay passes the stored table back in, so the gate never re-decides a stored row.
+  // Head rate table ('owner' | 'package') this decision uses. Omitted = a NEW decision: the owner's table. The snapshot
+  // freezes the choice (decisionInputs.rateTable, owner only), and a replay passes the stored table back in, so a stored
+  // row is never re-decided.
   rateTable = undefined,
   // Lawn area on file (customer_turf_profiles.lawn_sqft) for the "water you saved" gallons; null = no sentence.
   lawnSqft = null,
@@ -192,7 +193,7 @@ function decideWeekPlan({
     rainKnown,
     priorWeekEvents,
     rainOnlyCarryover,
-    // One head rate table for every reader (GATE_IRRIGATION_OWNER_RATES); off = the package table.
+    // One head rate table for every reader; a stored legacy row passes 'package'.
     rates: ratesForTable(table),
   });
   const runtime = normalizeRuntimeInputs({ runMinutes, wateringDays, systemType });
@@ -261,7 +262,12 @@ function restrictionNote(restriction) {
   }
   const dayWord = days === 1 ? 'one day' : `${days} days`;
   const hours = restriction.hoursNote ? `, ${restriction.hoursNote}` : '';
-  return `${restriction.label}: lawn watering is limited to ${dayWord} a week${hours}, through ${restriction.expiresOn}. Water on your assigned ${days === 1 ? 'day' : 'days'} only.`;
+  const base = `${restriction.label}: lawn watering is limited to ${dayWord} a week${hours}, through ${restriction.expiresOn}. Water on your assigned ${days === 1 ? 'day' : 'days'} only.`;
+  // The watering-time line (owner 2026-11-14, decision 1A, ungated), the same sentence as the visit card and the lawn
+  // prep guide. It needs allowedHours or noHourRestriction in the rule in force; without either the note is today's,
+  // byte for byte.
+  const timeLine = wateringTimeLine(restriction);
+  return timeLine ? `${base} ${timeLine}` : base;
 }
 
 function comparisonClause(plan, runMinutes) {
@@ -914,6 +920,10 @@ function etDateStringPlusDays(ymd, days) {
 // Every field that shapes the instruction must match — days, dates, hours,
 // label, county: an operator changing hoursNote alone must retire Monday's
 // snapshot from the report just like a day-cap change would.
+// allowedHours is deliberately NOT in the identity: the watering-time line it feeds is advice inside the allowed
+// hours, not part of the plan, so an hours-only change must not retire this week's plan (adding it would retire
+// every current-week snapshot as "policy_changed" the moment the field was first set). The app card re-renders the
+// note under the rule in force, so it shows an hours change at once; a sent email keeps the note it was sent with.
 const POLICY_IDENTITY_FIELDS = ['maxDaysPerWeek', 'effectiveFrom', 'expiresOn', 'label', 'hoursNote', 'county'];
 function policyIdentity(p) {
   return JSON.stringify(POLICY_IDENTITY_FIELDS.map((k) => (k === 'maxDaysPerWeek' ? Number(p?.[k]) : String(p?.[k] ?? ''))));

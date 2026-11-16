@@ -26,10 +26,10 @@ const bounceRecovery = require('../services/email-bounce-recovery');
 const bounceRescue = require('../services/email-bounce-rescue');
 const providerRetry = require('../services/transactional-email-provider-retry');
 
-// GATE_CALL_EMAIL_CHECKS (owner 2026-10-29): SendGrid files "no mail server for
+// SendGrid (owner 2026-10-29) files "no mail server for
 // this domain" as a blocked bounce. That is a bad address, not a sender block:
 // no provider retry, no "the recipient did not bounce" handling, anywhere in
-// this webhook. Gate off = providerRetry.isProviderBlockedEvent exactly.
+// this webhook.
 function isProviderBlock(ev) {
   return providerRetry.isProviderBlockedEvent(ev) && !bounceRecovery.isNoMailServerEvent(ev);
 }
@@ -153,7 +153,15 @@ function applyRetryableNewsletterDeliveryFilter(query) {
     .whereNull('clicked_at');
 }
 
-router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
+// Body cap. SendGrid posts many events in one JSON array and flushes a batch
+// "within approximately 30 seconds or when the batch size reaches 768
+// kilobytes" (twilio.com/docs/sendgrid/for-developers/tracking-events/
+// twilio-sendgrid-event-webhook-overview). body-parser's 100 KB default refused
+// real batches, and SendGrid re-sent each at the same size until it gave up,
+// losing its bounces. 1 MB is the bound every other route already parses
+// before any auth (the global express.json limit in server/index.js), so this
+// adds no new exposure.
+router.post('/events', express.raw({ type: '*/*', limit: '1mb' }), async (req, res) => {
   // Fail closed unless the public key is configured — we don't want anyone
   // POSTing fake bounces to suppress recipients.
   if (!process.env.SENDGRID_WEBHOOK_PUBLIC_KEY) {
@@ -417,7 +425,7 @@ async function handleEvent(ev) {
     bounceRecovery.alertBouncedContactAddress(email, ev)
       .catch((err) => logger.error(`[sendgrid-webhook] bounced-contact alert failed: ${err.message}`));
     if (deadDomain) {
-      // GATE_CALL_EMAIL_CHECKS: a "blocked" bounce for a domain with no mail
+      // A "blocked" bounce for a domain with no mail
       // server goes to people only, on every send path: the alert above and
       // the recording re-check card. No rescue: it can apply a repair on its
       // own, and a call-captured address is never auto-corrected (AGENTS.md
@@ -512,13 +520,13 @@ async function handleEvent(ev) {
     // Tracked bounces are NOT routed through alertBouncedContactAddress —
     // attemptRecovery has its own richer alert (alertUnrecoverableBounce).
     if (processedNew && attemptMatched) {
-      // GATE_CALL_EMAIL_CHECKS: a "blocked" bounce whose domain has no mail
+      // A "blocked" bounce whose domain has no mail
       // server is a bad address, not a sender block — no retry rail for it.
       if (isProviderBlock(ev)) {
         providerRetry.alertIfProviderRetriesExhausted(emailMessage, ev)
           .catch((err) => logger.error(`[sendgrid-webhook] provider-retry alert failed for ${messageId}: ${err.message}`));
       } else if (bounceRecovery.isNoMailServerEvent(ev) && !isRateReview) {
-        // GATE_CALL_EMAIL_CHECKS: a domain with no mail server goes to people
+        // A domain with no mail server goes to people
         // (the alert and the recording re-check card), never to
         // attemptRecovery, which can repair a domain and resend on its own.
         alertUntrackedHardBounce();
@@ -1097,9 +1105,8 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
         updated_at: at,
       });
     } else if (updates.subscriberAction === 'unsubscribe_if_active') {
-      await client('newsletter_subscribers')
-        .where({ id: delivery.subscriber_id })
-        .whereNot({ status: 'unsubscribed' })
+      await optOutNeedsWrite()(client('newsletter_subscribers')
+        .where({ id: delivery.subscriber_id }))
         .update({
           status: 'unsubscribed',
           unsubscribed_at: at,
@@ -1246,12 +1253,17 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
   return null;
 }
 
+// Lazy: keeps the subscriber service (and its sunset import) out of this
+// route's load path. See whereOptOutNeedsWrite (sweep #7765 B5).
+function optOutNeedsWrite() {
+  return require('../services/newsletter-subscribers').whereOptOutNeedsWrite;
+}
+
 async function unsubscribeNewsletterSubscriber(email, at, client = db) {
   if (!email) return;
   const lc = String(email).trim().toLowerCase();
-  await client('newsletter_subscribers')
-    .whereRaw('LOWER(email) = ?', [lc])
-    .whereNot({ status: 'unsubscribed' })
+  await optOutNeedsWrite()(client('newsletter_subscribers')
+    .whereRaw('LOWER(email) = ?', [lc]))
     .update({
       status: 'unsubscribed',
       unsubscribed_at: at,
