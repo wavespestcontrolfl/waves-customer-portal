@@ -30,7 +30,8 @@ stands after that, the next run queues a fresh alert for it.
 
 The portal's own check that the Air still polls (`agent-watchdog-liveness.js`)
 writes its row the same way. When the in-app digest gates are off or the row
-write fails, it emails the internal inbox once per silence episode, and sends
+write fails, it emails the internal inbox once per silence episode (kept in
+system_settings `outside_watchdog.silence_emailed_episode`, so a restart keeps it), and sends
 one closing email when polling resumes.
 
 Stale link-worker leases (`link_worker:stale_leases`) and a failed link-worker

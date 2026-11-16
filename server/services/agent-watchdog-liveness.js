@@ -37,9 +37,25 @@ const OPS_INBOX = 'contact@wavespestcontrol.com';
 const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || OPS_INBOX;
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 
-// One fallback email per silence episode (keyed by the last poll time), not
-// one per 23-min tick. In memory: a redeploy mid-episode sends one more.
-let emailedEpisode = null;
+// The silence episode (keyed by the last poll time) that went out by email: one
+// fallback email per episode, not one per 23-min tick, and one closing email when
+// polling resumes. Kept in system_settings so a deploy or restart mid-episode keeps
+// it. A read or write failure throws, so job_health shows the job failing.
+const EPISODE_SETTING = 'outside_watchdog.silence_emailed_episode';
+const settingsStore = {
+  async get() {
+    const row = await db('system_settings').where({ key: EPISODE_SETTING }).first('value');
+    return row && row.value ? String(row.value) : null;
+  },
+  async set(value) {
+    if (value === null) {
+      await db('system_settings').where({ key: EPISODE_SETTING }).del();
+      return;
+    }
+    await db('system_settings').insert({ key: EPISODE_SETTING, value, category: 'watchdog' })
+      .onConflict('key').merge({ value, updated_at: db.fn.now() });
+  },
+};
 
 const DEFAULT_STALE_MINUTES = 45;
 const OPS_KEY = 'outside-watchdog-silent';
@@ -93,9 +109,9 @@ function composeSilentRow(last, limit) {
 
 // The silence went out by email (the row could not land): the inbox gets one closing
 // email when polling resumes. A failed send keeps the episode, so the next fresh tick
-// tries again. In memory, as the episode key: a redeploy mid-episode loses it.
-async function sendClosingEmail(mailer, last) {
-  if (emailedEpisode === null) return null;
+// tries again.
+async function sendClosingEmail(mailer, store, last) {
+  if ((await store.get()) === null) return null;
   if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) return 'mailer not configured';
   let sent;
   try {
@@ -116,11 +132,11 @@ async function sendClosingEmail(mailer, last) {
     return 'failed';
   }
   if (sent && sent.ok === false) return 'failed';
-  emailedEpisode = null;
+  await store.set(null);
   return 'sent';
 }
 
-async function runWatchdogLivenessCheck({ now = new Date(), mailer = sendgrid } = {}) {
+async function runWatchdogLivenessCheck({ now = new Date(), mailer = sendgrid, store = settingsStore } = {}) {
   // The endpoint sits behind BOTH gates (linkWorkerAuth answers 403 while the
   // shared worker integration is off, so no observed row can land); a
   // "watchdog silent" row then would report a deliberate state.
@@ -130,7 +146,7 @@ async function runWatchdogLivenessCheck({ now = new Date(), mailer = sendgrid } 
   const limit = staleMinutes();
   if (last && ageMinutes <= limit) {
     const closed = await retireIfClean(OPS_KEY, { resolvedBy: 'outside-watchdog:polling' });
-    const closingEmail = await sendClosingEmail(mailer, last);
+    const closingEmail = await sendClosingEmail(mailer, store, last);
     return { skipped: false, silent: false, closed, ageMinutes, limit, ...(closingEmail ? { closingEmail } : {}) };
   }
 
@@ -154,7 +170,7 @@ async function runWatchdogLivenessCheck({ now = new Date(), mailer = sendgrid } 
     // still reported. No customer address is ever used here.
     sendEmail: async () => {
       const episode = last ? last.toISOString() : 'never';
-      if (emailedEpisode === episode) return { ok: true, skipped: 'already emailed this episode' };
+      if ((await store.get()) === episode) return { ok: true, skipped: 'already emailed this episode' };
       if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) {
         return { ok: false, error: 'mailer not configured' };
       }
@@ -167,7 +183,7 @@ async function runWatchdogLivenessCheck({ now = new Date(), mailer = sendgrid } 
         categories: ['ops', OPS_KEY],
         suppressErrorLog: true,
       });
-      if (!sent || sent.ok !== false) emailedEpisode = episode;
+      if (!sent || sent.ok !== false) await store.set(episode);
       return sent;
     },
   });
@@ -181,6 +197,4 @@ async function runWatchdogLivenessCheck({ now = new Date(), mailer = sendgrid } 
   return { skipped: false, silent: true, ageMinutes, limit, channel: result.channel };
 }
 
-function resetEmailedEpisodeForTests() { emailedEpisode = null; }
-
-module.exports = { runWatchdogLivenessCheck, DEFAULT_STALE_MINUTES, OPS_KEY, OPS_INBOX, resetEmailedEpisodeForTests };
+module.exports = { runWatchdogLivenessCheck, DEFAULT_STALE_MINUTES, OPS_KEY, OPS_INBOX, EPISODE_SETTING };

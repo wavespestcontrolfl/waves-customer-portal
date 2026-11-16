@@ -24,7 +24,13 @@ const mockRetire = jest.fn();
 jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: (...args) => mockRetire(...args) }));
 
 const { gateEnvValue, isEnabled } = require('../config/feature-gates');
-const { runWatchdogLivenessCheck, DEFAULT_STALE_MINUTES, OPS_KEY, OPS_INBOX, resetEmailedEpisodeForTests } = require('../services/agent-watchdog-liveness');
+const { runWatchdogLivenessCheck: runCheck, DEFAULT_STALE_MINUTES, OPS_KEY, OPS_INBOX } = require('../services/agent-watchdog-liveness');
+
+// The episode store (system_settings in production) as a plain value that outlives
+// a "restart": each test gets a fresh one.
+let store;
+const newStore = () => { let v = null; return { get: jest.fn(async () => v), set: jest.fn(async (x) => { v = x; }) }; };
+const runWatchdogLivenessCheck = (opts = {}) => runCheck({ store, ...opts });
 
 const mockMailer = { isConfigured: jest.fn(() => true), sendOne: jest.fn(async () => ({ ok: true })) };
 
@@ -39,7 +45,7 @@ beforeEach(() => {
   lastRow = null;
   mockDeliver.mockResolvedValue({ ok: true, channel: 'in_app', id: 'row-1' });
   mockRetire.mockResolvedValue(0);
-  resetEmailedEpisodeForTests();
+  store = newStore();
   mockMailer.isConfigured.mockReturnValue(true);
   mockMailer.sendOne.mockResolvedValue({ ok: true });
 });
@@ -147,6 +153,22 @@ test('an emailed silence gets one closing email when polling resumes; a failed s
   const r = await runWatchdogLivenessCheck({ now: NOW, mailer: mockMailer });
   expect(r).not.toHaveProperty('closingEmail');
   expect(mockMailer.sendOne).toHaveBeenCalledTimes(3);
+});
+
+test('the emailed episode survives a restart: the closing email still goes (Codex r11 P2)', async () => {
+  lastRow = { at: minutesBefore(90) };
+  mockDeliver.mockImplementation(async ({ sendEmail }) => {
+    const result = await sendEmail();
+    return { ok: result.ok !== false, channel: 'email', result };
+  });
+  await runWatchdogLivenessCheck({ now: NOW, mailer: mockMailer });
+  expect(store.set).toHaveBeenCalledWith(minutesBefore(90).toISOString());
+  // A restart: the module is loaded fresh; only the stored value carries over.
+  let fresh;
+  jest.isolateModules(() => { fresh = require('../services/agent-watchdog-liveness'); });
+  lastRow = { at: minutesBefore(5) };
+  await expect(fresh.runWatchdogLivenessCheck({ now: NOW, mailer: mockMailer, store })).resolves.toMatchObject({ closingEmail: 'sent' });
+  expect(store.set).toHaveBeenLastCalledWith(null);
 });
 
 test('a row-only silence sends no closing email', async () => {
