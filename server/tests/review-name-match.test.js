@@ -1,6 +1,6 @@
 /**
- * services/review-name-match.js — the review matcher's pass (GATE_REVIEW_NAME_MATCH_V2) and the
- * Reviews "Not this customer" action. Pins: off reads nothing; shadow writes nothing; on writes only
+ * services/review-name-match.js — the review matcher's pass and the
+ * Reviews "Not this customer" action. Pins: the pass writes only
  * the decisions that changed, each conditioned on the link state it was made for; a dismissed
  * customer is never named again for that review; a linked review is disputed when its customer's
  * first contact came after it, unless a person kept the link. All names are synthetic.
@@ -60,22 +60,7 @@ const review = (id, reviewerName, extra = {}) => ({
 describe('runReviewNameMatch', () => {
   beforeEach(() => loadEvidenceCandidates.mockReset());
 
-  test('off reads nothing', async () => {
-    const conn = fakeConn([]);
-    expect(await runReviewNameMatch({ conn, mode: 'off' })).toEqual({ mode: 'off', skipped: true });
-    expect(conn).not.toHaveBeenCalled();
-    expect(loadEvidenceCandidates).not.toHaveBeenCalled();
-  });
-
-  test('shadow scores every review and writes nothing', async () => {
-    const conn = fakeConn([review('r1', 'Dana Fenwikc')]);
-    loadEvidenceCandidates.mockResolvedValue([candidate('c1', 'Dana', 'Fenwick')]);
-    const out = await runReviewNameMatch({ conn, mode: 'shadow' });
-    expect(out).toMatchObject({ mode: 'shadow', reviews: 1, counts: { pause: 1 }, changed: 1, written: 0 });
-    expect(conn.updates).toEqual([]);
-  });
-
-  test('on writes the decisions that changed, each onto the link state it was made for', async () => {
+  test('writes the decisions that changed, each onto the link state it was made for', async () => {
     const now = new Date('2026-10-31T13:00:00Z');
     const conn = fakeConn([
       review('r1', 'Dana Fenwikc'),
@@ -89,8 +74,8 @@ describe('runReviewNameMatch', () => {
       candidate('c2', 'Marlow', 'Pemberton'),
       candidate('c3', 'Gwen', 'Harlowe', { timeline: { createdAt: '2026-10-25T14:00:00Z' } }),
     ]);
-    const out = await runReviewNameMatch({ conn, mode: 'on', now });
-    expect(out).toMatchObject({ mode: 'on', reviews: 3, changed: 2, written: 2 });
+    const out = await runReviewNameMatch({ conn, now });
+    expect(out).toMatchObject({ reviews: 3, changed: 2, written: 2 });
     const unchangedDismissal = ['raw', 'name_match_dismissed_at IS NOT DISTINCT FROM ?::timestamptz', [null]];
     expect(conn.updates).toEqual([
       {
@@ -116,7 +101,7 @@ describe('runReviewNameMatch', () => {
       candidate('c2', 'Dana', 'Fenwikc'),
       candidate('c3', 'Gwen', 'Harlowe', { timeline: { createdAt: '2026-10-25T14:00:00Z' } }),
     ]);
-    const out = await runReviewNameMatch({ conn, mode: 'on' });
+    const out = await runReviewNameMatch({ conn });
     expect(out).toMatchObject({ counts: { none: 2 }, changed: 0, written: 0 });
   });
 
@@ -124,28 +109,28 @@ describe('runReviewNameMatch', () => {
     const dismissedAt = new Date('2026-10-31T12:00:00Z');
     const conn = fakeConn([review('r1', 'Dana Fenwikc', { name_match_dismissed_customer_ids: ['c9'], name_match_dismissed_at: dismissedAt })]);
     loadEvidenceCandidates.mockResolvedValue([candidate('c1', 'Dana', 'Fenwick')]);
-    await runReviewNameMatch({ conn, mode: 'on' });
+    await runReviewNameMatch({ conn });
     expect(conn.updates[0].wheres).toContainEqual(['raw', 'name_match_dismissed_at IS NOT DISTINCT FROM ?::timestamptz', [dismissedAt]]);
   });
 
   test('a click auto-link is never disputed: it already waits in the queue for its own confirm', async () => {
     const conn = fakeConn([review('r3', 'Gwen Harlowe', { customer_id: 'c3', link_source: 'click_auto' })]);
     loadEvidenceCandidates.mockResolvedValue([candidate('c3', 'Gwen', 'Harlowe', { timeline: { createdAt: '2026-10-25T14:00:00Z' } })]);
-    const out = await runReviewNameMatch({ conn, mode: 'on' });
+    const out = await runReviewNameMatch({ conn });
     expect(out).toMatchObject({ counts: { none: 1 }, written: 0 });
   });
 
   test('an inactive customer is never suggested: the queue could not confirm them', async () => {
     const conn = fakeConn([review('r1', 'Marlow Pemberton')]);
     loadEvidenceCandidates.mockResolvedValue([candidate('c1', 'Marlow', 'Pemberton', { active: false })]);
-    const out = await runReviewNameMatch({ conn, mode: 'on' });
+    const out = await runReviewNameMatch({ conn });
     expect(out).toMatchObject({ counts: { none: 1 }, written: 0 });
   });
 
   test('a decision that no longer holds is cleared', async () => {
     const conn = fakeConn([review('r1', 'Trent Oakhurst', { name_match_result: 'pause', name_match_customer_id: 'c1', name_match_reason: 'near' })]);
     loadEvidenceCandidates.mockResolvedValue([candidate('c1', 'Dana', 'Fenwick')]);
-    await runReviewNameMatch({ conn, mode: 'on' });
+    await runReviewNameMatch({ conn });
     expect(conn.updates.map((u) => u.patch)).toEqual([
       expect.objectContaining({ name_match_result: null, name_match_customer_id: null, name_match_reason: null }),
     ]);

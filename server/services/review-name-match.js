@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * The review matcher's pass (owner 2026-10-31, review matching plan PR 3; GATE_REVIEW_NAME_MATCH_V2).
+ * The review matcher's pass (owner 2026-10-31, review matching plan PR 3).
  * It scores every live Google review with the evidence rules (review-link-evidence.js) against every
  * live customer (review-link-candidates.js) and records the decision on google_reviews
  * (name_match_*): link / link_confirm / pause / household / queue / reject for an unlinked review,
@@ -9,16 +9,14 @@
  *
  * Nothing here links a review, marks a customer or sends anything. The Reviews match queue lists the
  * decisions that name a customer for one tap (the existing manual match does the link), and a later
- * send-time guard reads them under its own gate. A customer a person ruled out for a review
+ * send-time guard (review-click-guard.js) reads them. A customer a person ruled out for a review
  * (name_match_dismissed_customer_ids) is never suggested for that review again.
  *
- * Mode (reviewNameMatchMode, read at call time): off = nothing runs; shadow = score and log the
- * counts, write nothing; on = write the decisions that changed. Runs after the hourly review sync.
+ * Writes the decisions that changed. Runs after the hourly review sync.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { reviewNameMatchMode } = require('../config/feature-gates');
 const {
   recordName, firstKnownContactAt, dateVerdict, scoreCandidate, decideReviewLink,
 } = require('./review-link-evidence');
@@ -98,14 +96,12 @@ async function computeDecisions(conn) {
   return decisions;
 }
 
-async function runReviewNameMatch({ conn = db, mode = reviewNameMatchMode(), now = new Date() } = {}) {
-  if (mode !== 'shadow' && mode !== 'on') return { mode: 'off', skipped: true };
+async function runReviewNameMatch({ conn = db, now = new Date() } = {}) {
   const decisions = await computeDecisions(conn);
   const counts = {};
   for (const { next } of decisions) counts[next.result || 'none'] = (counts[next.result || 'none'] || 0) + 1;
   const changes = decisions.filter(({ review, next }) => !sameDecision(review, next));
-  logger.info(`[review-name-match] ${mode}: ${decisions.length} reviews ${JSON.stringify(counts)}, ${changes.length} changed`);
-  if (mode !== 'on') return { mode, reviews: decisions.length, counts, changed: changes.length, written: 0 };
+  logger.info(`[review-name-match] on: ${decisions.length} reviews ${JSON.stringify(counts)}, ${changes.length} changed`);
 
   let written = 0;
   for (const { review, next } of changes) {
@@ -122,7 +118,7 @@ async function runReviewNameMatch({ conn = db, mode = reviewNameMatchMode(), now
       name_match_at: now,
     });
   }
-  return { mode, reviews: decisions.length, counts, changed: changes.length, written };
+  return { reviews: decisions.length, counts, changed: changes.length, written };
 }
 
 const DISMISSABLE = new Set([...NAMES_A_CUSTOMER, 'disputed']);

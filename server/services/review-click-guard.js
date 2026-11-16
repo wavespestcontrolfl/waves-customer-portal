@@ -27,7 +27,7 @@
  *                                            before the click is refused, not sent)
  * An untracked click (the bare office URL) is invisible here by nature.
  *
- * Probable reviewer (GATE_REVIEW_PROBABLE_REVIEWER_GUARD, owner 2026-10-31): the same checks also stop
+ * Probable reviewer (owner 2026-10-31): the same checks also stop
  * an ask, whatever its visit, when an open review-matcher decision names the customer
  * (services/review-name-match.js). A customer who reviewed under another spelling of their name is
  * not asked again. An "I left a review" text is not read here: one misread text would stop asks for
@@ -40,7 +40,7 @@
  */
 const db = require('../models/db');
 const { dateOnlyString, parseETDateTime } = require('../utils/datetime-et');
-const { reviewProbableReviewerGuardLive, reviewTapPauseLive } = require('../config/feature-gates');
+const { reviewTapPauseLive } = require('../config/feature-gates');
 
 // A date-only visit column is that ET calendar day, so the fallback anchor is
 // ET midnight. new Date('YYYY-MM-DD') would be UTC midnight on Railway (TZ=UTC),
@@ -153,9 +153,9 @@ async function customerAskedForLink({ serviceRecordId = null, sequenceId = null 
 // Review-matcher decisions that say this customer probably wrote an unlinked live review.
 const PROBABLE_REVIEWER_RESULTS = ['link', 'link_confirm', 'pause', 'household'];
 
-// Has this customer probably already left a Google review? Only with the gate on.
+// Has this customer probably already left a Google review?
 async function probableReviewer(customerId, database = db) {
-  if (!customerId || !reviewProbableReviewerGuardLive()) return false;
+  if (!customerId) return false;
   const named = await database('google_reviews')
     .where({ name_match_customer_id: customerId })
     .whereIn('name_match_result', PROBABLE_REVIEWER_RESULTS)

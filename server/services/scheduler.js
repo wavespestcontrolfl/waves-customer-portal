@@ -8846,7 +8846,7 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Review sync failed: ${err.message}`);
     }
-    // The review matcher scores the freshly synced reviews (GATE_REVIEW_NAME_MATCH_V2; off = no-op).
+    // The review matcher scores the freshly synced reviews (services/review-name-match.js).
     // Its own try: a failed sync still re-scores what is already stored, and a failed pass never
     // touches the sync.
     try {
