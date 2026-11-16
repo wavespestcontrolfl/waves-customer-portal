@@ -1,6 +1,6 @@
 // L11a (GATE_TECH_COST_RATES): calculateJobCost with technician and vehicle cost cards.
-// Gate off, or no card in effect = today's loaded_labor_rate x on-job hours and
-// drive_cost_per_stop, to the cent. Synthetic ids and numbers only.
+// Gate off, or no card in effect = loaded_labor_rate x on-job hours and the standard drive
+// (the Average Drive Time at the loaded labor rate), to the cent. Synthetic ids and numbers only.
 jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
@@ -46,12 +46,12 @@ const imputedCard = (id, effectiveDate, rate) => ({
   ...W2_CARD, id, effective_date: effectiveDate, created_at: `${effectiveDate}T00:00:00Z`, kind: 'imputed', imputed_hourly_rate: rate, vehicle_equipment_id: null,
 });
 
-// One hour on site.
+// One hour on site. A specialty name has no standard minutes (job-costing.js JOB_COST_STANDARD), so the measured hour is costed.
 const SVC = {
   id: 'svc-1',
   customer_id: 'cust-1',
   technician_id: 'tech-1',
-  service_type: 'Quarterly Pest Control Service',
+  service_type: 'Quarterly Termite Monitoring',
   scheduled_date: '2026-10-26',
   status: 'completed',
   estimated_price: 129,
@@ -178,12 +178,12 @@ describe('calculateJobCost with technician cost cards (GATE_TECH_COST_RATES)', (
   });
 
   describe('today: gate off, or no card in effect', () => {
-    test('gate off: loaded_labor_rate x on-job hours and drive_cost_per_stop, even with a card on file', async () => {
+    test('gate off: loaded_labor_rate x on-job hours and the standard drive, even with a card on file', async () => {
       const db = fakeDb();
       const res = await calculateJobCost('svc-1', db);
       expect(res.labor_cost).toBe(35);
-      expect(res.drive_cost).toBe(6);
-      expect(res.total_cost).toBe(41);
+      expect(res.drive_cost).toBe(11.67);
+      expect(res.total_cost).toBe(46.67);
       expect(res.costRates).toBeNull();
       expect(db.writes.serviceRecordUpdates[0].vehicle_fixed_cost).toBeNull();
       expect(db.writes.jobCosts[0]).not.toHaveProperty('vehicle_fixed_cost');
@@ -197,7 +197,7 @@ describe('calculateJobCost with technician cost cards (GATE_TECH_COST_RATES)', (
         process.env[GATE] = value;
         const res = await calculateJobCost('svc-1', fakeDb());
         expect(res.labor_cost).toBe(35);
-        expect(res.drive_cost).toBe(6);
+        expect(res.drive_cost).toBe(11.67);
       }
     });
 
@@ -215,28 +215,28 @@ describe('calculateJobCost with technician cost cards (GATE_TECH_COST_RATES)', (
       process.env[GATE] = 'true';
       const res = await calculateJobCost('svc-1', fakeDb({ technicianCards: [{ ...W2_CARD, technician_id: 'tech-2' }] }));
       expect(res.labor_cost).toBe(35);
-      expect(res.drive_cost).toBe(6);
+      expect(res.drive_cost).toBe(11.67);
     });
 
     test('gate on, a visit before the first card falls back (never the oldest card)', async () => {
       process.env[GATE] = 'true';
       const res = await calculateJobCost('svc-1', fakeDb({ svc: { ...SVC, scheduled_date: '2025-12-31' } }));
       expect(res.labor_cost).toBe(35);
-      expect(res.drive_cost).toBe(6);
+      expect(res.drive_cost).toBe(11.67);
     });
 
     test('gate on, a W-2 card for a technician with no pay rate: today\'s numbers', async () => {
       process.env[GATE] = 'true';
       const res = await calculateJobCost('svc-1', fakeDb({ technicians: [{ id: 'tech-1', pay_rate: null }] }));
       expect(res.labor_cost).toBe(35);
-      expect(res.drive_cost).toBe(6);
+      expect(res.drive_cost).toBe(11.67);
     });
 
     test('gate on, a visit with no technician: today\'s numbers', async () => {
       process.env[GATE] = 'true';
       const res = await calculateJobCost('svc-1', fakeDb({ svc: { ...SVC, technician_id: null } }));
       expect(res.labor_cost).toBe(35);
-      expect(res.drive_cost).toBe(6);
+      expect(res.drive_cost).toBe(11.67);
     });
   });
 
@@ -407,7 +407,7 @@ describe('calculateJobCost with technician cost cards (GATE_TECH_COST_RATES)', (
       delete process.env[GATE];
       const owner = await calculateJobCost('svc-owner', fakeDb({ svc: { ...SVC, id: 'svc-owner' }, record: marked('svc-owner', 36), legs }));
       const other = await calculateJobCost('svc-other', fakeDb({ svc: { ...SVC, id: 'svc-other' }, record: marked('svc-owner', 24), legs }));
-      expect(owner.drive_cost).toBe(6);
+      expect(owner.drive_cost).toBe(11.67);
       expect(other.drive_cost).toBe(0);
     });
   });
@@ -429,7 +429,7 @@ describe('calculateJobCost with technician cost cards (GATE_TECH_COST_RATES)', (
     test('before the first card the company labor rate applies', async () => {
       const res = await calculateJobCost('svc-1', fakeDb({ svc: { ...SVC, scheduled_date: '2025-12-31' }, technicianCards: cards, legs: [] }));
       expect(res.labor_cost).toBe(35);
-      expect(res.drive_cost).toBe(6);
+      expect(res.drive_cost).toBe(11.67);
     });
 
     test('a Date from the database reads as its calendar day (local midnight)', async () => {
@@ -459,7 +459,7 @@ describe('calculateJobCost with technician cost cards (GATE_TECH_COST_RATES)', (
       const offRes = await calculateJobCost('svc-1', off);
       expect(off.writes.jobCosts[0]).toMatchObject({ charged_on_job_minutes: null, charged_drive_minutes: null });
       expect(offRes.labor_cost).toBe(35);
-      expect(offRes.drive_cost).toBe(6);
+      expect(offRes.drive_cost).toBe(11.67);
       process.env[GATE] = 'true';
       const noCard = fakeDb({ jobCostColumns: COLS, technicianCards: [] });
       await calculateJobCost('svc-1', noCard);

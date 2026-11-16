@@ -1,18 +1,17 @@
 #!/usr/bin/env node
 //
-// Re-cost completed visits with the standard job costing (GATE_JOB_COST_STANDARD_MINUTES, owner ruling
+// Re-cost completed visits with the standard job costing (owner ruling
 // 2026-10-31): 20 lawn / 25 pest on-site minutes, the Average Drive Time per stop, and revenue from each
 // visit's own sources. Prints, for every service type, the visits and the revenue / material / labor / drive /
 // margin figures now on the service records ("before") and as re-costed ("after").
 //
-//   GATE_JOB_COST_STANDARD_MINUTES=true node server/scripts/job-cost-standard-recost.js --from 2026-08-01 --to 2026-10-30 \
+//   node server/scripts/job-cost-standard-recost.js --from 2026-08-01 --to 2026-10-30 \
 //     [--write --snapshot before-recost.jsonl]
 //
 // Dry run by default: every visit is re-costed inside its own transaction that is ROLLED BACK, so nothing
 // is written. Every write under calculateJobCost (job_costs, service_records, the ad-attribution sync) uses the
 // transaction handle passed in, never the app db singleton, so the roll back covers all of it. --write commits
-// each visit. Both modes need GATE_JOB_COST_STANDARD_MINUTES=true in the environment the script runs in: with it
-// off a re-cost would price the visits the old way, so the script refuses. Revenue is never re-derived over a
+// each visit. Revenue is never re-derived over a
 // recorded amount above $0 (keepRecordedRevenue); a recorded $0 falls to the visit's own price, prepay share or
 // invoice. At most 400 days per run, inclusive. No customer names are printed.
 //
@@ -150,7 +149,7 @@ async function recostVisit(conn, id, { write, calculateJobCost, keepBefore, load
 
 /**
  * @param {string[]} argv
- * @param {{conn?:object, log?:Function, gateOn?:Function, calculateJobCost?:Function, syncPricing?:Function,
+ * @param {{conn?:object, log?:Function, calculateJobCost?:Function, syncPricing?:Function,
  *   loadRecord?:Function, keepBefore?:Function}} deps injectable for tests
  */
 async function run(argv, deps = {}) {
@@ -158,10 +157,6 @@ async function run(argv, deps = {}) {
   const days = checkRange(opts.from, opts.to);
   checkSnapshot(opts);
   const log = deps.log || console.log;
-  const gateOn = deps.gateOn || (() => require('../config/feature-gates').jobCostStandardMinutesLive());
-  if (!gateOn()) {
-    throw new Error('GATE_JOB_COST_STANDARD_MINUTES is not "true" here, so nothing was costed (a re-cost would use the old numbers).');
-  }
   const conn = deps.conn || require('../models/db');
   const syncPricing = deps.syncPricing || ((c) => require('../services/pricing-engine').syncConstantsFromDB(c));
   if ((await syncPricing(conn)) !== true) {

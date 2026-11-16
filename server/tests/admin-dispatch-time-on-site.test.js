@@ -1753,11 +1753,11 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
     // Pre-fix, calculateJobCost used the arbitrary newest ambiguous record's
     // revenue and products for this visit's job_costs; only the
     // service_records write-through was guarded. The record is now nulled
-    // the moment ambiguity is detected, so it cannot reach deriveRevenue,
+    // the moment ambiguity is detected, so it cannot reach deriveRevenueFromOwnSources,
     // calcProductsCost, or the job_costs service_record_id linkage.
     expect(costingSource).toMatch(/const record = ambiguous \? null : resolvedRecord;/);
     const nullOutAt = costingSource.indexOf('const record = ambiguous ? null : resolvedRecord;');
-    const deriveRevenueAt = costingSource.indexOf('const revenue = intentionallyFree ? 0 : deriveVisitRevenue({');
+    const deriveRevenueAt = costingSource.indexOf('const revenue = intentionallyFree ? 0 : deriveRevenueFromOwnSources({');
     expect(nullOutAt).toBeGreaterThan(-1);
     expect(deriveRevenueAt).toBeGreaterThan(nullOutAt);
   });

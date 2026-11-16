@@ -51,7 +51,7 @@ has no "Triage done" comment.
   unread badge. Done and reopen are version-fenced, and dashboard-alert
   dismissals are per admin. Revisit when a second daily admin misses rows.
   (sweep #7303 B3, triaged 2026-11-01)
-- With `GATE_JOB_COST_STANDARD_MINUTES` on, a covered visit's prepay share
+- In job costing, a covered visit's prepay share
   outranks any recorded `service_records.revenue`, a hand-typed correction
   included (#7266). It changes cost and margin figures only. (sweep #7303
   overflow, triaged 2026-11-01)

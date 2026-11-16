@@ -85,7 +85,7 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
       customer_id: customerId,
       technician_id: techId,
       scheduled_date: '2026-10-26',
-      service_type: 'Quarterly Pest Control Service',
+      service_type: 'Quarterly Termite Monitoring',
       status: 'completed',
       estimated_price: 129,
       actual_start_time: '2026-10-26T14:00:00Z',
@@ -218,21 +218,21 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
       const recordId = randomUUID();
       await trx('service_records').insert({
         id: recordId, customer_id: customerId, scheduled_service_id: visitId, technician_id: techId,
-        service_date: '2026-10-26', service_type: 'Quarterly Pest Control Service', status: 'completed',
+        service_date: '2026-10-26', service_type: 'Quarterly Termite Monitoring', status: 'completed',
       });
       return recordId;
     };
     const num = (v) => Number(v);
 
-    it('gate off: $35 x 1 h labor and the $6 stop cost, even with cards on file', async () => {
+    it('gate off: $35 x 1 h labor and the standard stop cost (20 drive minutes at $35), even with cards on file', async () => {
       await addTechCard();
       await addVehicleCard();
       const res = await jobCosting.calculateJobCost(visitId, trx);
       expect(res.labor_cost).toBe(35);
-      expect(res.drive_cost).toBe(6);
+      expect(res.drive_cost).toBe(11.67);
       expect(res.costRates).toBeNull();
       expect(num((await costRow()).labor_cost)).toBe(35);
-      expect(num((await costRow()).drive_cost)).toBe(6);
+      expect(num((await costRow()).drive_cost)).toBe(11.67);
     });
 
     it('gate on, no card: the same rows as gate off', async () => {
@@ -315,7 +315,7 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
       process.env[GATE] = 'true';
       const res = await jobCosting.calculateJobCost(visitId, trx);
       expect(res.labor_cost).toBe(35);
-      expect(res.drive_cost).toBe(6);
+      expect(res.drive_cost).toBe(11.67);
     });
 
     it('cards are dated: the visit date picks the card, a later card does not re-price an earlier visit', async () => {
@@ -342,7 +342,7 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
       await jobCosting.calculateJobCost(visitId, trx);
       const without = await trx('service_records').where({ id: recordId }).first();
       expect(without.vehicle_fixed_cost).toBeNull();
-      expect(Number(without.drive_cost)).toBe(6);
+      expect(Number(without.drive_cost)).toBe(11.67);
     });
 
     it('a raise after the card does not re-cost a visit the card covers (the card keeps its wage)', async () => {
@@ -402,7 +402,7 @@ postgres('technician and vehicle cost cards on the migrated schema', () => {
       for (const [id, minutes] of [[visitId, 36], [other, 24]]) {
         await trx('service_records').insert({
           id: randomUUID(), customer_id: customerId, scheduled_service_id: id, technician_id: techId,
-          service_date: '2026-10-26', service_type: 'Quarterly Pest Control Service', status: 'completed',
+          service_date: '2026-10-26', service_type: 'Quarterly Termite Monitoring', status: 'completed',
           structured_notes: mark(minutes),
         });
       }
