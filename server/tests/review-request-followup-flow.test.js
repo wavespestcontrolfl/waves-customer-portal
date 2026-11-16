@@ -149,6 +149,7 @@ describe('review request follow-up flow', () => {
       if (table === 'customers') return customerQuery;
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
     // Service contact stored as a full name — the {first_name} slot must be the
@@ -202,6 +203,7 @@ describe('review request follow-up flow', () => {
       if (table === 'review_requests') return reviewRequestQueries.shift();
       if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Jamie', phone: '+19415550123', has_left_google_review: false }) });
       if (table === 'service_records' || table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() });
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550202', name: 'Sam Spouse', role: 'service_contact' });
@@ -255,6 +257,7 @@ describe('review request follow-up flow', () => {
       if (table === 'customers') return customerQuery;
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
@@ -317,6 +320,7 @@ describe('review request follow-up flow', () => {
       if (table === 'customers') return customerQuery;
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
@@ -385,6 +389,7 @@ describe('review request follow-up flow', () => {
       if (table === 'sms_log') return resolvesTo([]);
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue({ service_date: '2026-05-29' }) });
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null) });
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
@@ -477,6 +482,7 @@ describe('review request follow-up flow', () => {
       if (table === 'sms_log') return resolvesTo([]);
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue({ service_date: '2026-05-29' }) });
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null) });
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
@@ -547,6 +553,7 @@ describe('review request follow-up flow', () => {
       if (table === 'sms_log') return resolvesTo([]);
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue({ service_date: '2026-05-29' }) });
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null) });
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550199', name: 'Robin' });
@@ -612,6 +619,7 @@ describe('review request follow-up flow', () => {
       if (table === 'sms_log') return resolvesTo([]);
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue({ service_date: '2026-05-29' }) });
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null) });
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
@@ -671,6 +679,7 @@ describe('review request follow-up flow', () => {
       }
       if (table === 'review_requests') return reviewRequestQueries.shift();
       if (table === 'service_records') return serviceRecordQuery;
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -724,6 +733,7 @@ describe('review request follow-up flow', () => {
       }
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -756,6 +766,7 @@ describe('review request follow-up flow', () => {
       }
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -798,6 +809,7 @@ describe('review request follow-up flow', () => {
       }
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -838,6 +850,7 @@ describe('review request follow-up flow', () => {
       }
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -916,6 +929,7 @@ describe('review request follow-up flow', () => {
       if (table === 'review_requests') return reviewRequestQueries.shift();
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -939,6 +953,7 @@ describe('review request follow-up flow', () => {
       if (table === 'review_requests') return updateQuery;
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -957,6 +972,7 @@ describe('review request follow-up flow', () => {
       if (table === 'review_requests') return updateQuery;
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -978,6 +994,7 @@ describe('review request follow-up flow', () => {
       if (table === 'review_requests') return updateQuery;
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -1009,6 +1026,7 @@ describe('review request follow-up flow', () => {
       if (table === 'sms_log') return smsLogQuery;
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -1037,6 +1055,7 @@ describe('review request follow-up flow', () => {
       if (table === 'customers') return customersQuery;
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
     return { rrQuery, smsLogQuery };
@@ -1093,6 +1112,7 @@ describe('review request follow-up flow', () => {
       if (table === 'customers') return customersQuery;
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -1127,6 +1147,7 @@ describe('review request follow-up flow', () => {
         if (table === 'review_requests') return q;
         if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
         if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
       });
 
@@ -1166,6 +1187,7 @@ describe('review request follow-up flow', () => {
         if (table === 'sms_log') return smsLogQuery;
         if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
         if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
       });
       expect(await ReviewService.findInlineAwaitingEmail('cust-1')).toEqual({ id: 'rr-stranded' });
@@ -1181,6 +1203,7 @@ describe('review request follow-up flow', () => {
         if (table === 'customers') return customersQuery;
         if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
         if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
       });
       require('../services/twilio').findOutboundMessageSince.mockResolvedValueOnce({ found: false });
@@ -1228,6 +1251,7 @@ describe('review request follow-up flow', () => {
         }
         if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
         if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
       });
     };
@@ -1453,6 +1477,7 @@ describe('review request follow-up flow', () => {
           if (table === 'review_requests') return chain({ update: rrUpdate });
           if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue(customerRow) });
           if (table === 'service_contact_notification_prefs') return chain({ select: jest.fn().mockResolvedValue(prefRows) });
+          if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
           throw new Error(`Unexpected table query: ${table}`);
         });
         // The contact's row: email off — written between sendOutreachTouch's read and the handoff.
@@ -1486,6 +1511,7 @@ describe('review request follow-up flow', () => {
         if (table === 'review_requests') return chain({ update: rrUpdateOneOff, first: jest.fn().mockResolvedValue({ status: 'sent' }) });
         if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
         if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
       });
       const args = { request: { id: 'rr-7' }, customer: { id: 'cust-1', first_name: 'Megan' }, contact: { email: 'megan@example.com', name: 'Megan' }, reviewUrl: 'https://x/rate/t', techName: 'Adam', manageRetryVia: null };
@@ -1635,6 +1661,7 @@ describe('review request follow-up flow', () => {
       }
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -1648,6 +1675,7 @@ describe('review request follow-up flow', () => {
       if (table === 'review_requests') return rrQuery;
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
     const mine = new Date('2026-06-03T14:00:00.000Z');
@@ -1678,6 +1706,7 @@ describe('review request follow-up flow', () => {
       if (table === 'review_sequences') return chain({ first: jest.fn().mockResolvedValue(null) });
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -1693,6 +1722,7 @@ describe('review request follow-up flow', () => {
       if (table === 'review_requests') return updateQuery;
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -1722,6 +1752,7 @@ describe('review request follow-up flow', () => {
       }
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -1766,6 +1797,7 @@ describe('review request follow-up flow', () => {
       }
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -1804,6 +1836,7 @@ describe('review request follow-up flow', () => {
       if (table === 'review_requests') return rrChain;
       if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
     });
     // The row already has a minted code — the second insert must carry the
@@ -1843,6 +1876,7 @@ describe('review request follow-up flow', () => {
         }
         if (table === 'service_records') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed visit
         if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(null), orderBy: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis() }); // click guard: no completed scheduled visit
+      if (table === 'google_reviews') return chain({ first: jest.fn().mockResolvedValue(undefined) }); // click guard: no matcher decision names the customer
       throw new Error(`Unexpected table query: ${table}`);
       });
 

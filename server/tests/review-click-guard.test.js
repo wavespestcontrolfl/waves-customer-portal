@@ -24,6 +24,11 @@ function fakeDb({ serviceDate = null, scheduledDate = null, clicks = [] } = {}) 
       };
       return q;
     }
+    // No matcher decision names the customer: only the click arm can stop the ask here.
+    if (table === 'google_reviews') {
+      const q = { where: () => q, whereIn: () => q, whereNull: () => q, first: async () => undefined };
+      return q;
+    }
     throw new Error(`unexpected table ${table}`);
   };
 }
@@ -90,17 +95,11 @@ describe('newestCompletedVisitAnchor ordering matches the anchor instant', () =>
   });
 });
 
-// GATE_REVIEW_PROBABLE_REVIEWER_GUARD (owner 2026-10-31, review matching plan PR 4): an ask also
+// Probable reviewer (owner 2026-10-31, review matching plan PR 4): an ask also
 // stops, whatever its visit, when an open review-matcher decision names the customer. Texts are not
 // read here (the fake throws on any other table): an "I left a review" text is evidence inside the
 // matcher, next to a real review. Synthetic names only.
 describe('probable reviewer', () => {
-  const OLD = process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD;
-  afterEach(() => {
-    if (OLD === undefined) delete process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD;
-    else process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD = OLD;
-  });
-
   function fakeReviewDb({ reviews = [] } = {}) {
     return (table) => {
       if (table === 'google_reviews') {
@@ -125,21 +124,14 @@ describe('probable reviewer', () => {
 
   const openPause = { name_match_customer_id: 'cust-1', name_match_result: 'pause', customer_id: null, missing_since: null };
 
-  test('gate off: an open matcher decision changes nothing', async () => {
-    delete process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD;
-    expect(await guard.touchSuppressedByClick('cust-1', { fallbackAnchor: '2026-10-20T15:00:00Z' }, fakeReviewDb({ reviews: [openPause] }))).toBe(false);
-  });
-
-  test('gate on: an open matcher decision naming the customer stops every ask, with or without a visit anchor', async () => {
-    process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD = 'true';
+  test('an open matcher decision naming the customer stops every ask, with or without a visit anchor', async () => {
     const db = fakeReviewDb({ reviews: [openPause] });
     expect(await guard.touchSuppressedByClick('cust-1', {}, db)).toBe(true);
     expect(await guard.askSuppressedByClick({ customer_id: 'cust-1', created_at: '2026-10-20T15:00:00Z' }, db)).toBe(true);
     expect(await guard.touchSuppressedByClick('cust-2', {}, db)).toBe(false);
   });
 
-  test('gate on: a decision that is linked, removed, or only a queue entry does not stop the ask', async () => {
-    process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD = 'true';
+  test('a decision that is linked, removed, or only a queue entry does not stop the ask', async () => {
     const db = fakeReviewDb({
       reviews: [
         { ...openPause, customer_id: 'cust-9' },

@@ -6756,27 +6756,6 @@ function customerRouteCheckMode() {
   return value === 'true' ? 'on' : 'off';
 }
 
-// GATE_REVIEW_NAME_MATCH_V2 read at CALL time (owner 2026-10-31, review matching plan PR 3):
-// 'off' | 'shadow' | 'on'. After each hourly review sync, services/review-name-match.js scores every
-// live Google review against every customer (names, first known contact, activity) and records the
-// decision on google_reviews.name_match_*. shadow = score and log the counts, write nothing; on =
-// write the decisions, which the Reviews match queue lists for one tap. Nothing links, marks or
-// sends either way. Unset is the kill, no redeploy.
-function reviewNameMatchMode() {
-  const value = String(process.env.GATE_REVIEW_NAME_MATCH_V2 || '').trim().toLowerCase();
-  if (value === 'shadow') return 'shadow';
-  return value === 'true' ? 'on' : 'off';
-}
-
-// GATE_REVIEW_PROBABLE_REVIEWER_GUARD read at CALL time (owner 2026-10-31, review matching plan
-// PR 4): 'true' = every review ask, at the moment it would leave and inside the per-customer
-// review-send lock, also stops when the customer probably already left a Google review: an open
-// review-matcher decision names them (services/review-name-match.js; a person's Dismiss closes it;
-// services/review-click-guard.js). Covers the first-ask lock. Unset = today's guard, no redeploy.
-function reviewProbableReviewerGuardLive() {
-  return String(process.env.GATE_REVIEW_PROBABLE_REVIEWER_GUARD || '').trim().toLowerCase() === 'true';
-}
-
 // GATE_APP_RATING_PROMPT read at CALL time (owner 2026-11-02, "do the rating for everyone"):
 // 'off' | 'shadow' | 'on'. The Waves customer app (a build with the in-app review plugin) asks
 // POST /api/customer/app-rating/claim at most once a day from its home screen; the server answers
@@ -8624,8 +8603,6 @@ function movingAutoSendLive() {
 }
 // GATE_MOVING_AUTO_SEND reader, on its own line so gate PRs never conflict.
 module.exports.movingAutoSendLive = movingAutoSendLive;
-module.exports.reviewNameMatchMode = reviewNameMatchMode;
-module.exports.reviewProbableReviewerGuardLive = reviewProbableReviewerGuardLive;
 // GATE_APP_RATING_PROMPT reader, on its own line so gate PRs never conflict.
 module.exports.appRatingPromptMode = appRatingPromptMode;
 // GATE_QUICKMOVE_CUSTOMER_PICK read at CALL time (so a flip needs no redeploy); strict 'true', dark.

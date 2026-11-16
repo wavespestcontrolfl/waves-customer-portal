@@ -630,8 +630,7 @@ function serializeAttributionQueueItem(review, customer, reason) {
   };
 }
 
-// The review matcher's decisions this queue lists (services/review-name-match.js,
-// GATE_REVIEW_NAME_MATCH_V2): each names one customer for a person to confirm with Match or rule out
+// The review matcher's decisions this queue lists (services/review-name-match.js): each names one customer for a person to confirm with Match or rule out
 // with Dismiss. 'disputed' is a link whose customer's first contact came after the review.
 const NAME_MATCH_REASONS = Object.freeze({
   link: 'name_match_link',
