@@ -20,7 +20,7 @@ jest.mock('../services/call-hold', () => ({
   HOLD_LIMIT_SEC: 300,
   heldSeconds: jest.fn(() => 0),
   startHoldVoicemail: jest.fn(),
-  resumeRecording: jest.fn(async () => {}),
+  resumeRecording: jest.fn(async () => true),
 }));
 
 const twilio = require('twilio');
@@ -68,7 +68,7 @@ beforeEach(() => {
   callHold.roomIsOpen.mockReset().mockResolvedValue(true);
   callHold.heldSeconds.mockReset().mockReturnValue(0);
   callHold.startHoldVoicemail.mockReset();
-  callHold.resumeRecording.mockReset().mockResolvedValue(undefined);
+  callHold.resumeRecording.mockReset().mockResolvedValue(true);
 });
 
 describe('staff join <Dial>', () => {
@@ -394,6 +394,55 @@ describe('/call-complete?conf=1 after a hold voicemail', () => {
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', answered_by: 'human' }));
     expect(update.mock.calls[0][0]).not.toHaveProperty('call_outcome');
     expect(res.body).not.toContain('<Record');
+  });
+
+  const NO_MESSAGE = response(`${say('Sorry, we could not take a message right now. We will call you right back.')}<Hangup/>`);
+  const withVoicemail = () => callHold.holdState.mockResolvedValue({ found: true, open: false, closed: false, voicemailAt: '2026-11-17T15:05:00Z' });
+  // The webhook waits between resume tries: run it on fake time so the suite stays fast.
+  const completeOnFakeTime = async () => {
+    jest.useFakeTimers();
+    try {
+      const pending = complete();
+      await jest.advanceTimersByTimeAsync(5000);
+      return await pending;
+    } finally {
+      jest.useRealTimers();
+    }
+  };
+
+  test('a resume that fails once then succeeds still plays the normal voicemail', async () => {
+    withVoicemail();
+    callHold.resumeRecording.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const res = await completeOnFakeTime();
+    expect(res.body).toBe(VOICEMAIL);
+    expect(callHold.resumeRecording).toHaveBeenCalledTimes(2);
+  });
+
+  test('a resume that keeps failing never invites a message: the no-message line and a hangup, no tone, no pause', async () => {
+    withVoicemail();
+    callHold.resumeRecording.mockResolvedValue(false);
+    const res = await completeOnFakeTime();
+    expect(res.body).toBe(NO_MESSAGE);
+    expect(callHold.resumeRecording).toHaveBeenCalledTimes(3); // bounded: one try and two more
+    expect(res.body).not.toContain(CALLER_VOICEMAIL);
+    expect(res.body).not.toContain('voicemail-tone');
+    expect(res.body).not.toContain('<Pause');
+    expect(res.body).not.toContain('<Record');
+    expect(callHold.startHoldVoicemail).not.toHaveBeenCalled(); // the route raises no second bell: the claim's one bell stands
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', answered_by: 'human' })); // still an answered call
+  });
+
+  test('a resume try that hangs is cut off, and the answer still comes within the webhook limit', async () => {
+    withVoicemail();
+    callHold.resumeRecording.mockImplementation(() => new Promise(() => {}));
+    jest.useFakeTimers();
+    try {
+      const pending = complete();
+      await jest.advanceTimersByTimeAsync(12000);
+      expect((await pending).body).toBe(NO_MESSAGE);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('no hold voicemail: today\'s empty answer, byte for byte, and the recording is left alone', async () => {

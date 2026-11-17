@@ -125,12 +125,26 @@ async function pauseRecording(callSid) {
   }
 }
 
+// true when Twilio accepted the resume, false when it did not. Never throws.
 async function resumeRecording(callSid) {
   try {
     await client().calls(callSid).recordings('Twilio.CURRENT').update({ status: 'in-progress' });
+    return true;
   } catch (err) {
     logger.error(`[call-hold] recording NOT resumed for ${masked(callSid)} (${errorCode(err)}); the rest of the recording is silent`);
+    return false;
   }
+}
+
+// Pause the recording for a hold, then check the pause did not land AFTER the voicemail's resume. The voicemail
+// claim commits before it ends the room, and the room end comes before /call-complete resumes the recording, so a
+// re-read after the pause finished has two outcomes: it sees the voicemail stamp (or the hold gone), and this resumes
+// the recording itself; or it does not, so the claim commits after the pause finished and the resume comes later.
+// A state read that fails leaves the pause (the hold is the likely case). Never throws.
+async function pauseRecordingForHold(callSid) {
+  await pauseRecording(callSid);
+  const state = await holdState(callSid);
+  if (!state.error && (state.voicemailAt || !state.open)) await resumeRecording(callSid);
 }
 
 // One claim: never while a hold is open, never after the caller left. Returns the open hold or null.
@@ -186,7 +200,7 @@ async function startHold(callSid, { by = 'star', legSid = null } = {}) {
       return 'no_room';
     }
     await holdParticipant(callSid, roomSid);
-    await pauseRecording(callSid);
+    await pauseRecordingForHold(callSid);
     logger.info(`[call-hold] caller ${masked(callSid)} on hold (${by})`);
     return 'held';
   } catch (err) {
@@ -304,7 +318,7 @@ async function holdAgain(callSid) {
   try {
     const roomSid = await findRoomSid(callSid);
     if (roomSid) await holdParticipant(callSid, roomSid);
-    await pauseRecording(callSid);
+    await pauseRecordingForHold(callSid);
   } catch (err) {
     logger.error(`[call-hold] caller ${masked(callSid)} not put back on hold (${errorCode(err)})`);
   }
