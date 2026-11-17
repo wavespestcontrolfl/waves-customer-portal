@@ -300,7 +300,10 @@ function planTransferAccept(hold, ev, nowMs, closed) {
 }
 
 // The owner's call ended without a press 1 (or was never placed). With the staff gone, the caller goes to voicemail.
-function planTransferEnd(hold, ev, nowMs, closed) {
+function planTransferEnd(hold, ev, nowMs, closed, winner = null) {
+  // He took the call between the status callback's read and this decision: his leg is the winner, so its end is the
+  // winner's end ('winner'; the caller of this hands it on), never a transfer nobody took.
+  if (ev.legSid && ev.legSid === winner) return { next: hold, answer: 'winner' };
   const t = hold?.transfer;
   const matches = t && t.n === ev.n && t.status === 'ringing' && (!ev.legSid || !t.leg_sid || t.leg_sid === ev.legSid);
   if (!matches) return { next: hold, answer: 'stale' };
@@ -385,7 +388,7 @@ function planEvent(hold, ev, nowMs, closed, winner = null) {
     case 'transfer_start': return planTransferStart(hold, ev, nowMs, closed);
     case 'transfer_placed': return planTransferPlaced(hold, ev, winner);
     case 'transfer_accept': return planTransferAccept(hold, ev, nowMs, closed);
-    case 'transfer_end': return planTransferEnd(hold, ev, nowMs, closed);
+    case 'transfer_end': return planTransferEnd(hold, ev, nowMs, closed, winner);
     default: return { next: hold, answer: null };
   }
 }
@@ -981,7 +984,8 @@ async function acceptTransfer(callSid, { n, legSid }) {
   }
 }
 
-// The owner's call ended without a press 1. Answers the planner's: 'failed' | 'voicemail' | 'stale'. A database error
+// The owner's call ended without a press 1. Answers the planner's: 'failed' | 'voicemail' | 'stale' | 'winner' (his leg
+// became the winning leg before this decision: the caller hands the end to the winner's end). A database error
 // propagates (the status callback's retry in call-conference-path.js finishes it), as staffLeft does.
 async function endTransfer(callSid, { n, legSid = null, reason = null }) {
   const decision = await decide(callSid, { type: 'transfer_end', n, legSid, reason });

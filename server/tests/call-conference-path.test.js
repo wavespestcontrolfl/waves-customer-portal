@@ -558,6 +558,17 @@ describe('the warm transfer: the owner call ends (onTransferLegStatus)', () => {
     expect(log.updates).toEqual([]);
   });
 
+  test('he took the call between the read and the hold\'s decision (endTransfer answers winner): the winner end runs', async () => {
+    fakeCallLog({ conference_path: base() });
+    callHold.endTransfer.mockResolvedValue('winner');
+    callHold.staffLeft.mockResolvedValue('ordinary');
+    const log = fakeTwilio({ rooms });
+    expect(await ended({ status: 'completed' })).toBe('room_ended');
+    expect(callHold.endTransfer).toHaveBeenCalledWith(SID, { n: 1, legSid: TLEG, reason: 'completed' });
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID, { legSid: TLEG });
+    expect(log.roomUpdates).toEqual([{ sid: 'CF1', status: 'completed' }]);
+  });
+
   test('the call he took is the winning leg: its end is the winner end (the room ends, as for any staff)', async () => {
     fakeCallLog({ conference_path: { ...base(), accepted_leg_sid: TLEG } });
     callHold.staffLeft.mockResolvedValue('ordinary');

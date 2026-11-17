@@ -372,7 +372,10 @@ async function handleTransferLegStatus({ callSid, n, legSid, status }) {
   const state = await loadState(callSid);
   if (!state) return 'no_state';
   if (state.accepted_leg_sid === legSid) return onWinnerLegEnded(callSid, state, legSid);
-  return require('./call-hold').endTransfer(callSid, { n, legSid, reason: status });
+  const answer = await require('./call-hold').endTransfer(callSid, { n, legSid, reason: status });
+  if (answer !== 'winner') return answer;
+  // He took the call between the read above and the hold's decision: his leg's end is the winner's end after all.
+  return onWinnerLegEnded(callSid, (await loadState(callSid)) || state, legSid);
 }
 
 const onTransferLegStatus = (args, attempt = 0) => retryLegEnd(handleTransferLegStatus, 'transfer leg end', args, attempt);

@@ -1909,6 +1909,14 @@ describe('planner: the warm transfer (pure)', () => {
       expect(planEvent(heldHold(), { type: 'staff_left', legSid: LEG }, T, false, LEG).answer).toBe('voicemail');
     });
 
+    test('transfer_end for the winning leg (he took the call after the callback read the state): winner, nothing written', () => {
+      const before = taken();
+      expect(planEvent(before, { type: 'transfer_end', n: 1, legSid: TLEG, reason: 'completed' }, T, false, TLEG)).toEqual({ next: before, answer: 'winner' });
+      // A ringing transfer's end with another winner decides as before.
+      const ringing = ringingHold({ leg_sid: TLEG });
+      expect(planEvent(ringing, { type: 'transfer_end', n: 1, legSid: TLEG, reason: 'no-answer' }, T, false, LEG).answer).toBe('failed');
+    });
+
     test('transfer_placed for the winning leg (he took the call before the write landed): ok, nothing written', () => {
       const before = taken();
       expect(planEvent(before, { type: 'transfer_placed', n: 1, legSid: TLEG }, T, false, TLEG)).toEqual({ next: before, answer: 'ok' });
@@ -2322,6 +2330,14 @@ describe('the warm transfer: acceptTransfer', () => {
     const later = fakeTwilio();
     expect(await accept()).toBe('no_room');
     expect(later).toEqual([]);
+  });
+
+  test('his call ends after he took it, read as a transfer nobody took: endTransfer answers winner, nothing written or sent', async () => {
+    seed(ringingHold({ status: 'accepted', leg_sid: TLEG }, { phase: 'returned', applied: 'returned', ret_by: 'transfer' }), { accepted_leg_sid: TLEG });
+    const events = fakeTwilio();
+    expect(await hold.endTransfer(SID, { n: 1, legSid: TLEG, reason: 'completed' })).toBe('winner');
+    expect(events).toEqual([]);
+    expect(db.__state.writes).toEqual([]);
   });
 
   test('a staff leg end read as the winner just before he took the call: not_winner under the lock, nothing written or sent', async () => {
