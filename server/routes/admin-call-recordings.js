@@ -231,7 +231,12 @@ router.get('/live', requireAdmin, async (req, res, next) => {
         .orderBy([{ column: 'spoken_at', order: 'desc' }, { column: 'id', order: 'desc' }])
         .limit(LIVE_CALL_LINES)
         .select('speaker', 'text', 'spoken_at');
-      if (liveAssist) liveAssist.refreshAssistIfDue(row, { customerId: customer?.id || null });
+      // Fire and forget: the response does not wait. The service catches its own errors; this is the boundary for the
+      // unexpected. The log carries a code or name only (no call SID, no caller text, no message).
+      if (liveAssist) {
+        void liveAssist.refreshAssistIfDue(row, { customerId: customer?.id || null })
+          .catch((err) => logger.warn(`[call-recordings] live assist refresh rejected: ${err?.code || err?.name || 'error'}`));
+      }
       return {
         id: row.id,
         started_at: meta.live_transcription?.live_at || null,

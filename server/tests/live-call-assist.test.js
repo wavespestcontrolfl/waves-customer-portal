@@ -40,7 +40,9 @@ jest.mock('../models/db', () => {
       const cas = q.raws.find((r) => r.sql.includes("'assist' ->> 'runs'"));
       const l = live();
       if (cas) {
-        if ((Number(l.assist?.runs) || 0) !== cas.bindings[0] || l.stopped_at) return 0;
+        // The claim also checks stopped_at; the result save (the fence) checks only the run number.
+        const claim = q.raws.some((r) => r.sql.includes('stopped_at'));
+        if ((Number(l.assist?.runs) || 0) !== cas.bindings[0] || (claim && l.stopped_at)) return 0;
       }
       l.assist = { ...(l.assist || {}), ...JSON.parse(patch.metadata.bindings[0]) };
       return 1;
@@ -563,6 +565,53 @@ describe('live call assist self-booking gate', () => {
     expect(assistForPanel(meta)).toMatchObject({ times: '2026-11-11 at 9:00 AM' });
     schedulingOff();
     expect(assistForPanel(meta)).toBeNull();
+  });
+});
+
+describe('live call assist out-of-order runs', () => {
+  const deferred = () => { let resolve; let reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
+  const until = async (fn) => { for (let i = 0; i < 200 && !fn(); i += 1) await Promise.resolve(); };
+  const OLD = { ...PEST, intent: 'Older read', address_line1: '12 Example St', city: 'Bradenton', zip: '34202' };
+  const NEW = { ...PEST, intent: 'Newer read', address_line1: '9 Other Rd', city: 'Venice', zip: '34285' };
+
+  // Run 1 stalls in its price lookup past the 45 s claim gap; run 2 claims, finishes and saves first.
+  async function newerFinishesFirst(settleOlder) {
+    const slow = deferred();
+    mockPricing.mockImplementationOnce(() => slow.promise);
+    mockCreate.mockResolvedValueOnce(reply(OLD));
+    const older = run();
+    await until(() => mockPricing.mock.calls.length === 1);
+    expect(assist().runs).toBe(1);
+    speak(1);
+    advance(50 * 1000);
+    mockCreate.mockResolvedValueOnce(reply(NEW));
+    mockPricing.mockResolvedValueOnce('Standard pest control pricing: $120 per application on the quarterly plan');
+    await expect(run()).resolves.toEqual({ ran: true, saved: true });
+    const after = JSON.parse(JSON.stringify(assist()));
+    settleOlder(slow);
+    const result = await older;
+    return { after, result };
+  }
+
+  test('an older run that finishes last does not overwrite the newer facts, price and times', async () => {
+    const { after, result } = await newerFinishesFirst((slow) => slow.resolve('Standard pest control pricing: $99 per application'));
+    expect(after).toMatchObject({ runs: 2, intent: 'Newer read', price: expect.stringContaining('$120') });
+    expect(result).toEqual({ ran: true, saved: false });
+    expect(assist()).toEqual(after);
+    expect(assist().facts.address_line1).toBe('9 Other Rd');
+  });
+
+  test("an older run's lookup error leaves the newer state alone too", async () => {
+    const { after, result } = await newerFinishesFirst((slow) => slow.reject(new Error('db down')));
+    expect(result).toEqual({ ran: true, saved: false });
+    expect(assist()).toEqual(after);
+    expect(assist().key).toEqual(expect.any(String));
+    expect(assist().price).toContain('$120');
+  });
+
+  test('a run that finishes in order still saves', async () => {
+    await expect(run()).resolves.toEqual({ ran: true, saved: true });
+    expect(assist()).toMatchObject({ runs: 1, intent: 'Wants quarterly pest control' });
   });
 });
 

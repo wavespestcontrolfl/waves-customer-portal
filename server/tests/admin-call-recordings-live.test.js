@@ -19,6 +19,7 @@ jest.mock('../middleware/admin-auth', () => ({
 
 const express = require('express');
 const db = require('../models/db');
+const logger = require('../services/logger');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const router = require('../routes/admin-call-recordings');
 
@@ -92,6 +93,25 @@ describe('GET /admin/call-recordings/live: assist (GATE_CALL_LIVE_ASSIST)', () =
     expect(mockAssist.refreshAssistIfDue).toHaveBeenCalledTimes(1);
     expect(mockAssist.refreshAssistIfDue.mock.calls[0][0].twilio_call_sid).toBe(SID_A);
     expect(mockAssist.refreshAssistIfDue.mock.calls[0][1]).toEqual({ customerId: 'cust-1' });
+  });
+
+  test('a refresh that rejects still lets the response through with the calls, and the log carries no SID or message', async () => {
+    mockAssist.refreshAssistIfDue.mockImplementationOnce(() => Promise.reject(Object.assign(new Error(`boom ${SID_A} Casey Sample`), { code: 'EBOOM' })));
+    mockDb({ calls: [row(1)], utterances: { [SID_A]: [utt(1)] } });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/live`);
+      expect(res.status).toBe(200);
+      const { calls } = await res.json();
+      expect(calls).toHaveLength(1);
+      expect(calls[0].lines).toHaveLength(1);
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockAssist.refreshAssistIfDue).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const logged = logger.warn.mock.calls[0].join(' ');
+    expect(logged).toContain('EBOOM');
+    expect(logged).not.toContain(SID_A);
+    expect(logged).not.toMatch(/boom|Casey|Sample/);
   });
 
   test('gate off: assist is null on every call and nothing is refreshed', async () => {

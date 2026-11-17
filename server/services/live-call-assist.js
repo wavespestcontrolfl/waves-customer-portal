@@ -143,15 +143,16 @@ function mergeFacts(previous, next, withdrawn = []) {
 
 // Decides whether a run is due, then stamps it with a compare-and-swap on assist.runs: of two polls that read the
 // same count, one UPDATE matches and wins. Cheap checks first, so most polls cost no query beyond the row.
+// Returns the run's generation (its runs number, 1 or more) or 0 when no run is due or the claim was lost.
 async function claimRun(callSid, live, now) {
   const assist = live.assist || {};
   const runs = Number(assist.runs) || 0;
-  if (live.stopped_at || runs >= MAX_RUNS) return false;
+  if (live.stopped_at || runs >= MAX_RUNS) return 0;
   const last = Date.parse(assist.at);
-  if (Number.isFinite(last) && now.getTime() - last < MIN_GAP_MS) return false;
+  if (Number.isFinite(last) && now.getTime() - last < MIN_GAP_MS) return 0;
   const [{ n }] = await db('call_live_utterances').where({ call_sid: callSid, speaker: 'caller' }).count({ n: '*' });
   const callerCount = Number(n) || 0;
-  if (runs === 0 ? callerCount < FIRST_RUN_CALLERS : callerCount - (Number(assist.caller_count) || 0) < 1) return false;
+  if (runs === 0 ? callerCount < FIRST_RUN_CALLERS : callerCount - (Number(assist.caller_count) || 0) < 1) return 0;
   const won = await db('call_log')
     .where('twilio_call_sid', callSid)
     .whereRaw("COALESCE((metadata -> 'live_transcription' -> 'assist' ->> 'runs')::int, 0) = ?", [runs])
@@ -162,17 +163,24 @@ async function claimRun(callSid, live, now) {
         [JSON.stringify({ runs: runs + 1, at: now.toISOString(), caller_count: callerCount })],
       ),
     });
-  return won > 0;
+  return won > 0 ? runs + 1 : 0;
 }
 
-// Merges a finished run's fields into assist without touching runs, at or caller_count.
-async function saveResult(callSid, patch) {
-  await db('call_log').where('twilio_call_sid', callSid).update({
-    metadata: db.raw(
-      "jsonb_set(metadata, '{live_transcription,assist}', COALESCE(metadata -> 'live_transcription' -> 'assist', '{}'::jsonb) || ?::jsonb, true)",
-      [JSON.stringify(patch)],
-    ),
-  });
+// Merges a finished run's fields into assist without touching runs, at or caller_count. Fenced by the run's
+// generation: a run that took longer than the claim gap finds assist.runs already moved on by a newer claim, and its
+// stale facts, price and times are not written. True when the result was saved. The only write a run makes after its
+// claim, so the lookup-error stamp (key null) is fenced the same way.
+async function saveResult(callSid, patch, generation) {
+  const saved = await db('call_log')
+    .where('twilio_call_sid', callSid)
+    .whereRaw("COALESCE((metadata -> 'live_transcription' -> 'assist' ->> 'runs')::int, 0) = ?", [generation])
+    .update({
+      metadata: db.raw(
+        "jsonb_set(metadata, '{live_transcription,assist}', COALESCE(metadata -> 'live_transcription' -> 'assist', '{}'::jsonb) || ?::jsonb, true)",
+        [JSON.stringify(patch)],
+      ),
+    });
+  return saved > 0;
 }
 
 // The last ~3 minutes, oldest first, "Caller:" / "Agent:", cut to the newest 2,000 characters.
@@ -309,7 +317,8 @@ async function refreshAssistIfDue(callRow, { customerId = null } = {}) {
     const callSid = callRow?.twilio_call_sid;
     const live = meta(callRow?.metadata).live_transcription;
     if (!callSid || !live) return { ran: false, reason: 'not_live' };
-    if (!(await claimRun(callSid, live, new Date()))) return { ran: false, reason: 'not_due' };
+    const generation = await claimRun(callSid, live, new Date());
+    if (!generation) return { ran: false, reason: 'not_due' };
     const transcript = await transcriptWindow(callSid);
     if (!transcript) return { ran: true, saved: false };
     const read = await readCall(transcript);
@@ -323,8 +332,7 @@ async function refreshAssistIfDue(callRow, { customerId = null } = {}) {
     const scheduling = schedulingOn();
     const key = lookupKey(facts, useAccount ? customer.id : null, scheduling);
     const patch = { intent: read.intent, service: facts.service, facts, ...(await priceAndTimes(facts, customer, useAccount, key, previous, scheduling)) };
-    await saveResult(callSid, patch);
-    return { ran: true, saved: true };
+    return { ran: true, saved: await saveResult(callSid, patch, generation) };
   } catch (err) {
     logger.warn(`[live-call-assist] refresh failed: ${err?.code || err?.name || 'error'}`);
     return { ran: false, reason: 'error' };
