@@ -33,12 +33,17 @@ const SPEAKER_BY_TRACK = { inbound_track: 'caller', outbound_track: 'staff' };
 // across utterances ("4242 4242" … "4242 4242") is caught. The post-call scrub uses the same rule
 // on diarized segments (utils/pan-scrub scrubSegments).
 const SCRUB_WINDOW = 6;
-// A short code-shaped utterance (an expiry or a CVV) right after a masked card number is masked
-// too: the masked text no longer shows the card to the window scrub. Same shape and gap rule as
-// the post-call scrub's code-tail absorb.
+// A short code-shaped utterance (an expiry or a CVV) soon after a masked card number is masked
+// too: the masked text no longer shows the card to the window scrub. The link is the same speaker's
+// latest masked line within the gap, so a staff question in between ("And the security code?")
+// does not break it. Same shape and gap rule as the post-call scrub's code-tail absorb.
 const CODE_TAIL_RE = /^[\s,./:-]*(?:(?:\d{1,4}|zero|oh|one|two|three|four|five|six|seven|eight|nine)[\s,./:-]*){1,4}$/i;
 const CODE_TAIL_GAP_MS = 30 * 1000;
 const MAX_TEXT = 4000;
+// The post-call card-number quarantine ran on this call: purgeLiveUtterances stamped it, or the
+// recording's own scrub flagged a card number (transcription_metadata.pan_detected).
+const QUARANTINED_SQL = "((metadata #>> '{live_transcription,quarantined_at}') IS NOT NULL"
+  + " OR COALESCE(transcription_metadata ->> 'pan_detected', '') = 'true') AS quarantined";
 
 function maskSid(sid) {
   const value = String(sid || '');
@@ -169,9 +174,9 @@ function scrubWindow(recent, incoming) {
   for (let i = 0; i < segments.length; i += 1) {
     const seg = segments[i];
     const text = typeof scrubbed?.[i]?.text === 'string' ? scrubbed[i].text : seg.text;
-    const prev = out[i - 1];
-    const codeTail = !!prev && prev.panMasked && prev.speaker === seg.speaker
-      && seg.spokenAt - prev.spokenAt <= CODE_TAIL_GAP_MS && /\S/.test(text) && CODE_TAIL_RE.test(text);
+    const anchor = out.slice(0, i).reverse().find((p) => p.speaker === seg.speaker && p.panMasked);
+    const codeTail = !!anchor && seg.spokenAt - anchor.spokenAt <= CODE_TAIL_GAP_MS
+      && /\S/.test(text) && CODE_TAIL_RE.test(text);
     out.push({ ...seg, text: codeTail ? '[code removed]' : text, panMasked: seg.panMasked || codeTail || text !== seg.text });
   }
   return out;
@@ -195,8 +200,10 @@ async function storeUtterance(callSid, body) {
     const claimed = await trx('call_log')
       .where('twilio_call_sid', callSid)
       .whereRaw("(metadata -> 'live_transcription') IS NOT NULL")
-      .first('id');
+      .first('id', trx.raw(QUARANTINED_SQL));
     if (!claimed) return { stored: false, reason: 'not_started_here' };
+    // A quarantined call keeps no live text: a late callback or a redelivery stores nothing.
+    if (claimed.quarantined) return { stored: false, reason: 'quarantined' };
 
     const rows = await trx('call_live_utterances')
       .where('call_sid', callSid)
@@ -262,10 +269,17 @@ async function recordLiveTranscriptionEvent(body = {}) {
 /**
  * The post-call card-number quarantine found a card number on this call: drop its live text too.
  * The live scrub ran on a different transcript, so it may have missed what the post-call scrub saw.
+ * It takes storeUtterance's per-call lock and stamps quarantined_at first: an insert in flight
+ * finishes before the delete, and every later callback (a redelivery included, whose dedupe row the
+ * delete removes) finds the stamp and stores nothing.
  */
 async function purgeLiveUtterances(callSid) {
   if (!CALL_SID_RE.test(String(callSid || ''))) return 0;
-  return db('call_live_utterances').where('call_sid', callSid).del();
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`call_live_utterances:${callSid}`]);
+    await stampLiveState(trx, callSid, { quarantined_at: new Date().toISOString() });
+    return trx('call_live_utterances').where('call_sid', callSid).del();
+  });
 }
 
 module.exports = {

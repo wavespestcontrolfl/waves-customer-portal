@@ -5,7 +5,8 @@
  * tracks, final results only, the signed webhook URL), a Twilio refusal stamped and swallowed,
  * and the utterance store — final only, idempotent per (session, sequence), only for a call this
  * module claimed, and card-number scrubbed across utterances (a number read in two pieces, and a
- * code read right after a masked number).
+ * code read after a masked number, a staff question in between included); a quarantined call
+ * stores no more live text.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
@@ -15,14 +16,15 @@ jest.mock('twilio', () => jest.fn(() => ({ request: mockRequest })));
 
 // A small knex fake: call_log claims + stamps, and an in-memory call_live_utterances table.
 jest.mock('../models/db', () => {
-  const state = { claimed: new Set(), rowExists: true, stamps: [], utterances: [], nextId: 1, rawCalls: [] };
+  const state = { claimed: new Set(), quarantined: new Set(), panDetected: new Set(), rowExists: true, stamps: [], utterances: [], nextId: 1, rawCalls: [] };
   function callLog() {
     const q = { filters: [], raws: [] };
     q.where = jest.fn((col, val) => { q.filters.push([col, val]); return q; });
     q.whereRaw = jest.fn((sql) => { q.raws.push(sql); return q; });
     q.first = jest.fn(async () => {
       const sid = q.filters.find(([c]) => c === 'twilio_call_sid')?.[1];
-      return state.claimed.has(sid) ? { id: `log-${sid}` } : undefined;
+      if (!state.claimed.has(sid)) return undefined;
+      return { id: `log-${sid}`, quarantined: state.quarantined.has(sid) || state.panDetected.has(sid) };
     });
     q.update = jest.fn(async (patch) => {
       const sid = q.filters.find(([c]) => c === 'twilio_call_sid')?.[1];
@@ -35,6 +37,7 @@ jest.mock('../models/db', () => {
       }
       if (!state.claimed.has(sid)) return 0;
       state.stamps.push({ sid, claim: false, bindings: patch.metadata.bindings });
+      if ('quarantined_at' in JSON.parse(patch.metadata.bindings[0])) state.quarantined.add(sid);
       return 1;
     });
     return q;
@@ -115,6 +118,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   const s = db.__state;
   s.claimed = new Set();
+  s.quarantined = new Set();
+  s.panDetected = new Set();
   s.rowExists = true;
   s.stamps = [];
   s.utterances = [];
@@ -237,6 +242,15 @@ describe('recordLiveTranscriptionEvent', () => {
     expect(db.__state.utterances[2].text).toBe('4 5 6');
   });
 
+  test('a code read after a staff question is still masked (the same speaker\'s masked line is the link)', async () => {
+    await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', '4242 4242 4242 4242', 1));
+    await live.recordLiveTranscriptionEvent(content(3, 'outbound_track', 'And the security code?', 4));
+    await live.recordLiveTranscriptionEvent(content(4, 'inbound_track', '123', 7));
+    expect(db.__state.utterances.map((u) => u.text)).toEqual(['[card ending 4242]', 'And the security code?', '[code removed]']);
+    // The staff line itself is not a code tail: its speaker never said the card.
+    expect(db.__state.utterances[1].pan_masked).toBe(false);
+  });
+
   test('started / stopped / error events stamp the call; unknown events are ignored', async () => {
     await live.recordLiveTranscriptionEvent({ CallSid: CALL, TranscriptionEvent: 'transcription-started', Timestamp: '2026-11-16T15:00:00Z' });
     await live.recordLiveTranscriptionEvent({ CallSid: CALL, TranscriptionEvent: 'transcription-error', TranscriptionErrorCode: '32655', TranscriptionError: 'Provider Unavailable' });
@@ -256,5 +270,24 @@ describe('purgeLiveUtterances', () => {
     await expect(live.purgeLiveUtterances(CALL)).resolves.toBe(1);
     expect(db.__state.utterances).toHaveLength(0);
     await expect(live.purgeLiveUtterances('not-a-sid')).resolves.toBe(0);
+  });
+
+  test('takes the writer lock and stamps the call, so a late callback or a redelivery stores nothing', async () => {
+    db.__state.claimed.add(CALL);
+    await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'hello', 1));
+    db.__state.rawCalls = [];
+    await live.purgeLiveUtterances(CALL);
+    expect(db.__state.rawCalls[0]).toMatch(/pg_advisory_xact_lock/);
+    expect(JSON.parse(db.__state.stamps.at(-1).bindings[0])).toHaveProperty('quarantined_at');
+    await expect(live.recordLiveTranscriptionEvent(content(3, 'inbound_track', 'one more line', 5))).resolves.toEqual({ stored: false, reason: 'quarantined' });
+    await expect(live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'hello', 1))).resolves.toEqual({ stored: false, reason: 'quarantined' });
+    expect(db.__state.utterances).toHaveLength(0);
+  });
+
+  test('a call the recording scrub flagged (pan_detected) stores no live text', async () => {
+    db.__state.claimed.add(CALL);
+    db.__state.panDetected.add(CALL);
+    await expect(live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'hello', 1))).resolves.toEqual({ stored: false, reason: 'quarantined' });
+    expect(db.__state.utterances).toHaveLength(0);
   });
 });
