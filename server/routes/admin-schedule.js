@@ -8679,14 +8679,14 @@ function askedTimeStamp(cols, customerAskedTime) {
 }
 
 // GATE_RESERVICE_FOLD (owner 2026-11-17): a pest/lawn re-service within 14 days before the customer's next plan visit of
-// that line moves that visit up instead of booking. null = no fold (gate off, a recurring booking, not a re-service, no
-// plan visit in range); otherwise services/reservice-fold.js moveFoldTarget's { moved, answer | warning }.
-async function officeReserviceFold({ req, customerId, serviceKey, isRecurring, isCallback, scheduledDate, windowStart,
+// that line moves that visit up instead of booking. null = no fold (gate off, a recurring booking, not a re-service, not a
+// free one without add-on lines, no plan visit in range); otherwise services/reservice-fold.js moveFoldTarget's { moved, answer | warning }.
+async function officeReserviceFold({ req, customerId, serviceKey, isRecurring, isCallback, scheduledDate, windowStart, free,
   bookingProperty, technicianId, notifyCustomer, customerRequest, notes }) {
   if (require('../config/feature-gates').reserviceFoldLive?.() !== true) return null;
   const fold = require('../services/reservice-fold');
   const lane = fold.foldLaneForServiceKey(serviceKey);
-  if (isRecurring || !isCallback || !lane || !customerId) return null;
+  if (isRecurring || !isCallback || !free || !lane || !customerId) return null;
   const target = await fold.findFoldTarget(db, { customerId, lane, date: scheduledDate, propertyId: bookingProperty?.property_id || null });
   if (!target) return null;
   return fold.moveFoldTarget({
@@ -9382,16 +9382,6 @@ async function scheduleCreateHandler(req, res, next) {
       ? await reserviceOfficeRequest.resolveCustomerRequest(db, customerId, req.body.customerRequest)
       : null;
 
-    // Re-service fold (GATE_RESERVICE_FOLD): after validation, before pricing and the first write. A moved plan visit is the
-    // whole answer (nothing is created); a refused move books the re-service as before, with the reason in `warnings`.
-    const reserviceFold = await officeReserviceFold({
-      req, customerId, serviceKey: serviceRecord?.service_key, isRecurring, isCallback: resolvedIsCallback, scheduledDate, windowStart,
-      bookingProperty, technicianId: resolvedTechId, notifyCustomer: sendConfirmationSms === undefined ? true : !!sendConfirmationSms,
-      customerRequest: officeCustomerRequest, notes: combinedNotes,
-    });
-    if (reserviceFold?.moved) return res.status(200).json(reserviceFold.answer);
-    if (reserviceFold?.warning) bookingWarnings.push(reserviceFold.warning);
-
     // A recurring booking that creates WaveGuard plan coverage IS the
     // membership sale — let the "any member" discount floor see that, since
     // the customer row's tier is only stamped after the series commits.
@@ -9473,6 +9463,19 @@ async function scheduleCreateHandler(req, res, next) {
       || positiveMoneyInput(estimatedPrice)
       || addonHasExplicitPrice;
     const zeroCallbackPrice = resolvedIsCallback && customerEligibleForFreeCallback(customer) && !explicitPriceProvided;
+
+    // Re-service fold (GATE_RESERVICE_FOLD): after validation and pricing reads, before the first write. Only a FREE re-service
+    // with no add-on line folds: a priced re-service or an add-on carries a charge or line a moved plan visit would drop.
+    // A moved plan visit is the whole answer (nothing is created); a refused move books the re-service as before, with the
+    // reason in `warnings`.
+    const reserviceFold = await officeReserviceFold({
+      req, customerId, serviceKey: serviceRecord?.service_key, isRecurring, isCallback: resolvedIsCallback, scheduledDate, windowStart,
+      free: zeroCallbackPrice === true && (!serviceAddons || (Array.isArray(serviceAddons) && !serviceAddons.length)),
+      bookingProperty, technicianId: resolvedTechId, notifyCustomer: sendConfirmationSms === undefined ? true : !!sendConfirmationSms,
+      customerRequest: officeCustomerRequest, notes: combinedNotes,
+    });
+    if (reserviceFold?.moved) return res.status(200).json(reserviceFold.answer);
+    if (reserviceFold?.warning) bookingWarnings.push(reserviceFold.warning);
 
     let finalPrice = pricing.finalPrice;
     if (zeroCallbackPrice) finalPrice = 0;

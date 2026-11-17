@@ -19,11 +19,14 @@ const ACTOR = { techRole: 'admin', technicianId: 'staff-1' };
 const PLAN = { plan: { rescheduleOptions: {} } };
 
 let update;
+let first;
 let conn;
 beforeEach(() => {
   jest.clearAllMocks();
   update = jest.fn().mockResolvedValue(1);
-  conn = jest.fn(() => ({ where: jest.fn(() => ({ update })) }));
+  // The re-read after a refused move: by default the visit is still where it was.
+  first = jest.fn().mockResolvedValue({ scheduled_date: new Date('2099-11-29T04:00:00Z'), window_start: '09:00:00', status: 'pending' });
+  conn = jest.fn(() => ({ where: jest.fn(() => ({ update, first })) }));
   dispatch.planVisitMoveForStaff.mockResolvedValue(PLAN);
   dispatch.runPlannedVisitMove.mockResolvedValue({ status: 200, body: { notificationSent: true, warnings: ['Overlaps another visit.'] } });
 });
@@ -55,16 +58,21 @@ test('a moved visit answers 200 with nothing created, the notice first and the m
   expect(out.moved).toBe(true);
   expect(out.answer).toEqual({
     id: 'plan-1', recurringCreated: 0, appointments: [],
-    warnings: [foldOfficeNotice(TARGET), 'Overlaps another visit.'],
+    warnings: [foldOfficeNotice(TARGET, '2099-11-17', '10:00'), 'Overlaps another visit.'],
     reserviceFold: { movedServiceId: 'plan-1', serviceType: TARGET.service_type, fromDate: '2099-11-29', toDate: '2099-11-17', start: '10:00', notificationSent: true },
   });
 });
 
 test('the notice is plain English of about 25 words and names the real visit and date', () => {
-  const notice = foldOfficeNotice(TARGET);
+  const notice = foldOfficeNotice(TARGET, '2099-11-17', '10:00');
   expect(notice).toBe('No re-service booked: the Quarterly Pest Control Service on Sun, Nov 29 moved up to this time (within 14 days of the next plan visit).');
   expect(notice.split(/\s+/).length).toBeLessThanOrEqual(25);
   expect(FOLD_DAYS).toBe(14);
+});
+
+test('with no start asked the notice names the new day, not "this time"', () => {
+  expect(foldOfficeNotice(TARGET, '2099-11-17', null))
+    .toBe('No re-service booked: the Quarterly Pest Control Service on Sun, Nov 29 moved up to Tue, Nov 17 (within 14 days of the next plan visit).');
 });
 
 test("the office's words go to the moved visit in one update: the request when it has none, the notes appended with a dated prefix", async () => {
@@ -97,14 +105,51 @@ test('the planner refuses: nothing moves and the caller books the re-service wit
   expect(out.moved).toBe(false);
   expect(out.warning).toMatch(/booked as its own visit.*Sun, Nov 29.*That time is taken\./);
   expect(dispatch.runPlannedVisitMove).not.toHaveBeenCalled();
+  expect(first).not.toHaveBeenCalled();
   expect(update).not.toHaveBeenCalled();
 });
 
-test('a 409 from the rebooker before its write also means "book the re-service"; any other error is not swallowed', async () => {
+test('a 409 from the rebooker: the visit did not move, so the caller books the re-service with the reason', async () => {
   dispatch.runPlannedVisitMove.mockRejectedValueOnce(Object.assign(new Error('Visit changed.'), { statusCode: 409 }));
   const out = await run();
   expect(out).toMatchObject({ moved: false });
   expect(out.warning).toContain('Visit changed.');
+  expect(first).toHaveBeenCalledTimes(1);
+});
+
+test('a status of 300 or more from the move is read the same way', async () => {
+  dispatch.runPlannedVisitMove.mockResolvedValue({ status: 422, body: { error: 'Nope.' } });
+  const out = await run();
+  expect(out.moved).toBe(false);
+  expect(out.warning).toContain('Nope.');
+  expect(first).toHaveBeenCalledTimes(1);
+});
+
+test('an error after the move saved: the visit is on the asked slot, so it answers as a fold and says to check the visit', async () => {
+  first.mockResolvedValue({ scheduled_date: '2099-11-17', window_start: '10:00:00', status: 'confirmed' });
+  dispatch.runPlannedVisitMove.mockRejectedValueOnce(Object.assign(new Error('Visit changed.'), { statusCode: 409 }));
+  const out = await run();
+  expect(out.moved).toBe(true);
+  expect(out.answer.id).toBe('plan-1');
+  expect(out.answer.warnings).toContain('The move reported an error after it saved (Visit changed.). Check the visit.');
+  expect(update).toHaveBeenCalledTimes(1);
+  // ...and the same for a 300+ answer; with no start asked, the date alone decides.
+  first.mockResolvedValue({ scheduled_date: '2099-11-17', window_start: '09:00:00', status: 'pending' });
+  dispatch.runPlannedVisitMove.mockResolvedValueOnce({ status: 500, body: { error: 'Late.' } });
+  const again = await run({ windowStart: null });
+  expect(again.moved).toBe(true);
+  expect(again.answer.warnings.join(' ')).toContain('(Late.)');
+});
+
+test('the re-read does not count a visit on the date at another start, or one that was cancelled', async () => {
+  dispatch.runPlannedVisitMove.mockResolvedValue({ status: 500, body: { error: 'Late.' } });
+  first.mockResolvedValue({ scheduled_date: '2099-11-17', window_start: '09:00:00', status: 'pending' });
+  expect((await run()).moved).toBe(false);
+  first.mockResolvedValue({ scheduled_date: '2099-11-17', window_start: '10:00:00', status: 'cancelled' });
+  expect((await run()).moved).toBe(false);
+});
+
+test('any other error is not swallowed', async () => {
   dispatch.runPlannedVisitMove.mockRejectedValueOnce(new Error('boom'));
   await expect(run()).rejects.toThrow('boom');
 });

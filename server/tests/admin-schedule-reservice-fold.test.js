@@ -2,7 +2,7 @@
  * The re-service fold on POST /api/admin/schedule (GATE_RESERVICE_FOLD, owner 2026-11-17): the handler's wiring only.
  * findFoldTarget (reservice-fold-postgres.test.js) and moveFoldTarget (reservice-fold-move.test.js) have their own suites.
  * Pinned: gate off = no lookup and the usual 201; gate on + plan visit = the 200 fold answer and no insert; a refused move
- * books the re-service with the reason in `warnings`; a bad request keeps its 400; a recurring booking and a service that
+ * books the re-service with the reason in `warnings`; only a free re-service with no add-on line looks; a bad request keeps its 400; a recurring booking and a service that
  * is not a re-service never look. Harness mirrors admin-schedule-reservice-office-request.test.js.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -131,7 +131,7 @@ beforeEach(() => {
       { id: 'svc-pest-re', service_key: 'pest_re_service', name: 'Pest Re-Service' },
       { id: 'svc-pest-q', service_key: 'pest_control_quarterly', name: 'Quarterly Pest Control' },
     ],
-    customers: [{ id: CUST, first_name: 'Test', last_name: 'Customer', phone: null, email: null }],
+    customers: [{ id: CUST, first_name: 'Test', last_name: 'Customer', phone: null, email: null, waveguard_tier: 'Silver' }],
   };
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: jest.fn(() => 'now()') };
@@ -207,6 +207,29 @@ describe('POST / - re-service fold (GATE_RESERVICE_FOLD)', () => {
     expect(r.status).toBe(201);
     expect(inserts).toHaveLength(1);
     expect(r.body.warnings).toContain('The re-service was booked as its own visit: the plan visit could not move up (taken).');
+  });
+
+  test('a re-service that is not free books as before with no lookup: a price, an add-on line, or a customer with no free callback', async () => {
+    const booked = async (extra, customer) => {
+      if (customer) tables.customers = [{ id: CUST, first_name: 'Test', last_name: 'Customer', phone: null, email: null, ...customer }];
+      inserts = [];
+      const r = await post({ ...base, ...extra });
+      // The mock database cannot finish every shape (an add-on line fails after the insert): the proof is that the write
+      // was reached and the answer is not the fold's 200.
+      expect(r.status).not.toBe(200);
+      expect(inserts.length).toBeGreaterThan(0);
+    };
+    await booked({ estimatedPrice: 45 });
+    await booked({ primaryLinePrice: 45 });
+    await booked({ serviceAddons: [{ name: 'Extra', price: 20 }] });
+    await booked({ serviceAddons: [{ name: 'No-charge line', price: 0 }] });
+    await booked({}, { waveguard_tier: null });
+    expect(fold.findFoldTarget).not.toHaveBeenCalled();
+    expect(fold.moveFoldTarget).not.toHaveBeenCalled();
+  });
+
+  test('a free re-service with an empty add-on list still folds', async () => {
+    expect((await post({ ...base, serviceAddons: [] })).status).toBe(200);
   });
 
   test('a bad request still gets its normal 400 and never reaches the lookup', async () => {

@@ -929,6 +929,18 @@ describe('composeAppointmentSuccessToast', () => {
     expect(composeAppointmentSuccessToast({ resultsCount: 1, createdCount: 0, estimateAccepted: false, prepayNotice: 'Annual prepay invoice sent for $500.00.' }))
       .toBe('Appointment created Annual prepay invoice sent for $500.00.');
   });
+
+  it('re-service fold: when every result moved a plan visit, nothing was created and the toast says so', () => {
+    expect(composeAppointmentSuccessToast({ resultsCount: 1, createdCount: 0, estimateAccepted: false, prepayNotice: '', foldedCount: 1 }))
+      .toBe('Plan visit moved up. No re-service booked.');
+  });
+
+  it('re-service fold: with some created and some folded, today\'s text stays and the fold is added', () => {
+    expect(composeAppointmentSuccessToast({ resultsCount: 2, createdCount: 0, estimateAccepted: false, prepayNotice: '', foldedCount: 1 }))
+      .toBe('2 appointment series created — invoices will send with each service report A plan visit moved up instead of a re-service.');
+    expect(composeAppointmentSuccessToast({ resultsCount: 3, createdCount: 0, estimateAccepted: false, prepayNotice: '', foldedCount: 2 }))
+      .toBe('3 appointment series created — invoices will send with each service report 2 plan visits moved up instead of a re-service.');
+  });
 });
 
 describe('lineIsRetiredSale (codex r35 on #4786)', () => {
