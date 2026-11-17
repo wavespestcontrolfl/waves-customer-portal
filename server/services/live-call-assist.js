@@ -16,9 +16,11 @@
  * the first run once 2 Caller utterances exist, then at least 1 new Caller utterance and 45 s since the last run, at
  * most 12 runs per call, none after the call stops. Fire and forget: nothing here throws.
  *
- * Price and times are looked up again ONLY when (service, location, when, sizes) changed since the last run:
+ * Price and times are looked up again ONLY when (service, plan details, property type, location, when, sizes) changed:
  * resolveAvailability can geocode (a paid Google call) and pricing reads the DB. Facts the caller said earlier stay
- * in `facts`, so they survive after they scroll out of the 3-minute window.
+ * in `facts`, so they survive after they scroll out of the 3-minute window. A fact the caller took back is cleared
+ * (the model lists it in `withdrawn`), and the changed key looks price and times up again, so a stale price never sits
+ * beside a new intent.
  */
 
 const db = require('../models/db');
@@ -38,11 +40,28 @@ const MAX_RUNS = 12;
 const WINDOW_MS = 3 * 60 * 1000;
 const MAX_INPUT_CHARS = 2000;
 const SHOWN_TIMES = 3;
-const SERVICES = new Set(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait']);
+// The allowed values of get_pricing's inputs (CONTEXT_TOOLS in voice-agent/relay-tools.js; a test pins them to it). An
+// unknown value is dropped, never guessed. The engine's own defaults (quarterly, enhanced, monthly12, single_family)
+// stay in pricingText: nothing here invents one.
+const ENUMS = {
+  service: new Set(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait']),
+  property_type: new Set(['single_family', 'townhome_end', 'townhome_interior', 'duplex', 'condo_ground', 'condo_upper', 'commercial']),
+  frequency: new Set(['quarterly', 'bimonthly', 'monthly']),
+  lawn_track: new Set(['st_augustine', 'bermuda', 'zoysia', 'bahia']),
+  lawn_tier: new Set(['enhanced', 'premium']),
+  mosquito_tier: new Set(['seasonal9', 'monthly12']),
+};
+// What the plan says about the service: a different service makes these stale.
+const PLAN_KEYS = ['frequency', 'lawn_track', 'lawn_tier', 'mosquito_tier'];
+const FACT_KEYS = [
+  'service', 'when', 'address_line1', 'city', 'zip', 'home_sqft', 'lot_sqft', 'property_type', ...PLAN_KEYS,
+];
+// "address" in the withdrawn list means the whole spoken place.
+const WITHDRAWN_GROUPS = { address: ['address_line1', 'city', 'zip'] };
 
 const SYSTEM_PROMPT = `You read the last few minutes of a live phone call to a pest control and lawn care company. "Caller:" is the customer or prospect. "Agent:" is the Waves staff member.
-Reply with ONLY this JSON: {"intent": "<one plain line, 90 characters or fewer: what the caller wants>", "service": "pest_control" | "lawn_care" | "mosquito" | "tree_shrub" | "termite_bait" | null, "when": "<the caller's own words about timing, or null>", "address_line1": "<street address the caller said, or null>", "city": "<or null>", "zip": "<5 digits or null>", "home_sqft": <number the caller said for the home's square feet, or null>, "lot_sqft": <number the caller said for the lot, or null>}
-Use a service only when the caller is asking about that recurring plan. Fill address, timing and sizes only when the caller said them; never guess. No phone numbers and no card or account digits anywhere.`;
+Reply with ONLY this JSON: {"intent": "<one plain line, 90 characters or fewer: what the caller wants>", "service": "pest_control" | "lawn_care" | "mosquito" | "tree_shrub" | "termite_bait" | null, "when": "<the caller's own words about timing, or null>", "address_line1": "<street address the caller said, or null>", "city": "<or null>", "zip": "<5 digits or null>", "home_sqft": <number the caller said for the home's square feet, or null>, "lot_sqft": <number the caller said for the lot, or null>, "property_type": "single_family" | "townhome_end" | "townhome_interior" | "duplex" | "condo_ground" | "condo_upper" | "commercial" | null, "frequency": "quarterly" | "bimonthly" | "monthly" | null, "lawn_track": "st_augustine" | "bermuda" | "zoysia" | "bahia" | null, "lawn_tier": "enhanced" | "premium" | null, "mosquito_tier": "seasonal9" | "monthly12" | null, "withdrawn": [<fact names the caller took back>]}
+Use a service only when the caller is asking about that recurring plan. Fill address, timing, sizes and plan details only when the caller said them; never guess. Use "commercial" for any business, office, restaurant, HOA or multifamily property. A null fact means the caller did not mention it: the earlier value stays. When the caller gives a new value, put the new value. When the caller takes a fact back (for example turns down recurring service and wants a one-time treatment, or says the address was wrong), set that fact to null and list its name in "withdrawn": one of service, when, address (the street, city and zip together), home_sqft, lot_sqft, property_type, frequency, lawn_track, lawn_tier, mosquito_tier. Otherwise "withdrawn" is []. No phone numbers and no card or account digits anywhere.`;
 
 const gateOn = () => require('../config/feature-gates').isEnabled('callLiveAssist');
 
@@ -64,30 +83,46 @@ function size(value) {
   return typeof n === 'number' && Number.isFinite(n) && n > 0 && n <= 5000000 ? Math.round(n) : null;
 }
 
+function oneOf(set, value) {
+  const v = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return set.has(v) ? v : null;
+}
+
+// The facts the caller took back: only known names, "address" opened into its three parts.
+function withdrawnFacts(raw) {
+  if (!Array.isArray(raw)) return [];
+  const names = raw.flatMap((n) => (typeof n === 'string' ? WITHDRAWN_GROUPS[n.trim()] || [n.trim()] : []));
+  return [...new Set(names.filter((n) => FACT_KEYS.includes(n)))];
+}
+
 // Every field the model returns is checked here; null for anything out of shape.
 function validate(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const intent = text(raw.intent, 90);
   if (!intent) return null;
   const zip = typeof raw.zip === 'string' || typeof raw.zip === 'number' ? String(raw.zip).trim() : '';
-  return {
-    intent,
-    facts: {
-      service: SERVICES.has(raw.service) ? raw.service : null,
-      when: text(raw.when, 60),
-      address_line1: text(raw.address_line1, 80),
-      city: text(raw.city, 40),
-      zip: /^\d{5}(-\d{4})?$/.test(zip) ? zip.slice(0, 5) : null,
-      home_sqft: size(raw.home_sqft),
-      lot_sqft: size(raw.lot_sqft),
-    },
+  const facts = {
+    when: text(raw.when, 60),
+    address_line1: text(raw.address_line1, 80),
+    city: text(raw.city, 40),
+    zip: /^\d{5}(-\d{4})?$/.test(zip) ? zip.slice(0, 5) : null,
+    home_sqft: size(raw.home_sqft),
+    lot_sqft: size(raw.lot_sqft),
   };
+  for (const k of Object.keys(ENUMS)) facts[k] = oneOf(ENUMS[k], raw[k]);
+  return { intent, facts, withdrawn: withdrawnFacts(raw.withdrawn) };
 }
 
-// A newer non-null fact replaces the older one; an unspoken fact keeps what the caller said earlier.
-function mergeFacts(previous, next) {
+// A newer non-null fact replaces the older one; an unmentioned fact keeps what the caller said earlier; a withdrawn
+// fact is cleared. A different (or withdrawn) service also clears the plan details said for the old one.
+function mergeFacts(previous, next, withdrawn = []) {
+  const carried = (k) => (withdrawn.includes(k) ? null : previous?.[k] ?? null);
+  const service = next.service ?? carried('service');
+  const serviceChanged = !!previous?.service && service !== previous.service;
   const merged = {};
-  for (const k of Object.keys(next)) merged[k] = next[k] ?? previous?.[k] ?? null;
+  for (const k of FACT_KEYS) {
+    merged[k] = k === 'service' ? service : next[k] ?? (serviceChanged && PLAN_KEYS.includes(k) ? null : carried(k));
+  }
   return merged;
 }
 
@@ -188,7 +223,8 @@ function statesOtherProperty(customer, facts) {
   } catch { return true; }
 }
 
-// The engine's price text for the service, or null when none is asked. Throws on a lookup error.
+// The engine's price text for the service, or null when none is asked (the engine prices recurring plans only, so a
+// caller who dropped recurring service has no service and no price here). Throws on a lookup error.
 async function lookupPrice(facts, customer) {
   if (!facts.service) return null;
   // property_sqft is the account's TREATED LAWN area (never the home size); lot_sqft is the whole lot.
@@ -197,6 +233,9 @@ async function lookupPrice(facts, customer) {
     home_sqft: facts.home_sqft || undefined,
     lot_sqft: facts.lot_sqft || customer?.lot_sqft || undefined,
     ...(facts.service === 'lawn_care' && customer?.property_sqft ? { lawn_sqft: customer.property_sqft } : {}),
+    // What the caller said about the property and the plan goes to the engine's own guards and plan selection; an
+    // unsaid one is left out, so the engine's default applies.
+    ...Object.fromEntries(['property_type', ...PLAN_KEYS].filter((k) => facts[k]).map((k) => [k, facts[k]])),
   };
   return staffPrice(await require('./voice-agent/relay-context').pricingText(input));
 }
@@ -217,6 +256,33 @@ async function lookupTimes(facts, customer, useAccount) {
   return tools.formatSlots(res.availability && res.availability.slots, SHOWN_TIMES) || null;
 }
 
+// Everything a price or a time depends on: when any of it changes, both are looked up again.
+function lookupKey(facts, accountId) {
+  return JSON.stringify([
+    facts.service, facts.when, facts.address_line1?.toLowerCase(), facts.city?.toLowerCase(), facts.zip,
+    facts.home_sqft, facts.lot_sqft, facts.property_type, facts.frequency, facts.lawn_track, facts.lawn_tier,
+    facts.mosquito_tier, accountId,
+  ]);
+}
+
+// The price, times and key to store. An unchanged key reuses the last ones; a changed key looks both up again, and
+// whatever a lookup does not return is null, so nothing stale stays beside new facts. Each lookup stands alone: one
+// failing leaves the other and the intent in place, and drops the key so the next run tries again.
+async function priceAndTimes(facts, customer, useAccount, key, previous) {
+  if (key === previous.key) return { price: previous.price ?? null, times: previous.times ?? null, key };
+  let failed = false;
+  const attempt = async (fn) => {
+    try { return await fn(); } catch (err) {
+      failed = true;
+      logger.warn(`[live-call-assist] lookup failed: ${err?.code || err?.name || 'error'}`);
+      return null;
+    }
+  };
+  const price = await attempt(() => lookupPrice(facts, useAccount ? customer : null));
+  const times = facts.service || facts.when ? await attempt(() => lookupTimes(facts, customer, useAccount)) : null;
+  return { price, times, key: failed ? null : key };
+}
+
 /**
  * One refresh of a live call's assist; the caller does not await it. Resolves a small result for tests; never throws.
  * callRow: { twilio_call_sid, metadata }; customerId: the customer the panel matched to the call, if any.
@@ -235,33 +301,11 @@ async function refreshAssistIfDue(callRow, { customerId = null } = {}) {
     if (!read) return { ran: true, saved: false };
 
     const previous = live.assist || {};
-    const facts = mergeFacts(previous.facts, read.facts);
+    const facts = mergeFacts(previous.facts, read.facts, read.withdrawn);
     const customer = await accountFor(customerId);
     const useAccount = !!customer && !statesOtherProperty(customer, facts);
-    const key = JSON.stringify([
-      facts.service, facts.when, facts.address_line1?.toLowerCase(), facts.city?.toLowerCase(), facts.zip,
-      facts.home_sqft, facts.lot_sqft, useAccount ? customer.id : null,
-    ]);
-    const patch = { intent: read.intent, service: facts.service, facts };
-    if (key === previous.key) {
-      patch.price = previous.price ?? null;
-      patch.times = previous.times ?? null;
-      patch.key = key;
-    } else {
-      // Each lookup stands alone: one failing leaves the other and the intent in place. A failure drops the key so the
-      // next run tries again instead of reusing a gap.
-      let failed = false;
-      const attempt = async (fn) => {
-        try { return await fn(); } catch (err) {
-          failed = true;
-          logger.warn(`[live-call-assist] lookup failed: ${err?.code || err?.name || 'error'}`);
-          return null;
-        }
-      };
-      patch.price = await attempt(() => lookupPrice(facts, useAccount ? customer : null));
-      patch.times = facts.service || facts.when ? await attempt(() => lookupTimes(facts, customer, useAccount)) : null;
-      patch.key = failed ? null : key;
-    }
+    const key = lookupKey(facts, useAccount ? customer.id : null);
+    const patch = { intent: read.intent, service: facts.service, facts, ...(await priceAndTimes(facts, customer, useAccount, key, previous)) };
     await saveResult(callSid, patch);
     return { ran: true, saved: true };
   } catch (err) {
