@@ -17,10 +17,18 @@
  * transition ('pause' or 'resume') that was decided and committed but that Twilio has not yet
  * confirmed. Every decision is made under pg_advisory_xact_lock(hashtext('live_card_pause:' ||
  * callSid)) and committed before the Twilio request is sent. The requests for one call are sent
- * one at a time, and after each one the wanted state is read again, so the last request Twilio
- * receives always matches the newest committed decision: an older resume still in flight can never
- * land after a newer pause. A crash after a decision leaves `pending` set, and the next stored
- * utterance or the timer finishes it. A pause whose outcome is unknown (timeout, socket reset, 5xx)
+ * one at a time across every server process (a deploy overlap runs two): a second transaction-scoped
+ * advisory lock, the send lock on 'live_card_pause_send:' || callSid, is held for a whole drain (claim,
+ * request, record the outcome, claim again). The state decisions keep their own short transactions on
+ * the first lock, so a decision never waits on a Twilio request in flight. After each request the
+ * wanted state is read again, so the last request Twilio receives always matches the newest committed
+ * decision: an older resume or pause still in flight, in this process or in another, can never land
+ * after a newer decision. A crash after a decision leaves `pending` set, and the next stored
+ * utterance or the timer finishes it. The decision makers (a card trigger, the window-end timer, which
+ * is the resume guarantee) wait for the send lock. A stored utterance that finds the send lock held
+ * skips: the holder claims again after its request, and the timer waits for the window end. Each
+ * waiter holds a pool connection, so only those two wait. The Twilio client's own request timeout
+ * (30 s, the SDK default) bounds how long a request can hold the lock. A pause whose outcome is unknown (timeout, socket reset, 5xx)
  * keeps `pending` and the window, so the resume still goes out at the window end (resuming a
  * recording that never paused is harmless).
  *
@@ -46,8 +54,6 @@ const MAX_SENDS_PER_PASS = 4;
 const CARD_INTENT_RE = /\b(?:card\s+numbers?|credit\s+card|debit\s+card|card\s+ending|expir(?:ation|y)\s+date|security\s+code|cvv|cvc|code\s+on\s+the\s+back)\b/i;
 
 const timers = new Map();
-// The tail of the request chain of each call: its Twilio requests go out one at a time.
-const sendChains = new Map();
 
 function maskSid(sid) {
   const value = String(sid || '');
@@ -88,16 +94,36 @@ function cardPauseOf(row) {
   return value && typeof value === 'object' ? value : {};
 }
 
+function readCardPauseRow(conn, callSid) {
+  return conn('call_log')
+    .where('twilio_call_sid', callSid)
+    .whereRaw("(metadata -> 'live_transcription') IS NOT NULL")
+    .first(conn.raw("metadata -> 'live_transcription' -> 'card_pause' AS card_pause"));
+}
+
 // Run one decision under the per-call advisory lock; commit before any Twilio request is sent.
 async function withCallLock(callSid, fn) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`live_card_pause:${callSid}`]);
-    const row = await trx('call_log')
-      .where('twilio_call_sid', callSid)
-      .whereRaw("(metadata -> 'live_transcription') IS NOT NULL")
-      .first(trx.raw("metadata -> 'live_transcription' -> 'card_pause' AS card_pause"));
+    const row = await readCardPauseRow(trx, callSid);
     if (!row) return { action: 'none', reason: 'not_started_here' };
     return fn(trx, cardPauseOf(row));
+  });
+}
+
+// Hold the call's send lock while fn runs: its Twilio requests go out one at a time, across processes.
+// The transaction writes nothing and is only the lock's owner; the decisions use their own transactions.
+// wait=false skips (and sends nothing) when another sender holds it.
+async function withSendLock(callSid, wait, fn) {
+  return db.transaction(async (trx) => {
+    const key = [`live_card_pause_send:${callSid}`];
+    if (wait) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', key);
+    } else {
+      const res = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS locked', key);
+      if (!res?.rows?.[0]?.locked) return { action: 'send_busy' };
+    }
+    return fn();
   });
 }
 
@@ -116,15 +142,6 @@ async function stampCardPause(conn, callSid, next) {
 
 // Open = the recording is, or may still be, paused: no resume has been confirmed yet.
 const isPaused = (state) => !!state.paused_at && !state.resumed_at;
-
-// The requests of one call go out one at a time, in the order they were queued.
-function inOrder(callSid, fn) {
-  const run = (sendChains.get(callSid) || Promise.resolve()).then(fn);
-  const tail = run.then(() => {}, () => {});
-  sendChains.set(callSid, tail);
-  tail.then(() => { if (sendChains.get(callSid) === tail) sendChains.delete(callSid); });
-  return run;
-}
 
 // Decide, under the lock, what request this call needs next (if any) and commit the decision first.
 async function claimStep(callSid, { slackMs = 0, allowPause = true } = {}) {
@@ -224,7 +241,23 @@ async function drain(callSid, opts) {
   return { action: sent };
 }
 
-const reconcile = (callSid, opts) => inOrder(callSid, () => drain(callSid, opts));
+// A decision maker (a card trigger, the timer) waits for the send lock, then drains.
+const reconcile = (callSid, opts) => withSendLock(callSid, true, () => drain(callSid, opts));
+
+// The ordinary stored-utterance path. A call with no open pause costs one plain read and no
+// transaction; a pause not yet due with nothing pending costs the same. Otherwise it drains, but never
+// waits for the send lock: the holder claims again after its request, and the timer covers the end.
+async function selfHeal(callSid, opts) {
+  const row = await readCardPauseRow(db, callSid);
+  if (!row) return { action: 'none', reason: 'not_started_here' };
+  const state = cardPauseOf(row);
+  if (!isPaused(state)) return { action: 'none' };
+  const dueAtMs = new Date(state.resume_due_at).getTime();
+  if (!state.pending && dueAtMs > Date.now()) return { action: 'not_due', dueAtMs };
+  const out = await withSendLock(callSid, false, () => drain(callSid, opts));
+  // Busy: hand back the stored end so a restart that lost the timer arms it again.
+  return out.action === 'send_busy' ? { ...out, dueAtMs } : out;
+}
 
 function armTimer(callSid, dueAtMs) {
   clearTimeout(timers.get(callSid));
@@ -277,7 +310,7 @@ async function onUtteranceStored({ callSid, text, panMasked, pauseOpen = false }
     if (!gateOn && !pauseOpen) return { action: 'none', reason: 'gate_off' };
     if (!callSid || !process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return { action: 'none', reason: 'not_configured' };
     if (gateOn && isCardIntent(text, panMasked)) return await pauseOrExtend(callSid);
-    const out = await reconcile(callSid, { allowPause: gateOn });
+    const out = await selfHeal(callSid, { allowPause: gateOn });
     // A restart (a gate flip restarts the server) loses the timer of a running pause: arm one again.
     if (out?.dueAtMs && !timers.has(callSid)) armTimer(callSid, out.dueAtMs);
     return out;
@@ -291,5 +324,5 @@ module.exports = {
   onUtteranceStored,
   isCardIntent,
   PAUSE_MS,
-  _test: { timers, sendChains },
+  _test: { timers },
 };
