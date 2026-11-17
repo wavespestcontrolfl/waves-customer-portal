@@ -1,5 +1,5 @@
 /**
- * POST /admin/intelligence-bar/query with GATE_IB_TOOL_ADDITIONS on the
+ * POST /admin/intelligence-bar/query on the
  * production model (MODEL_FLAGSHIP=claude-opus-5-5, which thinks by default,
  * so the bar has no tool search and loads tools with discover_capabilities).
  * A found tool must not change `tools` (rendered first, the start of the
@@ -99,10 +99,7 @@ const callFound = { content: [{ type: 'tool_use', id: 'toolu_found', name: 'get_
 const answer = { content: [{ type: 'text', text: 'ok' }], usage: {} };
 const found = () => apiToolDefinition(registry.actions.get('get_review_stats').definition);
 
-describe('GATE_IB_TOOL_ADDITIONS on', () => {
-  beforeEach(() => { process.env.GATE_IB_TOOL_ADDITIONS = 'true'; });
-  afterEach(() => { delete process.env.GATE_IB_TOOL_ADDITIONS; });
-
+describe('on the production model', () => {
   test('a found tool comes in a system message after the results; tools, system and the earlier turns stay as sent', async () => {
     const [first, second] = await ask([discover, answer]);
     expect(names(first.request.tools)).not.toContain('get_review_stats');
@@ -137,19 +134,8 @@ describe('GATE_IB_TOOL_ADDITIONS on', () => {
   });
 });
 
-describe('without GATE_IB_TOOL_ADDITIONS, or on a model that takes no additions', () => {
-  afterEach(() => { delete process.env.GATE_IB_TOOL_ADDITIONS; });
-
-  test('gate off: the found definition is merged into tools, as before, with no system message or header', async () => {
-    const [first, second] = await ask([discover, answer]);
-    expect(names(first.request.tools)).not.toContain('get_review_stats');
-    expect(second.request.tools.find(t => t.name === 'get_review_stats')).toEqual(found());
-    expect(second.request.messages.some(m => m.role === 'system')).toBe(false);
-    expect(second.options).toBeUndefined();
-  });
-
-  test('gate on with Claude Sonnet 5: the merge stays', async () => {
-    process.env.GATE_IB_TOOL_ADDITIONS = 'true';
+describe('on a model that takes no additions', () => {
+  test('Claude Sonnet 5: the merge stays', async () => {
     const [first, second] = await ask([discover, answer], sonnetRouter);
     expect(first.request.model).toBe('claude-sonnet-5');
     expect(names(second.request.tools)).toContain('get_review_stats');
@@ -195,10 +181,8 @@ describe('a resumed task with saved additions', () => {
   };
   const isContinuation = message => message.role === 'user' && JSON.stringify(message).includes('Continue the original request');
 
-  afterEach(() => { delete process.env.GATE_IB_TOOL_ADDITIONS; });
 
   test('ends on an addition: it is dropped, `tools` is the page list as sent, and the found tools come back after the continuation', async () => {
-    process.env.GATE_IB_TOOL_ADDITIONS = 'true';
     const [resumed] = await resumeWith(savedRound());
     expect(resumed.request.tools).toEqual(pageTools);
     const messages = resumed.request.messages;
@@ -209,7 +193,6 @@ describe('a resumed task with saved additions', () => {
   });
 
   test('an addition inside the history stays where it is, unchanged; `tools` is the page list as sent; nothing is offered twice', async () => {
-    process.env.GATE_IB_TOOL_ADDITIONS = 'true';
     const history = [...savedRound(), ...calledFound];
     const [resumed] = await resumeWith(history);
     expect(resumed.request.tools).toEqual(pageTools);
@@ -219,25 +202,7 @@ describe('a resumed task with saved additions', () => {
     expect(resumed.options).toEqual(BETA);
   });
 
-  test('gate off (a rollback mid-task): a saved history with additions keeps the path; `tools` gains none of them', async () => {
-    const history = [...savedRound(), ...calledFound];
-    const [resumed] = await resumeWith(history);
-    expect(resumed.request.tools).toEqual(pageTools);
-    expect(withoutMarkers(resumed.request.messages[3])).toEqual(history[3]);
-    expect(resumed.options).toEqual(BETA);
-  });
-
-  test('gate off and a history that ends on an addition: the found tools still come back by message, not in `tools`', async () => {
-    const [resumed] = await resumeWith(savedRound());
-    expect(resumed.request.tools).toEqual(pageTools);
-    const messages = resumed.request.messages;
-    expect(messages.map(m => m.role)).toEqual(['user', 'assistant', 'user', 'user', 'system']);
-    expect(withoutMarkers(messages[4])).toEqual(ToolAdditions.additionMessage(addedByOriginal()));
-    expect(resumed.options).toEqual(BETA);
-  });
-
   test('on a model that cannot read additions, the saved ones are folded into tools', async () => {
-    process.env.GATE_IB_TOOL_ADDITIONS = 'true';
     const [resumed] = await resumeWith([...savedRound(), ...calledFound], sonnetRouter);
     expect(resumed.request.messages.some(m => m.role === 'system')).toBe(false);
     expect(resumed.request.tools.filter(t => t.name === 'get_review_stats')).toHaveLength(1);

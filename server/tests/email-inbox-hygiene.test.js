@@ -115,7 +115,6 @@ const EMAIL = {
 afterEach(() => {
   jest.clearAllMocks();
   delete process.env.GATE_EMAIL_AUTO_DRAFTS;
-  delete process.env.GATE_EMAIL_DRAFT_FACTS;
 });
 
 describe('handleSpam — quarantine + known-sender guard', () => {
@@ -611,23 +610,8 @@ describe('draftReplyForEmail signature and grounded facts', () => {
     expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('signature unavailable'));
   });
 
-  test('GATE_EMAIL_DRAFT_FACTS unset: the system prompt is byte-identical and no facts are read', async () => {
+  test('facts and rules ride the SYSTEM channel, the email stays in the user channel', async () => {
     process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
-    setupDb();
-    buildEmailDraftFacts.mockImplementation(async () => 'Visits:\n- Quarterly Pest Control Service | Tuesday, November 3');
-    await draftReplyForEmail({ ...FACTS_EMAIL }, { customer: CUSTOMER });
-    expect(buildEmailDraftFacts).not.toHaveBeenCalled();
-    expect(dispatchWithFallback.mock.calls[0][1].system).toBe(SYSTEM_BASELINE);
-    process.env.GATE_EMAIL_DRAFT_FACTS = 'yes';
-    setupDb();
-    await draftReplyForEmail({ ...FACTS_EMAIL, id: 'email-2' }, { customer: CUSTOMER });
-    expect(buildEmailDraftFacts).not.toHaveBeenCalled();
-    expect(dispatchWithFallback.mock.calls[1][1].system).toBe(SYSTEM_BASELINE);
-  });
-
-  test('GATE_EMAIL_DRAFT_FACTS=true: facts and rules ride the SYSTEM channel, the email stays in the user channel', async () => {
-    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
-    process.env.GATE_EMAIL_DRAFT_FACTS = 'true';
     setupDb();
     buildEmailDraftFacts.mockImplementation(async () => 'Visits:\n- Quarterly Pest Control Service | Tuesday, November 3');
     await draftReplyForEmail({ ...FACTS_EMAIL }, { customer: CUSTOMER });
@@ -651,9 +635,8 @@ describe('draftReplyForEmail signature and grounded facts', () => {
     ['no authentication results at all', { authentication_results: null }, {}],
     ['a Reply-To that is not the From address', { reply_to: 'someone@attacker.com' }, {}],
     ['a matched customer whose email is not the From address', {}, { email: 'other@customer.com' }],
-  ])('gate on, %s: no customer records are read and the prompt is unchanged', async (_label, emailPatch, customerPatch) => {
+  ])('%s: no customer records are read and the prompt is unchanged', async (_label, emailPatch, customerPatch) => {
     process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
-    process.env.GATE_EMAIL_DRAFT_FACTS = 'true';
     setupDb();
     buildEmailDraftFacts.mockImplementation(async () => 'Visits:\n- Quarterly Pest Control Service | Tuesday, November 3');
     await draftReplyForEmail({ ...FACTS_EMAIL, ...emailPatch }, { customer: { ...CUSTOMER, ...customerPatch } });
@@ -661,9 +644,8 @@ describe('draftReplyForEmail signature and grounded facts', () => {
     expect(dispatchWithFallback.mock.calls[0][1].system).toBe(SYSTEM_BASELINE);
   });
 
-  test('gate on but no matched customer or empty facts: prompt unchanged', async () => {
+  test('no matched customer or empty facts: prompt unchanged', async () => {
     process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
-    process.env.GATE_EMAIL_DRAFT_FACTS = 'true';
     setupDb();
     await draftReplyForEmail({ ...FACTS_EMAIL }, { customer: null });
     expect(buildEmailDraftFacts).not.toHaveBeenCalled();

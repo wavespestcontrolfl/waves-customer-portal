@@ -1,7 +1,7 @@
 /**
  * services/sms-late-drafter.js: the texting AI's shadow drafter run a few minutes late from the
  * owner's Mac. Pins the webhook filter it must reproduce, dedup, oldest-first and limit, the
- * kill switch, the silence guard (including the non-production suggest-mode default), the
+ * silence guard (including the non-production suggest-mode default), the
  * overrides handed to draftShadowReply, the lock, and that no log line carries message text.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -77,8 +77,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   stubFetch.mockClear();
   priorGates = { smsSuggestMode: featureGates.gates.smsSuggestMode, smsAutoSend: featureGates.gates.smsAutoSend, smsShadowDrafts: featureGates.gates.smsShadowDrafts };
-  priorEnv = { mac: process.env.GATE_SMS_MAC_DRAFTS, unanswered: process.env.GATE_SMS_UNANSWERED_REPLY };
-  process.env.GATE_SMS_MAC_DRAFTS = 'true';
+  priorEnv = { unanswered: process.env.GATE_SMS_UNANSWERED_REPLY };
   delete process.env.GATE_SMS_UNANSWERED_REPLY;
   // The silent baseline a production Mac job runs in: suggest mode and auto-send off.
   featureGates.gates.smsSuggestMode = false;
@@ -92,7 +91,7 @@ afterEach(() => {
   featureGates.gates.smsSuggestMode = priorGates.smsSuggestMode;
   featureGates.gates.smsAutoSend = priorGates.smsAutoSend;
   featureGates.gates.smsShadowDrafts = priorGates.smsShadowDrafts;
-  for (const [key, name] of [['mac', 'GATE_SMS_MAC_DRAFTS'], ['unanswered', 'GATE_SMS_UNANSWERED_REPLY']]) {
+  for (const [key, name] of [['unanswered', 'GATE_SMS_UNANSWERED_REPLY']]) {
     if (priorEnv[key] === undefined) delete process.env[name];
     else process.env[name] = priorEnv[key];
   }
@@ -100,31 +99,13 @@ afterEach(() => {
 
 const run = (dbi, over = {}) => draftPendingInbound({ dbi, findCustomer: findCustomerOk, now: NOW, ...over });
 
-describe('kill switch', () => {
-  test('GATE_SMS_MAC_DRAFTS unset or not exactly true: { skipped: gate_off } and nothing else runs', async () => {
-    for (const value of [undefined, '', 'false', '1', 'TRUE', 'on']) {
-      if (value === undefined) delete process.env.GATE_SMS_MAC_DRAFTS;
-      else process.env.GATE_SMS_MAC_DRAFTS = value;
-      const dbi = fakeDbi({ rows: [inboundRow()] });
-      expect(await run(dbi)).toEqual({ skipped: 'gate_off' });
-      expect(dbi).not.toHaveBeenCalled();
-      expect(draftShadowReply).not.toHaveBeenCalled();
-    }
-  });
-
-  test('the reader is strict and read at call time', () => {
-    process.env.GATE_SMS_MAC_DRAFTS = 'true';
-    expect(featureGates.smsMacDraftsLive()).toBe(true);
-    process.env.GATE_SMS_MAC_DRAFTS = 'yes';
-    expect(featureGates.smsMacDraftsLive()).toBe(false);
-  });
-
-  test('turning the gate off mid-run stops before the next draft', async () => {
-    draftShadowReply.mockImplementationOnce(async () => { process.env.GATE_SMS_MAC_DRAFTS = 'false'; return 'draft-1'; });
+describe('mid-run silence guard', () => {
+  test('a flag turned on mid-run stops before the next draft', async () => {
+    draftShadowReply.mockImplementationOnce(async () => { featureGates.gates.smsAutoSend = true; return 'draft-1'; });
     const rows = [inboundRow({ id: 'sms-1' }), inboundRow({ id: 'sms-2' })];
     const result = await run(fakeDbi({ rows }));
     expect(draftShadowReply).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({ drafted: 1, stopped: 'gate_off' });
+    expect(result).toMatchObject({ drafted: 1, stopped: 'auto_send_on' });
   });
 });
 

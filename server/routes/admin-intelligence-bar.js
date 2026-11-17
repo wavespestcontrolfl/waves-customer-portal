@@ -3947,14 +3947,14 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     OwnerDirect.noteSameNameContext(requestTaint, taskContext);
     // Text pasted or dropped into the message: every write shows its card (owner-direct.js, PASTED TEXT).
     if (req.body.pasted_text === true) OwnerDirect.notePastedText(requestTaint);
-    // GATE_IB_TOOL_ADDITIONS (tool-additions.js): a found tool is offered by a
+    // Tool additions (tool-additions.js): a found tool is offered by a
     // system message before the next round, so `tools` (rendered first, the
     // start of the cached prefix and of every thinking block's checked prefix)
     // stays as sent. A saved history that holds such messages, on a model that
     // cannot read them, gets them back in `tools`.
     ({ tools, messages: currentMessages } = ToolAdditions.forModel({ tools, messages: currentMessages, model }));
     const toolAdditions = ToolAdditions.createRequestState({
-      enabled: ToolAdditions.toolAdditionsWanted({ platformEnabled, toolSearch, model, saved: req.ibResumedTask?.checkpoint }),
+      enabled: ToolAdditions.toolAdditionsWanted({ platformEnabled, toolSearch, model }),
       messages: currentMessages,
     });
     if (req.ibResumedTask && platformEnabled) {

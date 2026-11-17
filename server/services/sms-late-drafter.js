@@ -20,8 +20,6 @@
  *     unanswered-reply stamp all read off. The drafter publishes a staff card or sends when the
  *     first two are on, and stamps a draft for the third. smsSuggestMode defaults ON outside
  *     production (feature-gates.js), so the job must run with NODE_ENV=production.
- *   - GATE_SMS_MAC_DRAFTS: strict opt-in kill switch, read on every call and again before each
- *     draft.
  *   - dedup: a text that already has ANY message_drafts row is never drafted again (so turning
  *     the live drafter back on cannot double up), and a Postgres advisory lock stops two
  *     overlapping runs picking the same text.
@@ -173,12 +171,6 @@ function bump(map, key) {
   map[key] = (map[key] || 0) + 1;
 }
 
-// Gate and silence checks, repeated before every draft: a flag flipped mid-run stops the run.
-function runRefusal() {
-  if (!gates().smsMacDraftsLive()) return 'gate_off';
-  return silenceRefusal();
-}
-
 async function processRow(row, { dbi, findCustomer }, result) {
   const verdict = await eligibility(row, findCustomer);
   if (verdict.skip) {
@@ -205,7 +197,7 @@ async function processRow(row, { dbi, findCustomer }, result) {
 async function draftBatch(rows, ctx, limit, result) {
   for (const row of rows) {
     if (result.drafted + result.failed >= limit) break;
-    const refusal = runRefusal();
+    const refusal = silenceRefusal();
     if (refusal) {
       result.stopped = refusal;
       logger.warn(`[sms-late] run stopped: ${refusal}`);
@@ -254,7 +246,6 @@ function clampInt(value, fallback, min, max) {
 
 /**
  * Draft the pending inbound texts. Returns:
- *   { skipped: 'gate_off' }            GATE_SMS_MAC_DRAFTS is off (nothing else ran)
  *   { refused: '<reason>' }            suggest mode, auto-send or the unanswered stamp reads on here
  *   { skipped: 'locked' | 'lock_error' } another run holds the lock
  *   { drafted, skipped, failed, examined, skippedReasons, stopped?, blockedExternal? }
@@ -268,7 +259,6 @@ function clampInt(value, fallback, min, max) {
 async function draftPendingInbound({
   windowMinutes = 60, minAgeSeconds = 60, limit = 10, dbi = db, findCustomer = defaultFindCustomer, now = new Date(),
 } = {}) {
-  if (!gates().smsMacDraftsLive()) return { skipped: 'gate_off' };
   const refused = silenceRefusal();
   if (refused) {
     logger.warn(`[sms-late] refused: ${refused}`);

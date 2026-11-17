@@ -344,7 +344,11 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(proposeSpy.mock.calls.map(([arg]) => arg.requestStartedAt)).toEqual([new Date(original.created_at).getTime()]);
     proposeSpy.mockRestore();
     // send_sms was loaded by the checkpointed discovery, never invoked, and must not need a repeated discovery.
-    expect(mockModel.mock.calls[0][0].tools.map(tool => tool.name)).toContain('send_sms');
+    // `tools` stays the page list the original request sent; the restored tool is offered by an addition message.
+    const resumedRequest = mockModel.mock.calls[0][0];
+    expect(resumedRequest.tools.map(tool => tool.name)).not.toContain('send_sms');
+    const additions = resumedRequest.messages.filter(message => message.role === 'system').flatMap(message => message.content);
+    expect(additions.map(block => block.tool?.definition?.name)).toContain('send_sms');
     expect(JSON.stringify(mockModel.mock.calls)).not.toContain('capability_not_loaded');
     expect(resumed.body.pendingActions).toHaveLength(1);
     expect(resumed.body.pendingActions[0].tool).toBe('send_sms');

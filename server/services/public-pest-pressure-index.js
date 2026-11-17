@@ -1,8 +1,7 @@
 'use strict';
 
 /**
- * Public Pest Pressure Index (GET /api/public/pest-pressure-index,
- * GATE_PUBLIC_PEST_PRESSURE_INDEX).
+ * Public Pest Pressure Index (GET /api/public/pest-pressure-index).
  *
  * Owner 2026-11-02 (backlink plan step 5, "Pest Pressure Index"): publish
  * COUNTY AVERAGES of the technician's on-site pest-activity rating from
