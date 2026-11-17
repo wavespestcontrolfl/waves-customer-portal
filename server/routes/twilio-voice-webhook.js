@@ -4271,10 +4271,11 @@ router.post('/conference-hold-facts', async (req, res) => {
     const state = conferencePath.CALL_SID_RE.test(parentSid) ? await callHold.holdState(parentSid) : { open: false };
     if (!state.open) {
       twiml.pause({ length: 1 });
-    } else if (callHold.heldSeconds(state) >= callHold.HOLD_LIMIT_SEC) {
-      // The limit: the caller goes to voicemail (the room ends, so this hold URL stops). A Twilio error restores the
-      // hold and this answer is a second of silence; the next fetch tries again.
-      await callHold.startHoldVoicemail(parentSid, 'timeout');
+    } else if (state.voicemailPending || callHold.heldSeconds(state) >= callHold.HOLD_LIMIT_SEC) {
+      // The limit, or a voicemail the staff phone hanging up could not start (voicemail_pending: its reason): the
+      // caller goes to voicemail (the room ends, so this hold URL stops). A Twilio error restores the hold and this
+      // answer is a second of silence; the next fetch tries again.
+      await callHold.startHoldVoicemail(parentSid, state.voicemailPending || 'timeout');
       twiml.pause({ length: 1 });
     } else {
       appendHoldFacts(twiml, parentSid, step);

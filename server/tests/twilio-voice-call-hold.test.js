@@ -337,6 +337,16 @@ describe('/conference-hold-facts (holdUrl)', () => {
     expect(await stepBody(8)).toBe(response('<Pause length="1"/>'));
   });
 
+  test('a pending voicemail (the staff phone hung up and the room would not end) starts at once with its reason', async () => {
+    callHold.holdState.mockResolvedValue({ found: true, open: true, closed: false, voicemailPending: 'staff_left' });
+    callHold.heldSeconds.mockReturnValue(40);
+    callHold.startHoldVoicemail.mockResolvedValue('started');
+    expect(await stepBody(3)).toBe(response('<Pause length="1"/>'));
+    expect(callHold.startHoldVoicemail).toHaveBeenCalledWith(SID, 'staff_left');
+    callHold.startHoldVoicemail.mockResolvedValue('failed');
+    expect(await stepBody(4)).toBe(response('<Pause length="1"/>')); // a failed try: silence, the next fetch tries again
+  });
+
   test('just under 5 minutes still speaks the script and starts nothing', async () => {
     callHold.heldSeconds.mockReturnValue(299);
     expect(await stepBody(1)).toContain(esc(FACTS[1]));

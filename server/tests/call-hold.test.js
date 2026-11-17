@@ -254,12 +254,53 @@ describe('endHold', () => {
     });
   };
 
-  test('the claim write fails after the unhold: returned, and the recording still resumes', async () => {
+  test('the return claim write fails: failed (the staff stay on the menu), and Twilio is never asked to unhold', async () => {
     const row = fakeCallLog(room());
     fakeTwilio();
     await hold.startHold(SID, { legSid: LEG });
     const events = fakeTwilio();
     failWrites();
+    expect(await hold.endHold(SID)).toBe('failed');
+    expect(events).toHaveLength(0);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('(ECONNRESET)'));
+    expect(stateOf(row).open).toBe(true);
+  });
+
+  test('the return claim read fails: failed, and Twilio is never asked to unhold or resume', async () => {
+    const row = fakeCallLog(room());
+    fakeTwilio();
+    await hold.startHold(SID, { legSid: LEG });
+    const events = fakeTwilio();
+    const working = db.getMockImplementation();
+    db.mockImplementation((...args) => {
+      const chain = working(...args);
+      chain.first = jest.fn(async () => { throw Object.assign(new Error('db down'), { code: 'ECONNRESET' }); });
+      return chain;
+    });
+    expect(await hold.endHold(SID)).toBe('failed');
+    expect(events).toHaveLength(0);
+    db.mockImplementation(working);
+    expect(stateOf(row).open).toBe(true);
+    expect(stateOf(row).return_at).toBeUndefined();
+  });
+
+  test('the close write fails after the unhold: returned, and the recording still resumes', async () => {
+    const row = fakeCallLog(room());
+    fakeTwilio();
+    await hold.startHold(SID, { legSid: LEG });
+    const events = fakeTwilio();
+    const working = db.getMockImplementation();
+    let updates = 0;
+    db.mockImplementation((...args) => {
+      const chain = working(...args);
+      const real = chain.update;
+      chain.update = jest.fn(async (...a) => {
+        updates += 1;
+        if (updates === 2) throw Object.assign(new Error('db down'), { code: 'ECONNRESET' }); // the close
+        return real(...a);
+      });
+      return chain;
+    });
     expect(await hold.endHold(SID)).toBe('returned');
     expect(events.map((e) => e.name)).toEqual(['list', 'participant', 'recording']);
     expect(events[2]).toMatchObject({ which: 'Twilio.CURRENT', status: 'in-progress' });
@@ -267,13 +308,25 @@ describe('endHold', () => {
     expect(stateOf(row).open).toBe(true);
   });
 
-  test('no room and the claim write fails: still no_room', async () => {
-    fakeCallLog(room());
+  test('no room and the close write fails: still no_room', async () => {
+    const row = fakeCallLog(room());
     fakeTwilio();
     await hold.startHold(SID, { legSid: LEG });
     fakeTwilio({ rooms: [] });
-    failWrites();
+    const working = db.getMockImplementation();
+    let updates = 0;
+    db.mockImplementation((...args) => {
+      const chain = working(...args);
+      const real = chain.update;
+      chain.update = jest.fn(async (...a) => {
+        updates += 1;
+        if (updates === 2) throw Object.assign(new Error('db down'), { code: 'ECONNRESET' });
+        return real(...a);
+      });
+      return chain;
+    });
     expect(await hold.endHold(SID)).toBe('no_room');
+    expect(stateOf(row).open).toBe(true);
   });
 
   test('any other REST error keeps the claim open: failed', async () => {
@@ -728,5 +781,49 @@ describe('a star after a press 1 whose close write failed', () => {
     expect(await hold.startHold(SID, { legSid: LEG })).toBe('held');
     expect(events).toHaveLength(0);
     expect(stateOf(row).count).toBe(1);
+  });
+});
+
+// The staff phone hangs up during the hold and the voicemail cannot end the room: the caller must not be hung up
+// by the ordinary cleanup. The restored hold keeps the reason, and the hold script's next fetch starts the voicemail.
+describe('the staff hang up during a hold and the room will not end', () => {
+  const cp = require('../services/call-conference-path');
+  const staffGone = () => cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG, status: 'completed' });
+  const heldRoom = () => ({ conference_path: { ...room().conference_path, legs: { 0: { sid: LEG } } } });
+
+  test('no ordinary cleanup, the hold is restored with the staff_left reason, the next fetch starts the voicemail', async () => {
+    const row = fakeCallLog(heldRoom());
+    fakeTwilio();
+    await hold.startHold(SID, { legSid: LEG });
+    jest.clearAllMocks();
+    const failed = fakeTwilio({ fail: { room: Object.assign(new Error('x'), { status: 500, code: 51000 }) } });
+    expect(await staffGone()).toBe('hold_voicemail_pending');
+    // Only the voicemail's own list + room end ran: no second list, no room end by cleanup, no call hang-up.
+    expect(names(failed)).toEqual(['list', 'room']);
+    expect(stateOf(row)).toMatchObject({ open: true, voicemail_pending: 'staff_left' });
+    expect(stateOf(row).voicemail_at).toBeUndefined();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect(await hold.holdState(SID)).toMatchObject({ open: true, voicemailAt: null, voicemailPending: 'staff_left' });
+
+    // The caller's hold script asks again: the voicemail claims with the pending reason and ends the room.
+    const next = fakeTwilio();
+    expect(await hold.startHoldVoicemail(SID, (await hold.holdState(SID)).voicemailPending)).toBe('started');
+    expect(names(next)).toEqual(['list', 'room']);
+    expect(next[1]).toMatchObject({ sid: ROOM, status: 'completed' });
+    expect(stateOf(row)).toMatchObject({ open: false, voicemail_reason: 'staff_left' });
+    expect(stateOf(row).voicemail_at).toBeDefined();
+    expect(stateOf(row).voicemail_pending).toBeUndefined();
+    expect((await hold.holdState(SID)).voicemailAt).toBe(stateOf(row).voicemail_at); // what /call-complete?conf=1 answers from
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(raiseAdminAlert.mock.calls[0][1].why).toMatch(/staff phone hung up/);
+  });
+
+  test('a plain 5 minute timeout that fails is restored with no pending reason', async () => {
+    const row = fakeCallLog(room());
+    fakeTwilio();
+    await hold.startHold(SID, { legSid: LEG });
+    fakeTwilio({ fail: { room: Object.assign(new Error('x'), { status: 500 }) } });
+    expect(await hold.startHoldVoicemail(SID, 'timeout')).toBe('failed');
+    expect(stateOf(row).voicemail_pending).toBeUndefined();
   });
 });
