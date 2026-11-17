@@ -11,10 +11,18 @@
  * the caller.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), callHoldVoiceLive: jest.fn(() => false) }));
 
 const mockUpset = jest.fn();
 jest.mock('../services/live-call-upset-alert', () => ({ afterCallerUtterance: (...args) => mockUpset(...args) }));
+
+// The spoken hold trigger (GATE_CALL_HOLD_VOICE) is pinned here only as a call, and as "not even required with the gate off".
+const mockHoldVoice = jest.fn(() => Promise.resolve());
+let mockHoldVoiceLoads = 0;
+jest.mock('../services/call-hold-voice', () => {
+  mockHoldVoiceLoads += 1;
+  return { afterStaffUtterance: (...args) => mockHoldVoice(...args) };
+});
 
 const mockRequest = jest.fn();
 jest.mock('twilio', () => jest.fn(() => ({ request: mockRequest })));
@@ -124,7 +132,7 @@ jest.mock('../models/db', () => {
 });
 
 const db = require('../models/db');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, callHoldVoiceLive } = require('../config/feature-gates');
 const live = require('../services/live-call-transcription');
 
 const CALL = 'CA' + 'a'.repeat(32);
@@ -158,6 +166,7 @@ beforeEach(() => {
   s.rawCalls = [];
   s.hold = null;
   isEnabled.mockReturnValue(true);
+  callHoldVoiceLive.mockReturnValue(false);
   process.env.TWILIO_ACCOUNT_SID = 'AC' + 'c'.repeat(32);
   process.env.TWILIO_AUTH_TOKEN = 'token';
   delete process.env.SERVER_DOMAIN;
@@ -246,6 +255,55 @@ describe('recordLiveTranscriptionEvent', () => {
     isEnabled.mockImplementation((gate) => gate !== 'liveCallUpsetAlert');
     await live.recordLiveTranscriptionEvent(content(3, 'inbound_track', 'Hello?', 3));
     expect(mockUpset).not.toHaveBeenCalled();
+  });
+
+  test('GATE_CALL_HOLD_VOICE: a stored staff line is handed to the hold trigger with its text; caller lines, duplicates and a held caller are not', async () => {
+    callHoldVoiceLive.mockReturnValue(true);
+    await live.recordLiveTranscriptionEvent(content(1, 'inbound_track', 'Please hold, I am a caller saying it', 1));
+    expect(mockHoldVoice).not.toHaveBeenCalled();
+    await expect(live.recordLiveTranscriptionEvent(content(2, 'outbound_track', 'Okay, please hold while I check.', 2))).resolves.toMatchObject({ stored: true });
+    expect(mockHoldVoice).toHaveBeenCalledTimes(1);
+    expect(mockHoldVoice).toHaveBeenCalledWith(CALL, 'Okay, please hold while I check.');
+    mockHoldVoice.mockClear();
+    // A redelivery stores nothing, so it asks for nothing.
+    await expect(live.recordLiveTranscriptionEvent(content(2, 'outbound_track', 'Okay, please hold while I check.', 2))).resolves.toMatchObject({ stored: false, reason: 'duplicate' });
+    expect(mockHoldVoice).not.toHaveBeenCalled();
+    // While the hold holds the caller nothing is stored, so no phrase can fire.
+    db.__state.hold = { phase: 'held', applied: null };
+    await expect(live.recordLiveTranscriptionEvent(content(3, 'outbound_track', 'Please hold.', 3))).resolves.toEqual({ stored: false, reason: 'on_hold' });
+    expect(mockHoldVoice).not.toHaveBeenCalled();
+  });
+
+  test('GATE_CALL_HOLD_VOICE off: the trigger is not called and its module is not even required', async () => {
+    let result;
+    let loadsBefore;
+    jest.isolateModules(() => {
+      const isolatedDb = require('../models/db');
+      const isolatedLive = require('../services/live-call-transcription');
+      isolatedDb.__state.claimed.add(CALL);
+      loadsBefore = mockHoldVoiceLoads;
+      result = isolatedLive.recordLiveTranscriptionEvent(content(1, 'outbound_track', 'Please hold.', 1));
+    });
+    await expect(result).resolves.toMatchObject({ stored: true });
+    expect(mockHoldVoice).not.toHaveBeenCalled();
+    expect(mockHoldVoiceLoads).toBe(loadsBefore);
+    await live.recordLiveTranscriptionEvent(content(2, 'outbound_track', 'Please hold.', 2));
+    expect(mockHoldVoice).not.toHaveBeenCalled();
+  });
+
+  test('a hold trigger that throws or rejects never changes the webhook answer; the log has the code only', async () => {
+    const logger = require('../services/logger');
+    callHoldVoiceLive.mockReturnValue(true);
+    mockHoldVoice.mockImplementationOnce(() => { throw Object.assign(new Error('boom: please hold'), { code: 'E_BOOM' }); });
+    await expect(live.recordLiveTranscriptionEvent(content(1, 'outbound_track', 'Please hold.', 1))).resolves.toEqual({ stored: true, panMasked: false });
+    mockHoldVoice.mockReturnValueOnce(Promise.reject(Object.assign(new Error('late: please hold'), { code: 'E_LATE' })));
+    await expect(live.recordLiveTranscriptionEvent(content(2, 'outbound_track', 'Please hold.', 2))).resolves.toEqual({ stored: true, panMasked: false });
+    await new Promise((resolve) => setImmediate(resolve));
+    const warns = logger.warn.mock.calls.map((c) => c[0]);
+    expect(warns).toEqual([
+      '[live-transcription] hold voice hook failed for CA…aaaaaa (E_BOOM)',
+      '[live-transcription] hold voice hook failed for CA…aaaaaa (E_LATE)',
+    ]);
   });
 
   test('while the star-key hold holds the caller, neither track is stored and no reader runs; text resumes after the return', async () => {

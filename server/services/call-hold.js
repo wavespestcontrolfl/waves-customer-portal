@@ -69,11 +69,12 @@
  * while the caller is held sends no resume (the return resumes the recording), and a card resume that lands as a hold
  * starts is followed by a pause. So the recording runs again only once both are over.
  *
- * THE HOLD BUTTON (the Live call panel, admin-call-recordings.js POST /live/:id/hold): requestHold moves the staff leg
- * that won the press 1 out of the room by REST, to the star's own route with by=button. From there the hold IS a star
+ * THE HOLD BUTTON (the Live call panel, admin-call-recordings.js POST /live/:id/hold) and THE VOICE TRIGGER: requestHold moves the staff leg
+ * that won the press 1 out of the room by REST, to the star's own route with by=button or by=voice. From there the hold IS a star
  * hold: the same decision, sender, menu, timer and press 1. Moving a call that is in a <Dial> also makes Twilio request
  * that <Dial>'s action URL, which is the same route: the second request is a duplicate star that replaces nothing, and
- * both answer the same TwiML. Nothing here texts or calls anyone.
+ * both answer the same TwiML. The voice trigger (call-hold-voice.js, GATE_CALL_HOLD_VOICE) asks the same way, with
+ * by=voice, when the staff say "please hold" or "let me put you on hold" on the live call. Nothing here texts or calls anyone.
  *
  * Left open: Twilio unreachable for every request of a re-hold as well (see the report), and a database that
  * is down while the caller is held (no decision can be made; the caller keeps the script).
@@ -811,7 +812,7 @@ async function voicemailAnswered(callSid) {
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// A hold the server asks for: the Live call panel's Hold button (see THE HOLD BUTTON above).
+// A hold the server asks for: the Live call panel's Hold button or the spoken trigger (see THE HOLD BUTTON above).
 // ---------------------------------------------------------------------------------------------------------
 
 // The panel's view of a call's hold (GET /live). null off the conference ring and before a staff press 1, else:
@@ -825,8 +826,9 @@ function holdForPanel(state) {
   return { can_hold: false, on_hold: true, since: hold.open_at || null };
 }
 
-// Who may ask the star route for a hold besides a star (the route reads its `by` query the same way).
-const REQUEST_BY = new Set(['button']);
+// Who may ask the star route for a hold besides a star: the Live call panel's Hold button and the spoken "please
+// hold" (call-hold-voice.js). The route reads its `by` query the same way.
+const REQUEST_BY = new Set(['button', 'voice']);
 
 // 'requested' | 'on_hold' | 'unavailable' | 'failed'. The REST move of the winning staff leg to the star route; the
 // hold itself is then the star's (it answers before the hold is confirmed: the panel's next poll shows it). A move

@@ -166,6 +166,7 @@
  *   GATE_TECH_JOB_TYPE_CHECKS=true (owner 2026-10-25, second technician starts early 2027: job type from the service catalog. The capability checks (slot offers, automatic technician pick, tech-out auto-move, auto-dispatch apply, the save-time fences) today read a visit's job type from its NAME, so "Palm Tree Nutritional Treatment", "Semiannual Palm", "Palm Fert" and "Top Dress" read as general pest and a technician set to Off for Lawn can still get them. On, the category comes from the service library first (the visit's service_id, else its service key, to services.category, mapped onto the five capability categories by the same table the service-line map uses) and falls back to the name only when the catalog names none. Office saves (schedule create and edit, board assign and drag, lead booking, Dispatch New Appointment) also add a plain warning, never a block, when the chosen technician is set to Off for the visit's job type; "needs review" never warns. Strict opt-in: exactly 'true', read at call time via techJobTypeChecksLive(). Ships DARK; off = name-only classification and no extra warning, byte-identical. Sends nothing to a customer.)
  *   GATE_CALL_HOLD=true (owner 2026-11-16 "ok build all", live-call suite: on a conference-path call (GATE_CALL_CONFERENCE_PATH), the staff press star to put the caller on hold. The caller hears a short script of pest facts, the call recording pauses, and the staff press 1 to go back. Strict opt-in, read at call time via callHoldLive(); off = byte-identical staff TwiML and no new route is reached. Spends money: Twilio bills the portal's neural Say voice (TWILIO_SAY_VOICE, default Polly.Joanna-Neural) per character of the script and prompts, so the owner flips it with his yes to the cost. Sends nothing to a customer. Kill: unset.)
  *   GATE_CALL_RING_FACT=true (owner 2026-11-16 "ok build all", live-call suite part 8: on half of the conference-path calls (GATE_CALL_CONFERENCE_PATH), chosen from the CallSid, the caller hears one pest fact from the hold script (call-hold-script.js FACTS) and then the ring, instead of the ring alone; the other half hear the ring as today. Each call is stamped conference_path.ring_fact {arm, fact} so ringFactReport() can compare hang-ups before the answer between the arms over 2 weeks. Strict opt-in, read at call time via callRingFactLive(); off = today's ring, byte for byte. Spends money (Twilio bills the Polly neural Say voice per character, about $1 a month) and the caller hears new audio, so the owner flips it; sends nothing to a customer. Kill: unset)
+ *   GATE_CALL_HOLD_VOICE=true (owner 2026-11-16 "ok build all", live-call suite part 7: when a staff member says "please hold", "hold please" or "let me put you on hold" on a conference-path call, the caller is put on hold exactly as if the staff had pressed star; "hold on a second" does not start a hold. Named risk: a false match puts a caller on hold, so it has its own off switch. Strict opt-in, read at call time via callHoldVoiceLive(). Needs GATE_CALL_HOLD, GATE_LIVE_CALL_TRANSCRIPTION and GATE_CALL_CONFERENCE_PATH. Spends nothing beyond the hold's own Say voice. Sends nothing to a customer. Kill: unset.)
  *   GATE_AUTO_DISPATCH_KEEP_TECH=true (owner 2026-10-25, second technician starts early 2027: the 04:10 auto-dispatch night run keeps each visit on its own technician. On, a visit that has a technician gets candidate slots on that same technician only (other technicians' slots are dropped as `other_tech`), and the write refuses to change a technician (`TECH_CHANGE_BLOCKED`, the visit stays). An unassigned visit is handled as before. Strict opt-in: exactly 'true', read at call time via autoDispatchKeepTechLive(), resolved once per run as config.keepTech. Ships DARK; off = the night run may move a visit to another technician for a shorter drive, byte-identical to before. Sends nothing to a customer.)
  *   GATE_PROMISE_RECORD_EVIDENCE=shadow|true (owner 2026-10-29, fix F4 "Stuck Alert Fixes": three false overdue bells on promises and asks the records had already answered. On, (1) an invoice Waves sent the customer after a staff promise ("I'll adjust the payment terms") is evidence the model may cite, (2) an estimate the customer accepted after a send-estimate ask counts even if it was sent before the ask, and (3) a waves row (promise or customer request) of kind other, callback or technician_follow_up whose customer has a live, non-series visit booked after the promise text and with its window end still ahead does not ring as overdue until that window end. `shadow` = change nothing; write audit_log rows for what it would have changed (sms_commitment.fulfillment.shadow, sms_commitment.on_track.shadow). Anything else = off, byte-identical. Read at call time via promiseRecordEvidenceMode(). See docs/gates-and-env.md.)
  *   GATE_SETTINGS_GATE_FLIP=true (owner 2026-11-06: Settings → Advanced → Features gets an on/off switch on every gate the portal can flip (a plain on/off gate with a description line here). Owner login only (requireFullAccess); turning a gate on asks for its name to be typed, turning it off is one click and writes 'false'; every flip writes an audit_log row (gate.flip) and goes through the same Railway variable write as the Intelligence Bar's set_railway_gate (compare-and-swap on the prior value; Railway redeploys the portal, so it restarts briefly). This gate itself, mode/timestamp gates and gates with no description stay Railway-only. Strict opt-in, read at call time via settingsGateFlipLive(); off = the page is read-only exactly as before and the flip routes answer 404)
@@ -4409,6 +4410,10 @@ const gates = {
   // callRingFactLive(); this entry is for logGateStatus. Off = byte-identical caller TwiML.
   callRingFact: process.env.GATE_CALL_RING_FACT === 'true',
 
+  // Spoken "please hold" trigger for the star-key hold (services/call-hold-voice.js). Read at CALL time by
+  // callHoldVoiceLive(); this entry is for logGateStatus. Off = nothing reads the staff's words for a hold.
+  callHoldVoice: process.env.GATE_CALL_HOLD_VOICE === 'true',
+
   // Customer location line (services/twilio.js deriveOutboundNumber →
   // config/locations.js resolveServiceLocation). ON: a customer whose city is
   // blank or unmapped gets the line of the office their ZIP, then geocode,
@@ -8412,6 +8417,11 @@ function callHoldLive() {
   return process.env.GATE_CALL_HOLD === 'true';
 }
 
+// GATE_CALL_HOLD_VOICE read at CALL time, strict `=== 'true'`, dark (owner 2026-11-16, "ok build all"). Kill = unset.
+function callHoldVoiceLive() {
+  return process.env.GATE_CALL_HOLD_VOICE === 'true';
+}
+
 function smsBareYesReplyLive() {
   return process.env.GATE_SMS_BARE_YES_REPLY === 'true';
 }
@@ -8427,6 +8437,8 @@ module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.callHoldLive = callHoldLive;
 // GATE_CALL_RING_FACT reader, on its own line so gate PRs never conflict.
 module.exports.callRingFactLive = callRingFactLive;
+// GATE_CALL_HOLD_VOICE reader, on its own line so gate PRs never conflict.
+module.exports.callHoldVoiceLive = callHoldVoiceLive;
 module.exports.ibSeriesMoveLive = ibSeriesMoveLive;
 module.exports.customerRouteCheckMode = customerRouteCheckMode;
 // GATE_CALL_CONFERENCE_PATH reader, on its own line so gate PRs never conflict.

@@ -1665,6 +1665,15 @@ describe('the Hold button: holdForPanel and requestHold', () => {
     expect(events[0].url).toBe(`https://staging.example.com/api/webhooks/twilio/conference-staff-left?parent=${SID}&by=button`);
   });
 
+  test("by 'voice' (the spoken \"please hold\") is accepted too: the leg moves with by=voice in the URL", async () => {
+    seed(null);
+    const events = fakeTwilio();
+    await expect(hold.requestHold(SID, { by: 'voice' })).resolves.toBe('requested');
+    expect(events).toEqual([{ name: 'call', sid: LEG, url: MOVED_TO.replace('by=button', 'by=voice'), method: 'POST' }]);
+    expect(holdOf()).toBeUndefined();
+    expect(db.__state.writes).toEqual([]);
+  });
+
   test('a hold already open, or a return in flight: on_hold, and nothing is moved', async () => {
     const events = fakeTwilio();
     for (const h of [heldHold(), heldHold({ applied: null }), heldHold({ phase: 'returned', applied: 'held', ret_by: 'press1' })]) {
