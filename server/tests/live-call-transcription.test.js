@@ -263,7 +263,12 @@ describe('recordLiveTranscriptionEvent', () => {
     expect(mockHoldVoice).not.toHaveBeenCalled();
     await expect(live.recordLiveTranscriptionEvent(content(2, 'outbound_track', 'Okay, please hold while I check.', 2))).resolves.toMatchObject({ stored: true });
     expect(mockHoldVoice).toHaveBeenCalledTimes(1);
-    expect(mockHoldVoice).toHaveBeenCalledWith(CALL, 'Okay, please hold while I check.');
+    // The speech time is the event's own Timestamp.
+    expect(mockHoldVoice).toHaveBeenCalledWith(CALL, 'Okay, please hold while I check.', { spokenAt: new Date(Date.UTC(2026, 10, 16, 15, 0, 2)) });
+    mockHoldVoice.mockClear();
+    // An event with no Timestamp is stored, and hands no speech time (the trigger then asks for nothing).
+    await live.recordLiveTranscriptionEvent(content(9, 'outbound_track', 'Please hold.', 9, { Timestamp: undefined }));
+    expect(mockHoldVoice).toHaveBeenLastCalledWith(CALL, 'Please hold.', { spokenAt: null });
     mockHoldVoice.mockClear();
     // A redelivery stores nothing, so it asks for nothing.
     await expect(live.recordLiveTranscriptionEvent(content(2, 'outbound_track', 'Okay, please hold while I check.', 2))).resolves.toMatchObject({ stored: false, reason: 'duplicate' });

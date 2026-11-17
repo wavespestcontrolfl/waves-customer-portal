@@ -86,12 +86,22 @@ const live = () => typeof featureGates.callHoldVoiceLive === 'function' && featu
 const masked = (callSid) => `…${String(callSid || '').slice(-6)}`;
 const errorCode = (err) => String(err?.code || err?.name || 'error').slice(0, 40);
 
+// A final transcript can arrive late (a slow or retried delivery). Speech older than this, or with no time, asks for
+// nothing: the staff may already have held and returned the caller by star or the button. requestHold also refuses
+// speech from before the newest hold ('stale').
+const MAX_SPEECH_AGE_MS = 10 * 1000;
+
 // Fire and forget; the returned promise is for tests. Never throws, never logs the text.
-async function afterStaffUtterance(callSid, text) {
+async function afterStaffUtterance(callSid, text, { spokenAt = null } = {}) {
   try {
     if (!live()) return;
     if (!isHoldPhrase(text)) return;
-    const answer = await require('./call-hold').requestHold(callSid, { by: 'voice' });
+    const spokenMs = spokenAt ? new Date(spokenAt).getTime() : Number.NaN;
+    if (!Number.isFinite(spokenMs) || Date.now() - spokenMs > MAX_SPEECH_AGE_MS) {
+      logger.info(`[call-hold-voice] late hold phrase ignored for ${masked(callSid)}`);
+      return;
+    }
+    const answer = await require('./call-hold').requestHold(callSid, { by: 'voice', spokenAt: new Date(spokenMs) });
     logger.info(`[call-hold-voice] hold asked for ${masked(callSid)} (${answer})`);
   } catch (err) {
     try { logger.warn(`[call-hold-voice] hold request failed for ${masked(callSid)} (${errorCode(err)})`); } catch { /* logging never throws out */ }

@@ -830,16 +830,19 @@ function holdForPanel(state) {
 // hold" (call-hold-voice.js). The route reads its `by` query the same way.
 const REQUEST_BY = new Set(['button', 'voice']);
 
-// 'requested' | 'on_hold' | 'unavailable' | 'failed'. The REST move of the winning staff leg to the star route; the
+// 'requested' | 'on_hold' | 'unavailable' | 'stale' | 'failed'. The REST move of the winning staff leg to the star route; the
 // hold itself is then the star's (it answers before the hold is confirmed: the panel's next poll shows it). A move
 // of a leg that already hung up is refused by Twilio: 'failed', and nothing changed. Never throws.
-async function requestHold(callSid, { by } = {}) {
+// `spokenAt` (the voice trigger only): the time of the speech that asks. Speech from before the newest hold opened asks
+// for a hold that already happened (a late transcript after a star and a press 1): 'stale', and nothing is moved.
+async function requestHold(callSid, { by, spokenAt = null } = {}) {
   if (!isEnabled() || !REQUEST_BY.has(by) || !conferencePath.CALL_SID_RE.test(String(callSid || ''))) return 'unavailable';
   try {
     const state = await conferencePath.loadState(callSid);
     const view = holdForPanel(state);
     if (view?.on_hold) return 'on_hold';
     if (!view?.can_hold) return 'unavailable';
+    if (spokenAt && Date.parse(state.hold?.open_at || '') >= new Date(spokenAt).getTime()) return 'stale';
     await client().calls(state.accepted_leg_sid).update({
       url: publicUrl(`${WEBHOOK_BASE}/conference-staff-left?parent=${encodeURIComponent(callSid)}&by=${by}`),
       method: 'POST',

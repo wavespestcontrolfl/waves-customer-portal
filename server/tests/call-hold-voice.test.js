@@ -16,6 +16,8 @@ const featureGates = require('../config/feature-gates');
 const { isHoldPhrase, afterStaffUtterance } = require('../services/call-hold-voice');
 
 const SID = 'CA' + 'd'.repeat(26) + '123456';
+// Speech said a moment ago: the time a live transcript carries.
+const fresh = () => ({ spokenAt: new Date(Date.now() - 1000) });
 
 describe('isHoldPhrase', () => {
   test.each([
@@ -111,7 +113,7 @@ describe('afterStaffUtterance', () => {
 
   test('gate off: nothing is asked', async () => {
     featureGates.callHoldVoiceLive.mockReturnValue(false);
-    await afterStaffUtterance(SID, 'Please hold.');
+    await afterStaffUtterance(SID, 'Please hold.', fresh());
     expect(mockRequestHold).not.toHaveBeenCalled();
     expect(logger.info).not.toHaveBeenCalled();
   });
@@ -120,7 +122,7 @@ describe('afterStaffUtterance', () => {
     const reader = featureGates.callHoldVoiceLive;
     delete featureGates.callHoldVoiceLive;
     try {
-      await afterStaffUtterance(SID, 'Please hold.');
+      await afterStaffUtterance(SID, 'Please hold.', fresh());
     } finally {
       featureGates.callHoldVoiceLive = reader;
     }
@@ -130,23 +132,36 @@ describe('afterStaffUtterance', () => {
   });
 
   test('not a hold phrase: nothing is asked', async () => {
-    await afterStaffUtterance(SID, 'Hold on a second.');
+    await afterStaffUtterance(SID, 'Hold on a second.', fresh());
     expect(mockRequestHold).not.toHaveBeenCalled();
   });
 
   test("a hold phrase asks for the hold, by 'voice', and logs the answer with the SID masked", async () => {
-    await afterStaffUtterance(SID, 'Okay, please hold while I check.');
+    await afterStaffUtterance(SID, 'Okay, please hold while I check.', fresh());
     expect(mockRequestHold).toHaveBeenCalledTimes(1);
-    expect(mockRequestHold).toHaveBeenCalledWith(SID, { by: 'voice' });
+    expect(mockRequestHold).toHaveBeenCalledWith(SID, { by: 'voice', spokenAt: expect.any(Date) });
     expect(logger.info).toHaveBeenCalledWith('[call-hold-voice] hold asked for …123456 (requested)');
+  });
+
+  test('late or timeless speech asks for nothing: the staff may already have held and returned the caller', async () => {
+    await afterStaffUtterance(SID, 'Please hold.', { spokenAt: new Date(Date.now() - 11000) });
+    await afterStaffUtterance(SID, 'Please hold.', {});
+    await afterStaffUtterance(SID, 'Please hold.');
+    await afterStaffUtterance(SID, 'Please hold.', { spokenAt: new Date('not a time') });
+    expect(mockRequestHold).not.toHaveBeenCalled();
+    expect(logger.info.mock.calls.map((c) => c[0])).toEqual(Array(4).fill('[call-hold-voice] late hold phrase ignored for …123456'));
+    // Nine seconds old is still this moment's speech: the request carries its time.
+    const spokenAt = new Date(Date.now() - 9000);
+    await afterStaffUtterance(SID, 'Please hold.', { spokenAt });
+    expect(mockRequestHold).toHaveBeenCalledWith(SID, { by: 'voice', spokenAt });
   });
 
   test('a rejected or throwing request is swallowed and logged by code only', async () => {
     const TEXT = 'Please hold while I read my secret words';
     mockRequestHold.mockRejectedValueOnce(Object.assign(new Error(`failed for ${TEXT}`), { code: 20404 }));
-    await expect(afterStaffUtterance(SID, TEXT)).resolves.toBeUndefined();
+    await expect(afterStaffUtterance(SID, TEXT, fresh())).resolves.toBeUndefined();
     mockRequestHold.mockImplementationOnce(() => { throw new Error(`sync ${TEXT}`); });
-    await expect(afterStaffUtterance(SID, TEXT)).resolves.toBeUndefined();
+    await expect(afterStaffUtterance(SID, TEXT, fresh())).resolves.toBeUndefined();
     expect(logger.warn).toHaveBeenCalledTimes(2);
     expect(logger.warn).toHaveBeenNthCalledWith(1, '[call-hold-voice] hold request failed for …123456 (20404)');
     expect(logger.warn).toHaveBeenNthCalledWith(2, '[call-hold-voice] hold request failed for …123456 (Error)');
@@ -154,9 +169,9 @@ describe('afterStaffUtterance', () => {
 
   test('no log line holds the text or the full SID', async () => {
     const TEXT = 'Please hold while I read my secret words';
-    await afterStaffUtterance(SID, TEXT);
+    await afterStaffUtterance(SID, TEXT, fresh());
     mockRequestHold.mockRejectedValueOnce(new Error(TEXT));
-    await afterStaffUtterance(SID, TEXT);
+    await afterStaffUtterance(SID, TEXT, fresh());
     const logged = [...logger.info.mock.calls, ...logger.warn.mock.calls, ...logger.error.mock.calls].map((c) => c.join(' ')).join('\n');
     expect(logged).not.toMatch(/secret|please hold/i);
     expect(logged).not.toContain(SID);

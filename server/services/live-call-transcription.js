@@ -341,7 +341,11 @@ function handStaffLineToHoldVoice(callSid, body) {
   if (SPEAKER_BY_TRACK[body.Track] !== 'staff' || !holdVoiceLive()) return;
   const failed = (err) => logger.warn(`[live-transcription] hold voice hook failed for ${maskSid(callSid)} (${err?.code || err?.name || 'error'})`);
   try {
-    Promise.resolve(require('./call-hold-voice').afterStaffUtterance(callSid, utteranceText(parseJson(body.TranscriptionData)))).catch(failed);
+    // The speech time is Twilio's own Timestamp (null when it has none: a line with no time asks for no hold).
+    const at = new Date(body?.Timestamp);
+    const spokenAt = Number.isNaN(at.getTime()) ? null : at;
+    Promise.resolve(require('./call-hold-voice').afterStaffUtterance(callSid, utteranceText(parseJson(body.TranscriptionData)), { spokenAt }))
+      .catch(failed);
   } catch (err) {
     failed(err);
   }
