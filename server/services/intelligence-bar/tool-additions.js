@@ -1,6 +1,5 @@
 /**
- * Mid-conversation tool additions for the Intelligence Bar
- * (GATE_IB_TOOL_ADDITIONS, read at call time).
+ * Mid-conversation tool additions for the Intelligence Bar.
  *
  * The API renders `tools` first, so a request whose `tools` array differs from
  * the one before it reads nothing from the prompt cache. Off the tool search
@@ -11,7 +10,7 @@
  * tens of thousands of tokens again and ran about three times slower than a
  * round that read its prefix from the cache.
  *
- * With the gate on, `tools` stays as sent for the whole request, and a found
+ * `tools` stays as sent for the whole request, and a found
  * tool is offered by a `role: "system"` message of `tool_addition` blocks that
  * carry its definition (platform.claude.com/docs/en/build-with-claude/
  * mid-conversation-system-messages, "Define tools in a message"; beta header
@@ -30,25 +29,18 @@
  * request on a model that does not take mid-conversation tool changes.
  */
 const MODELS = require('../../config/models');
-const gates = require('../../config/feature-gates');
 
 const INLINE_TOOLS_BETA = 'inline-tools-2026-09-15';
 
-// Both read at call time. A test's whole-module mock that lacks a reader
-// reads as off / unsupported, so the request keeps the merge into `tools`.
+// Read at call time. A test's whole-module mock that lacks the reader reads as
+// unsupported, so the request keeps the merge into `tools`.
 function modelTakesToolAdditions(model) {
   return typeof MODELS.anthropicSupportsMidConversationTools === 'function' && MODELS.anthropicSupportsMidConversationTools(model);
 }
 
-// On the platform path, off tool search, on a model that takes additions: a
-// request uses them when the gate is on, or when it resumes a saved history
-// (`saved`, the raw checkpoint) that already holds one. That task keeps the
-// path it started on whatever the gate reads now (a rollback mid-task), since
-// its saved thinking blocks were checked against the `tools` it sent.
-function toolAdditionsWanted({ platformEnabled, toolSearch, model, saved }) {
-  const live = typeof gates.ibToolAdditionsLive === 'function' && gates.ibToolAdditionsLive();
-  const started = Array.isArray(saved) && saved.some(isAdditionMessage);
-  return platformEnabled === true && toolSearch !== true && (live || started) && modelTakesToolAdditions(model);
+// On the platform path, off tool search, on a model that takes additions.
+function toolAdditionsWanted({ platformEnabled, toolSearch, model }) {
+  return platformEnabled === true && toolSearch !== true && modelTakesToolAdditions(model);
 }
 
 const isAdditionMessage = message => message?.role === 'system' && Array.isArray(message.content)
@@ -67,7 +59,7 @@ function additionMessage(definitions) {
 }
 
 // The SDK request options for one call: the beta header whenever the messages
-// it sends hold an addition (a resumed history too, whatever the gate reads).
+// it sends hold an addition (a resumed history too).
 function requestOptions(messages) {
   return (Array.isArray(messages) ? messages : []).some(isAdditionMessage)
     ? { headers: { 'anthropic-beta': INLINE_TOOLS_BETA } }

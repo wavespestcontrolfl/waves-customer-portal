@@ -1,7 +1,6 @@
 /**
- * GATE_SOCIAL_STUDIO_SKIP_META ("studio trim", owner 2026-11-01): the AUTONOMOUS
- * studio stops drafting and posting to Facebook and Instagram; LinkedIn and
- * Google Business stay. Gate off = exactly today's channels. Manual paths
+ * Studio trim (owner 2026-11-01): the AUTONOMOUS studio never drafts or posts
+ * to Facebook and Instagram; LinkedIn and Google Business stay. Manual paths
  * (previewCampaign / Publish All / testimonial graphics) are never filtered.
  */
 
@@ -69,10 +68,8 @@ jest.mock('../services/social-card-renderer', () => ({
 const db = require('../models/db');
 const SocialMediaService = require('../services/social-media');
 const Studio = require('../services/social-content-studio');
-const { socialStudioSkipMetaLive } = require('../config/feature-gates');
 
-const GATE = 'GATE_SOCIAL_STUDIO_SKIP_META';
-const ENV_KEYS = [GATE, 'SOCIAL_AUTONOMOUS_CHANNELS', 'SOCIAL_AUTONOMOUS_STUDIO_ENABLED', 'SOCIAL_AUTONOMOUS_INCLUDE_VERSUS'];
+const ENV_KEYS = ['SOCIAL_AUTONOMOUS_CHANNELS', 'SOCIAL_AUTONOMOUS_STUDIO_ENABLED', 'SOCIAL_AUTONOMOUS_INCLUDE_VERSUS'];
 const saved = {};
 beforeAll(() => { ENV_KEYS.forEach((k) => { saved[k] = process.env[k]; }); });
 afterAll(() => {
@@ -91,29 +88,8 @@ beforeEach(() => {
 
 const etNoon = (iso) => new Date(`${iso}T16:00:00Z`);
 
-describe('socialStudioSkipMetaLive reader', () => {
-  test('on only for exactly "true", read at call time', () => {
-    expect(socialStudioSkipMetaLive()).toBe(false);
-    for (const v of ['1', 'TRUE', 'yes', 'on', '', ' true']) {
-      process.env[GATE] = v;
-      expect(socialStudioSkipMetaLive()).toBe(false);
-    }
-    process.env[GATE] = 'true';
-    expect(socialStudioSkipMetaLive()).toBe(true);
-    delete process.env[GATE];
-    expect(socialStudioSkipMetaLive()).toBe(false);
-  });
-});
-
 describe('AUTONOMOUS_FLAGS.channels under the studio trim', () => {
-  test('gate off: today\'s channels, untouched', () => {
-    expect(Studio.AUTONOMOUS_FLAGS.channels.slice().sort()).toEqual(['facebook', 'gbp', 'instagram']);
-    process.env.SOCIAL_AUTONOMOUS_CHANNELS = 'gbp,facebook,instagram,linkedin';
-    expect(Studio.AUTONOMOUS_FLAGS.channels).toEqual(['gbp', 'facebook', 'instagram', 'linkedin']);
-  });
-
-  test('gate on: facebook and instagram drop, linkedin and gbp stay', () => {
-    process.env[GATE] = 'true';
+  test('facebook and instagram drop, linkedin and gbp stay', () => {
     expect(Studio.AUTONOMOUS_FLAGS.channels).toEqual(['gbp']);
     process.env.SOCIAL_AUTONOMOUS_CHANNELS = 'gbp,facebook,instagram,linkedin';
     expect(Studio.AUTONOMOUS_FLAGS.channels).toEqual(['gbp', 'linkedin']);
@@ -123,13 +99,11 @@ describe('AUTONOMOUS_FLAGS.channels under the studio trim', () => {
 
   test('autonomousStatus reports the trimmed list', async () => {
     process.env.SOCIAL_AUTONOMOUS_CHANNELS = 'gbp,facebook,instagram,linkedin';
-    process.env[GATE] = 'true';
     const status = await Studio.autonomousStatus();
     expect(status.channels).toEqual(['gbp', 'linkedin']);
   });
 
   test('the manual paths still know every channel', () => {
-    process.env[GATE] = 'true';
     expect(Studio.CHANNELS).toEqual(['facebook', 'instagram', 'linkedin', 'gbp']);
     expect(Studio.normalizeChannels(['facebook', 'instagram', 'gbp'])).toEqual(['facebook', 'instagram', 'gbp']);
     expect(Studio.normalizeChannels(null)).toEqual(['facebook', 'instagram', 'linkedin', 'gbp']);
@@ -137,24 +111,18 @@ describe('AUTONOMOUS_FLAGS.channels under the studio trim', () => {
 });
 
 describe('autonomous plans under the studio trim', () => {
-  test('versus plan: gate on drops Meta channels and Meta drafts; gate off keeps them', () => {
+  test('versus plan: drops Meta channels and Meta drafts', () => {
     process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
     process.env.SOCIAL_AUTONOMOUS_CHANNELS = 'gbp,facebook,instagram,linkedin';
     const day = etNoon('2026-06-10'); // versus fire day
-    const off = Studio.selectAutonomousVersusPlan(day);
-    expect(off.channels).toEqual(['gbp', 'facebook', 'instagram', 'linkedin']);
-    expect(Object.keys(off.preview.drafts).sort()).toEqual(['facebook', 'gbp', 'instagram', 'linkedin']);
-
-    process.env[GATE] = 'true';
     const on = Studio.selectAutonomousVersusPlan(day);
     expect(on.channels).toEqual(['gbp', 'linkedin']);
     expect(on.preview.inputs.channels).toEqual(['gbp', 'linkedin']);
     expect(Object.keys(on.preview.drafts).sort()).toEqual(['gbp', 'linkedin']);
   });
 
-  test('milestone plan: gate on carries no Meta channel or draft', () => {
+  test('milestone plan: carries no Meta channel or draft', () => {
     process.env.SOCIAL_AUTONOMOUS_CHANNELS = 'gbp,facebook,instagram,linkedin';
-    process.env[GATE] = 'true';
     const plan = Studio.planMilestone({
       threshold: 300, count: 312, average: 4.9, city: 'Venice', channels: Studio.AUTONOMOUS_FLAGS.channels,
     });
@@ -164,7 +132,6 @@ describe('autonomous plans under the studio trim', () => {
   });
 
   test('campaign drafts and previewCampaign still serve Meta when a caller asks (manual path)', () => {
-    process.env[GATE] = 'true';
     const context = {
       location: { city: 'Sarasota', id: 'sarasota', name: 'Sarasota' },
       services: [], content: [], recentSocials: [], pestPressure: null, reviews: [],
@@ -183,12 +150,11 @@ describe('runAutonomous under the studio trim', () => {
     process.env.SOCIAL_AUTONOMOUS_STUDIO_ENABLED = 'true';
   });
 
-  test('gate on and only Meta channels requested: skipped and logged, nothing rendered or published', async () => {
-    process.env[GATE] = 'true';
+  test('only Meta channels requested: skipped and logged, nothing rendered or published', async () => {
     process.env.SOCIAL_AUTONOMOUS_CHANNELS = 'facebook,instagram';
     const out = await Studio.runAutonomous({ force: true });
     expect(out.skipped).toBe(true);
-    expect(out.reason).toMatch(/GATE_SOCIAL_STUDIO_SKIP_META/);
+    expect(out.reason).toMatch(/studio trim removed every autonomous channel/);
     expect(SocialMediaService.publishToAll).not.toHaveBeenCalled();
     const logged = db.__state.inserted.filter((i) => i.table === 'social_content_studio_runs');
     expect(logged).toHaveLength(1);
@@ -218,23 +184,14 @@ describe('approveAutonomousRun under the studio trim', () => {
     ...extra,
   });
 
-  test('gate off: a queued draft publishes to every channel it was drafted for', async () => {
-    db.__state.run = draftRun();
-    await Studio.approveAutonomousRun('run-1');
-    const call = SocialMediaService.publishToAll.mock.calls[0][0];
-    expect(call.channels).toEqual(['gbp', 'facebook', 'instagram', 'linkedin']);
-  });
-
-  test('gate on: the same queued draft publishes to gbp and linkedin only', async () => {
-    process.env[GATE] = 'true';
+  test('a queued draft publishes to gbp and linkedin only', async () => {
     db.__state.run = draftRun();
     await Studio.approveAutonomousRun('run-1');
     const call = SocialMediaService.publishToAll.mock.calls[0][0];
     expect(call.channels).toEqual(['gbp', 'linkedin']);
   });
 
-  test('gate on: a draft queued for Meta only has nothing to publish', async () => {
-    process.env[GATE] = 'true';
+  test('a draft queued for Meta only has nothing to publish', async () => {
     db.__state.run = draftRun({ channels: JSON.stringify(['facebook', 'instagram']) });
     const out = await Studio.approveAutonomousRun('run-1');
     expect(out.ok).toBe(false);
@@ -242,8 +199,7 @@ describe('approveAutonomousRun under the studio trim', () => {
     expect(SocialMediaService.publishToAll).not.toHaveBeenCalled();
   });
 
-  test('gate on: a queued video variant is refused (it can only post to Meta)', async () => {
-    process.env[GATE] = 'true';
+  test('a queued video variant is refused (it can only post to Meta)', async () => {
     const run = draftRun();
     const preview = JSON.parse(run.preview);
     preview.visual.variants = [{ type: 'video', videoUrl: 'https://cdn.example.com/v.mp4' }, ...preview.visual.variants];

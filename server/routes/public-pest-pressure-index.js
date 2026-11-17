@@ -10,13 +10,8 @@
  * query, no PII leaves the server (county x service line averages only, a group
  * published at 20 or more visits), no paid AI, nothing sent to anyone. The
  * grouping, rounding and suppression are in
- * services/public-pest-pressure-index.js; this router only owns the gate, the
+ * services/public-pest-pressure-index.js; this router only owns the
  * rate limit, status codes and cache headers.
- *
- * Gate: GATE_PUBLIC_PEST_PRESSURE_INDEX (dark by default). Off = the whole
- * surface answers the generic 404, first in server/index.js ahead of the
- * wildcard CORS handler and the global /api/ limiter, and again here ahead of
- * this router's limiter, so a probe never sees a 204 or a 429.
  *
  * CORS: other sites cite and embed the figures, so server/index.js gives this
  * path the same `Access-Control-Allow-Origin: *` + OPTIONS handler as
@@ -33,16 +28,8 @@ const rateLimit = require('express-rate-limit');
 
 const router = express.Router();
 
-const { publicPestPressureIndexLive } = require('../config/feature-gates');
 const { getPublicPestPressureIndex } = require('../services/public-pest-pressure-index');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
-
-// Mirrors the index.js pre-limiter guard; dark answers the generic 404 before
-// the limiter can answer a revealing 429.
-const requireGate = (req, res, next) => {
-  if (!publicPestPressureIndexLive()) return res.status(404).json({ error: 'Not found' });
-  return next();
-};
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -54,7 +41,7 @@ const limiter = rateLimit({
   skip: () => process.env.NODE_ENV !== 'production',
 });
 
-router.get('/', requireGate, limiter, async (req, res) => {
+router.get('/', limiter, async (req, res) => {
   const format = req.query.format;
   if (format !== undefined && format !== 'csv' && format !== 'json') {
     res.set('Cache-Control', 'no-store');
