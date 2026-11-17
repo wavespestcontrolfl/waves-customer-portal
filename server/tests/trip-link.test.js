@@ -1,5 +1,5 @@
-// Trip link (GATE_TRIP_LINK): the matching and drive-leg rules (pure, synthetic points), the trips read, the nightly
-// gate, the backfill script's arguments, the route's gate and validation, and the wiring. The SQL runs in
+// Trip link: the matching and drive-leg rules (pure, synthetic points), the trips read, the nightly
+// days, the backfill script's arguments, the route's validation, and the wiring. The SQL runs in
 // trip-link.db.test.js. Synthetic coordinates and ids only.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -345,43 +345,14 @@ describe('the nightly days', () => {
   });
 });
 
-describe('the gate', () => {
-  beforeEach(() => { mockDb.mockClear(); delete process.env.GATE_TRIP_LINK; });
-  afterAll(() => { delete process.env.GATE_TRIP_LINK; });
-
-  test('off: the nightly run reads nothing and writes nothing', async () => {
-    expect(await tripLink.runTripLinkNightly({ now: new Date('2026-10-09T05:40:00Z') })).toEqual({ skipped: 'gated' });
-    process.env.GATE_TRIP_LINK = 'TRUE';
-    expect(tripLink.tripLinkLive()).toBe(false);
-    process.env.GATE_TRIP_LINK = '1';
-    expect(await tripLink.runTripLinkNightly()).toEqual({ skipped: 'gated' });
-    expect(mockDb).not.toHaveBeenCalled();
-  });
-
-  test('on: strict true, read at call time', () => {
-    process.env.GATE_TRIP_LINK = 'true';
-    expect(tripLink.tripLinkLive()).toBe(true);
-    delete process.env.GATE_TRIP_LINK;
-    expect(tripLink.tripLinkLive()).toBe(false);
-  });
-
-  test('a test double of feature-gates without the reader reads as off', () => {
-    jest.isolateModules(() => {
-      jest.doMock('../config/feature-gates', () => ({}));
-      expect(require('../services/trip-link').tripLinkLive()).toBe(false);
-    });
-    jest.dontMock('../config/feature-gates');
-  });
-});
-
 describe('the backfill script', () => {
   const summary = (matched = 1, total = 2) => ({
     day: 'x', technicians: 1, trips: 3, errors: 0, legs: { total, matched, no_vehicle: 0, no_destination: 0, no_stop: total - matched, ambiguous: 0 },
   });
-  const deps = (over = {}) => ({ conn: {}, log: jest.fn(), linkDay: jest.fn(async () => summary()), gateOn: () => false, ...over });
+  const deps = (over = {}) => ({ conn: {}, log: jest.fn(), linkDay: jest.fn(async () => summary()), ...over });
 
   test('arguments and the 120 day cap', () => {
-    expect(backfill.parseArgs(['--from', '2026-10-01', '--to', '2026-10-03', '--dry-run'])).toEqual({ from: '2026-10-01', to: '2026-10-03', dryRun: true, forceShadow: false });
+    expect(backfill.parseArgs(['--from', '2026-10-01', '--to', '2026-10-03', '--dry-run'])).toEqual({ from: '2026-10-01', to: '2026-10-03', dryRun: true });
     expect(() => backfill.parseArgs(['--nonsense'])).toThrow(/Unknown argument/);
     expect(backfill.daysBetween('2026-10-01', '2026-10-03')).toEqual(['2026-10-01', '2026-10-02', '2026-10-03']);
     expect(backfill.daysBetween('2026-01-01', '2026-04-30')).toHaveLength(120);
@@ -391,7 +362,7 @@ describe('the backfill script', () => {
     expect(() => backfill.daysBetween(undefined, '2026-03-01')).toThrow(/required/);
   });
 
-  test('the dry run asks for a dry run, writes nothing and works with the gate off', async () => {
+  test('the dry run asks for a dry run and writes nothing', async () => {
     const d = deps();
     const total = await backfill.run(['--from', '2026-10-01', '--to', '2026-10-02', '--dry-run'], d);
     expect(d.linkDay).toHaveBeenCalledTimes(2);
@@ -400,20 +371,16 @@ describe('the backfill script', () => {
     expect(String(d.log.mock.calls.at(-1)[0])).toMatch(/DRY RUN \(nothing written\)/);
   });
 
-  test('a write with the gate off is refused unless --force-shadow; gate on writes', async () => {
-    const refused = deps();
-    await expect(backfill.run(['--from', '2026-10-01', '--to', '2026-10-01'], refused)).rejects.toThrow(/force-shadow/);
-    expect(refused.linkDay).not.toHaveBeenCalled();
-    const forced = deps();
-    await backfill.run(['--from', '2026-10-01', '--to', '2026-10-01', '--force-shadow'], forced);
-    expect(forced.linkDay).toHaveBeenCalledWith(forced.conn, '2026-10-01', { dryRun: false });
-    const on = deps({ gateOn: () => true });
-    await backfill.run(['--from', '2026-10-01', '--to', '2026-10-01'], on);
-    expect(on.linkDay).toHaveBeenCalledTimes(1);
+  test('a write runs linkDay for each day with dryRun false; the old --force-shadow flag is gone', async () => {
+    const d = deps();
+    await backfill.run(['--from', '2026-10-01', '--to', '2026-10-01'], d);
+    expect(d.linkDay).toHaveBeenCalledTimes(1);
+    expect(d.linkDay).toHaveBeenCalledWith(d.conn, '2026-10-01', { dryRun: false });
+    expect(() => backfill.parseArgs(['--force-shadow'])).toThrow(/Unknown argument/);
   });
 
   test('a failed technician-day fails the run', async () => {
-    const d = deps({ linkDay: jest.fn(async () => ({ ...summary(), errors: 1 })), gateOn: () => true });
+    const d = deps({ linkDay: jest.fn(async () => ({ ...summary(), errors: 1 })) });
     await expect(backfill.run(['--from', '2026-10-01', '--to', '2026-10-01'], d)).rejects.toThrow(/failed/);
   });
 });
@@ -432,19 +399,11 @@ describe('the summary route', () => {
     baseUrl = `http://127.0.0.1:${server.address().port}`;
   });
   afterAll(async () => {
-    delete process.env.GATE_TRIP_LINK;
     if (server) await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   });
-  beforeEach(() => { mockDb.mockClear(); delete process.env.GATE_TRIP_LINK; });
-
-  test('gate off: 404 for staff, and the database is not touched', async () => {
-    const res = await call('/api/admin/trip-link/summary?from=2026-10-01&to=2026-10-02');
-    expect(res.status).toBe(404);
-    expect(mockDb).not.toHaveBeenCalled();
-  });
+  beforeEach(() => { mockDb.mockClear(); });
 
   test('staff only', async () => {
-    process.env.GATE_TRIP_LINK = 'true';
     expect((await call('/api/admin/trip-link/summary?from=2026-10-01&to=2026-10-02', 'tech')).status).toBe(403);
     expect((await call('/api/admin/trip-link/summary?from=2026-10-01&to=2026-10-02', 'nobody')).status).toBe(401);
   });
@@ -454,8 +413,7 @@ describe('the summary route', () => {
     ['a bad date', '?from=2026-02-30&to=2026-03-01'],
     ['a reversed range', '?from=2026-10-03&to=2026-10-01'],
     ['more than 120 days', '?from=2026-01-01&to=2026-05-01'],
-  ])('gate on: %s is a 400 before any query', async (_name, query) => {
-    process.env.GATE_TRIP_LINK = 'true';
+  ])('%s is a 400 before any query', async (_name, query) => {
     expect((await call(`/api/admin/trip-link/summary${query}`)).status).toBe(400);
     expect(mockDb).not.toHaveBeenCalled();
   });

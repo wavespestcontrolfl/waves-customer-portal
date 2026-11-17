@@ -1170,7 +1170,7 @@ app.use('/api/admin/email', require('./routes/admin-email'));
 app.use('/api/admin/bid-desk', require('./routes/admin-bid-desk'));
 // Bid kit (admin only).
 app.use('/api/admin/bid-kit', require('./routes/admin-bid-kit'));
-// Trip link summary (GATE_TRIP_LINK, dark): the router answers 404 for every path while the gate is off.
+// Trip link summary (staff only, read only).
 app.use('/api/admin/trip-link', require('./routes/admin-trip-link'));
 app.use('/api/admin/pricing-config', require('./routes/admin-pricing-config'));
 app.use('/api/admin/pest-pressure', require('./routes/admin-pest-pressure'));

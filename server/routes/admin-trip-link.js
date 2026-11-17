@@ -2,17 +2,13 @@ const express = require('express');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const gates = require('../config/feature-gates');
 const { validCalendarDate } = require('../utils/datetime-et');
 const { etDayBounds } = require('../services/visit-gps-context');
 
-// Trip link summary (GATE_TRIP_LINK, dark). Read only: counts and medians over visit_gps_legs and trip_links for a
+// Trip link summary. Read only: counts and medians over visit_gps_legs and trip_links for a
 // date range. Nothing here writes, and nothing is sent to anyone.
 const router = express.Router();
 router.use(adminAuthenticate, requireAdmin);
-// Gate off = the whole surface answers 404, exactly as if it were not mounted.
-const tripLinkLive = () => typeof gates.tripLinkLive === 'function' && gates.tripLinkLive();
-router.use((req, res, next) => (tripLinkLive() ? next() : res.status(404).json({ error: 'Not found' })));
 
 const MAX_RANGE_DAYS = 120;
 const STATUSES = ['matched', 'no_vehicle', 'no_destination', 'no_stop', 'ambiguous'];

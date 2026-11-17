@@ -1,4 +1,4 @@
-/** County-roll pins for the hourly geocoder backstop (GATE_GEOCODE_COUNTY_FALLBACK, dark).
+/** County-roll pins for the hourly geocoder backstop (owner 2026-11-02, "build pins").
  *
  * Three passes after the existing sweeps, none of them calling Google:
  *  1. customer-geocode-review retryCountyNeedsPin: rows already on the staff needs_pin list.
@@ -8,15 +8,13 @@
  *     address is the customer's, else the county lot for its own address.
  *  3. sweepPropertyVisitPins: upcoming visits with no pin whose stamp is their property's address
  *     take the property's pin, through the service-location recovery write.
- * Gate off: nothing here runs, no county call is made. Logs carry counts only (PII rule).
+ * While GATE_GEOCODE_REVIEW is off nothing here runs, no county call is made. Logs carry counts only (PII rule).
  */
 const db = require('../models/db');
 const logger = require('./logger');
-// Read at call time with an optional call: a test that mocks feature-gates wholesale must not crash the backstop.
-// The pass also needs GATE_GEOCODE_REVIEW: without it the write fence takes no locks and the review rechecks
-// are no-ops, so nothing here runs unless both gates are on.
-const countyFallbackLive = () => require('../config/feature-gates').geocodeCountyFallbackLive?.() === true
-  && require('./customer-geocode-review').reviewEnabled();
+// The pass needs GATE_GEOCODE_REVIEW: without it the write fence takes no locks and the review rechecks
+// are no-ops, so nothing here runs unless that gate is on.
+const countyFallbackLive = () => require('./customer-geocode-review').reviewEnabled();
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { toDateStr } = require('./auto-dispatch/dates');
 

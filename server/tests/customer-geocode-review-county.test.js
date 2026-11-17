@@ -1,4 +1,4 @@
-/** County-roll fallback inside the reviewed geocode (GATE_GEOCODE_COUNTY_FALLBACK). In-memory tables, no database. */
+/** County-roll fallback inside the reviewed geocode (needs GATE_GEOCODE_REVIEW). In-memory tables, no database. */
 let mockTables;
 jest.mock('../models/db', () => {
   const rowsOf = table => mockTables[table];
@@ -55,12 +55,11 @@ const savedReview = () => mockTables.customer_geocode_reviews[0];
 
 beforeEach(() => {
   process.env.GATE_GEOCODE_REVIEW = 'true';
-  process.env.GATE_GEOCODE_COUNTY_FALLBACK = 'true';
   geocodeAddressWithStatus.mockReset().mockResolvedValue(PARTIAL);
   countyLotPinForAddress.mockReset().mockResolvedValue(LOT);
   seed();
 });
-afterAll(() => { delete process.env.GATE_GEOCODE_REVIEW; delete process.env.GATE_GEOCODE_COUNTY_FALLBACK; });
+afterAll(() => { delete process.env.GATE_GEOCODE_REVIEW; });
 
 describe('attemptReviewedGeocode with the county fallback', () => {
   test.each(['partial_match', 'no_result', 'coarse_result:route'])('Google %s plus a county lot saves a county_parcel pin', async (reason) => {
@@ -87,13 +86,6 @@ describe('attemptReviewedGeocode with the county fallback', () => {
     await expect(attemptReviewedGeocode(CUSTOMER)).resolves.toBeNull();
     expect(savedReview()).toMatchObject({ status: 'needs_pin', reason: 'partial_match', evidence: null });
     expect(mockTables.customers[0].latitude).toBeNull();
-  });
-
-  test('gate off: no county call, today\'s needs_pin outcome', async () => {
-    delete process.env.GATE_GEOCODE_COUNTY_FALLBACK;
-    await expect(attemptReviewedGeocode(CUSTOMER)).resolves.toBeNull();
-    expect(countyLotPinForAddress).not.toHaveBeenCalled();
-    expect(savedReview()).toMatchObject({ status: 'needs_pin', reason: 'partial_match', source: 'google', evidence: null });
   });
 
   test.each([
@@ -233,8 +225,8 @@ describe('retryCountyNeedsPin', () => {
     expect(countyLotPinForAddress).toHaveBeenCalledTimes(1);
   });
 
-  test('gate off: the query never runs', async () => {
-    delete process.env.GATE_GEOCODE_COUNTY_FALLBACK;
+  test('with the review gate off the query never runs', async () => {
+    delete process.env.GATE_GEOCODE_REVIEW;
     const db = require('../models/db');
     db.mockClear();
     expect(await retryCountyNeedsPin({ now: NOW })).toEqual({ checked: 0, pinned: 0, customerIds: [] });
