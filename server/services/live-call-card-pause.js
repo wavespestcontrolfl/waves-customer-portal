@@ -45,6 +45,11 @@
  * confirmed resume, a terminal resume code, or a call that has ended (a terminal status or ended_at;
  * not live_transcription.stopped_at, which a hold or a stream fault sets while the recording runs on).
  *
+ * A restart loses every timer, and the live text may have stopped (a hold, a stream fault) or the gate
+ * gone off, so recoverOpenPauses runs every minute from scheduler.js whatever the gate says: it re-arms
+ * the timer of a pause whose end is ahead, and sends what is due or pending through the same lease and
+ * claim path. It skips an ended call and never writes on its own.
+ *
  * Risk: if a resume fails, the rest of that call's recording is silent and the post-call transcript
  * loses it. The gate is the instant off switch: off starts no new pause, and a running pause still
  * ends on time. Never throws, never on the webhook's response path.
@@ -76,6 +81,9 @@ const RETRY_MARGIN_MS = 2 * 1000;
 // 16, then every 30 s, until this long after the first failure.
 const BACKOFF_MS = [2000, 4000, 8000, 16000, 30000];
 const RESUME_RETRY_WINDOW_MS = 10 * 60 * 1000;
+// The recovery sweep looks at calls started in this long, at most this many at a time.
+const RECOVERY_LOOKBACK_MS = 6 * 60 * 60 * 1000;
+const RECOVERY_LIMIT = 25;
 
 const CARD_INTENT_RE = /\b(?:card\s+numbers?|credit\s+card|debit\s+card|card\s+ending|expir(?:ation|y)\s+date|security\s+code|cvv|cvc|code\s+on\s+the\s+back)\b/i;
 
@@ -433,7 +441,53 @@ async function onUtteranceStored({ callSid, text, panMasked, pauseOpen = false }
   }
 }
 
+let recovering = false;
+
+// Every minute (scheduler.js), whatever the gate says: a pause that began before a restart lost its
+// timer, and nothing else wakes it if the live text has stopped (a hold, a stream fault) or the gate went
+// off. Reads only recent calls with an unfinished pause (created_at is indexed; an idle server finds none),
+// skips an ended call, and writes nothing itself: a pause whose end is still ahead only gets its timer
+// back, and one that is due or has a step pending goes through the same lease and claim path as the timer.
+async function recoverOpenPauses() {
+  if (recovering) return { action: 'busy' };
+  recovering = true;
+  try {
+    const cutoff = new Date(Date.now() - RECOVERY_LOOKBACK_MS);
+    const rows = await db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb))
+      .where('created_at', '>', cutoff)
+      .whereRaw("(metadata -> 'live_transcription' -> 'card_pause' ->> 'paused_at') IS NOT NULL")
+      .whereRaw("(metadata -> 'live_transcription' -> 'card_pause' ->> 'resumed_at') IS NULL")
+      .whereRaw("(metadata ->> 'ended_at') IS NULL")
+      .whereNotIn(db.raw("COALESCE(status, '')"), [...TERMINAL_CALL_STATUSES])
+      .orderBy('created_at', 'desc')
+      .limit(RECOVERY_LIMIT)
+      .select('twilio_call_sid', db.raw("metadata -> 'live_transcription' -> 'card_pause' AS card_pause"));
+    let handled = 0;
+    for (const row of rows) {
+      const callSid = row.twilio_call_sid;
+      const state = cardPauseOf(row);
+      if (!callSid || !isPaused(state)) continue;
+      const dueAtMs = new Date(state.resume_due_at).getTime();
+      if (!state.pending && dueAtMs > Date.now()) {
+        if (!timers.has(callSid)) armTimer(callSid, dueAtMs);
+        continue;
+      }
+      handled += 1;
+      const out = await reconcile(callSid, { slackMs: TIMER_SLACK_MS, allowPause: isEnabled('callRecordingCardPause') });
+      if (out?.dueAtMs && out.action !== 'send_busy' && !timers.has(callSid)) armTimer(callSid, out.dueAtMs);
+    }
+    return { action: 'swept', open: rows.length, handled };
+  } catch (err) {
+    logger.warn(`[live-card-pause] recovery sweep failed: ${errorCode(err)}`);
+    return { action: 'error' };
+  } finally {
+    recovering = false;
+  }
+}
+
 module.exports = {
+  recoverOpenPauses,
   onUtteranceStored,
   isCardIntent,
   PAUSE_MS,

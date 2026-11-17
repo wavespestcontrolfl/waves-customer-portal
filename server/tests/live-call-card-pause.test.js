@@ -27,7 +27,8 @@ jest.mock('twilio', () => jest.fn(() => ({ calls: mockCalls })));
 // ends. Reads and writes yield a tick so two unlocked transactions would interleave.
 jest.mock('../models/db', () => {
   const newPool = () => ({ max: Infinity, inUse: 0, peak: 0, queue: [] });
-  const state = { claimed: true, cardPause: undefined, writes: [], locks: new Map(), pool: newPool(), callStatus: 'in-progress', endedAt: null, failReads: 0 };
+  const state = { claimed: true, cardPause: undefined, writes: [], locks: new Map(), pool: newPool(), callStatus: 'in-progress', endedAt: null, failReads: 0, source: 'twilio_inbound', sweepReads: [], failSweep: false };
+  const CALL_SID = 'CA' + 'a'.repeat(32);
   const tick = () => new Promise((resolve) => setImmediate(resolve));
   // A bounded connection pool: acquire waits while it is full (FIFO), like knex's.
   async function acquire() {
@@ -50,8 +51,28 @@ jest.mock('../models/db', () => {
   };
   function callLog(inTx) {
     const q = {};
+    q.excluded = [];
     q.where = jest.fn(() => q);
-    q.whereRaw = jest.fn(() => q);
+    // whereNotSandboxCall adds COALESCE(??, '') <> ? once per source it excludes.
+    q.whereRaw = jest.fn((sql, bindings) => {
+      if (String(sql).includes('COALESCE(??') && bindings) q.excluded.push(bindings[1]);
+      return q;
+    });
+    q.modify = jest.fn((fn) => { fn(q); return q; });
+    q.whereNotIn = jest.fn(() => q);
+    q.orderBy = jest.fn(() => q);
+    q.limit = jest.fn(() => q);
+    // The recovery sweep's read: open pauses of calls that have not ended and are not excluded sources.
+    q.select = jest.fn(pooled(inTx, async () => {
+      await tick();
+      if (state.failSweep) throw new Error('connection terminated');
+      const cp = state.cardPause;
+      const open = state.claimed && cp && cp.paused_at && !cp.resumed_at && !state.endedAt
+        && !['completed', 'busy', 'failed', 'no-answer', 'canceled'].includes(state.callStatus)
+        && !q.excluded.includes(state.source);
+      state.sweepReads.push({ excluded: q.excluded.slice(), rows: open ? 1 : 0 });
+      return open ? [{ twilio_call_sid: CALL_SID, card_pause: JSON.parse(JSON.stringify(cp)) }] : [];
+    }));
     q.first = jest.fn(pooled(inTx, async () => {
       await tick();
       if (state.failReads > 0) { state.failReads -= 1; throw new Error('connection terminated'); }
@@ -134,6 +155,9 @@ beforeEach(() => {
   s.callStatus = 'in-progress';
   s.endedAt = null;
   s.failReads = 0;
+  s.source = 'twilio_inbound';
+  s.sweepReads = [];
+  s.failSweep = false;
   isEnabled.mockReturnValue(true);
   process.env.TWILIO_ACCOUNT_SID = 'AC' + 'c'.repeat(32);
   process.env.TWILIO_AUTH_TOKEN = 'token';
@@ -755,5 +779,129 @@ describe('live call card pause: resume retries without an utterance', () => {
     await run(8 * 1000);
     expect(resumeFor()).toBe(2);
     expect(db.__state.cardPause).toMatchObject({ pending: null, sender: null });
+  });
+});
+
+describe('live call card pause: recovery sweep after a restart', () => {
+  const statuses = () => mockUpdate.mock.calls.map(([arg]) => arg.status);
+  const seed = (extra) => {
+    db.__state.cardPause = {
+      paused_at: '2026-11-16T15:00:00.000Z', resume_due_at: '2026-11-16T15:01:30.000Z', resumed_at: null, pauses: 1, pause_sent: true, ...extra,
+    };
+  };
+  // The new process: no timers, no utterance.
+  const restarted = () => loadInstance();
+
+  test('an open pause past its end, no timer and no utterance: the sweep resumes it, once', async () => {
+    seed();
+    const a = restarted();
+    jest.setSystemTime(new Date('2026-11-16T15:02:00Z'));
+    await expect(a.recoverOpenPauses()).resolves.toMatchObject({ action: 'swept', open: 1, handled: 1 });
+    expect(statuses()).toEqual(['in-progress']);
+    expect(db.__state.cardPause).toMatchObject({ pending: null, sender: null });
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+    // The next minute finds nothing open.
+    await expect(a.recoverOpenPauses()).resolves.toMatchObject({ open: 0 });
+    expect(statuses()).toEqual(['in-progress']);
+  });
+
+  test('a crashed resume step (pending resume, lease long gone) is finished by the sweep', async () => {
+    seed({ pending: 'resume', sender: { token: 'dead', until: new Date('2026-11-16T15:01:40Z').getTime() } });
+    const a = restarted();
+    jest.setSystemTime(new Date('2026-11-16T15:03:00Z'));
+    await a.recoverOpenPauses();
+    expect(statuses()).toEqual(['in-progress']);
+  });
+
+  test('the window end still ahead: the sweep re-arms the timer, and the timer resumes at the right time', async () => {
+    seed();
+    const a = restarted();
+    jest.setSystemTime(new Date('2026-11-16T15:00:30Z'));
+    await expect(a.recoverOpenPauses()).resolves.toMatchObject({ open: 1, handled: 0 });
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(a._test.timers.size).toBe(1);
+    // A second sweep does not stack another timer, and opens no transaction.
+    db.transaction.mockClear();
+    await a.recoverOpenPauses();
+    expect(a._test.timers.size).toBe(1);
+    expect(db.transaction).not.toHaveBeenCalled();
+    await advance(59 * 1000);
+    expect(mockUpdate).not.toHaveBeenCalled();
+    await advance(2 * 1000);
+    expect(statuses()).toEqual(['in-progress']);
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+  });
+
+  test('with the gate off the sweep still ends an open pause', async () => {
+    seed();
+    isEnabled.mockReturnValue(false);
+    const a = restarted();
+    jest.setSystemTime(new Date('2026-11-16T15:02:00Z'));
+    await a.recoverOpenPauses();
+    expect(statuses()).toEqual(['in-progress']);
+  });
+
+  test('with the gate off a pause that was never sent is not started by the sweep', async () => {
+    seed({ pending: 'pause', pause_sent: false });
+    isEnabled.mockReturnValue(false);
+    const a = restarted();
+    jest.setSystemTime(new Date('2026-11-16T15:00:20Z'));
+    await a.recoverOpenPauses();
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a terminal status', () => { db.__state.callStatus = 'completed'; }],
+    ['an ended_at stamp', () => { db.__state.endedAt = '2026-11-16T15:01:00.000Z'; }],
+  ])('an ended call is skipped (%s)', async (_name, endCall) => {
+    seed();
+    endCall();
+    const a = restarted();
+    jest.setSystemTime(new Date('2026-11-16T15:02:00Z'));
+    await expect(a.recoverOpenPauses()).resolves.toMatchObject({ action: 'swept', open: 0 });
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(a._test.timers.size).toBe(0);
+  });
+
+  test('two instances sweeping at once send one resume', async () => {
+    seed();
+    const a = restarted();
+    const b = restarted();
+    jest.setSystemTime(new Date('2026-11-16T15:02:00Z'));
+    await Promise.all([a.recoverOpenPauses(), b.recoverOpenPauses()]);
+    for (let i = 0; i < 5; i += 1) await advance(1000);
+    expect(statuses()).toEqual(['in-progress']);
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+  });
+
+  test('a sandbox call is never read: the read excludes the sandbox and tech-line sources', async () => {
+    seed();
+    db.__state.source = 'voice_relay_sandbox';
+    const a = restarted();
+    jest.setSystemTime(new Date('2026-11-16T15:02:00Z'));
+    await expect(a.recoverOpenPauses()).resolves.toMatchObject({ open: 0 });
+    expect(mockUpdate).not.toHaveBeenCalled();
+    const { VOICE_RELAY_SANDBOX_SOURCE, TECH_VOICE_SOURCE } = require('../services/voice-agent/relay-protocol');
+    expect(db.__state.sweepReads[0].excluded).toEqual([VOICE_RELAY_SANDBOX_SOURCE, TECH_VOICE_SOURCE]);
+  });
+
+  test('a sweep with no open pause opens no transaction and sends nothing', async () => {
+    const a = restarted();
+    db.__state.cardPause = undefined;
+    await expect(a.recoverOpenPauses()).resolves.toMatchObject({ action: 'swept', open: 0 });
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  test('a database error in the sweep is contained, and the next sweep runs', async () => {
+    seed();
+    const a = restarted();
+    jest.setSystemTime(new Date('2026-11-16T15:02:00Z'));
+    db.__state.failSweep = true;
+    await expect(a.recoverOpenPauses()).resolves.toMatchObject({ action: 'error' });
+    expect(mockUpdate).not.toHaveBeenCalled();
+    db.__state.failSweep = false;
+    await a.recoverOpenPauses();
+    expect(statuses()).toEqual(['in-progress']);
   });
 });
