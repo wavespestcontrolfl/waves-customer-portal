@@ -4209,7 +4209,8 @@ router.post('/conference-staff-menu', async (req, res) => {
   return sendTwiml(res, twiml);
 });
 
-// POST /conference-staff-menu-choice — 1 takes the caller off hold and puts the staff back in the room.
+// POST /conference-staff-menu-choice — 1 takes the caller off hold and puts the staff back in the room (or says the
+// caller went to voicemail first).
 router.post('/conference-staff-menu-choice', async (req, res) => {
   const parentSid = String(req.query.parent || '');
   const twiml = new VoiceResponse();
@@ -4223,6 +4224,9 @@ router.post('/conference-staff-menu-choice', async (req, res) => {
       const ended = await callHold.endHold(parentSid);
       if (ended === 'returned') {
         appendStaffConference(twiml, parentSid);
+      } else if (ended === 'voicemail') {
+        // The 5 minute limit (or the staff phone hanging up) claimed the hold first: the room is ending, never rejoin it.
+        staffVoicemailGoodbye(twiml);
       } else if (ended === 'no_room') {
         // The room is gone: the caller left, or the hold timer sent them to voicemail.
         if ((await callHold.holdState(parentSid)).voicemailAt) staffVoicemailGoodbye(twiml);

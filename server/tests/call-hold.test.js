@@ -46,6 +46,8 @@ function fakeCallLog(metadata, extra = {}) {
     if (m) return String(at(row.metadata, m[1].split(','))) === String(bindings[0]);
     m = sql.match(/^COALESCE\(metadata #>> '\{([^}]*)\}', '([^']*)'\) <> '([^']*)'$/);
     if (m) return String(at(row.metadata, m[1].split(',')) ?? m[2]) !== m[3];
+    m = sql.match(/^COALESCE\(metadata #>> '\{([^}]*)\}', ''\) < \?$/); // no value, or one older than the bound cutoff
+    if (m) return String(at(row.metadata, m[1].split(',')) ?? '') < String(bindings[0]);
     throw new Error(`unknown condition: ${sql}`);
   };
   const apply = ({ sql, bindings }) => {
@@ -76,10 +78,12 @@ function fakeCallLog(metadata, extra = {}) {
 }
 
 // Every Twilio call lands in `events` in order. `fail` maps an event name to an error to throw.
-function fakeTwilio({ rooms = [{ sid: ROOM }], fail = {} } = {}) {
+// `during` maps an event name to a function run while that Twilio call is in flight (before it answers).
+function fakeTwilio({ rooms = [{ sid: ROOM }], fail = {}, during = {} } = {}) {
   const events = [];
   const step = async (name, params) => {
     events.push({ name, ...params });
+    if (during[name]) await during[name]();
     if (fail[name]) throw fail[name];
   };
   const participants = jest.fn((sid) => ({ update: (params) => step('participant', { sid, ...params }) }));
@@ -99,6 +103,7 @@ function fakeTwilio({ rooms = [{ sid: ROOM }], fail = {} } = {}) {
 const room = () => ({ conference_path: { room: `waves-${SID}`, accepted_leg_sid: LEG } });
 const err404 = () => Object.assign(new Error('not found'), { status: 404, code: 20404 });
 const stateOf = (row) => row.metadata.conference_path.hold;
+const names = (events) => events.map((e) => e.name);
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -522,5 +527,206 @@ describe('startHoldVoicemail', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+// Press 1 (endHold) and the 5 minute voicemail (startHoldVoicemail) claim the same hold: whichever stamps first
+// wins before it asks Twilio for anything, and the other is refused. Each test starts the second request while
+// the first one's Twilio call is in flight, so the two really interleave.
+describe('press 1 and the voicemail race', () => {
+  const heldCall = async () => {
+    const row = fakeCallLog(room());
+    fakeTwilio();
+    await hold.startHold(SID, { legSid: LEG });
+    jest.clearAllMocks();
+    return row;
+  };
+  const err500 = () => Object.assign(new Error('x'), { status: 500, code: 51000 });
+
+  test('press 1 stamps return_at before it asks Twilio to unhold, and the close clears it', async () => {
+    const row = await heldCall();
+    let during = null;
+    fakeTwilio({ during: { participant: async () => { during = { ...stateOf(row) }; } } });
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(during).toMatchObject({ open: true });
+    expect(Number.isNaN(Date.parse(during.return_at))).toBe(false);
+    expect(stateOf(row)).toMatchObject({ open: false });
+    expect(stateOf(row).return_at).toBeUndefined();
+  });
+
+  test('press 1 wins: the voicemail starts during the unhold, is refused, ends no room and raises no alert', async () => {
+    const row = await heldCall();
+    const seen = {};
+    const events = fakeTwilio({ during: { participant: async () => { seen.vm = await hold.startHoldVoicemail(SID, 'timeout'); } } });
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(seen.vm).toBe('not_needed');
+    expect(names(events)).toEqual(['list', 'participant', 'recording']);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect(stateOf(row).voicemail_at).toBeUndefined();
+    expect(stateOf(row).open).toBe(false);
+  });
+
+  test('the voicemail wins: press 1 arrives while the room is ending, answers voicemail and never unholds', async () => {
+    const row = await heldCall();
+    const seen = {};
+    const events = fakeTwilio({ during: { room: async () => { seen.ret = await hold.endHold(SID); } } });
+    expect(await hold.startHoldVoicemail(SID, 'timeout')).toBe('started');
+    expect(seen.ret).toBe('voicemail');
+    expect(names(events)).toEqual(['list', 'room']);
+    expect(events.some((e) => e.name === 'participant' || e.name === 'recording')).toBe(false);
+    expect(stateOf(row)).toMatchObject({ open: false, voicemail_reason: 'timeout' });
+    expect(stateOf(row).return_at).toBeUndefined();
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
+  test('press 1 after the voicemail is already done answers voicemail with no Twilio call', async () => {
+    await heldCall();
+    fakeTwilio();
+    expect(await hold.startHoldVoicemail(SID, 'staff_left')).toBe('started');
+    const events = fakeTwilio();
+    expect(await hold.endHold(SID)).toBe('voicemail');
+    expect(events).toHaveLength(0);
+  });
+
+  test('press 1 wins but the unhold fails: its claim is lifted, so the voicemail can still take the caller', async () => {
+    const row = await heldCall();
+    fakeTwilio({ fail: { participant: err500() } });
+    expect(await hold.endHold(SID)).toBe('failed');
+    expect(stateOf(row)).toMatchObject({ open: true });
+    expect(stateOf(row).return_at).toBeUndefined();
+    const events = fakeTwilio();
+    expect(await hold.startHoldVoicemail(SID, 'timeout')).toBe('started');
+    expect(names(events)).toEqual(['list', 'room']);
+  });
+
+  test('press 1 wins, the unhold fails and the release write fails too: the claim goes stale and blocks nothing', async () => {
+    jest.useFakeTimers();
+    try {
+      jest.setSystemTime(new Date('2026-11-17T15:00:00Z'));
+      const row = await heldCall();
+      fakeTwilio({ fail: { participant: err500() } });
+      const working = db.getMockImplementation();
+      let updates = 0;
+      db.mockImplementation((...args) => {
+        const chain = working(...args);
+        const real = chain.update;
+        chain.update = jest.fn(async (...a) => {
+          updates += 1;
+          if (updates === 2) throw Object.assign(new Error('db'), { code: 'ECONNRESET' }); // the release
+          return real(...a);
+        });
+        return chain;
+      });
+      expect(await hold.endHold(SID)).toBe('failed');
+      expect(stateOf(row).return_at).toBeDefined();
+      db.mockImplementation(working);
+      // Fresh: the voicemail and a second press 1 both wait.
+      fakeTwilio();
+      expect(await hold.startHoldVoicemail(SID, 'timeout')).toBe('not_needed');
+      expect(await hold.endHold(SID)).toBe('failed');
+      // Stale (30 s): neither is blocked any more.
+      jest.setSystemTime(new Date('2026-11-17T15:00:31Z'));
+      const events = fakeTwilio();
+      expect(await hold.endHold(SID)).toBe('returned');
+      expect(names(events)).toEqual(['list', 'participant', 'recording']);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a stale return claim does not stop the voicemail', async () => {
+    const row = await heldCall();
+    stateOf(row).return_at = new Date(Date.now() - 60 * 1000).toISOString();
+    fakeTwilio();
+    expect(await hold.startHoldVoicemail(SID, 'timeout')).toBe('started');
+    expect(stateOf(row).return_at).toBeUndefined();
+    expect(stateOf(row).voicemail_at).toBeDefined();
+  });
+
+  test('the voicemail wins but ending the room fails: the hold is restored and press 1 then works', async () => {
+    const row = await heldCall();
+    fakeTwilio({ fail: { room: err500() } });
+    expect(await hold.startHoldVoicemail(SID, 'timeout')).toBe('failed');
+    expect(stateOf(row)).toMatchObject({ open: true });
+    expect(stateOf(row).voicemail_at).toBeUndefined();
+    const events = fakeTwilio();
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(names(events)).toEqual(['list', 'participant', 'recording']);
+  });
+
+  test('a press 1 that is still working makes a second press 1 answer failed without touching Twilio', async () => {
+    const row = await heldCall();
+    const seen = {};
+    const events = fakeTwilio({ during: { participant: async () => { seen.second = await hold.endHold(SID); } } });
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(seen.second).toBe('failed');
+    expect(names(events)).toEqual(['list', 'participant', 'recording']);
+    expect(stateOf(row).open).toBe(false);
+  });
+
+  test('a press 1 with the hold already closed (a duplicate) still answers returned and does not resume the recording', async () => {
+    await heldCall();
+    fakeTwilio();
+    await hold.endHold(SID);
+    const events = fakeTwilio();
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(names(events)).toEqual(['list', 'participant']);
+  });
+});
+
+// The unhold went through but the claim close failed: hold.open stays true with return_at set. The next star
+// must not take that for a hold that is applied now.
+describe('a star after a press 1 whose close write failed', () => {
+  test('closes the old claim, puts the caller on hold again and pauses the recording', async () => {
+    jest.useFakeTimers();
+    try {
+      jest.setSystemTime(new Date('2026-11-17T15:00:00Z'));
+      const row = fakeCallLog(room());
+      fakeTwilio();
+      await hold.startHold(SID, { legSid: LEG });
+      jest.setSystemTime(new Date('2026-11-17T15:04:50Z'));
+      const working = db.getMockImplementation();
+      let updates = 0;
+      db.mockImplementation((...args) => {
+        const chain = working(...args);
+        const real = chain.update;
+        chain.update = jest.fn(async (...a) => {
+          updates += 1;
+          if (updates === 2) throw Object.assign(new Error('db'), { code: 'ECONNRESET' }); // the close
+          return real(...a);
+        });
+        return chain;
+      });
+      const back = fakeTwilio();
+      expect(await hold.endHold(SID)).toBe('returned');
+      expect(names(back)).toEqual(['list', 'participant', 'recording']);
+      db.mockImplementation(working);
+      expect(stateOf(row)).toMatchObject({ open: true, count: 1 });
+      expect(stateOf(row).return_at).toBeDefined();
+
+      // The staff star again a moment later: the old claim (open since 5 minutes ago) must not count as a hold.
+      jest.setSystemTime(new Date('2026-11-17T15:05:10Z'));
+      const events = fakeTwilio();
+      expect(await hold.startHold(SID, { legSid: LEG })).toBe('held');
+      expect(names(events)).toEqual(['list', 'participant', 'recording']);
+      expect(events[1]).toMatchObject({ sid: SID, hold: true, holdMethod: 'POST' });
+      expect(events[2]).toMatchObject({ status: 'paused', pauseBehavior: 'silence' });
+      expect(stateOf(row)).toMatchObject({ open: true, count: 2, open_at: '2026-11-17T15:05:10.000Z', total_sec: 290 });
+      expect(stateOf(row).return_at).toBeUndefined();
+      // The new hold is 0 s old, so the old timer cannot send the caller to voicemail.
+      expect(hold.heldSeconds(await hold.holdState(SID))).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a redelivered star while the hold is open with no return_at is still just held', async () => {
+    const row = fakeCallLog(room());
+    fakeTwilio();
+    await hold.startHold(SID, { legSid: LEG });
+    const events = fakeTwilio();
+    expect(await hold.startHold(SID, { legSid: LEG })).toBe('held');
+    expect(events).toHaveLength(0);
+    expect(stateOf(row).count).toBe(1);
   });
 });
