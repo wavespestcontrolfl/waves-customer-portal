@@ -11,7 +11,8 @@
  * Cadence (the claim is a compare-and-swap UPDATE on call_log.metadata.live_transcription, so two webhooks racing
  * admit one check): 3 or more new caller utterances since the last check, at least 45 s since it, at most 8 checks
  * per call, and nothing once upset_alert_at is stamped. A refusal, bad JSON or an API error is no alert (the
- * check still counts toward the 8). Fire and forget: nothing here throws or delays the webhook's 200.
+ * check still counts toward the 8). An ended call (terminal status, ended_at or stopped_at) is never checked, and is
+ * rechecked right before the alert. A write that returns null or no id gives the claim back. Fire and forget: nothing here throws or delays the webhook's 200.
  */
 
 const db = require('../models/db');
@@ -21,6 +22,7 @@ const { toE164 } = require('../utils/phone');
 const { ledgerCall } = require('./llm-dispatch-metrics');
 const { anthropicText } = require('./llm/call');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
+const { TERMINAL_CALL_STATUSES } = require('../utils/call-timeline');
 const { raiseAdminAlert, firstSentence, cutAtWord, breaksAlertRules, MAX_WHY_CHARS } = require('./admin-alert-compose');
 
 let Anthropic = null;
@@ -44,6 +46,14 @@ const gateOn = () => require('../config/feature-gates').isEnabled('liveCallUpset
 function meta(value) {
   if (value && typeof value === 'object') return value;
   try { return JSON.parse(String(value || '')) || {}; } catch { return {}; }
+}
+
+// A call is over once Twilio reported a terminal status, the status callback stamped metadata.ended_at, or the
+// transcription-stopped event stamped live_transcription.stopped_at. live_transcription itself only proves the
+// transcription was claimed; it stays on the row after hangup.
+function callEnded(row) {
+  const m = meta(row?.metadata);
+  return TERMINAL_CALL_STATUSES.has(String(row?.status || '')) || !!m.ended_at || !!m.live_transcription?.stopped_at;
 }
 
 // The owner's cell is ADAM_PHONE (the same env the dial list and the CSR name map read).
@@ -130,6 +140,9 @@ function whyFrom(reason) {
 
 async function raiseAlert(call, acceptance, reason) {
   const callSid = call.twilio_call_sid;
+  // The call may have ended while the model ran: one fresh read, so the owner is not paged to join a dead call.
+  const fresh = await db('call_log').where('twilio_call_sid', callSid).first('status', 'metadata');
+  if (!fresh || callEnded(fresh)) return false;
   // Once per call: the first caller to stamp upset_alert_at raises it.
   const stamped = await db('call_log')
     .where('twilio_call_sid', callSid)
@@ -143,7 +156,7 @@ async function raiseAlert(call, acceptance, reason) {
   if (!stamped) return false;
   try {
     const name = String(acceptance?.csr_name || '').replace(/[^\p{L}\p{N} '.-]/gu, '').trim().slice(0, 20);
-    await raiseAdminAlert('live_call_upset', {
+    const written = await raiseAdminAlert('live_call_upset', {
       area: 'Comms',
       action: name ? `step in on ${name}'s upset caller` : 'step in on an upset caller',
       why: whyFrom(reason),
@@ -153,6 +166,10 @@ async function raiseAlert(call, acceptance, reason) {
       doneWhen: 'call_ended',
       who: 'person',
     }, { bell: true, dedupeKey: `live-call-upset:${callSid}`, bannerKind: 'live_call_upset' });
+    // notifyAdmin swallows a database failure and resolves null. A row (also a dedupe hit, which is the standing
+    // alert) or an intentional suppression (bell policy, internal test customer: id null, suppressed true) is
+    // delivered; nothing else is, so it takes the same release path as a rejection.
+    if (!written || (!written.id && !written.suppressed)) throw new Error('admin alert was not written');
   } catch (err) {
     // The alert never reached the owner: give the claim back so a later check may try again.
     await db('call_log').where('twilio_call_sid', callSid).update({
@@ -169,9 +186,10 @@ async function raiseAlert(call, acceptance, reason) {
 async function checkCall(callSid) {
   try {
     if (!gateOn()) return { checked: false, reason: 'gate_off' };
-    const call = await db('call_log').where('twilio_call_sid', callSid).first('id', 'twilio_call_sid', 'metadata');
+    const call = await db('call_log').where('twilio_call_sid', callSid).first('id', 'twilio_call_sid', 'status', 'metadata');
     const callMeta = meta(call?.metadata);
     if (!call || !callMeta.live_transcription) return { checked: false, reason: 'not_live' };
+    if (callEnded(call)) return { checked: false, reason: 'call_ended' };
     if (ownerAnswered(callMeta.forward_acceptance)) return { checked: false, reason: 'owner_on_call' };
     if (!(await claimCheck(callSid, callMeta.live_transcription, new Date()))) return { checked: false, reason: 'not_due' };
     const transcript = await transcriptWindow(callSid);
@@ -190,4 +208,4 @@ function afterCallerUtterance(callSid) {
   checkCall(callSid).catch(() => {});
 }
 
-module.exports = { afterCallerUtterance, checkCall, _test: { whyFrom, ownerAnswered } };
+module.exports = { afterCallerUtterance, checkCall, _test: { whyFrom, ownerAnswered, callEnded } };

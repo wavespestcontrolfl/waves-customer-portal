@@ -70,11 +70,13 @@ const OWNER = '+19415550100';
 const STAFF = '+19415550111';
 const T0 = Date.UTC(2026, 10, 16, 15, 0, 0);
 
-function setCall({ answeredBy = STAFF, csr = 'Virginia', liveState = {} } = {}) {
+function setCall({ answeredBy = STAFF, csr = 'Virginia', liveState = {}, status = 'in-progress', extra = {} } = {}) {
   db.__state.call = {
     id: 'log-1',
     twilio_call_sid: SID,
+    status,
     metadata: {
+      ...extra,
       live_transcription: { status: 'started', ...liveState },
       forward_acceptance: { accepted: true, answered_by_number: answeredBy, csr_name: csr },
     },
@@ -102,6 +104,7 @@ beforeEach(() => {
   process.env.ADAM_PHONE = OWNER;
   process.env.ANTHROPIC_API_KEY = 'test-key';
   mockCreate.mockResolvedValue(reply({ mood: 'upset', reason: 'Caller says nobody has come three times and wants a manager' }));
+  mockRaise.mockResolvedValue({ id: 'n-1', deduped: false });
   setCall();
   speak(3);
 });
@@ -246,9 +249,78 @@ describe('the alert', () => {
     expect(upset._test.whyFrom('')).toBe('The caller sounds upset about how the call is going.');
   });
 
+  test.each([
+    ['a null result (notifyAdmin caught a database failure)', null],
+    ['a result with no id', { deduped: false }],
+  ])('%s gives the claim back and the call is checked again later', async (_name, written) => {
+    mockRaise.mockResolvedValueOnce(written);
+    await expect(upset.checkCall(SID)).resolves.toEqual({ checked: false, reason: 'error' });
+    expect(liveState().upset_alert_at).toBeNull();
+    speak(3, 200);
+    liveState().upset_checked_at = new Date(0).toISOString();
+    await expect(upset.checkCall(SID)).resolves.toEqual({ checked: true, alerted: true });
+    expect(mockRaise).toHaveBeenCalledTimes(2);
+    expect(liveState().upset_alert_at).toBeTruthy();
+  });
+
+  test.each([
+    ['a dedupe hit (the alert already stands)', { id: 'n-0', deduped: true }],
+    ['a bell-policy mute (success without a row)', { id: null, suppressed: true, reason: 'bell_policy' }],
+  ])('%s keeps the sent stamp', async (_name, written) => {
+    mockRaise.mockResolvedValueOnce(written);
+    await expect(upset.checkCall(SID)).resolves.toEqual({ checked: true, alerted: true });
+    expect(liveState().upset_alert_at).toBeTruthy();
+    speak(3, 200);
+    liveState().upset_checked_at = new Date(0).toISOString();
+    await expect(upset.checkCall(SID)).resolves.toMatchObject({ reason: 'not_due' });
+    expect(mockRaise).toHaveBeenCalledTimes(1);
+  });
+
   test('a failed raise gives the claim back and still never throws', async () => {
     mockRaise.mockRejectedValueOnce(new Error('db down'));
     await expect(upset.checkCall(SID)).resolves.toEqual({ checked: false, reason: 'error' });
     expect(liveState().upset_alert_at).toBeNull();
+  });
+});
+
+describe('a call that is no longer live', () => {
+  test.each([
+    ['a terminal status', { status: 'completed' }],
+    ['a stamped ended_at', { extra: { ended_at: '2026-11-16T15:05:00.000Z' } }],
+    ['a stopped_at from the transcription-stopped event', { liveState: { stopped_at: '2026-11-16T15:05:00.000Z' } }],
+  ])('%s: no check, no model call, no claim', async (_name, opts) => {
+    setCall(opts);
+    await expect(upset.checkCall(SID)).resolves.toEqual({ checked: false, reason: 'call_ended' });
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(mockRaise).not.toHaveBeenCalled();
+    expect(liveState().upset_checks).toBeUndefined();
+  });
+
+  test.each(['completed', 'busy', 'failed', 'no-answer', 'canceled'])('terminal status %s ends the call', (status) => {
+    expect(upset._test.callEnded({ status, metadata: {} })).toBe(true);
+  });
+
+  test('an in-progress call with no end stamp is live', () => {
+    expect(upset._test.callEnded({ status: 'in-progress', metadata: { live_transcription: { status: 'started' } } })).toBe(false);
+  });
+
+  test('a call that ends while the model runs raises no alert and leaves no stamp', async () => {
+    mockCreate.mockImplementation(async () => {
+      db.__state.call.status = 'completed';
+      return reply({ mood: 'angry', reason: 'Caller is yelling about the bill' });
+    });
+    await expect(upset.checkCall(SID)).resolves.toEqual({ checked: true, alerted: false });
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(mockRaise).not.toHaveBeenCalled();
+    expect(liveState().upset_alert_at).toBeUndefined();
+  });
+
+  test('a stopped_at that lands during classification also stops the alert', async () => {
+    mockCreate.mockImplementation(async () => {
+      liveState().stopped_at = '2026-11-16T15:02:00.000Z';
+      return reply({ mood: 'upset', reason: 'Wants a manager' });
+    });
+    await expect(upset.checkCall(SID)).resolves.toEqual({ checked: true, alerted: false });
+    expect(mockRaise).not.toHaveBeenCalled();
   });
 });
