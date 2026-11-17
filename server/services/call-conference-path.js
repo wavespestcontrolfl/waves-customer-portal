@@ -320,8 +320,13 @@ async function endRoomAfterStaffHangup(callSid, state) {
 // the caller up, and the hold's sender finishes it (the room end that lets /call-complete take the message). With no
 // hold in the way the ordinary room end runs. No open room, or it will not end: hang up the caller, so no one is
 // left alone in it.
-async function onWinnerLegEnded(callSid, state) {
-  const answer = await require('./call-hold').staffLeft(callSid); // lazy: call-hold requires this module
+// A transfer ringing for the held caller ('transfer_pending', warm transfer in call-hold.js): the owner's answer decides, so
+// no voicemail starts and no room ends; the minute sweep does nothing for the call until the transfer is decided.
+// `legSid` is the leg that ended, read as the winner here; the hold re-checks it under its lock, and a leg that a warm
+// transfer replaced meanwhile ('not_winner') ends nothing.
+async function onWinnerLegEnded(callSid, state, legSid) {
+  const answer = await require('./call-hold').staffLeft(callSid, { legSid }); // lazy: call-hold requires this module
+  if (answer === 'not_winner' || answer === 'transfer_pending') return answer;
   return answer === 'voicemail' ? 'hold_voicemail' : endRoomAfterStaffHangup(callSid, state);
 }
 
@@ -331,7 +336,7 @@ async function handleStaffLegStatus({ callSid, index, legSid, status }) {
   const state = await loadState(callSid);
   if (!state) return 'no_state';
   if (state.accepted_leg_sid) {
-    return state.accepted_leg_sid === legSid ? onWinnerLegEnded(callSid, state) : 'accepted';
+    return state.accepted_leg_sid === legSid ? onWinnerLegEnded(callSid, state, legSid) : 'accepted';
   }
   if (!everyLegEnded(state)) return 'waiting';
   return (await sendCallerToVoicemail(callSid, noAnswerStatus(state))) === 'redirected' ? 'voicemail' : 'settled';
@@ -342,21 +347,38 @@ async function handleStaffLegStatus({ callSid, index, legSid, status }) {
 // is safe: the leg stamp writes the same status, the hold's decision and its sender are idempotent, the voicemail claim
 // admits one redirect, and the ordinary room end ends only a room still open (with none, its hang-up ends a caller
 // whose /call-complete answer ends the call anyway). Never rejects.
-async function onStaffLegStatus(args, attempt = 0) {
+async function retryLegEnd(handler, label, args, attempt) {
   try {
-    return await handleStaffLegStatus(args);
+    return await handler(args);
   } catch (err) {
     const delayMs = STAFF_END_RETRY_MS[attempt];
     if (!delayMs) {
-      logger.error(`[conference] staff leg end for ${masked(args?.callSid)} not handled after ${attempt + 1} tries (${errorCode(err)})`);
+      logger.error(`[conference] ${label} for ${masked(args?.callSid)} not handled after ${attempt + 1} tries (${errorCode(err)})`);
       return 'failed';
     }
-    logger.warn(`[conference] staff leg end for ${masked(args?.callSid)} not handled (${errorCode(err)}); try ${attempt + 2} in ${delayMs / 1000} s`);
-    const timer = setTimeout(() => { void onStaffLegStatus(args, attempt + 1); }, delayMs);
+    logger.warn(`[conference] ${label} for ${masked(args?.callSid)} not handled (${errorCode(err)}); try ${attempt + 2} in ${delayMs / 1000} s`);
+    const timer = setTimeout(() => { void retryLegEnd(handler, label, args, attempt + 1); }, delayMs);
     if (typeof timer.unref === 'function') timer.unref();
     return 'retry';
   }
 }
+
+const onStaffLegStatus = (args, attempt = 0) => retryLegEnd(handleStaffLegStatus, 'staff leg end', args, attempt);
+
+// The owner's transfer call ended (terminal statuses only). After he took the call it is the winning leg, so its end is the
+// winner's end; otherwise it is a transfer nobody took (call-hold.js endTransfer). Same retry as a staff leg end.
+async function handleTransferLegStatus({ callSid, n, legSid, status }) {
+  if (!TERMINAL_LEG_STATUSES.has(status) || !Number.isInteger(n) || !legSid) return 'ignored';
+  const state = await loadState(callSid);
+  if (!state) return 'no_state';
+  if (state.accepted_leg_sid === legSid) return onWinnerLegEnded(callSid, state, legSid);
+  const answer = await require('./call-hold').endTransfer(callSid, { n, legSid, reason: status });
+  if (answer !== 'winner') return answer;
+  // He took the call between the read above and the hold's decision: his leg's end is the winner's end after all.
+  return onWinnerLegEnded(callSid, (await loadState(callSid)) || state, legSid);
+}
+
+const onTransferLegStatus = (args, attempt = 0) => retryLegEnd(handleTransferLegStatus, 'transfer leg end', args, attempt);
 
 // One answered call of the sweep: true when its winning staff leg is over (Twilio's status) while its room is still
 // open, which is then handled the same way as the leg's status callback. The staff still on the call (in the room, or
@@ -371,8 +393,7 @@ async function recoverStaffEnd(row) {
   const rooms = await api.conferences.list({ friendlyName: roomFor(callSid), limit: 5 });
   if (!(rooms || []).some((room) => room.status !== 'completed')) return false;
   logger.warn(`[conference] the staff leg of ${masked(callSid)} is over and its room is still open: the sweep ends it`);
-  await onWinnerLegEnded(callSid, state);
-  return true;
+  return (await onWinnerLegEnded(callSid, state, state.accepted_leg_sid)) !== 'not_winner';
 }
 
 let sweepingStaffEnds = false;
@@ -419,7 +440,24 @@ async function closeForCallerEnd(callSid) {
     ["(metadata -> 'conference_path') IS NOT NULL", "(metadata #>> '{conference_path,closed_at}') IS NULL"]);
   if (!closed) return 0;
   // Every leg, the winner too: a staff member still hearing the announcement must not join an empty room.
-  return endLegs(await loadState(callSid));
+  const state = await loadState(callSid);
+  return (await endLegs(state)) + (await endTransferLegs(state));
+}
+
+// The owner's transfer call, for a caller who hung up: while it still rings, and after he took the call. His leg is then the
+// winning leg, which the ring's own legs do not include, and he may be outside the room (hearing "Connecting.", on his
+// hold menu): the room's end alone would not reach him there. Best effort.
+async function endTransferLegs(state) {
+  const ringLegs = new Set(Object.values(state?.legs || {}).map((leg) => leg?.sid).filter(Boolean));
+  const transfer = state?.hold?.transfer;
+  const sids = new Set();
+  if (transfer?.status === 'ringing' && transfer.leg_sid) sids.add(transfer.leg_sid);
+  if (state?.accepted_leg_sid && !ringLegs.has(state.accepted_leg_sid)) sids.add(state.accepted_leg_sid);
+  if (!sids.size) return 0;
+  const api = client();
+  const ended = await Promise.all([...sids].map((sid) => api.calls(sid).update({ status: 'completed' })
+    .then(() => 1, (err) => { logger.info(`[conference] transfer leg ${masked(sid)} not ended (${errorCode(err)})`); return 0; })));
+  return ended.reduce((sum, n) => sum + n, 0);
 }
 
 // /call-complete?conf=1: a conference <Dial> sends no DialCallSid or DialCallDuration and reports
@@ -456,6 +494,7 @@ module.exports = {
   scheduleNoAnswerBackstop,
   sendCallerToVoicemail,
   onStaffLegStatus,
+  onTransferLegStatus,
   recoverStaffEnds,
   closeForCallerEnd,
   conferenceDialOutcome,

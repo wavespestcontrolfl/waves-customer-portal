@@ -12,7 +12,7 @@
  * lock for the length of a transaction. Reads and writes yield a tick so two unlocked transactions would interleave.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ callConferencePathMode: jest.fn(() => 'on'), callHoldLive: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ callConferencePathMode: jest.fn(() => 'on'), callHoldLive: jest.fn(() => true), callWarmTransferLive: jest.fn(() => true) }));
 jest.mock('../services/admin-alert-compose', () => ({ ...jest.requireActual('../services/admin-alert-compose'), raiseAdminAlert: jest.fn(async () => ({ id: 'n1' })) }));
 jest.mock('../services/admin-alert-names', () => ({
   ...jest.requireActual('../services/admin-alert-names'),
@@ -76,7 +76,7 @@ jest.mock('../models/db', () => {
       await tick();
       if (state.failReads > 0) { state.failReads -= 1; throw Object.assign(new Error('db down'), { code: 'ECONNRESET' }); }
       if (table === 'customers') return { first_name: 'Test', last_name: 'Customer' };
-      return state.row ? { id: 77, customer_id: state.customerId, from_phone: '+19415550100', metadata: clone(state.row.metadata) } : undefined;
+      return state.row ? { id: 77, customer_id: state.customerId, from_phone: '+19415550100', to_phone: 'toPhone' in state ? state.toPhone : '+19415550199', metadata: clone(state.row.metadata) } : undefined;
     });
     q.update = jest.fn(async (patch) => {
       await tick();
@@ -133,6 +133,8 @@ const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-pr
 const SID = `CA${'a'.repeat(32)}`;
 const LEG = `CA${'0'.repeat(31)}1`;
 const ROOM = `CF${'d'.repeat(32)}`;
+const TLEG = `CA${'7'.repeat(32)}`; // the owner's transfer call
+const TARGET = '+19415550150';
 const NOW = new Date('2026-11-17T15:00:00Z');
 const iso = (offsetSec) => new Date(NOW.getTime() + offsetSec * 1000).toISOString();
 const err = (status, code) => Object.assign(new Error('x +19415550100'), { status, code });
@@ -182,6 +184,10 @@ function fakeTwilio({ rooms = [{ sid: ROOM }], fail = {}, during = {} } = {}) {
     recordings: jest.fn((which) => ({ update: (params) => step('recording', { sid, which, ...params }) })),
     update: (params) => step('call', { sid, ...params }),
   }));
+  calls.create = jest.fn(async (params) => {
+    await step('create', params);
+    return { sid: TLEG };
+  });
   mockTw.api = { calls, conferences };
   return events;
 }
@@ -190,6 +196,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.SERVER_DOMAIN;
   const s = db.__state;
+  delete s.toPhone;
   s.row = null; s.locks = new Map(); s.openTx = 0; s.txCount = 0; s.failReads = 0; s.failWrites = 0; s.failSweep = 0; s.customerId = null; s.writes = []; s.modifyCalls = []; s.sweeps = 0;
   mockTw.clientArgs = [];
   hold._test.resumeRetries.clear();
@@ -1734,5 +1741,826 @@ describe('the Hold button: holdForPanel and requestHold', () => {
     const events = fakeTwilio();
     await expect(hold.requestHold(SID, { by: 'button' })).resolves.toBe('failed');
     expect(events).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// The warm transfer (GATE_CALL_WARM_TRANSFER, part 6): hold.transfer, decided at the same one decision point.
+// ---------------------------------------------------------------------------------------------------------
+
+const transferOf = (o = {}) => ({
+  n: 1, status: 'ringing', leg_sid: null, from_leg_sid: LEG, from_name: 'Virginia', at: iso(-5), ended_at: null, end_reason: null,
+  from_left_at: null, accepted_at: null, ...o,
+});
+const ringingHold = (t = {}, h = {}) => heldHold({ transfer: transferOf(t), ...h });
+const transferOfHold = () => holdOf().transfer;
+const cpOf = () => db.__state.row.metadata.conference_path;
+
+describe('planner: the warm transfer (pure)', () => {
+  const { planEvent, transferRinging } = hold._test;
+  const T = NOW.getTime();
+  const plan = (h, ev, closed = false) => planEvent(h, ev, T, closed);
+
+  test('transferRinging: ringing and younger than 75 s only', () => {
+    expect(transferRinging(transferOf({ at: iso(-74) }), T)).toBe(true);
+    expect(transferRinging(transferOf({ at: iso(-75) }), T)).toBe(false);
+    for (const status of ['accepted', 'failed', 'canceled']) expect(transferRinging(transferOf({ status }), T)).toBe(false);
+    expect(transferRinging(undefined, T)).toBe(false);
+  });
+
+  describe('transfer_start', () => {
+    test('on a held hold: transfer n 1 rings, nothing else changes', () => {
+      const before = heldHold();
+      const out = plan(before, { type: 'transfer_start', legSid: LEG, fromName: 'Virginia' });
+      expect(out.answer).toBe('start');
+      expect(out.next).toEqual({ ...before, transfers: 1, transfer: transferOf({ at: iso(0) }) });
+    });
+
+    test('n is unique on the call: a new star carries the count, so a late callback of an earlier hold\'s transfer matches nothing', () => {
+      const OLD = `CA${'9'.repeat(32)}`;
+      const star = plan(heldHold({ phase: 'returned', applied: 'returned', ret_by: 'press1', transfer: transferOf({ n: 1, status: 'canceled', leg_sid: OLD }) }), { type: 'star', legSid: LEG });
+      expect(star.next).toMatchObject({ gen: 2, transfers: 1 });
+      expect(star.next.transfer).toBeUndefined();
+      const start = plan(star.next, { type: 'transfer_start', legSid: LEG });
+      expect(start.next).toMatchObject({ transfers: 2, transfer: { n: 2, status: 'ringing', leg_sid: null } });
+      // The canceled transfer's late callbacks (n 1, its own leg) while the new one is not placed yet:
+      expect(plan(start.next, { type: 'transfer_end', n: 1, legSid: OLD, reason: 'completed' })).toEqual({ next: start.next, answer: 'stale' });
+      expect(plan(start.next, { type: 'transfer_accept', n: 1, legSid: OLD })).toEqual({ next: start.next, answer: 'over' });
+    });
+
+    test('the next transfer of the same hold is n + 1 (after a failed one), and a missing name is null', () => {
+      const out = plan(heldHold({ transfer: transferOf({ n: 2, status: 'failed', at: iso(-60) }) }), { type: 'transfer_start', legSid: LEG });
+      expect(out.next.transfer).toMatchObject({ n: 3, status: 'ringing', leg_sid: null, from_name: null, from_leg_sid: LEG });
+    });
+
+    test('a transfer that rings is busy and writes nothing; one past its expiry is replaced', () => {
+      const ringing = ringingHold({ at: iso(-74) });
+      expect(plan(ringing, { type: 'transfer_start', legSid: LEG })).toEqual({ next: ringing, answer: 'busy' });
+      const out = plan(ringingHold({ at: iso(-80) }), { type: 'transfer_start', legSid: LEG });
+      expect([out.answer, out.next.transfer.n]).toEqual(['start', 2]);
+    });
+
+    test.each([
+      ['no hold', () => null],
+      ['a return', () => heldHold({ phase: 'returned', applied: 'returned', ret_by: 'press1' })],
+    ])('%s: not_held', (_name, make) => {
+      const before = make();
+      expect(plan(before, { type: 'transfer_start', legSid: LEG })).toEqual({ next: before, answer: 'not_held' });
+    });
+
+    test('a closed call is not_held; a voicemail answers voicemail', () => {
+      const before = heldHold();
+      expect(plan(before, { type: 'transfer_start', legSid: LEG }, true)).toEqual({ next: before, answer: 'not_held' });
+      const vm = heldHold({ phase: 'voicemail', voicemail_reason: 'timeout' });
+      expect(plan(vm, { type: 'transfer_start', legSid: LEG })).toEqual({ next: vm, answer: 'voicemail' });
+    });
+
+    test('a new star starts with no transfer (it lives inside the hold)', () => {
+      const out = plan(heldHold({ phase: 'returned', applied: 'returned', ret_by: 'transfer', transfer: transferOf({ status: 'accepted', leg_sid: TLEG }) }), { type: 'star', legSid: LEG });
+      expect(out.answer).toBe('start');
+      expect(out.next.transfer).toBeUndefined();
+    });
+  });
+
+  describe('transfer_placed', () => {
+    test('records the SID of the call that was placed', () => {
+      const out = plan(ringingHold(), { type: 'transfer_placed', n: 1, legSid: TLEG });
+      expect(out.answer).toBe('ok');
+      expect(out.next.transfer).toMatchObject({ leg_sid: TLEG, status: 'ringing' });
+    });
+
+    test.each([
+      ['another n', ringingHold(), { n: 2 }],
+      ['a transfer that ended', ringingHold({ status: 'failed' }), { n: 1 }],
+      ['a canceled transfer', ringingHold({ status: 'canceled' }), { n: 1 }],
+      ['a SID already set', ringingHold({ leg_sid: TLEG }), { n: 1 }],
+      ['no transfer', heldHold(), { n: 1 }],
+    ])('%s: stale (the caller ends the call it placed)', (_name, before, ev) => {
+      expect(plan(before, { type: 'transfer_placed', legSid: TLEG, ...ev })).toEqual({ next: before, answer: 'stale' });
+    });
+  });
+
+  describe('transfer_accept', () => {
+    const accept = (h, ev = {}, closed = false) => plan(h, { type: 'transfer_accept', n: 1, legSid: TLEG, ...ev }, closed);
+
+    test('a press 1 return with ret_by transfer, the transfer accepted, and his leg named for the winning-leg write', () => {
+      const out = accept(ringingHold({ leg_sid: TLEG }, { open_at: iso(-30) }));
+      expect(out.answer).toBe('return');
+      expect(out.acceptedLegSid).toBe(TLEG);
+      expect(out.cancelLegSid).toBeUndefined();
+      expect(out.next).toMatchObject({ phase: 'returned', ret_by: 'transfer', total_sec: 30 });
+      expect(out.next.transfer).toMatchObject({ status: 'accepted', leg_sid: TLEG, accepted_at: iso(0), ended_at: null });
+    });
+
+    test('the SID not recorded yet (the placement write is slow): the accept sets it', () => {
+      expect(accept(ringingHold()).next.transfer.leg_sid).toBe(TLEG);
+    });
+
+    test('a re-press or a redelivery of the accepted leg answers return with no write and no new winner', () => {
+      const done = heldHold({ phase: 'returned', ret_by: 'transfer', transfer: transferOf({ status: 'accepted', leg_sid: TLEG }) });
+      const out = accept(done);
+      expect(out).toEqual({ next: done, answer: 'return' });
+      expect(out.acceptedLegSid).toBeUndefined();
+    });
+
+    test('a voicemail answers voicemail first', () => {
+      const vm = heldHold({ phase: 'voicemail', transfer: transferOf({ status: 'failed' }) });
+      expect(accept(vm)).toEqual({ next: vm, answer: 'voicemail' });
+      const accepted = heldHold({ phase: 'voicemail', transfer: transferOf({ status: 'accepted', leg_sid: TLEG }) });
+      expect(accept(accepted).answer).toBe('voicemail');
+    });
+
+    test.each([
+      ['another n', () => ringingHold({ leg_sid: TLEG }), { n: 2 }],
+      ['no transfer', () => heldHold(), {}],
+      ['a failed transfer', () => ringingHold({ status: 'failed', leg_sid: TLEG }), {}],
+      ['a canceled transfer', () => ringingHold({ status: 'canceled', leg_sid: TLEG }), {}],
+      ['an expired transfer', () => ringingHold({ leg_sid: TLEG, at: iso(-75) }), {}],
+      ['a different leg than the recorded one', () => ringingHold({ leg_sid: TLEG }), { legSid: `CA${'8'.repeat(32)}` }],
+      ['a hold that is not held', () => ringingHold({ leg_sid: TLEG }, { phase: 'returned', ret_by: 'press1' }), {}],
+      ['an accepted transfer of another leg', () => heldHold({ phase: 'returned', transfer: transferOf({ status: 'accepted', leg_sid: TLEG }) }), { legSid: `CA${'8'.repeat(32)}` }],
+    ])('%s: over, nothing written', (_name, make, ev) => {
+      const before = make();
+      expect(accept(before, ev)).toEqual({ next: before, answer: 'over' });
+    });
+
+    test('a closed call: closed, nothing written', () => {
+      const before = ringingHold({ leg_sid: TLEG });
+      expect(accept(before, {}, true)).toEqual({ next: before, answer: 'closed' });
+    });
+
+    test('a closed call after he took it (a re-press, or his retry loop): closed, so the loop ends', () => {
+      const done = heldHold({ phase: 'returned', applied: 'held', ret_by: 'transfer', transfer: transferOf({ status: 'accepted', leg_sid: TLEG }) });
+      expect(accept(done, {}, true)).toEqual({ next: done, answer: 'closed' });
+    });
+  });
+
+  describe('the winning leg under the lock (a transfer moves it in the accept write)', () => {
+    const taken = () => ringingHold({ status: 'accepted', leg_sid: TLEG }, { phase: 'returned', applied: 'held', ret_by: 'transfer' });
+
+    test('staff_left from a leg that is no longer the winner: not_winner, nothing written', () => {
+      const before = taken();
+      expect(planEvent(before, { type: 'staff_left', legSid: LEG }, T, false, TLEG)).toEqual({ next: before, answer: 'not_winner' });
+    });
+
+    test('staff_left from the winner, or with no leg named: decided as before (here a return in flight: voicemail)', () => {
+      expect(planEvent(taken(), { type: 'staff_left', legSid: TLEG }, T, false, TLEG).answer).toBe('voicemail');
+      expect(planEvent(taken(), { type: 'staff_left' }, T, false, TLEG).answer).toBe('voicemail');
+      expect(planEvent(heldHold(), { type: 'staff_left', legSid: LEG }, T, false, LEG).answer).toBe('voicemail');
+      // No winner stored (never after a press 1): decided as before.
+      expect(planEvent(heldHold(), { type: 'staff_left', legSid: LEG }, T, false, null).answer).toBe('voicemail');
+    });
+
+    test('only a leg\'s own events are checked: the loops\' check and the owner\'s accept decide as before for any leg', () => {
+      expect(planEvent(heldHold(), { type: 'check', legSid: LEG }, T, false, TLEG).answer).not.toBe('not_winner');
+      expect(planEvent(heldHold(), { type: 'transfer_accept', n: 1, legSid: LEG }, T, false, TLEG).answer).not.toBe('not_winner');
+    });
+
+    test('a star from the winner, with no leg named, or with no winner stored: decided as before', () => {
+      const over = heldHold({ phase: 'returned', applied: 'returned', ret_by: 'press1', transfers: 1 });
+      expect(planEvent(over, { type: 'star', legSid: TLEG }, T, false, TLEG).answer).toBe('start');
+      expect(planEvent(over, { type: 'star' }, T, false, TLEG).answer).toBe('start');
+      expect(planEvent(over, { type: 'star', legSid: LEG }, T, false, null).answer).toBe('start');
+    });
+
+    test('a star or a menu key (press 1, press 2) from a leg that is no longer the winner: not_winner, nothing written, also in his own hold', () => {
+      const his = heldHold({ transfers: 1 }); // he took the call, then pressed star: a new hold, with no transfer
+      const over = heldHold({ phase: 'returned', applied: 'returned', ret_by: 'press1', transfers: 1 }); // his hold ended
+      for (const before of [taken(), his, over]) {
+        for (const type of ['star', 'press1', 'transfer_start']) {
+          expect(planEvent(before, { type, legSid: LEG }, T, false, TLEG)).toEqual({ next: before, answer: 'not_winner' });
+        }
+      }
+    });
+
+    test('a menu key from the winner, with no leg named, or with no winner stored: decided as before', () => {
+      const his = heldHold({ transfers: 1 });
+      expect(planEvent(his, { type: 'press1', legSid: TLEG }, T, false, TLEG).answer).toBe('return');
+      expect(planEvent(his, { type: 'press1' }, T, false, TLEG).answer).toBe('return');
+      expect(planEvent(heldHold(), { type: 'press1', legSid: LEG }, T, false, null).answer).toBe('return');
+      expect(planEvent(his, { type: 'transfer_start', legSid: TLEG }, T, false, TLEG).answer).toBe('start');
+      expect(planEvent(heldHold(), { type: 'transfer_start', legSid: LEG }, T, false, LEG).answer).toBe('start');
+    });
+
+    test('transfer_end for the winning leg (he took the call after the callback read the state): winner, nothing written', () => {
+      const before = taken();
+      expect(planEvent(before, { type: 'transfer_end', n: 1, legSid: TLEG, reason: 'completed' }, T, false, TLEG)).toEqual({ next: before, answer: 'winner' });
+      // A ringing transfer's end with another winner decides as before.
+      const ringing = ringingHold({ leg_sid: TLEG });
+      expect(planEvent(ringing, { type: 'transfer_end', n: 1, legSid: TLEG, reason: 'no-answer' }, T, false, LEG).answer).toBe('failed');
+    });
+
+    test('transfer_placed for the winning leg (he took the call before the write landed): ok, nothing written', () => {
+      const before = taken();
+      expect(planEvent(before, { type: 'transfer_placed', n: 1, legSid: TLEG }, T, false, TLEG)).toEqual({ next: before, answer: 'ok' });
+      // Also on a closed call: his leg ends with the room, never here.
+      expect(planEvent(before, { type: 'transfer_placed', n: 1, legSid: TLEG }, T, true, TLEG)).toEqual({ next: before, answer: 'ok' });
+      // A ringing transfer on a closed call (the caller hung up while it was placed) is stale: its caller ends that call.
+      const ringing = ringingHold();
+      expect(planEvent(ringing, { type: 'transfer_placed', n: 1, legSid: TLEG }, T, true, LEG)).toEqual({ next: ringing, answer: 'stale' });
+      // The same write when his leg is not the winner stays stale (its caller ends that call).
+      expect(planEvent(before, { type: 'transfer_placed', n: 1, legSid: TLEG }, T, false, LEG).answer).toBe('stale');
+    });
+  });
+
+  describe('transfer_end', () => {
+    const end = (h, ev = {}, closed = false) => plan(h, { type: 'transfer_end', n: 1, legSid: TLEG, reason: 'no-answer', ...ev }, closed);
+
+    test('the owner call ended with no press 1: the transfer failed, the hold stays held', () => {
+      const out = end(ringingHold({ leg_sid: TLEG }));
+      expect(out.answer).toBe('failed');
+      expect(out.next).toMatchObject({ phase: 'held' });
+      expect(out.next.transfer).toMatchObject({ status: 'failed', ended_at: iso(0), end_reason: 'no-answer' });
+    });
+
+    test('matches with no SID on either side (a call that was not placed, or not recorded yet)', () => {
+      expect(end(ringingHold(), { legSid: null }).answer).toBe('failed');
+      expect(end(ringingHold({ leg_sid: TLEG }), { legSid: null }).answer).toBe('failed');
+      expect(end(ringingHold(), { legSid: TLEG }).answer).toBe('failed');
+    });
+
+    test.each([
+      ['another n', ringingHold({ leg_sid: TLEG }), { n: 2 }],
+      ['another leg', ringingHold({ leg_sid: TLEG }), { legSid: `CA${'8'.repeat(32)}` }],
+      ['an accepted transfer', ringingHold({ status: 'accepted', leg_sid: TLEG }), {}],
+      ['a failed transfer (a redelivery)', ringingHold({ status: 'failed', leg_sid: TLEG }), {}],
+      ['no transfer', heldHold(), {}],
+    ])('%s: stale, nothing written', (_name, before, ev) => {
+      expect(end(before, ev)).toEqual({ next: before, answer: 'stale' });
+    });
+
+    test('the staff already left and the caller is held: voicemail, reason transfer_unanswered', () => {
+      const out = end(ringingHold({ leg_sid: TLEG, from_left_at: iso(-3) }, { open_at: iso(-40) }));
+      expect(out.answer).toBe('voicemail');
+      expect(out.next).toMatchObject({ phase: 'voicemail', voicemail_reason: 'transfer_unanswered', total_sec: 40 });
+      expect(out.next.transfer).toMatchObject({ status: 'failed', end_reason: 'no-answer' });
+    });
+
+    test('the staff left but the call is closed: the transfer fails, no voicemail', () => {
+      expect(end(ringingHold({ leg_sid: TLEG, from_left_at: iso(-3) }), {}, true)).toMatchObject({ answer: 'failed', next: { phase: 'held' } });
+    });
+  });
+
+  describe('press 1 while it rings', () => {
+    test('cancels the transfer (staff_back), names the owner call to end, and returns the caller as today', () => {
+      const out = plan(ringingHold({ leg_sid: TLEG }, { open_at: iso(-30) }), { type: 'press1' });
+      expect(out.answer).toBe('return');
+      expect(out.cancelLegSid).toBe(TLEG);
+      expect(out.next).toMatchObject({ phase: 'returned', ret_by: 'press1', total_sec: 30 });
+      expect(out.next.transfer).toMatchObject({ status: 'canceled', end_reason: 'staff_back', ended_at: iso(0), leg_sid: TLEG });
+    });
+
+    test('a transfer not placed yet is canceled with no call to end; no transfer, an expired one or a decided one change nothing extra', () => {
+      const early = plan(ringingHold(), { type: 'press1' });
+      expect(early.next.transfer.status).toBe('canceled');
+      expect('cancelLegSid' in early).toBe(false);
+      expect('cancelLegSid' in plan(heldHold(), { type: 'press1' })).toBe(false);
+      expect(plan(ringingHold({ leg_sid: TLEG, at: iso(-80) }), { type: 'press1' }).next.transfer.status).toBe('ringing');
+      expect(plan(ringingHold({ leg_sid: TLEG, status: 'failed' }), { type: 'press1' }).next.transfer.status).toBe('failed');
+    });
+  });
+
+  describe('the staff hang up while it rings', () => {
+    test('the first time: from_left_at is set, transfer_pending, the hold stays held', () => {
+      const out = plan(ringingHold({ leg_sid: TLEG }), { type: 'staff_left' });
+      expect(out.answer).toBe('transfer_pending');
+      expect(out.next).toMatchObject({ phase: 'held' });
+      expect(out.next.transfer).toMatchObject({ status: 'ringing', from_left_at: iso(0) });
+    });
+
+    test('a second hang-up event is transfer_pending with no write', () => {
+      const before = ringingHold({ leg_sid: TLEG, from_left_at: iso(-2) });
+      expect(plan(before, { type: 'staff_left' })).toEqual({ next: before, answer: 'transfer_pending' });
+    });
+
+    test('a transfer past its expiry is not waited for: the voicemail as today, ending the transfer and naming its call', () => {
+      const out = plan(ringingHold({ leg_sid: TLEG, at: iso(-80) }), { type: 'staff_left' });
+      expect(out.answer).toBe('voicemail');
+      expect(out.next).toMatchObject({ phase: 'voicemail', voicemail_reason: 'staff_left' });
+      expect(out.next.transfer).toMatchObject({ status: 'failed', end_reason: 'voicemail' });
+      expect(out.cancelLegSid).toBe(TLEG);
+    });
+
+    test('a decided transfer, and a return in flight, are today\'s voicemail', () => {
+      expect(plan(ringingHold({ status: 'failed' }), { type: 'staff_left' })).toMatchObject({ answer: 'voicemail', next: { voicemail_reason: 'staff_left' } });
+      const flight = heldHold({ phase: 'returned', applied: 'held', ret_by: 'transfer', transfer: transferOf({ status: 'accepted', leg_sid: TLEG }) });
+      expect(plan(flight, { type: 'staff_left' })).toMatchObject({ answer: 'voicemail' });
+    });
+
+    test('a closed call is ordinary', () => {
+      expect(plan(ringingHold({ leg_sid: TLEG }), { type: 'staff_left' }, true).answer).toBe('ordinary');
+    });
+  });
+
+  describe('the loops: expiry, limit, reminder', () => {
+    const check = (h, ev = {}) => plan(h, { type: 'check', ...ev });
+
+    test('an expired transfer fails (expired) and the hold stays held; its call is named', () => {
+      const out = check(ringingHold({ leg_sid: TLEG, at: iso(-75) }));
+      expect(out.next).toMatchObject({ phase: 'held' });
+      expect(out.next.transfer).toMatchObject({ status: 'failed', end_reason: 'expired', ended_at: iso(0) });
+      expect(out.cancelLegSid).toBe(TLEG);
+    });
+
+    test('an expired transfer whose staff left: the voicemail, reason transfer_unanswered', () => {
+      const out = check(ringingHold({ leg_sid: TLEG, at: iso(-75), from_left_at: iso(-20) }, { open_at: iso(-90) }));
+      expect(out.next).toMatchObject({ phase: 'voicemail', voicemail_reason: 'transfer_unanswered', total_sec: 90 });
+      expect(out.next.transfer).toMatchObject({ status: 'failed', end_reason: 'expired' });
+      expect(out.cancelLegSid).toBe(TLEG);
+    });
+
+    test('a transfer that still rings changes nothing, and the reminder says nothing of it', () => {
+      const young = ringingHold({ leg_sid: TLEG, at: iso(-74) });
+      expect(check(young)).toEqual({ next: young, answer: { remind: false } });
+      const old = check(ringingHold({ leg_sid: TLEG, at: iso(-10) }, { open_at: iso(-200) }), { remind: true });
+      expect(old.answer.remind).toBe(true);
+      expect(old.next.transfer.status).toBe('ringing');
+      expect('cancelLegSid' in old).toBe(false);
+    });
+
+    test('the 5 minute limit sends the caller to voicemail, ends the ringing transfer and names its call', () => {
+      const out = check(ringingHold({ leg_sid: TLEG, at: iso(-10) }, { open_at: iso(-301) }));
+      expect(out.next).toMatchObject({ phase: 'voicemail', voicemail_reason: 'timeout' });
+      expect(out.next.transfer).toMatchObject({ status: 'failed', end_reason: 'voicemail' });
+      expect(out.cancelLegSid).toBe(TLEG);
+    });
+
+    test('an old hold with an expired transfer and the limit: timeout, the transfer already expired', () => {
+      const out = check(ringingHold({ leg_sid: TLEG, at: iso(-100) }, { open_at: iso(-301) }));
+      expect(out.next).toMatchObject({ voicemail_reason: 'timeout' });
+      expect(out.next.transfer.end_reason).toBe('expired');
+      expect(out.cancelLegSid).toBe(TLEG);
+    });
+  });
+});
+
+describe('the warm transfer: withHoldLock writes the winning leg with the hold, or nothing', () => {
+  beforeEach(() => { process.env.CALL_TRANSFER_TO = TARGET; });
+  afterEach(() => { delete process.env.CALL_TRANSFER_TO; });
+
+  test('an accepted transfer commits the hold and accepted_leg_sid together', async () => {
+    seed(ringingHold({ leg_sid: TLEG }));
+    fakeTwilio();
+    expect(cpOf().accepted_leg_sid).toBe(LEG);
+    const out = await hold._test.decide(SID, { type: 'transfer_accept', n: 1, legSid: TLEG });
+    expect(out.answer).toBe('return');
+    expect(cpOf().accepted_leg_sid).toBe(TLEG);
+    expect(holdOf()).toMatchObject({ phase: 'returned', ret_by: 'transfer' });
+    expect(transferOfHold().status).toBe('accepted');
+  });
+
+  test('a write that fails leaves both as they were', async () => {
+    seed(ringingHold({ leg_sid: TLEG }));
+    db.__state.failWrites = 1;
+    await expect(hold._test.decide(SID, { type: 'transfer_accept', n: 1, legSid: TLEG })).rejects.toThrow('db down');
+    expect(cpOf().accepted_leg_sid).toBe(LEG);
+    expect(holdOf()).toMatchObject({ phase: 'held' });
+    expect(transferOfHold().status).toBe('ringing');
+  });
+
+  test('no other event changes the winning leg', async () => {
+    seed(heldHold());
+    fakeTwilio();
+    await hold._test.decide(SID, { type: 'transfer_start', legSid: LEG, fromName: 'Virginia' });
+    await hold._test.decide(SID, { type: 'transfer_placed', n: 1, legSid: TLEG });
+    await hold._test.decide(SID, { type: 'check', remind: true });
+    await hold._test.decide(SID, { type: 'transfer_end', n: 1, legSid: TLEG, reason: 'busy' });
+    await hold._test.decide(SID, { type: 'transfer_start', legSid: LEG });
+    await hold._test.decide(SID, { type: 'transfer_accept', n: 1, legSid: TLEG }); // over: n is 2 now
+    await hold._test.decide(SID, { type: 'press1' });
+    expect(cpOf().accepted_leg_sid).toBe(LEG);
+    // A re-press of an accepted transfer writes nothing either.
+    seed(heldHold({ phase: 'returned', applied: 'returned', ret_by: 'transfer', transfer: transferOf({ status: 'accepted', leg_sid: TLEG }) }));
+    cpOf().accepted_leg_sid = TLEG;
+    db.__state.writes = [];
+    await hold._test.decide(SID, { type: 'transfer_accept', n: 1, legSid: TLEG });
+    expect(db.__state.writes).toEqual([]);
+  });
+});
+
+describe('the warm transfer: transferAvailable and startTransfer', () => {
+  const featureGates = require('../config/feature-gates');
+  beforeEach(() => { process.env.CALL_TRANSFER_TO = '(941) 555-0150'; });
+  afterEach(() => { delete process.env.CALL_TRANSFER_TO; });
+  const CREATE = {
+    name: 'create',
+    to: TARGET,
+    from: '+19415550199',
+    url: `https://portal.wavespestcontrol.com/api/webhooks/twilio/conference-transfer-answer?parent=${SID}&n=1`,
+    method: 'POST',
+    timeout: 20,
+    statusCallback: `https://portal.wavespestcontrol.com/api/webhooks/twilio/conference-transfer-status?parent=${SID}&n=1`,
+    statusCallbackMethod: 'POST',
+    statusCallbackEvent: ['completed'],
+  };
+
+  test('transferAvailable: the gate, the hold gate, a valid number, and a menu leg that is not the target', () => {
+    expect(hold.transferTarget()).toBe(TARGET);
+    expect(hold.transferAvailable('+19415550123')).toBe(true);
+    expect(hold.transferAvailable('(941) 555-0123')).toBe(true);
+    expect(hold.transferAvailable(undefined)).toBe(true);
+    expect(hold.transferAvailable(TARGET)).toBe(false); // the owner never transfers to himself
+    expect(hold.transferAvailable('941-555-0150')).toBe(false);
+    featureGates.callWarmTransferLive.mockReturnValueOnce(false);
+    expect(hold.transferAvailable('+19415550123')).toBe(false);
+    featureGates.callHoldLive.mockReturnValueOnce(false);
+    expect(hold.transferAvailable('+19415550123')).toBe(false);
+    delete process.env.CALL_TRANSFER_TO;
+    expect(hold.transferTarget()).toBeNull();
+    expect(hold.transferAvailable('+19415550123')).toBe(false);
+    process.env.CALL_TRANSFER_TO = '';
+    expect(hold.transferAvailable('+19415550123')).toBe(false);
+    // toE164 passes malformed input through: none of these is a target, and none offers the transfer.
+    for (const bad of ['invalid', '+123', '941-555-015', '(141) 555-0150', '+44 20 7946 0000', 'client:owner']) {
+      process.env.CALL_TRANSFER_TO = bad;
+      expect([bad, hold.transferTarget()]).toEqual([bad, null]);
+      expect(hold.transferAvailable('+19415550123')).toBe(false);
+    }
+  });
+
+  test('a malformed CALL_TRANSFER_TO places no call: the transfer fails as not placed', async () => {
+    process.env.CALL_TRANSFER_TO = '+123';
+    seed(heldHold());
+    const events = fakeTwilio();
+    expect(await hold.startTransfer(SID, { legSid: LEG, fromName: 'Virginia' })).toBe('failed');
+    expect(events).toEqual([]);
+    expect(transferOfHold()).toMatchObject({ status: 'failed', end_reason: 'not_placed' });
+  });
+
+  test('the gate reader is read through the module at call time (a bare mock reads off)', () => {
+    const reader = featureGates.callWarmTransferLive;
+    delete featureGates.callWarmTransferLive;
+    try {
+      expect(hold.transferAvailable('+19415550123')).toBe(false);
+    } finally {
+      featureGates.callWarmTransferLive = reader;
+    }
+  });
+
+  test('places ONE call to the number with the exact parameters, records its SID, and answers ringing', async () => {
+    seed(heldHold());
+    const events = fakeTwilio();
+    expect(await hold.startTransfer(SID, { legSid: LEG, fromName: 'Virginia' })).toBe('ringing');
+    expect(events).toEqual([CREATE]);
+    expect(events[0]).not.toHaveProperty('machineDetection');
+    expect(transferOfHold()).toMatchObject({ n: 1, status: 'ringing', leg_sid: TLEG, from_leg_sid: LEG, from_name: 'Virginia' });
+    expect(holdOf()).toMatchObject({ phase: 'held', applied: 'held' });
+    // No phone number reaches the state or the log.
+    expect(JSON.stringify(holdOf())).not.toContain('+1941');
+    expect(JSON.stringify([...logger.info.mock.calls, ...logger.warn.mock.calls, ...logger.error.mock.calls])).not.toContain('555');
+  });
+
+  test('the owner takes the call before the placement write lands: ringing, and his call (now the winning leg) is never ended', async () => {
+    seed(heldHold());
+    const events = fakeTwilio({
+      during: { create: once(async () => { await hold._test.decide(SID, { type: 'transfer_accept', n: 1, legSid: TLEG }); }) },
+    });
+    expect(await hold.startTransfer(SID, { legSid: LEG, fromName: 'Virginia' })).toBe('ringing');
+    expect(names(events)).toEqual(['create']);
+    expect(cpOf().accepted_leg_sid).toBe(TLEG);
+    expect(transferOfHold()).toMatchObject({ status: 'accepted', leg_sid: TLEG });
+    expect(holdOf()).toMatchObject({ phase: 'returned', ret_by: 'transfer' });
+  });
+
+  test('the client sends the Waves line the caller dialed as the caller ID', async () => {
+    seed(heldHold());
+    db.__state.toPhone = '(941) 555-0188';
+    const events = fakeTwilio();
+    await hold.startTransfer(SID, { legSid: LEG });
+    expect(events[0].from).toBe('+19415550188');
+  });
+
+  test('a second press 2 while it rings is busy and places nothing', async () => {
+    seed(heldHold());
+    const events = fakeTwilio();
+    await hold.startTransfer(SID, { legSid: LEG });
+    expect(await hold.startTransfer(SID, { legSid: LEG })).toBe('busy');
+    expect(events.filter((e) => e.name === 'create')).toHaveLength(1);
+  });
+
+  test('not_held with no hold or a return; voicemail with a voicemail; failed with no call state', async () => {
+    const events = fakeTwilio();
+    seed(null);
+    expect(await hold.startTransfer(SID, { legSid: LEG })).toBe('not_held');
+    seed(heldHold({ phase: 'returned', applied: 'returned', ret_by: 'press1' }));
+    expect(await hold.startTransfer(SID, { legSid: LEG })).toBe('not_held');
+    seed(heldHold({ phase: 'voicemail', applied: 'held', voicemail_reason: 'timeout' }));
+    expect(await hold.startTransfer(SID, { legSid: LEG })).toBe('voicemail');
+    db.__state.row = null;
+    expect(await hold.startTransfer(SID, { legSid: LEG })).toBe('failed');
+    db.__state.failReads = 1;
+    seed(heldHold());
+    expect(await hold.startTransfer(SID, { legSid: LEG })).toBe('failed');
+    expect(events).toEqual([]);
+  });
+
+  test('no Waves line on the row, or no number set: nothing is placed, the transfer is over (not_placed), failed', async () => {
+    seed(heldHold());
+    db.__state.toPhone = null;
+    const events = fakeTwilio();
+    expect(await hold.startTransfer(SID, { legSid: LEG })).toBe('failed');
+    expect(transferOfHold()).toMatchObject({ status: 'failed', end_reason: 'not_placed' });
+    delete db.__state.toPhone;
+    delete process.env.CALL_TRANSFER_TO;
+    expect(await hold.startTransfer(SID, { legSid: LEG })).toBe('failed');
+    expect(transferOfHold()).toMatchObject({ n: 2, status: 'failed', end_reason: 'not_placed' });
+    expect(events).toEqual([]);
+  });
+
+  test('a create that throws: failed, the transfer is over (not_placed), the log has the code only', async () => {
+    seed(heldHold());
+    fakeTwilio({ fail: { create: err(400, 21215) } });
+    expect(await hold.startTransfer(SID, { legSid: LEG })).toBe('failed');
+    expect(transferOfHold()).toMatchObject({ status: 'failed', end_reason: 'not_placed', leg_sid: null });
+    const logged = JSON.stringify(logger.warn.mock.calls);
+    expect(logged).toContain('21215');
+    expect(logged).not.toContain('+1941');
+    // The staff can ask again: a new transfer, n 2.
+    fakeTwilio();
+    expect(await hold.startTransfer(SID, { legSid: LEG })).toBe('ringing');
+    expect(transferOfHold().n).toBe(2);
+  });
+
+  test('a transfer canceled while its call was being placed: the call just placed is ended, answer failed', async () => {
+    seed(heldHold());
+    const events = fakeTwilio({ during: { create: async () => { await hold.endHold(SID); } } });
+    expect(await hold.startTransfer(SID, { legSid: LEG })).toBe('failed');
+    expect(events.filter((e) => e.name === 'call')).toEqual([{ name: 'call', sid: TLEG, status: 'completed' }]);
+    expect(transferOfHold()).toMatchObject({ status: 'canceled', leg_sid: null });
+  });
+
+  test('the caller hangs up while the owner call is placed: the placement is stale, and the call just placed is ended', async () => {
+    seed(heldHold());
+    const events = fakeTwilio({ during: { create: async () => { cpOf().closed_at = '2026-11-17T15:00:01Z'; } } });
+    expect(await hold.startTransfer(SID, { legSid: LEG, fromName: 'Virginia' })).toBe('failed');
+    expect(events.filter((e) => e.name === 'call')).toEqual([{ name: 'call', sid: TLEG, status: 'completed' }]);
+    expect(transferOfHold()).toMatchObject({ status: 'ringing', leg_sid: null }); // no SID recorded on the closed call
+  });
+
+  test('the caller hangs up after the placement read the state, before its write: the read after the write ends his call', async () => {
+    seed(heldHold());
+    const events = fakeTwilio();
+    const { writes } = db.__state;
+    const push = writes.push.bind(writes);
+    // The close lands inside the placement's own write: the planner read the call as open.
+    writes.push = (h) => { if (h?.transfer?.leg_sid === TLEG) cpOf().closed_at = '2026-11-17T15:00:01Z'; return push(h); };
+    expect(await hold.startTransfer(SID, { legSid: LEG, fromName: 'Virginia' })).toBe('failed');
+    expect(transferOfHold()).toMatchObject({ status: 'ringing', leg_sid: TLEG });
+    expect(events.filter((e) => e.name === 'call')).toEqual([{ name: 'call', sid: TLEG, status: 'completed' }]);
+  });
+
+  test('a placement that cannot be recorded still rings: the answer route needs no SID', async () => {
+    seed(heldHold());
+    fakeTwilio({ during: { create: async () => { db.__state.failWrites = 1; } } });
+    expect(await hold.startTransfer(SID, { legSid: LEG })).toBe('ringing');
+    expect(transferOfHold()).toMatchObject({ status: 'ringing', leg_sid: null });
+  });
+});
+
+describe('the warm transfer: acceptTransfer', () => {
+  beforeEach(() => { process.env.CALL_TRANSFER_TO = TARGET; });
+  afterEach(() => { delete process.env.CALL_TRANSFER_TO; });
+  const accept = (extra = {}) => hold.acceptTransfer(SID, { n: 1, legSid: TLEG, ...extra });
+
+  test('returned once the unhold is confirmed; his leg is the winning leg; the recording resumes as for a press 1', async () => {
+    seed(ringingHold({ leg_sid: TLEG }, { open_at: iso(-30) }));
+    const events = fakeTwilio();
+    expect(await accept()).toBe('returned');
+    expect(names(events)).toEqual(['list', 'participant', 'recording']);
+    expect(events[1]).toMatchObject({ sid: SID, hold: false });
+    expect(holdOf()).toMatchObject({ phase: 'returned', applied: 'returned', ret_by: 'transfer', total_sec: 30 });
+    expect(transferOfHold()).toMatchObject({ status: 'accepted', leg_sid: TLEG });
+    expect(cpOf().accepted_leg_sid).toBe(TLEG);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('transfer 1 taken'));
+    // The routes read the winner from the view, across holds.
+    expect((await hold.holdState(SID)).winnerLegSid).toBe(TLEG);
+  });
+
+  test('a re-press settles again with no new decision and no second unhold', async () => {
+    seed(ringingHold({ leg_sid: TLEG }));
+    const events = fakeTwilio();
+    await accept();
+    const writes = db.__state.writes.length;
+    expect(await accept()).toBe('returned');
+    expect(db.__state.writes).toHaveLength(writes);
+    expect(names(events)).toEqual(['list', 'participant', 'recording']);
+  });
+
+  test('a re-press after an unconfirmed return finishes it', async () => {
+    seed(ringingHold({ leg_sid: TLEG }));
+    fakeTwilio({ fail: { participant: err(503) } });
+    expect(await accept()).toBe('failed');
+    expect(cpOf().accepted_leg_sid).toBe(TLEG); // he is the winning leg already; the return is still wanted
+    expect(holdOf()).toMatchObject({ phase: 'returned', applied: 'held', ret_by: 'transfer' });
+    const events = fakeTwilio();
+    expect(await accept()).toBe('returned');
+    expect(names(events)).toEqual(['list', 'participant', 'recording']);
+  });
+
+  test('over: another n, a canceled or failed transfer, an expired one, another leg; nothing is sent or written', async () => {
+    const events = fakeTwilio();
+    for (const [h, extra] of [
+      [ringingHold({ leg_sid: TLEG }), { n: 2 }],
+      [ringingHold({ leg_sid: TLEG, status: 'canceled' }, { phase: 'returned', ret_by: 'press1' }), {}],
+      [ringingHold({ leg_sid: TLEG, status: 'failed' }), {}],
+      [ringingHold({ leg_sid: TLEG, at: iso(-75) }), {}],
+      [ringingHold({ leg_sid: TLEG }), { legSid: `CA${'8'.repeat(32)}` }],
+    ]) {
+      seed(h);
+      expect(await accept(extra)).toBe('over');
+      expect(cpOf().accepted_leg_sid).toBe(LEG);
+    }
+    expect(events).toEqual([]);
+    expect(db.__state.writes).toEqual([]);
+  });
+
+  test('voicemail: the voicemail was decided first; its step is finished here', async () => {
+    seed(ringingHold({ status: 'failed', leg_sid: TLEG }, { phase: 'voicemail', voicemail_reason: 'timeout', applied: 'held' }));
+    const events = fakeTwilio();
+    expect(await accept()).toBe('voicemail');
+    expect(names(events)).toEqual(['list', 'room']);
+    expect(cpOf().accepted_leg_sid).toBe(LEG);
+  });
+
+  test('no_room: the caller left (a closed call, or the room is gone)', async () => {
+    seed(ringingHold({ leg_sid: TLEG }), { closed_at: iso(-1) });
+    const events = fakeTwilio();
+    expect(await accept()).toBe('no_room');
+    expect(events).toEqual([]);
+    seed(ringingHold({ leg_sid: TLEG }));
+    fakeTwilio({ rooms: [] });
+    expect(await accept()).toBe('no_room');
+  });
+
+  test('no_room: the caller hangs up while his unhold is confirmed, so his retry loop ends', async () => {
+    seed(ringingHold({ leg_sid: TLEG }));
+    const events = fakeTwilio({
+      fail: { participant: err(503) },
+      during: { participant: async () => { cpOf().closed_at = iso(0); } },
+    });
+    expect(await accept()).toBe('no_room');
+    expect(names(events)).toEqual(['list', 'participant']);
+    expect(cpOf().accepted_leg_sid).toBe(TLEG);
+    // His retry after that: the closed call answers at once, with no Twilio request.
+    const later = fakeTwilio();
+    expect(await accept()).toBe('no_room');
+    expect(later).toEqual([]);
+  });
+
+  test('his call ends after he took it, read as a transfer nobody took: endTransfer answers winner, nothing written or sent', async () => {
+    seed(ringingHold({ status: 'accepted', leg_sid: TLEG }, { phase: 'returned', applied: 'returned', ret_by: 'transfer' }), { accepted_leg_sid: TLEG });
+    const events = fakeTwilio();
+    expect(await hold.endTransfer(SID, { n: 1, legSid: TLEG, reason: 'completed' })).toBe('winner');
+    expect(events).toEqual([]);
+    expect(db.__state.writes).toEqual([]);
+  });
+
+  test('a staff leg end read as the winner just before he took the call: not_winner under the lock, nothing written or sent', async () => {
+    seed(ringingHold({ status: 'accepted', leg_sid: TLEG }, { phase: 'returned', applied: 'held', ret_by: 'transfer' }), { accepted_leg_sid: TLEG });
+    const events = fakeTwilio();
+    expect(await hold.staffLeft(SID, { legSid: LEG })).toBe('not_winner');
+    expect(events).toEqual([]);
+    expect(db.__state.writes).toEqual([]);
+    expect(holdOf()).toMatchObject({ phase: 'returned', ret_by: 'transfer', voicemail_at: null });
+  });
+
+  test('a late star from the staff who pressed 2, after he took the call: second_staff under the lock, no hold, nothing sent', async () => {
+    seed(ringingHold({ status: 'accepted', leg_sid: TLEG }, { phase: 'returned', applied: 'returned', ret_by: 'transfer' }), { accepted_leg_sid: TLEG });
+    const events = fakeTwilio();
+    expect(await hold.startHold(SID, { by: 'star', legSid: LEG })).toBe('second_staff');
+    expect(events).toEqual([]);
+    expect(db.__state.writes).toEqual([]);
+    expect(holdOf()).toMatchObject({ phase: 'returned', applied: 'returned', ret_by: 'transfer' });
+  });
+
+  test('a press 1 or 2 from the staff who pressed 2, in a later hold of his: second_staff under the lock, nothing written or sent', async () => {
+    seed(heldHold({ transfers: 1 }), { accepted_leg_sid: TLEG });
+    const events = fakeTwilio();
+    expect(await hold.endHold(SID, { legSid: LEG })).toBe('second_staff');
+    expect(await hold.startTransfer(SID, { legSid: LEG, fromName: 'Virginia' })).toBe('second_staff');
+    expect(events).toEqual([]);
+    expect(db.__state.writes).toEqual([]);
+    expect(holdOf()).toMatchObject({ phase: 'held', transfers: 1 });
+    expect(holdOf().transfer).toBeFalsy();
+  });
+
+  test('failed: the unhold could not be confirmed, or the database is down; never a throw', async () => {
+    seed(ringingHold({ leg_sid: TLEG }));
+    fakeTwilio({ fail: { participant: err(503) } });
+    expect(await accept()).toBe('failed');
+    seed(ringingHold({ leg_sid: TLEG }));
+    db.__state.failReads = 1;
+    expect(await accept()).toBe('failed');
+    expect(cpOf().accepted_leg_sid).toBe(LEG);
+  });
+});
+
+describe('the warm transfer: what ends it', () => {
+  beforeEach(() => { process.env.CALL_TRANSFER_TO = TARGET; });
+  afterEach(() => { delete process.env.CALL_TRANSFER_TO; });
+
+  test('endHold (the staff press 1 while it rings) ends the owner call, cancels the transfer and returns the caller', async () => {
+    seed(ringingHold({ leg_sid: TLEG }));
+    const events = fakeTwilio();
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(events.filter((e) => e.name === 'call')).toEqual([{ name: 'call', sid: TLEG, status: 'completed' }]);
+    expect(names(events)).toContain('participant');
+    expect(transferOfHold()).toMatchObject({ status: 'canceled', end_reason: 'staff_back' });
+    expect(holdOf()).toMatchObject({ phase: 'returned', applied: 'returned', ret_by: 'press1' });
+  });
+
+  test('endHold with a transfer whose call is not placed yet ends no call; one that fails to end never fails the return', async () => {
+    seed(ringingHold());
+    const first = fakeTwilio();
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(first.filter((e) => e.name === 'call')).toEqual([]);
+    seed(ringingHold({ leg_sid: TLEG }));
+    fakeTwilio({ fail: { call: err404() } });
+    expect(await hold.endHold(SID)).toBe('returned');
+  });
+
+  test('checkHold ends the owner call of an expired transfer; the hold stays held', async () => {
+    seed(ringingHold({ leg_sid: TLEG, at: iso(-76) }));
+    const events = fakeTwilio();
+    const view = await hold.checkHold(SID, { remind: true });
+    expect(events.filter((e) => e.name === 'call')).toEqual([{ name: 'call', sid: TLEG, status: 'completed' }]);
+    expect(view).toMatchObject({ phase: 'held', transfer: { status: 'failed', ringing: false, legSid: TLEG } });
+    expect(transferOfHold().end_reason).toBe('expired');
+  });
+
+  test('checkHold at the 5 minute limit: the voicemail runs as today and the owner ringing call is ended', async () => {
+    seed(ringingHold({ leg_sid: TLEG, at: iso(-5) }, { open_at: iso(-301) }));
+    const events = fakeTwilio();
+    await hold.checkHold(SID);
+    expect(events.filter((e) => e.name === 'call')).toEqual([{ name: 'call', sid: TLEG, status: 'completed' }]);
+    expect(events.filter((e) => e.name === 'room')).toHaveLength(1);
+    expect(holdOf()).toMatchObject({ phase: 'voicemail', voicemail_reason: 'timeout', applied: 'voicemail' });
+    expect(transferOfHold()).toMatchObject({ status: 'failed', end_reason: 'voicemail' });
+  });
+
+  test('staffLeft while it rings: transfer_pending, nothing sent, no voicemail, and the hang-up is remembered once', async () => {
+    seed(ringingHold({ leg_sid: TLEG }));
+    const events = fakeTwilio();
+    expect(await hold.staffLeft(SID)).toBe('transfer_pending');
+    const left = transferOfHold().from_left_at;
+    expect(left).toBe(iso(0));
+    expect(await hold.staffLeft(SID)).toBe('transfer_pending');
+    expect(transferOfHold().from_left_at).toBe(left);
+    expect(events).toEqual([]);
+    expect(holdOf()).toMatchObject({ phase: 'held' });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('staffLeft after the transfer expired: the voicemail as today, and the owner call is ended', async () => {
+    seed(ringingHold({ leg_sid: TLEG, at: iso(-80) }));
+    const events = fakeTwilio();
+    expect(await hold.staffLeft(SID)).toBe('voicemail');
+    expect(events.filter((e) => e.name === 'call')).toEqual([{ name: 'call', sid: TLEG, status: 'completed' }]);
+    expect(holdOf()).toMatchObject({ voicemail_reason: 'staff_left' });
+  });
+
+  test('endTransfer: the owner call ended with the staff still there: failed, the caller stays held', async () => {
+    seed(ringingHold({ leg_sid: TLEG }));
+    const events = fakeTwilio();
+    expect(await hold.endTransfer(SID, { n: 1, legSid: TLEG, reason: 'no-answer' })).toBe('failed');
+    expect(events).toEqual([]);
+    expect(holdOf()).toMatchObject({ phase: 'held' });
+    expect(transferOfHold()).toMatchObject({ status: 'failed', end_reason: 'no-answer' });
+    expect(await hold.endTransfer(SID, { n: 1, legSid: TLEG, reason: 'completed' })).toBe('stale'); // a redelivery
+    expect(transferOfHold().end_reason).toBe('no-answer');
+  });
+
+  test('endTransfer after the staff hung up: the caller goes to voicemail (transfer_unanswered) with the callback bell and its reason', async () => {
+    seed(ringingHold({ leg_sid: TLEG, from_left_at: iso(-4) }));
+    const events = fakeTwilio();
+    expect(await hold.endTransfer(SID, { n: 1, legSid: TLEG, reason: 'busy' })).toBe('voicemail');
+    expect(events.filter((e) => e.name === 'room')).toHaveLength(1);
+    expect(holdOf()).toMatchObject({ phase: 'voicemail', applied: 'voicemail', voicemail_reason: 'transfer_unanswered' });
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(raiseAdminAlert.mock.calls[0][1].why).toBe('A transfer was not answered after the staff hung up; the caller went to voicemail.');
+    expect(raiseAdminAlert.mock.calls[0][2]).toMatchObject({ metadata: { reason: 'transfer_unanswered' } });
+  });
+
+  test('endTransfer: a database error propagates, so the status callback retry finishes it', async () => {
+    seed(ringingHold({ leg_sid: TLEG }));
+    db.__state.failReads = 1;
+    await expect(hold.endTransfer(SID, { n: 1, legSid: TLEG, reason: 'failed' })).rejects.toThrow('db down');
+  });
+
+  test('the owner presses 1 after the staff left: the caller returns, and his leg is the winner', async () => {
+    seed(ringingHold({ leg_sid: TLEG, from_left_at: iso(-4) }));
+    const events = fakeTwilio();
+    expect(await hold.acceptTransfer(SID, { n: 1, legSid: TLEG })).toBe('returned');
+    expect(names(events)).toEqual(['list', 'participant', 'recording']);
+    expect(cpOf().accepted_leg_sid).toBe(TLEG);
+  });
+
+  test('holdState shows the transfer to the routes (no phone numbers), null with none', async () => {
+    seed(ringingHold({ leg_sid: TLEG }));
+    expect(await hold.holdState(SID)).toMatchObject({ transfer: { n: 1, status: 'ringing', ringing: true, legSid: TLEG, fromName: 'Virginia' } });
+    seed(ringingHold({ leg_sid: TLEG, at: iso(-80) }));
+    expect((await hold.holdState(SID)).transfer.ringing).toBe(false);
+    seed(heldHold());
+    expect((await hold.holdState(SID)).transfer).toBeNull();
   });
 });

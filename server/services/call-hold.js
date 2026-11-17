@@ -76,6 +76,22 @@
  * both answer the same TwiML. The voice trigger (call-hold-voice.js, GATE_CALL_HOLD_VOICE) asks the same way, with
  * by=voice, when the staff say "please hold" or "let me put you on hold" on the live call. Nothing here texts or calls anyone.
  *
+ * THE WARM TRANSFER (GATE_CALL_WARM_TRANSFER, owner 2026-11-16 "ok build all", part 6): the staff on the hold menu press 2 and
+ * the server places ONE call to CALL_TRANSFER_TO. The state is hold.transfer { n (unique on the call: hold.transfers counts
+ * the call's transfers and a new star carries it), status 'ringing' | 'accepted' | 'failed' |
+ * 'canceled', leg_sid, from_leg_sid, from_name, at, ended_at, end_reason, from_left_at, accepted_at } (no phone numbers). It lives
+ * inside the hold, so a new star starts with none, and it is decided at the same one decision point. The owner's press 1
+ * (transfer_accept) is a press 1 return (ret_by 'transfer') and, in the SAME transaction, makes his leg the call's winning leg
+ * (conference_path.accepted_leg_sid): one commit for both, or neither. The staff pressing 1 while it rings cancels it (the
+ * owner's call is ended: cancelLegSid). The staff hanging up while it rings defers the voicemail (from_left_at): the owner's
+ * answer then returns the caller, and no answer (the call ended, or 75 s) sends the caller to voicemail (transfer_unanswered).
+ * What finishes a ringing transfer: the owner's call status callback (endTransfer), the staff wait loop and the caller's facts
+ * loop (checkHold expires it after TRANSFER_EXPIRY_SEC), the voicemail (it ends the owner's call), the caller hanging up.
+ * A transfer whose return is not confirmed is finished like any press 1 return (see WHAT FINISHES A WANTED STATE).
+ * The lock passes the call's winning leg (accepted_leg_sid) to the planner, and the accept moves it in its own write. So a
+ * staff leg end read as the winner's just before the accept ends nothing ('not_winner'), and a placement write that lands
+ * after the accept answers 'ok' and never ends his call.
+ *
  * Left open: Twilio unreachable for every request of a re-hold as well (see the report), and a database that
  * is down while the caller is held (no decision can be made; the caller keeps the script).
  *
@@ -88,6 +104,7 @@ const RequestClient = require('twilio/lib/base/RequestClient');
 const db = require('../models/db');
 const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
+const { toE164, isValidNanpNumber } = require('../utils/phone');
 const conferencePath = require('./call-conference-path');
 const { TERMINAL_CALL_STATUSES } = require('../utils/call-timeline');
 // The card pause pauses this recording too (see THE CARD PAUSE above). Its rule for the Twilio answers a resume retry
@@ -111,6 +128,9 @@ const MAX_SENDS_PER_PASS = 6;
 // The press 1 and star requests wait this long (in steps) for a step another sender holds the lease on.
 const WAIT_MS = 6 * 1000;
 const WAIT_STEP_MS = 250;
+// The owner's phone rings this long; a transfer still ringing after the expiry is over whatever Twilio says.
+const TRANSFER_RING_SEC = 20;
+const TRANSFER_EXPIRY_SEC = 75;
 // A failed recording resume is retried in this process after these delays (one chain per call), then by the sweep.
 const RESUME_BACKOFF_MS = [2000, 4000, 8000, 16000];
 // The 1 minute sweep reads calls created in this window, at most this many.
@@ -119,6 +139,12 @@ const SWEEP_LIMIT = 25;
 
 // Read through the module object at call time: a suite that mocks feature-gates as a bare object reads off.
 const isEnabled = () => typeof featureGates.callHoldLive === 'function' && featureGates.callHoldLive();
+// The warm transfer (GATE_CALL_WARM_TRANSFER): the one US number a transfer rings (E.164), or null when it is unset or not a
+// valid US number (toE164 passes malformed input through, so the result is checked). Never logged.
+const transferTarget = () => {
+  const target = toE164(process.env.CALL_TRANSFER_TO);
+  return target && isValidNanpNumber(target) ? target : null;
+};
 const masked = (sid) => (sid ? `…${String(sid).slice(-6)}` : 'none');
 // Errors are logged by code only: a Twilio error message can carry a phone number.
 const errorCode = (err) => String(err?.code || err?.status || err?.name || 'error');
@@ -137,6 +163,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const secondsSince = (iso, nowMs) => Math.max(0, Math.round((nowMs - Date.parse(iso || '')) / 1000)) || 0;
 const isoAt = (nowMs) => new Date(nowMs).toISOString();
+
+// A transfer that is ringing and not yet expired.
+const transferRinging = (t, nowMs) => t?.status === 'ringing' && secondsSince(t.at, nowMs) < TRANSFER_EXPIRY_SEC;
+// The owner's call to end when a decision leaves a ringing transfer behind (null: none, or not placed yet).
+const ringingLegOf = (hold) => (hold?.transfer?.status === 'ringing' ? hold.transfer.leg_sid || null : null);
+const withCancel = (out, legSid) => (legSid ? { ...out, cancelLegSid: legSid } : out);
+const endTransferState = (t, status, reason, nowMs) => ({ ...t, status, ended_at: isoAt(nowMs), end_reason: reason });
 
 // No hold, or one that is over: the caller is back (confirmed), or the star that opened it was aborted.
 const isIdle = (hold) => !hold?.phase || (hold.phase === 'returned' && (hold.applied === 'returned' || hold.ret_by === 'abort'));
@@ -166,43 +199,123 @@ function planStar(hold, ev, nowMs) {
       alert_pending: false,
       vm_answered_at: null,
       sender: prev.sender || null,
+      // The transfers placed on this call so far, across holds: each transfer's n is unique on the call, so a late
+      // callback of an earlier hold's transfer never matches this hold's.
+      transfers: Math.max(Number(prev.transfers) || 0, Number(prev.transfer?.n) || 0),
     },
     answer: 'start',
   };
 }
 
+// The caller comes off hold: the wanted phase becomes 'returned' (ret_by says who asked for it).
+const toReturned = (hold, retBy, nowMs) => ({
+  ...hold, phase: 'returned', ret_by: retBy, total_sec: (Number(hold.total_sec) || 0) + secondsSince(hold.open_at, nowMs),
+});
+
+// A press 1 while a transfer rings cancels it: the owner's call is ended (cancelLegSid), the staff go back.
 function planPressOne(hold, nowMs) {
   if (isIdle(hold)) return { next: hold, answer: 'closed' };
   if (hold.phase === 'voicemail') return { next: hold, answer: 'voicemail' };
   if (hold.phase === 'returned') return { next: hold, answer: 'return' };
-  const total = (Number(hold.total_sec) || 0) + secondsSince(hold.open_at, nowMs);
-  return { next: { ...hold, phase: 'returned', ret_by: 'press1', total_sec: total }, answer: 'return' };
+  const next = toReturned(hold, 'press1', nowMs);
+  if (!transferRinging(hold.transfer, nowMs)) return { next, answer: 'return' };
+  return withCancel({ next: { ...next, transfer: endTransferState(hold.transfer, 'canceled', 'staff_back', nowMs) }, answer: 'return' }, hold.transfer.leg_sid);
 }
 
 // The caller goes to voicemail: the limit, or the staff phone is gone.
+// A transfer still ringing ends with it (the caller of this carries cancelLegSid, so the owner's call is ended too).
 function toVoicemail(hold, reason, nowMs) {
   const total = hold.phase === 'held' ? (Number(hold.total_sec) || 0) + secondsSince(hold.open_at, nowMs) : Number(hold.total_sec) || 0;
-  return { ...hold, phase: 'voicemail', voicemail_reason: reason, voicemail_at: isoAt(nowMs), total_sec: total };
+  const next = { ...hold, phase: 'voicemail', voicemail_reason: reason, voicemail_at: isoAt(nowMs), total_sec: total };
+  if (hold.transfer?.status === 'ringing') next.transfer = endTransferState(hold.transfer, 'failed', 'voicemail', nowMs);
+  return next;
 }
 
 // The loops' check: the 5 minute limit sends the caller to voicemail while the hold is held (a decided return
 // means the staff are there, so it waits); the 3 minute reminder is said once per hold.
+// A transfer that rings past its expiry fails first; when the staff already left, the caller goes to voicemail
+// (transfer_unanswered). The limit and the reminder then run on the result.
 function planCheck(hold, ev, nowMs) {
   if (hold?.phase !== 'held') return { next: hold, answer: { remind: false } };
-  const seconds = secondsSince(hold.open_at, nowMs);
-  if (seconds >= HOLD_LIMIT_SEC) return { next: toVoicemail(hold, 'timeout', nowMs), answer: { remind: false } };
-  if (ev.remind && seconds >= HOLD_REMINDER_SEC && !hold.reminded_at) {
-    return { next: { ...hold, reminded_at: isoAt(nowMs) }, answer: { remind: true } };
+  const ringingLeg = ringingLegOf(hold);
+  let cur = hold;
+  let expiredLeg = null;
+  if (hold.transfer?.status === 'ringing' && !transferRinging(hold.transfer, nowMs)) {
+    cur = { ...hold, transfer: endTransferState(hold.transfer, 'failed', 'expired', nowMs) };
+    expiredLeg = ringingLeg;
+    if (hold.transfer.from_left_at) return withCancel({ next: toVoicemail(cur, 'transfer_unanswered', nowMs), answer: { remind: false } }, expiredLeg);
   }
-  return { next: hold, answer: { remind: false } };
+  const seconds = secondsSince(cur.open_at, nowMs);
+  if (seconds >= HOLD_LIMIT_SEC) return withCancel({ next: toVoicemail(cur, 'timeout', nowMs), answer: { remind: false } }, ringingLeg);
+  if (ev.remind && seconds >= HOLD_REMINDER_SEC && !cur.reminded_at) {
+    return withCancel({ next: { ...cur, reminded_at: isoAt(nowMs) }, answer: { remind: true } }, expiredLeg);
+  }
+  return withCancel({ next: cur, answer: { remind: false } }, expiredLeg);
 }
 
 // The staff leg ended: during a hold, or during a return in flight (the staff are gone), the caller goes to
 // voicemail. A hold that is over leaves today's room end to the caller of this ('ordinary').
+// A transfer ringing while the caller is held defers the voicemail: the owner's answer decides (from_left_at).
 function planStaffLeft(hold, nowMs, closed) {
   if (closed || isIdle(hold)) return { next: hold, answer: 'ordinary' };
   if (hold.phase === 'voicemail') return { next: hold, answer: 'voicemail' };
-  return { next: toVoicemail(hold, 'staff_left', nowMs), answer: 'voicemail' };
+  if (hold.phase === 'held' && transferRinging(hold.transfer, nowMs)) {
+    if (hold.transfer.from_left_at) return { next: hold, answer: 'transfer_pending' };
+    return { next: { ...hold, transfer: { ...hold.transfer, from_left_at: isoAt(nowMs) } }, answer: 'transfer_pending' };
+  }
+  return withCancel({ next: toVoicemail(hold, 'staff_left', nowMs), answer: 'voicemail' }, ringingLegOf(hold));
+}
+
+// ---- The warm transfer (pure) ----
+
+function planTransferStart(hold, ev, nowMs, closed) {
+  if (hold?.phase === 'voicemail') return { next: hold, answer: 'voicemail' };
+  if (closed || hold?.phase !== 'held') return { next: hold, answer: 'not_held' };
+  if (transferRinging(hold.transfer, nowMs)) return { next: hold, answer: 'busy' };
+  const n = Math.max(Number(hold.transfers) || 0, Number(hold.transfer?.n) || 0) + 1; // unique on the call
+  const transfer = {
+    n, status: 'ringing', leg_sid: null, from_leg_sid: ev.legSid || null, from_name: ev.fromName || null,
+    at: isoAt(nowMs), ended_at: null, end_reason: null, from_left_at: null, accepted_at: null,
+  };
+  return { next: { ...hold, transfers: n, transfer }, answer: 'start' };
+}
+
+// The owner's call was placed: record its SID. A transfer that ended meanwhile (or another n) is stale: the caller ends the call.
+// So is a closed call (the caller hung up while the call was placed: closeForCallerEnd found no SID to end).
+// His leg already the winning leg (he took the call before this write landed): the placement is done, and his call is
+// never ended here (a caller hang-up after that ends it with the room).
+function planTransferPlaced(hold, ev, winner = null, closed = false) {
+  const t = hold?.transfer;
+  if (ev.legSid && ev.legSid === winner) return { next: hold, answer: 'ok' };
+  if (closed) return { next: hold, answer: 'stale' };
+  if (!t || t.n !== ev.n || t.status !== 'ringing' || t.leg_sid) return { next: hold, answer: 'stale' };
+  return { next: { ...hold, transfer: { ...t, leg_sid: ev.legSid } }, answer: 'ok' };
+}
+
+// The owner pressed 1. The caller comes off hold as a press 1 return (ret_by 'transfer', NOT planPressOne: that cancels a
+// ringing transfer), and the result carries acceptedLegSid so the same write makes his leg the winning leg.
+function planTransferAccept(hold, ev, nowMs, closed) {
+  const t = hold?.transfer;
+  if (hold?.phase === 'voicemail') return { next: hold, answer: 'voicemail' };
+  // A closed call (the caller hung up) has no room to join, also on a re-press or a retry after he took it.
+  if (closed) return { next: hold, answer: 'closed' };
+  if (t?.status === 'accepted' && t.leg_sid === ev.legSid) return { next: hold, answer: 'return' };
+  if (!t || t.n !== ev.n || !transferRinging(t, nowMs) || (t.leg_sid && t.leg_sid !== ev.legSid) || hold.phase !== 'held') return { next: hold, answer: 'over' };
+  const accepted = { ...t, status: 'accepted', leg_sid: ev.legSid, accepted_at: isoAt(nowMs) };
+  return { next: { ...toReturned(hold, 'transfer', nowMs), transfer: accepted }, answer: 'return', acceptedLegSid: ev.legSid };
+}
+
+// The owner's call ended without a press 1 (or was never placed). With the staff gone, the caller goes to voicemail.
+function planTransferEnd(hold, ev, nowMs, closed, winner = null) {
+  // He took the call between the status callback's read and this decision: his leg is the winner, so its end is the
+  // winner's end ('winner'; the caller of this hands it on), never a transfer nobody took.
+  if (ev.legSid && ev.legSid === winner) return { next: hold, answer: 'winner' };
+  const t = hold?.transfer;
+  const matches = t && t.n === ev.n && t.status === 'ringing' && (!ev.legSid || !t.leg_sid || t.leg_sid === ev.legSid);
+  if (!matches) return { next: hold, answer: 'stale' };
+  const next = { ...hold, transfer: endTransferState(t, 'failed', ev.reason || null, nowMs) };
+  if (t.from_left_at && hold.phase === 'held' && !closed) return { next: toVoicemail(next, 'transfer_unanswered', nowMs), answer: 'voicemail' };
+  return { next, answer: 'failed' };
 }
 
 const APPLIED_BY_STEP = { hold: 'held', rehold: 'held', return: 'returned', voicemail: 'voicemail' };
@@ -263,7 +376,18 @@ function planVoicemailAnswered(hold, nowMs) {
   return { next: { ...hold, applied: 'voicemail', vm_failed: false, alert_pending: true, vm_answered_at: isoAt(nowMs) }, answer: 'alert' };
 }
 
-function planEvent(hold, ev, nowMs, closed) {
+// `winner` is the call's winning leg (conference_path.accepted_leg_sid) as read under the lock: a warm transfer the owner
+// takes moves it in the same write as his accept, so a leg end or a placement decided after that sees the new one.
+// The events a staff leg sends about itself: a star, a menu key (press 1, press 2) and its own end. From a leg that is no
+// longer the call's winner (the staff who pressed 2, after the owner took the call: a key in their wait loop, also during a
+// later hold of his, a late or redelivered /conference-staff-left from their old <Dial>, or their leg's end read as the
+// winner's just before his accept) it changes nothing: they can neither hold, return nor transfer his caller, nor end the
+// room. The routes join them as staff-2. No leg named, or no winner stored, decides as before.
+const LEG_EVENTS = new Set(['star', 'press1', 'transfer_start', 'staff_left']);
+const notWinner = (ev, winner) => Boolean(LEG_EVENTS.has(ev.type) && ev.legSid && winner && ev.legSid !== winner);
+
+function planEvent(hold, ev, nowMs, closed, winner = null) {
+  if (notWinner(ev, winner)) return { next: hold, answer: 'not_winner' };
   switch (ev.type) {
     case 'star': return closed ? { next: hold, answer: 'no_room' } : planStar(hold, ev, nowMs);
     case 'press1': return planPressOne(hold, nowMs);
@@ -275,6 +399,10 @@ function planEvent(hold, ev, nowMs, closed) {
     // The sweep found the call over: no resume can land on its recording.
     case 'resume_over': return { next: hold?.rec_pending ? { ...hold, rec_pending: false } : hold, answer: null };
     case 'vm_answered': return planVoicemailAnswered(hold, nowMs);
+    case 'transfer_start': return planTransferStart(hold, ev, nowMs, closed);
+    case 'transfer_placed': return planTransferPlaced(hold, ev, winner, closed);
+    case 'transfer_accept': return planTransferAccept(hold, ev, nowMs, closed);
+    case 'transfer_end': return planTransferEnd(hold, ev, nowMs, closed, winner);
     default: return { next: hold, answer: null };
   }
 }
@@ -319,11 +447,16 @@ function holdFrom(state) {
   return hold && typeof hold === 'object' ? hold : null;
 }
 
-function writeHold(conn, callSid, hold) {
+// An accepted transfer also makes the owner's leg the call's winning leg: one UPDATE, so both commit or neither does.
+function writeHold(conn, callSid, hold, acceptedLegSid = null) {
+  const holdSql = "jsonb_set(metadata, '{conference_path,hold}', ?::jsonb, true)";
+  const metadata = acceptedLegSid
+    ? conn.raw(`jsonb_set(${holdSql}, '{conference_path,accepted_leg_sid}', ?::jsonb, true)`, [JSON.stringify(hold), JSON.stringify(acceptedLegSid)])
+    : conn.raw(holdSql, [JSON.stringify(hold)]);
   return conn('call_log')
     .where('twilio_call_sid', callSid)
     .whereRaw("(metadata -> 'conference_path') IS NOT NULL")
-    .update({ metadata: conn.raw("jsonb_set(metadata, '{conference_path,hold}', ?::jsonb, true)", [JSON.stringify(hold)]), updated_at: new Date() });
+    .update({ metadata, updated_at: new Date() });
 }
 
 // fn(hold, closed) -> { next, answer, ... }; the write (when next changed) commits with the lock released.
@@ -333,29 +466,37 @@ async function withHoldLock(callSid, fn) {
     const state = conferencePath.readState(await trx('call_log').where('twilio_call_sid', callSid).first('metadata'));
     if (!state) return { answer: 'no_state', next: null };
     const hold = holdFrom(state);
-    const out = fn(hold, Boolean(state.closed_at));
-    if (out.next !== hold) await writeHold(trx, callSid, out.next);
+    const out = fn(hold, Boolean(state.closed_at), state.accepted_leg_sid || null);
+    if (out.next !== hold) await writeHold(trx, callSid, out.next, out.acceptedLegSid);
     return out;
   });
 }
 
-const decide = (callSid, ev) => withHoldLock(callSid, (hold, closed) => planEvent(hold, ev, Date.now(), closed));
+const decide = (callSid, ev) => withHoldLock(callSid, (hold, closed, winner) => planEvent(hold, ev, Date.now(), closed, winner));
+
+const transferView = (t) => (t
+  ? { n: t.n, status: t.status, ringing: transferRinging(t, Date.now()), legSid: t.leg_sid || null, fromName: t.from_name || null }
+  : null);
 
 // What the routes read: the wanted phase, what Twilio confirmed, and the times. A read error answers { error }.
 function viewOf(state) {
-  const hold = holdFrom(state);
+  const hold = holdFrom(state) || {}; // no hold: every field below reads its empty value
   return {
     found: Boolean(state),
     closed: Boolean(state?.closed_at),
-    gen: hold?.gen || 0,
-    phase: hold?.phase || null,
-    applied: hold?.applied || null,
-    retBy: hold?.ret_by || null,
-    gone: Boolean(hold?.gone),
-    open: hold?.phase === 'held',
-    openAt: hold?.open_at || null,
-    voicemailAt: hold?.voicemail_at || null,
-    reason: hold?.voicemail_reason || null,
+    gen: hold.gen || 0,
+    phase: hold.phase || null,
+    applied: hold.applied || null,
+    retBy: hold.ret_by || null,
+    gone: Boolean(hold.gone),
+    open: hold.phase === 'held',
+    openAt: hold.open_at || null,
+    voicemailAt: hold.voicemail_at || null,
+    reason: hold.voicemail_reason || null,
+    transfer: transferView(hold.transfer),
+    // The call's winning leg, across holds: after a warm transfer it is the owner's leg (the routes join any other leg
+    // as a second staff).
+    winnerLegSid: state?.accepted_leg_sid || null,
   };
 }
 
@@ -667,11 +808,13 @@ async function settle(callSid, done) {
 // What the routes call. Each records ONE event, then lets the sender finish; none throws.
 // ---------------------------------------------------------------------------------------------------------
 
-// 'held' | 'no_room' | 'failed'. A star. A duplicate or redelivered star while a hold or a return is open is a
-// no-op ('held'): it never closes, replaces or restarts anything.
+// 'held' | 'no_room' | 'failed' | 'second_staff'. A star. A duplicate or redelivered star while a hold or a return is open
+// is a no-op ('held'): it never closes, replaces or restarts anything. 'second_staff': a star from a leg that is no longer
+// the call's winner (`legSid`, read under the lock) starts no hold, and the route joins that leg as staff-2.
 async function startHold(callSid, { by = 'star', legSid = null } = {}) {
   try {
     const decision = await decide(callSid, { type: 'star', by, legSid });
+    if (decision.answer === 'not_winner') return 'second_staff';
     if (decision.answer === 'no_state') return 'failed';
     if (decision.answer === 'no_room') return 'no_room';
     if (decision.answer === 'held') return 'held';
@@ -698,23 +841,41 @@ async function startHold(callSid, { by = 'star', legSid = null } = {}) {
   }
 }
 
-// 'returned' | 'voicemail' | 'no_room' | 'failed'. A press 1: it answers 'returned' only once the unhold is
-// confirmed; 'voicemail' when the voicemail is decided; 'failed' (the staff stay on the menu, whose loop finishes
-// the return) when it could not be confirmed in time.
-async function endHold(callSid) {
+// Ends the owner's ringing call (a decision left a ringing transfer behind). Best effort: never throws, and a call that is
+// already over (404) is the expected answer.
+async function endTransferCall(legSid) {
+  if (!legSid) return;
   try {
-    const decision = await decide(callSid, { type: 'press1' });
+    await client().calls(legSid).update({ status: 'completed' });
+  } catch (err) {
+    logger.info(`[call-hold] transfer call ${masked(legSid)} not ended (${errorCode(err)})`);
+  }
+}
+
+// What a return waits for: the unhold confirmed, or the voicemail decided first.
+function settledReturn(view) {
+  if (view.phase === 'voicemail') return 'voicemail';
+  if (view.phase === 'returned' && view.applied === 'returned') return view.gone ? 'no_room' : 'returned';
+  return null;
+}
+
+// 'returned' | 'voicemail' | 'no_room' | 'failed' | 'second_staff'. A press 1: it answers 'returned' only once the unhold is
+// confirmed; 'voicemail' when the voicemail is decided; 'failed' (the staff stay on the menu, whose loop finishes
+// the return) when it could not be confirmed in time. 'second_staff': the press came from a leg that is no longer the
+// call's winner (`legSid`, read under the lock): nothing changed, and the route joins it as staff-2.
+async function endHold(callSid, { legSid = null } = {}) {
+  try {
+    const decision = await decide(callSid, { type: 'press1', legSid });
+    if (decision.answer === 'not_winner') return 'second_staff';
     if (decision.answer === 'no_state') return 'failed';
     if (decision.answer === 'closed') return 'returned';
     if (decision.answer === 'voicemail') {
       await drain(callSid);
       return 'voicemail';
     }
-    const result = await settle(callSid, (view) => {
-      if (view.phase === 'voicemail') return 'voicemail';
-      if (view.phase === 'returned' && view.applied === 'returned') return view.gone ? 'no_room' : 'returned';
-      return null;
-    });
+    const canceling = endTransferCall(decision.cancelLegSid); // a ringing transfer is canceled: the owner's call ends
+    const result = await settle(callSid, settledReturn);
+    await canceling;
     return result || 'failed';
   } catch (err) {
     logger.warn(`[call-hold] hold not ended for ${masked(callSid)} (${errorCode(err)})`);
@@ -729,7 +890,9 @@ async function checkHold(callSid, { remind = false } = {}) {
   try {
     const decision = await decide(callSid, { type: 'check', remind });
     if (decision.answer === 'no_state') return { found: false, closed: false, phase: null, remind: false };
+    const canceling = endTransferCall(decision.cancelLegSid); // the limit, or an expired transfer: the owner's call ends
     if (nextStep(decision.next)) await drain(callSid);
+    await canceling;
     return { ...(await holdState(callSid)), remind: decision.answer?.remind === true };
   } catch (err) {
     logger.warn(`[call-hold] hold check failed for ${masked(callSid)} (${errorCode(err)})`);
@@ -737,15 +900,123 @@ async function checkHold(callSid, { remind = false } = {}) {
   }
 }
 
-// 'voicemail' | 'ordinary'. The winning staff leg ended. A hold open or a return in flight: the caller goes to
+// 'voicemail' | 'ordinary' | 'transfer_pending' | 'not_winner'. The winning staff leg ended. `legSid` is the leg that ended:
+// it is checked against the winning leg under the lock ('not_winner' when a transfer moved the winner meanwhile). A hold open or a return in flight: the caller goes to
 // voicemail ('voicemail'; one try here, the facts loop finishes it). Otherwise the ordinary room end runs. A
 // database error propagates: the status callback is Twilio's to retry, and ending the room blind could drop a
 // held caller.
-async function staffLeft(callSid) {
-  const decision = await decide(callSid, { type: 'staff_left' });
+async function staffLeft(callSid, { legSid = null } = {}) {
+  const decision = await decide(callSid, { type: 'staff_left', legSid });
+  if (decision.answer === 'not_winner') return 'not_winner'; // the owner took a transfer meanwhile: his leg is the winner
+  if (decision.answer === 'transfer_pending') return 'transfer_pending'; // the owner's answer decides: no voicemail, no room end
   if (decision.answer !== 'voicemail') return 'ordinary';
+  const canceling = endTransferCall(decision.cancelLegSid);
   await drain(callSid);
+  await canceling;
   return 'voicemail';
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The warm transfer (see THE WARM TRANSFER above).
+// ---------------------------------------------------------------------------------------------------------
+
+// The warm transfer's gate and the hold's, read at call time.
+function transferOn() {
+  return typeof featureGates.callWarmTransferLive === 'function' && featureGates.callWarmTransferLive() && isEnabled();
+}
+
+// The transfer is offered on a menu request: the gate, the hold, a valid CALL_TRANSFER_TO, and a menu leg that is not the
+// target (the owner never transfers to himself, including after he took a transfer).
+function transferAvailable(menuNumber) {
+  const target = transferTarget();
+  return Boolean(transferOn() && target && toE164(menuNumber) !== target);
+}
+
+// Places the one call to the transfer number. 'ringing' | 'failed'. The caller's own Waves line is the caller ID.
+async function placeTransferCall(callSid, n) {
+  const row = await db('call_log').where('twilio_call_sid', callSid).first('to_phone');
+  const from = toE164(row?.to_phone);
+  const to = transferTarget();
+  const query = `parent=${encodeURIComponent(callSid)}&n=${n}`;
+  let placed;
+  try {
+    if (!from || !to) throw Object.assign(new Error('no number'), { code: 'no_number' });
+    placed = await client().calls.create({
+      to,
+      from,
+      url: publicUrl(`${WEBHOOK_BASE}/conference-transfer-answer?${query}`),
+      method: 'POST',
+      timeout: TRANSFER_RING_SEC,
+      statusCallback: publicUrl(`${WEBHOOK_BASE}/conference-transfer-status?${query}`),
+      statusCallbackMethod: 'POST',
+      statusCallbackEvent: ['completed'],
+    });
+  } catch (err) {
+    logger.warn(`[call-hold] transfer call not placed for ${masked(callSid)} (${errorCode(err)})`);
+    await decide(callSid, { type: 'transfer_end', n, legSid: null, reason: 'not_placed' });
+    return 'failed';
+  }
+  let recorded;
+  try {
+    recorded = await decide(callSid, { type: 'transfer_placed', n, legSid: placed.sid });
+  } catch (err) {
+    // The call is out and rings; its answer route needs no SID. Only a cancel could not reach it (its ring ends in 20 s).
+    logger.warn(`[call-hold] transfer call ${masked(placed.sid)} not recorded for ${masked(callSid)} (${errorCode(err)})`);
+    return 'ringing';
+  }
+  // The caller can hang up between this decision's read and its commit, and closeForCallerEnd can then read the state
+  // before the SID landed. A read after the commit sees that close, or the close's own read sees the SID: one of the two
+  // ends his call.
+  if (recorded.answer === 'ok' && !(await holdState(callSid)).closed) return 'ringing';
+  await endTransferCall(placed.sid); // the transfer ended (or the caller hung up) while the call was placed
+  return 'failed';
+}
+
+// 'ringing' | 'busy' | 'not_held' | 'voicemail' | 'failed' | 'second_staff'. The staff pressed 2: one transfer at a time
+// per hold. 'second_staff': a press from a leg that is no longer the call's winner places no call.
+async function startTransfer(callSid, { legSid = null, fromName = null } = {}) {
+  try {
+    const decision = await decide(callSid, { type: 'transfer_start', legSid, fromName });
+    if (decision.answer === 'not_winner') return 'second_staff';
+    if (decision.answer === 'start') {
+      logger.info(`[call-hold] transfer ${decision.next.transfer.n} asked for ${masked(callSid)}`);
+      return await placeTransferCall(callSid, decision.next.transfer.n);
+    }
+    return ['busy', 'not_held', 'voicemail'].includes(decision.answer) ? decision.answer : 'failed';
+  } catch (err) {
+    logger.warn(`[call-hold] transfer not started for ${masked(callSid)} (${errorCode(err)})`);
+    return 'failed';
+  }
+}
+
+// 'returned' | 'voicemail' | 'over' | 'no_room' | 'failed'. The owner pressed 1: the caller comes off hold as a press 1
+// return does, and his leg becomes the winning leg in the same write. A re-press or a redelivery settles again.
+async function acceptTransfer(callSid, { n, legSid }) {
+  try {
+    const decision = await decide(callSid, { type: 'transfer_accept', n, legSid });
+    if (decision.answer === 'voicemail') {
+      await drain(callSid);
+      return 'voicemail';
+    }
+    if (decision.answer === 'closed') return 'no_room';
+    if (decision.answer === 'over') return 'over';
+    if (decision.answer !== 'return') return 'failed';
+    if (decision.acceptedLegSid) logger.info(`[call-hold] transfer ${n} taken for ${masked(callSid)}`);
+    // The caller can hang up while the unhold is confirmed: no room to join, so the owner's retry loop ends.
+    return (await settle(callSid, (view) => (view.closed ? 'no_room' : settledReturn(view)))) || 'failed';
+  } catch (err) {
+    logger.warn(`[call-hold] transfer not accepted for ${masked(callSid)} (${errorCode(err)})`);
+    return 'failed';
+  }
+}
+
+// The owner's call ended without a press 1. Answers the planner's: 'failed' | 'voicemail' | 'stale' | 'winner' (his leg
+// became the winning leg before this decision: the caller hands the end to the winner's end). A database error
+// propagates (the status callback's retry in call-conference-path.js finishes it), as staffLeft does.
+async function endTransfer(callSid, { n, legSid = null, reason = null }) {
+  const decision = await decide(callSid, { type: 'transfer_end', n, legSid, reason });
+  if (decision.answer === 'voicemail') await drain(callSid);
+  return decision.answer;
 }
 
 // The alert says who to call back: the customer on the call, else the one name on file for the number.
@@ -763,6 +1034,7 @@ async function callerNameFor(call) {
 const VOICEMAIL_WHY = {
   timeout: 'Waited 5 minutes on hold, then went to voicemail.',
   staff_left: 'The staff phone hung up during a hold; the caller went to voicemail.',
+  transfer_unanswered: 'A transfer was not answered after the staff hung up; the caller went to voicemail.',
 };
 
 // One bell per call (dedupeKey on the CallSid). true only when a row was written (an id) or the bell was suppressed on
@@ -911,7 +1183,8 @@ async function recoverPendingHolds() {
 }
 
 module.exports = {
-  HOLD_REMINDER_SEC, HOLD_LIMIT_SEC, LEASE_MS, isEnabled, startHold, endHold, checkHold, staffLeft, holdState, roomIsOpen, heldSeconds, resumeRecording,
-  recoverPendingHolds, voicemailAnswered, requestHold, holdForPanel,
-  _test: { planEvent, planClaim, nextStep, decide, resumeRetries },
+  HOLD_REMINDER_SEC, HOLD_LIMIT_SEC, TRANSFER_RING_SEC, TRANSFER_EXPIRY_SEC, LEASE_MS, isEnabled, startHold, endHold, checkHold, staffLeft,
+  holdState, roomIsOpen, heldSeconds, resumeRecording, recoverPendingHolds, voicemailAnswered, requestHold, holdForPanel,
+  transferTarget, transferOn, transferAvailable, startTransfer, acceptTransfer, endTransfer,
+  _test: { planEvent, planClaim, nextStep, decide, resumeRetries, transferRinging },
 };

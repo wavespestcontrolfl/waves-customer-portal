@@ -7,7 +7,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../config/feature-gates', () => ({ callConferencePathMode: jest.fn(() => 'off') }));
-jest.mock('../services/call-hold', () => ({ staffLeft: jest.fn() }));
+jest.mock('../services/call-hold', () => ({ staffLeft: jest.fn(), endTransfer: jest.fn() }));
 
 const mockTw = { api: null };
 jest.mock('twilio', () => {
@@ -334,9 +334,20 @@ describe('the winning staff call ends during a star-key hold', () => {
     callHold.staffLeft.mockResolvedValue('voicemail');
     const log = fakeTwilio({ rooms });
     expect(await ended()).toBe('hold_voicemail');
-    expect(callHold.staffLeft).toHaveBeenCalledWith(SID);
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID, { legSid: LEG0 });
     expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
     expect(mockTw.api.calls).not.toHaveBeenCalled();
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+
+  test('the winner moved under the hold lock (the owner took a transfer meanwhile): nothing is ended here', async () => {
+    fakeCallLog(held({ phase: 'held' }));
+    callHold.staffLeft.mockResolvedValue('not_winner');
+    const log = fakeTwilio({ rooms });
+    expect(await ended()).toBe('not_winner');
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID, { legSid: LEG0 });
+    expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
     expect(log.roomUpdates).toEqual([]);
     expect(log.updates).toEqual([]);
   });
@@ -418,7 +429,7 @@ describe('the minute staff-end sweep (recoverStaffEnds)', () => {
     const log = fakeTwilio({ callStatus: 'completed', rooms: open });
     expect(await cp.recoverStaffEnds()).toEqual({ action: 'swept', open: 1, handled: 1 });
     expect(mockTw.api.calls).toHaveBeenCalledWith(LEG0);
-    expect(callHold.staffLeft).toHaveBeenCalledWith(SID);
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID, { legSid: LEG0 });
     expect(log.roomUpdates).toEqual([{ sid: 'CF1', status: 'completed' }]);
     expect(log.updates).toEqual([]);
   });
@@ -428,7 +439,17 @@ describe('the minute staff-end sweep (recoverStaffEnds)', () => {
     callHold.staffLeft.mockResolvedValue('voicemail');
     const log = fakeTwilio({ callStatus: 'completed', rooms: open });
     expect(await cp.recoverStaffEnds()).toEqual({ action: 'swept', open: 1, handled: 1 });
-    expect(callHold.staffLeft).toHaveBeenCalledWith(SID);
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID, { legSid: LEG0 });
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+
+  test('the winner moved under the hold lock: the sweep ends nothing, and the call is not counted as handled', async () => {
+    fakeCallLog(answered({ hold: { phase: 'returned', applied: 'returned' } }));
+    callHold.staffLeft.mockResolvedValue('not_winner');
+    const log = fakeTwilio({ callStatus: 'completed', rooms: open });
+    expect(await cp.recoverStaffEnds()).toEqual({ action: 'swept', open: 1, handled: 0 });
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID, { legSid: LEG0 });
     expect(log.roomUpdates).toEqual([]);
     expect(log.updates).toEqual([]);
   });
@@ -513,5 +534,165 @@ describe('/call-complete outcome', () => {
     expect(await cp.conferenceDialOutcome(SID, undefined)).toEqual({ status: 'no-answer', duration: 0, accepted: false });
     expect(row.metadata.conference_path.voicemail_at).toEqual(expect.any(String));
     expect(log.updates).toEqual([{ sid: LEG0, status: 'completed' }, { sid: LEG1, status: 'completed' }]);
+  });
+});
+
+describe('the warm transfer: the owner call ends (onTransferLegStatus)', () => {
+  const TLEG = `CA${'7'.repeat(32)}`;
+  const base = () => ({ ...ringing().conference_path, accepted_leg_sid: LEG0 });
+  const ended = (extra = {}) => cp.onTransferLegStatus({ callSid: SID, n: 1, legSid: TLEG, status: 'no-answer', ...extra });
+  const rooms = [{ sid: 'CF1', status: 'in-progress' }];
+
+  beforeEach(() => { callHold.staffLeft.mockReset(); callHold.endTransfer.mockReset().mockResolvedValue('failed'); });
+
+  test('a call nobody took: the hold decides (endTransfer, with the status as its reason); no room is ended here', async () => {
+    fakeCallLog({ conference_path: base() });
+    const log = fakeTwilio({ rooms });
+    for (const status of ['completed', 'busy', 'no-answer', 'failed', 'canceled']) {
+      callHold.endTransfer.mockClear();
+      expect(await ended({ status })).toBe('failed');
+      expect(callHold.endTransfer).toHaveBeenCalledWith(SID, { n: 1, legSid: TLEG, reason: status });
+    }
+    expect(callHold.staffLeft).not.toHaveBeenCalled();
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+
+  test('he took the call between the read and the hold\'s decision (endTransfer answers winner): the winner end runs', async () => {
+    fakeCallLog({ conference_path: base() });
+    callHold.endTransfer.mockResolvedValue('winner');
+    callHold.staffLeft.mockResolvedValue('ordinary');
+    const log = fakeTwilio({ rooms });
+    expect(await ended({ status: 'completed' })).toBe('room_ended');
+    expect(callHold.endTransfer).toHaveBeenCalledWith(SID, { n: 1, legSid: TLEG, reason: 'completed' });
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID, { legSid: TLEG });
+    expect(log.roomUpdates).toEqual([{ sid: 'CF1', status: 'completed' }]);
+  });
+
+  test('the call he took is the winning leg: its end is the winner end (the room ends, as for any staff)', async () => {
+    fakeCallLog({ conference_path: { ...base(), accepted_leg_sid: TLEG } });
+    callHold.staffLeft.mockResolvedValue('ordinary');
+    const log = fakeTwilio({ rooms });
+    expect(await ended({ status: 'completed' })).toBe('room_ended');
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID, { legSid: TLEG });
+    expect(callHold.endTransfer).not.toHaveBeenCalled();
+    expect(log.roomUpdates).toEqual([{ sid: 'CF1', status: 'completed' }]);
+  });
+
+  test('the winner end during a hold of his own is the hold\'s voicemail, as for any staff', async () => {
+    fakeCallLog({ conference_path: { ...base(), accepted_leg_sid: TLEG } });
+    callHold.staffLeft.mockResolvedValue('voicemail');
+    expect(await ended({ status: 'completed' })).toBe('hold_voicemail');
+  });
+
+  test('a transfer still ringing for the held caller: onWinnerLegEnded ends no room and starts no voicemail', async () => {
+    fakeCallLog({ conference_path: base() });
+    callHold.staffLeft.mockResolvedValue('transfer_pending');
+    const log = fakeTwilio({ rooms });
+    expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'completed' })).toBe('transfer_pending');
+    expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
+    expect(mockTw.api.calls).not.toHaveBeenCalled();
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+
+  test('the staff sweep does the same for it: nothing is ended until the transfer is decided', async () => {
+    fakeCallLog({ conference_path: base() });
+    callHold.staffLeft.mockResolvedValue('transfer_pending');
+    const log = fakeTwilio({ callStatus: 'completed', rooms });
+    expect(await cp.recoverStaffEnds()).toEqual({ action: 'swept', open: 1, handled: 1 });
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+
+  test('a staff leg ending after he took the call is not the winner any more: no room end', async () => {
+    fakeCallLog({ conference_path: { ...base(), accepted_leg_sid: TLEG } });
+    const log = fakeTwilio({ rooms });
+    expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'completed' })).toBe('accepted');
+    expect(callHold.staffLeft).not.toHaveBeenCalled();
+    expect(log.roomUpdates).toEqual([]);
+  });
+
+  test('a status that is not terminal, a missing leg or n, and a call with no state are ignored without a hold decision', async () => {
+    fakeCallLog({ conference_path: base() });
+    fakeTwilio();
+    expect(await ended({ status: 'ringing' })).toBe('ignored');
+    expect(await ended({ legSid: null })).toBe('ignored');
+    expect(await ended({ n: NaN })).toBe('ignored');
+    expect(await ended({ n: undefined })).toBe('ignored');
+    fakeCallLog({}, { exists: false });
+    expect(await ended()).toBe('no_state');
+    expect(callHold.endTransfer).not.toHaveBeenCalled();
+  });
+
+  test('the hold cannot decide (a database error): the end is tried again, as a staff leg end is, until it is handled', async () => {
+    jest.useFakeTimers();
+    fakeCallLog({ conference_path: base() });
+    callHold.endTransfer.mockRejectedValueOnce(new Error('db down')).mockRejectedValueOnce(new Error('db down')).mockResolvedValue('voicemail');
+    fakeTwilio({ rooms });
+    expect(await ended()).toBe('retry');
+    await jest.advanceTimersByTimeAsync(2000);
+    expect(callHold.endTransfer).toHaveBeenCalledTimes(2);
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(callHold.endTransfer).toHaveBeenCalledTimes(3);
+    await jest.advanceTimersByTimeAsync(120000);
+    expect(callHold.endTransfer).toHaveBeenCalledTimes(3);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('transfer leg end for'));
+  });
+
+  test('a database that stays down: five retries, then an error log', async () => {
+    jest.useFakeTimers();
+    fakeCallLog({ conference_path: base() });
+    callHold.endTransfer.mockRejectedValue(new Error('db down'));
+    fakeTwilio({ rooms });
+    expect(await ended()).toBe('retry');
+    await jest.advanceTimersByTimeAsync(cp._test.STAFF_END_RETRY_MS.reduce((a, b) => a + b, 0) + 1000);
+    expect(callHold.endTransfer).toHaveBeenCalledTimes(6);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('transfer leg end for'));
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('not handled after 6 tries'));
+  });
+});
+
+describe('the warm transfer: the caller hangs up while it rings', () => {
+  const TLEG = `CA${'7'.repeat(32)}`;
+  const withHold = (transfer) => ({ conference_path: { leg_count: 1, accepted_leg_sid: LEG0, legs: { 0: { sid: LEG0 } }, hold: { gen: 1, phase: 'held', transfer } } });
+
+  test('the ringing owner call is ended with the staff legs, and counted', async () => {
+    fakeCallLog(withHold({ n: 1, status: 'ringing', leg_sid: TLEG }));
+    const log = fakeTwilio();
+    expect(await cp.closeForCallerEnd(SID)).toBe(2);
+    expect(log.updates).toEqual([{ sid: LEG0, status: 'completed' }, { sid: TLEG, status: 'completed' }]);
+  });
+
+  test('no owner call to end: a transfer not placed yet, one that ended, or none (the winner is a ring leg)', async () => {
+    for (const transfer of [{ n: 1, status: 'ringing', leg_sid: null }, { n: 1, status: 'failed', leg_sid: TLEG }, undefined]) {
+      fakeCallLog(withHold(transfer));
+      const log = fakeTwilio();
+      expect(await cp.closeForCallerEnd(SID)).toBe(1);
+      expect(log.updates).toEqual([{ sid: LEG0, status: 'completed' }]);
+    }
+  });
+
+  test('after he took the call his leg is the winner and no ring leg: it is ended too, also after a new hold of his', async () => {
+    const taken = (hold) => ({ conference_path: { leg_count: 1, accepted_leg_sid: TLEG, legs: { 0: { sid: LEG0 } }, hold } });
+    for (const hold of [
+      { gen: 1, phase: 'returned', applied: 'returned', transfer: { n: 1, status: 'accepted', leg_sid: TLEG } },
+      { gen: 2, phase: 'held', applied: 'held', transfers: 1 }, // his own star: a new hold, which starts with no transfer
+    ]) {
+      fakeCallLog(taken(hold));
+      const log = fakeTwilio();
+      expect(await cp.closeForCallerEnd(SID)).toBe(2);
+      expect(log.updates).toEqual([{ sid: LEG0, status: 'completed' }, { sid: TLEG, status: 'completed' }]);
+    }
+  });
+
+  test('an owner call that will not end is only logged: the close still counts the legs', async () => {
+    fakeCallLog(withHold({ n: 1, status: 'ringing', leg_sid: TLEG }));
+    fakeTwilio();
+    const update = jest.fn(async (params) => { if (params.status && mockTw.api.calls.mock.calls.at(-1)[0] === TLEG) throw Object.assign(new Error('x'), { status: 404 }); });
+    const calls = jest.fn(() => ({ update }));
+    mockTw.api = { ...mockTw.api, calls };
+    expect(await cp.closeForCallerEnd(SID)).toBe(1);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('transfer leg'));
   });
 });
