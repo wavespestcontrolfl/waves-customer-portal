@@ -2,8 +2,8 @@
  * Promise age-out against live Postgres (server/services/promise-age-out.js): what a run dismisses and what it
  * leaves, the marker it writes, the alerts that close with a text or an email promise, the dry run, a person's
  * action and the text lane's own close that land during a run, the Owed tab's closed-automatically list with its
- * Reopen, and the undo. Synthetic data only. Every run is scoped to this file's own promises, so it never touches
- * another suite's rows.
+ * Reopen, the undo (promises and the alerts the run closed), and a run whose audit row was not written. Synthetic
+ * data only. Every run is scoped to this file's own promises, so it never touches another suite's rows.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -294,5 +294,55 @@ maybeDescribe('promise age-out (live Postgres)', () => {
     expect((await row(earlier.id)).fulfillment.run).toBe(earlierRun.runId);
     const audit = await db('audit_log').where({ action: 'promise_age_out.reopen' }).whereRaw("metadata->>'runId' = ?", [runId]).first('metadata');
     expect(audit.metadata.reopened).toBe(1);
+  });
+
+  test('reopenPromiseAgeOut puts back the alerts that run closed, unread again when the close marked them read; an alert closed before the run stays closed', async () => {
+    const text = await staffText();
+    const byText = await textPromise({ text });
+    const byEmail = await emailPromise();
+    const unread = await alert({ dedupeKey: `sms-commitment-source:${text.id}`, customerId: text.customerId, sms_log_id: text.id, commitment_id: byText.id, commitment_ids: [byText.id] });
+    // The office read this alert two days before the run.
+    const read = await alert({ dedupeKey: `email-commitment:${byEmail.id}`, email_id: byEmail.email_id, commitment_id: byEmail.id });
+    await db('notifications').where({ id: read.id }).update({ read_at: ago(2) });
+    // A person marked this older alert for the text promise done three days before the run.
+    const doneBefore = await alert({ dedupeKey: `sms-commitment:${byText.id}`, customerId: text.customerId, sms_log_id: text.id, commitment_id: byText.id });
+    await db('notifications').where({ id: doneBefore.id }).update({ done_at: ago(3), done_by: randomUUID(), read_at: ago(3) });
+    const { runId } = await run({ scope: (q) => q.whereIn('cc.id', [byText.id, byEmail.id]) });
+    expect([(await alertRow(unread.id)).done_by, (await alertRow(read.id)).done_by]).toEqual(['promise-age-out', 'promise-age-out']);
+
+    const applied = await ageOut.reopenPromiseAgeOut({ run: runId, apply: true });
+
+    expect([applied.reopened, applied.alertsReopened]).toEqual([2, 2]);
+    const unreadAfter = await alertRow(unread.id);
+    expect([unreadAfter.done_at, unreadAfter.done_by, unreadAfter.resolution, unreadAfter.read_at]).toEqual([null, null, null, null]);
+    const readAfter = await alertRow(read.id);
+    expect([readAfter.done_at, readAfter.done_by, readAfter.resolution, readAfter.read_at.getTime()]).toEqual([null, null, null, ago(2).getTime()]);
+    expect((await alertRow(doneBefore.id)).done_at.getTime()).toBe(ago(3).getTime());
+    const audit = await db('audit_log').where({ action: 'promise_age_out.reopen' }).whereRaw("metadata->>'runId' = ?", [runId]).first('metadata');
+    expect([audit.metadata.reopened, audit.metadata.alertsReopened]).toEqual([2, 2]);
+  });
+
+  test('a run whose audit row is not written fails loudly, and it is still found and reopened from the promises it dismissed', async () => {
+    const aged = await callPromise();
+    const spy = jest.spyOn(require('../services/audit-log'), 'recordAuditEvent').mockRejectedValueOnce(new Error('audit_log is down'));
+    let failure;
+    try {
+      failure = await run({ scope: (q) => q.where('cc.id', aged.id) }).then(() => null, (err) => err);
+    } finally {
+      spy.mockRestore();
+    }
+    const runId = made.runs[made.runs.length - 1];
+
+    expect(failure.message).toBe(`run ${runId} dismissed 1 promise(s) and its audit row was not written: audit_log is down`);
+    expect(require('../services/logger').info).toHaveBeenCalledWith(expect.stringContaining(`run ${runId} dismissed 1 promise(s)`));
+    expect(await db('audit_log').whereRaw("metadata->>'runId' = ?", [runId]).first('id')).toBeUndefined();
+    expect((await row(aged.id)).fulfillment.run).toBe(runId);
+    const runs = await ageOut.listPromiseAgeOutRuns({ limit: 1000 });
+    expect(runs.filter((listed) => listed.run === runId)).toEqual([{ run: runId, promises: 1 }]);
+
+    const applied = await ageOut.reopenPromiseAgeOut({ run: runId, apply: true });
+
+    expect(applied.reopened).toBe(1);
+    expect((await row(aged.id)).status).toBe('open');
   });
 });

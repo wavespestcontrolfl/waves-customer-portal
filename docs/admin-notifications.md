@@ -353,8 +353,11 @@ customer's message by this rule.
    `promise-age-out`, resolution "The promise expired: no action in 30 days"); the watchdog retires a call promise's
    reminder. The Owed tab lists an expired Waves call promise under "Closed automatically" for 7 days with Reopen;
    a Reopen makes the promise the office's, so it does not expire again. A run that dismissed a promise is recorded
-   (audit_log `promise_age_out.expire`). `server/scripts/promise-age-out-dry-run.js` prints what a run would
-   dismiss; `server/scripts/reopen-promise-age-out.js --run <id> [--apply]` reopens one run.
+   (audit_log `promise_age_out.expire`), and every promise it dismissed carries its run id (`fulfillment.run`), so
+   a run is found from the promises also when that row was never written. `server/scripts/promise-age-out-dry-run.js`
+   prints what a run would dismiss; `server/scripts/reopen-promise-age-out.js` lists the runs, and with
+   `--run <id> [--apply]` reopens one: its promises and the alerts it closed for them (open again, and unread
+   again when the close is what marked them read).
    Quiet policy (owner ruling 2026-11-04, "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF";
    `GATE_ALERT_QUIET_FALL_OFF`): a second policy of the same module, `runAdminAlertQuietPolicy` in
    `server/services/admin-alert-retention.js`. It shares the nightly policy's candidates, activity stamps, `RERING`

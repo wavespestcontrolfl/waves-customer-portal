@@ -31,7 +31,12 @@
  * Every write repeats the whole rule in its WHERE, so a person's action, a new due time or a snooze that landed
  * since the read leaves the promise alone. A run that closed something records one audit_log row
  * (promise_age_out.expire). A second run finds nothing left.
- * server/scripts/promise-age-out-dry-run.js prints what a run would close; reopen-promise-age-out.js reopens a run.
+ *
+ * The undo. Every dismissed promise carries its run id (fulfillment.run), written with the dismissal itself, so a
+ * run can be found and reopened from the promises alone (listPromiseAgeOutRuns), also when its audit row was never
+ * written. reopenPromiseAgeOut puts back the promises and the alerts that run closed for them.
+ * server/scripts/promise-age-out-dry-run.js prints what a run would close; reopen-promise-age-out.js lists the
+ * runs and reopens one.
  */
 
 const db = require('../models/db');
@@ -141,39 +146,72 @@ async function runPromiseAgeOut({ now = new Date(), conn = db, dryRun = false, s
     afterId = rows.length ? rows[rows.length - 1].id : afterId;
   }
   const summary = { runId, cutoff: cutoff.toISOString(), dryRun, expired, failed, complete };
-  if (!dryRun && expired.total > 0) {
-    await require('./audit-log').recordAuditEvent({ actor_type: 'system', action: AUDIT_ACTION, resource_type: 'call_commitment',
-      metadata: { runId, days: AGE_OUT_DAYS, cutoff: summary.cutoff, expired, failed, complete }, critical: true, trx: conn });
-  }
   if (expired.total > 0 || failed > 0) {
-    logger.info(`[promise-age-out] ${dryRun ? 'would dismiss' : 'dismissed'} ${expired.total} promise(s) past ${AGE_OUT_DAYS} days (${JSON.stringify(expired.byChannel)}), ${failed} left open on an error`);
+    logger.info(`[promise-age-out] run ${runId} ${dryRun ? 'would dismiss' : 'dismissed'} ${expired.total} promise(s) past ${AGE_OUT_DAYS} days (${JSON.stringify(expired.byChannel)}), ${failed} left open on an error`);
   }
+  if (!dryRun && expired.total > 0) await recordRun(conn, summary);
   return summary;
 }
 
-// The promises one run dismissed that still carry its marker (a person's later verdict changes human_state).
-const dismissedBy = (conn, run) => conn('call_commitments').where({ status: 'dismissed' }).whereNull('human_state')
-  .whereRaw("fulfillment->>'closed_by' = ? AND fulfillment->>'run' = ?", [CLOSED_BY_AGE_OUT, String(run)]);
+// The run's audit row, written after its dismissals committed. When the insert fails the dismissals stand and the
+// run is still named: by the log line above, by each promise it dismissed (listPromiseAgeOutRuns) and by this
+// error, which fails the job so the missing row is seen.
+async function recordRun(conn, { runId, cutoff, expired, failed, complete }) {
+  try {
+    await require('./audit-log').recordAuditEvent({ actor_type: 'system', action: AUDIT_ACTION, resource_type: 'call_commitment',
+      metadata: { runId, days: AGE_OUT_DAYS, cutoff, expired, failed, complete }, critical: true, trx: conn });
+  } catch (err) {
+    throw new Error(`run ${runId} dismissed ${expired.total} promise(s) and its audit row was not written: ${err.message}`, { cause: err });
+  }
+}
+
+// The promises an age-out run dismissed that still carry its marker (a person's later verdict changes human_state).
+const dismissed = (conn) => conn('call_commitments').where({ status: 'dismissed' }).whereNull('human_state')
+  .whereRaw("fulfillment->>'closed_by' = ?", [CLOSED_BY_AGE_OUT]);
+const dismissedBy = (conn, run) => dismissed(conn).whereRaw("fulfillment->>'run' = ?", [String(run)]);
+
+// The runs whose dismissals still stand, newest first, read from the promises themselves. -> [{ run, promises }]
+const listPromiseAgeOutRuns = ({ conn = db, limit = 50 } = {}) => dismissed(conn)
+  .groupByRaw("fulfillment->>'run'").orderByRaw("fulfillment->>'run' DESC").limit(limit)
+  .select(conn.raw("fulfillment->>'run' AS run"), conn.raw('count(*)::int AS promises'));
+
+// The alerts that run closed for those promises go back to the bell as they were. A row the run closed has the
+// run's own time as its done time and this job as its closer (a row some earlier close already held keeps that
+// earlier time and stays closed); it names a promise in commitment_id or commitment_ids. It is unread again when
+// the close is what marked it read.
+const reopenAlerts = (conn, run, ids) => conn('notifications').where({ recipient_type: 'admin', done_by: DONE_BY })
+  .whereRaw('done_at = ?::timestamptz', [String(run)])
+  .whereRaw("(metadata->>'commitment_id' = ANY(?::text[]) OR jsonb_exists_any(COALESCE(metadata->'commitment_ids', '[]'::jsonb), ?::text[]))", [ids, ids])
+  .update({
+    ...require('./notification-service')._private.DONE_CLEARED,
+    read_at: conn.raw('CASE WHEN read_at = ?::timestamptz THEN NULL ELSE read_at END', [String(run)]),
+  });
 
 /**
- * Reopen what one run dismissed. A promise still past the limit expires again on the next nightly run, so this
- * is for after the rule changed. The lanes' own sweeps ring an overdue text or email promise again.
- * -> { run, found: counts, reopened }
+ * Reopen what one run dismissed: the promises that still carry its marker and the alerts it closed for them, with
+ * the audit row, in one transaction. A promise still past the limit expires again on the next nightly run, so this
+ * is for after the rule changed.
+ * -> { run, found: counts, reopened, alertsReopened }
  */
 async function reopenPromiseAgeOut({ run, apply = false, conn = db, now = new Date() } = {}) {
   if (!run) throw new Error('reopenPromiseAgeOut needs the run id of an age-out run');
   const found = emptyCounts();
   (await dismissedBy(conn, run).select('id', 'call_log_id', 'sms_log_id', 'email_id', 'party', 'kind')).forEach((row) => count(found, row));
-  if (!apply || !found.total) return { run, found, reopened: 0 };
-  const reopened = await dismissedBy(conn, run).update({ status: 'open', fulfillment: null, fulfilled_at: null, updated_at: now });
-  await require('./audit-log').recordAuditEvent({ actor_type: 'system', action: UNDO_AUDIT_ACTION, resource_type: 'call_commitment',
-    metadata: { runId: String(run), reopened }, critical: true, trx: conn });
-  return { run, found, reopened };
+  if (!apply || !found.total) return { run, found, reopened: 0, alertsReopened: 0 };
+  return conn.transaction(async (trx) => {
+    const ids = (await dismissedBy(trx, run).update({ status: 'open', fulfillment: null, fulfilled_at: null, updated_at: now }).returning(['id']))
+      .map((row) => row.id);
+    const alertsReopened = ids.length ? await reopenAlerts(trx, run, ids) : 0;
+    await require('./audit-log').recordAuditEvent({ actor_type: 'system', action: UNDO_AUDIT_ACTION, resource_type: 'call_commitment',
+      metadata: { runId: String(run), reopened: ids.length, alertsReopened }, critical: true, trx });
+    return { run, found, reopened: ids.length, alertsReopened };
+  });
 }
 
 module.exports = {
   runPromiseAgeOut,
   reopenPromiseAgeOut,
+  listPromiseAgeOutRuns,
   AGE_OUT_DAYS,
   AGED_OUT_KIND,
   CLOSED_BY_AGE_OUT,
