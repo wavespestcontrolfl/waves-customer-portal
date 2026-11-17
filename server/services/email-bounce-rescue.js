@@ -30,23 +30,23 @@
  *                             (deterministic letter-run/phonetic decode,
  *                             plus a FAST-tier LLM pass whose supporting
  *                             quote must appear verbatim in the
- *                             transcript). SUGGEST-ONLY, except the
- *                             SELF-FIX below.
+ *                             transcript). SUGGEST-ONLY: it rebuilds
+ *                             the address from the bounced one.
  *
  * Self-fix (GATE_CALL_BOUNCE_SELF_FIX, dark; owner 2026-11-17, page
- * NN7Qm52t): a customer's PRIMARY email may take a call-derived fix once
- * per customer when every candidate names the SAME address, the customer's
- * calls carry it, and it is a small fix — same domain, at most 2 changes, no
- * letter of the bounced address dropped (isSmallFix). It must validate with
- * a verified MX, never have bounced, and never have been on the do-not-email
- * list, even when that block was released. Prod ledger 2026-08 to 2026-11:
- * the two right near-miss guesses changed one letter or two dots; the wrong
- * guess of 11-02 dropped a letter; two other near-miss guesses were
- * addresses that had bounced months before. Anything else stays a
- * suggestion. With the switch on,
- * the LLM decode also reads spoken corrections ("knock off that 3-7"), and
- * relookAfterNewCalls re-runs a no-fix address after a later call that
- * talks about email.
+ * NN7Qm52t): a customer's PRIMARY email may take one consensus fix per
+ * customer when every candidate names the SAME address, a call record holds
+ * that complete address, the newest call that talks about email names it,
+ * and it is a small fix — same domain, at most 2 changes, no letter of the
+ * bounced address dropped (isSmallFix). It must validate with a verified MX,
+ * never have bounced, and never have been on the do-not-email list, even
+ * when that block was released. Decoded spellings stay suggestions. Prod
+ * ledger 2026-08 to 2026-11: the right near-miss guesses changed one letter
+ * or two dots; the wrong guess of 11-02 dropped a letter; two other near-miss
+ * guesses were addresses that had bounced months before. With the switch
+ * on, the LLM decode also reads spoken corrections ("knock off that 3-7")
+ * for the suggestion, and relookAfterNewCalls re-runs a no-fix address after
+ * a later call that talks about email.
  *
  * Actions (hands-off/exception-based, CLAUDE.md rule 14):
  *   - Auto-eligible tier + all validations green → apply. A PRIMARY
@@ -120,9 +120,13 @@ const DECODE_CONTEXT_LINES = 3;
 // A crashed auto-apply leaves an 'applying' ledger row; after this long a
 // new pass may take it over and retry.
 const APPLYING_STALE_MINUTES = 15;
-// Self-fix (GATE_CALL_BOUNCE_SELF_FIX): only call-derived tiers, only small
-// fixes, at most this many changes (selfFixCost).
-const CALL_DERIVED_TIERS = new Set(['extractor_consensus', 'transcript_decode']);
+// Self-fix (GATE_CALL_BOUNCE_SELF_FIX): only a COMPLETE address seen in the
+// customer's own call records (extractor_consensus sightings), only small
+// fixes, at most this many changes (selfFixCost). A decoded spelling
+// (transcript_decode, rule-based or AI) rebuilds the address from the bounced
+// one, borrowing its domain and digits, so it stays a suggestion (Codex r1
+// on #7906: "J-O-H-N-S at yahoo dot com" decoded onto the old gmail address).
+const SELF_FIX_TIER = 'extractor_consensus';
 const SELF_FIX_MAX_COST = 2;
 // Re-look sweep: rows per tick (each can cost one FAST-tier decode).
 const RELOOK_BATCH = 10;
@@ -278,12 +282,15 @@ function decodeSpelledCandidates(transcription, bouncedEmail) {
   return out;
 }
 
+// Talk about an email address. EMAIL_TALK_PATTERN is the same test in SQL.
+const EMAIL_TALK_RE = /e-?mail|@|\bdot\b\s*(com|net|org|edu)/i;
+
 // Context windows around email talk — the input for the LLM decode.
 function extractSpelledContexts(transcription) {
   const lines = String(transcription || '').split(/\n/);
   const contexts = [];
   lines.forEach((line, i) => {
-    if (!/e-?mail|@|\bdot\b\s*(com|net|org|edu)/i.test(line)) return;
+    if (!EMAIL_TALK_RE.test(line)) return;
     contexts.push(lines.slice(Math.max(0, i - 1), i + DECODE_CONTEXT_LINES).join('\n'));
   });
   return contexts.slice(0, MAX_DECODE_CONTEXTS);
@@ -590,22 +597,37 @@ async function knownBadAddress(email) {
   return Boolean(bounced || blocked);
 }
 
+// The customer's newest call that talks about email must name the fix in
+// full (its transcript or AI extraction). A later call may carry a
+// correction no tier can read ("there is no 3 at the end"), so a person
+// decides (Codex r1 on #7906).
+function newestEmailCallNames(calls, address) {
+  const talk = (calls || []).filter((c) => EMAIL_TALK_RE.test(String(c.transcription || '')));
+  const newest = talk[talk.length - 1];
+  if (!newest) return false;
+  const extraction = typeof newest.ai_extraction === 'string'
+    ? newest.ai_extraction : JSON.stringify(newest.ai_extraction || {});
+  const named = `${newest.transcription || ''}\n${extraction}`.match(EMAIL_SCAN_RE) || [];
+  return named.some((e) => normalizeEmail(e) === address);
+}
+
 /**
  * The self-fix outcome, or null. Only a customer's PRIMARY email. Every
  * candidate, from any tier, must name ONE address (two addresses = the
- * evidence disagrees, a person decides); the customer's calls must carry it;
- * and it must be a small fix. The address passes validateCandidate with a
- * verified MX, is not a known-bad address, and the customer has no earlier
- * self-fix.
+ * evidence disagrees, a person decides); a call record must hold that
+ * complete address (SELF_FIX_TIER), and so must the newest call that talks
+ * about email; and it must be a small fix. The address passes
+ * validateCandidate with a verified MX, is not a known-bad address, and the
+ * customer has no earlier self-fix.
  */
-async function selfFixOutcome({ tiers, owner, bouncedEmail, validations }) {
+async function selfFixOutcome({ tiers, owner, bouncedEmail, validations, calls }) {
   if (!owner.customer || owner.field !== 'email') return null;
   const bounced = normalizeEmail(bouncedEmail);
   const addresses = new Set(tiers.map((c) => normalizeEmail(c.email)).filter((e) => e && e !== bounced));
   if (addresses.size !== 1) return null;
   const [key] = addresses;
-  const cand = tiers.find((c) => CALL_DERIVED_TIERS.has(c.tier) && normalizeEmail(c.email) === key);
-  if (!cand || !isSmallFix(bounced, key)) return null;
+  const cand = tiers.find((c) => c.tier === SELF_FIX_TIER && normalizeEmail(c.email) === key);
+  if (!cand || !isSmallFix(bounced, key) || !newestEmailCallNames(calls, key)) return null;
   const v = validations.get(key) || await validateCandidate(key, {
     bouncedEmail, ownerCustomerId: owner.customer.id, ownerLeadId: null,
   });
@@ -814,7 +836,7 @@ async function suggestionFallbackBell({ rescueRowId, bouncedEmail, candidate, ow
  * GATE_CALL_BOUNCE_SELF_FIX on, a call-derived suggestion may become a
  * self-fix (selfFixOutcome); a collision never does.
  */
-async function decideOutcome({ tiers, owner, bouncedEmail }) {
+async function decideOutcome({ tiers, owner, bouncedEmail, calls = [] }) {
   const validations = new Map();
   let outcome = { status: 'no_candidate' };
   for (const cand of tiers) {
@@ -853,7 +875,7 @@ async function decideOutcome({ tiers, owner, bouncedEmail }) {
     break;
   }
   if (outcome.status === 'applied' || outcome.collision || !callBounceSelfFixLive()) return outcome;
-  return (await selfFixOutcome({ tiers, owner, bouncedEmail, validations })) || outcome;
+  return (await selfFixOutcome({ tiers, owner, bouncedEmail, validations, calls })) || outcome;
 }
 
 // ── main entry ──────────────────────────────────────────────────────
@@ -922,7 +944,7 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
     if (llm) tiers.push({ tier: 'transcript_decode', ...llm, llm: true });
   }
 
-  let outcome = await decideOutcome({ tiers, owner, bouncedEmail });
+  let outcome = await decideOutcome({ tiers, owner, bouncedEmail, calls });
 
   if (dryRun) return { dryRun: true, bouncedEmail, owner: owner.customer?.id || owner.lead?.id, ...outcome };
 
@@ -938,13 +960,26 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
     if (reusableRow.status === 'no_candidate' && outcome.status === 'no_candidate') {
       return { skipped: 'already_examined', status: 'no_candidate' };
     }
-    await db('email_bounce_rescues').where({ id: reusableRow.id }).update({
-      tier: outcome.tier || null,
-      candidate_email: outcome.candidate || null,
-      evidence: JSON.stringify(ledgerEvidence(outcome)),
-      status: persistStatus,
-      updated_at: new Date(),
-    });
+    // Claim the row: the write lands only while the row still has the
+    // status this run read (a stale 'applying' row: only while still
+    // stale). A bounce webhook and the re-look sweep can examine the same
+    // row at once; the run that loses writes nothing, so it cannot apply
+    // twice or demote the winner's record (Codex r1 on #7906).
+    const claimed = await db('email_bounce_rescues')
+      .where({ id: reusableRow.id, status: reusableRow.status })
+      .modify((q) => {
+        if (reusableRow.status === 'applying') {
+          q.where('updated_at', '<', new Date(Date.now() - APPLYING_STALE_MINUTES * 60_000));
+        }
+      })
+      .update({
+        tier: outcome.tier || null,
+        candidate_email: outcome.candidate || null,
+        evidence: JSON.stringify(ledgerEvidence(outcome)),
+        status: persistStatus,
+        updated_at: new Date(),
+      });
+    if (!claimed) return { skipped: 'already_examined' };
     row = { ...reusableRow, status: persistStatus };
   } else {
     row = await recordRescue({
@@ -969,8 +1004,9 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
       await db('email_bounce_rescues').where({ id: row.id })
         .update({ status: 'applied', applied_at: new Date(), applied_by: appliedBy, updated_at: new Date() });
     } catch (err) {
-      // STALE_OWNER or write failure: demote the ledger row so --apply can retry.
-      await db('email_bounce_rescues').where({ id: row.id })
+      // STALE_OWNER or write failure: demote this run's own 'applying' claim
+      // so --apply can retry; never a row another run already finished.
+      await db('email_bounce_rescues').where({ id: row.id, status: 'applying' })
         .update({ status: 'suggested', updated_at: new Date() });
       logger.warn(`[email-bounce-rescue] apply failed for ${redactEmail(bouncedEmail)}: ${err.message}`);
       outcome = { ...outcome, status: 'suggested', reason: `apply failed: ${err.message}` };
@@ -1029,6 +1065,9 @@ async function relookAfterNewCalls({ limit = RELOOK_BATCH, rescueFn = rescueBoun
   const summary = { examined: 0, fixed: 0, suggested: 0, unchanged: 0, failed: 0 };
   for (const row of rows) {
     summary.examined += 1;
+    // The look covers calls processed before it started: a call that lands
+    // while the rescue runs stays newer than the mark (Codex r1 on #7906).
+    const lookedAt = new Date();
     try {
       const result = await rescueFn(row.bounced_email, { appliedBy: 'relook' });
       if (result?.status === 'applied') summary.fixed += 1;
@@ -1042,7 +1081,7 @@ async function relookAfterNewCalls({ limit = RELOOK_BATCH, rescueFn = rescueBoun
     // per call, never one per tick).
     await db('email_bounce_rescues')
       .where({ id: row.id, status: 'no_candidate' })
-      .update({ updated_at: new Date() })
+      .update({ updated_at: lookedAt })
       .catch((err) => logger.warn(`[email-bounce-rescue] re-look mark failed: ${err.message}`));
   }
   return summary;

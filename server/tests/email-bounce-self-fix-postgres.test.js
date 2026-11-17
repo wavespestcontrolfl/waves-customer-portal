@@ -9,6 +9,7 @@
  *  - a re-look runs the normal rescue on the same ledger row, so a later call can save a self-fix there.
  *  - a self-fix never moves to a known-bad address: one with a ledger bounce row (even with no block left), or one with
  *    a do-not-email row in any status (a released block, or a bounce from before the ledger existed).
+ *  - two rescues of one re-examined row at once: the row claim lets one save the fix; the other writes and sends nothing.
  * A hard bounce suppresses the address before the rescue runs (the webhook's order), so the suite seeds that row too.
  * All names, phones and addresses synthetic.
  *
@@ -190,6 +191,28 @@ describeOrSkip('bounce self-fix SQL (Postgres)', () => {
     expect(after).toMatchObject({ status: 'applied', applied_by: 'relook', candidate_email: fixed });
     expect(after.evidence).toMatchObject({ self_fix: true });
     expect(await db('email_bounce_rescues').where({ customer_id: id }).count('* as n').first()).toMatchObject({ n: '1' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(deliverOpsDigest).not.toHaveBeenCalled();
+  });
+
+  it('two rescues of one re-examined row at once (bounce webhook + re-look): one saves the fix, the other writes nothing', async () => {
+    const bounced = addr('dualbox');
+    const fixed = addr('dualbax');
+    const { id, phone } = await seedCustomer(bounced);
+    const row = await seedNoFixRow({ customerId: id, bouncedEmail: bounced });
+    await seedSuppression(bounced);
+    await seedCall({ customerId: id, phone, transcription: `Caller: my email is wrong, it is ${fixed}`, extraction: { email: fixed } });
+
+    const results = await Promise.all([
+      rescue.rescueBouncedAddress(bounced),
+      rescue.rescueBouncedAddress(bounced, { appliedBy: 'relook' }),
+    ]);
+    expect(results.filter((r) => r.status === 'applied')).toHaveLength(1);
+    expect(results.filter((r) => r.skipped === 'already_examined')).toHaveLength(1);
+    expect((await db('customers').where({ id }).first('email')).email).toBe(fixed);
+    const after = await db('email_bounce_rescues').where({ id: row.id }).first();
+    expect(after).toMatchObject({ status: 'applied', candidate_email: fixed });
+    expect(after.evidence).toMatchObject({ self_fix: true });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(deliverOpsDigest).not.toHaveBeenCalled();
   });

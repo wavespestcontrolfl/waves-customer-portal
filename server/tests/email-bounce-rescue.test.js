@@ -639,9 +639,10 @@ describe('rescueBouncedAddress self-fix', () => {
   // picks which findOwner probe hits (1 = primary email, 2 = service contact).
   function world({
     customer = RAE, calls = RAE_CALLS, earlierSelfFix = false, bouncedBefore = [], blockedBefore = [],
-    ownerProbe = 1, customerUpdates = 1,
+    ownerProbe = 1, customerUpdates = 1, existingRow = null, claimRows = 1,
   } = {}) {
     const ledger = { inserts: [], updates: [] };
+    let ledgerUpdateCount = 0;
     const notes = [];
     let customerProbes = 0;
     db.transaction.mockImplementation(async (fn) => fn(db));
@@ -658,11 +659,17 @@ describe('rescueBouncedAddress self-fix', () => {
         });
         chain.first = jest.fn(() => {
           if (selfFixProbe && earlierSelfFix) return Promise.resolve({ id: 'r-earlier' });
+          if (existingRow && bouncedProbe === existingRow.bounced_email) return Promise.resolve(existingRow);
           if (bouncedProbe && bouncedBefore.includes(bouncedProbe)) return Promise.resolve({ id: 'r-bounced' });
           return Promise.resolve(null);
         });
         chain.insert = jest.fn((row) => { ledger.inserts.push(row); return chain; });
-        chain.update = jest.fn((row) => { ledger.updates.push(row); return Promise.resolve(1); });
+        // The first ledger update on a reusable row is the claim.
+        chain.update = jest.fn((row) => {
+          ledger.updates.push(row);
+          ledgerUpdateCount += 1;
+          return Promise.resolve(existingRow && ledgerUpdateCount === 1 ? claimRows : 1);
+        });
         return chain;
       }
       if (name === 'email_suppressions') {
@@ -787,6 +794,49 @@ describe('rescueBouncedAddress self-fix', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  const JOHN = { id: 'c4', first_name: 'Jon', last_name: 'T', phone: '+15550005555', email: 'john123@gmail.com' };
+
+  it('never saves a spelled-out guess that borrows the domain and digits of the bounced address', async () => {
+    process.env.GATE_CALL_BOUNCE_SELF_FIX = 'true';
+    world({
+      customer: JOHN,
+      calls: [{ id: 'callj', created_at: new Date('2026-07-14'), transcription: 'Caller: My email is J-O-H-N-S at yahoo dot com', ai_extraction: null }],
+    });
+    const r = await rescue.rescueBouncedAddress('john123@gmail.com');
+    expect(r).toMatchObject({ status: 'suggested', tier: 'transcript_decode', candidate: 'johns123@gmail.com' });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it('leaves a fix to a person when a later call talks about email and does not name it', async () => {
+    process.env.GATE_CALL_BOUNCE_SELF_FIX = 'true';
+    world({
+      customer: JOHN,
+      calls: [
+        { id: 'callk', created_at: new Date('2026-07-14'), transcription: 'Caller: it is johns123@gmail.com', ai_extraction: JSON.stringify({ email: 'johns123@gmail.com' }) },
+        { id: 'calll', created_at: new Date('2026-07-20'), transcription: 'Caller: About my email, there is no 3 at the end.', ai_extraction: null },
+      ],
+    });
+    const r = await rescue.rescueBouncedAddress('john123@gmail.com');
+    expect(r).toMatchObject({ status: 'suggested', tier: 'extractor_consensus', candidate: 'johns123@gmail.com' });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it('claims a re-examined row before it writes; a run that loses the claim writes and sends nothing', async () => {
+    process.env.GATE_CALL_BOUNCE_SELF_FIX = 'true';
+    mockDeliverOpsDigest.mockClear();
+    const row = { id: 'r-old', bounced_email: 'lymzafi@yahoo.com', status: 'no_candidate' };
+    const lost = world({ existingRow: row, claimRows: 0 });
+    expect(await rescue.rescueBouncedAddress('lymzafi@yahoo.com')).toEqual({ skipped: 'already_examined' });
+    expect(lost.ledger.updates).toHaveLength(1);
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(mockDeliverOpsDigest).not.toHaveBeenCalled();
+
+    const won = world({ existingRow: row, claimRows: 1 });
+    const r = await rescue.rescueBouncedAddress('lymzafi@yahoo.com');
+    expect(r).toMatchObject({ status: 'applied', selfFix: true, rescueId: 'r-old' });
+    expect(won.ledger.updates[0]).toMatchObject({ status: 'applying', candidate_email: 'lynzafi@yahoo.com' });
+  });
+
   it('never moves to an address that was on the do-not-email list, even after that block was released', async () => {
     process.env.GATE_CALL_BOUNCE_SELF_FIX = 'true';
     world({ blockedBefore: ['lynzafi@yahoo.com'] });
@@ -862,13 +912,15 @@ describe('rescueBouncedAddress self-fix', () => {
       });
     });
 
-    it('is read, anchored to the quote, and saved with the switch on', async () => {
+    it('is read and anchored to the quote with the switch on, and stays a suggestion (the AI rebuilt the address)', async () => {
       process.env.GATE_CALL_BOUNCE_SELF_FIX = 'true';
       world({ customer: ANN, calls: ANN_CALLS });
       const r = await rescue.rescueBouncedAddress('sanfran77737@gmail.com');
       expect(dispatchWithFallback.mock.calls[0][1].system).toContain('knock off that 3-7');
       expect(dispatchWithFallback.mock.calls[0][1].text).toContain("there's not a 3-7 after the 777");
-      expect(r).toMatchObject({ status: 'applied', tier: 'transcript_decode', candidate: 'sanfran777@gmail.com', selfFix: true });
+      expect(r).toMatchObject({ status: 'suggested', tier: 'transcript_decode', candidate: 'sanfran777@gmail.com' });
+      expect(r.selfFix).toBeUndefined();
+      expect(db.transaction).not.toHaveBeenCalled();
     });
 
     it('is not asked for with the switch off (the prompt is unchanged)', async () => {
@@ -917,6 +969,20 @@ describe('relookAfterNewCalls (a later call looks again)', () => {
     expect(rescueFn).toHaveBeenNthCalledWith(2, 'b2@yahoo.com', { appliedBy: 'relook' });
     // Only a row that is still no_candidate is marked (a saved fix keeps its row).
     expect(marks.map((m) => m.where[0])).toEqual([{ id: 'r1', status: 'no_candidate' }, { id: 'r2', status: 'no_candidate' }]);
+  });
+
+  it('marks a row with the time the look started, so a call that lands during the look still counts', async () => {
+    process.env.GATE_CALL_BOUNCE_SELF_FIX = 'true';
+    const marks = sweepWorld([{ id: 'r1', bounced_email: 'a1@yahoo.com' }]);
+    let startedAt = null;
+    const rescueFn = jest.fn(async () => {
+      startedAt = Date.now();
+      await new Promise((resolve) => { setTimeout(resolve, 25); });
+      return { skipped: 'already_examined', status: 'no_candidate' };
+    });
+    await rescue.relookAfterNewCalls({ rescueFn });
+    expect(marks).toHaveLength(1);
+    expect(marks[0].row.updated_at.getTime()).toBeLessThanOrEqual(startedAt);
   });
 
   it('asks only for no-fix rows of a customer whose primary email is the bounced one', async () => {
