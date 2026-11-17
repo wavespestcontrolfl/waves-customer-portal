@@ -1234,10 +1234,15 @@ const LISTS_ANY_SQL = "(metadata->>'commitment_id' = ANY(?::text[]) OR jsonb_exi
 // A customer's alert that lists one of the promises. Any customer's key: after a merge a closed row keeps the
 // former owner's key.
 const CUSTOMER_ALERT_LISTS_SQL = `(metadata->>'dedupeKey' LIKE 'sms-commitment-customer:%' AND ${LISTS_ANY_SQL})`;
-// An alert, open or closed, has spoken for the promise's text: the test of the "kept late" ring. One binding: the
-// text's id. A customer's alert keeps the id of every text it has listed a promise from in metadata.spoke_for.
-const SPOKE_FOR_SQL = `(metadata->>'dedupeKey' LIKE 'sms-commitment-customer:%'
-  AND jsonb_exists(COALESCE(metadata->'spoke_for', '[]'::jsonb), ?::text))`;
+// An alert, open or closed, has spoken for the promise's text: the test of the "kept late" ring. Two bindings: the
+// two older keys (closedOlderAlertKeys), then the text's id. A customer's alert keeps the id of every text it has
+// listed a promise from in metadata.spoke_for.
+const SPOKE_FOR_SQL = `(metadata->>'dedupeKey' = ANY(?::text[]) OR (metadata->>'dedupeKey' LIKE 'sms-commitment-customer:%'
+  AND jsonb_exists(COALESCE(metadata->'spoke_for', '[]'::jsonb), ?::text)))`;
+// Closed history only: no code writes these keys since #7902 (one alert per customer). This read keeps the
+// "kept late" ring quiet for a promise whose only earlier alert is a closed row an older build keyed on the
+// promise or on its text.
+const closedOlderAlertKeys = (commitmentId, textId) => [`sms-commitment:${commitmentId}`, `sms-commitment-source:${textId}`];
 
 // What an alert row speaks for, read from its key: a customer's alert lists its promises.
 function alertScope(meta) {
@@ -1837,7 +1842,7 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
     persisted = true;
     // No alert, open or closed, has spoken for this promise's text yet.
     if (keptLate(live, verdict) && !holdBell && !await trx('notifications').where({ recipient_type: 'admin' })
-      .whereRaw(SPOKE_FOR_SQL, [source.id]).first('id')) {
+      .whereRaw(SPOKE_FOR_SQL, [closedOlderAlertKeys(row.id, source.id), source.id]).first('id')) {
       // A suppressed bell leaves no row to find next tick: close now instead.
       const bell = await ringSmsCustomerBell(trx, { row, message, verdict: { ...verdict, late: true }, now });
       rang = true;

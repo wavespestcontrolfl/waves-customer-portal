@@ -4759,6 +4759,32 @@ postgres('SMS commitments on PostgreSQL', () => {
         } finally { delete process.env.GATE_ALERT_RING_ONCE; }
       });
 
+      // Closed history of an older build's key: no code writes these keys any more, but a closed row still counts as
+      // having spoken for the promise's text, so the "kept late" ring stays quiet.
+      test.each([['a closed alert an older build keyed on the promise', (held) => `sms-commitment:${held.id}`, 0],
+        ['a closed alert an older build keyed on its text', () => `sms-commitment-source:${message.id}`, 0],
+        ['no earlier alert', null, 1]])('a promise kept late whose only earlier alert is %s', async (_name, olderKey, rang) => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        process.env.GATE_ALERT_RING_ONCE = 'true';
+        try {
+          const held = await staffPromise();
+          if (olderKey) {
+            await mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert', title: 'Comms — follow up with Synthetic Fixture', body: 'old',
+              done_at: at(3600000), done_by: STAFF, read_at: at(3600000),
+              metadata: JSON.stringify({ dedupeKey: olderKey(held), triggerKey: 'sms_operational_followup', customerId: message.customer_id, sms_log_id: message.id, commitment_id: held.id }) });
+          }
+          const [guide] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), message_type: 'prep_guide', admin_user_id: null,
+            message_body: 'Your treatment prep guide: portal.example.invalid/prep', created_at: at(4.5 * 3600000) }).returning('id');
+          dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${guide.id}`, quote: 'Your treatment prep guide' } });
+          NotificationService.notifyAdmin.mockClear();
+          // Quiet: the promise closes on this check. With no alert that spoke for it, the late record rings first and
+          // the row closes on a later tick.
+          expect(await refreshSmsCommitments({ conn: mockPg, now: at(5 * 3600000) })).toMatchObject({ fulfilled: 1 - rang });
+          expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(rang);
+          expect((await mockPg('call_commitments').where({ id: held.id }).first()).status).toBe(rang ? 'open' : 'fulfilled');
+        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+      });
+
       test.each(['other', 'callback', 'technician_follow_up'])('gate true: a %s promise is held the same way', async (kind) => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
         await staffPromise(kindOf(kind));
