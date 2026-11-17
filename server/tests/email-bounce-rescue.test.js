@@ -641,7 +641,7 @@ describe('rescueBouncedAddress self-fix', () => {
   // picks which findOwner probe hits (1 = primary email, 2 = service contact).
   function world({
     customer = RAE, calls = RAE_CALLS, earlierSelfFix = false, bouncedBefore = [], blockedBefore = [],
-    ownerProbe = 1, customerUpdates = 1, existingRow = null, claimRows = 1,
+    ownerProbe = 1, customerUpdates = 1, existingRow = null, claimRows = 1, blockedInTrx = [],
   } = {}) {
     const ledger = { inserts: [], updates: [], inTransaction: [] };
     let ledgerUpdateCount = 0;
@@ -692,7 +692,11 @@ describe('rescueBouncedAddress self-fix', () => {
           }
           return chain;
         });
-        chain.first = jest.fn(() => Promise.resolve(!activeOnly && blockedBefore.includes(probe) ? { id: 's-released' } : null));
+        chain.first = jest.fn(() => {
+          // A block that lands after the first checks: only the save's re-read (inside its transaction) sees it.
+          if (inTrx && blockedInTrx.includes(probe)) return Promise.resolve({ id: 's-late' });
+          return Promise.resolve(!activeOnly && blockedBefore.includes(probe) ? { id: 's-released' } : null);
+        });
         return chain;
       }
       if (name === 'customers') {
@@ -839,6 +843,17 @@ describe('rescueBouncedAddress self-fix', () => {
     expect(r).toMatchObject({ status: 'suggested', candidate: 'lynzafi@yahoo.com' });
     expect(r.selfFix).toBeUndefined();
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it('re-reads the destination under its lock: a block that lands after the checks stops the save', async () => {
+    process.env.GATE_CALL_BOUNCE_SELF_FIX = 'true';
+    const { ledger, notes } = world({ blockedInTrx: ['lynzafi@yahoo.com'] });
+    const r = await rescue.rescueBouncedAddress('lymzafi@yahoo.com');
+    expect(r).toMatchObject({ status: 'suggested', candidate: 'lynzafi@yahoo.com' });
+    expect(r.reason).toMatch(/destination taken or blocked/);
+    expect(ledger.inTransaction).toEqual([]);
+    expect(notes).toEqual([]);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
   it('claims a re-examined row before it writes; a run that loses the claim writes and sends nothing', async () => {

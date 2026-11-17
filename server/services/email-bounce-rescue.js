@@ -503,34 +503,34 @@ async function mxResolves(domain) {
  * customer's billing email, or another lead. Any hit is a duplicate signal,
  * never an apply.
  */
-async function candidateCollision(email, { ownerCustomerId, ownerLeadId }) {
+async function candidateCollision(email, { ownerCustomerId, ownerLeadId }, q = db) {
   // The owner is excluded IN SQL, not post-hoc: with `.first()` and no
   // exclusion, a candidate present on BOTH the owner and another party
   // could return the owner row and read as collision-free (codex r2).
   const fieldChecks = CUSTOMER_EMAIL_FIELDS.map((f) => `LOWER(${f}) = ?`).join(' OR ');
-  const otherCustomer = await db('customers')
+  const otherCustomer = await q('customers')
     .whereRaw(`(${fieldChecks})`, CUSTOMER_EMAIL_FIELDS.map(() => email))
     .whereNull('deleted_at')
-    .modify((q) => { if (ownerCustomerId) q.whereNot('id', ownerCustomerId); })
+    .modify((b) => { if (ownerCustomerId) b.whereNot('id', ownerCustomerId); })
     .first();
   if (otherCustomer && otherCustomer.id !== ownerCustomerId) {
     return { kind: 'customer', id: otherCustomer.id };
   }
-  const billingPref = await db('notification_prefs')
+  const billingPref = await q('notification_prefs')
     .whereRaw('LOWER(billing_email) = ?', [email])
-    .modify((q) => { if (ownerCustomerId) q.whereNot('customer_id', ownerCustomerId); })
+    .modify((b) => { if (ownerCustomerId) b.whereNot('customer_id', ownerCustomerId); })
     .first()
     .catch(() => null);
   if (billingPref?.customer_id && billingPref.customer_id !== ownerCustomerId) {
     return { kind: 'billing_prefs', id: billingPref.customer_id };
   }
-  const otherLead = await db('leads')
+  const otherLead = await q('leads')
     .whereRaw('LOWER(email) = ?', [email])
     .whereNull('deleted_at')
-    .modify((q) => {
-      if (ownerLeadId) q.whereNot('id', ownerLeadId);
+    .modify((b) => {
+      if (ownerLeadId) b.whereNot('id', ownerLeadId);
       if (ownerCustomerId) {
-        q.where((q2) => q2.whereNull('customer_id').orWhereNot('customer_id', ownerCustomerId));
+        b.where((q2) => q2.whereNull('customer_id').orWhereNot('customer_id', ownerCustomerId));
       }
     })
     .first();
@@ -541,12 +541,18 @@ async function candidateCollision(email, { ownerCustomerId, ownerLeadId }) {
   return null;
 }
 
+// An active do-not-email row covers the address. `q` = db, or the save's
+// transaction for the re-check under the destination lock.
+function activeSuppression(email, q = db) {
+  return q('email_suppressions')
+    .where(require('../utils/email-equivalence').suppressionCoversEmail(email)).where({ status: 'active' }).first();
+}
+
 async function validateCandidate(candidate, { bouncedEmail, ownerCustomerId, ownerLeadId, excludeRescueId = null }) {
   const email = normalizeEmail(candidate);
   if (!EMAIL_RE.test(email)) return { ok: false, reason: 'syntax' };
   if (email === normalizeEmail(bouncedEmail)) return { ok: false, reason: 'same_as_bounced' };
-  const suppressed = await db('email_suppressions')
-    .where(require('../utils/email-equivalence').suppressionCoversEmail(email)).where({ status: 'active' }).first();
+  const suppressed = await activeSuppression(email);
   if (suppressed) return { ok: false, reason: 'candidate_suppressed' };
   const triedBefore = await db('email_bounce_rescues')
     .whereRaw('LOWER(candidate_email) = ?', [email])
@@ -588,11 +594,11 @@ async function hadEarlierSelfFix(customerId) {
 // ledger) or ever sat on the do-not-email list (any status, so a released
 // block still counts; this also covers bounces from before the ledger) stays
 // out. A failed read counts as known-bad (fail toward the human).
-async function knownBadAddress(email) {
+async function knownBadAddress(email, q = db) {
   const { suppressionCoversEmail } = require('../utils/email-equivalence');
   const [bounced, blocked] = await Promise.all([
-    db('email_bounce_rescues').whereRaw('LOWER(bounced_email) = ?', [email]).first('id'),
-    db('email_suppressions').where(suppressionCoversEmail(email)).first('id'),
+    q('email_bounce_rescues').whereRaw('LOWER(bounced_email) = ?', [email]).first('id'),
+    q('email_suppressions').where(suppressionCoversEmail(email)).first('id'),
   ]).catch(() => [{ id: 'read_failed' }]);
   return Boolean(bounced || blocked);
 }
@@ -658,6 +664,21 @@ function ledgerEvidence(outcome) {
 
 // ── actions ─────────────────────────────────────────────────────────
 
+// Re-judge the destination under its lock: validateCandidate (and, for a
+// self-fix, knownBadAddress) read it before the lock, so a writer that took
+// or blocked the address in between would be missed. Every other writer of a
+// customer email takes the same lock, so after it this read is final
+// (pre-push audit on #7906). Taken or blocked = the change rolls back.
+async function assertDestinationFree(trx, { candidate, owner, selfFix }) {
+  const taken = await candidateCollision(candidate, {
+    ownerCustomerId: owner.customer?.id || null, ownerLeadId: owner.lead?.id || null,
+  }, trx);
+  const blocked = selfFix ? await knownBadAddress(candidate, trx) : await activeSuppression(candidate, trx);
+  if (taken || blocked) {
+    throw Object.assign(new Error('destination taken or blocked mid-rescue'), { code: 'STALE_DESTINATION' });
+  }
+}
+
 // The rescue's ledger row turns 'applied' in the same transaction as the
 // email change, so a committed fix always carries its record (and the
 // once-per-customer guard always sees a self-fix). The row must still be
@@ -700,6 +721,7 @@ async function applyFix({ bouncedEmail, candidate, owner, tier, evidence, applie
           throw Object.assign(new Error('billing email changed mid-rescue'), { code: 'STALE_OWNER' });
         }
       }
+      await assertDestinationFree(trx, { candidate, owner, selfFix });
       if (field === 'email') {
         // PRIMARY email changes ride the standard fanout so lead/estimate
         // snapshots retarget and newsletter tokens rotate. Same narrowed

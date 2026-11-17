@@ -12,6 +12,8 @@
  *  - two rescues of one re-examined row at once: the row claim lets one save the fix; the other writes and sends nothing.
  *  - the ledger row turns 'applied' in the email change's own transaction: a mark that cannot land rolls the change back.
  *  - a call still in processing (no verdict) never starts a re-look.
+ *  - the save re-reads the destination under its lock: another customer or a block that lands after the checks rolls
+ *    the change back.
  * A hard bounce suppresses the address before the rescue runs (the webhook's order), so the suite seeds that row too.
  * All names, phones and addresses synthetic.
  *
@@ -252,6 +254,49 @@ describeOrSkip('bounce self-fix SQL (Postgres)', () => {
     expect((await db('email_bounce_rescues').whereRaw('LOWER(bounced_email) = ?', [bounced]).first()).status).toBe('suggested');
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+  });
+
+  // Another writer commits between the rescue's checks and its destination
+  // lock; the save re-reads under the lock and rolls back.
+  async function rescueWithWriterBeforeLock(bounced, writer) {
+    const commsLock = require('../utils/customer-comms-lock');
+    const realLock = commsLock.lockCustomerEmail;
+    const spy = jest.spyOn(commsLock, 'lockCustomerEmail').mockImplementationOnce(async (trx, email) => {
+      await writer();
+      await realLock(trx, email);
+    });
+    try {
+      return await rescue.rescueBouncedAddress(bounced);
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  it('rolls back when another customer takes the address between the checks and the save', async () => {
+    const bounced = addr('takebox');
+    const fixed = addr('takebax');
+    const { id, phone } = await seedCustomer(bounced);
+    await seedSuppression(bounced);
+    await seedCall({ customerId: id, phone, transcription: `Caller: my email is wrong, it is ${fixed}`, extraction: { email: fixed } });
+    const r = await rescueWithWriterBeforeLock(bounced, async () => { await seedCustomer(fixed); });
+    expect(r).toMatchObject({ status: 'suggested', candidate: fixed });
+    expect(r.reason).toMatch(/destination taken or blocked/);
+    expect((await db('customers').where({ id }).first('email')).email).toBe(bounced);
+    expect(await db('customer_interactions').where({ customer_id: id }).count('* as n').first()).toMatchObject({ n: '0' });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it('rolls back when the address is put on the do-not-email list between the checks and the save', async () => {
+    const bounced = addr('stopbox');
+    const fixed = addr('stopbax');
+    const { id, phone } = await seedCustomer(bounced);
+    await seedSuppression(bounced);
+    await seedCall({ customerId: id, phone, transcription: `Caller: my email is wrong, it is ${fixed}`, extraction: { email: fixed } });
+    const r = await rescueWithWriterBeforeLock(bounced, async () => { await seedSuppression(fixed); });
+    expect(r).toMatchObject({ status: 'suggested', candidate: fixed });
+    expect(r.reason).toMatch(/destination taken or blocked/);
+    expect((await db('customers').where({ id }).first('email')).email).toBe(bounced);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
   it('never moves to an address with a ledger bounce row, even when no block is left for it', async () => {
