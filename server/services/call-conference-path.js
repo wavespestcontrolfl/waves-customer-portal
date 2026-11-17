@@ -42,6 +42,8 @@ const WEBHOOK_BASE = '/api/webhooks/twilio';
 const TERMINAL_LEG_STATUSES = new Set(['completed', 'busy', 'no-answer', 'failed', 'canceled']);
 const VOICEMAIL_STATUSES = new Set(['no-answer', 'busy', 'failed']);
 const NO_ANSWER_BACKSTOP_EXTRA_SEC = 20;
+const VOICEMAIL_RETRY_SEC = 10;
+const VOICEMAIL_ATTEMPTS = 3;
 const CALL_TOKEN_TTL_MS = 2 * 60 * 1000;
 const CALL_TOKEN_MAX = 500;
 const CALL_SID_RE = /^CA[0-9a-f]{32}$/i;
@@ -54,6 +56,8 @@ const OPEN_SQL = [
 // Read through the module object at call time: a suite that mocks feature-gates as a bare object reads off.
 const conferenceMode = () => (typeof featureGates.callConferencePathMode === 'function' ? featureGates.callConferencePathMode() : 'off');
 const masked = (sid) => (sid ? `…${String(sid).slice(-6)}` : 'none');
+// Errors are logged by code only: a Twilio error message can carry a phone number.
+const errorCode = (err) => String(err?.code || err?.status || err?.name || 'error');
 const client = () => twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 const publicUrl = (path) => `https://${process.env.SERVER_DOMAIN || 'portal.wavespestcontrol.com'}${path}`;
 const roomFor = (callSid) => `waves-${callSid}`;
@@ -161,16 +165,23 @@ async function placeStaffLegs({ callSid, numbers, ringTimeoutSec, callerFrom, wa
         call = await api.calls.create({ ...params, from: callerFrom, callToken }).catch((err) => {
           // Only an API refusal falls back; a network error may have placed the call already.
           if (!(err?.status >= 400 && err?.status < 500)) throw err;
-          logger.warn(`[conference] caller-ID passthrough refused for leg ${index} (${err.code || err.status}); ringing from the Waves line`);
+          logger.warn(`[conference] caller-ID passthrough refused for leg ${index} (${errorCode(err)}); ringing from the Waves line`);
           return null;
         });
       }
       if (!call) call = await api.calls.create({ ...params, from: wavesLine });
       await stampLeg(callSid, index, { sid: call.sid })
-        .catch((err) => logger.warn(`[conference] leg ${index} SID stamp failed for ${masked(callSid)}: ${err.message}`));
+        .catch((err) => logger.warn(`[conference] leg ${index} SID stamp failed for ${masked(callSid)} (${errorCode(err)})`));
+      // The call may have settled while this leg was placed (the caller left, voicemail, another leg
+      // won), and that clean-up could not see this SID. Read after the stamp, so one of the two ends it.
+      const latest = await loadState(callSid).catch(() => null);
+      if (latest && (latest.closed_at || latest.voicemail_at || (latest.accepted_leg_sid && latest.accepted_leg_sid !== call.sid))) {
+        await api.calls(call.sid).update({ status: 'completed' })
+          .catch((err) => logger.info(`[conference] late leg ${masked(call.sid)} not ended (${errorCode(err)})`));
+      }
       return call.sid;
     } catch (err) {
-      logger.error(`[conference] staff leg ${index} not placed for ${masked(callSid)}: ${err.message}`);
+      logger.error(`[conference] staff leg ${index} not placed for ${masked(callSid)} (${errorCode(err)})`);
       await stampLeg(callSid, index, { status: 'failed' }).catch(() => {});
       return null;
     }
@@ -200,7 +211,7 @@ async function startCallerRecording(callSid) {
   } catch (err) {
     const call = await client().calls(callSid).fetch().catch(() => null);
     if (call && call.status !== 'in-progress') return 'caller_gone';
-    logger.error(`[conference] recording not started for ${masked(callSid)}: ${err.message}`);
+    logger.error(`[conference] recording not started for ${masked(callSid)} (${errorCode(err)})`);
     return 'failed';
   }
 }
@@ -212,7 +223,7 @@ async function endLegs(state, { except = null } = {}) {
   const api = client();
   // completed hangs up a leg whether it still rings or already plays the screen.
   const ended = await Promise.all(live.map((leg) => api.calls(leg.sid).update({ status: 'completed' })
-    .then(() => 1, (err) => { logger.info(`[conference] leg ${masked(leg.sid)} not ended (${err.code || err.message})`); return 0; })));
+    .then(() => 1, (err) => { logger.info(`[conference] leg ${masked(leg.sid)} not ended (${errorCode(err)})`); return 0; })));
   return ended.reduce((sum, n) => sum + n, 0);
 }
 
@@ -237,23 +248,35 @@ async function claimVoicemail(callSid) {
   return won > 0;
 }
 
-// The caller to today's voicemail path (/call-complete?conf=1&conf_status=...).
-async function sendCallerToVoicemail(callSid, status) {
-  if (!(await claimVoicemail(callSid))) return false;
+// The caller to today's voicemail path (/call-complete?conf=1&conf_status=...): 'redirected',
+// 'not_needed' (a press 1, the caller left, or another trigger holds the claim) or 'redirect_failed'.
+// A failed redirect releases the claim and tries again in 10 s (3 tries), so a Twilio hiccup cannot
+// leave the caller alone in the room; a later leg callback or the backstop may also take it.
+async function sendCallerToVoicemail(callSid, status, attempt = 1) {
+  if (!(await claimVoicemail(callSid))) return 'not_needed';
   const confStatus = VOICEMAIL_STATUSES.has(status) ? status : 'no-answer';
   try {
     await client().calls(callSid).update({ url: publicUrl(`${WEBHOOK_BASE}/call-complete?conf=1&conf_status=${confStatus}`), method: 'POST' });
-    return true;
+    return 'redirected';
   } catch (err) {
-    logger.warn(`[conference] caller ${masked(callSid)} not redirected to voicemail (${err.code || err.message})`);
-    return false;
+    logger.warn(`[conference] caller ${masked(callSid)} not redirected to voicemail (${errorCode(err)}), try ${attempt} of ${VOICEMAIL_ATTEMPTS}`);
+    await updateState(callSid, [[['voicemail_at'], null]])
+      .catch((releaseErr) => logger.warn(`[conference] voicemail claim not released for ${masked(callSid)} (${errorCode(releaseErr)})`));
+    if (attempt < VOICEMAIL_ATTEMPTS) {
+      const timer = setTimeout(() => {
+        sendCallerToVoicemail(callSid, confStatus, attempt + 1)
+          .catch((retryErr) => logger.warn(`[conference] voicemail retry failed for ${masked(callSid)} (${errorCode(retryErr)})`));
+      }, VOICEMAIL_RETRY_SEC * 1000);
+      if (typeof timer.unref === 'function') timer.unref();
+    }
+    return 'redirect_failed';
   }
 }
 
 function scheduleNoAnswerBackstop(callSid, ringTimeoutSec) {
   const timer = setTimeout(() => {
     sendCallerToVoicemail(callSid, 'no-answer')
-      .catch((err) => logger.warn(`[conference] no-answer backstop failed for ${masked(callSid)}: ${err.message}`));
+      .catch((err) => logger.warn(`[conference] no-answer backstop failed for ${masked(callSid)} (${errorCode(err)})`));
   }, (ringTimeoutSec + NO_ANSWER_BACKSTOP_EXTRA_SEC) * 1000);
   if (typeof timer.unref === 'function') timer.unref();
   return timer;
@@ -271,7 +294,7 @@ async function endRoomAfterStaffHangup(callSid, state) {
     for (const room of open) await api.conferences(room.sid).update({ status: 'completed' });
     if (open.length) return 'room_ended';
   } catch (err) {
-    logger.warn(`[conference] room end failed for ${masked(callSid)}: ${err.message}`);
+    logger.warn(`[conference] room end failed for ${masked(callSid)} (${errorCode(err)})`);
   }
   return api.calls(callSid).update({ status: 'completed' }).then(() => 'caller_hung_up', () => 'caller_gone');
 }
@@ -285,7 +308,7 @@ async function onStaffLegStatus({ callSid, index, legSid, status }) {
     return state.accepted_leg_sid === legSid ? endRoomAfterStaffHangup(callSid, state) : 'accepted';
   }
   if (!everyLegEnded(state)) return 'waiting';
-  return (await sendCallerToVoicemail(callSid, noAnswerStatus(state))) ? 'voicemail' : 'settled';
+  return (await sendCallerToVoicemail(callSid, noAnswerStatus(state))) === 'redirected' ? 'voicemail' : 'settled';
 }
 
 // The caller's call ended (/call-status): close the claim and end every leg still ringing.
@@ -308,7 +331,7 @@ async function conferenceDialOutcome(callSid, confStatus) {
   }
   // The caller left the room with no press 1 and no redirect (a join error): stop the ring first.
   await claimVoicemail(callSid)
-    .catch((err) => logger.warn(`[conference] ring not stopped for ${masked(callSid)}: ${err.message}`));
+    .catch((err) => logger.warn(`[conference] ring not stopped for ${masked(callSid)} (${errorCode(err)})`));
   return { status: 'no-answer', duration: 0 };
 }
 

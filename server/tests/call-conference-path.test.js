@@ -17,6 +17,7 @@ jest.mock('twilio', () => {
 });
 
 const db = require('../models/db');
+const logger = require('../services/logger');
 const gates = require('../config/feature-gates');
 const cp = require('../services/call-conference-path');
 
@@ -162,16 +163,35 @@ describe('claimStart + placeStaffLegs', () => {
     expect(c).toMatchObject({ to: '+19415550002', from: '+19415550000' });
     expect(c.callToken).toBeUndefined();
     expect(row.metadata.conference_path.legs).toEqual({ 0: { sid: LEG0 }, 1: { sid: LEG1 } });
+    expect(log.updates).toEqual([]);
+  });
+
+  test('a leg placed after the call settled is ended at once: the caller left, or another leg won', async () => {
+    for (const settle of [{ closed_at: 'x' }, { accepted_leg_sid: LEG1 }]) {
+      const row = fakeCallLog({ conference_path: { leg_count: 1, legs: { 0: {} } } });
+      const log = fakeTwilio();
+      mockTw.api.calls.create.mockImplementationOnce(async (p) => {
+        log.created.push(p);
+        Object.assign(row.metadata.conference_path, settle); // the clean-up ran while Twilio placed the call
+        return { sid: LEG0 };
+      });
+      await cp.placeStaffLegs({ callSid: SID, numbers: ['+19415550001'], ringTimeoutSec: 30, callerFrom: null, wavesLine: '+19415550000', callToken: null });
+      expect(log.updates).toEqual([{ sid: LEG0, status: 'completed' }]);
+    }
   });
 
   test('a network error never rings twice; the leg is stamped failed', async () => {
     const row = fakeCallLog({ conference_path: { leg_count: 1, legs: { 0: {} } } });
     fakeTwilio();
-    mockTw.api.calls.create.mockRejectedValueOnce(new Error('socket hang up'));
+    mockTw.api.calls.create.mockRejectedValueOnce(Object.assign(new Error('socket hang up calling +19415550001'), { code: 'ECONNRESET' }));
     const placed = await cp.placeStaffLegs({ callSid: SID, numbers: ['+19415550001'], ringTimeoutSec: 30, callerFrom: '+19415550100', wavesLine: '+19415550000', callToken: 'tok' });
     expect(placed).toEqual([]);
     expect(mockTw.api.calls.create).toHaveBeenCalledTimes(1);
     expect(row.metadata.conference_path.legs[0]).toEqual({ status: 'failed' });
+    // The provider's message can carry the phone number: only its code is logged.
+    const logged = [...logger.error.mock.calls, ...logger.warn.mock.calls].flat().join(' ');
+    expect(logged).toContain('ECONNRESET');
+    expect(logged).not.toContain('5550001');
   });
 });
 
@@ -217,6 +237,33 @@ describe('staff leg status', () => {
     // A redelivered callback after the claim: no second redirect.
     expect(await cp.onStaffLegStatus({ callSid: SID, index: 1, legSid: LEG1, status: 'busy' })).toBe('settled');
     expect(log.updates).toHaveLength(1);
+  });
+
+  test('a failed voicemail redirect releases the claim and tries again in 10 s, three tries at most', async () => {
+    jest.useFakeTimers();
+    const row = fakeCallLog(ringing());
+    fakeTwilio();
+    const redirect = jest.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('Call to +19415550100 failed'), { status: 503, code: 20503 }))
+      .mockResolvedValue({ sid: SID });
+    const legCalls = mockTw.api.calls.getMockImplementation();
+    mockTw.api.calls.mockImplementation((sid) => (sid === SID ? { update: redirect } : legCalls(sid)));
+    expect(await cp.sendCallerToVoicemail(SID, 'busy')).toBe('redirect_failed');
+    expect(row.metadata.conference_path.voicemail_at).toBeNull();
+    expect(logger.warn.mock.calls.flat().join(' ')).not.toContain('5550100');
+    await jest.advanceTimersByTimeAsync(10_000);
+    expect(redirect).toHaveBeenCalledTimes(2);
+    expect(redirect).toHaveBeenLastCalledWith({ method: 'POST', url: 'https://portal.wavespestcontrol.com/api/webhooks/twilio/call-complete?conf=1&conf_status=busy' });
+    expect(row.metadata.conference_path.voicemail_at).toEqual(expect.any(String));
+
+    fakeCallLog(ringing());
+    fakeTwilio();
+    const down = jest.fn().mockRejectedValue(Object.assign(new Error('down'), { status: 503 }));
+    const legCalls2 = mockTw.api.calls.getMockImplementation();
+    mockTw.api.calls.mockImplementation((sid) => (sid === SID ? { update: down } : legCalls2(sid)));
+    await cp.sendCallerToVoicemail(SID, 'no-answer');
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(down).toHaveBeenCalledTimes(3);
   });
 
   test('every leg busy or failed reports busy; a non-terminal status is ignored', async () => {
