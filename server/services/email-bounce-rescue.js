@@ -538,6 +538,12 @@ async function candidateCollision(email, { ownerCustomerId, ownerLeadId }, q = d
     && !(ownerCustomerId && otherLead.customer_id === ownerCustomerId)) {
     return { kind: 'lead', id: otherLead.id };
   }
+  // Gmail ignores local-part dots and everything after '+': a dot or tag
+  // variant of a mailbox another party holds is that party's inbox (the
+  // identity the destination lock keys on). The bounce recovery's check,
+  // fail-closed (pre-push audit on #7906).
+  const { gmailMailboxOwnedByOther } = require('./email-bounce-recovery');
+  if (await gmailMailboxOwnedByOther(email, ownerCustomerId, q)) return { kind: 'gmail_mailbox', id: null };
   return null;
 }
 
@@ -1212,7 +1218,7 @@ async function applySuggestedRescue(rescueId, { appliedBy = 'operator' } = {}) {
     ownerLeadId: owner.lead?.id || null,
     excludeRescueId: row.id,
   });
-  if (!v.ok) return { error: `validation failed: ${v.reason}${v.collision ? ` (${v.collision.kind} ${v.collision.id})` : ''}` };
+  if (!v.ok) return { error: `validation failed: ${v.reason}${v.collision ? ` (${[v.collision.kind, v.collision.id].filter(Boolean).join(' ')})` : ''}` };
   const evidence = typeof row.evidence === 'string' ? JSON.parse(row.evidence || '{}') : (row.evidence || {});
   const counts = await applyFix({
     bouncedEmail, candidate: normalizeEmail(row.candidate_email), owner,

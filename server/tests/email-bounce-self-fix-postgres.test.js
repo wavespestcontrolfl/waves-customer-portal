@@ -14,6 +14,8 @@
  *  - a call still in processing (no verdict) never starts a re-look.
  *  - the save re-reads the destination under its lock: another customer or a block that lands after the checks rolls
  *    the change back.
+ *  - a Gmail dot or + alias of another customer's inbox counts as that customer's address, at the checks and under the
+ *    lock.
  * A hard bounce suppresses the address before the rescue runs (the webhook's order), so the suite seeds that row too.
  * All names, phones and addresses synthetic.
  *
@@ -42,6 +44,8 @@ describeOrSkip('bounce self-fix SQL (Postgres)', () => {
   const created = { customers: [], suppressions: [] };
   const tag = randomUUID().slice(0, 8);
   const addr = (local) => `${local}${tag}@yahoo.com`;
+  // Gmail ignores local-part dots and everything after '+'.
+  const gaddr = (local) => `${local}${tag}@gmail.com`;
 
   beforeAll(() => {
     db = require('../models/db');
@@ -297,6 +301,32 @@ describeOrSkip('bounce self-fix SQL (Postgres)', () => {
     expect(r.reason).toMatch(/destination taken or blocked/);
     expect((await db('customers').where({ id }).first('email')).email).toBe(bounced);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it('never moves to another customer\'s Gmail inbox through a dot or + alias', async () => {
+    const bounced = gaddr('jon.smith');
+    const fixed = gaddr('john.smith');
+    const { id, phone } = await seedCustomer(bounced);
+    await seedCustomer(`johnsmith${tag}+billing@gmail.com`); // the same inbox as `fixed`
+    await seedSuppression(bounced);
+    await seedCall({ customerId: id, phone, transcription: `Caller: my email is wrong, it is ${fixed}`, extraction: { email: fixed } });
+    const r = await rescue.rescueBouncedAddress(bounced);
+    expect(r).toMatchObject({ status: 'suggested', candidate: fixed });
+    expect(r.selfFix).toBeUndefined();
+    expect((await db('customers').where({ id }).first('email')).email).toBe(bounced);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it('rolls back when another customer takes a Gmail alias of the address between the checks and the save', async () => {
+    const bounced = gaddr('mara.vo');
+    const fixed = gaddr('maria.vo');
+    const { id, phone } = await seedCustomer(bounced);
+    await seedSuppression(bounced);
+    await seedCall({ customerId: id, phone, transcription: `Caller: my email is wrong, it is ${fixed}`, extraction: { email: fixed } });
+    const r = await rescueWithWriterBeforeLock(bounced, async () => { await seedCustomer(`mariavo${tag}+home@gmail.com`); });
+    expect(r).toMatchObject({ status: 'suggested', candidate: fixed });
+    expect(r.reason).toMatch(/destination taken or blocked/);
+    expect((await db('customers').where({ id }).first('email')).email).toBe(bounced);
   });
 
   it('never moves to an address with a ledger bounce row, even when no block is left for it', async () => {
