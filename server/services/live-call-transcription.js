@@ -3,12 +3,18 @@
 /**
  * Live call transcription (GATE_LIVE_CALL_TRANSCRIPTION, dark; owner 2026-11-16 "ok build all").
  *
- * When a staff member presses 1 to take an inbound call (/inbound-forward-accept), Twilio Real-Time
- * Transcription starts on the CALLER's call: the parent CallSid that call_log is keyed on, both
- * tracks. The inbound track is the caller; the outbound track is what the caller hears, which is
- * the staff member once the legs bridge. Each final utterance posts to
- * /api/webhooks/twilio/live-transcription and lands in call_live_utterances, card-number scrubbed.
- * This module only collects the text. The features that read it come in later PRs.
+ * When a staff member presses 1 to take an inbound call (/inbound-forward-accept, or the conference
+ * ring's /conference-staff-accept), Twilio Real-Time Transcription starts on the CALLER's call: the
+ * parent CallSid that call_log is keyed on, both tracks. The inbound track is the caller; the
+ * outbound track is what the caller hears, which is the staff member once the legs bridge. Each
+ * final utterance posts to /api/webhooks/twilio/live-transcription and lands in
+ * call_live_utterances, card-number scrubbed. This module only collects the text; the features
+ * that read it are in their own modules.
+ *
+ * While the star-key hold holds the caller (call-hold.js: conference_path.hold.phase 'held'), no
+ * utterance is stored. The outbound track then carries the hold script, not the staff, and the
+ * call recording pauses for the hold too. A line that arrives after the hold is decided is dropped
+ * even when it was spoken just before the star; text resumes once the staff return.
  *
  * Spend: Twilio bills real-time transcription by the minute ($0.027/min, read 2026-11-16), so the
  * gate is the owner's flip. Starting after press 1 skips the greeting, the ringing, voicemail and
@@ -48,6 +54,8 @@ const MAX_TEXT = 4000;
 // recording's own scrub flagged a card number (transcription_metadata.pan_detected).
 const QUARANTINED_SQL = "((metadata #>> '{live_transcription,quarantined_at}') IS NOT NULL"
   + " OR COALESCE(transcription_metadata ->> 'pan_detected', '') = 'true') AS quarantined";
+// The star-key hold holds the caller (GATE_CALL_HOLD, call-hold.js): its wanted phase, as the card pause reads it.
+const HOLD_HELD_SQL = "COALESCE((metadata #>> '{conference_path,hold,phase}') = 'held', false) AS hold_held";
 // A card-number recording pause is open on the call (GATE_CALL_RECORDING_CARD_PAUSE, live-call-card-pause.js).
 const CARD_PAUSE_OPEN_SQL = "(metadata -> 'live_transcription' -> 'card_pause' ->> 'paused_at') IS NOT NULL"
   + " AND (metadata -> 'live_transcription' -> 'card_pause' ->> 'resumed_at') IS NULL AS card_pause_open";
@@ -243,10 +251,12 @@ async function storeUtterance(callSid, body) {
     const claimed = await trx('call_log')
       .where('twilio_call_sid', callSid)
       .whereRaw("(metadata -> 'live_transcription') IS NOT NULL")
-      .first('id', trx.raw(QUARANTINED_SQL), trx.raw(CARD_PAUSE_OPEN_SQL));
+      .first('id', trx.raw(QUARANTINED_SQL), trx.raw(CARD_PAUSE_OPEN_SQL), trx.raw(HOLD_HELD_SQL));
     if (!claimed) return { stored: false, reason: 'not_started_here' };
     // A quarantined call keeps no live text: a late callback or a redelivery stores nothing.
     if (claimed.quarantined) return { stored: false, reason: 'quarantined' };
+    // On hold: the caller hears the hold script, and the recording is paused.
+    if (claimed.hold_held === true) return { stored: false, reason: 'on_hold' };
     pauseOpen = claimed.card_pause_open === true;
 
     // The rows spoken around this one, not the newest rows: a line that arrives late (after later

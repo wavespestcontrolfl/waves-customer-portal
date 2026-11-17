@@ -11,6 +11,10 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/voice-agent/relay-server', () => ({ isRelayAttached: jest.fn(() => false) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false) }));
 jest.mock('../services/call-recording-processor', () => ({ recoverRecordingForCall: jest.fn() }));
+jest.mock('../services/live-call-transcription', () => ({
+  ...jest.requireActual('../services/live-call-transcription'),
+  startLiveTranscription: jest.fn(async () => ({ started: true })),
+}));
 jest.mock('../services/call-conference-path', () => ({
   ...jest.requireActual('../services/call-conference-path'),
   admitsConferencePath: jest.fn(() => false),
@@ -35,6 +39,8 @@ const VoiceResponse = twilio.twiml.VoiceResponse;
 const db = require('../models/db');
 const logger = require('../services/logger');
 const cp = require('../services/call-conference-path');
+const live = require('../services/live-call-transcription');
+const { isEnabled } = require('../config/feature-gates');
 const voiceRouter = require('../routes/twilio-voice-webhook');
 const { appendMainStaffRing, appendStaffRingDial } = voiceRouter._test;
 
@@ -224,6 +230,51 @@ describe('/conference-staff-accept', () => {
     expect(JSON.parse(acceptance.bindings[0])).toMatchObject({ accepted: true, parent_call_sid: SID, dial_call_sid: LEG, answered_by_number: '+19415550001' });
     await new Promise(setImmediate);
     expect(cp.endLegs).toHaveBeenCalledWith({ legs: { 0: { sid: LEG }, 1: { sid: 'CA2' } } }, { except: LEG });
+  });
+
+  describe('live text (GATE_LIVE_CALL_TRANSCRIPTION), as on today\'s ring', () => {
+    afterEach(() => { isEnabled.mockReset().mockReturnValue(false); });
+
+    test('the winning press 1 starts it on the caller call after the TwiML is sent, in the caller\'s language', async () => {
+      primeDb({ row: { metadata: { caller_language: 'es' }, call_outcome: null } });
+      isEnabled.mockImplementation((gate) => gate === 'liveCallTranscription');
+      cp.claimAccept.mockResolvedValue({ won: true, first: true });
+      const res = await press();
+      expect(res.body).toContain(STAFF_ROOM);
+      expect(live.startLiveTranscription).toHaveBeenCalledTimes(1);
+      expect(live.startLiveTranscription).toHaveBeenCalledWith({ parentCallSid: SID, language: 'es' });
+      expect(res.send.mock.invocationCallOrder[0]).toBeLessThan(live.startLiveTranscription.mock.invocationCallOrder[0]);
+      // A redelivered press 1 of the winner asks again, as today's ring does for both cells: the start's own claim
+      // (live_transcription IS NULL, pinned in live-call-transcription.test.js) admits one start per call.
+      cp.claimAccept.mockResolvedValue({ won: true, first: false });
+      await press();
+      expect(live.startLiveTranscription).toHaveBeenCalledTimes(2);
+      expect(cp.startCallerRecording).toHaveBeenCalledTimes(1);
+    });
+
+    test('a start that fails is only logged: the staff still join the room', async () => {
+      isEnabled.mockImplementation((gate) => gate === 'liveCallTranscription');
+      cp.claimAccept.mockResolvedValue({ won: true, first: true });
+      live.startLiveTranscription.mockRejectedValueOnce(new Error('twilio down'));
+      const res = await press();
+      expect(res.body).toContain(STAFF_ROOM);
+      await new Promise(setImmediate);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('[live-transcription] start failed'));
+    });
+
+    test('gate off, a lost press 1, a caller who left, or a claim error starts nothing', async () => {
+      cp.claimAccept.mockResolvedValue({ won: true, first: true });
+      await press();
+      isEnabled.mockImplementation((gate) => gate === 'liveCallTranscription');
+      cp.claimAccept.mockResolvedValue({ won: false, first: false });
+      await press();
+      cp.claimAccept.mockResolvedValue({ won: true, first: true });
+      cp.startCallerRecording.mockResolvedValueOnce('caller_gone');
+      await press();
+      cp.claimAccept.mockRejectedValueOnce(new Error('pg down'));
+      await press();
+      expect(live.startLiveTranscription).not.toHaveBeenCalled();
+    });
   });
 
   test('a redelivered press 1 of the winner joins again; nothing is started twice', async () => {
