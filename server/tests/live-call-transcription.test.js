@@ -15,6 +15,10 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }))
 const mockRequest = jest.fn();
 jest.mock('twilio', () => jest.fn(() => ({ request: mockRequest })));
 
+// The card-pause hook (GATE_CALL_RECORDING_CARD_PAUSE) is pinned here only as a call; its own suite covers the pause.
+const mockCardPause = jest.fn(() => Promise.resolve({ action: 'none' }));
+jest.mock('../services/live-call-card-pause', () => ({ onUtteranceStored: (...args) => mockCardPause(...args) }));
+
 // A small knex fake: call_log claims + stamps, and an in-memory call_live_utterances table.
 jest.mock('../models/db', () => {
   const state = { claimed: new Set(), quarantined: new Set(), panDetected: new Set(), rowExists: true, stamps: [], utterances: [], nextId: 1, rawCalls: [] };
@@ -25,7 +29,7 @@ jest.mock('../models/db', () => {
     q.first = jest.fn(async () => {
       const sid = q.filters.find(([c]) => c === 'twilio_call_sid')?.[1];
       if (!state.claimed.has(sid)) return undefined;
-      return { id: `log-${sid}`, quarantined: state.quarantined.has(sid) || state.panDetected.has(sid) };
+      return { id: `log-${sid}`, quarantined: state.quarantined.has(sid) || state.panDetected.has(sid), card_pause_open: state.pauseOpen === true };
     });
     q.update = jest.fn(async (patch) => {
       const sid = q.filters.find(([c]) => c === 'twilio_call_sid')?.[1];
@@ -222,6 +226,43 @@ describe('recordLiveTranscriptionEvent', () => {
     await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'hello', 1));
     await expect(live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'hello', 1))).resolves.toMatchObject({ stored: false, reason: 'duplicate' });
     expect(db.__state.utterances).toHaveLength(1);
+  });
+
+  test('the card-pause hook fires after the store commits with the masked text, never for a duplicate', async () => {
+    mockCardPause.mockClear();
+    db.transaction.mockImplementationOnce(async (fn) => {
+      const result = await fn(db);
+      expect(mockCardPause).not.toHaveBeenCalled(); // still inside the transaction
+      return result;
+    });
+    await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'my card is 4242 4242 4242 4242', 1));
+    expect(mockCardPause).toHaveBeenCalledTimes(1);
+    expect(mockCardPause).toHaveBeenCalledWith({ callSid: CALL, text: 'my card is [card ending 4242]', panMasked: true, pauseOpen: false });
+    await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'my card is 4242 4242 4242 4242', 1));
+    await live.recordLiveTranscriptionEvent(content(5, 'inbound_track', 'partial', 2, { Final: 'false' }));
+    expect(mockCardPause).toHaveBeenCalledTimes(1);
+    // A hook that rejects or throws never fails the store.
+    mockCardPause.mockReturnValueOnce(Promise.reject(new Error('twilio down')));
+    await expect(live.recordLiveTranscriptionEvent(content(3, 'outbound_track', 'ok', 3))).resolves.toMatchObject({ stored: true });
+  });
+
+  test('gate off: the hook is not called and the service is not required', async () => {
+    mockCardPause.mockClear();
+    isEnabled.mockImplementation((key) => key !== 'callRecordingCardPause');
+    await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'what is the card number', 1));
+    expect(mockCardPause).not.toHaveBeenCalled();
+  });
+
+  test('gate off with a card pause running: the hook still runs, so the pause ends on time', async () => {
+    mockCardPause.mockClear();
+    isEnabled.mockImplementation((key) => key !== 'callRecordingCardPause');
+    db.__state.pauseOpen = true;
+    try {
+      await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'ok, go ahead', 1));
+      expect(mockCardPause).toHaveBeenCalledWith(expect.objectContaining({ callSid: CALL, pauseOpen: true }));
+    } finally {
+      db.__state.pauseOpen = false;
+    }
   });
 
   test('a call this module never started is not written to', async () => {
