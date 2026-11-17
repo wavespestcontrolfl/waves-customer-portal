@@ -180,6 +180,7 @@ function fakeTwilio({ rooms = [{ sid: ROOM }], fail = {}, during = {} } = {}) {
   conferences.list = jest.fn(async (params) => { events.push({ name: 'list', ...params }); return rooms; });
   const calls = jest.fn((sid) => ({
     recordings: jest.fn((which) => ({ update: (params) => step('recording', { sid, which, ...params }) })),
+    update: (params) => step('call', { sid, ...params }),
   }));
   mockTw.api = { calls, conferences };
   return events;
@@ -1618,5 +1619,99 @@ describe('a voicemail callback bell that is not delivered', () => {
     await expect(hold.recoverPendingHolds()).resolves.toMatchObject({ action: 'swept', open: 1 });
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('sweep failed for'));
     expect(holdOf().rec_pending).toBe(true);
+  });
+});
+
+describe('the Hold button: holdForPanel and requestHold', () => {
+  const featureGates = require('../config/feature-gates');
+  const MOVED_TO = `https://portal.wavespestcontrol.com/api/webhooks/twilio/conference-staff-left?parent=${SID}&by=button`;
+  const NONE = { can_hold: false, on_hold: false, since: null };
+  const CAN = { can_hold: true, on_hold: false, since: null };
+
+  test('holdForPanel: null off the conference ring and before a press 1; Hold only while answered, open and idle', () => {
+    expect(hold.holdForPanel(null)).toBeNull();
+    expect(hold.holdForPanel({ room: `waves-${SID}` })).toBeNull();
+    const answered = { accepted_leg_sid: LEG };
+    expect(hold.holdForPanel(answered)).toEqual(CAN);
+    // A hold that is over: the caller is back, or the star was aborted.
+    expect(hold.holdForPanel({ ...answered, hold: heldHold({ phase: 'returned', applied: 'returned', ret_by: 'press1' }) })).toEqual(CAN);
+    expect(hold.holdForPanel({ ...answered, hold: heldHold({ phase: 'returned', applied: null, ret_by: 'abort' }) })).toEqual(CAN);
+    // Held, or a press 1 return Twilio has not confirmed: on hold since the star.
+    expect(hold.holdForPanel({ ...answered, hold: heldHold() })).toEqual({ can_hold: false, on_hold: true, since: iso(-10) });
+    expect(hold.holdForPanel({ ...answered, hold: heldHold({ phase: 'returned', applied: 'held', ret_by: 'press1' }) }))
+      .toEqual({ can_hold: false, on_hold: true, since: iso(-10) });
+    // A hold voicemail, the ring's voicemail, or a closed room: no hold and no button.
+    expect(hold.holdForPanel({ ...answered, hold: heldHold({ phase: 'voicemail', applied: 'voicemail' }) })).toEqual(NONE);
+    expect(hold.holdForPanel({ ...answered, voicemail_at: iso(-5) })).toEqual(NONE);
+    expect(hold.holdForPanel({ ...answered, closed_at: iso(-5) })).toEqual(NONE);
+  });
+
+  test("an answered call: the winning staff leg is moved by REST to the star route with by=button, and nothing is decided here", async () => {
+    seed(null);
+    const events = fakeTwilio();
+    await expect(hold.requestHold(SID, { by: 'button' })).resolves.toBe('requested');
+    expect(events).toEqual([{ name: 'call', sid: LEG, url: MOVED_TO, method: 'POST' }]);
+    // The star route decides the hold: no hold is written here and no lock is taken.
+    expect(holdOf()).toBeUndefined();
+    expect(db.__state.writes).toEqual([]);
+    expect(db.__state.txCount).toBe(0);
+  });
+
+  test("after a hold that is over, a new press moves the leg again; the URL names this server's own domain", async () => {
+    process.env.SERVER_DOMAIN = 'staging.example.com';
+    seed(heldHold({ phase: 'returned', applied: 'returned', ret_by: 'press1' }));
+    const events = fakeTwilio();
+    await expect(hold.requestHold(SID, { by: 'button' })).resolves.toBe('requested');
+    expect(events[0].url).toBe(`https://staging.example.com/api/webhooks/twilio/conference-staff-left?parent=${SID}&by=button`);
+  });
+
+  test('a hold already open, or a return in flight: on_hold, and nothing is moved', async () => {
+    const events = fakeTwilio();
+    for (const h of [heldHold(), heldHold({ applied: null }), heldHold({ phase: 'returned', applied: 'held', ret_by: 'press1' })]) {
+      seed(h);
+      await expect(hold.requestHold(SID, { by: 'button' })).resolves.toBe('on_hold');
+    }
+    expect(events).toEqual([]);
+  });
+
+  test('unavailable with no Twilio request: gate off, another asker, a bad SID, no conference ring, no press 1, a voicemail, a closed room', async () => {
+    const events = fakeTwilio();
+    seed(null);
+    featureGates.callHoldLive.mockReturnValueOnce(false);
+    await expect(hold.requestHold(SID, { by: 'button' })).resolves.toBe('unavailable');
+    await expect(hold.requestHold(SID, { by: 'star' })).resolves.toBe('unavailable');
+    await expect(hold.requestHold(SID)).resolves.toBe('unavailable');
+    await expect(hold.requestHold('CA123', { by: 'button' })).resolves.toBe('unavailable');
+    for (const setup of [
+      () => { db.__state.row = null; },
+      () => seed(null, { accepted_leg_sid: null }),
+      () => seed(heldHold({ phase: 'voicemail', applied: 'voicemail' })),
+      () => seed(null, { voicemail_at: iso(-5) }),
+      () => seed(null, { closed_at: iso(-5) }),
+    ]) {
+      setup();
+      await expect(hold.requestHold(SID, { by: 'button' })).resolves.toBe('unavailable');
+    }
+    expect(events).toEqual([]);
+  });
+
+  test('Twilio refuses the move (the staff leg already hung up): failed, nothing written, the log has the code only', async () => {
+    seed(null);
+    const events = fakeTwilio({ fail: { call: err(400, 21220) } });
+    await expect(hold.requestHold(SID, { by: 'button' })).resolves.toBe('failed');
+    expect(names(events)).toEqual(['call']);
+    expect(db.__state.writes).toEqual([]);
+    const logged = logger.warn.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).toContain('21220');
+    expect(logged).not.toContain(SID);
+    expect(logged).not.toContain('+1941');
+  });
+
+  test('a database read error: failed, and no Twilio request', async () => {
+    seed(null);
+    db.__state.failReads = 1;
+    const events = fakeTwilio();
+    await expect(hold.requestHold(SID, { by: 'button' })).resolves.toBe('failed');
+    expect(events).toEqual([]);
   });
 });

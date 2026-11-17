@@ -94,6 +94,18 @@ describe('/conference-staff-left', () => {
     expect(res.body).toBe(response(`<Redirect method="POST">${MENU_URL}&amp;first=1</Redirect>`));
   });
 
+  test("by=button (the Hold button's REST move) is recorded as button; every other by is a star", async () => {
+    callHold.isEnabled.mockReturnValue(true);
+    callHold.startHold.mockResolvedValue('held');
+    const res = await post('/conference-staff-left', { body, query: { by: 'button' } });
+    expect(callHold.startHold).toHaveBeenLastCalledWith(SID, { by: 'button', legSid: LEG });
+    expect(res.body).toBe(response(`<Redirect method="POST">${MENU_URL}&amp;first=1</Redirect>`));
+    for (const by of ['voice', 'BUTTON', 'star', '', ['button']]) {
+      await post('/conference-staff-left', { body, query: { by } });
+      expect(callHold.startHold).toHaveBeenLastCalledWith(SID, { by: 'star', legSid: LEG });
+    }
+  });
+
   test('no_room (the caller left): Hangup', async () => {
     callHold.isEnabled.mockReturnValue(true);
     callHold.startHold.mockResolvedValue('no_room');

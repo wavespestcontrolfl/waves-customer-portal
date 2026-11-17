@@ -9,6 +9,8 @@ const mockAssist = { refreshAssistIfDue: jest.fn(() => new Promise(() => {})), a
 jest.mock('../services/live-call-assist', () => mockAssist);
 const mockGates = { isEnabled: jest.fn(() => true) };
 jest.mock('../config/feature-gates', () => mockGates);
+const mockHold = { isEnabled: jest.fn(() => false), holdForPanel: jest.fn(() => null), requestHold: jest.fn() };
+jest.mock('../services/call-hold', () => mockHold);
 
 let mockRole = 'admin';
 jest.mock('../middleware/admin-auth', () => ({
@@ -77,6 +79,92 @@ const row = (n, extra = {}) => ({
 const utt = (i, speaker = 'caller') => ({ speaker, text: `line ${i}`, spoken_at: `2026-11-17T15:00:${String(i).padStart(2, '0')}.000Z` });
 
 beforeEach(() => { jest.clearAllMocks(); mockAssist.assistForPanel.mockReturnValue(null); mockRole = 'admin'; findKnownCallerCustomer.mockResolvedValue(null); mockGates.isEnabled.mockImplementation(() => true); });
+
+beforeEach(() => {
+  mockHold.isEnabled.mockReset().mockReturnValue(false);
+  mockHold.holdForPanel.mockReset().mockReturnValue(null);
+  mockHold.requestHold.mockReset();
+});
+
+describe('the Hold button (GATE_CALL_HOLD)', () => {
+  const ID = row(1).id;
+  const postHold = (base, id = ID) => fetch(`${base}/admin/call-recordings/live/${id}/hold`, { method: 'POST' });
+
+  test("GET /live, gate on: each call carries the hold view of its own conference_path", async () => {
+    mockHold.isEnabled.mockReturnValue(true);
+    const view = { can_hold: true, on_hold: false, since: null };
+    mockHold.holdForPanel.mockReturnValue(view);
+    const cp = { accepted_leg_sid: SID_B };
+    mockDb({ calls: [row(1, { metadata: { ...row(1).metadata, conference_path: cp } })], utterances: { [SID_A]: [] } });
+    await withServer(async (base) => {
+      const { calls } = await (await fetch(`${base}/admin/call-recordings/live`)).json();
+      expect(calls[0].hold).toEqual(view);
+    });
+    expect(mockHold.holdForPanel).toHaveBeenCalledWith(cp);
+  });
+
+  test('GET /live, gate off: hold is null on every call and no view is read', async () => {
+    mockHold.holdForPanel.mockReturnValue({ can_hold: true, on_hold: false, since: null });
+    mockDb({ calls: [row(1), row(2)], utterances: {} });
+    await withServer(async (base) => {
+      const { calls } = await (await fetch(`${base}/admin/call-recordings/live`)).json();
+      expect(calls.map((c) => c.hold)).toEqual([null, null]);
+    });
+    expect(mockHold.holdForPanel).not.toHaveBeenCalled();
+  });
+
+  test('POST: a technician login is refused before any query or move', async () => {
+    mockRole = 'technician';
+    mockHold.isEnabled.mockReturnValue(true);
+    mockDb({ linked: { twilio_call_sid: SID_A } });
+    await withServer(async (base) => { expect((await postHold(base)).status).toBe(403); });
+    expect(db).not.toHaveBeenCalled();
+    expect(mockHold.requestHold).not.toHaveBeenCalled();
+  });
+
+  test('POST: a call id that is not a UUID is 400; gate off is 409 unavailable; neither reads or moves anything', async () => {
+    mockDb({ linked: { twilio_call_sid: SID_A } });
+    await withServer(async (base) => {
+      mockHold.isEnabled.mockReturnValue(true);
+      expect((await postHold(base, 'not-a-uuid')).status).toBe(400);
+      mockHold.isEnabled.mockReturnValue(false);
+      const off = await postHold(base);
+      expect(off.status).toBe(409);
+      expect(await off.json()).toEqual({ result: 'unavailable' });
+    });
+    expect(db).not.toHaveBeenCalled();
+    expect(mockHold.requestHold).not.toHaveBeenCalled();
+  });
+
+  test('POST: an unknown call is 404 and nothing is moved', async () => {
+    mockHold.isEnabled.mockReturnValue(true);
+    mockDb({ linked: null });
+    await withServer(async (base) => { expect((await postHold(base)).status).toBe(404); });
+    expect(mockHold.requestHold).not.toHaveBeenCalled();
+  });
+
+  test("POST: the call's own SID is asked for a button hold, and each answer maps to its status", async () => {
+    mockHold.isEnabled.mockReturnValue(true);
+    mockDb({ linked: { twilio_call_sid: SID_A } });
+    await withServer(async (base) => {
+      for (const [result, status] of [['requested', 200], ['on_hold', 200], ['unavailable', 409], ['failed', 502]]) {
+        mockHold.requestHold.mockResolvedValueOnce(result);
+        const res = await postHold(base);
+        expect(res.status).toBe(status);
+        expect(await res.json()).toEqual({ result });
+      }
+    });
+    expect(mockHold.requestHold).toHaveBeenCalledTimes(4);
+    expect(mockHold.requestHold.mock.calls.every((c) => c[0] === SID_A && c[1].by === 'button')).toBe(true);
+  });
+
+  test('POST: a database error answers 500 through the router error path', async () => {
+    mockHold.isEnabled.mockReturnValue(true);
+    db.mockImplementation(() => ({ where() { return this; }, first: () => Promise.reject(new Error('db down')) }));
+    await withServer(async (base) => { expect((await postHold(base)).status).toBe(500); });
+    expect(mockHold.requestHold).not.toHaveBeenCalled();
+  });
+});
 
 describe('GET /admin/call-recordings/live: assist (GATE_CALL_LIVE_ASSIST)', () => {
   test('gate on: each call carries its assist and a refresh starts without the response waiting for it', async () => {
@@ -153,6 +241,7 @@ describe('GET /admin/call-recordings/live', () => {
         customer: { id: 'cust-1', name: 'Casey Sample' },
         answered_by: 'Pat Example',
         assist: null,
+        hold: null,
         lines: [
           { speaker: 'caller', text: 'line 1', at: '2026-11-17T15:00:01.000Z' },
           { speaker: 'staff', text: 'line 2', at: '2026-11-17T15:00:02.000Z' },

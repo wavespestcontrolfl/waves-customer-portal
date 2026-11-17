@@ -4181,9 +4181,10 @@ function staffVoicemailGoodbye(twiml) {
   twiml.hangup();
 }
 
-// POST /conference-staff-left — the staff pressed star (or the room ended under them). Gate off (flipped
-// mid-call) or a hold that did not start puts them back in the room; a caller who left ends the call. A duplicate
-// or redelivered star while a hold (or a press 1 return) is open answers like the first: it replaces nothing.
+// POST /conference-staff-left — the staff pressed star, the Live call panel's Hold button moved them out of the room
+// (call-hold.js requestHold, `by=button`), or the room ended under them. Gate off (flipped mid-call) or a hold that
+// did not start puts them back in the room; a caller who left ends the call. A duplicate or redelivered star while a
+// hold (or a press 1 return) is open answers like the first: it replaces nothing.
 router.post('/conference-staff-left', async (req, res) => {
   const parentSid = String(req.query.parent || '');
   const twiml = new VoiceResponse();
@@ -4193,7 +4194,9 @@ router.post('/conference-staff-left', async (req, res) => {
     } else if (!callHold.isEnabled()) {
       await rejoinOrHangup(twiml, parentSid);
     } else {
-      const held = await callHold.startHold(parentSid, { by: 'star', legSid: req.body?.CallSid || null });
+      // `by=button` marks the Hold button's move; anything else is a star. Twilio signs the whole URL.
+      const by = req.query.by === 'button' ? 'button' : 'star';
+      const held = await callHold.startHold(parentSid, { by, legSid: req.body?.CallSid || null });
       if (held === 'held') twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-staff-menu', parentSid, '&first=1'));
       else if (held === 'no_room') twiml.hangup();
       else appendStaffConference(twiml, parentSid);

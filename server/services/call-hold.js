@@ -69,6 +69,12 @@
  * while the caller is held sends no resume (the return resumes the recording), and a card resume that lands as a hold
  * starts is followed by a pause. So the recording runs again only once both are over.
  *
+ * THE HOLD BUTTON (the Live call panel, admin-call-recordings.js POST /live/:id/hold): requestHold moves the staff leg
+ * that won the press 1 out of the room by REST, to the star's own route with by=button. From there the hold IS a star
+ * hold: the same decision, sender, menu, timer and press 1. Moving a call that is in a <Dial> also makes Twilio request
+ * that <Dial>'s action URL, which is the same route: the second request is a duplicate star that replaces nothing, and
+ * both answer the same TwiML. Nothing here texts or calls anyone.
+ *
  * Left open: Twilio unreachable for every request of a re-hold as well (see the report), and a database that
  * is down while the caller is held (no decision can be made; the caller keeps the script).
  *
@@ -805,6 +811,46 @@ async function voicemailAnswered(callSid) {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// A hold the server asks for: the Live call panel's Hold button (see THE HOLD BUTTON above).
+// ---------------------------------------------------------------------------------------------------------
+
+// The panel's view of a call's hold (GET /live). null off the conference ring and before a staff press 1, else:
+//   on_hold   a hold is open (held, or a press 1 return Twilio has not confirmed yet); since = when it opened;
+//   can_hold  the Hold button works now: answered, the room open, no hold in progress, no voicemail.
+function holdForPanel(state) {
+  if (!state?.accepted_leg_sid) return null;
+  const hold = state.hold || null;
+  if (state.closed_at || state.voicemail_at || hold?.phase === 'voicemail') return { can_hold: false, on_hold: false, since: null };
+  if (isIdle(hold)) return { can_hold: true, on_hold: false, since: null };
+  return { can_hold: false, on_hold: true, since: hold.open_at || null };
+}
+
+// Who may ask the star route for a hold besides a star (the route reads its `by` query the same way).
+const REQUEST_BY = new Set(['button']);
+
+// 'requested' | 'on_hold' | 'unavailable' | 'failed'. The REST move of the winning staff leg to the star route; the
+// hold itself is then the star's (it answers before the hold is confirmed: the panel's next poll shows it). A move
+// of a leg that already hung up is refused by Twilio: 'failed', and nothing changed. Never throws.
+async function requestHold(callSid, { by } = {}) {
+  if (!isEnabled() || !REQUEST_BY.has(by) || !conferencePath.CALL_SID_RE.test(String(callSid || ''))) return 'unavailable';
+  try {
+    const state = await conferencePath.loadState(callSid);
+    const view = holdForPanel(state);
+    if (view?.on_hold) return 'on_hold';
+    if (!view?.can_hold) return 'unavailable';
+    await client().calls(state.accepted_leg_sid).update({
+      url: publicUrl(`${WEBHOOK_BASE}/conference-staff-left?parent=${encodeURIComponent(callSid)}&by=${by}`),
+      method: 'POST',
+    });
+    logger.info(`[call-hold] hold asked for ${masked(callSid)} (${by})`);
+    return 'requested';
+  } catch (err) {
+    logger.warn(`[call-hold] hold request failed for ${masked(callSid)} (${errorCode(err)})`);
+    return 'failed';
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // The recovery sweep (scheduler.js, every minute, whatever the gates say: it only finishes work already started).
 // ---------------------------------------------------------------------------------------------------------
 
@@ -861,6 +907,6 @@ async function recoverPendingHolds() {
 
 module.exports = {
   HOLD_REMINDER_SEC, HOLD_LIMIT_SEC, LEASE_MS, isEnabled, startHold, endHold, checkHold, staffLeft, holdState, roomIsOpen, heldSeconds, resumeRecording,
-  recoverPendingHolds, voicemailAnswered,
+  recoverPendingHolds, voicemailAnswered, requestHold, holdForPanel,
   _test: { planEvent, planClaim, nextStep, decide, resumeRetries },
 };

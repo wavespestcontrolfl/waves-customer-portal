@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card } from "../../components/ui";
+import { Button, Card } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const POLL_MS = 5000;
@@ -7,6 +7,8 @@ const POLL_MS = 5000;
 const IDLE_POLL_MS = 60000;
 const SHOWN_LINES = 8;
 const LABELS = { caller: "Caller", staff: "Agent" };
+// How long a pressed Hold waits for the polls to show the hold before the button comes back.
+const HOLD_WAIT_MS = 15000;
 
 async function fetchLiveCalls(signal) {
   const response = await fetch(`${API_BASE}/admin/call-recordings/live`, {
@@ -16,6 +18,14 @@ async function fetchLiveCalls(signal) {
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const body = await response.json();
   return { enabled: body?.enabled !== false, calls: Array.isArray(body?.calls) ? body.calls : [] };
+}
+
+async function postHold(callId) {
+  const response = await fetch(`${API_BASE}/admin/call-recordings/live/${encodeURIComponent(callId)}/hold`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
+  });
+  return response.ok;
 }
 
 export function elapsedLabel(startedAt, now) {
@@ -97,6 +107,50 @@ function AssistRows({ assist }) {
   );
 }
 
+// The Hold button (GATE_CALL_HOLD), from GET /live `hold` (null when the hold is off or the call is not on the
+// conference ring). A press does what a star press does: the caller hears the hold script, the recording pauses, and
+// the staff press 1 on the phone to go back. The next polls show the hold; a press that shows nothing within
+// HOLD_WAIT_MS gives the button back.
+function HoldControl({ call, now }) {
+  const [pressedAt, setPressedAt] = useState(null);
+  const [failed, setFailed] = useState(false);
+  const hold = call.hold;
+  const onHold = Boolean(hold?.on_hold);
+  useEffect(() => { if (onHold) setPressedAt(null); }, [onHold]);
+  if (onHold) {
+    const time = hold.since ? ` ${elapsedLabel(hold.since, now)}` : "";
+    return (
+      <p className="mt-3 mb-0 text-14 text-zinc-900" data-testid="live-call-hold">
+        {`On hold${time}. Press 1 on the phone to go back.`}
+      </p>
+    );
+  }
+  if (!hold?.can_hold) return null;
+  const waiting = pressedAt !== null && now - pressedAt < HOLD_WAIT_MS;
+  const press = async () => {
+    setFailed(false);
+    setPressedAt(Date.now());
+    let ok = false;
+    try {
+      ok = await postHold(call.id);
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      setPressedAt(null);
+      setFailed(true);
+    }
+  };
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-3" data-testid="live-call-hold">
+      <Button variant="secondary" size="sm" onClick={press} disabled={waiting}>
+        {waiting ? "Putting on hold…" : "Hold"}
+      </Button>
+      {failed && <span className="text-14 text-zinc-600">The hold did not start. Press star on the phone.</span>}
+    </div>
+  );
+}
+
 // Tailwind preflight is off in this app, so the links and the list set their own color, margin and padding.
 export default function LiveCallPanelV2() {
   const calls = useLiveCalls();
@@ -124,6 +178,7 @@ export default function LiveCallPanelV2() {
             {call.answered_by && <span className="text-zinc-600">Answered by {call.answered_by}</span>}
             <span className="text-zinc-600 tabular-nums ml-auto">{elapsedLabel(call.started_at, now)}</span>
           </div>
+          <HoldControl call={call} now={now} />
           <AssistRows assist={call.assist} />
           <ul className="mt-3 mb-0 list-none space-y-1 pl-0 text-14 text-zinc-900">
             {(call.lines || []).slice(-SHOWN_LINES).map((line, i) => (
