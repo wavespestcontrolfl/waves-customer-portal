@@ -779,7 +779,7 @@
     },
     {
       "endpoint": "/admin/email-templates",
-      "reviewed": "Handler (admin-email-templates.js GET /): email_templates select (metadata only: the template wording lives in email_template_versions, which this handler only counts), optional mode/purpose/status filters and a parameterized ilike search on name, key and description, plus version, draft and automation counts. No customer data, no write; read end to end. Keep mode: identity, purpose, sender, status and counts only. The *_key fields are left out: the run-time credential rule masks any key-named field. Re-reviewed 2026-11-02 (bed bug heat prep, Drive audit item 3): the only chain change is the protected template and automation key sets gaining prep.bed_bug_heat (constants); signals and unresolved unchanged, no new read or write.",
+      "reviewed": "Handler (admin-email-templates.js GET /): email_templates select (metadata only: the template wording lives in email_template_versions, which this handler only counts), optional mode/purpose/status filters and a parameterized ilike search on name, key and description, plus version, draft and automation counts. No customer data, no write; read end to end. Keep mode: identity, purpose, sender, status and counts only. The *_key fields are left out: the run-time credential rule masks any key-named field. Re-reviewed 2026-11-02 (bed bug heat prep, Drive audit item 3): the only chain change is the protected template and automation key sets gaining prep.bed_bug_heat (constants); signals and unresolved unchanged, no new read or write. Re-reviewed 2026-11-17 (bank payment failure email, PR #7901): the only chain change is the protected template key set gaining payment.ach_card_fallback, payment.ach_retry_notice, payment.ach_suspended and payment.ach_suspended_no_card (constants); signals and unresolved unchanged, no new read or write.",
       "scope": "broad",
       "office": true,
       "query": [
@@ -815,7 +815,7 @@
       },
       "signals": [],
       "unresolved": [],
-      "hash": "bde4baf555a45475bc944cde32cd3dc6"
+      "hash": "10ed4d8cf3dba13e058fc8c5ce4db011"
     },
     {
       "endpoint": "/admin/email-templates/automations",
