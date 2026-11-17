@@ -47,11 +47,10 @@
  * claim is the same single claim: the SMS fallback releases it only when nothing
  * went out. Off, the owner still gets the text, unchanged.
  *
- * Carry-over (owner 2026-11-02): GATE_RESERVICE_OPEN_CARRYOVER, strict
- * 'true', read at call time and only when the nudge itself runs. On, the same
- * text also names every re-service (callback or pest/lawn re-service) still
- * open from the last 30 days before today, until it is closed. Off, nothing
- * changes. The dedupe key stays one claim per technician per ET day.
+ * Carry-over (owner 2026-11-02): the same text also names every re-service
+ * (callback or pest/lawn re-service) still open from the last 30 days before
+ * today, until it is closed. The dedupe key stays one claim per technician per
+ * ET day.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -62,7 +61,6 @@ const { etDateString, etParts } = require('../utils/datetime-et');
 const { publicPortalUrl } = require('../utils/portal-url');
 
 const GATE = 'GATE_TECH_OPEN_VISIT_NUDGE';
-const CARRYOVER_GATE = 'GATE_RESERVICE_OPEN_CARRYOVER';
 const OWNER_BANNER_GATE = 'GATE_OWNER_NUDGE_BANNER';
 const CARRYOVER_DAYS = 30;
 const RESERVICE_KEYS = ['pest_re_service', 'lawn_re_service'];
@@ -82,10 +80,6 @@ function enabled() {
   // this gate texts a tech's personal phone, so it ships dark until the
   // owner sets the literal string 'true'.
   return process.env[GATE] === 'true';
-}
-
-function carryoverEnabled() {
-  return process.env[CARRYOVER_GATE] === 'true';
 }
 
 // GATE_OWNER_NUDGE_BANNER (feature-gates.js ownerNudgeBannerLive reads the same literal for the bell policy).
@@ -473,29 +467,27 @@ async function cardNudge(tech, visits, etDate, carryovers = null) {
   return true;
 }
 
-// Today's stops (and, gate on, the carry-over stops) one technician holds
-// right now. Null when both are empty. `carryovers` is only set with the gate.
-async function readLiveStops(techId, now, withCarryover) {
+// Today's stops and the carry-over stops one technician holds right now.
+// Null when both are empty.
+async function readLiveStops(techId, now) {
   const pick = (rows) => groupByTechnician(rows).find((g) => g.tech.id === String(techId));
   const today = pick(await findOpenVisitsToday(now, techId));
-  const carry = withCarryover ? pick(await findCarryoverVisits(now, techId)) : null;
+  const carry = pick(await findCarryoverVisits(now, techId));
   const base = today || carry;
   if (!base) return null;
-  const live = { tech: base.tech, visits: today ? today.visits : [] };
-  if (withCarryover) live.carryovers = carry ? carry.visits : [];
-  return live;
+  return { tech: base.tech, visits: today ? today.visits : [], carryovers: carry ? carry.visits : [] };
 }
 
 // Re-read at the send boundary: a visit finished or reassigned, a phone
 // changed, or the tech marked out (tech-out.js leaves an absent tech's stops
 // assigned for redistribution) after the sweep read must not be listed or
-// sent. Nothing to nudge gives the slot back. Gate on, both today's stops and
-// the carry-over stops are re-read.
-async function deliverNudge(techId, etDate, now, withCarryover = carryoverEnabled()) {
+// sent. Nothing to nudge gives the slot back. Both today's stops and the
+// carry-over stops are re-read.
+async function deliverNudge(techId, etDate, now) {
   let live;
   let absent;
   try {
-    live = await readLiveStops(techId, now, withCarryover);
+    live = await readLiveStops(techId, now);
     // includeOffDays: false - an open visit a technician really holds on a day
     // they do not work (an office placement) still gets its nudge.
     absent = await absentTechDays(db, { dateFrom: etDate, dateTo: etDate, technicianIds: [techId], includeOffDays: false });
@@ -541,10 +533,9 @@ function mergeGroups(todayGroups, carryGroups) {
 async function runTechOpenVisitNudge({ now = new Date() } = {}) {
   if (!enabled()) return { status: 'gate_off' };
 
-  const withCarryover = carryoverEnabled();
   const etDate = etDateString(now);
   const rows = await findOpenVisitsToday(now);
-  const carryRows = withCarryover ? await findCarryoverVisits(now) : [];
+  const carryRows = await findCarryoverVisits(now);
   const groups = mergeGroups(groupByTechnician(rows), groupByTechnician(carryRows));
 
   let sent = 0;
@@ -559,7 +550,7 @@ async function runTechOpenVisitNudge({ now = new Date() } = {}) {
     const message = buildMessage(visits, carryovers);
     let claimed;
     try {
-      claimed = await claimToday(tech.id, etDate, message, nudgePayload(visits, withCarryover ? carryovers : null));
+      claimed = await claimToday(tech.id, etDate, message, nudgePayload(visits, carryovers));
     } catch (err) {
       logger.error(`[tech-open-visit-nudge] claim failed for ${tech.id}: ${errTag(err)}`);
       skipped += 1;
@@ -571,13 +562,11 @@ async function runTechOpenVisitNudge({ now = new Date() } = {}) {
       continue;
     }
 
-    if (await deliverNudge(tech.id, etDate, now, withCarryover)) sent += 1;
+    if (await deliverNudge(tech.id, etDate, now)) sent += 1;
     else skipped += 1;
   }
 
-  const result = { status: 'ok', techs: groups.length, sent, skipped, visits: rows.length };
-  if (withCarryover) result.carryover = carryRows.length;
-  return result;
+  return { status: 'ok', techs: groups.length, sent, skipped, visits: rows.length, carryover: carryRows.length };
 }
 
 module.exports = {
@@ -587,7 +576,6 @@ module.exports = {
   _test: {
     findOpenVisitsToday,
     findCarryoverVisits,
-    carryoverEnabled,
     dayLabel,
     groupByTechnician,
     customerLabel,

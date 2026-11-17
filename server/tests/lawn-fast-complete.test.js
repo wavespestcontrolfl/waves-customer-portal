@@ -291,7 +291,7 @@ describe('buildLawnFastContext', () => {
     expect(ctx.plannedProducts.month).toBe(10);
   });
 
-  test('GATE_LAWN_NOV_LARGE_PATCH_N: a planned nitrogen line keeps the plan\'s reduced amount and its fungus note on the sheet; no other planned row gains a note', async () => {
+  test('November large patch cut: a planned nitrogen line keeps the plan\'s reduced amount and its fungus note on the sheet; no other planned row gains a note', async () => {
     process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
     const NOTE = 'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';

@@ -1,6 +1,6 @@
 // client/src/lib/lawn-sod-sheet.js
 //
-// The lawn Fast Complete sheet's view of the new-sod holds (GATE_LAWN_NEW_SOD_NOTE). The server
+// The lawn Fast Complete sheet's view of the new-sod holds. The server
 // decides every rule and every word (server/services/lawn-sod-sheet.js on top of lawn-sod-holds.js):
 // the context's `newSod` carries the banner lines and `lines`, a map by lower-case product id of
 // what the holds say about that product: `{ held: true, reason }` (kept off the sheet; the
@@ -10,7 +10,7 @@
 const lowerId = (id) => String(id ?? '').toLowerCase();
 
 /**
- * The context's `newSod`, or null (an older server, the gate off, or no hold today). A failed sod
+ * The context's `newSod`, or null (an older server, or no hold today). A failed sod
  * read arrives as `{ unavailable: true, message }`.
  */
 export function newSodOf(data) {

@@ -9,7 +9,7 @@ import cleanOff from './__fixtures__/lawn-layout/clean-off.json';
 import cleanOn from './__fixtures__/lawn-layout/clean-on.json';
 import SOD from '../dev-preview/new-sod-cards.json';
 
-// GATE_LAWN_NEW_SOD_REPORT_CARD on the real page. The page prints the strings the server built from the block frozen at
+// The New sod card on the real page. The page prints the strings the server built from the block frozen at
 // completion (data.lawnNewSod; the words are server/services/lawn-sod-report-card.js's, kept equal to the preview file
 // by a server test) and restates no rule. "clean-off" is the standard page body, "clean-on" the lawn layout.
 
@@ -68,7 +68,7 @@ describe.each([['the standard page', cleanOff], ['the lawn layout', cleanOn]])('
     expect(cardText(container)).toContain('The rest of the lawn was treated as planned.');
   });
 
-  it('no payload key (gate off, or nothing was held): no card, and the page text is what it was', async () => {
+  it('no payload key (nothing was held): no card, and the page text is what it was', async () => {
     const withKey = renderReport({ ...clone(fixture), lawnNewSod: SOD.cards.whole });
     await waitForReport();
     expect(cardText(withKey.container)).not.toBeNull();

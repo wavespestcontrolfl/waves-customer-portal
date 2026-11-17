@@ -1,5 +1,5 @@
-// GATE_LAWN_RECLAIMED_HALF_N on the lawn tank sheet (GET /api/admin/protocols/lawn-mix), next to GATE_LAWN_NOV_LARGE_PATCH_N (Codex r1 on #6511):
-// each nitrogen gate activates its OWN adjustment, decided with the planner's own v13 eligibility, so the sheet never shows the full N while the
+// GATE_LAWN_RECLAIMED_HALF_N on the lawn tank sheet (GET /api/admin/protocols/lawn-mix), next to the November large patch cut (Codex r1 on #6511):
+// each nitrogen rule activates its OWN adjustment, decided with the planner's own v13 eligibility, so the sheet never shows the full N while the
 // planner and Fast Complete halve it. Real handler and plan engine; synthetic fixtures; the property read is the only stub.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/admin-auth', () => ({
@@ -38,7 +38,7 @@ const PROPERTY = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
 const FUNGUS_NOTE = 'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
 const HALF_NOTE = 'Reclaimed water: half nitrogen today (0.375 lb N, 1.6 lb per 1,000).';
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N'];
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_RECLAIMED_HALF_N'];
 
 const handler = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/lawn-mix' && layer.route.methods.get).route.stack[0].handle;
 
@@ -108,8 +108,8 @@ describe('each nitrogen gate alone activates its own adjustment on the tank shee
     expect(mockLoadActive).not.toHaveBeenCalled();
   });
 
-  test('large patch gate alone (reclaimed OFF): 0.5 lb N with the fungus note, no property read', async () => {
-    only('GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N');
+  test('large patch cut alone (trouble areas and spot target on, reclaimed OFF): 0.5 lb N with the fungus note, no property read', async () => {
+    only('GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET');
     const body = await sheet();
     expect(bag(body).jobMix.ratePer1000).toBeCloseTo(2.0833, 3);
     expect(bag(body).gateNotes).toContainEqual({ key: 'activeFungusNitrogen', severity: 'note', text: FUNGUS_NOTE });
@@ -117,7 +117,7 @@ describe('each nitrogen gate alone activates its own adjustment on the tank shee
   });
 
   test('both on, a reclaimed lawn with fungus: the smaller target (0.375), only the reclaimed note', async () => {
-    only('GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N');
+    only('GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_RECLAIMED_HALF_N');
     const body = await sheet();
     expect(bag(body).jobMix.ratePer1000).toBeCloseTo(1.5625, 4);
     // Both notes: the half-nitrogen note and the fungus spreader instruction (without the fungus rule's own, larger, figures).
@@ -130,11 +130,11 @@ describe('each nitrogen gate alone activates its own adjustment on the tank shee
   });
 
   test('both on but the lawn is not reclaimed: the fungus cut alone; large patch without trouble areas + reclaimed on: the half alone', async () => {
-    only('GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N');
+    only('GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_RECLAIMED_HALF_N');
     reclaimed.mockResolvedValue(false);
     expect(await rate()).toBeCloseTo(2.0833, 3);
     reclaimed.mockResolvedValue(true);
-    only('GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N'); // large patch needs trouble areas: it is off by itself, the half is not
+    only('GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_RECLAIMED_HALF_N'); // large patch needs trouble areas: it is off by itself, the half is not
     expect(await rate()).toBeCloseTo(1.5625, 4);
   });
 

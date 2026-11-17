@@ -129,7 +129,7 @@ const POSTS = [
   { id: '99999999-9999-4999-8999-000000000002', title: 'Chinch Bugs in Bradenton Lawns: What to Look For', url: 'https://www.wavespestcontrol.com/lawn-care/chinch-bugs-bradenton/' },
 ];
 
-// GATE_LAWN_NEW_SOD_NOTE: what the server sends for a home with new sod (the words are the server's; see lawn-sod-sheet.js).
+// What the server sends for a home with new sod (the words are the server's; see lawn-sod-sheet.js).
 let sodTicked = false;
 const newSodFor = () => {
   if (STATE === 'sod') {

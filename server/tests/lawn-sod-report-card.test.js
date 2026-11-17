@@ -1,4 +1,4 @@
-// The lawn web report's New sod card (GATE_LAWN_NEW_SOD_REPORT_CARD): what is frozen at completion, the exact
+// The lawn web report's New sod card what is frozen at completion, the exact
 // sentences the server builds from the frozen block, the payload key, and the guarantees around a failed read.
 // Synthetic data; the completion transaction and the sheet context are fakes (the hold rules are
 // lawn-sod-holds.js's own tests, the planned classes are lawn-sod-sheet.test.js's).
@@ -16,16 +16,9 @@ const PRODUCT_CELSIUS = 'aaaaaaaa-0000-4000-8000-000000000002';
 const PRODUCT_SWAP = 'aaaaaaaa-0000-4000-8000-000000000003';
 const SWAP_NAME = 'LESCO 24-0-11 with PolyPlus OPTI';
 
-const GATES = ['GATE_LAWN_NEW_SOD_REPORT_CARD', 'GATE_LAWN_NEW_SOD_NOTE'];
-let saved;
 beforeEach(() => {
-  saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
-  GATES.forEach((name) => { process.env[name] = 'true'; });
   buildLawnFastContext.mockReset();
   logger.warn.mockClear();
-});
-afterEach(() => {
-  GATES.forEach((name) => { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; });
 });
 
 // A fake completion transaction: trx.transaction runs the callback on a savepoint-like query function.
@@ -88,20 +81,6 @@ describe('freezeNewSodCard: what is frozen at completion', () => {
     expect(writes[0].guard).toBe("(structured_notes::jsonb -> 'lawnNewSod') IS NULL");
     expect(JSON.parse(writes[0].patch.structured_notes.bindings[0])).toEqual({ lawnNewSod: frozen });
     expect(record.structured_notes).toEqual({ existing: 'kept', lawnNewSod: frozen });
-  });
-
-  test('gate off, or the sheet gate off: no read and no write', async () => {
-    for (const name of GATES) {
-      process.env[name] = 'false';
-      const { trx, writes } = fakeTrx();
-      expect((await run(trx)).out).toBeNull();
-      expect(trx.transaction).not.toHaveBeenCalled();
-      expect(buildLawnFastContext).not.toHaveBeenCalled();
-      expect(writes).toEqual([]);
-      process.env[name] = 'true';
-    }
-    delete process.env.GATE_LAWN_NEW_SOD_REPORT_CARD;
-    expect(require('../config/feature-gates').lawnNewSodReportCardLive()).toBe(false);
   });
 
   test('not a lawn sheet completion, an incomplete visit or a resumed completion: nothing', async () => {
@@ -326,7 +305,7 @@ describe('lawnNewSodPayload: the report payload key', () => {
   };
   const notes = { lawnNewSod: frozen };
 
-  test('gate on, lawn, frozen block: the built card, read from the notes alone (an object or a JSON string)', () => {
+  test('lawn, frozen block: the built card, read from the notes alone (an object or a JSON string)', () => {
     const expected = { lawnNewSod: card.cardOf(frozen) };
     expect(card.lawnNewSodPayload({ serviceLine: 'lawn', structuredNotes: notes })).toEqual(expected);
     expect(card.lawnNewSodPayload({ serviceLine: 'lawn', structuredNotes: JSON.stringify(notes) })).toEqual(expected);
@@ -339,19 +318,12 @@ describe('lawnNewSodPayload: the report payload key', () => {
     expect(buildLawnFastContext).not.toHaveBeenCalled();
   });
 
-  test('gate off (either gate), another service line, no block or a damaged block: no key at all (byte-identical payload)', () => {
+  test('another service line, no block or a damaged block: no key at all (byte-identical payload)', () => {
     expect(card.lawnNewSodPayload({ serviceLine: 'pest', structuredNotes: notes })).toEqual({});
     expect(card.lawnNewSodPayload({ serviceLine: 'lawn', structuredNotes: {} })).toEqual({});
     expect(card.lawnNewSodPayload({ serviceLine: 'lawn', structuredNotes: null })).toEqual({});
     expect(card.lawnNewSodPayload({ serviceLine: 'lawn', structuredNotes: { lawnNewSod: { v: 1 } } })).toEqual({});
     expect(card.lawnNewSodPayload()).toEqual({});
-    for (const name of GATES) {
-      process.env[name] = 'false';
-      expect(card.lawnNewSodPayload({ serviceLine: 'lawn', structuredNotes: notes })).toEqual({});
-      process.env[name] = 'true';
-    }
-    delete process.env.GATE_LAWN_NEW_SOD_REPORT_CARD;
-    expect(card.lawnNewSodPayload({ serviceLine: 'lawn', structuredNotes: notes })).toEqual({});
   });
 
   test('the report build and the completion both call this module (a wiring guard)', () => {

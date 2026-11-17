@@ -197,7 +197,9 @@ describe('everything else keeps the 10-0-22 at 4.5 lb per 1,000 (0.45 lb N), byt
     const body = await lawnMix({ month, scheduledServiceId: VISIT });
     expect(JSON.stringify(body)).not.toContain('activeLargePatchPotassium');
     expect(JSON.stringify(body)).not.toContain(DEC_K_PRODUCT);
-    expect(mockLoadActive).not.toHaveBeenCalled();
+    // November reads the areas for its own nitrogen cut; the December swap reads none.
+    if (month === '11') expect(JSON.stringify(body)).not.toContain('Black Out');
+    else expect(mockLoadActive).not.toHaveBeenCalled();
   });
 
   test('the GATE_LAWN_V13 program is off: no swap', async () => {

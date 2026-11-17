@@ -14,7 +14,7 @@ const engine = require('../services/waveguard-plan-engine');
 const reclaimed = require('../services/lawn-reclaimed-water');
 const v13 = require('../config/lawn-protocol-v13.json');
 
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_RECLAIMED_HALF_N'];
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_RECLAIMED_HALF_N'];
 const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 const PROPERTY = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const service = { id: 'svc-1', property_id: PROPERTY };
@@ -279,8 +279,8 @@ describe('with the November large patch cut too: the smaller target wins, not bo
     expect(found.visit.notes).toContain('active large patch mapped; normal 0.75 lb N');
   });
 
-  test('reclaimed with the large patch gate off is the half cut and reads no area', async () => {
-    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+  test('reclaimed with the spot target capture off (the large patch rule needs it) is the half cut and reads no area', async () => {
+    delete process.env.GATE_LAWN_SPOT_TARGET;
     const found = await run(REC(), 'Nov');
     expect(found.nitrogenCut).toBe(0.375);
     expect(mockLoadActive).not.toHaveBeenCalled();

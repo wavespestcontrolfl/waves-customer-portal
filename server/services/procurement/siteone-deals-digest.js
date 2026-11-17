@@ -14,10 +14,6 @@
  * Costs $0: plain string and regex rules over rows already in the database. No
  * model call, no paid API, no network. Read-only: it writes nothing but the bell.
  *
- * Gate: GATE_SITEONE_DEALS_DIGEST (feature-gates.js `siteOneDealsDigest`,
- * checked by the cron before this runs). The module itself does not read it, so
- * the admin can still call it by hand from a script.
- *
  * The bell follows docs/admin-notifications.md: it is raised through
  * raiseAdminAlert (headline and why inside the copy rules), and the one-line-
  * per-deal list lives in `detail` ("Show full text" on the bell). One bell per

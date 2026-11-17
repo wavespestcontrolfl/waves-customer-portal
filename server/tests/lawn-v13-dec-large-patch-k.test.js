@@ -235,17 +235,13 @@ describe('visitNutrientTargets in December', () => {
     expect(mockLoadActive).not.toHaveBeenCalled();
   });
 
-  test('the November rule is independent: the Dec gate does not cut November, and the Nov gate does not swap December', async () => {
+  test('the November rule is independent: the Dec gate does not cut November, and without it December is not swapped', async () => {
     const nov = v13.st_augustine.visits.find((visit) => visit.month === 'Nov');
-    expect((await run({ visit: nov, month: 'Nov' })).nitrogenCut).toBeNull();
+    expect((await run({ visit: nov, month: 'Nov' })).nitrogenCut).toBe(0.5);
+    expect((await run({ visit: nov, month: 'Nov' })).productSwap).toBeUndefined();
     delete process.env.GATE_LAWN_DEC_LARGE_PATCH_K;
-    process.env.GATE_LAWN_NOV_LARGE_PATCH_N = 'true';
-    try {
-      expect((await run()).productSwap).toBeUndefined();
-      expect((await run({ visit: nov, month: 'Nov' })).nitrogenCut).toBe(0.5);
-    } finally {
-      delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
-    }
+    expect((await run()).productSwap).toBeUndefined();
+    expect((await run({ visit: nov, month: 'Nov' })).nitrogenCut).toBe(0.5);
   });
 });
 

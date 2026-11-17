@@ -21,16 +21,14 @@
  *
  * Second phase (owner 2026-11-01, Action inbox agents A): DRY products whose
  * unit is a bare ounce are converted to g or lb (exact weight conversion,
- * stock and threshold converted with it). Its own gate,
- * GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ === 'true', read at call time via
- * inventoryUnitAutofixDryOzLive(); it also needs the sweep gate above. Dry-oz
- * fixes ring no bell: each leaves a movement audit row, and the alias digest
+ * stock and threshold converted with it). It runs with the sweep, so it needs
+ * the sweep gate above. Dry-oz fixes ring no bell: each leaves a movement audit row, and the alias digest
  * below is worded exactly as before. resolveDryOzTarget() decides, and parks everything doubtful.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled, inventoryUnitAutofixDryOzLive } = require('../config/feature-gates');
+const { isEnabled } = require('../config/feature-gates');
 const {
   convertInventoryQuantity,
   normalizeInventoryUnit,
@@ -510,9 +508,7 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
     }
   }
 
-  if (inventoryUnitAutofixDryOzLive()) {
-    await runDryOzPhase({ dbi, results });
-  }
+  await runDryOzPhase({ dbi, results });
 
   // One digest for alias renames only, worded exactly as before. Dry-oz fixes
   // ring nothing (deterministic fixes apply with an audit trail and no bell):
@@ -526,7 +522,7 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
 }
 
 /**
- * Dry-oz phase (gate inventoryUnitAutofixDryOz, on top of the sweep gate):
+ * Dry-oz phase (runs with the sweep, so under the sweep gate):
  * oz-family rows with positive dry-by-weight evidence are converted to g/lb
  * with their stock and threshold. Same one-transaction-per-product posture
  * as the alias phase; the decision is re-checked under the row lock.

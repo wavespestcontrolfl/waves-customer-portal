@@ -1,8 +1,7 @@
 'use strict';
 
 /**
- * The lawn Fast Complete sheet applies the new-sod holds (GATE_LAWN_NEW_SOD_NOTE,
- * owner 2026-10-09). The office records sod someone else laid on the customer's
+ * The lawn Fast Complete sheet applies the new-sod holds (owner 2026-10-09). The office records sod someone else laid on the customer's
  * property preferences (sod_laid_on, sod_covers, sod_area, sod_rooted_on) and
  * lawn-sod-holds.js says what a visit on a given day holds back. This module is
  * the glue between that pure rule module and the sheet:
@@ -341,13 +340,13 @@ async function loadSodForContext({ svc, knex, readFailures, plannedProducts, rul
  * The hold-adjusted context goes ONLY to a client that says it understands it (`sodAware`, the
  * `sodAware=1` query parameter of GET /lawn-fast/context; lawn-fast-complete.js passes it through). An old
  * or cached sheet ignores `newSod` and would pre-select every planned item, the held Dimension bag AND
- * the appended swap bag. So without the signal, or with the gate off, the context is the legacy one
+ * the appended swap bag. So without the signal the context is the legacy one
  * exactly: the same planned items (none appended, none removed), no `newSod`, and no read of the sod
- * record. That client then pre-selects held products exactly as it does with the gate off today: the
+ * record. That client then pre-selects held products as it always did: the
  * accepted status quo until its sheet is reloaded.
  */
 async function sodContextParts({ sodAware, svc, knex, readFailures, plannedProducts, ruleFor }) {
-  if (sodAware !== true || !featureGates.lawnNewSodNoteLive()) return { plannedProducts, fields: {} };
+  if (sodAware !== true) return { plannedProducts, fields: {} };
   const sod = await loadSodForContext({ svc, knex, readFailures, plannedProducts, ruleFor });
   return { plannedProducts: sod.plannedProducts, fields: sod.newSod ? { newSod: sod.newSod } : {} };
 }
@@ -380,7 +379,7 @@ async function noProductStillAllowed({ knex, svc, technicianNotes }) {
  * rest of the preflight), UNLOCKED: it gives the technician the early plain answer. The same check is
  * repeated inside the commit transaction (`lockSodRecordForNoProduct` + `assertNoProductUnderLock`), because
  * the office can change the sod record between the two. A claim the rebuilt context does not back (record
- * cleared or changed to part of the lawn, a different sod date, a failed read, the gate off) is 409
+ * cleared or changed to part of the lawn, a different sod date, a failed read) is 409
  * lawn_sod_no_product_stale, a terminal "reopen".
  */
 async function checkNoProductNote({ knex, svc, products, technicianNotes, next }) {
@@ -393,12 +392,12 @@ async function checkNoProductNote({ knex, svc, products, technicianNotes, next }
  * called FIRST in that transaction, before any other lock, and takes the property-preferences advisory lock sod
  * record writers take (writeAdminPreferences, the rooted tick) so the record cannot change until this completion
  * commits; the order is then the writers' own: advisory lock, customer (FOR SHARE), visit row. It returns whether
- * the case applies (gate on, completed lawn sheet, empty list, the sentence); only then is the recheck needed.
+ * the case applies (completed lawn sheet, empty list, the sentence); only then is the recheck needed.
  * `assertNoProductUnderLock` runs after the visit row lock and rolls the completion back with
  * lawn_sod_no_product_stale (409) when the rebuilt context no longer backs the claim.
  */
 async function lockSodRecordForNoProduct(trx, { customerId, lawnFast, isIncompleteVisit, products, technicianNotes }) {
-  if (lawnFast == null || isIncompleteVisit || !featureGates.lawnNewSodNoteLive() || !claimsNoProduct(products, technicianNotes)) return false;
+  if (lawnFast == null || isIncompleteVisit || !claimsNoProduct(products, technicianNotes)) return false;
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
   return true;
 }
@@ -413,12 +412,12 @@ async function assertNoProductUnderLock(trx, { svc, technicianNotes }) {
  * The swap bag is not a row of the staged program, so the plan carries no substitution for it; without one the
  * ledger would record the swap bag as an off-protocol product and the Dimension bag it stands in for as a skipped
  * default. This returns the swap as substitutions in the plan's own shape (planSubstitutionSnapshot), so both
- * products resolve to the Dimension bag's protocol row: `[]` unless the gate is on, this is a lawn sheet
+ * products resolve to the Dimension bag's protocol row: `[]` unless this is a lawn sheet
  * completion, the visit applied the swap bag, and the sheet context rebuilt NOW on the transaction (as a sod-aware
  * sheet) still makes that swap. A failed read is `[]` (the ledger is secondary; it never fails the visit).
  */
 async function sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts }) {
-  if (lawnFast == null || !featureGates.lawnNewSodNoteLive()) return [];
+  if (lawnFast == null) return [];
   const applied = new Set((Array.isArray(appliedProducts) ? appliedProducts : []).map((row) => lowerId(row?.product_id)).filter(Boolean));
   if (!applied.size) return [];
   try {

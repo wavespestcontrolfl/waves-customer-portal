@@ -796,7 +796,7 @@ function parseVisitNutrientTargets(notes) {
   };
 }
 
-// GATE_LAWN_NOV_LARGE_PATCH_N / GATE_LAWN_DEC_LARGE_PATCH_K: does the visit's property have an ACTIVE mapped trouble area of this type
+// The November large patch cut / GATE_LAWN_DEC_LARGE_PATCH_K: does the visit's property have an ACTIVE mapped trouble area of this type
 // that carries the rule's evidence? `evidence: 'large_patch'` asks lawn-trouble-areas loadActiveLargePatch: a "fungus" area also stands
 // for gray leaf spot, Pythium, dollar spot, fairy ring and rust, so only an area whose newest fungicide application names large patch
 // counts, and an unknown disease is "no". A gate that is off or a visit with no property is "no" (the normal target stands). A read that
@@ -831,7 +831,7 @@ async function hasActiveTroubleArea(knex, service, type, { strict = false, evide
 // The recipe text of a visit whose nitrogen target was cut, so what staff read (the line's `raw`, the visit's primary and notes) agrees
 // with the amount the plan computes. Rewrites only the shapes the v13 recipe uses; a line or note the pattern does not match stays as
 // written (the cut and the line note still apply: the amount and the note are never dependent on this text). `why` is the reason in
-// the words the line states it with: 'active patch mapped' (GATE_LAWN_NOV_LARGE_PATCH_N) or 'reclaimed water, half' (GATE_LAWN_RECLAIMED_HALF_N).
+// the words the line states it with: 'active patch mapped' (the November large patch cut) or 'reclaimed water, half' (GATE_LAWN_RECLAIMED_HALF_N).
 const NITROGEN_LINE = /(\d+(?:\.\d+)?) lb per 1,000 sq ft \((\d+(?:\.\d+)?) lb N\)/;
 const NITROGEN_NOTE = /\bN\s+rate:?\s*(\d+(?:\.\d+)?)\s*lb\s*N/i;
 // The line suffix never says "large patch": classifyProtocolLine reads that phrase in a line as a disease-gated line (conditionFlag
@@ -854,10 +854,10 @@ function nitrogenAdjustedVisit(visit, cut, why, noteWhy = why) {
 
 // The ONE decision whether the nitrogen target of a November visit at one property is cut, for every reader that states it (the plan,
 // the tank sheet, the previsit brief): the reduced target (config/lawn-v13-nitrogen-targets.js), else null. Gate first: with
-// GATE_LAWN_NOV_LARGE_PATCH_N off (or not a v13 program) nothing is read. Never raises a target; no matching month, a target already
+// the trouble areas or the spot target capture off (or not a v13 program) nothing is read. Never raises a target; no matching month, a target already
 // at or under the cut, or no active mapped area of the rule's type = null. `strict`: a failed area read throws (see hasActiveTroubleArea).
 async function fungusNitrogenCut(knex, service, { targetN, monthNumber, v13Active, strict = false }) {
-  if (!v13Active || !featureGates.lawnNovLargePatchNLive()) return null;
+  if (!v13Active || !featureGates.lawnTroubleAreasLive() || !featureGates.lawnSpotTargetLive()) return null;
   const rule = V13_TROUBLE_N_TARGETS.find((entry) => entry.month === monthNumber);
   if (!rule || !(targetN > rule.targetNPer1000) || !(await hasActiveTroubleArea(knex, service, rule.troubleType, { strict, evidence: rule.evidence }))) return null;
   return rule.targetNPer1000;
@@ -2247,7 +2247,7 @@ async function visitOnV13Protocol(knex, visit, { trackKey }) {
 // at all. v13 eligibility is decided here and nowhere else, independently of WHICH rule asks: each rule checks its own gate inside
 // visitNutrientTargets, so the answer never depends on another rule's gate.
 function visitProjectionLive() {
-  return featureGates.lawnV13Live?.() === true && !!(featureGates.lawnNovLargePatchNLive() || featureGates.lawnReclaimedHalfNLive?.()
+  return featureGates.lawnV13Live?.() === true && !!((featureGates.lawnTroubleAreasLive() && featureGates.lawnSpotTargetLive()) || featureGates.lawnReclaimedHalfNLive?.()
     || featureGates.lawnChinchTetrinoRateLive() || featureGates.lawnDecLargePatchKLive?.());
 }
 
@@ -2519,7 +2519,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
   // through v13LineState (one decision per line) and keeps its protocol product.
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
-  // The visit the lines are parsed from: the recipe step, or its copy with the cut nitrogen stated (GATE_LAWN_NOV_LARGE_PATCH_N,
+  // The visit the lines are parsed from: the recipe step, or its copy with the cut nitrogen stated (the November large patch cut,
   // GATE_LAWN_RECLAIMED_HALF_N), the Tetrino rate raised (GATE_LAWN_CHINCH_TETRINO_RATE) or the whole-lawn bag swapped (GATE_LAWN_DEC_LARGE_PATCH_K).
   const nitrogen = await visitNutrientTargets(knex, service, { visit: recipeStep, month, v13Active, strict });
   const { visit, targets: nutrientTargets, nitrogenCut, chinchRate, productSwap } = nitrogen;

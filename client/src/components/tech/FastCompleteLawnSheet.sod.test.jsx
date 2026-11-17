@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// New sod on the lawn Fast Complete sheet (GATE_LAWN_NEW_SOD_NOTE, owner 2026-10-09). The server decides every
+// New sod on the lawn Fast Complete sheet (owner 2026-10-09). The server decides every
 // hold and every word (`newSod` in the context); the sheet renders the banner, keeps a held line off the sheet
 // (greyed, with its reason; the technician can still add it by hand, with a warning), notes a part-of-lawn
 // skip, shows the server's swap bag, and performs the rooted tick. With no `newSod` it renders exactly as
@@ -182,7 +182,7 @@ async function analyzeAndComplete() {
   await waitFor(() => expect(completeCalls().length).toBeGreaterThan(0));
 }
 
-describe('with no newSod (gate off, older server, no hold today)', () => {
+describe('with no newSod (older server, no hold today)', () => {
   test('no banner, no held group, every planned line is a row', async () => {
     await openSheet(context(null));
     expect(banner()).toBeNull();
@@ -311,7 +311,7 @@ describe('the rooted tick', () => {
     expect(within(banner()).getByRole('checkbox').checked).toBe(false);
   });
 
-  test('404 from the tick (the gate is off, or the server does not know this sheet): the tick is hidden, no error, no retry loop', async () => {
+  test('404 from the tick (the server does not know this sheet): the tick is hidden, no error, no retry loop', async () => {
     rootedAnswer = Object.assign(new Error('Not found'), { status: 404 });
     await openSheet(context(DAY31));
     fireEvent.click(within(banner()).getByRole('checkbox'));
