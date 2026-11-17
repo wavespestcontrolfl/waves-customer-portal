@@ -1730,12 +1730,41 @@ router.post('/voice', async (req, res) => {
 // error) = today's empty answer.
 const EMPTY_RESPONSE_XML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
 
+// The recording must be running before a message is invited: up to 3 tries, 0.5 s apart, each cut off at 4 s, and no
+// new try once 7 s have passed (Twilio gives a webhook 15 s). A late success of a cut-off try is harmless.
+const RESUME_TRIES = 3;
+const RESUME_RETRY_MS = 500;
+const RESUME_TRY_MAX_MS = 4000;
+const RESUME_BUDGET_MS = 7000;
+const NO_MESSAGE_LINE = 'Sorry, we could not take a message right now. We will call you right back.';
+
+async function resumeBeforeVoicemail(callSid) {
+  const started = Date.now();
+  for (let attempt = 1; attempt <= RESUME_TRIES; attempt += 1) {
+    let timer;
+    const cutOff = new Promise((resolve) => { timer = setTimeout(() => resolve(false), RESUME_TRY_MAX_MS); });
+    const done = await Promise.race([callHold.resumeRecording(callSid), cutOff]);
+    clearTimeout(timer);
+    if (done === true) return true;
+    if (attempt === RESUME_TRIES || Date.now() - started >= RESUME_BUDGET_MS) break;
+    await new Promise((resolve) => setTimeout(resolve, RESUME_RETRY_MS));
+  }
+  return false;
+}
+
 async function holdVoicemailTwiml(callSid) {
   try {
     const state = await callHold.holdState(callSid);
     if (state.error || !state.voicemailAt) return null;
-    await callHold.resumeRecording(callSid);
     const twiml = new VoiceResponse();
+    if (!(await resumeBeforeVoicemail(callSid))) {
+      // A message that will not be recorded is never invited. The one office bell (raised when the voicemail
+      // started) still says to call the caller back.
+      logger.error(`[call-complete] recording not resumed for ${maskSid(callSid)}; no message is invited`);
+      twiml.say({ voice: SAY_VOICE }, NO_MESSAGE_LINE);
+      twiml.hangup();
+      return twiml.toString();
+    }
     twiml.say({ voice: SAY_VOICE }, holdScript.CALLER_VOICEMAIL);
     twiml.play('/audio/voicemail-tone.wav');
     twiml.pause({ length: 120 });

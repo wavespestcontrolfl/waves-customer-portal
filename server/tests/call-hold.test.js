@@ -914,3 +914,95 @@ describe('the staff hang up during a hold and the room will not end', () => {
     });
   });
 });
+
+// A pause that is still in flight when the voicemail has already resumed the recording must not leave the voicemail
+// silent: startHold (and holdAgain) re-read the hold after pausing and resume when the voicemail won.
+describe('a late hold pause and the voicemail resume', () => {
+  const cp = require('../services/call-conference-path');
+  const heldRoom = () => ({ conference_path: { ...room().conference_path, legs: { 0: { sid: LEG } } } });
+  const staffGone = () => cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG, status: 'completed' });
+  // The recording as Twilio would hold it: the last pause/resume call that LANDED wins.
+  const recordingState = (events) => events.filter((e) => e.name === 'recording').map((e) => e.status).pop();
+
+  test('the staff hang up while the participant hold is in flight: voicemail, room end and the resume land, then the late pause; the recording ends resumed', async () => {
+    const row = fakeCallLog(heldRoom());
+    const events = fakeTwilio({
+      during: {
+        participant: async () => {
+          // The staff leg ends before the hold request answers: the voicemail claims, ends the room, and
+          // /call-complete's resume (hold.resumeRecording) runs, all before startHold gets to pause.
+          expect(await staffGone()).toBe('hold_voicemail');
+          await hold.resumeRecording(SID);
+        },
+      },
+    });
+    expect(await hold.startHold(SID, { legSid: LEG })).toBe('held');
+    expect(stateOf(row)).toMatchObject({ open: false, voicemail_reason: 'staff_left' });
+    expect(events.filter((e) => e.name === 'recording').map((e) => e.status)).toEqual(['in-progress', 'paused', 'in-progress']);
+    expect(recordingState(events)).toBe('in-progress');
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
+  test('the voicemail claim lands after the pause finished: no extra resume here (the route\'s resume comes later)', async () => {
+    const row = fakeCallLog(heldRoom());
+    const events = fakeTwilio();
+    expect(await hold.startHold(SID, { legSid: LEG })).toBe('held');
+    expect(events.filter((e) => e.name === 'recording').map((e) => e.status)).toEqual(['paused']);
+    // Later: the voicemail, then the route's resume.
+    expect(await staffGone()).toBe('hold_voicemail');
+    await hold.resumeRecording(SID);
+    expect(stateOf(row)).toMatchObject({ open: false });
+    expect(recordingState(events)).toBe('in-progress');
+  });
+
+  test('a state read error after the pause leaves the pause alone', async () => {
+    fakeCallLog(heldRoom());
+    const events = fakeTwilio({
+      during: {
+        recording: async () => {
+          const working = db.getMockImplementation();
+          db.mockImplementation((...args) => {
+            const chain = working(...args);
+            chain.first = jest.fn(async () => { throw Object.assign(new Error('db'), { code: 'ECONNRESET' }); });
+            return chain;
+          });
+        },
+      },
+    });
+    expect(await hold.startHold(SID, { legSid: LEG })).toBe('held');
+    expect(recordingState(events)).toBe('paused');
+  });
+
+  test('holdAgain (the caller put back on hold after a failed voicemail) has the same check', async () => {
+    const row = fakeCallLog(heldRoom());
+    fakeTwilio();
+    await hold.startHold(SID, { legSid: LEG });
+    jest.clearAllMocks();
+    // Press 1, with the staff hanging up while its unhold is in flight and the first voicemail try failing: endHold
+    // puts the caller back on hold. While that second participant hold is in flight, the hold script's retry starts
+    // the voicemail (it works now) and the route resumes the recording, before holdAgain pauses.
+    let participantCalls = 0;
+    let roomCalls = 0;
+    const events = fakeTwilio({
+      during: {
+        participant: async () => {
+          participantCalls += 1;
+          if (participantCalls === 1) await staffGone();
+          if (participantCalls === 2) {
+            expect(await hold.startHoldVoicemail(SID, 'staff_left')).toBe('started');
+            await hold.resumeRecording(SID);
+          }
+        },
+        room: async () => {
+          roomCalls += 1;
+          if (roomCalls === 1) throw Object.assign(new Error('x'), { status: 500, code: 51000 });
+        },
+      },
+    });
+    expect(await hold.endHold(SID)).toBe('voicemail');
+    expect(stateOf(row)).toMatchObject({ open: false, voicemail_reason: 'staff_left' });
+    expect(events.filter((e) => e.name === 'recording').map((e) => e.status)).toEqual(['in-progress', 'paused', 'in-progress']);
+    expect(recordingState(events)).toBe('in-progress');
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+});
