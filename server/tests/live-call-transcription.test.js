@@ -18,6 +18,10 @@ jest.mock('../services/live-call-upset-alert', () => ({ afterCallerUtterance: (.
 const mockRequest = jest.fn();
 jest.mock('twilio', () => jest.fn(() => ({ request: mockRequest })));
 
+// The card-pause hook (GATE_CALL_RECORDING_CARD_PAUSE) is pinned here only as a call; its own suite covers the pause.
+const mockCardPause = jest.fn(() => Promise.resolve({ action: 'none' }));
+jest.mock('../services/live-call-card-pause', () => ({ onUtteranceStored: (...args) => mockCardPause(...args) }));
+
 // A small knex fake: call_log claims + stamps, and an in-memory call_live_utterances table.
 jest.mock('../models/db', () => {
   const state = { claimed: new Set(), quarantined: new Set(), panDetected: new Set(), rowExists: true, stamps: [], utterances: [], nextId: 1, rawCalls: [] };
@@ -28,7 +32,7 @@ jest.mock('../models/db', () => {
     q.first = jest.fn(async () => {
       const sid = q.filters.find(([c]) => c === 'twilio_call_sid')?.[1];
       if (!state.claimed.has(sid)) return undefined;
-      return { id: `log-${sid}`, quarantined: state.quarantined.has(sid) || state.panDetected.has(sid) };
+      return { id: `log-${sid}`, quarantined: state.quarantined.has(sid) || state.panDetected.has(sid), card_pause_open: state.pauseOpen === true };
     });
     q.update = jest.fn(async (patch) => {
       const sid = q.filters.find(([c]) => c === 'twilio_call_sid')?.[1];
@@ -240,6 +244,43 @@ describe('recordLiveTranscriptionEvent', () => {
     expect(db.__state.utterances).toHaveLength(1);
   });
 
+  test('the card-pause hook fires after the store commits with the masked text, never for a duplicate', async () => {
+    mockCardPause.mockClear();
+    db.transaction.mockImplementationOnce(async (fn) => {
+      const result = await fn(db);
+      expect(mockCardPause).not.toHaveBeenCalled(); // still inside the transaction
+      return result;
+    });
+    await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'my card is 4242 4242 4242 4242', 1));
+    expect(mockCardPause).toHaveBeenCalledTimes(1);
+    expect(mockCardPause).toHaveBeenCalledWith({ callSid: CALL, text: 'my card is [card ending 4242]', panMasked: true, pauseOpen: false });
+    await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'my card is 4242 4242 4242 4242', 1));
+    await live.recordLiveTranscriptionEvent(content(5, 'inbound_track', 'partial', 2, { Final: 'false' }));
+    expect(mockCardPause).toHaveBeenCalledTimes(1);
+    // A hook that rejects or throws never fails the store.
+    mockCardPause.mockReturnValueOnce(Promise.reject(new Error('twilio down')));
+    await expect(live.recordLiveTranscriptionEvent(content(3, 'outbound_track', 'ok', 3))).resolves.toMatchObject({ stored: true });
+  });
+
+  test('gate off: the hook is not called and the service is not required', async () => {
+    mockCardPause.mockClear();
+    isEnabled.mockImplementation((key) => key !== 'callRecordingCardPause');
+    await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'what is the card number', 1));
+    expect(mockCardPause).not.toHaveBeenCalled();
+  });
+
+  test('gate off with a card pause running: the hook still runs, so the pause ends on time', async () => {
+    mockCardPause.mockClear();
+    isEnabled.mockImplementation((key) => key !== 'callRecordingCardPause');
+    db.__state.pauseOpen = true;
+    try {
+      await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'ok, go ahead', 1));
+      expect(mockCardPause).toHaveBeenCalledWith(expect.objectContaining({ callSid: CALL, pauseOpen: true }));
+    } finally {
+      db.__state.pauseOpen = false;
+    }
+  });
+
   test('a call this module never started is not written to', async () => {
     await expect(live.recordLiveTranscriptionEvent({ ...content(2, 'inbound_track', 'hello', 1), CallSid: OTHER })).resolves.toMatchObject({ stored: false, reason: 'not_started_here' });
     expect(db.__state.utterances).toHaveLength(0);
@@ -374,5 +415,64 @@ describe('purgeLiveUtterances', () => {
     db.__state.panDetected.add(CALL);
     await expect(live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'hello', 1))).resolves.toEqual({ stored: false, reason: 'quarantined' });
     expect(db.__state.utterances).toHaveLength(0);
+  });
+});
+
+describe('liveTranscriptFor', () => {
+  const seed = (rows) => {
+    db.__state.utterances = rows.map((r, i) => ({ id: i + 1, call_sid: CALL, pan_masked: false, spoken_at: new Date(Date.UTC(2026, 10, 16, 15, 0, r.at)), ...r }));
+  };
+
+  test('returns null with no utterances, for a bad SID, and for rows with only empty text', async () => {
+    await expect(live.liveTranscriptFor(CALL)).resolves.toBeNull();
+    await expect(live.liveTranscriptFor('not-a-sid')).resolves.toBeNull();
+    seed([{ speaker: 'caller', text: '   ', at: 1 }, { speaker: 'staff', text: null, at: 2 }]);
+    await expect(live.liveTranscriptFor(CALL)).resolves.toBeNull();
+  });
+
+  test('labels staff Agent and caller Caller, one line per turn, in spoken order', async () => {
+    seed([
+      { speaker: 'staff', text: 'Waves, how can I help?', at: 5 },
+      { speaker: 'caller', text: 'I have ants in my kitchen.', at: 9 },
+      { speaker: 'staff', text: 'What is the address?', at: 12 },
+    ]);
+    const result = await live.liveTranscriptFor(CALL);
+    expect(result).toEqual({
+      text: 'Agent: Waves, how can I help?\nCaller: I have ants in my kitchen.\nAgent: What is the address?',
+      utterances: 3,
+      panMasked: false,
+    });
+  });
+
+  test('orders by spoken_at then id, not insertion order', async () => {
+    seed([
+      { speaker: 'caller', text: 'second', at: 8 },
+      { speaker: 'staff', text: 'first', at: 2 },
+      { speaker: 'caller', text: 'third', at: 8 },
+    ]);
+    const { text } = await live.liveTranscriptFor(CALL);
+    expect(text).toBe('Agent: first\nCaller: second third');
+  });
+
+  test('joins consecutive same-speaker utterances into one turn and skips empty ones', async () => {
+    seed([
+      { speaker: 'caller', text: 'My name is Sandy.', at: 1 },
+      { speaker: 'caller', text: '', at: 2 },
+      { speaker: 'caller', text: 'I live on Palm Street.', at: 3 },
+      { speaker: 'staff', text: 'Got it.', at: 4 },
+    ]);
+    const result = await live.liveTranscriptFor(CALL);
+    expect(result.text).toBe('Caller: My name is Sandy. I live on Palm Street.\nAgent: Got it.');
+    expect(result.utterances).toBe(3);
+  });
+
+  test('reports panMasked when any utterance was card-masked, and only reads this call', async () => {
+    seed([
+      { speaker: 'caller', text: 'my card is [card number removed]', at: 1, pan_masked: true },
+      { speaker: 'caller', text: 'other call text', at: 2, call_sid: OTHER },
+    ]);
+    const result = await live.liveTranscriptFor(CALL);
+    expect(result.panMasked).toBe(true);
+    expect(result.text).not.toContain('other call');
   });
 });

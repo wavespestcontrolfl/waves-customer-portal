@@ -1008,6 +1008,19 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY MINUTE — a card pause that began before a restart (or whose live text has stopped) still ends:
+  // re-arms the resume timer of an open pause and sends a due resume. Registered before the GATE_CRON_JOBS
+  // return and run whatever GATE_CALL_RECORDING_CARD_PAUSE says: a pause started while it was on must
+  // end, and a silent recording is the damage. No runExclusive on purpose: the per-call sender lease keeps
+  // overlapping deploy instances from sending twice, and no lock is held across a Twilio request.
+  cron.schedule('* * * * *', async () => {
+    try {
+      await require('./live-call-card-pause').recoverOpenPauses();
+    } catch (err) {
+      logger.error(`[live-card-pause] recovery tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // SMS prompt patches (GATE_SMS_PROMPT_AUTOPROMOTE): the drafter's snapshot of the active patch
   // loads here, BEFORE the cronJobs early return below, so a process with crons disabled still
   // drafts with the live patch (and its version tag). The watcher starts in every mode: it reads
@@ -1307,6 +1320,24 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`[portal-messages] pending notice sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // EVERY 2 MIN — spoken staff notes and reminders on live-transcribed calls (GATE_CALL_SPOKEN_NOTES, owner
+  // 2026-11-16): reads a finished call's staff lines once for "make a note" / "remind me" and rings the admin
+  // bell for each reminder that has come due. Bell and call record only; it never contacts a customer.
+  // Gate off = the job does nothing at all (no lease, no read). Exclusive, so two instances never run it at once.
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      if (!require('../config/feature-gates').isEnabled('callSpokenNotes')) return;
+      await runExclusive('live-call-spoken-notes', async () => {
+        const result = await require('./live-call-spoken-notes').run();
+        if (result.checked || result.raised) {
+          logger.info(`[live-call-spoken-notes] checked=${result.checked} asked=${result.asked} saved=${result.saved} raised=${result.raised}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[live-call-spoken-notes] run failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

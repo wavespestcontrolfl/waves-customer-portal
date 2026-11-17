@@ -48,6 +48,9 @@ const MAX_TEXT = 4000;
 // recording's own scrub flagged a card number (transcription_metadata.pan_detected).
 const QUARANTINED_SQL = "((metadata #>> '{live_transcription,quarantined_at}') IS NOT NULL"
   + " OR COALESCE(transcription_metadata ->> 'pan_detected', '') = 'true') AS quarantined";
+// A card-number recording pause is open on the call (GATE_CALL_RECORDING_CARD_PAUSE, live-call-card-pause.js).
+const CARD_PAUSE_OPEN_SQL = "(metadata -> 'live_transcription' -> 'card_pause' ->> 'paused_at') IS NOT NULL"
+  + " AND (metadata -> 'live_transcription' -> 'card_pause' ->> 'resumed_at') IS NULL AS card_pause_open";
 
 function maskSid(sid) {
   const value = String(sid || '');
@@ -232,16 +235,19 @@ async function storeUtterance(callSid, body) {
   const confidence = Number.isFinite(Number(data.confidence)) && data.confidence !== null ? Number(data.confidence) : null;
   const spokenAt = eventTime(body);
 
-  return db.transaction(async (trx) => {
+  let storedText = '';
+  let pauseOpen = false;
+  const result = await db.transaction(async (trx) => {
     // One writer per call: two utterances of one call never scrub against a stale window.
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`call_live_utterances:${callSid}`]);
     const claimed = await trx('call_log')
       .where('twilio_call_sid', callSid)
       .whereRaw("(metadata -> 'live_transcription') IS NOT NULL")
-      .first('id', trx.raw(QUARANTINED_SQL));
+      .first('id', trx.raw(QUARANTINED_SQL), trx.raw(CARD_PAUSE_OPEN_SQL));
     if (!claimed) return { stored: false, reason: 'not_started_here' };
     // A quarantined call keeps no live text: a late callback or a redelivery stores nothing.
     if (claimed.quarantined) return { stored: false, reason: 'quarantined' };
+    pauseOpen = claimed.card_pause_open === true;
 
     // The rows spoken around this one, not the newest rows: a line that arrives late (after later
     // lines were stored) is scrubbed with its own neighbors.
@@ -290,8 +296,21 @@ async function storeUtterance(callSid, body) {
     }
     const panMasked = scrubbed.some((s) => s.panMasked && (s.id === null || changed.includes(s)));
     if (panMasked) await stampLiveState(trx, callSid, { pan_detected: true });
+    storedText = scrubbed.find((s) => s.id === null).text;
     return { stored: true, panMasked };
   });
+  // After the commit, fire and forget (GATE_CALL_RECORDING_CARD_PAUSE): the recording pause never
+  // delays the webhook's 200 and never throws. Gate off: the service is required only to end a pause
+  // that started while the gate was on, so turning the gate off never leaves a live call unrecorded.
+  if (result.stored && (isEnabled('callRecordingCardPause') || pauseOpen)) {
+    try {
+      Promise.resolve(require('./live-call-card-pause').onUtteranceStored({ callSid, text: storedText, panMasked: result.panMasked, pauseOpen }))
+        .catch(() => {});
+    } catch (err) {
+      logger.warn(`[live-transcription] card pause hook failed for ${maskSid(callSid)}: ${err.message}`);
+    }
+  }
+  return result;
 }
 
 /**
@@ -363,11 +382,45 @@ async function purgeQuarantinedLiveText({ limit = 25 } = {}) {
   }
 }
 
+/**
+ * The call's live text as a transcript, for GATE_LIVE_CALL_BACKUP_TRANSCRIPT: null when the call has
+ * no usable utterance, else { text, utterances, panMasked }. Utterances run in spoken order;
+ * consecutive ones from one speaker join into one turn, and each turn is a line in the format the
+ * processor's normal transcripts use ("Agent: ..." for staff, "Caller: ..." for the caller).
+ */
+async function liveTranscriptFor(callSid) {
+  if (!CALL_SID_RE.test(String(callSid || ''))) return null;
+  const rows = await db('call_live_utterances')
+    .where('call_sid', callSid)
+    .orderBy([{ column: 'spoken_at', order: 'asc' }, { column: 'id', order: 'asc' }])
+    .select('speaker', 'text', 'pan_masked');
+  const turns = [];
+  let panMasked = false;
+  let utterances = 0;
+  for (const row of rows || []) {
+    const text = typeof row?.text === 'string' ? row.text.trim() : '';
+    if (!text) continue;
+    const speaker = row.speaker === 'staff' ? 'staff' : 'caller';
+    utterances += 1;
+    if (row.pan_masked) panMasked = true;
+    const last = turns[turns.length - 1];
+    if (last && last.speaker === speaker) last.text = `${last.text} ${text}`;
+    else turns.push({ speaker, text });
+  }
+  if (!turns.length) return null;
+  return {
+    text: turns.map((t) => `${t.speaker === 'staff' ? 'Agent' : 'Caller'}: ${t.text}`).join('\n'),
+    utterances,
+    panMasked,
+  };
+}
+
 module.exports = {
   startLiveTranscription,
   recordLiveTranscriptionEvent,
   purgeLiveUtterances,
   purgeQuarantinedLiveText,
+  liveTranscriptFor,
   WEBHOOK_PATH,
   _test: { scrubWindow, scrubLines, startParams, CODE_TAIL_RE },
 };
