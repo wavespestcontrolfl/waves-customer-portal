@@ -46,6 +46,8 @@ function fakeCallLog(metadata, extra = {}) {
     if (m) return String(at(row.metadata, m[1].split(','))) === String(bindings[0]);
     m = sql.match(/^COALESCE\(metadata #>> '\{([^}]*)\}', '([^']*)'\) <> '([^']*)'$/);
     if (m) return String(at(row.metadata, m[1].split(',')) ?? m[2]) !== m[3];
+    m = sql.match(/^\(COALESCE\(metadata #>> '\{([^}]*)\}', ''\) < \? OR \(metadata #>> '\{([^}]*)\}'\) IS NOT NULL\)$/); // free of a live return claim, or a staff_left voicemail is pending
+    if (m) return String(at(row.metadata, m[1].split(',')) ?? '') < String(bindings[0]) || at(row.metadata, m[2].split(',')) != null;
     m = sql.match(/^COALESCE\(metadata #>> '\{([^}]*)\}', ''\) < \?$/); // no value, or one older than the bound cutoff
     if (m) return String(at(row.metadata, m[1].split(',')) ?? '') < String(bindings[0]);
     throw new Error(`unknown condition: ${sql}`);
@@ -825,5 +827,90 @@ describe('the staff hang up during a hold and the room will not end', () => {
     fakeTwilio({ fail: { room: Object.assign(new Error('x'), { status: 500 }) } });
     expect(await hold.startHoldVoicemail(SID, 'timeout')).toBe('failed');
     expect(stateOf(row).voicemail_pending).toBeUndefined();
+  });
+
+  // Press 1 and the staff hang-up together: the unhold request is in flight (the return claim is live) when the staff
+  // leg ends. Exactly one of two things wins, decided by the close write and the stamp on the same hold row.
+  describe('the staff hang up while a press 1 is working', () => {
+    const once = (fn) => { let fired = false; return async () => { if (!fired) { fired = true; await fn(); } }; };
+
+    test('the stamp lands before the close: the staff handler touches no Twilio and the press 1 runs the voicemail itself', async () => {
+      const row = fakeCallLog(heldRoom());
+      fakeTwilio();
+      await hold.startHold(SID, { legSid: LEG });
+      jest.clearAllMocks();
+      const seen = {};
+      const events = fakeTwilio({ during: { participant: once(async () => { seen.staff = await staffGone(); }) } });
+      expect(await hold.endHold(SID)).toBe('voicemail');
+      expect(seen.staff).toBe('hold_voicemail_pending');
+      // unhold, then the voicemail's own list + room end. No recording resume, no second room end by cleanup.
+      expect(names(events)).toEqual(['list', 'participant', 'list', 'room']);
+      expect(events[3]).toMatchObject({ sid: ROOM, status: 'completed' });
+      expect(stateOf(row)).toMatchObject({ open: false, voicemail_reason: 'staff_left' });
+      expect(stateOf(row).voicemail_at).toBeDefined();
+      expect(stateOf(row).voicemail_pending).toBeUndefined();
+      expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+      expect((await hold.holdState(SID)).voicemailAt).toBe(stateOf(row).voicemail_at); // what /call-complete?conf=1 answers from
+    });
+
+    test('the close lands before the stamp: the press 1 returns, and the hang-up then gets today\'s room end', async () => {
+      const row = fakeCallLog(heldRoom());
+      fakeTwilio();
+      await hold.startHold(SID, { legSid: LEG });
+      jest.clearAllMocks();
+      const events = fakeTwilio();
+      expect(await hold.endHold(SID)).toBe('returned');
+      expect(stateOf(row).open).toBe(false);
+      expect(await staffGone()).toBe('room_ended');
+      expect(names(events)).toEqual(['list', 'participant', 'recording', 'list', 'room']);
+      expect(stateOf(row).voicemail_pending).toBeUndefined();
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+    });
+
+    test('stamp first and the voicemail cannot start: the caller is put back on hold and the next hold script fetch resolves it', async () => {
+      const row = fakeCallLog(heldRoom());
+      fakeTwilio();
+      await hold.startHold(SID, { legSid: LEG });
+      jest.clearAllMocks();
+      const seen = {};
+      const events = fakeTwilio({
+        fail: { room: Object.assign(new Error('x'), { status: 500, code: 51000 }) },
+        during: { participant: once(async () => { seen.staff = await staffGone(); }) },
+      });
+      expect(await hold.endHold(SID)).toBe('voicemail');
+      expect(seen.staff).toBe('hold_voicemail_pending');
+      expect(names(events)).toEqual(['list', 'participant', 'list', 'room', 'list', 'participant', 'recording']);
+      expect(events[5]).toMatchObject({ sid: SID, hold: true, holdMethod: 'POST' });
+      expect(events[6]).toMatchObject({ status: 'paused' });
+      expect(stateOf(row)).toMatchObject({ open: true, voicemail_pending: 'staff_left' });
+      expect(stateOf(row).voicemail_at).toBeUndefined();
+      expect(raiseAdminAlert).not.toHaveBeenCalled();
+      // The hold script's next fetch: the pending reason starts the voicemail, even with the old return claim on the row.
+      const next = fakeTwilio();
+      expect(await hold.startHoldVoicemail(SID, (await hold.holdState(SID)).voicemailPending)).toBe('started');
+      expect(names(next)).toEqual(['list', 'room']);
+      expect(stateOf(row)).toMatchObject({ open: false, voicemail_reason: 'staff_left' });
+      expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    });
+
+    test('a press 1 that arrives after the stamp answers voicemail and touches no Twilio', async () => {
+      const row = fakeCallLog(heldRoom());
+      fakeTwilio();
+      await hold.startHold(SID, { legSid: LEG });
+      stateOf(row).voicemail_pending = 'staff_left';
+      const events = fakeTwilio();
+      expect(await hold.endHold(SID)).toBe('voicemail');
+      expect(events).toHaveLength(0);
+    });
+
+    test('the stamp is only written while the hold is open: a closed hold gets no stamp', async () => {
+      const row = fakeCallLog(heldRoom());
+      fakeTwilio();
+      await hold.startHold(SID, { legSid: LEG });
+      await hold.endHold(SID);
+      fakeTwilio();
+      await staffGone();
+      expect(stateOf(row).voicemail_pending).toBeUndefined();
+    });
   });
 });
