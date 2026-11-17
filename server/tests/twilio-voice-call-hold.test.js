@@ -19,6 +19,7 @@ jest.mock('../services/call-hold', () => ({
   roomIsOpen: jest.fn(async () => true),
   resumeRecording: jest.fn(async () => true),
   voicemailAnswered: jest.fn(async () => {}),
+  transferOn: jest.fn(() => false),
   transferAvailable: jest.fn(() => false),
   startTransfer: jest.fn(),
   acceptTransfer: jest.fn(),
@@ -69,6 +70,7 @@ beforeEach(() => {
   callHold.holdState.mockReset().mockResolvedValue({ found: true, closed: false, phase: 'held', applied: 'held' });
   callHold.roomIsOpen.mockReset().mockResolvedValue(true);
   callHold.resumeRecording.mockReset().mockResolvedValue(true);
+  callHold.transferOn.mockReset().mockReturnValue(false);
   callHold.transferAvailable.mockReset().mockReturnValue(false);
   callHold.startTransfer.mockReset();
   callHold.acceptTransfer.mockReset();
@@ -626,6 +628,48 @@ describe('/conference-transfer-wait (the staff while it rings)', () => {
   });
 });
 
+describe('after the owner took the transfer, only his leg rejoins with star', () => {
+  // The staff who pressed 2 (LEG) press a key just as the owner (TLEG) takes the call, or come back by a loop: they join
+  // as a second staff (no star, no staff-left action). The owner's own leg rejoins as the call's staff.
+  const TAKEN = VIEW({ ...RING, status: 'accepted', ringing: false }, { phase: 'returned', applied: 'returned' });
+  const SAID = say('Your call is transferred. Stay on to introduce the caller, or hang up.');
+
+  test('a press 1 from the staff who pressed 2: the second staff join; from the owner leg: the staff <Dial> with star', async () => {
+    callHold.isEnabled.mockReturnValue(true);
+    callHold.transferOn.mockReturnValue(true);
+    callHold.endHold.mockResolvedValue('returned');
+    callHold.holdState.mockResolvedValue(TAKEN);
+    expect((await post('/conference-staff-menu-choice', { body: { Digits: '1', CallSid: LEG } })).body).toBe(response(`${SAID}${SECOND_STAFF}`));
+    expect((await post('/conference-staff-menu-choice', { body: { Digits: '1', CallSid: TLEG } })).body).toBe(response(STAFF_ROOM_ON));
+    expect(callHold.holdState).toHaveBeenCalledWith(SID);
+  });
+
+  test('the transfer gate off: a press 1 rejoins as today, with no state read', async () => {
+    callHold.isEnabled.mockReturnValue(true);
+    callHold.endHold.mockResolvedValue('returned');
+    callHold.holdState.mockResolvedValue(TAKEN);
+    expect((await post('/conference-staff-menu-choice', { body: { Digits: '1', CallSid: LEG } })).body).toBe(response(STAFF_ROOM_ON));
+    expect(callHold.holdState).not.toHaveBeenCalled();
+  });
+
+  test('a transfer that failed or was canceled: the press 1 rejoins with star', async () => {
+    callHold.isEnabled.mockReturnValue(true);
+    callHold.transferOn.mockReturnValue(true);
+    callHold.endHold.mockResolvedValue('returned');
+    for (const status of ['failed', 'canceled']) {
+      callHold.holdState.mockResolvedValue(VIEW({ ...RING, status, ringing: false }, { phase: 'returned', applied: 'returned' }));
+      expect((await post('/conference-staff-menu-choice', { body: { Digits: '1', CallSid: LEG } })).body).toBe(response(STAFF_ROOM_ON));
+    }
+  });
+
+  test('the menu loop of the staff who pressed 2 (any other key leads there): the second staff join; the owner rejoins with star', async () => {
+    callHold.isEnabled.mockReturnValue(true);
+    callHold.checkHold.mockResolvedValue(TAKEN);
+    expect((await post('/conference-staff-menu', { body: { CallSid: LEG } })).body).toBe(response(`${SAID}${SECOND_STAFF}`));
+    expect((await post('/conference-staff-menu', { body: { CallSid: TLEG } })).body).toBe(response(STAFF_ROOM_ON));
+  });
+});
+
 describe('/conference-transfer-answer (the whisper on the owner phone)', () => {
   const body = { CallSid: TLEG };
   const query = { n: '1' };
@@ -698,9 +742,18 @@ describe('/conference-transfer-accept (the owner pressed 1)', () => {
     expect((await accept()).body).toBe(response(`${say('The transfer ended. Goodbye.')}<Hangup/>`));
   });
 
-  test('failed: a gather with the same action to try again, then a hang-up', async () => {
+  test('failed (the unhold not confirmed in time): a short loop back to the accept, never a hang-up, until it settles', async () => {
+    // His leg is already the winning leg, so a hang-up here would end the room under the caller.
+    const RETRY = `<Pause length="1"/><Redirect method="POST">${ACCEPT_URL(1)}&amp;retry=1</Redirect>`;
+    callHold.isEnabled.mockReturnValue(true);
     callHold.acceptTransfer.mockResolvedValue('failed');
-    expect((await accept()).body).toBe(response(`<Gather numDigits="1" timeout="8" action="${ACCEPT_URL(1)}" method="POST">${say('Sorry, that did not work. Press 1 to try again.')}</Gather><Hangup/>`));
+    expect((await accept()).body).toBe(response(`${say('One moment.')}${RETRY}`));
+    // The loop's own fetch has no Digits: it settles again (no second "One moment."), then joins once confirmed.
+    expect((await accept({ body: { Digits: undefined }, query: { retry: '1' } })).body).toBe(response(RETRY));
+    callHold.acceptTransfer.mockResolvedValue('returned');
+    expect((await accept({ body: { Digits: undefined }, query: { retry: '1' } })).body).toBe(response(`${say('Connecting.')}${STAFF_ROOM_ON}`));
+    expect(callHold.acceptTransfer).toHaveBeenCalledTimes(3);
+    expect(callHold.acceptTransfer).toHaveBeenLastCalledWith(SID, { n: 1, legSid: TLEG });
   });
 
   test('any other key goes back to the whisper; nothing is accepted', async () => {

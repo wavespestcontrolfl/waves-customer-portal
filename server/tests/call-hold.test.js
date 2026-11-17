@@ -1876,6 +1876,11 @@ describe('planner: the warm transfer (pure)', () => {
       const before = ringingHold({ leg_sid: TLEG });
       expect(accept(before, {}, true)).toEqual({ next: before, answer: 'closed' });
     });
+
+    test('a closed call after he took it (a re-press, or his retry loop): closed, so the loop ends', () => {
+      const done = heldHold({ phase: 'returned', applied: 'held', ret_by: 'transfer', transfer: transferOf({ status: 'accepted', leg_sid: TLEG }) });
+      expect(accept(done, {}, true)).toEqual({ next: done, answer: 'closed' });
+    });
   });
 
   describe('transfer_end', () => {
@@ -2256,6 +2261,21 @@ describe('the warm transfer: acceptTransfer', () => {
     seed(ringingHold({ leg_sid: TLEG }));
     fakeTwilio({ rooms: [] });
     expect(await accept()).toBe('no_room');
+  });
+
+  test('no_room: the caller hangs up while his unhold is confirmed, so his retry loop ends', async () => {
+    seed(ringingHold({ leg_sid: TLEG }));
+    const events = fakeTwilio({
+      fail: { participant: err(503) },
+      during: { participant: async () => { cpOf().closed_at = iso(0); } },
+    });
+    expect(await accept()).toBe('no_room');
+    expect(names(events)).toEqual(['list', 'participant']);
+    expect(cpOf().accepted_leg_sid).toBe(TLEG);
+    // His retry after that: the closed call answers at once, with no Twilio request.
+    const later = fakeTwilio();
+    expect(await accept()).toBe('no_room');
+    expect(later).toEqual([]);
   });
 
   test('failed: the unhold could not be confirmed, or the database is down; never a throw', async () => {

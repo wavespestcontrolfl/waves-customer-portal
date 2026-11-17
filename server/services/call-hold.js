@@ -280,9 +280,10 @@ function planTransferPlaced(hold, ev) {
 function planTransferAccept(hold, ev, nowMs, closed) {
   const t = hold?.transfer;
   if (hold?.phase === 'voicemail') return { next: hold, answer: 'voicemail' };
+  // A closed call (the caller hung up) has no room to join, also on a re-press or a retry after he took it.
+  if (closed) return { next: hold, answer: 'closed' };
   if (t?.status === 'accepted' && t.leg_sid === ev.legSid) return { next: hold, answer: 'return' };
   if (!t || t.n !== ev.n || !transferRinging(t, nowMs) || (t.leg_sid && t.leg_sid !== ev.legSid) || hold.phase !== 'held') return { next: hold, answer: 'over' };
-  if (closed) return { next: hold, answer: 'closed' };
   const accepted = { ...t, status: 'accepted', leg_sid: ev.legSid, accepted_at: isoAt(nowMs) };
   return { next: { ...toReturned(hold, 'transfer', nowMs), transfer: accepted }, answer: 'return', acceptedLegSid: ev.legSid };
 }
@@ -879,12 +880,16 @@ async function staffLeft(callSid) {
 // The warm transfer (see THE WARM TRANSFER above).
 // ---------------------------------------------------------------------------------------------------------
 
+// The warm transfer's gate and the hold's, read at call time.
+function transferOn() {
+  return typeof featureGates.callWarmTransferLive === 'function' && featureGates.callWarmTransferLive() && isEnabled();
+}
+
 // The transfer is offered on a menu request: the gate, the hold, a valid CALL_TRANSFER_TO, and a menu leg that is not the
 // target (the owner never transfers to himself, including after he took a transfer).
 function transferAvailable(menuNumber) {
-  const live = typeof featureGates.callWarmTransferLive === 'function' && featureGates.callWarmTransferLive();
   const target = transferTarget();
-  return Boolean(live && isEnabled() && target && toE164(menuNumber) !== target);
+  return Boolean(transferOn() && target && toE164(menuNumber) !== target);
 }
 
 // Places the one call to the transfer number. 'ringing' | 'failed'. The caller's own Waves line is the caller ID.
@@ -952,7 +957,8 @@ async function acceptTransfer(callSid, { n, legSid }) {
     if (decision.answer === 'over') return 'over';
     if (decision.answer !== 'return') return 'failed';
     if (decision.acceptedLegSid) logger.info(`[call-hold] transfer ${n} taken for ${masked(callSid)}`);
-    return (await settle(callSid, settledReturn)) || 'failed';
+    // The caller can hang up while the unhold is confirmed: no room to join, so the owner's retry loop ends.
+    return (await settle(callSid, (view) => (view.closed ? 'no_room' : settledReturn(view)))) || 'failed';
   } catch (err) {
     logger.warn(`[call-hold] transfer not accepted for ${masked(callSid)} (${errorCode(err)})`);
     return 'failed';
@@ -1133,6 +1139,6 @@ async function recoverPendingHolds() {
 module.exports = {
   HOLD_REMINDER_SEC, HOLD_LIMIT_SEC, TRANSFER_RING_SEC, TRANSFER_EXPIRY_SEC, LEASE_MS, isEnabled, startHold, endHold, checkHold, staffLeft,
   holdState, roomIsOpen, heldSeconds, resumeRecording, recoverPendingHolds, voicemailAnswered, requestHold, holdForPanel,
-  transferTarget, transferAvailable, startTransfer, acceptTransfer, endTransfer,
+  transferTarget, transferOn, transferAvailable, startTransfer, acceptTransfer, endTransfer,
   _test: { planEvent, planClaim, nextStep, decide, resumeRetries, transferRinging },
 };
