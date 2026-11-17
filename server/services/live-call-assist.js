@@ -141,6 +141,10 @@ function mergeFacts(previous, next, withdrawn = []) {
   for (const k of FACT_KEYS) {
     merged[k] = k === 'service' ? service : next[k] ?? (stale(k) ? null : carried(k));
   }
+  // The caller took a place back and has named none since: the matched account's address must not stand in for it
+  // (it may be the very address the caller rejected). Naming any street, city or zip ends it.
+  const namedPlace = ADDRESS_KEYS.some((k) => next[k]);
+  if (!namedPlace && (withdrawn.some((k) => ADDRESS_KEYS.includes(k)) || previous?.place_withdrawn === true)) merged.place_withdrawn = true;
   return merged;
 }
 
@@ -341,7 +345,7 @@ async function refreshAssistIfDue(callRow, { customerId = null } = {}) {
     const previous = live.assist || {};
     const facts = mergeFacts(previous.facts, read.facts, read.withdrawn);
     const customer = await accountFor(customerId);
-    const useAccount = !!customer && !statesOtherProperty(customer, facts);
+    const useAccount = !!customer && !facts.place_withdrawn && !statesOtherProperty(customer, facts);
     const scheduling = schedulingOn();
     const key = lookupKey(facts, useAccount ? customer.id : null, scheduling);
     const patch = { intent: read.intent, service: facts.service, facts, ...(await priceAndTimes(facts, customer, useAccount, key, previous, scheduling)) };

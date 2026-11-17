@@ -488,6 +488,37 @@ describe('live call assist withdrawn facts', () => {
     expect(mockPricing).toHaveBeenCalledWith({ service: 'pest_control', home_sqft: undefined, lot_sqft: undefined });
   });
 
+  test('a matched caller who takes the address back gets no account pin or sizes until a place is named again', async () => {
+    db.__state.customers = { 'cust-1': { id: 'cust-1', address_line1: '1 Sample Way', city: 'Bradenton', zip: '34202', lot_sqft: 8000, property_sqft: 3000 } };
+    const nextFor = async (obj) => {
+      speak(1);
+      advance(50 * 1000);
+      mockCreate.mockResolvedValue(reply({ ...NO_FACTS, ...obj }));
+      await run({ customerId: 'cust-1' });
+    };
+    const onAccount = expect.objectContaining({ account: expect.objectContaining({ customerId: 'cust-1' }) });
+    mockCreate.mockResolvedValue(reply({ ...PEST, service: 'lawn_care', when: 'next week' }));
+    await run({ customerId: 'cust-1' });
+    expect(mockAvailability).toHaveBeenLastCalledWith(onAccount);
+    mockAvailability.mockClear();
+    mockPricing.mockClear();
+    // "Not that house": the account's own address must not stand in for the one the caller just rejected.
+    await nextFor({ intent: 'Not that house', service: 'lawn_care', when: 'next week', withdrawn: ['address'] });
+    expect(assist()).toMatchObject({ times: null });
+    expect(assist().facts.place_withdrawn).toBe(true);
+    expect(mockAvailability).not.toHaveBeenCalled();
+    expect(mockPricing).toHaveBeenCalledWith({ service: 'lawn_care', home_sqft: undefined, lot_sqft: undefined });
+    // A later read that names no place keeps the account out.
+    await nextFor({ intent: 'Asks about the price', service: 'lawn_care', when: 'next week' });
+    expect(mockAvailability).not.toHaveBeenCalled();
+    expect(assist().facts.place_withdrawn).toBe(true);
+    // Naming the account's own street brings the account back.
+    mockMatches.mockReturnValue(true);
+    await nextFor({ intent: 'It is my home after all', service: 'lawn_care', when: 'next week', address_line1: '1 Sample Way' });
+    expect(mockAvailability).toHaveBeenLastCalledWith(onAccount);
+    expect(assist().facts.place_withdrawn).toBeUndefined();
+  });
+
   test('withdrawn: only known names, "address" means street, city and zip', () => {
     const v = _test.validate({ intent: 'x', withdrawn: ['address', 'service', 'service', 'call_summary', 7, 'zip'] });
     expect([...v.withdrawn].sort()).toEqual(['address_line1', 'city', 'service', 'zip']);
