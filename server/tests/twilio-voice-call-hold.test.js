@@ -559,8 +559,31 @@ describe('/conference-staff-menu-choice: 2 starts the transfer', () => {
   });
 });
 
+describe('/conference-staff-menu-choice from the transfer wait (wait=1)', () => {
+  const BACK_TO_WAIT = response(`<Redirect method="POST">${WAIT_URL}</Redirect>`);
+  const choose = (Digits, query = { wait: '1' }) => post('/conference-staff-menu-choice', { body: { Digits, CallSid: LEG }, query });
+
+  test('a key other than 1 or 2 goes back to the transfer wait, never to the hold menu (which would not take the caller back)', async () => {
+    for (const digit of ['3', '9', '*', '#', '']) expect((await choose(digit)).body).toBe(BACK_TO_WAIT);
+    expect(callHold.endHold).not.toHaveBeenCalled();
+    expect(callHold.startTransfer).not.toHaveBeenCalled();
+  });
+
+  test('without wait=1 the same key goes to the hold menu, as before', async () => {
+    expect((await choose('3', {})).body).toBe(response(`<Redirect method="POST">${MENU_URL}</Redirect>`));
+  });
+
+  test('1 from the wait is the press 1 return; 2 with the transfer not offered goes back to the wait', async () => {
+    callHold.isEnabled.mockReturnValue(true);
+    callHold.endHold.mockResolvedValue('returned');
+    expect((await choose('1')).body).toBe(response(STAFF_ROOM_ON));
+    expect((await choose('2')).body).toBe(BACK_TO_WAIT);
+    expect(callHold.startTransfer).not.toHaveBeenCalled();
+  });
+});
+
 describe('/conference-transfer-wait (the staff while it rings)', () => {
-  const GATHER = `<Gather numDigits="1" timeout="5" action="${CHOICE_URL}" method="POST">`;
+  const GATHER = `<Gather numDigits="1" timeout="5" action="${CHOICE_URL}&amp;wait=1" method="POST">`;
   const LOOP = `<Redirect method="POST">${WAIT_URL}</Redirect>`;
 
   test('ringing: a 5 s gather whose key 1 is the press 1 route; first=1 says "Calling now"; the loop is silent after', async () => {

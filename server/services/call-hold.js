@@ -77,7 +77,8 @@
  * by=voice, when the staff say "please hold" or "let me put you on hold" on the live call. Nothing here texts or calls anyone.
  *
  * THE WARM TRANSFER (GATE_CALL_WARM_TRANSFER, owner 2026-11-16 "ok build all", part 6): the staff on the hold menu press 2 and
- * the server places ONE call to CALL_TRANSFER_TO. The state is hold.transfer { n, status 'ringing' | 'accepted' | 'failed' |
+ * the server places ONE call to CALL_TRANSFER_TO. The state is hold.transfer { n (unique on the call: hold.transfers counts
+ * the call's transfers and a new star carries it), status 'ringing' | 'accepted' | 'failed' |
  * 'canceled', leg_sid, from_leg_sid, from_name, at, ended_at, end_reason, from_left_at, accepted_at } (no phone numbers). It lives
  * inside the hold, so a new star starts with none, and it is decided at the same one decision point. The owner's press 1
  * (transfer_accept) is a press 1 return (ret_by 'transfer') and, in the SAME transaction, makes his leg the call's winning leg
@@ -194,6 +195,9 @@ function planStar(hold, ev, nowMs) {
       alert_pending: false,
       vm_answered_at: null,
       sender: prev.sender || null,
+      // The transfers placed on this call so far, across holds: each transfer's n is unique on the call, so a late
+      // callback of an earlier hold's transfer never matches this hold's.
+      transfers: Math.max(Number(prev.transfers) || 0, Number(prev.transfer?.n) || 0),
     },
     answer: 'start',
   };
@@ -264,11 +268,12 @@ function planTransferStart(hold, ev, nowMs, closed) {
   if (hold?.phase === 'voicemail') return { next: hold, answer: 'voicemail' };
   if (closed || hold?.phase !== 'held') return { next: hold, answer: 'not_held' };
   if (transferRinging(hold.transfer, nowMs)) return { next: hold, answer: 'busy' };
+  const n = Math.max(Number(hold.transfers) || 0, Number(hold.transfer?.n) || 0) + 1; // unique on the call
   const transfer = {
-    n: (Number(hold.transfer?.n) || 0) + 1, status: 'ringing', leg_sid: null, from_leg_sid: ev.legSid || null, from_name: ev.fromName || null,
+    n, status: 'ringing', leg_sid: null, from_leg_sid: ev.legSid || null, from_name: ev.fromName || null,
     at: isoAt(nowMs), ended_at: null, end_reason: null, from_left_at: null, accepted_at: null,
   };
-  return { next: { ...hold, transfer }, answer: 'start' };
+  return { next: { ...hold, transfers: n, transfer }, answer: 'start' };
 }
 
 // The owner's call was placed: record its SID. A transfer that ended meanwhile (or another n) is stale: the caller ends the call.

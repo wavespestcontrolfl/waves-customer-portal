@@ -1773,7 +1773,19 @@ describe('planner: the warm transfer (pure)', () => {
       const before = heldHold();
       const out = plan(before, { type: 'transfer_start', legSid: LEG, fromName: 'Virginia' });
       expect(out.answer).toBe('start');
-      expect(out.next).toEqual({ ...before, transfer: transferOf({ at: iso(0) }) });
+      expect(out.next).toEqual({ ...before, transfers: 1, transfer: transferOf({ at: iso(0) }) });
+    });
+
+    test('n is unique on the call: a new star carries the count, so a late callback of an earlier hold\'s transfer matches nothing', () => {
+      const OLD = `CA${'9'.repeat(32)}`;
+      const star = plan(heldHold({ phase: 'returned', applied: 'returned', ret_by: 'press1', transfer: transferOf({ n: 1, status: 'canceled', leg_sid: OLD }) }), { type: 'star', legSid: LEG });
+      expect(star.next).toMatchObject({ gen: 2, transfers: 1 });
+      expect(star.next.transfer).toBeUndefined();
+      const start = plan(star.next, { type: 'transfer_start', legSid: LEG });
+      expect(start.next).toMatchObject({ transfers: 2, transfer: { n: 2, status: 'ringing', leg_sid: null } });
+      // The canceled transfer's late callbacks (n 1, its own leg) while the new one is not placed yet:
+      expect(plan(start.next, { type: 'transfer_end', n: 1, legSid: OLD, reason: 'completed' })).toEqual({ next: start.next, answer: 'stale' });
+      expect(plan(start.next, { type: 'transfer_accept', n: 1, legSid: OLD })).toEqual({ next: start.next, answer: 'over' });
     });
 
     test('the next transfer of the same hold is n + 1 (after a failed one), and a missing name is null', () => {

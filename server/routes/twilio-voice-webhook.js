@@ -4357,7 +4357,8 @@ router.post('/conference-staff-menu-choice', async (req, res) => {
     } else if (digit === '2' && callHold.transferAvailable(req.body?.To || req.body?.Called)) {
       await appendTransferStart(twiml, parentSid, req.body);
     } else if (digit !== '1') {
-      holdMenuRedirect(twiml, parentSid);
+      if (req.query.wait === '1') twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-transfer-wait', parentSid));
+      else holdMenuRedirect(twiml, parentSid);
     } else {
       await appendPressOneReturn(twiml, parentSid, req.body?.CallSid);
     }
@@ -4379,7 +4380,9 @@ const TRANSFER_OVER = 'The transfer ended. Goodbye.';
 
 // The staff who pressed 2 while the transfer rings: a silent loop whose only key is 1 (back to the caller, which cancels it).
 function appendTransferWait(twiml, parentSid, { first, remind }) {
-  const gather = twiml.gather({ numDigits: 1, timeout: 5, action: HOLD_ROUTE('conference-staff-menu-choice', parentSid), method: 'POST' });
+  // `wait=1`: a key other than 1 or 2 goes back to this loop, never to the hold menu (whose loop would not take the
+  // caller back when the transfer fails).
+  const gather = twiml.gather({ numDigits: 1, timeout: 5, action: HOLD_ROUTE('conference-staff-menu-choice', parentSid, '&wait=1'), method: 'POST' });
   if (first) gather.say({ voice: SAY_VOICE }, 'Calling now. Press 1 to go back to the caller.');
   if (remind) gather.say({ voice: SAY_VOICE }, holdScript.STAFF_REMINDER);
   twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-transfer-wait', parentSid));
