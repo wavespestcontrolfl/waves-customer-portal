@@ -5875,6 +5875,8 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
     // pattern as the terminal handoff mint serialization.
     let recentFailures = 0;
     let achReplay = false;
+    // Stage 3 moved Auto Pay to a consented card (the flip below landed): picks which stage-3 email goes.
+    let achCardPromoted = false;
     await db.transaction(async (trx) => {
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -5961,6 +5963,7 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
               await trx('customers')
                 .where({ id: customer.id })
                 .update({ autopay_payment_method_id: fallbackCard.id });
+              achCardPromoted = true;
             } else {
               await trx('customers')
                 .where({ id: customer.id })
@@ -6022,6 +6025,11 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
     // stay off, owner 2026-09-28). Gate off, none of the email code below runs.
     const achMessageType = recentFailures >= 3 ? 'ach_suspended'
       : recentFailures >= 2 ? 'ach_card_fallback' : 'ach_retry_notice';
+    // The email for that stage. Stage 3 says "your Auto Pay now uses your card" only when the flip above moved a
+    // customer who is on Auto Pay to the card; every other stage-3 case (no consented card, or not on Auto Pay) gets
+    // the "pay by card" email.
+    const achEmailStage = achMessageType === 'ach_suspended' && !(achCardPromoted && customer.autopay_enabled !== false)
+      ? 'ach_suspended_no_card' : achMessageType;
     const achEmailOn = require('../config/feature-gates').achFailureEmailLive();
     let smsNoticeOwned = false;
     if (achReplay) {
@@ -6060,7 +6068,7 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
       // Gate on, the email is a durable notice of this event too: owned
       // (already recorded) means nothing is re-sent, SMS included. Only a
       // missing email is re-attempted, never a second one.
-      const emailOwned = achEmailOn && await PaymentLifecycleEmail.achFailureEmailRecorded({ paymentIntentId: piId, eventId, messageType: achMessageType });
+      const emailOwned = achEmailOn && await PaymentLifecycleEmail.achFailureEmailRecorded({ paymentIntentId: piId, eventId, messageType: achEmailStage });
       if (noticeExists || emailOwned) {
         if (!achEmailOn || emailOwned) {
           logger.info(`[stripe-webhook] ACH failure replay for PI ${piId} — skipping SMS + follow-up side effects`);
@@ -6127,7 +6135,7 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
         paymentId: payment.id,
         paymentIntentId: piId,
         eventId,
-        messageType: achMessageType,
+        messageType: achEmailStage,
         customerInitiated: await isCustomerInitiatedPaymentIntent(paymentIntent),
       }).catch((err) => ({ ok: false, error: err.message }));
       if (!emailResult?.ok) {

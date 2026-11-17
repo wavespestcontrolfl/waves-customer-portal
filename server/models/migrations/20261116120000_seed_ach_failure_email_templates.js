@@ -1,11 +1,14 @@
 /**
- * Seed the three customer emails for a failed bank (ACH) payment, one per escalation stage of stripe-webhook's
- * handleAchFailure (owner 2026-11-16, dark behind GATE_ACH_FAILURE_EMAIL). The matching texts (ach_retry_notice,
- * ach_card_fallback, ach_suspended) stay off (owner 2026-09-28); this email is their only notice.
+ * Seed the four customer emails for a failed bank (ACH) payment, one per escalation stage of stripe-webhook's
+ * handleAchFailure; stage 3 has two (Auto Pay moved to the card, or no card). Owner 2026-11-16, dark behind
+ * GATE_ACH_FAILURE_EMAIL. The matching texts (ach_retry_notice, ach_card_fallback, ach_suspended) stay off (owner
+ * 2026-09-28); this email is their only notice.
  *
  * Same shape as 20260522000002_seed_ach_processing_acknowledgment_templates (email half): transactional_required
  * stream, the transactional preference group upserted first, one active version, one preview fixture. Editable from
- * the admin email templates library. The copy is the owner-approved text wording.
+ * the admin email templates library. The copy is NOT the texts' wording: their lines on a retry in 3 business days,
+ * a switch to the card at the second failure and a bank update link at the third do not match the code, so each
+ * email says only what happens.
  */
 
 const SERVICE_FROM = 'contact@wavespestcontrol.com';
@@ -16,47 +19,70 @@ const SHARED_BLOCKS_TAIL = [
   { type: 'signature', content: 'Thank you, The Waves Team' },
 ];
 
+const GO_TO_BILLING = { type: 'cta', label: 'Go to billing', url_variable: 'billing_url' };
+// Every line below is what handleAchFailure (and the charge path) does at that stage, read from the code on
+// 2026-11-16: stage 1 changes nothing and promises no retry (only a monthly Auto Pay payment is retried; an invoice
+// payment is not); stage 2 sets ach_status needs_verification, so collection refuses the bank until a bank is saved
+// again (billing-v2) and nothing moves to a card; stage 3 sets ach_status suspended (the pay page offers card only)
+// and moves Auto Pay to a consented card when one exists, else turns Auto Pay off.
 const EMAIL_TEMPLATES = [
   {
     key: 'payment.ach_retry_notice',
-    name: 'Bank Payment Failed - Retry',
-    description: 'First failed bank (ACH) payment: we retry automatically and the customer needs to do nothing.',
-    required: ['first_name'],
+    name: 'Bank Payment Failed - First Notice',
+    description: 'First failed bank (ACH) payment in 90 days: the customer can pay or update the payment method. No retry is promised: only a monthly Auto Pay payment is retried.',
+    required: ['first_name', 'billing_url'],
     optional: [],
     subject: 'Your bank payment did not go through',
-    preview: 'We will retry automatically in 3 business days. Nothing you need to do right now.',
+    preview: 'You can pay now or update your payment method in your account.',
     blocks: [
       ...SHARED_BLOCKS_HEAD,
-      { type: 'paragraph', content: "Your bank payment did not go through. We'll retry automatically in 3 business days. Nothing you need to do right now." },
+      { type: 'paragraph', content: 'Your bank payment did not go through. You can pay now or update your payment method in your account.' },
+      GO_TO_BILLING,
       ...SHARED_BLOCKS_TAIL,
     ],
   },
   {
     key: 'payment.ach_card_fallback',
-    name: 'Bank Payment Failed - Switched To Card',
-    description: 'Second failed bank (ACH) payment in 90 days: the payment moved to the card on file, which carries a processing fee.',
-    required: ['first_name'],
+    name: 'Bank Payment Failed - Bank Paused',
+    description: 'Second failed bank (ACH) payment in 90 days: bank payments pause until the customer saves a bank account again. Nothing moves to the card.',
+    required: ['first_name', 'billing_url'],
     optional: [],
-    subject: 'We switched your payment to your card',
-    preview: 'Your bank payment failed again, so this payment moved to your card on file.',
+    subject: 'Your bank payment did not go through again',
+    preview: 'Bank payments are paused on your account until you add your bank account again.',
     blocks: [
       ...SHARED_BLOCKS_HEAD,
-      { type: 'paragraph', content: 'Your bank payment failed again, so we switched this payment to your card on file. Card payments include a processing fee. You can switch back to bank payment once your account is verified.' },
+      { type: 'paragraph', content: 'Your bank payment did not go through again, so bank payments are paused on your account. To pay by bank again, add your bank account again in your account. You can also pay by card there. Credit card payments include a surcharge.' },
+      GO_TO_BILLING,
       ...SHARED_BLOCKS_TAIL,
     ],
   },
   {
     key: 'payment.ach_suspended',
-    name: 'Bank Payment Failed - Bank Suspended',
-    description: 'Third failed bank (ACH) payment in 90 days: the card became the default and the customer can update the bank account from the billing tab. Carries an update link, so a collections dispute hold withholds it.',
+    name: 'Bank Payment Failed - Auto Pay On Card',
+    description: 'Third or later failed bank (ACH) payment in 90 days, customer on Auto Pay: bank payments stop and Auto Pay moved to the consented card on file.',
     required: ['first_name', 'billing_url'],
     optional: [],
-    subject: 'Update your bank account to pay with no added fee',
-    preview: 'Your bank payment failed again, so your card is now the default.',
+    subject: 'Your Auto Pay now uses your card',
+    preview: 'Your bank payment did not go through again, so your Auto Pay now uses your card on file.',
     blocks: [
       ...SHARED_BLOCKS_HEAD,
-      { type: 'paragraph', content: 'Your bank payment failed again, so we set your card as the default. Card payments include a processing fee. To pay by bank with no added fee, update your bank account here:' },
-      { type: 'cta', label: 'Update bank account', url_variable: 'billing_url' },
+      { type: 'paragraph', content: 'Your bank payment did not go through again, so bank payments are now off on your account. Your Auto Pay now uses your card on file. Credit card payments include a surcharge.' },
+      GO_TO_BILLING,
+      ...SHARED_BLOCKS_TAIL,
+    ],
+  },
+  {
+    key: 'payment.ach_suspended_no_card',
+    name: 'Bank Payment Failed - Card Needed',
+    description: 'Third or later failed bank (ACH) payment in 90 days with no card moved to Auto Pay: bank payments stop, and Auto Pay (when it was on) is off until the customer turns it on with a card.',
+    required: ['first_name', 'billing_url'],
+    optional: [],
+    subject: 'Bank payments are off on your account',
+    preview: 'Your bank payment did not go through again, so bank payments are now off on your account.',
+    blocks: [
+      ...SHARED_BLOCKS_HEAD,
+      { type: 'paragraph', content: 'Your bank payment did not go through again, so bank payments are now off on your account. Please pay by card in your account. If you used Auto Pay, it is off for now. You can turn it back on with a card. Credit card payments include a surcharge.' },
+      GO_TO_BILLING,
       ...SHARED_BLOCKS_TAIL,
     ],
   },

@@ -348,7 +348,8 @@ describe('handleAchFailure — GATE_ACH_FAILURE_EMAIL bank failure email', () =>
   test.each([
     [1, 'ach_retry_notice'],
     [2, 'ach_card_fallback'],
-    [3, 'ach_suspended'],
+    // No consented card on file: Auto Pay was turned off, so the "pay by card" email, never "Auto Pay uses your card".
+    [3, 'ach_suspended_no_card'],
   ])('%i recent failure(s) send the %s email for this payment intent and event', async (recentFailures, messageType) => {
     mockState.recentFailures = recentFailures;
 
@@ -359,6 +360,41 @@ describe('handleAchFailure — GATE_ACH_FAILURE_EMAIL bank failure email', () =>
       customerId: 'cust-1', invoiceId: 'inv-plain', paymentId: 'pay-1', paymentIntentId: 'pi_ach_1', eventId: EVENT, messageType,
     }));
     expect(mockHandleAutopayFailure).toHaveBeenCalledWith('cust-1');
+  });
+
+  test('stage 3 says "Auto Pay now uses your card" only when the flip moved a customer on Auto Pay to a consented card', async () => {
+    mockState.recentFailures = 3;
+    mockState.paymentMethodRows = [BANK_ROW(), CARD_ROW()];
+    mockState.consentRows = [CARD_CONSENT()];
+
+    await handleAchFailure(PI, 'R01', EVENT);
+
+    expect(mockState.customerUpdates).toContainEqual(expect.objectContaining({ autopay_payment_method_id: 'pm-card' }));
+    expect(mockSendAchFailureNotice).toHaveBeenCalledWith(expect.objectContaining({ messageType: 'ach_suspended' }));
+  });
+
+  test('stage 3 for a customer not on Auto Pay gets the "pay by card" email even when a consented card was flipped', async () => {
+    mockState.recentFailures = 3;
+    mockState.customer = { ...mockState.customer, autopay_enabled: false };
+    mockState.paymentMethodRows = [BANK_ROW(), CARD_ROW()];
+    mockState.consentRows = [CARD_CONSENT()];
+
+    await handleAchFailure(PI, 'R01', EVENT);
+
+    expect(mockState.customerUpdates).toContainEqual(expect.objectContaining({ autopay_payment_method_id: 'pm-card' }));
+    expect(mockSendAchFailureNotice).toHaveBeenCalledWith(expect.objectContaining({ messageType: 'ach_suspended_no_card' }));
+  });
+
+  test('stage 3 whose consented card vanished before the flip gets the "pay by card" email', async () => {
+    mockState.recentFailures = 3;
+    mockState.paymentMethodRows = [BANK_ROW(), CARD_ROW()];
+    mockState.consentRows = [CARD_CONSENT()];
+    mockState.vanishCardAfterResolve = true;
+
+    await handleAchFailure(PI, 'R01', EVENT);
+
+    expect(mockState.customerUpdates).toContainEqual(expect.objectContaining({ autopay_enabled: false }));
+    expect(mockSendAchFailureNotice).toHaveBeenCalledWith(expect.objectContaining({ messageType: 'ach_suspended_no_card' }));
   });
 
   test('a replay whose email is already recorded sends nothing and skips follow-ups', async () => {

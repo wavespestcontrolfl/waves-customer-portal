@@ -73,6 +73,7 @@ const PROTECTED_EMAIL_TEMPLATE_KEYS = new Set([
   'payment.ach_card_fallback',
   'payment.ach_retry_notice',
   'payment.ach_suspended',
+  'payment.ach_suspended_no_card',
   'payment.failed',
   'payment.method_expiring',
   'payment.method_updated',

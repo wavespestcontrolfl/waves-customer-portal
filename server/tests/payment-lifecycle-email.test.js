@@ -993,6 +993,7 @@ describe('payment lifecycle email sender', () => {
       ['ach_retry_notice', 'payment.ach_retry_notice'],
       ['ach_card_fallback', 'payment.ach_card_fallback'],
       ['ach_suspended', 'payment.ach_suspended'],
+      ['ach_suspended_no_card', 'payment.ach_suspended_no_card'],
     ])('%s sends %s keyed by payment intent + event on the payment-issue billing channel', async (messageType, templateKey) => {
       setDbQueues(lifecycleQueues());
 

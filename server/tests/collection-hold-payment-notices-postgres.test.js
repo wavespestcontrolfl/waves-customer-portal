@@ -288,7 +288,7 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
 
     test('a template outside the gated set is untouched by the hold (source contract on the shared set)', () => {
       const Hold = require('../services/collections/collection-hold');
-      expect([...Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES].sort()).toEqual(['payment.failed', 'payment.method_expiring', 'payment.retry_notice']);
+      expect([...Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES].sort()).toEqual(['payment.ach_card_fallback', 'payment.ach_retry_notice', 'payment.ach_suspended', 'payment.ach_suspended_no_card', 'payment.failed', 'payment.method_expiring', 'payment.retry_notice']);
       // the guard's set adds only the machine-initiated dunning templates; receipts and confirmations stay out
       for (const key of ['invoice.receipt', 'billing.receipt_notice', 'payment.confirmation', 'invoice.sent']) {
         expect(Hold.HOLD_GATED_EMAIL_TEMPLATES.has(key)).toBe(false);

@@ -22,13 +22,21 @@ function render(key, payload = seed.__private.PREVIEW_PAYLOAD) {
 }
 
 describe('bank payment failure email seeds (GATE_ACH_FAILURE_EMAIL)', () => {
-  test('one template per stage, keyed as the sender expects, with the owner-approved wording', () => {
-    expect(Object.keys(byKey).sort()).toEqual(['payment.ach_card_fallback', 'payment.ach_retry_notice', 'payment.ach_suspended']);
-    expect(render('payment.ach_retry_notice').text).toContain("Your bank payment did not go through. We'll retry automatically in 3 business days. Nothing you need to do right now.");
-    expect(render('payment.ach_card_fallback').text).toContain('Your bank payment failed again, so we switched this payment to your card on file. Card payments include a processing fee. You can switch back to bank payment once your account is verified.');
-    const suspended = render('payment.ach_suspended').text;
-    expect(suspended).toContain('Your bank payment failed again, so we set your card as the default. Card payments include a processing fee. To pay by bank with no added fee, update your bank account here:');
-    expect(suspended).toContain('https://portal.wavespestcontrol.com/?tab=billing');
+  test('one template per email stage, keyed as the sender expects, saying only what the code does at that stage', () => {
+    expect(Object.keys(byKey).sort()).toEqual(['payment.ach_card_fallback', 'payment.ach_retry_notice', 'payment.ach_suspended', 'payment.ach_suspended_no_card']);
+    const first = render('payment.ach_retry_notice').text;
+    expect(first).toContain('Your bank payment did not go through. You can pay now or update your payment method in your account.');
+    const second = render('payment.ach_card_fallback').text;
+    expect(second).toContain('Your bank payment did not go through again, so bank payments are paused on your account. To pay by bank again, add your bank account again in your account. You can also pay by card there. Credit card payments include a surcharge.');
+    const onCard = render('payment.ach_suspended').text;
+    expect(onCard).toContain('Your bank payment did not go through again, so bank payments are now off on your account. Your Auto Pay now uses your card on file. Credit card payments include a surcharge.');
+    const noCard = render('payment.ach_suspended_no_card').text;
+    expect(noCard).toContain('Your bank payment did not go through again, so bank payments are now off on your account. Please pay by card in your account. If you used Auto Pay, it is off for now. You can turn it back on with a card. Credit card payments include a surcharge.');
+    // The texts' lines that the code does not do never reach an email: a promised retry, a switch to the card at the
+    // second failure, a bank update link at the third (the pay page offers card only once bank payments are off).
+    const all = Object.keys(byKey).map((key) => `${byKey[key].subject} ${byKey[key].preview} ${render(key).text}`).join('\n');
+    expect(all).not.toMatch(/retry|business days|switched this payment|update your bank account|no added fee|processing fee/i);
+    for (const key of Object.keys(byKey)) expect(render(key).text).toContain('https://portal.wavespestcontrol.com/?tab=billing');
   });
 
   test.each(Object.keys(byKey))('%s renders cleanly and never names "Waves Pest Control" in the body', (key) => {
@@ -40,11 +48,11 @@ describe('bank payment failure email seeds (GATE_ACH_FAILURE_EMAIL)', () => {
     expect(JSON.stringify(byKey[key].blocks)).not.toContain('Waves Pest Control');
   });
 
-  test('only the stage that carries an update link is held by a collections dispute hold', () => {
-    expect(HOLD_GATED_EMAIL_TEMPLATES.has('payment.ach_suspended')).toBe(true);
-    expect(HOLD_GATED_EMAIL_TEMPLATES.has('payment.ach_retry_notice')).toBe(false);
-    expect(HOLD_GATED_EMAIL_TEMPLATES.has('payment.ach_card_fallback')).toBe(false);
-    expect(byKey['payment.ach_suspended'].required).toContain('billing_url');
+  test('every stage carries the billing link, so a collections dispute hold withholds each one', () => {
+    for (const key of Object.keys(byKey)) {
+      expect(HOLD_GATED_EMAIL_TEMPLATES.has(key)).toBe(true);
+      expect(byKey[key].required).toContain('billing_url');
+    }
   });
 
   test('the migration file name stays within 57 characters', () => {
