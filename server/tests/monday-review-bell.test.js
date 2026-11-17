@@ -51,32 +51,9 @@ beforeEach(() => {
   notifyAdmin.mockResolvedValue({ id: 'n1' });
 });
 
-describe('the gate', () => {
-  test('off: no list is read, nothing is closed, nothing is raised', async () => {
-    const l = loaders();
-    const out = await review.runMondayReview({ now: MONDAY, gateEnabled: false, loaders: l });
-    expect(out).toEqual({ skipped: 'disabled' });
-    for (const fn of Object.values(l)) expect(fn).not.toHaveBeenCalled();
-    expect(episodes.openAdminAlertKeys).not.toHaveBeenCalled();
-    expect(notifyAdmin).not.toHaveBeenCalled();
-  });
-
-  test('read from the environment when not passed, strict true', async () => {
-    const saved = process.env.GATE_MONDAY_REVIEW_BELL;
-    try {
-      process.env.GATE_MONDAY_REVIEW_BELL = '1';
-      expect(await review.runMondayReview({ now: MONDAY, loaders: loaders() })).toEqual({ skipped: 'disabled' });
-      process.env.GATE_MONDAY_REVIEW_BELL = 'true';
-      expect((await review.runMondayReview({ now: MONDAY, loaders: loaders() })).outcome).toBe('raised');
-    } finally {
-      if (saved === undefined) delete process.env.GATE_MONDAY_REVIEW_BELL; else process.env.GATE_MONDAY_REVIEW_BELL = saved;
-    }
-  });
-});
-
 describe('one alert for a busy week', () => {
   test('raises one needs-you row that rings, with a line and a page per list', async () => {
-    const out = await review.runMondayReview({ now: MONDAY, gateEnabled: true, loaders: loaders() });
+    const out = await review.runMondayReview({ now: MONDAY, loaders: loaders() });
     expect(out).toMatchObject({ count: 4, outcome: 'raised', counts: { alerts: 3, promises: 37, drafts: 22, visits: 38 } });
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     const [category, title, body, opts] = notifyAdmin.mock.calls[0];
@@ -102,7 +79,7 @@ describe('one alert for a busy week', () => {
 
   test('a list with no work is left out, and the wording follows the count', async () => {
     const out = await review.runMondayReview({
-      now: MONDAY, gateEnabled: true,
+      now: MONDAY,
       loaders: { ...ZERO, promises: async () => ({ count: 1, oldestAt: new Date('2026-10-30T20:00:00Z') }) },
     });
     expect(out.count).toBe(1);
@@ -134,7 +111,7 @@ describe('last week, zero weeks, and the same day', () => {
       expect(notifyAdmin).not.toHaveBeenCalled(); // closed first
       return 1;
     });
-    await review.runMondayReview({ now: MONDAY, gateEnabled: true, loaders: loaders() });
+    await review.runMondayReview({ now: MONDAY, loaders: loaders() });
     expect(episodes.openAdminAlertKeys).toHaveBeenCalledWith(expect.anything(), 'monday-review:');
     expect(episodes.closeAdminAlertKeys).toHaveBeenCalledTimes(1);
     const [, keys, reason, opts] = episodes.closeAdminAlertKeys.mock.calls[0];
@@ -148,7 +125,7 @@ describe('last week, zero weeks, and the same day', () => {
   test('same day rerun: this key is not closed and the second write is a plain dedupe', async () => {
     episodes.openAdminAlertKeys.mockResolvedValue([TODAY_KEY]);
     notifyAdmin.mockResolvedValue({ id: 'n1', deduped: true });
-    const out = await review.runMondayReview({ now: MONDAY, gateEnabled: true, loaders: loaders() });
+    const out = await review.runMondayReview({ now: MONDAY, loaders: loaders() });
     expect(out.outcome).toBe('unchanged');
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
     expect(notifyAdmin.mock.calls[0][3].dedupeKey).toBe(TODAY_KEY);
@@ -159,7 +136,7 @@ describe('last week, zero weeks, and the same day', () => {
   test('every count zero: nothing raised, older rows closed as "Nothing to review"', async () => {
     episodes.openAdminAlertKeys.mockResolvedValue(['monday-review:2026-10-26', TODAY_KEY]);
     episodes.closeAdminAlertKeys.mockResolvedValue(2);
-    const out = await review.runMondayReview({ now: MONDAY, gateEnabled: true, loaders: ZERO });
+    const out = await review.runMondayReview({ now: MONDAY, loaders: ZERO });
     expect(out).toEqual({ count: 0, outcome: 'closed' });
     expect(notifyAdmin).not.toHaveBeenCalled();
     const [, keys, reason, opts] = episodes.closeAdminAlertKeys.mock.calls[0];
@@ -169,7 +146,7 @@ describe('last week, zero weeks, and the same day', () => {
   });
 
   test('every count zero and nothing open: a clear run writes nothing', async () => {
-    const out = await review.runMondayReview({ now: MONDAY, gateEnabled: true, loaders: ZERO });
+    const out = await review.runMondayReview({ now: MONDAY, loaders: ZERO });
     expect(out).toEqual({ count: 0, outcome: 'clear' });
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
     expect(notifyAdmin).not.toHaveBeenCalled();
@@ -178,7 +155,7 @@ describe('last week, zero weeks, and the same day', () => {
   test('a failed read throws and closes nothing', async () => {
     episodes.openAdminAlertKeys.mockResolvedValue(['monday-review:2026-10-26']);
     await expect(review.runMondayReview({
-      now: MONDAY, gateEnabled: true, loaders: loaders({ drafts: async () => { throw new Error('connection reset'); } }),
+      now: MONDAY, loaders: loaders({ drafts: async () => { throw new Error('connection reset'); } }),
     })).rejects.toThrow('connection reset');
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
     expect(notifyAdmin).not.toHaveBeenCalled();
@@ -186,12 +163,12 @@ describe('last week, zero weeks, and the same day', () => {
 
   test('the owner silenced the category: reported, not an error', async () => {
     notifyAdmin.mockResolvedValue({ id: null, suppressed: true });
-    expect((await review.runMondayReview({ now: MONDAY, gateEnabled: true, loaders: loaders() })).outcome).toBe('suppressed');
+    expect((await review.runMondayReview({ now: MONDAY, loaders: loaders() })).outcome).toBe('suppressed');
   });
 
   test('a write that failed throws', async () => {
     notifyAdmin.mockResolvedValue(null);
-    await expect(review.runMondayReview({ now: MONDAY, gateEnabled: true, loaders: loaders() })).rejects.toThrow('not written');
+    await expect(review.runMondayReview({ now: MONDAY, loaders: loaders() })).rejects.toThrow('not written');
   });
 });
 

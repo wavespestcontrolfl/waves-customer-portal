@@ -1,4 +1,4 @@
-// GATE_CUSTOMER_LAST_TOUCH: the Intelligence Bar customer search, the admin MCP
+// Customer last contact: the Intelligence Bar customer search, the admin MCP
 // (it proxies the bar) and the admin customer directory serve the newest PERSON
 // touch under the same keys. No database: knex compiles with the pg dialect and
 // every query is captured and answered from a canned list.
@@ -24,14 +24,10 @@ jest.mock('../models/db', () => {
 });
 
 const { contactTouchSql } = require('../services/customer-intelligence/quiet-customers');
-const gates = require('../config/feature-gates');
 const { executeTool } = require('../services/intelligence-bar/tools');
 const router = require('../routes/admin-customers');
 
-const GATE = 'GATE_CUSTOMER_LAST_TOUCH';
-const saved = process.env[GATE];
-beforeEach(() => { mockQueries.length = 0; delete process.env[GATE]; });
-afterAll(() => { if (saved === undefined) delete process.env[GATE]; else process.env[GATE] = saved; });
+beforeEach(() => { mockQueries.length = 0; });
 
 describe('contactTouchSql', () => {
   const sql = contactTouchSql('customers');
@@ -83,25 +79,8 @@ describe('contactTouchSql', () => {
   });
 });
 
-describe('customerLastTouchLive', () => {
-  test('is strict and dark by default', () => {
-    expect(gates.customerLastTouchLive()).toBe(false);
-    for (const v of ['1', 'TRUE', 'yes', 'false']) { process.env[GATE] = v; expect(gates.customerLastTouchLive()).toBe(false); }
-    process.env[GATE] = 'true';
-    expect(gates.customerLastTouchLive()).toBe(true);
-  });
-});
-
 describe('Intelligence Bar query_customers (and the admin MCP that proxies it)', () => {
-  test('gate off: serves the stored column and selects no touch subquery', async () => {
-    const out = await executeTool('query_customers', { search: 'Pat' });
-    expect(out.customers[0].last_contact_date).toBe('2026-01-01T00:00:00.000Z');
-    expect(mockQueries.join('\n')).not.toContain('last_touch_at');
-    expect(mockQueries.join('\n')).not.toContain('FROM emails em');
-  });
-
-  test('gate on: selects the builder SQL and serves it under the same key', async () => {
-    process.env[GATE] = 'true';
+  test('selects the builder SQL and serves it under the same key', async () => {
     const out = await executeTool('query_customers', { search: 'Pat' });
     expect(out.customers[0].last_contact_date).toBe('2026-10-30T12:00:00.000Z');
     const page = mockQueries.find((q) => q.includes('last_touch_at'));
@@ -121,16 +100,7 @@ describe('admin customer directory', () => {
   };
   const pageQuery = () => mockQueries.find((q) => /limit \$?\d|limit \?/i.test(q) && /"customers"\.\*/.test(q));
 
-  test('gate off: stored column, old ORDER BY last_contact_date', async () => {
-    const body = await list({ sort: 'last_contact', order: 'desc' });
-    expect(body.customers[0].lastContactDate).toBe('2026-01-01T00:00:00.000Z');
-    const q = pageQuery();
-    expect(q).toContain('order by last_contact_date desc, LOWER(');
-    expect(q).not.toContain('last_touch_at');
-  });
-
-  test.each(['asc', 'desc'])('gate on: serves the touch and sorts %s by the builder SQL, NULLS LAST', async (order) => {
-    process.env[GATE] = 'true';
+  test.each(['asc', 'desc'])('serves the touch and sorts %s by the builder SQL, NULLS LAST', async (order) => {
     const body = await list({ sort: 'last_contact', order });
     expect(body.customers[0].lastContactDate).toBe('2026-10-30T12:00:00.000Z');
     const q = pageQuery();
@@ -140,21 +110,13 @@ describe('admin customer directory', () => {
     expect(q).not.toContain('last_contact_date desc');
   });
 
-  test('gate on, another sort: still serves the touch, sort unchanged', async () => {
-    process.env[GATE] = 'true';
+  test('another sort: still serves the touch, sort unchanged', async () => {
     await list({ sort: 'revenue', order: 'asc' });
     expect(pageQuery()).toContain('order by lifetime_revenue_net asc');
     expect(pageQuery()).not.toContain(`${contactTouchSql('customers')} asc NULLS LAST`);
   });
 
-  test('detail: gate off serves the stored column and runs no query', async () => {
-    const stored = new Date('2026-01-01T00:00:00Z');
-    await expect(router._private.servedLastContactDate({ id: 'c1', last_contact_date: stored })).resolves.toBe(stored);
-    expect(mockQueries).toEqual([]);
-  });
-
-  test('detail: gate on reads the builder SQL for that customer and serves it', async () => {
-    process.env[GATE] = 'true';
+  test('detail: reads the builder SQL for that customer and serves it', async () => {
     const touch = await router._private.servedLastContactDate({ id: 'c1', last_contact_date: 'stored' });
     expect(touch).toBe('2026-10-30T12:00:00.000Z');
     expect(mockQueries).toHaveLength(1);
