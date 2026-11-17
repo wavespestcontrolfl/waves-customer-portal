@@ -736,7 +736,7 @@ const NotificationService = {
           // refresh should write; `quiet` writes it without ringing or bumping.
           const adjusted = refreshOnDedupe && typeof standingRefresh === 'function'
             ? await standingRefresh(existing, existingMeta) : null;
-          // A row the owner sent to Claude (GATE_ALERT_SEND_TO_CLAUDE) stays in Claude's queue while it is open: this
+          // A row the owner sent to Claude stays in Claude's queue while it is open: this
           // emission still updates its text, never its routing (admin-alert-routing.js keepSentToClaude).
           const useMeta = keepSentToClaude(existing, existingMeta, adjusted?.metadata ? { ...metadata, ...adjusted.metadata } : metadata);
           const useDetail = adjusted && 'detail' in adjusted ? adjusted.detail : createOpts.detail;

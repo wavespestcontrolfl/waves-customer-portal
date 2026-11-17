@@ -480,7 +480,7 @@
  *   GATE_NIGHT_TOLD_LOCK=true (owner 2026-11-05, "D1 a": a night tool never changes a time the customer was already told. Today GATE_NIGHT_LOCK_24H freezes a visit for the night passes only after its 24-hour reminder, so on the two nights after the 72-hour reminder (sent about 9:45 AM three days before, it names a 2-hour window) the 4:10 auto-dispatch run and the 5:00 catch-up run may still change a visit the customer already has a time for. On, and with GATE_NIGHT_LOCK_24H on, the auto-dispatch reminder freeze (evaluation, apply-time re-check and grouped-sibling guards, skip code REMINDER_SENT_FROZEN) also freezes a visit the customer was actually told a time for: its latest promise has a known slot, read by the no-show detector's promise reader (delivered texts and pushes, emails, call commitments, bookings, applied reschedules, series moves; reminder_72h_sent is NOT used, the sender also sets it for a skipped reminder; a promise with an unknown window does not freeze yet). The 4:40 AM day re-plan (shadow, and its apply-time re-check) also treats a customer-confirmed visit, a first or one-time visit, a visit a person placed, and a visit with a known-slot promise (reason time_told) as fixed. Not changed: the 4:20 route re-order pass (it only changes stop order inside promised windows), the rain pass, the rebooker and every staff path. Strict `=== 'true'`, read at call time via nightToldLockLive() and once per night run; dark by default. Sends nothing to a customer, no spend. Rollback: unset it.)
  *   GATE_DAY_ONLY_PROMISE=true (owner 2026-11-05 "D1 a" and "D2 a", 2026-11-06 "office": until the 24-hour reminder a customer is promised only the DAY of a visit, never an hour; a night tool never changes what the customer was told. This gate is built in parts. Part A (this change): the no-show detector's promise reader learns an explicit day-only marker (metadata.promise_level 'day'), server/services/time-promise.js gives the later parts one API (DAY_PROMISE_META, shouldPromiseDayOnly, showHourFor, loadPromiseLevels), and the night tools honor it. With GATE_NIGHT_TOLD_LOCK and GATE_NIGHT_LOCK_24H on, the 4:10 auto-dispatch run and the 5:00 catch-up freeze any visit whose latest promise exists, a day-only one or an unknown window too, because that tool moves DATES and the customer was told that day (skip code REMINDER_SENT_FROZEN). With GATE_NIGHT_TOLD_LOCK on, the 4:40 AM day re-plan (shadow, and its apply-time re-check) may change the hour of a visit told only the day, so a first or one-time visit or a person-placed visit told only the day is movable inside its day, while a customer-confirmed visit and any visit told an hour stay fixed. Later parts, each behind this same gate: the senders (confirmation, 72-hour text, move notices, emails) send day-only copy carrying the marker; customer screens (app, portal, appointment page, calendar file, reschedule page) show the day plus the arrival window texted the day before; the AI context; the office booking checkbox "customer asked for this time". Online booking and the AI call agent keep the customer's hour pick. It acts only together with GATE_NIGHT_TOLD_LOCK (and GATE_NIGHT_LOCK_24H for the auto-dispatch part). Strict `=== 'true'`, read at call time via dayOnlyPromiseLive() and once per night run; dark by default. Part A sends nothing to a customer. Part B1 (the booking confirmation and the 72-hour reminder: text, app notification and email) CHANGES CUSTOMER-FACING COPY once this is flipped: an office-booked first visit or a system-placed recurring visit is promised only the day (new text rows appointment_confirmation_day_v1/_v2, reminder_72h_day_v1, reminder_72h_no_reply_day_v1 and email templates appointment.confirmation_day, appointment.reminder_72h_day, which the owner approves before the flip), while a customer's own pick, a visit inside 24.25 hours and a customer with the 24-hour reminder off keep the window copy; a missing day row sends the window copy. Part E (the office windows): the New Appointment and Edit Appointment windows show a "Customer asked for this time" box and a phone-script line, and the schedule feeds carry what each customer was told (`told`) for visits of the next 14 days, shown as a "Told: day only" / "Told: <window>" badge; the client reads it as the `day_only_promise` flag on GET /api/admin/feature-flags. Gate off = no box, no field, no read. No new message is sent and no spend. Rollback: unset it.)
  *   GATE_WDO_ATTENTION_RINGS=true (owner 2026-11-05, step S3 of the admin-bell plan, "go": the WDO report attention sweep (GATE_WDO_REPORT_ATTENTION) rings again. Its category wdo_report_attention has no default under GATE_ADMIN_BELL_POLICY, so the policy muted every ring (no row, yet the sweep counted it as rung) and the last real WDO alert row is from August. On, the sweep passes bellDefault (a saved owner "off" still wins), counts a muted result as NOT rung (warn log, no false ring), closes its own open rows with a plain resolution when no WDO report is stalled any more, keeps a standing row's count right when some items are fixed, and replaces a row a larger set supersedes. Admin notification only; no customer contact. Strict opt-in, read at call time via wdoAttentionRingsLive(); off = the sweep is as before. Kill switch: unset.)
- *   GATE_IB_ANSWER_SEND_TO_CLAUDE=true (owner 2026-11-05: under a bar answer that searched its tools and changed nothing, the owner login sees "Claude has this as gap #N." or a free "Send to Claude" button that sends the owner's own typed question (a pasted one gets no button), never the answer. Needs GATE_IB_SEND_TO_CLAUDE live too. Read at call time via ibAnswerSendToClaudeLive(); off = the /query reply and the claude-ideas status stay as before)
+ *   GATE_IB_ANSWER_SEND_TO_CLAUDE=true (owner 2026-11-05: under a bar answer that searched its tools and changed nothing, the owner login sees "Claude has this as gap #N." or a free "Send to Claude" button that sends the owner's own typed question (a pasted one gets no button), never the answer. Read at call time via ibAnswerSendToClaudeLive(); off = the /query reply and the claude-ideas status stay as before)
  *   GATE_CALL_RECORDING_CARD_PAUSE=true (owner 2026-11-16 "ok build all", live-call suite part 9: while card details are spoken on a live-transcribed call, the call recording pauses for 90 seconds. When a stored utterance says "card number", "credit card", "debit card", "card ending", "expiration date", "security code", "CVV", "CVC" or "code on the back", or the live scrub masked a card number, the Dial recording on the caller's call is paused by REST (silence, so it stays aligned with the live text) and resumed at the end; a later trigger only moves the end out. State is call_log.metadata.live_transcription.card_pause. Needs GATE_LIVE_CALL_TRANSCRIPTION on. Read via isEnabled('callRecordingCardPause') at boot, strict 'true', dark by default; off = no recording change and nothing new required. RISK: if a resume fails, the rest of that call's recording is silent and the post-call transcript loses it; the gate is the instant off switch. Sends nothing to a customer; no paid call beyond the Twilio REST update. Kill: delete the variable.)
  */
 
@@ -9096,54 +9096,18 @@ function alertCustomerLineLive() {
 // GATE_ALERT_CUSTOMER_LINE reader, on its own line so gate PRs never conflict.
 module.exports.alertCustomerLineLive = alertCustomerLineLive;
 
-// GATE_ALERT_SEND_TO_CLAUDE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-02: "for the
-// stuff that needs to be fixed ... we need to be able to send that back to terminal, open a terminal session, to have
-// Claude fix that"; scope "All but customer contact"). On, the bell's "What to do" panel (GATE_ALERT_EXPLAINER) carries
-// a "Send to Claude" button that moves the row into Claude's queue, where the Mac launcher opens a terminal tab for it
-// (services/admin-alert-send-to-claude.js), and `needs-me` names each alert's customer. Off = no button, the send route
-// answers 404 and needs-me is as before.
-function alertSendToClaudeLive() {
-  return process.env.GATE_ALERT_SEND_TO_CLAUDE === 'true';
-}
-// GATE_ALERT_SEND_TO_CLAUDE reader, on its own line so gate PRs never conflict.
-module.exports.alertSendToClaudeLive = alertSendToClaudeLive;
-
-// GATE_IB_SEND_TO_CLAUDE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-03: "it should be
-// for any issue, even ones that dont have an issue mid day, but ideas"). On, the Intelligence Bar box (the Cmd+K palette
-// and the mobile sheet) carries a free "Send to Claude" button beside Ask: it makes NO model call, writes one admin
-// notification row in Claude's queue, and the Mac launcher opens a Claude tab that scopes the idea
-// (services/admin-claude-ideas.js). Off = no button, the send and cancel routes answer 404 and /status says
-// `{ enabled: false }`.
-function ibSendToClaudeLive() {
-  return process.env.GATE_IB_SEND_TO_CLAUDE === 'true';
-}
-// GATE_IB_SEND_TO_CLAUDE reader, on its own line so gate PRs never conflict.
-module.exports.ibSendToClaudeLive = ibSendToClaudeLive;
-
 // GATE_IB_ANSWER_SEND_TO_CLAUDE read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-05: a bar
-// answer that searched its tools and changed nothing needs a one-tap path to Claude). Needs GATE_IB_SEND_TO_CLAUDE live too.
+// answer that searched its tools and changed nothing needs a one-tap path to Claude).
 // On, for the owner login only, a /query reply where the bar searched its capabilities and proposed or committed no write
 // carries `answerClaude: { stuck: true, gapId }`, and /admin/claude-ideas/status says `answerButton: true`. The palette then
 // shows "Claude has this as gap #N." (a gap row was written; the Mac gap launcher already has it) or a "Send to Claude (free)"
 // button that sends the OWNER'S typed question for that answer (never pasted text), never the answer text. Off = the reply and
 // the status stay as before.
 function ibAnswerSendToClaudeLive() {
-  return process.env.GATE_IB_ANSWER_SEND_TO_CLAUDE === 'true' && ibSendToClaudeLive();
+  return process.env.GATE_IB_ANSWER_SEND_TO_CLAUDE === 'true';
 }
 // GATE_IB_ANSWER_SEND_TO_CLAUDE reader, on its own line so gate PRs never conflict.
 module.exports.ibAnswerSendToClaudeLive = ibAnswerSendToClaudeLive;
-
-// GATE_ALERT_SEND_TO_CLAUDE_COPY read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-03,
-// decision 1 = A: "customer alerts = a COPY, read-only until approval"). On, for the owner login only, a bell row that
-// "Send to Claude" refuses (customer contact, or words our own code did not write) carries a "Send a copy to Claude
-// (read-only)" button: it writes ONE new owner-only row into Claude's queue that names the alert by id and holds no
-// customer words, and the alert stays in the bell (services/admin-alert-copy-to-claude.js). Off = no button and the
-// copy routes answer 404.
-function alertSendToClaudeCopyLive() {
-  return process.env.GATE_ALERT_SEND_TO_CLAUDE_COPY === 'true';
-}
-// GATE_ALERT_SEND_TO_CLAUDE_COPY reader, on its own line so gate PRs never conflict.
-module.exports.alertSendToClaudeCopyLive = alertSendToClaudeCopyLive;
 
 // GATE_ALERT_BELL_ORDER read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-05, admin-bell plan
 // decision D1 "go"). On, GET /api/admin/notifications lists needs-you rows first, then unlabeled rows, then the rest, newest

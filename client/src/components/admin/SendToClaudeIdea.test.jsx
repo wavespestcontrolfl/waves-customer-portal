@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Hook-level tests for the free "Send to Claude" idea button (GATE_IB_SEND_TO_CLAUDE): the composer's own marks and
+// Hook-level tests for the free "Send to Claude" idea button: the composer's own marks and
 // in-flight photos survive a send and its Undo (Codex P2s on #7548).
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';

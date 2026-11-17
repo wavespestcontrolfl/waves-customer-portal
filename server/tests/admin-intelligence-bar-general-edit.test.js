@@ -200,8 +200,7 @@ describe('the /query proposal', () => {
     expect(loopbackCalls).toHaveLength(0);
   });
 
-  test('a reply that searched and then proposed a card carries no stuck-answer mark, even with both send-to-Claude gates on', async () => {
-    process.env.GATE_IB_SEND_TO_CLAUDE = 'true';
+  test('a reply that searched and then proposed a card carries no stuck-answer mark, even with the answer send-to-Claude gate on', async () => {
     process.env.GATE_IB_ANSWER_SEND_TO_CLAUDE = 'true';
     try {
       const { answer } = await proposeThroughQuery();
@@ -210,7 +209,6 @@ describe('the /query proposal', () => {
       expect(saved.pendingActions).toHaveLength(1);
       expect('answerClaude' in saved).toBe(false);
     } finally {
-      delete process.env.GATE_IB_SEND_TO_CLAUDE;
       delete process.env.GATE_IB_ANSWER_SEND_TO_CLAUDE;
     }
   });

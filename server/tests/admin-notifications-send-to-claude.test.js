@@ -1,4 +1,4 @@
-// "Send to Claude" on the route (GATE_ALERT_SEND_TO_CLAUDE alone, no explainer gate): POST /:id/send-to-claude reaches the
+// "Send to Claude" on the route (no explainer gate): POST /:id/send-to-claude reaches the
 // sender only for an admin, with a well-formed id, version and note, and POST /:id/unsend-from-claude reaches the undo
 // with a well-formed id and `at` (gate off answers 404 like an unknown route). The list marks sendable rows. The sender
 // itself is admin-alert-send-to-claude.test.js.
@@ -30,7 +30,6 @@ jest.mock('../services/admin-alert-explainer', () => ({
   explainAdminAlert: jest.fn(),
 }));
 jest.mock('../services/admin-alert-send-to-claude', () => ({
-  sendToClaudeLive: jest.fn(() => true),
   cleanNote: jest.requireActual('../services/admin-alert-send-to-claude').cleanNote,
   withSendToClaudeFields: jest.fn((rows) => rows),
   sendAdminAlertToClaude: jest.fn(async () => ({ status: 200, body: { sent: true, at: '2026-11-03T15:00:00.000Z', message: 'Sent to Claude.' } })),
@@ -55,7 +54,7 @@ jest.mock('../middleware/admin-auth', () => ({
 
 const { explainerLive } = require('../services/admin-alert-explainer');
 const {
-  sendToClaudeLive, sendAdminAlertToClaude, unsendAdminAlertFromClaude, withSendToClaudeFields,
+  sendAdminAlertToClaude, unsendAdminAlertFromClaude, withSendToClaudeFields,
 } = require('../services/admin-alert-send-to-claude');
 const NotificationService = require('../services/notification-service');
 const router = require('../routes/admin-notifications');
@@ -88,7 +87,6 @@ const unsend = (base, { who = 'admin', id = ID, body = { at: AT } } = {}) => fet
 beforeEach(() => {
   jest.clearAllMocks();
   explainerLive.mockReturnValue(false);
-  sendToClaudeLive.mockReturnValue(true);
 });
 
 test('an admin send reaches the sender with the version (lower case), the sender and the caller\'s scope; the answer carries the send\'s time', async () => {
@@ -138,14 +136,6 @@ test('the sender\'s own status comes back as it is', async () => {
   });
 });
 
-test('send gate off: 404 and no send', async () => {
-  sendToClaudeLive.mockReturnValue(false);
-  await withServer(async (base) => {
-    expect((await send(base)).status).toBe(404);
-  });
-  expect(sendAdminAlertToClaude).not.toHaveBeenCalled();
-});
-
 test('a technician is refused; a malformed id or a missing version is a 400; none reaches the sender', async () => {
   await withServer(async (base) => {
     expect((await send(base, { who: 'tech' })).status).toBe(403);
@@ -173,14 +163,6 @@ describe('unsend-from-claude', () => {
       expect(res.status).toBe(409);
       expect(await res.json()).toEqual({ error: 'started' });
     });
-  });
-
-  test('send gate off: 404 and no undo', async () => {
-    sendToClaudeLive.mockReturnValue(false);
-    await withServer(async (base) => {
-      expect((await unsend(base)).status).toBe(404);
-    });
-    expect(unsendAdminAlertFromClaude).not.toHaveBeenCalled();
   });
 
   test('a technician is refused; a malformed id, a missing or odd `at` is a 400; none reaches the undo', async () => {
