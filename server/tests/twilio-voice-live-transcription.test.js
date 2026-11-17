@@ -116,10 +116,16 @@ describe('/live-transcription', () => {
     expect(res.sendStatus).toHaveBeenCalledWith(200);
   });
 
-  test('a failed write still answers 200', async () => {
-    live.recordLiveTranscriptionEvent.mockRejectedValueOnce(new Error('db down'));
+  test('a failed write still answers 200 and logs the error code, never the message (knex puts the text in it)', async () => {
+    const logger = require('../services/logger');
+    live.recordLiveTranscriptionEvent.mockRejectedValueOnce(Object.assign(
+      new Error("insert into call_live_utterances ... values ('my address is 12 Example St')"), { code: '23514' },
+    ));
     const res = mockRes();
     await handlerFor('/live-transcription')({ body: { CallSid: PARENT } }, res);
     expect(res.sendStatus).toHaveBeenCalledWith(200);
+    const logged = logger.warn.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).toContain('23514');
+    expect(logged).not.toMatch(/Example St|insert into/);
   });
 });

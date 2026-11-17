@@ -872,7 +872,8 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
   } catch { /* best-effort */ }
   // The live transcript (GATE_LIVE_CALL_TRANSCRIPTION) is a second copy of the
   // call's words, scrubbed by its own pass on a different transcript: a
-  // quarantined call keeps none of it.
+  // quarantined call keeps none of it. A failed purge is retried every 5
+  // minutes (purgeQuarantinedLiveText): pan_detected above marks the debt.
   if (call.twilio_call_sid) {
     try {
       await require('./live-call-transcription').purgeLiveUtterances(call.twilio_call_sid);

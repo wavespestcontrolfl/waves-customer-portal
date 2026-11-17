@@ -85,6 +85,10 @@ jest.mock('../models/db', () => {
   const db = jest.fn((table) => (table === 'call_log' ? callLog() : utterances()));
   db.raw = jest.fn((sql, bindings) => {
     state.rawCalls.push(sql);
+    if (/EXISTS/.test(sql) && /pan_detected/.test(sql)) { // purgeQuarantinedLiveText's lookup
+      const sids = [...new Set(state.utterances.map((u) => u.call_sid))].filter((sid) => state.panDetected.has(sid));
+      return Promise.resolve({ rows: sids.slice(0, bindings[0]).map((callSid) => ({ call_sid: callSid })) });
+    }
     return { sql, bindings };
   });
   db.transaction = jest.fn(async (fn) => fn(db));
@@ -282,6 +286,18 @@ describe('purgeLiveUtterances', () => {
     await expect(live.recordLiveTranscriptionEvent(content(3, 'inbound_track', 'one more line', 5))).resolves.toEqual({ stored: false, reason: 'quarantined' });
     await expect(live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'hello', 1))).resolves.toEqual({ stored: false, reason: 'quarantined' });
     expect(db.__state.utterances).toHaveLength(0);
+  });
+
+  test('a purge that failed is retried by the 5-minute sweep; a call without a flagged scrub keeps its text', async () => {
+    db.__state.claimed.add(CALL);
+    db.__state.claimed.add(OTHER);
+    await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'hello', 1));
+    await live.recordLiveTranscriptionEvent({ ...content(3, 'inbound_track', 'other call', 2), CallSid: OTHER });
+    db.__state.panDetected.add(CALL); // the recording scrub flagged CALL, and its purge failed
+    await expect(live.purgeQuarantinedLiveText()).resolves.toEqual({ purged: 1 });
+    expect(db.__state.utterances.map((u) => u.call_sid)).toEqual([OTHER]);
+    db.raw.mockImplementationOnce(() => Promise.reject(Object.assign(new Error('db down'), { code: '57P01' })));
+    await expect(live.purgeQuarantinedLiveText()).resolves.toEqual({ purged: 0 });
   });
 
   test('a call the recording scrub flagged (pan_detected) stores no live text', async () => {

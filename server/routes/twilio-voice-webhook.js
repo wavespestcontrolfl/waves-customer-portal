@@ -2632,7 +2632,8 @@ router.post('/live-transcription', async (req, res) => {
   try {
     await require('../services/live-call-transcription').recordLiveTranscriptionEvent(req.body || {});
   } catch (err) {
-    logger.warn(`[live-transcription] event not stored for ${maskSid(req.body?.CallSid)}: ${err.message}`);
+    // The error code only: knex puts the failed query and its values (the transcript text) in err.message.
+    logger.warn(`[live-transcription] event not stored for ${maskSid(req.body?.CallSid)}: ${err?.code || err?.name || 'error'}`);
   }
   res.sendStatus(200);
 });

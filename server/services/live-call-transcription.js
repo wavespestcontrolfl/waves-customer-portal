@@ -282,10 +282,34 @@ async function purgeLiveUtterances(callSid) {
   });
 }
 
+/**
+ * The retry for a purge that failed: quarantineCardRecording swallows a purge error, but the call
+ * keeps transcription_metadata.pan_detected, so live text left on such a call is the debt. The
+ * 5-minute recording job (scheduler.js) runs this; each call found is purged again. Never throws.
+ */
+async function purgeQuarantinedLiveText({ limit = 25 } = {}) {
+  try {
+    const result = await db.raw(
+      `SELECT c.twilio_call_sid AS call_sid FROM call_log c
+        WHERE COALESCE(c.transcription_metadata ->> 'pan_detected', '') = 'true'
+          AND EXISTS (SELECT 1 FROM call_live_utterances u WHERE u.call_sid = c.twilio_call_sid)
+        LIMIT ?`,
+      [limit],
+    );
+    let purged = 0;
+    for (const { call_sid: callSid } of result?.rows || []) purged += await purgeLiveUtterances(callSid);
+    return { purged };
+  } catch (err) {
+    logger.warn(`[live-transcription] quarantine retry failed: ${err?.code || err?.name || 'error'}`);
+    return { purged: 0 };
+  }
+}
+
 module.exports = {
   startLiveTranscription,
   recordLiveTranscriptionEvent,
   purgeLiveUtterances,
+  purgeQuarantinedLiveText,
   WEBHOOK_PATH,
   _test: { scrubWindow, startParams, CODE_TAIL_RE },
 };
