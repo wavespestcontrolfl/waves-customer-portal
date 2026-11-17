@@ -15,10 +15,6 @@ jest.mock('../models/db', () => {
   return proxy;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({
-  ...jest.requireActual('../config/feature-gates'),
-  leadRepeatSweepLive: jest.fn(() => true),
-}));
 jest.mock('../services/lead-funnel-bridge', () => ({
   ...jest.requireActual('../services/lead-funnel-bridge'),
   bridgeLeadFunnelStage: jest.fn(async () => ({ updated: 0 })),

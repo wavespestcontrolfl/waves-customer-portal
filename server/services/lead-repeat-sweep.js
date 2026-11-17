@@ -1,6 +1,6 @@
 /**
- * Nightly lead repeat sweep: GATE_LEAD_REPEAT_SWEEP (owner 2026-11-01, Action
- * inbox agents "A": "nightly fixers for ... lead status").
+ * Nightly lead repeat sweep (owner 2026-11-01, Action inbox agents "A":
+ * "nightly fixers for ... lead status").
  *
  * The Action Inbox item "N leads waiting over 30m for first contact" counts
  * every unanswered `new` lead, so a person who reran the quote wizard five
@@ -53,7 +53,6 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { leadRepeatSweepLive } = require('../config/feature-gates');
 const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const { applyLeadsAwaitingContactFilter } = require('./lead-waiting-queue');
 const { namesCompatible, normName, normalizeStreetKey } = require('./customer-dedupe');
@@ -332,8 +331,6 @@ async function settleOne(dbi, lead, results) {
  * through the whole queue, one transaction per filing, at most WRITE_CAP.
  */
 async function runLeadRepeatSweep({ dbi = db, pageSize = PAGE_SIZE } = {}) {
-  if (!leadRepeatSweepLive()) return { skipped: 'gate_off' };
-
   const results = { scanned: 0, filed: 0, kept: {}, errors: 0, filings: [] };
   let after = null;
   for (let page = 0; page < MAX_PAGES && results.filed < WRITE_CAP; page += 1) {

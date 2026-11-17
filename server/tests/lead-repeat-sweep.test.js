@@ -1,16 +1,13 @@
 /**
- * Lead repeat sweep — the pure "same person's earlier open lead" rules and the
- * gate. The SQL, the row lock and the whole nightly run are covered against
- * PostgreSQL in lead-repeat-sweep-postgres.test.js.
+ * Lead repeat sweep — the pure "same person's earlier open lead" rules. The SQL,
+ * the row lock and the whole nightly run are covered against PostgreSQL in
+ * lead-repeat-sweep-postgres.test.js.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ leadRepeatSweepLive: jest.fn(() => false) }));
 jest.mock('../services/lead-funnel-bridge', () => ({ bridgeLeadFunnelStage: jest.fn() }));
 
-const { leadRepeatSweepLive } = require('../config/feature-gates');
 const logger = require('../services/logger');
-const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const { runLeadRepeatSweep, isSamePersonRoot, _test } = require('../services/lead-repeat-sweep');
 
 const { namesAgree, sameService, extraPropertyCount, differentPremise, mergeableExtractedData, phoneLast10 } = _test;
@@ -125,16 +122,6 @@ describe('mergeableExtractedData', () => {
   });
 });
 
-describe('runLeadRepeatSweep gate', () => {
-  it('gate off: reads and writes nothing', async () => {
-    leadRepeatSweepLive.mockReturnValue(false);
-    const dbi = jest.fn();
-    expect(await runLeadRepeatSweep({ dbi })).toEqual({ skipped: 'gate_off' });
-    expect(dbi).not.toHaveBeenCalled();
-    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
-  });
-});
-
 describe('runLeadRepeatSweep error logging (security review P2)', () => {
   // A chainable knex stand-in: the first awaited query (the candidate page)
   // yields one lead; the second (its earlier same-phone lookup) fails with a
@@ -159,7 +146,6 @@ describe('runLeadRepeatSweep error logging (security review P2)', () => {
   }
 
   it('logs the error code and lead id, never the message with the phone', async () => {
-    leadRepeatSweepLive.mockReturnValue(true);
     const result = await runLeadRepeatSweep({ dbi: failingDbi() });
     expect(result.errors).toBe(1);
     const lines = logger.warn.mock.calls.map(([line]) => line);

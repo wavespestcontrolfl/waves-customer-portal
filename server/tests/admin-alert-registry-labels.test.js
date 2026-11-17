@@ -38,8 +38,6 @@ const rowFor = (key, meta, ageDays = 0) => ({
   metadata: meta, created_at: new Date(NOW.getTime() - ageDays * DAY_MS), read_at: null, done_at: null,
 });
 
-afterEach(() => { delete process.env.GATE_ALERT_CLAUDE_FAULTS; });
-
 describe('the labels a registry type stores are all valid composer values', () => {
   test.each(entries)('%s', (key, trigger) => {
     const labels = labelsOf(trigger);
@@ -86,7 +84,6 @@ describe('Claude-queue routing ignores the labels', () => {
   });
 
   test('a customer-contact type is never rescued or routed, labelled or not', () => {
-    process.env.GATE_ALERT_CLAUDE_FAULTS = 'true';
     for (const key of CUSTOMER_KEYS) {
       const { category } = TRIGGER_REGISTRY[key];
       expect(routing.rescueClaudeFault({ category, triggerKey: key, metadata: metaFor(key), payload: { customerId: UUID } })).toBeNull();
@@ -94,7 +91,7 @@ describe('Claude-queue routing ignores the labels', () => {
     }
   });
 
-  test('exactly the registry types the faults gate names are who claude; the others that say claude are left out on purpose', () => {
+  test('exactly the registry types the Claude-faults rescue names are who claude; the others that say claude are left out on purpose', () => {
     const claudeKeys = entries.filter(([, t]) => t.rule.who === 'claude').map(([k]) => k).sort();
     expect(claudeKeys).toEqual([...routing.CLAUDE_FAULT_TRIGGERS, ...Object.keys(routing.CLAUDE_FAULT_TRIGGERS_LEFT_OUT)].sort());
   });
