@@ -1082,6 +1082,60 @@ async function sendAchProcessing({
   });
 }
 
+// Bank (ACH) payment failure notices, one template per escalation stage of stripe-webhook's handleAchFailure
+// (GATE_ACH_FAILURE_EMAIL; the keys are its email stages: the messageType values, with stage 3 split into
+// ach_suspended = Auto Pay moved to the card and ach_suspended_no_card = every other stage-3 case). Their texts stay
+// off (owner 2026-09-28), so this email is the only notice. One email per payment intent + Stripe event: a
+// redelivery shares the key, and a replay of the event may recount a later stage but still resolves to the one row.
+const ACH_FAILURE_TEMPLATES = Object.freeze({
+  ach_retry_notice: 'payment.ach_retry_notice',
+  ach_card_fallback: 'payment.ach_card_fallback',
+  ach_suspended: 'payment.ach_suspended',
+  ach_suspended_no_card: 'payment.ach_suspended_no_card',
+});
+
+function achFailureEmailIdempotencyKey({ paymentIntentId, eventId = null, messageType }) {
+  return `payment.ach_failure:${paymentIntentId}:${eventId || messageType}`;
+}
+
+// GATE_ACH_FAILURE_EMAIL replay probe: has this event's email reached a terminal row in the email ledger? It is the
+// row sendTemplate dedupes on, so a recorded email is never sent again. An unreadable ledger reads as recorded: fail
+// closed, never a second email.
+async function achFailureEmailRecorded(args) {
+  try {
+    const row = await db('email_messages').where({ idempotency_key: achFailureEmailIdempotencyKey(args) }).first();
+    return !!row && !EmailTemplateLibrary.shouldRetryExistingMessage(row);
+  } catch (err) {
+    logger.warn(`[payment-lifecycle-email] ACH failure email probe failed (treating as recorded, fail closed): ${err.message}`);
+    return true;
+  }
+}
+
+async function sendAchFailureNotice({
+  customerId,
+  invoiceId = null,
+  paymentId = null,
+  paymentIntentId,
+  eventId = null,
+  messageType,
+  customerInitiated = false,
+} = {}) {
+  const templateKey = ACH_FAILURE_TEMPLATES[messageType];
+  if (!templateKey) return { ok: false, skipped: true, reason: 'unknown_ach_failure_stage' };
+  return sendLifecycleTemplate({
+    customerId,
+    templateKey,
+    eventType: templateKey,
+    payload: { billing_url: portalBillingUrl() },
+    invoiceId,
+    paymentId,
+    idempotencyKey: achFailureEmailIdempotencyKey({ paymentIntentId, eventId, messageType }),
+    billingDeliveryCategory: 'payment_issue',
+    customerInitiated: customerInitiated === true,
+    categories: customerInitiated === true ? [CUSTOMER_INITIATED_EMAIL_CATEGORY] : [],
+  });
+}
+
 async function sendPaymentPlanConfirmed({
   customerId,
   paymentPlanId,
@@ -1196,6 +1250,8 @@ module.exports = {
   sendPaymentRetryNotice,
   sendPaymentFailed,
   sendAchProcessing,
+  sendAchFailureNotice,
+  achFailureEmailRecorded,
   sendPaymentPlanConfirmed,
   sendRefundIssued,
   sendCancellationRefundIssued,

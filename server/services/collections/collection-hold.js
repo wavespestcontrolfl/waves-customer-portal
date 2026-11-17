@@ -302,7 +302,11 @@ const CUSTOMER_INITIATED_EMAIL_CATEGORY = 'customer_initiated';
 // Category stamped on a dunning email an OPERATOR sent on purpose (the office "send now" button):
 // a stored copy of it re-sent by the provider-retry rail keeps the operator exemption.
 const OPERATOR_INITIATED_EMAIL_CATEGORY = 'operator_initiated';
-const HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES = new Set(['payment.failed', 'payment.retry_notice', 'payment.method_expiring']);
+const HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES = new Set([
+  'payment.failed', 'payment.retry_notice', 'payment.method_expiring',
+  // The four bank (ACH) failure emails each carry a billing link (GATE_ACH_FAILURE_EMAIL).
+  'payment.ach_retry_notice', 'payment.ach_card_fallback', 'payment.ach_suspended', 'payment.ach_suspended_no_card',
+]);
 // Machine-initiated dunning emails that carry a pay / update-card / billing link: the Day 3-90
 // invoice follow-up ladder, the customer-level combined steps, the late-payment reminders
 // (balance-reminder + late-payment-checker), the bank-verification re-nudge and the legacy previsit

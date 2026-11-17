@@ -56,7 +56,7 @@ jest.mock('../services/stripe-invoice-state', () => ({
   nextInvoiceStatusAfterFailedPayment: jest.fn(() => 'sent'),
 }));
 jest.mock('../services/stripe-pricing', () => ({ computeChargeAmount: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gates: {} }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gates: {}, achFailureEmailLive: () => false }));
 jest.mock('../services/invoice-helpers', () => ({ INVOICE_UNCOLLECTIBLE_STATUSES: ['void'], invoiceAmountDue: jest.fn() }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendPaymentFailed: jest.fn(async () => {}) }));
