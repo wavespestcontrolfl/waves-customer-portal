@@ -234,8 +234,10 @@ describe('/conference-staff-menu-choice', () => {
     callHold.isEnabled.mockReturnValue(true);
     callHold.endHold.mockResolvedValue('returned');
     const res = await post('/conference-staff-menu-choice', { body: { Digits: '1' } });
-    expect(callHold.endHold).toHaveBeenCalledWith(SID);
+    expect(callHold.endHold).toHaveBeenCalledWith(SID, { legSid: null });
     expect(res.body).toBe(response(STAFF_ROOM_ON));
+    // The role is decided under the hold's lock: no extra read for it.
+    expect(callHold.holdState).not.toHaveBeenCalled();
   });
 
   test('1: the caller left -> The caller hung up. + Hangup', async () => {
@@ -618,7 +620,7 @@ describe('/conference-transfer-wait (the staff while it rings)', () => {
     callHold.checkHold.mockResolvedValue(VIEW({ ...RING, status, ringing: false }));
     callHold.endHold.mockResolvedValue('returned');
     expect((await post('/conference-transfer-wait')).body).toBe(response(`${say('No answer.')}${STAFF_ROOM_ON}`));
-    expect(callHold.endHold).toHaveBeenCalledWith(SID);
+    expect(callHold.endHold).toHaveBeenCalledWith(SID, { legSid: null });
     callHold.endHold.mockResolvedValue('voicemail');
     expect((await post('/conference-transfer-wait')).body).toBe(response(`${say('No answer.')}${say(STAFF_VOICEMAIL)}<Hangup/>`));
     callHold.endHold.mockResolvedValue('no_room');
@@ -659,44 +661,41 @@ describe('after the owner took the transfer, only his leg rejoins with star', ()
   const HIS_HOLD = VIEW(null, { phase: 'held', applied: 'held', winnerLegSid: TLEG });
   const SAID = say('Your call is transferred. Stay on to introduce the caller, or hang up.');
 
-  test('a press 1 from the staff who pressed 2: the second staff join; from the owner leg: the staff <Dial> with star', async () => {
+  test('a press 1 from the staff who pressed 2: the decision point answers second_staff, and they join as staff-2; the owner rejoins with star', async () => {
     callHold.isEnabled.mockReturnValue(true);
-    callHold.transferOn.mockReturnValue(true);
-    callHold.endHold.mockResolvedValue('returned');
-    callHold.holdState.mockResolvedValue(TAKEN);
+    callHold.endHold.mockImplementation(async (sid, { legSid } = {}) => (legSid === TLEG ? 'returned' : 'second_staff'));
     expect((await post('/conference-staff-menu-choice', { body: { Digits: '1', CallSid: LEG } })).body).toBe(response(`${SAID}${SECOND_STAFF}`));
     expect((await post('/conference-staff-menu-choice', { body: { Digits: '1', CallSid: TLEG } })).body).toBe(response(STAFF_ROOM_ON));
-    expect(callHold.holdState).toHaveBeenCalledWith(SID);
-  });
-
-  test('the transfer gate off: a press 1 rejoins as today, with no state read', async () => {
-    callHold.isEnabled.mockReturnValue(true);
-    callHold.endHold.mockResolvedValue('returned');
-    callHold.holdState.mockResolvedValue(TAKEN);
-    expect((await post('/conference-staff-menu-choice', { body: { Digits: '1', CallSid: LEG } })).body).toBe(response(STAFF_ROOM_ON));
+    expect(callHold.endHold.mock.calls).toEqual([[SID, { legSid: LEG }], [SID, { legSid: TLEG }]]);
+    // The stored winner decides under the hold's lock: the route reads no gate (transferOn is false here, as when the
+    // gate is turned off after he took the call) and no view for the role.
+    expect(callHold.transferOn).not.toHaveBeenCalled();
     expect(callHold.holdState).not.toHaveBeenCalled();
   });
 
-  test('a transfer that failed or was canceled: the press 1 rejoins with star', async () => {
+  test('second_staff from their wait loop (wait=1) joins them too; a room that is gone hangs up', async () => {
     callHold.isEnabled.mockReturnValue(true);
-    callHold.transferOn.mockReturnValue(true);
-    callHold.endHold.mockResolvedValue('returned');
-    for (const status of ['failed', 'canceled']) {
-      callHold.holdState.mockResolvedValue(VIEW({ ...RING, status, ringing: false }, { phase: 'returned', applied: 'returned' }));
-      expect((await post('/conference-staff-menu-choice', { body: { Digits: '1', CallSid: LEG } })).body).toBe(response(STAFF_ROOM_ON));
-    }
+    callHold.endHold.mockResolvedValue('second_staff');
+    expect((await post('/conference-staff-menu-choice', { body: { Digits: '1', CallSid: LEG }, query: { wait: '1' } })).body).toBe(response(`${SAID}${SECOND_STAFF}`));
+    callHold.roomIsOpen.mockResolvedValue(false);
+    expect((await post('/conference-staff-menu-choice', { body: { Digits: '1', CallSid: LEG } })).body).toBe(response(`${SAID}<Hangup/>`));
   });
 
-  test('a new hold of his before their wait loop returns: the staff who pressed 2 still join as a second staff', async () => {
+  test('a press 2 from the staff who pressed 2 after he took the call: no call is placed, and they join as staff-2', async () => {
+    callHold.isEnabled.mockReturnValue(true);
+    callHold.transferAvailable.mockReturnValue(true);
+    callHold.startTransfer.mockResolvedValue('second_staff');
+    expect((await post('/conference-staff-menu-choice', { body: { Digits: '2', CallSid: LEG }, query: { wait: '1' } })).body).toBe(response(`${SAID}${SECOND_STAFF}`));
+    expect(callHold.startTransfer).toHaveBeenCalledWith(SID, { legSid: LEG, fromName: null });
+  });
+
+  test('a new hold of his before their wait loop returns: the staff who pressed 2 join as staff-2 and never hear his hold menu', async () => {
     callHold.isEnabled.mockReturnValue(true);
     callHold.transferOn.mockReturnValue(true);
     callHold.checkHold.mockResolvedValue(HIS_HOLD);
     expect((await post('/conference-transfer-wait', { body: { CallSid: LEG } })).body).toBe(response(`${SAID}${SECOND_STAFF}`));
-    // Their press 1 on that hold: the caller comes back for him, and they join as the second staff.
-    callHold.endHold.mockResolvedValue('returned');
-    callHold.holdState.mockResolvedValue({ ...HIS_HOLD, phase: 'returned', applied: 'returned' });
-    expect((await post('/conference-staff-menu-choice', { body: { Digits: '1', CallSid: LEG } })).body).toBe(response(`${SAID}${SECOND_STAFF}`));
-    // His own menu on that hold is the hold menu, as for any staff.
+    expect((await post('/conference-staff-menu', { body: { CallSid: LEG } })).body).toBe(response(`${SAID}${SECOND_STAFF}`));
+    // His own menu on that hold is the hold menu, as for any staff. (A key of theirs on it changes nothing: call-hold.test.js.)
     expect((await post('/conference-staff-menu', { body: { CallSid: TLEG }, query: { first: '1' } })).body).toContain(say(MENU_LINE));
   });
 

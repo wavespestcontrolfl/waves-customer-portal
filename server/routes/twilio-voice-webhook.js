@@ -4293,12 +4293,13 @@ router.post('/conference-staff-menu', async (req, res) => {
     const state = conferencePath.CALL_SID_RE.test(parentSid) ? await callHold.checkHold(parentSid, { remind: true }) : { closed: true };
     if (state.voicemailAt) staffVoicemailGoodbye(twiml);
     else if (state.closed) callerGone(twiml);
+    // A leg that is no longer the winner never hears the hold menu (also during a later hold of the owner's): staff-2.
+    else if (secondStaff(state, req.body?.CallSid)) await appendSecondStaff(twiml, parentSid);
     else if (state.phase === 'held' || (state.phase === 'returned' && state.applied !== 'returned' && !state.gone)) {
       appendHoldMenu(twiml, parentSid, {
         first: req.query.first === '1', remind: state.remind, transfer: callHold.transferAvailable(req.body?.To || req.body?.Called),
       });
-    } else if (secondStaff(state, req.body?.CallSid)) await appendSecondStaff(twiml, parentSid);
-    else await rejoinOrHangup(twiml, parentSid);
+    } else await rejoinOrHangup(twiml, parentSid);
   } catch (err) {
     logger.error(`[call-hold] menu error for ${maskSid(parentSid)} (${err?.code || err?.name || 'error'})`);
     return res.type('text/xml').send(HANGUP_XML);
@@ -4316,11 +4317,15 @@ const secondStaff = (view, legSid) => Boolean(view?.winnerLegSid && legSid && vi
 
 // A press 1 on the hold menu (also the end of an unanswered transfer): the staff go back in the room once the unhold is
 // confirmed (the request waits for it, up to 6 s). The caller already sent to voicemail: the staff are told.
+// The hold's decision point names the leg and reads the call's stored winner under its lock, whatever
+// GATE_CALL_WARM_TRANSFER reads now (the gate only stops new transfers): a press from a leg that is no longer the winner
+// (the staff who pressed 2, after the owner took the call) changes nothing, and they join as staff-2.
 async function appendPressOneReturn(twiml, parentSid, legSid) {
-  const ended = await callHold.endHold(parentSid);
-  if (ended === 'returned') {
-    if (callHold.transferOn() && secondStaff(await callHold.holdState(parentSid), legSid)) await appendSecondStaff(twiml, parentSid);
-    else appendStaffConference(twiml, parentSid);
+  const ended = await callHold.endHold(parentSid, { legSid: legSid || null });
+  if (ended === 'second_staff') {
+    await appendSecondStaff(twiml, parentSid);
+  } else if (ended === 'returned') {
+    appendStaffConference(twiml, parentSid);
   } else if (ended === 'voicemail') {
     // The 5 minute limit (or the staff phone hanging up) decided the voicemail first: the room is ending, never rejoin it.
     staffVoicemailGoodbye(twiml);
@@ -4338,6 +4343,9 @@ async function appendTransferStart(twiml, parentSid, body) {
   const started = await callHold.startTransfer(parentSid, { legSid: body?.CallSid || null, fromName: resolveCsrName(body?.To || body?.Called) });
   if (started === 'ringing' || started === 'busy') {
     twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-transfer-wait', parentSid, '&first=1'));
+  } else if (started === 'second_staff') {
+    // A press 2 from a leg that is no longer the winner: no call is placed, and they join as staff-2.
+    await appendSecondStaff(twiml, parentSid);
   } else if (started === 'voicemail') {
     staffVoicemailGoodbye(twiml);
   } else {

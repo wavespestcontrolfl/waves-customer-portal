@@ -376,13 +376,21 @@ function planVoicemailAnswered(hold, nowMs) {
 
 // `winner` is the call's winning leg (conference_path.accepted_leg_sid) as read under the lock: a warm transfer the owner
 // takes moves it in the same write as his accept, so a leg end or a placement decided after that sees the new one.
+// The events a staff leg sends about itself: a menu key (press 1, press 2) and its own end. From a leg that is no longer
+// the call's winner (the staff who pressed 2, after the owner took the call: a key in their wait loop, also during a later
+// hold of his, or their leg's end read as the winner's just before his accept) it changes nothing: they can neither return
+// nor transfer his hold, nor end the room. The routes join them as staff-2. No leg named, or no winner stored, decides as
+// before.
+const LEG_EVENTS = new Set(['press1', 'transfer_start', 'staff_left']);
+const notWinner = (ev, winner) => Boolean(LEG_EVENTS.has(ev.type) && ev.legSid && winner && ev.legSid !== winner);
+
 function planEvent(hold, ev, nowMs, closed, winner = null) {
+  if (notWinner(ev, winner)) return { next: hold, answer: 'not_winner' };
   switch (ev.type) {
     case 'star': return closed ? { next: hold, answer: 'no_room' } : planStar(hold, ev, nowMs);
     case 'press1': return planPressOne(hold, nowMs);
     case 'check': return planCheck(hold, ev, nowMs);
-    // A leg end read as the winner's before a transfer moved the winner: it changes nothing.
-    case 'staff_left': return ev.legSid && ev.legSid !== winner ? { next: hold, answer: 'not_winner' } : planStaffLeft(hold, nowMs, closed);
+    case 'staff_left': return planStaffLeft(hold, nowMs, closed);
     case 'step_done': return planStepDone(hold, ev, nowMs);
     case 'step_failed': return planStepFailed(hold, ev);
     case 'abort': return planAbort(hold, ev);
@@ -847,12 +855,14 @@ function settledReturn(view) {
   return null;
 }
 
-// 'returned' | 'voicemail' | 'no_room' | 'failed'. A press 1: it answers 'returned' only once the unhold is
+// 'returned' | 'voicemail' | 'no_room' | 'failed' | 'second_staff'. A press 1: it answers 'returned' only once the unhold is
 // confirmed; 'voicemail' when the voicemail is decided; 'failed' (the staff stay on the menu, whose loop finishes
-// the return) when it could not be confirmed in time.
-async function endHold(callSid) {
+// the return) when it could not be confirmed in time. 'second_staff': the press came from a leg that is no longer the
+// call's winner (`legSid`, read under the lock): nothing changed, and the route joins it as staff-2.
+async function endHold(callSid, { legSid = null } = {}) {
   try {
-    const decision = await decide(callSid, { type: 'press1' });
+    const decision = await decide(callSid, { type: 'press1', legSid });
+    if (decision.answer === 'not_winner') return 'second_staff';
     if (decision.answer === 'no_state') return 'failed';
     if (decision.answer === 'closed') return 'returned';
     if (decision.answer === 'voicemail') {
@@ -955,10 +965,12 @@ async function placeTransferCall(callSid, n) {
   return 'failed';
 }
 
-// 'ringing' | 'busy' | 'not_held' | 'voicemail' | 'failed'. The staff pressed 2: one transfer at a time per hold.
+// 'ringing' | 'busy' | 'not_held' | 'voicemail' | 'failed' | 'second_staff'. The staff pressed 2: one transfer at a time
+// per hold. 'second_staff': a press from a leg that is no longer the call's winner places no call.
 async function startTransfer(callSid, { legSid = null, fromName = null } = {}) {
   try {
     const decision = await decide(callSid, { type: 'transfer_start', legSid, fromName });
+    if (decision.answer === 'not_winner') return 'second_staff';
     if (decision.answer === 'start') {
       logger.info(`[call-hold] transfer ${decision.next.transfer.n} asked for ${masked(callSid)}`);
       return await placeTransferCall(callSid, decision.next.transfer.n);
