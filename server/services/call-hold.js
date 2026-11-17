@@ -480,20 +480,20 @@ const transferView = (t) => (t
 
 // What the routes read: the wanted phase, what Twilio confirmed, and the times. A read error answers { error }.
 function viewOf(state) {
-  const hold = holdFrom(state);
+  const hold = holdFrom(state) || {}; // no hold: every field below reads its empty value
   return {
     found: Boolean(state),
     closed: Boolean(state?.closed_at),
-    gen: hold?.gen || 0,
-    phase: hold?.phase || null,
-    applied: hold?.applied || null,
-    retBy: hold?.ret_by || null,
-    gone: Boolean(hold?.gone),
-    open: hold?.phase === 'held',
-    openAt: hold?.open_at || null,
-    voicemailAt: hold?.voicemail_at || null,
-    reason: hold?.voicemail_reason || null,
-    transfer: transferView(hold?.transfer),
+    gen: hold.gen || 0,
+    phase: hold.phase || null,
+    applied: hold.applied || null,
+    retBy: hold.ret_by || null,
+    gone: Boolean(hold.gone),
+    open: hold.phase === 'held',
+    openAt: hold.open_at || null,
+    voicemailAt: hold.voicemail_at || null,
+    reason: hold.voicemail_reason || null,
+    transfer: transferView(hold.transfer),
     // The call's winning leg, across holds: after a warm transfer it is the owner's leg (the routes join any other leg
     // as a second staff).
     winnerLegSid: state?.accepted_leg_sid || null,
