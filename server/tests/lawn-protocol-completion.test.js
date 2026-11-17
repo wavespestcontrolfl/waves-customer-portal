@@ -528,7 +528,7 @@ describe('recordLawnProtocolCompletion — Codex #4113 round fixes', () => {
     expect(JSON.parse(completions[0].metadata).unlistedSkippedProducts).toEqual([]);
   });
 
-  // GATE_LAWN_NEW_SOD_NOTE (Codex on #6231): the new-sod bag swap is not a plan substitution; the visit hands it in.
+  // New sod (Codex on #6231): the new-sod bag swap is not a plan substitution; the visit hands it in.
   describe('a substitution the visit made (visitSubstitutions: the new-sod bag swap)', () => {
     const plan = {
       protocol: { structured: { protocolKey: 'st_augustine', version: 1, window: { key: 'summer_insect', title: 'Summer', requiredTasks: [] },

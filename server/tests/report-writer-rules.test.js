@@ -4,11 +4,12 @@
 // every older line the rules contradict is rewritten out of its prompt.
 const fs = require('fs');
 const path = require('path');
-const { selectReportCopyPrompt, writerRulesInScope } = require('../services/service-report/lawn-report-copy-prompt');
+const { selectReportCopyPrompt, writerRulesInScope, specialtyVoiceServes } = require('../services/service-report/lawn-report-copy-prompt');
+const { selectRemainingServicePrompt, REMAINING_SERVICE_PROMPT_VERSION } = require('../services/service-report/remaining-service-copy-prompts');
 const {
   OWNER_RULES, PROMPT_REWRITES, REPORT_WRITER_RULES_VERSION, writerRulesRejection, activeIngredientsMentioned, bookedReasonBlock,
   groundedTimeframePhrases, observedAndReportedLines,
-  lowercaseGermanRoach,
+  lowercaseGermanRoach, composeWriterRulesPrompt,
 } = require('../services/service-report/report-writer-rules');
 const { scrubCustomerText } = require('../services/completion-comms-context');
 const { HUMAN_PROSE_RULES } = require('../services/llm/human-prose-rules');
@@ -74,10 +75,14 @@ describe('writer rules scope', () => {
     expect(prompt).not.toContain(OWNER_RULES);
   });
 
-  test.each(IN_SCOPE)('%s gets the owner rules', (serviceKey, findingsType) => {
+  test.each(IN_SCOPE)('%s gets the owner rules (the termite, cockroach, rodent and mosquito writers in their one voice)', (serviceKey, findingsType) => {
     const context = { serviceKey, findingsType };
     expect(writerRulesInScope('Old label', context)).toBe(true);
     const prompt = selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, writerRules: true });
+    if (specialtyVoiceServes({ ...context, writerRules: true })) {
+      expect(prompt).toContain('# specialty_report_voice_v1');
+      return;
+    }
     expect(prompt).toContain(OWNER_RULES);
     expect(prompt).toContain(`# ${REPORT_WRITER_RULES_VERSION}`);
     expect(prompt.split('Describe the rating in words only')).toHaveLength(2);
@@ -115,8 +120,13 @@ describe('writer rules scope', () => {
 });
 
 describe('prompt rewrites', () => {
-  const inScopePrompts = IN_SCOPE
-    .map(([serviceKey, findingsType]) => selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey, findingsType, writerRules: true }));
+  // The stacked writer under the rules for every in-scope key, the termite, cockroach, rodent and mosquito ones too: those
+  // are served in their one voice, so the stacked text is composed here the way selectReportCopyPrompt composes it (it
+  // still serves a visit when the writer rules are off for the route and for any other module).
+  const sharedSafety = V4_SHARED.slice(V4_SHARED.indexOf('## HARD CONSTRAINTS'), V4_SHARED.indexOf('## ANTI-TEMPLATE RULES', V4_SHARED.indexOf('## HARD CONSTRAINTS'))).trim();
+  const inScopePrompts = IN_SCOPE.map(([serviceKey, findingsType]) => composeWriterRulesPrompt([
+    `# ${REMAINING_SERVICE_PROMPT_VERSION}`, sharedSafety, selectRemainingServicePrompt({ serviceKey, findingsType }, 'main'),
+  ]));
   const sourcePrompts = IN_SCOPE
     .map(([serviceKey, findingsType]) => selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey, findingsType }));
 

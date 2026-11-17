@@ -6682,7 +6682,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // this visit either commits first — and the caller's locked guard
           // sees it — or waits until this completion has committed (Codex r5
           // P1 #5903).
-          // GATE_LAWN_NEW_SOD_NOTE: a lawn sheet completing with NO product because the new sod holds every planned product
+          // A lawn sheet completing with NO product because the new sod holds every planned product
           // has that claim re-judged below, under the sod record's own advisory lock. The lock is taken FIRST, ahead of every
           // other lock here, as the sod record's writers (writeAdminPreferences, the rooted tick) take it before their customer
           // and visit locks. False (nothing taken) for every other completion.
@@ -8802,7 +8802,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             plan: waveguardPlan && !(lawnLedgerVisit ? lawnPlanAttributesVisit(waveguardPlan) : lawnPlanProgramApplies(waveguardPlan))
               ? { ...waveguardPlan, protocol: null } : waveguardPlan,
             serviceProducts: insertedServiceProducts,
-            // GATE_LAWN_NEW_SOD_NOTE: the new-sod bag swap as a substitution, so the ledger ties the swap bag to the bag it replaced.
+            // The new-sod bag swap as a substitution, so the ledger ties the swap bag to the bag it replaced.
             visitSubstitutions: await require('./lawn-sod-sheet').sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts: insertedServiceProducts }),
             completionInput: {
               ...(lawnProtocolCompletion || {}),
@@ -8842,7 +8842,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           }
         }
 
-        // GATE_LAWN_NEW_SOD_REPORT_CARD: what the new-sod holds kept off this visit, frozen for the report's New sod card
+        // What the new-sod holds kept off this visit, frozen for the report's New sod card
         // (lawn-sod-report-card.js). Secondary and savepointed; never fails the visit.
         await require('./lawn-sod-report-card').freezeNewSodCard(trx, {
           svc, record, lawnFast, isIncompleteVisit, resumingCommittedCompletion, appliedProducts: insertedServiceProducts,

@@ -1,4 +1,4 @@
-// GATE_LAWN_NOV_LARGE_PATCH_N (owner 2026-10-09): the gate reader, the rule's config, and visitNutrientTargets, the one place the
+// The November large patch cut (owner 2026-10-09): the rule's config, and visitNutrientTargets, the one place the
 // plan and the tank sheet read a visit's nutrient targets from. Synthetic knex and trouble-area store; no database.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockLoadActive = jest.fn();
@@ -10,13 +10,12 @@ jest.mock('../services/lawn-trouble-areas', () => ({
   loadActiveLargePatch: (...args) => mockLoadActive(...args),
 }));
 
-const featureGates = require('../config/feature-gates');
 const { V13_TROUBLE_N_TARGETS, FUNGUS_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
 const engine = require('../services/waveguard-plan-engine');
 const v13 = require('../config/lawn-protocol-v13.json');
 const { TYPES } = jest.requireActual('../services/lawn-trouble-areas');
 
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET'];
 const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 const allOn = () => { for (const name of GATES) process.env[name] = 'true'; };
 beforeEach(() => { jest.clearAllMocks(); allOn(); mockLoadActive.mockResolvedValue([{ id: 'a', type: 'fungus' }]); });
@@ -32,18 +31,6 @@ const run = (args = {}) => {
   return engine.visitNutrientTargets({}, service, { visit, month: 'Nov', v13Active: true, ...rest });
 };
 const targetsFor = async (args = {}) => { const { visit: _visit, ...found } = await run(args); return found; };
-
-describe('lawnNovLargePatchNLive', () => {
-  test.each([[undefined, false], ['', false], ['1', false], ['TRUE', false], ['false', false], ['true', true]])('the variable %j gives %s, read at call time', (value, expected) => {
-    if (value === undefined) delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N; else process.env.GATE_LAWN_NOV_LARGE_PATCH_N = value;
-    expect(featureGates.lawnNovLargePatchNLive()).toBe(expected);
-  });
-
-  test.each(GATES.slice(0, -1))('is off when %s is off (fail closed: the rule reads the mapped areas)', (name) => {
-    delete process.env[name];
-    expect(featureGates.lawnNovLargePatchNLive()).toBe(false);
-  });
-});
 
 describe('the rule', () => {
   test('one entry: November, fungus, 0.5 lb N; the closed type list names fungus and keeps take-all separate', () => {
@@ -137,8 +124,8 @@ describe('fungusNitrogenCut, the one decision every reader shares (codex #6256 r
     expect(mockLoadActive).not.toHaveBeenCalled();
   });
 
-  test('gate first: with the gate off nothing is read at all, not even the property', async () => {
-    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+  test('gate first: with the spot target capture off nothing is read at all, not even the property', async () => {
+    delete process.env.GATE_LAWN_SPOT_TARGET;
     const areas = require('../services/lawn-trouble-areas');
     areas.propertyOf.mockClear();
     expect(await cutFor()).toBeNull();
@@ -179,7 +166,7 @@ describe('the visit text staff read agrees with the cut (codex #6256 r1 P1)', ()
   test('nothing is rewritten when the cut does not apply: the same visit object comes back', async () => {
     mockLoadActive.mockResolvedValue([]);
     expect((await run({ visit: NOV_VISIT })).visit).toBe(NOV_VISIT);
-    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+    delete process.env.GATE_LAWN_SPOT_TARGET;
     expect((await run({ visit: NOV_VISIT })).visit).toBe(NOV_VISIT);
   });
 
@@ -262,9 +249,9 @@ describe('the property read and the trouble-area read share one savepoint (codex
     expect(columns).toEqual(expect.arrayContaining(['property_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip']));
   });
 
-  test('strict with a good read: the same cut; strict with the gate off: no read at all', async () => {
+  test('strict with a good read: the same cut; strict with the spot target capture off: no read at all', async () => {
     expect(await engine.fungusNitrogenCut({}, service, { targetN: 0.75, monthNumber: 11, v13Active: true, strict: true })).toBe(0.5);
-    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+    delete process.env.GATE_LAWN_SPOT_TARGET;
     areas.propertyOf.mockClear();
     mockLoadActive.mockClear();
     mockLoadActive.mockRejectedValue(new Error('boom'));
@@ -355,7 +342,7 @@ describe('fungusNitrogenNotes', () => {
 });
 
 describe('the recipe text', () => {
-  test('no track states the rule in its November notes or lines (the text would be false with the gate off)', () => {
+  test('no track states the rule in its November notes or lines (the text would be false while the trouble-area or spot target gates are off)', () => {
     for (const track of Object.values(v13)) {
       const nov = track.visits.find((visit) => visit.month === 'Nov');
       expect(`${nov.primary}\n${nov.notes}`).not.toMatch(/0\.5 lb N|fungus is (mapped|active)|reduced/i);

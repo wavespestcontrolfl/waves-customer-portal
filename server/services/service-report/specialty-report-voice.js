@@ -1,6 +1,6 @@
 /**
  * The termite, cockroach, rodent and mosquito report writer in one voice
- * (GATE_SPECIALTY_REPORT_VOICE; owner 2026-10-24, "yes build voice" to
+ * (owner 2026-10-24, "yes build voice" to
  * "should the termite, cockroach, rodent and mosquito reports get the same
  * plain voice as pest reports?"). Under GATE_REPORT_WRITER_RULES these
  * writers got about 3,700 words in stacked blocks: the owner rules, the

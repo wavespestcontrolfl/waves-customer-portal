@@ -154,10 +154,9 @@ describe('/completion-actions on a December visit', () => {
     expect(await actions()).toEqual(gated);
   });
 
-  test('another month is untouched, and reads no area', async () => {
+  test('another month gets no swap (November reads the areas for its own nitrogen cut)', async () => {
     const body = await actions({ month: '11' });
     expect(rawsOf(body).join('\n')).not.toContain('Black Out');
-    expect(mockLoadActive).not.toHaveBeenCalled();
   });
 
   test('a visit pinned to an older version, or to another month\'s window: no swap (the plan would not swap it either)', async () => {

@@ -1,4 +1,4 @@
-// GATE_LAWN_NOV_LARGE_PATCH_N (owner 2026-10-09) on the lawn tank sheet (GET /api/admin/protocols/lawn-mix): a v13 November visit
+// The November large patch cut (owner 2026-10-09) on the lawn tank sheet (GET /api/admin/protocols/lawn-mix): a v13 November visit
 // at a lawn with an ACTIVE mapped fungus area sizes the 24-0-11 bag for 0.5 lb N (2.083 lb per 1,000, noted as 2.1) instead of the
 // visit's 0.75 lb N (3.125); the yearly-limit read sees the same reduced rate. Real handler and plan engine; synthetic fixtures.
 jest.mock('../models/db', () => jest.fn());
@@ -38,7 +38,7 @@ const V13_SUMMARY = { version: LAWN_V13_VERSION, products: [{ productId: 'f24', 
 const PROPERTY = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
 const NOTE = 'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET'];
 
 const handler = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/lawn-mix' && layer.route.methods.get).route.stack[0].handle;
 
@@ -87,7 +87,7 @@ beforeEach(() => {
 });
 afterEach(() => { for (const name of [...GATES, 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY']) delete process.env[name]; });
 
-describe('active large patch mapped, gate on', () => {
+describe('active large patch mapped', () => {
   test('November 24-0-11 is sized for 0.5 lb N: 2.083 lb per 1,000, 20.83 lb on 10,000 sq ft, with the technician note', async () => {
     const body = await sheet();
     expect(bag(body).jobMix).toMatchObject({ rateSource: 'target_n_analysis', targetNPer1000: 0.5, amountUnit: 'lb' });
@@ -131,7 +131,7 @@ describe('the text staff read agrees with the cut (codex #6256 r1 P1)', () => {
     expect(bag(body).raw).toBe(STALE);
     expect(body.visit.primary).toBe(STALE);
     expect(body.visit.objective).toMatch(/^N rate: 0\.75 lb N\. Spreader visit\./);
-    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+    delete process.env.GATE_LAWN_SPOT_TARGET;
     mockLoadActive.mockResolvedValue([{ type: 'fungus' }]);
     expect((await sheet()).visit.primary).toBe(STALE);
   });
@@ -182,10 +182,10 @@ describe('the cut follows the protocol the PLANNER resolves for the visit (codex
     expect(bag(await sheet()).jobMix.ratePer1000).toBeCloseTo(3.125, 3);
   });
 
-  test('the gate is off (or the trouble-areas gate is): a pinned visit makes NO protocol lookup of its own, and the sheet is unchanged', async () => {
+  test('the spot target capture is off (or the trouble-areas gate is): a pinned visit makes NO protocol lookup of its own, and the sheet is unchanged', async () => {
     Object.assign(visit, pin(LAWN_V13_VERSION));
-    for (const name of ['GATE_LAWN_NOV_LARGE_PATCH_N', 'GATE_LAWN_TROUBLE_AREAS']) {
-      process.env.GATE_LAWN_NOV_LARGE_PATCH_N = 'true';
+    for (const name of ['GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_TROUBLE_AREAS']) {
+      process.env.GATE_LAWN_SPOT_TARGET = 'true';
       process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
       delete process.env[name];
       operatingLayer.getProtocolWindowContext.mockClear();
@@ -261,15 +261,10 @@ describe('everything else keeps the visit\'s own 0.75 lb N (3.125 lb per 1,000),
     expect(limitRate()).toBeCloseTo(3.125, 3);
   };
 
-  test('the gate is off', async () => {
-    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+  test('the spot target capture is off', async () => {
+    delete process.env.GATE_LAWN_SPOT_TARGET;
     await expectNormal();
     expect(mockLoadActive).not.toHaveBeenCalled();
-  });
-
-  test.each(['TRUE', '1', 'yes', ''])('the gate is %j (not exactly "true")', async (value) => {
-    process.env.GATE_LAWN_NOV_LARGE_PATCH_N = value;
-    await expectNormal();
   });
 
   test('the trouble-areas gate is off', async () => {

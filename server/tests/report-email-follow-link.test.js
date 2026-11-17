@@ -1,10 +1,9 @@
 // Owner 2026-11-01 (social audit "follow link"): one Follow line in the visit
-// report email, behind GATE_REPORT_EMAIL_FOLLOW_LINK. Gate off = unchanged.
+// report email.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-for-signed-map-images';
 const { buildServiceReportV1Email } = require('../services/service-report/email-delivery');
 const { renderTemplate } = require('../services/email-template-library');
 const { followUsLine } = require('../services/email-template');
-const { reportEmailFollowLinkLive } = require('../config/feature-gates');
 
 const LEAD = 'Follow Waves on social:';
 const FB = 'https://facebook.com/wavespestcontrol';
@@ -18,16 +17,6 @@ const report = () => buildServiceReportV1Email({
 });
 
 describe('report email follow line', () => {
-  afterEach(() => { delete process.env.GATE_REPORT_EMAIL_FOLLOW_LINK; });
-
-  test('the gate is strict true and dark by default', () => {
-    expect(reportEmailFollowLinkLive()).toBe(false);
-    process.env.GATE_REPORT_EMAIL_FOLLOW_LINK = '1';
-    expect(reportEmailFollowLinkLive()).toBe(false);
-    process.env.GATE_REPORT_EMAIL_FOLLOW_LINK = 'true';
-    expect(reportEmailFollowLinkLive()).toBe(true);
-  });
-
   test('the line links only the confirmed profiles', () => {
     const line = followUsLine();
     expect(line.html.match(/href="[^"]+"/g)).toEqual([`href="${FB}"`, `href="${IG}"`, `href="${TT}"`]);
@@ -36,21 +25,7 @@ describe('report email follow line', () => {
   });
 
   describe('legacy fallback email', () => {
-    test('gate off: no follow line in either part', () => {
-      const { html, text } = report();
-      expect(html).not.toContain(LEAD);
-      expect(text).not.toContain(LEAD);
-      expect(html).not.toContain('tiktok.com/@wavespestcontrol" class="dm-link"');
-    });
-
-    test('gate off output is identical to the output with the gate never set', () => {
-      const a = report();
-      process.env.GATE_REPORT_EMAIL_FOLLOW_LINK = 'false';
-      expect(report()).toEqual(a);
-    });
-
-    test('gate on: the line appears once per part, before the footer and the signature', () => {
-      process.env.GATE_REPORT_EMAIL_FOLLOW_LINK = 'true';
+    test('the line appears once per part, before the footer and the signature', () => {
       const { html, text } = report();
       expect(count(html, LEAD)).toBe(1);
       expect(count(text, LEAD)).toBe(1);

@@ -224,12 +224,12 @@ function pestVoiceServes(serviceType, context = {}) {
 }
 
 // Whether selectReportCopyPrompt serves the one-voice termite, cockroach,
-// rodent and mosquito prompt (GATE_SPECIALTY_REPORT_VOICE): under the writer
+// rodent and mosquito prompt: under the writer
 // rules, for a visit whose remaining-service modules are all in
 // SPECIALTY_VOICE_MODULES. The generate route trims the same empty inputs as
 // the quiet pest writer then, so both read this.
 function specialtyVoiceServes(context = {}) {
-  if (context.writerRules !== true || context.specialtyVoice !== true) return false;
+  if (context.writerRules !== true) return false;
   if (!selectRemainingServicePrompt(context, 'main')) return false;
   const modules = resolveRemainingServiceModules(context);
   return Boolean(modules?.length) && modules.every((key) => SPECIALTY_VOICE_MODULES.has(key));
@@ -244,7 +244,7 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
   const writerRules = context.writerRules === true && writerRulesInScope(serviceType, context);
   const compose = (parts) => (writerRules ? composeWriterRulesPrompt(parts) : parts.filter(Boolean).join('\n\n'));
   const remaining = selectRemainingServicePrompt(context, 'main');
-  // GATE_SPECIALTY_REPORT_VOICE (specialty-report-voice.js): one prompt in the
+  // Specialty voice (specialty-report-voice.js): one prompt in the
   // pest report's voice in place of the stacked blocks below; a callback or
   // re-service is named at its end, as the callback modifier was.
   if (remaining && specialtyVoiceServes(context)) {

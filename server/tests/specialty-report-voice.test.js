@@ -1,7 +1,7 @@
-// GATE_SPECIALTY_REPORT_VOICE (owner 2026-10-24, "yes build voice"): under the
+// The specialty voice (owner 2026-10-24, "yes build voice"): under the
 // writer rules the termite, cockroach, rodent and mosquito writers get one
-// prompt in the pest report's voice in place of their stacked blocks. Off, and
-// for every other writer, the prompt is byte-identical.
+// prompt in the pest report's voice in place of their stacked blocks. Without
+// the writer rules, and for every other writer, the prompt is the stacked one.
 const fs = require('fs');
 const path = require('path');
 const { selectReportCopyPrompt, specialtyVoiceServes } = require('../services/service-report/lawn-report-copy-prompt');
@@ -11,7 +11,7 @@ const {
 } = require('../services/service-report/specialty-report-voice');
 const { REMAINING_SERVICE_MODULES } = require('../services/service-report/remaining-service-copy-prompts');
 const {
-  OWNER_RULES, groundedTimeframePhrases, noteAbsenceHint, writerRulesRejection,
+  groundedTimeframePhrases, noteAbsenceHint, writerRulesRejection,
 } = require('../services/service-report/report-writer-rules');
 const { SERVICE_EXPECTATIONS, writerExpectations } = require('../services/service-report/report-writer-records');
 const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
@@ -44,33 +44,26 @@ const IN_SCOPE = [
 
 describe('which writer gets the one-voice specialty prompt', () => {
   test.each(IN_SCOPE)('%s, under the writer rules', (serviceKey, findingsType) => {
-    const context = { serviceKey, findingsType, serviceModel: 'one_time', writerRules: true, specialtyVoice: true };
+    const context = { serviceKey, findingsType, serviceModel: 'one_time', writerRules: true };
     expect(selectReportCopyPrompt(V4_SHARED, 'Old label', context)).toBe(SPECIALTY_REPORT_VOICE_PROMPT);
     expect(specialtyVoiceServes(context)).toBe(true);
   });
 
   test('a callback is named at the end, as the callback modifier was', () => {
     const prompt = selectReportCopyPrompt(V4_SHARED, 'Old label', {
-      serviceKey: 'rodent_trapping', findingsType: 'rodent_trapping', isCallback: true, writerRules: true, specialtyVoice: true,
+      serviceKey: 'rodent_trapping', findingsType: 'rodent_trapping', isCallback: true, writerRules: true,
     });
     expect(prompt).toBe(specialtyReportVoicePrompt({ reservice: true }));
     expect(prompt.endsWith(RESERVICE_LINE)).toBe(true);
     expect(prompt).not.toContain('CROSS-SERVICE MODIFIER');
   });
 
-  test.each(IN_SCOPE)('off, %s keeps the stacked writer byte for byte', (serviceKey, findingsType) => {
-    const context = { serviceKey, findingsType, serviceModel: 'one_time', writerRules: true };
-    const before = selectReportCopyPrompt(V4_SHARED, 'Old label', context);
-    expect(before).toContain(OWNER_RULES);
-    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, specialtyVoice: false })).toBe(before);
-    expect(specialtyVoiceServes({ ...context, specialtyVoice: false })).toBe(false);
-  });
-
-  test('without the writer rules the flag changes nothing', () => {
-    const context = { serviceKey: 'termite_bait', findingsType: 'termite_bait_station' };
-    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, specialtyVoice: true }))
-      .toBe(selectReportCopyPrompt(V4_SHARED, 'Old label', context));
-    expect(specialtyVoiceServes({ ...context, specialtyVoice: true })).toBe(false);
+  test.each(IN_SCOPE)('without the writer rules, %s keeps the stacked writer, not the voice', (serviceKey, findingsType) => {
+    const context = { serviceKey, findingsType, serviceModel: 'one_time' };
+    const stacked = selectReportCopyPrompt(V4_SHARED, 'Old label', context);
+    expect(stacked).not.toBe(SPECIALTY_REPORT_VOICE_PROMPT);
+    expect(stacked).not.toContain(`# ${SPECIALTY_REPORT_VOICE_VERSION}`);
+    expect(specialtyVoiceServes(context)).toBe(false);
   });
 
   test.each([
@@ -87,15 +80,14 @@ describe('which writer gets the one-voice specialty prompt', () => {
     ['palm_injection', 'palm_injection'],
     ['pest_general_quarterly', null],
     ['lawn_care_6week', null],
-  ])('%s keeps its own writer with the flag on', (serviceKey, findingsType) => {
+  ])('%s keeps its own writer, not the voice', (serviceKey, findingsType) => {
     const context = { serviceKey, findingsType, writerRules: true };
-    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, specialtyVoice: true }))
-      .toBe(selectReportCopyPrompt(V4_SHARED, 'Old label', context));
-    expect(specialtyVoiceServes({ ...context, specialtyVoice: true })).toBe(false);
+    expect(String(selectReportCopyPrompt(V4_SHARED, 'Old label', context))).not.toContain(`# ${SPECIALTY_REPORT_VOICE_VERSION}`);
+    expect(specialtyVoiceServes(context)).toBe(false);
   });
 
   test('a findings form that does not match the service gets no writer either way', () => {
-    const context = { serviceKey: 'termite_bait', findingsType: 'cockroach', writerRules: true, specialtyVoice: true };
+    const context = { serviceKey: 'termite_bait', findingsType: 'cockroach', writerRules: true };
     expect(specialtyVoiceServes(context)).toBe(false);
     expect(selectReportCopyPrompt(V4_SHARED, 'Old label', context)).toBeNull();
   });

@@ -862,10 +862,10 @@ describe('the quiet pest report', () => {
     expect(text).not.toContain('Customer interaction:');
   });
 
-  test('a remaining-service writer keeps every line', async () => {
-    mockProfile = { serviceKey: 'rodent_trapping', findingsType: 'rodent_trapping' };
-    mockServiceType = 'Rodent Trapping';
-    await handler(mkReq(quietBody('Checked the traps in the garage.')), mkRes());
+  test('a remaining-service writer the specialty voice does not serve keeps every line', async () => {
+    mockProfile = { serviceKey: 'flea_tick', findingsType: 'flea' };
+    mockServiceType = 'Flea & Tick Treatment';
+    await handler(mkReq(quietBody('Treated the yard for fleas.')), mkRes());
     const { system, text } = mockProvider.mock.calls[0][0];
     expect(system).not.toContain('# pest_report_voice');
     expect(text).toContain('Observations: None noted');
@@ -873,10 +873,10 @@ describe('the quiet pest report', () => {
   });
 });
 
-// GATE_SPECIALTY_REPORT_VOICE (owner 2026-10-24, "yes build voice"): the
+// The specialty voice (owner 2026-10-24, "yes build voice"): the
 // termite, cockroach, rodent and mosquito writers get the one-voice prompt and
-// the quiet pest writer's trimmed inputs. Off, every line stays.
-describe('GATE_SPECIALTY_REPORT_VOICE', () => {
+// the quiet pest writer's trimmed inputs.
+describe('the specialty voice', () => {
   const body = (note) => ({
     serviceNotes: note, customerInteraction: 'Customer home — spoke with them', pestActivityRating: 1, fresh: true,
   });
@@ -885,19 +885,7 @@ describe('GATE_SPECIALTY_REPORT_VOICE', () => {
     mockProfile = { serviceKey: 'rodent_trapping', findingsType: 'rodent_trapping' };
     mockServiceType = 'Rodent Trapping';
   });
-  afterEach(() => { delete process.env.GATE_SPECIALTY_REPORT_VOICE; });
-
-  test('off: the stacked writer and every input line', async () => {
-    await handler(mkReq(body('Checked the traps in the garage.')), mkRes());
-    const { system, text } = mockProvider.mock.calls[0][0];
-    expect(system).toContain(OWNER_RULES);
-    expect(system).not.toContain('# specialty_report_voice_v1');
-    expect(text).toContain('Observations: None noted');
-    expect(text).toContain('Customer interaction: Customer home — spoke with them');
-  });
-
-  test('on: the one-voice prompt, and an empty field or the sheet setting sends no line', async () => {
-    process.env.GATE_SPECIALTY_REPORT_VOICE = 'true';
+  test('the one-voice prompt, and an empty field or the sheet setting sends no line', async () => {
     const res = mkRes();
     await handler(mkReq(body('Checked the traps in the garage.')), res);
     expect(res.statusCode).toBe(200);
@@ -909,7 +897,6 @@ describe('GATE_SPECIALTY_REPORT_VOICE', () => {
   });
 
   test('recorded observations and a concern still reach the writer', async () => {
-    process.env.GATE_SPECIALTY_REPORT_VOICE = 'true';
     await handler(mkReq({
       ...body('Set traps in the attic.'), observations: ['Droppings along the attic hatch'], customerConcern: 'Scratching in the attic at night',
     }), mkRes());
@@ -919,8 +906,7 @@ describe('GATE_SPECIALTY_REPORT_VOICE', () => {
     expect(text).not.toContain('Customer interaction:');
   });
 
-  test('on: a pest visit keeps its own one-voice writer and inputs', async () => {
-    process.env.GATE_SPECIALTY_REPORT_VOICE = 'true';
+  test('a pest visit keeps its own one-voice writer and inputs', async () => {
     mockProfile = { serviceKey: 'pest_general_quarterly', findingsType: null };
     mockServiceType = 'Quarterly Pest Control Service';
     await handler(mkReq(body('Quarterly. Treated the thresholds.')), mkRes());
@@ -930,8 +916,7 @@ describe('GATE_SPECIALTY_REPORT_VOICE', () => {
     expect(text).not.toContain('Customer interaction:');
   });
 
-  test('on: a flea visit keeps the stacked writer', async () => {
-    process.env.GATE_SPECIALTY_REPORT_VOICE = 'true';
+  test('a flea visit keeps the stacked writer', async () => {
     mockProfile = { serviceKey: 'flea_tick', findingsType: 'flea' };
     mockServiceType = 'Flea & Tick Treatment';
     await handler(mkReq(body('Treated the yard for fleas.')), mkRes());
