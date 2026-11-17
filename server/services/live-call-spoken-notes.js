@@ -200,6 +200,7 @@ async function extractPending(now) {
   const since = new Date(now.getTime() - LOOKBACK_MS);
   const settled = new Date(now.getTime() - SETTLE_MS);
   const calls = await db('call_log')
+    .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call takes no staff notes
     .whereRaw("(metadata -> 'live_transcription' ->> 'stopped_at') IS NOT NULL")
     .whereRaw("(metadata -> 'live_transcription' ->> 'stopped_at')::timestamptz > ?", [since.toISOString()])
     .whereRaw("(metadata -> 'live_transcription' ->> 'stopped_at')::timestamptz <= ?", [settled.toISOString()])
@@ -259,6 +260,7 @@ async function stampRaised(callId, index, raisedAt) {
 async function ringDue(now) {
   const since = new Date(now.getTime() - RING_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   const calls = await db('call_log')
+    .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call rings no reminder
     .where('created_at', '>', since)
     .whereRaw(
       "jsonb_path_exists(metadata, ?::jsonpath, jsonb_build_object('now', ?::text))",

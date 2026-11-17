@@ -31,14 +31,19 @@ jest.mock('../models/db', () => {
     const q = { raws: [], conds: {} };
     q.where = jest.fn((a, b) => { if (typeof a === 'string') q.conds[a] = b; return q; });
     q.whereRaw = jest.fn((sql, bindings) => { q.raws.push({ sql, bindings }); return q; });
+    q.modify = jest.fn((fn) => { fn(q); return q; });
     q.orderBy = jest.fn(() => q);
     q.limit = jest.fn((n) => { q.max = n; return q; });
     q.select = jest.fn(async () => {
       const sqls = q.raws.map((r) => r.sql).join(' ');
       let rows = state.calls;
+      // whereNotSandboxCall: COALESCE(source, '') <> <internal source>, once per internal source.
+      for (const r of q.raws.filter((x) => x.sql.startsWith("COALESCE(??, '') <> ?"))) {
+        rows = rows.filter((row) => (row[r.bindings[0]] || '') !== r.bindings[1]);
+      }
       if (sqls.includes('stopped_at')) {
-        const [from] = q.raws.find((r) => r.sql.includes('> ?')).bindings;
-        const [to] = q.raws.find((r) => r.sql.includes('<= ?')).bindings;
+        const [from] = q.raws.find((r) => r.sql.includes('::timestamptz > ?')).bindings;
+        const [to] = q.raws.find((r) => r.sql.includes('::timestamptz <= ?')).bindings;
         rows = rows.filter((r) => {
           const stopped = r.metadata?.live_transcription?.stopped_at;
           return stopped && Date.parse(stopped) > Date.parse(from) && Date.parse(stopped) <= Date.parse(to) && !spoken(r)?.checked_at;
@@ -101,10 +106,11 @@ const SID = 'CA' + 'b'.repeat(32);
 const NOW = new Date('2026-11-17T19:00:00.000Z'); // 2:00 PM ET
 const STOPPED = '2026-11-17T18:50:00.000Z';
 
-function setCall({ stoppedAt = STOPPED, spoken, lines } = {}) {
+function setCall({ stoppedAt = STOPPED, spoken, lines, source = null } = {}) {
   db.__state.calls = [{
     id: 'call-1',
     twilio_call_sid: SID,
+    source,
     created_at: '2026-11-17T18:40:00.000Z',
     transcription: 'untouched transcript',
     metadata: { live_transcription: { status: 'started', stopped_at: stoppedAt, ...(spoken ? { spoken_notes: spoken } : {}) } },
@@ -142,6 +148,18 @@ describe('gate', () => {
 });
 
 describe('extract', () => {
+  // voice-relay-sandbox-dry-run.test.js: every call_log reader excludes the bake-off sandbox calls.
+  it('never reads a bake-off sandbox call: no model call, no save, no bell', async () => {
+    const due = { checked_at: '2026-11-17T18:51:00.000Z', notes: [], reminders: [{ text: 'Call back', due_at: '2026-11-17T18:55:00.000Z', raised_at: null }] };
+    setCall({ source: 'voice_relay_sandbox' });
+    expect(await spokenNotes.run(NOW)).toMatchObject({ checked: 0, asked: 0, saved: 0 });
+    setCall({ source: 'voice_relay_sandbox', spoken: due });
+    await spokenNotes.run(NOW);
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(mockRaise).not.toHaveBeenCalled();
+    expect(saved()).toEqual(due);
+  });
+
   it('marks a call with no trigger phrase as checked and never calls the model', async () => {
     setCall({ lines: [{ speaker: 'staff', text: 'We can come Tuesday.' }, { speaker: 'caller', text: 'Works for me.' }] });
     const out = await spokenNotes.run(NOW);
