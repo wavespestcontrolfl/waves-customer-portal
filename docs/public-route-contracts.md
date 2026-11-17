@@ -4214,6 +4214,29 @@ Lead call/text follow-up (owner 2026-10-24; always on): on `POST /api/webhooks/t
 
 `GATE_SMS_BARE_YES_REPLY` (dark, strict `true`, read at call time via `smsBareYesReplyLive()`; owner 2026-10-29, weekly sweep #5007 B3): on `POST /api/webhooks/twilio/sms`, a compliance-eligible sender's bare "YES" (the opt-in detector's keyword `YES`: any case, trailing punctuation ignored, a tapback quoting it included) is handled as START today: the inbox row is typed `opt_in`, suppression is cleared, recipient asks are confirmed, `notification_prefs.sms_enabled` is set, the TwiML response is `<Message>You've been re-subscribed to Waves SMS.</Message>` (owner 2026-11-04: texts say "Waves") (or the "received your request" text after a failed clear), and the handler returns before every later branch. Gate on, `server/services/messaging/bare-yes-reply.js` decides first, right after the carrier-command detector: the YES keeps that START handling and response only while it can restore something — an active `messaging_suppression` row for the number (`loadSuppressionState`), `notification_prefs.sms_enabled = false` on the matched customer, or a recipient ask this YES would confirm (`yesWouldConfirmAsk`, sharing its predicate with `markRecipientOptin`). Otherwise the text continues down the ordinary inbound path as a text with no carrier command: no opt-in response (the ordinary `<Response></Response>` or whatever a later branch answers), no suppression clear, no consent or preference write, no `opt_in` typing, and the existing courtesy rule decides the reply bell. The decision is made once, before the recruiting lookup (so for any sender's bare YES), and every later keyword check reads it: a YES called a reply takes the ordinary recruiting lookup (fail-closed for a plausible applicant, where a command's lookup is best-effort), is a staff text from an active technician's phone (`GATE_TECH_STAFF_GUARDS`), and reaches the visit-technician relay (`GATE_CUSTOMER_TEXT_TO_VISIT_TECH`). One `logger.info` line with the masked phone. A failed or incomplete lookup keeps START. START, SUBSCRIBE, UNSTOP, OPTIN, OPT IN, STOP/HELP and every non-eligible sender are unchanged. Off (unset) = byte-identical.
 
+`/api/webhooks/twilio/live-transcription` (POST; machine-to-machine
+callback under the existing Twilio-signature-validated mount;
+`GATE_LIVE_CALL_TRANSCRIPTION`, dark, owner 2026-11-16 "ok build all").
+With the gate on, a staff press 1 at `/inbound-forward-accept` starts Twilio
+Real-Time Transcription on the caller's call (the `ParentCallSid`) after the
+TwiML is sent: both tracks (inbound = caller, outbound = staff), final results
+only, `en-US`, or `es-US` for a caller stamped `caller_language = 'es'`. One
+start per call, claimed on `call_log.metadata.live_transcription`; the outcome
+(`started` with the session SID, or `start_failed` with Twilio's code) is
+stamped on the same key and never changes the press-1 TwiML. Twilio posts
+`transcription-started` / `-content` / `-stopped` / `-error` (form fields
+`CallSid`, `TranscriptionSid`, `SequenceId`, `Track`, `Final`, `Timestamp`,
+`LanguageCode`, `TranscriptionData` JSON with `transcript` and `confidence`,
+`TranscriptionErrorCode`, `TranscriptionError`). Only a call with that claim
+is written: a final utterance becomes one `call_live_utterances` row (unique
+per session and `SequenceId`, so a redelivery inserts nothing), card-number
+scrubbed together with the call's last 5 utterances (`scrubSegments`), plus a
+short code-shaped utterance by the same speaker within 30 s of a masked card
+number; a mask stamps `live_transcription.pan_detected`. The other events
+stamp `live_at`, `stopped_at` or `event_error*`. Every outcome answers 200,
+a failed write included. The post-call card-number quarantine deletes the
+call's live utterances. Gate off: no start, and the press-1 TwiML is
+byte-identical),
 `/api/webhooks/twilio/outbound-amd` +
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
 callbacks under the existing Twilio-signature-validated mount. The shared

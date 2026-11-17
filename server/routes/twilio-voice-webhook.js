@@ -2559,6 +2559,23 @@ router.post('/inbound-forward-screen', (req, res) => {
   }
 });
 
+// GATE_LIVE_CALL_TRANSCRIPTION (dark; owner 2026-11-16 "ok build all"): a human
+// pressed 1, so the caller's call starts live transcription
+// (services/live-call-transcription.js). Runs after the TwiML is sent and never
+// throws: the connect must not wait on, or fail with, a Twilio REST call.
+function startLiveTranscriptionAfterAccept(parentCallSid, callRow) {
+  try {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!parentCallSid || !isEnabled('liveCallTranscription')) return;
+    const language = parseJsonObject(callRow?.metadata).caller_language === 'es' ? 'es' : null;
+    require('../services/live-call-transcription')
+      .startLiveTranscription({ parentCallSid, language })
+      .catch((err) => logger.warn(`[live-transcription] start failed for ${maskSid(parentCallSid)}: ${err.message}`));
+  } catch (err) {
+    logger.warn(`[live-transcription] start skipped for ${maskSid(parentCallSid)}: ${err.message}`);
+  }
+}
+
 // =========================================================================
 // POST /api/webhooks/twilio/inbound-forward-accept — accept/reject staff leg
 // =========================================================================
@@ -2566,9 +2583,10 @@ router.post('/inbound-forward-accept', async (req, res) => {
   try {
     const digits = String(req.body?.Digits || '').trim();
     const twiml = new VoiceResponse();
+    const parentCallSid = req.body?.ParentCallSid || null;
+    let callRow = null;
 
     if (digits === '1') {
-      const parentCallSid = req.body?.ParentCallSid || null;
       await rememberForwardAccept({
         parentCallSid,
         dialCallSid: req.body?.CallSid,
@@ -2577,7 +2595,6 @@ router.post('/inbound-forward-accept', async (req, res) => {
       // Announce who's calling now that a human has accepted. This is enrichment
       // only — a lookup failure must never break the connect, so fall back to a
       // generic confirmation on any error.
-      let callRow = null;
       if (parentCallSid) {
         try {
           callRow = await db('call_log')
@@ -2595,10 +2612,30 @@ router.post('/inbound-forward-accept', async (req, res) => {
     }
 
     res.type('text/xml').send(twiml.toString());
+    if (digits === '1') startLiveTranscriptionAfterAccept(parentCallSid, callRow);
   } catch (err) {
     logger.error(`Inbound forward accept error: ${err.message}`);
     res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
   }
+});
+
+// =========================================================================
+// POST /api/webhooks/twilio/live-transcription — Real-Time Transcription events
+//
+// GATE_LIVE_CALL_TRANSCRIPTION: Twilio posts transcription-started / -content /
+// -stopped / -error here for a transcription startLiveTranscriptionAfterAccept
+// began. Signed at the mount like every Twilio callback. Only a call the start
+// claimed is written to; every outcome answers 200 so Twilio never retries a
+// stored event, and a failed write is logged, never surfaced.
+// =========================================================================
+router.post('/live-transcription', async (req, res) => {
+  try {
+    await require('../services/live-call-transcription').recordLiveTranscriptionEvent(req.body || {});
+  } catch (err) {
+    // The error code only: knex puts the failed query and its values (the transcript text) in err.message.
+    logger.warn(`[live-transcription] event not stored for ${maskSid(req.body?.CallSid)}: ${err?.code || err?.name || 'error'}`);
+  }
+  res.sendStatus(200);
 });
 
 // =========================================================================

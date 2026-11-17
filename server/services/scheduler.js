@@ -8968,6 +8968,8 @@ function initScheduledJobs() {
     try {
       const processor = require('./call-recording-processor');
       if (processor.recoverMissingRecentRecordings) await processor.recoverMissingRecentRecordings();
+      // A card quarantine whose live-text purge failed is purged again (never throws).
+      await require('./live-call-transcription').purgeQuarantinedLiveText();
       if (processor.processAllPending) await processor.processAllPending();
     } catch (e) { logger.error(`Recording batch process failed: ${e.message}`); }
   }, { timezone: 'America/New_York' });
