@@ -24,6 +24,8 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { createEditTracker, scrubPansTracked, trackedEditList } = require('../utils/pan-scrub');
+// A sandbox (voice relay test) call never has live text; its rows stay out of the sweep like every other reader.
+const { VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
 
 const CALL_SID_RE = /^CA[0-9a-f]{32}$/i;
 const WEBHOOK_PATH = '/api/webhooks/twilio/live-transcription';
@@ -340,9 +342,10 @@ async function purgeQuarantinedLiveText({ limit = 25 } = {}) {
     const result = await db.raw(
       `SELECT c.twilio_call_sid AS call_sid FROM call_log c
         WHERE COALESCE(c.transcription_metadata ->> 'pan_detected', '') = 'true'
+          AND COALESCE(c.source, '') <> ?
           AND EXISTS (SELECT 1 FROM call_live_utterances u WHERE u.call_sid = c.twilio_call_sid)
         LIMIT ?`,
-      [limit],
+      [VOICE_RELAY_SANDBOX_SOURCE, limit],
     );
     let purged = 0;
     for (const { call_sid: callSid } of result?.rows || []) purged += await purgeLiveUtterances(callSid);

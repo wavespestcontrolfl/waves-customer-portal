@@ -97,7 +97,8 @@ jest.mock('../models/db', () => {
     state.rawCalls.push(sql);
     if (/EXISTS/.test(sql) && /pan_detected/.test(sql)) { // purgeQuarantinedLiveText's lookup
       const sids = [...new Set(state.utterances.map((u) => u.call_sid))].filter((sid) => state.panDetected.has(sid));
-      return Promise.resolve({ rows: sids.slice(0, bindings[0]).map((callSid) => ({ call_sid: callSid })) });
+      state.sweepBindings = bindings;
+      return Promise.resolve({ rows: sids.slice(0, bindings.at(-1)).map((callSid) => ({ call_sid: callSid })) });
     }
     return { sql, bindings };
   });
@@ -346,6 +347,7 @@ describe('purgeLiveUtterances', () => {
     await live.recordLiveTranscriptionEvent({ ...content(3, 'inbound_track', 'other call', 2), CallSid: OTHER });
     db.__state.panDetected.add(CALL); // the recording scrub flagged CALL, and its purge failed
     await expect(live.purgeQuarantinedLiveText()).resolves.toEqual({ purged: 1 });
+    expect(db.__state.sweepBindings).toEqual(['voice_relay_sandbox', 25]); // sandbox calls stay out
     expect(db.__state.utterances.map((u) => u.call_sid)).toEqual([OTHER]);
     db.raw.mockImplementationOnce(() => Promise.reject(Object.assign(new Error('db down'), { code: '57P01' })));
     await expect(live.purgeQuarantinedLiveText()).resolves.toEqual({ purged: 0 });
