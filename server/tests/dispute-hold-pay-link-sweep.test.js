@@ -80,7 +80,7 @@ describe('customer-message purposes gated by the dispute hold at the send bounda
 describe('lifecycle (payment.*) emails that carry a pay / update-card link', () => {
   test('one shared template set feeds the fresh-send guard and the stored-copy paths', () => {
     const Hold = require('../services/collections/collection-hold');
-    expect([...Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES].sort()).toEqual(['payment.failed', 'payment.method_expiring', 'payment.retry_notice']);
+    expect([...Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES].sort()).toEqual(['payment.ach_suspended', 'payment.failed', 'payment.method_expiring', 'payment.retry_notice']);
     // the guard's set is the lifecycle set plus the machine-initiated dunning templates (below)
     for (const templateKey of Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES) expect(Hold.HOLD_GATED_EMAIL_TEMPLATES.has(templateKey)).toBe(true);
     expect(read('services/payment-lifecycle-email.js')).toMatch(/HOLD_GATED_TEMPLATES = require\('\.\/collections\/collection-hold'\)\.HOLD_GATED_EMAIL_TEMPLATES/);
@@ -96,8 +96,8 @@ describe('lifecycle (payment.*) emails that carry a pay / update-card link', () 
   });
 
   test('every sender of a hold-gated lifecycle email is classified (all go through sendLifecycleTemplate\'s guard)', () => {
-    expect(filesMatching(/\.sendPaymentRetryNotice\(|\.sendPaymentMethodExpiring\(|\.sendPaymentFailed\(/)).toEqual([
-      'routes/stripe-webhook.js', // sendPaymentFailed: customerInitiated from the PI's own markers
+    expect(filesMatching(/\.sendPaymentRetryNotice\(|\.sendPaymentMethodExpiring\(|\.sendPaymentFailed\(|\.sendAchFailureNotice\(/)).toEqual([
+      'routes/stripe-webhook.js', // sendPaymentFailed + sendAchFailureNotice (payment.ach_suspended): customerInitiated from the PI's own markers
       'services/autopay-notifications.js', // sendPaymentMethodExpiring
       'services/billing-cron.js', // sendPaymentRetryNotice (via billing-retry-email-obligation)
       'services/billing-retry-email-obligation.js',
@@ -212,7 +212,7 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
     expect(read('services/previsit-balance-reminder.js')).toMatch(/EMAIL_TEMPLATE_KEY = 'billing\.previsit_balance'/);
     expect(dunning.has('billing.previsit_balance')).toBe(true);
     // ... and the lifecycle set is unchanged, both feeding the one HOLD_GATED_EMAIL_TEMPLATES
-    expect([...Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES].sort()).toEqual(['payment.failed', 'payment.method_expiring', 'payment.retry_notice']);
+    expect([...Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES].sort()).toEqual(['payment.ach_suspended', 'payment.failed', 'payment.method_expiring', 'payment.retry_notice']);
     for (const templateKey of [...Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES, ...dunning]) expect(Hold.HOLD_GATED_EMAIL_TEMPLATES.has(templateKey)).toBe(true);
     expect(Hold.HOLD_GATED_EMAIL_TEMPLATES.size).toBe(Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES.size + dunning.size);
   });

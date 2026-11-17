@@ -984,6 +984,94 @@ describe('payment lifecycle email sender', () => {
     }));
   });
 
+  describe('bank payment failure notice (GATE_ACH_FAILURE_EMAIL)', () => {
+    const failureArgs = (messageType) => ({
+      customerId: 'cust-1', invoiceId: 'inv-1', paymentId: 'pay-1', paymentIntentId: 'pi_1', eventId: 'evt_1', messageType,
+    });
+
+    test.each([
+      ['ach_retry_notice', 'payment.ach_retry_notice'],
+      ['ach_card_fallback', 'payment.ach_card_fallback'],
+      ['ach_suspended', 'payment.ach_suspended'],
+    ])('%s sends %s keyed by payment intent + event on the payment-issue billing channel', async (messageType, templateKey) => {
+      setDbQueues(lifecycleQueues());
+
+      const result = await PaymentLifecycleEmail.sendAchFailureNotice(failureArgs(messageType));
+
+      expect(result).toMatchObject({ ok: true, deliveryOutcome: 'accepted' });
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+        templateKey,
+        to: 'billing@example.com',
+        idempotencyKey: 'payment.ach_failure:pi_1:evt_1',
+        suppressionGroupKey: 'transactional_required',
+        payload: expect.objectContaining({ billing_url: expect.stringMatching(/\/\?tab=billing$/) }),
+      }));
+    });
+
+    test('without a Stripe event id the stage keys the email', async () => {
+      setDbQueues(lifecycleQueues());
+
+      await PaymentLifecycleEmail.sendAchFailureNotice({ ...failureArgs('ach_retry_notice'), eventId: null });
+
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+        idempotencyKey: 'payment.ach_failure:pi_1:ach_retry_notice',
+      }));
+    });
+
+    test('an explicit Text/App-only payment-issue choice sends no email', async () => {
+      setDbQueues(lifecycleQueues({ prefs: { payment_issue_channels: ['sms'] } }));
+
+      const result = await PaymentLifecycleEmail.sendAchFailureNotice(failureArgs('ach_suspended'));
+
+      expect(result).toMatchObject({ ok: false, skipped: true, reason: 'billing_email_not_selected' });
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    test('no email on file sends nothing (and never falls back to a text)', async () => {
+      const customerContact = require('../services/customer-contact');
+      customerContact.getInvoiceEmailRecipients.mockReturnValueOnce([]);
+      setDbQueues(lifecycleQueues());
+
+      const result = await PaymentLifecycleEmail.sendAchFailureNotice(failureArgs('ach_retry_notice'));
+
+      expect(result).toMatchObject({ ok: false, skipped: true, reason: 'missing_email' });
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('a suppressed address is refused by the template library and reported as blocked', async () => {
+      EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: false, blocked: true, reason: 'Suppressed: unsubscribe (transactional_required)' });
+      setDbQueues(lifecycleQueues());
+
+      const result = await PaymentLifecycleEmail.sendAchFailureNotice(failureArgs('ach_card_fallback'));
+
+      expect(result).toMatchObject({ ok: false, blocked: true });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('an unknown stage sends nothing', async () => {
+      const result = await PaymentLifecycleEmail.sendAchFailureNotice(failureArgs('ach_unknown'));
+
+      expect(result).toMatchObject({ ok: false, skipped: true, reason: 'unknown_ach_failure_stage' });
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    test('the replay probe counts a terminal ledger row as the notice and a failed or missing row as not sent', async () => {
+      EmailTemplates.shouldRetryExistingMessage = jest.fn((row) => row.status === 'failed');
+      const probe = (row) => {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => row) };
+        db.mockImplementationOnce(() => q);
+        return PaymentLifecycleEmail.achFailureEmailRecorded({ paymentIntentId: 'pi_1', eventId: 'evt_1', messageType: 'ach_retry_notice' });
+      };
+      await expect(probe({ status: 'sent' })).resolves.toBe(true);
+      await expect(probe({ status: 'failed' })).resolves.toBe(false);
+      await expect(probe(undefined)).resolves.toBe(false);
+      db.mockImplementationOnce(() => { throw new Error('ledger down'); });
+      await expect(PaymentLifecycleEmail.achFailureEmailRecorded({ paymentIntentId: 'pi_1', eventId: 'evt_1', messageType: 'ach_retry_notice' })).resolves.toBe(true);
+    });
+  });
+
   test('skips ACH processing send when invoice cannot be found', async () => {
     setDbQueues({
       invoices: [chain({ first: null })],

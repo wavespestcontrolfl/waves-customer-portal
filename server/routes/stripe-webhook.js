@@ -6017,6 +6017,13 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
     // fall through to the SMS block only (the follow-up counters below
     // stay replay-skipped either way).
     let replaySkipFollowups = false;
+    // The escalation stage this failure reached (also the SMS template key), and
+    // GATE_ACH_FAILURE_EMAIL: the customer EMAIL for that stage (the three texts
+    // stay off, owner 2026-09-28). Gate off, none of the email code below runs.
+    const achMessageType = recentFailures >= 3 ? 'ach_suspended'
+      : recentFailures >= 2 ? 'ach_card_fallback' : 'ach_retry_notice';
+    const achEmailOn = require('../config/feature-gates').achFailureEmailLive();
+    let smsNoticeOwned = false;
     if (achReplay) {
       let noticeExists = true;
       try {
@@ -6050,9 +6057,16 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
       } catch (probeErr) {
         logger.warn(`[stripe-webhook] ACH replay notice probe failed (skipping resend, fail closed): ${probeErr.message}`);
       }
-      if (noticeExists) {
-        logger.info(`[stripe-webhook] ACH failure replay for PI ${piId} — skipping SMS + follow-up side effects`);
-        return;
+      // Gate on, the email is a durable notice of this event too: owned
+      // (already recorded) means nothing is re-sent, SMS included. Only a
+      // missing email is re-attempted, never a second one.
+      const emailOwned = achEmailOn && await PaymentLifecycleEmail.achFailureEmailRecorded({ paymentIntentId: piId, eventId, messageType: achMessageType });
+      if (noticeExists || emailOwned) {
+        if (!achEmailOn || emailOwned) {
+          logger.info(`[stripe-webhook] ACH failure replay for PI ${piId} — skipping SMS + follow-up side effects`);
+          return;
+        }
+        smsNoticeOwned = true;
       }
       replaySkipFollowups = true;
       logger.warn(`[stripe-webhook] ACH failure replay for PI ${piId} with NO durable notice — re-attempting the customer SMS only`);
@@ -6064,7 +6078,7 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
       // Phone-less customers with an explicit Email/App billing selection
       // still reach sendBillingSms — it now requires only customer.id and
       // routes through the central router with to: customer.phone || null.
-      {
+      if (!smsNoticeOwned) {
         let body;
         let messageType;
         // Deep link into the portal's Billing tab (Codex #2822 P2). The
@@ -6073,13 +6087,7 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
         // bare path lands on Dashboard) — so this must use the
         // established /?tab=billing form, same as the billing email CTAs.
         const billingUrl = `${publicPortalUrl()}/?tab=billing`;
-        if (recentFailures >= 3) {
-          messageType = 'ach_suspended';
-        } else if (recentFailures >= 2) {
-          messageType = 'ach_card_fallback';
-        } else {
-          messageType = 'ach_retry_notice';
-        }
+        messageType = achMessageType;
         body = await renderRequiredSmsTemplate(messageType, {
           first_name: customer.first_name || 'there',
           billing_url: billingUrl,
@@ -6108,6 +6116,31 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
       logger.error(`[stripe-webhook] ACH failure SMS failed: ${smsErr.message}`);
     }
 
+    // GATE_ACH_FAILURE_EMAIL: the one customer email for this failure (no email
+    // on file = no send, never a text). Same delivery rules as the card-failure
+    // email (explicit billing channel choice, suppressions, dispute hold).
+    let achEmailRetry = null;
+    if (achEmailOn) {
+      const emailResult = await PaymentLifecycleEmail.sendAchFailureNotice({
+        customerId: customer.id,
+        invoiceId: achInvoiceId,
+        paymentId: payment.id,
+        paymentIntentId: piId,
+        eventId,
+        messageType: achMessageType,
+        customerInitiated: await isCustomerInitiatedPaymentIntent(paymentIntent),
+      }).catch((err) => ({ ok: false, error: err.message }));
+      if (!emailResult?.ok) {
+        const reason = emailResult?.reason || emailResult?.error || 'unknown';
+        logger.warn(`[stripe-webhook] ACH failure email not sent for customer ${customer.id}: ${reason}`);
+        // A transient miss (preferences unreadable, provider handoff) fails the handler after the follow-ups
+        // below, so Stripe redelivers and the replay re-attempts the email only. A hold is a wait, not a miss.
+        if (emailResult?.retryable && !require('../services/collections/collection-hold').isHoldSuppression(emailResult)) {
+          achEmailRetry = Object.assign(new Error(`ACH failure email not delivered: ${reason}`), { code: 'ACH_FAILURE_EMAIL_RETRY' });
+        }
+      }
+    }
+
     // Notify the per-invoice follow-up engine — increments autopay-hold counters
     // and releases sequences once the threshold is crossed. Skipped on the
     // notice-only replay path: the original delivery already counted this
@@ -6119,6 +6152,7 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
         logger.error(`[invoice-followups] handleAutopayFailure failed: ${e.message}`);
       }
     }
+    if (achEmailRetry) throw achEmailRetry;
   } catch (err) {
     // Rethrow so the router records the error and returns 500 — the event
     // stays unprocessed and Stripe redelivers. Swallowing here acked

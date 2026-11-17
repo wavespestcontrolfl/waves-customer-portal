@@ -53,10 +53,18 @@ jest.mock('../config/feature-gates', () => ({
   gates: {},
   // The renewal reconciler's own gate (Codex #4971 r25) — per-test.
   gateEnvValue: (name) => (name === 'GATE_TERMITE_ANNUAL_PLAN' ? mockState.termiteGateOn : false),
+  // GATE_ACH_FAILURE_EMAIL — per-test.
+  achFailureEmailLive: () => mockState.achEmailOn,
 }));
 jest.mock('../services/invoice-helpers', () => ({ INVOICE_UNCOLLECTIBLE_STATUSES: ['void'], invoiceAmountDue: jest.fn() }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
-jest.mock('../services/payment-lifecycle-email', () => ({ sendPaymentFailed: jest.fn(async () => {}) }));
+const mockSendAchFailureNotice = jest.fn(async () => ({ ok: true }));
+const mockAchEmailRecorded = jest.fn(async () => false);
+jest.mock('../services/payment-lifecycle-email', () => ({
+  sendPaymentFailed: jest.fn(async () => {}),
+  sendAchFailureNotice: (...a) => mockSendAchFailureNotice(...a),
+  achFailureEmailRecorded: (...a) => mockAchEmailRecorded(...a),
+}));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
 jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
@@ -73,6 +81,7 @@ function resetMockState() {
     invoiceRow: null,
     termiteRenewalTerm: null, // annual_prepay_terms row for invoiceRow (a renewal successor when set)
     termiteGateOn: false,     // GATE_TERMITE_ANNUAL_PLAN — the renewal reconciler is live
+    achEmailOn: false,        // GATE_ACH_FAILURE_EMAIL
     customer: { id: 'cust-1', first_name: 'Pat', phone: '+15550001111' },
     achLogRow: null,        // existing ach_failure_log row (replay when set)
     recentFailures: 1,
@@ -314,6 +323,94 @@ describe('handleAchFailure — escalation error propagation', () => {
 
     await expect(handleAchFailure(PI, 'R01', 'evt_r22b')).resolves.toBeUndefined();
     expect(mockHandleAutopayFailure).toHaveBeenCalledWith('cust-1');
+  });
+});
+
+describe('handleAchFailure — GATE_ACH_FAILURE_EMAIL bank failure email', () => {
+  const EVENT = 'evt_mail_1';
+
+  beforeEach(() => {
+    mockState.achEmailOn = true;
+    mockState.invoiceRow = { id: 'inv-plain', customer_id: 'cust-1', payer_id: null };
+  });
+
+  test('gate off: no email is attempted and the text path is unchanged', async () => {
+    mockState.achEmailOn = false;
+    mockState.recentFailures = 2;
+
+    await handleAchFailure(PI, 'R01', EVENT);
+
+    expect(mockSendAchFailureNotice).not.toHaveBeenCalled();
+    expect(mockAchEmailRecorded).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    [1, 'ach_retry_notice'],
+    [2, 'ach_card_fallback'],
+    [3, 'ach_suspended'],
+  ])('%i recent failure(s) send the %s email for this payment intent and event', async (recentFailures, messageType) => {
+    mockState.recentFailures = recentFailures;
+
+    await handleAchFailure(PI, 'R01', EVENT);
+
+    expect(mockSendAchFailureNotice).toHaveBeenCalledTimes(1);
+    expect(mockSendAchFailureNotice).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1', invoiceId: 'inv-plain', paymentId: 'pay-1', paymentIntentId: 'pi_ach_1', eventId: EVENT, messageType,
+    }));
+    expect(mockHandleAutopayFailure).toHaveBeenCalledWith('cust-1');
+  });
+
+  test('a replay whose email is already recorded sends nothing and skips follow-ups', async () => {
+    mockState.achLogRow = { id: 'log-1' };
+    mockAchEmailRecorded.mockResolvedValueOnce(true);
+
+    await expect(handleAchFailure(PI, 'R01', EVENT)).resolves.toBeUndefined();
+
+    expect(mockAchEmailRecorded).toHaveBeenCalledWith({ paymentIntentId: 'pi_ach_1', eventId: EVENT, messageType: 'ach_retry_notice' });
+    expect(mockSendAchFailureNotice).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockHandleAutopayFailure).not.toHaveBeenCalled();
+  });
+
+  test('a replay with no recorded email re-attempts the email once, without re-counting follow-ups', async () => {
+    mockState.achLogRow = { id: 'log-1' };
+
+    await expect(handleAchFailure(PI, 'R01', EVENT)).resolves.toBeUndefined();
+
+    expect(mockSendAchFailureNotice).toHaveBeenCalledTimes(1);
+    expect(mockHandleAutopayFailure).not.toHaveBeenCalled();
+  });
+
+  test('a transient email miss fails the handler after the follow-ups so Stripe redelivers', async () => {
+    mockSendAchFailureNotice.mockResolvedValueOnce({ ok: false, retryable: true, reason: 'billing_prefs_unavailable' });
+
+    await expect(handleAchFailure(PI, 'R01', EVENT)).rejects.toThrow('ACH failure email not delivered');
+    expect(mockHandleAutopayFailure).toHaveBeenCalledWith('cust-1');
+  });
+
+  test.each([
+    ['no email on file', { ok: false, skipped: true, reason: 'missing_email' }],
+    ['a suppressed address', { ok: false, blocked: true, reason: 'Suppressed: unsubscribe' }],
+    ['a dispute hold', { ok: false, blocked: true, skipped: true, retryable: true, code: 'COLLECTION_HOLD_DEFER' }],
+  ])('%s is not an error and not retried', async (_label, outcome) => {
+    mockSendAchFailureNotice.mockResolvedValueOnce(outcome);
+
+    await expect(handleAchFailure(PI, 'R01', EVENT)).resolves.toBeUndefined();
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a payer-billed invoice and a termite renewal debit still return before any email', async () => {
+    mockState.invoiceRow = { id: 'inv-payer', customer_id: 'cust-1', payer_id: 'payer-1' };
+    await handleAchFailure(PI, 'R01', 'evt_payer');
+
+    mockState.invoiceRow = { id: 'inv-renewal', customer_id: 'cust-1', payer_id: null };
+    mockState.termiteRenewalTerm = { id: 'succ-1' };
+    mockState.termiteGateOn = true;
+    await handleAchFailure(PI, 'R01', 'evt_renewal');
+
+    expect(mockSendAchFailureNotice).not.toHaveBeenCalled();
+    expect(mockAchEmailRecorded).not.toHaveBeenCalled();
   });
 });
 
