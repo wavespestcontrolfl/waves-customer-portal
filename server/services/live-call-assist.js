@@ -53,6 +53,8 @@ const ENUMS = {
 };
 // What the plan says about the service: a different service makes these stale.
 const PLAN_KEYS = ['frequency', 'lawn_track', 'lawn_tier', 'mosquito_tier'];
+// What belongs to one place: a different street makes the others stale unless the same read says them again.
+const PLACE_KEYS = ['address_line1', 'city', 'zip', 'home_sqft', 'lot_sqft', 'property_type'];
 const FACT_KEYS = [
   'service', 'when', 'address_line1', 'city', 'zip', 'home_sqft', 'lot_sqft', 'property_type', ...PLAN_KEYS,
 ];
@@ -64,6 +66,8 @@ Reply with ONLY this JSON: {"intent": "<one plain line, 90 characters or fewer: 
 Use a service only when the caller is asking about that recurring plan. Fill address, timing, sizes and plan details only when the caller said them; never guess. Use "commercial" for any business, office, restaurant, HOA or multifamily property. A null fact means the caller did not mention it: the earlier value stays. When the caller gives a new value, put the new value. When the caller takes a fact back (for example turns down recurring service and wants a one-time treatment, or says the address was wrong), set that fact to null and list its name in "withdrawn": one of service, when, address (the street, city and zip together), home_sqft, lot_sqft, property_type, frequency, lawn_track, lawn_tier, mosquito_tier. Otherwise "withdrawn" is []. No phone numbers and no card or account digits anywhere.`;
 
 const gateOn = () => require('../config/feature-gates').isEnabled('callLiveAssist');
+// The same gate resolveAvailability reads: with scheduling off no open times are looked up, reused or shown.
+const schedulingOn = () => require('../config/feature-gates').isEnabled('selfBooking');
 
 function meta(value) {
   if (value && typeof value === 'object') return value;
@@ -113,15 +117,26 @@ function validate(raw) {
   return { intent, facts, withdrawn: withdrawnFacts(raw.withdrawn) };
 }
 
+// Casing, spacing and punctuation do not make a different place.
+const placeText = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+// True when this read names a street, city or zip that differs from the one said before: the caller moved to another
+// property, so the sizes and type said for the old one must not price the new one.
+function switchedProperty(previous, next) {
+  return ['address_line1', 'city', 'zip'].some((k) => next[k] && previous?.[k] && placeText(next[k]) !== placeText(previous[k]));
+}
+
 // A newer non-null fact replaces the older one; an unmentioned fact keeps what the caller said earlier; a withdrawn
 // fact is cleared. A different (or withdrawn) service also clears the plan details said for the old one.
 function mergeFacts(previous, next, withdrawn = []) {
   const carried = (k) => (withdrawn.includes(k) ? null : previous?.[k] ?? null);
   const service = next.service ?? carried('service');
   const serviceChanged = !!previous?.service && service !== previous.service;
+  const moved = switchedProperty(previous, next);
+  const stale = (k) => (serviceChanged && PLAN_KEYS.includes(k)) || (moved && PLACE_KEYS.includes(k));
   const merged = {};
   for (const k of FACT_KEYS) {
-    merged[k] = k === 'service' ? service : next[k] ?? (serviceChanged && PLAN_KEYS.includes(k) ? null : carried(k));
+    merged[k] = k === 'service' ? service : next[k] ?? (stale(k) ? null : carried(k));
   }
   return merged;
 }
@@ -256,19 +271,20 @@ async function lookupTimes(facts, customer, useAccount) {
   return tools.formatSlots(res.availability && res.availability.slots, SHOWN_TIMES) || null;
 }
 
-// Everything a price or a time depends on: when any of it changes, both are looked up again.
-function lookupKey(facts, accountId) {
+// Everything a price or a time depends on, and whether scheduling is on: when any of it changes, both are looked up
+// again (so times come back on their own once GATE_SELF_BOOKING is turned on).
+function lookupKey(facts, accountId, scheduling) {
   return JSON.stringify([
-    facts.service, facts.when, facts.address_line1?.toLowerCase(), facts.city?.toLowerCase(), facts.zip,
+    facts.service, facts.when, placeText(facts.address_line1), placeText(facts.city), facts.zip,
     facts.home_sqft, facts.lot_sqft, facts.property_type, facts.frequency, facts.lawn_track, facts.lawn_tier,
-    facts.mosquito_tier, accountId,
+    facts.mosquito_tier, accountId, scheduling,
   ]);
 }
 
 // The price, times and key to store. An unchanged key reuses the last ones; a changed key looks both up again, and
 // whatever a lookup does not return is null, so nothing stale stays beside new facts. Each lookup stands alone: one
 // failing leaves the other and the intent in place, and drops the key so the next run tries again.
-async function priceAndTimes(facts, customer, useAccount, key, previous) {
+async function priceAndTimes(facts, customer, useAccount, key, previous, scheduling) {
   if (key === previous.key) return { price: previous.price ?? null, times: previous.times ?? null, key };
   let failed = false;
   const attempt = async (fn) => {
@@ -279,7 +295,7 @@ async function priceAndTimes(facts, customer, useAccount, key, previous) {
     }
   };
   const price = await attempt(() => lookupPrice(facts, useAccount ? customer : null));
-  const times = facts.service || facts.when ? await attempt(() => lookupTimes(facts, customer, useAccount)) : null;
+  const times = scheduling && (facts.service || facts.when) ? await attempt(() => lookupTimes(facts, customer, useAccount)) : null;
   return { price, times, key: failed ? null : key };
 }
 
@@ -304,8 +320,9 @@ async function refreshAssistIfDue(callRow, { customerId = null } = {}) {
     const facts = mergeFacts(previous.facts, read.facts, read.withdrawn);
     const customer = await accountFor(customerId);
     const useAccount = !!customer && !statesOtherProperty(customer, facts);
-    const key = lookupKey(facts, useAccount ? customer.id : null);
-    const patch = { intent: read.intent, service: facts.service, facts, ...(await priceAndTimes(facts, customer, useAccount, key, previous)) };
+    const scheduling = schedulingOn();
+    const key = lookupKey(facts, useAccount ? customer.id : null, scheduling);
+    const patch = { intent: read.intent, service: facts.service, facts, ...(await priceAndTimes(facts, customer, useAccount, key, previous, scheduling)) };
     await saveResult(callSid, patch);
     return { ran: true, saved: true };
   } catch (err) {
@@ -317,8 +334,10 @@ async function refreshAssistIfDue(callRow, { customerId = null } = {}) {
 // The shape GET /live sends: text only, or null while there is nothing to show.
 function assistForPanel(callMeta) {
   const a = meta(callMeta).live_transcription?.assist;
-  if (!a || (!a.intent && !a.price && !a.times)) return null;
-  return { intent: a.intent || null, price: a.price || null, times: a.times || null, at: a.at || null };
+  // Cached times are not shown while scheduling is off, whatever an earlier run saved.
+  const times = (schedulingOn() && a?.times) || null;
+  if (!a || (!a.intent && !a.price && !times)) return null;
+  return { intent: a.intent || null, price: a.price || null, times, at: a.at || null };
 }
 
 module.exports = { refreshAssistIfDue, assistForPanel, _test: { validate, staffPrice, mergeFacts } };

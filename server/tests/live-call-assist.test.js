@@ -464,6 +464,108 @@ describe('live call assist withdrawn facts', () => {
   });
 });
 
+describe('live call assist property switch', () => {
+  const HOME = { ...PEST, address_line1: '12 Example St', city: 'Bradenton', zip: '34202', lot_sqft: 9000, property_type: 'condo_ground' };
+  const next = async (obj) => {
+    speak(1);
+    advance(50 * 1000);
+    mockCreate.mockResolvedValue(reply(obj));
+    await run();
+  };
+
+  test('a new street clears the old sizes, type, city and zip unless the same read says them again', async () => {
+    mockCreate.mockResolvedValue(reply(HOME));
+    await run();
+    await next({ ...PEST, home_sqft: null, address_line1: '9 Other Rd' });
+    expect(assist().facts).toMatchObject({
+      service: 'pest_control', address_line1: '9 Other Rd', city: null, zip: null, home_sqft: null, lot_sqft: null, property_type: null,
+    });
+    expect(mockPricing).toHaveBeenLastCalledWith({ service: 'pest_control' });
+    expect(mockAvailability).toHaveBeenLastCalledWith(expect.objectContaining({ address_line1: '9 Other Rd', city: null, zip: null }));
+    // Values the same read gives for the new place stay.
+    await next({ ...PEST, home_sqft: 1800, address_line1: '5 Third Ave', city: 'Venice', zip: '34285', property_type: 'single_family' });
+    expect(assist().facts).toMatchObject({ address_line1: '5 Third Ave', city: 'Venice', zip: '34285', home_sqft: 1800, lot_sqft: null, property_type: 'single_family' });
+    expect(mockPricing).toHaveBeenLastCalledWith({ service: 'pest_control', home_sqft: 1800, property_type: 'single_family' });
+    // The plan is not tied to the place.
+    expect(assist().service).toBe('pest_control');
+  });
+
+  test('a change of case, spacing or punctuation is not a switch', async () => {
+    mockCreate.mockResolvedValue(reply(HOME));
+    await run();
+    await next({ ...PEST, home_sqft: null, address_line1: '12  EXAMPLE st.', city: 'bradenton', zip: null });
+    expect(assist().facts).toMatchObject({ address_line1: '12 EXAMPLE st.', city: 'bradenton', zip: '34202', home_sqft: 2000, lot_sqft: 9000, property_type: 'condo_ground' });
+    expect(mockPricing).toHaveBeenCalledTimes(1);
+    expect(mockAvailability).toHaveBeenCalledTimes(1);
+  });
+
+  test('a street named for the first time, or a street taken back and given again, keeps what was said', () => {
+    const prev = { ...NO_FACTS, home_sqft: 2000, city: 'Bradenton' };
+    expect(_test.mergeFacts(prev, { ...NO_FACTS, address_line1: '12 Example St' })).toMatchObject({ home_sqft: 2000, city: 'Bradenton' });
+    expect(_test.mergeFacts({ ...NO_FACTS, zip: '34202', home_sqft: 2000 }, { ...NO_FACTS, zip: '34285' })).toMatchObject({ zip: '34285', home_sqft: null });
+  });
+
+  test('account facts do not carry onto another street', async () => {
+    db.__state.customers = { 'cust-1': { id: 'cust-1', address_line1: '1 Sample Way', lot_sqft: 8000, property_sqft: 3000 } };
+    mockCreate.mockResolvedValue(reply({ ...PEST, service: 'lawn_care', home_sqft: null }));
+    await run({ customerId: 'cust-1' });
+    expect(mockPricing).toHaveBeenLastCalledWith({ service: 'lawn_care', lot_sqft: 8000, lawn_sqft: 3000 });
+    mockMatches.mockReturnValue(false);
+    speak(1);
+    advance(50 * 1000);
+    mockCreate.mockResolvedValue(reply({ ...PEST, service: 'lawn_care', home_sqft: null, address_line1: '9 Other Rd', city: 'Venice', zip: '34285' }));
+    await run({ customerId: 'cust-1' });
+    expect(mockPricing).toHaveBeenLastCalledWith({ service: 'lawn_care' });
+    expect(mockAvailability).toHaveBeenLastCalledWith(expect.objectContaining({ address_line1: '9 Other Rd', account: null }));
+  });
+});
+
+describe('live call assist self-booking gate', () => {
+  const schedulingOff = () => isEnabled.mockImplementation((name) => name !== 'selfBooking');
+  const SPOKEN = { ...PEST, address_line1: '12 Example St', city: 'Bradenton', zip: '34202' };
+
+  test('cached times are hidden while the gate is off, with no lookup, and come back when it is on', async () => {
+    mockCreate.mockResolvedValue(reply(SPOKEN));
+    await run();
+    expect(assist().times).toContain('9:00 AM');
+    const panel = () => assistForPanel({ live_transcription: liveState() });
+    expect(panel().times).toContain('9:00 AM');
+
+    schedulingOff();
+    // The route's read: the saved times are not served.
+    expect(panel()).toMatchObject({ intent: 'Wants quarterly pest control', times: null });
+    // The next due run neither reuses them nor looks times up; the price stays.
+    mockAvailability.mockClear();
+    mockLocate.mockClear();
+    speak(1);
+    advance(50 * 1000);
+    await run();
+    expect(mockAvailability).not.toHaveBeenCalled();
+    expect(mockLocate).not.toHaveBeenCalled();
+    expect(assist().times).toBeNull();
+    expect(assist().price).toContain('$99');
+    // Same facts, gate still off: still no lookup.
+    speak(1);
+    advance(50 * 1000);
+    await run();
+    expect(mockAvailability).not.toHaveBeenCalled();
+
+    isEnabled.mockReturnValue(true);
+    speak(1);
+    advance(50 * 1000);
+    await run();
+    expect(mockAvailability).toHaveBeenCalledTimes(1);
+    expect(panel().times).toContain('9:00 AM');
+  });
+
+  test('a panel with only times shows nothing while the gate is off', () => {
+    const meta = { live_transcription: { assist: { runs: 1, at: 'x', times: '2026-11-11 at 9:00 AM' } } };
+    expect(assistForPanel(meta)).toMatchObject({ times: '2026-11-11 at 9:00 AM' });
+    schedulingOff();
+    expect(assistForPanel(meta)).toBeNull();
+  });
+});
+
 describe('assistForPanel', () => {
   test('text fields only, null while nothing is known', () => {
     expect(assistForPanel({})).toBeNull();
