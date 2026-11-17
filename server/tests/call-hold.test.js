@@ -1953,6 +1953,11 @@ describe('planner: the warm transfer (pure)', () => {
     test('transfer_placed for the winning leg (he took the call before the write landed): ok, nothing written', () => {
       const before = taken();
       expect(planEvent(before, { type: 'transfer_placed', n: 1, legSid: TLEG }, T, false, TLEG)).toEqual({ next: before, answer: 'ok' });
+      // Also on a closed call: his leg ends with the room, never here.
+      expect(planEvent(before, { type: 'transfer_placed', n: 1, legSid: TLEG }, T, true, TLEG)).toEqual({ next: before, answer: 'ok' });
+      // A ringing transfer on a closed call (the caller hung up while it was placed) is stale: its caller ends that call.
+      const ringing = ringingHold();
+      expect(planEvent(ringing, { type: 'transfer_placed', n: 1, legSid: TLEG }, T, true, LEG)).toEqual({ next: ringing, answer: 'stale' });
       // The same write when his leg is not the winner stays stale (its caller ends that call).
       expect(planEvent(before, { type: 'transfer_placed', n: 1, legSid: TLEG }, T, false, LEG).answer).toBe('stale');
     });
@@ -2282,6 +2287,26 @@ describe('the warm transfer: transferAvailable and startTransfer', () => {
     expect(await hold.startTransfer(SID, { legSid: LEG })).toBe('failed');
     expect(events.filter((e) => e.name === 'call')).toEqual([{ name: 'call', sid: TLEG, status: 'completed' }]);
     expect(transferOfHold()).toMatchObject({ status: 'canceled', leg_sid: null });
+  });
+
+  test('the caller hangs up while the owner call is placed: the placement is stale, and the call just placed is ended', async () => {
+    seed(heldHold());
+    const events = fakeTwilio({ during: { create: async () => { cpOf().closed_at = '2026-11-17T15:00:01Z'; } } });
+    expect(await hold.startTransfer(SID, { legSid: LEG, fromName: 'Virginia' })).toBe('failed');
+    expect(events.filter((e) => e.name === 'call')).toEqual([{ name: 'call', sid: TLEG, status: 'completed' }]);
+    expect(transferOfHold()).toMatchObject({ status: 'ringing', leg_sid: null }); // no SID recorded on the closed call
+  });
+
+  test('the caller hangs up after the placement read the state, before its write: the read after the write ends his call', async () => {
+    seed(heldHold());
+    const events = fakeTwilio();
+    const { writes } = db.__state;
+    const push = writes.push.bind(writes);
+    // The close lands inside the placement's own write: the planner read the call as open.
+    writes.push = (h) => { if (h?.transfer?.leg_sid === TLEG) cpOf().closed_at = '2026-11-17T15:00:01Z'; return push(h); };
+    expect(await hold.startTransfer(SID, { legSid: LEG, fromName: 'Virginia' })).toBe('failed');
+    expect(transferOfHold()).toMatchObject({ status: 'ringing', leg_sid: TLEG });
+    expect(events.filter((e) => e.name === 'call')).toEqual([{ name: 'call', sid: TLEG, status: 'completed' }]);
   });
 
   test('a placement that cannot be recorded still rings: the answer route needs no SID', async () => {

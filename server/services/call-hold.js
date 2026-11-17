@@ -281,11 +281,13 @@ function planTransferStart(hold, ev, nowMs, closed) {
 }
 
 // The owner's call was placed: record its SID. A transfer that ended meanwhile (or another n) is stale: the caller ends the call.
+// So is a closed call (the caller hung up while the call was placed: closeForCallerEnd found no SID to end).
 // His leg already the winning leg (he took the call before this write landed): the placement is done, and his call is
-// never ended.
-function planTransferPlaced(hold, ev, winner = null) {
+// never ended here (a caller hang-up after that ends it with the room).
+function planTransferPlaced(hold, ev, winner = null, closed = false) {
   const t = hold?.transfer;
   if (ev.legSid && ev.legSid === winner) return { next: hold, answer: 'ok' };
+  if (closed) return { next: hold, answer: 'stale' };
   if (!t || t.n !== ev.n || t.status !== 'ringing' || t.leg_sid) return { next: hold, answer: 'stale' };
   return { next: { ...hold, transfer: { ...t, leg_sid: ev.legSid } }, answer: 'ok' };
 }
@@ -398,7 +400,7 @@ function planEvent(hold, ev, nowMs, closed, winner = null) {
     case 'resume_over': return { next: hold?.rec_pending ? { ...hold, rec_pending: false } : hold, answer: null };
     case 'vm_answered': return planVoicemailAnswered(hold, nowMs);
     case 'transfer_start': return planTransferStart(hold, ev, nowMs, closed);
-    case 'transfer_placed': return planTransferPlaced(hold, ev, winner);
+    case 'transfer_placed': return planTransferPlaced(hold, ev, winner, closed);
     case 'transfer_accept': return planTransferAccept(hold, ev, nowMs, closed);
     case 'transfer_end': return planTransferEnd(hold, ev, nowMs, closed, winner);
     default: return { next: hold, answer: null };
@@ -962,8 +964,11 @@ async function placeTransferCall(callSid, n) {
     logger.warn(`[call-hold] transfer call ${masked(placed.sid)} not recorded for ${masked(callSid)} (${errorCode(err)})`);
     return 'ringing';
   }
-  if (recorded.answer === 'ok') return 'ringing';
-  await endTransferCall(placed.sid); // the transfer ended while the call was placed
+  // The caller can hang up between this decision's read and its commit, and closeForCallerEnd can then read the state
+  // before the SID landed. A read after the commit sees that close, or the close's own read sees the SID: one of the two
+  // ends his call.
+  if (recorded.answer === 'ok' && !(await holdState(callSid)).closed) return 'ringing';
+  await endTransferCall(placed.sid); // the transfer ended (or the caller hung up) while the call was placed
   return 'failed';
 }
 
