@@ -3986,9 +3986,11 @@ router.post('/conference-staff-accept', async (req, res) => {
     try {
       claim = await conferencePath.claimAccept(parentSid, legSid);
     } catch (err) {
-      // The database cannot say who won: join anyway, so the caller still reaches a person.
+      // The database cannot say who won: join anyway, so the caller still reaches a person. Another leg
+      // may have won, so this one takes none of the first press 1's steps: ending "the other legs"
+      // could hang up the winner, and a second recording or forward_acceptance would replace its own.
       logger.error(`[conference] accept claim failed for ${maskSid(parentSid)}; joining: ${err.message}`);
-      claim = { won: true, first: true };
+      claim = { won: true, first: false };
     }
     if (!claim.won) return goodbye();
     if (claim.first) {

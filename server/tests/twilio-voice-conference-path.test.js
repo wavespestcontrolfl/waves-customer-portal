@@ -235,11 +235,14 @@ describe('/conference-staff-accept', () => {
     expect(cp.closeForCallerEnd).toHaveBeenCalledWith(SID);
   });
 
-  test('the claim cannot be read: join anyway, so the caller reaches a person', async () => {
+  test('the claim cannot be read: join anyway, but end no leg and start nothing (another leg may have won)', async () => {
     cp.claimAccept.mockRejectedValue(new Error('pg down'));
     const res = await press();
     expect(res.body).toContain(STAFF_ROOM);
-    expect(cp.startCallerRecording).toHaveBeenCalledWith(SID);
+    await new Promise(setImmediate);
+    expect(cp.endLegs).not.toHaveBeenCalled();
+    expect(cp.startCallerRecording).not.toHaveBeenCalled();
+    expect(cp.updateState).not.toHaveBeenCalled();
   });
 });
 
