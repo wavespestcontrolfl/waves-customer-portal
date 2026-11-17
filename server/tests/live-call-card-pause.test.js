@@ -1090,12 +1090,40 @@ describe('the star-key hold resumes through this lease (resumeOutsideCardWindow)
     expect(order()).toEqual(['in-progress', 'paused']);
   });
 
-  test('a window whose pause was decided but not sent does not hold the resume back, and neither does a window past its end', async () => {
+  test('a window whose pause was decided but not sent does not hold the resume back: that pause goes out right after it', async () => {
     db.__state.cardPause = { paused_at: iso(-1000), resume_due_at: iso(60000), resumed_at: null, pending: 'pause', pause_sent: false, sender: null };
     expect(await cardPause.resumeOutsideCardWindow(CALL, holdResume())).toEqual({ sent: true, ok: true });
-    db.__state.cardPause = { paused_at: iso(-100000), resume_due_at: iso(-10000), resumed_at: null, pending: null, pause_sent: true, sender: null };
+    await advance(10);
+    expect(order()).toEqual(['in-progress', 'paused']);
+    expect(db.__state.cardPause).toMatchObject({ pending: null, resumed_at: null, sender: null });
+  });
+
+  test('a due window: a confirmed resume closes it, an unconfirmed one leaves the end to the card pause', async () => {
+    db.__state.cardPause = { paused_at: iso(-100000), resume_due_at: iso(-1000), resumed_at: null, pending: null, pause_sent: true, sender: null };
+    expect(await cardPause.resumeOutsideCardWindow(CALL, jest.fn(async () => ({ ok: false, code: '20500' })))).toEqual({ sent: true, ok: false, code: '20500' });
+    expect(db.__state.cardPause).toMatchObject({ resumed_at: null, pending: null, sender: null });
     expect(await cardPause.resumeOutsideCardWindow(CALL, holdResume())).toEqual({ sent: true, ok: true });
-    expect(order()).toEqual(['in-progress', 'in-progress']);
+    expect(db.__state.cardPause).toMatchObject({ resumed_at: expect.any(String), pending: null, pause_sent: false, sender: null });
+    await advance(10);
+    expect(order()).toEqual(['in-progress']);
+  });
+
+  test('a card trigger that extends a due window while the hold resume is in flight: the pause goes out again after it', async () => {
+    db.__state.cardPause = { paused_at: iso(-100000), resume_due_at: iso(-1000), resumed_at: null, pending: null, pause_sent: true, sender: null };
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const resume = jest.fn(async () => { await gate; await mockUpdate({ status: 'in-progress' }); return { ok: true }; });
+    const sending = cardPause.resumeOutsideCardWindow(CALL, resume);
+    await advance(0);
+    expect(resume).toHaveBeenCalledTimes(1);
+    // The card pause still reads the recording as paused, so it only moves the end out and sends nothing.
+    await trigger();
+    expect(db.__state.cardPause).toMatchObject({ pending: null, resumed_at: null });
+    expect(pauseCalls()).toHaveLength(0);
+    release();
+    expect(await sending).toEqual({ sent: true, ok: true });
+    await advance(10);
+    expect(order()).toEqual(['in-progress', 'paused']);
   });
 
   test('a hold resume whose lease ran out before its fence sends nothing: the card pause took over and paused', async () => {

@@ -18,6 +18,7 @@ jest.mock('../services/call-hold', () => ({
   holdState: jest.fn(),
   roomIsOpen: jest.fn(async () => true),
   resumeRecording: jest.fn(async () => true),
+  voicemailAnswered: jest.fn(async () => {}),
 }));
 
 const twilio = require('twilio');
@@ -355,6 +356,7 @@ describe('/call-complete?conf=1 after a hold voicemail', () => {
     expect(res.body).toBe(VOICEMAIL);
     expect(callHold.holdState).toHaveBeenCalledWith(SID);
     expect(callHold.resumeRecording).toHaveBeenCalledWith(SID);
+    expect(callHold.voicemailAnswered).toHaveBeenCalledWith(SID); // the caller is in the voicemail: the one bell is wanted
     // Still an answered call: the usual bookkeeping, no call_outcome.
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', answered_by: 'human' }));
     expect(update.mock.calls[0][0]).not.toHaveProperty('call_outcome');
@@ -393,7 +395,8 @@ describe('/call-complete?conf=1 after a hold voicemail', () => {
     expect(res.body).not.toContain('voicemail-tone');
     expect(res.body).not.toContain('<Pause');
     expect(res.body).not.toContain('<Record');
-    expect(callHold.checkHold).not.toHaveBeenCalled(); // the route decides and raises nothing here: the voicemail's one bell stands
+    expect(callHold.checkHold).not.toHaveBeenCalled(); // the route decides nothing here
+    expect(callHold.voicemailAnswered).toHaveBeenCalledWith(SID); // and the one bell is still wanted
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', answered_by: 'human' })); // still an answered call
   });
 
@@ -414,6 +417,7 @@ describe('/call-complete?conf=1 after a hold voicemail', () => {
     callHold.holdState.mockResolvedValue({ found: true, open: false, closed: false, voicemailAt: null });
     expect((await complete()).body).toBe(EMPTY);
     expect(callHold.resumeRecording).not.toHaveBeenCalled();
+    expect(callHold.voicemailAnswered).not.toHaveBeenCalled();
   });
 
   test('a state read error is today\'s empty answer', async () => {

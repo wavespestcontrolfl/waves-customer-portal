@@ -238,34 +238,6 @@ async function releaseLease(callSid, token) {
   }
 }
 
-// The star-key hold (call-hold.js) resumes this recording too: after a press 1, a retry of that, and for its
-// voicemail. Its resume is sent as this module's lease holder, so it is ordered with every card-pause request for
-// the call (a pause decided while it is in flight goes out after it). It is never sent while a window whose pause
-// was sent is open: that window's own end resumes the recording. A window whose pause was decided but not sent
-// does not hold it back: that pause goes out after it (or never, with the gate off, and then the recording must
-// run). Answers { sent: true, ...await resume() }, { sent: false, reason: 'card_window' }, or { sent: false,
-// reason: 'busy' } (a card-pause request is in flight: the hold retries). A call with no live text has no card
-// pause: the resume goes straight out. A database error is thrown, and nothing was sent.
-async function resumeOutsideCardWindow(callSid, resume) {
-  const token = crypto.randomUUID();
-  const claim = await withCallLock(callSid, async (trx, state) => {
-    const now = Date.now();
-    const windowOpen = isPaused(state) && new Date(state.resume_due_at).getTime() > now;
-    if (windowOpen && !(state.pending === 'pause' && !state.pause_sent)) return { action: 'card_window' };
-    if (state.sender && Number(state.sender.until) > now) return { action: 'busy' };
-    await stampCardPause(trx, callSid, { ...state, sender: { token, until: now + LEASE_MS } });
-    return { action: 'send' };
-  });
-  if (claim.reason === 'not_started_here') return { sent: true, ...(await resume()) };
-  if (claim.action !== 'send') return { sent: false, reason: claim.action };
-  try {
-    if (!(await fenceLease(callSid, token))) return { sent: false, reason: 'busy' };
-    return { sent: true, ...(await resume()) };
-  } finally {
-    await releaseLease(callSid, token);
-  }
-}
-
 // What a confirmed request does to the state. Never touches a decision committed while it was in flight,
 // but a request that landed late (after its sender's lease ran out and another sender moved on) can
 // leave the recording against the wanted state, and that is recorded as a step to send:
@@ -444,6 +416,54 @@ async function selfHeal(callSid, opts) {
   const dueAtMs = new Date(state.resume_due_at).getTime();
   if (!state.pending && dueAtMs > Date.now()) return { action: 'not_due', dueAtMs };
   return pass(callSid, opts);
+}
+
+// What a resume the hold sent (resumeOutsideCardWindow) leaves for this module, from the state as it is now. A window
+// open now was opened or moved while that resume was in flight (it was not open when the resume was claimed, or its
+// pause had not been sent): the recording may run, so its pause must go out again. A due window is closed by a
+// confirmed resume; an unconfirmed one leaves the end to this module's own resume.
+function stateAfterOutsideResume(current, confirmed) {
+  if (!isPaused(current)) return current;
+  if (new Date(current.resume_due_at).getTime() > Date.now()) return { ...current, pending: 'pause', pause_sent: false };
+  return confirmed ? { ...current, resumed_at: new Date().toISOString(), pending: null, pause_sent: false } : current;
+}
+
+// The star-key hold (call-hold.js) resumes this recording too: after a press 1, a retry of that, and for its
+// voicemail. Its resume is sent as this module's lease holder, and its outcome is recorded here before the lease goes
+// back, so a card trigger that opened or moved a window meanwhile gets its pause sent again right after it. It is never
+// sent while a window whose pause was sent is open: that window's own end resumes the recording. A window whose pause
+// was decided but not sent does not hold it back: that pause goes out after it. Answers { sent: true, ...await
+// resume() }, { sent: false, reason: 'card_window' }, or { sent: false, reason: 'busy' } (a card-pause request is in
+// flight: the hold retries). A call with no live text has no card pause: the resume goes straight out. A database
+// error is thrown before anything is sent.
+async function resumeOutsideCardWindow(callSid, resume) {
+  const token = crypto.randomUUID();
+  const claim = await withCallLock(callSid, async (trx, state) => {
+    const now = Date.now();
+    const windowOpen = isPaused(state) && new Date(state.resume_due_at).getTime() > now;
+    if (windowOpen && !(state.pending === 'pause' && !state.pause_sent)) return { action: 'card_window' };
+    if (state.sender && Number(state.sender.until) > now) return { action: 'busy' };
+    await stampCardPause(trx, callSid, { ...state, sender: { token, until: now + LEASE_MS } });
+    return { action: 'send' };
+  });
+  if (claim.reason === 'not_started_here') return { sent: true, ...(await resume()) };
+  if (claim.action !== 'send') return { sent: false, reason: claim.action };
+  let out;
+  let repause = false;
+  try {
+    if (!(await fenceLease(callSid, token))) return { sent: false, reason: 'busy' };
+    out = await resume();
+    await recordOutcome(callSid, (current) => {
+      const next = stateAfterOutsideResume(current, out?.ok === true);
+      repause = next.pending === 'pause';
+      return next;
+    });
+  } finally {
+    await releaseLease(callSid, token);
+  }
+  // Not awaited (a pass never rejects): the hold's step does not wait on a second request, and the pause is committed.
+  if (repause) void reconcile(callSid, { allowPause: true });
+  return { sent: true, ...out };
 }
 
 function armTimer(callSid, dueAtMs) {

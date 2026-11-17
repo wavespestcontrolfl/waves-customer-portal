@@ -26,6 +26,7 @@
  *   rec_pending  a press 1 return was confirmed but the recording resume was not: step 'resume' retries it,
  *   alert_pending  the voicemail was confirmed but its callback bell was not delivered: step 'alert' retries it,
  *   alerted_at  when that bell was delivered,
+ *   vm_answered_at  when /call-complete?conf=1 answered the hold voicemail (the caller is in it: the bell is wanted),
  *   gone       the caller's room was already gone when a step ran,
  *   sender     { token, until }: the lease of the one sender }.
  *
@@ -152,6 +153,7 @@ function planStar(hold, ev, nowMs) {
       gone: false,
       rec_pending: false, // this hold pauses the recording again
       alert_pending: false,
+      vm_answered_at: null,
       sender: prev.sender || null,
     },
     answer: 'start',
@@ -209,7 +211,9 @@ function planStepDone(hold, ev, nowMs) {
       vm_failed: false,
       gone: Boolean(ev.gone),
       rec_pending: ev.step === 'return' ? ev.resumed === false && hold.phase === 'returned' : Boolean(hold.rec_pending),
-      alert_pending: ev.step === 'voicemail' ? !ev.gone : Boolean(hold.alert_pending),
+      // A room end whose answer was lost reads as no room on its retry; the voicemail answer (vm_answered_at) still
+      // wants the bell. A delivered bell is never wanted again.
+      alert_pending: ev.step === 'voicemail' ? !hold.alerted_at && (!ev.gone || Boolean(hold.vm_answered_at)) : Boolean(hold.alert_pending),
     },
     answer: null,
   };
@@ -238,6 +242,16 @@ function planAbort(hold, ev) {
   return { next: { ...hold, phase: 'returned', ret_by: 'abort' }, answer: 'aborted' };
 }
 
+// /call-complete?conf=1 answered the hold voicemail: the room is over and the caller is in the voicemail, whatever the
+// room-end step's own answer said (one whose answer was lost reads as no room on its retry, and that retry would mark
+// the caller gone). The bell is wanted once: 'alert' while it is not yet delivered.
+function planVoicemailAnswered(hold, nowMs) {
+  if (hold?.phase !== 'voicemail') return { next: hold, answer: null };
+  if (hold.alerted_at) return { next: hold, answer: null };
+  if (hold.vm_answered_at) return { next: hold, answer: hold.alert_pending ? 'alert' : null };
+  return { next: { ...hold, applied: 'voicemail', vm_failed: false, alert_pending: true, vm_answered_at: isoAt(nowMs) }, answer: 'alert' };
+}
+
 function planEvent(hold, ev, nowMs, closed) {
   switch (ev.type) {
     case 'star': return closed ? { next: hold, answer: 'no_room' } : planStar(hold, ev, nowMs);
@@ -249,6 +263,7 @@ function planEvent(hold, ev, nowMs, closed) {
     case 'abort': return planAbort(hold, ev);
     // The sweep found the call over: no resume can land on its recording.
     case 'resume_over': return { next: hold?.rec_pending ? { ...hold, rec_pending: false } : hold, answer: null };
+    case 'vm_answered': return planVoicemailAnswered(hold, nowMs);
     default: return { next: hold, answer: null };
   }
 }
@@ -769,6 +784,17 @@ async function raiseVoicemailAlert(callSid, reason) {
   }
 }
 
+// /call-complete?conf=1 is answering the hold voicemail: marks the one office bell wanted and raises it (the lease path;
+// a busy lease leaves it to that sender's next claim or to the sweep). Never throws.
+async function voicemailAnswered(callSid) {
+  try {
+    const out = await decide(callSid, { type: 'vm_answered' });
+    if (out.answer === 'alert') await drain(callSid, { retry: false });
+  } catch (err) {
+    logger.warn(`[call-hold] voicemail answer not recorded for ${masked(callSid)} (${errorCode(err)})`);
+  }
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // The recovery sweep (scheduler.js, every minute, whatever the gates say: it only finishes work already started).
 // ---------------------------------------------------------------------------------------------------------
@@ -826,6 +852,6 @@ async function recoverPendingHolds() {
 
 module.exports = {
   HOLD_REMINDER_SEC, HOLD_LIMIT_SEC, LEASE_MS, isEnabled, startHold, endHold, checkHold, staffLeft, holdState, roomIsOpen, heldSeconds, resumeRecording,
-  recoverPendingHolds,
+  recoverPendingHolds, voicemailAnswered,
   _test: { planEvent, planClaim, nextStep, decide, resumeRetries },
 };

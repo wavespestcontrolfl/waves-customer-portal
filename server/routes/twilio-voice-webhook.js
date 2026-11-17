@@ -1756,10 +1756,12 @@ async function holdVoicemailTwiml(callSid) {
   try {
     const state = await callHold.holdState(callSid);
     if (state.error || !state.voicemailAt) return null;
+    // The caller is in the hold voicemail: the one office bell is wanted now, whatever the room-end step's own answer
+    // said (call-hold.js raises it once). Not awaited: it never throws, and the caller's answer does not wait on it.
+    void callHold.voicemailAnswered(callSid);
     const twiml = new VoiceResponse();
     if (!(await resumeBeforeVoicemail(callSid))) {
-      // A message that will not be recorded is never invited. The one office bell (raised when the voicemail
-      // started) still says to call the caller back.
+      // A message that will not be recorded is never invited. The one office bell still says to call the caller back.
       logger.error(`[call-complete] recording not resumed for ${maskSid(callSid)}; no message is invited`);
       twiml.say({ voice: SAY_VOICE }, NO_MESSAGE_LINE);
       twiml.hangup();

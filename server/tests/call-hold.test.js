@@ -1303,6 +1303,73 @@ describe('a recording resume that fails after a press 1', () => {
 });
 
 // ---------------------------------------------------------------------------------------------------------
+describe('the voicemail answer wants the bell (a room end whose answer was lost)', () => {
+  const limit = () => seed(heldHold({ open_at: iso(-300) }));
+  // The room end lands but its answer is lost: the room is gone, and the step reads a timeout.
+  const lostEnd = (rooms) => ({
+    rooms,
+    fail: { room: (n) => { if (n !== 1) return null; rooms.length = 0; return Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }); } },
+  });
+
+  test('the planner: wanted once; a late retry that reads no room keeps it wanted; a new hold starts with none', () => {
+    const { planEvent } = hold._test;
+    const T = NOW.getTime();
+    const vm = heldHold({ phase: 'voicemail', voicemail_at: iso(0), voicemail_reason: 'timeout' });
+    const answered = planEvent(vm, { type: 'vm_answered' }, T, false);
+    expect(answered).toMatchObject({ answer: 'alert', next: { applied: 'voicemail', alert_pending: true, vm_answered_at: NOW.toISOString() } });
+    expect(planEvent(answered.next, { type: 'step_done', gen: 1, step: 'voicemail', gone: true }, T, false).next).toMatchObject({ alert_pending: true, gone: true });
+    expect(planEvent(answered.next, { type: 'vm_answered' }, T, false)).toEqual({ next: answered.next, answer: 'alert' });
+    const delivered = { ...answered.next, alert_pending: false, alerted_at: iso(1) };
+    expect(planEvent(delivered, { type: 'vm_answered' }, T, false)).toEqual({ next: delivered, answer: null });
+    expect(planEvent(delivered, { type: 'step_done', gen: 1, step: 'voicemail', gone: false }, T, false).next.alert_pending).toBe(false);
+    for (const h of [heldHold(), heldHold({ phase: 'returned', applied: 'returned' }), null]) {
+      expect(planEvent(h, { type: 'vm_answered' }, T, false)).toEqual({ next: h, answer: null });
+    }
+    // A star never starts a hold over a voicemail; a new generation (after a return) starts with no voicemail answer.
+    expect(planEvent(delivered, { type: 'star', by: 'star', legSid: LEG }, T, false).next).toBe(delivered);
+    const stale = heldHold({ phase: 'returned', applied: 'returned', ret_by: 'press1', vm_answered_at: iso(-60) });
+    expect(planEvent(stale, { type: 'star', by: 'star', legSid: LEG }, T, false).next).toMatchObject({ gen: 2, phase: 'held', alert_pending: false, vm_answered_at: null });
+  });
+
+  test('the voicemail answer arrives first: one bell, and no room end is tried again', async () => {
+    limit();
+    const events = fakeTwilio(lostEnd([{ sid: ROOM }]));
+    expect(await hold.checkHold(SID)).toMatchObject({ phase: 'voicemail', applied: 'held' });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    await hold.voicemailAnswered(SID);
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(holdOf()).toMatchObject({ applied: 'voicemail', alert_pending: false, alerted_at: expect.any(String), vm_answered_at: expect.any(String) });
+    await hold.checkHold(SID);
+    expect(names(events)).toEqual(['list', 'room']);
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
+  test('the retry reads no room first (caller gone): the voicemail answer still raises the one bell, once', async () => {
+    limit();
+    fakeTwilio(lostEnd([{ sid: ROOM }]));
+    await hold.checkHold(SID);
+    expect(await hold.checkHold(SID)).toMatchObject({ applied: 'voicemail', gone: true });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    await hold.voicemailAnswered(SID);
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    await hold.voicemailAnswered(SID);
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
+  test('a voicemail answer for a hold not in voicemail changes nothing, and a database error is only logged', async () => {
+    seed(heldHold());
+    fakeTwilio();
+    await hold.voicemailAnswered(SID);
+    expect(holdOf()).toMatchObject({ phase: 'held', applied: 'held' });
+    expect(holdOf().vm_answered_at).toBeFalsy();
+    limit();
+    db.__state.failReads = 1;
+    await expect(hold.voicemailAnswered(SID)).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('voicemail answer not recorded'));
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+});
+
 describe('a card-pause window holds the recording (live-call-card-pause.js)', () => {
   const cardPause = require('../services/live-call-card-pause');
 
