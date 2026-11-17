@@ -75,3 +75,20 @@ test("seriesPolicy 'single': no acknowledgement, the rebooker is told to move th
   expect(out.plan.rescheduleOptions.expectOccurrenceIds).toBeUndefined();
   expect(SmartRebooker.previewSeriesMove).not.toHaveBeenCalled();
 });
+
+test("a caller's own `expect` joins the rebooker's write fence last, and `allowLive: false` turns off the live override", async () => {
+  const pins = { scheduled_date: '2099-01-01', status: 'pending', visit_id: null, customer_pick_by: null };
+  const out = await plan({ seriesPolicy: 'single', allowLive: false, expect: pins });
+  expect(out.plan.rescheduleOptions.allowLive).toBe(false);
+  // The planner's own pins stay; the caller's snapshot wins where both name a field.
+  expect(out.plan.rescheduleOptions.expect).toMatchObject({ ...pins, window_start: '09:00:00', window_end: '10:00:00' });
+  expect(out.plan.rescheduleOptions.expect.scheduled_date).toBe('2099-01-01');
+});
+
+test('default callers are unchanged: the live override stays on and no caller pin is added', async () => {
+  const out = await plan({ seriesPolicy: 'single' });
+  expect(out.plan.rescheduleOptions.allowLive).toBe(true);
+  expect(out.plan.rescheduleOptions.expect).not.toHaveProperty('status');
+  expect(out.plan.rescheduleOptions.expect).not.toHaveProperty('visit_id');
+  expect(out.plan.rescheduleOptions.expect).not.toHaveProperty('customer_pick_by');
+});

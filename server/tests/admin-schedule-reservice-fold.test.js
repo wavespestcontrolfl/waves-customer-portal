@@ -188,6 +188,13 @@ describe('POST / - re-service fold (GATE_RESERVICE_FOLD)', () => {
     }));
   });
 
+  test("the office's customerAskedTime reaches the move, whatever it is, for the move to judge", async () => {
+    await post({ ...base, customerAskedTime: true });
+    expect(fold.moveFoldTarget).toHaveBeenCalledWith(expect.objectContaining({ customerAskedTime: true }));
+    await post(base);
+    expect(fold.moveFoldTarget.mock.calls[1][0].customerAskedTime).toBeUndefined();
+  });
+
   test('the move says no text with the confirmation box off', async () => {
     await post(base);
     expect(fold.moveFoldTarget).toHaveBeenCalledWith(expect.objectContaining({ notifyCustomer: false }));

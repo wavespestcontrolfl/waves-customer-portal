@@ -6377,6 +6377,12 @@ async function requireSeriesMoveAck({ serviceId, newDate, body, actor, reschedul
 // refreshed preview, and the count is enforced again inside the series
 // transaction (codex r18 P2).
 // Answers a refusal, or null.
+// A caller's own snapshot of the visit (`expect`, e.g. the re-service fold's lookup) joins the rebooker's write fence LAST,
+// after every pin the planner set, so the caller's picture wins. No `expect`: nothing changes.
+function mergeCallerExpect(rescheduleOptions, expect) {
+  if (expect) rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), ...expect };
+}
+
 async function planCollectiveDisclosure({ serviceId, newDate, observedForMove, body, actor, rescheduleOptions, seriesPolicy }) {
   // `seriesPolicy: 'single'` is for a caller that governs its own scope (the re-service fold moves one plan visit and leaves
   // the plan alone, owner 2026-11-17): the rebooker never widens this move to the series, so no acknowledgement is owed.
@@ -6440,7 +6446,7 @@ async function planCollectiveDisclosure({ serviceId, newDate, observedForMove, b
 // reassignment). The reminder sync still runs, as for any silent move: it
 // releases the unit mover's reminder hold and keeps a pending creation
 // confirmation pending.
-async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCustomer, operationKey, body, actor, sourceSurface = 'dispatch_board', keepSlot = false, seriesPolicy }) {
+async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCustomer, operationKey, body, actor, sourceSurface = 'dispatch_board', keepSlot = false, seriesPolicy, allowLive, expect }) {
   // Staff-initiated reschedules may override live lifecycle states
   // (en_route / on_site) — rain starts mid-route, or the customer calls
   // to push the visit while the tech is already there. The rebooker
@@ -6453,7 +6459,7 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   // own repair/measurement pass and emitDispatchJobUpdate running another
   // right after it (codex #4295 r2 P2).
   const qualityDates = new Set();
-  const rescheduleOptions = { allowLive: true, actorId: actor.technicianId || null, qualityDates };
+  const rescheduleOptions = { allowLive: allowLive !== false, actorId: actor.technicianId || null, qualityDates };
   const technicianRefusal = await planMoveTechnician({ serviceId, body, actor, rescheduleOptions });
   if (technicianRefusal) return technicianRefusal;
   // The window the rebooker will persist, resolved against the CURRENT
@@ -6501,6 +6507,7 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   if (shownStopRefusal) return shownStopRefusal;
   const disclosureRefusal = await planCollectiveDisclosure({ serviceId, newDate, observedForMove, body, actor, rescheduleOptions, seriesPolicy });
   if (disclosureRefusal) return disclosureRefusal;
+  mergeCallerExpect(rescheduleOptions, expect);
   return { plan: { rescheduleOptions, effectiveWindow, expectVisit, qualityDates, customerAskedTime: body?.customerAskedTime === true } };
 }
 

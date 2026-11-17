@@ -49,7 +49,7 @@ describeOrSkip('findFoldTarget', () => {
     const id = await plan(5, { technician_id: null, customer_request: 'x', notes: 'Dog in yard' });
     expect(await find()).toEqual({
       id, scheduled_date: later(5), window_start: '09:00:00', window_end: '10:00:00', service_type: 'Quarterly Pest Control Service',
-      technician_id: null, customer_request: 'x', notes: 'Dog in yard',
+      technician_id: null, status: 'pending', customer_request: 'x', notes: 'Dog in yard',
     });
   });
 
@@ -106,14 +106,15 @@ describeOrSkip('findFoldTarget', () => {
     expect(await find()).toBeNull();
   });
 
-  test('a grouped stop does not fold; a visit whose partner is finished still does', async () => {
-    const date = later(5);
-    const [{ id: visitId }] = await trx('service_visits').insert({ customer_id: customerId, scheduled_date: date, stop_base_key: `fold-${randomUUID()}`, created_by: 'test' }).returning('id');
+  test('a visit on a shared stop does not fold, even when its partner is finished; the answer carries the status the move pins', async () => {
+    const [{ id: visitId }] = await trx('service_visits').insert({ customer_id: customerId, scheduled_date: later(5), stop_base_key: `fold-${randomUUID()}`, created_by: 'test' }).returning('id');
     const id = await plan(5, { visit_id: visitId });
     const partner = await plan(5, { visit_id: visitId, service_type: 'Lawn Fertilization & Weed Control Service', service_id: lawnServiceId });
     expect(await find()).toBeNull();
     await trx('scheduled_services').where({ id: partner }).update({ status: 'completed' });
-    expect((await find()).id).toBe(id);
+    expect(await find()).toBeNull();
+    await trx('scheduled_services').where({ id }).update({ visit_id: null, status: 'confirmed' });
+    expect(await find()).toMatchObject({ id, status: 'confirmed' });
   });
 
   describe('premise', () => {

@@ -14,7 +14,7 @@ jest.mock('../routes/admin-dispatch', () => ({
 const dispatch = require('../routes/admin-dispatch');
 const { moveFoldTarget, foldOfficeNotice, foldLaneForServiceKey, FOLD_DAYS } = require('../services/reservice-fold');
 
-const TARGET = { id: 'plan-1', scheduled_date: '2099-11-29', service_type: 'Quarterly Pest Control Service', customer_request: null, notes: 'Dog in yard' };
+const TARGET = { id: 'plan-1', scheduled_date: '2099-11-29', status: 'pending', service_type: 'Quarterly Pest Control Service', customer_request: null, notes: 'Dog in yard' };
 const ACTOR = { techRole: 'admin', technicianId: 'staff-1' };
 const PLAN = { plan: { rescheduleOptions: {} } };
 
@@ -26,7 +26,10 @@ beforeEach(() => {
   update = jest.fn().mockResolvedValue(1);
   // The re-read after a refused move: by default the visit is still where it was.
   first = jest.fn().mockResolvedValue({ scheduled_date: new Date('2099-11-29T04:00:00Z'), window_start: '09:00:00', status: 'pending' });
-  conn = jest.fn(() => ({ where: jest.fn(() => ({ update, first })) }));
+  const query = { update, first };
+  query.where = jest.fn(() => query);
+  conn = jest.fn(() => query);
+  conn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   dispatch.planVisitMoveForStaff.mockResolvedValue(PLAN);
   dispatch.runPlannedVisitMove.mockResolvedValue({ status: 200, body: { notificationSent: true, warnings: ['Overlaps another visit.'] } });
 });
@@ -41,6 +44,9 @@ test('asks the staff move for this one visit: the office start, technician and t
   expect(dispatch.planVisitMoveForStaff).toHaveBeenCalledWith({
     serviceId: 'plan-1', newDate: '2099-11-17', newWindow: { start: '10:00' }, notifyCustomer: true,
     body: { technicianId: 'tech-9' }, actor: ACTOR, sourceSurface: 'office_booking', seriesPolicy: 'single',
+    // The lookup's picture of the visit is the rebooker's write fence, and a live visit is never moved.
+    allowLive: false,
+    expect: { scheduled_date: '2099-11-29', status: 'pending', visit_id: null, customer_pick_by: null },
   });
   expect(dispatch.runPlannedVisitMove).toHaveBeenCalledWith(expect.objectContaining({
     plan: PLAN.plan, serviceId: 'plan-1', newDate: '2099-11-17', reasonCode: 'admin', notifyCustomer: true, actor: ACTOR,
@@ -75,21 +81,43 @@ test('with no start asked the notice names the new day, not "this time"', () => 
     .toBe('No re-service booked: the Quarterly Pest Control Service on Sun, Nov 29 moved up to Tue, Nov 17 (within 14 days of the next plan visit).');
 });
 
-test("the office's words go to the moved visit in one update: the request when it has none, the notes appended with a dated prefix", async () => {
+test("the customer's asked-for time reaches the planner only when it is exactly true", async () => {
+  await run({ customerAskedTime: true });
+  expect(dispatch.planVisitMoveForStaff.mock.calls[0][0].body).toEqual({ technicianId: 'tech-9', customerAskedTime: true });
+  dispatch.planVisitMoveForStaff.mockClear();
+  await run({ customerAskedTime: 'yes' });
+  await run({ customerAskedTime: undefined, technicianId: null });
+  expect(dispatch.planVisitMoveForStaff.mock.calls[0][0].body).toEqual({ technicianId: 'tech-9' });
+  expect(dispatch.planVisitMoveForStaff.mock.calls[1][0].body).toEqual({});
+});
+
+const NOTES_LINE = (text) => ({ sql: "concat_ws(E'\\n', nullif(notes, ''), ?::text)", bindings: [`[Re-service folded in, Tue, Nov 17] ${text}`] });
+
+test("a visit with no words takes the customer's words as its request; the notes are appended in SQL, not rewritten", async () => {
   await run();
-  expect(update).toHaveBeenCalledTimes(1);
-  expect(update).toHaveBeenCalledWith({
-    customer_request: 'Ants in the kitchen', customer_request_source: 'call',
-    notes: 'Dog in yard\n[Re-service folded in, Tue, Nov 17] Ants in the kitchen',
+  expect(update).toHaveBeenCalledTimes(2);
+  expect(update.mock.calls[0][0]).toEqual({ customer_request: 'Ants in the kitchen', customer_request_source: 'call' });
+  expect(update.mock.calls[1][0]).toEqual({ notes: NOTES_LINE('Ants in the kitchen') });
+});
+
+test('a visit that already has words (or got them meanwhile) keeps them; the new words go into the notes line with their source', async () => {
+  update.mockResolvedValueOnce(0);
+  await run();
+  expect(update.mock.calls[0][0]).toEqual({ customer_request: 'Ants in the kitchen', customer_request_source: 'call' });
+  expect(update.mock.calls[1][0]).toEqual({
+    notes: NOTES_LINE("Customer's words (call): Ants in the kitchen. Ants in the kitchen"),
   });
 });
 
-test('a visit that already has the customer\'s words keeps them; nothing to carry writes nothing', async () => {
-  await run({ target: { ...TARGET, customer_request: 'Earlier words' } });
-  expect(update.mock.calls[0][0]).not.toHaveProperty('customer_request');
+test('words with no office notes: filled once and no notes write; no words and no notes: no write at all', async () => {
+  await run({ notes: null });
+  expect(update).toHaveBeenCalledTimes(1);
   update.mockClear();
-  await run({ target: { ...TARGET, customer_request: 'Earlier words' }, customerRequest: null, notes: null });
+  await run({ customerRequest: null, notes: null });
   expect(update).not.toHaveBeenCalled();
+  await run({ customerRequest: null });
+  expect(update).toHaveBeenCalledTimes(1);
+  expect(update.mock.calls[0][0]).toEqual({ notes: NOTES_LINE('Ants in the kitchen') });
 });
 
 test('a failed copy of the words does not undo the move: the answer says to add them by hand', async () => {
@@ -132,7 +160,7 @@ test('an error after the move saved: the visit is on the asked slot, so it answe
   expect(out.moved).toBe(true);
   expect(out.answer.id).toBe('plan-1');
   expect(out.answer.warnings).toContain('The move reported an error after it saved (Visit changed.). Check the visit.');
-  expect(update).toHaveBeenCalledTimes(1);
+  expect(update).toHaveBeenCalledTimes(2);
   // ...and the same for a 300+ answer; with no start asked, the date alone decides.
   first.mockResolvedValue({ scheduled_date: '2099-11-17', window_start: '09:00:00', status: 'pending' });
   dispatch.runPlannedVisitMove.mockResolvedValueOnce({ status: 500, body: { error: 'Late.' } });

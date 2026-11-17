@@ -53,18 +53,17 @@ async function findFoldTarget(conn, { customerId, lane, date, propertyId = null 
     .where((q) => q.whereNull('s.is_callback').orWhere('s.is_callback', false))
     .whereIn('s.status', ['pending', 'confirmed'])
     .whereNull('s.customer_pick_by')
+    // A visit already on a shared stop moves with its stop, not alone: only an ungrouped plan visit folds.
+    .whereNull('s.visit_id')
     .whereRaw('s.scheduled_date >= ?::date AND s.scheduled_date <= (?::date + ?::int)', [day, day, FOLD_DAYS])
     .modify((qb) => applyCoverageScope(qb, 's', scope))
     .orderBy('s.scheduled_date', 'asc')
     .orderByRaw('s.window_start ASC NULLS LAST')
     .limit(25)
     .select('s.id', 's.scheduled_date', 's.window_start', 's.window_end', 's.service_type', 's.technician_id',
-      's.customer_request', 's.notes', 's.visit_id', 'sv.category');
+      's.customer_request', 's.notes', 's.status', 'sv.category');
   for (const row of rows) {
     if (laneForCoverageRow({ category: row.category, serviceType: row.service_type }) !== lane) continue;
-    // A grouped stop (two or more open members) moves as one visit: it is not a plan visit this fold moves alone.
-    if (row.visit_id
-      && (await require('./visit-groups').openMembers(conn, row.visit_id)).length >= 2) continue;
     return {
       id: row.id,
       scheduled_date: dateOnlyString(row.scheduled_date),
@@ -72,6 +71,7 @@ async function findFoldTarget(conn, { customerId, lane, date, propertyId = null 
       window_end: row.window_end,
       service_type: row.service_type,
       technician_id: row.technician_id,
+      status: row.status,
       customer_request: row.customer_request,
       notes: row.notes,
     };
@@ -97,19 +97,23 @@ async function movedAnyway(conn, target, newDate, windowStart) {
     && (!windowStart || String(row.window_start || '').startsWith(windowStart));
 }
 
-// After the move committed: the office's words go to the moved visit so the technician knows the problem. One guarded
-// update of two text columns; no column here fires a text, a reminder or a sync trigger.
+// After the move committed: the office's words go to the moved visit so the technician knows the problem. The customer's
+// words fill customer_request only while it is empty (one guarded UPDATE: a visit that already has words, or got them
+// meanwhile, keeps them) and otherwise go into the notes line with their source, so nothing is lost or overwritten. Notes
+// are appended in SQL, never rewritten from the lookup snapshot. No column here fires a text, a reminder or a sync trigger.
 async function carryOfficeWords(conn, target, { customerRequest, notes, date }) {
-  const patch = {};
-  if (customerRequest?.text && !target.customer_request) {
-    patch.customer_request = customerRequest.text;
-    patch.customer_request_source = customerRequest.source;
+  const words = customerRequest?.text || null;
+  let wordsToNotes = false;
+  if (words) {
+    const filled = await conn('scheduled_services').where({ id: target.id })
+      .where((q) => q.whereNull('customer_request').orWhere('customer_request', ''))
+      .update({ customer_request: words, customer_request_source: customerRequest.source });
+    wordsToNotes = filled === 0;
   }
-  if (notes) {
-    patch.notes = [target.notes, `[Re-service folded in, ${foldDateLabel(date)}] ${notes}`].filter(Boolean).join('\n');
-  }
-  if (!Object.keys(patch).length) return;
-  await conn('scheduled_services').where({ id: target.id }).update(patch);
+  const line = [wordsToNotes ? `Customer's words (${customerRequest.source}): ${words}.` : '', notes].filter(Boolean).join(' ');
+  if (!line) return;
+  await conn('scheduled_services').where({ id: target.id })
+    .update({ notes: conn.raw("concat_ws(E'\\n', nullif(notes, ''), ?::text)", [`[Re-service folded in, ${foldDateLabel(date)}] ${line}`]) });
 }
 
 // Runs the planned move. A 409 comes from the rebooker's own checks, before its single write commits: it is returned as
@@ -166,7 +170,7 @@ async function foldAnswer({ conn, target, newDate, windowStart, out, failure, cu
  * refused before anything committed (the caller then books the re-service as before). Any other error propagates.
  * A refusal after the move started re-reads the visit: one already on the asked slot counts as moved, with a warning.
  */
-async function moveFoldTarget({ conn = db, target, date, windowStart, technicianId, notifyCustomer, actor, customerRequest, notes }) {
+async function moveFoldTarget({ conn = db, target, date, windowStart, technicianId, customerAskedTime, notifyCustomer, actor, customerRequest, notes }) {
   const { planVisitMoveForStaff } = require('../routes/admin-dispatch');
   const newDate = dateOnlyString(date);
   const refused = (why) => ({
@@ -178,10 +182,16 @@ async function moveFoldTarget({ conn = db, target, date, windowStart, technician
     newDate,
     newWindow: windowStart ? { start: windowStart } : null,
     notifyCustomer,
-    body: technicianId ? { technicianId } : {},
+    // The office's "customer asked for this time" rides only when it is exactly true (the planner stamps it when
+    // GATE_DAY_ONLY_PROMISE is on), as the edit modal's move builds it.
+    body: { ...(technicianId ? { technicianId } : {}), ...(customerAskedTime === true ? { customerAskedTime: true } : {}) },
     actor,
     sourceSurface: FOLD_SOURCE_SURFACE,
     seriesPolicy: 'single',
+    // The lookup's picture of the visit is the rebooker's write fence: a visit that left the range, went live, joined a stop
+    // or entered a Quick Move hand-off since the lookup makes the move miss (a 409), and the re-service books instead.
+    allowLive: false,
+    expect: { scheduled_date: target.scheduled_date, status: target.status, visit_id: null, customer_pick_by: null },
   });
   // A planner refusal wrote nothing: no re-read.
   if (!planned.plan) return refused(planned.body?.error || 'the move was refused');
