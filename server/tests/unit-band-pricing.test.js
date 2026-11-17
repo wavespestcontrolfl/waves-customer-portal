@@ -601,6 +601,49 @@ describe('pricing engine wiring', () => {
   });
 });
 
+// The call-agent draft prices a home pest program at quarterly visits
+// (owner 2026-11-17). The band resolver still reads the count that was
+// discussed, so its eligibility and its monthly park are unchanged; only the
+// count that reaches the pricer moves.
+describe('call-agent quarterly start on a unit', () => {
+  const resolve = (intent) => withGate('true', () => resolveUnitBandPricing(fakeDb(seedRows()), {
+    intent, unitScope: unitScope(), propertyFacts: unitFacts(), extraction: extractionWithBedrooms(1),
+  }));
+  const pestLine = (intent, band) => generateEstimate(buildEngineInput({
+    intent, propertyFacts: unitFacts(), context: {}, unitBandPricing: band, quarterlyPestStart: true,
+  })).lineItems.find((l) => l.service === 'pest_control');
+
+  test('a bi-monthly ask prices from the signed quarterly band row', async () => {
+    const intent = unitIntent({ pest: { frequency: 'bimonthly' } });
+    const band = await resolve(intent);
+    expect(band.pest).toMatchObject({ frequency: 'bi_monthly', intentFrequency: 'bimonthly' });
+    expect(pestLine(intent, band)).toMatchObject({
+      pricingBasis: 'caller_stated_bedroom_count', visitsPerYear: 4, perApp: 85, annual: 340, requiresManualReview: false,
+    });
+  });
+
+  test('a monthly ask keeps its excluded-program park and prices quarterly on the standard ladder', async () => {
+    const intent = unitIntent({ pest: { frequency: 'monthly' } });
+    const band = await resolve(intent);
+    expect(band.parked).toEqual({ pest: 'monthly_frequency' });
+    const line = pestLine(intent, band);
+    expect(line.pricingBasis).toBeUndefined();
+    expect(line.visitsPerYear).toBe(4);
+    const { reasons } = classifyLane({
+      intent,
+      propertyFacts: unitFacts(),
+      engineResult: { summary: {}, lineItems: [line] },
+      engineInput: buildEngineInput({ intent, propertyFacts: unitFacts(), context: {}, unitBandPricing: band, quarterlyPestStart: true }),
+      totals: { monthly: line.monthly, annual: line.annual, oneTime: 0 },
+      comps: null,
+      calibration: [],
+      context: { isExistingCustomer: false, extractionSource: 'enriched', smsThread: [], transcript: 'Caller: quarterly pest control for my apartment' },
+    });
+    expect(reasons[0]).toMatch(/^pest visit count: monthly \(12 a year\) was discussed/);
+    expect(reasons.some((r) => r.startsWith('monthly cadence on a residential unit'))).toBe(true);
+  });
+});
+
 describe('draft builder — engine input + lane', () => {
   const context = () => ({
     isExistingCustomer: false, extractionSource: 'enriched', smsThread: [],

@@ -1452,6 +1452,25 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Bounced call emails: a later call looks again (GATE_CALL_BOUNCE_SELF_FIX,
+  // dark; owner 2026-11-17). A customer whose email bounced with no fix found
+  // gets one more rescue look after each later processed call that talks
+  // about email (services/email-bounce-rescue.js relookAfterNewCalls; the
+  // sweep re-reads the gate strictly). Twice an hour, so a correction said on
+  // a call is read within the hour even when one tick drops. Off = no lock,
+  // no query.
+  cron.schedule('17,47 * * * *', async () => {
+    if (!gateEnvValue('GATE_CALL_BOUNCE_SELF_FIX')) return;
+    try {
+      await runExclusive('bounce-fix-relook', async () => {
+        const summary = await require('./email-bounce-rescue').relookAfterNewCalls();
+        if (summary.examined) logger.info(`[bounce-fix-relook] ${JSON.stringify(summary)}`);
+      });
+    } catch (err) {
+      logger.error(`[bounce-fix-relook] sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Plaid bank feed → Bank Import staging (GATE_PLAID_SYNC + GATE_BANK_IMPORT,
   // read at call time). Staging only — nothing reaches the P&L until an
   // exact match or the operator links it. Items waiting on a re-login skip.
@@ -8968,6 +8987,8 @@ function initScheduledJobs() {
     try {
       const processor = require('./call-recording-processor');
       if (processor.recoverMissingRecentRecordings) await processor.recoverMissingRecentRecordings();
+      // A card quarantine whose live-text purge failed is purged again (never throws).
+      await require('./live-call-transcription').purgeQuarantinedLiveText();
       if (processor.processAllPending) await processor.processAllPending();
     } catch (e) { logger.error(`Recording batch process failed: ${e.message}`); }
   }, { timezone: 'America/New_York' });

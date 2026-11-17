@@ -28,8 +28,8 @@
  * legs: { "<i>": { sid, status } }, accepted_leg_sid, accepted_at, voicemail_at, closed_at, recording,
  * fallback }. Call SIDs and times only: no customer data, no staff numbers.
  * Every claim is one conditional UPDATE, so two staff, a backstop and a hang-up can race safely.
- * This module holds the state and the Twilio REST calls. Nothing calls it until the /voice switch
- * and its routes land in routes/twilio-voice-webhook.js (the next PR).
+ * This module holds the state and the Twilio REST calls; the TwiML and the webhook routes live in
+ * routes/twilio-voice-webhook.js.
  */
 
 const twilio = require('twilio');
@@ -52,9 +52,12 @@ const OPEN_SQL = [
   "(metadata #>> '{conference_path,voicemail_at}') IS NULL",
   "(metadata #>> '{conference_path,closed_at}') IS NULL",
 ];
+// The caller's call has no terminal status yet (the same set as a staff leg's). Built from constants.
+const CALLER_LIVE_SQL = `(status IS NULL OR status NOT IN (${[...TERMINAL_LEG_STATUSES].map((s) => `'${s}'`).join(', ')}))`;
 
 // Read through the module object at call time: a suite that mocks feature-gates as a bare object reads off.
 const conferenceMode = () => (typeof featureGates.callConferencePathMode === 'function' ? featureGates.callConferencePathMode() : 'off');
+const conferenceRingOn = () => conferenceMode() !== 'off';
 const masked = (sid) => (sid ? `…${String(sid).slice(-6)}` : 'none');
 // Errors are logged by code only: a Twilio error message can carry a phone number.
 const errorCode = (err) => String(err?.code || err?.status || err?.name || 'error');
@@ -126,7 +129,8 @@ function stampLeg(callSid, index, fields) {
   return updateState(callSid, Object.entries(fields).map(([key, value]) => [['legs', String(index), key], value]));
 }
 
-// { claim: 'claimed' | 'retry' (a redelivered redirect: the legs already ring) | 'no_row', state }.
+// { claim: 'claimed' | 'retry' (a redelivered redirect: the legs already ring) | 'ended' (the caller's
+// call already has a terminal status: no leg may ring for it) | 'no_row', state }.
 async function claimStart(callSid, { legCount, ringTimeoutSec }) {
   const state = {
     room: roomFor(callSid),
@@ -138,13 +142,16 @@ async function claimStart(callSid, { legCount, ringTimeoutSec }) {
   };
   const claimed = await db('call_log').where('twilio_call_sid', callSid)
     .whereRaw("(metadata -> 'conference_path') IS NULL")
+    .whereRaw(CALLER_LIVE_SQL)
     .update({
       metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{conference_path}', ?::jsonb, true)", [JSON.stringify(state)]),
       updated_at: new Date(),
     });
   if (Number(claimed) > 0) return { claim: 'claimed', state };
-  const existing = await loadState(callSid);
-  return { claim: existing ? 'retry' : 'no_row', state: existing };
+  const row = await db('call_log').where('twilio_call_sid', callSid).first('metadata', 'status');
+  const existing = readState(row);
+  if (existing) return { claim: 'retry', state: existing };
+  return { claim: row ? 'ended' : 'no_row', state: null };
 }
 
 async function placeStaffLegs({ callSid, numbers, ringTimeoutSec, callerFrom, wavesLine, callToken }) {
@@ -324,21 +331,23 @@ async function closeForCallerEnd(callSid) {
 // 'answered', so the outcome comes from the claim. Talk time counts from the press 1, as a bridged
 // <Dial>'s DialCallDuration does today.
 async function conferenceDialOutcome(callSid, confStatus) {
-  if (VOICEMAIL_STATUSES.has(confStatus)) return { status: confStatus, duration: 0 };
+  if (VOICEMAIL_STATUSES.has(confStatus)) return { status: confStatus, duration: 0, accepted: false };
   const acceptedAt = Date.parse((await loadState(callSid))?.accepted_at || '');
   if (Number.isFinite(acceptedAt)) {
-    return { status: 'completed', duration: Math.max(0, Math.round((Date.now() - acceptedAt) / 1000)) };
+    return { status: 'completed', duration: Math.max(0, Math.round((Date.now() - acceptedAt) / 1000)), accepted: true };
   }
   // The caller left the room with no press 1 and no redirect (a join error): stop the ring first.
   await claimVoicemail(callSid)
     .catch((err) => logger.warn(`[conference] ring not stopped for ${masked(callSid)} (${errorCode(err)})`));
-  return { status: 'no-answer', duration: 0 };
+  return { status: 'no-answer', duration: 0, accepted: false };
 }
 
 module.exports = {
   CALL_SID_RE,
+  errorCode,
   roomFor,
   admitsConferencePath,
+  conferenceRingOn,
   stashCallToken,
   takeCallToken,
   claimStart,

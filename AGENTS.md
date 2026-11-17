@@ -347,11 +347,10 @@ execute the workflows they describe.
   authorized, never treatment (2026-09-26)), inserts keep idempotency keys,
   TCPA consent precedes any SMS; hard-bounced call-captured emails are
   re-verified against the recording and surfaced for owner read-back, never
-  auto-corrected or resent (one exception, owner 2026-11-05: a spelling the
-  caller's letters settled, `email_spelling_settled`, is resent once to the
-  other pass's spelling for the same customer behind
-  `GATE_CALL_BOUNCE_OTHER_SPELLING`; the profile takes it only on delivery;
-  no card).
+  auto-corrected or resent. Owner exceptions: `GATE_CALL_BOUNCE_OTHER_SPELLING`
+  resends once to the other pass's settled spelling, same customer, taken
+  on delivery, no card (11-05); `GATE_CALL_BOUNCE_SELF_FIX` saves one small
+  call fix per customer, never resends (`isSmallFix`; 11-17).
 - **Estimator engine authority.** `generateEstimate` is the sole dollar
   authority — LLM output proposes intent only and never reaches
   proposal/price fields; engine drafts never auto-send; existing customers
