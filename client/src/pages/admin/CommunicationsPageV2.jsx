@@ -87,6 +87,7 @@ import { useLocation, useNavigate, useOutletContext } from "react-router-dom";
 import EmailPage from "./EmailPage";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import CallLogTabV2 from "./CallLogTabV2";
+import LiveCallPanelV2 from "./LiveCallPanelV2";
 import TriageInboxTabV2 from "./TriageInboxTabV2";
 import PortalInboxTabV2 from "./PortalInboxTabV2";
 import MessengerTabV2 from "./MessengerTabV2";
@@ -4502,6 +4503,7 @@ export default function CommunicationsPageV2() {
   return (
     <div className="bg-surface-page min-h-full font-sans text-zinc-900 max-w-[1300px] mx-auto">
       {" "}
+      {isAdminRole && <LiveCallPanelV2 />}
       {isAdminRole && emailVisited && <div hidden={activeTab !== "email"}>
         <EmailPage key={outletContext.user.id} active={activeTab === "email"} navigation={navigation} />
       </div>}

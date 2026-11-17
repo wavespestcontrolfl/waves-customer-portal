@@ -96,6 +96,8 @@ async function main() {
       // The Communications page reads the Portal and Messenger tab counts.
       else if (api === '/admin/portal-inbox/summary') body = { enabled: true, count: 0 };
       else if (api === '/admin/messenger/summary') body = { enabled: true, unanswered: 0 };
+      // The live call panel polls for calls with live text (GATE_LIVE_CALL_TRANSCRIPTION, off here).
+      else if (api === '/admin/call-recordings/live') body = { enabled: false, calls: [] };
       // The SMS composer's mic asks whether server dictation is on (GATE_SERVER_DICTATION, off here).
       else if (api === '/tech/dictation/availability') body = { available: false };
       else { report.unmatched.push(record); body = { error: 'Unmatched synthetic request' }; status = 500; }
