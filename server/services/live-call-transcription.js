@@ -11,10 +11,12 @@
  * call_live_utterances, card-number scrubbed. This module only collects the text; the features
  * that read it are in their own modules.
  *
- * While the star-key hold holds the caller (call-hold.js: conference_path.hold.phase 'held'), no
- * utterance is stored. The outbound track then carries the hold script, not the staff, and the
- * call recording pauses for the hold too. A line that arrives after the hold is decided is dropped
- * even when it was spoken just before the star; text resumes once the staff return.
+ * While the star-key hold holds the caller (call-hold.js), no utterance is stored: from the star
+ * (conference_path.hold.phase 'held') until Twilio confirms the caller is off hold (applied stays
+ * 'held' while a return or a voicemail is decided but not confirmed, and the caller still hears the
+ * script). The outbound track then carries the hold script, not the staff, and the call recording
+ * pauses for the hold too. A line that arrives after the star is decided is dropped even when it
+ * was spoken just before it; text resumes once the return or the voicemail is confirmed.
  *
  * Spend: Twilio bills real-time transcription by the minute ($0.027/min, read 2026-11-16), so the
  * gate is the owner's flip. Starting after press 1 skips the greeting, the ringing, voicemail and
@@ -54,8 +56,9 @@ const MAX_TEXT = 4000;
 // recording's own scrub flagged a card number (transcription_metadata.pan_detected).
 const QUARANTINED_SQL = "((metadata #>> '{live_transcription,quarantined_at}') IS NOT NULL"
   + " OR COALESCE(transcription_metadata ->> 'pan_detected', '') = 'true') AS quarantined";
-// The star-key hold holds the caller (GATE_CALL_HOLD, call-hold.js): its wanted phase, as the card pause reads it.
-const HOLD_HELD_SQL = "COALESCE((metadata #>> '{conference_path,hold,phase}') = 'held', false) AS hold_held";
+// The star-key hold holds the caller (GATE_CALL_HOLD, call-hold.js): a hold is wanted, or Twilio's hold is not yet undone.
+const HOLD_HELD_SQL = "COALESCE((metadata #>> '{conference_path,hold,phase}') = 'held'"
+  + " OR (metadata #>> '{conference_path,hold,applied}') = 'held', false) AS hold_held";
 // A card-number recording pause is open on the call (GATE_CALL_RECORDING_CARD_PAUSE, live-call-card-pause.js).
 const CARD_PAUSE_OPEN_SQL = "(metadata -> 'live_transcription' -> 'card_pause' ->> 'paused_at') IS NOT NULL"
   + " AND (metadata -> 'live_transcription' -> 'card_pause' ->> 'resumed_at') IS NULL AS card_pause_open";
@@ -255,7 +258,7 @@ async function storeUtterance(callSid, body) {
     if (!claimed) return { stored: false, reason: 'not_started_here' };
     // A quarantined call keeps no live text: a late callback or a redelivery stores nothing.
     if (claimed.quarantined) return { stored: false, reason: 'quarantined' };
-    // On hold: the caller hears the hold script, and the recording is paused.
+    // On hold, or a return not yet confirmed: the caller hears the hold script, and the recording is paused.
     if (claimed.hold_held === true) return { stored: false, reason: 'on_hold' };
     pauseOpen = claimed.card_pause_open === true;
 

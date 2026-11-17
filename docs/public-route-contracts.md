@@ -4238,7 +4238,8 @@ per session and `SequenceId`, so a redelivery inserts nothing), card-number
 scrubbed together with the call's last 5 utterances (`scrubSegments`), plus a
 short code-shaped utterance by the same speaker within 30 s of a masked card
 number; a mask stamps `live_transcription.pan_detected`. While the
-star-key hold holds the caller (`conference_path.hold.phase = 'held'`), a
+star-key hold holds the caller (`conference_path.hold.phase = 'held'`, or
+`applied = 'held'` until Twilio confirms the return or the voicemail), a
 final utterance is answered 200 and not stored. With
 `GATE_CALL_RECORDING_CARD_PAUSE` also on (dark, owner 2026-11-16 "ok build
 all"), a stored utterance that asks for or names card details, or one the
