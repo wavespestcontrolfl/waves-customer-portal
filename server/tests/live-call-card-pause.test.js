@@ -10,9 +10,10 @@
  * Ordering and recovery: a resume still in flight when a new card trigger arrives never lands after
  * the pause that replaces it; a decision committed before a crash is finished by the next utterance
  * or the timer; a pause whose response is lost keeps its window and still resumes at the end.
- * Across processes: two module instances sharing one db send one request at a time (the send lock);
- * a stored utterance that finds it held skips without waiting; a call with no open pause opens no
- * transaction.
+ * Across processes: two module instances sharing one db send one request at a time (the sender
+ * lease in the state row); a busy decision maker retries and a busy stored utterance skips, both
+ * without holding a connection; an expired lease is taken over; no connection is held while a request
+ * is in flight (bounded pool of 2); a call with no open pause opens no transaction.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
@@ -25,37 +26,46 @@ jest.mock('twilio', () => jest.fn(() => ({ calls: mockCalls })));
 // A small knex fake: one call_log row and a real per-key advisory lock held until the transaction
 // ends. Reads and writes yield a tick so two unlocked transactions would interleave.
 jest.mock('../models/db', () => {
-  const state = { claimed: true, cardPause: undefined, writes: [], locks: new Map() };
+  const newPool = () => ({ max: Infinity, inUse: 0, peak: 0, queue: [] });
+  const state = { claimed: true, cardPause: undefined, writes: [], locks: new Map(), pool: newPool() };
   const tick = () => new Promise((resolve) => setImmediate(resolve));
-  function callLog() {
+  // A bounded connection pool: acquire waits while it is full (FIFO), like knex's.
+  async function acquire() {
+    const { pool } = state;
+    if (pool.inUse >= pool.max) await new Promise((resolve) => pool.queue.push(resolve));
+    else pool.inUse += 1;
+    pool.peak = Math.max(pool.peak, pool.inUse);
+  }
+  function release() {
+    const { pool } = state;
+    const next = pool.queue.shift();
+    if (next) next();
+    else pool.inUse -= 1;
+  }
+  // A query outside a transaction takes a connection for its own duration; inside one it rides on it.
+  const pooled = (inTx, fn) => async (...args) => {
+    if (inTx) return fn(...args);
+    await acquire();
+    try { return await fn(...args); } finally { release(); }
+  };
+  function callLog(inTx) {
     const q = {};
     q.where = jest.fn(() => q);
     q.whereRaw = jest.fn(() => q);
-    q.first = jest.fn(async () => {
+    q.first = jest.fn(pooled(inTx, async () => {
       await tick();
       return state.claimed ? { card_pause: state.cardPause ? JSON.parse(JSON.stringify(state.cardPause)) : null } : undefined;
-    });
-    q.update = jest.fn(async (patch) => {
+    }));
+    q.update = jest.fn(pooled(inTx, async (patch) => {
       await tick();
       if (!state.claimed) return 0;
       state.cardPause = JSON.parse(patch.metadata.bindings[0]).card_pause;
       state.writes.push(state.cardPause);
       return 1;
-    });
+    }));
     return q;
   }
   function raw(sql, bindings, held) {
-    if (String(sql).includes('pg_try_advisory_xact_lock')) {
-      const tryKey = bindings[0];
-      return (async () => {
-        await tick();
-        if (state.locks.get(tryKey)) return { rows: [{ locked: false }] };
-        let release;
-        state.locks.set(tryKey, new Promise((resolve) => { release = resolve; }));
-        held.push(() => { state.locks.delete(tryKey); release(); });
-        return { rows: [{ locked: true }] };
-      })();
-    }
     if (!String(sql).includes('pg_advisory_xact_lock')) return { sql, bindings };
     const key = bindings[0];
     return (async () => {
@@ -65,19 +75,22 @@ jest.mock('../models/db', () => {
       held.push(() => { state.locks.delete(key); release(); });
     })();
   }
-  const db = jest.fn(() => callLog());
+  const db = jest.fn(() => callLog(false));
   db.transaction = jest.fn(async (fn) => {
+    await acquire();
     const held = [];
-    const trx = jest.fn(() => callLog());
+    const trx = jest.fn(() => callLog(true));
     trx.raw = (sql, bindings) => raw(sql, bindings, held);
     try {
       return await fn(trx);
     } finally {
-      held.forEach((release) => release());
+      held.forEach((unlock) => unlock());
+      release();
     }
   });
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.__state = state;
+  db.__newPool = newPool;
   return db;
 });
 
@@ -114,6 +127,7 @@ beforeEach(() => {
   s.cardPause = undefined;
   s.writes = [];
   s.locks = new Map();
+  s.pool = db.__newPool();
   isEnabled.mockReturnValue(true);
   process.env.TWILIO_ACCOUNT_SID = 'AC' + 'c'.repeat(32);
   process.env.TWILIO_AUTH_TOKEN = 'token';
@@ -124,7 +138,11 @@ beforeEach(() => {
 afterEach(() => {
   cardPause._test.timers.forEach((t) => clearTimeout(t));
   cardPause._test.timers.clear();
-  instances.forEach((inst) => { inst._test.timers.forEach((t) => clearTimeout(t)); inst._test.timers.clear(); });
+  cardPause._test.retries.forEach((t) => clearTimeout(t));
+  cardPause._test.retries.clear();
+  instances.forEach((inst) => {
+    [inst._test.timers, inst._test.retries].forEach((m) => { m.forEach((t) => clearTimeout(t)); m.clear(); });
+  });
   instances.length = 0;
   jest.useRealTimers();
 });
@@ -427,14 +445,32 @@ describe('live call card pause: two server processes sharing one database', () =
   const statuses = () => mockUpdate.mock.calls.map(([arg]) => arg.status);
   const flush = async () => { for (let i = 0; i < 30; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
   const utter = (inst, text, extra = {}) => inst.onUtteranceStored({ callSid: CALL, text, panMasked: false, ...extra });
-  // A request that stays in flight until the test lets it land.
+  const LEASE_MS = cardPause._test.LEASE_MS;
+  // A request that stays in flight until the test lets it land. Also notes how many connections are
+  // in use at the moment each request goes out.
   function hang(status) {
-    const held = { land: null };
-    mockUpdate.mockImplementation((arg) => (arg.status === status
-      ? new Promise((resolve) => { held.land = () => resolve({ status }); })
-      : Promise.resolve({ status: arg.status })));
+    const held = { land: null, connsAtSend: [] };
+    mockUpdate.mockImplementation((arg) => {
+      held.connsAtSend.push(db.__state.pool.inUse);
+      return arg.status === status
+        ? new Promise((resolve) => { held.land = () => resolve({ status }); })
+        : Promise.resolve({ status: arg.status });
+    });
     return held;
   }
+  // A committed state as a crashed or slow sender elsewhere would have left it.
+  const seed = (extra) => {
+    db.__state.cardPause = {
+      paused_at: '2026-11-16T15:00:00.000Z', resume_due_at: '2026-11-16T15:01:30.000Z', resumed_at: null, pauses: 1, ...extra,
+    };
+  };
+
+  test('the Twilio client gets a request timeout shorter than the lease', async () => {
+    await trigger();
+    const opts = require('twilio').mock.calls[0][2];
+    expect(opts.httpClient.defaultTimeout).toBe(cardPause._test.REQUEST_TIMEOUT_MS);
+    expect(cardPause._test.REQUEST_TIMEOUT_MS).toBeLessThan(LEASE_MS);
+  });
 
   test('a due resume on another process waits for the pause still in flight, then goes out after it', async () => {
     const a = loadInstance();
@@ -446,26 +482,26 @@ describe('live call card pause: two server processes sharing one database', () =
     // Only process B keeps a timer for this call (A's restarted).
     a._test.timers.forEach((t) => clearTimeout(t));
     a._test.timers.clear();
+    // A short window that has ended while the pause is still in flight.
+    db.__state.cardPause.resume_due_at = '2026-11-16T15:00:04.000Z';
 
-    // B sees the open pause on a later utterance: the send lock is held, so it sends nothing, and it
-    // arms its own timer for the stored end.
-    jest.setSystemTime(new Date('2026-11-16T15:00:30Z'));
+    // B finds A's lease live: it sends nothing, and arms its own timer for the stored end.
+    jest.setSystemTime(new Date('2026-11-16T15:00:05Z'));
     await expect(utter(b, 'Tuesday works')).resolves.toMatchObject({ action: 'send_busy' });
     expect(b._test.timers.size).toBe(1);
-
-    // The window ends while A's pause is still in flight: B's timer must not send the resume over it.
-    await advance(61 * 1000);
+    await advance(1000);
+    // B's timer found the lease busy too and retries: still no resume over the pause.
+    expect(b._test.retries.size).toBe(1);
     expect(statuses()).toEqual(['paused']);
 
     mockUpdate.mockResolvedValue({});
     pause.land();
     await first;
-    await flush();
+    await advance(1000);
     // The last request Twilio got is the resume, the newest decision, and it came after the pause.
     expect(statuses()).toEqual(['paused', 'in-progress']);
-    expect(db.__state.cardPause).toMatchObject({ pending: null, pause_sent: false });
+    expect(db.__state.cardPause).toMatchObject({ pending: null, pause_sent: false, sender: null });
     expect(db.__state.cardPause.resumed_at).toBeTruthy();
-    // Nothing is left for anyone to send.
     await advance(120 * 1000);
     expect(statuses()).toEqual(['paused', 'in-progress']);
   });
@@ -479,37 +515,123 @@ describe('live call card pause: two server processes sharing one database', () =
     await advance(91 * 1000);
     expect(statuses()).toEqual(['paused', 'in-progress']);
 
-    // B commits a new window (and its own pause) while A's resume is still in flight.
-    const second = utter(b, 'and the cvv');
-    await flush();
+    // B commits a new window while A's resume is still in flight; its own pause waits behind the lease.
+    await expect(utter(b, 'and the cvv')).resolves.toMatchObject({ action: 'extend' });
     expect(db.__state.cardPause).toMatchObject({ pending: 'pause', resumed_at: null, resume_due_at: '2026-11-16T15:03:01.000Z' });
+    await advance(1000);
     expect(statuses()).toEqual(['paused', 'in-progress']);
 
     mockUpdate.mockResolvedValue({});
     resume.land();
-    await second;
-    await flush();
+    await advance(1000);
     expect(statuses()).toEqual(['paused', 'in-progress', 'paused']);
-    // Paused, window kept, nothing pending: the end resumes it later.
-    expect(db.__state.cardPause).toMatchObject({ pending: null, resumed_at: null, resume_due_at: '2026-11-16T15:03:01.000Z' });
+    // Paused, window kept, nothing pending, lease released: the end resumes it later.
+    expect(db.__state.cardPause).toMatchObject({ pending: null, resumed_at: null, resume_due_at: '2026-11-16T15:03:01.000Z', sender: null });
     await advance(91 * 1000);
     expect(statuses()).toEqual(['paused', 'in-progress', 'paused', 'in-progress']);
   });
 
-  test('a stored utterance while another process holds the send lock sends nothing and does not wait', async () => {
+  test('a stored utterance while another process holds the lease sends nothing and does not wait', async () => {
     const a = loadInstance();
     const b = loadInstance();
     const pause = hang('paused');
     const first = utter(a, "what's the card number");
     await flush();
-    jest.setSystemTime(new Date('2026-11-16T15:00:20Z'));
+    jest.setSystemTime(new Date('2026-11-16T15:00:03Z'));
     // Resolves while A's request is still in flight.
     await expect(utter(b, 'and the expiration')).resolves.toMatchObject({ action: 'send_busy' });
     expect(statuses()).toEqual(['paused']);
+    // A stored utterance never schedules a retry of its own.
+    expect(b._test.retries.size).toBe(0);
     mockUpdate.mockResolvedValue({});
     pause.land();
     await first;
     expect(statuses()).toEqual(['paused']);
+  });
+
+  test('a crashed sender: its lease blocks others until it expires, then the resume is taken over', async () => {
+    const b = loadInstance();
+    // The holder died after claiming the resume; its lease runs 5 s more.
+    seed({ pending: 'resume', pause_sent: true, sender: { token: 'dead-sender', until: new Date('2026-11-16T15:02:05Z').getTime() } });
+    jest.setSystemTime(new Date('2026-11-16T15:02:00Z'));
+    await expect(utter(b, 'Tuesday works')).resolves.toMatchObject({ action: 'send_busy' });
+    expect(mockUpdate).not.toHaveBeenCalled();
+    jest.setSystemTime(new Date('2026-11-16T15:02:06Z'));
+    await expect(utter(b, 'Tuesday works')).resolves.toMatchObject({ action: 'resumed' });
+    expect(statuses()).toEqual(['in-progress']);
+    expect(db.__state.cardPause).toMatchObject({ pending: null, sender: null });
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+  });
+
+  test('a busy card trigger retries and sends its pause once the old lease is gone', async () => {
+    const b = loadInstance();
+    // A resume was claimed by a sender that crashed; the window had ended. A new card phrase arrives.
+    seed({ pending: 'resume', pause_sent: true, sender: { token: 'dead-sender', until: new Date('2026-11-16T15:02:03Z').getTime() } });
+    jest.setSystemTime(new Date('2026-11-16T15:02:00Z'));
+    await expect(utter(b, 'and the cvv')).resolves.toMatchObject({ action: 'extend' });
+    expect(db.__state.cardPause).toMatchObject({ pending: 'pause', resumed_at: null });
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(b._test.retries.size).toBe(1);
+    await advance(2000);
+    expect(mockUpdate).not.toHaveBeenCalled();
+    await advance(2000);
+    expect(statuses()).toEqual(['paused']);
+    expect(db.__state.cardPause).toMatchObject({ pending: null, sender: null, resumed_at: null });
+    // A retry never stacks: one timer at a time, none left over.
+    expect(b._test.retries.size).toBe(0);
+  });
+
+  test('a retry gives up after the lease would have expired plus a margin', async () => {
+    const b = loadInstance();
+    // A sender that renews forever is not a thing, but a lease that stays live must not spin the retry.
+    const renew = () => seed({ pending: 'pause', pause_sent: false, sender: { token: 'busy-sender', until: Date.now() + 60 * 1000 } });
+    renew();
+    jest.setSystemTime(new Date('2026-11-16T15:00:10Z'));
+    renew();
+    const stay = setInterval(renew, 100);
+    try {
+      await expect(utter(b, 'and the cvv')).resolves.toMatchObject({ action: 'extend' });
+      await advance(20 * 1000);
+    } finally {
+      clearInterval(stay);
+    }
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(b._test.retries.size).toBe(0);
+  });
+
+  test('bounded pool of 2: overlapping triggers and a request in flight finish with no stall, and no connection is held during the request', async () => {
+    db.__state.pool.max = 2;
+    const a = loadInstance();
+    const b = loadInstance();
+    const pause = hang('paused');
+    const first = utter(a, "what's the card number");
+    await flush();
+    expect(statuses()).toEqual(['paused']);
+    // The request is in flight, and nothing holds a connection.
+    expect(db.__state.pool.inUse).toBe(0);
+    expect(pause.connsAtSend).toEqual([0]);
+
+    // Two more triggers and a stored utterance overlap it, on both processes.
+    jest.setSystemTime(new Date('2026-11-16T15:00:02Z'));
+    const others = Promise.all([utter(b, 'the credit card please'), utter(a, 'and the cvv'), utter(b, 'Tuesday works')]);
+    await flush();
+    expect(db.__state.pool.inUse).toBe(0);
+    expect(statuses()).toEqual(['paused']);
+
+    mockUpdate.mockResolvedValue({});
+    pause.land();
+    await advance(1000);
+    await expect(first).resolves.toBeDefined();
+    await expect(others).resolves.toHaveLength(3);
+    expect(db.__state.pool.peak).toBeLessThanOrEqual(2);
+    expect(db.__state.pool.inUse).toBe(0);
+    expect(db.__state.pool.queue).toHaveLength(0);
+    expect(pauseCalls()).toHaveLength(1);
+    expect(db.__state.cardPause).toMatchObject({ pending: null, resumed_at: null, sender: null });
+    // The window was moved by the later triggers; its end still resumes. Small steps, so the real-time
+    // database ticks keep up with the fake clock (a lease is judged on that clock).
+    for (let i = 0; i < 100; i += 1) await advance(1000);
+    expect(statuses()).toEqual(['paused', 'in-progress']);
   });
 
   test('an ordinary utterance opens no transaction: no open pause, or a pause not yet due with nothing pending', async () => {

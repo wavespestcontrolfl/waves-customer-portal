@@ -17,27 +17,36 @@
  * transition ('pause' or 'resume') that was decided and committed but that Twilio has not yet
  * confirmed. Every decision is made under pg_advisory_xact_lock(hashtext('live_card_pause:' ||
  * callSid)) and committed before the Twilio request is sent. The requests for one call are sent
- * one at a time across every server process (a deploy overlap runs two): a second transaction-scoped
- * advisory lock, the send lock on 'live_card_pause_send:' || callSid, is held for a whole drain (claim,
- * request, record the outcome, claim again). The state decisions keep their own short transactions on
- * the first lock, so a decision never waits on a Twilio request in flight. After each request the
- * wanted state is read again, so the last request Twilio receives always matches the newest committed
- * decision: an older resume or pause still in flight, in this process or in another, can never land
- * after a newer decision. A crash after a decision leaves `pending` set, and the next stored
- * utterance or the timer finishes it. The decision makers (a card trigger, the window-end timer, which
- * is the resume guarantee) wait for the send lock. A stored utterance that finds the send lock held
- * skips: the holder claims again after its request, and the timer waits for the window end. Each
- * waiter holds a pool connection, so only those two wait. The Twilio client's own request timeout
- * (30 s, the SDK default) bounds how long a request can hold the lock. A pause whose outcome is unknown (timeout, socket reset, 5xx)
- * keeps `pending` and the window, so the resume still goes out at the window end (resuming a
+ * one at a time across every server process (a deploy overlap runs two), and no database connection
+ * is held while a request is in flight (a held connection plus the decision transactions of the same
+ * pass could exhaust a small pool). The sender owns a lease in the same state: `sender` = { token,
+ * until }, taken or renewed by claimStep in the same stamp as its decision, so a crash leaves both.
+ * Another live lease makes claimStep answer send_busy; an expired one is taken over. After each
+ * request the wanted state is read again, so the last request Twilio receives always matches the
+ * newest committed decision: an older resume or pause still in flight, in this process or in another,
+ * can never land after a newer decision. The lease is released when the pass ends (cleared by its last
+ * claim, or by releaseLease when the pass stops early).
+ *
+ * A crash after a decision leaves `pending` set, and the next
+ * stored utterance or the timer finishes it. A pause whose outcome is unknown (timeout, socket reset,
+ * 5xx) keeps `pending` and the window, so the resume still goes out at the window end (resuming a
  * recording that never paused is harmless).
+ *
+ * The decision makers (a card trigger, the window-end timer, which is the resume guarantee) that find
+ * the lease busy retry on a short timer, one retry per call, holding no connection between attempts,
+ * and give up once the lease would have expired plus a margin (claimStep takes over an expired lease
+ * anyway, and the window-end timer and later utterances cover the rest). A stored utterance that finds
+ * it busy skips. LEASE_MS is above the Twilio request timeout, so a crashed sender blocks the others
+ * for seconds only.
  *
  * Risk: if a resume fails, the rest of that call's recording is silent and the post-call transcript
  * loses it. The gate is the instant off switch: off starts no new pause, and a running pause still
  * ends on time. Never throws, never on the webhook's response path.
  */
 
+const crypto = require('crypto');
 const twilio = require('twilio');
+const RequestClient = require('twilio/lib/base/RequestClient');
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
@@ -50,10 +59,19 @@ const CURRENT_RECORDING = 'Twilio.CURRENT';
 const TERMINAL_RESUME_CODES = new Set(['16108', '21220', '20404']);
 // One pass sends at most this many requests (a resume, then the pause that replaced it, ...).
 const MAX_SENDS_PER_PASS = 4;
+// A request that takes longer is abandoned (an unknown outcome, handled like any other lost response).
+const REQUEST_TIMEOUT_MS = 5 * 1000;
+// The sender's lease is longer than the longest request, plus the claim and record steps around it.
+const LEASE_MS = 8 * 1000;
+const RETRY_MS = 250;
+const RETRY_MARGIN_MS = 2 * 1000;
 
 const CARD_INTENT_RE = /\b(?:card\s+numbers?|credit\s+card|debit\s+card|card\s+ending|expir(?:ation|y)\s+date|security\s+code|cvv|cvc|code\s+on\s+the\s+back)\b/i;
 
 const timers = new Map();
+// One busy-retry timer per call.
+const retries = new Map();
+let requestClient = null;
 
 function maskSid(sid) {
   const value = String(sid || '');
@@ -83,7 +101,8 @@ function warn(what, callSid, err) {
 }
 
 async function setRecording(callSid, status) {
-  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  requestClient = requestClient || new RequestClient({ timeout: REQUEST_TIMEOUT_MS });
+  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN, { httpClient: requestClient });
   const update = { status };
   if (status === 'paused') update.pauseBehavior = 'silence';
   await client.calls(callSid).recordings(CURRENT_RECORDING).update(update);
@@ -111,22 +130,6 @@ async function withCallLock(callSid, fn) {
   });
 }
 
-// Hold the call's send lock while fn runs: its Twilio requests go out one at a time, across processes.
-// The transaction writes nothing and is only the lock's owner; the decisions use their own transactions.
-// wait=false skips (and sends nothing) when another sender holds it.
-async function withSendLock(callSid, wait, fn) {
-  return db.transaction(async (trx) => {
-    const key = [`live_card_pause_send:${callSid}`];
-    if (wait) {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', key);
-    } else {
-      const res = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS locked', key);
-      if (!res?.rows?.[0]?.locked) return { action: 'send_busy' };
-    }
-    return fn();
-  });
-}
-
 async function stampCardPause(conn, callSid, next) {
   return conn('call_log')
     .where('twilio_call_sid', callSid)
@@ -143,27 +146,55 @@ async function stampCardPause(conn, callSid, next) {
 // Open = the recording is, or may still be, paused: no resume has been confirmed yet.
 const isPaused = (state) => !!state.paused_at && !state.resumed_at;
 
-// Decide, under the lock, what request this call needs next (if any) and commit the decision first.
-async function claimStep(callSid, { slackMs = 0, allowPause = true } = {}) {
-  return withCallLock(callSid, async (trx, state) => {
-    if (!isPaused(state)) return { action: 'none' };
-    const dueAtMs = new Date(state.resume_due_at).getTime();
-    let kind = state.pending || null;
-    if (dueAtMs - slackMs <= Date.now() && kind !== 'resume') {
-      if (kind === 'pause' && !state.pause_sent) {
-        // No pause request was ever sent and the window is over: there is nothing to undo.
-        await stampCardPause(trx, callSid, { ...state, resumed_at: new Date().toISOString(), pending: null });
-        return { action: 'none', reason: 'pause_not_sent' };
-      }
-      // Whatever the recording is doing, it must run again now (a resume of a running one is harmless).
-      kind = 'resume';
-      await stampCardPause(trx, callSid, { ...state, pending: 'resume' });
+// Decide what request this call needs next (if any), from the state as it is now. Returns the answer
+// and the state to commit with it: a send also takes or renews this pass's lease; any answer that
+// sends nothing clears this pass's own lease.
+function planClaim(state, token, { slackMs = 0, allowPause = true }) {
+  const now = Date.now();
+  const mine = state.sender?.token === token;
+  const clearMine = (st) => (mine ? { ...st, sender: null } : st);
+  if (!isPaused(state)) return { res: { action: 'none' }, next: clearMine(state) };
+  const dueAtMs = new Date(state.resume_due_at).getTime();
+  let kind = state.pending || null;
+  let next = state;
+  if (dueAtMs - slackMs <= now && kind !== 'resume') {
+    if (kind === 'pause' && !state.pause_sent) {
+      // No pause request was ever sent and the window is over: there is nothing to undo.
+      const closed = { ...state, resumed_at: new Date(now).toISOString(), pending: null };
+      return { res: { action: 'none', reason: 'pause_not_sent' }, next: clearMine(closed) };
     }
-    // Gate off starts no pause of its own; the window end still resumes.
-    if (!kind || (kind === 'pause' && !allowPause)) return { action: 'not_due', dueAtMs };
-    if (kind === 'pause') await stampCardPause(trx, callSid, { ...state, pause_sent: true });
-    return { send: kind, dueAtMs, first: !state.pause_sent };
+    // Whatever the recording is doing, it must run again now (a resume of a running one is harmless).
+    kind = 'resume';
+    next = { ...state, pending: 'resume' };
+  }
+  // Gate off starts no pause of its own; the window end still resumes.
+  if (!kind || (kind === 'pause' && !allowPause)) return { res: { action: 'not_due', dueAtMs }, next: clearMine(next) };
+  const lease = state.sender;
+  if (lease && lease.token !== token && Number(lease.until) > now) return { res: { action: 'send_busy', dueAtMs }, next };
+  next = { ...next, sender: { token, until: now + LEASE_MS }, ...(kind === 'pause' ? { pause_sent: true } : {}) };
+  return { res: { send: kind, dueAtMs, first: !state.pause_sent }, next };
+}
+
+// Commit the decision (and the lease with it) before any Twilio request is sent.
+async function claimStep(callSid, token, opts) {
+  return withCallLock(callSid, async (trx, state) => {
+    const { res, next } = planClaim(state, token, opts || {});
+    if (next !== state) await stampCardPause(trx, callSid, next);
+    return res;
   });
+}
+
+// Give the lease back when a pass stops without a claim that cleared it (an error, the send cap).
+async function releaseLease(callSid, token) {
+  try {
+    await withCallLock(callSid, async (trx, state) => {
+      if (state.sender?.token === token) await stampCardPause(trx, callSid, { ...state, sender: null });
+      return { action: 'none' };
+    });
+  } catch (err) {
+    // The lease expires by itself.
+    warn('lease release failed', callSid, err);
+  }
 }
 
 // What a confirmed request does to the state. Never touches a decision committed while it was in flight.
@@ -228,25 +259,59 @@ async function sendStep(callSid, step) {
 }
 
 // Send what is pending, then read the wanted state again and send again if a newer decision replaced
-// it (a resume in flight when a card trigger moved the window: the pause goes out after it).
+// it (a resume in flight when a card trigger moved the window: the pause goes out after it). One token
+// owns the lease for the whole pass; no connection is held while a request is in flight.
 async function drain(callSid, opts) {
+  const token = crypto.randomUUID();
   let sent = null;
-  for (let i = 0; i < MAX_SENDS_PER_PASS; i += 1) {
-    const step = await claimStep(callSid, opts);
-    if (!step.send) return sent ? { ...step, action: sent } : step;
-    const out = await sendStep(callSid, step);
-    if (out.error_code) return out;
-    sent = out.action;
+  let holding = false;
+  try {
+    for (let i = 0; i < MAX_SENDS_PER_PASS; i += 1) {
+      const step = await claimStep(callSid, token, opts);
+      holding = !!step.send;
+      if (!step.send) return sent ? { ...step, action: sent } : step;
+      const out = await sendStep(callSid, step);
+      if (out.error_code) return out;
+      sent = out.action;
+    }
+    return { action: sent };
+  } finally {
+    if (holding) await releaseLease(callSid, token);
   }
-  return { action: sent };
 }
 
-// A decision maker (a card trigger, the timer) waits for the send lock, then drains.
-const reconcile = (callSid, opts) => withSendLock(callSid, true, () => drain(callSid, opts));
+// A decision maker that finds the lease busy retries on a short timer, never stacked per call, until
+// the lease would have expired plus a margin. It holds no connection between attempts.
+function scheduleRetry(callSid, stopAtMs) {
+  if (retries.has(callSid)) return;
+  const stopAt = stopAtMs || Date.now() + LEASE_MS + RETRY_MARGIN_MS;
+  const timer = setTimeout(async () => {
+    retries.delete(callSid);
+    try {
+      const out = await drain(callSid, { slackMs: TIMER_SLACK_MS, allowPause: isEnabled('callRecordingCardPause') });
+      if (out.action === 'send_busy') {
+        if (Date.now() < stopAt) scheduleRetry(callSid, stopAt);
+      } else if (out.dueAtMs && !timers.has(callSid)) {
+        armTimer(callSid, out.dueAtMs);
+      }
+    } catch (err) {
+      warn('retry failed', callSid, err);
+    }
+  }, RETRY_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+  retries.set(callSid, timer);
+}
+
+// A decision maker (a card trigger, the timer) drains, and retries if another sender holds the lease.
+async function reconcile(callSid, opts) {
+  const out = await drain(callSid, opts);
+  if (out.action === 'send_busy') scheduleRetry(callSid);
+  return out;
+}
 
 // The ordinary stored-utterance path. A call with no open pause costs one plain read and no
-// transaction; a pause not yet due with nothing pending costs the same. Otherwise it drains, but never
-// waits for the send lock: the holder claims again after its request, and the timer covers the end.
+// transaction; a pause not yet due with nothing pending costs the same. Otherwise it drains, but a busy
+// lease is skipped: the holder claims again after its request, and the timer covers the end.
 async function selfHeal(callSid, opts) {
   const row = await readCardPauseRow(db, callSid);
   if (!row) return { action: 'none', reason: 'not_started_here' };
@@ -254,9 +319,7 @@ async function selfHeal(callSid, opts) {
   if (!isPaused(state)) return { action: 'none' };
   const dueAtMs = new Date(state.resume_due_at).getTime();
   if (!state.pending && dueAtMs > Date.now()) return { action: 'not_due', dueAtMs };
-  const out = await withSendLock(callSid, false, () => drain(callSid, opts));
-  // Busy: hand back the stored end so a restart that lost the timer arms it again.
-  return out.action === 'send_busy' ? { ...out, dueAtMs } : out;
+  return drain(callSid, opts);
 }
 
 function armTimer(callSid, dueAtMs) {
@@ -264,8 +327,9 @@ function armTimer(callSid, dueAtMs) {
   const timer = setTimeout(() => {
     timers.delete(callSid);
     reconcile(callSid, { slackMs: TIMER_SLACK_MS, allowPause: isEnabled('callRecordingCardPause') }).then((out) => {
-      // Another process extended the pause (or a pause is still open): wait for the end.
-      if (out?.dueAtMs) armTimer(callSid, out.dueAtMs);
+      // Another process extended the pause (or a pause is still open): wait for the end. A busy lease
+      // is the retry's job, not a reason to fire again at once.
+      if (out?.dueAtMs && out.action !== 'send_busy') armTimer(callSid, out.dueAtMs);
     }).catch(() => {});
   }, Math.max(0, dueAtMs - Date.now()));
   if (typeof timer.unref === 'function') timer.unref();
@@ -324,5 +388,5 @@ module.exports = {
   onUtteranceStored,
   isCardIntent,
   PAUSE_MS,
-  _test: { timers },
+  _test: { timers, retries, LEASE_MS, REQUEST_TIMEOUT_MS },
 };
