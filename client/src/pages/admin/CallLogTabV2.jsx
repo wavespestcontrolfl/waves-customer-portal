@@ -203,6 +203,24 @@ export function callSummaryFor(call) {
   return { text: earlyText, early: true };
 }
 
+// While a call's summary is still being written in the background, an open Calls tab reloads every
+// SUMMARY_POLL_MS so it shows the early summary, then the recording pipeline's own summary. Bounded: a call stops
+// counting SUMMARY_WAIT_MS after its live text stopped.
+export const SUMMARY_POLL_MS = 20 * 1000;
+const SUMMARY_WAIT_MS = 10 * 60 * 1000;
+// The early summary is claimed about 3 s after the stop; a call with no claim by then gets none (gate off).
+const SUMMARY_CLAIM_WAIT_MS = 60 * 1000;
+
+export function awaitingSummary(call, now = Date.now()) {
+  const live = parseJsonObject(call?.metadata)?.live_transcription;
+  const stopped = Date.parse(live?.stopped_at);
+  if (!Number.isFinite(stopped) || now - stopped > SUMMARY_WAIT_MS) return false;
+  const shown = callSummaryFor(call);
+  if (shown && !shown.early) return false; // the recording pipeline's summary is in
+  if (shown?.early || live?.early_summary_claimed_at) return true; // written, or being written
+  return now - stopped <= SUMMARY_CLAIM_WAIT_MS;
+}
+
 function getCallDisplayName(call) {
   const linkedName = call.first_name
     ? `${call.first_name} ${call.last_name || ""}`.trim()
@@ -604,6 +622,20 @@ export default function CallLogTabV2() {
   useEffect(() => {
     loadCalls();
   }, []);
+  // A call whose summary is still being written (awaitingSummary): reload until it lands. A hidden tab skips the
+  // reload but keeps checking, and a failed reload still schedules the next one.
+  const [summaryTick, setSummaryTick] = useState(0);
+  useEffect(() => {
+    if (!calls.some((c) => awaitingSummary(c))) return undefined;
+    const t = setTimeout(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        setSummaryTick((n) => n + 1);
+        return;
+      }
+      Promise.resolve(loadCalls(callLogSearch.trim())).finally(() => setSummaryTick((n) => n + 1));
+    }, SUMMARY_POLL_MS);
+    return () => clearTimeout(t);
+  }, [calls, summaryTick]);
   useEffect(() => {
     const t = setTimeout(() => {
       loadCalls(callLogSearch.trim());
