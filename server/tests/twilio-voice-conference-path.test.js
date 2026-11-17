@@ -23,6 +23,7 @@ jest.mock('../services/call-conference-path', () => ({
   claimAccept: jest.fn(),
   startCallerRecording: jest.fn(async () => 'started'),
   closeForCallerEnd: jest.fn(async () => 0),
+  conferenceRingOn: jest.fn(() => false),
   loadState: jest.fn(async () => ({ legs: {} })),
   endLegs: jest.fn(async () => 0),
   onStaffLegStatus: jest.fn(async () => 'waiting'),
@@ -83,6 +84,7 @@ beforeEach(() => {
   cp.startCallerRecording.mockReset().mockResolvedValue('started');
   cp.loadState.mockReset().mockResolvedValue({ legs: {} });
   cp.onStaffLegStatus.mockReset().mockResolvedValue('waiting');
+  cp.conferenceRingOn.mockReset().mockReturnValue(false);
   primeDb();
 });
 
@@ -235,14 +237,11 @@ describe('/conference-staff-accept', () => {
     expect(cp.closeForCallerEnd).toHaveBeenCalledWith(SID);
   });
 
-  test('the claim cannot be read: join anyway, but end no leg and start nothing (another leg may have won)', async () => {
+  test('the claim cannot be read: <Hangup/> as today, never a join the no-answer clean-up would end', async () => {
     cp.claimAccept.mockRejectedValue(new Error('pg down'));
-    const res = await press();
-    expect(res.body).toContain(STAFF_ROOM);
-    await new Promise(setImmediate);
-    expect(cp.endLegs).not.toHaveBeenCalled();
+    expect((await press()).body).toBe(`${XML}<Response><Hangup/></Response>`);
     expect(cp.startCallerRecording).not.toHaveBeenCalled();
-    expect(cp.updateState).not.toHaveBeenCalled();
+    expect(cp.endLegs).not.toHaveBeenCalled();
   });
 });
 
@@ -305,6 +304,14 @@ describe('/call-status', () => {
     jest.useFakeTimers();
     primeStatus({ id: 1, status: 'in-progress', metadata: { conference_path: { room: `waves-${SID}` } }, created_at: new Date() });
     expect((await status('completed')).statusCode).toBe(200);
+    expect(cp.closeForCallerEnd).toHaveBeenCalledWith(SID);
+  });
+
+  test('gate on: a ring claimed after this callback read the row is still closed after the commit', async () => {
+    jest.useFakeTimers();
+    cp.conferenceRingOn.mockReturnValue(true);
+    primeStatus({ id: 1, status: 'in-progress', metadata: {}, created_at: new Date() });
+    await status('completed');
     expect(cp.closeForCallerEnd).toHaveBeenCalledWith(SID);
   });
 

@@ -52,9 +52,12 @@ const OPEN_SQL = [
   "(metadata #>> '{conference_path,voicemail_at}') IS NULL",
   "(metadata #>> '{conference_path,closed_at}') IS NULL",
 ];
+// The caller's call has no terminal status yet (the same set as a staff leg's). Built from constants.
+const CALLER_LIVE_SQL = `(status IS NULL OR status NOT IN (${[...TERMINAL_LEG_STATUSES].map((s) => `'${s}'`).join(', ')}))`;
 
 // Read through the module object at call time: a suite that mocks feature-gates as a bare object reads off.
 const conferenceMode = () => (typeof featureGates.callConferencePathMode === 'function' ? featureGates.callConferencePathMode() : 'off');
+const conferenceRingOn = () => conferenceMode() !== 'off';
 const masked = (sid) => (sid ? `…${String(sid).slice(-6)}` : 'none');
 // Errors are logged by code only: a Twilio error message can carry a phone number.
 const errorCode = (err) => String(err?.code || err?.status || err?.name || 'error');
@@ -126,7 +129,8 @@ function stampLeg(callSid, index, fields) {
   return updateState(callSid, Object.entries(fields).map(([key, value]) => [['legs', String(index), key], value]));
 }
 
-// { claim: 'claimed' | 'retry' (a redelivered redirect: the legs already ring) | 'no_row', state }.
+// { claim: 'claimed' | 'retry' (a redelivered redirect: the legs already ring) | 'ended' (the caller's
+// call already has a terminal status: no leg may ring for it) | 'no_row', state }.
 async function claimStart(callSid, { legCount, ringTimeoutSec }) {
   const state = {
     room: roomFor(callSid),
@@ -138,13 +142,16 @@ async function claimStart(callSid, { legCount, ringTimeoutSec }) {
   };
   const claimed = await db('call_log').where('twilio_call_sid', callSid)
     .whereRaw("(metadata -> 'conference_path') IS NULL")
+    .whereRaw(CALLER_LIVE_SQL)
     .update({
       metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{conference_path}', ?::jsonb, true)", [JSON.stringify(state)]),
       updated_at: new Date(),
     });
   if (Number(claimed) > 0) return { claim: 'claimed', state };
-  const existing = await loadState(callSid);
-  return { claim: existing ? 'retry' : 'no_row', state: existing };
+  const row = await db('call_log').where('twilio_call_sid', callSid).first('metadata', 'status');
+  const existing = readState(row);
+  if (existing) return { claim: 'retry', state: existing };
+  return { claim: row ? 'ended' : 'no_row', state: null };
 }
 
 async function placeStaffLegs({ callSid, numbers, ringTimeoutSec, callerFrom, wavesLine, callToken }) {
@@ -339,6 +346,7 @@ module.exports = {
   CALL_SID_RE,
   roomFor,
   admitsConferencePath,
+  conferenceRingOn,
   stashCallToken,
   takeCallToken,
   claimStart,

@@ -25,14 +25,16 @@ const SID = `CA${'a'.repeat(32)}`;
 const LEG0 = `CA${'0'.repeat(31)}1`;
 const LEG1 = `CA${'0'.repeat(31)}2`;
 
-function fakeCallLog(metadata = {}, { exists = true } = {}) {
-  const row = { exists, metadata: JSON.parse(JSON.stringify(metadata)) };
+function fakeCallLog(metadata = {}, { exists = true, status = 'in-progress' } = {}) {
+  const row = { exists, status, metadata: JSON.parse(JSON.stringify(metadata)) };
   const at = (obj, parts) => parts.reduce((o, k) => (o == null ? undefined : o[k]), obj);
   const holds = (sql) => {
     let m = sql.match(/^\(metadata -> 'conference_path'\) IS (NOT )?NULL$/);
     if (m) return (row.metadata?.conference_path != null) === Boolean(m[1]);
     m = sql.match(/^\(metadata #>> '\{([^}]*)\}'\) IS (NOT )?NULL$/);
     if (m) return (at(row.metadata, m[1].split(',')) != null) === Boolean(m[2]);
+    m = sql.match(/^\(status IS NULL OR status NOT IN \((.*)\)\)$/);
+    if (m) return row.status == null || !m[1].split(', ').map((s) => s.replace(/'/g, '')).includes(row.status);
     throw new Error(`unknown condition: ${sql}`);
   };
   const apply = ({ sql, bindings }) => {
@@ -49,7 +51,7 @@ function fakeCallLog(metadata = {}, { exists = true } = {}) {
     const chain = {
       where: jest.fn(() => chain),
       whereRaw: jest.fn((sql) => { conditions.push(sql); return chain; }),
-      first: jest.fn(async () => (row.exists ? { metadata: JSON.parse(JSON.stringify(row.metadata)) } : undefined)),
+      first: jest.fn(async () => (row.exists ? { status: row.status, metadata: JSON.parse(JSON.stringify(row.metadata)) } : undefined)),
       update: jest.fn(async (data) => {
         if (!row.exists || !conditions.every(holds)) return 0;
         apply(data.metadata);
@@ -138,6 +140,10 @@ describe('claimStart + placeStaffLegs', () => {
     expect((await cp.claimStart(SID, { legCount: 2, ringTimeoutSec: 30 })).claim).toBe('retry');
     fakeCallLog({}, { exists: false });
     expect((await cp.claimStart(SID, { legCount: 2, ringTimeoutSec: 30 })).claim).toBe('no_row');
+    // The caller hung up first: its terminal status refuses the claim, so no staff phone rings.
+    const ended = fakeCallLog({}, { status: 'completed' });
+    expect((await cp.claimStart(SID, { legCount: 2, ringTimeoutSec: 30 })).claim).toBe('ended');
+    expect(ended.metadata.conference_path).toBeUndefined();
   });
 
   test('legs ring the press-1 screen; the CallToken shows the caller, a refusal falls back to the Waves line', async () => {

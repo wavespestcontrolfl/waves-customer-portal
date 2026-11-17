@@ -3857,8 +3857,10 @@ router.post('/call-status', async (req, res) => {
     if (!isOutbound && CallStatus === 'completed' && !internalLine(req)) {
       scheduleRecordingRecovery(CallSid);
     }
-    // The caller's call ended during a conference ring: no staff leg may keep ringing for it.
-    if (!isOutbound && conferenceRing && TERMINAL_CALL_STATUSES.has(CallStatus)) {
+    // The caller's call ended during a conference ring: no staff leg may keep ringing for it. With the
+    // gate on this runs after the commit even when the row read above had no ring yet: a ring claimed
+    // in between is closed here, and the claim itself refuses a call whose terminal status landed first.
+    if (!isOutbound && TERMINAL_CALL_STATUSES.has(CallStatus) && (conferenceRing || conferencePath.conferenceRingOn())) {
       void conferencePath.closeForCallerEnd(CallSid)
         .catch((err) => logger.warn(`[conference] leg clean-up failed for ${maskSid(CallSid)}: ${err.message}`));
     }
@@ -3982,16 +3984,9 @@ router.post('/conference-staff-accept', async (req, res) => {
   };
   try {
     if (String(req.body?.Digits || '').trim() !== '1' || !conferencePath.CALL_SID_RE.test(parentSid) || !legSid) return goodbye();
-    let claim;
-    try {
-      claim = await conferencePath.claimAccept(parentSid, legSid);
-    } catch (err) {
-      // The database cannot say who won: join anyway, so the caller still reaches a person. Another leg
-      // may have won, so this one takes none of the first press 1's steps: ending "the other legs"
-      // could hang up the winner, and a second recording or forward_acceptance would replace its own.
-      logger.error(`[conference] accept claim failed for ${maskSid(parentSid)}; joining: ${err.message}`);
-      claim = { won: true, first: false };
-    }
+    // A claim the database cannot decide is an error (<Hangup/>, as today's accept): a leg that joined
+    // without the claim would be ended by the no-answer clean-up mid-conversation.
+    const claim = await conferencePath.claimAccept(parentSid, legSid);
     if (!claim.won) return goodbye();
     if (claim.first) {
       const recording = await conferencePath.startCallerRecording(parentSid);
