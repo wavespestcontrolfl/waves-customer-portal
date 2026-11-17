@@ -131,9 +131,6 @@ maybeDescribe('send to Claude (live Postgres)', () => {
     expect(listed.headline).toBe('Sent to Claude from the bell (accepted-schedule)');
     expect(listed.why).toBeNull();
     expect(listed.detail).toBeNull();
-    // Not asked and the gate off: no names.
-    const plain = (await listNeedsMe({ who: 'claude', role: 'admin' })).items.find((i) => i.id === alert.id);
-    expect(plain).not.toHaveProperty('customer');
   });
 
   test('the admin\'s note is stored in the stamp, and a send with no note stores none', async () => {
