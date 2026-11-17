@@ -441,15 +441,23 @@ async function closeForCallerEnd(callSid) {
   if (!closed) return 0;
   // Every leg, the winner too: a staff member still hearing the announcement must not join an empty room.
   const state = await loadState(callSid);
-  return (await endLegs(state)) + (await endRingingTransferLeg(state));
+  return (await endLegs(state)) + (await endTransferLegs(state));
 }
 
-// The owner's transfer call, while it still rings for a caller who hung up. Best effort.
-async function endRingingTransferLeg(state) {
+// The owner's transfer call, for a caller who hung up: while it still rings, and after he took the call. His leg is then the
+// winning leg, which the ring's own legs do not include, and he may be outside the room (hearing "Connecting.", on his
+// hold menu): the room's end alone would not reach him there. Best effort.
+async function endTransferLegs(state) {
+  const ringLegs = new Set(Object.values(state?.legs || {}).map((leg) => leg?.sid).filter(Boolean));
   const transfer = state?.hold?.transfer;
-  if (transfer?.status !== 'ringing' || !transfer.leg_sid) return 0;
-  return client().calls(transfer.leg_sid).update({ status: 'completed' })
-    .then(() => 1, (err) => { logger.info(`[conference] transfer leg ${masked(transfer.leg_sid)} not ended (${errorCode(err)})`); return 0; });
+  const sids = new Set();
+  if (transfer?.status === 'ringing' && transfer.leg_sid) sids.add(transfer.leg_sid);
+  if (state?.accepted_leg_sid && !ringLegs.has(state.accepted_leg_sid)) sids.add(state.accepted_leg_sid);
+  if (!sids.size) return 0;
+  const api = client();
+  const ended = await Promise.all([...sids].map((sid) => api.calls(sid).update({ status: 'completed' })
+    .then(() => 1, (err) => { logger.info(`[conference] transfer leg ${masked(sid)} not ended (${errorCode(err)})`); return 0; })));
+  return ended.reduce((sum, n) => sum + n, 0);
 }
 
 // /call-complete?conf=1: a conference <Dial> sends no DialCallSid or DialCallDuration and reports

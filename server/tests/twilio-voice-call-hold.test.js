@@ -654,7 +654,9 @@ describe('/conference-transfer-wait (the staff while it rings)', () => {
 describe('after the owner took the transfer, only his leg rejoins with star', () => {
   // The staff who pressed 2 (LEG) press a key just as the owner (TLEG) takes the call, or come back by a loop: they join
   // as a second staff (no star, no staff-left action). The owner's own leg rejoins as the call's staff.
-  const TAKEN = VIEW({ ...RING, status: 'accepted', ringing: false }, { phase: 'returned', applied: 'returned' });
+  const TAKEN = VIEW({ ...RING, status: 'accepted', ringing: false }, { phase: 'returned', applied: 'returned', winnerLegSid: TLEG });
+  // He took the call, then pressed star himself: a new hold, which starts with no transfer. His leg is still the winner.
+  const HIS_HOLD = VIEW(null, { phase: 'held', applied: 'held', winnerLegSid: TLEG });
   const SAID = say('Your call is transferred. Stay on to introduce the caller, or hang up.');
 
   test('a press 1 from the staff who pressed 2: the second staff join; from the owner leg: the staff <Dial> with star', async () => {
@@ -683,6 +685,26 @@ describe('after the owner took the transfer, only his leg rejoins with star', ()
       callHold.holdState.mockResolvedValue(VIEW({ ...RING, status, ringing: false }, { phase: 'returned', applied: 'returned' }));
       expect((await post('/conference-staff-menu-choice', { body: { Digits: '1', CallSid: LEG } })).body).toBe(response(STAFF_ROOM_ON));
     }
+  });
+
+  test('a new hold of his before their wait loop returns: the staff who pressed 2 still join as a second staff', async () => {
+    callHold.isEnabled.mockReturnValue(true);
+    callHold.transferOn.mockReturnValue(true);
+    callHold.checkHold.mockResolvedValue(HIS_HOLD);
+    expect((await post('/conference-transfer-wait', { body: { CallSid: LEG } })).body).toBe(response(`${SAID}${SECOND_STAFF}`));
+    // Their press 1 on that hold: the caller comes back for him, and they join as the second staff.
+    callHold.endHold.mockResolvedValue('returned');
+    callHold.holdState.mockResolvedValue({ ...HIS_HOLD, phase: 'returned', applied: 'returned' });
+    expect((await post('/conference-staff-menu-choice', { body: { Digits: '1', CallSid: LEG } })).body).toBe(response(`${SAID}${SECOND_STAFF}`));
+    // His own menu on that hold is the hold menu, as for any staff.
+    expect((await post('/conference-staff-menu', { body: { CallSid: TLEG }, query: { first: '1' } })).body).toContain(say(MENU_LINE));
+  });
+
+  test('the transfer failed while the staff who pressed 2 are still the winner: "No answer." and the press 1 return', async () => {
+    callHold.isEnabled.mockReturnValue(true);
+    callHold.checkHold.mockResolvedValue(VIEW({ ...RING, status: 'failed', ringing: false }, { winnerLegSid: LEG }));
+    callHold.endHold.mockResolvedValue('returned');
+    expect((await post('/conference-transfer-wait', { body: { CallSid: LEG } })).body).toBe(response(`${say('No answer.')}${STAFF_ROOM_ON}`));
   });
 
   test('the menu loop of the staff who pressed 2 (any other key leads there): the second staff join; the owner rejoins with star', async () => {

@@ -2132,6 +2132,21 @@ describe('the warm transfer: transferAvailable and startTransfer', () => {
     expect(hold.transferAvailable('+19415550123')).toBe(false);
     process.env.CALL_TRANSFER_TO = '';
     expect(hold.transferAvailable('+19415550123')).toBe(false);
+    // toE164 passes malformed input through: none of these is a target, and none offers the transfer.
+    for (const bad of ['invalid', '+123', '941-555-015', '(141) 555-0150', '+44 20 7946 0000', 'client:owner']) {
+      process.env.CALL_TRANSFER_TO = bad;
+      expect([bad, hold.transferTarget()]).toEqual([bad, null]);
+      expect(hold.transferAvailable('+19415550123')).toBe(false);
+    }
+  });
+
+  test('a malformed CALL_TRANSFER_TO places no call: the transfer fails as not placed', async () => {
+    process.env.CALL_TRANSFER_TO = '+123';
+    seed(heldHold());
+    const events = fakeTwilio();
+    expect(await hold.startTransfer(SID, { legSid: LEG, fromName: 'Virginia' })).toBe('failed');
+    expect(events).toEqual([]);
+    expect(transferOfHold()).toMatchObject({ status: 'failed', end_reason: 'not_placed' });
   });
 
   test('the gate reader is read through the module at call time (a bare mock reads off)', () => {
@@ -2259,6 +2274,8 @@ describe('the warm transfer: acceptTransfer', () => {
     expect(transferOfHold()).toMatchObject({ status: 'accepted', leg_sid: TLEG });
     expect(cpOf().accepted_leg_sid).toBe(TLEG);
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('transfer 1 taken'));
+    // The routes read the winner from the view, across holds.
+    expect((await hold.holdState(SID)).winnerLegSid).toBe(TLEG);
   });
 
   test('a re-press settles again with no new decision and no second unhold', async () => {

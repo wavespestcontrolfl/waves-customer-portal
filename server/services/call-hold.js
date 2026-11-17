@@ -104,7 +104,7 @@ const RequestClient = require('twilio/lib/base/RequestClient');
 const db = require('../models/db');
 const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
-const { toE164 } = require('../utils/phone');
+const { toE164, isValidNanpNumber } = require('../utils/phone');
 const conferencePath = require('./call-conference-path');
 const { TERMINAL_CALL_STATUSES } = require('../utils/call-timeline');
 // The card pause pauses this recording too (see THE CARD PAUSE above). Its rule for the Twilio answers a resume retry
@@ -139,8 +139,12 @@ const SWEEP_LIMIT = 25;
 
 // Read through the module object at call time: a suite that mocks feature-gates as a bare object reads off.
 const isEnabled = () => typeof featureGates.callHoldLive === 'function' && featureGates.callHoldLive();
-// The warm transfer (GATE_CALL_WARM_TRANSFER): the one number a transfer rings (E.164), or null. Never logged.
-const transferTarget = () => toE164(process.env.CALL_TRANSFER_TO) || null;
+// The warm transfer (GATE_CALL_WARM_TRANSFER): the one US number a transfer rings (E.164), or null when it is unset or not a
+// valid US number (toE164 passes malformed input through, so the result is checked). Never logged.
+const transferTarget = () => {
+  const target = toE164(process.env.CALL_TRANSFER_TO);
+  return target && isValidNanpNumber(target) ? target : null;
+};
 const masked = (sid) => (sid ? `…${String(sid).slice(-6)}` : 'none');
 // Errors are logged by code only: a Twilio error message can carry a phone number.
 const errorCode = (err) => String(err?.code || err?.status || err?.name || 'error');
@@ -480,6 +484,9 @@ function viewOf(state) {
     voicemailAt: hold?.voicemail_at || null,
     reason: hold?.voicemail_reason || null,
     transfer: transferView(hold?.transfer),
+    // The call's winning leg, across holds: after a warm transfer it is the owner's leg (the routes join any other leg
+    // as a second staff).
+    winnerLegSid: state?.accepted_leg_sid || null,
   };
 }
 

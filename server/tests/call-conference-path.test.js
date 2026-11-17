@@ -664,12 +664,25 @@ describe('the warm transfer: the caller hangs up while it rings', () => {
     expect(log.updates).toEqual([{ sid: LEG0, status: 'completed' }, { sid: TLEG, status: 'completed' }]);
   });
 
-  test('no call to end: a transfer not placed yet, one that ended, one that was taken (the room end does that), or none', async () => {
-    for (const transfer of [{ n: 1, status: 'ringing', leg_sid: null }, { n: 1, status: 'failed', leg_sid: TLEG }, { n: 1, status: 'accepted', leg_sid: TLEG }, undefined]) {
+  test('no owner call to end: a transfer not placed yet, one that ended, or none (the winner is a ring leg)', async () => {
+    for (const transfer of [{ n: 1, status: 'ringing', leg_sid: null }, { n: 1, status: 'failed', leg_sid: TLEG }, undefined]) {
       fakeCallLog(withHold(transfer));
       const log = fakeTwilio();
       expect(await cp.closeForCallerEnd(SID)).toBe(1);
       expect(log.updates).toEqual([{ sid: LEG0, status: 'completed' }]);
+    }
+  });
+
+  test('after he took the call his leg is the winner and no ring leg: it is ended too, also after a new hold of his', async () => {
+    const taken = (hold) => ({ conference_path: { leg_count: 1, accepted_leg_sid: TLEG, legs: { 0: { sid: LEG0 } }, hold } });
+    for (const hold of [
+      { gen: 1, phase: 'returned', applied: 'returned', transfer: { n: 1, status: 'accepted', leg_sid: TLEG } },
+      { gen: 2, phase: 'held', applied: 'held', transfers: 1 }, // his own star: a new hold, which starts with no transfer
+    ]) {
+      fakeCallLog(taken(hold));
+      const log = fakeTwilio();
+      expect(await cp.closeForCallerEnd(SID)).toBe(2);
+      expect(log.updates).toEqual([{ sid: LEG0, status: 'completed' }, { sid: TLEG, status: 'completed' }]);
     }
   });
 
