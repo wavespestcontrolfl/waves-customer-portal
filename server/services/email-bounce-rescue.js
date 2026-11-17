@@ -35,12 +35,15 @@
  *
  * Self-fix (GATE_CALL_BOUNCE_SELF_FIX, dark; owner 2026-11-17, page
  * NN7Qm52t): a customer's PRIMARY email may take a call-derived fix once
- * per customer when every candidate that is a small fix names the SAME
- * address — same domain, at most 2 changes, and no letter of the bounced
- * address dropped (isSmallFix) — the customer's calls carry it, and it
- * validates with a verified MX and never bounced before. Prod ledger 2026-08 to 2026-11: the one wrong call-derived guess on
- * record dropped a letter; the two right near-miss guesses changed one
- * letter or two dots. Anything else stays a suggestion. With the switch on,
+ * per customer when every candidate names the SAME address, the customer's
+ * calls carry it, and it is a small fix — same domain, at most 2 changes, no
+ * letter of the bounced address dropped (isSmallFix). It must validate with
+ * a verified MX, never have bounced, and never have been on the do-not-email
+ * list, even when that block was released. Prod ledger 2026-08 to 2026-11:
+ * the two right near-miss guesses changed one letter or two dots; the wrong
+ * guess of 11-02 dropped a letter; two other near-miss guesses were
+ * addresses that had bounced months before. Anything else stays a
+ * suggestion. With the switch on,
  * the LLM decode also reads spoken corrections ("knock off that 3-7"), and
  * relookAfterNewCalls re-runs a no-fix address after a later call that
  * talks about email.
@@ -574,36 +577,40 @@ async function hadEarlierSelfFix(customerId) {
   return Boolean(row);
 }
 
-// Never back to a known-bad address: one that bounced before (for anyone)
-// stays out even when its suppression was released. Fail toward the human.
-async function bouncedBefore(email) {
-  const row = await db('email_bounce_rescues')
-    .whereRaw('LOWER(bounced_email) = ?', [email])
-    .first('id')
-    .catch(() => ({ id: 'read_failed' }));
-  return Boolean(row);
+// Never a known-bad address: one that bounced before (for anyone; the
+// ledger) or ever sat on the do-not-email list (any status, so a released
+// block still counts; this also covers bounces from before the ledger) stays
+// out. A failed read counts as known-bad (fail toward the human).
+async function knownBadAddress(email) {
+  const { suppressionCoversEmail } = require('../utils/email-equivalence');
+  const [bounced, blocked] = await Promise.all([
+    db('email_bounce_rescues').whereRaw('LOWER(bounced_email) = ?', [email]).first('id'),
+    db('email_suppressions').where(suppressionCoversEmail(email)).first('id'),
+  ]).catch(() => [{ id: 'read_failed' }]);
+  return Boolean(bounced || blocked);
 }
 
 /**
  * The self-fix outcome, or null. Only a customer's PRIMARY email. Every
- * candidate that is a small fix, from any tier, must name ONE address (two
- * different small fixes = the evidence disagrees, a person decides), and the
- * customer's calls must carry it. The address passes validateCandidate with
- * a verified MX, never bounced before, and the customer has no earlier
+ * candidate, from any tier, must name ONE address (two addresses = the
+ * evidence disagrees, a person decides); the customer's calls must carry it;
+ * and it must be a small fix. The address passes validateCandidate with a
+ * verified MX, is not a known-bad address, and the customer has no earlier
  * self-fix.
  */
 async function selfFixOutcome({ tiers, owner, bouncedEmail, validations }) {
   if (!owner.customer || owner.field !== 'email') return null;
-  const small = tiers.filter((c) => isSmallFix(bouncedEmail, c.email));
-  const addresses = new Set(small.map((c) => normalizeEmail(c.email)));
-  const cand = small.find((c) => CALL_DERIVED_TIERS.has(c.tier));
-  if (addresses.size !== 1 || !cand) return null;
-  const key = normalizeEmail(cand.email);
+  const bounced = normalizeEmail(bouncedEmail);
+  const addresses = new Set(tiers.map((c) => normalizeEmail(c.email)).filter((e) => e && e !== bounced));
+  if (addresses.size !== 1) return null;
+  const [key] = addresses;
+  const cand = tiers.find((c) => CALL_DERIVED_TIERS.has(c.tier) && normalizeEmail(c.email) === key);
+  if (!cand || !isSmallFix(bounced, key)) return null;
   const v = validations.get(key) || await validateCandidate(key, {
     bouncedEmail, ownerCustomerId: owner.customer.id, ownerLeadId: null,
   });
   if (!v.ok || v.mxUnknown) return null;
-  if (await bouncedBefore(key)) return null;
+  if (await knownBadAddress(key)) return null;
   if (await hadEarlierSelfFix(owner.customer.id)) return null;
   return { status: 'applied', tier: cand.tier, candidate: key, evidence: cand, selfFix: true };
 }

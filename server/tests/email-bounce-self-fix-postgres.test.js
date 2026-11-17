@@ -6,7 +6,9 @@
  *    same call is never read twice.
  *  - the once-per-customer check reads the ledger's jsonb evidence: after one self-fix, a bounce of the fixed address is a
  *    suggestion for a person, not a second self-fix.
- *  - a self-fix never moves back to an address that bounced before, even when its suppression was released.
+ *  - a re-look runs the normal rescue on the same ledger row, so a later call can save a self-fix there.
+ *  - a self-fix never moves to a known-bad address: one with a ledger bounce row (even with no block left), or one with
+ *    a do-not-email row in any status (a released block, or a bounce from before the ledger existed).
  * A hard bounce suppresses the address before the rescue runs (the webhook's order), so the suite seeds that row too.
  * All names, phones and addresses synthetic.
  *
@@ -171,11 +173,45 @@ describeOrSkip('bounce self-fix SQL (Postgres)', () => {
     expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
   });
 
-  it('never moves back to an address that bounced before, even after its suppression was released', async () => {
+  it('a later call that talks about email saves a self-fix on the same ledger row, through the normal rescue', async () => {
+    const bounced = addr('kwintar');
+    const fixed = addr('kwintor');
+    const { id, phone } = await seedCustomer(bounced);
+    const row = await seedNoFixRow({ customerId: id, bouncedEmail: bounced });
+    await seedSuppression(bounced);
+    await seedCall({ customerId: id, phone, transcription: `Caller: my email is wrong, it is ${fixed}`, extraction: { email: fixed } });
+
+    const summary = await rescue.relookAfterNewCalls({
+      rescueFn: (email, opts) => (email === bounced ? rescue.rescueBouncedAddress(email, opts) : Promise.resolve({})),
+    });
+    expect(summary).toMatchObject({ fixed: 1 });
+    expect((await db('customers').where({ id }).first('email')).email).toBe(fixed);
+    const after = await db('email_bounce_rescues').where({ id: row.id }).first();
+    expect(after).toMatchObject({ status: 'applied', applied_by: 'relook', candidate_email: fixed });
+    expect(after.evidence).toMatchObject({ self_fix: true });
+    expect(await db('email_bounce_rescues').where({ customer_id: id }).count('* as n').first()).toMatchObject({ n: '1' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(deliverOpsDigest).not.toHaveBeenCalled();
+  });
+
+  it('never moves to an address with a ledger bounce row, even when no block is left for it', async () => {
     const older = addr('oldbox');
     const current = addr('oldbax');
     const { id, phone } = await seedCustomer(current);
     await db('email_bounce_rescues').insert({ bounced_email: older, customer_id: id, status: 'no_candidate', evidence: JSON.stringify({}) });
+    await seedSuppression(current);
+    await seedCall({ customerId: id, phone, transcription: `Caller: it is ${older}`, extraction: { email: older } });
+
+    const r = await rescue.rescueBouncedAddress(current);
+    expect(r).toMatchObject({ status: 'suggested', candidate: older });
+    expect(r.selfFix).toBeUndefined();
+    expect((await db('customers').where({ id }).first('email')).email).toBe(current);
+  });
+
+  it('never moves to an address whose do-not-email block was released (a bounce from before the ledger)', async () => {
+    const older = addr('pastbox');
+    const current = addr('pastbax');
+    const { id, phone } = await seedCustomer(current);
     await seedSuppression(older, 'released');
     await seedSuppression(current);
     await seedCall({ customerId: id, phone, transcription: `Caller: it is ${older}`, extraction: { email: older } });

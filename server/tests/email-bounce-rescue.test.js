@@ -632,10 +632,15 @@ describe('rescueBouncedAddress self-fix', () => {
   ];
 
   // A table fake per db() call. The ledger answers the once-per-customer
-  // probe (its whereRaw names self_fix) with `earlierSelfFix`; every other
-  // ledger read finds nothing. `ownerProbe` picks which findOwner probe hits
-  // (1 = primary email, 2 = service contact).
-  function world({ customer = RAE, calls = RAE_CALLS, earlierSelfFix = false, bouncedBefore = [], ownerProbe = 1, customerUpdates = 1 } = {}) {
+  // probe (its whereRaw names self_fix) with `earlierSelfFix`, and the
+  // bounced-before probe with `bouncedBefore`; every other ledger read finds
+  // nothing. The do-not-email list holds `blockedBefore` as RELEASED rows: an
+  // any-status read finds them, the active-only read does not. `ownerProbe`
+  // picks which findOwner probe hits (1 = primary email, 2 = service contact).
+  function world({
+    customer = RAE, calls = RAE_CALLS, earlierSelfFix = false, bouncedBefore = [], blockedBefore = [],
+    ownerProbe = 1, customerUpdates = 1,
+  } = {}) {
     const ledger = { inserts: [], updates: [] };
     const notes = [];
     let customerProbes = 0;
@@ -658,6 +663,22 @@ describe('rescueBouncedAddress self-fix', () => {
         });
         chain.insert = jest.fn((row) => { ledger.inserts.push(row); return chain; });
         chain.update = jest.fn((row) => { ledger.updates.push(row); return Promise.resolve(1); });
+        return chain;
+      }
+      if (name === 'email_suppressions') {
+        const chain = makeChain();
+        let probe = null;
+        let activeOnly = false;
+        chain.where = jest.fn((arg) => {
+          if (typeof arg === 'function') {
+            const ctx = { whereRaw: (sql, args) => { [probe] = args || []; return ctx; }, orWhereRaw: () => ctx };
+            arg.call(ctx);
+          } else if (arg && arg.status === 'active') {
+            activeOnly = true;
+          }
+          return chain;
+        });
+        chain.first = jest.fn(() => Promise.resolve(!activeOnly && blockedBefore.includes(probe) ? { id: 's-released' } : null));
         return chain;
       }
       if (name === 'customers') {
@@ -763,6 +784,27 @@ describe('rescueBouncedAddress self-fix', () => {
     world({ bouncedBefore: ['lynzafi@yahoo.com'] });
     const r = await rescue.rescueBouncedAddress('lymzafi@yahoo.com');
     expect(r).toMatchObject({ status: 'suggested', candidate: 'lynzafi@yahoo.com' });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it('never moves to an address that was on the do-not-email list, even after that block was released', async () => {
+    process.env.GATE_CALL_BOUNCE_SELF_FIX = 'true';
+    world({ blockedBefore: ['lynzafi@yahoo.com'] });
+    const r = await rescue.rescueBouncedAddress('lymzafi@yahoo.com');
+    expect(r).toMatchObject({ status: 'suggested', candidate: 'lynzafi@yahoo.com' });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it('leaves a small fix to a person when a later call names a different, bigger change', async () => {
+    process.env.GATE_CALL_BOUNCE_SELF_FIX = 'true';
+    world({
+      calls: [...RAE_CALLS, {
+        id: 'call3', created_at: new Date('2026-07-20'),
+        transcription: 'Caller: actually, use lynn.zafiro@yahoo.com', ai_extraction: JSON.stringify({ email: 'lynn.zafiro@yahoo.com' }),
+      }],
+    });
+    const r = await rescue.rescueBouncedAddress('lymzafi@yahoo.com');
+    expect(r).toMatchObject({ status: 'suggested' });
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
