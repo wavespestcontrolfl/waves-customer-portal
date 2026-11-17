@@ -3194,7 +3194,9 @@ function placeholderOfLength(url) {
 // staff lock and exclusion are pickVisitRefusal's (they are rechecked on the
 // locked row); the day-move guard and the person-placed check never hold a
 // windowless due-date row, and AUTO_DISPATCH_REQUIRE_PORTAL_PREFERENCES
-// already turns isCustomerRecurringDispatchEnabled() off.
+// already turns isCustomerRecurringDispatchEnabled() off. The automatic-move
+// limit is not asked: this row is a pick fallback row, which the night run may
+// place at the limit (owner 2026-11-17; move-limit.js pickFallbackDue).
 async function autoDispatchFallbackRefusal(service, now) {
   const adConfig = require('./auto-dispatch/config');
   if (!adConfig.isCustomerRecurringDispatchEnabled()) return 'auto_dispatch_off';
@@ -3208,11 +3210,6 @@ async function autoDispatchFallbackRefusal(service, now) {
   if (SmartRebooker.leavesOwnRound(service.recurring_pattern, dateOnlyString(service.scheduled_date), dueDate, etDateString(now))) return 'out_of_round';
   // An unresolved plan_lapsed alert: RECURRING_PLAN_INACTIVE (same read, same fail-open rule).
   if (!(await require('./auto-dispatch/eligibility').isRecurringPlanActive(service, db)).active) return 'plan_lapsed';
-  // The automatic-move limit, counted from the durable log (fails closed).
-  const moveLimit = require('./auto-dispatch/move-limit');
-  const config = adConfig.getAutoDispatchConfig();
-  const counts = await moveLimit.loadMoveCounts(db, [service.id], config);
-  if (moveLimit.limitSkip(service, counts, config)) return counts ? 'auto_move_limit' : 'pick_check_failed';
   return null;
 }
 
@@ -3517,7 +3514,6 @@ const PICK_REFUSAL_COPY = {
   plan_lapsed: 'This plan has lapsed, so Auto-Dispatch would not book this visit if the customer does not pick.',
   out_of_season: 'A week from now is outside this seasonal plan, so pick a day yourself.',
   out_of_round: 'A week from now is outside this lawn round, so pick a day yourself.',
-  auto_move_limit: 'Auto-Dispatch already moved this visit as many times as it may, so pick a day yourself.',
   office_review_pending: 'This booking is waiting for office review.',
   customer_texts_off: 'This customer does not get texts.',
   text_check_failed: 'Could not check whether this customer gets texts. Try again.',

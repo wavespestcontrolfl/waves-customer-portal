@@ -112,6 +112,93 @@ describe('the verdict', () => {
   });
 });
 
+// Owner 2026-11-17 ("pick limit"): a pick fallback row (handed to the customer,
+// pick-by passed, no window) may be placed at the limit. A placed row counts again.
+describe('the pick fallback exemption', () => {
+  const config = { maxAutoMovesPerVisit: 2 };
+  const now = new Date('2026-11-17T12:00:00Z');
+  const past = '2026-11-17T11:00:00Z';
+  const future = '2026-11-17T13:00:00Z';
+  const atLimit = new Map([['s1', 2]]);
+  const refuse = (id, why) => Object.assign(new Error(`${id} ${why}`), { statusCode: 409 });
+  // Counts come from reschedule_log; the exemption re-read comes from scheduled_services.
+  function tableConn(logRows, serviceRows) {
+    const conn = jest.fn((table) => {
+      const rows = table === 'reschedule_log' ? logRows : serviceRows;
+      const c = new Proxy({}, {
+        get: (_t, prop) => (prop === 'then' ? (res, rej) => Promise.resolve(rows).then(res, rej) : () => c),
+      });
+      return c;
+    });
+    return conn;
+  }
+
+  test.each([
+    ['deadline passed, no window', { id: 's1', customer_pick_by: past, window_start: null }, true],
+    ['deadline passed, a window set (placed): counted', { id: 's1', customer_pick_by: past, window_start: '09:00:00' }, false],
+    ['deadline in the future: counted', { id: 's1', customer_pick_by: future, window_start: null }, false],
+    ['no pick deadline: counted', { id: 's1', customer_pick_by: null, window_start: null }, false],
+    ['a Date deadline passed, window undefined', { id: 's1', customer_pick_by: new Date(past) }, true],
+  ])('pickFallbackDue: %s', (_label, row, due) => {
+    expect(moveLimit.pickFallbackDue(row, now)).toBe(due);
+  });
+
+  test('limitSkip lets a fallback row through at the limit and on unknown counts; every other row at the limit still skips', () => {
+    const due = { id: 's1', customer_pick_by: new Date(Date.now() - 60000), window_start: null };
+    expect(moveLimit.limitSkip(due, atLimit, config)).toBeNull();
+    expect(moveLimit.limitSkip(due, null, config)).toBeNull();
+    for (const row of [
+      { id: 's1', customer_pick_by: new Date(Date.now() - 60000), window_start: '09:00:00' },
+      { id: 's1', customer_pick_by: new Date(Date.now() + 3600000), window_start: null },
+      { id: 's1', customer_pick_by: null, window_start: null },
+    ]) {
+      expect(moveLimit.limitSkip(row, atLimit, config)).toMatchObject({ reason_code: 'MOVE_LIMIT_REACHED' });
+    }
+    expect(moveLimit.limitSkip(due, atLimit, { maxAutoMovesPerVisit: 0 })).toBeNull();
+  });
+
+  test('assertUnderLimit: a fallback row at the limit passes; a placed one, a future one and a plain one are refused', async () => {
+    const due = { id: 's1', customer_pick_by: new Date(Date.now() - 60000), window_start: null };
+    const stillDue = [{ id: 's1', customer_pick_by: new Date(Date.now() - 60000), window_start: null }];
+    const log = [{ scheduled_service_id: 's1', moves: '2' }];
+    await expect(moveLimit.assertUnderLimit(tableConn(log, stillDue), [due], config, refuse)).resolves.toBeUndefined();
+    for (const row of [
+      { ...due, window_start: '09:00:00' },
+      { ...due, customer_pick_by: new Date(Date.now() + 3600000) },
+      { ...due, customer_pick_by: null },
+    ]) {
+      await expect(moveLimit.assertUnderLimit(tableConn(log, []), [row], config, refuse)).rejects.toMatchObject({ statusCode: 409 });
+    }
+    // The limit off reads nothing.
+    const off = tableConn(log, stillDue);
+    await moveLimit.assertUnderLimit(off, [{ ...due, window_start: '09:00:00' }], { maxAutoMovesPerVisit: 0 }, refuse);
+    expect(off).not.toHaveBeenCalled();
+  });
+
+  test('a stale caller row: the transaction read decides (the customer picked meanwhile, so the row counts)', async () => {
+    const stale = { id: 's1', customer_pick_by: new Date(Date.now() - 60000), window_start: null };
+    const picked = [{ id: 's1', customer_pick_by: new Date(Date.now() - 60000), window_start: '09:00:00' }];
+    await expect(moveLimit.assertUnderLimit(tableConn([{ scheduled_service_id: 's1', moves: '2' }], picked), [stale], config, refuse))
+      .rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  test('a grouped unit: the fallback row is exempt, but another member at the limit still refuses', async () => {
+    const due = { id: 's1', customer_pick_by: new Date(Date.now() - 60000), window_start: null };
+    const other = { id: 's2', customer_pick_by: null, window_start: '09:00:00' };
+    const log = [{ scheduled_service_id: 's1', moves: '2' }, { scheduled_service_id: 's2', moves: '2' }];
+    await expect(moveLimit.assertUnderLimit(tableConn(log, [{ ...due }]), [due, other], config, refuse))
+      .rejects.toMatchObject({ message: expect.stringMatching(/^s2 /) });
+  });
+
+  test("the fallback placement's own log row (no original window) is not counted as a move", async () => {
+    const conn = logConn([]);
+    await moveLimit.countAutoMoves(conn, ['s1']);
+    expect(conn.calls).toEqual(expect.arrayContaining([
+      ['whereRaw', `${SLOT_CHANGED_SQL} AND original_window IS NOT NULL`],
+    ]));
+  });
+});
+
 describe('needs-a-person notice', () => {
   const visit = (id, date) => ({ id, customer_id: `c-${id}`, scheduled_date: date });
   beforeEach(() => {
