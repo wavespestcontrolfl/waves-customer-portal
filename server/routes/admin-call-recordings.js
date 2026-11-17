@@ -194,6 +194,54 @@ router.get('/recordings', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /live — calls being transcribed right now (live-call-transcription.js): created in the last
+// 2 hours, live_at stamped, stopped_at not, and no final call status yet (a stopped event lost in a
+// restart must not leave an ended call on screen). Newest first, at most 5, each with its last 15
+// final utterances in spoken order. Read-only and admin-only; with GATE_LIVE_CALL_TRANSCRIPTION off
+// it answers { enabled: false, calls: [] } without a query, and the panel then asks once a minute.
+const LIVE_CALL_WINDOW_MS = 2 * 60 * 60 * 1000;
+const LIVE_CALL_MAX = 5;
+const LIVE_CALL_LINES = 15;
+const { TERMINAL_CALL_STATUSES } = require('../utils/call-timeline');
+router.get('/live', requireAdmin, async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').isEnabled('liveCallTranscription')) {
+      return res.json(forStaffRole(req, { enabled: false, calls: [] }));
+    }
+    const since = new Date(Date.now() - LIVE_CALL_WINDOW_MS);
+    const ended = [...TERMINAL_CALL_STATUSES];
+    const rows = await db('call_log')
+      .where('created_at', '>=', since)
+      .whereRaw("(metadata -> 'live_transcription' ->> 'live_at') IS NOT NULL")
+      .whereRaw("(metadata -> 'live_transcription' ->> 'stopped_at') IS NULL")
+      .whereRaw(`(status IS NULL OR status NOT IN (${ended.map(() => '?').join(', ')}))`, ended)
+      .orderBy('created_at', 'desc')
+      .limit(LIVE_CALL_MAX)
+      .select('id', 'twilio_call_sid', 'customer_id', 'from_phone', 'metadata');
+    const calls = await Promise.all(rows.map(async (row) => {
+      let meta = row.metadata || {};
+      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
+      const customer = await findLiveCustomerForCall(row);
+      const utterances = await db('call_live_utterances')
+        .where('call_sid', row.twilio_call_sid)
+        .orderBy([{ column: 'spoken_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+        .limit(LIVE_CALL_LINES)
+        .select('speaker', 'text', 'spoken_at');
+      return {
+        id: row.id,
+        started_at: meta.live_transcription?.live_at || null,
+        caller_phone: row.from_phone || null,
+        customer: customer
+          ? { id: customer.id, name: `${customer.first_name || ''} ${customer.last_name || ''}`.trim() }
+          : null,
+        answered_by: String(meta.forward_acceptance?.csr_name || '').trim() || null,
+        lines: utterances.reverse().map((u) => ({ speaker: u.speaker, text: u.text || '', at: u.spoken_at })),
+      };
+    }));
+    res.json(forStaffRole(req, { enabled: true, calls }));
+  } catch (err) { next(err); }
+});
+
 // POST /process/:callSid — process a single recording.
 // force=true (via query or body) bypasses the "already processed" dedup
 // guard so the admin Reprocess button can re-extract on an existing row.
