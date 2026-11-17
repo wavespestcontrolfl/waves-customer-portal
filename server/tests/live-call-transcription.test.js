@@ -33,6 +33,8 @@ jest.mock('../models/db', () => {
     q.update = jest.fn(async (patch) => {
       const sid = q.filters.find(([c]) => c === 'twilio_call_sid')?.[1];
       if (!state.rowExists) return 0;
+      // The purge's early-summary drop (WHERE early_summary IS NOT NULL): no row here carries one.
+      if (String(patch.metadata?.sql || '').includes("- 'early_summary'")) { state.summaryDrops = (state.summaryDrops || 0) + 1; return 0; }
       if (q.raws.some((r) => r.includes('IS NULL'))) {
         if (state.claimed.has(sid)) return 0;
         state.claimed.add(sid);

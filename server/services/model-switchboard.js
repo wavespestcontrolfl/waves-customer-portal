@@ -603,6 +603,7 @@ const LANES = [
   L('kb_audit', 'Knowledge-base nightly audit', 'knowledge-base.js', 'deep', T('ROUTINE'), P('deepAnalysis', 'fallback')),
   L('wiki_compiler', 'Wiki compiler + agronomic wiki', 'knowledge/wiki-compiler.js, agronomic-wiki.js', 'deep', T('ROUTINE'), P('deepAnalysis', 'fallback')),
   L('quarantine_arbiter', 'Contact quarantine arbiter', 'contact-quarantine-arbiter.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
+  L('live_call_early_summary', 'Live call · summary from the live text', 'live-call-early-summary.js', 'fastText', T('LIVE_CALL'), null, { inbound: true }),
   L('call_self_audit', 'Call self-audit', 'call-self-audit.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
   L('call_incidents', 'Call self-audit second reader', 'call-incidents.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'one leg per call: the provider the audit did NOT answer on (usually the OpenAI primary; the Anthropic fallback when the audit fell back to OpenAI); GATE_CALL_INCIDENTS' }),
   L('voice_relay_judge', 'Voice relay eval judge', 'eval/voice-relay-judge.js', 'deep', P('voiceJudge', 'primary'), P('voiceJudge', 'fallback'), { inbound: true, note: 'grades synthetic manual replay transcripts when --judge is selected' }),
@@ -698,6 +699,7 @@ const LANE_AREA = {
   transcription: 'calls',
   transcript_label: 'calls',
   contact_pass: 'calls',
+  live_call_early_summary: 'calls',
   call_self_audit: 'calls',
   call_incidents: 'calls',
   // Shadow typed decisions ride the nightly call self-audit (and inbound texts
@@ -869,6 +871,7 @@ const LANE_DESCRIBE = {
   transcription: 'Transcribes recordings, with a long-call verifier',
   transcript_label: 'Labels who is speaking',
   contact_pass: 'Second listen for spelled emails and addresses',
+  live_call_early_summary: 'Summarizes a call from its live text the moment it ends, until the recording pipeline\'s summary lands (dark: GATE_CALL_EARLY_SUMMARY)',
   call_self_audit: 'Audits the extraction against the transcript',
   call_incidents: 'Second opinion that confirms a self-audit disagreement',
   lead_synopsis: 'Summarises a new lead from the call',

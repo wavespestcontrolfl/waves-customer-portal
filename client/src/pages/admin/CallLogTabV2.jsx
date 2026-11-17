@@ -188,6 +188,21 @@ function parseJsonObject(value) {
   }
 }
 
+// What the recording pipeline writes in place of a summary when its extraction fails.
+const PIPELINE_SUMMARY_FAILURE_RE = /^(AI extraction returned invalid JSON|Call processing failed)/;
+
+// The summary a call row shows (GATE_CALL_EARLY_SUMMARY). Only a call that got a summary from its live text
+// shows one, so with the gate off the row is unchanged. The recording pipeline's own summary wins once it lands.
+export function callSummaryFor(call) {
+  const early = parseJsonObject(call?.metadata)?.live_transcription?.early_summary?.text;
+  const earlyText = typeof early === "string" ? early.trim() : "";
+  if (!earlyText) return null;
+  const final = call?.call_summary || parseAiExtraction(call)?.call_summary;
+  const finalText = typeof final === "string" ? final.trim() : "";
+  if (finalText && !PIPELINE_SUMMARY_FAILURE_RE.test(finalText)) return { text: finalText, early: false };
+  return { text: earlyText, early: true };
+}
+
 function getCallDisplayName(call) {
   const linkedName = call.first_name
     ? `${call.first_name} ${call.last_name || ""}`.trim()
@@ -1710,6 +1725,20 @@ export default function CallLogTabV2() {
                         />{" "}
                       </div>
                     )}
+                    {/* Summary — from the call's live text the moment it ends, then the
+                        recording pipeline's own summary once it lands. */}
+                    {(() => {
+                      const summary = callSummaryFor(c);
+                      if (!summary) return null;
+                      return (
+                        <div className="mt-2 ml-8 p-2 bg-zinc-50 border-hairline rounded-md">
+                          <div className="text-14 text-ink-tertiary font-medium mb-1">
+                            {summary.early ? "Summary from the live call" : "Summary"}
+                          </div>
+                          <p className="m-0 text-14 text-ink-primary">{summary.text}</p>
+                        </div>
+                      );
+                    })()}
                     {/* Transcription — collapsible. Transcripts are noisy,
                         keep them out of the way until the admin wants them. */}
                     {c.transcription &&

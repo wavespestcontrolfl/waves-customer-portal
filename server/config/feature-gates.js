@@ -311,6 +311,7 @@
  *   GATE_IB_OWNER_DIRECT=true (Intelligence Bar owner-direct mode, owner ruling 2026-10-01: for the owner login only (ibFullAccess) the bar takes the record it picks as the target with no target refusals, runs internal edits — lead/customer/property fields, statuses, notes, tech assignment, reschedule, stock — without a confirmation card, and answers in 1–3 lines; customer messages, money and bulk changes keep their one-tap card; every other login is unchanged; off = byte-identical to today; kill = unset)
  *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
+ *   GATE_CALL_EARLY_SUMMARY=true (owner 2026-11-16 "ok build all, use haiku": when a call's live text stops, Claude Haiku 5.5 writes a 2-3 sentence summary of it into call_log.metadata.live_transcription.early_summary, and the Calls tab shows it until the recording pipeline's own summary lands; never writes call_summary, ai_extraction or commitments; one Haiku call per call; needs GATE_LIVE_CALL_TRANSCRIPTION; kill: unset)
  *   GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT=true (call routing: a call with a confirmed on-the-hour time and a trusted address is no longer held only because the service is unclear — ambiguous_pest_or_service fails open so the Waves Assessment fallback books it; needs GATE_CALL_FAIL_OPEN_BOOKING; the office still gets the advisory card; off = byte-identical today)
  *   GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT=true (call booker: a business address (Google addressUse.business) given with no unit is not held for the missing unit when the caller says they own/lease/occupy the WHOLE building; the extraction judges it and the code verifies the pinned caller quote; suite/unit/strip-mall wording keeps the hold)
  *   GATE_CALL_FIRST_NAME_ADVISORY=true (call booker: a new caller who gave a last name but no first name still becomes a customer and books; the missing first name files an advisory office card instead of holding the booking; strict opt-in, read at call time)
@@ -2184,6 +2185,9 @@ const gates = {
   // Disposition rules layer: stamps a terminal disposition on every processed
   // call (call_log.disposition). No behavior change beyond the stamp.
   callDispositionV1: process.env.GATE_CALL_DISPOSITION_V1 === 'true',
+  // Early call summary from the live text (live-call-early-summary.js), dark: strict === 'true'. Read when a call's
+  // live text stops; off = no Haiku call and no new summary (saved ones still show and still drop on a card quarantine).
+  callEarlySummary: process.env.GATE_CALL_EARLY_SUMMARY === 'true',
   // Layered spam classifier: records verdicts to call_spam_verdicts (100%
   // precision offline; any discard action is a separate consumer decision).
   callSpamClassifier: process.env.GATE_CALL_SPAM_CLASSIFIER === 'true',

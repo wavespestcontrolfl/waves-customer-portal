@@ -125,6 +125,8 @@ const LANE_RUNTIME = {
   // offline (Codex r16): one provider with no cross-provider answer, retried by the background call pipeline.
   transcript_label: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   contact_pass: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact', ...CALL_PIPELINE },
+  // Early call summary (GATE_CALL_EARLY_SUMMARY): one Haiku summary of the live text when the call ends, saved on the call's metadata for the Calls tab; nothing is sent.
+  live_call_early_summary: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', expected_duration_ms: 8_000, stall_after_ms: 60_000, hard_timeout_ms: 60_000 },
   call_self_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', workflow_id: 'call-self-audit', ...LONG_BATCH },
   call_incidents: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', workflow_id: 'call-incidents-adjudicate', ...LONG_BATCH },
   lead_synopsis: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction' },
