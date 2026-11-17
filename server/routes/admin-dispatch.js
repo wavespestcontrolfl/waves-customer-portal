@@ -4909,7 +4909,7 @@ function lawnFastProductIds(req) {
   return ids.length ? [...new Set(ids)].slice(0, 20) : undefined;
 }
 
-// GATE_LAWN_NEW_SOD_NOTE capability signal: a sheet that understands the context's `newSod` sends `sodAware=1` (query string).
+// New-sod capability signal: a sheet that understands the context's `newSod` sends `sodAware=1` (query string).
 const sodAwareRequest = (req) => req.query?.sodAware === '1';
 
 // GET /api/admin/dispatch/:lawnFastServiceId/lawn-fast/context
@@ -4926,7 +4926,7 @@ router.get('/:lawnFastServiceId/lawn-fast/context', async (req, res, next) => {
     const serviceId = await lawnFastRequestId(req, res);
     if (!serviceId) return;
     const productIds = lawnFastProductIds(req);
-    // GATE_LAWN_NEW_SOD_NOTE: the new-sod holds go only to a sheet that sends `sodAware=1` (it understands `newSod`).
+    // The new-sod holds go only to a sheet that sends `sodAware=1` (it understands `newSod`).
     const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId, ...(sodAwareRequest(req) ? { sodAware: true } : {}), ...(productIds ? { productIds } : {}) });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason, code: ctx.reason });
     const { ok, ...body } = ctx;
@@ -5019,8 +5019,7 @@ router.post('/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear', async (
 
 // POST /api/admin/dispatch/:lawnFastServiceId/lawn-fast/sod-rooted
 // body: { sodLaidOn: 'YYYY-MM-DD' } (the sod date the sheet rendered)
-// The technician's "Sod mowed twice and does not lift" tick on a home with new sod (GATE_LAWN_NEW_SOD_NOTE, 404
-// {enabled:false} while off, nothing read or written). Saves property_preferences.sod_rooted_on = the visit's ET day, from
+// The technician's "Sod mowed twice and does not lift" tick on a home with new sod. Saves property_preferences.sod_rooted_on = the visit's ET day, from
 // day 31 of the record whose sod date the sheet rendered (a changed record is 409 sod_record_changed), and never for a
 // visit on a later day than today (409 sod_rooted_future_visit). Idempotent; never moves or clears a saved day. Sent only by a
 // sod-aware sheet (`?sodAware=1`; without it 404 {enabled:false}). Lock order: the customer's property-preferences advisory
@@ -5029,7 +5028,7 @@ router.post('/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear', async (
 // Technician and office only; no customer text, no report change. See services/lawn-sod-sheet.js.
 router.post('/:lawnFastServiceId/lawn-fast/sod-rooted', async (req, res, next) => {
   try {
-    if (!require('../config/feature-gates').lawnNewSodNoteLive() || !sodAwareRequest(req)) return res.status(404).json({ enabled: false });
+    if (!sodAwareRequest(req)) return res.status(404).json({ enabled: false });
     const serviceId = await lawnFastRequestId(req, res);
     if (!serviceId) return;
     const owner = await db('scheduled_services').where({ id: serviceId }).first('customer_id');

@@ -1459,7 +1459,7 @@ function registryLabels(trigger) {
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
 // A registry event the bell policy just dropped: when it is a fault marked "Claude fixes this"
-// (GATE_ALERT_CLAUDE_FAULTS, services/admin-alert-routing.js), write its one row to Claude's queue through the same
+// (services/admin-alert-routing.js), write its one row to Claude's queue through the same
 // bell write (`writeBell`, so it is keyed like a ring and a retry dedupes), send no push (Claude's queue never pages a
 // phone), and return the stats. `policySilenced` stays true: the policy still kept it off the bell.
 // null = not rescued, drop as before. Never throws.
@@ -1649,7 +1649,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     );
 
     if (policySilenced) {
-      // GATE_ALERT_CLAUDE_FAULTS (services/admin-alert-routing.js): a fault the registry marks "Claude fixes this" is
+      // Dropped Claude faults (services/admin-alert-routing.js): a fault the registry marks "Claude fixes this" is
       // written to Claude's queue instead of the drop below: one Activity-only row, no ring, no push.
       const rescued = await writeRescuedFault({ trigger, triggerKey, payload, bellMetadata, writeBell, onBell, pushOnly, relayFailureCall });
       if (rescued) return rescued;

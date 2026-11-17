@@ -1,4 +1,4 @@
-// Lawn Fast Complete applies the new-sod holds (GATE_LAWN_NEW_SOD_NOTE): which product lines the holds
+// Lawn Fast Complete applies the new-sod holds (owner 2026-10-09): which product lines the holds
 // cover, the banner, the part-of-lawn notes, the October bag swap, the all-held message, a visit at another
 // home, and the rooted tick's write. The hold RULES are lawn-sod-holds.js's own tests; this file proves the
 // sheet reads them. Synthetic data; a table-keyed fake knex.
@@ -491,8 +491,8 @@ describe('loadSodForContext', () => {
   });
 });
 
-describe('buildLawnFastContext: the gate', () => {
-  const GATES = ['GATE_LAWN_NEW_SOD_NOTE', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
+describe('buildLawnFastContext: the sod-aware context', () => {
+  const GATES = ['GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
   const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
   beforeEach(() => {
     resolveCompletionProfileForScheduledService.mockReset().mockResolvedValue({
@@ -503,7 +503,6 @@ describe('buildLawnFastContext: the gate', () => {
     });
     process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
-    delete process.env.GATE_LAWN_NEW_SOD_NOTE;
   });
   afterAll(() => {
     for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
@@ -514,7 +513,7 @@ describe('buildLawnFastContext: the gate', () => {
     property_preferences: record, customer_properties: HOME, customer_turf_profiles: { grass_type: 'st_augustine' },
   });
 
-  test('off: a sod customer\'s context is byte-for-byte the one without a sod record, and the record is never read', async () => {
+  test('no sod-aware signal: a sod customer\'s context is byte-for-byte the one without a sod record, and the record is never read', async () => {
     const withSod = fakeKnex(tables(prefs()));
     const withoutSod = fakeKnex(tables(undefined));
     const a = await buildLawnFastContext(VISIT, { knex: withSod });
@@ -525,8 +524,7 @@ describe('buildLawnFastContext: the gate', () => {
     expect(a.plannedProducts.items[0]).not.toHaveProperty('sodSwap');
   });
 
-  test('on: the context carries newSod, and a customer with no sod record is unchanged', async () => {
-    process.env.GATE_LAWN_NEW_SOD_NOTE = 'true';
+  test('with the signal: the context carries newSod, and a customer with no sod record is unchanged', async () => {
     const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables(prefs())), sodAware: true });
     expect(ctx.newSod).toMatchObject({ headline: 'New sod, day 5. Laid Oct 1, 2026.', noWholeLawn: sodSheet.NO_PRODUCT_TEXT, noProductAllowed: true });
     expect(ctx.newSod.lines[P_BAG24]).toMatchObject({ held: true });
@@ -546,10 +544,8 @@ describe('buildLawnFastContext: the gate', () => {
       });
     });
 
-    test('gate on, no signal: byte-for-byte the gate-off context (no swap bag appended, nothing removed, no newSod), sod record never read', async () => {
-      delete process.env.GATE_LAWN_NEW_SOD_NOTE;
-      const legacy = await buildLawnFastContext(VISIT, { knex: fakeKnex(dimTables()) });
-      process.env.GATE_LAWN_NEW_SOD_NOTE = 'true';
+    test('no signal: byte-for-byte the legacy context (no swap bag appended, nothing removed, no newSod), sod record never read', async () => {
+      const legacy = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables(undefined)) });
       const knex = fakeKnex(dimTables());
       const unsignalled = await buildLawnFastContext(VISIT, { knex });
       expect(JSON.stringify(unsignalled)).toBe(JSON.stringify(legacy));
@@ -561,18 +557,10 @@ describe('buildLawnFastContext: the gate', () => {
       expect(JSON.stringify(truthy)).toBe(JSON.stringify(legacy));
     });
 
-    test('gate on, signal sent: the Dimension bag is held and the swap bag is appended', async () => {
-      process.env.GATE_LAWN_NEW_SOD_NOTE = 'true';
+    test('signal sent: the Dimension bag is held and the swap bag is appended', async () => {
       const aware = await buildLawnFastContext(VISIT, { knex: fakeKnex(dimTables()), sodAware: true });
       expect(aware.plannedProducts.items.map((i) => i.productId)).toEqual([P_DIM_BAG, P_BAG24]);
       expect(aware.newSod.lines[P_DIM_BAG]).toMatchObject({ held: true });
-    });
-
-    test('gate off, signal sent: still the legacy context', async () => {
-      delete process.env.GATE_LAWN_NEW_SOD_NOTE;
-      const legacy = await buildLawnFastContext(VISIT, { knex: fakeKnex(dimTables()) });
-      const signalled = await buildLawnFastContext(VISIT, { knex: fakeKnex(dimTables()), sodAware: true });
-      expect(JSON.stringify(signalled)).toBe(JSON.stringify(legacy));
     });
   });
 });
@@ -581,7 +569,7 @@ describe('buildLawnFastContext: the gate', () => {
 
 describe('preflightLawnFastCompletion: an empty product list', () => {
   const { preflightLawnFastCompletion } = require('../services/lawn-fast-complete');
-  const GATES = ['GATE_LAWN_NEW_SOD_NOTE', 'GATE_LAWN_FAST_COMPLETE', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
+  const GATES = ['GATE_LAWN_FAST_COMPLETE', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
   const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
   const ASSESSMENT = uuid(40);
   const IDENTITY = {
@@ -601,7 +589,6 @@ describe('preflightLawnFastCompletion: an empty product list', () => {
     process.env.GATE_LAWN_FAST_COMPLETE = 'true';
     process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
-    process.env.GATE_LAWN_NEW_SOD_NOTE = 'true';
     // The assessment is this visit's own, on this property (the preflight's property-scope check).
     const history = require('../services/lawn-assessment-history');
     jest.spyOn(history, 'installedForVisit').mockResolvedValue({ id: ASSESSMENT });
@@ -658,28 +645,6 @@ describe('preflightLawnFastCompletion: an empty product list', () => {
     expect(await run({ record: new Error('read failed'), technicianNotes: NOTE })).toEqual(STALE);
   });
 
-  test('the gate off: the sentence is stale (nothing authorizes it), the sod record is never read', async () => {
-    delete process.env.GATE_LAWN_NEW_SOD_NOTE;
-    const knex = fakeKnex({
-      scheduled_services: visitRow(), customers: { billing_mode: null, has_multi_home: false }, products_catalog: CATALOG,
-      property_preferences: prefs(), customer_properties: HOME, lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true }, lawn_assessment_photos: [],
-    });
-    const out = await preflightLawnFastCompletion({ knex, svc: { id: VISIT, customer_id: 'cust-1' }, lawnAssessmentId: ASSESSMENT, expectedVisit: IDENTITY, lawnFast: { visitType: 'recurring' }, products: [], technicianNotes: NOTE });
-    expect(out).toEqual(STALE);
-    expect(knex.mock.calls.map(([table]) => table)).not.toContain('property_preferences');
-  });
-
-  test('gate off and no sentence: an empty list is judged exactly as before', async () => {
-    delete process.env.GATE_LAWN_NEW_SOD_NOTE;
-    const knex = fakeKnex({
-      scheduled_services: visitRow(), customers: { billing_mode: null, has_multi_home: false }, products_catalog: CATALOG,
-      property_preferences: prefs(), customer_properties: HOME, lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true }, lawn_assessment_photos: [],
-    });
-    const out = await preflightLawnFastCompletion({ knex, svc: { id: VISIT, customer_id: 'cust-1' }, lawnAssessmentId: ASSESSMENT, expectedVisit: IDENTITY, lawnFast: { visitType: 'recurring' }, products: [], technicianNotes: '' });
-    expect(out).toBeNull();
-    expect(knex.mock.calls.map(([table]) => table)).not.toContain('property_preferences');
-  });
-
   test('a product on the list is never touched by this path', async () => {
     expect(await run({ products: [{ productId: P_BAG24 }], technicianNotes: '' })).toBeNull();
     // A list with a product that still carries the sentence is a normal completion: nothing to authorize.
@@ -692,12 +657,9 @@ describe('preflightLawnFastCompletion: an empty product list', () => {
 describe('the no-product claim inside the commit transaction', () => {
   const NOTE = 'No product applied: new sod is rooting (laid Oct 1, 2026). Held: fertilizer until Oct 31, 2026.';
   const trxWith = (events) => ({ raw: jest.fn(async (sql, binds) => { events.push(['raw', binds]); }) });
-  const GATE = process.env.GATE_LAWN_NEW_SOD_NOTE;
-  afterEach(() => { if (GATE === undefined) delete process.env.GATE_LAWN_NEW_SOD_NOTE; else process.env.GATE_LAWN_NEW_SOD_NOTE = GATE; });
   const claim = (extra = {}) => ({ customerId: 'cust-1', lawnFast: { visitType: 'recurring' }, isIncompleteVisit: false, products: [], technicianNotes: NOTE, ...extra });
 
-  test('claim + gate on: takes the property-preferences advisory lock (the sod writers\' key) and says the recheck is needed', async () => {
-    process.env.GATE_LAWN_NEW_SOD_NOTE = 'true';
+  test('a claim: takes the property-preferences advisory lock (the sod writers\' key) and says the recheck is needed', async () => {
     const events = [];
     const trx = trxWith(events);
     expect(await sodSheet.lockSodRecordForNoProduct(trx, claim())).toBe(true);
@@ -705,20 +667,18 @@ describe('the no-product claim inside the commit transaction', () => {
   });
 
   test.each([
-    ['gate off', { gate: false }],
     ['no lawnFast block', { lawnFast: null }],
     ['an incomplete visit outcome', { isIncompleteVisit: true }],
     ['a product on the list', { products: [{ productId: P_BAG24 }] }],
     ['no list at all but no sentence', { technicianNotes: 'Nothing to spread.' }],
-  ])('%s: no lock, no recheck (completes exactly as before)', async (_label, { gate = true, ...extra }) => {
-    if (gate) process.env.GATE_LAWN_NEW_SOD_NOTE = 'true'; else delete process.env.GATE_LAWN_NEW_SOD_NOTE;
+  ])('%s: no lock, no recheck (completes exactly as before)', async (_label, extra) => {
     const trx = trxWith([]);
     expect(await sodSheet.lockSodRecordForNoProduct(trx, claim(extra))).toBe(false);
     expect(trx.raw).not.toHaveBeenCalled();
   });
 
   describe('assertNoProductUnderLock: the claim is re-judged on the transaction\'s own reads', () => {
-    const GATES = ['GATE_LAWN_NEW_SOD_NOTE', 'GATE_LAWN_FAST_COMPLETE', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
+    const GATES = ['GATE_LAWN_FAST_COMPLETE', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
     const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
     beforeEach(() => {
       resolveCompletionProfileForScheduledService.mockReset().mockResolvedValue({
@@ -730,7 +690,6 @@ describe('the no-product claim inside the commit transaction', () => {
       process.env.GATE_LAWN_FAST_COMPLETE = 'true';
       process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
       process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
-      process.env.GATE_LAWN_NEW_SOD_NOTE = 'true';
     });
     afterAll(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
     const trxFor = (record) => Object.assign(fakeKnex({
@@ -778,7 +737,6 @@ describe('the no-product claim inside the commit transaction', () => {
         ['not a lawn sheet completion', () => subs(swapRecord(), { lawnFast: null })],
         ['the sod record is gone', () => subs(null)],
         ['the read failed (the ledger never fails the visit)', () => subs(new Error('read failed'))],
-        ['the gate is off', () => { delete process.env.GATE_LAWN_NEW_SOD_NOTE; return subs(swapRecord()); }],
       ])('%s: no substitution', async (_label, run) => {
         expect(await run()).toEqual([]);
       });
@@ -896,7 +854,7 @@ describe('confirmSodRooted', () => {
   });
 });
 
-// The classes that kept a PLANNED line off the visit, for the customer report card (GATE_LAWN_NEW_SOD_REPORT_CARD).
+// The classes that kept a PLANNED line off the visit, for the customer report card.
 describe('plannedHeld: the hold classes the report card names', () => {
   const held = (out) => out.newSod.plannedHeld.map(({ kind, until, rootedCheck }) => ({ kind, until, rootedCheck }));
   const celsius = planItem(P_CELSIUS, 'Celsius WG', { applicationMethod: 'spot_treatment' });

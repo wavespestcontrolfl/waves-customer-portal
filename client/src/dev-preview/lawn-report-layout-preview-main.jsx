@@ -19,7 +19,7 @@ const FIXTURES = import.meta.glob('../pages/__fixtures__/lawn-layout/*.json', { 
 const LAYOUT_SCENARIOS = ['spot', 'granular', 'clean'];
 // GATE_LAWN_REPORT_POLISH scenarios: a mixed-head system, a single-head system, 15 minutes on four days, and nothing on file; gate off ("base") and on.
 const POLISH_SCENARIOS = ['mixed', 'single', 'fourday', 'nothing', 'rainwet', 'raindry', 'rainnone'];
-// GATE_LAWN_NEW_SOD_REPORT_CARD scenarios: the clean visit with the New sod card the server builds from a frozen block
+// New sod card scenarios: the clean visit with the New sod card the server builds from a frozen block
 // (new-sod-cards.json, kept equal to the server's words by server/tests/lawn-sod-report-card.test.js). Synthetic data.
 const SOD_SCENARIOS = ['sod-whole', 'sod-swap', 'sod-part'];
 const SCENARIOS = [...LAYOUT_SCENARIOS, ...POLISH_SCENARIOS, ...SOD_SCENARIOS];

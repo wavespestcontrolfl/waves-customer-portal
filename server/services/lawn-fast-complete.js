@@ -546,7 +546,7 @@ function programRateFor(item, programRows) {
   return Number(row.ratePer1000) > 0 && row.rateUnit ? { ratePer1000: Number(row.ratePer1000), rateUnit: row.rateUnit } : {};
 }
 
-// GATE_LAWN_NOV_LARGE_PATCH_N, GATE_LAWN_RECLAIMED_HALF_N: a nitrogen line the plan sized for a reduced target (or left at its full rate on
+// Large patch November cut, GATE_LAWN_RECLAIMED_HALF_N: a nitrogen line the plan sized for a reduced target (or left at its full rate on
 // a reclaimed lawn because it carries the pre-emergent or the winter potash) keeps the plan's note on the sheet (the planned row prints its
 // gateNotes). GATE_LAWN_CHINCH_TETRINO_RATE: the Tetrino line the plan sized at the raised chinch rate keeps its note the same way.
 // GATE_LAWN_DEC_LARGE_PATCH_K: so does the potassium bag the plan swapped in. Only those notes are carried: every other planned row is the
@@ -980,8 +980,8 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
   const { unavailable: plannedProductsUnavailable, troubleSeed, ...plannedProducts } = await loadPlannedProducts(svc, knex, visitType, readFailures);
   const turfHeightCapture = typed ? false : await loadTurfHeightCapture(technicianId, knex, readFailures);
   const reCheck = await loadReCheckNote(svc, knex);
-  // GATE_LAWN_NEW_SOD_NOTE: the visit's new-sod holds, for a sod-aware sheet only (lawn-sod-sheet.js: `sodContextParts`).
-  // Gate off, or an older sheet that did not send the signal: the legacy context exactly, no read of the sod record.
+  // The visit's new-sod holds, for a sod-aware sheet only (lawn-sod-sheet.js: `sodContextParts`).
+  // An older sheet that did not send the signal: the legacy context exactly, no read of the sod record.
   const sod = await require('./lawn-sod-sheet').sodContextParts({ sodAware, svc, knex, readFailures, plannedProducts, ruleFor: (row) => productRuleEntry(String(row.id), row) });
 
   return {
@@ -998,7 +998,7 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null,
     // never renders (mirrors /complete's turfHeightApplicable).
     turfHeightCapture,
     plannedProducts: sod.plannedProducts,
-    // GATE_LAWN_NEW_SOD_NOTE: the banner, the held lines and the rooted tick, only for a home with a sod record that holds something today.
+    // The banner, the held lines and the rooted tick, only for a home with a sod record that holds something today.
     ...sod.fields,
     // GATE_LAWN_SPOT_RULES: the sheet asks for a spot row's area (and holds Complete without
     // one). The key exists only while the gate is live, so gate off is byte-identical.
@@ -1357,7 +1357,7 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
       },
     };
   }
-  // GATE_LAWN_NEW_SOD_NOTE: an empty list that claims "every planned product is held by new sod" is re-judged by the server
+  // An empty list that claims "every planned product is held by new sod" is re-judged by the server
   // (lawn-sod-sheet.js checkNoProductNote), else the rest of the preflight:
   // a row still carrying gallons sprayed is refused (legacyGallonsRefusal), then
   // GATE_LAWN_TROUBLE_AREAS: every spot row names a closed-list place (lawn-trouble-areas.js preflightPlaces; a yearly limit

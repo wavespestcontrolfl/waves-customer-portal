@@ -1069,10 +1069,9 @@ function initScheduledJobs() {
 
   // HOURLY 8 AM-8 PM ET at :41 — the office check after a "report only, no
   // pay link" completion (owner 2026-10-30): a bill still open the next ET day
-  // raises one needs-you Billing alert; a settled bill closes it. Gate read per
-  // tick, so a flip needs no restart. Office-side only: no customer message.
+  // raises one needs-you Billing alert; a settled bill closes it. Office-side
+  // only: no customer message.
   cron.schedule('41 8-20 * * *', async () => {
-    if (!require('../config/feature-gates').reportOnlyPaymentAlertLive()) return;
     try {
       await runExclusive('report-only-payment-alert', async () => {
         const result = await require('./report-only-payment-alert').runReportOnlyPaymentCheck();
@@ -2139,12 +2138,10 @@ function initScheduledJobs() {
   // agents A). Files an unanswered lead that repeats the same person's open
   // lead (same phone and name, within 30 days) as its duplicate, so the
   // inbox counts each person once and the real lead can settle. Lead status
-  // and history only; sends nothing. Gate GATE_LEAD_REPEAT_SWEEP is read at
-  // call time; kill = unset. runExclusive: an overlapping tick must not file
-  // from a stale read.
+  // and history only; sends nothing. runExclusive: an overlapping tick must
+  // not file from a stale read.
   // =========================================================================
   cron.schedule('52 4 * * *', async () => {
-    if (!require('../config/feature-gates').leadRepeatSweepLive()) return;
     logger.info('Running: Lead repeat sweep');
     try {
       await runExclusive('lead-repeat-sweep', () =>
@@ -2202,13 +2199,12 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKLY SITEONE DEALS BELL (gated: cronJobs AND siteOneDealsDigest)
+  // WEEKLY SITEONE DEALS BELL (gated: cronJobs)
   // Reads the last 7 days of contact@ mail (the emails table), keeps SiteOne and
   // product-maker deal mail, rings ONE admin bell. Plain rules, no model call and
   // no paid API. Monday 8:00am ET.
   // =========================================================================
   cron.schedule('0 8 * * 1', async () => {
-    if (!isEnabled('siteOneDealsDigest')) return;
     logger.info('Running: Weekly SiteOne deals digest');
     try {
       // runExclusive: a deploy overlap must not run the scan twice (the bell
@@ -2223,13 +2219,12 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // Catch-up for the Monday 8:00 deals digest above: Monday and Tuesday at 10:52, same
-  // gates. A lost Monday tick (deploy restart, dropped tick) rang no bell that week.
+  // Catch-up for the Monday 8:00 deals digest above: Monday and Tuesday at 10:52. A lost
+  // Monday tick (deploy restart, dropped tick) rang no bell that week.
   // job_health.last_success_at shows whether this ET week's run finished; the rerun reads
   // the window the Monday tick would have read (pinned to Monday 8:00) and the bell's
   // weekly dedupeKey still allows only one bell. Checked before the lock and again under it.
   cron.schedule('52 10 * * 1,2', async () => {
-    if (!isEnabled('siteOneDealsDigest')) return;
     try {
       const digest = require('./procurement/siteone-deals-digest');
       if (!(await digest.weekIsMissing())) return;

@@ -58,7 +58,7 @@
 //     live on the server; the sheet only renders the cards and performs their taps, and
 //     the completion carries which cards showed and what the tech did (`lawnFast.
 //     treatmentGuide`). Nothing is added by itself.
-//     With the context's `newSod` (GATE_LAWN_NEW_SOD_NOTE, owner 2026-10-09) the sheet opens with
+//     With the context's `newSod` (owner 2026-10-09) the sheet opens with
 //     a "New sod, day N" banner (LawnSodParts.jsx) and applies the server's new-sod holds: a line a
 //     hold covers is not pre-selected but listed greyed under "Held for new sod" with its reason
 //     (the technician can still add it by hand, with a warning on the row), a part-of-lawn record
@@ -288,7 +288,7 @@ const assessmentOf = (data) => (data?.assessment && typeof data.assessment === '
 
 const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
 // The tick saved, but the holds could not be read again.
-// GATE_LAWN_NEW_SOD_NOTE capability signal: this sheet understands the context's `newSod`, so the server may hold products back,
+// New-sod capability signal: this sheet understands the context's `newSod`, so the server may hold products back,
 // add the swap bag and offer the rooted tick. Sent on the context reads that feed the holds and on the tick. A context read
 // without it is the legacy context, so the sheet then has no holds to show.
 const SOD_AWARE = 'sodAware=1';
@@ -355,7 +355,7 @@ const optionalContextFields = (data) => ({
   takeAllProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.takeAllProductIds) ? data.plannedProducts.takeAllProductIds : [],
   // Group 11 stacking: the large patch Artavia rows passed over for a take-all lawn. Blocked from the start, whatever the guide read does.
   group11HeldProductIds: Array.isArray(data?.plannedProducts?.group11HeldProductIds) ? data.plannedProducts.group11HeldProductIds : [],
-  // GATE_LAWN_NEW_SOD_NOTE: the banner, the held lines and the rooted tick; null while the gate is off or the home has no hold today.
+  // The banner, the held lines and the rooted tick; null when the home has no hold today.
   newSod: newSodOf(data),
 });
 
@@ -1057,7 +1057,7 @@ function rowsForPlanned(items, ctx, catalog) {
   }));
 }
 
-// GATE_LAWN_NEW_SOD_NOTE: a line a new-sod hold covers is not pre-selected (it is listed under "Held for new sod").
+// A line a new-sod hold covers is not pre-selected (it is listed under "Held for new sod").
 const plannedRows = (ctx, catalog) => rowsForPlanned(splitHeldPlanned(uniquePlanned(ctx.planned), ctx.newSod).start, ctx, catalog);
 
 function useProductRows(ctx, catalog) {
@@ -1101,7 +1101,7 @@ function useProductRows(ctx, catalog) {
     touched.current.add(String(productId).toLowerCase());
     setRows((prev) => prev.filter((row) => row.productId !== productId));
   }, []);
-  // GATE_LAWN_NEW_SOD_NOTE: the rows after the holds were read again (the rooted tick). `start` is what a FRESH sheet would start
+  // The rows after the holds were read again (the rooted tick). `start` is what a FRESH sheet would start
   // with now: the refreshed plan's lines the refreshed holds do not keep off. A row the technician has not touched follows it:
   // it leaves when the refreshed plan or holds no longer start with it, it takes the refreshed plan's quantity, and a released
   // line comes back. A product he added, removed or changed himself stays as he left it.
@@ -1192,7 +1192,7 @@ function limitWarningsOf(rows) {
   return [...new Set(lines)];
 }
 
-// GATE_LAWN_NEW_SOD_NOTE: the server flags a visit whose planned products are ALL held by the new sod; only then may the
+// The server flags a visit whose planned products are ALL held by the new sod; only then may the
 // sheet complete with no product (the server re-derives it at completion). Everything else Complete asks for still applies.
 const noProductOkOf = (newSod) => newSod?.noProductAllowed === true && typeof newSod.noProductNote === 'string' && !!newSod.noProductNote;
 // With no product on the sheet in that state the record says why, in the server's own sentence, after the technician's note.
@@ -1212,7 +1212,7 @@ function missingRequirement({ sodWait = '', noProductOk = false, form, rows, gui
   const closedPlace = rows.find((row) => row.placeRule && (row.placeBlock || row.placeNowhere));
   const missingPlace = rows.find((row) => row.placeRule && !row.places?.length);
   const [, reason = ''] = [
-    // GATE_LAWN_NEW_SOD_NOTE: the rooted tick is being saved, or the holds could not be read again after it.
+    // The rooted tick is being saved, or the holds could not be read again after it.
     [sodWait, sodWait],
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
@@ -1221,7 +1221,7 @@ function missingRequirement({ sodWait = '', noProductOk = false, form, rows, gui
     [!assessmentId && !assessed && photos === 0, ADD_PHOTO],
     [!assessmentId && !assessed, ANALYZE_PHOTOS],
     [!assessmentId, CONFIRM_ASSESSMENT],
-    // GATE_LAWN_NEW_SOD_NOTE: the server says the new sod holds every planned product, so an empty list is honest.
+    // The server says the new sod holds every planned product, so an empty list is honest.
     [!rows.length && !noProductOk, ADD_PRODUCTS],
     // The guide is still reading, or a row on the sheet is not offered for this lawn right now.
     [guideHold, guideHold],
@@ -1603,7 +1603,7 @@ function useSheetAreas({ placeCtx, guide, cleared, refused, refusedCard, moved }
   return useMemo(() => (base ? { ...base, known: base.known.filter((area) => !cleared.includes(area.id)), blocked: { ...base.blocked, ...fresh }, blockedTypes: { ...base.blockedTypes, ...freshTypes }, refused, refusedCard, moved } : null), [base, fresh, freshTypes, cleared, refused, refusedCard, moved]);
 }
 
-// GATE_LAWN_NEW_SOD_NOTE: the holds as the server last said them, and the rooted tick. The tick reads the holds again
+// The holds as the server last said them, and the rooted tick. The tick reads the holds again
 // (`sodFresh`; `undefined` = the context's own).
 function useSodHolds({ ctx, service, request, base, reconcilePlanned }) {
   const [sodFresh, setSodFresh] = useState(undefined);
@@ -1666,7 +1666,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
-  // GATE_LAWN_NEW_SOD_NOTE: the holds as the server last said them. The rooted tick reads the plan and the holds again;
+  // The holds as the server last said them. The rooted tick reads the plan and the holds again;
   // `sheetCtx` is the context with the plan parts of that last read (the opening context until then).
   const { newSod, liveCtx: sheetCtx, rereads: sodRereads, confirmSodRooted, sodWait } = useSodHolds({ ctx, service, request, base, reconcilePlanned: products.reconcilePlanned });
   // The place maps, read again when /complete refuses a place (the context aside, and the guide below).
@@ -1796,7 +1796,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   });
 
   const guideHold = guideHoldReason({ gov, status: guideStatus, rows });
-  // GATE_LAWN_NEW_SOD_NOTE: while the rooted tick is saved and the holds are read again, the sheet waits (a released line is not yet back).
+  // While the rooted tick is saved and the holds are read again, the sheet waits (a released line is not yet back).
   const missingReason = missingRequirement({ sodWait, noProductOk: noProductOkOf(newSod), form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
   const limitWarnings = limitWarningsOf(rows);
@@ -2086,7 +2086,7 @@ function AddOnLine({ item, sod, onSheet, waiting, unreadableNote = '', locked, o
   const rate = Number(item.ratePer1000) > 0 && item.rateUnit ? `${item.ratePer1000} ${unitLabel(item.rateUnit)} per 1,000 sq ft` : '';
   const look = sodAddLook(sod);
   const why = [
-    // GATE_LAWN_NEW_SOD_NOTE: the hold's reason (or the part-of-lawn skip note) leads the line.
+    // The hold's reason (or the part-of-lawn skip note) leads the line.
     sodWords(sod),
     // Short on purpose (owner 2026-10-30): the protocol line, the substitution and the gate notes show on the row once added.
     item.applicationMethod ? methodLabel(item.applicationMethod) : '',
@@ -2132,7 +2132,7 @@ function WeedSpotsEntry({ newSod, weedMix, items, places = null, labels = {}, on
   const names = items.map((item) => item.product.name).join(', ');
   // What differs by place (a place at its limit, a place that takes the replacement) is said by place.
   const byPlace = places ? Object.entries(weedMix.byPlace || {}).filter(([, d]) => d.note && d.note !== weedMix.note) : [];
-  // GATE_LAWN_NEW_SOD_NOTE: the entry's products are one weed killer class, so one hold line speaks for them.
+  // The entry's products are one weed killer class, so one hold line speaks for them.
   const sod = items.map((item) => sodLineOf(newSod, item.productId)).find(Boolean);
   const look = sodAddLook(sod);
   const line = [done ? 'On the sheet' : names, sodWords(sod), weedMix.note, ...byPlace.map(([id, d]) => `${labels[id] || id}: ${d.note}`)];
@@ -2261,7 +2261,7 @@ function TreatmentGuide({ newSod = null, guide, checks, onCheck, rows, catalog, 
             {card.detail && <p className="tech-visit-muted">{card.detail}</p>}
             {gateNotesOf(card.items).map((gateNote) => <p key={gateNote} className="tech-visit-muted">{gateNote}</p>)}
             {card.note && <p className="tech-visit-muted" role="status">{card.note}</p>}
-            {/* GATE_LAWN_NEW_SOD_NOTE: what the new-sod holds say about a product this card names, before its action. */}
+            {/* What the new-sod holds say about a product this card names, before its action. */}
             {!onSheet && sodCardWords(card, newSod).map((words) => <p key={words} className="tech-visit-status--warn" role="status">{words}</p>)}
             {placeSets(card, areas).map((line) => <p key={line} className="tech-visit-muted">{line}</p>)}
             {/* A check-only card (take-all, no trouble area on file) has no product to add. */}
@@ -2320,7 +2320,7 @@ function ChinchFoundEntry({ newSod, chinch, catalog, places, labels, on, locked,
   const names = [...new Set(options.map((option) => option.item.name))];
   // What differs by place (a place at its limit, a place that takes the second product) is said by place.
   const byPlace = Object.entries(chinch.byPlace || {}).filter(([, d]) => d.note && d.note !== note);
-  // GATE_LAWN_NEW_SOD_NOTE: a chinch product a hold covers (Dylox at the end of the ladder) says so; the tap still works.
+  // A chinch product a hold covers (Dylox at the end of the ladder) says so; the tap still works.
   const sod = options.map((option) => sodLineOf(newSod, option.item.productId)).find(Boolean);
   const line = [names.length ? `${names.join(' or ')}, spot treatment` : null, sodWords(sod), ...(item?.gateNotes || []), note, ...byPlace.map(([id, d]) => `${labels[id] || id}: ${d.note}`)];
   const add = (option) => {

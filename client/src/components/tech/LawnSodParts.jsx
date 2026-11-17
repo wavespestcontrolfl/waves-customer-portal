@@ -1,6 +1,6 @@
 // client/src/components/tech/LawnSodParts.jsx
 //
-// The new-sod parts of the lawn Fast Complete sheet (GATE_LAWN_NEW_SOD_NOTE, owner 2026-10-09):
+// The new-sod parts of the lawn Fast Complete sheet (owner 2026-10-09):
 //  - SodBanner: the top of the sheet. "New sod, day N. Laid <date>." with whole lawn or the named
 //    part, the held classes in one line, the large patch note, and (once the weed killer hold has
 //    passed its 30 days) the technician's "Sod mowed twice and does not lift" tick.
@@ -27,7 +27,7 @@ export function SodBanner({ newSod, onRooted, locked = false, dictationPending =
       await onRooted(newSod.rooted.sodLaidOn);
       setTick({ busy: false, error: '', gone: false });
     } catch (err) {
-      // 404: the server does not offer the tick (the gate is off, or it does not know this sheet). Hide it; no error to retry.
+      // 404: the server does not offer the tick (it does not know this sheet). Hide it; no error to retry.
       // Every other refusal (sod_record_changed, sod_not_this_home, sod_rooted_too_early, sod_rooted_future_visit) carries the
       // server's own plain sentence: show it as sent.
       if (err?.status === 404) setTick({ busy: false, error: '', gone: true });

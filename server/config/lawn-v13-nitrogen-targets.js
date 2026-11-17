@@ -1,5 +1,5 @@
 /**
- * Lawn v13 nitrogen targets that depend on a mapped trouble area (GATE_LAWN_NOV_LARGE_PATCH_N, owner 2026-10-09).
+ * Lawn v13 nitrogen targets that depend on a mapped trouble area (owner 2026-10-09).
  *
  * UF/IFAS Large Patch (SS-PLP-5): reduce nitrogen and use slow-release in the disease window, November to May; it does not say
  * zero. The v13 November visit applies LESCO 24-0-11 at 0.75 lb N per 1,000 sq ft; while fungus is mapped as active the bag is

@@ -1475,11 +1475,11 @@ describe('sweep', () => {
   });
 });
 
-// GATE_LAWN_NOV_LARGE_PATCH_N (codex #6256 r3 P1): the brief states the November bag's target the way the plan does.
+// The November large patch cut (codex #6256 r3 P1): the brief states the November bag's target the way the plan does.
 describe('the November nitrogen target on the lawn brief', () => {
   const { LAWN_V13_VERSION } = require('../services/lawn-program');
   const areas = require('../services/lawn-trouble-areas');
-  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
+  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET'];
   const BAG = 'LESCO 24-0-11 with PolyPlus OPTI';
   const november = (version = LAWN_V13_VERSION) => mockSummarize.mockReturnValue({
     version,
@@ -1519,16 +1519,16 @@ describe('the November nitrogen target on the lawn brief', () => {
     expect(summary.products[0].gates.targetN).toBe('0.75 lb N/1000');
   });
 
-  test('no change, and no trouble-area read, when the gate is off, the program is not v13, the month is not November, or no fungus is mapped', async () => {
+  test('no change, and no trouble-area read, when the spot target capture is off, the program is not v13, the month is not November, or no fungus is mapped', async () => {
     november();
-    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+    delete process.env.GATE_LAWN_SPOT_TARGET;
     const off = await guidanceFor();
     expect(bagOf(off).gates.targetN).toBe('0.75 lb N/1000');
     november('2026.05');
     expect(bagOf(await guidanceFor()).gates.targetN).toBe('0.75 lb N/1000');
     expect(loadActive).not.toHaveBeenCalled();
     expect(propertyOf).not.toHaveBeenCalled();
-    process.env.GATE_LAWN_NOV_LARGE_PATCH_N = 'true';
+    process.env.GATE_LAWN_SPOT_TARGET = 'true';
     november();
     mockSummarize.mockReturnValue({ ...mockSummarize(), window: { key: 'oct', month: 10, title: 'October', visitType: 'granular', goal: 'Feed' } });
     expect(bagOf(await guidanceFor()).gates.targetN).toBe('0.75 lb N/1000');
@@ -1549,9 +1549,9 @@ describe('the November nitrogen target on the lawn brief', () => {
     expect(state.updates.scheduled_services || []).toEqual([]);
   });
 
-  test('a failed read with the gate off is never reached: the brief is generated as before', async () => {
+  test('a failed read with the spot target capture off is never reached: the brief is generated as before', async () => {
     november();
-    delete process.env.GATE_LAWN_NOV_LARGE_PATCH_N;
+    delete process.env.GATE_LAWN_SPOT_TARGET;
     loadActive.mockRejectedValue(new Error('db down'));
     expect(bagOf(await guidanceFor()).gates.targetN).toBe('0.75 lb N/1000');
     expect(loadActive).not.toHaveBeenCalled();
