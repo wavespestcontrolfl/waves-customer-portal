@@ -663,6 +663,18 @@ describe('rescueBouncedAddress self-fix', () => {
           if (String(sql).includes('bounced_email')) [bouncedProbe] = args || [];
           return chain;
         });
+        // knownBadAddress reads bounced_email through suppressionCoversEmail (a callback).
+        chain.where = jest.fn((arg) => {
+          if (typeof arg === 'function') {
+            const ctx = {
+              whereRaw: (sql, args) => { if (String(sql).includes('bounced_email')) [bouncedProbe] = args || []; return ctx; },
+              orWhereRaw: () => ctx,
+              orWhere: () => ctx,
+            };
+            arg.call(ctx, ctx); // knex passes the builder as `this` and as the argument
+          }
+          return chain;
+        });
         chain.first = jest.fn(() => {
           if (selfFixProbe && earlierSelfFix) return Promise.resolve({ id: 'r-earlier' });
           if (existingRow && bouncedProbe === existingRow.bounced_email) return Promise.resolve(existingRow);

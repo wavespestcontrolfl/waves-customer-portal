@@ -343,6 +343,21 @@ describeOrSkip('bounce self-fix SQL (Postgres)', () => {
     expect((await db('customers').where({ id }).first('email')).email).toBe(current);
   });
 
+  it('never moves to a Gmail alias of an address with a ledger bounce row', async () => {
+    const older = gaddr('kimlo');
+    const current = gaddr('kim.la');
+    const fixed = gaddr('kim.lo'); // a small fix of `current`, and the same inbox as `older`
+    const { id, phone } = await seedCustomer(current);
+    await db('email_bounce_rescues').insert({ bounced_email: older, customer_id: id, status: 'no_candidate', evidence: JSON.stringify({}) });
+    await seedSuppression(current);
+    await seedCall({ customerId: id, phone, transcription: `Caller: it is ${fixed}`, extraction: { email: fixed } });
+
+    const r = await rescue.rescueBouncedAddress(current);
+    expect(r).toMatchObject({ status: 'suggested', candidate: fixed });
+    expect(r.selfFix).toBeUndefined();
+    expect((await db('customers').where({ id }).first('email')).email).toBe(current);
+  });
+
   it('never moves to an address whose do-not-email block was released (a bounce from before the ledger)', async () => {
     const older = addr('pastbox');
     const current = addr('pastbax');

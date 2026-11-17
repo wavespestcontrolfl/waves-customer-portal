@@ -599,11 +599,13 @@ async function hadEarlierSelfFix(customerId) {
 // Never a known-bad address: one that bounced before (for anyone; the
 // ledger) or ever sat on the do-not-email list (any status, so a released
 // block still counts; this also covers bounces from before the ledger) stays
-// out. A failed read counts as known-bad (fail toward the human).
+// out. Both reads match a Gmail dot or + alias too (suppressionCoversEmail):
+// it is the same inbox. A failed read counts as known-bad (fail toward the
+// human).
 async function knownBadAddress(email, q = db) {
   const { suppressionCoversEmail } = require('../utils/email-equivalence');
   const [bounced, blocked] = await Promise.all([
-    q('email_bounce_rescues').whereRaw('LOWER(bounced_email) = ?', [email]).first('id'),
+    q('email_bounce_rescues').where(suppressionCoversEmail(email, 'bounced_email')).first('id'),
     q('email_suppressions').where(suppressionCoversEmail(email)).first('id'),
   ]).catch(() => [{ id: 'read_failed' }]);
   return Boolean(bounced || blocked);
