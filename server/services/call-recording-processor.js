@@ -1110,6 +1110,20 @@ function callMetadataObject(call) {
     return {};
   }
 }
+// The voicemail channel: the model's flag, or the voice webhook's answered_by / call_outcome stamp. A conference
+// call the star-key hold sent to voicemail (GATE_CALL_HOLD, services/call-hold.js startHoldVoicemail) is an
+// ANSWERED call: the staff talked with the caller first, and the message sits at the end of the same recording.
+// The hold timer already rang the callback bell, so such a call never takes the voicemail lanes (the quote-link
+// text to a new prospect, a second callback bell). Returns { voicemailChannel, holdVoicemail }.
+function voicemailChannelFor(call, extracted) {
+  const holdVoicemail = Boolean(callMetadataObject(call).conference_path?.hold?.voicemail_at);
+  const voicemailChannel = !holdVoicemail && Boolean(
+    extracted?.is_voicemail
+    || call?.answered_by === 'voicemail'
+    || call?.call_outcome === 'voicemail'
+  );
+  return { voicemailChannel, holdVoicemail };
+}
 // The parent's end is reliable only once Twilio reported its duration: the
 // voice webhook marks a voicemail before the recorder runs, with duration
 // still null, and a callback started while the caller is still recording
@@ -12996,12 +13010,9 @@ const CallRecordingProcessor = {
     // so OR that signal with the model's is_voicemail flag. Model-only detection
     // was inconsistent — some voicemails slipped through as live calls and minted
     // partial-data customers, others were dropped entirely.
-    const voicemailChannel = !!(
-      extracted.is_voicemail
-      || call.answered_by === 'voicemail'
-      || call.call_outcome === 'voicemail'
-    );
+    const { voicemailChannel, holdVoicemail } = voicemailChannelFor(call, extracted);
     if (voicemailChannel) extracted.is_voicemail = true;
+    else if (holdVoicemail) extracted.is_voicemail = false; // an answered call; see voicemailChannelFor
 
     // A voicemail from a NEW prospect with a callback number and concrete
     // service intent is a workable lead, not a skip: it continues into the
@@ -26378,6 +26389,7 @@ CallRecordingProcessor._test = {
   slotElapsedAtBookingTime,
   fileSkippedBookingCard,
   isLiveLeadConversation,
+  voicemailChannelFor,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
   wholeStructureUnitWaiverForCall,

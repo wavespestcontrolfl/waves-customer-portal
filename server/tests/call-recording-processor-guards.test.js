@@ -57,6 +57,26 @@ describe('call recording appointment guardrails', () => {
     expect(maskPhone('')).toBe('unknown');
   });
 
+  // GATE_CALL_HOLD: the hold timer ends the room and the caller leaves a message at the end of the answered
+  // call's own recording. The model may flag that message as a voicemail; the call must still never take the
+  // voicemail lanes (the quote-link text to a new prospect, a second callback bell).
+  test('a call the star-key hold sent to voicemail is an answered call, never the voicemail channel', () => {
+    const { voicemailChannelFor } = CallRecordingProcessor._test;
+    const hold = { conference_path: { hold: { open: false, voicemail_at: '2026-11-17T15:05:00.000Z', voicemail_reason: 'timeout' } } };
+    // Today's three signals each still make a voicemail.
+    expect(voicemailChannelFor({ answered_by: 'human' }, { is_voicemail: true }).voicemailChannel).toBe(true);
+    expect(voicemailChannelFor({ answered_by: 'voicemail' }, {}).voicemailChannel).toBe(true);
+    expect(voicemailChannelFor({ call_outcome: 'voicemail' }, {}).voicemailChannel).toBe(true);
+    expect(voicemailChannelFor({ answered_by: 'human' }, { is_voicemail: false }).voicemailChannel).toBe(false);
+    // A hold voicemail never is, whatever the model says, with object or JSON-string metadata.
+    expect(voicemailChannelFor({ answered_by: 'human', metadata: hold }, { is_voicemail: true }))
+      .toEqual({ voicemailChannel: false, holdVoicemail: true });
+    expect(voicemailChannelFor({ answered_by: 'human', metadata: JSON.stringify(hold) }, { is_voicemail: true }).voicemailChannel).toBe(false);
+    // A hold that ended with the staff back on the line (no voicemail_at) changes nothing.
+    expect(voicemailChannelFor({ metadata: { conference_path: { hold: { open: false, count: 1 } } } }, { is_voicemail: true }))
+      .toEqual({ voicemailChannel: true, holdVoicemail: false });
+  });
+
   test('contacted requires a processed live conversation, never a voicemail or attempt', () => {
     const evidence = { call: { status: 'completed' }, extracted: { is_voicemail: false },
       leadId: 'lead-1', finalStatus: 'processed', transcription: 'Customer and staff discuss a quote.' };

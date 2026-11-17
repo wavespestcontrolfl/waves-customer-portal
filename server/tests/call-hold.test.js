@@ -35,13 +35,15 @@ const ROOM = `CF${'d'.repeat(32)}`;
 function fakeCallLog(metadata, extra = {}) {
   const row = { metadata: JSON.parse(JSON.stringify(metadata)), ...extra };
   const at = (obj, parts) => parts.reduce((o, k) => (o == null ? undefined : o[k]), obj);
-  const holds = (sql) => {
+  const holds = ({ sql, bindings = [] }) => {
     let m = sql.match(/^\(metadata -> 'conference_path'\) IS (NOT )?NULL$/);
     if (m) return (row.metadata?.conference_path != null) === Boolean(m[1]);
     m = sql.match(/^\(metadata #>> '\{([^}]*)\}'\) IS (NOT )?NULL$/);
     if (m) return (at(row.metadata, m[1].split(',')) != null) === Boolean(m[2]);
     m = sql.match(/^\(metadata #>> '\{([^}]*)\}'\) = '([^']*)'$/);
     if (m) return String(at(row.metadata, m[1].split(','))) === m[2];
+    m = sql.match(/^\(metadata #>> '\{([^}]*)\}'\) = \?$/); // a bound value
+    if (m) return String(at(row.metadata, m[1].split(','))) === String(bindings[0]);
     m = sql.match(/^COALESCE\(metadata #>> '\{([^}]*)\}', '([^']*)'\) <> '([^']*)'$/);
     if (m) return String(at(row.metadata, m[1].split(',')) ?? m[2]) !== m[3];
     throw new Error(`unknown condition: ${sql}`);
@@ -57,7 +59,7 @@ function fakeCallLog(metadata, extra = {}) {
     const conditions = [];
     const chain = {
       where: jest.fn(() => chain),
-      whereRaw: jest.fn((sql) => { conditions.push(sql); return chain; }),
+      whereRaw: jest.fn((sql, bindings) => { conditions.push({ sql, bindings }); return chain; }),
       first: jest.fn(async () => (table === 'customers'
         ? { first_name: 'Test', last_name: 'Customer' }
         : { id: 77, customer_id: row.customerId || null, from_phone: '+19415550100', metadata: JSON.parse(JSON.stringify(row.metadata)) })),

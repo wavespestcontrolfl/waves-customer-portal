@@ -119,9 +119,10 @@ function setPaths(entries) {
   return db.raw(expr, bindings);
 }
 
+// Each condition is fixed SQL, or { sql, bindings } when it compares against a value (always bound, never inlined).
 function updateState(callSid, entries, conditions = ["(metadata -> 'conference_path') IS NOT NULL"]) {
   let query = db('call_log').where('twilio_call_sid', callSid);
-  for (const sql of conditions) query = query.whereRaw(sql);
+  for (const c of conditions) query = typeof c === 'string' ? query.whereRaw(c) : query.whereRaw(c.sql, c.bindings);
   return query.update({ metadata: setPaths(entries), updated_at: new Date() }).then(Number);
 }
 

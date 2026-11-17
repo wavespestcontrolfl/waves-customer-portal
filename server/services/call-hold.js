@@ -213,7 +213,7 @@ async function claimHoldVoicemail(callSid, reason) {
 }
 
 // Puts the hold back as it was, only while our own stamp is still on it.
-const restoreHold = (callSid, claim) => writeHold(callSid, claim.prev, [HAS_STATE_SQL, `(metadata #>> '{conference_path,hold,voicemail_at}') = '${claim.hold.voicemail_at}'`])
+const restoreHold = (callSid, claim) => writeHold(callSid, claim.prev, [HAS_STATE_SQL, { sql: "(metadata #>> '{conference_path,hold,voicemail_at}') = ?", bindings: [claim.hold.voicemail_at] }])
   .catch((err) => logger.warn(`[call-hold] voicemail claim not restored for ${masked(callSid)} (${errorCode(err)})`));
 
 // Ends every open room of the call. A room that is already gone (404) does not count. Throws on any other error.
