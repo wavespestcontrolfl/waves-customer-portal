@@ -616,12 +616,13 @@ describe('/conference-transfer-wait (the staff while it rings)', () => {
   });
 
   test('taken: they hear it, then join the room as a second staff (no star, no action); a room that is gone hangs up', async () => {
-    callHold.checkHold.mockResolvedValue(VIEW({ ...RING, status: 'accepted', ringing: false }, { phase: 'returned', applied: 'returned' }));
+    // The accept makes his leg the call's winner in the same write as status accepted.
+    callHold.checkHold.mockResolvedValue(VIEW({ ...RING, status: 'accepted', ringing: false }, { phase: 'returned', applied: 'returned', winnerLegSid: TLEG }));
     const said = say('Your call is transferred. Stay on to introduce the caller, or hang up.');
-    expect((await post('/conference-transfer-wait')).body).toBe(response(`${said}${SECOND_STAFF}`));
+    expect((await post('/conference-transfer-wait', { body: { CallSid: LEG } })).body).toBe(response(`${said}${SECOND_STAFF}`));
     expect(callHold.roomIsOpen).toHaveBeenCalledWith(SID);
     callHold.roomIsOpen.mockResolvedValue(false);
-    expect((await post('/conference-transfer-wait')).body).toBe(response(`${said}<Hangup/>`));
+    expect((await post('/conference-transfer-wait', { body: { CallSid: LEG } })).body).toBe(response(`${said}<Hangup/>`));
   });
 
   test.each(['failed', 'canceled'])('%s while the hold is held: "No answer." and the press 1 return (the same four answers)', async (status) => {
