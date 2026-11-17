@@ -251,10 +251,42 @@ function servicesWithTreeShrubPalms(services, { isCommercial, lookupEnriched }) 
   return { ...services, treeShrub: { ...ts, palmCountUnverified: true } };
 }
 
+// Pest visit count on the call-agent draft (owner 2026-11-17, "both", price
+// study): a home pest program starts at quarterly visits. In 90 days all 43
+// sent pest estimates went out quarterly, and the 3 drafts the composer
+// started at another count were each re-priced by hand. The count that was
+// discussed stays on the intent; classifyLane names it as the first review
+// reason, so the first send still stops for the operator.
+// Commercial pest is left alone: its visit count is the risk-type program's
+// (resolveCommercialCadence), never this field.
+const DISCUSSED_PEST_VISITS = {
+  monthly: { name: 'monthly', perYear: 12 },
+  bimonthly: { name: 'bi-monthly', perYear: 6 },
+};
+
+function discussedPestVisitCount(intent) {
+  if (!intent || intent.is_commercial === true) return null;
+  const discussed = String(intent.services?.pest?.frequency || '').toLowerCase();
+  return DISCUSSED_PEST_VISITS[discussed] ? discussed : null;
+}
+
+// Read off the two facts themselves (the count on the intent against the
+// count that priced), so the reason can never report a re-price that did not
+// happen: an input built without quarterlyPestStart yields nothing.
+function discussedPestVisitReason({ intent, engineInput, lines }) {
+  const discussed = DISCUSSED_PEST_VISITS[discussedPestVisitCount(intent)];
+  if (!discussed || engineInput?.services?.pest?.frequency !== 'quarterly') return null;
+  if (!lines.some((l) => l.service === 'pest_control')) return null;
+  return `pest visit count: ${discussed.name} (${discussed.perYear} a year) was discussed, and this draft prices quarterly (4 a year) — change the visit count before send if the customer wants ${discussed.name}`;
+}
+
 function buildEngineInput({
   intent, propertyFacts, context, priorQualifyingServices = [],
   profileDescribesQuotedProperty = false, profileMeasurementUnitExact = false,
   lookupEnriched = null, unitBandPricing = null,
+  // Opt-in, set by the call-agent pipeline only. The tech estimate tool and
+  // the moving re-price share this mapper and price the count they were given.
+  quarterlyPestStart = false,
 }) {
   // profileDescribesQuotedProperty is POSITIVELY established by the caller
   // (the trusted profile's saved address street-matches the final quoted
@@ -280,8 +312,12 @@ function buildEngineInput({
   const homeSource = propertyFacts?.home?.source || SQFT_SOURCES.NONE;
   const lotSource = propertyFacts?.lot?.source || SQFT_SOURCES.NONE;
 
+  const quotedServices = quarterlyPestStart && discussedPestVisitCount(intent)
+    ? { ...intent.services, pest: { ...intent.services.pest, frequency: 'quarterly' } }
+    : (intent.services || {});
+
   return {
-    services: servicesWithTreeShrubPalms(intent.services || {}, { isCommercial, lookupEnriched }),
+    services: servicesWithTreeShrubPalms(quotedServices, { isCommercial, lookupEnriched }),
     isCommercial,
     category: intent.category || (isCommercial ? 'COMMERCIAL' : 'RESIDENTIAL'),
     // Freshly-resolved type (lookup/extraction) beats the profile's saved
@@ -734,6 +770,11 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   if (!positive(totals?.monthly) && !positive(totals?.annual) && !positive(totals?.oneTime)) {
     return { lane: LANES.RED, reasons: ['engine produced zero totals'] };
   }
+
+  // Stated FIRST: the operator must see the visit count that was discussed
+  // before any other gap on the list.
+  const visitCountReason = discussedPestVisitReason({ intent, engineInput, lines });
+  if (visitCountReason) reasons.push(visitCountReason);
 
   // Yellow triggers — draft still lands, with the gaps spelled out. A draft
   // whose ONLY money is provisional (every priced line review-flagged) is

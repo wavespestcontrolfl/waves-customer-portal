@@ -2889,6 +2889,9 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     if (intent.decision === 'draft' && Object.keys(intent.services || {}).length) {
       engineInput = buildEngineInput({
         intent,
+        // A home pest program starts at quarterly visits on this draft
+        // (owner 2026-11-17); classifyLane names the count that was discussed.
+        quarterlyPestStart: true,
         // Gate ON: a true property switch must not PRICE the quoted
         // property with the original property's type either — scopeFacts
         // fences it, so an unresolved type reaches the pricer as 'unknown'
