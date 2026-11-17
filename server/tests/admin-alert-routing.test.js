@@ -219,13 +219,10 @@ describe("Claude's queue in the Activity feed (buildActivity)", () => {
   });
 });
 
-// GATE_ALERT_CLAUDE_FAULTS (owner 2026-11-02, "build all"): a fault the code marks "Claude fixes this" that the bell
+// Dropped Claude faults (owner 2026-11-02, "build all"): a fault the code marks "Claude fixes this" that the bell
 // policy would drop goes to Claude's queue instead. Only a drop is rescued; nothing that rings changes.
 describe('dropped Claude faults (classifyClaudeFault, rescueClaudeFault)', () => {
   const { classifyClaudeFault, rescueClaudeFault, CLAUDE_FAULT_TRIGGERS, CLAUDE_FAULT_TRIGGERS_LEFT_OUT, CLAUDE_FAULT_CATEGORIES } = routing;
-  beforeEach(() => { process.env.GATE_ALERT_CLAUDE_FAULTS = 'true'; });
-  afterEach(() => { delete process.env.GATE_ALERT_CLAUDE_FAULTS; });
-
   test('the two lists cover exactly the registry rules that say who claude, each one broken', () => {
     const { TRIGGER_REGISTRY } = require('../services/notification-triggers');
     const markedForClaude = Object.keys(TRIGGER_REGISTRY).filter((k) => TRIGGER_REGISTRY[k].rule?.who === 'claude').sort();
@@ -269,14 +266,6 @@ describe('dropped Claude faults (classifyClaudeFault, rescueClaudeFault)', () =>
     }
   });
 
-  test('gate off or not exactly true: nothing is rescued', () => {
-    for (const v of [undefined, 'false', 'TRUE', '1', 'shadow']) {
-      if (v === undefined) delete process.env.GATE_ALERT_CLAUDE_FAULTS; else process.env.GATE_ALERT_CLAUDE_FAULTS = v;
-      expect(classifyClaudeFault({ category: 'token_alert' })).toBeNull();
-      expect(rescueClaudeFault({ category: 'system', triggerKey: 'seo_sync_failed', metadata: {} })).toBeNull();
-    }
-  });
-
   test('rescueClaudeFault stamps a copy for the queue (create() then skips the policy) and keeps the row fields', () => {
     const metadata = { triggerKey: 'event_sources_unhealthy', priority: 'normal', payload: { failingCount: 2 } };
     const out = rescueClaudeFault({ category: 'newsletter', triggerKey: 'event_sources_unhealthy', metadata, payload: metadata.payload });
@@ -294,10 +283,9 @@ describe('create(): a dropped Claude fault is written to the queue instead', () 
     return { conn, inserted };
   };
   const make = (over) => ({ recipientType: 'admin', title: 'cloudflare_workers_ai credential expired', body: 'Check token health', link: '/admin/social-media', ...over });
-  afterEach(() => { delete process.env.GATE_ALERT_CLAUDE_FAULTS; bellPolicy.bellAllowed.mockImplementation(async () => false); });
+  afterEach(() => { bellPolicy.bellAllowed.mockImplementation(async () => false); });
 
-  test('gate on: the policy says drop, so the row is written Activity-only, who claude, broken (no metadata given)', async () => {
-    process.env.GATE_ALERT_CLAUDE_FAULTS = 'true';
+  test('the policy says drop, so the row is written Activity-only, who claude, broken (no metadata given)', async () => {
     const { conn, inserted } = recorder();
     const out = await NotificationService.create(make({ category: 'token_alert', connection: conn }));
     expect(out.id).toBe('n2');
@@ -305,23 +293,14 @@ describe('create(): a dropped Claude fault is written to the queue instead', () 
     expect(JSON.parse(inserted[0].metadata)).toEqual({ feed: 'activity', who: 'claude', severity: 'broken', claudeQueue: 'token-alert' });
   });
 
-  test('gate off: the same alert is dropped exactly as before (no row)', async () => {
-    const { conn, inserted } = recorder();
-    const out = await NotificationService.create(make({ category: 'token_alert', connection: conn }));
-    expect(out).toMatchObject({ suppressed: true, reason: 'bell_policy' });
-    expect(inserted).toHaveLength(0);
-  });
-
-  test('gate on: an alert the policy lets ring is untouched (a rescue happens only at a drop)', async () => {
-    process.env.GATE_ALERT_CLAUDE_FAULTS = 'true';
+  test('an alert the policy lets ring is untouched (a rescue happens only at a drop)', async () => {
     bellPolicy.bellAllowed.mockImplementation(async () => true);
     const { conn, inserted } = recorder();
     await NotificationService.create(make({ category: 'token_alert', connection: conn, metadata: { source: 'token-health' } }));
     expect(JSON.parse(inserted[0].metadata)).toEqual({ source: 'token-health' });
   });
 
-  test('gate on: a dropped alert that is not a Claude fault is still dropped', async () => {
-    process.env.GATE_ALERT_CLAUDE_FAULTS = 'true';
+  test('a dropped alert that is not a Claude fault is still dropped', async () => {
     const { conn, inserted } = recorder();
     const out = await NotificationService.create(make({ category: 'call_pipeline_drift', connection: conn }));
     expect(out).toMatchObject({ suppressed: true, reason: 'bell_policy' });

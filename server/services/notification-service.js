@@ -583,7 +583,7 @@ const NotificationService = {
               declared: { contact: metadata?.contact === true, promise: metadata?.promise === true },
             });
             if (!allowed) {
-              // GATE_ALERT_CLAUDE_FAULTS (services/admin-alert-routing.js): a fault the code marks "Claude fixes
+              // Dropped Claude faults (services/admin-alert-routing.js): a fault the code marks "Claude fixes
               // this" is written to Claude's queue (Activity-only, who 'claude') instead of the drop below.
               const rescued = rescueClaudeFault({ category, metadata });
               if (!rescued) return silenceForBellPolicy({ category, title, metadata });

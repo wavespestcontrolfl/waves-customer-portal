@@ -111,9 +111,9 @@ function classifyClaudeQueue({ category, metadata, dedupeKey } = {}) {
   return hit ? { className: hit.name, severity: hit.severity || 'broken' } : null;
 }
 
-// Dropped faults (owner 2026-11-02, "build all"; GATE_ALERT_CLAUDE_FAULTS). The bell policy writes NO row for an
+// Dropped faults (owner 2026-11-02, "build all"). The bell policy writes NO row for an
 // alert it silences, so a fault the code itself marks "Claude fixes this" vanished: the property-lookup canary
-// failed for weeks with no row anywhere. With the gate on, the two drop points (NotificationService.create and
+// failed for weeks with no row anywhere. The two drop points (NotificationService.create and
 // triggerNotification) write such an alert to Claude's queue instead. Only an alert the policy would drop is
 // rescued: nothing that rings today stops ringing, and nothing new rings.
 //   1. A trigger-registry alert whose rule says who 'claude' (notification-triggers.js). Named here on purpose;
@@ -135,13 +135,6 @@ const CLAUDE_FAULT_TRIGGERS_LEFT_OUT = Object.freeze({
 });
 const CLAUDE_FAULT_CATEGORIES = Object.freeze({ token_alert: 'token-alert' });
 
-function claudeFaultsEnabled() {
-  try {
-    const gates = require('../config/feature-gates');
-    return typeof gates.alertClaudeFaultsLive === 'function' && gates.alertClaudeFaultsLive() === true;
-  } catch { return false; }
-}
-
 // A rescue also refuses the technician-scope customer id (scopeCustomerId), top level or in either payload, not only
 // carriesCustomer's ids.
 const tiedToCustomer = (meta, payload) => carriesCustomer(meta)
@@ -150,9 +143,8 @@ const tiedToCustomer = (meta, payload) => carriesCustomer(meta)
     .some((v) => v !== undefined && v !== null && String(v).trim() !== '');
 
 // The verdict for an alert the bell policy is about to drop: null = dropped as today, else { className, severity }.
-// `payload` is a registry event's raw payload (before sanitizing). Pure except for the gate read.
+// `payload` is a registry event's raw payload (before sanitizing). Pure.
 function classifyClaudeFault({ category, triggerKey, metadata, payload } = {}) {
-  if (!claudeFaultsEnabled()) return null;
   const meta = metaOf(metadata);
   if (CUSTOMER_CONTACT_CATEGORIES.has(category) || category === 'ops_digest') return null;
   if (tiedToCustomer(meta, metaOf(payload))) return null;
@@ -273,7 +265,6 @@ module.exports = {
   keepSentToClaude,
   classifyClaudeQueue,
   classifyClaudeFault,
-  claudeFaultsEnabled,
   stampClaudeQueue,
   rescueClaudeFault,
   rerouteOpenRows,

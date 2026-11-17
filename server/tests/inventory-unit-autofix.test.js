@@ -11,10 +11,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
-  inventoryUnitAutofixDryOzLive: jest.fn(() => false),
 }));
 
-const { isEnabled, inventoryUnitAutofixDryOzLive } = require('../config/feature-gates');
+const { isEnabled } = require('../config/feature-gates');
 const { notifyAdmin } = require('../services/notification-service');
 const { convertInventoryQuantity } = require('../services/inventory-units');
 const {
@@ -47,7 +46,6 @@ function makeChain(table, route) {
 beforeEach(() => {
   jest.clearAllMocks();
   isEnabled.mockReturnValue(false);
-  inventoryUnitAutofixDryOzLive.mockReturnValue(false);
 });
 
 // ---------------------------------------------------------------------------
@@ -735,35 +733,13 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
   }
 
   const lockedRows = () => Object.fromEntries(OZ_ROWS.map((r) => [r.id, { ...r, low_stock_threshold: null }]));
-  // The sweep gate is a boot-time isEnabled read; the dry-oz gate is its call-time reader.
+  // The sweep gate is a boot-time isEnabled read.
   const gates = (...on) => {
     isEnabled.mockImplementation((gate) => on.includes(gate));
-    inventoryUnitAutofixDryOzLive.mockReturnValue(on.includes('inventoryUnitAutofixDryOz'));
   };
 
-  it('gate off: no dry-oz scan and no dry-oz writes; alias behavior unchanged', async () => {
+  it('sweep gate on: applies each dry row with the exact args, parks the rest, one digest', async () => {
     gates('inventoryUnitAutofix');
-    const { dbi, state } = buildDryDbi({
-      aliasCandidates: [{ id: 'p1', name: 'Talstar P', inventory_unit: 'Gallons' }],
-      products: { p1: { id: 'p1', name: 'Talstar P', inventory_unit: 'Gallons', inventory_on_hand: '2.5', low_stock_threshold: null } },
-    });
-    const result = await runInventoryUnitAutofixSweep({ dbi });
-    expect(result.applied).toBe(1);
-    expect(result.dryOz).toMatchObject({ applied: 0, parked: 0, stale: 0, errors: 0 });
-    expect(state.updates).toHaveLength(1);
-    expect(state.updates[0].payload.inventory_unit).toBe('gal');
-    expect(state.chains.some((c) => c.called('whereRaw') && c.args('whereRaw')[0] === OZ_FAMILY_SQL)).toBe(false);
-  });
-
-  it('dry-oz gate alone does nothing: the sweep gate still returns early', async () => {
-    gates('inventoryUnitAutofixDryOz');
-    const { dbi } = buildDryDbi({});
-    expect(await runInventoryUnitAutofixSweep({ dbi })).toEqual({ skipped: 'gate_off' });
-    expect(dbi).not.toHaveBeenCalled();
-  });
-
-  it('both gates on: applies each dry row with the exact args, parks the rest, one digest', async () => {
-    gates('inventoryUnitAutofix', 'inventoryUnitAutofixDryOz');
     const { dbi, state } = buildDryDbi({ products: lockedRows() });
     const result = await runInventoryUnitAutofixSweep({ dbi });
 
@@ -797,7 +773,7 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
   });
 
   it('a formulation edit between scan and lock leaves the row alone (lockedCheck)', async () => {
-    gates('inventoryUnitAutofix', 'inventoryUnitAutofixDryOz');
+    gates('inventoryUnitAutofix');
     const edited = lockedRows();
     edited.w1 = { ...edited.w1, formulation: 'sc' };
     const { dbi, state } = buildDryDbi({ ozRows: [OZ_ROWS[0]], products: edited });
@@ -809,7 +785,7 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
   });
 
   it('a unit edit between scan and lock is stale, not applied', async () => {
-    gates('inventoryUnitAutofix', 'inventoryUnitAutofixDryOz');
+    gates('inventoryUnitAutofix');
     const products = lockedRows();
     products.w1 = { ...products.w1, inventory_unit: 'fl_oz' };
     const { dbi, state } = buildDryDbi({ ozRows: [OZ_ROWS[0]], products });
@@ -821,7 +797,7 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
   });
 
   it('an error leaves that row parked and the phase continues', async () => {
-    gates('inventoryUnitAutofix', 'inventoryUnitAutofixDryOz');
+    gates('inventoryUnitAutofix');
     const { dbi, state } = buildDryDbi({ products: lockedRows(), failOn: 'w1' });
     const result = await runInventoryUnitAutofixSweep({ dbi });
     expect(result.dryOz).toMatchObject({ applied: 1, parked: 2, stale: 0, errors: 1 });
@@ -829,7 +805,7 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
   });
 
   it('a failed scan is counted and does not break the alias phase or the digest', async () => {
-    gates('inventoryUnitAutofix', 'inventoryUnitAutofixDryOz');
+    gates('inventoryUnitAutofix');
     const { dbi } = buildDryDbi({
       failOn: 'scan',
       aliasCandidates: [{ id: 'p1', name: 'Talstar P', inventory_unit: 'Gallons' }],
@@ -842,7 +818,7 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
   });
 
   it('bounds dry-oz writes with BATCH_CAP', async () => {
-    gates('inventoryUnitAutofix', 'inventoryUnitAutofixDryOz');
+    gates('inventoryUnitAutofix');
     const ozRows = Array.from({ length: BATCH_CAP + 5 }, (_, i) => (
       { id: `d-${i}`, name: `Dry ${String(i).padStart(3, '0')}`, formulation: 'wdg', inventory_unit: 'oz', inventory_on_hand: '1' }
     ));
@@ -854,7 +830,7 @@ describe('runInventoryUnitAutofixSweep dry-oz phase', () => {
   });
 
   it('a mixed run sends the alias digest in its old words, listing alias fixes only', async () => {
-    gates('inventoryUnitAutofix', 'inventoryUnitAutofixDryOz');
+    gates('inventoryUnitAutofix');
     const { dbi } = buildDryDbi({
       aliasCandidates: [{ id: 'p1', name: 'Talstar P', inventory_unit: 'Gallons' }],
       products: { ...lockedRows(), p1: { id: 'p1', name: 'Talstar P', inventory_unit: 'Gallons', inventory_on_hand: '2.5', low_stock_threshold: null } },
