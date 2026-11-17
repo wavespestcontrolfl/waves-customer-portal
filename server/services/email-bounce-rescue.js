@@ -25,12 +25,28 @@
  *                             surfaced for owner read-back, never
  *                             auto-corrected (AGENTS.md call-pipeline
  *                             rule — the original failure mode IS a
- *                             mishear).
+ *                             mishear). One exception, the SELF-FIX below.
  *   'transcript_decode'     — reconstruction from spelled letters
  *                             (deterministic letter-run/phonetic decode,
  *                             plus a FAST-tier LLM pass whose supporting
  *                             quote must appear verbatim in the
- *                             transcript). SUGGEST-ONLY.
+ *                             transcript). SUGGEST-ONLY: it rebuilds
+ *                             the address from the bounced one.
+ *
+ * Self-fix (GATE_CALL_BOUNCE_SELF_FIX, dark; owner 2026-11-17, page
+ * NN7Qm52t): a customer's PRIMARY email may take one consensus fix per
+ * customer when every candidate names the SAME address, a call record holds
+ * that complete address, the newest call that talks about email names it,
+ * and it is a small fix — same domain, at most 2 changes, no letter of the
+ * bounced address dropped (isSmallFix). It must validate with a verified MX,
+ * never have bounced, and never have been on the do-not-email list, even
+ * when that block was released. Decoded spellings stay suggestions. Prod
+ * ledger 2026-08 to 2026-11: the right near-miss guesses changed one letter
+ * or two dots; the wrong guess of 11-02 dropped a letter; two other near-miss
+ * guesses were addresses that had bounced months before. With the switch
+ * on, the LLM decode also reads spoken corrections ("knock off that 3-7")
+ * for the suggestion, and relookAfterNewCalls re-runs a no-fix address after
+ * a later call that talks about email.
  *
  * Actions (hands-off/exception-based, CLAUDE.md rule 14):
  *   - Auto-eligible tier + all validations green → apply. A PRIMARY
@@ -66,6 +82,7 @@ const { deliverOpsDigest } = require('./ops-digest');
 const NotificationService = require('./notification-service');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
+const { callBounceSelfFixLive } = require('../config/feature-gates');
 
 // Structured-output contract for the decode (llm/call.js jsonSchema). The
 // verbatim-quote anchor and the syntax/MX/suppression revalidation still run.
@@ -78,7 +95,17 @@ const DECODE_SCHEMA = {
     supporting_quote: { type: 'string', description: 'Copied VERBATIM from the excerpts' },
   },
 };
-const { redactEmail, correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
+const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
+
+// Log-safe address. Local, not imported: email-typo-correction never
+// exported a redactEmail, so the old import was undefined and the failed-
+// apply log line threw before the suggestion email (the person's alert) went.
+function redactEmail(value) {
+  if (!value || typeof value !== 'string') return '';
+  const [local, domain] = value.split('@');
+  if (!domain) return '[redacted]';
+  return `${local.slice(0, 2)}***@${domain}`;
+}
 
 const EMAIL_RE = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
 const EMAIL_SCAN_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
@@ -93,6 +120,16 @@ const DECODE_CONTEXT_LINES = 3;
 // A crashed auto-apply leaves an 'applying' ledger row; after this long a
 // new pass may take it over and retry.
 const APPLYING_STALE_MINUTES = 15;
+// Self-fix (GATE_CALL_BOUNCE_SELF_FIX): only a COMPLETE address seen in the
+// customer's own call records (extractor_consensus sightings), only small
+// fixes, at most this many changes (selfFixCost). A decoded spelling
+// (transcript_decode, rule-based or AI) rebuilds the address from the bounced
+// one, borrowing its domain and digits, so it stays a suggestion (Codex r1
+// on #7906: "J-O-H-N-S at yahoo dot com" decoded onto the old gmail address).
+const SELF_FIX_TIER = 'extractor_consensus';
+const SELF_FIX_MAX_COST = 2;
+// Re-look sweep: rows per tick (each can cost one FAST-tier decode).
+const RELOOK_BATCH = 10;
 
 // Consumer mailbox providers where a same-domain inbound near-miss can be a
 // STRANGER (millions of local parts one edit apart) — inbound evidence on
@@ -150,6 +187,49 @@ function editDistance(a, b) {
   return prev[t.length];
 }
 
+// Self-fix change count from the BOUNCED local part to a candidate's: an
+// edit distance where dropping a letter of the bounced address is never a
+// small fix (cost above SELF_FIX_MAX_COST), and a change keeps its kind
+// (letter to letter, digit to digit, dot/symbol to dot/symbol). Adding any
+// character, or dropping a digit or a dot, costs 1. So "drop the 37" is 2,
+// one misheard letter is 1, two dots the caller never said is 2, and a
+// guess that loses a letter the caller spelled is out.
+const DROPPED_LETTER_COST = SELF_FIX_MAX_COST + 1;
+function charKind(c) {
+  if (/[a-z]/.test(c)) return 'letter';
+  if (/[0-9]/.test(c)) return 'digit';
+  return 'symbol';
+}
+function dropCost(c) {
+  return charKind(c) === 'letter' ? DROPPED_LETTER_COST : 1;
+}
+function swapCost(a, b) {
+  if (a === b) return 0;
+  return charKind(a) === charKind(b) ? 1 : dropCost(a) + 1;
+}
+function selfFixCost(bouncedLocal, candidateLocal) {
+  const s = String(bouncedLocal || '').toLowerCase();
+  const t = String(candidateLocal || '').toLowerCase();
+  let prev = [0];
+  for (let j = 1; j <= t.length; j++) prev[j] = j;
+  for (let i = 1; i <= s.length; i++) {
+    const row = [prev[0] + dropCost(s[i - 1])];
+    for (let j = 1; j <= t.length; j++) {
+      row[j] = Math.min(prev[j] + dropCost(s[i - 1]), row[j - 1] + 1, prev[j - 1] + swapCost(s[i - 1], t[j - 1]));
+    }
+    prev = row;
+  }
+  return prev[t.length];
+}
+
+// A self-fix candidate: same domain, a different local part, small fix.
+function isSmallFix(bouncedEmail, candidateEmail) {
+  const b = normalizeEmail(bouncedEmail);
+  const c = normalizeEmail(candidateEmail);
+  if (!c || c === b || domainPart(c) !== domainPart(b)) return false;
+  return selfFixCost(localPart(b), localPart(c)) <= SELF_FIX_MAX_COST;
+}
+
 // ── deterministic transcript decode ─────────────────────────────────
 
 // Letter runs the way people spell on calls: "J-A-N-E-B-O-D-M-E-R",
@@ -202,12 +282,15 @@ function decodeSpelledCandidates(transcription, bouncedEmail) {
   return out;
 }
 
+// Talk about an email address. EMAIL_TALK_PATTERN is the same test in SQL.
+const EMAIL_TALK_RE = /e-?mail|@|\bdot\b\s*(com|net|org|edu)/i;
+
 // Context windows around email talk — the input for the LLM decode.
 function extractSpelledContexts(transcription) {
   const lines = String(transcription || '').split(/\n/);
   const contexts = [];
   lines.forEach((line, i) => {
-    if (!/e-?mail|@|\bdot\b\s*(com|net|org|edu)/i.test(line)) return;
+    if (!EMAIL_TALK_RE.test(line)) return;
     contexts.push(lines.slice(Math.max(0, i - 1), i + DECODE_CONTEXT_LINES).join('\n'));
   });
   return contexts.slice(0, MAX_DECODE_CONTEXTS);
@@ -221,18 +304,31 @@ function extractSpelledContexts(transcription) {
  * before it can even be SUGGESTED — decode-tier candidates never
  * auto-apply. Decode failures degrade to "no tier-C candidate".
  */
-async function llmDecodeCandidate({ contexts, bouncedEmail, transcription }) {
+// Spoken corrections (GATE_CALL_BOUNCE_SELF_FIX): a caller who tells us how
+// the stored address is wrong ("there's not a 3-7 after the 777", "it's a C,
+// not a K"). The verbatim-quote anchor and every validation still apply.
+const DECODE_CORRECTIONS_RULE = [
+  'The caller may also say in words how the stored address is wrong, for',
+  'example "knock off that 3-7", "there is no dot", or "it\'s a C, not a K".',
+  'When an excerpt states such a correction plainly, apply exactly that',
+  'correction to the known-wrong address and copy the correction words',
+  'VERBATIM as the supporting_quote. Never guess a change the caller did not state.',
+].join(' ');
+
+async function llmDecodeCandidate({ contexts, bouncedEmail, transcription, readCorrections = false }) {
   if (!contexts.length) return null;
+  const system = [
+    'You reconstruct email addresses that a phone-call transcriber mis-heard.',
+    'The stored address is KNOWN WRONG (it hard-bounced). Use only the spelled',
+    'letters, phonetic hints ("w like whiskey"), and stated abbreviations in the',
+    'transcript excerpts. Report the reconstructed candidate_email with a',
+    'supporting_quote copied VERBATIM from the excerpts. If the excerpts do not',
+    'determine a correction, candidate_email is null.',
+  ];
+  if (readCorrections) system.push(DECODE_CORRECTIONS_RULE);
   const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
     laneId: 'bounce_rescue',
-    system: [
-      'You reconstruct email addresses that a phone-call transcriber mis-heard.',
-      'The stored address is KNOWN WRONG (it hard-bounced). Use only the spelled',
-      'letters, phonetic hints ("w like whiskey"), and stated abbreviations in the',
-      'transcript excerpts. Report the reconstructed candidate_email with a',
-      'supporting_quote copied VERBATIM from the excerpts. If the excerpts do not',
-      'determine a correction, candidate_email is null.',
-    ].join(' '),
+    system: system.join(' '),
     text: `Known-wrong address: ${bouncedEmail}\n\nTranscript excerpts:\n${contexts.join('\n---\n')}`,
     jsonMode: true,
     jsonSchema: DECODE_SCHEMA,
@@ -333,7 +429,7 @@ async function callSightings(phone) {
     .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a test call's spoken email is not evidence
     .whereNotNull('transcription')
     .orderBy('created_at')
-    .select('id', 'created_at', 'transcription', 'ai_extraction')
+    .select('id', 'created_at', 'transcription', 'ai_extraction', 'processed_at', 'processing_status')
     .catch(() => []);
   const sightings = [];
   for (const call of calls) {
@@ -407,34 +503,34 @@ async function mxResolves(domain) {
  * customer's billing email, or another lead. Any hit is a duplicate signal,
  * never an apply.
  */
-async function candidateCollision(email, { ownerCustomerId, ownerLeadId }) {
+async function candidateCollision(email, { ownerCustomerId, ownerLeadId }, q = db) {
   // The owner is excluded IN SQL, not post-hoc: with `.first()` and no
   // exclusion, a candidate present on BOTH the owner and another party
   // could return the owner row and read as collision-free (codex r2).
   const fieldChecks = CUSTOMER_EMAIL_FIELDS.map((f) => `LOWER(${f}) = ?`).join(' OR ');
-  const otherCustomer = await db('customers')
+  const otherCustomer = await q('customers')
     .whereRaw(`(${fieldChecks})`, CUSTOMER_EMAIL_FIELDS.map(() => email))
     .whereNull('deleted_at')
-    .modify((q) => { if (ownerCustomerId) q.whereNot('id', ownerCustomerId); })
+    .modify((b) => { if (ownerCustomerId) b.whereNot('id', ownerCustomerId); })
     .first();
   if (otherCustomer && otherCustomer.id !== ownerCustomerId) {
     return { kind: 'customer', id: otherCustomer.id };
   }
-  const billingPref = await db('notification_prefs')
+  const billingPref = await q('notification_prefs')
     .whereRaw('LOWER(billing_email) = ?', [email])
-    .modify((q) => { if (ownerCustomerId) q.whereNot('customer_id', ownerCustomerId); })
+    .modify((b) => { if (ownerCustomerId) b.whereNot('customer_id', ownerCustomerId); })
     .first()
     .catch(() => null);
   if (billingPref?.customer_id && billingPref.customer_id !== ownerCustomerId) {
     return { kind: 'billing_prefs', id: billingPref.customer_id };
   }
-  const otherLead = await db('leads')
+  const otherLead = await q('leads')
     .whereRaw('LOWER(email) = ?', [email])
     .whereNull('deleted_at')
-    .modify((q) => {
-      if (ownerLeadId) q.whereNot('id', ownerLeadId);
+    .modify((b) => {
+      if (ownerLeadId) b.whereNot('id', ownerLeadId);
       if (ownerCustomerId) {
-        q.where((q2) => q2.whereNull('customer_id').orWhereNot('customer_id', ownerCustomerId));
+        b.where((q2) => q2.whereNull('customer_id').orWhereNot('customer_id', ownerCustomerId));
       }
     })
     .first();
@@ -442,15 +538,27 @@ async function candidateCollision(email, { ownerCustomerId, ownerLeadId }) {
     && !(ownerCustomerId && otherLead.customer_id === ownerCustomerId)) {
     return { kind: 'lead', id: otherLead.id };
   }
+  // Gmail ignores local-part dots and everything after '+': a dot or tag
+  // variant of a mailbox another party holds is that party's inbox (the
+  // identity the destination lock keys on). The bounce recovery's check,
+  // fail-closed (pre-push audit on #7906).
+  const { gmailMailboxOwnedByOther } = require('./email-bounce-recovery');
+  if (await gmailMailboxOwnedByOther(email, ownerCustomerId, q)) return { kind: 'gmail_mailbox', id: null };
   return null;
+}
+
+// An active do-not-email row covers the address. `q` = db, or the save's
+// transaction for the re-check under the destination lock.
+function activeSuppression(email, q = db) {
+  return q('email_suppressions')
+    .where(require('../utils/email-equivalence').suppressionCoversEmail(email)).where({ status: 'active' }).first();
 }
 
 async function validateCandidate(candidate, { bouncedEmail, ownerCustomerId, ownerLeadId, excludeRescueId = null }) {
   const email = normalizeEmail(candidate);
   if (!EMAIL_RE.test(email)) return { ok: false, reason: 'syntax' };
   if (email === normalizeEmail(bouncedEmail)) return { ok: false, reason: 'same_as_bounced' };
-  const suppressed = await db('email_suppressions')
-    .where(require('../utils/email-equivalence').suppressionCoversEmail(email)).where({ status: 'active' }).first();
+  const suppressed = await activeSuppression(email);
   if (suppressed) return { ok: false, reason: 'candidate_suppressed' };
   const triedBefore = await db('email_bounce_rescues')
     .whereRaw('LOWER(candidate_email) = ?', [email])
@@ -473,9 +581,135 @@ async function validateCandidate(candidate, { bouncedEmail, ownerCustomerId, own
   return { ok: true, mxUnknown: mx === null };
 }
 
+// ── self-fix (GATE_CALL_BOUNCE_SELF_FIX) ────────────────────────────
+
+// Once per customer: an earlier self-fix that was saved (or is being saved)
+// means this address is the self-fixed one bouncing again — a person takes
+// it. A failed read counts as an earlier fix (fail toward the human).
+async function hadEarlierSelfFix(customerId) {
+  const row = await db('email_bounce_rescues')
+    .where({ customer_id: customerId })
+    .whereIn('status', ['applied', 'applying'])
+    .whereRaw("evidence->>'self_fix' = 'true'")
+    .first('id')
+    .catch(() => ({ id: 'read_failed' }));
+  return Boolean(row);
+}
+
+// Never a known-bad address: one that bounced before (for anyone; the
+// ledger) or ever sat on the do-not-email list (any status, so a released
+// block still counts; this also covers bounces from before the ledger) stays
+// out. Both reads match a Gmail dot or + alias too (suppressionCoversEmail):
+// it is the same inbox. A failed read counts as known-bad (fail toward the
+// human).
+async function knownBadAddress(email, q = db) {
+  const { suppressionCoversEmail } = require('../utils/email-equivalence');
+  const [bounced, blocked] = await Promise.all([
+    q('email_bounce_rescues').where(suppressionCoversEmail(email, 'bounced_email')).first('id'),
+    q('email_suppressions').where(suppressionCoversEmail(email)).first('id'),
+  ]).catch(() => [{ id: 'read_failed' }]);
+  return Boolean(bounced || blocked);
+}
+
+// A call whose processing reached its verdict, so its extraction will not
+// change: processed_at is the verdict time (set since 2026-10-10, never
+// backfilled), and these are the processor's verdict statuses
+// (call-recording-processor.js). No status, 'pending', 'processing' and the
+// retry lanes are not finished.
+const CALL_VERDICT_STATUSES = new Set(['processed', 'spam', 'voicemail', 'customer_creation_failed', 'lead_creation_failed']);
+function callFinished(call) {
+  return Boolean(call.processed_at) || CALL_VERDICT_STATUSES.has(call.processing_status);
+}
+
+// The email the call pipeline settled on for a call: ai_extraction.email,
+// the field it saves to the customer record (call-recording-processor.js).
+function extractedEmail(call) {
+  let x = call.ai_extraction;
+  if (typeof x === 'string') {
+    try { x = JSON.parse(x); } catch { return null; }
+  }
+  return x && typeof x === 'object' && typeof x.email === 'string' ? normalizeEmail(x.email) : null;
+}
+
+// The customer's newest call that talks about email must be finished, and
+// its extraction must give the fix as the caller's email. A transcript
+// mention is not enough: an agent's read-back the caller turned down ("No,
+// remove the final digit") names the address too. A later call may carry a
+// correction no tier can read ("there is no 3 at the end"), and a call
+// still in processing may still change its extraction, so a person decides
+// (Codex r1 and the pre-push audits on #7906).
+function newestEmailCallNames(calls, address) {
+  const talk = (calls || []).filter((c) => EMAIL_TALK_RE.test(String(c.transcription || '')));
+  const newest = talk[talk.length - 1];
+  if (!newest || !callFinished(newest)) return false;
+  return extractedEmail(newest) === address;
+}
+
+/**
+ * The self-fix outcome, or null. Only a customer's PRIMARY email. Every
+ * candidate, from any tier, must name ONE address (two addresses = the
+ * evidence disagrees, a person decides); a call record must hold that
+ * complete address (SELF_FIX_TIER), and so must the newest call that talks
+ * about email; and it must be a small fix. The address passes
+ * validateCandidate with a verified MX, is not a known-bad address, and the
+ * customer has no earlier self-fix.
+ */
+async function selfFixOutcome({ tiers, owner, bouncedEmail, validations, calls }) {
+  if (!owner.customer || owner.field !== 'email') return null;
+  const bounced = normalizeEmail(bouncedEmail);
+  const addresses = new Set(tiers.map((c) => normalizeEmail(c.email)).filter((e) => e && e !== bounced));
+  if (addresses.size !== 1) return null;
+  const [key] = addresses;
+  const cand = tiers.find((c) => c.tier === SELF_FIX_TIER && normalizeEmail(c.email) === key);
+  if (!cand || !isSmallFix(bounced, key) || !newestEmailCallNames(calls, key)) return null;
+  const v = validations.get(key) || await validateCandidate(key, {
+    bouncedEmail, ownerCustomerId: owner.customer.id, ownerLeadId: null,
+  });
+  if (!v.ok || v.mxUnknown) return null;
+  if (await knownBadAddress(key)) return null;
+  if (await hadEarlierSelfFix(owner.customer.id)) return null;
+  return { status: 'applied', tier: cand.tier, candidate: key, evidence: cand, selfFix: true };
+}
+
+// What the ledger row keeps of an outcome's evidence.
+function ledgerEvidence(outcome) {
+  if (!outcome.evidence) return {};
+  const out = { quote: outcome.evidence.quote, llm: Boolean(outcome.evidence.llm) };
+  if (outcome.selfFix) out.self_fix = true;
+  return out;
+}
+
 // ── actions ─────────────────────────────────────────────────────────
 
-async function applyFix({ bouncedEmail, candidate, owner, tier, evidence, appliedBy }) {
+// Re-judge the destination under its lock: validateCandidate (and, for a
+// self-fix, knownBadAddress) read it before the lock, so a writer that took
+// or blocked the address in between would be missed. Every other writer of a
+// customer email takes the same lock, so after it this read is final
+// (pre-push audit on #7906). Taken or blocked = the change rolls back.
+async function assertDestinationFree(trx, { candidate, owner, selfFix }) {
+  const taken = await candidateCollision(candidate, {
+    ownerCustomerId: owner.customer?.id || null, ownerLeadId: owner.lead?.id || null,
+  }, trx);
+  const blocked = selfFix ? await knownBadAddress(candidate, trx) : await activeSuppression(candidate, trx);
+  if (taken || blocked) {
+    throw Object.assign(new Error('destination taken or blocked mid-rescue'), { code: 'STALE_DESTINATION' });
+  }
+}
+
+// The rescue's ledger row turns 'applied' in the same transaction as the
+// email change, so a committed fix always carries its record (and the
+// once-per-customer guard always sees a self-fix). The row must still be
+// this run's 'applying' claim, or the change rolls back (pre-push audit on
+// #7906). No row id (the operator apply) = no ledger write here.
+async function markApplied(trx, rescueRowId, appliedBy) {
+  if (!rescueRowId) return;
+  const marked = await trx('email_bounce_rescues')
+    .where({ id: rescueRowId, status: 'applying' })
+    .update({ status: 'applied', applied_at: new Date(), applied_by: appliedBy, updated_at: new Date() });
+  if (marked !== 1) throw Object.assign(new Error('rescue row no longer claimed'), { code: 'STALE_CLAIM' });
+}
+
+async function applyFix({ bouncedEmail, candidate, owner, tier, evidence, appliedBy, selfFix = false, rescueRowId = null }) {
   const counts = await db.transaction(async (trx) => {
     if (owner.customer) {
       const field = owner.field === 'billing_email' ? null : owner.field;
@@ -504,6 +738,7 @@ async function applyFix({ bouncedEmail, candidate, owner, tier, evidence, applie
           throw Object.assign(new Error('billing email changed mid-rescue'), { code: 'STALE_OWNER' });
         }
       }
+      await assertDestinationFree(trx, { candidate, owner, selfFix });
       if (field === 'email') {
         // PRIMARY email changes ride the standard fanout so lead/estimate
         // snapshots retarget and newsletter tokens rotate. Same narrowed
@@ -521,11 +756,19 @@ async function applyFix({ bouncedEmail, candidate, owner, tier, evidence, applie
         customer_id: owner.customer.id,
         interaction_type: 'email_outbound',
         subject: 'Bounced email auto-corrected from evidence on file',
-        body: `Replaced the hard-bounced ${owner.field} with ${candidate} (${tier}). Evidence: ${String(evidence.quote || '').slice(0, 300)}`,
+        body: selfFix
+          ? `Replaced the hard-bounced email ${bouncedEmail} with ${candidate}, a small fix found in this customer's own calls (${tier}, self-fix). To undo, put the old address back. Evidence: ${String(evidence.quote || '').slice(0, 300)}`
+          : `Replaced the hard-bounced ${owner.field} ${bouncedEmail} with ${candidate} (${tier}). Evidence: ${String(evidence.quote || '').slice(0, 300)}`,
         metadata: JSON.stringify({
-          bounced_email: bouncedEmail, candidate_email: candidate, tier, field: owner.field, source: 'email-bounce-rescue',
+          bounced_email: bouncedEmail,
+          candidate_email: candidate,
+          tier,
+          field: owner.field,
+          source: 'email-bounce-rescue',
+          ...(selfFix ? { self_fix: true } : {}),
         }),
       });
+      await markApplied(trx, rescueRowId, appliedBy);
       return { customersUpdated: 1 };
     }
     // Lead-only owner: exactly the resolved lead row — other leads sharing
@@ -539,6 +782,7 @@ async function applyFix({ bouncedEmail, candidate, owner, tier, evidence, applie
     if (updated !== 1) {
       throw Object.assign(new Error('lead email changed mid-rescue'), { code: 'STALE_OWNER' });
     }
+    await markApplied(trx, rescueRowId, appliedBy);
     return { leadsUpdated: 1 };
   });
 
@@ -650,6 +894,55 @@ async function suggestionFallbackBell({ rescueRowId, bouncedEmail, candidate, ow
   ).catch((err) => logger.warn(`[email-bounce-rescue] fallback bell failed: ${err.message}`));
 }
 
+// ── outcome ─────────────────────────────────────────────────────────
+
+/**
+ * First candidate that validates decides the outcome. Then, with
+ * GATE_CALL_BOUNCE_SELF_FIX on, a call-derived suggestion may become a
+ * self-fix (selfFixOutcome); a collision never does.
+ */
+async function decideOutcome({ tiers, owner, bouncedEmail, calls = [] }) {
+  const validations = new Map();
+  let outcome = { status: 'no_candidate' };
+  for (const cand of tiers) {
+    const v = await validateCandidate(cand.email, {
+      bouncedEmail,
+      ownerCustomerId: owner.customer?.id || null,
+      ownerLeadId: owner.lead?.id || null,
+    });
+    validations.set(normalizeEmail(cand.email), v);
+    if (!v.ok) {
+      if (v.reason === 'collision') {
+        outcome = {
+          status: 'suggested', tier: cand.tier, candidate: cand.email, evidence: cand, collision: true,
+          reason: 'candidate is already on file for another customer/lead — possible duplicate pair, review before applying',
+        };
+        break;
+      }
+      continue;
+    }
+    // Only mechanical repairs and non-freemail inbound ground truth may
+    // auto-apply; call-derived evidence (consensus/decode) is owner
+    // read-back territory per the call-pipeline rule (one exception: the
+    // self-fix below).
+    const autoTier = (cand.tier === 'domain_repair'
+      || (cand.tier === 'inbound_ground_truth' && !cand.suggestOnly));
+    if (autoTier && !v.mxUnknown) {
+      outcome = { status: 'applied', tier: cand.tier, candidate: cand.email, evidence: cand };
+    } else {
+      outcome = {
+        status: 'suggested', tier: cand.tier, candidate: cand.email, evidence: cand,
+        reason: v.mxUnknown ? 'MX could not be verified'
+          : cand.tier === 'inbound_ground_truth' ? 'freemail-domain inbound match — could be a different sender'
+            : 'call-derived evidence requires owner read-back',
+      };
+    }
+    break;
+  }
+  if (outcome.status === 'applied' || outcome.collision || !callBounceSelfFixLive()) return outcome;
+  return (await selfFixOutcome({ tiers, owner, bouncedEmail, validations, calls })) || outcome;
+}
+
 // ── main entry ──────────────────────────────────────────────────────
 
 /**
@@ -710,51 +1003,19 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
   }
   if (!tiers.length) {
     const contexts = calls.flatMap((c) => extractSpelledContexts(c.transcription));
-    const llm = await llmDecodeCandidate({ contexts, bouncedEmail, transcription: transcriptAll });
+    const llm = await llmDecodeCandidate({
+      contexts, bouncedEmail, transcription: transcriptAll, readCorrections: callBounceSelfFixLive(),
+    });
     if (llm) tiers.push({ tier: 'transcript_decode', ...llm, llm: true });
   }
 
-  // First candidate that validates decides the outcome.
-  let outcome = { status: 'no_candidate' };
-  for (const cand of tiers) {
-    const v = await validateCandidate(cand.email, {
-      bouncedEmail,
-      ownerCustomerId: owner.customer?.id || null,
-      ownerLeadId: owner.lead?.id || null,
-    });
-    if (!v.ok) {
-      if (v.reason === 'collision') {
-        outcome = {
-          status: 'suggested', tier: cand.tier, candidate: cand.email, evidence: cand,
-          reason: 'candidate is already on file for another customer/lead — possible duplicate pair, review before applying',
-        };
-        break;
-      }
-      continue;
-    }
-    // Only mechanical repairs and non-freemail inbound ground truth may
-    // auto-apply; call-derived evidence (consensus/decode) is owner
-    // read-back territory per the call-pipeline rule.
-    const autoTier = (cand.tier === 'domain_repair'
-      || (cand.tier === 'inbound_ground_truth' && !cand.suggestOnly));
-    if (autoTier && !v.mxUnknown) {
-      outcome = { status: 'applied', tier: cand.tier, candidate: cand.email, evidence: cand };
-    } else {
-      outcome = {
-        status: 'suggested', tier: cand.tier, candidate: cand.email, evidence: cand,
-        reason: v.mxUnknown ? 'MX could not be verified'
-          : cand.tier === 'inbound_ground_truth' ? 'freemail-domain inbound match — could be a different sender'
-            : 'call-derived evidence requires owner read-back',
-      };
-    }
-    break;
-  }
+  let outcome = await decideOutcome({ tiers, owner, bouncedEmail, calls });
 
   if (dryRun) return { dryRun: true, bouncedEmail, owner: owner.customer?.id || owner.lead?.id, ...outcome };
 
-  // Auto-applies persist as 'applying' FIRST and flip to 'applied' only
-  // after the write commits — a crash in between leaves a stale 'applying'
-  // row that a later pass takes over (see entry check above).
+  // Auto-applies persist as 'applying' FIRST and flip to 'applied' in the
+  // write's own transaction (markApplied) — a crash before it leaves a stale
+  // 'applying' row that a later pass takes over (see entry check above).
   const persistStatus = outcome.status === 'applied' ? 'applying' : outcome.status;
   let row;
   if (reusableRow) {
@@ -764,13 +1025,26 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
     if (reusableRow.status === 'no_candidate' && outcome.status === 'no_candidate') {
       return { skipped: 'already_examined', status: 'no_candidate' };
     }
-    await db('email_bounce_rescues').where({ id: reusableRow.id }).update({
-      tier: outcome.tier || null,
-      candidate_email: outcome.candidate || null,
-      evidence: JSON.stringify(outcome.evidence ? { quote: outcome.evidence.quote, llm: !!outcome.evidence.llm } : {}),
-      status: persistStatus,
-      updated_at: new Date(),
-    });
+    // Claim the row: the write lands only while the row still has the
+    // status this run read (a stale 'applying' row: only while still
+    // stale). A bounce webhook and the re-look sweep can examine the same
+    // row at once; the run that loses writes nothing, so it cannot apply
+    // twice or demote the winner's record (Codex r1 on #7906).
+    const claimed = await db('email_bounce_rescues')
+      .where({ id: reusableRow.id, status: reusableRow.status })
+      .modify((q) => {
+        if (reusableRow.status === 'applying') {
+          q.where('updated_at', '<', new Date(Date.now() - APPLYING_STALE_MINUTES * 60_000));
+        }
+      })
+      .update({
+        tier: outcome.tier || null,
+        candidate_email: outcome.candidate || null,
+        evidence: JSON.stringify(ledgerEvidence(outcome)),
+        status: persistStatus,
+        updated_at: new Date(),
+      });
+    if (!claimed) return { skipped: 'already_examined' };
     row = { ...reusableRow, status: persistStatus };
   } else {
     row = await recordRescue({
@@ -779,7 +1053,7 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
       leadId: owner.lead?.id || null,
       tier: outcome.tier || null,
       candidate: outcome.candidate || null,
-      evidence: outcome.evidence ? { quote: outcome.evidence.quote, llm: !!outcome.evidence.llm } : {},
+      evidence: ledgerEvidence(outcome),
       status: persistStatus,
       appliedBy: outcome.status === 'applied' ? appliedBy : null,
     });
@@ -790,13 +1064,14 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
     try {
       await applyFix({
         bouncedEmail, candidate: outcome.candidate, owner, tier: outcome.tier,
-        evidence: outcome.evidence, appliedBy,
+        evidence: outcome.evidence, appliedBy, selfFix: Boolean(outcome.selfFix),
+        rescueRowId: row.id,
       });
-      await db('email_bounce_rescues').where({ id: row.id })
-        .update({ status: 'applied', applied_at: new Date(), applied_by: appliedBy, updated_at: new Date() });
     } catch (err) {
-      // STALE_OWNER or write failure: demote the ledger row so --apply can retry.
-      await db('email_bounce_rescues').where({ id: row.id })
+      // STALE_OWNER, STALE_CLAIM or a write failure: the transaction rolled
+      // back, so nothing changed. Demote this run's own 'applying' claim so
+      // --apply can retry; never a row another run already finished.
+      await db('email_bounce_rescues').where({ id: row.id, status: 'applying' })
         .update({ status: 'suggested', updated_at: new Date() });
       logger.warn(`[email-bounce-rescue] apply failed for ${redactEmail(bouncedEmail)}: ${err.message}`);
       outcome = { ...outcome, status: 'suggested', reason: `apply failed: ${err.message}` };
@@ -816,6 +1091,67 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
     });
   }
   return { bouncedEmail, ...outcome, rescueId: row.id };
+}
+
+// ── re-look after a later call (GATE_CALL_BOUNCE_SELF_FIX) ──────────
+
+// The words the decode reads (extractSpelledContexts), as a Postgres regex: a
+// later call that never talks about email holds no correction, so it costs
+// no re-look. Bound as a value — the pattern's `?` must not reach the SQL.
+const EMAIL_TALK_PATTERN = 'e-?mail|@|\\mdot\\M\\s*(com|net|org|edu)';
+
+/**
+ * A no-fix bounced address gets one more look after each later processed
+ * call (processing verdict after the last look) that talks about email. Only a customer whose PRIMARY email is still
+ * the bounced address; leads stay as they are. The look is the normal
+ * rescue (self-fix rules included); a look that finds nothing marks the row
+ * looked, so the same call is never read (or paid for) twice.
+ */
+async function relookAfterNewCalls({ limit = RELOOK_BATCH, rescueFn = rescueBouncedAddress } = {}) {
+  if (!rescueEnabled() || !callBounceSelfFixLive()) return { skipped: 'gated_off' };
+  const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+  const rows = await db('email_bounce_rescues as r')
+    .join('customers as c', 'c.id', 'r.customer_id')
+    .where('r.status', 'no_candidate')
+    .whereNull('c.deleted_at')
+    .whereNotNull('c.phone')
+    .whereRaw('LOWER(c.email) = LOWER(r.bounced_email)')
+    .whereExists(function laterEmailCall() {
+      this.select(db.raw('1')).from('call_log as cl')
+        .where((w) => w.whereRaw('cl.from_phone = c.phone').orWhereRaw('cl.to_phone = c.phone'))
+        .whereNotNull('cl.transcription')
+        // A processing verdict after the last look: a call still in
+        // processing (no processed_at) waits for its verdict.
+        .whereRaw('cl.processed_at > r.updated_at')
+        .whereRaw('cl.transcription ~* ?', [EMAIL_TALK_PATTERN])
+        .modify((qb) => whereNotSandboxCall(qb, 'cl.source'));
+    })
+    .orderBy('r.updated_at')
+    .limit(limit)
+    .select('r.id', 'r.bounced_email');
+  const summary = { examined: 0, fixed: 0, suggested: 0, unchanged: 0, failed: 0 };
+  for (const row of rows) {
+    summary.examined += 1;
+    // The look covers calls processed before it started: a call that lands
+    // while the rescue runs stays newer than the mark (Codex r1 on #7906).
+    const lookedAt = new Date();
+    try {
+      const result = await rescueFn(row.bounced_email, { appliedBy: 'relook' });
+      if (result?.status === 'applied') summary.fixed += 1;
+      else if (result?.status === 'suggested') summary.suggested += 1;
+      else summary.unchanged += 1;
+    } catch (err) {
+      summary.failed += 1;
+      logger.warn(`[email-bounce-rescue] re-look failed for ${redactEmail(row.bounced_email)}: ${err.message}`);
+    }
+    // Still no fix: mark the row looked (a failed look too — one paid read
+    // per call, never one per tick).
+    await db('email_bounce_rescues')
+      .where({ id: row.id, status: 'no_candidate' })
+      .update({ updated_at: lookedAt })
+      .catch((err) => logger.warn(`[email-bounce-rescue] re-look mark failed: ${err.message}`));
+  }
+  return summary;
 }
 
 async function recordRescue({ bouncedEmail, customerId = null, leadId = null, tier = null, candidate = null, evidence = {}, status, appliedBy = null }) {
@@ -893,7 +1229,7 @@ async function applySuggestedRescue(rescueId, { appliedBy = 'operator' } = {}) {
     ownerLeadId: owner.lead?.id || null,
     excludeRescueId: row.id,
   });
-  if (!v.ok) return { error: `validation failed: ${v.reason}${v.collision ? ` (${v.collision.kind} ${v.collision.id})` : ''}` };
+  if (!v.ok) return { error: `validation failed: ${v.reason}${v.collision ? ` (${[v.collision.kind, v.collision.id].filter(Boolean).join(' ')})` : ''}` };
   const evidence = typeof row.evidence === 'string' ? JSON.parse(row.evidence || '{}') : (row.evidence || {});
   const counts = await applyFix({
     bouncedEmail, candidate: normalizeEmail(row.candidate_email), owner,
@@ -907,10 +1243,13 @@ async function applySuggestedRescue(rescueId, { appliedBy = 'operator' } = {}) {
 module.exports = {
   rescueEnabled,
   rescueBouncedAddress,
+  relookAfterNewCalls,
   applySuggestedRescue,
   previewSuggestedRescue,
   // exported for unit tests — pure/deterministic pieces
   editDistance,
+  selfFixCost,
+  isSmallFix,
   decodeSpelledCandidates,
   extractSpelledContexts,
   consensusCandidates,
