@@ -162,6 +162,7 @@
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
  *   GATE_CALL_CONFERENCE_PATH=test|true (owner 2026-11-16 "ok build all", live-call suite base: the main office staff ring connects through a per-call Twilio conference instead of <Dial><Number>, with the same press-1 screen, voicemail and recording. test = only callers listed in CALL_CONFERENCE_TEST_CALLERS; true = every main office ring. Read at call time via callConferencePathMode(); anything else is off, byte-identical TwiML. New spend (conference participant-minutes) and a named risk (rewrites the live inbound call path). Kill: unset.)
+ *   GATE_CALL_WARM_TRANSFER=true (owner 2026-11-16 "ok build all", live-call suite part 6: on a conference-path call with the hold (GATE_CALL_CONFERENCE_PATH, GATE_CALL_HOLD), the staff on the hold menu press 2 and the portal rings the one number in CALL_TRANSFER_TO with "<name> is transferring a caller. Press 1 to take the call." The owner presses 1 and joins the room, the staff who pressed 2 can stay on to introduce the caller, and no answer sends the staff back to the caller. Strict opt-in, read at call time via callWarmTransferLive(); off, or CALL_TRANSFER_TO unset, = the hold menu is byte-identical and no new route is reached. SPEND gate: each transfer places one outbound call to the owner's phone (Twilio minutes plus a short Polly whisper, under $1 a month). Sends nothing to a customer. Kill: unset.)
  *   GATE_TECH_WORK_DAYS=true (owner 2026-10-25, work days per technician: a technician row may carry technicians.work_days, the weekdays that person works (the Team tab "Work days" row; empty = every day). On, slot offers, automatic booking and automatic moves skip that technician on a day they do not work, and an automatic booking that lands on such a day stays unassigned for the owner; office saves (schedule create and edit, board assign and drag) still go through and add a plain warning line. Strict opt-in: exactly 'true', read at call time via techWorkDaysLive(). Ships DARK; off = work_days is ignored everywhere and the Team tab shows no editor. Sends nothing to a customer.)
  *   GATE_TECH_JOB_TYPE_CHECKS=true (owner 2026-10-25, second technician starts early 2027: job type from the service catalog. The capability checks (slot offers, automatic technician pick, tech-out auto-move, auto-dispatch apply, the save-time fences) today read a visit's job type from its NAME, so "Palm Tree Nutritional Treatment", "Semiannual Palm", "Palm Fert" and "Top Dress" read as general pest and a technician set to Off for Lawn can still get them. On, the category comes from the service library first (the visit's service_id, else its service key, to services.category, mapped onto the five capability categories by the same table the service-line map uses) and falls back to the name only when the catalog names none. Office saves (schedule create and edit, board assign and drag, lead booking, Dispatch New Appointment) also add a plain warning, never a block, when the chosen technician is set to Off for the visit's job type; "needs review" never warns. Strict opt-in: exactly 'true', read at call time via techJobTypeChecksLive(). Ships DARK; off = name-only classification and no extra warning, byte-identical. Sends nothing to a customer.)
  *   GATE_CALL_HOLD=true (owner 2026-11-16 "ok build all", live-call suite: on a conference-path call (GATE_CALL_CONFERENCE_PATH), the staff press star to put the caller on hold. The caller hears a short script of pest facts, the call recording pauses, and the staff press 1 to go back. Strict opt-in, read at call time via callHoldLive(); off = byte-identical staff TwiML and no new route is reached. Spends money: Twilio bills the portal's neural Say voice (TWILIO_SAY_VOICE, default Polly.Joanna-Neural) per character of the script and prompts, so the owner flips it with his yes to the cost. Sends nothing to a customer. Kill: unset.)
@@ -4402,6 +4403,10 @@ const gates = {
   // registry; this entry is for logGateStatus.
   techLines: gateEnvValue('GATE_TECH_LINES'),
 
+  // Warm transfer from the hold menu (services/call-hold.js). Read at CALL time by callWarmTransferLive(); this entry
+  // is for logGateStatus. Off = the hold menu is byte-identical and no transfer route is reached.
+  callWarmTransfer: process.env.GATE_CALL_WARM_TRANSFER === 'true',
+
   // Star-key hold on the conference call path (services/call-hold.js). Read at CALL time by
   // callHoldLive(); this entry is for logGateStatus. Off = byte-identical staff TwiML.
   callHold: process.env.GATE_CALL_HOLD === 'true',
@@ -6734,6 +6739,11 @@ function callConferencePathMode() {
   return value === 'true' ? 'on' : 'off';
 }
 
+// GATE_CALL_WARM_TRANSFER read at CALL time, strict `=== 'true'`, dark (owner 2026-11-16, "ok build all"). Kill = unset.
+function callWarmTransferLive() {
+  return process.env.GATE_CALL_WARM_TRANSFER === 'true';
+}
+
 function customerRouteCheckMode() {
   const value = String(process.env.GATE_CUSTOMER_ROUTE_CHECK || '').trim().toLowerCase();
   if (value === 'shadow') return 'shadow';
@@ -8443,6 +8453,8 @@ module.exports.ibSeriesMoveLive = ibSeriesMoveLive;
 module.exports.customerRouteCheckMode = customerRouteCheckMode;
 // GATE_CALL_CONFERENCE_PATH reader, on its own line so gate PRs never conflict.
 module.exports.callConferencePathMode = callConferencePathMode;
+// GATE_CALL_WARM_TRANSFER reader, on its own line so gate PRs never conflict.
+module.exports.callWarmTransferLive = callWarmTransferLive;
 // GATE_MOVING_FLOW read at CALL time, strict `=== 'true'`, dark (owner 2026-11-02). On, the moving link, the public
 // /moving/:token page and its routes, and the Customer 360 Moving card work (services/customer-moves.js,
 // routes/moving-public.js). Off = every new public and admin route answers 404 and the admin UI hides the card. Kill = unset.

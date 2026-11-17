@@ -19,6 +19,9 @@ jest.mock('../services/call-hold', () => ({
   roomIsOpen: jest.fn(async () => true),
   resumeRecording: jest.fn(async () => true),
   voicemailAnswered: jest.fn(async () => {}),
+  transferAvailable: jest.fn(() => false),
+  startTransfer: jest.fn(),
+  acceptTransfer: jest.fn(),
 }));
 
 const twilio = require('twilio');
@@ -66,6 +69,9 @@ beforeEach(() => {
   callHold.holdState.mockReset().mockResolvedValue({ found: true, closed: false, phase: 'held', applied: 'held' });
   callHold.roomIsOpen.mockReset().mockResolvedValue(true);
   callHold.resumeRecording.mockReset().mockResolvedValue(true);
+  callHold.transferAvailable.mockReset().mockReturnValue(false);
+  callHold.startTransfer.mockReset();
+  callHold.acceptTransfer.mockReset();
 });
 
 describe('staff join <Dial>', () => {
@@ -445,5 +451,300 @@ describe('/call-complete?conf=1 after a hold voicemail', () => {
     callHold.holdState.mockResolvedValue({ found: true, open: false, closed: false, voicemailAt: '2026-11-17T15:05:00Z' });
     expect((await complete({}, { CallSid: SID, DialCallSid: LEG, DialCallStatus: 'completed', DialCallDuration: '30' })).body).toBe(EMPTY);
     expect(callHold.holdState).not.toHaveBeenCalled();
+  });
+});
+
+// =========================================================================================================
+// The warm transfer (GATE_CALL_WARM_TRANSFER, part 6)
+// =========================================================================================================
+
+const TLEG = `CA${'7'.repeat(32)}`;
+const OWNER_LINE = '+19415550150';
+const WAIT_URL = `/api/webhooks/twilio/conference-transfer-wait?parent=${SID}`;
+const ANSWER_URL = (n) => `/api/webhooks/twilio/conference-transfer-answer?parent=${SID}&amp;n=${n}`;
+const ACCEPT_URL = (n) => `/api/webhooks/twilio/conference-transfer-accept?parent=${SID}&amp;n=${n}`;
+const OFFER_LINE = `${MENU_LINE} Press 2 to transfer the call.`;
+const SECOND_STAFF = `<Dial><Conference startConferenceOnEnter="true" endConferenceOnExit="false" beep="false" participantLabel="staff-2">waves-${SID}</Conference></Dial>`;
+const VIEW = (transfer, extra = {}) => ({ found: true, closed: false, phase: 'held', applied: 'held', remind: false, transfer, ...extra });
+const RING = { n: 1, status: 'ringing', ringing: true, legSid: TLEG, fromName: 'Virginia' };
+
+describe('the hold menu offers the transfer', () => {
+  const GATHER = `<Gather numDigits="1" timeout="15" action="${CHOICE_URL}" method="POST">`;
+  const MENU_LOOP = `<Redirect method="POST">${MENU_URL}</Redirect>`;
+
+  test('available: the first line also offers option 2, and the menu leg number is what availability is asked about', async () => {
+    callHold.transferAvailable.mockReturnValue(true);
+    const res = await post('/conference-staff-menu', { query: { first: '1' }, body: { To: '+19415550123', Called: '+19415550124' } });
+    expect(res.body).toBe(response(`${GATHER}${say(OFFER_LINE)}</Gather>${MENU_LOOP}`));
+    expect(callHold.transferAvailable).toHaveBeenLastCalledWith('+19415550123');
+    await post('/conference-staff-menu', { query: { first: '1' }, body: { Called: '+19415550124' } });
+    expect(callHold.transferAvailable).toHaveBeenLastCalledWith('+19415550124');
+  });
+
+  test('not available (gate off, number unset, or the menu leg is the number): today\'s menu, byte for byte', async () => {
+    const today = response(`${GATHER}${say(MENU_LINE)}</Gather>${MENU_LOOP}`);
+    callHold.transferAvailable.mockReturnValue(false);
+    expect((await post('/conference-staff-menu', { query: { first: '1' }, body: { To: OWNER_LINE } })).body).toBe(today);
+    expect((await post('/conference-staff-menu', { query: { first: '1' } })).body).toBe(today);
+  });
+
+  test('a later loop stays silent; the reminder follows the offer line on the first entry', async () => {
+    callHold.transferAvailable.mockReturnValue(true);
+    expect((await post('/conference-staff-menu')).body).toBe(response(`${GATHER.replace(/>$/, '/>')}${MENU_LOOP}`));
+    callHold.checkHold.mockResolvedValueOnce({ ...HELD, remind: true });
+    expect((await post('/conference-staff-menu', { query: { first: '1' } })).body)
+      .toBe(response(`${GATHER}${say(OFFER_LINE)}${say(STAFF_REMINDER)}</Gather>${MENU_LOOP}`));
+  });
+});
+
+describe('/conference-staff-menu-choice: 2 starts the transfer', () => {
+  const body = { Digits: '2', CallSid: LEG, To: '+19415550123' };
+  const WAIT_FIRST = response(`<Redirect method="POST">${WAIT_URL}&amp;first=1</Redirect>`);
+
+  test('available: the transfer starts with the pressing leg and the CSR name of the number that pressed 2', async () => {
+    callHold.transferAvailable.mockReturnValue(true);
+    callHold.startTransfer.mockResolvedValue('ringing');
+    process.env.VIRGINIA_PHONE = '+19415550123';
+    try {
+      expect((await post('/conference-staff-menu-choice', { body })).body).toBe(WAIT_FIRST);
+    } finally {
+      delete process.env.VIRGINIA_PHONE;
+    }
+    expect(callHold.transferAvailable).toHaveBeenCalledWith('+19415550123');
+    expect(callHold.startTransfer).toHaveBeenCalledWith(SID, { legSid: LEG, fromName: 'Virginia' });
+    expect(callHold.endHold).not.toHaveBeenCalled();
+  });
+
+  test('an unmapped number passes a null name (the whisper says "A team member"); Called is read when To is missing', async () => {
+    callHold.transferAvailable.mockReturnValue(true);
+    callHold.startTransfer.mockResolvedValue('ringing');
+    await post('/conference-staff-menu-choice', { body: { Digits: '2', CallSid: LEG, Called: '+19415550177' } });
+    expect(callHold.startTransfer).toHaveBeenCalledWith(SID, { legSid: LEG, fromName: null });
+  });
+
+  test('busy goes to the same wait; voicemail is the staff goodbye; anything else says it did not start and goes back to the menu', async () => {
+    callHold.transferAvailable.mockReturnValue(true);
+    callHold.startTransfer.mockResolvedValue('busy');
+    expect((await post('/conference-staff-menu-choice', { body })).body).toBe(WAIT_FIRST);
+    callHold.startTransfer.mockResolvedValue('voicemail');
+    expect((await post('/conference-staff-menu-choice', { body })).body).toBe(response(`${say(STAFF_VOICEMAIL)}<Hangup/>`));
+    for (const answer of ['failed', 'not_held']) {
+      callHold.startTransfer.mockResolvedValue(answer);
+      expect((await post('/conference-staff-menu-choice', { body })).body)
+        .toBe(response(`${say('Sorry, the transfer did not start.')}<Redirect method="POST">${MENU_URL}</Redirect>`));
+    }
+  });
+
+  test('not available: a 2 is any other key: back to the menu, nothing started, no hold ended', async () => {
+    callHold.transferAvailable.mockReturnValue(false);
+    expect((await post('/conference-staff-menu-choice', { body })).body).toBe(response(`<Redirect method="POST">${MENU_URL}</Redirect>`));
+    expect(callHold.startTransfer).not.toHaveBeenCalled();
+    expect(callHold.endHold).not.toHaveBeenCalled();
+  });
+
+  test('1 is the press 1 return as today, even while the transfer is offered', async () => {
+    callHold.transferAvailable.mockReturnValue(true);
+    callHold.isEnabled.mockReturnValue(true);
+    callHold.endHold.mockResolvedValue('returned');
+    expect((await post('/conference-staff-menu-choice', { body: { Digits: '1' } })).body).toBe(response(STAFF_ROOM_ON));
+    expect(callHold.startTransfer).not.toHaveBeenCalled();
+  });
+
+  test('a thrown error hangs up rather than a 500', async () => {
+    callHold.transferAvailable.mockReturnValue(true);
+    callHold.startTransfer.mockRejectedValue(new Error('boom'));
+    expect((await post('/conference-staff-menu-choice', { body })).body).toBe(response('<Hangup/>'));
+  });
+});
+
+describe('/conference-transfer-wait (the staff while it rings)', () => {
+  const GATHER = `<Gather numDigits="1" timeout="5" action="${CHOICE_URL}" method="POST">`;
+  const LOOP = `<Redirect method="POST">${WAIT_URL}</Redirect>`;
+
+  test('ringing: a 5 s gather whose key 1 is the press 1 route; first=1 says "Calling now"; the loop is silent after', async () => {
+    callHold.checkHold.mockResolvedValue(VIEW(RING));
+    expect((await post('/conference-transfer-wait', { query: { first: '1' } })).body)
+      .toBe(response(`${GATHER}${say('Calling now. Press 1 to go back to the caller.')}</Gather>${LOOP}`));
+    expect((await post('/conference-transfer-wait')).body).toBe(response(`${GATHER.replace(/>$/, '/>')}${LOOP}`));
+    expect(callHold.checkHold).toHaveBeenLastCalledWith(SID, { remind: true });
+  });
+
+  test('the 3 minute reminder is said once when the hold check asks for it', async () => {
+    callHold.checkHold.mockResolvedValue(VIEW(RING, { remind: true }));
+    expect((await post('/conference-transfer-wait')).body).toBe(response(`${GATHER}${say(STAFF_REMINDER)}</Gather>${LOOP}`));
+  });
+
+  test('a state read error keeps the loop: the caller stays held, and the next fetch decides', async () => {
+    callHold.checkHold.mockResolvedValue({ found: false, closed: false, error: true, phase: 'held', applied: 'held', remind: false });
+    expect((await post('/conference-transfer-wait')).body).toBe(response(`${GATHER.replace(/>$/, '/>')}${LOOP}`));
+  });
+
+  test('taken: they hear it, then join the room as a second staff (no star, no action); a room that is gone hangs up', async () => {
+    callHold.checkHold.mockResolvedValue(VIEW({ ...RING, status: 'accepted', ringing: false }, { phase: 'returned', applied: 'returned' }));
+    const said = say('Your call is transferred. Stay on to introduce the caller, or hang up.');
+    expect((await post('/conference-transfer-wait')).body).toBe(response(`${said}${SECOND_STAFF}`));
+    expect(callHold.roomIsOpen).toHaveBeenCalledWith(SID);
+    callHold.roomIsOpen.mockResolvedValue(false);
+    expect((await post('/conference-transfer-wait')).body).toBe(response(`${said}<Hangup/>`));
+  });
+
+  test.each(['failed', 'canceled'])('%s while the hold is held: "No answer." and the press 1 return (the same four answers)', async (status) => {
+    callHold.isEnabled.mockReturnValue(true);
+    callHold.checkHold.mockResolvedValue(VIEW({ ...RING, status, ringing: false }));
+    callHold.endHold.mockResolvedValue('returned');
+    expect((await post('/conference-transfer-wait')).body).toBe(response(`${say('No answer.')}${STAFF_ROOM_ON}`));
+    expect(callHold.endHold).toHaveBeenCalledWith(SID);
+    callHold.endHold.mockResolvedValue('voicemail');
+    expect((await post('/conference-transfer-wait')).body).toBe(response(`${say('No answer.')}${say(STAFF_VOICEMAIL)}<Hangup/>`));
+    callHold.endHold.mockResolvedValue('no_room');
+    expect((await post('/conference-transfer-wait')).body).toBe(response(`${say('No answer.')}${say('The caller hung up.')}<Hangup/>`));
+    callHold.endHold.mockResolvedValue('failed');
+    expect((await post('/conference-transfer-wait')).body)
+      .toBe(response(`${say('No answer.')}${say('Sorry, that did not work.')}<Redirect method="POST">${MENU_URL}</Redirect>`));
+  });
+
+  test('the voicemail decided (the limit): the staff hear it and hang up, even after the caller left; a closed call says so', async () => {
+    callHold.checkHold.mockResolvedValue(VIEW({ ...RING, status: 'failed', ringing: false }, { phase: 'voicemail', voicemailAt: '2026-11-17T15:05:00Z' }));
+    expect((await post('/conference-transfer-wait')).body).toBe(response(`${say(STAFF_VOICEMAIL)}<Hangup/>`));
+    callHold.checkHold.mockResolvedValue(VIEW(RING, { closed: true }));
+    expect((await post('/conference-transfer-wait')).body).toBe(response(`${say('The caller hung up.')}<Hangup/>`));
+  });
+
+  test('anything else (the hold is over, no transfer) rejoins an open room or hangs up', async () => {
+    callHold.isEnabled.mockReturnValue(true);
+    callHold.checkHold.mockResolvedValue(VIEW(null, { phase: 'returned', applied: 'returned' }));
+    expect((await post('/conference-transfer-wait')).body).toBe(response(STAFF_ROOM_ON));
+    callHold.roomIsOpen.mockResolvedValue(false);
+    expect((await post('/conference-transfer-wait')).body).toBe(response('<Hangup/>'));
+  });
+
+  test('a bad parent hangs up with no hold check; a thrown error hangs up', async () => {
+    expect((await post('/conference-transfer-wait', { query: { parent: 'nope' } })).body).toBe(response(`${say('The caller hung up.')}<Hangup/>`));
+    expect(callHold.checkHold).not.toHaveBeenCalled();
+    callHold.checkHold.mockRejectedValue(new Error('boom'));
+    expect((await post('/conference-transfer-wait')).body).toBe(response('<Hangup/>'));
+  });
+});
+
+describe('/conference-transfer-answer (the whisper on the owner phone)', () => {
+  const body = { CallSid: TLEG };
+  const query = { n: '1' };
+  const GATHER = (n) => `<Gather numDigits="1" timeout="8" action="${ACCEPT_URL(n)}" method="POST">`;
+  const whisper = (name) => `<Say ${VOICE} loop="2">${name} is transferring a caller. Press 1 to take the call.</Say>`;
+  const GOODBYE = `${say('Goodbye.')}<Hangup/>`;
+  const OVER = response(`${say('The transfer ended. Goodbye.')}<Hangup/>`);
+  const hs = (extra) => callHold.holdState.mockResolvedValue({ found: true, closed: false, phase: 'held', applied: 'held', ...extra });
+
+  test('ringing: the name of the transferring staff member, said twice, a gather for 1, then Goodbye', async () => {
+    hs({ transfer: RING });
+    expect((await post('/conference-transfer-answer', { body, query })).body).toBe(response(`${GATHER(1)}${whisper('Virginia')}</Gather>${GOODBYE}`));
+  });
+
+  test('an unmapped number: "A team member"', async () => {
+    hs({ transfer: { ...RING, fromName: null } });
+    expect((await post('/conference-transfer-answer', { body, query })).body).toBe(response(`${GATHER(1)}${whisper('A team member')}</Gather>${GOODBYE}`));
+  });
+
+  test('the SID is not recorded yet: still answered; another call than the recorded one is over', async () => {
+    hs({ transfer: { ...RING, legSid: null } });
+    expect((await post('/conference-transfer-answer', { body, query })).body).toContain('transferring a caller');
+    hs({ transfer: RING });
+    expect((await post('/conference-transfer-answer', { body: { CallSid: `CA${'8'.repeat(32)}` }, query })).body).toBe(OVER);
+  });
+
+  test('not ringing, another n, a decided transfer or none: The transfer ended. Goodbye.', async () => {
+    for (const transfer of [{ ...RING, ringing: false }, { ...RING, n: 2 }, { ...RING, status: 'failed', ringing: false }, null]) {
+      hs({ transfer });
+      expect((await post('/conference-transfer-answer', { body, query })).body).toBe(OVER);
+    }
+    callHold.holdState.mockResolvedValue({ found: false, open: true, closed: false, phase: 'held', error: true });
+    expect((await post('/conference-transfer-answer', { body, query })).body).toBe(OVER);
+  });
+
+  test('a closed call: The caller hung up.', async () => {
+    hs({ closed: true, transfer: RING });
+    expect((await post('/conference-transfer-answer', { body, query })).body).toBe(response(`${say('The caller hung up.')}<Hangup/>`));
+  });
+
+  test('a bad parent, a missing or bad n, or a thrown error: Hangup', async () => {
+    hs({ transfer: RING });
+    expect((await post('/conference-transfer-answer', { body, query: { n: '1', parent: 'nope' } })).body).toBe(response('<Hangup/>'));
+    for (const bad of [undefined, '', 'x', '0', '-1']) {
+      expect((await post('/conference-transfer-answer', { body, query: { n: bad } })).body).toBe(response('<Hangup/>'));
+    }
+    callHold.holdState.mockRejectedValue(new Error('boom'));
+    expect((await post('/conference-transfer-answer', { body, query })).body).toBe(response('<Hangup/>'));
+  });
+});
+
+describe('/conference-transfer-accept (the owner pressed 1)', () => {
+  const body = { Digits: '1', CallSid: TLEG };
+  const query = { n: '1' };
+  const accept = (extra = {}) => post('/conference-transfer-accept', { body: { ...body, ...extra.body }, query: { ...query, ...extra.query } });
+
+  test('returned: "Connecting." and the ordinary staff <Dial> (his star holds the caller, his hang-up ends the room)', async () => {
+    callHold.isEnabled.mockReturnValue(true);
+    callHold.acceptTransfer.mockResolvedValue('returned');
+    expect((await accept()).body).toBe(response(`${say('Connecting.')}${STAFF_ROOM_ON}`));
+    expect(callHold.acceptTransfer).toHaveBeenCalledWith(SID, { n: 1, legSid: TLEG });
+  });
+
+  test('voicemail, no_room and over each end the call with their words', async () => {
+    callHold.acceptTransfer.mockResolvedValue('voicemail');
+    expect((await accept()).body).toBe(response(`${say(STAFF_VOICEMAIL)}<Hangup/>`));
+    callHold.acceptTransfer.mockResolvedValue('no_room');
+    expect((await accept()).body).toBe(response(`${say('The caller hung up.')}<Hangup/>`));
+    callHold.acceptTransfer.mockResolvedValue('over');
+    expect((await accept()).body).toBe(response(`${say('The transfer ended. Goodbye.')}<Hangup/>`));
+  });
+
+  test('failed: a gather with the same action to try again, then a hang-up', async () => {
+    callHold.acceptTransfer.mockResolvedValue('failed');
+    expect((await accept()).body).toBe(response(`<Gather numDigits="1" timeout="8" action="${ACCEPT_URL(1)}" method="POST">${say('Sorry, that did not work. Press 1 to try again.')}</Gather><Hangup/>`));
+  });
+
+  test('any other key goes back to the whisper; nothing is accepted', async () => {
+    expect((await accept({ body: { Digits: '5' } })).body).toBe(response(`<Redirect method="POST">${ANSWER_URL(1)}</Redirect>`));
+    expect((await accept({ body: { Digits: '' } })).body).toBe(response(`<Redirect method="POST">${ANSWER_URL(1)}</Redirect>`));
+    expect(callHold.acceptTransfer).not.toHaveBeenCalled();
+  });
+
+  test('a bad parent, a bad n, a missing call SID, or a thrown error: Hangup, nothing accepted', async () => {
+    expect((await accept({ query: { parent: 'nope' } })).body).toBe(response('<Hangup/>'));
+    expect((await accept({ query: { n: 'x' } })).body).toBe(response('<Hangup/>'));
+    expect((await accept({ body: { CallSid: undefined } })).body).toBe(response('<Hangup/>'));
+    expect(callHold.acceptTransfer).not.toHaveBeenCalled();
+    callHold.acceptTransfer.mockRejectedValue(new Error('boom'));
+    expect((await accept()).body).toBe(response('<Hangup/>'));
+  });
+});
+
+describe('/conference-transfer-status (statusCallback of the owner call)', () => {
+  const sent = [];
+  let spy;
+  beforeEach(() => {
+    sent.length = 0;
+    spy = jest.spyOn(conferencePath, 'onTransferLegStatus').mockImplementation(async (args) => { sent.push(args); return 'ok'; });
+  });
+  afterEach(() => spy.mockRestore());
+  const status = async (extra = {}) => {
+    const res = { code: null };
+    res.sendStatus = jest.fn((code) => { res.code = code; return res; });
+    await handlerFor('/conference-transfer-status')({ body: { CallSid: TLEG, CallStatus: 'no-answer', ...extra.body }, query: { parent: SID, n: '2', ...extra.query }, headers: {} }, res);
+    return res.code;
+  };
+
+  test('the leg end is handed to the service with the n from the query, and answered 200', async () => {
+    expect(await status()).toBe(200);
+    expect(sent).toEqual([{ callSid: SID, n: 2, legSid: TLEG, status: 'no-answer' }]);
+  });
+
+  test('a bad parent or n is answered 200 with nothing handled; a throw is logged and still 200', async () => {
+    expect(await status({ query: { parent: 'nope' } })).toBe(200);
+    expect(await status({ query: { n: '' } })).toBe(200);
+    expect(await status({ query: { n: '0' } })).toBe(200);
+    expect(sent).toEqual([]);
+    spy.mockRejectedValue(new Error('boom'));
+    expect(await status()).toBe(200);
   });
 });

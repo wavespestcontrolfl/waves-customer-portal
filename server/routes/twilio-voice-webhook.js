@@ -4232,9 +4232,12 @@ async function rejoinOrHangup(twiml, parentSid) {
 
 // The 3 minute reminder is said once per hold: the hold's decision point (call-hold.js checkHold) answers
 // remind:true to exactly one fetch, so a redelivered or overlapping fetch never repeats it.
-function appendHoldMenu(twiml, parentSid, { first = false, remind = false } = {}) {
+// With `transfer` (the warm transfer is offered, GATE_CALL_WARM_TRANSFER) the first line also offers option 2.
+function appendHoldMenu(twiml, parentSid, { first = false, remind = false, transfer = false } = {}) {
   const gather = twiml.gather({ numDigits: 1, timeout: 15, action: HOLD_ROUTE('conference-staff-menu-choice', parentSid), method: 'POST' });
-  if (first) gather.say({ voice: SAY_VOICE }, 'Your caller is on hold. Press 1 to go back to the caller.');
+  if (first) {
+    gather.say({ voice: SAY_VOICE }, `Your caller is on hold. Press 1 to go back to the caller.${transfer ? ' Press 2 to transfer the call.' : ''}`);
+  }
   if (remind) gather.say({ voice: SAY_VOICE }, holdScript.STAFF_REMINDER);
   twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-staff-menu', parentSid));
 }
@@ -4291,7 +4294,9 @@ router.post('/conference-staff-menu', async (req, res) => {
     if (state.voicemailAt) staffVoicemailGoodbye(twiml);
     else if (state.closed) callerGone(twiml);
     else if (state.phase === 'held' || (state.phase === 'returned' && state.applied !== 'returned' && !state.gone)) {
-      appendHoldMenu(twiml, parentSid, { first: req.query.first === '1', remind: state.remind });
+      appendHoldMenu(twiml, parentSid, {
+        first: req.query.first === '1', remind: state.remind, transfer: callHold.transferAvailable(req.body?.To || req.body?.Called),
+      });
     } else await rejoinOrHangup(twiml, parentSid);
   } catch (err) {
     logger.error(`[call-hold] menu error for ${maskSid(parentSid)} (${err?.code || err?.name || 'error'})`);
@@ -4300,37 +4305,195 @@ router.post('/conference-staff-menu', async (req, res) => {
   return sendTwiml(res, twiml);
 });
 
-// POST /conference-staff-menu-choice — 1 takes the caller off hold and puts the staff back in the room, once the
-// unhold is confirmed (the request waits for it, up to 6 s). The caller already sent to voicemail: the staff are told.
+const holdMenuRedirect = (twiml, parentSid) => twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-staff-menu', parentSid));
+
+// A press 1 on the hold menu (also the end of an unanswered transfer): the staff go back in the room once the unhold is
+// confirmed (the request waits for it, up to 6 s). The caller already sent to voicemail: the staff are told.
+async function appendPressOneReturn(twiml, parentSid) {
+  const ended = await callHold.endHold(parentSid);
+  if (ended === 'returned') {
+    appendStaffConference(twiml, parentSid);
+  } else if (ended === 'voicemail') {
+    // The 5 minute limit (or the staff phone hanging up) decided the voicemail first: the room is ending, never rejoin it.
+    staffVoicemailGoodbye(twiml);
+  } else if (ended === 'no_room') {
+    // The room is gone: the caller left.
+    callerGone(twiml);
+  } else {
+    twiml.say({ voice: SAY_VOICE }, 'Sorry, that did not work.');
+    holdMenuRedirect(twiml, parentSid);
+  }
+}
+
+// Press 2 on the hold menu (the warm transfer is offered): one transfer at a time per hold.
+async function appendTransferStart(twiml, parentSid, body) {
+  const started = await callHold.startTransfer(parentSid, { legSid: body?.CallSid || null, fromName: resolveCsrName(body?.To || body?.Called) });
+  if (started === 'ringing' || started === 'busy') {
+    twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-transfer-wait', parentSid, '&first=1'));
+  } else if (started === 'voicemail') {
+    staffVoicemailGoodbye(twiml);
+  } else {
+    twiml.say({ voice: SAY_VOICE }, 'Sorry, the transfer did not start.');
+    holdMenuRedirect(twiml, parentSid);
+  }
+}
+
+// POST /conference-staff-menu-choice — 1 takes the caller off hold and puts the staff back in the room (and cancels a
+// ringing transfer); 2 starts the warm transfer when it is offered.
 router.post('/conference-staff-menu-choice', async (req, res) => {
   const parentSid = String(req.query.parent || '');
   const twiml = new VoiceResponse();
-  const toMenu = () => twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-staff-menu', parentSid));
+  const digit = String(req.body?.Digits || '').trim();
   try {
     if (!conferencePath.CALL_SID_RE.test(parentSid)) {
       twiml.hangup();
-    } else if (String(req.body?.Digits || '').trim() !== '1') {
-      toMenu();
+    } else if (digit === '2' && callHold.transferAvailable(req.body?.To || req.body?.Called)) {
+      await appendTransferStart(twiml, parentSid, req.body);
+    } else if (digit !== '1') {
+      holdMenuRedirect(twiml, parentSid);
     } else {
-      const ended = await callHold.endHold(parentSid);
-      if (ended === 'returned') {
-        appendStaffConference(twiml, parentSid);
-      } else if (ended === 'voicemail') {
-        // The 5 minute limit (or the staff phone hanging up) decided the voicemail first: the room is ending, never rejoin it.
-        staffVoicemailGoodbye(twiml);
-      } else if (ended === 'no_room') {
-        // The room is gone: the caller left.
-        callerGone(twiml);
-      } else {
-        twiml.say({ voice: SAY_VOICE }, 'Sorry, that did not work.');
-        toMenu();
-      }
+      await appendPressOneReturn(twiml, parentSid);
     }
   } catch (err) {
     logger.error(`[call-hold] menu choice error for ${maskSid(parentSid)} (${err?.code || err?.name || 'error'})`);
     return res.type('text/xml').send(HANGUP_XML);
   }
   return sendTwiml(res, twiml);
+});
+
+// ---- The warm transfer (GATE_CALL_WARM_TRANSFER; call-hold.js startTransfer / acceptTransfer / endTransfer) ----
+
+const transferN = (req) => {
+  const n = Number.parseInt(req.query.n, 10);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+};
+const transferAnswerRoute = (parentSid, n) => HOLD_ROUTE('conference-transfer-answer', parentSid, `&n=${n}`);
+const TRANSFER_OVER = 'The transfer ended. Goodbye.';
+
+// The staff who pressed 2 while the transfer rings: a silent loop whose only key is 1 (back to the caller, which cancels it).
+function appendTransferWait(twiml, parentSid, { first, remind }) {
+  const gather = twiml.gather({ numDigits: 1, timeout: 5, action: HOLD_ROUTE('conference-staff-menu-choice', parentSid), method: 'POST' });
+  if (first) gather.say({ voice: SAY_VOICE }, 'Calling now. Press 1 to go back to the caller.');
+  if (remind) gather.say({ voice: SAY_VOICE }, holdScript.STAFF_REMINDER);
+  twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-transfer-wait', parentSid));
+}
+
+// The transfer was taken: the staff stay on as a second staff (no star; their hang-up no longer ends the room).
+async function appendSecondStaff(twiml, parentSid) {
+  twiml.say({ voice: SAY_VOICE }, 'Your call is transferred. Stay on to introduce the caller, or hang up.');
+  if (!(await callHold.roomIsOpen(parentSid))) return twiml.hangup();
+  return twiml.dial().conference({
+    startConferenceOnEnter: true, endConferenceOnExit: false, beep: 'false', participantLabel: 'staff-2',
+  }, conferencePath.roomFor(parentSid));
+}
+
+// POST /conference-transfer-wait — the staff's loop while the transfer rings. Each fetch is a hold check (the limit, the
+// reminder, an expired transfer) and then follows the transfer: ringing keeps the loop; taken joins them as a second
+// staff; unanswered tells them and takes the caller back as a press 1 does.
+router.post('/conference-transfer-wait', async (req, res) => {
+  const parentSid = String(req.query.parent || '');
+  const twiml = new VoiceResponse();
+  try {
+    const state = conferencePath.CALL_SID_RE.test(parentSid) ? await callHold.checkHold(parentSid, { remind: true }) : { closed: true };
+    const status = state.transfer?.status;
+    if (state.voicemailAt) {
+      staffVoicemailGoodbye(twiml);
+    } else if (state.closed) {
+      callerGone(twiml);
+    } else if (state.error || state.transfer?.ringing) {
+      // A read error keeps the loop, as the hold menu does: the caller stays held, and the next fetch decides.
+      appendTransferWait(twiml, parentSid, { first: req.query.first === '1', remind: state.remind });
+    } else if (status === 'accepted') {
+      await appendSecondStaff(twiml, parentSid);
+    } else if ((status === 'failed' || status === 'canceled') && state.phase === 'held') {
+      twiml.say({ voice: SAY_VOICE }, 'No answer.');
+      await appendPressOneReturn(twiml, parentSid);
+    } else {
+      await rejoinOrHangup(twiml, parentSid);
+    }
+  } catch (err) {
+    logger.error(`[call-hold] transfer wait error for ${maskSid(parentSid)} (${err?.code || err?.name || 'error'})`);
+    return res.type('text/xml').send(HANGUP_XML);
+  }
+  return sendTwiml(res, twiml);
+});
+
+// POST /conference-transfer-answer — the owner's phone answered (the call url): who is transferring, and press 1.
+router.post('/conference-transfer-answer', async (req, res) => {
+  const parentSid = String(req.query.parent || '');
+  const n = transferN(req);
+  const legSid = req.body?.CallSid || null;
+  const twiml = new VoiceResponse();
+  try {
+    if (!conferencePath.CALL_SID_RE.test(parentSid) || !n) return res.type('text/xml').send(HANGUP_XML);
+    const { closed, transfer } = await callHold.holdState(parentSid);
+    if (closed) {
+      callerGone(twiml);
+    } else if (transfer && transfer.n === n && transfer.ringing && (!transfer.legSid || transfer.legSid === legSid)) {
+      const gather = twiml.gather({ numDigits: 1, timeout: 8, action: HOLD_ROUTE('conference-transfer-accept', parentSid, `&n=${n}`), method: 'POST' });
+      gather.say({ voice: SAY_VOICE, loop: 2 }, `${transfer.fromName || 'A team member'} is transferring a caller. Press 1 to take the call.`);
+      twiml.say({ voice: SAY_VOICE }, 'Goodbye.');
+      twiml.hangup();
+    } else {
+      twiml.say({ voice: SAY_VOICE }, TRANSFER_OVER);
+      twiml.hangup();
+    }
+  } catch (err) {
+    logger.error(`[call-hold] transfer answer error for ${maskSid(parentSid)} (${err?.code || err?.name || 'error'})`);
+    return res.type('text/xml').send(HANGUP_XML);
+  }
+  return sendTwiml(res, twiml);
+});
+
+// POST /conference-transfer-accept — the owner pressed 1: the caller comes off hold, and he joins the room as the call's
+// winning leg (his star holds the caller, his hang-up ends the room, as for any staff).
+router.post('/conference-transfer-accept', async (req, res) => {
+  const parentSid = String(req.query.parent || '');
+  const n = transferN(req);
+  const legSid = req.body?.CallSid || null;
+  const twiml = new VoiceResponse();
+  try {
+    if (!conferencePath.CALL_SID_RE.test(parentSid) || !n || !legSid) return res.type('text/xml').send(HANGUP_XML);
+    if (String(req.body?.Digits || '').trim() !== '1') {
+      twiml.redirect({ method: 'POST' }, transferAnswerRoute(parentSid, n));
+      return sendTwiml(res, twiml);
+    }
+    const taken = await callHold.acceptTransfer(parentSid, { n, legSid });
+    if (taken === 'returned') {
+      twiml.say({ voice: SAY_VOICE }, 'Connecting.');
+      appendStaffConference(twiml, parentSid);
+    } else if (taken === 'voicemail') {
+      staffVoicemailGoodbye(twiml);
+    } else if (taken === 'no_room') {
+      callerGone(twiml);
+    } else if (taken === 'over') {
+      twiml.say({ voice: SAY_VOICE }, TRANSFER_OVER);
+      twiml.hangup();
+    } else {
+      const gather = twiml.gather({ numDigits: 1, timeout: 8, action: HOLD_ROUTE('conference-transfer-accept', parentSid, `&n=${n}`), method: 'POST' });
+      gather.say({ voice: SAY_VOICE }, 'Sorry, that did not work. Press 1 to try again.');
+      twiml.hangup();
+    }
+  } catch (err) {
+    logger.error(`[call-hold] transfer accept error for ${maskSid(parentSid)} (${err?.code || err?.name || 'error'})`);
+    return res.type('text/xml').send(HANGUP_XML);
+  }
+  return sendTwiml(res, twiml);
+});
+
+// POST /conference-transfer-status — the owner's call ended (statusCallback; terminal statuses only). Answered 200 either way:
+// a handling that throws is retried by the service, as for a staff leg.
+router.post('/conference-transfer-status', async (req, res) => {
+  const parentSid = String(req.query.parent || '');
+  const n = transferN(req);
+  try {
+    if (conferencePath.CALL_SID_RE.test(parentSid) && n) {
+      await conferencePath.onTransferLegStatus({ callSid: parentSid, n, legSid: req.body?.CallSid || null, status: req.body?.CallStatus });
+    }
+  } catch (err) {
+    logger.error(`[call-hold] transfer leg status failed for ${maskSid(parentSid)} (${conferencePath.errorCode(err)})`);
+  }
+  res.sendStatus(200);
 });
 
 // The hold script, one fact per step (about 10 s), so the server sees the hold that often: the opening
