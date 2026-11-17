@@ -9,7 +9,7 @@ jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest
 jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(() => Promise.resolve()), syncVoiceMessageForCall: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/voice-agent/relay-server', () => ({ isRelayAttached: jest.fn(() => false) }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false), callRingFactLive: jest.fn(() => false) }));
 jest.mock('../services/call-recording-processor', () => ({ recoverRecordingForCall: jest.fn() }));
 jest.mock('../services/call-conference-path', () => ({
   ...jest.requireActual('../services/call-conference-path'),
@@ -33,10 +33,13 @@ jest.mock('../services/call-conference-path', () => ({
 const twilio = require('twilio');
 const VoiceResponse = twilio.twiml.VoiceResponse;
 const db = require('../models/db');
+const featureGates = require('../config/feature-gates');
+const ringFact = require('../services/call-ring-fact');
+const holdScript = require('../services/call-hold-script');
 const logger = require('../services/logger');
 const cp = require('../services/call-conference-path');
 const voiceRouter = require('../routes/twilio-voice-webhook');
-const { appendMainStaffRing, appendStaffRingDial } = voiceRouter._test;
+const { appendMainStaffRing, appendStaffRingDial, appendCallerConference } = voiceRouter._test;
 
 const SID = `CA${'b'.repeat(32)}`;
 const LEG = `CA${'c'.repeat(32)}`;
@@ -86,6 +89,7 @@ beforeEach(() => {
   cp.loadState.mockReset().mockResolvedValue({ legs: {} });
   cp.onStaffLegStatus.mockReset().mockResolvedValue('waiting');
   cp.conferenceRingOn.mockReset().mockReturnValue(false);
+  featureGates.callRingFactLive.mockReset().mockReturnValue(false);
   primeDb();
 });
 
@@ -335,5 +339,131 @@ describe('/call-status', () => {
     primeStatus({ id: 1, status: 'ringing', metadata: { conference_path: {} }, created_at: new Date() });
     await status('in-progress');
     expect(cp.closeForCallerEnd).not.toHaveBeenCalled();
+  });
+});
+
+// Ring fact (GATE_CALL_RING_FACT): half the conference-ring calls hear one fact before the ring.
+describe('ring fact on the conference ring', () => {
+  const WAIT_BASE = '/api/webhooks/twilio/conference-wait';
+  const sidFor = (arm) => {
+    for (let i = 0; i < 500; i += 1) {
+      const sid = `CA${String(i).padStart(32, 'a')}`;
+      if (ringFact.choose(sid).arm === arm) return sid;
+    }
+    throw new Error(`no ${arm} sid`);
+  };
+  const FACT_SID = sidFor('fact');
+  const RING_SID = sidFor('ring');
+  const roomFor = (sid) => `<Dial action="/api/webhooks/twilio/call-complete?conf=1"><Conference startConferenceOnEnter="false" endConferenceOnExit="true" beep="false" waitUrl="/audio/ringback-us.wav" waitMethod="GET" participantLabel="caller">waves-${sid}</Conference></Dial>`;
+  const factRoom = (sid, i) => `<Dial action="/api/webhooks/twilio/call-complete?conf=1"><Conference startConferenceOnEnter="false" endConferenceOnExit="true" beep="false" waitUrl="${WAIT_BASE}?fact=${i}" waitMethod="POST" participantLabel="caller">waves-${sid}</Conference></Dial>`;
+  const enter = (sid) => post('/conference-enter', { body: { CallSid: sid, From: '(941) 555-0100', To: '+19415550000' }, query: { ring: '25' } });
+  const ringbackOnly = `${XML}<Response><Play loop="0">/audio/ringback-us.wav</Play><Redirect method="POST">${WAIT_BASE}</Redirect></Response>`;
+
+  beforeEach(() => {
+    cp.admitsConferencePath.mockReturnValue(true);
+    cp.claimStart.mockResolvedValue({ claim: 'claimed', state: {} });
+    cp.placeStaffLegs.mockResolvedValue([LEG]);
+    cp.updateState.mockReset().mockResolvedValue(1);
+  });
+
+  describe('appendCallerConference', () => {
+    const render = (choice) => { const t = new VoiceResponse(); appendCallerConference(t, SID, choice); return t.toString(); };
+    test('no choice (gate off) and the ring arm are today\'s TwiML, byte for byte', () => {
+      expect(render()).toBe(`${XML}<Response>${CALLER_ROOM}</Response>`);
+      expect(render(null)).toBe(`${XML}<Response>${CALLER_ROOM}</Response>`);
+      expect(render({ arm: 'ring', fact: 4 })).toBe(`${XML}<Response>${CALLER_ROOM}</Response>`);
+    });
+    test('the fact arm waits on /conference-wait with POST', () => {
+      expect(render({ arm: 'fact', fact: 7 })).toBe(`${XML}<Response>${factRoom(SID, 7)}</Response>`);
+    });
+    test('a fact arm with a bad index falls back to the plain ring', () => {
+      expect(render({ arm: 'fact', fact: 12 })).toBe(`${XML}<Response>${CALLER_ROOM}</Response>`);
+      expect(render({ arm: 'fact', fact: -1 })).toBe(`${XML}<Response>${CALLER_ROOM}</Response>`);
+    });
+  });
+
+  describe('/conference-enter', () => {
+    test('gate off: today\'s TwiML and no stamp, whatever the CallSid', async () => {
+      expect((await enter(FACT_SID)).body).toBe(`${XML}<Response>${roomFor(FACT_SID)}</Response>`);
+      expect(cp.updateState).not.toHaveBeenCalled();
+    });
+
+    test('gate on, a fact-arm call: the wait route in the TwiML and the stamp written', async () => {
+      featureGates.callRingFactLive.mockReturnValue(true);
+      const { fact } = ringFact.choose(FACT_SID);
+      expect((await enter(FACT_SID)).body).toBe(`${XML}<Response>${factRoom(FACT_SID, fact)}</Response>`);
+      expect(cp.updateState).toHaveBeenCalledTimes(1);
+      const [sid, entries] = cp.updateState.mock.calls[0];
+      expect(sid).toBe(FACT_SID);
+      expect(entries).toEqual([[['ring_fact'], { arm: 'fact', fact, at: expect.stringMatching(/^\d{4}-\d\d-\d\dT/) }]]);
+    });
+
+    test('gate on, a ring-arm call: today\'s TwiML byte for byte, and the arm is stamped', async () => {
+      featureGates.callRingFactLive.mockReturnValue(true);
+      expect((await enter(RING_SID)).body).toBe(`${XML}<Response>${roomFor(RING_SID)}</Response>`);
+      expect(cp.updateState.mock.calls[0][1][0][1]).toEqual(expect.objectContaining({ arm: 'ring' }));
+    });
+
+    test('a failed stamp keeps the ring and logs a code only', async () => {
+      featureGates.callRingFactLive.mockReturnValue(true);
+      cp.updateState.mockRejectedValue(Object.assign(new Error('pg down +19415550100'), { code: 'ECONNRESET' }));
+      const { fact } = ringFact.choose(FACT_SID);
+      const res = await enter(FACT_SID);
+      expect(res.body).toBe(`${XML}<Response>${factRoom(FACT_SID, fact)}</Response>`);
+      expect(cp.scheduleNoAnswerBackstop).toHaveBeenCalled();
+      const logged = logger.warn.mock.calls.flat().join(' ');
+      expect(logged).toMatch(/ring fact stamp failed/);
+      expect(logged).not.toContain(FACT_SID);
+      expect(logged).not.toMatch(/555010/);
+    });
+
+    test('a redelivered request keeps the arm and the fact and does not stamp again', async () => {
+      featureGates.callRingFactLive.mockReturnValue(true);
+      const first = await enter(FACT_SID);
+      cp.updateState.mockClear();
+      cp.claimStart.mockResolvedValue({ claim: 'retry', state: { legs: {} } });
+      const second = await enter(FACT_SID);
+      expect(second.body).toBe(first.body);
+      expect(cp.updateState).not.toHaveBeenCalled();
+    });
+
+    test('a call that falls back to the classic ring is not stamped', async () => {
+      featureGates.callRingFactLive.mockReturnValue(true);
+      cp.placeStaffLegs.mockResolvedValue([]);
+      expect((await enter(FACT_SID)).body).toBe(CLASSIC_RING_25);
+      expect(cp.updateState).not.toHaveBeenCalledWith(FACT_SID, [[['ring_fact'], expect.anything()]]);
+    });
+  });
+
+  describe('/conference-wait', () => {
+    const wait = (fact) => post('/conference-wait', { query: fact === undefined ? {} : { fact } });
+    beforeEach(() => featureGates.callRingFactLive.mockReturnValue(true));
+
+    test.each([0, 5, 11])('fact %i: that one approved fact in the Say voice, then the looping ringback', async (i) => {
+      const text = holdScript.FACTS[i].replace(/'/g, '&apos;');
+      const res = await wait(String(i));
+      expect(res.body).toBe(`${XML}<Response><Say voice="Polly.Joanna-Neural">${text}</Say><Play loop="0">/audio/ringback-us.wav</Play><Redirect method="POST">${WAIT_BASE}</Redirect></Response>`);
+      expect(res.type).toHaveBeenCalledWith('text/xml');
+    });
+
+    test.each([undefined, '', '12', '-1', '1.5', 'abc', '07x', ['1', '2']])('a bad index (%p): the plain ringback', async (bad) => {
+      expect((await wait(bad)).body).toBe(ringbackOnly);
+    });
+
+    test('gate off: the plain ringback even for a good index', async () => {
+      featureGates.callRingFactLive.mockReturnValue(false);
+      expect((await wait('3')).body).toBe(ringbackOnly);
+    });
+
+    test('an error while reading the gate: the plain ringback', async () => {
+      featureGates.callRingFactLive.mockImplementation(() => { throw new Error('boom'); });
+      expect((await wait('3')).body).toBe(ringbackOnly);
+      expect(logger.warn).toHaveBeenCalled();
+    });
+
+    test('only verbs Twilio allows in a waitUrl', async () => {
+      const verbs = [...(await wait('2')).body.matchAll(/<([A-Z][A-Za-z]*)[ >/]/g)].map((m) => m[1]);
+      expect(verbs.filter((v) => !['Response', 'Say', 'Play', 'Pause', 'Redirect'].includes(v))).toEqual([]);
+    });
   });
 });

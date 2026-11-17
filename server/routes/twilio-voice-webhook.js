@@ -8,6 +8,7 @@ const { ringTargetForLine } = require('../services/tech-line');
 const conferencePath = require('../services/call-conference-path');
 const callHold = require('../services/call-hold');
 const holdScript = require('../services/call-hold-script');
+const ringFact = require('../services/call-ring-fact');
 const twilio = require('twilio');
 const VoiceResponse = twilio.twiml.VoiceResponse;
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
@@ -228,14 +229,18 @@ function appendForwardScreen(twiml, action) {
 // hold can step out without ending it. The staff <Dial> has no action: the room's end ends the call.
 const CONFERENCE_RINGBACK_URL = '/audio/ringback-us.wav';
 
-function appendCallerConference(twiml, callSid) {
+// Ring fact (GATE_CALL_RING_FACT, services/call-ring-fact.js): the arm `fact` points the wait at POST
+// /conference-wait, which says one fact and then plays the ringback. The arm `ring`, and the gate off
+// (ringFactChoice null), is today's waitUrl and waitMethod, byte for byte.
+function appendCallerConference(twiml, callSid, ringFactChoice = null) {
+  const factArm = ringFactChoice?.arm === 'fact' && ringFact.parseFactIndex(String(ringFactChoice.fact)) !== null;
   const dial = twiml.dial({ action: '/api/webhooks/twilio/call-complete?conf=1' });
   dial.conference({
     startConferenceOnEnter: false,
     endConferenceOnExit: true,
     beep: 'false',
-    waitUrl: CONFERENCE_RINGBACK_URL,
-    waitMethod: 'GET',
+    waitUrl: factArm ? `/api/webhooks/twilio/conference-wait?fact=${ringFactChoice.fact}` : CONFERENCE_RINGBACK_URL,
+    waitMethod: factArm ? 'POST' : 'GET',
     participantLabel: 'caller',
   }, conferencePath.roomFor(callSid));
   return dial;
@@ -4020,6 +4025,26 @@ router.post('/call-status', async (req, res) => {
 // Conference ring (GATE_CALL_CONFERENCE_PATH) — services/call-conference-path.js has the whole flow.
 // =========================================================================
 
+// GATE_CALL_RING_FACT: null with the gate off (and on any error), else { arm, fact } from the CallSid.
+function chooseRingFact(callSid) {
+  try {
+    return ringFact.live() ? ringFact.choose(callSid) : null;
+  } catch (err) {
+    logger.warn(`[conference] ring fact choice failed for ${maskSid(callSid)} (${conferencePath.errorCode(err)})`);
+    return null;
+  }
+}
+
+// Best effort: a stamp that fails is logged by code only and changes nothing in the ring.
+async function stampRingFact(callSid, choice) {
+  if (!choice) return;
+  try {
+    await conferencePath.updateState(callSid, [[['ring_fact'], ringFact.stampFor(choice)]]);
+  } catch (err) {
+    logger.warn(`[conference] ring fact stamp failed for ${maskSid(callSid)} (${conferencePath.errorCode(err)})`);
+  }
+}
+
 // POST /conference-enter — the caller leg, after the greeting (/voice <Redirect>). Rings every staff
 // number by REST and puts the caller in the room. Any failure before a leg rings = today's <Dial>.
 router.post('/conference-enter', async (req, res) => {
@@ -4036,10 +4061,12 @@ router.post('/conference-enter', async (req, res) => {
     // The gate is read again: a call still in its greeting when the gate goes off takes today's ring.
     if (!conferencePath.admitsConferencePath({ from: From })) throw Object.assign(new Error('gate off'), { code: 'gate_off' });
     const { claim, state } = await conferencePath.claimStart(CallSid, { legCount: forwardNumbers.length, ringTimeoutSec });
+    // GATE_CALL_RING_FACT: the arm comes from the CallSid alone, so a redelivered request gets the first one's.
+    const ringFactChoice = chooseRingFact(CallSid);
     if (claim === 'retry' && state?.fallback !== 'classic_ring') {
       // A redelivered request: the legs already ring. The backstop is one claim, so a second is safe.
       conferencePath.scheduleNoAnswerBackstop(CallSid, ringTimeoutSec);
-      appendCallerConference(twiml, CallSid);
+      appendCallerConference(twiml, CallSid, ringFactChoice);
       return res.type('text/xml').send(twiml.toString());
     }
     if (claim !== 'claimed') throw Object.assign(new Error('no claim'), { code: `claim_${claim}` });
@@ -4056,7 +4083,8 @@ router.post('/conference-enter', async (req, res) => {
       throw Object.assign(new Error('no leg'), { code: 'no_leg_placed' });
     }
     conferencePath.scheduleNoAnswerBackstop(CallSid, ringTimeoutSec);
-    appendCallerConference(twiml, CallSid);
+    await stampRingFact(CallSid, ringFactChoice);
+    appendCallerConference(twiml, CallSid, ringFactChoice);
     return res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`[conference] ${maskSid(CallSid)} takes the classic ring (${conferencePath.errorCode(err)})`);
@@ -4065,6 +4093,38 @@ router.post('/conference-enter', async (req, res) => {
     return res.type('text/xml').send(classic.toString());
   }
 });
+
+// POST /conference-wait — the caller's waitUrl on the arm `fact` (GATE_CALL_RING_FACT): one fact, then the
+// ringback. What the Twilio docs say (https://www.twilio.com/docs/voice/twiml/conference, "waitUrl"): the URL
+// may return a TwiML document; only Say, Play, Pause and Redirect are allowed there (error 13238:
+// https://www.twilio.com/docs/api/errors/13238); when the document runs out of verbs, silence plays, and a
+// Redirect loops it; if the waitUrl request fails the conference is not fully established. <Play loop="0">
+// repeats until the call ends (<Say> documents loop 0 as "until hung up or 1,000 iterations":
+// https://www.twilio.com/docs/voice/twiml/say), so the ringback keeps playing until the staff start the room.
+// A <Redirect> to this route without a fact follows it, so the ringback resumes even if Twilio ever stops a
+// looping <Play>, and the fact is never said twice. The fact is read from the owner-approved FACTS list by
+// index; a bad or missing index, the gate off or any error answers the plain ringback.
+const WAIT_ROUTE = '/api/webhooks/twilio/conference-wait';
+router.post('/conference-wait', (req, res) => {
+  const twiml = new VoiceResponse();
+  try {
+    const index = ringFact.live() ? ringFact.parseFactIndex(req.query?.fact) : null;
+    if (index !== null) twiml.say({ voice: SAY_VOICE }, holdScript.FACTS[index]);
+  } catch (err) {
+    logger.warn(`[conference] ring fact wait failed (${conferencePath.errorCode(err)})`);
+    return sendTwiml(res, ringbackOnlyTwiml());
+  }
+  twiml.play({ loop: 0 }, CONFERENCE_RINGBACK_URL);
+  twiml.redirect({ method: 'POST' }, WAIT_ROUTE);
+  return sendTwiml(res, twiml);
+});
+
+function ringbackOnlyTwiml() {
+  const twiml = new VoiceResponse();
+  twiml.play({ loop: 0 }, CONFERENCE_RINGBACK_URL);
+  twiml.redirect({ method: 'POST' }, WAIT_ROUTE);
+  return twiml;
+}
 
 // POST /conference-staff-screen — a staff leg answered: the same press-1 screen as today's legs.
 router.post('/conference-staff-screen', (req, res) => {
