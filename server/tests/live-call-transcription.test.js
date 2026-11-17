@@ -376,3 +376,62 @@ describe('purgeLiveUtterances', () => {
     expect(db.__state.utterances).toHaveLength(0);
   });
 });
+
+describe('liveTranscriptFor', () => {
+  const seed = (rows) => {
+    db.__state.utterances = rows.map((r, i) => ({ id: i + 1, call_sid: CALL, pan_masked: false, spoken_at: new Date(Date.UTC(2026, 10, 16, 15, 0, r.at)), ...r }));
+  };
+
+  test('returns null with no utterances, for a bad SID, and for rows with only empty text', async () => {
+    await expect(live.liveTranscriptFor(CALL)).resolves.toBeNull();
+    await expect(live.liveTranscriptFor('not-a-sid')).resolves.toBeNull();
+    seed([{ speaker: 'caller', text: '   ', at: 1 }, { speaker: 'staff', text: null, at: 2 }]);
+    await expect(live.liveTranscriptFor(CALL)).resolves.toBeNull();
+  });
+
+  test('labels staff Agent and caller Caller, one line per turn, in spoken order', async () => {
+    seed([
+      { speaker: 'staff', text: 'Waves, how can I help?', at: 5 },
+      { speaker: 'caller', text: 'I have ants in my kitchen.', at: 9 },
+      { speaker: 'staff', text: 'What is the address?', at: 12 },
+    ]);
+    const result = await live.liveTranscriptFor(CALL);
+    expect(result).toEqual({
+      text: 'Agent: Waves, how can I help?\nCaller: I have ants in my kitchen.\nAgent: What is the address?',
+      utterances: 3,
+      panMasked: false,
+    });
+  });
+
+  test('orders by spoken_at then id, not insertion order', async () => {
+    seed([
+      { speaker: 'caller', text: 'second', at: 8 },
+      { speaker: 'staff', text: 'first', at: 2 },
+      { speaker: 'caller', text: 'third', at: 8 },
+    ]);
+    const { text } = await live.liveTranscriptFor(CALL);
+    expect(text).toBe('Agent: first\nCaller: second third');
+  });
+
+  test('joins consecutive same-speaker utterances into one turn and skips empty ones', async () => {
+    seed([
+      { speaker: 'caller', text: 'My name is Sandy.', at: 1 },
+      { speaker: 'caller', text: '', at: 2 },
+      { speaker: 'caller', text: 'I live on Palm Street.', at: 3 },
+      { speaker: 'staff', text: 'Got it.', at: 4 },
+    ]);
+    const result = await live.liveTranscriptFor(CALL);
+    expect(result.text).toBe('Caller: My name is Sandy. I live on Palm Street.\nAgent: Got it.');
+    expect(result.utterances).toBe(3);
+  });
+
+  test('reports panMasked when any utterance was card-masked, and only reads this call', async () => {
+    seed([
+      { speaker: 'caller', text: 'my card is [card number removed]', at: 1, pan_masked: true },
+      { speaker: 'caller', text: 'other call text', at: 2, call_sid: OTHER },
+    ]);
+    const result = await live.liveTranscriptFor(CALL);
+    expect(result.panMasked).toBe(true);
+    expect(result.text).not.toContain('other call');
+  });
+});
