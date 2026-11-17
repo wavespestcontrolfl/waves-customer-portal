@@ -5,9 +5,10 @@
  * Without --run it lists the runs whose dismissals still stand, read from the promises themselves: every
  * dismissed promise carries its run id, so the list does not need the run's audit_log row.
  *
- * With --run it finds the promises that still carry that run's marker and, with --apply, sets them open again
- * with no proof and puts back the alerts that run closed for them. A promise a person has since settled or
- * reopened no longer matches and is left alone. Dry run by default. Prints counts only.
+ * With --run it finds the promises that still carry that run's marker and, with --apply, sets them open again,
+ * each with the proof it carried before the run (most carried none), and puts back the alerts that run closed for
+ * them. A promise a person has since settled or reopened no longer matches and is left alone. Dry run by default.
+ * Prints counts only.
  *
  * A reopened promise that is still past the 30-day limit expires again on the next nightly run, so use this after
  * the rule changed. One promise is reopened for good from the Owed tab's "Closed automatically" list.

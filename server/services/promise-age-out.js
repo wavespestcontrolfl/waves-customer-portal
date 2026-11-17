@@ -13,15 +13,18 @@
  * Call, text and email promises; Waves' promises and the customer's.
  *
  * The promise is dismissed, never deleted and never marked kept: status 'dismissed', human_state stays NULL, and
- * fulfillment says why ({ kind: 'aged_out', basis, closed_by: 'promise_age_out', closed_at, run, days }). The
- * closed_by marker is its own, so the evidence re-judge (call-commitments.js autoClosedSql) never reads the row
- * as one of its closes and never reopens it. The Owed tab lists an expired Waves call promise under "Closed
- * automatically" for 7 days with its Reopen; a person's Reopen sets human_state, so the promise never expires again.
+ * fulfillment says why ({ kind: 'aged_out', basis, closed_by: 'promise_age_out', closed_at, run, days }). An open
+ * promise can carry a suggested proof (an association the evidence pass stored and did not close on); the marker
+ * keeps it under `prior`. The closed_by marker is its own, so the evidence re-judge (call-commitments.js
+ * autoClosedSql) never reads the row as one of its closes and never reopens it. The Owed tab lists an expired Waves
+ * call promise under "Closed automatically" for 7 days with its Reopen; a person's Reopen sets human_state, so the
+ * promise never expires again.
  *
  * What closes with it. A text promise's alert through the text lane's own closer (closeSmsCommitmentAlerts: the
  * shared alert stays for the text's other open promises). An email promise's alert by its key. A call promise's
- * overdue reminder is the watchdog's: its next run (5 minutes) retires a reminder whose promise is no longer open.
- * Nothing is sent to a customer.
+ * overdue reminder is the watchdog's: its next run retires a reminder whose promise is no longer open.
+ * Nothing is sent to a customer. A text promise a booked visit holds (GATE_PROMISE_RECORD_EVIDENCE rule 3) is
+ * never dismissed while held: a hold ends at most 14 days after the due time, and the limit is 30 days after it.
  *
  * Writes: one short statement per call promise, one short transaction per text or email promise (the promise,
  * then its alert). Every promise of one text shares one alert, and the text lane does its work on a text under
@@ -34,7 +37,8 @@
  *
  * The undo. Every dismissed promise carries its run id (fulfillment.run), written with the dismissal itself, so a
  * run can be found and reopened from the promises alone (listPromiseAgeOutRuns), also when its audit row was never
- * written. reopenPromiseAgeOut puts back the promises and the alerts that run closed for them.
+ * written. reopenPromiseAgeOut puts back the promises, each with the proof it carried, and the alerts that run
+ * closed for them.
  * server/scripts/promise-age-out-dry-run.js prints what a run would close; reopen-promise-age-out.js lists the
  * runs and reopens one.
  */
@@ -72,9 +76,11 @@ function agedScope(query, cc, cutoff) {
     .whereRaw(`(${staleAiRowSql(cc)}) IS NOT TRUE`);
 }
 
-// The dismissal every channel writes, on a query already narrowed to one promise.
-const dismiss = (query, cutoff, proof, now) => agedScope(query, 'call_commitments', cutoff)
-  .update({ status: 'dismissed', fulfillment: JSON.stringify(proof), fulfilled_at: null, updated_at: now });
+// The dismissal every channel writes, on one promise. The marker keeps the proof the promise carried as `prior`.
+const dismiss = (conn, row, { cutoff, proof, now }) => agedScope(conn('call_commitments').where({ id: row.id }), 'call_commitments', cutoff).update({
+  status: 'dismissed', fulfilled_at: null, updated_at: now,
+  fulfillment: conn.raw("?::jsonb || CASE WHEN fulfillment IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('prior', fulfillment) END", [JSON.stringify(proof)]),
+});
 
 const doneColumns = (trx, now) => require('./notification-service')._private.doneColumns({
   by: DONE_BY, resolution: RESOLUTION, at: now, keepExisting: true, conn: trx,
@@ -82,22 +88,22 @@ const doneColumns = (trx, now) => require('./notification-service')._private.don
 
 // One closer per channel: (conn, row, { cutoff, proof, now }) -> 1 when the promise was dismissed, else 0.
 const CLOSERS = {
-  call: (conn, row, { cutoff, proof, now }) => dismiss(conn('call_commitments').where({ id: row.id }), cutoff, proof, now),
-  text: (conn, row, { cutoff, proof, now }) => conn.transaction(async (trx) => {
+  call: dismiss,
+  text: (conn, row, rule) => conn.transaction(async (trx) => {
     await trx('sms_log').where({ id: row.sms_log_id }).forUpdate().first('id');
-    const closed = await dismiss(trx('call_commitments').where({ id: row.id }), cutoff, proof, now);
+    const closed = await dismiss(trx, row, rule);
     if (closed) {
       await require('./sms-operational-actions').closeSmsCommitmentAlerts(trx,
-        { commitmentId: row.id, smsLogId: row.sms_log_id, now }, doneColumns(trx, now));
+        { commitmentId: row.id, smsLogId: row.sms_log_id, now: rule.now }, doneColumns(trx, rule.now));
     }
     return closed;
   }),
-  email: (conn, row, { cutoff, proof, now }) => conn.transaction(async (trx) => {
-    const closed = await dismiss(trx('call_commitments').where({ id: row.id }), cutoff, proof, now);
+  email: (conn, row, rule) => conn.transaction(async (trx) => {
+    const closed = await dismiss(trx, row, rule);
     if (closed) {
       const { openToCloser } = require('./notification-service')._private;
       await openToCloser(trx('notifications').where({ recipient_type: 'admin' })
-        .whereRaw("metadata->>'dedupeKey' = ?", [`email-commitment:${row.id}`]), DONE_BY).update(doneColumns(trx, now));
+        .whereRaw("metadata->>'dedupeKey' = ?", [`email-commitment:${row.id}`]), DONE_BY).update(doneColumns(trx, rule.now));
     }
     return closed;
   }),
@@ -188,8 +194,8 @@ const reopenAlerts = (conn, run, ids) => conn('notifications').where({ recipient
   });
 
 /**
- * Reopen what one run dismissed: the promises that still carry its marker and the alerts it closed for them, with
- * the audit row, in one transaction. A promise still past the limit expires again on the next nightly run, so this
+ * Reopen what one run dismissed: the promises that still carry its marker (each gets back the proof it carried)
+ * and the alerts it closed for them, with the audit row, in one transaction. A promise still past the limit expires again on the next nightly run, so this
  * is for after the rule changed.
  * -> { run, found: counts, reopened, alertsReopened }
  */
@@ -199,8 +205,9 @@ async function reopenPromiseAgeOut({ run, apply = false, conn = db, now = new Da
   (await dismissedBy(conn, run).select('id', 'call_log_id', 'sms_log_id', 'email_id', 'party', 'kind')).forEach((row) => count(found, row));
   if (!apply || !found.total) return { run, found, reopened: 0, alertsReopened: 0 };
   return conn.transaction(async (trx) => {
-    const ids = (await dismissedBy(trx, run).update({ status: 'open', fulfillment: null, fulfilled_at: null, updated_at: now }).returning(['id']))
-      .map((row) => row.id);
+    // `->` gives NULL for a promise that carried no proof.
+    const ids = (await dismissedBy(trx, run).update({ status: 'open', fulfillment: trx.raw("fulfillment -> 'prior'"), fulfilled_at: null, updated_at: now })
+      .returning(['id'])).map((row) => row.id);
     const alertsReopened = ids.length ? await reopenAlerts(trx, run, ids) : 0;
     await require('./audit-log').recordAuditEvent({ actor_type: 'system', action: UNDO_AUDIT_ACTION, resource_type: 'call_commitment',
       metadata: { runId: String(run), reopened: ids.length, alertsReopened }, critical: true, trx });

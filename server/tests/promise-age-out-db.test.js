@@ -274,8 +274,10 @@ maybeDescribe('promise age-out (live Postgres)', () => {
     expect((await row(ours.id)).status).toBe('open');
   });
 
-  test('reopenPromiseAgeOut reopens what one run dismissed and a person has not settled since; its dry run writes nothing', async () => {
-    const stays = await callPromise();
+  test('reopenPromiseAgeOut reopens what one run dismissed and a person has not settled since, with the proof it carried; its dry run writes nothing', async () => {
+    // The evidence pass stored a suggested proof on this promise and left it open.
+    const suggested = { kind: 'visit_completed', strength: 'association', record_type: 'scheduled_service', record_id: randomUUID() };
+    const stays = await callPromise({ fulfillment: JSON.stringify(suggested) });
     const settled = await callPromise();
     const earlier = await callPromise();
     const earlierRun = await run({ scope: (q) => q.where('cc.id', earlier.id) });
@@ -283,13 +285,14 @@ maybeDescribe('promise age-out (live Postgres)', () => {
     await db('call_commitments').where({ id: settled.id }).update({ human_state: 'dismissed' });
 
     const dry = await ageOut.reopenPromiseAgeOut({ run: runId });
-    expect([dry.found.total, dry.reopened, (await row(stays.id)).status]).toEqual([1, 0, 'dismissed']);
+    const held = await row(stays.id);
+    expect([dry.found.total, dry.reopened, held.status, held.fulfillment.kind, held.fulfillment.prior]).toEqual([1, 0, 'dismissed', 'aged_out', suggested]);
 
     const applied = await ageOut.reopenPromiseAgeOut({ run: runId, apply: true });
 
     expect([applied.found.total, applied.reopened]).toEqual([1, 1]);
     const after = await row(stays.id);
-    expect([after.status, after.human_state, after.fulfillment, after.fulfilled_at]).toEqual(['open', null, null, null]);
+    expect([after.status, after.human_state, after.fulfillment, after.fulfilled_at]).toEqual(['open', null, suggested, null]);
     expect((await row(settled.id)).status).toBe('dismissed');
     expect((await row(earlier.id)).fulfillment.run).toBe(earlierRun.runId);
     const audit = await db('audit_log').where({ action: 'promise_age_out.reopen' }).whereRaw("metadata->>'runId' = ?", [runId]).first('metadata');
@@ -343,6 +346,7 @@ maybeDescribe('promise age-out (live Postgres)', () => {
     const applied = await ageOut.reopenPromiseAgeOut({ run: runId, apply: true });
 
     expect(applied.reopened).toBe(1);
-    expect((await row(aged.id)).status).toBe('open');
+    const after = await row(aged.id);
+    expect([after.status, after.fulfillment]).toEqual(['open', null]);
   });
 });
