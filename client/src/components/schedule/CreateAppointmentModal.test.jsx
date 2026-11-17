@@ -935,11 +935,13 @@ describe('composeAppointmentSuccessToast', () => {
       .toBe('Plan visit moved up. No re-service booked.');
   });
 
-  it('re-service fold: with some created and some folded, today\'s text stays and the fold is added', () => {
+  it('re-service fold: with some created and some folded, today\'s text counts only the created ones and the fold is added', () => {
     expect(composeAppointmentSuccessToast({ resultsCount: 2, createdCount: 0, estimateAccepted: false, prepayNotice: '', foldedCount: 1 }))
-      .toBe('2 appointment series created — invoices will send with each service report A plan visit moved up instead of a re-service.');
+      .toBe('Appointment created — invoice will send with service report A plan visit moved up instead of a re-service.');
     expect(composeAppointmentSuccessToast({ resultsCount: 3, createdCount: 0, estimateAccepted: false, prepayNotice: '', foldedCount: 2 }))
-      .toBe('3 appointment series created — invoices will send with each service report 2 plan visits moved up instead of a re-service.');
+      .toBe('Appointment created — invoice will send with service report 2 plan visits moved up instead of a re-service.');
+    expect(composeAppointmentSuccessToast({ resultsCount: 3, createdCount: 0, estimateAccepted: false, prepayNotice: '', foldedCount: 1 }))
+      .toBe('2 appointment series created — invoices will send with each service report A plan visit moved up instead of a re-service.');
   });
 });
 

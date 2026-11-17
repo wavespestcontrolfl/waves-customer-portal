@@ -1420,7 +1420,8 @@ export function classifyManualPrepayMintOutcome({ minted, fresh }) {
 export function composeAppointmentSuccessToast({ resultsCount, createdCount, estimateAccepted, prepayNotice, foldedCount = 0 }) {
   // GATE_RESERVICE_FOLD: a save the server answered by moving a plan visit up created nothing.
   if (foldedCount > 0 && foldedCount === resultsCount) return 'Plan visit moved up. No re-service booked.';
-  const apptCount = resultsCount || createdCount;
+  // A fold created nothing, so it is not counted as a created appointment.
+  const apptCount = (resultsCount - foldedCount) || createdCount;
   const baseMessage = prepayNotice
     ? (apptCount === 1 ? 'Appointment created' : `${apptCount} appointment series created`)
     : (apptCount === 1
