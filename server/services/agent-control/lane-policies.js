@@ -144,6 +144,8 @@ const LANE_RUNTIME = {
   // run one provider and degrade to null / a review path / typed notes — no cross-provider answer. lead_synopsis wraps its direct SDK call in ledgerCall.
   // direct_sdk (Codex r15): contact_dictation and address_recovery are raw Gemini fetches (contact-dictation.js, address-validation/recovery.js).
   csr_coach: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null },
+  // Spoken staff notes (GATE_CALL_SPOKEN_NOTES): one Haiku read per finished live call that has a trigger phrase on the staff side; a miss saves nothing.
+  live_call_spoken_notes: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 5_000, stall_after_ms: 60_000, hard_timeout_ms: 60_000 },
   contact_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'transcription_contact' },
   address_recovery: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction' },
   tech_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact' },

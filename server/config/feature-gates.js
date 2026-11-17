@@ -250,6 +250,7 @@
  *   GATE_CONTACT_CORRECTION=true (auto-apply customer-stated name/email/address corrections from inbound SMS and processed calls)
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
+ *   GATE_CALL_SPOKEN_NOTES=true (owner 2026-11-16 "ok build all, use haiku", live-call suite part 12: when staff say "make a note" or "remind me" on a live-transcribed call, a Claude Haiku 5.5 read of those staff lines saves the note on the call record and rings an admin bell at the reminder time said. It never texts, emails or calls anyone. Spends on Haiku calls when on: owner flip only. Kill: unset)
  *   GATE_PROPERTY_RECOMMENDATIONS=true (customer app Home, owner rulings 2026-08-13: the "Recommendations, For your property" card. It shows at most one service offer, chosen by what the customer already has (pest, then lawn, then tree and shrub), and the mosquito note in season. Its button files a request and rings the office; nothing is sold. Off = no card. Kill = unset.)
  *   GATE_ONE_TAP_PURCHASE=true (customer app, owner rulings 2026-08-13, 2026-11-11 and 2026-11-12: the Recommendations offer's button becomes "Add now", and My Plan gains an "Add a service" card with one such button for each service the customer does not have (pest, lawn, tree and shrub, mosquito, rodent bait stations; never termite). The customer agrees to the terms, picks a first visit and confirms; the visit and the recurring series are booked, nothing is charged at confirm, and the customer gets a confirmation email and an app notification, never a text. The screens show the WaveGuard discount on the new service and, when GATE_WAVEGUARD_EXTEND_EXISTING is on, the new price of the services the customer already has, which confirm applies. Needs GATE_PROPERTY_RECOMMENDATIONS. Refused for monthly-billed and payer-billed accounts. Off = the button files a request as before and every /api/one-tap route answers 404. Kill = unset.)
  *   GATE_REPORT_PLAN_SUMMARY=true ("Your plan" section on the LIVE report: an active plan member's visit/re-service COUNTS for this year — never prices, owner ruling 2026-09-28; live view only, stripped from PDF/static like nextAppointment; dark = report payload carries no planSummary)
@@ -2219,6 +2220,9 @@ const gates = {
   // Nightly self-audit: samples recent calls, strong-model re-read, drift
   // metrics to call_audit_findings; alerts ONLY on threshold breach.
   callSelfAudit: process.env.GATE_CALL_SELF_AUDIT === 'true',
+  // Spoken staff notes and reminders on a live call (owner 2026-11-16 "ok build all, use haiku", live-call suite part 12):
+  // services/live-call-spoken-notes.js, 2-minute job. Haiku spend: owner flip. Bell only, never a customer message.
+  callSpokenNotes: process.env.GATE_CALL_SPOKEN_NOTES === 'true',
   // Correction loop for calls (logGateStatus only; read live via callIncidentsLive()).
   callIncidents: gateEnvValue('GATE_CALL_INCIDENTS') && process.env.GATE_CALL_SELF_AUDIT === 'true',
   // Fail-open booking: a CONFIRMED appointment books despite recoverable
