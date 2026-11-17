@@ -28,8 +28,8 @@
  * legs: { "<i>": { sid, status } }, accepted_leg_sid, accepted_at, voicemail_at, closed_at, recording,
  * fallback }. Call SIDs and times only: no customer data, no staff numbers.
  * Every claim is one conditional UPDATE, so two staff, a backstop and a hang-up can race safely.
- * This module holds the state and the Twilio REST calls. Nothing calls it until the /voice switch
- * and its routes land in routes/twilio-voice-webhook.js (the next PR).
+ * This module holds the state and the Twilio REST calls; the TwiML and the webhook routes live in
+ * routes/twilio-voice-webhook.js.
  */
 
 const twilio = require('twilio');
