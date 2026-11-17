@@ -244,6 +244,14 @@ describe('/conference-staff-menu-choice', () => {
       .toBe(response(`${say(STAFF_VOICEMAIL)}<Hangup/>`));
   });
 
+  test('1: the hold timer sent the caller to voicemail first -> "Your caller went to voicemail." + Hangup, never the room', async () => {
+    callHold.isEnabled.mockReturnValue(true);
+    callHold.endHold.mockResolvedValue('voicemail');
+    const res = await post('/conference-staff-menu-choice', { body: { Digits: '1' } });
+    expect(res.body).toBe(response(`${say(STAFF_VOICEMAIL)}<Hangup/>`));
+    expect(res.body).not.toContain('<Conference');
+  });
+
   test('another key after the reminder goes back to the menu with reminded=1, so it is not said again', async () => {
     expect((await post('/conference-staff-menu-choice', { body: { Digits: '5' }, query: { reminded: '1' } })).body)
       .toBe(response(`<Redirect method="POST">${MENU_URL}&amp;reminded=1</Redirect>`));
