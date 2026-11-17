@@ -1,5 +1,5 @@
 /**
- * Messenger inbox (GATE_MESSENGER_INBOX, owner 2026-10-31).
+ * Messenger inbox (owner 2026-10-31).
  *
  * Facebook Messenger for the Waves Pest Control page, inside Admin >
  * Communications. The page has no webhook subscription, so intake is a poll:
@@ -22,7 +22,6 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const { messengerInboxLive } = require('../config/feature-gates');
 const { findOrCreateThread, appendMessage } = require('./conversations');
 
 const CHANNEL = 'facebook_messenger';
@@ -387,7 +386,6 @@ async function settlePoll({ complete, failed, firstRun, advanced, empty, now, pa
  * A page or message cap that stops the walk early leaves the cursor where it was.
  */
 async function pollMessenger({ now = new Date(), limits: override } = {}) {
-  if (!messengerInboxLive()) return { skipped: 'gate_off' };
   const config = pageConfig();
   if (!config) return { skipped: 'not_configured' };
   const limits = { conversationPages: MAX_CONVERSATION_PAGES, messagePages: MAX_MESSAGE_PAGES, ...override };

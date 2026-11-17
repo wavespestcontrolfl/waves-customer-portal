@@ -1,5 +1,5 @@
 /**
- * Spam TAG for SMS senders (GATE_SMS_SPAM_TAG, owner 2026-11-02) against real
+ * Spam TAG for SMS senders (owner 2026-11-02) against real
  * PostgreSQL: the migration, the tag, the not-spam undo, the customer and
  * open-lead refusals, and NANP-versus-international phone identity. Tables live
  * in a private schema that is dropped afterwards; every phone is synthetic.
@@ -60,7 +60,6 @@ let mockDatabase;
     tag = require('../services/sms-spam-tag');
   });
   afterAll(async () => {
-    delete process.env.GATE_SMS_SPAM_TAG;
     if (!mockDatabase) return;
     await mockDatabase.raw('DROP SCHEMA ?? CASCADE', [schema]).catch(() => {});
     await mockDatabase.destroy();
@@ -353,11 +352,8 @@ let mockDatabase;
     expect(await tag.findTaggedSender('+442079460958')).toBeNull();
   });
 
-  test('the webhook lookup honors the gate and an open lead', async () => {
+  test('the webhook lookup honors an open lead', async () => {
     await tag.tagSpamSender({ number: '+19415550100', adminUserId: ADMIN });
-    delete process.env.GATE_SMS_SPAM_TAG;
-    expect(await tag.taggedVerdictForInbound({ phone: '+19415550100' })).toBeNull();
-    process.env.GATE_SMS_SPAM_TAG = 'true';
     expect(await tag.taggedVerdictForInbound({ phone: '+19415550100' })).toMatchObject({ method: 'manual', enforced: true, marked_by: ADMIN });
     expect(await tag.taggedVerdictForInbound({ phone: '+19415550102' })).toBeNull();
     // A lead that arrived after the tag wins.

@@ -6,7 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SmsTab } from "./CommunicationsPageV2";
 
-// GATE_SMS_LIKE (owner 2026-11-02, "SMS Like Button"): the like button under
+// Owner 2026-11-02, "SMS Like Button": the like button under
 // the customer's newest text, and like lines, in the Messages thread.
 vi.mock("react-router-dom", async (importOriginal) => ({ ...(await importOriginal()), useNavigate: () => vi.fn() }));
 
@@ -40,7 +40,7 @@ beforeEach(() => {
   localStorage.setItem("waves_admin_token", "synthetic-token");
   sessionStorage.clear();
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
-  log = { smsLike: true, messages: [] };
+  log = { messages: [] };
   vi.stubGlobal("fetch", vi.fn(async (url) => {
     const parsed = new URL(String(url), "http://localhost");
     if (parsed.pathname.endsWith("/log")) return response({ ...log, hasMore: false, page: 1 });
@@ -133,7 +133,7 @@ it("keeps the like button through an Unanswered refresh that combines loaded pag
     const parsed = new URL(String(url), "http://localhost");
     if (parsed.pathname.endsWith("/log")) {
       const page = Number(parsed.searchParams.get("page") || 1);
-      return response({ smsLike: true, messages: page === 1 ? pageOne : pageTwo, hasMore: page === 1, page });
+      return response({ messages: page === 1 ? pageOne : pageTwo, hasMore: page === 1, page });
     }
     return response({ numbers: [] });
   });
@@ -145,18 +145,4 @@ it("keeps the like button through an Unanswered refresh that combines loaded pag
   // The 30-second refresh re-reads both loaded pages and combines them.
   await tick(30000);
   expect(likeButton()).toBeInTheDocument();
-});
-
-it("gate off: no Like button, and a customer like stays its own bubble", async () => {
-  log = {
-    messages: [
-      sms("r-1", "inbound", 'Liked "Your technician arrives Tuesday."', 3),
-      sms("out-1", "outbound", "Your technician arrives Tuesday.", 2),
-    ],
-  };
-  await openThread('Liked "Your technician arrives Tuesday."');
-
-  expect(document.getElementById("sms-message-r-1")).toHaveTextContent('Liked "Your technician arrives Tuesday."');
-  expect(screen.queryByTitle("The customer reacted to this text")).not.toBeInTheDocument();
-  expect(likeButton()).not.toBeInTheDocument();
 });

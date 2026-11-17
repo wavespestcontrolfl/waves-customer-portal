@@ -1251,11 +1251,10 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // EVERY 3 MIN — Facebook Messenger intake (GATE_MESSENGER_INBOX, read in
-  // the poll): the page has no webhook, so new messages are read from the Graph
-  // API into the unified messages store, one bell per thread with a new
-  // customer message. Exclusive, so two instances never poll at once; the
-  // gate-off poll does nothing.
+  // EVERY 3 MIN — Facebook Messenger intake: the page has no webhook, so new
+  // messages are read from the Graph API into the unified messages store, one
+  // bell per thread with a new customer message. Exclusive, so two instances
+  // never poll at once.
   cron.schedule('*/3 * * * *', async () => {
     try {
       await runExclusive('messenger-inbox', async () => {

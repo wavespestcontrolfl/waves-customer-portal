@@ -297,14 +297,13 @@ const TABS = [
     adminOnly: true,
   },
 ];
-// Tabs behind a dark gate. Each is added to the nav only when its summary endpoint answers
-// enabled:true; the answer's count rides in the tab label. Listed in nav-insertion order: `after` names the
-// anchor tabs, the first one present wins.
-//  - Portal (GATE_PORTAL_INBOX): what customers asked for inside the customer portal and nobody answered.
+// The Portal and Messenger tabs. Each summary endpoint's count rides in the tab label. Listed in
+// nav-insertion order: `after` names the anchor tabs, the first one present wins.
+//  - Portal: what customers asked for inside the customer portal and nobody answered.
 //    Owner-only, right after Triage.
-//  - Messenger (GATE_MESSENGER_INBOX): the Facebook page's Messenger threads. Every staff role (the server
+//  - Messenger: the Facebook page's Messenger threads. Every staff role (the server
 //    scopes a technician to their own customers); right after Portal, else Triage, else SMS.
-const GATED_TABS = [
+const INBOX_TABS = [
   { tab: { key: "portal", label: "Portal", Icon: MessagesSquare, adminOnly: true }, Component: PortalInboxTabV2, summary: "/admin/portal-inbox/summary", countField: "count", after: ["triage"] },
   { tab: { key: "messenger", label: "Messenger", Icon: MessagesSquare }, Component: MessengerTabV2, summary: "/admin/messenger/summary", countField: "unanswered", after: ["portal", "triage", "sms"] },
 ];
@@ -398,18 +397,12 @@ function smsMessageMatchesLine(message, lineNumber) {
   return phoneKey(messageLine) === lineKey;
 }
 
-// One log response from several refreshed pages. It keeps the page-level
-// flags the inbox reads (GATE_SMS_LIKE's smsLike, GATE_SMS_SPAM_TAG's
-// smsSpamTag): a rebuilt response without smsSpamTag would turn Mark spam
-// back into the block while the gate is on.
+// One log response from several refreshed pages.
 export function mergeRefreshedLogPages(pages, loadedPageCount) {
   return {
     messages: mergeSmsMessages([], pages.flatMap((pageData) => pageData.messages)),
     hasMore: !!pages.at(-1)?.hasMore,
     page: pages.at(-1)?.page || loadedPageCount,
-    // GATE_SMS_LIKE: every page answers it; the combined result keeps it.
-    smsLike: pages.every((pageData) => pageData.smsLike === true),
-    ...(pages.some((pageData) => pageData?.smsSpamTag === true) ? { smsSpamTag: true } : {}),
   };
 }
 
@@ -669,13 +662,13 @@ function SmsLogItemV2({ msg: m, onReply }) {
   );
 }
 
-// GATE_SMS_SPAM_TAG: a thread whose inbound texts carry an enforced spam
+// A thread whose inbound texts carry an enforced spam
 // verdict (tagged here, or silenced by the auto screen) offers "Not spam"
 // instead of "Mark spam"; the tag keeps the texts and only silences alerts.
 // A tagged sender counts even when no text carries a verdict (a photo-only
 // thread: photos are never stamped), so the tag can always be undone.
-function spamTagState(thread, { spamTagOn, canAct }) {
-  const spamTagged = spamTagOn && Array.isArray(thread.messages)
+function spamTagState(thread, { canAct }) {
+  const spamTagged = Array.isArray(thread.messages)
     && thread.messages.some((m) => m.senderSpamTagged === true
       || (m.direction === "inbound" && m.spamEnforced === true));
   // Not spam is offered even once the number belongs to a customer (Codex P2 on
@@ -685,7 +678,7 @@ function spamTagState(thread, { spamTagOn, canAct }) {
   return { spamTagged, canNotSpam: spamTagged && canAct };
 }
 
-// GATE_SMS_SPAM_TAG: the label on a received text the spam check or a tag
+// The label on a received text the spam check or a tag
 // silenced (display only; any enforced verdict sets it).
 function SpamLabel({ message }) {
   if (message.direction === "outbound" || message.spamEnforced !== true) return null;
@@ -705,8 +698,6 @@ function ConversationViewV2({
   onOpenProfile,
   onMarkSpam,
   onNotSpam,
-  spamTagOn = false,
-  smsLike = false,
   onLiked,
 }) {
   // "Call back" rides the owner-only call bridge: a technician gets no button.
@@ -721,10 +712,10 @@ function ConversationViewV2({
   // unlinked number (outbound only, nothing ever received) does not offer it.
   const hasInbound = Array.isArray(thread.messages) && thread.messages.some((m) => m.direction === "inbound");
   const canMarkSpam = !thread.customerId && !thread.customerName && !!contactPhone && hasInbound && typeof onMarkSpam === "function";
-  const { spamTagged, canNotSpam } = spamTagState(thread, { spamTagOn, canAct: !!contactPhone && typeof onNotSpam === "function" });
-  // GATE_SMS_LIKE: customer likes become badges on our quoted text, and the
-  // customer's newest text gets the like button. Off: the list is unchanged.
-  const likeView = smsLikeThread(messages, smsLike);
+  const { spamTagged, canNotSpam } = spamTagState(thread, { canAct: !!contactPhone && typeof onNotSpam === "function" });
+  // Customer likes become badges on our quoted text, and the
+  // customer's newest text gets the like button.
+  const likeView = smsLikeThread(messages);
   return (
     <div className="flex flex-col h-full">
       {" "}
@@ -771,9 +762,7 @@ function ConversationViewV2({
               size="sm"
               variant="secondary"
               className="flex-1 md:flex-none"
-              title={spamTagOn
-                ? "Tag this number as spam: its texts stay here, marked read, with no alerts"
-                : "Block this number and mark the thread read"}
+              title="Tag this number as spam: its texts stay here, marked read, with no alerts"
               onClick={() => onMarkSpam(thread)}
             >
               <Ban size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
@@ -1394,9 +1383,6 @@ export function SmsTab({
   // full digits so a foreign block can never hide a NANP thread sharing
   // its suffix (the server enforces the same split).
   const [blocked, setBlocked] = useState(() => new Set());
-  // GATE_SMS_SPAM_TAG, from the /log payload: Mark spam tags the sender (texts
-  // stay, no alerts) instead of blocking it.
-  const [spamTagOn, setSpamTagOn] = useState(false);
   const blockedFromNumbers = (numbers) => {
     return new Set(numbers.map(smsThreadKey).filter((key) => key !== "unknown"));
   };
@@ -1408,8 +1394,6 @@ export function SmsTab({
   const [selected360Id, setSelected360Id] = useState(null);
   const [smsPage, setSmsPage] = useState(1);
   const [smsHasMore, setSmsHasMore] = useState(false);
-  // GATE_SMS_LIKE: the log says whether the like button and badges are on.
-  const [smsLike, setSmsLike] = useState(false);
   const [smsLoadingMore, setSmsLoadingMore] = useState(false);
   const smsSearchRef = useRef("");
   const smsLoadSeqRef = useRef(0);
@@ -1617,7 +1601,6 @@ export function SmsTab({
       }
       const logData = logResult.status === "fulfilled" ? logResult.value : null;
       if (Array.isArray(logData?.messages) && !logData.error) {
-        setSpamTagOn(logData.smsSpamTag === true);
         const retainHistory = refreshesLoadedDataset && requestedStatusFilter !== "unanswered";
         setMessages((prev) => append || retainHistory ? mergeSmsMessages(prev, logData.messages) : logData.messages);
         if (refreshesLoadedDataset && requestedStatusFilter === "unanswered" && !append) {
@@ -1634,7 +1617,6 @@ export function SmsTab({
         smsPageRef.current = logData.page || page;
         setSmsPage(smsPageRef.current);
         setSmsHasMore(!!logData.hasMore);
-        setSmsLike(logData.smsLike === true);
         smsLoadedSearchRef.current = normalizedSearch;
         smsLoadedStatusFilterRef.current = requestedStatusFilter;
         setSmsLoadError("");
@@ -1696,7 +1678,7 @@ export function SmsTab({
   }, [active, customer?.id, loadData]);
 
   const markMessagesRead = useCallback(
-    async (thread, { throwOnError = false } = {}) => {
+    async (thread) => {
       const threadMessages = Array.isArray(thread?.messages)
         ? thread.messages
         : Array.isArray(thread?.messagesList)
@@ -1746,12 +1728,8 @@ export function SmsTab({
           }),
         });
         notifyUnreadChanged();
-      } catch (e) {
+      } catch {
         loadData(smsSearch.trim());
-        // Callers that must observe a partial mark-spam/read failure (codex
-        // #4213 P2) opt in here; every other caller keeps today's
-        // fire-and-forget resync-and-swallow behavior.
-        if (throwOnError) throw e;
       }
     },
     [loadData, smsSearch],
@@ -3292,48 +3270,13 @@ export function SmsTab({
     return { all: threads.length, unread, unanswered, unknown };
   }, [threads]);
 
-  // Mark spam: block the sender (future texts are dropped before they are
-  // logged), mark this thread read (it stops counting toward the badge and
-  // the nightly unanswered-texts digest), and return to the list. Only
-  // offered on threads with no customer behind them; the server refuses a
-  // customer's number (CUSTOMER_NUMBER) regardless.
-  const handleMarkSpam = async (thread) => {
+  // Mark spam: tag the sender. Nothing is removed: its texts stay in the
+  // inbox, marked read with a Spam tag and no alerts, and calls still ring.
+  // Only offered on threads with no customer behind them; the server refuses a
+  // customer's or an open lead's number.
+  const handleTagSpam = async (thread) => {
     const number = thread?.contactPhone;
     if (!number) return;
-    if (spamTagOn) return handleTagSpam(number);
-    if (!window.confirm(`Block ${number} as spam? Future texts AND calls from this number are rejected before they reach anyone, and this thread is marked read.`)) return;
-    try {
-      await adminFetch(`/admin/communications/blocked-numbers`, {
-        method: "POST",
-        body: JSON.stringify({ number, reason: "Marked spam from the SMS inbox" }),
-      });
-    } catch (e) {
-      alert(`Could not mark spam: ${e.message}`);
-      return;
-    }
-    // The block itself succeeded — leave and drop the thread from the
-    // operational lists regardless of what the read call below does.
-    setBlocked((prev) => {
-      const add = blockedFromNumbers([number]);
-      return new Set([...prev, ...add]);
-    });
-    setSmsView("threads");
-    setActiveThread(null);
-    loadData(smsSearch);
-    try {
-      // throwOnError: a swallowed read failure would leave the confirmation
-      // claiming "marked read" while the messages stay unread and reappear
-      // in the badge the moment the number is unblocked (codex #4213 P2).
-      await markMessagesRead(thread, { throwOnError: true });
-    } catch (e) {
-      alert(`${number} is blocked, but marking the thread read failed: ${e.message}. Its messages may still show as unread if this number is ever unblocked.`);
-    }
-  };
-
-  // GATE_SMS_SPAM_TAG: tag the sender. Nothing is removed: its texts stay in
-  // the inbox, marked read with a Spam tag and no alerts, and calls still ring.
-  // The server refuses a customer's or an open lead's number.
-  const handleTagSpam = async (number) => {
     if (!window.confirm(`Mark ${number} as spam? Its texts stay in the inbox with a Spam tag and no alerts. Calls are not blocked.`)) return;
     try {
       const result = await adminFetch(`/admin/communications/spam-senders`, {
@@ -3352,7 +3295,7 @@ export function SmsTab({
     loadData(smsSearch);
   };
 
-  // GATE_SMS_SPAM_TAG: undo the tag. The number's texts come back as needing a reply.
+  // Undo the tag. The number's texts come back as needing a reply.
   const handleNotSpam = async (thread) => {
     const number = thread?.contactPhone;
     if (!number) return;
@@ -3368,7 +3311,7 @@ export function SmsTab({
     loadData(smsSearch);
   };
 
-  // GATE_SMS_LIKE: the thumbs-up went out. Show the like now, then reload so
+  // The thumbs-up went out. Show the like now, then reload so
   // the sent text and the server's record of the like appear in the thread.
   const handleLiked = (messageId, officeLike) => {
     if (officeLike) setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, officeLike } : m)));
@@ -4208,10 +4151,8 @@ export function SmsTab({
             onOpenProfile={(id) => setSelected360Id(id)}
             // Blocking a number is owner-only (2026-10-02); the server
             // refuses a technician, so the button is not offered.
-            onMarkSpam={smsIsAdminRole ? handleMarkSpam : undefined}
+            onMarkSpam={smsIsAdminRole ? handleTagSpam : undefined}
             onNotSpam={smsIsAdminRole ? handleNotSpam : undefined}
-            spamTagOn={spamTagOn}
-            smsLike={smsLike}
             onLiked={handleLiked}
           />{" "}
           {renderLoadMore("Load older SMS history")}
@@ -4467,30 +4408,29 @@ export default function CommunicationsPageV2() {
   // Memoized by role: the hash-sync effect below depends on `tabs`, and a
   // fresh array every render would re-run applyHashTab() after each tab
   // click, snapping the user back to the deep-linked tab (codex P2).
-  // counts: a gated tab's key is present only once its one-time summary read answered enabled:true (gate
-  // off, a failed read or a role without the tab leaves it out). The tabs report later counts through
+  // counts: a tab's key is present once its one-time summary read answered (a failed read or a role
+  // without the tab leaves it out, and the tab shows with no count). The tabs report later counts through
   // countSetters, which keep one identity for the life of the page.
   const [counts, setCounts] = useState({});
-  const countSetters = useMemo(() => Object.fromEntries(GATED_TABS.map(({ tab: { key } }) => [
+  const countSetters = useMemo(() => Object.fromEntries(INBOX_TABS.map(({ tab: { key } }) => [
     key, (n) => setCounts((prev) => (prev[key] === n ? prev : { ...prev, [key]: n })),
   ])), []);
   useEffect(() => {
     let cancelled = false;
-    GATED_TABS.filter(({ tab }) => isAdminRole || !tab.adminOnly).forEach(async ({ tab, summary, countField }) => {
+    INBOX_TABS.filter(({ tab }) => isAdminRole || !tab.adminOnly).forEach(async ({ tab, summary, countField }) => {
       try {
         const answer = await adminFetch(summary);
-        if (!cancelled && answer?.enabled === true) countSetters[tab.key](Number(answer[countField]) || 0);
+        if (!cancelled) countSetters[tab.key](Number(answer?.[countField]) || 0);
       } catch {
-        /* no tab when the summary cannot be read */
+        /* no count when the summary cannot be read */
       }
     });
     return () => { cancelled = true; };
   }, [isAdminRole, countSetters]);
-  const shown = Object.keys(counts).join();
-  const tabs = useMemo(() => GATED_TABS.reduce(
-    (nav, { tab, after }) => (shown.split(",").includes(tab.key) ? insertTabAfter(nav, tab, after) : nav),
+  const tabs = useMemo(() => INBOX_TABS.reduce(
+    (nav, { tab, after }) => (!tab.adminOnly || isAdminRole ? insertTabAfter(nav, tab, after) : nav),
     TABS.filter((t) => !t.adminOnly || isAdminRole),
-  ), [isAdminRole, shown]);
+  ), [isAdminRole]);
   // The count rides in the label (the nav has no badge slot); label changes do
   // not change `tabs`, so the hash-sync effect below never re-runs for them.
   const navSections = useMemo(
@@ -4498,7 +4438,7 @@ export default function CommunicationsPageV2() {
     [tabs, counts],
   );
   const activeTab = tabs.some((item) => item.key === tab) ? tab : "sms";
-  const gatedTab = GATED_TABS.find(({ tab: { key } }) => key === activeTab);
+  const inboxTab = INBOX_TABS.find(({ tab: { key } }) => key === activeTab);
   const smsParams = new URLSearchParams(location.search);
   const feedbackEnabled = smsParams.get("feedback") === "1";
   const smsTarget = ["thread", "message", "phone", "fromNumber", "draftId", "draft"].map((key) => smsParams.get(key) || "");
@@ -4577,7 +4517,7 @@ export default function CommunicationsPageV2() {
       {smsVisited && <div hidden={activeTab !== "sms"}><SmsTab key={openedSmsTarget} active={activeTab === "sms"} feedbackEnabled={feedbackEnabled} /></div>}
       {activeTab === "calls" && <CallLogTabV2 />}
       {activeTab === "triage" && <TriageInboxTabV2 isAdmin={isAdminRole} />}
-      {gatedTab && <gatedTab.Component onCount={countSetters[activeTab]} routeHash={location.hash} />}
+      {inboxTab && <inboxTab.Component onCount={countSetters[activeTab]} routeHash={location.hash} />}
       {activeTab === "owed" && <OwedTabV2 />}
       {activeTab === "templates" && (
         <>

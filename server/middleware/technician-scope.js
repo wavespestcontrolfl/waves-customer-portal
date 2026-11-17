@@ -140,7 +140,7 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|unread-count|link-library|agent-draft)$/ },
   { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|send-prep|rewrite-sms|ai-draft|name-check)$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/blocked-numbers$/ },
-  // Facebook Messenger threads (GATE_MESSENGER_INBOX, dark): the router scopes a
+  // Facebook Messenger threads: the router scopes a
   // technician to threads linked to a customer on their own route, like the SMS inbox.
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/messenger\/(summary|threads|threads\/[^/]+)$/ },
   { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/messenger\/threads\/[^/]+\/(read|reply)$/ },

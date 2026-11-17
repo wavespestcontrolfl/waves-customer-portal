@@ -4,7 +4,7 @@ import { Badge, Button, Card, CardBody, Textarea } from "../../components/ui";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import { formatETDateTime } from "../../lib/timezone";
 
-// Communications -> Messenger tab (GATE_MESSENGER_INBOX). The Facebook page's
+// Communications -> Messenger tab. The Facebook page's
 // Messenger threads, read into the portal every 3 minutes. A reply goes out
 // through Facebook's Send API, which allows it for 24 hours after the
 // customer's last message; past that the tab links to Facebook instead.

@@ -613,7 +613,7 @@ router.post('/sms', async (req, res) => {
     try {
       const screen = require('../services/sms-solicitation-classifier');
       const solicitationMode = screen.classifierMode();
-      // A sender the office tagged as spam (GATE_SMS_SPAM_TAG, dark): the same
+      // A sender the office tagged as spam: the same
       // silencing path as an enforced screen verdict, with a manual verdict and
       // no model call. Staff, the AI line, reactions, photos, an empty body, a
       // carrier keyword or command, an applicant, and any sender with a customer
@@ -1065,7 +1065,7 @@ router.post('/sms', async (req, res) => {
       });
     }
 
-    // A manual tag (GATE_SMS_SPAM_TAG) can be undone while this text is in
+    // A manual tag can be undone while this text is in
     // flight. Re-read it now that both rows exist: either this read sees the
     // undo and the text gets ordinary handling, or the undo's own scan, which
     // runs after its delete, sees these rows and clears them.

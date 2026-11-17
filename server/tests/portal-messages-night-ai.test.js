@@ -38,23 +38,19 @@ describe('GATE_PORTAL_MESSAGES_NIGHT_AI', () => {
     expect(gates.portalMessagesNightAiLive()).toBe(false);
   });
 
-  it('needs the portal messages, the Portal tab and Ask Waves on as well', () => {
+  it('needs the portal messages and Ask Waves on as well', () => {
     const keep = { ...process.env };
     try {
       process.env.GATE_PORTAL_MESSAGES_NIGHT_AI = 'true';
       process.env.GATE_PORTAL_MESSAGES = 'true';
-      process.env.GATE_PORTAL_INBOX = 'true';
       expect(NightAi.enabled()).toBe(true);
       process.env.PORTAL_CHAT_SELF_SERVE = 'off';
       expect(NightAi.enabled()).toBe(false);
       delete process.env.PORTAL_CHAT_SELF_SERVE;
-      process.env.GATE_PORTAL_INBOX = 'false';
-      expect(NightAi.enabled()).toBe(false);
-      process.env.GATE_PORTAL_INBOX = 'true';
       process.env.GATE_PORTAL_MESSAGES = 'false';
       expect(NightAi.enabled()).toBe(false);
     } finally {
-      for (const key of ['GATE_PORTAL_MESSAGES_NIGHT_AI', 'GATE_PORTAL_MESSAGES', 'GATE_PORTAL_INBOX', 'PORTAL_CHAT_SELF_SERVE']) {
+      for (const key of ['GATE_PORTAL_MESSAGES_NIGHT_AI', 'GATE_PORTAL_MESSAGES', 'PORTAL_CHAT_SELF_SERVE']) {
         if (keep[key] === undefined) delete process.env[key]; else process.env[key] = keep[key];
       }
     }
