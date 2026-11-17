@@ -48,7 +48,8 @@ describeOrSkip('findFoldTarget', () => {
   test('a plan visit 5 days later folds; the answer carries what the move and the notice need', async () => {
     const id = await plan(5, { technician_id: null, customer_request: 'x', notes: 'Dog in yard' });
     expect(await find()).toEqual({
-      id, scheduled_date: later(5), window_start: '09:00:00', window_end: '10:00:00', service_type: 'Quarterly Pest Control Service',
+      id, customer_id: customerId, property_id: null, service_id: pestServiceId, is_callback: false,
+      scheduled_date: later(5), window_start: '09:00:00', window_end: '10:00:00', service_type: 'Quarterly Pest Control Service',
       technician_id: null, status: 'pending', customer_request: 'x', notes: 'Dog in yard',
     });
   });

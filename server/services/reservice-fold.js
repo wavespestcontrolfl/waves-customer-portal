@@ -60,12 +60,16 @@ async function findFoldTarget(conn, { customerId, lane, date, propertyId = null 
     .orderBy('s.scheduled_date', 'asc')
     .orderByRaw('s.window_start ASC NULLS LAST')
     .limit(25)
-    .select('s.id', 's.scheduled_date', 's.window_start', 's.window_end', 's.service_type', 's.technician_id',
-      's.customer_request', 's.notes', 's.status', 'sv.category');
+    .select('s.id', 's.customer_id', 's.property_id', 's.service_id', 's.is_callback', 's.scheduled_date', 's.window_start',
+      's.window_end', 's.service_type', 's.technician_id', 's.customer_request', 's.notes', 's.status', 'sv.category');
   for (const row of rows) {
     if (laneForCoverageRow({ category: row.category, serviceType: row.service_type }) !== lane) continue;
     return {
       id: row.id,
+      customer_id: row.customer_id,
+      property_id: row.property_id,
+      service_id: row.service_id,
+      is_callback: row.is_callback,
       scheduled_date: dateOnlyString(row.scheduled_date),
       window_start: row.window_start,
       window_end: row.window_end,
@@ -138,9 +142,15 @@ async function runFoldMove({ planned, target, newDate, notifyCustomer, actor }) 
 }
 
 // The 200 answer the booking route sends when the plan visit moved. Carrying the office's words never undoes the move.
-async function foldAnswer({ conn, target, newDate, windowStart, out, failure, customerRequest, notes }) {
-  const warnings = [foldOfficeNotice(target, newDate, windowStart), ...(Array.isArray(out?.body?.warnings) ? out.body.warnings : [])];
+async function foldAnswer({ conn, target, newDate, windowStart, out, failure, notifyCustomer, customerRequest, notes }) {
+  const body = out?.body || {};
+  const warnings = [foldOfficeNotice(target, newDate, windowStart), ...(Array.isArray(body.warnings) ? body.warnings : [])];
   if (failure) warnings.push(`The move reported an error after it saved (${failure}). Check the visit.`);
+  // The office asked for the "visit moved" text and it did not go (a failed send, or a move that errored before its text
+  // step). Same words as the Dispatch board's stop move. A visit already on the slot (notificationSkipped) needs no text.
+  if (notifyCustomer !== false && body.notificationSent !== true && !body.notificationSkipped) {
+    warnings.push(`The customer was not texted about the move: ${body.notificationError || 'the text could not be sent'}.`);
+  }
   try {
     await carryOfficeWords(conn, target, { customerRequest, notes, date: newDate });
   } catch (err) {
@@ -158,7 +168,7 @@ async function foldAnswer({ conn, target, newDate, windowStart, out, failure, cu
       fromDate: target.scheduled_date,
       toDate: newDate,
       start: windowStart || null,
-      notificationSent: out?.body?.notificationSent === true,
+      notificationSent: body.notificationSent === true,
     },
   };
 }
@@ -188,17 +198,29 @@ async function moveFoldTarget({ conn = db, target, date, windowStart, technician
     actor,
     sourceSurface: FOLD_SOURCE_SURFACE,
     seriesPolicy: 'single',
-    // The lookup's picture of the visit is the rebooker's write fence: a visit that left the range, went live, joined a stop
-    // or entered a Quick Move hand-off since the lookup makes the move miss (a 409), and the re-service books instead.
+    // The lookup's picture of the visit is the rebooker's write fence: a visit that left the range, went live, joined a stop,
+    // entered a Quick Move hand-off, or changed customer, premise, service, or plan or callback kind since the lookup makes
+    // the move miss (a 409), and the re-service books instead.
     allowLive: false,
-    expect: { scheduled_date: target.scheduled_date, status: target.status, visit_id: null, customer_pick_by: null },
+    expect: {
+      customer_id: target.customer_id,
+      property_id: target.property_id,
+      service_id: target.service_id,
+      service_type: target.service_type,
+      is_recurring: true,
+      is_callback: target.is_callback,
+      scheduled_date: target.scheduled_date,
+      status: target.status,
+      visit_id: null,
+      customer_pick_by: null,
+    },
   });
   // A planner refusal wrote nothing: no re-read.
   if (!planned.plan) return refused(planned.body?.error || 'the move was refused');
   const { out, failure } = await runFoldMove({ planned, target, newDate, notifyCustomer, actor });
   // The move started: a row already on the asked slot saved, and a re-service booked now would double up.
   if (failure && !(await movedAnyway(conn, target, newDate, windowStart))) return refused(failure);
-  return { moved: true, answer: await foldAnswer({ conn, target, newDate, windowStart, out, failure, customerRequest, notes }) };
+  return { moved: true, answer: await foldAnswer({ conn, target, newDate, windowStart, out, failure, notifyCustomer, customerRequest, notes }) };
 }
 
 module.exports = {

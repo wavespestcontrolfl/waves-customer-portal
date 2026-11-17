@@ -14,7 +14,10 @@ jest.mock('../routes/admin-dispatch', () => ({
 const dispatch = require('../routes/admin-dispatch');
 const { moveFoldTarget, foldOfficeNotice, foldLaneForServiceKey, FOLD_DAYS } = require('../services/reservice-fold');
 
-const TARGET = { id: 'plan-1', scheduled_date: '2099-11-29', status: 'pending', service_type: 'Quarterly Pest Control Service', customer_request: null, notes: 'Dog in yard' };
+const TARGET = {
+  id: 'plan-1', customer_id: 'cust-1', property_id: null, service_id: 'svc-pest', is_callback: false,
+  scheduled_date: '2099-11-29', status: 'pending', service_type: 'Quarterly Pest Control Service', customer_request: null, notes: 'Dog in yard',
+};
 const ACTOR = { techRole: 'admin', technicianId: 'staff-1' };
 const PLAN = { plan: { rescheduleOptions: {} } };
 
@@ -44,9 +47,13 @@ test('asks the staff move for this one visit: the office start, technician and t
   expect(dispatch.planVisitMoveForStaff).toHaveBeenCalledWith({
     serviceId: 'plan-1', newDate: '2099-11-17', newWindow: { start: '10:00' }, notifyCustomer: true,
     body: { technicianId: 'tech-9' }, actor: ACTOR, sourceSurface: 'office_booking', seriesPolicy: 'single',
-    // The lookup's picture of the visit is the rebooker's write fence, and a live visit is never moved.
+    // The lookup's picture of the visit is the rebooker's write fence (its customer, premise, service, plan kind, day and
+    // status; still alone and not in a Quick Move hand-off), and a live visit is never moved.
     allowLive: false,
-    expect: { scheduled_date: '2099-11-29', status: 'pending', visit_id: null, customer_pick_by: null },
+    expect: {
+      customer_id: 'cust-1', property_id: null, service_id: 'svc-pest', service_type: 'Quarterly Pest Control Service',
+      is_recurring: true, is_callback: false, scheduled_date: '2099-11-29', status: 'pending', visit_id: null, customer_pick_by: null,
+    },
   });
   expect(dispatch.runPlannedVisitMove).toHaveBeenCalledWith(expect.objectContaining({
     plan: PLAN.plan, serviceId: 'plan-1', newDate: '2099-11-17', reasonCode: 'admin', notifyCustomer: true, actor: ACTOR,
@@ -67,6 +74,23 @@ test('a moved visit answers 200 with nothing created, the notice first and the m
     warnings: [foldOfficeNotice(TARGET, '2099-11-17', '10:00'), 'Overlaps another visit.'],
     reserviceFold: { movedServiceId: 'plan-1', serviceType: TARGET.service_type, fromDate: '2099-11-29', toDate: '2099-11-17', start: '10:00', notificationSent: true },
   });
+});
+
+test('the office asked for the "visit moved" text and it did not go: the answer says so, with the reason', async () => {
+  dispatch.runPlannedVisitMove.mockResolvedValueOnce({ status: 200, body: { notificationSent: false, notificationError: 'No mobile number on file' } });
+  const out = await run();
+  expect(out.answer.warnings).toContain('The customer was not texted about the move: No mobile number on file.');
+  expect(out.answer.reserviceFold.notificationSent).toBe(false);
+  // No reason given: the plain fallback.
+  dispatch.runPlannedVisitMove.mockResolvedValueOnce({ status: 200, body: { notificationSent: false } });
+  expect((await run()).answer.warnings).toContain('The customer was not texted about the move: the text could not be sent.');
+});
+
+test('no text line when the office chose no text, or the visit already sat on the slot', async () => {
+  dispatch.runPlannedVisitMove.mockResolvedValueOnce({ status: 200, body: {} });
+  expect((await run({ notifyCustomer: false })).answer.warnings.join(' ')).not.toContain('not texted');
+  dispatch.runPlannedVisitMove.mockResolvedValueOnce({ status: 200, body: { notificationSent: false, notificationSkipped: 'already_at_target' } });
+  expect((await run()).answer.warnings.join(' ')).not.toContain('not texted');
 });
 
 test('the notice is plain English of about 25 words and names the real visit and date', () => {
@@ -160,6 +184,8 @@ test('an error after the move saved: the visit is on the asked slot, so it answe
   expect(out.moved).toBe(true);
   expect(out.answer.id).toBe('plan-1');
   expect(out.answer.warnings).toContain('The move reported an error after it saved (Visit changed.). Check the visit.');
+  // The refused move never reached its text step, so the office is told the customer was not texted.
+  expect(out.answer.warnings).toContain('The customer was not texted about the move: the text could not be sent.');
   expect(update).toHaveBeenCalledTimes(2);
   // ...and the same for a 300+ answer; with no start asked, the date alone decides.
   first.mockResolvedValue({ scheduled_date: '2099-11-17', window_start: '09:00:00', status: 'pending' });
