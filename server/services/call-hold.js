@@ -58,6 +58,12 @@
  * call), then recoverPendingHolds, a 1 minute sweep (scheduler.js, whatever the gates say) that drains any recent call
  * with either state pending through the same lease path, so two server processes send one resume and raise one bell.
  *
+ * THE CARD PAUSE (live-call-card-pause.js) pauses this recording too, while card details are spoken. Every resume of
+ * the hold (press 1, its retries, the voicemail) goes out through resumeOutsideCardWindow, as the card pause's lease
+ * holder: never inside a card window whose pause was sent (that window's own end resumes the recording, and the hold
+ * counts its resume as done; the voicemail counts it as not resumed and invites no message), and always before a card
+ * pause decided while it is in flight.
+ *
  * Left open: Twilio unreachable for every request of a re-hold as well (see the report), and a database that
  * is down while the caller is held (no decision can be made; the caller keeps the script).
  *
@@ -72,6 +78,11 @@ const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
 const conferencePath = require('./call-conference-path');
 const { TERMINAL_CALL_STATUSES } = require('../utils/call-timeline');
+// The card pause pauses this recording too (see THE CARD PAUSE above). Its rule for the Twilio answers a resume retry
+// cannot fix (16108, 21220, 20404) is the hold's rule too.
+const cardPause = require('./live-call-card-pause');
+
+const { TERMINAL_RESUME_CODES } = cardPause;
 
 const WEBHOOK_BASE = '/api/webhooks/twilio';
 // A hold open this long is told to the staff phone (reminder) and sent to voicemail (limit). Owner-approved.
@@ -93,10 +104,6 @@ const RESUME_BACKOFF_MS = [2000, 4000, 8000, 16000];
 // The 1 minute sweep reads calls created in this window, at most this many.
 const SWEEP_LOOKBACK_MS = 6 * 60 * 60 * 1000;
 const SWEEP_LIMIT = 25;
-// Twilio answers a retry cannot fix for a recording resume: 16108 the recording is already complete, 21220 the call
-// is not in progress, 20404 the call or recording is gone. The same rule as TERMINAL_RESUME_CODES in
-// live-call-card-pause.js (an unmerged PR: not imported).
-const TERMINAL_RESUME_CODES = new Set(['16108', '21220', '20404']);
 
 // Read through the module object at call time: a suite that mocks feature-gates as a bare object reads off.
 const isEnabled = () => typeof featureGates.callHoldLive === 'function' && featureGates.callHoldLive();
@@ -366,8 +373,7 @@ async function pauseRecording(callSid) {
   }
 }
 
-// { ok: true } when Twilio accepted the resume, else { ok: false, code }. Never throws.
-async function resumeOutcome(callSid) {
+async function sendResume(callSid) {
   try {
     await client().calls(callSid).recordings('Twilio.CURRENT').update({ status: 'in-progress' });
     return { ok: true };
@@ -377,8 +383,34 @@ async function resumeOutcome(callSid) {
   }
 }
 
-// true when Twilio accepted the resume, false when it did not. Never throws.
-const resumeRecording = async (callSid) => (await resumeOutcome(callSid)).ok;
+// { ok: true } when Twilio accepted the resume; { ok: true, deferred: true } when a card-pause window holds the
+// recording (live-call-card-pause.js: the hold sends nothing inside one, and the window's own end resumes it); else
+// { ok: false, code }. The resume goes out as the card pause's lease holder, so a card pause decided meanwhile lands
+// after it. A card-pause request in flight ('card_busy') or a failed check ('card_check') is a failure the pending
+// resume retries. Never throws.
+async function resumeOutcome(callSid) {
+  let out;
+  try {
+    out = await cardPause.resumeOutsideCardWindow(callSid, () => sendResume(callSid));
+  } catch (err) {
+    logger.error(`[call-hold] recording resume for ${masked(callSid)} not sent: the card-pause check failed (${errorCode(err)})`);
+    return { ok: false, code: 'card_check' };
+  }
+  if (out.sent) return out.ok ? { ok: true } : { ok: false, code: out.code };
+  if (out.reason === 'card_window') {
+    logger.info(`[call-hold] recording resume for ${masked(callSid)} left to the card pause: its window is open`);
+    return { ok: true, deferred: true };
+  }
+  logger.warn(`[call-hold] recording resume for ${masked(callSid)} waits: a card-pause request is in flight`);
+  return { ok: false, code: 'card_busy' };
+}
+
+// The voicemail's resume (/call-complete?conf=1): true only when the recording runs again. Inside a card-pause window
+// it does not, so no message is invited. Never throws.
+async function resumeRecording(callSid) {
+  const out = await resumeOutcome(callSid);
+  return out.ok && !out.deferred;
+}
 
 const holdParticipant = (callSid, roomSid) => client().conferences(roomSid).participants(callSid).update({
   hold: true,
@@ -506,7 +538,7 @@ async function settleFollowUp(callSid, { gen, send: step }, out, retry) {
   }
   if (out.resume.ok) {
     await recordOutcome(callSid, { type: 'step_done', gen, step });
-    logger.info(`[call-hold] recording resumed for ${masked(callSid)}`);
+    if (!out.resume.deferred) logger.info(`[call-hold] recording resumed for ${masked(callSid)}`);
     return { failed: false };
   }
   await recordOutcome(callSid, { type: 'step_failed', gen, step, code: out.resume.code });

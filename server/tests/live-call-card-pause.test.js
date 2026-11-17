@@ -1042,3 +1042,84 @@ describe('live call card pause: a sender that stalls past its lease', () => {
     expect(db.__state.cardPause.resumed_at).toBeTruthy();
   });
 });
+
+describe('the star-key hold resumes through this lease (resumeOutsideCardWindow)', () => {
+  // The hold's resume request, recorded in the same Twilio mock as the card pause's own requests (so their order shows).
+  const holdResume = () => jest.fn(async () => { await mockUpdate({ status: 'in-progress' }); return { ok: true }; });
+  const order = () => mockUpdate.mock.calls.map(([arg]) => arg.status);
+  const iso = (ms) => new Date(Date.now() + ms).toISOString();
+
+  test('a call with no live text has no card pause: the resume goes straight out and nothing is written', async () => {
+    db.__state.claimed = false;
+    const resume = holdResume();
+    expect(await cardPause.resumeOutsideCardWindow(CALL, resume)).toEqual({ sent: true, ok: true });
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(db.__state.writes).toEqual([]);
+  });
+
+  test('no open window: the resume is sent as the lease holder, and the lease is given back', async () => {
+    const leaseDuringSend = [];
+    const resume = jest.fn(async () => { leaseDuringSend.push(db.__state.cardPause?.sender); return { ok: false, code: '20003' }; });
+    expect(await cardPause.resumeOutsideCardWindow(CALL, resume)).toEqual({ sent: true, ok: false, code: '20003' });
+    expect(leaseDuringSend).toEqual([expect.objectContaining({ token: expect.any(String), until: expect.any(Number) })]);
+    expect(db.__state.cardPause.sender).toBeNull();
+  });
+
+  test('an open window whose pause went out holds the resume back; the window end still resumes the recording', async () => {
+    await trigger();
+    expect(pauseCalls()).toHaveLength(1);
+    const resume = holdResume();
+    expect(await cardPause.resumeOutsideCardWindow(CALL, resume)).toEqual({ sent: false, reason: 'card_window' });
+    expect(resume).not.toHaveBeenCalled();
+    await advance(cardPause.PAUSE_MS);
+    expect(order()).toEqual(['paused', 'in-progress']);
+  });
+
+  test('a card trigger while the hold resume is in flight: the pause goes out after the resume', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const resume = jest.fn(async () => { await gate; await mockUpdate({ status: 'in-progress' }); return { ok: true }; });
+    const sending = cardPause.resumeOutsideCardWindow(CALL, resume);
+    await advance(0);
+    expect(resume).toHaveBeenCalledTimes(1);
+    await trigger();
+    expect(pauseCalls()).toHaveLength(0);
+    release();
+    expect(await sending).toEqual({ sent: true, ok: true });
+    await advance(300);
+    expect(order()).toEqual(['in-progress', 'paused']);
+  });
+
+  test('a window whose pause was decided but not sent does not hold the resume back, and neither does a window past its end', async () => {
+    db.__state.cardPause = { paused_at: iso(-1000), resume_due_at: iso(60000), resumed_at: null, pending: 'pause', pause_sent: false, sender: null };
+    expect(await cardPause.resumeOutsideCardWindow(CALL, holdResume())).toEqual({ sent: true, ok: true });
+    db.__state.cardPause = { paused_at: iso(-100000), resume_due_at: iso(-10000), resumed_at: null, pending: null, pause_sent: true, sender: null };
+    expect(await cardPause.resumeOutsideCardWindow(CALL, holdResume())).toEqual({ sent: true, ok: true });
+    expect(order()).toEqual(['in-progress', 'in-progress']);
+  });
+
+  test('a hold resume whose lease ran out before its fence sends nothing: the card pause took over and paused', async () => {
+    let unstall;
+    db.__state.stall = { n: 2, promise: new Promise((resolve) => { unstall = resolve; }) };
+    const resume = holdResume();
+    const sending = cardPause.resumeOutsideCardWindow(CALL, resume);
+    await advance(0);
+    await advance(9000);
+    await trigger();
+    expect(pauseCalls()).toHaveLength(1);
+    unstall();
+    expect(await sending).toEqual({ sent: false, reason: 'busy' });
+    expect(resume).not.toHaveBeenCalled();
+    expect(order()).toEqual(['paused']);
+  });
+
+  test('a card-pause request in flight (a live lease) answers busy and sends nothing; an expired lease is taken over', async () => {
+    db.__state.cardPause = { sender: { token: 'other', until: Date.now() + 5000 } };
+    const resume = holdResume();
+    expect(await cardPause.resumeOutsideCardWindow(CALL, resume)).toEqual({ sent: false, reason: 'busy' });
+    expect(resume).not.toHaveBeenCalled();
+    expect(db.__state.cardPause.sender.token).toBe('other');
+    db.__state.cardPause = { sender: { token: 'other', until: Date.now() - 1 } };
+    expect(await cardPause.resumeOutsideCardWindow(CALL, resume)).toEqual({ sent: true, ok: true });
+  });
+});

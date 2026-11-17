@@ -56,6 +56,9 @@
  * the timer of a pause whose end is ahead, and sends what is due or pending through the same lease and
  * claim path. It skips an ended call and never writes on its own.
  *
+ * The star-key hold (call-hold.js) resumes this recording as well. It sends its resume through
+ * resumeOutsideCardWindow, as this module's lease holder, and never inside a window whose pause was sent.
+ *
  * Risk: if a resume fails, the rest of that call's recording is silent and the post-call transcript
  * loses it. The gate is the instant off switch: off starts no new pause, and a running pause still
  * ends on time. Never throws, never on the webhook's response path.
@@ -232,6 +235,34 @@ async function releaseLease(callSid, token) {
   } catch (err) {
     // The lease expires by itself.
     warn('lease release failed', callSid, err);
+  }
+}
+
+// The star-key hold (call-hold.js) resumes this recording too: after a press 1, a retry of that, and for its
+// voicemail. Its resume is sent as this module's lease holder, so it is ordered with every card-pause request for
+// the call (a pause decided while it is in flight goes out after it). It is never sent while a window whose pause
+// was sent is open: that window's own end resumes the recording. A window whose pause was decided but not sent
+// does not hold it back: that pause goes out after it (or never, with the gate off, and then the recording must
+// run). Answers { sent: true, ...await resume() }, { sent: false, reason: 'card_window' }, or { sent: false,
+// reason: 'busy' } (a card-pause request is in flight: the hold retries). A call with no live text has no card
+// pause: the resume goes straight out. A database error is thrown, and nothing was sent.
+async function resumeOutsideCardWindow(callSid, resume) {
+  const token = crypto.randomUUID();
+  const claim = await withCallLock(callSid, async (trx, state) => {
+    const now = Date.now();
+    const windowOpen = isPaused(state) && new Date(state.resume_due_at).getTime() > now;
+    if (windowOpen && !(state.pending === 'pause' && !state.pause_sent)) return { action: 'card_window' };
+    if (state.sender && Number(state.sender.until) > now) return { action: 'busy' };
+    await stampCardPause(trx, callSid, { ...state, sender: { token, until: now + LEASE_MS } });
+    return { action: 'send' };
+  });
+  if (claim.reason === 'not_started_here') return { sent: true, ...(await resume()) };
+  if (claim.action !== 'send') return { sent: false, reason: claim.action };
+  try {
+    if (!(await fenceLease(callSid, token))) return { sent: false, reason: 'busy' };
+    return { sent: true, ...(await resume()) };
+  } finally {
+    await releaseLease(callSid, token);
   }
 }
 
@@ -525,6 +556,8 @@ async function recoverOpenPauses() {
 module.exports = {
   recoverOpenPauses,
   onUtteranceStored,
+  resumeOutsideCardWindow,
+  TERMINAL_RESUME_CODES,
   isCardIntent,
   PAUSE_MS,
   _test: { timers, retries, LEASE_MS, REQUEST_TIMEOUT_MS, RESUME_RETRY_WINDOW_MS },

@@ -20,6 +20,17 @@ jest.mock('../services/admin-alert-names', () => ({
   nameOnFileForPhone: jest.fn(async () => null),
 }));
 
+// The card pause (live-call-card-pause.js) owns the recording while its window is open. By default it lets the hold's
+// resume through; a test sets mockCard.answer to an answer (or a function giving one, or throwing) to hold it back.
+const mockCard = { answer: null };
+jest.mock('../services/live-call-card-pause', () => ({
+  TERMINAL_RESUME_CODES: new Set(['16108', '21220', '20404']),
+  resumeOutsideCardWindow: jest.fn(async (_sid, resume) => {
+    const answer = typeof mockCard.answer === 'function' ? await mockCard.answer() : mockCard.answer;
+    return answer || { sent: true, ...(await resume()) };
+  }),
+}));
+
 const mockTw = { api: null, clientArgs: [] };
 jest.mock('twilio', () => {
   const actual = jest.requireActual('twilio');
@@ -181,6 +192,7 @@ beforeEach(() => {
   s.row = null; s.locks = new Map(); s.openTx = 0; s.txCount = 0; s.failReads = 0; s.failWrites = 0; s.failSweep = 0; s.customerId = null; s.writes = []; s.modifyCalls = []; s.sweeps = 0;
   mockTw.clientArgs = [];
   hold._test.resumeRetries.clear();
+  mockCard.answer = null;
   jest.useFakeTimers({ now: NOW, doNotFake: ['setImmediate', 'nextTick'] });
 });
 afterEach(() => jest.useRealTimers());
@@ -1291,6 +1303,56 @@ describe('a recording resume that fails after a press 1', () => {
 });
 
 // ---------------------------------------------------------------------------------------------------------
+describe('a card-pause window holds the recording (live-call-card-pause.js)', () => {
+  const cardPause = require('../services/live-call-card-pause');
+
+  test('a press 1 inside an open card-pause window sends no resume and leaves nothing pending: the window end resumes it', async () => {
+    seed(heldHold());
+    const events = fakeTwilio();
+    mockCard.answer = { sent: false, reason: 'card_window' };
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(names(events)).toEqual(['list', 'participant']);
+    expect(holdOf()).toMatchObject({ phase: 'returned', applied: 'returned', rec_pending: false, sender: null });
+    expect(cardPause.resumeOutsideCardWindow).toHaveBeenCalledTimes(1);
+    expect(cardPause.resumeOutsideCardWindow).toHaveBeenCalledWith(SID, expect.any(Function));
+    expect(hold._test.resumeRetries.size).toBe(0);
+  });
+
+  test('a card-pause request in flight keeps the resume pending, and the backoff sends it once the card pause lets it through', async () => {
+    seed(heldHold());
+    const events = fakeTwilio();
+    let n = 0;
+    mockCard.answer = () => { n += 1; return n <= 2 ? { sent: false, reason: 'busy' } : null; };
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(statuses(events)).toEqual([]);
+    expect(holdOf()).toMatchObject({ rec_pending: true, last_error_code: 'card_busy' });
+    await advance(2000);
+    expect(statuses(events)).toEqual(['in-progress']);
+    expect(holdOf()).toMatchObject({ rec_pending: false, last_error_code: null });
+  });
+
+  test('a card-pause check that fails sends nothing and leaves the resume pending (never resumed blind)', async () => {
+    seed(heldHold());
+    const events = fakeTwilio();
+    mockCard.answer = () => { throw Object.assign(new Error('db down'), { code: 'ECONNRESET' }); };
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(statuses(events)).toEqual([]);
+    expect(holdOf()).toMatchObject({ rec_pending: true, last_error_code: 'card_check' });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('the card-pause check failed (ECONNRESET)'));
+  });
+
+  test('the voicemail resume inside an open card-pause window answers false and sends nothing, so no message is invited', async () => {
+    seed(null);
+    const events = fakeTwilio();
+    mockCard.answer = { sent: false, reason: 'card_window' };
+    expect(await hold.resumeRecording(SID)).toBe(false);
+    expect(statuses(events)).toEqual([]);
+    mockCard.answer = null;
+    expect(await hold.resumeRecording(SID)).toBe(true);
+    expect(statuses(events)).toEqual(['in-progress']);
+  });
+});
+
 describe('a voicemail callback bell that is not delivered', () => {
   const instances = [];
   function loadInstance() {
