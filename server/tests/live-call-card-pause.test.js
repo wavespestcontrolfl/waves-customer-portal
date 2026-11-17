@@ -27,7 +27,7 @@ jest.mock('twilio', () => jest.fn(() => ({ calls: mockCalls })));
 // ends. Reads and writes yield a tick so two unlocked transactions would interleave.
 jest.mock('../models/db', () => {
   const newPool = () => ({ max: Infinity, inUse: 0, peak: 0, queue: [] });
-  const state = { claimed: true, cardPause: undefined, writes: [], locks: new Map(), pool: newPool(), callStatus: 'in-progress', endedAt: null, failReads: 0, source: 'twilio_inbound', sweepReads: [], failSweep: false };
+  const state = { claimed: true, cardPause: undefined, writes: [], locks: new Map(), pool: newPool(), callStatus: 'in-progress', endedAt: null, failReads: 0, source: 'twilio_inbound', sweepReads: [], failSweep: false, txCount: 0, stall: null };
   const CALL_SID = 'CA' + 'a'.repeat(32);
   const tick = () => new Promise((resolve) => setImmediate(resolve));
   // A bounded connection pool: acquire waits while it is full (FIFO), like knex's.
@@ -101,6 +101,9 @@ jest.mock('../models/db', () => {
   }
   const db = jest.fn(() => callLog(false));
   db.transaction = jest.fn(async (fn) => {
+    // A test can stall the nth transaction (counted from txCount = 0) before it takes a connection.
+    state.txCount += 1;
+    if (state.stall && state.stall.n === state.txCount) await state.stall.promise;
     await acquire();
     const held = [];
     const trx = jest.fn(() => callLog(true));
@@ -158,6 +161,8 @@ beforeEach(() => {
   s.source = 'twilio_inbound';
   s.sweepReads = [];
   s.failSweep = false;
+  s.txCount = 0;
+  s.stall = null;
   isEnabled.mockReturnValue(true);
   process.env.TWILIO_ACCOUNT_SID = 'AC' + 'c'.repeat(32);
   process.env.TWILIO_AUTH_TOKEN = 'token';
@@ -903,5 +908,137 @@ describe('live call card pause: recovery sweep after a restart', () => {
     db.__state.failSweep = false;
     await a.recoverOpenPauses();
     expect(statuses()).toEqual(['in-progress']);
+  });
+});
+
+describe('live call card pause: a sender that stalls past its lease', () => {
+  const statuses = () => mockUpdate.mock.calls.map(([arg]) => arg.status);
+  const flush = async () => { for (let i = 0; i < 60; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  async function run(ms, step = 1000) {
+    for (let t = 0; t < ms; t += step) {
+      await jest.advanceTimersByTimeAsync(step);
+      await flush();
+    }
+  }
+  const utter = (inst, text) => inst.onUtteranceStored({ callSid: CALL, text, panMasked: false });
+  // Stall the nth database transaction until the test lets it go.
+  function stallTx(n) {
+    const held = {};
+    db.__state.txCount = 0;
+    db.__state.stall = { n, promise: new Promise((resolve) => { held.go = resolve; }) };
+    return held;
+  }
+
+  test('sender A claims a pause and stalls before sending; B resumes and closes; A then sends nothing (the fence)', async () => {
+    const a = loadInstance();
+    const b = loadInstance();
+    // A's transactions: 1 the decision, 2 the claim, 3 the fence right before the request.
+    const stall = stallTx(3);
+    const first = utter(a, "what's the card number");
+    await flush();
+    expect(db.__state.cardPause).toMatchObject({ pending: 'pause', pause_sent: true });
+    expect(mockUpdate).not.toHaveBeenCalled();
+
+    // A's lease (8 s) runs out, the window ends, and B resumes the recording and closes the state.
+    jest.setSystemTime(new Date('2026-11-16T15:01:40Z'));
+    await expect(utter(b, 'Tuesday works')).resolves.toMatchObject({ action: 'resumed' });
+    expect(statuses()).toEqual(['in-progress']);
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+
+    // A wakes: it is no longer the sender, so its stale pause is never sent.
+    stall.go();
+    await first;
+    await flush();
+    expect(statuses()).toEqual(['in-progress']);
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+    expect(pauseCalls()).toHaveLength(0);
+  });
+
+  test('the fence write losing (the token changed) sends nothing and leaves the other sender in place', async () => {
+    const a = loadInstance();
+    const stall = stallTx(3);
+    const first = utter(a, "what's the card number");
+    await flush();
+    const other = { token: 'someone-else', until: Date.now() + 60 * 1000 };
+    db.__state.cardPause = { ...db.__state.cardPause, sender: other };
+    stall.go();
+    await expect(first).resolves.toBeDefined();
+    await flush();
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(db.__state.cardPause.sender).toEqual(other);
+  });
+
+  test('the fence extends the lease from the moment of the request, not from the claim', async () => {
+    const a = loadInstance();
+    let untilAtSend = null;
+    mockUpdate.mockImplementation(() => {
+      untilAtSend = db.__state.cardPause.sender?.until;
+      return Promise.resolve({});
+    });
+    const stall = stallTx(3);
+    const first = utter(a, "what's the card number");
+    await flush();
+    // 5 s pass between the claim and the request.
+    jest.setSystemTime(new Date('2026-11-16T15:00:05Z'));
+    stall.go();
+    await first;
+    expect(untilAtSend).toBe(new Date('2026-11-16T15:00:05Z').getTime() + cardPause._test.LEASE_MS);
+  });
+
+  test('a pause that lands after another sender closed the state is caught up: the next claim resumes', async () => {
+    const a = loadInstance();
+    const b = loadInstance();
+    // A's pause request leaves, then its response stalls beyond the lease.
+    let landPause;
+    mockUpdate.mockImplementationOnce(() => new Promise((resolve) => { landPause = () => resolve({ status: 'paused' }); }));
+    const first = utter(a, "what's the card number");
+    await flush();
+    expect(statuses()).toEqual(['paused']);
+    // The lease runs out and the window ends; B resumes and closes.
+    jest.setSystemTime(new Date('2026-11-16T15:01:40Z'));
+    mockUpdate.mockResolvedValue({});
+    await expect(utter(b, 'Tuesday works')).resolves.toMatchObject({ action: 'resumed' });
+    expect(statuses()).toEqual(['paused', 'in-progress']);
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+
+    // A's pause lands late: the recording is silent against a closed state. It resumes it again.
+    landPause();
+    await first;
+    await flush();
+    expect(statuses()).toEqual(['paused', 'in-progress', 'in-progress']);
+    expect(db.__state.cardPause).toMatchObject({ pending: null, sender: null });
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+    // Settled: nothing more.
+    await run(60 * 1000);
+    expect(statuses()).toEqual(['paused', 'in-progress', 'in-progress']);
+  });
+
+  test('a resume that lands late into a newer open window is caught up: the pause is sent again', async () => {
+    const a = loadInstance();
+    const b = loadInstance();
+    await utter(a, "what's the card number");
+    expect(statuses()).toEqual(['paused']);
+    // The window ends and A's resume request goes out, but its response stalls.
+    let landResume;
+    mockUpdate.mockImplementationOnce(() => new Promise((resolve) => { landResume = () => resolve({ status: 'in-progress' }); }));
+    await run(91 * 1000);
+    expect(statuses()).toEqual(['paused', 'in-progress']);
+
+    // A card phrase opens a newer window. A's lease runs out, so B takes over and sends the pause.
+    mockUpdate.mockResolvedValue({});
+    await utter(b, 'and the cvv');
+    await run(12 * 1000);
+    expect(statuses()).toEqual(['paused', 'in-progress', 'paused']);
+    expect(db.__state.cardPause).toMatchObject({ pending: null, resumed_at: null });
+
+    // A's resume lands late: the recording runs inside the open window. A pause is sent again.
+    landResume();
+    await run(2 * 1000);
+    expect(statuses()).toEqual(['paused', 'in-progress', 'paused', 'paused']);
+    expect(db.__state.cardPause).toMatchObject({ pending: null, resumed_at: null, sender: null });
+    // The window still ends with its own resume.
+    await run(100 * 1000);
+    expect(statuses().slice(-1)).toEqual(['in-progress']);
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
   });
 });

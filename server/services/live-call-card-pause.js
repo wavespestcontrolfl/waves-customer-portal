@@ -39,6 +39,12 @@
  * it busy skips. LEASE_MS is above the Twilio request timeout, so a crashed sender blocks the others
  * for seconds only.
  *
+ * The lease is re-validated and extended right before each request (fenceLease), so a sender that
+ * stalled after its claim and lost the lease sends nothing. A request that still lands late, after
+ * another sender moved on, is reconciled against the wanted state even when that is closed
+ * (stateAfterSuccess): a pause that landed on a closed state reopens a resume, a resume that landed
+ * into a newer open window reopens a pause.
+ *
  * A resume that failed in a way a retry can fix (a timeout, a 5xx, a thrown database error) does not
  * wait for another utterance: a backoff retry (2 s, 4, 8, 16, then every 30 s, for 10 minutes after the
  * first failure) runs through the same lease and claim path, one timer per call. It stops on a
@@ -204,6 +210,18 @@ async function claimStep(callSid, token, opts) {
   });
 }
 
+// Right before a request: still the sender? One short state-lock transaction extends the lease from now
+// (the client's request timeout is shorter than the lease, so the request cannot outlive it) when the
+// token is still ours; otherwise nothing is sent (a stalled sender whose lease ran out and was taken over).
+async function fenceLease(callSid, token) {
+  const out = await withCallLock(callSid, async (trx, state) => {
+    if (state.sender?.token !== token) return { owned: false };
+    await stampCardPause(trx, callSid, { ...state, sender: { token, until: Date.now() + LEASE_MS } });
+    return { owned: true };
+  });
+  return out.owned === true;
+}
+
 // Give the lease back when a pass stops without a claim that cleared it (an error, the send cap).
 async function releaseLease(callSid, token) {
   try {
@@ -217,17 +235,31 @@ async function releaseLease(callSid, token) {
   }
 }
 
-// What a confirmed request does to the state. Never touches a decision committed while it was in flight.
+// What a confirmed request does to the state. Never touches a decision committed while it was in flight,
+// but a request that landed late (after its sender's lease ran out and another sender moved on) can
+// leave the recording against the wanted state, and that is recorded as a step to send:
+//   - a pause that landed on a closed state: the recording is silent, a resume is wanted again;
+//   - a resume that landed while a newer window is open with nothing pending: the recording runs, a pause
+//     is wanted again.
 function stateAfterSuccess(current, step) {
-  if (!isPaused(current)) return current;
+  const nowMs = Date.now();
+  if (!isPaused(current)) {
+    if (step.send !== 'pause') return current;
+    const iso = new Date(nowMs).toISOString();
+    return {
+      ...current, paused_at: current.paused_at || iso, resume_due_at: current.resume_due_at || iso, resumed_at: null, pending: 'resume', pause_sent: true,
+    };
+  }
   if (current.pending === step.send) {
     return step.send === 'pause'
       ? { ...current, pending: null }
-      : { ...current, resumed_at: new Date().toISOString(), pending: null, pause_sent: false };
+      : { ...current, resumed_at: new Date(nowMs).toISOString(), pending: null, pause_sent: false };
   }
-  // A card trigger replaced the resume while it was in flight: the recording runs again, so the pause
-  // that follows is a first request.
-  return step.send === 'resume' ? { ...current, pause_sent: false } : current;
+  if (step.send !== 'resume') return current;
+  // The recording runs again, so the pause that follows is a first request. With the window still ahead
+  // and nothing pending, the pause must be sent again.
+  const windowAhead = new Date(current.resume_due_at).getTime() > nowMs;
+  return windowAhead && !current.pending ? { ...current, pending: 'pause', pause_sent: false } : { ...current, pause_sent: false };
 }
 
 function stateAfterFailure(current, step, err, code) {
@@ -290,6 +322,10 @@ async function drain(callSid, opts) {
       const step = await claimStep(callSid, token, opts);
       holding = !!step.send;
       if (!step.send) return sent ? { ...step, action: sent } : step;
+      if (!(await fenceLease(callSid, token))) {
+        holding = false;
+        return sent ? { action: sent } : { action: 'send_busy', dueAtMs: step.dueAtMs };
+      }
       const out = await sendStep(callSid, step);
       if (out.error_code) return out;
       sent = out.action;
