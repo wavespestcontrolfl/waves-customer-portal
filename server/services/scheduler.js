@@ -1295,6 +1295,24 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 2 MIN — spoken staff notes and reminders on live-transcribed calls (GATE_CALL_SPOKEN_NOTES, owner
+  // 2026-11-16): reads a finished call's staff lines once for "make a note" / "remind me" and rings the admin
+  // bell for each reminder that has come due. Bell and call record only; it never contacts a customer.
+  // Gate off = the job does nothing at all (no lease, no read). Exclusive, so two instances never run it at once.
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      if (!require('../config/feature-gates').isEnabled('callSpokenNotes')) return;
+      await runExclusive('live-call-spoken-notes', async () => {
+        const result = await require('./live-call-spoken-notes').run();
+        if (result.checked || result.raised) {
+          logger.info(`[live-call-spoken-notes] checked=${result.checked} asked=${result.asked} saved=${result.saved} raised=${result.raised}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[live-call-spoken-notes] run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 5 MIN — retry committed route-quality refreshes, including dates
   // outside the nightly optimizer's six-day band. The durable row claim
   // fences overlapping ticks/deploys; no second cron lease is needed.

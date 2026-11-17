@@ -42,6 +42,7 @@ import CallTranscriptSync, {
 import CallIntelligencePanel from "../../components/admin/CallIntelligencePanel";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import { describeProcessResult } from "../../lib/callProcessResult";
+import { formatETDateTime } from "../../lib/timezone";
 
 // A 409 from the process route is the documented blocked-claim conflict and
 // carries a classifiable body. Any other non-2xx — an expired session, a
@@ -304,6 +305,47 @@ function routeFeedbackLabel(feedback) {
 function percentLabel(value) {
   const n = Number(value || 0);
   return `${Math.round(n * 100)}%`;
+}
+
+// Notes and reminders staff spoke on a live call (server/services/live-call-spoken-notes.js, dark behind
+// GATE_CALL_SPOKEN_NOTES). Each block hides when empty; a reminder shows its due time in ET.
+export function SpokenNotesCard({ metadata }) {
+  const spoken = parseJsonObject(metadata)?.live_transcription?.spoken_notes;
+  const notes = (Array.isArray(spoken?.notes) ? spoken.notes : []).filter((t) => typeof t === "string" && t.trim());
+  const reminders = (Array.isArray(spoken?.reminders) ? spoken.reminders : []).filter((r) => typeof r?.text === "string" && r.text.trim());
+  if (!notes.length && !reminders.length) return null;
+  const dueLabel = (iso) => {
+    const at = new Date(iso);
+    if (!iso || Number.isNaN(at.getTime())) return "";
+    return `${formatETDateTime(at, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} ET`;
+  };
+  return (
+    <div className="mt-1.5 ml-8 p-2 bg-zinc-50 border-hairline rounded-md flex flex-col gap-2" data-testid="spoken-notes-card">
+      {notes.length > 0 && (
+        <div>
+          <div className="text-14 text-ink-tertiary font-medium mb-1">Notes from the call</div>
+          <ul className="list-none pl-0 mt-0 mb-0 flex flex-col gap-1">
+            {notes.map((text, i) => (
+              <li key={i} className="text-14 text-ink-secondary break-words">{text}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {reminders.length > 0 && (
+        <div>
+          <div className="text-14 text-ink-tertiary font-medium mb-1">Reminders</div>
+          <ul className="list-none pl-0 mt-0 mb-0 flex flex-col gap-1">
+            {reminders.map((r, i) => (
+              <li key={i} className="text-14 text-ink-secondary break-words">
+                {r.text}
+                {dueLabel(r.due_at) ? <span className="text-ink-tertiary"> · {dueLabel(r.due_at)}</span> : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function StatButton({ label, value, filter, active, onClick, alert }) {
@@ -1765,6 +1807,7 @@ export default function CallLogTabV2() {
                           </div>
                         );
                       })()}
+                    <SpokenNotesCard metadata={c.metadata} />
                     <SandyTransferCard handoff={parseJsonObject(c.metadata)?.relay_handoff} />
                     <CallIntelligencePanel
                       callId={c.id}
