@@ -222,6 +222,39 @@ describe('endHold', () => {
     expect(stateOf(row).open).toBe(false);
   });
 
+  // A database write that fails after Twilio took the caller off hold must not strand the caller alone
+  // in the room while the staff stay on the menu.
+  const failWrites = () => {
+    const working = db.getMockImplementation();
+    db.mockImplementation((...args) => {
+      const chain = working(...args);
+      chain.update = jest.fn(async () => { throw Object.assign(new Error('db down'), { code: 'ECONNRESET' }); });
+      return chain;
+    });
+  };
+
+  test('the claim write fails after the unhold: returned, and the recording still resumes', async () => {
+    const row = fakeCallLog(room());
+    fakeTwilio();
+    await hold.startHold(SID, { legSid: LEG });
+    const events = fakeTwilio();
+    failWrites();
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(events.map((e) => e.name)).toEqual(['list', 'participant', 'recording']);
+    expect(events[2]).toMatchObject({ which: 'Twilio.CURRENT', status: 'in-progress' });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('(ECONNRESET)'));
+    expect(stateOf(row).open).toBe(true);
+  });
+
+  test('no room and the claim write fails: still no_room', async () => {
+    fakeCallLog(room());
+    fakeTwilio();
+    await hold.startHold(SID, { legSid: LEG });
+    fakeTwilio({ rooms: [] });
+    failWrites();
+    expect(await hold.endHold(SID)).toBe('no_room');
+  });
+
   test('any other REST error keeps the claim open: failed', async () => {
     const row = fakeCallLog(room());
     fakeTwilio();

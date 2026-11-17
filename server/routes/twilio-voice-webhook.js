@@ -4088,7 +4088,7 @@ router.post('/conference-staff-status', async (req, res) => {
 // =========================================================================
 
 const HOLD_ROUTE = (name, sid, extra = '') => `/api/webhooks/twilio/${name}?parent=${encodeURIComponent(sid)}${extra}`;
-const FACTS_PER_STEP = 4;
+const REMINDER_EVERY_STEPS = 5;
 const sendTwiml = (res, twiml) => res.type('text/xml').send(twiml.toString());
 const HANGUP_XML = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
 
@@ -4127,7 +4127,7 @@ router.post('/conference-staff-left', async (req, res) => {
     }
     return sendTwiml(res, twiml);
   } catch (err) {
-    logger.error(`[call-hold] staff-left error for ${maskSid(parentSid)}: ${err.message}`);
+    logger.error(`[call-hold] staff-left error for ${maskSid(parentSid)} (${err?.code || err?.name || 'error'})`);
     try {
       const safe = new VoiceResponse();
       if (conferencePath.CALL_SID_RE.test(parentSid)) await rejoinOrHangup(safe, parentSid);
@@ -4149,7 +4149,7 @@ router.post('/conference-staff-menu', async (req, res) => {
     else if (!state.open) await rejoinOrHangup(twiml, parentSid);
     else appendHoldMenu(twiml, parentSid, { first: req.query.first === '1' });
   } catch (err) {
-    logger.error(`[call-hold] menu error for ${maskSid(parentSid)}: ${err.message}`);
+    logger.error(`[call-hold] menu error for ${maskSid(parentSid)} (${err?.code || err?.name || 'error'})`);
     return res.type('text/xml').send(HANGUP_XML);
   }
   return sendTwiml(res, twiml);
@@ -4177,23 +4177,26 @@ router.post('/conference-staff-menu-choice', async (req, res) => {
       }
     }
   } catch (err) {
-    logger.error(`[call-hold] menu choice error for ${maskSid(parentSid)}: ${err.message}`);
+    logger.error(`[call-hold] menu choice error for ${maskSid(parentSid)} (${err?.code || err?.name || 'error'})`);
     return res.type('text/xml').send(HANGUP_XML);
   }
   return sendTwiml(res, twiml);
 });
 
-// The hold script for one step: the opening on step 0, four facts in order (cycling through all of
-// them by step), the reminder between this step's last fact and the next step's first, then the next step.
+// The hold script, one fact per step (about 10 s), so the server sees the hold that often: the opening
+// on step 0, then the facts in order (cycling through all of them), with the reminder before every
+// fifth fact. That puts the reminder about once a minute, between two facts (owner-approved script).
 function appendHoldFacts(twiml, parentSid, step) {
   const say = (text) => twiml.say({ voice: SAY_VOICE }, text);
-  if (step === 0) say(holdScript.OPENING);
-  for (let i = 0; i < FACTS_PER_STEP; i += 1) {
-    if (i > 0 || step === 0) twiml.pause({ length: 2 });
-    say(holdScript.FACTS[(step * FACTS_PER_STEP + i) % holdScript.FACTS.length]);
+  const reminderStep = step > 0 && step % REMINDER_EVERY_STEPS === 0;
+  if (step === 0) {
+    say(holdScript.OPENING);
+  } else {
+    twiml.pause({ length: 3 });
+    if (reminderStep) say(holdScript.REMINDER);
   }
-  twiml.pause({ length: 2 });
-  say(holdScript.REMINDER);
+  if (step === 0 || reminderStep) twiml.pause({ length: 2 });
+  say(holdScript.FACTS[step % holdScript.FACTS.length]);
   twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-hold-facts', parentSid, `&step=${step + 1}`));
 }
 
@@ -4209,7 +4212,7 @@ router.post('/conference-hold-facts', async (req, res) => {
     if (!state.open) twiml.pause({ length: 1 });
     else appendHoldFacts(twiml, parentSid, step);
   } catch (err) {
-    logger.error(`[call-hold] facts error for ${maskSid(parentSid)}: ${err.message}`);
+    logger.error(`[call-hold] facts error for ${maskSid(parentSid)} (${err?.code || err?.name || 'error'})`);
     return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="1"/></Response>');
   }
   return sendTwiml(res, twiml);
