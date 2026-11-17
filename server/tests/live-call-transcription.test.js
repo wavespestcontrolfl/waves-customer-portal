@@ -4,9 +4,10 @@
  * Pins: one start per call (both cells can press 1), the Twilio REST shape (caller's call, both
  * tracks, final results only, the signed webhook URL), a Twilio refusal stamped and swallowed,
  * and the utterance store — final only, idempotent per (session, sequence), only for a call this
- * module claimed, and card-number scrubbed across utterances (a number read in two pieces, and a
- * code read after a masked number, a staff question in between included); a quarantined call
- * stores no more live text.
+ * module claimed, and card-number scrubbed across utterances (a number read in pieces, with staff
+ * lines between them, or a piece that arrives late; a code read after a masked number, a staff
+ * question in between included) while each mask stays on its own line; a quarantined call stores
+ * no more live text, and a failed purge is retried.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
@@ -56,7 +57,10 @@ jest.mock('../models/db', () => {
       const sign = q.dir === 'asc' ? 1 : -1;
       return state.utterances
         .filter((u) => u.call_sid === sid)
-        .filter((u) => q.times.every(([op, at]) => (op === '<=' ? u.spoken_at.getTime() <= at : u.spoken_at.getTime() > at)))
+        .filter((u) => q.times.every(([op, at]) => {
+        const ms = u.spoken_at.getTime();
+        return op === '<=' ? ms <= at : op === '>=' ? ms >= at : ms > at;
+      }))
         .sort((a, b) => sign * ((a.spoken_at - b.spoken_at) || (a.id - b.id)))
         .slice(0, q.lim)
         .map((u) => ({ ...u }));
@@ -261,6 +265,24 @@ describe('recordLiveTranscriptionEvent', () => {
       ['staff', 'Sure, what card?', false],
       ['caller', '[card ending 4242]', true],
     ]);
+  });
+
+  test('a staff line between two halves of the caller\'s card number does not hide it', async () => {
+    await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', '4242 4242', 1));
+    await live.recordLiveTranscriptionEvent(content(3, 'outbound_track', 'Okay, go ahead.', 2));
+    await live.recordLiveTranscriptionEvent(content(4, 'inbound_track', '4242 4242', 3));
+    const rows = db.__state.utterances.map((u) => [u.speaker, u.text, u.pan_masked]);
+    expect(rows).toEqual([['caller', '[card ending 4242]', true], ['staff', 'Okay, go ahead.', false], ['caller', '', true]]);
+  });
+
+  test('a card read in four pieces with staff acknowledgements between them is masked', async () => {
+    const lines = [['inbound_track', '4242'], ['outbound_track', 'Okay.'], ['inbound_track', '4242'], ['outbound_track', 'Uh huh.'],
+      ['inbound_track', '4242'], ['outbound_track', 'Got it.'], ['inbound_track', '4242']];
+    for (const [i, [track, text]] of lines.entries()) await live.recordLiveTranscriptionEvent(content(2 + i, track, text, 1 + 2 * i));
+    const caller = db.__state.utterances.filter((u) => u.speaker === 'caller');
+    expect(caller.map((u) => u.text)).toEqual(['[card ending 4242]', '', '', '']);
+    expect(caller.every((u) => u.pan_masked)).toBe(true);
+    expect(db.__state.utterances.filter((u) => u.speaker === 'staff').map((u) => u.text)).toEqual(['Okay.', 'Uh huh.', 'Got it.']);
   });
 
   test('a card number half that arrives late is scrubbed with its own neighbors, not the newest rows', async () => {

@@ -29,10 +29,12 @@ const CALL_SID_RE = /^CA[0-9a-f]{32}$/i;
 const WEBHOOK_PATH = '/api/webhooks/twilio/live-transcription';
 // Transcribing the caller's call: inbound = the caller, outbound = what the caller hears (staff).
 const SPEAKER_BY_TRACK = { inbound_track: 'caller', outbound_track: 'staff' };
-// Each new utterance is scrubbed together with the ones spoken just before and after it, so a card
-// number read across utterances ("4242 4242" … "4242 4242") is caught, even when a line arrives
-// late. The scrub is utils/pan-scrub's, the one the post-call transcript uses (scrubLines below).
-const SCRUB_WINDOW = 6;
+// Each new utterance is scrubbed together with the lines spoken in the 90 s before and after it (up
+// to 30 each side), so a card number read in pieces ("4242" … "okay" … "4242" …) is caught, even
+// when a line arrives late. The scrub is utils/pan-scrub's, the one the post-call transcript uses
+// (scrubLines below).
+const SCRUB_WINDOW_MS = 90 * 1000;
+const SCRUB_WINDOW_ROWS = 30;
 // A short code-shaped utterance (an expiry or a CVV) soon after a masked card number is masked
 // too: the masked text no longer shows the card to the window scrub. The link is the same speaker's
 // latest masked line within the gap, so a staff question in between ("And the security code?")
@@ -195,7 +197,15 @@ function scrubWindow(recent, incoming) {
   // Spoken order; the new utterance (id null) sorts after a stored one spoken at the same instant.
   const byId = (a, b) => (a.id === null ? 1 : b.id === null ? -1 : Number(a.id) - Number(b.id));
   const segments = [...recent, incoming].sort((a, b) => (a.spokenAt - b.spokenAt) || byId(a, b));
+  // All lines in spoken order, then each speaker's own lines again: a staff line ("Okay, go ahead.")
+  // between two halves of the caller's card number must not hide it.
   const scrubbed = scrubLines(segments.map((s) => s.text));
+  for (const speaker of new Set(segments.map((s) => s.speaker))) {
+    const mine = segments.map((s, i) => (s.speaker === speaker ? i : -1)).filter((i) => i >= 0);
+    scrubLines(mine.map((i) => scrubbed[i].text)).forEach((r, k) => {
+      scrubbed[mine[k]] = { text: r.text, masked: scrubbed[mine[k]].masked || r.masked };
+    });
+  }
   const out = [];
   for (let i = 0; i < segments.length; i += 1) {
     const seg = segments[i];
@@ -231,20 +241,22 @@ async function storeUtterance(callSid, body) {
     // A quarantined call keeps no live text: a late callback or a redelivery stores nothing.
     if (claimed.quarantined) return { stored: false, reason: 'quarantined' };
 
-    // The rows spoken just before and just after this one, not the newest rows: a line that arrives
-    // late (after later lines were stored) is scrubbed with its own neighbors.
+    // The rows spoken around this one, not the newest rows: a line that arrives late (after later
+    // lines were stored) is scrubbed with its own neighbors.
     const columns = ['id', 'speaker', 'text', 'pan_masked', 'spoken_at'];
     const earlier = await trx('call_live_utterances')
       .where('call_sid', callSid)
       .where('spoken_at', '<=', spokenAt)
+      .where('spoken_at', '>=', new Date(spokenAt.getTime() - SCRUB_WINDOW_MS))
       .orderBy([{ column: 'spoken_at', order: 'desc' }, { column: 'id', order: 'desc' }])
-      .limit(SCRUB_WINDOW - 1)
+      .limit(SCRUB_WINDOW_ROWS)
       .select(columns);
     const later = await trx('call_live_utterances')
       .where('call_sid', callSid)
       .where('spoken_at', '>', spokenAt)
+      .where('spoken_at', '<=', new Date(spokenAt.getTime() + SCRUB_WINDOW_MS))
       .orderBy([{ column: 'spoken_at', order: 'asc' }, { column: 'id', order: 'asc' }])
-      .limit(SCRUB_WINDOW - 1)
+      .limit(SCRUB_WINDOW_ROWS)
       .select(columns);
     const recent = [...earlier.reverse(), ...later].map((r) => ({
       id: r.id, speaker: r.speaker, text: r.text || '', panMasked: !!r.pan_masked, spokenAt: new Date(r.spoken_at).getTime(),
