@@ -7,6 +7,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../config/feature-gates', () => ({ callConferencePathMode: jest.fn(() => 'off') }));
+jest.mock('../services/call-hold', () => ({ staffLeft: jest.fn() }));
 
 const mockTw = { api: null };
 jest.mock('twilio', () => {
@@ -20,6 +21,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const gates = require('../config/feature-gates');
 const cp = require('../services/call-conference-path');
+const callHold = require('../services/call-hold');
 
 const SID = `CA${'a'.repeat(32)}`;
 const LEG0 = `CA${'0'.repeat(31)}1`;
@@ -51,6 +53,11 @@ function fakeCallLog(metadata = {}, { exists = true, status = 'in-progress' } = 
     const chain = {
       where: jest.fn(() => chain),
       whereRaw: jest.fn((sql) => { conditions.push(sql); return chain; }),
+      modify: jest.fn(() => chain),
+      orderBy: jest.fn(() => chain),
+      limit: jest.fn(() => chain),
+      // The staff-end sweep's read: the row when every condition holds.
+      select: jest.fn(async () => (row.exists && conditions.every(holds) ? [{ twilio_call_sid: SID, metadata: JSON.parse(JSON.stringify(row.metadata)) }] : [])),
       first: jest.fn(async () => (row.exists ? { status: row.status, metadata: JSON.parse(JSON.stringify(row.metadata)) } : undefined)),
       update: jest.fn(async (data) => {
         if (!row.exists || !conditions.every(holds)) return 0;
@@ -312,6 +319,155 @@ describe('the winning staff call ends', () => {
     expect(await cp.onStaffLegStatus({ callSid: SID, index: 1, legSid: LEG1, status: 'canceled' })).toBe('accepted');
     expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
     expect(log.updates).toEqual([]);
+  });
+});
+
+describe('the winning staff call ends during a star-key hold', () => {
+  const held = (hold) => ({ conference_path: { ...ringing().conference_path, accepted_leg_sid: LEG0, hold } });
+  const ended = () => cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'completed' });
+  const rooms = [{ sid: 'CF1', status: 'in-progress' }];
+
+  beforeEach(() => callHold.staffLeft.mockReset());
+
+  test('the hold decides the caller goes to voicemail: no room end and no hang-up here (the hold\'s sender does the room end)', async () => {
+    fakeCallLog(held({ phase: 'held' }));
+    callHold.staffLeft.mockResolvedValue('voicemail');
+    const log = fakeTwilio({ rooms });
+    expect(await ended()).toBe('hold_voicemail');
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID);
+    expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
+    expect(mockTw.api.calls).not.toHaveBeenCalled();
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+
+  test('no hold in the way (none, a hold that is over, or a closed call): today\'s room end, in every shape', async () => {
+    fakeCallLog(held({ phase: 'returned', applied: 'returned' }));
+    callHold.staffLeft.mockResolvedValue('ordinary');
+    const log = fakeTwilio({ rooms });
+    expect(await ended()).toBe('room_ended');
+    expect(log.roomUpdates).toEqual([{ sid: 'CF1', status: 'completed' }]);
+  });
+
+  test('no open room and an ordinary hang-up: the caller is hung up, as today', async () => {
+    fakeCallLog(held(undefined));
+    callHold.staffLeft.mockResolvedValue('ordinary');
+    const log = fakeTwilio({ rooms: [] });
+    expect(await ended()).toBe('caller_hung_up');
+    expect(log.updates).toEqual([{ sid: SID, status: 'completed' }]);
+  });
+
+  test('the hold cannot decide (a database error): nothing is ended blind, and the end is tried again until it is handled', async () => {
+    jest.useFakeTimers();
+    // A press 1 return that finished before the retry: the caller would be alone in the room without it.
+    fakeCallLog(held({ phase: 'returned', applied: 'returned' }));
+    callHold.staffLeft.mockRejectedValueOnce(new Error('db down')).mockRejectedValueOnce(new Error('db down')).mockResolvedValue('ordinary');
+    const log = fakeTwilio({ rooms });
+    expect(await ended()).toBe('retry');
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+    await jest.advanceTimersByTimeAsync(2000);
+    expect(callHold.staffLeft).toHaveBeenCalledTimes(2);
+    expect(log.roomUpdates).toEqual([]);
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(callHold.staffLeft).toHaveBeenCalledTimes(3);
+    expect(log.roomUpdates).toEqual([{ sid: 'CF1', status: 'completed' }]);
+    await jest.advanceTimersByTimeAsync(120000);
+    expect(callHold.staffLeft).toHaveBeenCalledTimes(3);
+  });
+
+  test('a database that stays down: five retries, then an error log (the minute sweep finishes it)', async () => {
+    jest.useFakeTimers();
+    fakeCallLog(held({ phase: 'held' }));
+    callHold.staffLeft.mockRejectedValue(new Error('db down'));
+    const log = fakeTwilio({ rooms });
+    expect(await ended()).toBe('retry');
+    await jest.advanceTimersByTimeAsync(cp._test.STAFF_END_RETRY_MS.reduce((a, b) => a + b, 0) + 1000);
+    expect(callHold.staffLeft).toHaveBeenCalledTimes(6);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('not handled after 6 tries (Error)'));
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+});
+
+describe('a staff leg end the database cannot stamp', () => {
+  test('the leg stamp throws: the retry stamps it and ends the room', async () => {
+    jest.useFakeTimers();
+    const row = fakeCallLog({ conference_path: { ...ringing().conference_path, accepted_leg_sid: LEG0 } });
+    callHold.staffLeft.mockReset().mockResolvedValue('ordinary');
+    const normal = db.getMockImplementation();
+    db.mockImplementationOnce(() => ({ ...normal(), where: jest.fn(function where() { return this; }), whereRaw: jest.fn(function whereRaw() { return this; }), update: jest.fn(async () => { throw Object.assign(new Error('reset'), { code: 'ECONNRESET' }); }) }));
+    const log = fakeTwilio({ rooms: [{ sid: 'CF1', status: 'in-progress' }] });
+    expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'completed' })).toBe('retry');
+    expect(callHold.staffLeft).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('not handled (ECONNRESET); try 2 in 2 s'));
+    await jest.advanceTimersByTimeAsync(2000);
+    expect(row.metadata.conference_path.legs[0].status).toBe('completed');
+    expect(log.roomUpdates).toEqual([{ sid: 'CF1', status: 'completed' }]);
+  });
+});
+
+describe('the minute staff-end sweep (recoverStaffEnds)', () => {
+  const answered = (extra = {}) => ({ conference_path: { ...ringing().conference_path, accepted_leg_sid: LEG0, ...extra } });
+  const open = [{ sid: 'CF1', status: 'in-progress' }];
+
+  beforeEach(() => callHold.staffLeft.mockReset().mockResolvedValue('ordinary'));
+
+  test('a winning leg that is over with the room still open: the sweep ends the room, as the status callback would', async () => {
+    fakeCallLog(answered({ hold: { phase: 'returned', applied: 'returned' } }));
+    const log = fakeTwilio({ callStatus: 'completed', rooms: open });
+    expect(await cp.recoverStaffEnds()).toEqual({ action: 'swept', open: 1, handled: 1 });
+    expect(mockTw.api.calls).toHaveBeenCalledWith(LEG0);
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID);
+    expect(log.roomUpdates).toEqual([{ sid: 'CF1', status: 'completed' }]);
+    expect(log.updates).toEqual([]);
+  });
+
+  test('a hold in the way: the hold decides (voicemail), and the sweep ends nothing itself', async () => {
+    fakeCallLog(answered({ hold: { phase: 'held' } }));
+    callHold.staffLeft.mockResolvedValue('voicemail');
+    const log = fakeTwilio({ callStatus: 'completed', rooms: open });
+    expect(await cp.recoverStaffEnds()).toEqual({ action: 'swept', open: 1, handled: 1 });
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID);
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+
+  test('the staff still on the call, or no open room: nothing is done', async () => {
+    fakeCallLog(answered());
+    fakeTwilio({ callStatus: 'in-progress', rooms: open });
+    expect(await cp.recoverStaffEnds()).toEqual({ action: 'swept', open: 1, handled: 0 });
+    expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
+    const log = fakeTwilio({ callStatus: 'completed', rooms: [{ sid: 'CF1', status: 'completed' }] });
+    expect(await cp.recoverStaffEnds()).toEqual({ action: 'swept', open: 1, handled: 0 });
+    expect(callHold.staffLeft).not.toHaveBeenCalled();
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+
+  test('only an answered call whose caller is still on the line is read: no press 1, a closed or an ended call give none', async () => {
+    for (const [metadata, opts] of [
+      [ringing(), {}],
+      [answered({ closed_at: '2026-11-17T15:00:00Z' }), {}],
+      [{ ...answered(), ended_at: '2026-11-17T15:00:00Z' }, {}],
+      [answered(), { status: 'completed' }],
+    ]) {
+      fakeCallLog(metadata, opts);
+      fakeTwilio({ callStatus: 'completed', rooms: open });
+      expect(await cp.recoverStaffEnds()).toEqual({ action: 'swept', open: 0, handled: 0 });
+      expect(mockTw.api.calls).not.toHaveBeenCalled();
+    }
+  });
+
+  test('a Twilio error on one call is only logged; a read error answers error', async () => {
+    fakeCallLog(answered());
+    fakeTwilio({ rooms: open });
+    mockTw.api.calls = jest.fn(() => ({ fetch: jest.fn(async () => { throw Object.assign(new Error('x'), { status: 503 }); }) }));
+    expect(await cp.recoverStaffEnds()).toEqual({ action: 'swept', open: 1, handled: 0 });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('staff-end sweep failed for'));
+    db.mockImplementation(() => { throw new Error('db down'); });
+    expect(await cp.recoverStaffEnds()).toEqual({ action: 'error' });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('staff-end sweep read failed (Error)'));
   });
 });
 

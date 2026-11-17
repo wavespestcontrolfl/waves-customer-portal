@@ -975,6 +975,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY MIN — star-key hold recovery (call-hold.js). A recording resume that failed after a press 1, and a voicemail
+  // callback bell that was not written, finish here: it reads recent calls with either still pending and drains them
+  // through the per-call sender lease, so overlapping deploy instances send one resume and raise one bell. Registered
+  // before the GATE_CRON_JOBS return and run whatever GATE_CALL_HOLD says: it only finishes work already started
+  // (a silent recording and a missed callback are the damage). No runExclusive on purpose, like the sweep below.
+  // =========================================================================
+  cron.schedule('* * * * *', async () => {
+    try {
+      await require('./call-hold').recoverPendingHolds();
+    } catch (err) {
+      logger.error(`[call-hold] recovery tick failed: ${err.message}`);
+    }
+    // The same tick, also whatever the gates say: a conference call whose winning staff leg is over while its room is
+    // still open (a staff-end event a restart lost) gets its room ended (call-conference-path.js recoverStaffEnds).
+    try {
+      await require('./call-conference-path').recoverStaffEnds();
+    } catch (err) {
+      logger.error(`[conference] staff-end recovery tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY MIN — Bundled tech pushes. A burst of
   // visit changes (an office script, many single moves in a row) sends each
   // tech ONE push once their changes go quiet, not one per visit. Registered
