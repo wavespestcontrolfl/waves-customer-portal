@@ -1,4 +1,4 @@
-// GATE_LAWN_NEW_SOD_REPORT_CARD: the "New sod" card on the lawn web report. It prints the strings the server built
+// The "New sod" card on the lawn web report. It prints the strings the server built
 // from the block frozen at completion (server/services/lawn-sod-report-card.js) and restates no rule: what was held,
 // when each resumes and the bag swap are all in `data.lawnNewSod`. Live web report only (the PDF and static views
 // do not print it). Absent payload key = nothing.

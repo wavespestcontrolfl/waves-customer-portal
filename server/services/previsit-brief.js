@@ -403,7 +403,7 @@ const NO_LAWN_GUIDANCE = Object.freeze({
   held_products: [],
 });
 
-// GATE_LAWN_NOV_LARGE_PATCH_N, GATE_LAWN_RECLAIMED_HALF_N: the brief states a nitrogen bag's stored target (gates.targetN, "0.75 lb N/1000");
+// The November large patch cut, GATE_LAWN_RECLAIMED_HALF_N: the brief states a nitrogen bag's stored target (gates.targetN, "0.75 lb N/1000");
 // for a visit where the plan cuts it (waveguard-plan-engine nitrogenDecision, the plan's own decision) the brief states the cut and why, so
 // the pocket reference agrees with the plan and the Fast Complete sheet. Gate off, not v13 or no cut: the entries are left as they are (no read).
 // STRICT like the brief's other reads: the sweep stores the brief, so a failed read aborts the generation (the prior brief

@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * The lawn web report's "New sod" card (GATE_LAWN_NEW_SOD_REPORT_CARD, owner 2026-10-09).
+ * The lawn web report's "New sod" card (owner 2026-10-09).
  *
  * Decided ONCE, at completion, and frozen in structured_notes.lawnNewSod; the report renders only the frozen block
  * and never re-reads the live sod record (the office can change or clear it later):
@@ -12,14 +12,13 @@
  *                      the visit.
  *   cardOf             the frozen block as the customer's words: a title and fixed sentences. The page prints
  *                      strings only and restates no rule.
- *   lawnNewSodPayload  the report payload key, only while the gate is live and a valid frozen block exists.
+ *   lawnNewSodPayload  the report payload key, only when a valid frozen block exists.
  *
  * Wording: plain and short; no label or law is cited; no large patch, fungicide, disease watch or discount.
  * Every date comes from the frozen block (computed by lawn-sod-holds.js on the visit's day).
  */
 
 const logger = require('./logger');
-const featureGates = require('../config/feature-gates');
 const { monthLabel } = require('./service-report/lawn-report-v2');
 
 const FREEZE_KEY = 'lawnNewSod';
@@ -98,9 +97,9 @@ function cardOf(frozenBlock) {
   };
 }
 
-/** The report payload key: only a lawn report, while the gate is live, from a valid frozen block. Absent = byte-identical payload. */
+/** The report payload key: only a lawn report, from a valid frozen block. Absent = no card. */
 function lawnNewSodPayload({ serviceLine, structuredNotes } = {}) {
-  if (serviceLine !== 'lawn' || !featureGates.lawnNewSodReportCardLive()) return {};
+  if (serviceLine !== 'lawn') return {};
   const card = cardOf(parseJsonObject(structuredNotes)[FREEZE_KEY]);
   return card ? { lawnNewSod: card } : {};
 }
@@ -155,7 +154,7 @@ async function decideFrozen(knex, { svc, lawnFast, appliedProducts }) {
  * completes without the card. Never throws. Returns the frozen block or null.
  */
 async function freezeNewSodCard(trx, { svc, record, lawnFast, isIncompleteVisit, resumingCommittedCompletion, appliedProducts } = {}) {
-  if (lawnFast == null || isIncompleteVisit || resumingCommittedCompletion || !featureGates.lawnNewSodReportCardLive()) return null;
+  if (lawnFast == null || isIncompleteVisit || resumingCommittedCompletion) return null;
   try {
     const frozen = await trx.transaction(async (sp) => {
       const block = await decideFrozen(sp, { svc, lawnFast, appliedProducts });

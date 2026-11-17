@@ -1,4 +1,4 @@
-// GATE_LAWN_NOV_LARGE_PATCH_N (owner 2026-10-09) through the real plan engine and PostgreSQL (cloned schema): the v13 November
+// The November large patch cut (owner 2026-10-09) through the real plan engine and PostgreSQL (cloned schema): the v13 November
 // 24-0-11 bag is sized for 0.5 lb N when the lawn has an ACTIVE mapped fungus area, and the one reduced target reaches the plan item,
 // the completion defaults, the yearly-limit read and the note the technician sees. Synthetic data only. Skips without DATABASE_URL.
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
@@ -10,7 +10,7 @@ jest.setTimeout(60000);
 const KEY = 'fixture_v13_lawn_nov';
 const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE',
-  'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_NOV_LARGE_PATCH_N'];
+  'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET'];
 const NOTE = 'Active large patch mapped: nitrogen reduced to 0.5 lb N (2.1 lb per 1,000). Close the spreader over the patch and 6 ft around it.';
 // Ledger dates are anchored to the fixture visit's day, never to today (the evidence is read as of the visit, so a today-relative date would
 // fall after the visit from 11/10 on).
@@ -226,9 +226,9 @@ describeDb('November large patch nitrogen through PostgreSQL', () => {
     });
   });
 
-  test('active fungus but the gate is off, or the trouble-areas gate is off: the old plan, no fungus note anywhere', async () => {
+  test('active fungus but the spot target capture is off, or the trouble-areas gate is off: the old plan, no fungus note anywhere', async () => {
     const visit = await novemberVisit([{ type: 'fungus', target: LARGE }]);
-    setGates(GATES.filter((name) => name !== 'GATE_LAWN_NOV_LARGE_PATCH_N'));
+    setGates(GATES.filter((name) => name !== 'GATE_LAWN_SPOT_TARGET'));
     const gateOff = await plan(visit);
     setGates(GATES.filter((name) => name !== 'GATE_LAWN_TROUBLE_AREAS'));
     const areasOff = await plan(visit);

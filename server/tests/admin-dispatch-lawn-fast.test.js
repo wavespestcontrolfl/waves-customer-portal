@@ -437,11 +437,11 @@ describe('POST lawn-fast/trouble-areas/:areaId/clear', () => {
   });
 });
 
-// POST lawn-fast/sod-rooted (GATE_LAWN_NEW_SOD_NOTE, dark): the sheet's own gate and ownership, the property-preferences advisory
+// POST lawn-fast/sod-rooted: the sheet's own gate and ownership, the property-preferences advisory
 // lock taken BEFORE the visit lock (writeAdminPreferences' order), the same eligibility the context applies, then the service's write.
 describe('POST lawn-fast/sod-rooted', () => {
   const ROOTED = '/:lawnFastServiceId/lawn-fast/sod-rooted';
-  const GATES = ['GATE_LAWN_FAST_COMPLETE', 'GATE_LAWN_NEW_SOD_NOTE'];
+  const GATES = ['GATE_LAWN_FAST_COMPLETE'];
   const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
   const today = require('../utils/datetime-et').etDateString(new Date());
   const visit = (extra = {}) => ({ id: 'visit-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: today, service_type: 'Lawn Care', ...extra });
@@ -481,8 +481,8 @@ describe('POST lawn-fast/sod-rooted', () => {
     expect(router.stack.indexOf(routeLayer('post', ROOTED))).toBeGreaterThan(authIdx);
   });
 
-  test.each(['GATE_LAWN_NEW_SOD_NOTE', 'GATE_LAWN_FAST_COMPLETE'])('without %s: 404 {enabled:false}, nothing read or written', async (name) => {
-    delete process.env[name];
+  test('without GATE_LAWN_FAST_COMPLETE: 404 {enabled:false}, nothing read or written', async () => {
+    delete process.env.GATE_LAWN_FAST_COMPLETE;
     const res = await tick();
     expect(res.statusCode).toBe(404);
     expect(res.body).toEqual({ enabled: false });

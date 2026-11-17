@@ -7722,7 +7722,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     ...lawnPolishPayload({ serviceLine, reportV2 }),
     // GATE_LAWN_REPORT_STAGE1_FIXES (lawn only): the key the web page reads for the applied card and the hero contact lines. Absent = byte-identical payload.
     ...stage1PayloadFlag(serviceLine),
-    // GATE_LAWN_NEW_SOD_REPORT_CARD (lawn only): the New sod card, built from the block frozen at completion. Absent = byte-identical payload.
+    // New sod card (lawn only), built from the block frozen at completion. Absent when nothing was frozen.
     ...lawnNewSodPayload({ serviceLine, structuredNotes: service.structured_notes }),
     mapSvgUrl: `/api/reports/${token}/map.svg`,
     treatmentNarrativeRenderedSignature,

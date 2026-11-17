@@ -131,7 +131,7 @@ const isCutTarget = (unit, range, target, nitrogenCut) => unit === 'lb_n' && nit
   && target === Number(nitrogenCut.to) && targetInRange(range, Number(nitrogenCut.from));
 
 // `nitrogenCut` is `{ from, to }`: the visit's normal nitrogen target and the reduced one the plan applied to THIS visit
-// (GATE_LAWN_NOV_LARGE_PATCH_N: the decision visitNutrientTargets returned, never re-derived here), else null. A lb_n row
+// (the November large patch cut: the decision visitNutrientTargets returned, never re-derived here), else null. A lb_n row
 // whose stored range admits `from` then also admits a mix sized for exactly `to`, because the stored row keeps the program's own range (gates.targetN) and the cut is the plan's override of it. No other
 // row, unit or value is loosened.
 // `chinchRate` is `{ from, to, productName }` (GATE_LAWN_CHINCH_TETRINO_RATE): the May Tetrino rate the stored row states and the raised

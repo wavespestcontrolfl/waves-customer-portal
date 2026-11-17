@@ -1036,7 +1036,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     const appointmentMonth = roundsAppointmentMonth(rounds, month);
     ({ month, recipeVisit } = roundsRecipe(rounds, track, month, recipeVisit));
     const { visit: recipeStep, warnings: cadenceWarnings } = await visitForPlan(db, recipeVisit, scheduled, req.query.visitsPerYear, { track, trackKey });
-    // The visit the sheet reads: the recipe step, or (GATE_LAWN_NOV_LARGE_PATCH_N, GATE_LAWN_RECLAIMED_HALF_N, GATE_LAWN_DEC_LARGE_PATCH_K) its copy
+    // The visit the sheet reads: the recipe step, or (the November large patch cut, GATE_LAWN_RECLAIMED_HALF_N, GATE_LAWN_DEC_LARGE_PATCH_K) its copy
     // with the cut nitrogen or the swapped bag stated, so the line text, the objective and the amount agree. Only a visit the planner would also
     // plan on v13, and only for the month of the window the plan reads (a visit pinned to an older version, or to another month's window, gets no cut here).
     const nitrogen = await visitNutrientTargets(db, scheduled, { visit: recipeStep, month, v13Active: await sheetReadsPlansStep(db, scheduled, { trackKey, month }) });
