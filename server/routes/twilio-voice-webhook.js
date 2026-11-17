@@ -1723,6 +1723,36 @@ router.post('/voice', async (req, res) => {
 // =========================================================================
 // POST /api/webhooks/twilio/call-complete — Called when the dial completes
 // =========================================================================
+// The star-key hold's voicemail (GATE_CALL_HOLD, services/call-hold.js startHoldVoicemail): the claim ended the room, so
+// the caller's <Dial> ran this action. The recording resumes (the hold paused it), the caller hears the one owner-approved
+// line and a tone, and the message lands in the call's own recording: never a <Record>, which would park or replace the
+// conversation recording (decideRecordingAttach). The call stays an answered call. Null (no hold voicemail, or any read
+// error) = today's empty answer.
+const EMPTY_RESPONSE_XML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
+
+async function holdVoicemailTwiml(callSid) {
+  try {
+    const state = await callHold.holdState(callSid);
+    if (state.error || !state.voicemailAt) return null;
+    await callHold.resumeRecording(callSid);
+    const twiml = new VoiceResponse();
+    twiml.say({ voice: SAY_VOICE }, holdScript.CALLER_VOICEMAIL);
+    twiml.play('/audio/voicemail-tone.wav');
+    twiml.pause({ length: 120 });
+    twiml.hangup();
+    return twiml.toString();
+  } catch (err) {
+    logger.warn(`[call-complete] hold voicemail answer failed for ${maskSid(callSid)} (${err?.code || err?.name || 'error'})`);
+    return null;
+  }
+}
+
+// What /call-complete answers when the dial ended and the call is an answered one: today's empty response, except
+// for a conference call the hold timer sent to voicemail.
+async function answeredCallTwiml(query, callSid) {
+  return (query.conf === '1' && await holdVoicemailTwiml(callSid)) || EMPTY_RESPONSE_XML;
+}
+
 router.post('/call-complete', async (req, res) => {
   try {
     const { CallSid, CallDuration, DialCallSid, DialCallStatus, DialCallDuration } = req.body;
@@ -1903,7 +1933,9 @@ router.post('/call-complete', async (req, res) => {
       return res.type('text/xml').send(twiml.toString());
     }
 
-    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+    // A conference call the hold timer sent to voicemail: the room ended, the caller leaves a message inside
+    // this call's own recording. Any other call keeps today's empty answer.
+    res.type('text/xml').send(await answeredCallTwiml(req.query, CallSid));
   } catch (err) {
     logger.error(`Call complete webhook error: ${err.message}`);
     notifyTwilioFailure({
@@ -4103,10 +4135,31 @@ async function rejoinOrHangup(twiml, parentSid) {
   else twiml.hangup();
 }
 
-function appendHoldMenu(twiml, parentSid, { first = false } = {}) {
-  const gather = twiml.gather({ numDigits: 1, timeout: 15, action: HOLD_ROUTE('conference-staff-menu-choice', parentSid), method: 'POST' });
+// The menu says the 3 minute reminder once per hold: its own URLs carry reminded=1 from then on (no state write).
+// `reminded` is true when the reminder was said now or earlier in this loop.
+function appendHoldMenu(twiml, parentSid, { first = false, remind = false, reminded = false } = {}) {
+  const extra = reminded || remind ? '&reminded=1' : '';
+  const gather = twiml.gather({ numDigits: 1, timeout: 15, action: HOLD_ROUTE('conference-staff-menu-choice', parentSid, extra), method: 'POST' });
   if (first) gather.say({ voice: SAY_VOICE }, 'Your caller is on hold. Press 1 to go back to the caller.');
-  twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-staff-menu', parentSid));
+  if (remind) gather.say({ voice: SAY_VOICE }, holdScript.STAFF_REMINDER);
+  twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-staff-menu', parentSid, extra));
+}
+
+function staffVoicemailGoodbye(twiml) {
+  twiml.say({ voice: SAY_VOICE }, holdScript.STAFF_VOICEMAIL);
+  twiml.hangup();
+}
+
+// An open hold: past the limit the caller goes to voicemail (the staff are told and hung up on); past the
+// reminder time the menu says it once; a voicemail that did not start (a Twilio error, restored) retries next loop.
+async function openHoldMenu(twiml, parentSid, state, query) {
+  const seconds = callHold.heldSeconds(state);
+  if (seconds >= callHold.HOLD_LIMIT_SEC) {
+    const started = await callHold.startHoldVoicemail(parentSid, 'timeout');
+    if (started === 'started' || started === 'caller_gone') return staffVoicemailGoodbye(twiml);
+  }
+  const reminded = query.reminded === '1';
+  return appendHoldMenu(twiml, parentSid, { first: query.first === '1', reminded, remind: !reminded && seconds >= callHold.HOLD_REMINDER_SEC });
 }
 
 // POST /conference-staff-left — the staff pressed star (or the room ended under them). Gate off (flipped
@@ -4145,9 +4198,10 @@ router.post('/conference-staff-menu', async (req, res) => {
   const twiml = new VoiceResponse();
   try {
     const state = conferencePath.CALL_SID_RE.test(parentSid) ? await callHold.holdState(parentSid) : { closed: true };
-    if (state.closed) callerGone(twiml);
+    if (state.voicemailAt) staffVoicemailGoodbye(twiml);
+    else if (state.closed) callerGone(twiml);
     else if (!state.open) await rejoinOrHangup(twiml, parentSid);
-    else appendHoldMenu(twiml, parentSid, { first: req.query.first === '1' });
+    else await openHoldMenu(twiml, parentSid, state, req.query);
   } catch (err) {
     logger.error(`[call-hold] menu error for ${maskSid(parentSid)} (${err?.code || err?.name || 'error'})`);
     return res.type('text/xml').send(HANGUP_XML);
@@ -4159,7 +4213,7 @@ router.post('/conference-staff-menu', async (req, res) => {
 router.post('/conference-staff-menu-choice', async (req, res) => {
   const parentSid = String(req.query.parent || '');
   const twiml = new VoiceResponse();
-  const toMenu = () => twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-staff-menu', parentSid));
+  const toMenu = () => twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-staff-menu', parentSid, req.query.reminded === '1' ? '&reminded=1' : ''));
   try {
     if (!conferencePath.CALL_SID_RE.test(parentSid)) {
       twiml.hangup();
@@ -4170,7 +4224,9 @@ router.post('/conference-staff-menu-choice', async (req, res) => {
       if (ended === 'returned') {
         appendStaffConference(twiml, parentSid);
       } else if (ended === 'no_room') {
-        callerGone(twiml);
+        // The room is gone: the caller left, or the hold timer sent them to voicemail.
+        if ((await callHold.holdState(parentSid)).voicemailAt) staffVoicemailGoodbye(twiml);
+        else callerGone(twiml);
       } else {
         twiml.say({ voice: SAY_VOICE }, 'Sorry, that did not work.');
         toMenu();
@@ -4209,8 +4265,16 @@ router.post('/conference-hold-facts', async (req, res) => {
   const twiml = new VoiceResponse();
   try {
     const state = conferencePath.CALL_SID_RE.test(parentSid) ? await callHold.holdState(parentSid) : { open: false };
-    if (!state.open) twiml.pause({ length: 1 });
-    else appendHoldFacts(twiml, parentSid, step);
+    if (!state.open) {
+      twiml.pause({ length: 1 });
+    } else if (callHold.heldSeconds(state) >= callHold.HOLD_LIMIT_SEC) {
+      // The limit: the caller goes to voicemail (the room ends, so this hold URL stops). A Twilio error restores the
+      // hold and this answer is a second of silence; the next fetch tries again.
+      await callHold.startHoldVoicemail(parentSid, 'timeout');
+      twiml.pause({ length: 1 });
+    } else {
+      appendHoldFacts(twiml, parentSid, step);
+    }
   } catch (err) {
     logger.error(`[call-hold] facts error for ${maskSid(parentSid)} (${err?.code || err?.name || 'error'})`);
     return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="1"/></Response>');

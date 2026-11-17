@@ -306,13 +306,25 @@ async function endRoomAfterStaffHangup(callSid, state) {
   return api.calls(callSid).update({ status: 'completed' }).then(() => 'caller_hung_up', () => 'caller_gone');
 }
 
+// The winning staff leg ended. A hold in the way (star-key hold, GATE_CALL_HOLD): the caller goes to voicemail
+// instead of being hung up. A hold already sent to voicemail is left alone: the caller may be leaving a message,
+// and endRoomAfterStaffHangup hangs the caller up when no room is open.
+async function onWinnerLegEnded(callSid, state) {
+  if (state.hold?.voicemail_at) return 'hold_voicemail';
+  if (!state.hold?.open) return endRoomAfterStaffHangup(callSid, state);
+  const started = await require('./call-hold').startHoldVoicemail(callSid, 'staff_left'); // lazy: call-hold requires this module
+  if (started === 'started' || started === 'caller_gone') return 'hold_voicemail';
+  const latest = await loadState(callSid);
+  return latest?.hold?.voicemail_at ? 'hold_voicemail' : endRoomAfterStaffHangup(callSid, latest || state);
+}
+
 async function onStaffLegStatus({ callSid, index, legSid, status }) {
   if (!TERMINAL_LEG_STATUSES.has(status) || !Number.isInteger(index) || index < 0) return 'ignored';
   await stampLeg(callSid, index, legSid ? { sid: legSid, status } : { status });
   const state = await loadState(callSid);
   if (!state) return 'no_state';
   if (state.accepted_leg_sid) {
-    return state.accepted_leg_sid === legSid ? endRoomAfterStaffHangup(callSid, state) : 'accepted';
+    return state.accepted_leg_sid === legSid ? onWinnerLegEnded(callSid, state) : 'accepted';
   }
   if (!everyLegEnded(state)) return 'waiting';
   return (await sendCallerToVoicemail(callSid, noAnswerStatus(state))) === 'redirected' ? 'voicemail' : 'settled';

@@ -5,10 +5,18 @@
  * route in routes/twilio-voice-webhook.js speaks it with the portal's Say voice. OPENING plays when
  * the hold starts, FACTS play in this order four at a time, and REMINDER plays between two facts
  * about once a minute. Each fact keeps its source in the comment beside it.
+ *
+ * Hold timer lines (owner-approved 2026-11-17): STAFF_REMINDER is said to the staff phone at 3 minutes (always
+ * the computer voice); CALLER_VOICEMAIL is the only thing the caller hears when the hold ends at 5 minutes or
+ * the staff phone hangs up; STAFF_VOICEMAIL tells the staff phone the caller is now leaving a message.
  */
 
 const OPENING = 'Thanks for holding. Here are a few pest facts while you wait.';
 const REMINDER = "Thanks for holding. We'll be right with you.";
+
+const STAFF_REMINDER = 'Your caller has been on hold for 3 minutes.';
+const STAFF_VOICEMAIL = 'Your caller went to voicemail.';
+const CALLER_VOICEMAIL = 'Sorry for the wait. Please leave a message after the tone, and we will call you right back.';
 
 const FACTS = [
   'When floodwater rises, fire ants can link their bodies together into a waterproof raft and float for days.', // PNAS, 2011
@@ -25,4 +33,4 @@ const FACTS = [
   'Roof rats are expert climbers, often seen at night running along utility lines, using their long tails for balance.', // University of California IPM
 ];
 
-module.exports = { OPENING, REMINDER, FACTS };
+module.exports = { OPENING, REMINDER, STAFF_REMINDER, STAFF_VOICEMAIL, CALLER_VOICEMAIL, FACTS };
