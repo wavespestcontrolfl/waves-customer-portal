@@ -93,12 +93,12 @@ function foldOfficeNotice(target, newDate, windowStart) {
   return `No re-service booked: the ${target.service_type} on ${foldDateLabel(target.scheduled_date)} moved up to ${to} (within ${FOLD_DAYS} days of the next plan visit).`;
 }
 
-// After a refusal that came once the move had started: did the plan visit land on the asked slot anyway?
-async function movedAnyway(conn, target, newDate, windowStart) {
-  const row = await conn('scheduled_services').where({ id: target.id }).first('scheduled_date', 'window_start', 'status');
-  return !!row && dateOnlyString(row.scheduled_date) === newDate
-    && !['cancelled', 'completed', 'skipped', 'no_show'].includes(row.status)
-    && (!windowStart || String(row.window_start || '').startsWith(windowStart));
+// A thrown 4xx refuses this move and wrote nothing: the planner only reads, and the rebooker raises its refusals (its
+// checks, and a write fence that missed) inside its own transaction, while its steps after the commit and the move's text
+// step catch their own errors. The reason, or null for an error that is not ours to swallow.
+function moveRefusal(err) {
+  const code = Number(err?.statusCode || err?.status);
+  return code >= 400 && code < 500 ? (err.message || 'the move was refused') : null;
 }
 
 // After the move committed: the office's words go to the moved visit so the technician knows the problem. The customer's
@@ -120,8 +120,8 @@ async function carryOfficeWords(conn, target, { customerRequest, notes, date }) 
     .update({ notes: conn.raw("concat_ws(E'\\n', nullif(notes, ''), ?::text)", [`[Re-service folded in, ${foldDateLabel(date)}] ${line}`]) });
 }
 
-// Runs the planned move. A 409 comes from the rebooker's own checks, before its single write commits: it is returned as
-// `failure`. Any other error is not ours to swallow.
+// Runs the planned move. A thrown refusal (moveRefusal) wrote nothing and comes back as `failure`: the re-service books.
+// Any answer, even one of 300 or more, comes after the rebooker returned, so its write committed and the fold stands.
 async function runFoldMove({ planned, target, newDate, notifyCustomer, actor }) {
   const { runPlannedVisitMove } = require('../routes/admin-dispatch');
   try {
@@ -134,20 +134,21 @@ async function runFoldMove({ planned, target, newDate, notifyCustomer, actor }) 
       notifyCustomer,
       actor,
     });
-    return { out, failure: out.status >= 300 ? (out.body?.error || 'the move was refused') : null };
+    return { out, failure: null };
   } catch (err) {
-    if (err?.statusCode !== 409) throw err;
-    return { out: null, failure: err.message };
+    const why = moveRefusal(err);
+    if (!why) throw err;
+    return { out: null, failure: why };
   }
 }
 
 // The 200 answer the booking route sends when the plan visit moved. Carrying the office's words never undoes the move.
-async function foldAnswer({ conn, target, newDate, windowStart, out, failure, notifyCustomer, customerRequest, notes }) {
-  const body = out?.body || {};
+async function foldAnswer({ conn, target, newDate, windowStart, out, notifyCustomer, customerRequest, notes }) {
+  const body = out.body || {};
   const warnings = [foldOfficeNotice(target, newDate, windowStart), ...(Array.isArray(body.warnings) ? body.warnings : [])];
-  if (failure) warnings.push(`The move reported an error after it saved (${failure}). Check the visit.`);
-  // The office asked for the "visit moved" text and it did not go (a failed send, or a move that errored before its text
-  // step). Same words as the Dispatch board's stop move. A visit already on the slot (notificationSkipped) needs no text.
+  if (out.status >= 300) warnings.push(`The move reported an error after it saved (${body.error || 'no detail'}). Check the visit.`);
+  // The office asked for the "visit moved" text and it did not go (a failed send, or a move answer that came back as an
+  // error). Same words as the Dispatch board's stop move. A visit already on the slot (notificationSkipped) needs no text.
   if (notifyCustomer !== false && body.notificationSent !== true && !body.notificationSkipped) {
     warnings.push(`The customer was not texted about the move: ${body.notificationError || 'the text could not be sent'}.`);
   }
@@ -176,51 +177,61 @@ async function foldAnswer({ conn, target, newDate, windowStart, out, failure, no
 /**
  * Move the plan visit up to the re-service's date and start (the Dispatch board's single-visit staff move; the customer
  * gets the existing "visit moved" text when `notifyCustomer` is not false).
- * Returns { moved: true, answer } for the 200 the booking route sends, or { moved: false, warning } when the move was
- * refused before anything committed (the caller then books the re-service as before). Any other error propagates.
- * A refusal after the move started re-reads the visit: one already on the asked slot counts as moved, with a warning.
+ * Returns { moved: true, answer } for the 200 the booking route sends, or { moved: false, warning } when the plan or the
+ * move refused before anything wrote (the caller then books the re-service as before). Any other error propagates.
  */
 async function moveFoldTarget({ conn = db, target, date, windowStart, technicianId, customerAskedTime, notifyCustomer, actor, customerRequest, notes }) {
-  const { planVisitMoveForStaff } = require('../routes/admin-dispatch');
   const newDate = dateOnlyString(date);
   const refused = (why) => ({
     moved: false,
     warning: `The re-service was booked as its own visit: the plan visit on ${foldDateLabel(target.scheduled_date)} could not move up (${why}).`,
   });
-  const planned = await planVisitMoveForStaff({
-    serviceId: target.id,
-    newDate,
-    newWindow: windowStart ? { start: windowStart } : null,
-    notifyCustomer,
-    // The office's "customer asked for this time" rides only when it is exactly true (the planner stamps it when
-    // GATE_DAY_ONLY_PROMISE is on), as the edit modal's move builds it.
-    body: { ...(technicianId ? { technicianId } : {}), ...(customerAskedTime === true ? { customerAskedTime: true } : {}) },
-    actor,
-    sourceSurface: FOLD_SOURCE_SURFACE,
-    seriesPolicy: 'single',
-    // The lookup's picture of the visit is the rebooker's write fence: a visit that left the range, went live, joined a stop,
-    // entered a Quick Move hand-off, or changed customer, premise, service, or plan or callback kind since the lookup makes
-    // the move miss (a 409), and the re-service books instead.
-    allowLive: false,
-    expect: {
-      customer_id: target.customer_id,
-      property_id: target.property_id,
-      service_id: target.service_id,
-      service_type: target.service_type,
-      is_recurring: true,
-      is_callback: target.is_callback,
-      scheduled_date: target.scheduled_date,
-      status: target.status,
-      visit_id: null,
-      customer_pick_by: null,
-    },
-  });
-  // A planner refusal wrote nothing: no re-read.
-  if (!planned.plan) return refused(planned.body?.error || 'the move was refused');
-  const { out, failure } = await runFoldMove({ planned, target, newDate, notifyCustomer, actor });
-  // The move started: a row already on the asked slot saved, and a re-service booked now would double up.
-  if (failure && !(await movedAnyway(conn, target, newDate, windowStart))) return refused(failure);
-  return { moved: true, answer: await foldAnswer({ conn, target, newDate, windowStart, out, failure, notifyCustomer, customerRequest, notes }) };
+  const plan = await planFoldMove({ target, newDate, windowStart, technicianId, customerAskedTime, notifyCustomer, actor });
+  if (plan.failure) return refused(plan.failure);
+  const { out, failure } = await runFoldMove({ planned: plan.planned, target, newDate, notifyCustomer, actor });
+  if (failure) return refused(failure);
+  return { moved: true, answer: await foldAnswer({ conn, target, newDate, windowStart, out, notifyCustomer, customerRequest, notes }) };
+}
+
+// Plans the single-visit move; the planner only reads. Its refusal, returned or thrown (moveRefusal: e.g. a plan visit with
+// no stored duration, or one that would run past midnight at the re-service's start), comes back as `failure`.
+async function planFoldMove({ target, newDate, windowStart, technicianId, customerAskedTime, notifyCustomer, actor }) {
+  const { planVisitMoveForStaff } = require('../routes/admin-dispatch');
+  try {
+    const planned = await planVisitMoveForStaff({
+      serviceId: target.id,
+      newDate,
+      newWindow: windowStart ? { start: windowStart } : null,
+      notifyCustomer,
+      // The office's "customer asked for this time" rides only when it is exactly true (the planner stamps it when
+      // GATE_DAY_ONLY_PROMISE is on), as the edit modal's move builds it.
+      body: { ...(technicianId ? { technicianId } : {}), ...(customerAskedTime === true ? { customerAskedTime: true } : {}) },
+      actor,
+      sourceSurface: FOLD_SOURCE_SURFACE,
+      seriesPolicy: 'single',
+      // The lookup's picture of the visit is the rebooker's write fence: a visit that left the range, went live, joined a
+      // stop, entered a Quick Move hand-off, or changed customer, premise, service, or plan or callback kind since the
+      // lookup makes the move miss (a 409), and the re-service books instead.
+      allowLive: false,
+      expect: {
+        customer_id: target.customer_id,
+        property_id: target.property_id,
+        service_id: target.service_id,
+        service_type: target.service_type,
+        is_recurring: true,
+        is_callback: target.is_callback,
+        scheduled_date: target.scheduled_date,
+        status: target.status,
+        visit_id: null,
+        customer_pick_by: null,
+      },
+    });
+    return { planned, failure: planned.plan ? null : (planned.body?.error || 'the move was refused') };
+  } catch (err) {
+    const why = moveRefusal(err);
+    if (!why) throw err;
+    return { planned: null, failure: why };
+  }
 }
 
 module.exports = {
