@@ -9472,7 +9472,10 @@ async function scheduleCreateHandler(req, res, next) {
       req, customerId, serviceKey: serviceRecord?.service_key, isRecurring, isCallback: resolvedIsCallback, scheduledDate, windowStart,
       customerAskedTime,
       free: zeroCallbackPrice === true && (!serviceAddons || (Array.isArray(serviceAddons) && !serviceAddons.length)),
-      bookingProperty, technicianId: resolvedTechId, notifyCustomer: sendConfirmationSms === undefined ? true : !!sendConfirmationSms,
+      // The office's technician choice: an explicit Unassigned = null (the moved visit is unassigned); no technician chosen
+      // or found = undefined (the plan visit keeps its own).
+      bookingProperty, technicianId: assignmentMode === 'unassigned' ? null : (resolvedTechId || undefined),
+      notifyCustomer: sendConfirmationSms === undefined ? true : !!sendConfirmationSms,
       customerRequest: officeCustomerRequest, notes: combinedNotes,
     });
     if (reserviceFold?.moved) return res.status(200).json(reserviceFold.answer);

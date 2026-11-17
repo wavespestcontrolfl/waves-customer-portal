@@ -195,6 +195,13 @@ describe('POST / - re-service fold (GATE_RESERVICE_FOLD)', () => {
     expect(fold.moveFoldTarget.mock.calls[1][0].customerAskedTime).toBeUndefined();
   });
 
+  test('the technician choice: Unassigned reaches the move as null; no choice leaves the plan visit its own technician', async () => {
+    await post({ ...base, assignmentMode: 'unassigned', technicianId: 'tech-9' });
+    expect(fold.moveFoldTarget.mock.calls[0][0].technicianId).toBeNull();
+    await post(base);
+    expect(fold.moveFoldTarget.mock.calls[1][0].technicianId).toBeUndefined();
+  });
+
   test('the move says no text with the confirmation box off', async () => {
     await post(base);
     expect(fold.moveFoldTarget).toHaveBeenCalledWith(expect.objectContaining({ notifyCustomer: false }));

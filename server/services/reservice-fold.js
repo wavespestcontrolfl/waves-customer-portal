@@ -203,9 +203,13 @@ async function planFoldMove({ target, newDate, windowStart, technicianId, custom
       newDate,
       newWindow: windowStart ? { start: windowStart } : null,
       notifyCustomer,
-      // The office's "customer asked for this time" rides only when it is exactly true (the planner stamps it when
-      // GATE_DAY_ONLY_PROMISE is on), as the edit modal's move builds it.
-      body: { ...(technicianId ? { technicianId } : {}), ...(customerAskedTime === true ? { customerAskedTime: true } : {}) },
+      // technicianId: undefined = keep the plan visit's technician; null = the office chose Unassigned (the planner
+      // unassigns); an id = that technician. The office's "customer asked for this time" rides only when it is exactly
+      // true (the planner stamps it when GATE_DAY_ONLY_PROMISE is on), as the edit modal's move builds it.
+      body: {
+        ...(technicianId !== undefined ? { technicianId } : {}),
+        ...(customerAskedTime === true ? { customerAskedTime: true } : {}),
+      },
       actor,
       sourceSurface: FOLD_SOURCE_SURFACE,
       seriesPolicy: 'single',

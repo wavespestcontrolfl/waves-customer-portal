@@ -59,9 +59,14 @@ test('asks the staff move for this one visit: the office start, technician and t
   }));
 });
 
-test('no start and no technician chosen: the move sends neither', async () => {
-  await run({ windowStart: null, technicianId: null, notifyCustomer: false });
+test('no start and no technician chosen: the move sends neither, so the plan visit keeps its technician', async () => {
+  await run({ windowStart: null, technicianId: undefined, notifyCustomer: false });
   expect(dispatch.planVisitMoveForStaff).toHaveBeenCalledWith(expect.objectContaining({ newWindow: null, body: {}, notifyCustomer: false }));
+});
+
+test('the office chose Unassigned: the move carries technicianId null, so the planner unassigns the moved visit', async () => {
+  await run({ technicianId: null });
+  expect(dispatch.planVisitMoveForStaff.mock.calls[0][0].body).toEqual({ technicianId: null });
 });
 
 test('a moved visit answers 200 with nothing created, the notice first and the move warnings after', async () => {
@@ -108,7 +113,7 @@ test("the customer's asked-for time reaches the planner only when it is exactly 
   expect(dispatch.planVisitMoveForStaff.mock.calls[0][0].body).toEqual({ technicianId: 'tech-9', customerAskedTime: true });
   dispatch.planVisitMoveForStaff.mockClear();
   await run({ customerAskedTime: 'yes' });
-  await run({ customerAskedTime: undefined, technicianId: null });
+  await run({ customerAskedTime: undefined, technicianId: undefined });
   expect(dispatch.planVisitMoveForStaff.mock.calls[0][0].body).toEqual({ technicianId: 'tech-9' });
   expect(dispatch.planVisitMoveForStaff.mock.calls[1][0].body).toEqual({});
 });
