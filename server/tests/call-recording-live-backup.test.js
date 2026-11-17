@@ -1,0 +1,228 @@
+/** GATE_LIVE_CALL_BACKUP_TRANSCRIPT: a call with no recording keeps its live text as the transcript. */
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
+jest.mock('../config/twilio-numbers', () => ({
+  isInternalNumber: jest.fn(() => false), isOwnedNumber: jest.fn(() => false),
+  findByNumber: jest.fn(() => null), getLeadSourceFromNumber: jest.fn(() => ({ source: 'phone_call' })),
+}));
+jest.mock('../services/live-call-transcription', () => ({
+  liveTranscriptFor: jest.fn(), purgeLiveUtterances: jest.fn(async () => 0),
+}));
+const mockGate = { on: false };
+jest.mock('../config/feature-gates', () => {
+  const actual = jest.requireActual('../config/feature-gates');
+  return { ...actual, isEnabled: jest.fn((key) => (key === 'liveCallBackupTranscript' ? mockGate.on : actual.isEnabled(key))) };
+});
+
+const db = require('../models/db');
+const { liveTranscriptFor } = require('../services/live-call-transcription');
+const processor = require('../services/call-recording-processor');
+
+const SID = 'CA00000000000000000000000000000456';
+const liveText = 'Caller: I need a termite inspection.\nAgent: Sure, what is the address?';
+
+// Rows + patches the fixture db holds. liveSweepRows feeds recoverMissingRecentRecordings.
+function primeDb({ recordingUrl = null, recordingSid = null, status = null, attempts = 0 } = {}) {
+  const row = {
+    id: 'live-backup-fixture', twilio_call_sid: SID, direction: 'inbound',
+    from_phone: '+19415550123', to_phone: '+19415550124', recording_url: recordingUrl, recording_sid: recordingSid,
+    recording_duration_seconds: 90, duration_seconds: 90, transcription: null, processing_status: status,
+    extraction_attempts: attempts, created_at: new Date(), metadata: {},
+  };
+  const patches = [];
+  db.mockImplementation((table) => {
+    const builder = {};
+    let owner;
+    const chain = (...args) => {
+      if (args[0] === 'processing_token') owner = args[1];
+      for (const arg of args) if (typeof arg === 'function') arg.call(builder, builder);
+      return builder;
+    };
+    for (const method of ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'orWhere', 'orWhereRaw', 'andWhere', 'select', 'orderBy', 'limit', 'leftJoin', 'forUpdate', 'clone', 'onConflict', 'ignore', 'modify']) builder[method] = chain;
+    builder.first = async () => (table === 'call_log' && (!owner || owner === row.processing_token) ? { ...row } : null);
+    builder.insert = jest.fn(() => builder);
+    builder.update = (patch, returning) => {
+      if (table === 'call_log') {
+        patches.push(patch);
+        if (patch.processing_status !== undefined) row.processing_status = patch.processing_status;
+        if (patch.processing_token !== undefined) row.processing_token = patch.processing_token;
+        if (patch.extraction_attempts !== undefined) row.extraction_attempts += 1;
+        if (typeof patch.transcription === 'string') row.transcription = patch.transcription;
+      }
+      return {
+        returning: async () => [{ extraction_attempts: row.extraction_attempts }],
+        then: (resolve, reject) => Promise.resolve(Array.isArray(returning) ? [{ extraction_attempts: row.extraction_attempts, transcription: row.transcription }] : 1).then(resolve, reject),
+      };
+    };
+    builder.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+    return builder;
+  });
+  db.raw = jest.fn((sql) => sql);
+  db.transaction = async (fn) => fn(db);
+  return { row, patches };
+}
+
+const extractionPrompts = (fetchSpy) => fetchSpy.mock.calls
+  .map(([, opts]) => (opts?.body ? JSON.parse(opts.body).contents?.[0]?.parts?.[0]?.text : null))
+  .filter((t) => t && t.includes('Extract'));
+
+describe('live-text backup transcript in processRecording', () => {
+  let fetchSpy;
+  let geminiKey;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGate.on = true;
+    liveTranscriptFor.mockResolvedValue({ text: liveText, utterances: 3, panMasked: false });
+    geminiKey = process.env.GEMINI_API_KEY;
+    process.env.GEMINI_API_KEY = 'fixture-only';
+    fetchSpy = jest.spyOn(global, 'fetch').mockRejectedValue(new Error('fixture extraction boundary'));
+  });
+  afterEach(() => {
+    fetchSpy.mockRestore();
+    if (geminiKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = geminiKey;
+  });
+
+  test('gate on, no recording, live text: written as the transcript and extraction runs on it', async () => {
+    const { row, patches } = primeDb();
+    const result = await processor.processRecording(SID);
+    expect(liveTranscriptFor).toHaveBeenCalledWith(SID);
+    const write = patches.find((p) => p.transcription_provider === 'twilio_realtime');
+    expect(write).toMatchObject({ transcription: liveText, transcription_status: 'completed', transcription_model: null, transcript_structured: null });
+    expect(row.transcription).toBe(liveText);
+    expect(result.error).toContain('fixture extraction boundary');
+    const prompt = JSON.parse(fetchSpy.mock.calls[0][1].body).contents[0].parts[0].text;
+    expect(prompt).toContain('Agent: Sure, what is the address?');
+    expect(row.processing_status).not.toBe('no_transcription');
+  });
+
+  test('the write carries the live provenance and the card-masked flag', async () => {
+    liveTranscriptFor.mockResolvedValue({ text: liveText, utterances: 3, panMasked: true });
+    const { patches } = primeDb();
+    await processor.processRecording(SID);
+    const write = patches.find((p) => p.transcription_provider === 'twilio_realtime');
+    const [, bindings] = db.raw.mock.calls.find(([sql]) => String(sql).includes('jsonb_object_agg'));
+    expect(JSON.parse(bindings[bindings.length - 1])).toEqual({
+      source: 'live_transcription', recording_transcription_unavailable: true, utterances: 3, pan_detected_live: true,
+    });
+    expect(write.transcription_metadata).toBeDefined();
+  });
+
+  test('gate off: no recording stays no_transcription and the live text is never read', async () => {
+    mockGate.on = false;
+    const { row } = primeDb();
+    const result = await processor.processRecording(SID);
+    expect(result.error).toMatch(/transcription/i);
+    expect(row.processing_status).toBe('no_transcription');
+    expect(liveTranscriptFor).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test('gate on but no utterances: no_transcription as today', async () => {
+    liveTranscriptFor.mockResolvedValue(null);
+    const { row } = primeDb();
+    const result = await processor.processRecording(SID);
+    expect(result.error).toMatch(/transcription/i);
+    expect(row.processing_status).toBe('no_transcription');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test('a read failure on the live text falls through to no_transcription', async () => {
+    liveTranscriptFor.mockRejectedValue(new Error('db down'));
+    const { row } = primeDb();
+    await processor.processRecording(SID);
+    expect(row.processing_status).toBe('no_transcription');
+  });
+
+  test('a call WITH a recording whose transcription failed stays no_transcription; live text unused', async () => {
+    const { row } = primeDb({ recordingUrl: 'https://api.twilio.com/fixture-recording', recordingSid: 'RE00000000000000000000000000000001' });
+    const result = await processor.processRecording(SID);
+    expect(result.error || result.reason).toMatch(/transcription/i);
+    expect(row.processing_status).toBe('no_transcription');
+    expect(liveTranscriptFor).not.toHaveBeenCalled();
+    expect(extractionPrompts(fetchSpy)).toHaveLength(0);
+  });
+
+  test('a quarantined recording (SID kept, url cleared) never uses the live text', async () => {
+    const { row } = primeDb({ recordingSid: 'RE00000000000000000000000000000002' });
+    await processor.processRecording(SID);
+    expect(row.processing_status).toBe('no_transcription');
+    expect(liveTranscriptFor).not.toHaveBeenCalled();
+  });
+
+  test('a lost write fence abandons the pass without extracting', async () => {
+    const { row } = primeDb();
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const builder = base(table);
+      const update = builder.update;
+      builder.update = (patch, returning) => (patch.transcription_provider === 'twilio_realtime' ? 0 : update(patch, returning));
+      return builder;
+    });
+    expect(await processor.processRecording(SID)).toMatchObject({ skipped: true, reason: 'terminal_write_ownership_lost' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(row.transcription).toBeNull();
+  });
+});
+
+describe('missing-recording sweep with live text', () => {
+  let procSpy;
+  let recoverSpy;
+  // The sweep reads candidates, then per no_completed_recording result the live row and the call state.
+  function primeSweep({ liveRow = { id: 1 }, state = { processing_status: null, extraction_attempts: 0 } } = {}) {
+    db.mockImplementation((table) => {
+      const builder = {};
+      const chain = (...args) => { for (const arg of args) if (typeof arg === 'function') arg.call(builder, builder); return builder; };
+      for (const method of ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'orWhere', 'orWhereRaw', 'select', 'orderBy', 'orderByRaw', 'limit', 'modify']) builder[method] = chain;
+      builder.first = async () => (table === 'call_live_utterances' ? (liveRow || undefined) : table === 'call_log' ? state : null);
+      builder.then = (resolve, reject) => Promise.resolve(table === 'call_log'
+        ? [{ twilio_call_sid: SID, direction: 'inbound', duration_seconds: 120 }] : []).then(resolve, reject);
+      return builder;
+    });
+    db.raw = jest.fn((sql) => sql);
+  }
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGate.on = true;
+    recoverSpy = jest.spyOn(processor, 'recoverRecordingForCall').mockResolvedValue({ success: false, reason: 'no_completed_recording' });
+    procSpy = jest.spyOn(processor, 'processRecording').mockResolvedValue({ success: true });
+  });
+  afterEach(() => { recoverSpy.mockRestore(); procSpy.mockRestore(); });
+
+  test('no_completed_recording + live text + gate on: one processRecording call', async () => {
+    primeSweep();
+    await processor.recoverMissingRecentRecordings();
+    expect(procSpy).toHaveBeenCalledTimes(1);
+    expect(procSpy).toHaveBeenCalledWith(SID);
+  });
+
+  test('gate off: no processRecording call', async () => {
+    mockGate.on = false;
+    primeSweep();
+    await processor.recoverMissingRecentRecordings();
+    expect(procSpy).not.toHaveBeenCalled();
+  });
+
+  test('no live text: no processRecording call', async () => {
+    primeSweep({ liveRow: null });
+    await processor.recoverMissingRecentRecordings();
+    expect(procSpy).not.toHaveBeenCalled();
+  });
+
+  test('a call already processed is left alone', async () => {
+    primeSweep({ state: { processing_status: 'processed', extraction_attempts: 0 } });
+    await processor.recoverMissingRecentRecordings();
+    expect(procSpy).not.toHaveBeenCalled();
+  });
+
+  test('a pass that throws is logged with the SID masked and the sweep still returns', async () => {
+    primeSweep();
+    procSpy.mockRejectedValue(new Error('boom'));
+    const result = await processor.recoverMissingRecentRecordings();
+    expect(result.checked).toBe(1);
+    const warn = require('../services/logger').warn.mock.calls.map((c) => c[0]).find((m) => /live backup transcript pass failed/.test(m));
+    expect(warn).toBeDefined();
+    expect(warn).not.toContain(SID);
+  });
+});

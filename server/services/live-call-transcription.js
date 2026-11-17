@@ -356,11 +356,45 @@ async function purgeQuarantinedLiveText({ limit = 25 } = {}) {
   }
 }
 
+/**
+ * The call's live text as a transcript, for GATE_LIVE_CALL_BACKUP_TRANSCRIPT: null when the call has
+ * no usable utterance, else { text, utterances, panMasked }. Utterances run in spoken order;
+ * consecutive ones from one speaker join into one turn, and each turn is a line in the format the
+ * processor's normal transcripts use ("Agent: ..." for staff, "Caller: ..." for the caller).
+ */
+async function liveTranscriptFor(callSid) {
+  if (!CALL_SID_RE.test(String(callSid || ''))) return null;
+  const rows = await db('call_live_utterances')
+    .where('call_sid', callSid)
+    .orderBy([{ column: 'spoken_at', order: 'asc' }, { column: 'id', order: 'asc' }])
+    .select('speaker', 'text', 'pan_masked');
+  const turns = [];
+  let panMasked = false;
+  let utterances = 0;
+  for (const row of rows || []) {
+    const text = typeof row?.text === 'string' ? row.text.trim() : '';
+    if (!text) continue;
+    const speaker = row.speaker === 'staff' ? 'staff' : 'caller';
+    utterances += 1;
+    if (row.pan_masked) panMasked = true;
+    const last = turns[turns.length - 1];
+    if (last && last.speaker === speaker) last.text = `${last.text} ${text}`;
+    else turns.push({ speaker, text });
+  }
+  if (!turns.length) return null;
+  return {
+    text: turns.map((t) => `${t.speaker === 'staff' ? 'Agent' : 'Caller'}: ${t.text}`).join('\n'),
+    utterances,
+    panMasked,
+  };
+}
+
 module.exports = {
   startLiveTranscription,
   recordLiveTranscriptionEvent,
   purgeLiveUtterances,
   purgeQuarantinedLiveText,
+  liveTranscriptFor,
   WEBHOOK_PATH,
   _test: { scrubWindow, scrubLines, startParams, CODE_TAIL_RE },
 };
