@@ -265,12 +265,15 @@ customer's message by this rule.
    `ringSmsCustomerBell` in `server/services/sms-operational-actions.js`). The row lists its promises
    in `metadata.commitment_ids` (and `itemKeys`), the promise that joined last first. A promise joins
    when its own overdue check rings, together with the other open promises from its text. The row
-   rings when it first appears and again, unread and moved to the top, only when a promise it has
-   not listed before joins it (`GATE_ALERT_RING_ONCE` on). A promise that is done, dismissed, expired
-   or held by a booked visit leaves the row without a ring, and the row closes when no promise is
-   left on it. `metadata.spoke_for` keeps every promise the open row has listed, so a promise that
-   left it (a booked visit held it) comes back without a ring and does not ring "kept late" a second
-   time. Done on the row, and Called back, settle the promises it lists. Rows an older build keyed on one text
+   rings exactly when the row of one text rang before the fold (`GATE_ALERT_RING_ONCE` on): when it
+   first appears and again, unread and moved to the top, when a promise joins from a text that has
+   no promise on the row. A text with a promise on the open row never rings it again (owner
+   2026-10-22: one text, one ring). A promise that is done, dismissed, expired or held by a booked
+   visit leaves the row without a ring, and the row closes when no promise is left on it.
+   `metadata.spoke_for` keeps the id of every text the row has listed a promise from: a promise
+   whose text is there does not ring "kept late" (a row keyed on that text kept its key after it
+   closed, and stopped that ring the same way).
+   Done on the row, and Called back, settle the promises it lists. Rows an older build keyed on one text
    (`sms-commitment-source:<text id>`) or on one promise (`sms-commitment:<promise id>`) fold into
    the customer's row the first time one of their promises is checked or settled: a row whose open
    promises all belong to the customer takes the customer's key (an unread row first) and the others

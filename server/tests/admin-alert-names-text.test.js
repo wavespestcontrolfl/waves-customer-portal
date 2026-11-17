@@ -117,7 +117,7 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
   const gateAsk = (extra = {}) => row({ id: 'commit-2', kind: 'callback', description: 'call me back about the gate', sms_log_id: 'sms-2',
     source_created_at: GATE_AT, evidence: [{ quote: 'Please call me back about the gate', matched: true }], ...extra });
   const customerAlert = (lead, promises) => ring({ row: lead, args: { dedupeKey: `sms-commitment-customer:${CUSTOMER_ID}`, promises,
-    spokeFor: ['commit-1', 'commit-2'], message: { id: lead.sms_log_id, customer_id: CUSTOMER_ID, created_at: lead.source_created_at, message_body: '' } } });
+    spokeFor: ['sms-1', 'sms-2'], message: { id: lead.sms_log_id, customer_id: CUSTOMER_ID, created_at: lead.source_created_at, message_body: '' } } });
 
   test('follow-ups from two texts: the lead is quoted with its day, the rest are counted, each line names its own day', async () => {
     const lead = gateAsk();
@@ -133,7 +133,7 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     ]);
     // The list keeps the alert's order; itemKeys is the same set sorted, so only a change of members rewrites the row.
     expect(opts.metadata).toMatchObject({ commitment_id: 'commit-2', sms_log_id: 'sms-2', commitment_ids: ['commit-2', 'commit-1'],
-      itemKeys: ['commit-1', 'commit-2'], spoke_for: ['commit-1', 'commit-2'] });
+      itemKeys: ['commit-1', 'commit-2'], spoke_for: ['sms-1', 'sms-2'] });
   });
 
   test('two texts that hold a customer ask and our own promise say both; our promise in the lead reads "We said"', async () => {
@@ -465,7 +465,7 @@ describe('GATE_ALERT_RING_ONCE: a promise rings once (owner 2026-10-14)', () => 
     expect(sentUpdates[0].bindings).toContain('n-fresh');
   });
 
-  test('gate on: an open row rings again, and rises, only when the promise being checked joins it (a customer alert)', async () => {
+  test('gate on: an open row rings again, and rises, only when the checked promise brings a text the row does not show (a customer alert)', async () => {
     await ring({ args: { joins: true } });
     expect(lastCall()[3]).toMatchObject({ dedupeOpenOnly: true, refreshOnDedupe: true, bumpOnRefresh: true });
     expect(lastCall()[3].ringOnRefresh()).toBe(true);

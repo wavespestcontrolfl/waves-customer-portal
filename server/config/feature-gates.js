@@ -8996,8 +8996,8 @@ module.exports.smsBareYesReplyLive = smsBareYesReplyLive;
 // On, an overdue promise bell (SMS and email, ringOverdueBell) never makes a second row or
 // ring for a promise while its row is still open, and the call booking-miss watchdog skips its
 // repeat rings. A customer's text alert (one open row per customer, owner 2026-11-16) rings
-// again only when a promise it has not listed before joins it. Off = the 24-hour rolling
-// dedupe: a new row and bell each day.
+// again only when a promise joins from a text that has no promise on it. Off = the 24-hour
+// rolling dedupe: a new row and bell each day.
 function alertRingOnceLive() {
   return process.env.GATE_ALERT_RING_ONCE === 'true';
 }
