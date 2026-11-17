@@ -308,7 +308,7 @@ async function endRoomAfterStaffHangup(callSid, state) {
 }
 
 // The winning staff leg ended. A hold in the way (star-key hold, GATE_CALL_HOLD): the caller goes to voicemail
-// instead of being hung up. A hold already sent to voicemail is left alone: the caller may be leaving a message,
+// instead of being hung up, and one that cannot start yet stays open for the hold script's next fetch to retry. A hold already sent to voicemail is left alone: the caller may be leaving a message,
 // and endRoomAfterStaffHangup hangs the caller up when no room is open.
 async function onWinnerLegEnded(callSid, state) {
   if (state.hold?.voicemail_at) return 'hold_voicemail';
@@ -316,7 +316,11 @@ async function onWinnerLegEnded(callSid, state) {
   const started = await require('./call-hold').startHoldVoicemail(callSid, 'staff_left'); // lazy: call-hold requires this module
   if (started === 'started' || started === 'caller_gone') return 'hold_voicemail';
   const latest = await loadState(callSid);
-  return latest?.hold?.voicemail_at ? 'hold_voicemail' : endRoomAfterStaffHangup(callSid, latest || state);
+  if (latest?.hold?.voicemail_at) return 'hold_voicemail';
+  // The hold is still open (the room would not end and the hold was restored with the staff_left reason pending, or a
+  // press 1 holds it): ending the room here would drop the caller with no message and no bell. The caller keeps the
+  // hold script, and its next fetch starts the voicemail (the 5 minute limit still backstops it).
+  return latest?.hold?.open ? 'hold_voicemail_pending' : endRoomAfterStaffHangup(callSid, latest || state);
 }
 
 async function onStaffLegStatus({ callSid, index, legSid, status }) {

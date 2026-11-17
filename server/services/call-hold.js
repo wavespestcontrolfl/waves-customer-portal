@@ -58,7 +58,7 @@ function holdFrom(state) {
   return hold && typeof hold === 'object' ? hold : { open: false, count: 0, total_sec: 0 };
 }
 
-// { open, closed, found, openAt, voicemailAt, returnAt }: for the routes. A read error answers open: the staff stay on
+// { open, closed, found, openAt, voicemailAt, returnAt, voicemailPending }: for the routes. A read error answers open: the staff stay on
 // the menu and the caller keeps the script, rather than the staff rejoining a room while the caller is held.
 async function holdState(callSid) {
   try {
@@ -70,6 +70,7 @@ async function holdState(callSid) {
       openAt: state?.hold?.open_at || null,
       voicemailAt: state?.hold?.voicemail_at || null,
       returnAt: state?.hold?.return_at || null,
+      voicemailPending: state?.hold?.voicemail_pending || null,
     };
   } catch (err) {
     logger.warn(`[call-hold] state read failed for ${masked(callSid)} (${errorCode(err)})`);
@@ -95,7 +96,8 @@ async function roomIsOpen(callSid) {
 
 const writeHold = (callSid, hold, conditions) => conferencePath.updateState(callSid, [[['hold'], hold]], conditions);
 
-const withoutReturn = ({ return_at: _returnAt, ...rest }) => rest;
+// A hold object without its transient marks: the return claim and the pending voicemail reason.
+const withoutReturn = ({ return_at: _returnAt, voicemail_pending: _pending, ...rest }) => rest;
 const secondsSince = (iso) => Math.max(0, Math.round((Date.now() - Date.parse(iso || '')) / 1000)) || 0;
 // A return claim another request is still working on. A stale one (its request is gone) blocks nothing.
 const returnInFlight = (hold) => Boolean(hold.return_at) && secondsSince(hold.return_at) < RETURN_CLAIM_STALE_SEC;
@@ -219,10 +221,12 @@ async function claimReturn(callSid) {
   return blocked === 'idle' ? { stamp: null } : { lost: blocked };
 }
 
-// A state read or write that fails must not keep the staff out of the room (voicemail needs the same database).
+// Fails closed: a claim read or write that errors answers { lost: 'failed' }, never an unclaimed unhold. The error may
+// be one request's own, while another request has already won the voicemail claim; the staff stay on the menu and
+// press 1 again once the claim can be read.
 const claimReturnSafely = (callSid) => claimReturn(callSid).catch((err) => {
   logger.warn(`[call-hold] return not claimed for ${masked(callSid)} (${errorCode(err)})`);
-  return { stamp: null };
+  return { lost: 'failed' };
 });
 
 // The unhold did not happen: lift our own return claim so the next press 1 or the 5 minute limit can act.
@@ -281,8 +285,10 @@ async function claimHoldVoicemail(callSid, reason) {
   return won > 0 ? { hold, prev } : null;
 }
 
-// Puts the hold back as it was, only while our own stamp is still on it.
-const restoreHold = (callSid, claim) => writeHold(callSid, claim.prev, [HAS_STATE_SQL, { sql: "(metadata #>> '{conference_path,hold,voicemail_at}') = ?", bindings: [claim.hold.voicemail_at] }])
+// Puts the hold back as it was, only while our own stamp is still on it. A voicemail that is not the plain 5 minute
+// limit (the staff phone hung up) leaves its reason on the restored hold as voicemail_pending: the caller's hold
+// script fetch starts that voicemail at once, with this reason, instead of waiting for the limit.
+const restoreHold = (callSid, claim, reason) => writeHold(callSid, reason === 'timeout' ? claim.prev : { ...claim.prev, voicemail_pending: reason }, [HAS_STATE_SQL, { sql: "(metadata #>> '{conference_path,hold,voicemail_at}') = ?", bindings: [claim.hold.voicemail_at] }])
   .catch((err) => logger.warn(`[call-hold] voicemail claim not restored for ${masked(callSid)} (${errorCode(err)})`));
 
 // Ends every open room of the call. A room that is already gone (404) does not count. Throws on any other error.
@@ -347,10 +353,11 @@ async function raiseVoicemailAlert(callSid, reason) {
   }
 }
 
-// 'started' | 'not_needed' | 'caller_gone' | 'failed'. Never throws. The hold limit passed, or the staff phone
+// 'started' | 'not_needed' | 'caller_gone' | 'failed'. Never throws. 'failed' = the hold is still open (restored,
+// with the reason pending when it is not the 5 minute limit) or its state could not be read. The hold limit passed, or the staff phone
 // hung up during the hold: claim once, end the room (the caller's <Dial> action then runs /call-complete,
 // which lets the caller leave a message), then raise the alert. A room that is already gone keeps the claim
-// and rings nothing (the caller left). Any other Twilio error restores the hold: the next loop tries again.
+// and rings nothing (the caller left). Any other Twilio error restores the hold: the next hold script fetch tries again.
 async function startHoldVoicemail(callSid, reason) {
   let claim = null;
   try {
@@ -359,7 +366,7 @@ async function startHoldVoicemail(callSid, reason) {
     if (!(await endOpenRooms(callSid))) return 'caller_gone';
   } catch (err) {
     logger.warn(`[call-hold] hold voicemail not started for ${masked(callSid)} (${errorCode(err)})`);
-    if (claim) await restoreHold(callSid, claim);
+    if (claim) await restoreHold(callSid, claim, reason);
     return 'failed';
   }
   logger.info(`[call-hold] caller ${masked(callSid)} sent to voicemail (${reason})`);

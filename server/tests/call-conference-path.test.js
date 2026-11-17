@@ -337,12 +337,15 @@ describe('the winning staff call ends during a star-key hold', () => {
     expect(log.updates).toEqual([]);
   });
 
-  test('the voicemail did not start (failed): today\'s room end', async () => {
-    fakeCallLog(held({ open: true }));
+  test('the voicemail did not start (failed) and the hold is still open: the room is NOT ended and the caller is not hung up', async () => {
+    fakeCallLog(held({ open: true, voicemail_pending: 'staff_left' }));
     callHold.startHoldVoicemail.mockResolvedValue('failed');
     const log = fakeTwilio({ rooms });
-    expect(await ended()).toBe('room_ended');
-    expect(log.roomUpdates).toEqual([{ sid: 'CF1', status: 'completed' }]);
+    expect(await ended()).toBe('hold_voicemail_pending');
+    expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
+    expect(mockTw.api.calls).not.toHaveBeenCalled();
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
   });
 
   test('not_needed with another request holding the voicemail claim: nothing is touched', async () => {
