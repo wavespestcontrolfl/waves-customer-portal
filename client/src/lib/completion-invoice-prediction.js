@@ -56,10 +56,10 @@ const predictionKindOf = (service) => service.billingLane?.prediction?.kind || n
 // 'payer_billed' (draft/sent, but not collectible from this homeowner at
 // all), and 'credit_applied' (draft/sent, covered by account credit, never
 // marked literally paid). A technician collects nothing at the door for
-// any of the five — but complete-scheduled-service.js's own
-// invoiceBlocksReview holds the review ask for every invoice status
+// any of the five — but complete-scheduled-service.js's shouldBundleReview
+// keeps the review link out of the completion text for every invoice status
 // EXCEPT literal 'paid'/'prepaid', which only 'invoice_settled' actually
-// is. Every reason except the literal paid/prepaid one holds the preview.
+// is. Every reason except the literal paid/prepaid one keeps the link out of that text.
 function siblingInvoiceOf(service) {
   const coverage = service.billingLane?.siblingCoverage || null;
   return {
@@ -92,7 +92,7 @@ function prepaidCovers({ service, usingUnpricedPrediction, predictionKind, invoi
   return service.prepaidAmount != null && prepaid > 0 && prepaid >= invoiceAmount;
 }
 
-// paid and prepaid are both settled to the server (invoiceBlocksReview,
+// paid and prepaid are both settled to the server (shouldBundleReview,
 // report-only completion) — codex #4140 r15 P2.
 const invoiceIsSettled = (service) => SETTLED_STATUSES.includes(service.checkoutInvoiceStatus)
   || SETTLED_STATUSES.includes(service.invoiceStatus);
@@ -154,12 +154,13 @@ export function completionInvoicePrediction({
     && !reportOnly
     && hasBillingSignal({ service, sibling, typedOneTimeBilling })
     && invoiceAmount > 0;
-  // The server's invoiceBlocksReview: an UNPAID invoice after completion —
+  // The server's shouldBundleReview: an UNPAID invoice after completion —
   // one minted now (willInvoice) or one already sent from dispatch and still
-  // open (completionInvoiceAlreadySent, codex #4140 r12 P2). Prepaid and
-  // paid invoices never hold the ask. A covering sibling invoice awaiting
-  // payment or reconciliation holds it too — the reused invoice completion
-  // actually checks is the SIBLING's, and invoiceBlocksReview clears only on
+  // open (completionInvoiceAlreadySent, codex #4140 r12 P2) — carries a pay
+  // link, so the review link never rides in the completion text. Prepaid and
+  // paid invoices do not. A covering sibling invoice awaiting
+  // payment or reconciliation counts too — the reused invoice completion
+  // actually checks is the SIBLING's, and it clears only on
   // its literal 'paid'/'prepaid' status, not this row's own.
   const reviewAwaitsPayment = willInvoice || sibling.notYetSettled
     || (!!service.completionInvoiceAlreadySent && !invoiceAlreadyPaid);

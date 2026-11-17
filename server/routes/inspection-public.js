@@ -169,7 +169,7 @@
  *   and never sees another customer's visit data, reschedule URL, or
  *   booking (Codex pre-push P1, 2026-09-24).
  *
- *   Exception, behind GATE_INSPECTION_REUSE_LEAD_SHELL (strict 'true', dark):
+ *   Exception (own intake shell reuse):
  *   the web form mints a customer for the lead seconds before the lead row,
  *   so an unverified lead whose linked customer is provably its OWN
  *   untouched intake shell (leadOwnIntakeShell: new_lead, active, created at
@@ -177,8 +177,7 @@
  *   visit/login/merge history, same phone identity and email, no other
  *   lead's provenance, the primary and only live profile of its account,
  *   a complete stored street/city/ZIP, the same unit as the booking) books onto that customer instead of a second row,
- *   with outright (not requires_verification) provenance. Gate off = the
- *   paragraph above holds without exception.
+ *   with outright (not requires_verification) provenance.
  *
  * POST /:token/waitlist — the out-of-area stop's one-field ask: inserts (or
  *   no-ops on) a newsletter_subscribers row tagged `expansion_waitlist:<county>`
@@ -201,7 +200,7 @@ const logger = require('../services/logger');
 const { recordPageView } = require('../services/customer-page-views');
 const { noStore } = require('../middleware/no-store');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { leadInspectionLinkLive, inspectionReuseLeadShellLive } = require('../config/feature-gates');
+const { leadInspectionLinkLive } = require('../config/feature-gates');
 const { verifyLeadConsultationToken, smsChannelFor, mintWaitlistTicket, verifyWaitlistTicket } = require('../utils/lead-consultation-token');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
@@ -310,7 +309,7 @@ function buildLeadPayload(lead, custRow) {
 const LEAD_ROW_FIELDS = [
   'id', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip',
   'status', 'customer_id', 'converted_at', 'first_contact_channel', 'twilio_call_sid',
-  // leadOwnIntakeShell (GATE_INSPECTION_REUSE_LEAD_SHELL) compares it with the linked customer's created_at.
+  // leadOwnIntakeShell compares it with the linked customer's created_at.
   'created_at',
 ];
 
@@ -1387,10 +1386,10 @@ async function resolveOrLinkCustomerForLead(trx, freshLead, resolved, token) {
   // under an arbitrarily chosen household. The shared-phone match runs
   // BEFORE any account is created (local audit P1), so a reuse or an
   // already_booked answer never leaves an orphan customer_accounts row.
-  // GATE_INSPECTION_REUSE_LEAD_SHELL: an UNVERIFIED (web-form) lead whose own
+  // An UNVERIFIED (web-form) lead whose own
   // untouched intake profile the form just minted books onto THAT profile
-  // instead of a second customer row. Gate off = this block never runs.
-  if (!verifiedContact && inspectionReuseLeadShellLive()) {
+  // instead of a second customer row.
+  if (!verifiedContact) {
     const reusedShell = await tryReuseOwnIntakeShell(trx, freshLead, resolved);
     if (reusedShell) return reusedShell;
   }
@@ -1555,7 +1554,7 @@ async function reuseWithProvenance(trx, freshLead, matched, resolved) {
   return reused;
 }
 
-// GATE_INSPECTION_REUSE_LEAD_SHELL — the lead's OWN intake profile.
+// The lead's OWN intake profile (shell reuse).
 //
 // lead-webhook.js creates a customer (pipeline_stage 'new_lead') and then the
 // lead (customer_id = that customer) seconds later. The page distrusts

@@ -828,7 +828,7 @@ describe("PipelineAnalytics drafts tile", () => {
 });
 
 
-describe("isCallTodayEstimate (GATE_ESTIMATE_CALL_LIST)", () => {
+describe("isCallTodayEstimate", () => {
   const NOW_MS = NOW.getTime();
   const viewedOffer = (hours, extra = {}) =>
     estimate({
@@ -892,7 +892,7 @@ describe("isCallTodayEstimate (GATE_ESTIMATE_CALL_LIST)", () => {
   });
 });
 
-describe("isPickReasonEstimate (GATE_ESTIMATE_CALL_LIST)", () => {
+describe("isPickReasonEstimate", () => {
   const NOW_MS = NOW.getTime();
   const expired = (extra = {}) =>
     estimate({
@@ -925,20 +925,13 @@ describe("PipelineAnalytics call-list cards", () => {
     viewedAt: hoursAgo(5),
   });
 
-  it("gate off: no Call today or Pick reason card", () => {
-    renderAnalytics({ estimates: [callable] });
-    expect(screen.queryByText("Call today")).not.toBeInTheDocument();
-    expect(screen.queryByText("Pick reason")).not.toBeInTheDocument();
-  });
-
-  it("gate on: the Call today card shows its count and applies the filter", () => {
+  it("the Call today card shows its count and applies the filter", () => {
     const onFilterChange = vi.fn();
     render(
       <PipelineAnalytics
         estimates={[callable]}
         activeFilter="all"
         onFilterChange={onFilterChange}
-        callListEnabled
       />,
     );
     const card = screen.getByText("Call today").closest("button");

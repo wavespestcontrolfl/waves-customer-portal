@@ -166,20 +166,12 @@ describe('the Automatic hint while the ask goes out after the report text', () =
       .toBe('Review text goes out separately at the first review send (:14 and :44 each hour) at least 10 minutes after the report text. If the report is held for the morning, it goes about 10 minutes after that report text goes out. If the report goes by the Waves app, or texts are turned off for this customer, it goes at the smart send window.');
   });
 
-  test('an unpaid completion invoice: 10 minutes after payment', () => {
-    const { text } = completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'auto', preview: afterReport, reviewAwaitsPayment: true });
-    expect(text).toMatch(/waits for the invoice to be paid, then goes out at the first review send \(:14 and :44 each hour\) at least 10 minutes after payment/);
-    // Any report not texted right away keeps the smart window (codex #6434 r11 P2).
-    expect(text).toMatch(/If the report was held for the morning: about 10 minutes after that report text or the payment, whichever is later \(a single visit's held report that went out before the payment keeps the smart send window\)\./);
-  });
-
-  test('GATE_REVIEW_ASK_AT_VISIT (askAtVisit in the preview): an unpaid invoice gets the same 10 minutes after the report text, and the link still stays out of the pay-link text', () => {
-    const atVisit = { ...afterReport, askAtVisit: true };
-    const unpaid = completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'auto', preview: atVisit, reviewAwaitsPayment: true });
-    expect(unpaid.text).toBe(completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'auto', preview: atVisit }).text);
+  test('an unpaid invoice gets the same 10 minutes after the report text, and the link still stays out of the pay-link text', () => {
+    const unpaid = completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'auto', preview: afterReport, reviewAwaitsPayment: true });
+    expect(unpaid.text).toBe(completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'auto', preview: afterReport }).text);
     expect(unpaid.text).toMatch(/at least 10 minutes after the report text/);
     expect(unpaid.text).not.toMatch(/invoice/);
-    const asked = completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'customer_requested', preview: { ...atVisit, bundlesImmediateAsk: true }, reviewAwaitsPayment: true });
+    const asked = completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'customer_requested', preview: { ...afterReport, bundlesImmediateAsk: true }, reviewAwaitsPayment: true });
     expect(asked.bundled).toBe(false);
     expect(asked.text).not.toMatch(/waits for invoice payment/);
   });
@@ -192,14 +184,15 @@ describe('the Automatic hint while the ask goes out after the report text', () =
     expect(now.text).toMatch(/smart send window, because no report text goes out/);
     expect(now.text).not.toMatch(/after the report text/);
     const paid = completionReviewHint({ willReview: true, reviewTiming: 'auto', preview: afterReport, reviewAwaitsPayment: true, ...opts });
-    expect(paid.text).toMatch(/waits for the invoice to be paid, then goes out at the smart send window, because no report text goes out/);
+    expect(paid.text).toBe(now.text);
   });
 
   test('gate off: the smart-window wording is unchanged', () => {
     const off = { ...afterReport, afterReport: false, afterReportMinutes: null, cadenceTickMinutesOfHour: [14, 44], earliestAt: '2026-10-20T20:00:00.000Z', latestAt: '2026-10-20T20:30:00.000Z', at: '2026-10-20T20:15:00.000Z' };
     expect(timedReviewHint({ reviewTiming: 'auto', preview: off })).not.toMatch(/after the report text/);
     const { text } = completionReviewHint({ willReview: true, effectiveSendSms: true, reviewTiming: 'auto', preview: off, reviewAwaitsPayment: true });
-    expect(text).toMatch(/smart send window computed from the payment/);
+    expect(text).toContain(timedReviewHint({ reviewTiming: 'auto', preview: off }));
+    expect(text).not.toMatch(/invoice/);
   });
 
   test('explicit timings keep their own wording', () => {

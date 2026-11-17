@@ -109,18 +109,8 @@ test.each(['Jamie Example', '(941) 555-0101'])('search %s shares row/count crite
   expect(rows.sql).toContain("CONCAT_WS(' '"); expect(rows.bindings).toContain(`%${search}%`);
   if (search.includes('941')) expect(rows.bindings).toContain('%9415550101%');
 });
-describe('GET /analytics/lost and GATE_LEAD_NO_RESPONSE_REASON', () => {
-  afterEach(() => { delete process.env.GATE_LEAD_NO_RESPONSE_REASON; });
-  test('gate off: only lost leads are counted', async () => {
-    lead = null;
-    expect((await request('get', '/analytics/lost', {}, { start_date: '2030-09-24', end_date: '2030-09-24' })).error).toBeUndefined();
-    expect(queries[0].sql).toContain('"status" = ?');
-    expect(queries[0].sql).not.toContain('"status" in');
-    expect(queries[0].bindings).toContain('lost');
-    expect(queries[0].bindings).not.toContain('unresponsive');
-  });
-  test('gate on: unresponsive leads are counted too, so no_response shows as a reason', async () => {
-    process.env.GATE_LEAD_NO_RESPONSE_REASON = 'true';
+describe('GET /analytics/lost counts unresponsive leads', () => {
+  test('unresponsive leads are counted too, so no_response shows as a reason', async () => {
     lead = null;
     expect((await request('get', '/analytics/lost', {}, { start_date: '2030-09-24', end_date: '2030-09-24' })).error).toBeUndefined();
     expect(queries[0].sql).toContain('"status" in (?, ?)');

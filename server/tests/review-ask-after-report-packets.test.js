@@ -66,14 +66,11 @@ test('no anchor (gate off, or no sent summary text): enrollment keeps the smart 
   expect(ReviewService.enrollPostService.mock.calls[0][0].reportTextAnchor).toBeNull();
 });
 
-describe('GATE_REVIEW_ASK_AT_VISIT on a combined visit (owner 2026-11-01)', () => {
+describe('Review ask at the visit, a combined visit (owner 2026-11-01)', () => {
   const unpaid = { id: 'inv-1', status: 'sent' };
-  const switchWas = process.env.GATE_REVIEW_ASK_AT_VISIT;
-  afterEach(() => { if (switchWas === undefined) delete process.env.GATE_REVIEW_ASK_AT_VISIT; else process.env.GATE_REVIEW_ASK_AT_VISIT = switchWas; });
   const stamps = (updates) => updates.filter((u) => u.table === 'service_records');
 
-  test('switch on: the unpaid invoice does not hold the ask after the summary, and the members are stamped once it answered', async () => {
-    process.env.GATE_REVIEW_ASK_AT_VISIT = 'true';
+  test('the unpaid invoice does not hold the ask after the summary, and the members are stamped once it answered', async () => {
     const updates = [];
     const out = await enrollVisitCompletionReview('pk-1', fakeDatabase({ smsEffect: { status: 'sent' }, legs: sentLegs, invoice: unpaid, updates }), { deliverySettled: true });
     expect(out).toMatchObject({ enrolled: true });
@@ -81,8 +78,7 @@ describe('GATE_REVIEW_ASK_AT_VISIT on a combined visit (owner 2026-11-01)', () =
     expect(stamps(updates).map((u) => u.row.structured_notes.bindings)).toEqual([[JSON.stringify({ reviewAskedAtVisit: true })]]);
   });
 
-  test('switch on, a passing enrollment failure: no stamp, the packet goes back to recovery', async () => {
-    process.env.GATE_REVIEW_ASK_AT_VISIT = 'true';
+  test('a passing enrollment failure: no stamp, the packet goes back to recovery', async () => {
     ReviewService.enrollPostService.mockResolvedValueOnce({ started: false, reason: 'plan_resolution_failed' });
     const updates = [];
     const out = await enrollVisitCompletionReview('pk-1', fakeDatabase({ smsEffect: { status: 'sent' }, legs: sentLegs, invoice: unpaid, updates }), { deliverySettled: true });
@@ -99,10 +95,7 @@ describe('GATE_REVIEW_ASK_AT_VISIT on a combined visit (owner 2026-11-01)', () =
     expect(updates).toEqual([]);
   });
 
-  test('switch off: the unpaid invoice holds the ask, and the payment of an unstamped visit still asks', async () => {
-    delete process.env.GATE_REVIEW_ASK_AT_VISIT;
-    const held = await enrollVisitCompletionReview('pk-1', fakeDatabase({ smsEffect: { status: 'sent' }, legs: sentLegs, invoice: unpaid }), { deliverySettled: true });
-    expect(held).toEqual({ enrolled: false, reason: 'invoice_unpaid' });
+  test('the payment of an unstamped visit still asks', async () => {
     const updates = [];
     const paid = await enrollVisitCompletionReview('pk-1', fakeDatabase({ smsEffect: { status: 'sent' }, legs: sentLegs, invoice: { ...unpaid, status: 'paid' }, updates }), { trigger: 'payment' });
     expect(paid).toMatchObject({ enrolled: true });

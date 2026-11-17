@@ -104,6 +104,9 @@ describe('review request follow-up flow', () => {
     jest.clearAllMocks();
     jest.useFakeTimers().setSystemTime(new Date('2026-06-03T14:00:00.000Z'));
     shortenOrPassthrough.mockImplementation((url) => Promise.resolve(url));
+    // The 180-day tap pause has its own suites; here no customer has tapped, and the pause's
+    // click read would otherwise take the next query off these ordered fakes.
+    jest.spyOn(require('../services/review-click-guard'), 'tapPauseActive').mockResolvedValue(false);
   });
 
   afterEach(() => {

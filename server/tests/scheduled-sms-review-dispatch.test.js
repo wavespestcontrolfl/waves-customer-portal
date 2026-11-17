@@ -331,7 +331,7 @@ test('a tracked click since the visit drops ONLY the bundled review suffix: the 
   expect(require('../services/review-click-guard').askIdSuppressedByClick).toHaveBeenCalledWith('review-1');
 });
 
-test('GATE_REVIEW_TAP_PAUSE: a paused bundled ask in a deferred completion drops ONLY the review suffix; the completion still sends and the ask is suppressed', async () => {
+test('Tap pause: a paused bundled ask in a deferred completion drops ONLY the review suffix; the completion still sends and the ask is suppressed', async () => {
   const guard = require('../services/review-click-guard');
   const completion = 'Your service is complete: https://portal.test/report/abc\nReceipt: https://portal.test/receipt/xyz';
   row.message_body = completion + '\n\nEnjoyed the service? A quick review means the world: https://portal.test/rate/review1';

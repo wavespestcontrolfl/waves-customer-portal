@@ -1840,7 +1840,7 @@ const ReviewService = {
     // ({ status: 'sent'|'paid', at }). Gate off: ignored.
     reportTextAnchor = null,
   }) {
-    // GATE_REVIEW_TAP_PAUSE (owner 2026-11-02, reviews audit D3): a customer who tapped a tracked
+    // Tap pause (owner 2026-11-02, reviews audit D3): a customer who tapped a tracked
     // review link in the last 180 days gets no automatic ask, in either mode. A link the customer
     // asked for (completion panel, or the visit record for a combined visit) still goes. A failed
     // lookup asks nothing now and reads as a passing failure, so a recovery path (the payment, the
@@ -2088,7 +2088,7 @@ const ReviewService = {
       // Webhooks pass a narrow projection. Resolve omitted ownership before
       // considering the representative service record's review preferences.
       const Packets = require('./visit-completion-packets');
-      // trigger 'payment': a combined visit that already asked after its summary (GATE_REVIEW_ASK_AT_VISIT)
+      // trigger 'payment': a combined visit that already asked after its summary
       // gets no second ask from the payment.
       const packetResult = invoice?.id && invoice.visit_completion_packet_id === undefined
         ? await Packets.enrollVisitCompletionReviewForInvoice(invoice.id, db, { trigger: "payment" })
@@ -2106,7 +2106,7 @@ const ReviewService = {
       if (typeof notes === "string") {
         try { notes = JSON.parse(notes); } catch { notes = {}; }
       }
-      // GATE_REVIEW_ASK_AT_VISIT (owner 2026-11-01): this visit's completion made its review ask after the
+      // Review ask at the visit (owner 2026-11-01): this visit's completion made its review ask after the
       // report text (started, or a final skip), paid or not, so a payment never starts another. A visit
       // with no such marker (no visit-time ask, a passing failure, completed before the switch, or the
       // payment came first) keeps this ask; the per-record dedupe keeps it to one.
@@ -2298,7 +2298,7 @@ const ReviewService = {
       logger.info(`[review] Suppressed request (customerId=${request.customer_id} requestId=${requestId} reason=review_link_clicked)`);
       return { refused: "review_link_clicked" };
     }
-    // GATE_REVIEW_TAP_PAUSE: a queued AUTOMATIC ask (one queued before the switch, or in legacy mode)
+    // Tap pause: a queued AUTOMATIC ask (one queued before the switch, or in legacy mode)
     // stands down after a tap in the last 180 days, whatever visit it answered. Staff asks go.
     if (OUTREACH.isAskTemplate(request.template_key) && await ClickGuard.tapPauseForRequest(request)) {
       await db("review_requests").where({ id: requestId }).update({ status: "suppressed" });
@@ -4514,7 +4514,7 @@ const ReviewService = {
             suppressed++;
             return;
           }
-          // GATE_REVIEW_TAP_PAUSE: the Day-3 follow-up is an automatic text, whoever sent the first
+          // Tap pause: the Day-3 follow-up is an automatic text, whoever sent the first
           // ask: a tap in the last 180 days ends it.
           if (OUTREACH.isAskTemplate(request.template_key) && await ClickGuard.tapPauseActive(request.customer_id)) {
             await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() });
@@ -7250,7 +7250,7 @@ const ReviewService = {
 
     if (manualAskRecent) return stop("manual_ask_recent");
 
-    // GATE_REVIEW_TAP_PAUSE (owner 2026-11-02, D3): an automatic cadence stands down when the customer
+    // Tap pause (owner 2026-11-02, D3): an automatic cadence stands down when the customer
     // tapped a tracked review link in the last 180 days (a tap on this cadence stopped it above). A
     // cadence a person started, or one the customer asked for (its own stamp or its visit record),
     // keeps going. A failed lookup defers an ask step (below).

@@ -1,5 +1,5 @@
 /**
- * Public quote wizard — GATE_QUOTE_SAME_PERSON_MATCH.
+ * Public quote wizard — same-person customer match.
  *
  * 2026-10-30: one person ran the wizard 5 times in 15 minutes. The typed phone
  * already matched 2 rows of that person at the same address, so the ambiguity
@@ -60,37 +60,20 @@ function fakeDb(phoneRows, emailRows = []) {
   return db;
 }
 
-describe('findExistingCustomerByContact with GATE_QUOTE_SAME_PERSON_MATCH', () => {
-  const saved = process.env.GATE_QUOTE_SAME_PERSON_MATCH;
-  afterEach(() => {
-    if (saved === undefined) delete process.env.GATE_QUOTE_SAME_PERSON_MATCH;
-    else process.env.GATE_QUOTE_SAME_PERSON_MATCH = saved;
-  });
-
+describe('findExistingCustomerByContact same-person match', () => {
   const twoSamePerson = [
     row('web', { created_at: '2026-10-29T10:00:00Z' }),
     row('inspection', { created_at: '2026-10-28T10:00:00Z' }),
   ];
 
-  test('gate off + 2 matches: null, so the route inserts a new customers row (old behavior)', async () => {
-    delete process.env.GATE_QUOTE_SAME_PERSON_MATCH;
-    const db = fakeDb(twoSamePerson);
-    expect(await findExistingCustomerByContact(db, CONTACT, TYPED)).toBeNull();
-    expect(db.limits).toEqual([2]);
-    process.env.GATE_QUOTE_SAME_PERSON_MATCH = 'yes';
-    expect(await findExistingCustomerByContact(fakeDb(twoSamePerson), CONTACT, TYPED)).toBeNull();
-  });
-
-  test('gate on + 2 same-person rows at the typed address: the winner row, so the route inserts nothing', async () => {
-    process.env.GATE_QUOTE_SAME_PERSON_MATCH = 'true';
+  test('2 same-person rows at the typed address: the winner row, so the route inserts nothing', async () => {
     const db = fakeDb(twoSamePerson);
     const found = await findExistingCustomerByContact(db, CONTACT, TYPED);
     expect(found.id).toBe('inspection'); // equal business weight: the older row
     expect(db.limits).toEqual([2, 11]);
   });
 
-  test('gate on + rows that do not all match: null, so the route inserts as before', async () => {
-    process.env.GATE_QUOTE_SAME_PERSON_MATCH = 'true';
+  test('rows that do not all match: null, so the route inserts as before', async () => {
     const otherName = [row('a'), row('b', { first_name: 'Joan' })];
     const otherStreet = [row('a'), row('b', { address_line1: '9 Other Ave' })];
     expect(await findExistingCustomerByContact(fakeDb(otherName), CONTACT, TYPED)).toBeNull();
@@ -98,21 +81,18 @@ describe('findExistingCustomerByContact with GATE_QUOTE_SAME_PERSON_MATCH', () =
     expect(await findExistingCustomerByContact(fakeDb(twoSamePerson), CONTACT, { ...TYPED, address_line1: '77 Elm Ct' })).toBeNull();
   });
 
-  test('gate on + more than 10 phone matches: null', async () => {
-    process.env.GATE_QUOTE_SAME_PERSON_MATCH = 'true';
+  test('more than 10 phone matches: null', async () => {
     const eleven = Array.from({ length: 11 }, (_, i) => row(`r${i}`));
     expect(await findExistingCustomerByContact(fakeDb(eleven), CONTACT, TYPED)).toBeNull();
   });
 
-  test('gate on without the typed argument (the rodent pre-pricing lookup): null, no cluster fetch', async () => {
-    process.env.GATE_QUOTE_SAME_PERSON_MATCH = 'true';
+  test('without the typed argument (the rodent pre-pricing lookup): null, no cluster fetch', async () => {
     const db = fakeDb(twoSamePerson);
     expect(await findExistingCustomerByContact(db, CONTACT)).toBeNull();
     expect(db.limits).toEqual([2]);
   });
 
-  test('a single phone match and the email fallback are unchanged with the gate on', async () => {
-    process.env.GATE_QUOTE_SAME_PERSON_MATCH = 'true';
+  test('a single phone match and the email fallback are unchanged', async () => {
     expect(await findExistingCustomerByContact(fakeDb([row('only')]), CONTACT, TYPED)).toMatchObject({ id: 'only' });
     expect(await findExistingCustomerByContact(fakeDb([], [row('e')]), CONTACT, TYPED)).toMatchObject({ id: 'e' });
   });

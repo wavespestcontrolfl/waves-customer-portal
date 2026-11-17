@@ -276,13 +276,13 @@ function numberOrNull(...values) {
 // email would resolve the same shared household by another key); only a
 // no-match phone probe falls through.
 //
-// GATE_QUOTE_SAME_PERSON_MATCH (dark): an ambiguous phone whose 2..10 rows are
+// Same-person match: an ambiguous phone whose 2..10 rows are
 // ALL one person at the typed address (names + street/unit/ZIP match, pairwise
 // and against the typed contact) resolves to the nightly sweep's winner row,
 // so a rerun does not add a customers row each time. `typed` is optional; the
 // pre-pricing rodent lookup omits it and keeps the old null.
 async function resolveAmbiguousPhoneSamePerson(database, phoneDigits, typed) {
-  if (!typed || !require('../config/feature-gates').quoteSamePersonMatchLive()) return null;
+  if (!typed) return null;
   const rows = await database('customers')
     .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
     .whereNull('deleted_at')

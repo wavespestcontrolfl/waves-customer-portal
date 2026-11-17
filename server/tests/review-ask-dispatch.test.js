@@ -227,7 +227,7 @@ describe('review ask dispatch boundary', () => {
     expect(lock.runExclusive).toHaveBeenCalledWith('review-send:customer', expect.any(Function), { recordHealth: false, waitForSlot: false });
   });
 
-  test('GATE_REVIEW_TAP_PAUSE: a paused bundled ask drops its line and the completion still goes; an unreadable pause holds the line', async () => {
+  test('Tap pause: a paused bundled ask drops its line and the completion still goes; an unreadable pause holds the line', async () => {
     const send = jest.fn(async () => ({ sent: true }));
     guard.tapPauseForRequestId.mockResolvedValueOnce(true);
     expect(await withBundledAskGate('customer', 'rr-1', send)).toEqual({ sent: true });
