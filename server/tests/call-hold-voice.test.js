@@ -41,6 +41,11 @@ describe('isHoldPhrase', () => {
     "I'm putting you on hold now.",
     "Give me one second, I'll put you on hold.",
     'Let me put you on hold, okay?',
+    // A condition after the ask, a polite "if you could", and words that only look like a question.
+    'Please hold while I see if the tech is in.',
+    'Let me put you on hold while I see if I can find it.',
+    'If you could please hold for one moment.',
+    'Will do, please hold.',
     'PLEASE   HOLD',
   ])('starts a hold: %j', (text) => {
     expect(isHoldPhrase(text)).toBe(true);
@@ -60,6 +65,12 @@ describe('isHoldPhrase', () => {
     'Can you please hold?',
     'Okay, can you hold, please?',
     'Is it okay if I put you on hold?',
+    'Before I check that, can you please hold?',
+    'Let me put you on hold, is that okay?',
+    // A condition makes it a maybe, not a hold.
+    'If I need to check with the technician, I will put you on hold.',
+    "I'll put you on hold if I need to.",
+    'When I am putting you on hold, the recording stops.',
     // Lawn and pest instructions, and account holds.
     'Please hold off on watering for 24 hours.',
     'Please hold off on mowing until Friday.',
