@@ -160,7 +160,7 @@ const claudeQueuePatch = ({ className, severity }) => ({ feed: 'activity', who: 
 // Already stamped by an earlier step of the same write (notifyAdmin, then create).
 const isStamped = (meta) => Boolean(meta && meta.claudeQueue && meta.feed === 'activity');
 
-// A bell row the owner sent to Claude with the bell's "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE,
+// A bell row the owner sent to Claude with the bell's "Send to Claude" (
 // services/admin-alert-send-to-claude.js) carries this class, and `sentToClaude` says when, by whom and about whom.
 const SENT_TO_CLAUDE_CLASS = 'sent-to-claude';
 const SENT_FIELDS = ['feed', 'who', 'severity', 'claudeQueue', 'sentToClaude'];

@@ -1,4 +1,4 @@
-// GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE (owner 2026-11-02, option A): an
+// Estimate follow-up email reply pause (owner 2026-11-02, option A): an
 // inbound email from the customer pauses the estimate follow-up emails the way
 // an inbound text already does. Mocked unit suite: the db builder records every
 // table it is asked for and every predicate, and resolves per-table rows.
@@ -51,8 +51,7 @@ jest.mock('../services/estimate-conversion-guard', () => ({
 }));
 jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: jest.fn(() => '+19413180000') }));
 jest.mock('../config/feature-gates', () => ({
-  isEnabled: jest.fn(() => true), // an every-key-true mock must NOT switch the new gate on
-  estimateFollowupEmailReplyPauseLive: jest.fn(() => false),
+  isEnabled: jest.fn(() => true),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/email-template-library', () => ({
@@ -65,7 +64,6 @@ jest.mock('../services/email/gmail-client', () => ({}));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const featureGates = require('../config/feature-gates');
 const { hasRepliedRecently } = require('../services/estimate-follow-up')._private;
 
 const CUSTOMER_EST = {
@@ -87,10 +85,6 @@ const CUSTOMER_REPLY = { from_address: 'pat@example.com', authentication_results
 const FORGED = 'mx.google.com; dkim=none; spf=pass (google.com: domain of "x dkim=pass header.d=example.com y"@evil.example designates 192.0.2.1 as permitted sender) smtp.mailfrom="x dkim=pass header.d=example.com y"@evil.example';
 const LEAD_REPLY = { from_address: 'lead@example.com', authentication_results: ALIGNED('example.com') };
 
-function setGate(on) {
-  featureGates.estimateFollowupEmailReplyPauseLive.mockReturnValue(on);
-}
-
 // rows: { messages: row|null, customers: row|null|Error, emails: rows[]|Error }
 function setRows(rows) {
   db._rows = (table) => {
@@ -100,30 +94,14 @@ function setRows(rows) {
   };
 }
 
-describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE)', () => {
+describe('hasRepliedRecently email arm', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db._calls.length = 0;
     db._rows = null;
-    setGate(false);
   });
 
-  test('gate off: the emails table is never queried, even for a customer who emailed', async () => {
-    setRows({ emails: { id: 'e1' } });
-    expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(false);
-    expect(emailCalls()).toHaveLength(0);
-    expect(await hasRepliedRecently(LEAD_EST)).toBe(false);
-    expect(emailCalls()).toHaveLength(0);
-  });
-
-  test('a mock that answers true to every isEnabled key does not switch the gate on', async () => {
-    setRows({ emails: { id: 'e1' } });
-    await hasRepliedRecently(CUSTOMER_EST);
-    expect(emailCalls()).toHaveLength(0);
-  });
-
-  test('gate on + authenticated email from the customer\'s address inside the window = true', async () => {
-    setGate(true);
+  test('authenticated email from the customer\'s address inside the window = true', async () => {
     setRows({ customers: { email: 'pat@example.com' }, emails: [CUSTOMER_REPLY] });
     const before = Date.now();
     expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(true);
@@ -142,7 +120,6 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
   });
 
   test('customer_id is never sender proof: the query keys on the expected addresses only', async () => {
-    setGate(true);
     setRows({ customers: { email: 'owner@example.org' }, emails: [] });
     expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(false);
     const [c] = emailCalls();
@@ -152,32 +129,27 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
   });
 
   test('a spoofed From never counts: the sender did not authenticate as its domain', async () => {
-    setGate(true);
     setRows({ emails: [{ from_address: 'lead@example.com', authentication_results: SPOOFED }] });
     expect(await hasRepliedRecently(LEAD_EST)).toBe(false);
     expect(emailCalls()).toHaveLength(1);
   });
 
   test('a dkim=pass forged inside a quoted MAIL FROM never counts (strict reader)', async () => {
-    setGate(true);
     setRows({ emails: [{ from_address: 'lead@example.com', authentication_results: FORGED }] });
     expect(await hasRepliedRecently(LEAD_EST)).toBe(false);
   });
 
   test('a row with no Authentication-Results never counts', async () => {
-    setGate(true);
     setRows({ emails: [{ from_address: 'pat@example.com', authentication_results: null }] });
     expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(false);
   });
 
   test('one authenticated reply among spoofed rows counts', async () => {
-    setGate(true);
     setRows({ emails: [{ from_address: 'lead@example.com', authentication_results: SPOOFED }, LEAD_REPLY] });
     expect(await hasRepliedRecently(LEAD_EST)).toBe(true);
   });
 
   test('a lead (no customer_id) matches its estimate address only, with no customer read', async () => {
-    setGate(true);
     setRows({ emails: [LEAD_REPLY] });
     expect(await hasRepliedRecently(LEAD_EST)).toBe(true);
     expect(db._calls.filter((x) => x.table === 'customers')).toHaveLength(0);
@@ -186,14 +158,12 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
   });
 
   test('no email in the window = false', async () => {
-    setGate(true);
     setRows({ emails: [] });
     expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(false);
     expect(emailCalls()).toHaveLength(1);
   });
 
   test('a Gmail SENT row never counts: the query excludes personSentFilter rows (NULL labels kept)', async () => {
-    setGate(true);
     setRows({ emails: [] });
     await hasRepliedRecently(CUSTOMER_EST);
     const [c] = emailCalls();
@@ -204,7 +174,6 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
   });
 
   test('one of our own addresses never counts as a reply address', async () => {
-    setGate(true);
     setRows({ customers: { email: 'pat@example.com' }, emails: [CUSTOMER_REPLY] });
     // Lead with an internal address: no usable address, no email query, false.
     expect(await hasRepliedRecently({ ...LEAD_EST, customer_email: 'contact@wavespestcontrol.com' })).toBe(false);
@@ -221,21 +190,18 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
   });
 
   test('a lead with no usable email and no phone is false without any email query', async () => {
-    setGate(true);
     setRows({ emails: [CUSTOMER_REPLY] });
     expect(await hasRepliedRecently({ id: 'x', customer_id: null, customer_phone: null, customer_email: '  ' })).toBe(false);
     expect(emailCalls()).toHaveLength(0);
   });
 
   test('the SMS arm is checked first: a text short-circuits the email query', async () => {
-    setGate(true);
     setRows({ messages: { id: 'm1' }, emails: [CUSTOMER_REPLY] });
     expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(true);
     expect(emailCalls()).toHaveLength(0);
   });
 
   test('email-read failure fails OPEN on the cron path', async () => {
-    setGate(true);
     setRows({ emails: Object.assign(new Error('select ... where from_address = any(pat@example.com) - emails down'), { code: '57P01' }) });
     expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(false);
     // the estimate id and the error code only: never the message, which carries the bindings
@@ -244,24 +210,17 @@ describe('hasRepliedRecently email arm (GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE
   });
 
   test('a failed customer-address read fails open on cron and throws on replay', async () => {
-    setGate(true);
     setRows({ customers: new Error('customers down'), emails: [CUSTOMER_REPLY] });
     expect(await hasRepliedRecently(CUSTOMER_EST)).toBe(false);
     await expect(hasRepliedRecently(CUSTOMER_EST, 14, { throwOnError: true })).rejects.toThrow('reply-pause check failed');
   });
 
   test('email-read failure THROWS on the replay path', async () => {
-    setGate(true);
     setRows({ emails: new Error('select ... any(pat@example.com) - emails down') });
     const err = await hasRepliedRecently(CUSTOMER_EST, 14, { throwOnError: true }).catch((e) => e);
     expect(err).toBeInstanceOf(Error);
     // fails closed, and the thrown message carries no bindings (the replay caller logs it)
     expect(err.message).toBe('reply-pause check failed: Error');
     expect(err.message).not.toContain('pat@example.com');
-  });
-
-  test('gate off: an emails failure is unreachable (replay path still only reads texts)', async () => {
-    setRows({ emails: new Error('emails down') });
-    await expect(hasRepliedRecently(CUSTOMER_EST, 14, { throwOnError: true })).resolves.toBe(false);
   });
 });

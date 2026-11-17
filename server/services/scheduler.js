@@ -5599,8 +5599,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 8:20AM — Follow-up due alerts (GATE_FOLLOWUP_DUE_ALERT; returns before
-  // any read when off). Owner 2026-11-02 (B1): a flagged follow-up that is due
+  // DAILY 8:20AM — Follow-up due alerts. Owner 2026-11-02 (B1): a flagged follow-up that is due
   // and has no later visit gets one Schedule bell on its due date (link to the
   // customer page, where the owner books); the ones already more than 3 days
   // past due share one catch-up bell. Each run closes the bells whose
@@ -5608,7 +5607,6 @@ function initScheduledJobs() {
   // nothing to a customer.
   // =========================================================================
   cron.schedule('20 8 * * *', async () => {
-    if (!require('../config/feature-gates').followupDueAlertLive()) return;
     try {
       await runExclusive('followup-due-alerts', async () => {
         const result = await require('./followup-due-alerts').runFollowupDueAlerts();
@@ -5666,15 +5664,13 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // MONDAYS 9:20AM — Monday review bell (GATE_MONDAY_REVIEW_BELL; returns before
-  // any read when off). Owner 2026-11-02 ("build all", B2): one needs-you bell a
+  // MONDAYS 9:20AM — Monday review bell. Owner 2026-11-02 ("build all", B2): one needs-you bell a
   // week for the work that sits: needs-you alerts unread 14+ days, overdue
   // promises, completed visits with only a draft invoice, open past visits. The
   // key is the ET Monday date, so a rerun the same day writes nothing; last
   // week's row closes first. Sends nothing to a customer.
   // =========================================================================
   cron.schedule('20 9 * * 1', async () => {
-    if (!require('../config/feature-gates').mondayReviewBellLive()) return;
     try {
       await runExclusive('monday-review-bell', async () => {
         const result = await require('./monday-review-bell').runMondayReview();

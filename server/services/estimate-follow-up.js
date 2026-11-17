@@ -92,17 +92,8 @@ function wasRecentlyOpened(est, hours = 2, nowMs = Date.now()) {
   return nowMs - ts < hours * 3600000;
 }
 
-// GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE, read at CALL time. Reached through
-// the module object behind a typeof guard so a whole-module feature-gates mock
-// that predates the gate reads as OFF instead of throwing (and an `isEnabled`
-// mock that answers true for every key cannot turn this one on by accident).
-function emailReplyPauseLive() {
-  return typeof featureGates.estimateFollowupEmailReplyPauseLive === "function"
-    && featureGates.estimateFollowupEmailReplyPauseLive() === true;
-}
-
 // SMS arm of the reply-pause: an inbound text (conversation matched by
-// customer_id or phone) inside the window. Unchanged from before the email arm.
+// customer_id or phone) inside the window.
 async function hasInboundSmsSince(est, cutoff) {
   const q = db("messages")
     .join("conversations", "messages.conversation_id", "conversations.id")
@@ -182,15 +173,13 @@ async function hasInboundEmailSince(est, cutoff) {
 
 // Reply-pause: if the customer has SMS'd Waves in the last N days (via
 // phone match or customer_id), pause the cron touch and let Virginia
-// handle it live. With GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE on, an
-// inbound EMAIL in the same window pauses it too (SMS arm checked first;
-// off = the emails table is never queried). Soft-fails if the tables aren't
+// handle it live. An inbound EMAIL in the same window pauses it too (SMS arm
+// checked first). Soft-fails if the tables aren't
 // present (e.g. fresh env) so we don't break the whole follow-up loop.
 async function hasRepliedRecently(est, days = 14, { throwOnError = false } = {}) {
   const cutoff = new Date(Date.now() - days * 86400000);
   try {
     if (await hasInboundSmsSince(est, cutoff)) return true;
-    if (!emailReplyPauseLive()) return false;
     return await hasInboundEmailSince(est, cutoff);
   } catch (e) {
     // Cron path fails OPEN (a skipped nudge self-heals on the next stage

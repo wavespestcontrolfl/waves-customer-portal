@@ -32,12 +32,10 @@
 // the list-1 query skips this key so the bell never counts itself.
 //
 // Sends nothing to a customer, calls no paid API, and writes only admin
-// notifications. GATE_MONDAY_REVIEW_BELL (strict 'true', read at call time).
-// Off = the weekly cron returns before any read.
+// notifications.
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { mondayReviewBellLive } = require('../config/feature-gates');
 // GATE_MONDAY_FELL_OFF_LINE, read at call time and guarded: a test that mocks feature-gates without the reader reads off.
 const fellOffLineLive = () => require('../config/feature-gates').mondayFellOffLineLive?.() === true;
 const { etDateString } = require('../utils/datetime-et');
@@ -344,13 +342,11 @@ const defaultLoaders = {
 };
 
 /**
- * Monday cron entry point. Returns { skipped } when the gate is off, otherwise
- * { count, outcome }: raised | unchanged | suppressed | closed | clear.
+ * Monday cron entry point. Returns { count, outcome }: raised | unchanged | suppressed | closed | clear.
  * A read failure throws (runExclusive records it in job_health) and closes
  * nothing. `loaders` replaces the four list readers (tests).
  */
-async function runMondayReview({ now = new Date(), database = db, gateEnabled, loaders = {} } = {}) {
-  if (!(gateEnabled ?? mondayReviewBellLive())) return { skipped: 'disabled' };
+async function runMondayReview({ now = new Date(), database = db, loaders = {} } = {}) {
   const read = { ...defaultLoaders, ...loaders };
   const ctx = { now, database };
   const [alerts, promises, drafts, visits] = [

@@ -15,7 +15,7 @@ const LAST_TOUCH_SQL = `GREATEST(
 )`;
 
 // Newest PERSON touch for the customer row `customerAlias` (customers.id), served
-// as "last contact" behind GATE_CUSTOMER_LAST_TOUCH by the Intelligence Bar
+// as "last contact" by the Intelligence Bar
 // customer search, the admin MCP and the admin customer directory. NULL when the
 // customer has none. It differs from LAST_TOUCH_SQL above, which is the quiet
 // list's "meaningful touch" (completed visit or inbound text only, floored to

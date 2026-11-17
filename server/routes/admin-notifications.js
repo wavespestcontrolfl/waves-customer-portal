@@ -15,10 +15,10 @@ const { withAlertButtons, runAlertButton } = require('../services/admin-alert-bu
 const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const { explainAdminAlert, explainerLive, withExplainerFields } = require('../services/admin-alert-explainer');
 const {
-  sendAdminAlertToClaude, unsendAdminAlertFromClaude, withSendToClaudeFields, cleanNote, sendToClaudeLive,
+  sendAdminAlertToClaude, unsendAdminAlertFromClaude, withSendToClaudeFields, cleanNote,
 } = require('../services/admin-alert-send-to-claude');
 const {
-  copyLive, withSendCopyToClaudeFields, sendAlertCopyToClaude, cancelAlertCopy,
+  withSendCopyToClaudeFields, sendAlertCopyToClaude, cancelAlertCopy,
 } = require('../services/admin-alert-copy-to-claude');
 
 router.use(adminAuthenticate);
@@ -163,7 +163,7 @@ router.get('/', async (req, res, next) => {
       // The customer it names and its "What to do" summary ride as `customer`, `explainable` and `explainer`, for the
       // admin role while GATE_ALERT_EXPLAINER is on. With that gate off, GATE_ALERT_CUSTOMER_LINE alone adds `customer`
       // (a database read, no AI call). The done list (/done) carries neither. `sendToClaude` marks a row the "Send to Claude" button may move,
-      // for the admin role while GATE_ALERT_SEND_TO_CLAUDE is on (no explainer needed).
+      // for the owner login (no explainer needed).
       notifications: [...(page === 1 && !before ? liveCtx.live : []), ...rows],
       page, limit, hasMore: persisted.length > limit,
       next: persisted.length > limit && lastServed ? (ranked ? formatRankedCursor(lastServed) : formatCursor(lastServed)) : null,
@@ -583,16 +583,14 @@ router.post('/:id/explain', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/notifications/:id/send-to-claude — the bell's "Send to Claude" button (GATE_ALERT_SEND_TO_CLAUDE, owner
+// POST /api/admin/notifications/:id/send-to-claude — the bell's "Send to Claude" button (owner
 // login only; no explainer gate, owner 2026-11-03). `version` (required): the content version the bell served for the row.
 // `note` (optional text, 500 characters): the admin's own words for the Claude tab. Moves the row out of the bell into
 // Claude's queue, where the Mac launcher opens a Claude tab for it (services/admin-alert-send-to-claude.js). The answer
 // carries `at`, the send's time, for the undo. 422 for customer contact, a row our code did not write, a done row or a
-// row already off the bell; 409 when the row changed since the bell read it. Sends nothing to anyone. Gate off: 404,
-// the same as an unknown route.
+// row already off the bell; 409 when the row changed since the bell read it. Sends nothing to anyone.
 router.post('/:id/send-to-claude', requireAdmin, async (req, res, next) => {
   try {
-    if (!sendToClaudeLive()) return res.status(404).json({ error: 'Not found' });
     // Owner login only (Codex security review on #7548): a send and its note go into a Claude terminal tab.
     if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.' });
     const id = String(req.params.id);
@@ -610,13 +608,11 @@ router.post('/:id/send-to-claude', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/notifications/:id/unsend-from-claude — the 10-second Undo after a send (GATE_ALERT_SEND_TO_CLAUDE,
-// owner login only). `at` (required): the time the send answered with. Puts the row back in the bell while it is open, still
+// POST /api/admin/notifications/:id/unsend-from-claude — the 10-second Undo after a send (owner login only). `at` (required): the time the send answered with. Puts the row back in the bell while it is open, still
 // carries that send and no Mac tab has started on it; 409 `started`, `changed` or `done` otherwise. Sends nothing to
-// anyone. Gate off: 404, the same as an unknown route.
+// anyone.
 router.post('/:id/unsend-from-claude', requireAdmin, async (req, res, next) => {
   try {
-    if (!sendToClaudeLive()) return res.status(404).json({ error: 'Not found' });
     // Owner login only (Codex security review on #7548): a send and its note go into a Claude terminal tab.
     if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.' });
     const id = String(req.params.id);
@@ -631,14 +627,13 @@ router.post('/:id/unsend-from-claude', requireAdmin, async (req, res, next) => {
 });
 
 // POST /api/admin/notifications/:id/send-copy-to-claude — the bell's "Send a copy to Claude (read-only)" button for a row
-// "Send to Claude" refuses (GATE_ALERT_SEND_TO_CLAUDE_COPY, owner login only, step 3). `version` (required): the content
+// "Send to Claude" refuses (owner login only, step 3). `version` (required): the content
 // version the bell served for the row. `note` (optional text, 500 characters). Writes ONE new owner-only row into Claude's
 // queue that names the alert by id and holds no customer words; the alert itself stays in the bell
 // (services/admin-alert-copy-to-claude.js). The answer carries the copy's `id` and `at`, for the undo. 409 when the row
-// changed since the bell read it or cannot be copied. Sends nothing to anyone. Gate off: 404, the same as an unknown route.
+// changed since the bell read it or cannot be copied. Sends nothing to anyone.
 router.post('/:id/send-copy-to-claude', requireAdmin, async (req, res, next) => {
   try {
-    if (!copyLive()) return res.status(404).json({ error: 'Not found' });
     if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.' });
     const id = String(req.params.id);
     if (!UUID_RE.test(id)) return res.status(404).json({ error: 'Not found' });
@@ -653,12 +648,11 @@ router.post('/:id/send-copy-to-claude', requireAdmin, async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/notifications/:id/cancel-copy — the 10-second Undo after a copy, on the COPY's id (GATE_ALERT_SEND_TO_CLAUDE_COPY,
-// owner login only). `at` (required): the time the send answered with. Closes the copy while it is open, still that send and
-// no Mac tab has started on it; 409 `started`, `changed` or `done` otherwise. Gate off: 404.
+// POST /api/admin/notifications/:id/cancel-copy — the 10-second Undo after a copy, on the COPY's id
+// (owner login only). `at` (required): the time the send answered with. Closes the copy while it is open, still that send and
+// no Mac tab has started on it; 409 `started`, `changed` or `done` otherwise.
 router.post('/:id/cancel-copy', requireAdmin, async (req, res, next) => {
   try {
-    if (!copyLive()) return res.status(404).json({ error: 'Not found' });
     if (!ibFullAccess(req)) return res.status(403).json({ error: 'This action is limited to the owner account.' });
     const id = String(req.params.id);
     if (!UUID_RE.test(id)) return res.status(404).json({ error: 'Not found' });

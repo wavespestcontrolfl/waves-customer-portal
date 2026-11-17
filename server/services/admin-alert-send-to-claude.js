@@ -1,6 +1,6 @@
 'use strict';
 
-// "Send to Claude" (owner 2026-11-02, GATE_ALERT_SEND_TO_CLAUDE): "for the stuff that needs to be fixed, like that broken
+// "Send to Claude" (owner 2026-11-02): "for the stuff that needs to be fixed, like that broken
 // property ID ... we need to be able to send that back to terminal, open a terminal session, to have Claude fix that";
 // scope answer "All but customer contact".
 //
@@ -129,17 +129,12 @@ function sendRefusal(row) {
   return writtenByOurCode(row, meta) ? null : 'not_system_written';
 }
 
-// GATE_ALERT_SEND_TO_CLAUDE, read at call time; a missing or throwing reader reads as off.
-function sendToClaudeLive() {
-  try { return require('../config/feature-gates').alertSendToClaudeLive?.() === true; } catch { return false; }
-}
-
 // The bell list's persisted rows, marked `sendToClaude: true` where the allow-list permits a send, for the owner login
-// (`fullAccess`: ib-access ibFullAccess) while GATE_ALERT_SEND_TO_CLAUDE is on; otherwise the rows as they are. Owner only
+// (`fullAccess`: ib-access ibFullAccess); otherwise the rows as they are. Owner only
 // (Codex security review on #7548): a send and its note go into a Claude terminal tab, and requireAdmin accepts every admin
 // account. Never throws: a row whose check throws stays unmarked.
 function withSendToClaudeFields(rows, { role, fullAccess = false } = {}) {
-  if (!Array.isArray(rows) || role !== 'admin' || fullAccess !== true || !sendToClaudeLive()) return rows;
+  if (!Array.isArray(rows) || role !== 'admin' || fullAccess !== true) return rows;
   return rows.map((row) => {
     try { return sendRefusal(row) ? row : { ...row, sendToClaude: true }; } catch { return row; }
   });
@@ -258,6 +253,6 @@ async function unsendAdminAlertFromClaude(id, { at, by, role, technicianId = nul
 
 module.exports = {
   sendAdminAlertToClaude, unsendAdminAlertFromClaude, withSendToClaudeFields, cleanNote, plainText, byStamp, uuidOrNull, UUID_RE,
-  sendRefusal, sendToClaudeLive, sentPatch,
+  sendRefusal, sentPatch,
   CONTACT_CATEGORIES, CONTACT_TRIGGERS, SYSTEM_CATEGORIES, CHECK_CLASSES, declaredContact,
 };

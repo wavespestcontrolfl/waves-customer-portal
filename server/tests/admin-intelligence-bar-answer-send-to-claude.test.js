@@ -161,16 +161,15 @@ beforeEach(() => {
   mockGapMerges.length = 0;
   mockSavedStatus = 'new';
   process.env.GATE_IB_PLATFORM = 'true';
-  process.env.GATE_IB_SEND_TO_CLAUDE = 'true';
   process.env.GATE_IB_ANSWER_SEND_TO_CLAUDE = 'true';
   delete process.env.AGENT_GAP_REPORTS;
 });
 afterAll(() => {
-  for (const name of ['GATE_IB_PLATFORM', 'GATE_IB_SEND_TO_CLAUDE', 'GATE_IB_ANSWER_SEND_TO_CLAUDE', 'IB_FULL_ACCESS_EMAILS']) delete process.env[name];
+  for (const name of ['GATE_IB_PLATFORM', 'GATE_IB_ANSWER_SEND_TO_CLAUDE', 'IB_FULL_ACCESS_EMAILS']) delete process.env[name];
 });
 
 describe('answerClaude on /query', () => {
-  test('owner, both gates on, a capability search and no write: stuck, with the gap id the flush saved', async () => {
+  test('owner, the gate on, a capability search and no write: stuck, with the gap id the flush saved', async () => {
     script(DECLINE_REPLY);
     const payload = await ask();
     expect(mockGapRows).toHaveLength(1);
@@ -209,7 +208,6 @@ describe('answerClaude on /query', () => {
   test.each([
     ['the answer gate is off', () => { delete process.env.GATE_IB_ANSWER_SEND_TO_CLAUDE; }],
     ['the answer gate is not exactly true', () => { process.env.GATE_IB_ANSWER_SEND_TO_CLAUDE = 'yes'; }],
-    ['the box gate is off', () => { delete process.env.GATE_IB_SEND_TO_CLAUDE; }],
   ])('no key at all when %s', async (_name, change) => {
     change();
     script(DECLINE_REPLY);

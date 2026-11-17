@@ -394,7 +394,7 @@ function customerNameFor(n, type) {
   return String(n.title || '').toLowerCase().includes(name.toLowerCase()) ? null : name;
 }
 
-// "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE) on any row the server marked `sendToClaude` (never customer contact),
+// "Send to Claude" on any row the server marked `sendToClaude` (never customer contact),
 // below the row's text. Two steps: the button opens a small panel with an optional note for Claude; Send then moves the
 // row out of the bell into Claude's queue, where a Claude tab works on it (owner 2026-11-03: for any issue). onSend(n,
 // note) resolves 'sent' (the row leaves the list), 'refreshed' (the list was read again with a note) or 'failed'.
@@ -402,7 +402,7 @@ function customerNameFor(n, type) {
 // closing the whole bell).
 const NOTE_MAX = 500;
 const SENT_NOTE = 'Sent to Claude.';
-// "Send a copy to Claude (read-only)" (GATE_ALERT_SEND_TO_CLAUDE_COPY, owner login only, step 3): the same two-step panel on a
+// "Send a copy to Claude (read-only)" (owner login only, step 3): the same two-step panel on a
 // row step 1 refuses (customer contact, words our own code did not write). The alert STAYS in the bell.
 const COPY_SENT_NOTE = 'Copy sent to Claude.';
 const COPY_LABEL = 'Send a copy to Claude (read-only)';

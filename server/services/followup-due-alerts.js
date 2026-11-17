@@ -38,9 +38,6 @@
 // Read-only on dispatch_alerts, scheduled_services and customers; writes only
 // admin notifications. Sends nothing to a customer, books nothing, calls no
 // paid API.
-//
-// GATE_FOLLOWUP_DUE_ALERT (strict 'true', read at call time). Off = the cron
-// returns before any read.
 
 const db = require('../models/db');
 const logger = require('./logger');
@@ -414,15 +411,12 @@ async function catchUpPass(database, older, today) {
 }
 
 /**
- * Daily cron entry point. Returns { skipped } when the gate is off, otherwise
- * { raised, closed, listed, outcome }. A read failure throws (runExclusive
- * records it in job_health) and closes nothing. `gateEnabled` and `now` are
- * for tests.
+ * Daily cron entry point. Returns { skipped } when the alert episodes are off,
+ * otherwise { raised, closed, listed, outcome }. A read failure throws
+ * (runExclusive records it in job_health) and closes nothing. `now` is for tests.
  */
-async function runFollowupDueAlerts({ now = new Date(), database = db, gateEnabled } = {}) {
+async function runFollowupDueAlerts({ now = new Date(), database = db } = {}) {
   const gates = require('../config/feature-gates');
-  const live = gateEnabled ?? gates.followupDueAlertLive();
-  if (!live) return { skipped: 'disabled' };
   // ALERT_EPISODES off (alertEpisodesLive, the close/reopen kill switch every episodes caller reads): this job closes
   // and re-rings only through admin-alert-episodes, so it stands down rather than raise bells it could never close.
   // A test that mocks feature-gates without the reader keeps the default (on).
