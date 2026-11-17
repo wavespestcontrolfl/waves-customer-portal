@@ -236,7 +236,7 @@ describe('runAlertButton: one tap', () => {
 
 describe('close-only buttons (close_note): the bell\'s own Done with the button\'s note', () => {
   const CLOSE = closeNoteButtons('called_back');
-  const closeRow = (over = {}) => row({ metadata: { buttons: CLOSE, dedupeKey: 'sms-commitment:c-9', customerId: 'c-1' }, ...over });
+  const closeRow = (over = {}) => row({ metadata: { buttons: CLOSE, dedupeKey: 'sms-commitment-customer:c-9', customerId: 'c-1' }, ...over });
 
   beforeEach(() => {
     mockRow = closeRow();

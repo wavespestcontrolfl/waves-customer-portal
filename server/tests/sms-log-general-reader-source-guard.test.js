@@ -543,8 +543,8 @@ const ALLOWLIST = [
   },
   {
     file: 'services/sms-operational-actions.js',
-    snippet: 'const text = await trx(\'sms_log as s\').where({ \'s.id\': smsLogId }).first(\'s.customer_id\', trx.raw(`${SOURCE_SENT_AT_SQL} AS created_at`));',
-    reason: 'closeSmsCommitmentAlerts: single-row lookup by id of the source text the alert is about (its owner and send time only) — not a list read.',
+    snippet: 'const text = await trx(\'sms_log as s\').where({ \'s.id\': smsLogId }).first(\'s.customer_id\');',
+    reason: 'closeSmsCommitmentAlerts: single-row lookup by id of the source text the alert is about (its owner only) — not a list read.',
   },
   {
     file: 'services/sms-shadow-backfill.js',

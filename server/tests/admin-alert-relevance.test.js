@@ -892,7 +892,7 @@ describe('class rules', () => {
     }
     // Same categories the classes use, but another emitter's dedupe key.
     expect(classify(note({ category: 'billing', metadata: { dedupeKey: 'payment-failed:x', alertKind: 'diverged' } }))).toBeNull();
-    expect(classify(note({ category: 'alert', metadata: { dedupeKey: 'sms-commitment:x' } }))).toBeNull();
+    expect(classify(note({ category: 'alert', metadata: { dedupeKey: 'sms-commitment-customer:x' } }))).toBeNull();
   });
 });
 

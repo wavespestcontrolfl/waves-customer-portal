@@ -42,7 +42,7 @@ const row = (extra = {}) => ({
 });
 const ring = (over = {}, customer = { first_name: 'Albert', last_name: 'Clark' }) => ringOverdueBell(trxFor(customer), {
   row: row(over.row), message: { id: 'sms-1', customer_id: CUSTOMER_ID, created_at: sourceAt, message_body: 'Hi, swarming termites in my mobile home, can I get a free estimate?' },
-  verdict: { verdict: 'open', ...over.verdict }, dedupeKey: 'sms-commitment:commit-1', ...over.args,
+  verdict: { verdict: 'open', ...over.verdict }, dedupeKey: 'sms-commitment-customer:cust-1', ...over.args,
 });
 const lastCall = () => NotificationService.notifyAdmin.mock.calls.at(-1);
 
@@ -67,7 +67,7 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
   test('dedupe, bell, link and metadata are unchanged; the rule stamps are added', async () => {
     await ring();
     const [, , , opts] = lastCall();
-    expect(opts).toMatchObject({ bell: true, dedupeKey: 'sms-commitment:commit-1', dedupeWindowMs: 24 * 3600 * 1000, refreshOnDedupe: true,
+    expect(opts).toMatchObject({ bell: true, dedupeKey: 'sms-commitment-customer:cust-1', dedupeWindowMs: 24 * 3600 * 1000, refreshOnDedupe: true,
       link: `/admin/customers?customerId=${CUSTOMER_ID}&tab=comms` });
     expect(opts.metadata).toMatchObject({ triggerKey: 'sms_operational_followup', customerId: CUSTOMER_ID, sms_log_id: 'sms-1',
       commitment_id: 'commit-1', kind: 'send_estimate', verification: 'open',
@@ -80,7 +80,7 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(sentUpdates).toHaveLength(1);
     const { sql, bindings } = sentUpdates[0];
     expect(sql).toMatch(/^update "notifications" set "done_at" = COALESCE\(done_at, \$1::timestamptz\), "done_by" = \$2/);
-    expect(bindings).toEqual(expect.arrayContaining(['supersede', 'Replaced by a newer reminder for the same promise', 'admin', 'sms-commitment:commit-1', 'n-new']));
+    expect(bindings).toEqual(expect.arrayContaining(['supersede', 'Replaced by a newer reminder for the same promise', 'admin', 'sms-commitment-customer:cust-1', 'n-new']));
     // The newest row is excluded; the older ones are selected by the system closer's rule.
     expect(sql).toContain('and not "id" = $8');
     // Open rows, OR rows a PERSON (or the quiet fall-off) marked done (taken over, so their Reopen cannot
@@ -100,12 +100,12 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     const quote = "Adam will be out there and he'll look into how we can resolve it";
     const promise = (id, description) => row({ id, kind: 'other', description, evidence: [{ quote, matched: true }], sms_context: { basis: 'promise' } });
     const first = promise('commit-1', 'will be out there');
-    await ring({ row: first, args: { dedupeKey: 'sms-commitment-source:sms-1', promises: [first, promise('commit-2', "he'll look into how we can resolve it")] } });
+    await ring({ row: first, args: { dedupeKey: 'sms-commitment-customer:cust-1', promises: [first, promise('commit-2', "he'll look into how we can resolve it")] } });
     const [, title, body, opts] = lastCall();
     expect(title).toBe('Comms — follow up with Albert Clark');
     expect(body).toMatch(/^We said “will be out there” and “he'll look into/);
     expect(body.length).toBeLessThanOrEqual(MAX_WHY_CHARS);
-    expect(opts.dedupeKey).toBe('sms-commitment-source:sms-1');
+    expect(opts.dedupeKey).toBe('sms-commitment-customer:cust-1');
     expect(opts.detail).toContain('Albert Clark');
     expect(opts.detail).toContain('• “will be out there”');
     expect(opts.detail).toContain("• “he'll look into how we can resolve it”");
@@ -317,9 +317,9 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     // One text with a call-back and another promise: the shared row is not call-back only.
     const callback = row({ id: 'commit-1', kind: 'callback', evidence: [{ quote: 'call me back', matched: true }], sms_context: { basis: 'promise' } });
     const estimate = row({ id: 'commit-2', kind: 'send_estimate', evidence: [{ quote: 'send the price', matched: true }], sms_context: { basis: 'promise' } });
-    await ring({ row: callback, args: { dedupeKey: 'sms-commitment-source:sms-1', promises: [callback, estimate] } });
+    await ring({ row: callback, args: { dedupeKey: 'sms-commitment-customer:cust-1', promises: [callback, estimate] } });
     expect(lastCall()[3].metadata.buttons).toBeNull();
-    await ring({ row: callback, args: { dedupeKey: 'sms-commitment-source:sms-1', promises: [callback, row({ ...callback, id: 'commit-3' })] } });
+    await ring({ row: callback, args: { dedupeKey: 'sms-commitment-customer:cust-1', promises: [callback, row({ ...callback, id: 'commit-3' })] } });
     expect(lastCall()[3].metadata.buttons).toEqual(CALLED_BACK);
     // An email call-back promise gets none: Done's settle step settles text follow-ups only.
     await ring({ row: { kind: 'callback', evidence: [{ quote: 'please call me back about the gate' }] }, args: { sourceIdField: 'email_id', triggerKey: 'email_operational_followup' } });
@@ -448,7 +448,7 @@ describe('GATE_ALERT_RING_ONCE: a promise rings once (owner 2026-10-14)', () => 
     await ring();
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     const opts = lastCall()[3];
-    expect(opts).toMatchObject({ dedupeOpenOnly: true, refreshOnDedupe: true, bell: true, dedupeKey: 'sms-commitment:commit-1' });
+    expect(opts).toMatchObject({ dedupeOpenOnly: true, refreshOnDedupe: true, bell: true, dedupeKey: 'sms-commitment-customer:cust-1' });
     expect(opts.dedupeWindowMs).toBeUndefined();
     expect(opts.ringOnRefresh()).toBe(false);
     // Strays of the same key still close, as before.

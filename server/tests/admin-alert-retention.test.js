@@ -104,7 +104,7 @@ describe('re-ring list', () => {
     expect(retention.ringRiskFor(keyed('series-price-guard:cancelled-root:r')).kind).toBe('periodic');
     expect(retention.ringRiskFor(keyed('series-price-guard:over-last-paid:r')).kind).toBe('event');
     expect(retention.ringRiskFor(keyed('sms-draft-canary:smsDraftDefault')).kind).toBe('periodic');
-    expect(retention.ringRiskFor(keyed('sms-commitment-source:9')).live).toBe('promiseOpen');
+    expect(retention.ringRiskFor(keyed('email-commitment:9')).live).toBe('promiseOpen');
     expect(retention.ringRiskFor(keyed('sms-commitment-customer:c1')).live).toBe('promiseOpen');
     expect(retention.ringRiskFor(keyed('truck-kit:v1')).emitter).toBe('truck-kit');
     expect(retention.ringRiskFor(keyed('autopay_hold_charge:declined:inv-1')).kind).toBe('event');
@@ -235,8 +235,8 @@ describe('runAdminAlertRetention: re-ring accounting', () => {
   });
 
   test('an overdue-promise row whose promise is still open is held, never expired', async () => {
-    const open = keyed('sms-commitment-source:1');
-    const closed = keyed('sms-commitment-source:2');
+    const open = keyed('sms-commitment-customer:1');
+    const closed = keyed('sms-commitment-customer:2');
     const io = fakeIo([open, closed], { live: { [open.id]: true } });
     const summary = await retention.runAdminAlertRetention({ now: NOW, io });
     expect(io.calls.live).toEqual(['promiseOpen']);
@@ -249,7 +249,7 @@ describe('runAdminAlertRetention: re-ring accounting', () => {
 describe('scan budget and the continuation cursor', () => {
   // 25 old promise rows whose promise is still open (kept for now), then one eligible alert behind them.
   const setup = () => {
-    const held = Array.from({ length: 25 }, (_, i) => row({ created_at: ago(200 - i), metadata: { dedupeKey: `sms-commitment-source:${i}` } }));
+    const held = Array.from({ length: 25 }, (_, i) => row({ created_at: ago(200 - i), metadata: { dedupeKey: `sms-commitment-customer:${i}` } }));
     const eligible = row({ created_at: ago(100), metadata: { dedupeKey: 'plain:eligible' } });
     const live = Object.fromEntries(held.map((r) => [r.id, true]));
     return { held, eligible, cursors: {}, live };

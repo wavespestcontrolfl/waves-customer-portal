@@ -273,12 +273,10 @@ customer's message by this rule.
    `metadata.spoke_for` keeps the id of every text the row has listed a promise from: a promise
    whose text is there does not ring "kept late" (a row keyed on that text kept its key after it
    closed, and stopped that ring the same way).
-   Done on the row, and Called back, settle the promises it lists. Rows an older build keyed on one text
-   (`sms-commitment-source:<text id>`) or on one promise (`sms-commitment:<promise id>`) fold into
-   the customer's row the first time one of their promises is checked or settled: a row whose open
-   promises all belong to the customer takes the customer's key (an unread row first) and the others
-   close as "Replaced by one alert for this customer", with no ring. A merge moves the listed
-   promises to the surviving customer's row the same way. Every writer takes the alert service's
+   Done on the row, and Called back, settle the promises it lists. A row whose open promises all
+   belong to the customer, but which is keyed on another customer's key, takes the customer's key
+   (an unread row first) and the others close as "Replaced by one alert for this customer", with no
+   ring. A merge moves the listed promises to the surviving customer's row the same way. Every writer takes the alert service's
    lock for the customer's key before it reads or locks the row. An email follow-up keeps one row
    per promise (`email-commitment:<promise id>`).
    A customer's number that keeps failing texts is one subject too (owner 2026-11-04, "fix check",

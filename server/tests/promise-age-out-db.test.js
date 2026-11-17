@@ -174,20 +174,16 @@ maybeDescribe('promise age-out (live Postgres)', () => {
     await run();
   });
 
-  test('a text promise closes its alerts; the alert the text shares stays for a promise still inside 30 days, then closes with it', async () => {
+  test("a text promise leaves the customer's alert; the alert stays for a promise still inside 30 days, then closes with it", async () => {
     const text = await staffText();
     const aged = await textPromise({ text });
     const stillDue = await textPromise({ text, description: 'Call you tomorrow', due_at: ago(10) });
-    const shared = await alert({ dedupeKey: `sms-commitment-source:${text.id}`, customerId: text.customerId, sms_log_id: text.id, commitment_id: aged.id, commitment_ids: [aged.id, stillDue.id] });
-    const legacy = await alert({ dedupeKey: `sms-commitment:${aged.id}`, customerId: text.customerId, sms_log_id: text.id, commitment_id: aged.id });
+    const shared = await customerAlert(text.customerId, [aged, stillDue], [text]);
 
     const first = await run();
 
     expect(first.expired.total).toBe(1);
     expect([(await row(aged.id)).status, (await row(stillDue.id)).status]).toEqual(['dismissed', 'open']);
-    const legacyAfter = await alertRow(legacy.id);
-    expect([legacyAfter.done_by, legacyAfter.resolution]).toEqual(['promise-age-out', 'The promise expired: no action in 30 days']);
-    expect(legacyAfter.done_at).not.toBeNull();
     const sharedAfter = await alertRow(shared.id);
     expect(sharedAfter.done_at).toBeNull();
     expect(meta(sharedAfter).commitment_ids).toEqual([stillDue.id]);
@@ -236,7 +232,7 @@ maybeDescribe('promise age-out (live Postgres)', () => {
     const text = await staffText();
     const aged = await textPromise({ text });
     const settling = await textPromise({ text, description: 'Call you tomorrow', due_at: ago(10) });
-    const shared = await alert({ dedupeKey: `sms-commitment-source:${text.id}`, customerId: text.customerId, sms_log_id: text.id, commitment_id: aged.id, commitment_ids: [aged.id, settling.id] });
+    const shared = await customerAlert(text.customerId, [aged, settling], [text]);
     // The lane's order: the text's row first, then the promise it settles.
     const lane = await db.transaction();
     let running;
@@ -307,12 +303,12 @@ maybeDescribe('promise age-out (live Postgres)', () => {
     const text = await staffText();
     const byText = await textPromise({ text });
     const byEmail = await emailPromise();
-    const unread = await alert({ dedupeKey: `sms-commitment-source:${text.id}`, customerId: text.customerId, sms_log_id: text.id, commitment_id: byText.id, commitment_ids: [byText.id] });
+    const unread = await customerAlert(text.customerId, [byText], [text]);
     // The office read this alert two days before the run.
     const read = await alert({ dedupeKey: `email-commitment:${byEmail.id}`, email_id: byEmail.email_id, commitment_id: byEmail.id });
     await db('notifications').where({ id: read.id }).update({ read_at: ago(2) });
-    // A person marked this older alert for the text promise done three days before the run.
-    const doneBefore = await alert({ dedupeKey: `sms-commitment:${byText.id}`, customerId: text.customerId, sms_log_id: text.id, commitment_id: byText.id });
+    // A person marked this earlier alert for the text promise done three days before the run.
+    const doneBefore = await alert({ dedupeKey: `sms-commitment-customer:${text.customerId}`, customerId: text.customerId, sms_log_id: text.id, commitment_id: byText.id });
     await db('notifications').where({ id: doneBefore.id }).update({ done_at: ago(3), done_by: randomUUID(), read_at: ago(3) });
     const { runId } = await run({ scope: (q) => q.whereIn('cc.id', [byText.id, byEmail.id]) });
     expect([(await alertRow(unread.id)).done_by, (await alertRow(read.id)).done_by]).toEqual(['promise-age-out', 'promise-age-out']);
