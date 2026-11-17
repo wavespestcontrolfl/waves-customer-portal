@@ -25,13 +25,13 @@ describe('bank payment failure email seeds (GATE_ACH_FAILURE_EMAIL)', () => {
   test('one template per email stage, keyed as the sender expects, saying only what the code does at that stage', () => {
     expect(Object.keys(byKey).sort()).toEqual(['payment.ach_card_fallback', 'payment.ach_retry_notice', 'payment.ach_suspended', 'payment.ach_suspended_no_card']);
     const first = render('payment.ach_retry_notice').text;
-    expect(first).toContain('Your bank payment did not go through. You can pay now or update your payment method in your account.');
+    expect(first).toContain('Your bank payment did not go through. You can pay now or update your payment method on your billing page.');
     const second = render('payment.ach_card_fallback').text;
-    expect(second).toContain('Your bank payment did not go through again, so bank payments are paused on your account. To pay by bank again, add your bank account again in your account. You can also pay by card there. Credit card payments include a surcharge.');
+    expect(second).toContain('Your bank payment failed a second time, so bank payments are paused for now. To use your bank, add your bank account again on your billing page. You can also pay by card there. Credit card payments include a surcharge.');
     const onCard = render('payment.ach_suspended').text;
-    expect(onCard).toContain('Your bank payment did not go through again, so bank payments are now off on your account. Your Auto Pay now uses your card on file. Credit card payments include a surcharge.');
+    expect(onCard).toContain('Your bank payment failed again, so bank payments are now off on your account. Your Auto Pay now uses your card on file. Credit card payments include a surcharge.');
     const noCard = render('payment.ach_suspended_no_card').text;
-    expect(noCard).toContain('Your bank payment did not go through again, so bank payments are now off on your account. Please pay by card in your account. If you used Auto Pay, it is off for now. You can turn it back on with a card. Credit card payments include a surcharge.');
+    expect(noCard).toContain('Your bank payment failed again, so bank payments are now off on your account. Please pay by card on your billing page. If you used Auto Pay, it is off for now. You can turn it back on with a card. Credit card payments include a surcharge.');
     // The texts' lines that the code does not do never reach an email: a promised retry, a switch to the card at the
     // second failure, a bank update link at the third (the pay page offers card only once bank payments are off).
     const all = Object.keys(byKey).map((key) => `${byKey[key].subject} ${byKey[key].preview} ${render(key).text}`).join('\n');
