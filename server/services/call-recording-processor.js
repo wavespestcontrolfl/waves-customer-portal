@@ -11879,6 +11879,9 @@ const CallRecordingProcessor = {
     const recordedFallbackOf = (row) => {
       if (!row || !isUsableFallback(row.transcription)) return null;
       if (row.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER) return null;
+      // The live-text backup is not recorded evidence: a retry re-reads the live text through its own
+      // branch (provenance kept), and a recording that arrives later gets its own transcription.
+      if (row.transcription_provider === LIVE_TRANSCRIPTION_PROVIDER) return null;
       // The sentinel check runs on the RECORDED part: a composite whose
       // recorded leg was already rejected carries the sentinel there.
       const recorded = recordedPartOfComposite(row.transcription);
@@ -25910,6 +25913,32 @@ const CallRecordingProcessor = {
     return { success: true, recovered: true, recordingSid: recording.sid };
   },
 
+  // GATE_LIVE_CALL_BACKUP_TRANSCRIPT: Twilio holds no recording, but the call may hold live text:
+  // process it once so that text becomes the transcript. The unrecorded-call alert is unchanged.
+  async processLiveBackupCandidates(results) {
+    if (!isEnabled('liveCallBackupTranscript')) return;
+    for (const r of results.filter((x) => x.reason === 'no_completed_recording')) {
+      try {
+        const hasLive = await db('call_live_utterances').where('call_sid', r.callSid).first('id');
+        if (!hasLive) continue;
+        // Only a call still owed a pass: a finished or claimed one is left alone, so a 5-minute
+        // sweep never re-extracts a processed, voicemail or spam call. No recording means the
+        // recording retry sweep never picks this row up, so a failed pass retries here.
+        // A 'processing' claim whose pass stopped beating (crash, deploy) is owed too: the same
+        // reclaimableClaim rule processRecording's own claim uses, so a live claim is never touched
+        // and the claim's atomic ownership guard still decides the takeover.
+        const state = await db('call_log').where('twilio_call_sid', r.callSid)
+          .first('processing_status', 'extraction_attempts', db.raw(`${reclaimableClaim(LEGACY_CLAIM_QUIET_MINUTES)} AS claim_stale`));
+        const status = state?.processing_status || null;
+        const owed = !status || status === 'pending' || status === 'no_transcription' || status === 'extraction_failed'
+          || (status === 'processing' && state?.claim_stale === true);
+        if (owed && (Number(state?.extraction_attempts) || 0) < CALL_EXTRACTION_MAX_ATTEMPTS) await this.processRecording(r.callSid);
+      } catch (liveErr) {
+        logger.warn(`[call-proc] live backup transcript pass failed for ${maskSid(r.callSid)}: ${liveErr.message}`);
+      }
+    }
+  },
+
   async recoverMissingRecentRecordings() {
     // The extra columns feed the unrecorded-call alert below (the row's
     // identity + timing; nothing the recovery itself needs). Rows that can
@@ -26009,25 +26038,7 @@ const CallRecordingProcessor = {
       }
     }
 
-    // GATE_LIVE_CALL_BACKUP_TRANSCRIPT: Twilio holds no recording, but the call may hold live text:
-    // process it once so that text becomes the transcript. The watchdog alert below is unchanged.
-    if (isEnabled('liveCallBackupTranscript')) {
-      for (const r of results.filter((x) => x.reason === 'no_completed_recording')) {
-        try {
-          const hasLive = await db('call_live_utterances').where('call_sid', r.callSid).first('id');
-          if (!hasLive) continue;
-          // Only a call still owed a pass: a finished or claimed one is left alone, so a 5-minute
-          // sweep never re-extracts a processed, voicemail or spam call. No recording means the
-          // recording retry sweep never picks this row up, so a failed pass retries here.
-          const state = await db('call_log').where('twilio_call_sid', r.callSid).first('processing_status', 'extraction_attempts');
-          const status = state?.processing_status || null;
-          const owed = !status || status === 'pending' || status === 'no_transcription' || status === 'extraction_failed';
-          if (owed && (Number(state?.extraction_attempts) || 0) < CALL_EXTRACTION_MAX_ATTEMPTS) await this.processRecording(r.callSid);
-        } catch (liveErr) {
-          logger.warn(`[call-proc] live backup transcript pass failed for ${maskSid(r.callSid)}: ${liveErr.message}`);
-        }
-      }
-    }
+    await this.processLiveBackupCandidates(results);
 
     const recovered = results.filter((r) => r.recovered).length;
     if (recovered > 0) logger.info(`[call-proc] Recovered ${recovered} missing recent recording(s)`);

@@ -23,11 +23,11 @@ const SID = 'CA00000000000000000000000000000456';
 const liveText = 'Caller: I need a termite inspection.\nAgent: Sure, what is the address?';
 
 // Rows + patches the fixture db holds. liveSweepRows feeds recoverMissingRecentRecordings.
-function primeDb({ recordingUrl = null, recordingSid = null, status = null, attempts = 0 } = {}) {
+function primeDb({ recordingUrl = null, recordingSid = null, status = null, attempts = 0, transcription = null, provider = null } = {}) {
   const row = {
     id: 'live-backup-fixture', twilio_call_sid: SID, direction: 'inbound',
     from_phone: '+19415550123', to_phone: '+19415550124', recording_url: recordingUrl, recording_sid: recordingSid,
-    recording_duration_seconds: 90, duration_seconds: 90, transcription: null, processing_status: status,
+    recording_duration_seconds: 90, duration_seconds: 90, transcription, transcription_provider: provider, processing_status: status,
     extraction_attempts: attempts, created_at: new Date(), metadata: {},
   };
   const patches = [];
@@ -49,6 +49,7 @@ function primeDb({ recordingUrl = null, recordingSid = null, status = null, atte
         if (patch.processing_token !== undefined) row.processing_token = patch.processing_token;
         if (patch.extraction_attempts !== undefined) row.extraction_attempts += 1;
         if (typeof patch.transcription === 'string') row.transcription = patch.transcription;
+        if (patch.transcription_provider !== undefined) row.transcription_provider = patch.transcription_provider;
       }
       return {
         returning: async () => [{ extraction_attempts: row.extraction_attempts }],
@@ -151,6 +152,47 @@ describe('live-text backup transcript in processRecording', () => {
     expect(liveTranscriptFor).not.toHaveBeenCalled();
   });
 
+  test('a retry after a failed extraction goes through the live branch again and keeps the live provenance', async () => {
+    const { row, patches } = primeDb();
+    await processor.processRecording(SID);
+    expect(row.transcription_provider).toBe('twilio_realtime');
+    // A later utterance arrived; the retry must read it, not reuse the stored copy.
+    const longer = `${liveText}\nCaller: It is 12 Palm Street.`;
+    liveTranscriptFor.mockResolvedValue({ text: longer, utterances: 4, panMasked: false });
+    row.processing_status = 'extraction_failed';
+    row.processing_token = null;
+    patches.length = 0;
+    fetchSpy.mockClear();
+    await processor.processRecording(SID);
+    expect(liveTranscriptFor).toHaveBeenCalledTimes(2);
+    expect(patches.some((p) => p.transcription_provider === 'twilio_builtin')).toBe(false);
+    expect(patches.find((p) => p.transcription_provider === 'twilio_realtime')).toMatchObject({ transcription: longer });
+    expect(row.transcription_provider).toBe('twilio_realtime');
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body).contents[0].parts[0].text).toContain('It is 12 Palm Street.');
+  });
+
+  test('a stored live transcript is not recorded evidence when a recording later arrives and fails to transcribe', async () => {
+    const { row, patches } = primeDb({
+      recordingUrl: 'https://api.twilio.com/fixture-recording', recordingSid: 'RE00000000000000000000000000000003',
+      status: 'extraction_failed', transcription: liveText, provider: 'twilio_realtime',
+    });
+    const result = await processor.processRecording(SID);
+    expect(result.error || result.reason).toMatch(/transcription/i);
+    expect(row.processing_status).toBe('no_transcription');
+    expect(patches.some((p) => p.transcription_provider === 'twilio_builtin')).toBe(false);
+    expect(liveTranscriptFor).not.toHaveBeenCalled();
+    expect(extractionPrompts(fetchSpy)).toHaveLength(0);
+  });
+
+  test('a stored RECORDED transcript still serves as the cached fallback (unchanged)', async () => {
+    const { patches } = primeDb({
+      recordingUrl: 'https://api.twilio.com/fixture-recording', recordingSid: 'RE00000000000000000000000000000004',
+      status: 'extraction_failed', transcription: liveText, provider: 'twilio_builtin',
+    });
+    await processor.processRecording(SID);
+    expect(patches.some((p) => p.transcription_provider === 'twilio_builtin')).toBe(true);
+  });
+
   test('a lost write fence abandons the pass without extracting', async () => {
     const { row } = primeDb();
     const base = db.getMockImplementation();
@@ -206,6 +248,26 @@ describe('missing-recording sweep with live text', () => {
 
   test('no live text: no processRecording call', async () => {
     primeSweep({ liveRow: null });
+    await processor.recoverMissingRecentRecordings();
+    expect(procSpy).not.toHaveBeenCalled();
+  });
+
+  test('a stale processing claim (stopped beating) is admitted through the reclaim predicate', async () => {
+    primeSweep({ state: { processing_status: 'processing', extraction_attempts: 0, claim_stale: true } });
+    await processor.recoverMissingRecentRecordings();
+    expect(procSpy).toHaveBeenCalledTimes(1);
+    const rawSql = db.raw.mock.calls.map(([sql]) => String(sql)).find((sql) => sql.includes('claim_stale'));
+    expect(rawSql).toBe(`${processor._test.reclaimableClaimSql(10)} AS claim_stale`);
+  });
+
+  test('a fresh processing claim is left alone', async () => {
+    primeSweep({ state: { processing_status: 'processing', extraction_attempts: 0, claim_stale: false } });
+    await processor.recoverMissingRecentRecordings();
+    expect(procSpy).not.toHaveBeenCalled();
+  });
+
+  test('a stale claim at the retry cap is left alone', async () => {
+    primeSweep({ state: { processing_status: 'processing', extraction_attempts: 99, claim_stale: true } });
     await processor.recoverMissingRecentRecordings();
     expect(procSpy).not.toHaveBeenCalled();
   });
