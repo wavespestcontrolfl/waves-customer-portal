@@ -4232,7 +4232,14 @@ is written: a final utterance becomes one `call_live_utterances` row (unique
 per session and `SequenceId`, so a redelivery inserts nothing), card-number
 scrubbed together with the call's last 5 utterances (`scrubSegments`), plus a
 short code-shaped utterance by the same speaker within 30 s of a masked card
-number; a mask stamps `live_transcription.pan_detected`. The other events
+number; a mask stamps `live_transcription.pan_detected`. With
+`GATE_CALL_RECORDING_CARD_PAUSE` also on (dark, owner 2026-11-16 "ok build
+all"), a stored utterance that asks for or names card details, or one the
+scrub masked, pauses the caller's call recording by REST (`Twilio.CURRENT`,
+`Status=paused`, `PauseBehavior=silence`), off the response path; the
+recording resumes 90 s later, and a new trigger moves the end out. State is
+`live_transcription.card_pause`. A pause that was running when that gate
+went off still resumes. No new spend. The other events
 stamp `live_at`, `stopped_at` or `event_error*`. Every outcome answers 200,
 a failed write included. The post-call card-number quarantine deletes the
 call's live utterances. Gate off: no start, and the press-1 TwiML is
