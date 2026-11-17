@@ -10,6 +10,8 @@
  *  - a self-fix never moves to a known-bad address: one with a ledger bounce row (even with no block left), or one with
  *    a do-not-email row in any status (a released block, or a bounce from before the ledger existed).
  *  - two rescues of one re-examined row at once: the row claim lets one save the fix; the other writes and sends nothing.
+ *  - the ledger row turns 'applied' in the email change's own transaction: a mark that cannot land rolls the change back.
+ *  - a call still in processing (no verdict) never starts a re-look.
  * A hard bounce suppresses the address before the rescue runs (the webhook's order), so the suite seeds that row too.
  * All names, phones and addresses synthetic.
  *
@@ -82,11 +84,12 @@ describeOrSkip('bounce self-fix SQL (Postgres)', () => {
     return { id, phone };
   }
 
-  async function seedCall({ customerId, phone, transcription, processedHoursAgo = 1, extraction = {} }) {
+  // processed = false: the call is still in processing (no verdict yet).
+  async function seedCall({ customerId, phone, transcription, processedHoursAgo = 1, extraction = {}, processed = true }) {
     const at = new Date(Date.now() - processedHoursAgo * 3600 * 1000);
     await db('call_log').insert({
       customer_id: customerId, from_phone: phone, transcription, ai_extraction: JSON.stringify(extraction),
-      created_at: at, processed_at: at,
+      created_at: at, processed_at: processed ? at : null, processing_status: processed ? 'processed' : 'processing',
     });
   }
 
@@ -124,7 +127,7 @@ describeOrSkip('bounce self-fix SQL (Postgres)', () => {
     expect(again).not.toHaveBeenCalled();
   });
 
-  it('skips a later call that never talks about email, a call before the last look, and a changed primary email', async () => {
+  it('skips a later call that never talks about email, a call before the last look, a call still in processing, and a changed primary email', async () => {
     const quiet = addr('quiet');
     const a = await seedCustomer(quiet);
     await seedNoFixRow({ customerId: a.id, bouncedEmail: quiet });
@@ -140,11 +143,17 @@ describeOrSkip('bounce self-fix SQL (Postgres)', () => {
     await seedNoFixRow({ customerId: c.id, bouncedEmail: moved });
     await seedCall({ customerId: c.id, phone: c.phone, transcription: 'Caller: my email changed.' });
 
+    const busy = addr('busy');
+    const d = await seedCustomer(busy);
+    await seedNoFixRow({ customerId: d.id, bouncedEmail: busy });
+    await seedCall({ customerId: d.id, phone: d.phone, transcription: 'Caller: my email is wrong.', processed: false });
+
     const rescueFn = noChange();
     await rescue.relookAfterNewCalls({ rescueFn });
     expect(rescueFn.mock.calls.map(([e]) => e)).not.toEqual(expect.arrayContaining([quiet]));
     expect(rescueFn.mock.calls.map(([e]) => e)).not.toEqual(expect.arrayContaining([old]));
     expect(rescueFn.mock.calls.map(([e]) => e)).not.toEqual(expect.arrayContaining([moved]));
+    expect(rescueFn.mock.calls.map(([e]) => e)).not.toEqual(expect.arrayContaining([busy]));
   });
 
   it('saves one self-fix, and a bounce of the fixed address goes to a person', async () => {
@@ -215,6 +224,34 @@ describeOrSkip('bounce self-fix SQL (Postgres)', () => {
     expect(after.evidence).toMatchObject({ self_fix: true });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(deliverOpsDigest).not.toHaveBeenCalled();
+  });
+
+  it('rolls the email change back when its ledger row cannot turn applied (the record commits with the change)', async () => {
+    const bounced = addr('rollbox');
+    const fixed = addr('rollbax');
+    const { id, phone } = await seedCustomer(bounced);
+    await seedSuppression(bounced);
+    await seedCall({ customerId: id, phone, transcription: `Caller: my email is wrong, it is ${fixed}`, extraction: { email: fixed } });
+    // Inside the save's transaction, the ledger row stops being this run's
+    // 'applying' claim, so the 'applied' mark cannot land.
+    const commsLock = require('../utils/customer-comms-lock');
+    const realLock = commsLock.lockCustomerEmail;
+    const spy = jest.spyOn(commsLock, 'lockCustomerEmail').mockImplementationOnce(async (trx, email) => {
+      await realLock(trx, email);
+      await trx('email_bounce_rescues').whereRaw('LOWER(bounced_email) = ?', [bounced]).update({ status: 'suggested' });
+    });
+    try {
+      const r = await rescue.rescueBouncedAddress(bounced);
+      expect(r).toMatchObject({ status: 'suggested', candidate: fixed });
+      expect(r.reason).toMatch(/rescue row no longer claimed/);
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await db('customers').where({ id }).first('email')).email).toBe(bounced);
+    expect(await db('customer_interactions').where({ customer_id: id }).count('* as n').first()).toMatchObject({ n: '0' });
+    expect((await db('email_bounce_rescues').whereRaw('LOWER(bounced_email) = ?', [bounced]).first()).status).toBe('suggested');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
   });
 
   it('never moves to an address with a ledger bounce row, even when no block is left for it', async () => {

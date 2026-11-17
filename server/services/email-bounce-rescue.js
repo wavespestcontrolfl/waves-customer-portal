@@ -429,7 +429,7 @@ async function callSightings(phone) {
     .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a test call's spoken email is not evidence
     .whereNotNull('transcription')
     .orderBy('created_at')
-    .select('id', 'created_at', 'transcription', 'ai_extraction')
+    .select('id', 'created_at', 'transcription', 'ai_extraction', 'processed_at', 'processing_status')
     .catch(() => []);
   const sightings = [];
   for (const call of calls) {
@@ -597,14 +597,25 @@ async function knownBadAddress(email) {
   return Boolean(bounced || blocked);
 }
 
-// The customer's newest call that talks about email must name the fix in
-// full (its transcript or AI extraction). A later call may carry a
-// correction no tier can read ("there is no 3 at the end"), so a person
-// decides (Codex r1 on #7906).
+// A call whose processing reached its verdict, so its extraction will not
+// change: processed_at is the verdict time (set since 2026-10-10, never
+// backfilled), and these are the processor's verdict statuses
+// (call-recording-processor.js). No status, 'pending', 'processing' and the
+// retry lanes are not finished.
+const CALL_VERDICT_STATUSES = new Set(['processed', 'spam', 'voicemail', 'customer_creation_failed', 'lead_creation_failed']);
+function callFinished(call) {
+  return Boolean(call.processed_at) || CALL_VERDICT_STATUSES.has(call.processing_status);
+}
+
+// The customer's newest call that talks about email must be finished and
+// must name the fix in full (its transcript or AI extraction). A later call
+// may carry a correction no tier can read ("there is no 3 at the end"), and
+// a call still in processing may still change its extraction, so a person
+// decides (Codex r1 and the pre-push audit on #7906).
 function newestEmailCallNames(calls, address) {
   const talk = (calls || []).filter((c) => EMAIL_TALK_RE.test(String(c.transcription || '')));
   const newest = talk[talk.length - 1];
-  if (!newest) return false;
+  if (!newest || !callFinished(newest)) return false;
   const extraction = typeof newest.ai_extraction === 'string'
     ? newest.ai_extraction : JSON.stringify(newest.ai_extraction || {});
   const named = `${newest.transcription || ''}\n${extraction}`.match(EMAIL_SCAN_RE) || [];
@@ -647,7 +658,20 @@ function ledgerEvidence(outcome) {
 
 // ── actions ─────────────────────────────────────────────────────────
 
-async function applyFix({ bouncedEmail, candidate, owner, tier, evidence, appliedBy, selfFix = false }) {
+// The rescue's ledger row turns 'applied' in the same transaction as the
+// email change, so a committed fix always carries its record (and the
+// once-per-customer guard always sees a self-fix). The row must still be
+// this run's 'applying' claim, or the change rolls back (pre-push audit on
+// #7906). No row id (the operator apply) = no ledger write here.
+async function markApplied(trx, rescueRowId, appliedBy) {
+  if (!rescueRowId) return;
+  const marked = await trx('email_bounce_rescues')
+    .where({ id: rescueRowId, status: 'applying' })
+    .update({ status: 'applied', applied_at: new Date(), applied_by: appliedBy, updated_at: new Date() });
+  if (marked !== 1) throw Object.assign(new Error('rescue row no longer claimed'), { code: 'STALE_CLAIM' });
+}
+
+async function applyFix({ bouncedEmail, candidate, owner, tier, evidence, appliedBy, selfFix = false, rescueRowId = null }) {
   const counts = await db.transaction(async (trx) => {
     if (owner.customer) {
       const field = owner.field === 'billing_email' ? null : owner.field;
@@ -705,6 +729,7 @@ async function applyFix({ bouncedEmail, candidate, owner, tier, evidence, applie
           ...(selfFix ? { self_fix: true } : {}),
         }),
       });
+      await markApplied(trx, rescueRowId, appliedBy);
       return { customersUpdated: 1 };
     }
     // Lead-only owner: exactly the resolved lead row — other leads sharing
@@ -718,6 +743,7 @@ async function applyFix({ bouncedEmail, candidate, owner, tier, evidence, applie
     if (updated !== 1) {
       throw Object.assign(new Error('lead email changed mid-rescue'), { code: 'STALE_OWNER' });
     }
+    await markApplied(trx, rescueRowId, appliedBy);
     return { leadsUpdated: 1 };
   });
 
@@ -948,9 +974,9 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
 
   if (dryRun) return { dryRun: true, bouncedEmail, owner: owner.customer?.id || owner.lead?.id, ...outcome };
 
-  // Auto-applies persist as 'applying' FIRST and flip to 'applied' only
-  // after the write commits — a crash in between leaves a stale 'applying'
-  // row that a later pass takes over (see entry check above).
+  // Auto-applies persist as 'applying' FIRST and flip to 'applied' in the
+  // write's own transaction (markApplied) — a crash before it leaves a stale
+  // 'applying' row that a later pass takes over (see entry check above).
   const persistStatus = outcome.status === 'applied' ? 'applying' : outcome.status;
   let row;
   if (reusableRow) {
@@ -1000,12 +1026,12 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
       await applyFix({
         bouncedEmail, candidate: outcome.candidate, owner, tier: outcome.tier,
         evidence: outcome.evidence, appliedBy, selfFix: Boolean(outcome.selfFix),
+        rescueRowId: row.id,
       });
-      await db('email_bounce_rescues').where({ id: row.id })
-        .update({ status: 'applied', applied_at: new Date(), applied_by: appliedBy, updated_at: new Date() });
     } catch (err) {
-      // STALE_OWNER or write failure: demote this run's own 'applying' claim
-      // so --apply can retry; never a row another run already finished.
+      // STALE_OWNER, STALE_CLAIM or a write failure: the transaction rolled
+      // back, so nothing changed. Demote this run's own 'applying' claim so
+      // --apply can retry; never a row another run already finished.
       await db('email_bounce_rescues').where({ id: row.id, status: 'applying' })
         .update({ status: 'suggested', updated_at: new Date() });
       logger.warn(`[email-bounce-rescue] apply failed for ${redactEmail(bouncedEmail)}: ${err.message}`);
@@ -1037,7 +1063,7 @@ const EMAIL_TALK_PATTERN = 'e-?mail|@|\\mdot\\M\\s*(com|net|org|edu)';
 
 /**
  * A no-fix bounced address gets one more look after each later processed
- * call that talks about email. Only a customer whose PRIMARY email is still
+ * call (processing verdict after the last look) that talks about email. Only a customer whose PRIMARY email is still
  * the bounced address; leads stay as they are. The look is the normal
  * rescue (self-fix rules included); a look that finds nothing marks the row
  * looked, so the same call is never read (or paid for) twice.
@@ -1055,7 +1081,9 @@ async function relookAfterNewCalls({ limit = RELOOK_BATCH, rescueFn = rescueBoun
       this.select(db.raw('1')).from('call_log as cl')
         .where((w) => w.whereRaw('cl.from_phone = c.phone').orWhereRaw('cl.to_phone = c.phone'))
         .whereNotNull('cl.transcription')
-        .whereRaw('COALESCE(cl.processed_at, cl.created_at) > r.updated_at')
+        // A processing verdict after the last look: a call still in
+        // processing (no processed_at) waits for its verdict.
+        .whereRaw('cl.processed_at > r.updated_at')
         .whereRaw('cl.transcription ~* ?', [EMAIL_TALK_PATTERN])
         .modify((qb) => whereNotSandboxCall(qb, 'cl.source'));
     })

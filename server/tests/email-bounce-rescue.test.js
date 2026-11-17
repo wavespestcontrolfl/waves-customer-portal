@@ -339,6 +339,7 @@ describe('rescueBouncedAddress flow', () => {
 
   it('auto-applies a NON-freemail inbound near-miss through the ledger-first path', async () => {
     const rescues = makeChain({ first: null, returning: [{ id: 'r-corp' }] });
+    rescues.update = jest.fn(() => Promise.resolve(1)); // Postgres: one row matched (the 'applied' mark)
     db.transaction.mockImplementation(async (fn) => fn(db));
     db.mockImplementation((name) => {
       if (name === 'email_bounce_rescues') return rescues;
@@ -359,6 +360,7 @@ describe('rescueBouncedAddress flow', () => {
     expect(r).toMatchObject({ status: 'applied', tier: 'inbound_ground_truth', candidate: 'svendors@corp-example.com' });
     // Ledger-first: the insert carried the pending 'applying' state, not 'applied'.
     expect(rescues.insert).toHaveBeenCalledWith(expect.objectContaining({ status: 'applying' }));
+    expect(rescues.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'applied', applied_by: 'webhook' }));
     // The primary-email fanout ran with the narrowed call-path review scope.
     const fanout = require('../services/customer-email-fanout');
     expect(fanout.propagateCustomerEmailChange).toHaveBeenCalledWith(
@@ -641,11 +643,15 @@ describe('rescueBouncedAddress self-fix', () => {
     customer = RAE, calls = RAE_CALLS, earlierSelfFix = false, bouncedBefore = [], blockedBefore = [],
     ownerProbe = 1, customerUpdates = 1, existingRow = null, claimRows = 1,
   } = {}) {
-    const ledger = { inserts: [], updates: [] };
+    const ledger = { inserts: [], updates: [], inTransaction: [] };
     let ledgerUpdateCount = 0;
+    let inTrx = false;
     const notes = [];
     let customerProbes = 0;
-    db.transaction.mockImplementation(async (fn) => fn(db));
+    db.transaction.mockImplementation(async (fn) => {
+      inTrx = true;
+      try { return await fn(db); } finally { inTrx = false; }
+    });
     db.raw = jest.fn(async () => ({}));
     db.mockImplementation((name) => {
       if (name === 'email_bounce_rescues') {
@@ -667,6 +673,7 @@ describe('rescueBouncedAddress self-fix', () => {
         // The first ledger update on a reusable row is the claim.
         chain.update = jest.fn((row) => {
           ledger.updates.push(row);
+          if (inTrx) ledger.inTransaction.push(row);
           ledgerUpdateCount += 1;
           return Promise.resolve(existingRow && ledgerUpdateCount === 1 ? claimRows : 1);
         });
@@ -700,7 +707,8 @@ describe('rescueBouncedAddress self-fix', () => {
       }
       if (name === 'call_log') {
         const chain = makeChain();
-        chain.select = jest.fn(() => Promise.resolve(calls));
+        // A call has its processing verdict unless the case says otherwise.
+        chain.select = jest.fn(() => Promise.resolve(calls.map((c) => ({ processing_status: 'processed', ...c }))));
         return chain;
       }
       if (name === 'customer_interactions') {
@@ -726,6 +734,9 @@ describe('rescueBouncedAddress self-fix', () => {
     expect(ledger.inserts[0]).toMatchObject({ status: 'applying' });
     expect(JSON.parse(ledger.inserts[0].evidence)).toMatchObject({ self_fix: true });
     expect(ledger.updates).toContainEqual(expect.objectContaining({ status: 'applied', applied_by: 'webhook' }));
+    // ...in the same transaction as the email change, so a committed fix
+    // always carries its 'applied' self-fix row.
+    expect(ledger.inTransaction).toEqual([expect.objectContaining({ status: 'applied', applied_by: 'webhook' })]);
     // The primary-email fanout with the narrowed review scope, like every apply.
     expect(fanout.propagateCustomerEmailChange).toHaveBeenCalledWith(
       expect.objectContaining({ after: { id: 'c1', email: 'lynzafi@yahoo.com' }, reviewReasonCodes: ['customer_email_missing'] }),
@@ -818,6 +829,15 @@ describe('rescueBouncedAddress self-fix', () => {
     });
     const r = await rescue.rescueBouncedAddress('john123@gmail.com');
     expect(r).toMatchObject({ status: 'suggested', tier: 'extractor_consensus', candidate: 'johns123@gmail.com' });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it('waits for a call still in processing: no self-fix while the newest email call has no verdict', async () => {
+    process.env.GATE_CALL_BOUNCE_SELF_FIX = 'true';
+    world({ calls: [RAE_CALLS[0], { ...RAE_CALLS[1], processing_status: 'processing', processed_at: null }] });
+    const r = await rescue.rescueBouncedAddress('lymzafi@yahoo.com');
+    expect(r).toMatchObject({ status: 'suggested', candidate: 'lynzafi@yahoo.com' });
+    expect(r.selfFix).toBeUndefined();
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
@@ -997,7 +1017,7 @@ describe('relookAfterNewCalls (a later call looks again)', () => {
     const sub = makeChain();
     sub.from = jest.fn(() => sub);
     query.whereExists.mock.calls[0][0].call(sub);
-    expect(sub.whereRaw).toHaveBeenCalledWith('COALESCE(cl.processed_at, cl.created_at) > r.updated_at');
+    expect(sub.whereRaw).toHaveBeenCalledWith('cl.processed_at > r.updated_at');
     expect(sub.whereRaw).toHaveBeenCalledWith('cl.transcription ~* ?', ['e-?mail|@|\\mdot\\M\\s*(com|net|org|edu)']);
   });
 });
