@@ -1,5 +1,5 @@
 /**
- * Quick Move "let the customer pick a day" routes (GATE_QUICKMOVE_CUSTOMER_PICK):
+ * Quick Move "let the customer pick a day" routes:
  * POST /api/tech/services/:id/customer-pick and its dispatch twin
  * POST /api/admin/dispatch/:serviceId/customer-pick.
  *
@@ -98,9 +98,7 @@ const HANDED_OFF = {
 const TECH = '/api/tech/services';
 const DISPATCH = '/api/admin/dispatch';
 
-const prevPickGate = process.env.GATE_QUICKMOVE_CUSTOMER_PICK;
 beforeEach(() => {
-  process.env.GATE_QUICKMOVE_CUSTOMER_PICK = 'true';
   mockCaller.id = 'tech-1';
   mockCaller.role = 'technician';
   db.__state.scheduledServices = [
@@ -113,10 +111,6 @@ beforeEach(() => {
   mockCommit.mockClear();
   emitDispatchJobUpdate.mockClear();
   flushDispatchQualityDates.mockClear();
-});
-afterAll(() => {
-  if (prevPickGate === undefined) delete process.env.GATE_QUICKMOVE_CUSTOMER_PICK;
-  else process.env.GATE_QUICKMOVE_CUSTOMER_PICK = prevPickGate;
 });
 
 async function post(path, body = { reasonCode: 'weather_rain' }) {
@@ -146,13 +140,6 @@ describe.each([
     expect(mockCommit).not.toHaveBeenCalled();
   });
 
-  test('gate off: 404 disabled before any check, nothing reached', async () => {
-    delete process.env.GATE_QUICKMOVE_CUSTOMER_PICK;
-    const r = await post(`${base}/svc-own/customer-pick`);
-    expect(r).toEqual({ status: 404, body: { error: 'disabled' } });
-    expect(mockHandOff).not.toHaveBeenCalled();
-    expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
-  });
 
   test("another technician's visit: 403, nothing reached", async () => {
     const r = await post(`${base}/svc-other/customer-pick`);
@@ -187,7 +174,6 @@ describe.each([
   test.each([
     ['bad_reason', 400],
     ['not_found', 404],
-    ['disabled', 404],
     ['state_changed', 409],
     ['pick_text_too_long', 409],
     ['customer_texts_off', 409],
@@ -199,7 +185,7 @@ describe.each([
     const r = await post(`${base}/svc-own/customer-pick`);
     // The sheet shows `error` (words, never the bare code); `reason` is the code.
     expect(r).toEqual({ status, body: { error: expect.any(String), reason } });
-    if (reason !== 'disabled') expect(r.body.error).not.toBe(reason);
+    expect(r.body.error).not.toBe(reason);
     expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
     expect(flushDispatchQualityDates).not.toHaveBeenCalled();
   });

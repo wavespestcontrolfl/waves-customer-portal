@@ -1080,9 +1080,8 @@ loaded, or the reverse) the commit is refused `409 SCOPE_CHANGED` and the
 page reloads. A page loaded before the gate was set sends no field and gets
 the same reload when a date would be named.
 
-Visits handed to the customer by Quick Move (owner 2026-11-01; the hand-off is
-behind `GATE_QUICKMOVE_CUSTOMER_PICK`, but everything below is keyed on the
-column and is NOT gated). Quick Move's "let the customer pick a day" parks a
+Visits handed to the customer by Quick Move (owner 2026-11-01; everything below
+is keyed on the column). Quick Move's "let the customer pick a day" parks a
 recurring plan visit with no window at a placeholder date about a week out and
 sets `scheduled_services.customer_pick_by` (timestamptz: 24 hours after the
 hand-off text, rounded up to the quarter hour; owner 2026-11-02, before which
@@ -1127,15 +1126,8 @@ For a row with `customer_pick_by` set:
 - **Auto-Dispatch waits.** `loadEligibleServices` and the unplaced-visit
   alert skip the row until `customer_pick_by` passes; the page still accepts
   a pick after the deadline, until a run books it.
-- **After a kill.** Turning `GATE_QUICKMOVE_CUSTOMER_PICK` off stops new
-  hand-offs only (the Quick Move option disappears and both
-  `POST .../customer-pick` routes answer `404 { error: 'disabled' }`). A link
-  already sent keeps working, and Auto-Dispatch still books an unpicked visit
-  after its deadline.
-
 Quick Move "let the customer pick a day" on the reschedule GET (owner 2026-11-01;
-read from `scheduled_services.customer_pick_by`, not behind
-`GATE_QUICKMOVE_CUSTOMER_PICK`, so a link already sent keeps working after a kill;
+read from `scheduled_services.customer_pick_by`;
 `customerPickFields` in `routes/reschedule-public.js`). A visit with the marker
 set and no `window_start` (handed to the customer, waiting) carries
 `customerPick: { pickBy, pickByLabel, deadlinePassed, originalDate,

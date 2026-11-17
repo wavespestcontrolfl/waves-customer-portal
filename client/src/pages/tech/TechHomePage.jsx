@@ -1703,7 +1703,7 @@ const EXTRA_REASON_ERROR_COPY = {
   target_not_later: 'Running late needs a time after the current window — pick a later slot.',
 };
 
-// "Let {first} pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK): the one MOVE TO row
+// "Let {first} pick a day": the one MOVE TO row
 // that hands the stop to the customer instead of booking a time. Styled like
 // the day rows beside it; the muted second line says what the text offers.
 function PickRow({ first, pick, active, onClick }) {

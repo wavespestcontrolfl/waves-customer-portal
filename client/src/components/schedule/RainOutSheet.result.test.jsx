@@ -75,7 +75,7 @@ describe('RainOutSheet commit result', () => {
   });
 });
 
-// "Let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK) on the dispatch sheet.
+// "Let the customer pick a day" on the dispatch sheet.
 const customerPick = {
   available: true,
   pickBy: '2099-01-03T01:00:00.000Z',

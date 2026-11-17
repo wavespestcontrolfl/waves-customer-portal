@@ -1,5 +1,5 @@
 /**
- * Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK, owner
+ * Quick Move "let the customer pick a day" (owner
  * 2026-11-01): RainOut.handOffToCustomer and RainOut.customerPickOffer.
  *
  * The real rain-out, template renderer (getTemplate on the template snapshot),
@@ -143,7 +143,6 @@ afterAll(() => { jest.useRealTimers(); });
 
 beforeEach(() => {
   jest.clearAllMocks();
-  process.env.GATE_QUICKMOVE_CUSTOMER_PICK = 'true';
   delete process.env.GATE_QUICKMOVE_EXTRA_REASONS;
   state = {
     service: { ...VISIT, ...CUSTOMER },
@@ -171,7 +170,6 @@ beforeEach(() => {
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: SID });
 });
 afterEach(() => {
-  delete process.env.GATE_QUICKMOVE_CUSTOMER_PICK;
   delete process.env.GATE_QUICKMOVE_EXTRA_REASONS;
 });
 
@@ -250,13 +248,6 @@ describe('rain_out_customer_pick_v1 template', () => {
 });
 
 describe('handOffToCustomer refusals write nothing', () => {
-  test('gate off: disabled, before any read', async () => {
-    delete process.env.GATE_QUICKMOVE_CUSTOMER_PICK;
-    expect(await handOff()).toEqual({ ok: false, reason: 'disabled' });
-    expect(db).not.toHaveBeenCalled();
-    expectNothingWritten();
-  });
-
   test.each([
     ['custom (the dispatcher-typed reason)', 'custom'],
     ['an unknown code', 'weather_snow'],
@@ -612,12 +603,6 @@ describe('handOffToCustomer writes and texts', () => {
 });
 
 describe('customerPickOffer (the sheets\' offer)', () => {
-  test('gate off: undefined, nothing read', async () => {
-    delete process.env.GATE_QUICKMOVE_CUSTOMER_PICK;
-    expect(await RainOut.customerPickOffer('svc-1')).toBeUndefined();
-    expect(db).not.toHaveBeenCalled();
-  });
-
   test('an eligible visit: the deadline and the exact text for every preset reason, measured, nothing written or minted', async () => {
     const offer = await RainOut.customerPickOffer('svc-1');
     expect(offer).toEqual({

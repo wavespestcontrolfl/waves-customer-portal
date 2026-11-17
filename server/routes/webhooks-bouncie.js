@@ -26,7 +26,6 @@ const logger = require('../services/logger');
 const mileageService = require('../services/bouncie-mileage');
 const gpsArrivalDetector = require('../services/gps-arrival-detector');
 const truckClockIn = require('../services/truck-clock-in');
-const gates = require('../config/feature-gates');
 const { pingTechLocation, readTechStatus } = require('../services/tech-status');
 const { FUTURE_TIMESTAMP_TOLERANCE_MS } = require('../services/customer-tracking-eta');
 const {
@@ -133,9 +132,8 @@ async function resolveTechnician(imei) {
   }
 }
 
-// ---------- engine-off arrival (GATE_ARRIVAL_ENGINE_OFF, owner 2026-11-01) ----------
+// ---------- engine-off arrival (owner 2026-11-01) ----------
 
-const arrivalEngineOffLive = () => typeof gates.arrivalEngineOffLive === 'function' && gates.arrivalEngineOffLive();
 // A last known location counts as the engine-off position only when it was
 // reported at most this long before the trip-end (and never after it).
 const ENGINE_OFF_LAST_LOCATION_MAX_MS = 10 * 60 * 1000;
@@ -170,7 +168,7 @@ async function engineOffPoint({ imei, payload, ownPoint }) {
   return { ...base, position_source: null, last_location_gap_s: gapSeconds };
 }
 
-const isEngineOffArrivalEvent = (eventType) => eventType === 'trip-end' && arrivalEngineOffLive();
+const isEngineOffArrivalEvent = (eventType) => eventType === 'trip-end';
 
 // The point the rest of the event runs on. With no usable engine-off position
 // only the detector's not-marked diagnostic runs and the event carries no point:

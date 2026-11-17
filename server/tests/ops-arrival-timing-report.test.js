@@ -1,5 +1,5 @@
-// ops/agents/arrival-timing-report.js — the pure half and its read-only guard. The report decides whether
-// GATE_ARRIVAL_ENGINE_OFF can be flipped, so a wrong sign, a wrong arrival match or a still stretch carried across
+// ops/agents/arrival-timing-report.js — the pure half and its read-only guard. The report decided whether
+// the engine-off arrival rule went live, so a wrong sign, a wrong arrival match or a still stretch carried across
 // an engine-off would mislead that call.
 jest.mock('../models/db', () => jest.fn());
 

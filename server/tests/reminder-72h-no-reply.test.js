@@ -1,7 +1,6 @@
 /**
  * The 72-hour reminder for a visit Auto-Dispatch booked after the customer did
- * not pick a day (Quick Move "let the customer pick a day",
- * GATE_QUICKMOVE_CUSTOMER_PICK, owner 2026-11-01).
+ * not pick a day (Quick Move "let the customer pick a day", owner 2026-11-01).
  *
  * Pins: the migration row (GSM-7, placeholders, segment cap, insert-if-absent),
  * the selection rule (customer_pick_by set AND last_auto_dispatch_at later AND

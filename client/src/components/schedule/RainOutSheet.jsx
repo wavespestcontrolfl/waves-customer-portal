@@ -314,7 +314,7 @@ function authHeaders() {
   };
 }
 
-// "Let {first} pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK): the one MOVE TO row
+// "Let {first} pick a day": the one MOVE TO row
 // that hands the visit to the customer instead of booking a time. Styled like
 // the preset rows above it; the muted second line names what the text offers.
 function PickRow({ first, pick, active, onClick }) {

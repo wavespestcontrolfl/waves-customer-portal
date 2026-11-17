@@ -324,8 +324,7 @@ describe('visitInsideMoveNoticeWindow — a visit handed to the customer to pick
     expect(visitInsideMoveNoticeWindow({ scheduled_date: '2027-06-01', window_start: '20:00', customer_pick_by: handedAt }, now)).toBe(true);
   });
 
-  test('works with the gate unset (a link already sent must keep working after a kill)', () => {
-    delete process.env.GATE_QUICKMOVE_CUSTOMER_PICK;
+  test('a handed-off visit with no window is outside the notice window (a link already sent keeps working)', () => {
     expect(visitInsideMoveNoticeWindow({ scheduled_date: '2027-06-09', window_start: null, customer_pick_by: handedAt }, now)).toBe(false);
   });
 });

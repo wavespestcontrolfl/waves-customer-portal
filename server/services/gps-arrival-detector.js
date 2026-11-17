@@ -5,7 +5,6 @@ const { ensureCustomerGeocoded } = require('./geocoder');
 const { recordAuditEvent } = require('./audit-log');
 const { stampedAddressDiverges } = require('./stamped-address');
 const { isStaffMaintenanceEnabled } = require('../middleware/staff-maintenance');
-const gates = require('../config/feature-gates');
 
 const SETTINGS_KEYS = [
   'gps_arrival.enabled',
@@ -146,13 +145,12 @@ function distanceMeters(fromLat, fromLng, toLat, toLng) {
   return earthRadiusMeters * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// GATE_ARRIVAL_ENGINE_OFF (owner 2026-11-01), read at call time.
-const engineOffRuleLive = () => typeof gates.arrivalEngineOffLive === 'function' && gates.arrivalEngineOffLive();
-const engineOffContext = (point) => ({ engineOffRule: engineOffRuleLive(), engineOff: point?.engine_off === true });
-// An engine-off marker the receiver could not give a position (gate on only).
-const engineOffWithoutPosition = (point) => engineOffRuleLive() && point?.engine_off === true && validLatitude(point.lat) == null;
-// An engine-off on the truck's borrowed last location (gate on only).
-const borrowedEngineOff = (point) => engineOffRuleLive() && point?.engine_off === true && point?.position_source === 'last_location';
+// Engine-off arrival (owner 2026-11-01).
+const engineOffContext = (point) => ({ engineOff: point?.engine_off === true });
+// An engine-off marker the receiver could not give a position.
+const engineOffWithoutPosition = (point) => point?.engine_off === true && validLatitude(point.lat) == null;
+// An engine-off on the truck's borrowed last location.
+const borrowedEngineOff = (point) => point?.engine_off === true && point?.position_source === 'last_location';
 
 function buildSpeedDecision({ distance, speedMph, ignition, config }) {
   const speed = finiteNumber(speedMph);
@@ -175,20 +173,20 @@ function buildSpeedDecision({ distance, speedMph, ignition, config }) {
   return { arrived: false, reason: 'outside_arrival_radius' };
 }
 
-// Gate on: the engine-off point (a trip-end the receiver flagged) marks inside
+// The engine-off point (a trip-end the receiver flagged) marks inside
 // the arrival radius, and the immediate-radius rule keeps marking: in October
 // 2026 it fired a median 12 s before the truck parked (p90 42 s), while the
 // slow-radius rule fired a median 1 min early at ~104 m (p90 3.1 min). A sample
 // only the slow rule would have marked is recorded as awaiting_engine_off.
-function buildArrivalDecision({ distance, speedMph, ignition, config, engineOffRule = false, engineOff = false }) {
+function buildArrivalDecision({ distance, speedMph, ignition, config, engineOff = false }) {
   if (distance == null) return { arrived: false, reason: 'invalid_distance' };
-  if (engineOffRule && engineOff) {
+  if (engineOff) {
     return distance <= config.radiusMeters
       ? { arrived: true, reason: 'engine_off_in_radius' }
       : { arrived: false, reason: 'engine_off_outside_radius' };
   }
   const decision = buildSpeedDecision({ distance, speedMph, ignition, config });
-  return engineOffRule && decision.reason === 'inside_arrival_radius_slow'
+  return decision.reason === 'inside_arrival_radius_slow'
     ? { arrived: false, reason: 'awaiting_engine_off' }
     : decision;
 }
@@ -214,7 +212,7 @@ function validateSampleTiming({ techStatus, point, service, now = Date.now() }) 
   if (pointMs == null || techMs == null) {
     return { ok: false, reason: 'missing_location_timestamp' };
   }
-  // Gate on, an engine-off on a borrowed last location is timed by its trip-end:
+  // An engine-off on a borrowed last location is timed by its trip-end:
   // the position was reported up to 10 minutes earlier and never written back, so
   // the stored location may be older than the trip-end, but never newer (the truck
   // moved on after the engine-off). A trip-end with its own GPS is a sample.

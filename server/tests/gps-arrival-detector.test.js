@@ -203,7 +203,7 @@ describe('gps-arrival-detector', () => {
       distance: 120,
       speedMph: 8,
       config,
-    })).toMatchObject({ arrived: true, reason: 'inside_arrival_radius_slow' });
+    })).toMatchObject({ arrived: false, reason: 'awaiting_engine_off' });
   });
 
   test('marks the current en-route job on property when GPS is at the destination', async () => {
@@ -950,8 +950,8 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
   });
 });
 
-// GATE_ARRIVAL_ENGINE_OFF (owner 2026-11-01): the arrival is tied to the truck turning off.
-describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', () => {
+// Engine-off arrival (owner 2026-11-01): the arrival is tied to the truck turning off.
+describe('gps-arrival-detector engine-off arrival', () => {
   const FAR_LAT = 27.4386 + 0.0027; // ~300 m north of the destination
   const MID_LAT = 27.4386 + 0.0009; // ~100 m north: inside the slow radius, outside the immediate one
   const engineOffPoint = (overrides = {}) => basePoint({
@@ -978,29 +978,9 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     delete process.env.STAFF_MAINTENANCE_MODE;
     detector._test.resetConfigCache();
     trackTransitions.markOnProperty.mockResolvedValue({ ok: true, state: 'on_property' });
-    process.env.GATE_ARRIVAL_ENGINE_OFF = 'true';
   });
 
-  afterAll(() => {
-    delete process.env.GATE_ARRIVAL_ENGINE_OFF;
-  });
-
-  test('gate off (unset or not exactly true): the old speed and radius rules still mark a slow sample', async () => {
-    delete process.env.GATE_ARRIVAL_ENGINE_OFF;
-    expect(await run(baseService(), { point: basePoint({ speed_mph: 3, ignition: true }) }))
-      .toMatchObject({ ok: true, arrivalMarked: true });
-    process.env.GATE_ARRIVAL_ENGINE_OFF = '1';
-    expect(await run(baseService(), { point: basePoint({ speed_mph: 3, ignition: true }) }))
-      .toMatchObject({ ok: true, arrivalMarked: true });
-    // With the gate off the engine-off marker changes nothing: the old rules judge the point.
-    delete process.env.GATE_ARRIVAL_ENGINE_OFF;
-    expect(await run(baseService(), { point: engineOffPoint() }))
-      .toMatchObject({ ok: true, arrivalMarked: true });
-    expect(recordAuditEvent.mock.calls.map(([e]) => e.metadata.decision_reason))
-      .toEqual(['inside_immediate_radius', 'inside_immediate_radius', 'inside_immediate_radius']);
-  });
-
-  test('gate on: a slow sample the slow-radius rule alone would mark does not mark and records awaiting_engine_off once', async () => {
+  test('a slow sample the slow-radius rule alone would mark does not mark and records awaiting_engine_off once', async () => {
     const point = basePoint({ lat: MID_LAT, speed_mph: 3, ignition: true });
     const first = await run(baseService(), { point });
     await run(baseService(), { point });
@@ -1014,7 +994,7 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     expect(notMarkedWrites()[0].metadata.engine_off).toBeUndefined();
   });
 
-  test('gate on: the immediate-radius rule keeps marking (it fires within seconds of parking)', async () => {
+  test('the immediate-radius rule keeps marking (it fires within seconds of parking)', async () => {
     const result = await run(baseService(), { point: basePoint({ speed_mph: 3, ignition: true }) });
 
     expect(result).toMatchObject({ ok: true, arrivalMarked: true });
@@ -1025,18 +1005,18 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     }));
   });
 
-  test('gate on: a sample with ignition false is still not an engine-off event', async () => {
+  test('a sample with ignition false is still not an engine-off event', async () => {
     const result = await run(baseService(), { point: basePoint({ lat: MID_LAT, speed_mph: 0, ignition: false }) });
     expect(result).toMatchObject({ ok: false, reason: 'awaiting_engine_off' });
     expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
   });
 
-  test('gate on: a fast in-radius sample keeps its old reason (not an awaiting_engine_off row)', async () => {
+  test('a fast in-radius sample keeps its old reason (not an awaiting_engine_off row)', async () => {
     const result = await run(baseService(), { point: basePoint({ speed_mph: 32, ignition: true }) });
     expect(result).toMatchObject({ ok: false, reason: 'inside_radius_moving_too_fast' });
   });
 
-  test('gate on: an engine-off inside the radius marks, with the position source and gap in the audit row', async () => {
+  test('an engine-off inside the radius marks, with the position source and gap in the audit row', async () => {
     const result = await run(baseService(), { point: engineOffPoint() });
 
     expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('svc-1', { actingTechId: 'tech-1' });
@@ -1053,7 +1033,7 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     }));
   });
 
-  test('gate on: an engine-off at 120 m (past the immediate radius, inside 175 m) marks', async () => {
+  test('an engine-off at 120 m (past the immediate radius, inside 175 m) marks', async () => {
     const result = await run(baseService(), { point: engineOffPoint({ lat: 27.4386 + 0.00108, position_source: 'trip_end_gps', last_location_gap_s: null }) });
     expect(result).toMatchObject({ ok: true, arrivalMarked: true });
     expect(recordAuditEvent.mock.calls[0][0].metadata).toMatchObject({
@@ -1061,7 +1041,7 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     });
   });
 
-  test('gate on: an engine-off outside the radius does not mark and records engine_off_outside_radius once', async () => {
+  test('an engine-off outside the radius does not mark and records engine_off_outside_radius once', async () => {
     const point = engineOffPoint({ lat: FAR_LAT });
     const result = await run(baseService(), { point });
     await run(baseService(), { point });
@@ -1079,7 +1059,7 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     expect(notMarkedWrites()[0].metadata.distance_m).toBeGreaterThan(175);
   });
 
-  test('gate on: an engine-off with no usable position records engine_off_no_position with no distance', async () => {
+  test('an engine-off with no usable position records engine_off_no_position with no distance', async () => {
     const point = basePoint({
       lat: undefined, lng: undefined, ignition: false, speed_mph: 0, engine_off: true, position_source: null, last_location_gap_s: 1200,
     });
@@ -1097,7 +1077,7 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
   test.each([
     ['older than the 10-minute sample limit', minutesAgo(20)],
     ['before the visit went en route (it went en route 5 minutes ago)', minutesAgo(8)],
-  ])('gate on: a position-less engine-off %s is from an earlier trip and writes nothing', async (_label, endedAt) => {
+  ])('a position-less engine-off %s is from an earlier trip and writes nothing', async (_label, endedAt) => {
     const point = basePoint({
       lat: undefined, lng: undefined, ignition: false, speed_mph: 0, engine_off: true, position_source: null, reported_at: endedAt,
     });
@@ -1107,7 +1087,7 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     expect(notMarkedWrites()).toHaveLength(0);
   });
 
-  test('gate on: an engine-off is timed by its trip-end, though the stored location is minutes older; a sample is not', async () => {
+  test('an engine-off is timed by its trip-end, though the stored location is minutes older; a sample is not', async () => {
     // The receiver never writes a borrowed position back, so tech_status keeps the last sample's time.
     const techStatus = baseTechStatus({ lat: NEAR_LAT, location_updated_at: minutesAgo(6) });
 
@@ -1121,7 +1101,7 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     expect(sample).toMatchObject({ ok: false, reason: 'stale_location_sample' });
   });
 
-  test('gate on: a borrowed engine-off is refused when its trip-end is in the future or a newer sample exists', async () => {
+  test('a borrowed engine-off is refused when its trip-end is in the future or a newer sample exists', async () => {
     const future = await run(baseService(), {
       techStatus: baseTechStatus({ lat: NEAR_LAT, location_updated_at: minutesAgo(3) }),
       point: engineOffPoint({ reported_at: new Date(Date.now() + 5 * 60 * 1000).toISOString() }),
@@ -1137,7 +1117,7 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
   });
 
-  test('gate on: a trip-end with its own GPS keeps the location-time match of a sample', async () => {
+  test('a trip-end with its own GPS keeps the location-time match of a sample', async () => {
     const result = await run(baseService(), {
       techStatus: baseTechStatus({ lat: NEAR_LAT, location_updated_at: minutesAgo(6) }),
       point: engineOffPoint({ position_source: 'trip_end_gps', last_location_gap_s: null }),
@@ -1146,14 +1126,14 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
   });
 
-  test('gate on: an engine-off with no position for a job that is not en route writes nothing', async () => {
+  test('an engine-off with no position for a job that is not en route writes nothing', async () => {
     const point = basePoint({ lat: undefined, lng: undefined, engine_off: true, position_source: null });
     const result = await run(baseService({ track_state: 'on_property', status: 'on_site' }), { point, techStatus: baseTechStatus() });
     expect(result).toEqual({ ok: false, reason: 'engine_off_no_position' });
     expect(notMarkedWrites()).toHaveLength(0);
   });
 
-  test('gate on: the unchanged checks still apply to an engine-off (technician mismatch, config.enabled, Staff maintenance)', async () => {
+  test('the unchanged checks still apply to an engine-off (technician mismatch, config.enabled, Staff maintenance)', async () => {
     const mismatch = await run(baseService({ technician_id: 'tech-2' }), { point: engineOffPoint() });
     expect(mismatch).toMatchObject({ ok: false, reason: 'technician_mismatch' });
 
@@ -1170,9 +1150,9 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
     expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
   });
 
-  test('buildArrivalDecision: gate on judges the engine-off by radius and keeps the immediate rule; gate off ignores the flag', () => {
+  test('buildArrivalDecision: judges the engine-off by radius and keeps the immediate rule', () => {
     const { buildArrivalDecision, DEFAULT_CONFIG } = detector._test;
-    const on = { engineOffRule: true, config: DEFAULT_CONFIG };
+    const on = { config: DEFAULT_CONFIG };
     expect(buildArrivalDecision({ ...on, distance: 170, speedMph: 0, ignition: false, engineOff: true }))
       .toEqual({ arrived: true, reason: 'engine_off_in_radius' });
     expect(buildArrivalDecision({ ...on, distance: 176, speedMph: 0, ignition: false, engineOff: true }))
@@ -1185,7 +1165,5 @@ describe('gps-arrival-detector engine-off arrival (GATE_ARRIVAL_ENGINE_OFF)', ()
       .toEqual({ arrived: false, reason: 'outside_arrival_radius' });
     expect(buildArrivalDecision({ ...on, distance: null, engineOff: true }))
       .toEqual({ arrived: false, reason: 'invalid_distance' });
-    expect(buildArrivalDecision({ config: DEFAULT_CONFIG, distance: 40, speedMph: 3, engineOff: true }))
-      .toEqual({ arrived: true, reason: 'inside_immediate_radius' });
   });
 });

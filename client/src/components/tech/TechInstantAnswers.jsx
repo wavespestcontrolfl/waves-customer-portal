@@ -2,7 +2,7 @@
  * Tech instant answers — one-tap chips and an answer card for the tech
  * Intelligence Bar. Next stop, access notes and last treatment come from
  * GET /tech/answers (deterministic, no model call), never from the
- * Intelligence Bar query route. Renders nothing while the gate is off.
+ * Intelligence Bar query route. Renders nothing until the kinds list loads.
  */
 
 import { useState, useEffect } from 'react';

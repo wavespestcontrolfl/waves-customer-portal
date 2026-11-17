@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * READ-ONLY: how early the Bouncie GPS arrival fires against when the truck actually parked, and what an arrival
- * rule tied to the truck parking (the planned GATE_ARRIVAL_ENGINE_OFF) needs to be true before it goes live (owner
+ * rule tied to the truck parking needed to be true before it went live (owner
  * 2026-11-01: the arrival triggers early; tie it to the truck turning off).
  *
  *   PG_CA_FILE=~/ops-oneshots/certs/railway-pg-root.pem railway run --service Postgres -- \

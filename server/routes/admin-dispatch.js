@@ -4627,7 +4627,7 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     // A technician whose Team tab switch is off sees
     // why, not move choices the commit would refuse (plus the customer-pick
-    // offer while GATE_QUICKMOVE_CUSTOMER_PICK is on).
+    // offer).
     {
       const refusal = await techMoveRefusal(req);
       if (refusal) return res.status(refusal.status).json(await moveRefusalBody(refusal, req.params.serviceId));
@@ -5431,7 +5431,7 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 // POST /api/admin/dispatch/:serviceId/customer-pick
 // body: { reasonCode }
 //
-// Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK, owner
+// Quick Move "let the customer pick a day" (owner
 // 2026-11-01), the dispatch twin of POST /api/tech/services/:id/customer-pick:
 // the visit leaves today's route and the customer gets one text with their
 // reschedule link (services/rain-out.js handOffToCustomer). Same ownership and
@@ -5441,9 +5441,6 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 // move visits" switch is off may use this option only.
 router.post('/:serviceId/customer-pick', async (req, res, next) => {
   try {
-    if (require('../config/feature-gates').quickMoveCustomerPickLive?.() !== true) {
-      return res.status(404).json({ error: 'disabled' });
-    }
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
       .first('id', 'technician_id', 'scheduled_date');
