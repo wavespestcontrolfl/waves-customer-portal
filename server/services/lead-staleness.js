@@ -17,7 +17,7 @@
  * Setting it to 0 / empty / any non-numeric value disables the sweep
  * entirely (fail-safe off switch). Leave it unset for the default.
  *
- * GATE_LEAD_NO_RESPONSE_REASON (owner 2026-11-01, dark): the sweep also
+ * No-response reason (owner 2026-11-01): the sweep also
  * writes lost_reason 'no_response' on every lead it parks, and parks
  * estimate_sent / estimate_viewed leads whose estimate expired with a
  * lost-group disposition. An expired estimate means quiet (estimates expire
@@ -28,7 +28,6 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { bridgeLeadsFunnelStage } = require('./lead-funnel-bridge');
 const { DISPOSITIONS } = require('./estimate-disposition');
-const { leadNoResponseReasonLive } = require('../config/feature-gates');
 const { openChatScope, openRequestScope, openBookingScope, openMessageScope } = require('./portal-inbox');
 const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 const { personSentFilter } = require('./email/email-customer-link');
@@ -66,10 +65,13 @@ function getThresholdDays() {
 // `excludeSoftDeleted` is passed by the caller only when leads.deleted_at
 // exists (the soft-delete lane ships separately) — a removed lead must not
 // be flipped or have activity written on it.
-function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false, noResponseReason = false }) {
-  const changes = { status: 'unresponsive', updated_at: now };
+function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false }) {
   // Only a blank reason is filled; a reason staff already wrote stays.
-  if (noResponseReason) changes.lost_reason = qb.raw('COALESCE(leads.lost_reason, ?)', [NO_RESPONSE_REASON]);
+  const changes = {
+    status: 'unresponsive',
+    updated_at: now,
+    lost_reason: qb.raw('COALESCE(leads.lost_reason, ?)', [NO_RESPONSE_REASON]),
+  };
   return staleLeadScope(qb('leads').where('leads.status', 'new'), { now, cutoff, excludeSoftDeleted })
     .update(changes)
     .returning('id');
@@ -361,16 +363,15 @@ async function runLeadStalenessSweep() {
   // leads are excluded; before it lands, the condition would 500 the query.
   const excludeSoftDeleted = await db.schema.hasColumn('leads', 'deleted_at').catch(() => false);
 
-  const noResponseReason = leadNoResponseReasonLive();
   const opts = { now, cutoff, excludeSoftDeleted };
   let expiredEstimates = 0;
 
   // The UPDATE(s) + one batched activity INSERT run inside a transaction, so a
   // failed insert rolls the flips back and the next run retries cleanly.
   const marked = await db.transaction(async (trx) => {
-    const flipped = await buildStaleLeadUpdate(trx, { ...opts, noResponseReason });
-    // Gate on: quiet leads whose estimate expired as a loss are parked too.
-    const fromEstimate = noResponseReason ? await buildExpiredEstimateLeadUpdate(trx, opts) : [];
+    const flipped = await buildStaleLeadUpdate(trx, opts);
+    // Quiet leads whose estimate expired as a loss are parked too.
+    const fromEstimate = await buildExpiredEstimateLeadUpdate(trx, opts);
     expiredEstimates = fromEstimate.length;
 
     if (flipped.length || fromEstimate.length) {
@@ -382,7 +383,7 @@ async function runLeadStalenessSweep() {
         metadata: JSON.stringify({ auto: true, threshold_days: thresholdDays, ...extra }),
       });
       await trx('lead_activities').insert([
-        ...flipped.map((row) => activity(row, noResponseReason ? { lost_reason: NO_RESPONSE_REASON } : {})),
+        ...flipped.map((row) => activity(row, { lost_reason: NO_RESPONSE_REASON })),
         ...fromEstimate.map((row) => activity(row, { lost_reason: NO_RESPONSE_REASON, source: 'estimate_expired' })),
       ]);
 
@@ -396,10 +397,8 @@ async function runLeadStalenessSweep() {
     return flipped.length + fromEstimate.length;
   });
 
-  logger.info(`[lead-staleness] thresholdDays=${thresholdDays} marked=${marked}${noResponseReason ? ` expiredEstimates=${expiredEstimates}` : ''}`);
-  return noResponseReason
-    ? { disabled: false, marked, expiredEstimates }
-    : { disabled: false, marked };
+  logger.info(`[lead-staleness] thresholdDays=${thresholdDays} marked=${marked} expiredEstimates=${expiredEstimates}`);
+  return { disabled: false, marked, expiredEstimates };
 }
 
 module.exports = {

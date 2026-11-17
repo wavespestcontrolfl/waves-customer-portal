@@ -24,8 +24,7 @@
  * Effects (activity rows, summary counts, env off switch) are covered with
  * the chain-mock style used by the other sweep tests.
  *
- * GATE_LEAD_NO_RESPONSE_REASON (dark): off = every assertion above is
- * unchanged; on = lost_reason 'no_response' on each flip, plus a second
+ * No-response reason: lost_reason 'no_response' on each flip, plus a second
  * UPDATE for estimate_sent / estimate_viewed leads whose estimate expired as
  * a loss (same exemptions, no converted_at, no newer live estimate, quiet for
  * the window). It never sets status 'lost'.
@@ -89,7 +88,7 @@ function makeUpdateChain(result) {
   return chain;
 }
 
-// The sweep builds the `new` UPDATE first, then (gate on only) the
+// The sweep builds the `new` UPDATE first, then the
 // expired-estimate UPDATE: the first trx('leads') call gets `flipped`, the
 // second gets `estimateFlipped`.
 function installDb({ flipped = [], estimateFlipped = [], hasDeletedAt = false } = {}) {
@@ -185,7 +184,6 @@ describe('lead staleness sweep', () => {
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(NOW);
     delete process.env.LEAD_STALENESS_DAYS;
-    delete process.env.GATE_LEAD_NO_RESPONSE_REASON;
     mockDb.mockReset();
     logger.info.mockClear();
   });
@@ -193,7 +191,6 @@ describe('lead staleness sweep', () => {
   afterEach(() => {
     jest.useRealTimers();
     delete process.env.LEAD_STALENESS_DAYS;
-    delete process.env.GATE_LEAD_NO_RESPONSE_REASON;
     jest.clearAllMocks();
   });
 
@@ -241,7 +238,7 @@ describe('lead staleness sweep', () => {
       // The recursive-chain clause is a multi-line raw fragment; compare
       // whitespace-normalized so the pin is on the SQL, not the indentation.
       expect(sql.replace(/\s+/g, ' ')).toBe(
-        'update "leads" set "status" = ?, "updated_at" = ? '
+        'update "leads" set "status" = ?, "updated_at" = ?, "lost_reason" = COALESCE(leads.lost_reason, ?) '
         + 'where "leads"."status" = ? and "leads"."created_at" <= ? '
         + 'and ("leads"."next_follow_up_at" is null or "leads"."next_follow_up_at" <= ?) '
         + 'and not exists (select 1 from "lead_activities" '
@@ -276,7 +273,7 @@ describe('lead staleness sweep', () => {
         + OWED_REPLY_CLAUSE_TAIL
         + ' returning "id"'
       );
-      expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, cutoff, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show', 'booked', 'completed', ...OWED_REPLY_BINDINGS]);
+      expect(bindings).toEqual(['unresponsive', NOW, 'no_response', 'new', cutoff, NOW, cutoff, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show', 'booked', 'completed', ...OWED_REPLY_BINDINGS]);
 
       return knex.destroy();
     });
@@ -327,15 +324,6 @@ describe('lead staleness sweep', () => {
         expect(bindings).toEqual(expect.arrayContaining(['resolved', 'closed', 'cancelled']));
         return knex.destroy();
       });
-
-      test('the exemption has no gate: it compiles the same with GATE_LEAD_NO_RESPONSE_REASON on or off', () => {
-        const knex = require('knex')({ client: 'pg' });
-        const off = squash(buildStaleLeadUpdate(knex, { now: NOW, cutoff }).toSQL().sql);
-        const on = squash(buildStaleLeadUpdate(knex, { now: NOW, cutoff, noResponseReason: true }).toSQL().sql);
-        const tail = (t) => t.slice(t.indexOf('and not exists (select 1 from "ai_escalations"'));
-        expect(tail(on)).toBe(tail(off));
-        return knex.destroy();
-      });
     });
 
     test('excludeSoftDeleted adds deleted_at IS NULL', () => {
@@ -352,26 +340,17 @@ describe('lead staleness sweep', () => {
     });
   });
 
-  describe('GATE_LEAD_NO_RESPONSE_REASON (compiled SQL)', () => {
+  describe('no-response reason (compiled SQL)', () => {
     const knexFor = () => require('knex')({ client: 'pg' });
     const cutoff = new Date(NOW.getTime() - 21 * DAY_MS);
     const lostCodes = DISPOSITIONS.filter((d) => d.group === 'lost').map((d) => d.code);
     const norm = (sql) => sql.replace(/\s+/g, ' ');
 
-    test('gate off: the new-lead UPDATE is unchanged (no lost_reason)', () => {
+    test('the new-lead UPDATE fills a blank reason only', () => {
       const knex = knexFor();
-      const { sql } = buildStaleLeadUpdate(knex, { now: NOW, cutoff }).toSQL();
-      expect(sql).toContain('update "leads" set "status" = ?, "updated_at" = ? where');
-      expect(sql).not.toContain('lost_reason');
-      return knex.destroy();
-    });
-
-    test('gate on: the new-lead UPDATE fills a blank reason only', () => {
-      const knex = knexFor();
-      const { sql, bindings } = buildStaleLeadUpdate(knex, { now: NOW, cutoff, noResponseReason: true }).toSQL();
+      const { sql, bindings } = buildStaleLeadUpdate(knex, { now: NOW, cutoff }).toSQL();
       expect(sql).toContain('set "status" = ?, "updated_at" = ?, "lost_reason" = COALESCE(leads.lost_reason, ?) where');
       expect(bindings.slice(0, 3)).toEqual(['unresponsive', NOW, 'no_response']);
-      // The WHERE is the same one gate off uses.
       expect(bindings.slice(3)).toEqual(['new', cutoff, NOW, cutoff, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show', 'booked', 'completed', ...OWED_REPLY_BINDINGS]);
       return knex.destroy();
     });
@@ -469,9 +448,13 @@ describe('lead staleness sweep', () => {
 
       const result = await runLeadStalenessSweep();
 
-      expect(result).toEqual({ disabled: false, marked: 2 });
+      expect(result).toEqual({ disabled: false, marked: 2, expiredEstimates: 0 });
       expect(mockDb.transaction).toHaveBeenCalledTimes(1);
-      expect(leadsChain.update).toHaveBeenCalledWith({ status: 'unresponsive', updated_at: NOW });
+      expect(leadsChain.update).toHaveBeenCalledWith({
+        status: 'unresponsive',
+        updated_at: NOW,
+        lost_reason: { sql: 'COALESCE(leads.lost_reason, ?)', bindings: ['no_response'] },
+      });
       expect(leadsChain.returning).toHaveBeenCalledWith('id');
 
       // Default 21-day cutoff lands on the created_at bound.
@@ -486,19 +469,19 @@ describe('lead staleness sweep', () => {
           activity_type: 'status_change',
           description: 'Auto-marked unresponsive after 21 days with no contact',
           performed_by: 'system',
-          metadata: JSON.stringify({ auto: true, threshold_days: 21 }),
+          metadata: JSON.stringify({ auto: true, threshold_days: 21, lost_reason: 'no_response' }),
         },
         {
           lead_id: 'lead-2',
           activity_type: 'status_change',
           description: 'Auto-marked unresponsive after 21 days with no contact',
           performed_by: 'system',
-          metadata: JSON.stringify({ auto: true, threshold_days: 21 }),
+          metadata: JSON.stringify({ auto: true, threshold_days: 21, lost_reason: 'no_response' }),
         },
       ]);
 
       // One summary line: count + threshold.
-      expect(logger.info).toHaveBeenCalledWith('[lead-staleness] thresholdDays=21 marked=2');
+      expect(logger.info).toHaveBeenCalledWith('[lead-staleness] thresholdDays=21 marked=2 expiredEstimates=0');
 
       // Funnel rows collapse to the lost bucket for the flipped leads, on the
       // SAME transaction (unresponsive is a closed status).
@@ -511,7 +494,7 @@ describe('lead staleness sweep', () => {
 
       const result = await runLeadStalenessSweep();
 
-      expect(result).toEqual({ disabled: false, marked: 1 });
+      expect(result).toEqual({ disabled: false, marked: 1, expiredEstimates: 0 });
       const cutoff = new Date(NOW.getTime() - 30 * DAY_MS);
       expect(leadsChain.where).toHaveBeenCalledWith('leads.created_at', '<=', cutoff);
       expect(activityInsert).toHaveBeenCalledWith([
@@ -544,10 +527,10 @@ describe('lead staleness sweep', () => {
 
       const result = await runLeadStalenessSweep();
 
-      expect(result).toEqual({ disabled: false, marked: 0 });
+      expect(result).toEqual({ disabled: false, marked: 0, expiredEstimates: 0 });
       expect(activityInsert).not.toHaveBeenCalled();
       expect(bridgeLeadsFunnelStage).not.toHaveBeenCalled();
-      expect(logger.info).toHaveBeenCalledWith('[lead-staleness] thresholdDays=21 marked=0');
+      expect(logger.info).toHaveBeenCalledWith('[lead-staleness] thresholdDays=21 marked=0 expiredEstimates=0');
     });
 
     test('disabled via env: never touches the database', async () => {
@@ -563,19 +546,7 @@ describe('lead staleness sweep', () => {
       expect(mockDb.transaction).not.toHaveBeenCalled();
     });
 
-    describe('GATE_LEAD_NO_RESPONSE_REASON on', () => {
-      beforeEach(() => { process.env.GATE_LEAD_NO_RESPONSE_REASON = 'true'; });
-
-      test('new-lead flips carry the reason; no second UPDATE when the gate is off', async () => {
-        delete process.env.GATE_LEAD_NO_RESPONSE_REASON;
-        const { trx } = installDb({ flipped: [{ id: 'lead-1' }] });
-        const result = await runLeadStalenessSweep();
-        expect(result).toEqual({ disabled: false, marked: 1 });
-        // Only the lead UPDATE and the activity insert: no estimate flip.
-        expect(trx.mock.calls.map(([t]) => t)).toEqual(['leads', 'lead_activities']);
-        expect(trx.raw).not.toHaveBeenCalled();
-      });
-
+    describe('no-response reason and expired-estimate leads', () => {
       test('writes lost_reason no_response on new-lead flips, status stays unresponsive', async () => {
         const { leadsChain, activityInsert } = installDb({ flipped: [{ id: 'lead-1' }] });
         const result = await runLeadStalenessSweep();
@@ -638,7 +609,7 @@ describe('lead staleness sweep', () => {
         expect(bridgeLeadsFunnelStage).not.toHaveBeenCalled();
       });
 
-      test('LEAD_STALENESS_DAYS off switch still wins over the gate', async () => {
+      test('LEAD_STALENESS_DAYS off switch still wins', async () => {
         installDb({ flipped: [{ id: 'x' }] });
         process.env.LEAD_STALENESS_DAYS = '0';
         expect(await runLeadStalenessSweep()).toEqual({ disabled: true, marked: 0 });

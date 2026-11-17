@@ -5467,12 +5467,10 @@ only the authenticated lead's draft. Resolving a repeat to its root at
 estimate acceptance / self-booking is PR B′ (services, not this route).
 Kill switch: unset the gate — rows already labelled keep their marker.
 
-Same-person customer link (owner 2026-10-31; DARK behind
-`GATE_QUOTE_SAME_PERSON_MATCH`, read at call time, strict `'true'`, default
-off in every environment — off, behavior is exactly as before): the
-post-pricing customer upsert in `/calculate` still links a typed phone that
-matches exactly ONE non-deleted customer row, and still declines a phone
-that matches several. With the gate on, a phone that matches 2 to 10 rows
+Same-person customer link (owner 2026-10-31; always on since the gate was
+removed 2026-11-16): the
+post-pricing customer upsert in `/calculate` links a typed phone that
+matches exactly ONE non-deleted customer row. A phone that matches 2 to 10 rows
 links the lead and draft estimate to ONE of them instead of inserting a new
 `customers` row, but only when every matched row is live (active, not
 deleted) and all rows plus the typed contact are one person at one premise:
@@ -5491,7 +5489,7 @@ The existing-row update is the same one a single match gets
 `last_contact_*`, never downgrade a stage). The link grants no identity:
 booking.js's contact-linked handoff guard still refuses to book a quote
 draft linked to an established customer. The pre-pricing rodent lookup is
-unchanged. Kill switch: unset the gate.
+unchanged.
 `/api/public/ai-intake` (`GET /status` + `POST /message`) (the Ask Waves
 marketing-site chat brain — no auth, no token, **gated behind GATE_ASK_WAVES**
 (503 when off; fails closed in prod). Rate limits: 30 req/15min in-route on
@@ -7474,8 +7472,7 @@ or an SMS-delivered token whose signed `channel` claim is `smsChannelFor`
 of this exact phone — never a bare public-form
 submission; otherwise it always gets its own separate prospect profile and
 never sees another customer's visit data, reschedule URL, or booking
-(Codex pre-push P1, 2026-09-24). Exception, DARK behind `GATE_INSPECTION_REUSE_LEAD_SHELL` (strict
-`'true'`, read at call time; off = the rule above holds with no exception):
+(Codex pre-push P1, 2026-09-24). Exception (owner 2026-10-31; always on since the gate was removed 2026-11-16):
 an unverified lead whose linked customer is provably its OWN untouched intake
 profile (`leadOwnIntakeShell`: active, `new_lead`, created at most 10 minutes
 before the lead, this lead the first live lead on it, no billing, visit,

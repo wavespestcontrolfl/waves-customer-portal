@@ -14015,13 +14015,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Explicit delayed timing skips the bundle and schedules a separate review
     // request below.
     const invoiceUnpaidAtCompletion = !recapReviewOnly && !!invoice && invoice.status !== 'paid' && invoice.status !== 'prepaid';
-    // GATE_REVIEW_ASK_AT_VISIT (owner 2026-11-01): with the switch on, an unpaid invoice no longer holds the
-    // ask; it goes after the report text (enrollPostService below). The link still never rides inside the
-    // pay-link text: shouldBundleReview keeps refusing an unpaid invoice.
-    const reviewAskAtVisit = require('../config/feature-gates').reviewAskAtVisitLive();
-    const invoiceBlocksReview = invoiceUnpaidAtCompletion && !reviewAskAtVisit;
+    // An unpaid invoice does not hold the ask (owner 2026-11-01); it goes after the report text
+    // (enrollPostService below). The link still never rides inside the pay-link text:
+    // shouldBundleReview keeps refusing an unpaid invoice.
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
-    const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
+    const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview
       && !suppressTypedCustomerComms
       // The fixed re-service text is the ONE text: no review ask rides it or
       // follows it (scope: "leave it off on re-services"). A re-service asks for
@@ -14142,7 +14140,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       !recapSmsAlreadySentForVisit &&
       effectiveRequestReview &&
       // An unpaid invoice's completion text carries its pay link: a review link never rides in it,
-      // the switch on or off (with GATE_REVIEW_ASK_AT_VISIT on, the ask follows as its own text).
+      // (the ask follows as its own text).
       !invoiceUnpaidAtCompletion &&
       svc.cust_phone &&
       !serviceReportV1Delivery &&
@@ -16059,12 +16057,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
         reviewEnrollment = { started: false, reason: 'error' };
       }
     }
-    // GATE_REVIEW_ASK_AT_VISIT: once the visit-time ask has answered (started, or a final skip such as
-    // recently asked), the record says so and a later payment starts no ask (enrollForPaidInvoice). Written
-    // only after the answer: a payment before it keeps today's path, and the per-record dedupe keeps that
-    // to one ask. No visit-time ask, or a passing failure (the two a combined visit retries): no marker,
-    // so the payment keeps the ask it gave before the switch.
-    if (reviewAskAtVisit && reviewEnrollment
+    // Once the visit-time ask has answered (started, or a final skip such as recently asked), the record
+    // says so and a later payment starts no ask (enrollForPaidInvoice). Written only after the answer: a
+    // payment before it keeps the older path, and the per-record dedupe keeps that to one ask. No visit-time
+    // ask, or a passing failure (the two a combined visit retries): no marker, so the payment keeps the ask
+    // it gave before.
+    if (reviewEnrollment
       && !(reviewEnrollment.started === false && ['plan_resolution_failed', 'error'].includes(reviewEnrollment.reason))) {
       await mergeRecordNotesKeys(record.id, { reviewAskedAtVisit: true }).catch((markErr) => {
         logger.error(`[dispatch] Review asked-at-visit marker for record ${record.id} not stored: ${markErr.message}`);

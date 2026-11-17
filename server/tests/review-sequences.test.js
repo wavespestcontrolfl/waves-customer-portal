@@ -16,8 +16,6 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: (g) => !!mockGates[g],
   // GATE_REVIEW_ASK_AFTER_REPORT: the call-time reader, driven by the same flags object.
   reviewAskAfterReportLive: () => mockGates.reviewAskAfterReport === true,
-  // GATE_REVIEW_TAP_PAUSE: the 180-day pause's call-time reader (review-click-guard.js tapPauseActive).
-  reviewTapPauseLive: () => mockGates.reviewTapPause === true,
   gates: mockGates,
 }));
 // Personalized-ask drafter (own suite: review-ask-drafter.test.js). Default
@@ -193,7 +191,6 @@ beforeEach(() => {
   mockGates.reviewSequences = false;
   mockGates.reviewDirectLink = false;
   mockGates.reviewAskAfterReport = false;
-  mockGates.reviewTapPause = false;
   mockDraftAskBody.mockReset().mockResolvedValue(null);
   mockDraftEmailIntro.mockReset().mockResolvedValue(null);
   mockDraftTechVoice.mockReset().mockResolvedValue(null);
@@ -4447,7 +4444,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     enroll.mockResolvedValueOnce({ enrolled: false, reason: 'member_review_suppressed' });
     const individual = jest.spyOn(ReviewService, 'enrollPostService');
     const result = await ReviewService.enrollForPaidInvoice({ id: 'packet-invoice', customer_id: 'customer-1', service_record_id: 'representative-record' });
-    // The paid signal names itself, so a combined visit closed with GATE_REVIEW_ASK_AT_VISIT on starts nothing.
+    // The paid signal names itself, so a combined visit already asked at the visit starts nothing.
     expect(enroll).toHaveBeenCalledWith('packet-invoice', expect.anything(), { trigger: 'payment' });
     expect(individual).not.toHaveBeenCalled();
     expect(result).toEqual({ enrolled: false, reason: 'member_review_suppressed' });
@@ -4535,7 +4532,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(out3).toEqual({ enrolled: false, reason: 'not_completion_invoice' });
   });
 
-  test('GATE_REVIEW_ASK_AT_VISIT: a visit whose visit-time ask answered gets no second ask from its payment', async () => {
+  test('a visit whose visit-time ask answered gets no second ask from its payment', async () => {
     mockGates.reviewSequences = true;
     const mock = makeMock({
       customers: [{ id: 'av-1', first_name: 'Ada', last_name: 'V', phone: '+19410000081', nearest_location_id: 'venice' }],
@@ -7389,6 +7386,14 @@ test('a queued SMS retry renews its expired unsent review link before provider h
 // starts, a stranded 'sending' row released to the scheduler, an uncertain
 // summary that enrolls after recovery) still sends nothing.
 describe('send-time click guard (services/review-click-guard.js)', () => {
+  // This block pins the visit-anchored guard on its own: the 180-day tap pause (its own describe, below) is stood in
+  // for, so an older tap does not pause the automatic asks these cases expect to go.
+  const pauseSpies = [];
+  beforeEach(() => {
+    const ClickGuard = require('../services/review-click-guard');
+    pauseSpies.push(jest.spyOn(ClickGuard, 'tapPauseForRequest').mockResolvedValue(false), jest.spyOn(ClickGuard, 'tapPauseActive').mockResolvedValue(false));
+  });
+  afterEach(() => { while (pauseSpies.length) pauseSpies.pop().mockRestore(); });
   const VISIT = new Date(Date.now() - 4 * 86400000);
   const CLICKED = new Date(Date.now() - 2 * 86400000);
   const customer = { id: 'clk-1', first_name: 'Pat', last_name: 'Lee', phone: '+19410000901', nearest_location_id: 'venice' };
@@ -8310,9 +8315,9 @@ describe('the drafter\'s date is the day the visit was worked (review-visit-day.
   });
 });
 
-// GATE_REVIEW_TAP_PAUSE (owner 2026-11-02, reviews audit D3): a tracked review-link tap in the last 180 days pauses
+// Tap pause (owner 2026-11-02, reviews audit D3): a tracked review-link tap in the last 180 days pauses
 // automatic review asks, whatever visit it answered; staff-started cadences keep going.
-describe('GATE_REVIEW_TAP_PAUSE: no automatic review ask for 180 days after a tap', () => {
+describe('Tap pause: no automatic review ask for 180 days after a tap', () => {
   const DAY = 86400000;
   // A tap on an earlier visit's ask: delivered 40 days ago (outside the 30-day supersede window), tapped the next day.
   const tapRow = (customerId, tappedDaysAgo) => ({ id: `rr-tap-${customerId}`, customer_id: customerId, channel: 'sms', status: 'opened',
@@ -8321,9 +8326,8 @@ describe('GATE_REVIEW_TAP_PAUSE: no automatic review ask for 180 days after a ta
     started_by: startedBy, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
     started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000) });
 
-  test('switch on: a visit enrolls no cadence when the customer tapped 39 days ago', async () => {
+  test('a visit enrolls no cadence when the customer tapped 39 days ago', async () => {
     mockGates.reviewSequences = true;
-    mockGates.reviewTapPause = true;
     const mock = makeMock({ customers: [{ id: 'tp-1', first_name: 'Ana', last_name: 'T', phone: '+19410000091', nearest_location_id: 'bradenton' }], review_requests: [tapRow('tp-1', 39)] });
     db.mockImplementation(mock);
     const result = await ReviewService.enrollPostService({ customerId: 'tp-1', completedAt: new Date() });
@@ -8331,25 +8335,15 @@ describe('GATE_REVIEW_TAP_PAUSE: no automatic review ask for 180 days after a ta
     expect(mock.__state.rows.review_sequences || []).toHaveLength(0);
   });
 
-  test('switch on: a tap older than 180 days pauses nothing', async () => {
+  test('a tap older than 180 days pauses nothing', async () => {
     mockGates.reviewSequences = true;
-    mockGates.reviewTapPause = true;
     const mock = makeMock({ customers: [{ id: 'tp-2', first_name: 'Bea', last_name: 'T', phone: '+19410000092', nearest_location_id: 'bradenton' }], review_requests: [tapRow('tp-2', 200)] });
     db.mockImplementation(mock);
     const result = await ReviewService.enrollPostService({ customerId: 'tp-2', completedAt: new Date() });
     expect(result.started).toBe(true);
   });
 
-  test('switch off: a recent tap pauses nothing (a tap stops only the visit it answered)', async () => {
-    mockGates.reviewSequences = true;
-    const mock = makeMock({ customers: [{ id: 'tp-3', first_name: 'Cy', last_name: 'T', phone: '+19410000093', nearest_location_id: 'bradenton' }], review_requests: [tapRow('tp-3', 39)] });
-    db.mockImplementation(mock);
-    const result = await ReviewService.enrollPostService({ customerId: 'tp-3', completedAt: new Date() });
-    expect(result.started).toBe(true);
-  });
-
-  test('switch on: an automatic cadence already running stops at its next step, with no send', async () => {
-    mockGates.reviewTapPause = true;
+  test('an automatic cadence already running stops at its next step, with no send', async () => {
     const mock = makeMock({ customers: [{ id: 'tp-4', first_name: 'Di', last_name: 'T', phone: '+19410000094', nearest_location_id: 'bradenton' }],
       review_sequences: [cadence('tp-4', 'post_service')], review_requests: [tapRow('tp-4', 39)] });
     db.mockImplementation(mock);
@@ -8359,8 +8353,7 @@ describe('GATE_REVIEW_TAP_PAUSE: no automatic review ask for 180 days after a ta
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('tap_pause');
   });
 
-  test('switch on: a cadence a person started keeps going', async () => {
-    mockGates.reviewTapPause = true;
+  test('a cadence a person started keeps going', async () => {
     const mock = makeMock({ customers: [{ id: 'tp-5', first_name: 'Ed', last_name: 'T', phone: '+19410000095', nearest_location_id: 'bradenton' }],
       review_sequences: [cadence('tp-5', 'tech-1')], review_requests: [tapRow('tp-5', 39)] });
     db.mockImplementation(mock);
@@ -8368,9 +8361,8 @@ describe('GATE_REVIEW_TAP_PAUSE: no automatic review ask for 180 days after a ta
     expect(mock.__state.rows.review_sequences[0].stop_reason || null).not.toBe('tap_pause');
   });
 
-  test('switch on: a link the customer asked for still enrolls and its cadence keeps going', async () => {
+  test('a link the customer asked for still enrolls and its cadence keeps going', async () => {
     mockGates.reviewSequences = true;
-    mockGates.reviewTapPause = true;
     const asked = { by: 'tech-1', at: new Date().toISOString(), source: 'completion' };
     const mock = makeMock({ customers: [{ id: 'tp-6', first_name: 'Flo', last_name: 'T', phone: '+19410000096', nearest_location_id: 'bradenton' }], review_requests: [tapRow('tp-6', 39)] });
     db.mockImplementation(mock);
@@ -8382,9 +8374,8 @@ describe('GATE_REVIEW_TAP_PAUSE: no automatic review ask for 180 days after a ta
     expect(running.__state.rows.review_sequences[0].stop_reason || null).not.toBe('tap_pause');
   });
 
-  test('switch on, a combined visit: the visit record says the customer asked, so enrollment and its cadence go on', async () => {
+  test('a combined visit: the visit record says the customer asked, so enrollment and its cadence go on', async () => {
     mockGates.reviewSequences = true;
-    mockGates.reviewTapPause = true;
     const asked = { by: 'tech-1', at: new Date().toISOString(), source: 'completion_panel' };
     const record = (id, customerId) => ({ id, customer_id: customerId, service_date: new Date().toISOString().slice(0, 10),
       structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed', customerRequestedReview: asked }) });
@@ -8406,8 +8397,7 @@ describe('GATE_REVIEW_TAP_PAUSE: no automatic review ask for 180 days after a ta
   test.each([
     ['an automatic queued ask stands down', 'auto', 0, 'suppressed'],
     ['a staff ask still goes', 'admin', 1, undefined],
-  ])('switch on, a queued ask after a tap 39 days ago: %s', async (_label, triggeredBy, sends, status) => {
-    mockGates.reviewTapPause = true;
+  ])('a queued ask after a tap 39 days ago: %s', async (_label, triggeredBy, sends, status) => {
     const customer = { id: 'tp-8', first_name: 'Synthetic', phone: '+12025550108', nearest_location_id: 'venice' };
     const mock = makeMock({ customers: [customer], review_requests: [tapRow('tp-8', 39), { id: 'rr-queued-tp', customer_id: customer.id,
       status: 'pending', channel: 'sms', template_key: 'friendly_ask', location_id: 'venice', token: 'tp-token', triggered_by: triggeredBy,
@@ -8418,8 +8408,7 @@ describe('GATE_REVIEW_TAP_PAUSE: no automatic review ask for 180 days after a ta
     if (status) expect(mock.__state.rows.review_requests.find((r) => r.id === 'rr-queued-tp').status).toBe(status);
   });
 
-  test('switch on, legacy mode: a link the customer asked for is queued as auto and still delivered', async () => {
-    mockGates.reviewTapPause = true;
+  test('legacy mode: a link the customer asked for is queued as auto and still delivered', async () => {
     // The legacy queued row has no template_key: sendSMS renders the stored review_request SMS template.
     jest.doMock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(async (_key, vars) => `Hi ${vars.first_name}, ${vars.review_url}`) }));
     const asked = { by: 'tech-1', at: new Date().toISOString(), source: 'completion' };
@@ -8444,7 +8433,7 @@ describe('GATE_REVIEW_TAP_PAUSE: no automatic review ask for 180 days after a ta
     expect(mock.__state.rows.review_requests.find((r) => r.id === queued.id).status).not.toBe('suppressed');
   });
 
-  test('a completion text\'s bundled ask: a tap before this visit drops the review line only with the switch on, and a requested link still rides', async () => {
+  test('a completion text\'s bundled ask: a tap before this visit drops the review line, and a requested link still rides', async () => {
     const { withBundledAskGate } = require('../services/review-ask-dispatch');
     const today = new Date().toISOString().slice(0, 10);
     const asked = { by: 'tech-1', at: new Date().toISOString(), source: 'completion_panel' };
@@ -8455,26 +8444,20 @@ describe('GATE_REVIEW_TAP_PAUSE: no automatic review ask for 180 days after a ta
     const drops = [];
     const send = async (drop) => { drops.push(drop); return { sent: true }; };
     db.mockImplementation(makeMock(rows({ requestReview: true })));
-    await withBundledAskGate('tp-13', 'rr-inline-tp13', send); // switch off: the tap predates this visit
-    mockGates.reviewTapPause = true;
     await withBundledAskGate('tp-13', 'rr-inline-tp13', send);
     db.mockImplementation(makeMock(rows({ requestReview: true, customerRequestedReview: asked })));
     await withBundledAskGate('tp-13', 'rr-inline-tp13', send);
-    expect(drops).toEqual([null, 'clicked', null]);
+    expect(drops).toEqual(['clicked', null]);
   });
 
-  test.each([
-    ['switch on: the Day-3 follow-up of an older ask stands down after a tap 39 days ago', true, 0],
-    ['switch off: the same follow-up goes (control)', false, 1],
-  ])('%s', async (_label, on, sent) => {
-    mockGates.reviewTapPause = on;
+  test('the Day-3 follow-up of an older ask stands down after a tap 39 days ago', async () => {
     const customer = { id: 'tp-9', first_name: 'Synthetic', phone: '+12025550109' };
     const mock = makeMock({ customers: [customer], review_requests: [{ ...tapRow('tp-9', 39), followup_sent: true },
       { id: 'legacy-tp', customer_id: customer.id, status: 'sent', followup_sent: false, sms_sent_at: new Date(Date.now() - 80 * 3600000), score: null, rated_at: null }] });
     db.mockImplementation(mock);
     mockRenderSmsTemplate.mockResolvedValue('Please leave a Google review: https://g.page/r/example/review');
     mockSendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-tp' });
-    expect(await ReviewService.processFollowups()).toMatchObject({ sent });
-    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(sent);
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(0);
   });
 });

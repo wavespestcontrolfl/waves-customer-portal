@@ -1617,7 +1617,7 @@ async function liveThirdPartyPayerForPacket(packetId, database = db) {
 // The paid signal carries only the invoice; resolving its packet is part of
 // the same one-shot boundary, so a failed lookup reopens the packet through
 // the invoice link in one statement instead of losing the review.
-// `options.trigger` 'payment' marks the paid signal (GATE_REVIEW_ASK_AT_VISIT reads it).
+// `options.trigger` 'payment' marks the paid signal (the asked-at-visit skip reads it).
 async function enrollVisitCompletionReviewForInvoice(invoiceId, database = db, options = {}) {
   let packetId;
   try {
@@ -1690,7 +1690,7 @@ async function enrollVisitCompletionReview(packetId, database = db, options = {}
   }
 }
 
-// GATE_REVIEW_ASK_AT_VISIT (owner 2026-11-01): every member record carries reviewAskedAtVisit, stamped
+// Review ask at the visit (owner 2026-11-01): every member record carries reviewAskedAtVisit, stamped
 // once the visit's own ask after its summary answered (below).
 async function packetAskedAtVisit(packetId, database) {
   const members = await database('visit_completion_packet_items as i')
@@ -1716,10 +1716,9 @@ async function markPacketAskedAtVisit(packetId, database) {
 async function enrollVisitCompletionReviewOnce(packetId, database = db, { deliverySettled = false, trigger } = {}) {
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();
   if (!packet) return { enrolled: false, reason: 'packet_missing' };
-  // A visit that already asked after its summary gets no second ask from the payment. With the switch on,
-  // an unpaid invoice no longer holds that ask (below).
+  // A visit that already asked after its summary gets no second ask from the payment. An unpaid invoice
+  // does not hold that ask.
   if (trigger === 'payment' && await packetAskedAtVisit(packet.id, database)) return { enrolled: false, reason: 'asked_at_visit' };
-  const askAtVisit = require('../config/feature-gates').reviewAskAtVisitLive();
   const payload = packetPayload(packet);
   const formAsks = ({ body }) => body.requestReview !== false
     && (!body.reviewSuppression || body.reviewSuppression === 'invoice_created');
@@ -1737,8 +1736,6 @@ async function enrollVisitCompletionReviewOnce(packetId, database = db, { delive
   }
   const visit = await database('service_visits').where({ id: packet.visit_id }).first();
   if (!requested || visit.billing_hold) return { enrolled: false, reason: 'visit_review_suppressed' };
-  const invoice = await database('invoices').where({ visit_completion_packet_id: packet.id }).first();
-  if (invoice && !askAtVisit && !['paid', 'prepaid'].includes(invoice.status)) return { enrolled: false, reason: 'invoice_unpaid' };
   // A paid signal can arrive while the summary is still being delivered or
   // after an uncertain handoff: the ask never goes out ahead of the summary
   // it follows, and an uncertain delivery stays with the office.
@@ -1778,7 +1775,7 @@ async function enrollVisitCompletionReviewOnce(packetId, database = db, { delive
   // schedule instead of a fresh enrollment the cadence cooldown might refuse.
   const resumed = await require('./visit-completion-summary').resumeVisitReviewOutreach(packet.id, database);
   if (resumed) {
-    if (askAtVisit && trigger !== 'payment') await markPacketAskedAtVisit(packet.id, database);
+    if (trigger !== 'payment') await markPacketAskedAtVisit(packet.id, database);
     return { enrolled: true, resumed };
   }
   const first = members[0];
@@ -1799,7 +1796,7 @@ async function enrollVisitCompletionReviewOnce(packetId, database = db, { delive
     return { enrolled: false, retryable: true, reason: result.reason };
   }
   // The visit-time ask answered (started, or a final skip): the payment starts no second one.
-  if (askAtVisit && trigger !== 'payment') await markPacketAskedAtVisit(packet.id, database);
+  if (trigger !== 'payment') await markPacketAskedAtVisit(packet.id, database);
   return { enrolled: true, result };
 }
 

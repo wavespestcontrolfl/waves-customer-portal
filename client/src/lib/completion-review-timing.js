@@ -34,11 +34,7 @@ export function reviewTimingHint(options) {
   }
   return hint;
 }
-function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment = false, reportTextExpected }) {
-  // An unpaid completion invoice holds the ask until payment lands (the
-  // server's invoiceBlocksReview; enrollForPaidInvoice then enrolls). A
-  // relative timing is re-derived from the payment time; an absolute one is
-  // kept if it is still ahead (codex #4140 r10 P2).
+function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundled, reportTextExpected }) {
   // The master cron gate is dark: nothing automated sends at all — not the
   // cadence ticks, not the legacy 15-minute scheduler (codex #4140 r15 P1).
   // Only a link bundled into the completion text itself still goes.
@@ -49,42 +45,26 @@ function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundle
     if (preview?.schedulerEnabled === false) return "Automated review texts are paused — the scheduler is off (GATE_CRON_JOBS). Nothing will send until it is turned on; the choice is recorded on this visit.";
     if (preview?.schedulerEnabled !== true) return "Whether automated review texts can send is not known yet (the send-time preview has not loaded). If the scheduler is off nothing sends; the choice is recorded on this visit.";
   }
-  // Automatic after payment: enrollForPaidInvoice recovers no explicit
-  // delay, so cadence mode computes the smart window from the payment and
-  // the legacy path substitutes its 120-minute default (codex #4140 r19 P2).
-  // Customer requested stores a zero delay, so it goes at the next tick.
-  if (awaitsPayment && reviewTiming === "auto") {
-    const afterReport = afterReportHint(preview, reportTextExpected, { afterPayment: true });
-    if (afterReport) return afterReport;
-    return preview?.reviewSequencesEnabled
-      ? "Review text waits for the invoice to be paid, then goes out at the smart send window computed from the payment."
-      : `Review text waits for the invoice to be paid, then goes out about 2 hours after payment, at the next scheduler tick${preview?.smsSendWindowEnabled ? " the 8 AM–8 PM window allows" : ""}.`;
-  }
-  if (awaitsPayment && reviewTiming === "customer_requested") return "The request is recorded on this visit. New review enrollment waits for invoice payment and visit eligibility. An existing cadence keeps its schedule.";
-  const timed = timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled, reportTextExpected });
-  return awaitsPayment && timed ? `Only once the invoice is paid: ${timed} A payment after that time sends at the next tick after payment.` : timed;
+  return timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled, reportTextExpected });
 }
 // GATE_REVIEW_ASK_AFTER_REPORT: with no completion text to follow (texting off,
 // no phone, email only) the server passes no anchor and keeps the smart window.
 // Null when the server did not name the after-report rule (the smart window wording applies).
-function afterReportHint(preview, reportTextExpected, { afterPayment = false } = {}) {
+function afterReportHint(preview, reportTextExpected) {
   if (preview?.afterReport !== true) return null;
-  const lead = afterPayment ? "Review text waits for the invoice to be paid, then goes out" : "Review text goes out separately";
+  const lead = "Review text goes out separately";
   if (reportTextExpected === false) return `${lead} at the smart send window, because no report text goes out to follow.`;
-  // The ask is eligible 10 minutes after the report text (or the payment) and goes at the next
+  // The ask is eligible 10 minutes after the report text and goes at the next
   // :14/:44 review send; a target outside the 8 AM–8 PM window waits for the morning. A report
   // held for the morning pulls the ask to 10 minutes after its replay goes out as a text
   // (pullAskAfterHeldReport); the Waves app, opted-out and failed reports keep the smart window,
   // which the panel cannot know ahead of time.
-  const after = afterPayment ? "payment" : "the report text";
   const tickList = preview.cadenceTickMinutesOfHour || [14, 44];
   // GATE_REVIEW_SENDER_EVERY_5_MIN names twelve minutes; say it in words.
   const ticks = tickList.length > 2 ? "every 5 minutes" : `${tickList.map((m) => `:${String(m).padStart(2, "0")}`).join(" and ")} each hour`;
   const windowNote = preview.smsSendWindowEnabled ? " A target after 8 PM waits for the next morning." : "";
-  const held = afterPayment
-    ? " If the report was held for the morning: about 10 minutes after that report text or the payment, whichever is later (a single visit's held report that went out before the payment keeps the smart send window)."
-    : " If the report is held for the morning, it goes about 10 minutes after that report text goes out.";
-  return `${lead} at the first review send (${ticks}) at least ${afterReportMinutes(preview)} minutes after ${after}.${windowNote}${held} If the report goes by the Waves app, or texts are turned off for this customer, it goes at the smart send window.`;
+  const held = " If the report is held for the morning, it goes about 10 minutes after that report text goes out.";
+  return `${lead} at the first review send (${ticks}) at least ${afterReportMinutes(preview)} minutes after the report text.${windowNote}${held} If the report goes by the Waves app, or texts are turned off for this customer, it goes at the smart send window.`;
 }
 export function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled, reportTextExpected }) {
   // GATE_REVIEW_ASK_AFTER_REPORT: the server names the rule; the panel
@@ -464,14 +444,11 @@ export function completionReportTextExpected({ effectiveSendSms, customerPhone }
 
 // The hint under the review timing, and whether the review link rides inside the completion
 // text (the server's shouldBundleReview as far as it is known before the completion exists).
-// An unpaid invoice holds the customer-requested ask server-side (invoiceBlocksReview), so the
-// preview must not promise the link the timing hint says waits for payment (codex #4140 r22 P2).
+// An unpaid invoice's completion text carries its pay link, so the review link never rides in it
+// (the server's shouldBundleReview); the ask follows as its own text.
 // The one-time recap path is exempt server-side (recapReviewOnly) and stays exempt here.
 // `customerPhone` (the schedule payload's) tells whether a report text can go at all;
 // unknown (undefined) reads as yes, as before.
-// GATE_REVIEW_ASK_AT_VISIT (the server's preview names it as askAtVisit): an unpaid invoice no
-// longer holds the ask, so the hint words the normal timing. The link still never rides inside
-// the pay-link text, so `bundled` keeps reading the unpaid invoice.
 export function completionReviewHint({ willReview, oneTimeRecapOnly = false, effectiveSendSms, reviewTiming, reviewCustomAt, preview, reviewAwaitsPayment, customerPhone }) {
   const bundled = willReview
     && effectiveSendSms
@@ -479,9 +456,8 @@ export function completionReviewHint({ willReview, oneTimeRecapOnly = false, eff
       || (reviewTiming === "customer_requested"
         && preview?.bundlesImmediateAsk === true
         && !reviewAwaitsPayment));
-  const awaitsPayment = !!reviewAwaitsPayment && preview?.askAtVisit !== true;
   const text = willReview && !oneTimeRecapOnly
-    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment, reportTextExpected: completionReportTextExpected({ effectiveSendSms, customerPhone }) })
+    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, reportTextExpected: completionReportTextExpected({ effectiveSendSms, customerPhone }) })
     : "";
   return { text, bundled };
 }

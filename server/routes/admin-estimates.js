@@ -4480,17 +4480,15 @@ router.get('/', async (req, res, next) => {
     const acceptanceRecordIds = await acceptanceRecordIdSet(estimates);
     // GATE_COMMISSION_SOLD_BY: null (no read, no key) while the gate is off.
     const soldByById = await loadSoldByForList(db, estimates);
-    // GATE_ESTIMATE_CALL_LIST: the newest outbound call to each VIEWED row's phone, one batched read.
-    // Gate off = no read and lastCalledAt stays null; a failed read costs only the field.
+    // Call list: the newest outbound call to each VIEWED row's phone, one batched read.
+    // A failed read costs only the field (lastCalledAt stays null).
     let lastCalledById = new Map();
-    if (require('../config/feature-gates').estimateCallListLive?.() === true) {
-      try {
-        lastCalledById = await require('../services/estimate-call-list').lastCalledAtByEstimateId(db, estimates);
-      } catch (err) {
-        // Never err.message: a Knex error carries the SQL with its bindings, i.e. every customer
-        // phone in the batch's whereIn (AGENTS.md, PII in logs). The driver code is enough.
-        logger.warn(`[estimates] call-list lastCalledAt read failed (${err?.code || 'no code'})`);
-      }
+    try {
+      lastCalledById = await require('../services/estimate-call-list').lastCalledAtByEstimateId(db, estimates);
+    } catch (err) {
+      // Never err.message: a Knex error carries the SQL with its bindings, i.e. every customer
+      // phone in the batch's whereIn (AGENTS.md, PII in logs). The driver code is enough.
+      logger.warn(`[estimates] call-list lastCalledAt read failed (${err?.code || 'no code'})`);
     }
 
     res.json({
@@ -4566,7 +4564,7 @@ router.get('/', async (req, res, next) => {
           notes: e.notes,
           followUpCount: e.follow_up_count || 0,
           lastFollowUpAt: e.last_follow_up_at,
-          // GATE_ESTIMATE_CALL_LIST: newest outbound call to a viewed row's phone; null otherwise.
+          // Call list: newest outbound call to a viewed row's phone; null otherwise.
           lastCalledAt: lastCalledById.get(e.id) || null,
           declineReason: e.decline_reason,
           disposition: e.disposition || null,
@@ -5405,7 +5403,7 @@ router.put('/:id/proposal', async (req, res, next) => {
       ...(revivingBid ? { status: estimate.viewed_at ? 'viewed' : estimate.sent_at ? 'sent' : 'draft' } : {}),
       ...(revivingBid && ['expired_unviewed', 'expired_viewed', 'expired_unsent'].includes(estimate.disposition)
         ? { disposition: null, disposition_source: null, disposition_at: null, disposition_note: null } : {}),
-      // A staff loss reason (GATE_ESTIMATE_CALL_LIST) does not survive a revive either. Judged on
+      // A staff loss reason (the call list's Pick reason) does not survive a revive either. Judged on
       // the LOCKED row: a Pick reason saved after the pre-read must not ride into the live offer.
       ...(revivingBid && require('../services/estimate-disposition').isStaffLossRow(locked)
         ? require('../services/estimate-disposition').STAFF_LOSS_CLEARED_UPDATES : {}),
@@ -6367,7 +6365,7 @@ router.patch('/:id', async (req, res, next) => {
       // live estimate stamped here would carry the stale staff loss through
       // expiry/conversion via their COALESCEs. Archive reasons belong to
       // the archive endpoint.
-      // GATE_ESTIMATE_CALL_LIST adds one more: a staff reason on an EXPIRED row, status left alone.
+      // the call list adds one more: a staff reason on an EXPIRED row, status left alone.
       expiredReason = require('../services/estimate-call-list').staffReasonOnExpiredAllowed(estimate, req.body);
       if (!expiredReason && req.body.status !== 'declined' && estimate.status !== 'declined') {
         return res.status(400).json({ error: 'A decline reason can only be set while declining the estimate (or editing an already-declined one).' });

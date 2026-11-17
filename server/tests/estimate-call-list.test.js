@@ -1,7 +1,7 @@
 /**
- * GATE_ESTIMATE_CALL_LIST (admin only, nothing sent to a customer):
- *   - PATCH /api/admin/estimates/:id takes a staff loss reason on an EXPIRED row with no status change,
- *     only while the gate is on; every live row keeps the old refusal and gate off keeps today's 400.
+ * Estimate call list (admin only, nothing sent to a customer):
+ *   - PATCH /api/admin/estimates/:id takes a staff loss reason on an EXPIRED row with no status change;
+ *     every live row keeps the old refusal.
  *   - Reviving an expired row (extend, direct and grouped siblings) sheds a staff loss reason.
  *   - lastCalledAt: one batched call_log read for the viewed rows, phone matched as call_log.to_phone is stored.
  */
@@ -88,8 +88,6 @@ function makeRes() {
 
 const SENT = '2026-10-01T12:00:00Z';
 
-afterEach(() => { delete process.env.GATE_ESTIMATE_CALL_LIST; });
-
 describe('PATCH /api/admin/estimates/:id staff reason on an expired row', () => {
   const patchHandler = routeHandler(adminEstimatesRouter, '/:id', 'patch');
   const expiredRow = (extra = {}) => ({
@@ -108,8 +106,7 @@ describe('PATCH /api/admin/estimates/:id staff reason on an expired row', () => 
     return { res, write };
   }
 
-  test('gate on: stamps the reason as staff, leaves the status alone, and guards on status = expired', async () => {
-    process.env.GATE_ESTIMATE_CALL_LIST = 'true';
+  test('stamps the reason as staff, leaves the status alone, and guards on status = expired', async () => {
     const { res, write } = await run(expiredRow(), { disposition: 'declined_competitor', competitorName: 'Rival Pest', competitorPrice: '$45', dispositionNote: 'went cheaper' });
     expect(res.status).not.toHaveBeenCalled();
     expect(res.json).toHaveBeenCalledWith({ success: true });
@@ -120,46 +117,34 @@ describe('PATCH /api/admin/estimates/:id staff reason on an expired row', () => 
     expect(write.where).toHaveBeenCalledWith({ status: 'expired' });
   });
 
-  test('gate on: a request that repeats status expired is still a reason-only edit', async () => {
-    process.env.GATE_ESTIMATE_CALL_LIST = 'true';
+  test('a request that repeats status expired is still a reason-only edit', async () => {
     const { res, write } = await run(expiredRow(), { status: 'expired', disposition: 'diy' });
     expect(res.json).toHaveBeenCalledWith({ success: true });
     expect(write.update.mock.calls[0][0]).not.toHaveProperty('status');
   });
 
-  test('gate off: the old 400 stays', async () => {
-    const { res, write } = await run(expiredRow(), { disposition: 'declined_price' });
-    expect(res.status).toHaveBeenCalledWith(400);
-    expect(write.update).not.toHaveBeenCalled();
-  });
-
-  test.each(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed', 'accepted'])('gate on: a %s row is still refused', async (status) => {
-    process.env.GATE_ESTIMATE_CALL_LIST = 'true';
+  test.each(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed', 'accepted'])('a %s row is still refused', async (status) => {
     const { res, write } = await run({ id: 'e1', status, sent_at: SENT, viewed_at: SENT }, { disposition: 'declined_price' });
     expect(res.status).toHaveBeenCalledWith(400);
     expect(write.update).not.toHaveBeenCalled();
   });
 
-  test('gate on: a request that tries to change the status is refused', async () => {
-    process.env.GATE_ESTIMATE_CALL_LIST = 'true';
+  test('a request that tries to change the status is refused', async () => {
     const { res } = await run(expiredRow(), { status: 'declined', disposition: 'declined_price' });
     expect(res.status).toHaveBeenCalledWith(409);
   });
 
-  test('gate on: a never-sent expired draft (expired_unsent) is refused', async () => {
-    process.env.GATE_ESTIMATE_CALL_LIST = 'true';
+  test('a never-sent expired draft (expired_unsent) is refused', async () => {
     const { res } = await run(expiredRow({ sent_at: null, viewed_at: null, disposition: 'expired_unsent' }), { disposition: 'declined_price' });
     expect(res.status).toHaveBeenCalledWith(400);
   });
 
-  test('gate on: the validator still applies (Other needs a note, unknown code refused)', async () => {
-    process.env.GATE_ESTIMATE_CALL_LIST = 'true';
+  test('the validator still applies (Other needs a note, unknown code refused)', async () => {
     expect((await run(expiredRow(), { disposition: 'declined_other' })).res.status).toHaveBeenCalledWith(400);
     expect((await run(expiredRow(), { disposition: 'expired_viewed' })).res.status).toHaveBeenCalledWith(400);
   });
 
-  test('gate on: a revive racing the write (0 rows) answers 409', async () => {
-    process.env.GATE_ESTIMATE_CALL_LIST = 'true';
+  test('a revive racing the write (0 rows) answers 409', async () => {
     const read = makeBuilder({ first: expiredRow() });
     const write = makeBuilder({ updateCount: 0 });
     db.mockImplementationOnce(() => read).mockImplementationOnce(() => write);
@@ -238,29 +223,6 @@ describe('revive clears a staff loss reason', () => {
       expect(sibling[column].__raw).toContain("disposition_source = 'staff'");
       expect(sibling[column].__raw).toMatch(new RegExp(`ELSE ${column} END$`));
     }
-  });
-});
-
-describe('GET /api/admin/feature-flags estimate_call_list', () => {
-  const flagsHandler = routeHandler(require('../routes/admin-feature-flags'), '/', 'get');
-  async function flags() {
-    db.mockReset();
-    const q = {};
-    q.where = jest.fn(() => q);
-    q.select = jest.fn(async () => [{ flag_key: 'estimate_call_list', enabled: true }]);
-    db.mockImplementation(() => q);
-    const res = makeRes();
-    await flagsHandler({ technicianId: 't1' }, res, jest.fn());
-    return res.json.mock.calls[0][0].flags;
-  }
-
-  test('gate on: the admin client sees the flag', async () => {
-    process.env.GATE_ESTIMATE_CALL_LIST = 'true';
-    expect((await flags()).estimate_call_list).toBe(true);
-  });
-
-  test('gate off: the flag is absent even if a stray per-user row says true', async () => {
-    expect(await flags()).not.toHaveProperty('estimate_call_list');
   });
 });
 

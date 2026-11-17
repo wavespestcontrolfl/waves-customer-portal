@@ -22,10 +22,9 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
 
-const gateState = { live: true, reviewLive: false, reuseShell: false };
+const gateState = { live: true, reviewLive: false };
 jest.mock('../config/feature-gates', () => ({
   leadInspectionLinkLive: jest.fn(() => gateState.live),
-  inspectionReuseLeadShellLive: jest.fn(() => gateState.reuseShell),
   gateEnvValue: jest.fn(name => name === 'GATE_GEOCODE_REVIEW' && gateState.reviewLive),
 }));
 
@@ -245,7 +244,6 @@ afterEach(() => {
   insertCalls.length = 0;
   gateState.live = true;
   gateState.reviewLive = false;
-  gateState.reuseShell = false;
   mockLoserBlockers.mockClear();
   mockLoserBlockers.mockImplementation(async () => []);
   mockGeocode.mockClear();
@@ -4011,11 +4009,10 @@ describe('bookingAddressInputs — what the booking address resolves from', () =
   });
 });
 
-// GATE_INSPECTION_REUSE_LEAD_SHELL: the web form mints a customer for a lead
-// seconds before the lead row. An unverified lead's page used to ignore it and
-// mint a second prospect; with the gate on it books onto the lead's OWN
-// untouched intake shell, and onto a new prospect in every other case.
-describe('GATE_INSPECTION_REUSE_LEAD_SHELL: the lead\'s own intake profile', () => {
+// The web form mints a customer for a lead seconds before the lead row. An
+// unverified lead's page books onto the lead's OWN untouched intake shell,
+// and onto a new prospect in every other case.
+describe('the lead\'s own intake profile (shell reuse)', () => {
   const SHELL_ID = 'cust-shell';
   const SHELL = {
     id: SHELL_ID, first_name: 'Pat', last_name: 'Lee', phone: '(941) 555-0101', email: null, account_id: 'acct-shell',
@@ -4037,7 +4034,6 @@ describe('GATE_INSPECTION_REUSE_LEAD_SHELL: the lead\'s own intake profile', () 
     mockBuildAvailability.mockResolvedValueOnce({
       days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
     });
-    gateState.reuseShell = true;
     const res = await callPost(mintLeadConsultationToken(LEAD_ID), body);
     expect(res.statusCode).toBe(200);
     return res;
@@ -4052,21 +4048,7 @@ describe('GATE_INSPECTION_REUSE_LEAD_SHELL: the lead\'s own intake profile', () 
     expect(JSON.parse(provenanceInsert().payload.metadata).customer_id).not.toBe(SHELL_ID);
   }
 
-  test('gate off: a new prospect is created, the shell is never read as a shell', async () => {
-    firstResults.leads = SHELL_LEAD;
-    firstResults.customers = (q) => (q.conds.id === SHELL_ID ? SHELL : null);
-    listResults.scheduled_services = [];
-    mockBuildAvailability.mockResolvedValueOnce({
-      days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
-    });
-    gateState.reuseShell = false;
-    await callPost(mintLeadConsultationToken(LEAD_ID), BOOK_BODY);
-    expectNewProspect();
-    expect(mockLoserBlockers).not.toHaveBeenCalled();
-    expect(provenanceInsert().payload.description).toBe('Consultation page created a prospect profile for this lead');
-  });
-
-  test('gate on, own untouched shell: no customers insert, booking lands on the shell, outright provenance, a reload resolves it', async () => {
+  test('own untouched shell: no customers insert, booking lands on the shell, outright provenance, a reload resolves it', async () => {
     await commitWith();
     expect(customerInserts()).toHaveLength(0);
     expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe(SHELL_ID);
@@ -4085,7 +4067,7 @@ describe('GATE_INSPECTION_REUSE_LEAD_SHELL: the lead\'s own intake profile', () 
     expect(reloaded.id).toBe(SHELL_ID);
   });
 
-  test('gate on: a reused shell keeps its stored address; nothing is written to the customers row', async () => {
+  test('a reused shell keeps its stored address; nothing is written to the customers row', async () => {
     await commitWith();
     expect(updateCalls.some((c) => c.table === 'customers' && 'address_line1' in c.payload)).toBe(false);
   });
@@ -4114,13 +4096,13 @@ describe('GATE_INSPECTION_REUSE_LEAD_SHELL: the lead\'s own intake profile', () 
     // Codex #7250 r2 P2: the booked unit must equal the stored one exactly.
     ['the booking names an apartment the shell does not have', { body: { ...BOOK_BODY, address: '123 Any St Apt 4, Bradenton, FL 34209' } }],
     ['the shell stores a building unit and the booking names an apartment', { shell: { ...SHELL, address_line1: '123 Any St Bldg 4' }, body: { ...BOOK_BODY, address: '123 Any St Apt 4, Bradenton, FL 34209' } }],
-  ])('gate on, but %s: a new prospect is created', async (_label, { blockers, ...seed }) => {
+  ])('%s: a new prospect is created', async (_label, { blockers, ...seed }) => {
     if (blockers) mockLoserBlockers.mockImplementation(async () => blockers);
     await commitWith(seed);
     expectNewProspect();
   });
 
-  test('gate on, email matches ignoring case and spacing, and a stored address that matches is kept: still the shell', async () => {
+  test('email matches ignoring case and spacing, and a stored address that matches is kept: still the shell', async () => {
     await commitWith({
       shell: { ...SHELL, email: ' Pat@Example.com ', address_line1: '123 Any St', city: 'Bradenton', zip: '34209', latitude: 27.4, longitude: -82.5 },
       lead: { ...SHELL_LEAD, email: 'pat@example.com' },
@@ -4130,20 +4112,19 @@ describe('GATE_INSPECTION_REUSE_LEAD_SHELL: the lead\'s own intake profile', () 
     expect(updateCalls.some((c) => c.table === 'customers' && 'address_line1' in c.payload)).toBe(false);
   });
 
-  test('gate on: the same unit in another notation is still the shell (Apt 4 stored, Unit 4 booked)', async () => {
+  test('the same unit in another notation is still the shell (Apt 4 stored, Unit 4 booked)', async () => {
     await commitWith({ shell: { ...SHELL, address_line2: 'Apt 4' }, body: { ...BOOK_BODY, address: '123 Any St Unit 4, Bradenton, FL 34209' } });
     expect(customerInserts()).toHaveLength(0);
     expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe(SHELL_ID);
   });
 
-  test('gate on, VERIFIED lead (call caller ID): the shell test is never consulted, the linked customer books as before', async () => {
+  test('VERIFIED lead (call caller ID): the shell test is never consulted, the linked customer books as before', async () => {
     firstResults.leads = { ...LINKED_LEAD, customer_id: SHELL_ID, created_at: SHELL_LEAD.created_at };
     firstResults.customers = { ...SHELL, address_line1: '123 Any St', city: 'Bradenton', zip: '34209', latitude: 27.4, longitude: -82.5 };
     listResults.scheduled_services = [];
     mockBuildAvailability.mockResolvedValueOnce({
       days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
     });
-    gateState.reuseShell = true;
     await callPost(mintLeadConsultationToken(LEAD_ID), BOOK_BODY);
     expect(mockLoserBlockers).not.toHaveBeenCalled();
     expect(customerInserts()).toHaveLength(0);

@@ -1,7 +1,7 @@
 /**
- * Viewed-estimate call list (GATE_ESTIMATE_CALL_LIST, admin only).
+ * Viewed-estimate call list (admin only).
  *
- * The estimates list carries `lastCalledAt` on every VIEWED row while the gate is on:
+ * The estimates list carries `lastCalledAt` on every VIEWED row:
  * the newest outbound call_log row to that estimate's customer phone that the CUSTOMER answered.
  * The admin page uses it to drop an offer from "Call today" once somebody has reached the customer
  * (the click-to-call bridge in call-bridge.js writes `direction = 'outbound'` with `to_phone` in E.164).
@@ -68,12 +68,11 @@ async function lastCalledAtByEstimateId(database, estimates, nowMs = Date.now())
 
 /**
  * May PATCH /api/admin/estimates/:id stamp a staff loss reason on this row WITHOUT a status change?
- * Only while the gate is on, only on a row whose status is `expired` (the request leaves the
+ * Only on a row whose status is `expired` (the request leaves the
  * status alone), and never on a never-sent internal draft that aged out (`expired_unsent`:
  * process debris, not a customer loss). Every live row keeps the old refusal.
  */
 function staffReasonOnExpiredAllowed(estimate, body = {}) {
-  if (require('../config/feature-gates').estimateCallListLive?.() !== true) return false;
   if (estimate?.status !== 'expired') return false;
   if (body.status !== undefined && body.status !== 'expired') return false;
   if (!estimate.sent_at && !estimate.viewed_at) return false;

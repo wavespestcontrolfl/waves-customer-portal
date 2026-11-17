@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// GATE_ESTIMATE_CALL_LIST (flag `estimate_call_list`): the "Call today" and "Pick reason" filters, the
-// two Needs-attention cards and the reason-only decline modal. Gate off = none of them exist.
+// The estimate call list: the "Call today" and "Pick reason" filters, the
+// two Needs-attention cards and the reason-only decline modal.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { MemoryRouter } from "react-router-dom";
@@ -21,7 +21,7 @@ import EstimatesPageV2, {
   useCallListWatch,
 } from "./EstimatesPageV2";
 
-const flags = { estimate_call_list: false, estimates_v2_status_pills: false };
+const flags = { estimates_v2_status_pills: false };
 
 vi.mock("../../components/admin/customer360/CustomerSmsPanel", () => ({
   useCustomerSms: () => vi.fn(),
@@ -117,7 +117,6 @@ function renderPage(width = 1440) {
 }
 
 beforeEach(() => {
-  flags.estimate_call_list = false;
   flags.estimates_v2_status_pills = false;
   patches = [];
   window.HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -148,16 +147,7 @@ afterEach(() => {
 const rowIds = (container) =>
   Array.from(container.querySelectorAll("[data-estimate-id]")).map((n) => n.getAttribute("data-estimate-id"));
 
-it("gate off (desktop): no Call today / Pick reason cards or buttons", async () => {
-  renderPage();
-  await screen.findByText("Fresh View");
-  expect(screen.queryByText("Call today")).not.toBeInTheDocument();
-  expect(screen.queryByText("Pick reason")).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Pick reason" })).not.toBeInTheDocument();
-});
-
-it("gate on (desktop): the Call today card counts only the 2h-48h, uncalled viewed offers and filters oldest first", async () => {
-  flags.estimate_call_list = true;
+it("(desktop) the Call today card counts only the 2h-48h, uncalled viewed offers and filters oldest first", async () => {
   const { container } = renderPage();
   await screen.findByText("Fresh View");
   const card = screen.getByText("Call today").closest("button");
@@ -168,8 +158,7 @@ it("gate on (desktop): the Call today card counts only the 2h-48h, uncalled view
   expect(screen.getAllByRole("button", { name: /^Call .* via Waves$/ })).toHaveLength(2);
 });
 
-it("gate on (desktop): Pick reason lists recently expired opened offers and saves a reason without a status", async () => {
-  flags.estimate_call_list = true;
+it("(desktop) Pick reason lists recently expired opened offers and saves a reason without a status", async () => {
   const { container } = renderPage();
   await screen.findByText("Fresh View");
   const card = screen.getByText("Pick reason", { selector: "div" }).closest("button");
@@ -189,8 +178,7 @@ it("gate on (desktop): Pick reason lists recently expired opened offers and save
 it.each([
   ["status pills off", false],
   ["status pills on", true],
-])("gate on (mobile, %s): both filters join the chip set and Call today runs oldest first", async (_label, pills) => {
-  flags.estimate_call_list = true;
+])("(mobile, %s): both filters join the chip set and Call today runs oldest first", async (_label, pills) => {
   flags.estimates_v2_status_pills = pills;
   const { container } = renderPage(390);
   await screen.findByText("Fresh View");
@@ -198,19 +186,6 @@ it.each([
   expect(await screen.findByText(/^Pick reason \(1\)$/)).toBeInTheDocument();
   fireEvent.click(screen.getByText(/^Call today \(2\)$/));
   await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
-});
-
-it.each([
-  ["status pills off", false],
-  ["status pills on", true],
-])("gate off (mobile, %s): neither filter is offered", async (_label, pills) => {
-  flags.estimates_v2_status_pills = pills;
-  renderPage(390);
-  await screen.findByText("Fresh View");
-  fireEvent.click(screen.getByRole("button", { name: /^Filter: / }));
-  await screen.findByText("Filter estimates");
-  expect(screen.queryByText(/^Call today/)).not.toBeInTheDocument();
-  expect(screen.queryByText(/^Pick reason/)).not.toBeInTheDocument();
 });
 
 // The click-to-call answers before the customer picks up, so the answered-call proof (lastCalledAt)
@@ -230,7 +205,7 @@ it("call watch: re-reads quietly once a minute after a Call today call, and stop
     const refresh = vi.fn();
     const row = viewed("w-1", "Watched Offer", 5 * HOUR);
     const { result, rerender } = renderHook(
-      ({ estimates }) => useCallListWatch({ enabled: true, estimates, refresh }),
+      ({ estimates }) => useCallListWatch({ estimates, refresh }),
       { initialProps: { estimates: [row] } },
     );
     act(() => result.current("w-1"));
@@ -252,24 +227,10 @@ it("call watch: gives up after 15 minutes when the customer never answers", () =
   try {
     const refresh = vi.fn();
     const rows = [viewed("w-2", "Never Answered", 5 * HOUR)];
-    const { result } = renderHook(() => useCallListWatch({ enabled: true, estimates: rows, refresh }));
+    const { result } = renderHook(() => useCallListWatch({ estimates: rows, refresh }));
     act(() => result.current("w-2"));
     tickMinutes(20);
     expect(refresh).toHaveBeenCalledTimes(CALL_WATCH_MAX_MS / CALL_WATCH_INTERVAL_MS);
-  } finally {
-    vi.useRealTimers();
-  }
-});
-
-it("call watch: does nothing with the gate off", () => {
-  vi.useFakeTimers();
-  try {
-    const refresh = vi.fn();
-    const rows = [viewed("w-3", "Gate Off", 5 * HOUR)];
-    const { result } = renderHook(() => useCallListWatch({ enabled: false, estimates: rows, refresh }));
-    act(() => result.current("w-3"));
-    tickMinutes(3);
-    expect(refresh).not.toHaveBeenCalled();
   } finally {
     vi.useRealTimers();
   }
