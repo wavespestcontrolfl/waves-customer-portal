@@ -1883,6 +1883,28 @@ describe('planner: the warm transfer (pure)', () => {
     });
   });
 
+  describe('the winning leg under the lock (a transfer moves it in the accept write)', () => {
+    const taken = () => ringingHold({ status: 'accepted', leg_sid: TLEG }, { phase: 'returned', applied: 'held', ret_by: 'transfer' });
+
+    test('staff_left from a leg that is no longer the winner: not_winner, nothing written', () => {
+      const before = taken();
+      expect(planEvent(before, { type: 'staff_left', legSid: LEG }, T, false, TLEG)).toEqual({ next: before, answer: 'not_winner' });
+    });
+
+    test('staff_left from the winner, or with no leg named: decided as before (here a return in flight: voicemail)', () => {
+      expect(planEvent(taken(), { type: 'staff_left', legSid: TLEG }, T, false, TLEG).answer).toBe('voicemail');
+      expect(planEvent(taken(), { type: 'staff_left' }, T, false, TLEG).answer).toBe('voicemail');
+      expect(planEvent(heldHold(), { type: 'staff_left', legSid: LEG }, T, false, LEG).answer).toBe('voicemail');
+    });
+
+    test('transfer_placed for the winning leg (he took the call before the write landed): ok, nothing written', () => {
+      const before = taken();
+      expect(planEvent(before, { type: 'transfer_placed', n: 1, legSid: TLEG }, T, false, TLEG)).toEqual({ next: before, answer: 'ok' });
+      // The same write when his leg is not the winner stays stale (its caller ends that call).
+      expect(planEvent(before, { type: 'transfer_placed', n: 1, legSid: TLEG }, T, false, LEG).answer).toBe('stale');
+    });
+  });
+
   describe('transfer_end', () => {
     const end = (h, ev = {}, closed = false) => plan(h, { type: 'transfer_end', n: 1, legSid: TLEG, reason: 'no-answer', ...ev }, closed);
 
@@ -2115,6 +2137,18 @@ describe('the warm transfer: transferAvailable and startTransfer', () => {
     expect(JSON.stringify([...logger.info.mock.calls, ...logger.warn.mock.calls, ...logger.error.mock.calls])).not.toContain('555');
   });
 
+  test('the owner takes the call before the placement write lands: ringing, and his call (now the winning leg) is never ended', async () => {
+    seed(heldHold());
+    const events = fakeTwilio({
+      during: { create: once(async () => { await hold._test.decide(SID, { type: 'transfer_accept', n: 1, legSid: TLEG }); }) },
+    });
+    expect(await hold.startTransfer(SID, { legSid: LEG, fromName: 'Virginia' })).toBe('ringing');
+    expect(names(events)).toEqual(['create']);
+    expect(cpOf().accepted_leg_sid).toBe(TLEG);
+    expect(transferOfHold()).toMatchObject({ status: 'accepted', leg_sid: TLEG });
+    expect(holdOf()).toMatchObject({ phase: 'returned', ret_by: 'transfer' });
+  });
+
   test('the client sends the Waves line the caller dialed as the caller ID', async () => {
     seed(heldHold());
     db.__state.toPhone = '(941) 555-0188';
@@ -2276,6 +2310,15 @@ describe('the warm transfer: acceptTransfer', () => {
     const later = fakeTwilio();
     expect(await accept()).toBe('no_room');
     expect(later).toEqual([]);
+  });
+
+  test('a staff leg end read as the winner just before he took the call: not_winner under the lock, nothing written or sent', async () => {
+    seed(ringingHold({ status: 'accepted', leg_sid: TLEG }, { phase: 'returned', applied: 'held', ret_by: 'transfer' }), { accepted_leg_sid: TLEG });
+    const events = fakeTwilio();
+    expect(await hold.staffLeft(SID, { legSid: LEG })).toBe('not_winner');
+    expect(events).toEqual([]);
+    expect(db.__state.writes).toEqual([]);
+    expect(holdOf()).toMatchObject({ phase: 'returned', ret_by: 'transfer', voicemail_at: null });
   });
 
   test('failed: the unhold could not be confirmed, or the database is down; never a throw', async () => {

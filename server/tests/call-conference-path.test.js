@@ -334,9 +334,20 @@ describe('the winning staff call ends during a star-key hold', () => {
     callHold.staffLeft.mockResolvedValue('voicemail');
     const log = fakeTwilio({ rooms });
     expect(await ended()).toBe('hold_voicemail');
-    expect(callHold.staffLeft).toHaveBeenCalledWith(SID);
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID, { legSid: LEG0 });
     expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
     expect(mockTw.api.calls).not.toHaveBeenCalled();
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+
+  test('the winner moved under the hold lock (the owner took a transfer meanwhile): nothing is ended here', async () => {
+    fakeCallLog(held({ phase: 'held' }));
+    callHold.staffLeft.mockResolvedValue('not_winner');
+    const log = fakeTwilio({ rooms });
+    expect(await ended()).toBe('not_winner');
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID, { legSid: LEG0 });
+    expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
     expect(log.roomUpdates).toEqual([]);
     expect(log.updates).toEqual([]);
   });
@@ -418,7 +429,7 @@ describe('the minute staff-end sweep (recoverStaffEnds)', () => {
     const log = fakeTwilio({ callStatus: 'completed', rooms: open });
     expect(await cp.recoverStaffEnds()).toEqual({ action: 'swept', open: 1, handled: 1 });
     expect(mockTw.api.calls).toHaveBeenCalledWith(LEG0);
-    expect(callHold.staffLeft).toHaveBeenCalledWith(SID);
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID, { legSid: LEG0 });
     expect(log.roomUpdates).toEqual([{ sid: 'CF1', status: 'completed' }]);
     expect(log.updates).toEqual([]);
   });
@@ -428,7 +439,17 @@ describe('the minute staff-end sweep (recoverStaffEnds)', () => {
     callHold.staffLeft.mockResolvedValue('voicemail');
     const log = fakeTwilio({ callStatus: 'completed', rooms: open });
     expect(await cp.recoverStaffEnds()).toEqual({ action: 'swept', open: 1, handled: 1 });
-    expect(callHold.staffLeft).toHaveBeenCalledWith(SID);
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID, { legSid: LEG0 });
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+
+  test('the winner moved under the hold lock: the sweep ends nothing, and the call is not counted as handled', async () => {
+    fakeCallLog(answered({ hold: { phase: 'returned', applied: 'returned' } }));
+    callHold.staffLeft.mockResolvedValue('not_winner');
+    const log = fakeTwilio({ callStatus: 'completed', rooms: open });
+    expect(await cp.recoverStaffEnds()).toEqual({ action: 'swept', open: 1, handled: 0 });
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID, { legSid: LEG0 });
     expect(log.roomUpdates).toEqual([]);
     expect(log.updates).toEqual([]);
   });
@@ -542,7 +563,7 @@ describe('the warm transfer: the owner call ends (onTransferLegStatus)', () => {
     callHold.staffLeft.mockResolvedValue('ordinary');
     const log = fakeTwilio({ rooms });
     expect(await ended({ status: 'completed' })).toBe('room_ended');
-    expect(callHold.staffLeft).toHaveBeenCalledWith(SID);
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID, { legSid: TLEG });
     expect(callHold.endTransfer).not.toHaveBeenCalled();
     expect(log.roomUpdates).toEqual([{ sid: 'CF1', status: 'completed' }]);
   });

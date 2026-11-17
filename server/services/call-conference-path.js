@@ -322,9 +322,11 @@ async function endRoomAfterStaffHangup(callSid, state) {
 // left alone in it.
 // A transfer ringing for the held caller ('transfer_pending', warm transfer in call-hold.js): the owner's answer decides, so
 // no voicemail starts and no room ends; the minute sweep does nothing for the call until the transfer is decided.
-async function onWinnerLegEnded(callSid, state) {
-  const answer = await require('./call-hold').staffLeft(callSid); // lazy: call-hold requires this module
-  if (answer === 'transfer_pending') return 'transfer_pending';
+// `legSid` is the leg that ended, read as the winner here; the hold re-checks it under its lock, and a leg that a warm
+// transfer replaced meanwhile ('not_winner') ends nothing.
+async function onWinnerLegEnded(callSid, state, legSid) {
+  const answer = await require('./call-hold').staffLeft(callSid, { legSid }); // lazy: call-hold requires this module
+  if (answer === 'not_winner' || answer === 'transfer_pending') return answer;
   return answer === 'voicemail' ? 'hold_voicemail' : endRoomAfterStaffHangup(callSid, state);
 }
 
@@ -334,7 +336,7 @@ async function handleStaffLegStatus({ callSid, index, legSid, status }) {
   const state = await loadState(callSid);
   if (!state) return 'no_state';
   if (state.accepted_leg_sid) {
-    return state.accepted_leg_sid === legSid ? onWinnerLegEnded(callSid, state) : 'accepted';
+    return state.accepted_leg_sid === legSid ? onWinnerLegEnded(callSid, state, legSid) : 'accepted';
   }
   if (!everyLegEnded(state)) return 'waiting';
   return (await sendCallerToVoicemail(callSid, noAnswerStatus(state))) === 'redirected' ? 'voicemail' : 'settled';
@@ -369,7 +371,7 @@ async function handleTransferLegStatus({ callSid, n, legSid, status }) {
   if (!TERMINAL_LEG_STATUSES.has(status) || !Number.isInteger(n) || !legSid) return 'ignored';
   const state = await loadState(callSid);
   if (!state) return 'no_state';
-  if (state.accepted_leg_sid === legSid) return onWinnerLegEnded(callSid, state);
+  if (state.accepted_leg_sid === legSid) return onWinnerLegEnded(callSid, state, legSid);
   return require('./call-hold').endTransfer(callSid, { n, legSid, reason: status });
 }
 
@@ -388,8 +390,7 @@ async function recoverStaffEnd(row) {
   const rooms = await api.conferences.list({ friendlyName: roomFor(callSid), limit: 5 });
   if (!(rooms || []).some((room) => room.status !== 'completed')) return false;
   logger.warn(`[conference] the staff leg of ${masked(callSid)} is over and its room is still open: the sweep ends it`);
-  await onWinnerLegEnded(callSid, state);
-  return true;
+  return (await onWinnerLegEnded(callSid, state, state.accepted_leg_sid)) !== 'not_winner';
 }
 
 let sweepingStaffEnds = false;
