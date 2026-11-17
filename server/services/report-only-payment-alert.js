@@ -9,8 +9,7 @@
 // longer owed. Office-side only: it sends the customer nothing.
 //
 // The completion records the choice as structured_notes.payLinkOmitted
-// (complete-scheduled-service.js). Gate: GATE_REPORT_ONLY_PAYMENT_ALERT,
-// read per tick by the scheduler (reportOnlyPaymentAlertLive).
+// (complete-scheduled-service.js). The scheduler runs this hourly.
 
 const db = require('../models/db');
 const logger = require('./logger');

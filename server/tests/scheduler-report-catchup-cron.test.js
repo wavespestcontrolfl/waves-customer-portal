@@ -71,7 +71,7 @@ const { etDateString } = require('../utils/datetime-et');
 let registrations = null;
 function tick(expression, handlerSource) {
   if (!registrations) {
-    isEnabled.mockImplementation((name) => name === 'cronJobs' || name === 'siteOneDealsDigest');
+    isEnabled.mockImplementation((name) => name === 'cronJobs');
     initScheduledJobs();
     registrations = cron.schedule.mock.calls.map(([expr, fn, opts]) => ({ expr, fn, opts }));
   }
@@ -85,7 +85,7 @@ function tick(expression, handlerSource) {
 beforeEach(() => {
   jest.clearAllMocks();
   runExclusive.mockImplementation(async (_key, task) => task());
-  isEnabled.mockImplementation((name) => name === 'cronJobs' || name === 'siteOneDealsDigest');
+  isEnabled.mockImplementation((name) => name === 'cronJobs');
 });
 
 describe('SiteOne deals digest catch-up (Mon + Tue 10:52)', () => {
@@ -103,13 +103,6 @@ describe('SiteOne deals digest catch-up (Mon + Tue 10:52)', () => {
     await catchUp();
     expect(runExclusive).toHaveBeenCalledWith('siteone-deals-digest', expect.any(Function));
     expect(siteone.runSiteOneDealsCatchUp).toHaveBeenCalledTimes(1);
-  });
-
-  test('gate off: the tick returns before any check', async () => {
-    isEnabled.mockImplementation((name) => name === 'cronJobs');
-    await catchUp();
-    expect(siteone.weekIsMissing).not.toHaveBeenCalled();
-    expect(runExclusive).not.toHaveBeenCalled();
   });
 
   test('a failed catch-up is logged, never thrown out of the tick', async () => {

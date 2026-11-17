@@ -148,7 +148,6 @@
  *   GATE_SERIES_MOVE_CARRIES_VISIT=true (staff whole-schedule moves carry each grouped visit partner to the new stop in the same transaction instead of refusing with VISIT_SERIES_MOVE_UNSUPPORTED; read at call time via seriesMoveCarriesVisitLive(), dark by default; customer self-serve moves unchanged; frozen visits still refuse)
  *   GATE_ONE_TEXT_PER_CUSTOMER_DAY=true (owner 2026-10-12/13: one on-the-way text and one arrived text per customer, service address, technician and ET day, however many services or visits that day has; appointment reminders are NOT changed (the existing same-slot merge owns them); the rule never reads visit_id, service_visits or visit_effects; read at call time via oneTextPerCustomerDayLive(), dark by default; off = every tracker text is byte-identical to before)
  *   GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND=true (every 15 minutes, archive a customer's draft estimates that a later-created SENT estimate replaced, when nobody edited the draft after that send; read at call time via estimateDraftRetireOnSendLive(), dark by default; staff-facing only, sends nothing)
- *   GATE_REPORT_ONLY_PAYMENT_ALERT=true (hourly 8 AM-8 PM ET, a bill still open the ET day after a "report only, no pay link" completion raises one needs-you Billing alert to record the payment, and the alert closes when the bill is paid, voided or no longer owed; read at call time via reportOnlyPaymentAlertLive(), dark by default; office-side only, sends nothing)
  *   GATE_SERIES_MOVE_TEXT_COALESCE=true (when staff move a recurring series from the board or the edit modal, the customer text waits 3 minutes and only the newest move's date is sent; an older move's text is dropped when a newer staff move covers the same visit; reminders and other move effects stay immediate; read at call time via seriesMoveTextCoalesceLive(), dark by default; customer-facing)
  *   GATE_MULTI_TECH_TEXT_TIMES=true (the lead reply agent's next-available check, the text drafter's open-times fallback and the estimate converter's first service day read the website booking engine (per technician, route-aware) instead of the old by-city engine; a lead with only a city is placed at that city's centre; read at call time via multiTechTextTimesLive(), dark by default; customer-facing; off = the old by-city engine, byte-identical)
  *   GATE_PACKAGE_FOLLOWUP_AUTOBOOK=true (booking visit 1 of a two-treatment package — catalog cockroach_control, flea_tick or bed_bug_treatment — also books visit 2 in the same transaction: 14 days later (the catalog row's follow-up interval), same technician and window, confirmed with no office confirm step, $0 included, linked to visit 1 so a date move of visit 1 shifts it by the same days until the customer confirms or moves it (its time of day is kept) and a cancel, skip or no-show of visit 1 always retires it; owner rulings 2026-10-04. Covers admin Schedule create, estimate acceptance, the Leads page, the call pipeline (its visit 2 is written confirmed too); voice-agent and outbound-callback bookings are not covered yet. Off = visit 2 is booked only from the closeout card or a call that discussed it. Read at call time via packageFollowupAutobookLive(), dark by default; kill = unset. No confirmation text for visit 2; reminders arm through the self-heal sweep; the customer can reschedule it.)
@@ -174,7 +173,6 @@
  *   GATE_ALERT_CATALOG=watch (owner 2026-10-29, "ok go" on admin bell rebuild step D1: every notification-registry type declares how it closes, and an admin alert the 08-28 bell policy silences is counted. `watch` = when NotificationService.create silences an admin row it writes ONE audit_log row (notification.bell_policy.muted) per Eastern day per distinct alert, category + trigger key + digit-free title stem only; the bell, pushes and create()'s return are unchanged. Anything else = off, byte-identical: no read, no write. Read at call time via alertCatalogMode(). See docs/gates-and-env.md.)
  *   GATE_ALERT_REGISTRY_LABELS=true (owner 2026-11-05, admin-alert plan step S1, "go": each trigger-registry bell row stores the labels its registry rule already declares (area, severity, who, doneWhen, and contact or promise when declared), the way a composed alert does, so the needs-me list, the morning banner counts, the Monday review, the FYI 7-day expiry and the plain-words explainer read stored labels instead of guessing. The alert's own fields always win; no subject is invented. Read at call time via alertRegistryLabelsLive(), strict 'true', dark by default; off = byte-identical rows. Sends nothing to a customer.)
  *   GATE_LEAD_STATUS_FOLLOWS_CONTACT=shadow|true (owner 2026-11-04, "WHY ARENT THESE UPDATED ... FOR ALL COMUNNICATION LINES": a 'new' lead moves to 'contacted' once a person reached it on any Waves line after its first contact: a delivered staff text, a connected call, a staff email, or a visit booked for its customer. A gated sweep every 10 minutes (services/lead-contact-sync.js); shadow logs what would move and writes nothing, true writes; read at call time via leadStatusFollowsContactMode(), unset = off. Never sets won. See docs/gates-and-env.md.)
- *   GATE_LEAD_REPEAT_SWEEP=true (owner 2026-11-01, Action inbox agents A, "yes do this": a nightly 4:52 AM ET sweep files an unanswered lead that repeats the same person's open lead as its duplicate, so the inbox counts each person once and the person's real lead can settle. A waiting lead (the inbox's own leads_awaiting_contact queue) is filed only when an earlier live lead with the same phone, from the 30 days before it, leads to exactly one open root that has the same phone, a matching first or last name and no conflicting name, the same customer row when both are linked, the same street, unit and ZIP when both carry one, the same requested service by the quote wizard's own rule (catalog service_key, else the service label; no extra properties on either), and a live courtship (no closed estimate, shared with the wizard via lead-courtship.js). A won, lost or other closed earlier lead, another service, or a closed estimate never makes a repeat. The filing is the Leads page's own: status duplicate, the extracted_data.duplicate_of_lead_id marker the wizard's repeat dedupe writes, a status_change history row, then the funnel bridge. No first response is stamped. Sends nothing to anyone. Read at call time via leadRepeatSweepLive(), strict 'true', dark by default; off = no lead is touched. Undo a filing on the Leads page; the sweep never files that lead again. Kill switch: unset.)
  *   GATE_PORTAL_CHAT_ANSWERED_CLOSE=shadow|true (owner 2026-10-31, approved Portal inbox plan: a portal chat hand-off bell closes once a person texted, called or emailed that customer after the hand-off; its own gate, read at call time via portalChatAnsweredCloseMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_AUTOPAY_HOLD_TIMEOUT=shadow|true|charge (owner 2026-10-26, "OK FIX": an invoice reminder sequence held for Auto Pay (status autopay_hold) is released into the normal reminder ladder when Auto Pay never charged it. Only a charge failure used to release a hold, so an invoice Auto Pay never charges (for example an annual-prepay invoice staff created after a visit) got no reminder and no charge, forever. A hold older than 3 days with no stripe_invoice_charge_attempts row for the invoice at all, no payments row for the customer since the hold began and no failed payment still on the Auto Pay retry ladder is released through releaseFromAutopayHold(); terminal, payer-billed and payment-plan invoices, an invoice whose linked visit is still open, and a customer the customer-level reminder engine owns or covers are left alone. `shadow` = write one audit_log row per would-release invoice a day (invoice_followup.autopay_hold_timeout_shadow), change nothing; `true` = release; `charge` (owner 2026-10-28, "Charge the saved card"; narrowed 2026-10-29, option B) = charge the customer's saved Auto Pay card or bank for a held VISIT bill only, and only inside the visit-completion rail's own authorization (completion-charge-verdict.js: the visit's agreed price cap, the same lanes; an issued-invoice closeout counts as a performed visit for this charge only). Keep the hold when the charge went through or its outcome is unclear (an office alert says check Stripe). Over the agreed price, no agreed price, a visit that was not performed, a payer, or any guard refusal = the hold is kept, nothing is charged or texted, one office alert asks for a review (it is looked at again only after the bill or visit price changes). Release the hold only when the card was really declined or there is no Auto Pay method; an invoice bound to no visit, an annual-prepay term rail invoice, or a bill no completion lane admits is released as `true` releases it, never charged (one office alert, one audit_log row per attempt, invoice_followup.autopay_hold_timeout_charge). `charge` MOVES MONEY: the owner flips it. Anything else = off, no query. Read at call time via autopayHoldTimeoutMode(). Runs inside the invoice follow-up job. See docs/gates-and-env.md.)
  *   GATE_AUTO_DISPATCH_DRY_TIME_ORDER=shadow|true (owner 2026-11-01, rain backtest of 440 outdoor stops + D5, ruling "forget the pest-early rule": auto-dispatch orders the day by product dry time. The service-family default time window (pest 8-10 AM, lawn 10 AM-12 PM) is replaced by a dry-time window from the products the visit uses: 4 h or more dry time 8-10 AM, 1-3 h 8 AM-12 PM, rain-proof (granular, bait, gel, dust, water-in, rain-OK services) 1-5 PM. DRY_TIME_ORDER_SEASON ('MM-DD..MM-DD', wrap-around allowed) narrows the dates; default all year. Customer-set times, blackouts and the flex-tier freeze are unchanged. Values: shadow = live windows unchanged, each pass-1 audit row logs constraints_checked.dry_time (class, hours, source, the slot today's window picked and the slot the dry window would pick); true = the dry window replaces the family default as the soft default time window, and for the rain-sensitive classes (4 h or more, 1-3 h) the credit also counts in a placed visit's move gain on its CURRENT date only: a timed visit is re-timed into its dry window on the same date, never moved to another date (owner 2026-10-24: no automatic day moves for rain). A rain-proof visit never gains from its afternoon window (a soft default only), and the flex-tier freeze, the score bar, the drive floor and the road check are unchanged. When the dry window opens after the day's first hour (rain-proof 1-5 PM) the search also asks the same slot finder for starts at or after the window start (not in capacity or arrival-search mode; no new paid calls): true adds them to the live candidates after the route options, shadow scores them for shadow_best only. shadow_best is the slot true would pick under these move rules; would_move says it differs from the current slot. Strict: exactly 'shadow' or 'true', read at call time via autoDispatchDryTimeOrderMode(). Ships DARK; off = byte-identical, no extra database read. Sends nothing to a customer. Kill switch: unset.)
@@ -471,7 +469,6 @@
  *   GATE_PAYROLL_MERCURY_STATUS=true (basic payroll option A, owner plan 2026-10-30: Waves works out each W-2 paycheck and Mercury sends it only after the owner approves it in the Mercury app. Needs GATE_PAYROLL. This is the read-only half: the 15-minute poller that reads each payment's approval request and transaction from Mercury, the recipient check when a Mercury recipient id is saved on a technician, the warnings before a send, and the payment chips on the pay run. Needs the env MERCURY_API_TOKEN (a custom token with read scopes and Send Money with Approval) and MERCURY_ACCOUNT_ID; MERCURY_API_BASE defaults to https://api.mercury.com/api/v1. The token, account number, routing number and any Mercury answer are never logged or stored. Read at call time via payrollMercuryStatusLive(), strict 'true', dark by default; off = no Mercury call at all and every payroll output and route is byte for byte today's; rollback = unset. Sends nothing to a customer or staff member.)
  *   GATE_PAYROLL_MERCURY_PAY=true (basic payroll option A, owner plan 2026-10-30. Needs GATE_PAYROLL and GATE_PAYROLL_MERCURY_STATUS. Turns on Send to Mercury and Send again on a finalized pay run: for each bank-transfer paycheck with a Mercury recipient id the portal asks Mercury for an APPROVAL REQUEST (POST request-send-money); no money moves until a different Mercury user approves it in the Mercury app, and the portal never calls Mercury's direct send. A request is never sent twice by code: a lost answer becomes an 'unknown' payment the owner resolves. Read at call time via payrollMercuryPayLive(), strict 'true', dark by default; off = no request is ever made; rollback = unset (existing payment rows stay and still block a void).)
  *   GATE_BUG_ID_EXTENSION=true (owner 2026-10-31, "Let's do the insect identification": the Chrome extension's bug identifier, POST /api/public/bug-id-extension/identify. Anonymous and worldwide, so no lead capture, no pricing, no row and no stored photo; 1–3 photos go to the v2 species-catalog pest engine (identifyPestV2, Gemini-only ladder, as the customer app) and only its customer-facing v2 answer comes back. Paid vision per request, bounded by 6/hour and 15/day per IP plus one worldwide daily cap of its own (PUBLIC_LLM_DAILY_CAP_BUG_ID_EXTENSION, default 100, bucket bug-id-extension) that counts whatever GATE_PUBLIC_LLM_SHARED_CAP says and fails closed. Read at call time via bugIdExtensionLive(), strict 'true', dark by default; off = the whole /api/public/bug-id-extension surface answers 404 before cors(), any limiter or body parser. Sends nothing to anyone. Kill switch: unset.)
- *   GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ=true (owner 2026-11-01, Action inbox agents A, "yes do this": the 3:45 AM ET inventory unit sweep also converts a DRY product whose unit is a bare ounce (oz, Ounces) to g, or to lb from 16 oz of stock up, with its stock, low-stock level, reorder quantity and per-visit usage converted by the exact weight factor. A product counts as dry only when its formulation says so (WDG, WG, WSG, granular, powder, dust, paste, gel bait) and nothing says liquid or count (no liquid code or word, no liquid look on the Unit Review page, no volume rate or default unit, no station, cartridge, tablet or trap in the name, category or any unit field, no per-item rate unit) and its price has an explicit cost unit when it has a price, and any cost unit is a weight unit or a bare ounce, and it has no per-visit supplies usage. Everything else stays in the Unit Review queue as before. Needs GATE_INVENTORY_UNIT_AUTOFIX ON too. Every fix leaves a movement audit row (source inventory_unit_review_autofix_dry_oz) and rings no bell; the alias digest keeps its old wording. Strict opt-in, read at call time via inventoryUnitAutofixDryOzLive(); off = oz rows stay parked exactly as before. Kill switch: unset.)
  *   GATE_RAINOUT_KEEP_RAIN_OK=true (owner 2026-11-01 "build both", after the wider rain-OK list in #7381: a Rain-out Move on "this + rest of route" for a RAIN reason (weather_rain only; every other reason, and a request with no reason yet, keeps the full route) leaves a stop OUT of the rest-of-route list when every service at that stop is rain-OK by rain-fit rainClassOf (a grouped stop moves as one: if any live member is outdoor, every member stays in), so that stop is neither moved nor texted; the tapped stop and its own visit group are never filtered. The moved-visit text also drops its "Why the move? Treatments need a few rain-free hours..." sentence (GATE_RAINOUT_EFFICACY_NOTE) when the moved service is rain-OK. Strict opt-in (exactly 'true'), read at call time by server/services/rain-out.js via rainoutKeepRainOkLive(); ships DARK; off = byte-identical list, queries and text. Customer-facing (it decides who gets a move text), so the owner flips it; unset = kill switch. The tech-facing storm-watch nudge skips all-rain-OK stops with no gate.)
  *
  * In development, most gates are OPEN by default so you can test locally.
@@ -1973,10 +1970,6 @@ const gates = {
   // only, as before. See services/lead-auto-reply.js.
   currentCustomerQuoteText: process.env.GATE_CURRENT_CUSTOMER_QUOTE_TEXT === 'true',
 
-  // Nightly lead repeat sweep (owner 2026-11-01, Action inbox agents A). Boot-log
-  // entry only; the call-time reader is leadRepeatSweepLive().
-  leadRepeatSweep: process.env.GATE_LEAD_REPEAT_SWEEP === 'true',
-
   // SMS prompt auto-promote (owner rulings 2026-09-27 and 2026-10-24): the texting drafter's
   // prompt improves with no human approval step. A pathology proposal becomes ONE candidate
   // rule block, the sealed exam grades the drafter with it against the current prompt, a
@@ -3039,11 +3032,6 @@ const gates = {
   // unit-review tab.
   inventoryUnitAutofix: process.env.GATE_INVENTORY_UNIT_AUTOFIX === 'true',
 
-  // Dry-oz phase of the same sweep (owner 2026-11-01, Action inbox agents A).
-  // Needs inventoryUnitAutofix too. Boot-log entry only; the call-time reader
-  // is inventoryUnitAutofixDryOzLive().
-  inventoryUnitAutofixDryOz: process.env.GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ === 'true',
-
   // Weekly incident regression eval — replays the incident corpus
   // (server/fixtures/incident-eval/) through the LIVE fact-check gate and
   // inbox classifier to catch prompt/model drift. Read-only except one admin
@@ -3624,16 +3612,6 @@ const gates = {
   // browser, so it must never auto-run in dev). The admin "run now" endpoint is
   // requireAdmin-only and unaffected by this gate. Double-gated behind cronJobs.
   priceScanWeekly: process.env.GATE_PRICE_SCAN === 'true',
-
-  // Weekly SiteOne deals bell (owner 2026-10-31, plan A): Monday 8:00 AM ET the
-  // portal reads the last 7 days of the contact@ Gmail sync, keeps the SiteOne
-  // and product-maker mail that looks like a deal (promo, flyer, early order,
-  // rebate, price increase, price match), and rings ONE admin bell listing each
-  // deal with its deadline and the catalog products it names. Plain rules over
-  // rows already in the database: no model call, no paid API, no network, sends
-  // nothing to anyone. Strict opt-in (`=== 'true'`) checked by the cron in
-  // scheduler.js; double-gated behind cronJobs. Dark by default; kill = unset.
-  siteOneDealsDigest: process.env.GATE_SITEONE_DEALS_DIGEST === 'true',
 
   // Card-Present Surcharge (Tap to Pay) — adds the 2.9% credit-card surcharge to
   // in-person card_present charges, mirroring the online flow. Card-present
@@ -4445,10 +4423,6 @@ const gates = {
   // service reads process.env directly (strict '==='), so a flip needs no
   // redeploy; this entry is for logGateStatus.
   techOpenVisitNudge: process.env.GATE_TECH_OPEN_VISIT_NUDGE === 'true',
-  // Owner 2026-11-02: the same 7 PM text also lists re-services still open
-  // from earlier days (last 30). Strict 'true'; the nudge service reads
-  // process.env directly at call time; this entry is for logGateStatus.
-  reserviceOpenCarryover: process.env.GATE_RESERVICE_OPEN_CARRYOVER === 'true',
 
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 
@@ -5473,15 +5447,6 @@ function seriesMoveCarriesVisitLive() {
 // that customer are archived. Unset = kill, no redeploy.
 function estimateDraftRetireOnSendLive() {
   return process.env.GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND === 'true';
-}
-
-// GATE_REPORT_ONLY_PAYMENT_ALERT read at CALL time — strict `=== 'true'`
-// (server/services/report-only-payment-alert.js via the scheduler). Owner
-// 2026-10-30 (tech portal gaps, option A): a bill still open the ET day after
-// a "report only, no pay link" completion raises one office alert to record
-// the payment. Office-side only; sends no customer message. Unset = kill.
-function reportOnlyPaymentAlertLive() {
-  return process.env.GATE_REPORT_ONLY_PAYMENT_ALERT === 'true';
 }
 
 function seriesMoveTextCoalesceLive() {
@@ -7485,12 +7450,6 @@ function leadStatusFollowsContactMode() {
   return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
-// GATE_LEAD_REPEAT_SWEEP read at CALL time, strict `=== 'true'`, dark in every environment. Off = the 4:52 AM
-// lead repeat sweep touches no lead; a repeat stays in the waiting queue as before.
-function leadRepeatSweepLive() {
-  return process.env.GATE_LEAD_REPEAT_SWEEP === 'true';
-}
-
 // GATE_PORTAL_CHAT_ANSWERED_CLOSE read at CALL time: 'shadow', 'true' or 'off'. A portal chat hand-off bell
 // (portal-chat-escalation:<id>, doneWhen 'customer_answered') as a class of admin-alert-relevance.js: closed
 // once a person called back, answered the customer's call, texted or emailed that customer after the bell's
@@ -8841,7 +8800,6 @@ module.exports.lawnWikiPauseLive = lawnWikiPauseLive;
 module.exports.seriesMoveTextCoalesceLive = seriesMoveTextCoalesceLive;
 // GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND reader. Kept here, away from the end of the file, so gate PRs appending there never conflict with it.
 module.exports.estimateDraftRetireOnSendLive = estimateDraftRetireOnSendLive;
-module.exports.reportOnlyPaymentAlertLive = reportOnlyPaymentAlertLive;
 // GATE_SMS_UNANSWERED_REPLY reader, on its own line.
 module.exports.smsUnansweredReplyLive = smsUnansweredReplyLive;
 // GATE_CONTACT_LOGIN reader, on its own line.
@@ -8932,8 +8890,6 @@ module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
 module.exports.sprayRainRulesMode = sprayRainRulesMode;
 // GATE_LEAD_STATUS_FOLLOWS_CONTACT reader, on its own line so gate PRs never conflict.
 module.exports.leadStatusFollowsContactMode = leadStatusFollowsContactMode;
-// GATE_LEAD_REPEAT_SWEEP reader, on its own line so gate PRs never conflict.
-module.exports.leadRepeatSweepLive = leadRepeatSweepLive;
 // GATE_PORTAL_CHAT_ANSWERED_CLOSE reader, on its own line so gate PRs never conflict.
 module.exports.portalChatAnsweredCloseMode = portalChatAnsweredCloseMode;
 // GATE_ESTIMATE_OFFER_TIERS reader, on its own line so gate PRs never conflict.
@@ -9178,16 +9134,6 @@ function alertRingOnceLive() {
 // GATE_ALERT_RING_ONCE reader, on its own line so gate PRs never conflict.
 module.exports.alertRingOnceLive = alertRingOnceLive;
 
-// GATE_ALERT_CLAUDE_FAULTS read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-02,
-// "build all"). On, an alert the bell policy would DROP (no row) is written to Claude's queue instead when the code
-// marks it "Claude fixes this": a registry alert named in services/admin-alert-routing.js CLAUDE_FAULT_TRIGGERS, or a
-// token_alert row. Customer-tied alerts are never rescued. Activity-only, no ring, no push. Off = dropped as today.
-function alertClaudeFaultsLive() {
-  return process.env.GATE_ALERT_CLAUDE_FAULTS === 'true';
-}
-// GATE_ALERT_CLAUDE_FAULTS reader, on its own line so gate PRs never conflict.
-module.exports.alertClaudeFaultsLive = alertClaudeFaultsLive;
-
 // GATE_ALERT_REGISTRY_LABELS read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-05, admin-alert
 // plan step S1, "go"). On, the bell row a trigger-registry event writes also stores the labels its registry rule declares:
 // area, severity, who, doneWhen, and contact or promise when the rule says so (services/notification-triggers.js). The
@@ -9387,11 +9333,6 @@ function routeEngineSummaryLive() {
 // untouched intake shell (inspection-public.js#leadOwnIntakeShell) and books onto that row. Kill switch = unset the variable.
 function inspectionReuseLeadShellLive() {
   return process.env.GATE_INSPECTION_REUSE_LEAD_SHELL === 'true';
-}
-// GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ read at CALL time, strict `=== 'true'`, dark in every environment. Off = the
-// 3:45 AM inventory unit sweep leaves every oz-family row parked for the Unit Review page, as before.
-function inventoryUnitAutofixDryOzLive() {
-  return process.env.GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ === 'true';
 }
 
 // GATE_QUOTE_SAME_PERSON_MATCH read at CALL time, strict `=== 'true'`, dark in every environment. Off = a typed phone that matches
@@ -9597,8 +9538,6 @@ module.exports.messengerInboxLive = messengerInboxLive;
 module.exports.routeEngineSummaryLive = routeEngineSummaryLive;
 // GATE_INSPECTION_REUSE_LEAD_SHELL reader, on its own line so gate PRs never conflict.
 module.exports.inspectionReuseLeadShellLive = inspectionReuseLeadShellLive;
-// GATE_INVENTORY_UNIT_AUTOFIX_DRY_OZ reader, on its own line (away from the busy tail) so gate PRs never conflict.
-module.exports.inventoryUnitAutofixDryOzLive = inventoryUnitAutofixDryOzLive;
 // GATE_QUOTE_SAME_PERSON_MATCH reader, on its own line so gate PRs never conflict.
 module.exports.quoteSamePersonMatchLive = quoteSamePersonMatchLive;
 // GATE_PAYER_PACKET_AUTOSEND reader, on its own line so gate PRs never conflict.
