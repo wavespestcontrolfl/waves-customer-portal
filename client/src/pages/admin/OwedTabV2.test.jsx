@@ -320,6 +320,19 @@ describe("OwedTabV2", () => {
     expect(screen.getAllByRole("button", { name: "Reopen" })).toHaveLength(2);
   });
 
+  it("describes a promise the nightly age-out dismissed as expired, never as kept, with its Reopen", async () => {
+    autoClosedRows = [
+      { id: "k1", kind: "other", party: "waves", status: "dismissed", customer_id: "cust-1", customer_first_name: "Test", customer_last_name: "Customer",
+        description: "Look into the warranty question", updated_at: "2026-09-04T05:44:00.000Z",
+        fulfillment: { kind: "aged_out", basis: "no_action_in_30_days", closed_by: "promise_age_out", closed_at: "2026-09-04T05:44:00.000Z", run: "2026-09-04T05:44:00.000Z", days: 30 } },
+    ];
+    render(<OwedTabV2 />);
+    await screen.findByText("Closed automatically (last 7 days)");
+    expect(screen.getByText(/Expired: no action in 30 days/)).toBeInTheDocument();
+    expect(screen.queryByText(/Kept/)).toBeNull();
+    expect(screen.getAllByRole("button", { name: "Reopen" })).toHaveLength(1);
+  });
+
   it("pages the Closed-automatically list: Load more asks for the page after the cursor and appends it", async () => {
     const closedRow = (id, n) => ({ id, kind: "send_estimate", party: "waves", status: "fulfilled", customer_id: `cust-${n}`, customer_first_name: `Test${n}`, customer_last_name: "Customer",
       updated_at: `2026-09-04T1${n}:00:00.000Z`, fulfillment: { kind: "estimate_sent", strength: "association", matched_at: "2026-09-03T12:45:00Z" } });
