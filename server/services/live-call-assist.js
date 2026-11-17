@@ -238,9 +238,16 @@ async function accountFor(customerId) {
   } catch { return null; }
 }
 
-// True when the caller named a street that is not the account's own: then the spoken location wins.
+const zip5 = (v) => String(v || '').replace(/\D/g, '').slice(0, 5);
+
+// True when the caller named a place that is not the account's own: a city or zip that differs from the account's
+// (even with no street said yet), or a street that does not match it. Then the spoken location wins, and the account's
+// pin and sizes stay out until the caller names the account's own property. Casing and a zip+4 are the same place.
 function statesOtherProperty(customer, facts) {
-  if (!customer || !facts.address_line1) return false;
+  if (!customer) return false;
+  if (facts.city && customer.city && placeText(facts.city) !== placeText(customer.city)) return true;
+  if (facts.zip && customer.zip && zip5(facts.zip) !== zip5(customer.zip)) return true;
+  if (!facts.address_line1) return false;
   try {
     return !require('../routes/booking')._internals.addressMatchesCustomer(customer, facts.address_line1, facts.zip || undefined);
   } catch { return true; }

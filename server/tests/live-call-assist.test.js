@@ -275,6 +275,28 @@ describe('live call assist price and times', () => {
     expect(mockPricing).toHaveBeenCalledWith({ service: 'pest_control', home_sqft: 2000, lot_sqft: undefined });
   });
 
+  // No street yet: a city or zip that is not the account's means another property, so the account's pin and sizes stay
+  // out (the spoken place is used instead).
+  test.each([
+    ['another city', { city: 'Venice' }],
+    ['another zip', { zip: '34285' }],
+  ])('a matched customer who names %s, with no street, gets no account pin or sizes', async (_label, place) => {
+    db.__state.customers = { 'cust-1': { id: 'cust-1', address_line1: '1 Sample Way', city: 'Bradenton', zip: '34202-1234', lot_sqft: 8000, property_sqft: 3000 } };
+    mockCreate.mockResolvedValue(reply({ ...PEST, service: 'lawn_care', ...place }));
+    await run({ customerId: 'cust-1' });
+    expect(mockAvailability).toHaveBeenCalledWith(expect.objectContaining({ ...place, account: null }));
+    expect(mockPricing).toHaveBeenCalledWith({ service: 'lawn_care', home_sqft: 2000, lot_sqft: undefined });
+    expect(mockMatches).not.toHaveBeenCalled();
+  });
+
+  test('the account\'s own city in other casing and its 5-digit zip still use the account', async () => {
+    db.__state.customers = { 'cust-1': { id: 'cust-1', address_line1: '1 Sample Way', city: 'Bradenton', zip: '34202-1234', lot_sqft: 8000, property_sqft: 3000 } };
+    mockCreate.mockResolvedValue(reply({ ...PEST, service: 'lawn_care', city: 'BRADENTON', zip: '34202' }));
+    await run({ customerId: 'cust-1' });
+    expect(mockAvailability).toHaveBeenCalledWith(expect.objectContaining({ account: { kind: 'account', customerId: 'cust-1', coords: { lat: 27.5, lng: -82.5 } } }));
+    expect(mockPricing).toHaveBeenCalledWith({ service: 'lawn_care', home_sqft: 2000, lot_sqft: 8000, lawn_sqft: 3000 });
+  });
+
   test('no service and no timing: no price or availability lookup', async () => {
     db.__state.customers = { 'cust-1': { id: 'cust-1', address_line1: '1 Sample Way' } };
     mockCreate.mockResolvedValue(reply({ ...PEST, service: null }));
